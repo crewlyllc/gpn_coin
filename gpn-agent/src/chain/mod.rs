@@ -266,10 +266,19 @@ impl ChainClient {
 
     pub async fn submit_attestation(
         &self,
-        _result: [u8; 32],
-        _gpu_info_hash: [u8; 32],
+        result: [u8; 32],
+        gpu_info_hash: [u8; 32],
+        gpu_count: u8,
+        compute_gflops: u64,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        log::info!("Attestation submitted to chain (RPC stub)");
+        // NOTE: RPC stub — the real extrinsic submission mirrors `gpn_seed_feed`
+        // (custom Signer + GpnConfig, bare AccountId32). Wiring the actual
+        // `GPUAttestation::submit_attestation` extrinsic is the follow-up once
+        // the seed-feed plumbing is reused (see priority #3 in HEARTBEAT).
+        log::info!(
+            "Attestation ready for chain: response={} gpu_info={} gpus={} compute={} GFLOPS (RPC stub)",
+            hex::encode(&result[..4]), hex::encode(&gpu_info_hash[..4]), gpu_count, compute_gflops
+        );
         Ok(())
     }
 

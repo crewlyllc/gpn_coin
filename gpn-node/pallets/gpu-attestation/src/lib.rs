@@ -30,6 +30,13 @@ impl AttestationTier {
     pub fn min_gpus(&self) -> u32 {
         match self { Self::Unattested => 0, Self::Bronze => 1, Self::Silver => 4, Self::Gold => 16 }
     }
+    /// Minimum measured compute throughput (FP32 GFLOPS) required to earn this
+    /// tier. Ties the tier to **proof of real compute** — a provider must
+    /// demonstrate it can actually serve a usable AI workload, not just report
+    /// a GPU count. (RTX 4060 ≈ 9-15 TFLOPS FP32; Bronze needs only a slice.)
+    pub fn min_gflops(&self) -> u64 {
+        match self { Self::Unattested => 0, Self::Bronze => 100, Self::Silver => 1_000, Self::Gold => 5_000 }
+    }
 }
 
 /// A single attestation record
@@ -39,6 +46,10 @@ pub struct AttestationRecord {
     pub gpu_info_hash: [u8; 32],
     pub challenge_response: [u8; 32],
     pub gpu_count: u8,
+    /// Measured compute throughput (FP32 GFLOPS) demonstrated by the provider.
+    /// This is the on-chain attestable metric tying the AI-compute leg to the
+    /// marketplace: a requestor can require `min_gflops` and match against it.
+    pub compute_gflops: u64,
     pub tier: AttestationTier,
     pub missed_count: u32,
 }
@@ -136,6 +147,8 @@ pub mod pallet {
         NoStakeToWithdraw,
         InvalidGPUCount,
         StakeTransferFailed,
+        /// Reported compute throughput is below the minimum for the claimed GPU tier.
+        InsufficientCompute,
     }
 
     // Hooks
@@ -183,21 +196,32 @@ pub mod pallet {
             challenge_response: [u8; 32],
             gpu_info_hash: [u8; 32],
             gpu_count: u8,
+            compute_gflops: u64,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             ensure!(<ProviderStake<T>>::contains_key(&who), Error::<T>::InsufficientStake);
 
-            let tier = if gpu_count >= 16 { AttestationTier::Gold }
+            let mut tier = if gpu_count >= 16 { AttestationTier::Gold }
                 else if gpu_count >= 4 { AttestationTier::Silver }
                 else if gpu_count >= 1 { AttestationTier::Bronze }
                 else { return Err(Error::<T>::InvalidGPUCount.into()); };
+
+            // GPU count is necessary but not sufficient — the provider must also
+            // prove it can actually deliver the compute throughput for that tier.
+            // A node reporting 16 GPUs that can't muster 5000 GFLOPS is demoted.
+            if compute_gflops < tier.min_gflops() {
+                tier = AttestationTier::Unattested;
+            }
+            if tier == AttestationTier::Unattested {
+                return Err(Error::<T>::InsufficientCompute.into());
+            }
 
             let now: u32 = frame_system::Pallet::<T>::block_number()
                 .try_into().unwrap_or(0);
 
             let record = AttestationRecord {
                 submitted_at: now, gpu_info_hash, challenge_response,
-                gpu_count, tier: tier.clone(), missed_count: 0,
+                gpu_count, compute_gflops, tier: tier.clone(), missed_count: 0,
             };
 
             let is_new = !<Attestations<T>>::contains_key(&who);
@@ -403,9 +427,13 @@ mod tests {
     type AttestPallet = crate::pallet::Pallet::<Test>;
 
     fn stake_and_attest(who: u64, amount: Balance, gpus: u8) {
+        stake_and_attest_gflops(who, amount, gpus, 10_000); // plenty of compute
+    }
+
+    fn stake_and_attest_gflops(who: u64, amount: Balance, gpus: u8, gflops: u64) {
         AttestPallet::deposit_stake(RuntimeOrigin::signed(who), amount).unwrap();
         AttestPallet::submit_attestation(
-            RuntimeOrigin::signed(who), [1u8; 32], [2u8; 32], gpus,
+            RuntimeOrigin::signed(who), [1u8; 32], [2u8; 32], gpus, gflops,
         ).unwrap();
     }
 
@@ -453,7 +481,7 @@ mod tests {
     fn test_submit_attestation_requires_stake() {
         new_test_ext().execute_with(|| {
             let result = AttestPallet::submit_attestation(
-                RuntimeOrigin::signed(ALICE), [1u8; 32], [2u8; 32], 1,
+                RuntimeOrigin::signed(ALICE), [1u8; 32], [2u8; 32], 1, 10_000,
             );
             assert_eq!(result, Err(Error::<Test>::InsufficientStake.into()));
         });
@@ -488,9 +516,57 @@ mod tests {
         new_test_ext().execute_with(|| {
             AttestPallet::deposit_stake(RuntimeOrigin::signed(ALICE), 500).unwrap();
             let result = AttestPallet::submit_attestation(
-                RuntimeOrigin::signed(ALICE), [1u8; 32], [2u8; 32], 0,
+                RuntimeOrigin::signed(ALICE), [1u8; 32], [2u8; 32], 0, 10_000,
             );
             assert_eq!(result, Err(Error::<Test>::InvalidGPUCount.into()));
+        });
+    }
+
+    #[test]
+    fn test_record_stores_compute_gflops() {
+        new_test_ext().execute_with(|| {
+            stake_and_attest_gflops(ALICE, 500, 1, 912); // RTX 4060-ish
+            let rec = Attestations::<Test>::get(ALICE).unwrap();
+            assert_eq!(rec.compute_gflops, 912);
+            assert_eq!(rec.tier, AttestationTier::Bronze);
+        });
+    }
+
+    #[test]
+    fn test_low_gflops_demotes_and_rejects_tier() {
+        new_test_ext().execute_with(|| {
+            AttestPallet::deposit_stake(RuntimeOrigin::signed(ALICE), 500).unwrap();
+            // 1 GPU claims Bronze (needs >=100 GFLOPS) but only delivers 50 → rejected.
+            let result = AttestPallet::submit_attestation(
+                RuntimeOrigin::signed(ALICE), [1u8; 32], [2u8; 32], 1, 50,
+            );
+            assert_eq!(result, Err(Error::<Test>::InsufficientCompute.into()));
+            assert!(Attestations::<Test>::get(ALICE).is_none());
+        });
+    }
+
+    #[test]
+    fn test_gflops_thresholds_per_tier() {
+        new_test_ext().execute_with(|| {
+            // Bronze needs >=100; exactly 100 passes.
+            AttestPallet::deposit_stake(RuntimeOrigin::signed(ALICE), 500).unwrap();
+            AttestPallet::submit_attestation(
+                RuntimeOrigin::signed(ALICE), [1u8; 32], [2u8; 32], 1, 100,
+            ).unwrap();
+            assert_eq!(Attestations::<Test>::get(ALICE).unwrap().tier, AttestationTier::Bronze);
+
+            // 4 GPUs claim Silver (needs >=1000) but deliver 500 → rejected.
+            AttestPallet::deposit_stake(RuntimeOrigin::signed(BOB), 500).unwrap();
+            let result = AttestPallet::submit_attestation(
+                RuntimeOrigin::signed(BOB), [1u8; 32], [2u8; 32], 4, 500,
+            );
+            assert_eq!(result, Err(Error::<Test>::InsufficientCompute.into()));
+
+            // 4 GPUs with 1500 GFLOPS → Silver.
+            AttestPallet::submit_attestation(
+                RuntimeOrigin::signed(BOB), [1u8; 32], [2u8; 32], 4, 1500,
+            ).unwrap();
+            assert_eq!(Attestations::<Test>::get(BOB).unwrap().tier, AttestationTier::Silver);
         });
     }
 

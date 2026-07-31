@@ -100,6 +100,18 @@ impl GPUMonitor {
     }
 }
 
+/// Measure real FP32 compute throughput (GFLOPS) with a short dense-GEMM
+/// benchmark on the given OpenCL device. This is the number submitted on-chain
+/// as the **attestable compute metric** (`AttestationRecord::compute_gflops`),
+/// tying the AI-compute leg to the marketplace's `min_gflops` requirement.
+pub fn measure_gflops(device_index: usize) -> Result<u64, String> {
+    let mut mm = matmul::GpuMatmul::new(device_index, 1024)
+        .map_err(|e| format!("open GPU matmul: {e}"))?;
+    // 4 measured iters (1024³ GEMM ≈ 2.1 GFLOP each); warms up the kernel too.
+    let (_elapsed, gflops) = mm.run_many(4).map_err(|e| format!("GEMM benchmark: {e}"))?;
+    Ok(gflops.round() as u64)
+}
+
 pub fn hash_gpu_info(info: &GPUInfo) -> [u8; 32] {
     let serialized = serde_json::to_vec(info).unwrap_or_default();
     use sha2::{Sha256, Digest};

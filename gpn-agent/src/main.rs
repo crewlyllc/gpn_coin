@@ -157,9 +157,17 @@ impl GPUMiningNodeAgent {
         // Build GPU info hash
         let gpu_info = self.state.read().await.gpu_info.clone();
         let gpu_info_hash = gpu::hash_gpu_info(&gpu_info);
+        let gpu_count = 1u8; // TODO: read actual GPU count from telemetry
+
+        // Measure real compute throughput (GFLOPS) on the GPU — this is the
+        // on-chain attestable metric proving real AI-compute capability.
+        let gflops = gpu::measure_gflops(self.config.mining_device_index).unwrap_or(0);
+        log::info!("Measured GPU compute: {} GFLOPS (FP32)", gflops);
 
         // Submit attestation to chain
-        self.chain_client.submit_attestation(result, gpu_info_hash).await?;
+        self.chain_client
+            .submit_attestation(result, gpu_info_hash, gpu_count, gflops)
+            .await?;
 
         log::info!("GPU attestation submitted successfully");
         Ok(())

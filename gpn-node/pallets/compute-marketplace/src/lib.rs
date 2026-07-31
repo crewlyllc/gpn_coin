@@ -18,11 +18,15 @@ pub struct GPURequirements {
     pub min_compute_capability: u16,
     pub min_gpu_count: u8,
     pub min_cuda_cores: u32,
+    /// Minimum measured compute throughput (FP32 GFLOPS) the provider must
+    /// attest to (see `gpu-attestation::AttestationRecord::compute_gflops`).
+    /// 0 = no throughput requirement.
+    pub min_gflops: u64,
 }
 
 impl Default for GPURequirements {
     fn default() -> Self {
-        Self { min_vram_mb: 8_000, min_compute_capability: 75, min_gpu_count: 1, min_cuda_cores: 0 }
+        Self { min_vram_mb: 8_000, min_compute_capability: 75, min_gpu_count: 1, min_cuda_cores: 0, min_gflops: 0 }
     }
 }
 
@@ -444,7 +448,7 @@ mod tests {
     type MarketPallet = crate::pallet::Pallet::<Test>;
 
     fn default_reqs() -> GPURequirements {
-        GPURequirements { min_vram_mb: 16_000, min_compute_capability: 80, min_gpu_count: 1, min_cuda_cores: 6_000 }
+        GPURequirements { min_vram_mb: 16_000, min_compute_capability: 80, min_gpu_count: 1, min_cuda_cores: 6_000, min_gflops: 1_000 }
     }
 
     fn workload() -> [u8; 32] { [9u8; 32] }
