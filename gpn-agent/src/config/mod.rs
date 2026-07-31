@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
 pub struct AgentConfig {
     // Node identity
     pub node_name: String,
@@ -33,6 +34,10 @@ pub struct AgentConfig {
     pub mining_algorithm: String,
     pub mining_pool_url: String,
     pub solo_mining: bool,
+    /// HTTP JSON-RPC endpoint of the node for external mining (gpn_getTemplate/gpn_submitWork)
+    pub mining_rpc_url: String,
+    /// OpenCL GPU device index to mine on
+    pub mining_device_index: usize,
 }
 
 impl Default for AgentConfig {
@@ -55,6 +60,8 @@ impl Default for AgentConfig {
             mining_algorithm: "ethash".to_string(),
             mining_pool_url: "".to_string(),
             solo_mining: true,
+            mining_rpc_url: "http://127.0.0.1:9944".to_string(),
+            mining_device_index: 0,
         }
     }
 }

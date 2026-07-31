@@ -21,7 +21,7 @@
 //! ```
 
 use gpn_agent::{
-    chain, config, gpu, modes, profitability, AgentState, Mode,
+    chain, config, gpu, mining::MiningConfig, modes, profitability, AgentState, Mode,
 };
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -54,8 +54,13 @@ impl GPUMiningNodeAgent {
         }));
 
         let mode_manager = modes::ModeManager::new(
-            config.mode.clone(),
             state.clone(),
+            MiningConfig {
+                rpc_url: config.mining_rpc_url.clone(),
+                device_index: config.mining_device_index,
+                batch: 1 << 20,
+                poll_ms: 2000,
+            },
         )?;
 
         let profitability_calc = profitability::ProfitabilityCalculator::new(
@@ -77,6 +82,22 @@ impl GPUMiningNodeAgent {
     /// Main agent loop
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
         log::info!("GPU Node Agent starting in {:?} mode", self.config.mode);
+
+        // Enter the configured mode on boot so mining actually launches.
+        let boot_mode = match self.config.mode.as_str() {
+            "compute" => Mode::Compute,
+            "stake_only" => Mode::StakeOnly,
+            "mine" => Mode::Mining,
+            // "auto" and anything else start mining, then let the
+            // profitability oracle switch as needed.
+            _ => Mode::Mining,
+        };
+        self.mode_manager.boot(boot_mode).await?;
+        {
+            let mut state = self.state.write().await;
+            state.current_mode = boot_mode;
+        }
+        log::info!("Booted into {:?} mode (mining={})", boot_mode, self.mode_manager.is_mining());
 
         // Periodic operations
         let mut attestation_interval = tokio::time::interval(

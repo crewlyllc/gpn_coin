@@ -7,6 +7,7 @@ pub mod chain;
 pub mod compute;
 pub mod config;
 pub mod gpu;
+pub mod mining;
 pub mod modes;
 pub mod profitability;
 pub mod utils;
