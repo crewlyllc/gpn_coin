@@ -1,12 +1,26 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3 (Prototype) — BOTH AUTO-SWITCH LEGS LIVE & TESTED on the RTX 4060 (real Ethash mining engine + real GPU AI-compute engine, both folded into `ModeManager` and start/stopped by mode switches)**
-**Last Updated:** 2026-07-31 09:30 PT
+**Status: Phase 3 (Prototype) — END-TO-END PROFITABILITY-DRIVEN AUTO-SWITCH VERIFIED LIVE ON THE RTX 4060 (scripted feed drives ModeManager to genuinely stop/restart real GPU Ethash mining AND start/stop real GPU AI compute as revenue flips; node imported 17 GPU-mined blocks across both mining phases)**
+**Last Updated:** 2026-07-31 11:05 PT
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 19)
+## 🚀 Current Milestone (Cycle 20)
+
+**The headline feature is now proven on real hardware end-to-end.** Ran `gpn-agent` in `auto` mode with `profitability_feed = "scripted"` against a live `gpn-node` (Alice, no internal miner, external-mining RPC on :9944). The scripted `demand_spike_scenario` drove exactly two switches, each genuinely starting/stopping the real GPU engines:
+
+1. Boot → **Mining** (DAG built, real Ethash engine started) → mined & submitted blocks **#1–#8** (node imported all).
+2. Compute demand spike → **Mining → Compute**: mining engine **stopped** (DAG released), real 2048³ GEMM AI workload **started** (~**915 GFLOPS** on RTX 4060).
+3. Compute demand fades → **Compute → Mining**: compute stopped, mining engine **restarted** (DAG rebuilt) → mined & submitted blocks **#9–#17** (node imported all).
+
+**Verified:** node imported 17 blocks (best #17), exactly 2 switches, mining & compute engines never overlapped. This is the product thesis (one GPU alternates between securing the network and serving AI compute based on real-time profitability, no human in loop) proven on hardware.
+
+Detail: `shared/artifacts/project7/cycle20-autoswitch-live-verified-log.md` (config: `shared/artifacts/project7/autoswitch-demo.toml`)
+
+---
+
+## Previous Milestone (Cycle 19)
 
 **`Compute` mode now actually runs a real AI workload on the GPU — the compute leg of the auto-switch is live.** `ModeManager` holds a real `ComputeExecutor` engine (symmetric to the `ExternalMiner` mining engine) that runs a dense float32 GEMM — the core primitive of neural inference — on the same GPU that mines Ethash. Switching to `Compute` **starts** the real workload; switching to `Mining` **stops** it and releases the GPU. This mirrors the mining integration (Cycle 17) exactly. (Docker isn't on this host and the old `DockerExecutor` was a dead stub — replaced with the working OpenCL engine; container orchestration is documented as the production layer on top.)
 
@@ -84,13 +98,13 @@ This **completes the production mining architecture**: node and miner are fully 
 | **Auto-switch DECISION pure + tested; scripted feed + headless sim (cycle 18)** | ✅ **LIVE** |
 | **Compute engine folded into ModeManager — `Compute` runs real GPU AI GEMM (cycle 19)** | ✅ **LIVE** |
 | **Auto-switch BOTH legs proven on RTX 4060: mining & compute engines start/stop (cycle 19)** | ✅ **LIVE** |
+| **END-TO-END auto-switch: scripted feed drives Mining↔Compute on RTX 4060, node imported 17 GPU-mined blocks (cycle 20)** | ✅ **LIVE** |
 | gpn-agent subxt chain client (stub) | 🟡 pending |
 
 ## Next Concrete Actions (priority order)
-1. [ ] **Profitability-driven auto-switch LIVE on the RTX 4060**: run the agent in `auto` mode with `profitability_feed = "scripted"` and confirm ModeManager really stops/restarts mining **and** starts/stops compute as the timeline flips. Both legs are individually proven (cycles 17/19); this is the end-to-end hardware-verification pass. *(The decision logic + both engines are done — this is wiring the demo.)*
-2. [ ] gpn-agent subxt chain client — replace placeholder `ChainClient` so `profitability_feed = "chain"` returns real difficulty / token price / GPU-hour price / utilization / APR.
-3. [ ] Two-node testnet docs in README + CI wiring for `scripts/gpn_two_node_testnet.sh`.
-4. [ ] Compute marketplace integration: surface `ComputeExecutor` throughput/GFLOPS as an on-chain attestable metric (ties the AI-compute leg to the `compute-marketplace` / `gpu-attestation` pallets).
+1. [ ] **Real `ChainClient` (subxt)** — replace the placeholder so `profitability_feed = "chain"` returns real on-chain difficulty / token price / GPU-hour price / utilization / APR (currently hardcoded stubs). Turns the scripted demo into a live-market-driven auto-switch. *(This is the top remaining item — scripted path is fully proven on hardware.)*
+2. [ ] Two-node testnet docs in README + CI wiring for `gpn-node/scripts/gpn_two_node_testnet.sh`.
+3. [ ] Compute marketplace integration: surface `ComputeExecutor` throughput/GFLOPS as an on-chain attestable metric (ties the AI-compute leg to the `compute-marketplace` / `gpu-attestation` pallets).
 
 ## Phase 1 Findings
 
