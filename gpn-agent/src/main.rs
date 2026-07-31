@@ -20,42 +20,11 @@
 //! └── Profitability Calculator (auto-switch decision)
 //! ```
 
-mod chain;
-mod compute;
-mod config;
-mod gpu;
-mod modes;
-mod profitability;
-mod utils;
-
+use gpn_agent::{
+    chain, config, gpu, modes, profitability, AgentState, Mode,
+};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-
-/// Agent state shared across all components
-#[derive(Clone)]
-pub struct AgentState {
-    /// Current operating mode
-    pub current_mode: Mode,
-    /// GPU hardware info
-    pub gpu_info: gpu::GPUInfo,
-    /// Wallet/account info
-    pub account: chain::AccountInfo,
-    /// Last profitability analysis
-    pub last_profitability: Option<profitability::ProfitAnalysis>,
-    /// Whether agent is running
-    pub is_running: bool,
-}
-
-/// Operating mode for the GPU
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Mode {
-    /// GPU mining (Ethash PoW)
-    Mining,
-    /// Serving compute jobs
-    Compute,
-    /// Idle GPU, only staking rewards
-    StakeOnly,
-}
 
 /// Main agent struct
 pub struct GPUMiningNodeAgent {

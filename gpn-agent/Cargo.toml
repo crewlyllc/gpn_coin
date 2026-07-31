@@ -23,8 +23,19 @@ sp-runtime = "28"
 # GPU monitoring
 sysinfo = "0.30"
 
+# GPU compute (OpenCL, runtime-loaded — no C headers / CUDA toolkit needed)
+opencl3 = { version = "0.12", features = ["dynamic"] }
+
+# Ethash reference (cache + dag sizing + validation)
+ethash = "0.4"
+hex = "0.4"
+ethereum-types = "0.8"
+
 # Crypto
 sha2 = "0.10"
 
 # Async utilities
 futures = "0.3"
+
+[dev-dependencies]
+sha3 = "0.10"
