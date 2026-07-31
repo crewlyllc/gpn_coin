@@ -147,3 +147,17 @@ curl -s -H 'Content-Type: application/json' -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"
 ```
 
 **Note:** a node runs either the internal self-miner (`--force-authoring` / `--dev`) **or** serves external miners — not both. The self-miner consumes every build within milliseconds, leaving no template for external miners.
+
+### GPU external miner (`gpn-agent`)
+
+The full production path — mine on your own GPU from a machine that does **not** run a full node:
+
+```bash
+# 1. node (authority, no internal miner — leaves templates available)
+gpn-node --alice --chain local --tmp --rpc-port 9944 --node-key <KEY_A>
+
+# 2. external GPU miner (RTX 4060, OpenCL) — fetches template, mines, submits over HTTP
+cargo run -p gpn-agent --release --bin gpn_external_miner -- http://127.0.0.1:9944 0 1048576
+```
+
+Mining is now a single HTTP call, which is the substrate for GPU auto-switch (the GPU can alternate between serving AI compute and mining by starting/stopping this loop).
