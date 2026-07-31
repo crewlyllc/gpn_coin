@@ -1,12 +1,25 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3 (Prototype) — END-TO-END PROFITABILITY-DRIVEN AUTO-SWITCH VERIFIED LIVE ON THE RTX 4060 (scripted feed drives ModeManager to genuinely stop/restart real GPU Ethash mining AND start/stop real GPU AI compute as revenue flips; node imported 17 GPU-mined blocks across both mining phases)**
-**Last Updated:** 2026-07-31 11:05 PT
+**Status: Phase 3 (Prototype) — REAL SUBXT CHAIN CLIENT: on-chain profitability feed + difficulty read live from a running node (Cycle 21); END-TO-END PROFITABILITY-DRIVEN AUTO-SWITCH VERIFIED LIVE ON THE RTX 4060 (scripted feed drives ModeManager to genuinely stop/restart real GPU Ethash mining AND start/stop real GPU AI compute as revenue flips; node imported 17 GPU-mined blocks across both mining phases)**
+**Last Updated:** 2026-07-31 12:15 PT
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 20)
+## 🚀 Current Milestone (Cycle 21)
+
+**The `ChainClient` is now real — the `chain` profitability feed reads actual on-chain data, not stubs.** Replaced the hardcoded placeholder client (100M difficulty, $0.05 token, etc.) with a subxt `OnlineClient<SubstrateConfig>` using **dynamic storage queries** (no codegen). It reads:
+- `GPUPoW::Difficulty` — the pallet's little-endian `[u64;4]` PoW **target**, converted to a classic difficulty metric `2^256/target`.
+- `ProfitabilityOracle::CurrentFeed` — real `ProfitabilityFeed` (token price / GPU-hour price / utilization / APR) from micro-USD + basis points.
+- `System::Account` balance (best-effort).
+
+**Verified live against a running `gpn-node --dev` (RTX 4060, blocks #0–#10):** `[live] difficulty = 2048` — real, derived from the chain's self-tuning target (2^245 → 2^11), NOT the 100M placeholder. Feed values fall back gracefully until an oracle operator seeds them. 3 new unit tests; suite 13 passed / 7 GPU-gated ignored; release build clean.
+
+Detail: `shared/artifacts/project7/cycle21-subxt-chain-client-log.md`
+
+---
+
+## Previous Milestone (Cycle 20)
 
 **The headline feature is now proven on real hardware end-to-end.** Ran `gpn-agent` in `auto` mode with `profitability_feed = "scripted"` against a live `gpn-node` (Alice, no internal miner, external-mining RPC on :9944). The scripted `demand_spike_scenario` drove exactly two switches, each genuinely starting/stopping the real GPU engines:
 
@@ -99,10 +112,11 @@ This **completes the production mining architecture**: node and miner are fully 
 | **Compute engine folded into ModeManager — `Compute` runs real GPU AI GEMM (cycle 19)** | ✅ **LIVE** |
 | **Auto-switch BOTH legs proven on RTX 4060: mining & compute engines start/stop (cycle 19)** | ✅ **LIVE** |
 | **END-TO-END auto-switch: scripted feed drives Mining↔Compute on RTX 4060, node imported 17 GPU-mined blocks (cycle 20)** | ✅ **LIVE** |
-| gpn-agent subxt chain client (stub) | 🟡 pending |
+| **Real subxt ChainClient: on-chain difficulty + profitability feed read live (cycle 21)** | ✅ **LIVE** |
+| gpn-agent subxt chain client (stub) | ✅ **REPLACED (cycle 21)** |
 
 ## Next Concrete Actions (priority order)
-1. [ ] **Real `ChainClient` (subxt)** — replace the placeholder so `profitability_feed = "chain"` returns real on-chain difficulty / token price / GPU-hour price / utilization / APR (currently hardcoded stubs). Turns the scripted demo into a live-market-driven auto-switch. *(This is the top remaining item — scripted path is fully proven on hardware.)*
+1. [ ] **Seed the on-chain feed via extrinsic** — wire a subxt-signed `ProfitabilityOracle.update_feed` (or a one-off seeding tool) so `token_price_usd` / `avg_gpu_hour_price` / `utilization` / `APR` come from the chain instead of fallback. Completes the live-market-driven auto-switch. *(Difficulty leg already real; this is the last feed gap.)*
 2. [ ] Two-node testnet docs in README + CI wiring for `gpn-node/scripts/gpn_two_node_testnet.sh`.
 3. [ ] Compute marketplace integration: surface `ComputeExecutor` throughput/GFLOPS as an on-chain attestable metric (ties the AI-compute leg to the `compute-marketplace` / `gpu-attestation` pallets).
 
