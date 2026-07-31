@@ -1,12 +1,22 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3 (Prototype) — Auto-Switch Substrate LIVE (`ModeManager` starts/stops real GPU mining); mining engine extracted to stoppable `ExternalMiner`**
-**Last Updated:** 2026-07-31 07:30 PT
+**Status: Phase 3 (Prototype) — Auto-Switch DECISION LIVE & TESTED (pure `decide_switch` + scripted profitability feed + headless simulator); `ModeManager` starts/stops real GPU mining**
+**Last Updated:** 2026-07-31 09:00 PT
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 17)
+## 🚀 Current Milestone (Cycle 18)
+
+**The auto-switch decision logic is now pure, unit-tested, and demonstrable — and `auto` mode can actually be driven by a profitability feed.** Extracted `decide_switch()` as a free function (testable without chain/GPU, with hysteresis anti-flapping), replaced the stub tests with 5 real ones, added a `ScriptedFeed` demand-spike timeline + `config.profitability_feed` ("chain"/"scripted") switch in the live `ProfitabilityCalculator`, and a headless `gpn_simulate_autoswitch` binary that prints the GPU mode timeline (Mining → Compute on spike → Mining on fade).
+
+**Verified (cycle 18):** `decide_switch` prefers-highest / hysteresis no-op / flip-on-exceed / anti-flapping / all-mode-pairs all pass; scripted feed flips Mining→Compute→Mining (exactly 2 switches) at 5% hysteresis and stays put on small ±4% oscillation at 10%; live agent `analyze()` returns the scripted timeline when `profitability_feed = "scripted"`. Agent tests 9 passed, 4 GPU-gated ignored; release build clean.
+
+Detail: `shared/artifacts/project7/cycle18-profitability-autoswitch-log.md` (commit dcfc7e7)
+
+---
+
+## 🚀 Previous Milestone (Cycle 17)
 
 **The headline auto-switch feature now has a real substrate.** The agent's `ModeManager` previously only *logged* mode transitions. Now switching to `Mining` mode **actually starts the GPU mining loop** (spawns the `ExternalMiner` engine — builds DAG, polls `gpn_getTemplate`, mines, submits via `gpn_submitWork`), and switching to `Compute`/`StakeOnly` **stops it and releases the GPU**. The mining loop was extracted from the `gpn_external_miner` binary into a reusable, stoppable `ExternalMiner` engine (`gpn-agent/src/mining/mod.rs`) running on a dedicated OS thread.
 
@@ -61,13 +71,14 @@ This **completes the production mining architecture**: node and miner are fully 
 | **External GPU miner wired to RPC — `gpn_external_miner` (cycle 16)** | ✅ **LIVE** |
 | **Stoppable mining engine `ExternalMiner` + ModeManager start/stop (cycle 17)** | ✅ **LIVE** |
 | **Auto-switch start/stop proven (Mining↔Compute) (cycle 17)** | ✅ **LIVE** |
+| **Auto-switch DECISION pure + tested; scripted feed + headless sim (cycle 18)** | ✅ **LIVE** |
 | gpn-agent subxt chain client (stub) | 🟡 pending |
 
 ## Next Concrete Actions (priority order)
-1. [ ] **Profitability-driven auto-switch in live `auto` mode** — hook `ModeManager` switching to the `ProfitabilityOracle` feed with realistic data so a rising compute price actually flips the GPU to Compute mode (and back). Currently placeholder oracle data (mining dominates) keeps `auto` in Mining. Top priority.
-2. [ ] Two-node testnet docs in README + CI wiring for `scripts/gpn_two_node_testnet.sh`
-3. [ ] gpn-agent subxt chain client — submit compute/marketplace extrinsics over the wire (replace placeholder `ChainClient`).
-4. [ ] Fold compute executor (Docker) into `ModeManager` so `Compute` mode actually runs jobs, mirroring the mining integration.
+1. [ ] **Fold compute executor (Docker) into `ModeManager`** so `Compute` mode actually runs a real AI job, mirroring the mining integration (currently `Compute` only flips a flag). Highest value — completes the "GPU serves AI compute" leg of the auto-switch.
+2. [ ] gpn-agent subxt chain client — replace placeholder `ChainClient` so `profitability_feed = "chain"` returns real difficulty / token price / GPU-hour price / utilization / APR.
+3. [ ] Two-node testnet docs in README + CI wiring for `scripts/gpn_two_node_testnet.sh`.
+4. [ ] Profitability-driven auto-switch **live on the RTX 4060**: run agent in `auto` mode with `profitability_feed = "scripted"` and confirm the ModeManager really stops/restarts mining as the timeline flips. (Decision logic is done; this is the hardware-verification pass.)
 
 ## Phase 1 Findings
 
