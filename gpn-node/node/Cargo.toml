@@ -50,8 +50,9 @@ serde = { workspace = true }
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
-jsonrpsee = { version = "0.24", features = ["server"] }
+jsonrpsee = { version = "0.24", features = ["server", "macros"] }
 serde_json = "1"
+hex = "0.4"
 
 # Real Ethash PoW (memory-hard, GPU-mineable). Light-cache mode lets a CPU
 # mine/verify the same algorithm a GPU miner targets with the full DAG.

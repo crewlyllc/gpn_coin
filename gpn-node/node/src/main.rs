@@ -7,6 +7,7 @@ mod chain_spec;
 mod cli;
 mod command;
 mod gpu_miner;
+mod rpc;
 mod service;
 
 fn main() -> sc_cli::Result<()> {

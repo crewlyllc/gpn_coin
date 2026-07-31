@@ -19,7 +19,7 @@ use sp_core::U256;
 use sp_io::hashing::twox_128;
 use sp_runtime::generic::BlockId;
 use sp_runtime::traits::Block as BlockT;
-use std::{sync::Arc, sync::OnceLock, time::Duration};
+use std::{sync::Arc, sync::Mutex, sync::OnceLock, time::Duration};
 
 use crate::gpu_miner::EthashGpuMiner;
 
@@ -193,7 +193,13 @@ pub type Service = sc_service::PartialComponents<
     FullSelectChain,
     PowImportQueue<Block>,
     sc_transaction_pool::TransactionPoolHandle<Block, FullClient>,
-    (GPNPowAlgorithm, Option<Telemetry>),
+    (
+        GPNPowAlgorithm,
+        Option<Telemetry>,
+        // Shared slot the external-miner RPC reads the worker from. Populated
+        // in `new_full` once the authority mining worker starts.
+        Arc<Mutex<Option<MiningWorker>>>,
+    ),
 >;
 
 pub fn new_partial(config: &Configuration) -> Result<Service, ServiceError> {
@@ -239,6 +245,10 @@ pub fn new_partial(config: &Configuration) -> Result<Service, ServiceError> {
 
     let algorithm = GPNPowAlgorithm { client: client.clone() };
 
+    // Shared slot that the authority mining worker is parked into later, so
+    // the external-miner RPC can reach it lazily at call time.
+    let miner_worker_slot: Arc<Mutex<Option<MiningWorker>>> = Arc::new(Mutex::new(None));
+
     let block_import = PowBlockImport::new(
         client.clone(),
         client.clone(),
@@ -264,7 +274,7 @@ pub fn new_partial(config: &Configuration) -> Result<Service, ServiceError> {
         keystore_container,
         select_chain,
         transaction_pool,
-        other: (algorithm, telemetry),
+        other: (algorithm, telemetry, miner_worker_slot),
     })
 }
 
@@ -282,7 +292,7 @@ pub fn new_full<
         keystore_container,
         select_chain,
         transaction_pool,
-        other: (algorithm, mut telemetry),
+        other: (algorithm, mut telemetry, miner_worker_slot),
     } = new_partial(&config)?;
 
     let net_config = sc_network::config::FullNetworkConfiguration::<
@@ -333,7 +343,11 @@ pub fn new_full<
     let prometheus_registry = config.prometheus_registry().cloned();
 
     let rpc_extensions_builder = {
-        Box::new(move |_| Ok(jsonrpsee::RpcModule::new(())))
+        let client = client.clone();
+        let miner_worker_slot = miner_worker_slot.clone();
+        Box::new(move |_| {
+            Ok(crate::rpc::create_full_rpc(miner_worker_slot.clone(), client.clone()))
+        })
     };
 
     let _rpc_handlers = sc_service::spawn_tasks(sc_service::SpawnTasksParams {
@@ -387,6 +401,10 @@ pub fn new_full<
 
         task_manager.spawn_essential_handle().spawn("pow-mining-worker", None, task);
 
+        // Park a clone of the worker in the shared slot so external miners can
+        // fetch templates and submit seals over RPC.
+        *miner_worker_slot.lock().unwrap() = Some(worker.clone());
+
         if force_authoring {
             spawn_miner(worker);
         }
@@ -395,7 +413,7 @@ pub fn new_full<
     Ok(task_manager)
 }
 
-type MiningWorker = sc_consensus_pow::MiningHandle<Block, GPNPowAlgorithm, Arc<SyncingService<Block>>>;
+pub(crate) type MiningWorker = sc_consensus_pow::MiningHandle<Block, GPNPowAlgorithm, Arc<SyncingService<Block>>>;
 
 /// How many nonces the GPU searches per `worker.metadata()` poll. Large enough
 /// to find a dev-difficulty solution in one shot, but bounded so we regularly

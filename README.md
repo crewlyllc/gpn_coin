@@ -105,7 +105,7 @@ cargo run -- config/default.toml
 
 - ✅ **Phase 1 (Research):** Complete
 - ✅ **Phase 2 (Design):** Complete
-- 🏗️ **Phase 3 (Prototype):** Dev testnet live — real Ethash PoW consensus + self-tuning difficulty + **real GPU Ethash miner on the RTX 4060** (OpenCL, produces node-verifiable seals); GPU miner wired into live node; **seal-format + extrinsic tests committed to `gpn-node/scripts/`**. Next: two-node p2p testnet + fee pallet + external subxt miner path
+- 🏗️ **Phase 3 (Prototype):** Dev testnet live — real Ethash PoW consensus + self-tuning difficulty + **real GPU Ethash miner on the RTX 4060** (OpenCL, produces node-verifiable seals); GPU miner wired into live node; **seal-format + extrinsic tests committed**; **TransactionPayment fees live**; **external miner RPC live** (`gpn_getTemplate`/`gpn_submitWork` — node & miner separable, verified end-to-end). Next: wire gpn-agent GPU miner to the RPC + profitability auto-switch prototype
 - ⏳ **Phase 4 (Launch):** Not started
 
 ## GPU Mining (gpn-agent)
@@ -122,3 +122,28 @@ Heavy GPU correctness tests (build the 1 GiB DAG, ~34 s each):
 ```bash
 cargo test -- --ignored --nocapture gpu_hashimoto_matches_reference
 ```
+
+## External Mining RPC
+
+The node exposes two JSON-RPC methods so a miner can run separately from the node (the production mining architecture — and the substrate for GPU auto-switch):
+
+- `gpn_getTemplate` → `{ best_hash, pre_hash, difficulty, block_number }`
+- `gpn_submitWork(pre_hash, seal)` → `bool` (seal = 8-byte LE nonce ++ 32-byte mix hash)
+
+Run an authority node **without** the internal self-miner to leave templates available for external miners:
+
+```bash
+gpn-node --alice --chain local --tmp --rpc-port 9944   # no --force-authoring
+```
+
+Then, from another process (or a reference CPU miner):
+
+```bash
+# fetch template, mine a seal, submit it
+PRE=$(curl -s -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"gpn_getTemplate","params":[]}' http://127.0.0.1:9944/ | jq -r '.result.pre_hash, .result.difficulty')
+PREHASH=$(echo $PRE | cut -d' ' -f1); TGT=$(echo $PRE | cut -d' ' -f2)
+SEAL=$(gpn-node/target/release/gpn_mine_seal "$PREHASH" "$TGT")
+curl -s -H 'Content-Type: application/json' -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"gpn_submitWork\",\"params\":[\"$PREHASH\",\"$SEAL\"]}" http://127.0.0.1:9944/
+```
+
+**Note:** a node runs either the internal self-miner (`--force-authoring` / `--dev`) **or** serves external miners — not both. The self-miner consumes every build within milliseconds, leaving no template for external miners.

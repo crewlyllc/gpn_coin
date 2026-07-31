@@ -1,20 +1,23 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3 (Prototype) — TransactionPayment FEES LIVE; two-node GPU testnet still 6/6 🎉**
-**Last Updated:** 2026-07-31 05:15 PT
+**Status: Phase 3 (Prototype) — External Miner RPC LIVE (`gpn_getTemplate`/`gpn_submitWork`); node & miner now separable**
+**Last Updated:** 2026-07-31 06:20 PT
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 14)
+## 🚀 Current Milestone (Cycle 15)
 
-**Transaction fees are wired into the runtime and verified end-to-end.** This was the top blocker for any non-dev network — without a fee pallet, every extrinsic cost 0 GPN (free spam / no validator economics). Cycle 14 added `pallet-transaction-payment` to the runtime (Config with `FungibleAdapter<Balances,()>`, `IdentityFee` weight/length-to-fee, `OperationalFeeMultiplier=5`) and appended `ChargeTransactionPayment<Runtime>` to `SignedExtra` (must be last). The chain-spec genesis now sets `transaction_payment: Default::default()`.
+**External-miner RPC is live and verified end-to-end.** The node now exposes `gpn_getTemplate` and `gpn_submitWork`, so a miner process (`gpn-agent` GPU miner or any standalone miner) can fetch a block template over RPC, mine on its own GPU, and submit the seal remotely — without running a full node. This is the **production mining architecture** and the substrate for the headline GPU auto-switch feature: node and miner are now separable.
 
-**Verified (cycle 14):**
-- Runtime + full node build clean (release).
-- **4/4 extrinsic tests pass** — a 1.23 GPN transfer now debits `amount + fee`, measured **fee = 108,157,144** (was 0 before).
-- **Two-node GPU p2p testnet still 6/6** with fees enabled: GPU mining, peer sync, longest-chain convergence all intact (no regression).
-- Detail: `shared/artifacts/project7/cycle14-transaction-payment-log.md`
+**Verified (cycle 15):**
+- `gpn_getTemplate` returns `{best_hash, pre_hash, difficulty, block_number}` — confirmed live.
+- Reference CPU miner (`gpn_mine_seal`) mined a valid Ethash seal → `gpn_submitWork` returned `true` → node logged `✅ Successfully mined block` + `🏆 Imported #1`; `chain_getHeader` shows the submitted seal in the digest.
+- Negative paths: stale pre_hash → `false`; invalid hex → clean RPC error.
+- `cargo test -p gpn-node` → **5/5 passed** (seal verify suite), no regression. Release build clean.
+- Detail: `shared/artifacts/project7/cycle15-external-miner-rpc-log.md`
+
+**Key finding:** a node should run EITHER the internal self-miner OR serve external miners, not both — the self-miner consumes every build within ms, so external miners see `None`. Production design: mining node exposes RPC (no internal miner); compute node runs the agent.
 
 ---
 
@@ -36,13 +39,14 @@
 | Pallet unit tests (81 across all 5) | ✅ |
 | GPU miner validation tests (DAG, trace-diff, matches-reference) | ✅ |
 | **Fee mechanism (TransactionPayment) (cycle 14)** | ✅ **LIVE** |
+| **External miner RPC — `gpn_getTemplate`/`gpn_submitWork` (cycle 15)** | ✅ **LIVE** |
 | gpn-agent subxt chain client (stub) | 🟡 pending |
 
 ## Next Concrete Actions (priority order)
-1. [ ] **External subxt miner path (production mining architecture)** — agent fetches block template over RPC, mines on its own GPU, submits seal remotely. Needs a `gpn_getTemplate`-style RPC endpoint. This is the real "GPU auto-switch" substrate: node and miner become separable, a prerequisite for mining↔compute switching.
-2. [ ] Wire the `gpn_getTemplate` RPC (runtime already exposes `GPUMiningApi::mining_info` + `verify_solution`; add a client RPC returning header+difficulty to external miners).
+1. [ ] **Wire the `gpn-agent` GPU miner to the new external-miner RPC** — agent fetches template via `gpn_getTemplate`, mines on its own GPU (OpenCL/RTX 4060), submits seal via `gpn_submitWork`. Completes the external subxt miner path (node+miner fully separable) and lets the agent run on a machine without a full node.
+2. [ ] **Profitability-auto-switch prototype in gpn-agent** (compute-mode vs mine-mode decision from `ProfitabilityOracle` feed) — the headline feature, now unblocked by the separable node/miner architecture.
 3. [ ] Two-node testnet docs in README + CI wiring for `scripts/gpn_two_node_testnet.sh`
-4. [ ] Profitability-auto-switch prototype in gpn-agent (compute-mode vs mine-mode decision from `ProfitabilityOracle` feed) — the headline feature.
+4. [ ] gpn-agent subxt chain client — submit compute/marketplace extrinsics over the wire.
 
 ## Phase 1 Findings
 
