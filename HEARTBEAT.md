@@ -1,8 +1,24 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3 (Prototype) — External GPU Miner LIVE (`gpn_external_miner`); node & miner fully separable, mining = one HTTP call**
-**Last Updated:** 2026-07-31 07:00 PT
+**Status: Phase 3 (Prototype) — Auto-Switch Substrate LIVE (`ModeManager` starts/stops real GPU mining); mining engine extracted to stoppable `ExternalMiner`**
+**Last Updated:** 2026-07-31 07:30 PT
 **Caretaker:** PM07
+
+---
+
+## 🚀 Current Milestone (Cycle 17)
+
+**The headline auto-switch feature now has a real substrate.** The agent's `ModeManager` previously only *logged* mode transitions. Now switching to `Mining` mode **actually starts the GPU mining loop** (spawns the `ExternalMiner` engine — builds DAG, polls `gpn_getTemplate`, mines, submits via `gpn_submitWork`), and switching to `Compute`/`StakeOnly` **stops it and releases the GPU**. The mining loop was extracted from the `gpn_external_miner` binary into a reusable, stoppable `ExternalMiner` engine (`gpn-agent/src/mining/mod.rs`) running on a dedicated OS thread.
+
+**Verified live on the RTX 4060:** agent in `mine` mode → `ModeManager.boot()` started the engine → mined blocks #1–#12 over RPC, node imported each. New GPU-gated test `mode_switch_starts_and_stops_miner` proves the auto-switch core: Mining→Compute **stops** the engine, Compute→Mining **restarts** it. Also fixed two real bugs: (1) boot never launched mining (same-mode short-circuit — added `boot()`); (2) `switch_to` never persisted `current_mode` to state (would break repeated auto-switches).
+
+**Verified (cycle 17):**
+- `ExternalMiner::start`/`stop` — engine spawns & cleanly cancels, releasing the DAG from VRAM.
+- `ModeManager` switches Mining→Compute→Mining, `is_mining()` toggles correctly (GPU-gated test, ✅).
+- Agent `mine` mode mined blocks #1–#12 through `ModeManager` (RPC path), node imported all.
+- Config: `mining_rpc_url`/`mining_device_index` added; `#[serde(default)]` on all fields (fixed flat-struct vs `[node]`-section TOML crash); `default.toml` rewritten flat.
+- `cargo test` → 4 passed, GPU tests `#[ignore]`d. Release build clean.
+- Detail: `shared/artifacts/project7/cycle17-autoswitch-mode-manager-log.md`
 
 ---
 
@@ -43,13 +59,15 @@ This **completes the production mining architecture**: node and miner are fully 
 | **Fee mechanism (TransactionPayment) (cycle 14)** | ✅ **LIVE** |
 | **External miner RPC — `gpn_getTemplate`/`gpn_submitWork` (cycle 15)** | ✅ **LIVE** |
 | **External GPU miner wired to RPC — `gpn_external_miner` (cycle 16)** | ✅ **LIVE** |
+| **Stoppable mining engine `ExternalMiner` + ModeManager start/stop (cycle 17)** | ✅ **LIVE** |
+| **Auto-switch start/stop proven (Mining↔Compute) (cycle 17)** | ✅ **LIVE** |
 | gpn-agent subxt chain client (stub) | 🟡 pending |
 
 ## Next Concrete Actions (priority order)
-1. [ ] **Profitability-auto-switch prototype in `gpn-agent`** (compute-mode vs mine-mode decision from `ProfitabilityOracle` feed) — the **headline feature**, now fully unblocked by the separable node/miner architecture (mining = one HTTP call). Top priority.
+1. [ ] **Profitability-driven auto-switch in live `auto` mode** — hook `ModeManager` switching to the `ProfitabilityOracle` feed with realistic data so a rising compute price actually flips the GPU to Compute mode (and back). Currently placeholder oracle data (mining dominates) keeps `auto` in Mining. Top priority.
 2. [ ] Two-node testnet docs in README + CI wiring for `scripts/gpn_two_node_testnet.sh`
-3. [ ] gpn-agent subxt chain client — submit compute/marketplace extrinsics over the wire.
-4. [ ] Fold `gpn_external_miner` into the agent's mode manager so `Mining` mode runs the external loop (not an in-node miner).
+3. [ ] gpn-agent subxt chain client — submit compute/marketplace extrinsics over the wire (replace placeholder `ChainClient`).
+4. [ ] Fold compute executor (Docker) into `ModeManager` so `Compute` mode actually runs jobs, mirroring the mining integration.
 
 ## Phase 1 Findings
 
