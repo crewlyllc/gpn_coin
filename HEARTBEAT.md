@@ -1,26 +1,46 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3 (Prototype) — DEV TESTNET IS LIVE 🎉**
-**Last Updated:** 2026-07-30 21:00 PT
+**Status: Phase 3 (Prototype) — REAL ETHASH POW LIVE 🎉**
+**Last Updated:** 2026-07-30 22:10 PT
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 7)
+## 🚀 Current Milestone (Cycle 8)
 
-The GPN dev testnet is **running and producing PoW blocks**, with all 5 custom pallets live and a real signed extrinsic executing on-chain. The full loop works: **RPC → tx pool → PoW block authoring → execution → state change**.
+**Block authoring now uses REAL Ethash PoW** — the placeholder CPU blake2 hashing is gone. Blocks are sealed with a genuine 40-byte `nonce(8) ++ mix_hash(32)` Ethash solution and verified on-chain via `ethash::hashimoto_light` (light-cache mode, epoch 0, 16 MB cache). Same algorithm + seal layout a GPU miner produces with the full dataset — **GPU-mineable by construction.**
 
-**Verified live:**
-- `./target/release/gpn-node --dev --tmp --force-authoring --rpc-port 9944` → blocks #1, #2, ... #17+ authored & imported
-- PoW seal present in block header digest
-- Pallets registered in runtime metadata: `GPUPoW`, `GPUAttestation`, `ComputeMarketplace`, `ProfitabilityOracle`, `GPNToken` ✅
-- `Balances.transfer_allow_death` (//Alice→//Bob) submitted, **included in block**, balance deducted exactly ✅
-
-**The one bug that blocked everything:** `service.rs` used PoW target `1_000_000_000` — impossible to hit (P~1e-68). Fixed to `2^240` (dev placeholder). Full detail in `shared/artifacts/project7/cycle7-testnet-live-log.md`.
+**Verified live (cycle 8):**
+- `./target/release/gpn-node --dev --tmp --force-authoring` → mines + imports blocks #1 → #46+ using real Ethash
+- ~1 block / ~20 s cadence = exactly the light-cache CPU rate at target 2^244 (P≈2.4e-4/hash) — proof the miner is running genuine Ethash, not instant blake2
+- Seals present as `pow_` consensus digests (`0x05706f775f...`); `verify_seal` hard-requires 40-byte nonce+mix + recomputed matching mix_hash, so every import proves real Ethash verification passed
+- Full detail: `shared/artifacts/project7/cycle8-ethash-pow-log.md`
 
 ---
 
-*Below: prior research (Phase 1) and design context — kept for reference.*
+## Build Progress (Phase 3)
+
+| Component | Status |
+|-----------|--------|
+| 5 pallets (gpu-pow, gpu-attestation, compute-marketplace, gpn-token, profitability-oracle) | ✅ compile |
+| gpn-runtime | ✅ compiles |
+| gpn-node binary | ✅ builds & runs |
+| Dev testnet producing blocks (cycle 7) | ✅ |
+| End-to-end signed extrinsic (cycle 7) | ✅ |
+| **Real Ethash PoW in consensus (cycle 8)** | ✅ **LIVE** |
+| Pallet unit tests (65 across all 5) | ✅ |
+| Wire pallet-gpu-pow difficulty adjustment into node `difficulty()` | 🔴 next |
+| Real GPU (CUDA/OpenCL) Ethash miner in gpn-agent on RTX 4060 | 🔴 next |
+| Fee mechanism (TransactionPayment) | 🟡 pending |
+| gpn-agent subxt chain client (stub) | 🟡 pending |
+| Two-node p2p testnet | 🟡 pending |
+
+## Next Concrete Actions (priority order)
+1. [ ] Wire `pallet-gpu-pow` difficulty adjustment into `GPNPowAlgorithm::difficulty()` so block time self-tunes (read stored difficulty via runtime API)
+2. [ ] Real GPU Ethash mining on the RTX 4060 — CUDA/OpenCL miner in `gpn-agent` producing the same 40-byte seal, pointed at the dev node
+3. [ ] Add a fee pallet before any non-dev network
+4. [ ] Promote extrinsic test + PoW seal-format test into repo (`gpn-node/scripts/`)
+5. [ ] Two-node local testnet (p2p + longest-chain)
 
 ## Phase 1 Findings
 
@@ -228,7 +248,7 @@ Alternative consideration: **Substrate framework** (Polkadot SDK) for modular bl
 - **Auto-switching** is genuinely novel — nothing in the space does this yet
 - **GPU attestation** for staking is also novel — no existing chain links staking weight to verified GPU compute
 
-## Build Progress (Phase 3)
+## Build Progress (Phase 3) — LEGACY (superseded by table at top)
 
 | Component | Status |
 |-----------|--------|
@@ -237,17 +257,12 @@ Alternative consideration: **Substrate framework** (Polkadot SDK) for modular bl
 | gpn-node binary | ✅ builds & runs |
 | **Dev testnet producing blocks** | ✅ **LIVE (cycle 7)** |
 | End-to-end signed extrinsic | ✅ verified (cycle 7) |
-| Real GPU Ethash PoW (replaces CPU placeholder) | 🔴 next big task |
-| Unit tests for 4 pallets (only gpu-pow has 12) | 🟡 pending |
+| **Real Ethash PoW in consensus** | ✅ **LIVE (cycle 8)** |
+| Unit tests for all 5 pallets (65 total) | ✅ |
 | Fee mechanism (no TransactionPayment pallet → 0 fees) | 🟡 pending |
 | gpn-agent subxt chain client (stub) | 🟡 pending |
 | Two-node p2p testnet | 🟡 pending |
 
-## Next Concrete Actions (priority order)
-1. [ ] Replace placeholder CPU PoW with **real GPU Ethash** algorithm (wire `pallet-gpu-pow` verify + `gpn-agent` miner as the actual consensus)
-2. [ ] Unit tests for `gpu-attestation`, `compute-marketplace`, `gpn-token`, `profitability-oracle`
-3. [ ] Add a fee pallet before any non-dev network
-4. [ ] Promote the extrinsic test into the repo + test GPU PoW `submit_solution` / marketplace `create_job` / oracle `update_feed`
-5. [ ] Two-node local testnet (p2p + longest-chain)
+*See top of file for the current milestone and priority list (cycle 8: difficulty-adjustment wiring + real GPU miner next).*
 
-*Progress: Phase 1 (research) ✅, Phase 2 (design) ✅, Phase 3 (prototype) — dev testnet live; GPU PoW + tests next.*
+*Progress: Phase 1 (research) ✅, Phase 2 (design) ✅, Phase 3 (prototype) — dev testnet live with real Ethash PoW; difficulty self-tuning + GPU miner next.*

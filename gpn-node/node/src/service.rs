@@ -1,7 +1,6 @@
 //! Service and ServiceFactory implementation for the GPN PoW node.
 
 use futures::FutureExt;
-use codec::Encode;
 use gpn_runtime::{self, Block, RuntimeApi};
 use sc_basic_authorship::ProposerFactory;
 use sc_client_api::BlockBackend;
@@ -16,7 +15,7 @@ use sp_consensus_pow::{Seal, POW_ENGINE_ID};
 use sp_core::U256;
 use sp_runtime::generic::BlockId;
 use sp_runtime::traits::Block as BlockT;
-use std::{sync::Arc, time::Duration};
+use std::{sync::Arc, sync::OnceLock, time::Duration};
 
 pub(crate) type FullClient = sc_service::TFullClient<
     Block,
@@ -26,41 +25,88 @@ pub(crate) type FullClient = sc_service::TFullClient<
 type FullBackend = sc_service::TFullBackend<Block>;
 type FullSelectChain = LongestChain<FullBackend, Block>;
 
-/// The minimum difficulty target for a valid PoW solution.
+/// Dev/testnet PoW *target* (hash < target = valid, so HIGHER = EASIER).
 ///
-/// NOTE: This is a *dev/testnet* placeholder value chosen so the CPU miner can
-/// actually find a seal. The value is a 256-bit *target* (hash < target = valid),
-/// so HIGHER = EASIER. The old value 1_000_000_000 made every valid hash astronomically
-/// unlikely (P ~ 1e-68) — the miner could never author a block. 2^240 gives
-/// P ~ 1.5e-5 per hash, so a CPU finds a block in tens of thousands of hashes.
-/// A real GPU Ethash target + difficulty adjustment (see `pallet-gpu-pow`) replaces
-/// this placeholder before any public network.
-fn initial_difficulty() -> U256 {
-    // 2^240, expressed as big-endian: byte[1] = 0x01, rest 0.
+/// This is the convention `sc_consensus_pow` uses and the one `pallet-gpu-pow`
+/// follows internally. NOTE: it is the inverse of Ethereum's "difficulty"
+/// (where higher = harder). Here 2^240 gives P ~ 1.5e-5 per hash — a CPU
+/// miner using the light cache finds a block in tens of seconds on the dev
+/// chain. A real difficulty-adjustment (from `pallet-gpu-pow`) replaces this
+/// placeholder before any public network.
+fn initial_target() -> U256 {
+    // 2^244: byte[1] = 0x10, rest 0. Slightly easier than 2^240 so the
+    // light-cache CPU miner produces blocks at a reasonable dev cadence.
     let mut buf = [0u8; 32];
-    buf[1] = 0x01;
+    buf[1] = 0x10;
     U256::from_big_endian(&buf)
 }
 
-/// A simple CPU PoW algorithm for GPN.
+/// Dev chain uses Ethash epoch 0 (smallest cache, 16 MB) so light-cache CPU
+/// mining is feasible without loading the full ~1 GB dataset.
+const DEV_EPOCH: usize = 0;
+
+/// The Ethash seal layout: 8-byte little-endian nonce ++ 32-byte mix hash.
+const SEAL_NONCE_LEN: usize = 8;
+const SEAL_MIX_LEN: usize = 32;
+const SEAL_LEN: usize = SEAL_NONCE_LEN + SEAL_MIX_LEN;
+
+/// Lazily-built Ethash light cache for the dev epoch. Verification on every
+/// block import and mining both share this cache.
+fn ethash_cache() -> &'static [u8] {
+    static CACHE: OnceLock<Vec<u8>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let seed = ethash::get_seedhash(DEV_EPOCH);
+        let cache_size = ethash::get_cache_size(DEV_EPOCH);
+        let mut cache = vec![0u8; cache_size];
+        ethash::make_cache(&mut cache, seed);
+        cache
+    })
+}
+
+/// Full dataset size for the dev epoch (used only to size hashimoto lookups;
+/// light mode computes dataset items from the cache on the fly).
+fn ethash_full_size() -> usize {
+    ethash::get_full_size(DEV_EPOCH)
+}
+
+/// A real Ethash PoW algorithm for GPN.
 ///
-/// NOTE: This is a placeholder mining algorithm so the node can compile and
-/// author blocks on a dev chain. The real GPU Ethash-derived algorithm is a
-/// follow-up (see `pallet-gpu-pow` + `gpn-agent`).
+/// Blocks are sealed with a genuine Ethash solution (nonce + mix_hash) and
+/// verified via the standard `hashimoto_light`. The same algorithm a GPU
+/// miner targets with the full dataset — GPU-compatible by construction.
 #[derive(Clone)]
 pub struct GPNPowAlgorithm;
 
-fn hash_meets_difficulty(pre_hash: &<Block as BlockT>::Hash, seal: &Seal, difficulty: U256) -> bool {
-    let seal_hash = sp_io::hashing::blake2_256(seal);
-    let work = (pre_hash.encode(), seal_hash).encode();
-    let hash = sp_io::hashing::blake2_256(&work);
-    U256::from_little_endian(&hash) < difficulty
+/// Verify a seal: parse nonce + mix_hash, recompute Ethash over the block
+/// pre-hash, and require the computed mix hash to match AND the final hash to
+/// be below the target.
+fn verify_seal(pre_hash: &<Block as BlockT>::Hash, seal: &Seal, target: U256) -> bool {
+    if seal.len() != SEAL_LEN {
+        return false;
+    }
+    let nonce = u64::from_le_bytes(seal[..SEAL_NONCE_LEN].try_into().unwrap());
+    let mut mix = [0u8; SEAL_MIX_LEN];
+    mix.copy_from_slice(&seal[SEAL_NONCE_LEN..SEAL_LEN]);
+
+    let header_hash = ethereum_types::H256::from_slice(pre_hash.as_ref());
+    let (computed_mix, result) = ethash::hashimoto_light(
+        header_hash,
+        ethereum_types::H64::from_low_u64_be(nonce),
+        ethash_full_size(),
+        ethash_cache(),
+    );
+
+    if computed_mix.as_bytes() != mix {
+        return false;
+    }
+    U256::from_little_endian(result.as_bytes()) < target
 }
+
 impl PowAlgorithm<Block> for GPNPowAlgorithm {
     type Difficulty = U256;
 
     fn difficulty(&self, _parent: <Block as BlockT>::Hash) -> Result<Self::Difficulty, sc_consensus_pow::Error<Block>> {
-        Ok(initial_difficulty())
+        Ok(initial_target())
     }
 
     fn verify(
@@ -71,7 +117,7 @@ impl PowAlgorithm<Block> for GPNPowAlgorithm {
         seal: &Seal,
         difficulty: Self::Difficulty,
     ) -> Result<bool, sc_consensus_pow::Error<Block>> {
-        Ok(hash_meets_difficulty(pre_hash, seal, difficulty))
+        Ok(verify_seal(pre_hash, seal, difficulty))
     }
 }
 
@@ -297,22 +343,34 @@ pub fn new_full<
 
 type MiningWorker = sc_consensus_pow::MiningHandle<Block, GPNPowAlgorithm, Arc<SyncingService<Block>>>;
 
-/// Spawn a dedicated miner thread: poll `worker.metadata()`, hash-search for a
-/// valid seal, then submit it. Runs on its own OS thread because the submit
-/// future holds a non-`Send` mutex guard across an await.
+/// Spawn a dedicated miner thread: poll `worker.metadata()`, run real Ethash
+/// (light-cache) mining to find a valid nonce + mix_hash, then submit the seal.
+/// Runs on its own OS thread because the submit future holds a non-`Send`
+/// mutex guard across an await.
 fn spawn_miner(worker: MiningWorker) {
     std::thread::Builder::new()
         .name("gpn-miner".into())
         .spawn(move || {
+            let cache = ethash_cache();
+            let full_size = ethash_full_size();
             let mut nonce: u64 = 0;
             loop {
                 if let Some(metadata) = worker.metadata() {
                     let pre_hash = metadata.pre_hash;
-                    let difficulty = metadata.difficulty;
+                    let target = metadata.difficulty;
+                    let header_hash = ethereum_types::H256::from_slice(pre_hash.as_ref());
                     // Search a bounded window so we re-check for a new build.
-                    for _ in 0..100_000 {
-                        let seal: Seal = nonce.to_le_bytes().to_vec();
-                        if hash_meets_difficulty(&pre_hash, &seal, difficulty) {
+                    for _ in 0..200_000 {
+                        let (mix, result) = ethash::hashimoto_light(
+                            header_hash,
+                            ethereum_types::H64::from_low_u64_be(nonce),
+                            full_size,
+                            cache,
+                        );
+                        if U256::from_little_endian(result.as_bytes()) < target {
+                            let mut seal = Vec::with_capacity(SEAL_LEN);
+                            seal.extend_from_slice(&nonce.to_le_bytes());
+                            seal.extend_from_slice(mix.as_bytes());
                             let _ = futures::executor::block_on(worker.submit(seal));
                             nonce = nonce.wrapping_add(1);
                             break;
