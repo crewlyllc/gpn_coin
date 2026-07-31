@@ -1,20 +1,20 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3 (Prototype) — TWO-NODE GPU P2P TESTNET LIVE: longest-chain sync + GPU mining across peers 🎉**
-**Last Updated:** 2026-07-31 04:20 PT
+**Status: Phase 3 (Prototype) — TransactionPayment FEES LIVE; two-node GPU testnet still 6/6 🎉**
+**Last Updated:** 2026-07-31 05:15 PT
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 13)
+## 🚀 Current Milestone (Cycle 14)
 
-**The two-node local p2p testnet is live and promoted into the repo.** Both nodes run the real OpenCL Ethash miner on the RTX 4060, connect over libp2p via `--bootnodes`, sync one longest chain, and converge on the same mined block. (Cycle 12 hardened the PoW seal-format + extrinsic tests; cycle 11 wired the GPU miner into the node.)
+**Transaction fees are wired into the runtime and verified end-to-end.** This was the top blocker for any non-dev network — without a fee pallet, every extrinsic cost 0 GPN (free spam / no validator economics). Cycle 14 added `pallet-transaction-payment` to the runtime (Config with `FungibleAdapter<Balances,()>`, `IdentityFee` weight/length-to-fee, `OperationalFeeMultiplier=5`) and appended `ChargeTransactionPayment<Runtime>` to `SignedExtra` (must be last). The chain-spec genesis now sets `transaction_payment: Default::default()`.
 
-**Verified (cycle 13):**
-- **`gpn-node/scripts/gpn_two_node_testnet.sh`** — boots Alice + Bob on the `local` spec, connects B→A via bootnodes, asserts **6/6**: A GPU miner online, A produces blocks, B GPU miner online, B connected as peer, B syncs blocks, both converge on the same non-zero mined block.
-- **6/6 pass on both the debug AND the rebuilt release binary** (see below).
-- **Fixed a stale-release trap:** the committed `target/release/gpn-node` predated the cycle-11 GPU wiring and silently used the CPU miner. Rebuilt release (1m08s) — it now contains the GPU miner and passes on the GPU.
-- Full detail: `shared/artifacts/project7/cycle13-two-node-p2p-log.md`
+**Verified (cycle 14):**
+- Runtime + full node build clean (release).
+- **4/4 extrinsic tests pass** — a 1.23 GPN transfer now debits `amount + fee`, measured **fee = 108,157,144** (was 0 before).
+- **Two-node GPU p2p testnet still 6/6** with fees enabled: GPU mining, peer sync, longest-chain convergence all intact (no regression).
+- Detail: `shared/artifacts/project7/cycle14-transaction-payment-log.md`
 
 ---
 
@@ -35,13 +35,14 @@
 | **Two-node GPU p2p testnet (cycle 13)** | ✅ **LIVE** |
 | Pallet unit tests (81 across all 5) | ✅ |
 | GPU miner validation tests (DAG, trace-diff, matches-reference) | ✅ |
-| Fee mechanism (TransactionPayment) | 🟡 pending |
+| **Fee mechanism (TransactionPayment) (cycle 14)** | ✅ **LIVE** |
 | gpn-agent subxt chain client (stub) | 🟡 pending |
 
 ## Next Concrete Actions (priority order)
-1. [ ] Add a fee pallet (TransactionPayment) before any non-dev network
-2. [ ] External subxt miner path — agent fetches block template over RPC, mines on its own GPU, submits seal remotely (needs a `gpn_getTemplate`-style RPC endpoint; this is the production mining architecture)
+1. [ ] **External subxt miner path (production mining architecture)** — agent fetches block template over RPC, mines on its own GPU, submits seal remotely. Needs a `gpn_getTemplate`-style RPC endpoint. This is the real "GPU auto-switch" substrate: node and miner become separable, a prerequisite for mining↔compute switching.
+2. [ ] Wire the `gpn_getTemplate` RPC (runtime already exposes `GPUMiningApi::mining_info` + `verify_solution`; add a client RPC returning header+difficulty to external miners).
 3. [ ] Two-node testnet docs in README + CI wiring for `scripts/gpn_two_node_testnet.sh`
+4. [ ] Profitability-auto-switch prototype in gpn-agent (compute-mode vs mine-mode decision from `ProfitabilityOracle` feed) — the headline feature.
 
 ## Phase 1 Findings
 
