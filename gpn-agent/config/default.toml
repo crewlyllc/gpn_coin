@@ -9,6 +9,8 @@ attestation_interval_secs = 3600
 hysteresis_percent = 5.0
 min_epoch_hours = 1.0
 profitability_check_interval_secs = 3600
+# "chain" = live RPC (default) | "scripted" = deterministic demand-spike demo
+profitability_feed = "chain"
 staked_amount = 10000.0
 max_concurrent_jobs = 2
 docker_endpoint = "unix:///var/run/docker.sock"

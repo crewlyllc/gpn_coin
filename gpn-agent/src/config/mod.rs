@@ -22,6 +22,10 @@ pub struct AgentConfig {
     pub hysteresis_percent: f64,
     pub min_epoch_hours: f64,
     pub profitability_check_interval_secs: u64,
+    /// Profitability feed source: "chain" (live RPC) or "scripted"
+    /// (deterministic demand-spike timeline — used for demos/tests until the
+    /// real chain feed is wired).
+    pub profitability_feed: String,
 
     // Staking
     pub staked_amount: f64,
@@ -54,6 +58,7 @@ impl Default for AgentConfig {
             hysteresis_percent: 5.0,
             min_epoch_hours: 1.0,
             profitability_check_interval_secs: 3600, // Every hour
+            profitability_feed: "chain".to_string(),
             staked_amount: 10_000.0,
             max_concurrent_jobs: 2,
             docker_endpoint: "unix:///var/run/docker.sock".to_string(),

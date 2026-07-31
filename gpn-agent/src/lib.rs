@@ -12,6 +12,9 @@ pub mod modes;
 pub mod profitability;
 pub mod utils;
 
+// Re-export the scripted feed for the headless simulator binary.
+pub use profitability::scripted::ScriptedFeed;
+
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
