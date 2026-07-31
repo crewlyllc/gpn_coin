@@ -100,6 +100,6 @@ cargo run -- config/default.toml
 ## Phase Status
 
 - ✅ **Phase 1 (Research):** Complete
-- 🏗️ **Phase 2 (Design):** In progress — architecture docs written, pallets scaffolded
-- ⏳ **Phase 3 (Prototype):** Not started
+- ✅ **Phase 2 (Design):** Complete
+- 🏗️ **Phase 3 (Prototype):** Dev testnet live — real Ethash PoW consensus + self-tuning difficulty; GPU miner + fee + p2p next
 - ⏳ **Phase 4 (Launch):** Not started

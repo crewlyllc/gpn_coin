@@ -9,6 +9,8 @@ use codec::{Decode, DecodeWithMemTracking, Encode};
 use scale_info::TypeInfo;
 use core::fmt::Debug;
 
+use sp_runtime::SaturatedConversion;
+
 #[cfg(feature = "std")]
 use serde::{Deserialize, Serialize};
 
@@ -79,6 +81,18 @@ pub mod pallet {
     pub type Difficulty<T: Config> = StorageValue<_, U256, ValueQuery>;
 
     #[pallet::storage]
+    /// Unix timestamp (seconds) of the last block that ran the difficulty
+    /// adjustment. Guards against adjusting on block 1 and provides the
+    /// `actual_time` window for `adjust_difficulty`.
+    pub type LastBlockTimestamp<T: Config> = StorageValue<_, u64, ValueQuery>;
+
+    #[pallet::storage]
+    /// Block number of the most recent difficulty adjustment. Difficulty is
+    /// recomputed once every `DifficultyAdjustmentWindow` blocks (using the
+    /// average block time over that window) to keep the adjustment stable.
+    pub type LastAdjustmentBlock<T: Config> = StorageValue<_, BlockNumberFor<T>, ValueQuery>;
+
+    #[pallet::storage]
     pub type CurrentEpoch<T: Config> = StorageValue<_, u64, ValueQuery>;
 
     #[pallet::storage]
@@ -119,6 +133,8 @@ pub mod pallet {
             <LastHalvingBlock<T>>::put(zero_block);
             <PendingRewardBeneficiary<T>>::kill();
             <TotalMinted<T>>::put(zero_bal);
+            <LastBlockTimestamp<T>>::put(0u64);
+            <LastAdjustmentBlock<T>>::put(zero_block);
         }
     }
 
@@ -144,6 +160,42 @@ pub mod pallet {
     #[pallet::hooks]
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
         fn on_initialize(now: BlockNumberFor<T>) -> Weight {
+            // Self-tune block time: every `DifficultyAdjustmentWindow` blocks,
+            // recompute the difficulty target from the *average* block time over
+            // that window (target semantics: higher = easier). Windowed + averaged
+            // adjustment is stable, unlike per-block adjustment (which oscillates
+            // due to the lag between difficulty read and block import).
+            let window = T::DifficultyAdjustmentWindow::get();
+            let last_adj = <LastAdjustmentBlock<T>>::get();
+            let last_ts = <LastBlockTimestamp<T>>::get();
+            let current_ts: u64 = pallet_timestamp::Pallet::<T>::get().saturated_into::<u64>();
+            if last_adj.is_zero() {
+                // First block: just seed the window start, no adjustment yet.
+                <LastAdjustmentBlock<T>>::put(now);
+                <LastBlockTimestamp<T>>::put(current_ts);
+            } else if !window.is_zero() && now >= last_adj + window {
+                let blocks: u64 = (now - last_adj).saturated_into::<u64>();
+                let elapsed_ms = current_ts.saturating_sub(last_ts);
+                // `last_ts`/`current_ts` are in MILLISECONDS (pallet_timestamp
+                // Moment); `TargetBlockTime` is in SECONDS. Convert to seconds
+                // before comparing. Guard against a missing window start
+                // (last_ts == 0, e.g. block 1 seeded before a timestamp was set).
+                let elapsed_s = elapsed_ms / 1000;
+                if last_ts != 0 && blocks > 0 && elapsed_s > 0 {
+                    let avg_block_time = elapsed_s / blocks;
+                    let stored = <Difficulty<T>>::get();
+                    let new = Self::adjust_difficulty(stored, avg_block_time);
+                    log::info!(
+                        target: "runtime::gpu-pow",
+                        "ADJUST now={} last_adj={} last_ts={} cur_ts={} elapsed_s={} blocks={} avg_s={} target={} stored_limb3={} new_limb3={}",
+                        now.saturated_into::<u64>(), last_adj.saturated_into::<u64>(), last_ts, current_ts, elapsed_s, blocks, avg_block_time,
+                        T::TargetBlockTime::get(), stored[3], new[3],
+                    );
+                }
+                <LastAdjustmentBlock<T>>::put(now);
+                <LastBlockTimestamp<T>>::put(current_ts);
+            }
+
             let halving_interval = T::HalvingInterval::get();
             let last_halving = <LastHalvingBlock<T>>::get();
             if !halving_interval.is_zero() && !last_halving.is_zero() && now - last_halving >= halving_interval {
@@ -196,16 +248,19 @@ pub mod pallet {
 
         pub fn adjust_difficulty(
             parent_difficulty: U256,
-            parent_timestamp: u64,
-            current_timestamp: u64,
+            actual_time: u64,
         ) -> U256 {
             let target_time = T::TargetBlockTime::get();
-            let actual_time = current_timestamp.saturating_sub(parent_timestamp);
             if actual_time == 0 { return parent_difficulty; }
-            // Difficulty adjustment: multiply by target/actual ratio
-            // Scale by 1000 to avoid truncation. Adjust difficulty proportionally.
-            let ratio_numer = target_time * 1000;
-            let ratio_denom = actual_time * 1000 / 2 + target_time * 1000 / 2;
+            // `Difficulty` is a *target* (hash < target = valid, higher = EASIER).
+            // Ratio = 2*actual/(actual+target):
+            //   - blocks too slow (actual > target) -> ratio > 1 -> target up (easier)
+            //   - blocks too fast (actual < target) -> ratio < 1 -> target down (harder)
+            //   - on time (actual == target)       -> ratio == 1 -> unchanged
+            // The (actual+target) averaging smooths noise vs a raw actual/target
+            // ratio. Scaled by 1000 to avoid truncation.
+            let ratio_numer = actual_time * 1000;
+            let ratio_denom = (target_time + actual_time) * 1000 / 2;
             let ratio_denom = ratio_denom.max(1);
             let new_diff = Self::apply_difficulty_ratio(parent_difficulty, ratio_numer, ratio_denom);
             let min_d = T::MinDifficulty::get();
@@ -287,7 +342,7 @@ mod tests {
     use super::*;
     use frame_support::{
         construct_runtime, derive_impl, parameter_types,
-        traits::{BuildGenesisConfig, ConstU16, ConstU32, ConstU64, ConstU128, Everything},
+        traits::{BuildGenesisConfig, ConstU16, ConstU32, ConstU64, ConstU128, Everything, Hooks},
     };
     use sp_core::H256;
     use sp_runtime::{
@@ -300,6 +355,7 @@ mod tests {
         CurrentBlockReward, CurrentEpoch, Difficulty, PendingBlockRewards,
         PendingRewardBeneficiary,
     };
+    use sp_runtime::SaturatedConversion;
 
     type Block = frame_system::mocking::MockBlock<Test>;
     type Balance = u128;
@@ -442,11 +498,59 @@ mod tests {
     }
 
     #[test]
-    fn test_difficulty_adjustment_slower() {
+    #[test]
+    fn test_difficulty_adjustment_slower_easier() {
         new_test_ext().execute_with(|| {
-            let parent = TestMinDifficulty::get();
-            let adjusted = GpuPowPallet::adjust_difficulty(parent, 100, 130);
-            assert!(GpuPowPallet::u256_lt(&adjusted, &parent) || adjusted == parent);
+            // Blocks too slow (actual 30s > target 15s) -> target must rise (easier).
+            let parent = [0, 0, 0, 0x1000_0000_0000_0000];
+            let adjusted = GpuPowPallet::adjust_difficulty(parent, 30);
+            assert!(GpuPowPallet::u256_gt(&adjusted, &parent));
+        });
+    }
+
+    #[test]
+    fn test_difficulty_adjustment_faster_harder() {
+        new_test_ext().execute_with(|| {
+            // Blocks too fast (actual 5s < target 15s) -> target must fall (harder).
+            let parent = [0, 0, 0, 0x1000_0000_0000_0000];
+            let adjusted = GpuPowPallet::adjust_difficulty(parent, 5);
+            assert!(GpuPowPallet::u256_lt(&adjusted, &parent));
+        });
+    }
+
+    #[test]
+    fn test_difficulty_adjustment_on_time_stable() {
+        new_test_ext().execute_with(|| {
+            // On-time (actual 15s == target 15s) -> unchanged.
+            let parent = [0, 0, 0, 0x1000_0000_0000_0000];
+            let adjusted = GpuPowPallet::adjust_difficulty(parent, 15);
+            assert_eq!(adjusted, parent);
+        });
+    }
+
+    #[test]
+    fn test_on_initialize_tunes_difficulty_windowed() {
+        new_test_ext().execute_with(|| {
+            // Window = 10. Start from an easy target (above MinDifficulty) so
+            // hardening is observable. Timestamps are in MILLISECONDS.
+            // Blocks 1-11 are fast (avg 5s < target 15s) -> the target falls.
+            Difficulty::<Test>::put([0, 0, 0, 0x1000_0000_0000]); // 2^236, easy
+            let before = Difficulty::<Test>::get();
+            assert!(GpuPowPallet::u256_gt(&before, &TestMinDifficulty::get()));
+
+            pallet_timestamp::Pallet::<Test>::set_timestamp(1_000_000_000); // ms
+            System::set_block_number(1);
+            GpuPowPallet::on_initialize(1); // seeds window start, no change
+
+            // 5s (5000ms) per block for blocks 2..11; window completes at block
+            // 11: 10 blocks over 50s = 5s avg -> harder.
+            for b in 2..=11 {
+                pallet_timestamp::Pallet::<Test>::set_timestamp(1_000_000_000 + (b as u64) * 5000);
+                System::set_block_number(b);
+                GpuPowPallet::on_initialize(b);
+            }
+            let after = Difficulty::<Test>::get();
+            assert!(GpuPowPallet::u256_lt(&after, &before));
         });
     }
 

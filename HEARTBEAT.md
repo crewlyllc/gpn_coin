@@ -1,20 +1,23 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3 (Prototype) — REAL ETHASH POW LIVE 🎉**
-**Last Updated:** 2026-07-30 22:10 PT
+**Status: Phase 3 (Prototype) — REAL ETHASH POW + SELF-TUNING DIFFICULTY LIVE 🎉**
+**Last Updated:** 2026-07-30 23:58 PT
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 8)
+## 🚀 Current Milestone (Cycle 9)
 
-**Block authoring now uses REAL Ethash PoW** — the placeholder CPU blake2 hashing is gone. Blocks are sealed with a genuine 40-byte `nonce(8) ++ mix_hash(32)` Ethash solution and verified on-chain via `ethash::hashimoto_light` (light-cache mode, epoch 0, 16 MB cache). Same algorithm + seal layout a GPU miner produces with the full dataset — **GPU-mineable by construction.**
+**Difficulty now self-tunes** — the fixed dev target is gone. `GPNPowAlgorithm::difficulty()` reads `pallet-gpu-pow`'s stored `Difficulty` target from chain state, and the pallet adjusts it every `DifficultyAdjustmentWindow` (10) blocks based on measured average block time (target semantics: higher = easier, hash < target). Block authoring still uses real Ethash (nonce+mix_hash, `hashimoto_light`).
 
-**Verified live (cycle 8):**
-- `./target/release/gpn-node --dev --tmp --force-authoring` → mines + imports blocks #1 → #46+ using real Ethash
-- ~1 block / ~20 s cadence = exactly the light-cache CPU rate at target 2^244 (P≈2.4e-4/hash) — proof the miner is running genuine Ethash, not instant blake2
-- Seals present as `pow_` consensus digests (`0x05706f775f...`); `verify_seal` hard-requires 40-byte nonce+mix + recomputed matching mix_hash, so every import proves real Ethash verification passed
-- Full detail: `shared/artifacts/project7/cycle8-ethash-pow-log.md`
+**Verified live (cycle 9):**
+- Genesis target 2^245 → stable, **zero timestamp rejections**
+- `ADJUST avg_s=5 target=15` → hardened (2^53→2^52) when blocks too fast
+- `ADJUST avg_s=18 target=15` → eased when blocks too slow
+- Converges around the 15s target — textbook windowed difficulty
+- Full detail: `shared/artifacts/project7/cycle9-difficulty-tuning-log.md`
+
+**Bugs fixed this cycle:** inverted adjustment direction; ms-vs-seconds unit mismatch (Moment is ms, TargetBlockTime is s); first-window `last_ts=0` guard; genesis was far too easy (2^252 → instant mining → timestamp chaos), now 2^245.
 
 ---
 
@@ -28,19 +31,18 @@
 | Dev testnet producing blocks (cycle 7) | ✅ |
 | End-to-end signed extrinsic (cycle 7) | ✅ |
 | **Real Ethash PoW in consensus (cycle 8)** | ✅ **LIVE** |
-| Pallet unit tests (65 across all 5) | ✅ |
-| Wire pallet-gpu-pow difficulty adjustment into node `difficulty()` | 🔴 next |
+| **Self-tuning difficulty from pallet (cycle 9)** | ✅ **LIVE** |
+| Pallet unit tests (79 across all 5) | ✅ |
 | Real GPU (CUDA/OpenCL) Ethash miner in gpn-agent on RTX 4060 | 🔴 next |
 | Fee mechanism (TransactionPayment) | 🟡 pending |
 | gpn-agent subxt chain client (stub) | 🟡 pending |
 | Two-node p2p testnet | 🟡 pending |
 
 ## Next Concrete Actions (priority order)
-1. [ ] Wire `pallet-gpu-pow` difficulty adjustment into `GPNPowAlgorithm::difficulty()` so block time self-tunes (read stored difficulty via runtime API)
-2. [ ] Real GPU Ethash mining on the RTX 4060 — CUDA/OpenCL miner in `gpn-agent` producing the same 40-byte seal, pointed at the dev node
-3. [ ] Add a fee pallet before any non-dev network
-4. [ ] Promote extrinsic test + PoW seal-format test into repo (`gpn-node/scripts/`)
-5. [ ] Two-node local testnet (p2p + longest-chain)
+1. [ ] Real GPU Ethash mining on the RTX 4060 — CUDA/OpenCL miner in `gpn-agent` producing the same 40-byte `nonce(8) ++ mix_hash(32)` seal, pointed at the dev node (seal format + light-cache verify already standard Ethash)
+2. [ ] Add a fee pallet (TransactionPayment) before any non-dev network
+3. [ ] Promote extrinsic test + PoW seal-format test into repo (`gpn-node/scripts/`)
+4. [ ] Two-node local testnet (p2p + longest-chain)
 
 ## Phase 1 Findings
 

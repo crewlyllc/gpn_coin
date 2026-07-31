@@ -1,10 +1,12 @@
 //! Service and ServiceFactory implementation for the GPN PoW node.
 
+use codec::Decode;
 use futures::FutureExt;
 use gpn_runtime::{self, Block, RuntimeApi};
 use sc_basic_authorship::ProposerFactory;
 use sc_client_api::BlockBackend;
 use sc_client_api::Backend;
+use sc_client_api::StorageProvider;
 use sc_consensus::{BlockImport, LongestChain};
 use sc_consensus_pow::{PowAlgorithm, PowBlockImport, PowImportQueue, start_mining_worker};
 use sc_network_sync::SyncingService;
@@ -12,7 +14,9 @@ use sc_service::{error::Error as ServiceError, Configuration, TaskManager};
 use sc_telemetry::{Telemetry, TelemetryWorker};
 use sc_transaction_pool_api::OffchainTransactionPoolFactory;
 use sp_consensus_pow::{Seal, POW_ENGINE_ID};
+use sp_core::storage::StorageKey;
 use sp_core::U256;
+use sp_io::hashing::twox_128;
 use sp_runtime::generic::BlockId;
 use sp_runtime::traits::Block as BlockT;
 use std::{sync::Arc, sync::OnceLock, time::Duration};
@@ -31,14 +35,42 @@ type FullSelectChain = LongestChain<FullBackend, Block>;
 /// follows internally. NOTE: it is the inverse of Ethereum's "difficulty"
 /// (where higher = harder). Here 2^240 gives P ~ 1.5e-5 per hash — a CPU
 /// miner using the light cache finds a block in tens of seconds on the dev
-/// chain. A real difficulty-adjustment (from `pallet-gpu-pow`) replaces this
-/// placeholder before any public network.
+/// chain.
+///
+/// This is now a **fallback only**: the live difficulty is read from
+/// `pallet-gpu-pow`'s stored `Difficulty` target (genesis = 2^244), which the
+/// chain self-tunes every block. `initial_target()` is used only if that
+/// storage read fails.
 fn initial_target() -> U256 {
     // 2^244: byte[1] = 0x10, rest 0. Slightly easier than 2^240 so the
     // light-cache CPU miner produces blocks at a reasonable dev cadence.
     let mut buf = [0u8; 32];
     buf[1] = 0x10;
     U256::from_big_endian(&buf)
+}
+
+/// Storage prefix for `pallet-gpu-pow` as named in `construct_runtime!`
+/// (`GPUPoW: pallet_gpu_pow` in the runtime).
+const GPU_POW_PREFIX: &[u8] = b"GPUPoW";
+/// Storage item name of the pallet's difficulty target.
+const DIFFICULTY_ITEM: &[u8] = b"Difficulty";
+
+/// Convert the pallet's `[u64; 4]` little-endian-limbed target into a
+/// `sp_core::U256` (same numeric value).
+fn limbs_to_u256(limbs: [u64; 4]) -> U256 {
+    let mut bytes = [0u8; 32];
+    for (i, limb) in limbs.iter().enumerate() {
+        bytes[i * 8..i * 8 + 8].copy_from_slice(&limb.to_le_bytes());
+    }
+    U256::from_little_endian(&bytes)
+}
+
+/// The twox128-prefixed storage key for `pallet-gpu-pow::Difficulty`.
+fn difficulty_storage_key() -> StorageKey {
+    let mut key = Vec::with_capacity(32);
+    key.extend_from_slice(&twox_128(GPU_POW_PREFIX));
+    key.extend_from_slice(&twox_128(DIFFICULTY_ITEM));
+    StorageKey(key)
 }
 
 /// Dev chain uses Ethash epoch 0 (smallest cache, 16 MB) so light-cache CPU
@@ -74,8 +106,15 @@ fn ethash_full_size() -> usize {
 /// Blocks are sealed with a genuine Ethash solution (nonce + mix_hash) and
 /// verified via the standard `hashimoto_light`. The same algorithm a GPU
 /// miner targets with the full dataset — GPU-compatible by construction.
+///
+/// Difficulty is **self-tuning**: `difficulty()` reads the `Difficulty`
+/// target stored by `pallet-gpu-pow` at the parent block (which the pallet
+/// adjusts every block toward the target block time), instead of returning a
+/// fixed placeholder.
 #[derive(Clone)]
-pub struct GPNPowAlgorithm;
+pub struct GPNPowAlgorithm {
+    client: Arc<FullClient>,
+}
 
 /// Verify a seal: parse nonce + mix_hash, recompute Ethash over the block
 /// pre-hash, and require the computed mix hash to match AND the final hash to
@@ -105,7 +144,20 @@ fn verify_seal(pre_hash: &<Block as BlockT>::Hash, seal: &Seal, target: U256) ->
 impl PowAlgorithm<Block> for GPNPowAlgorithm {
     type Difficulty = U256;
 
-    fn difficulty(&self, _parent: <Block as BlockT>::Hash) -> Result<Self::Difficulty, sc_consensus_pow::Error<Block>> {
+    fn difficulty(&self, parent: <Block as BlockT>::Hash) -> Result<Self::Difficulty, sc_consensus_pow::Error<Block>> {
+        // Read the pallet's stored difficulty target at the parent block. The
+        // pallet self-tunes it each block toward the target block time.
+        let data = self
+            .client
+            .storage(parent, &difficulty_storage_key())
+            .ok()
+            .flatten();
+        if let Some(data) = data {
+            if let Ok(limbs) = <[u64; 4]>::decode(&mut &data.0[..]) {
+                return Ok(limbs_to_u256(limbs));
+            }
+        }
+        // Fallback (shouldn't happen post-genesis): a dev-friendly target.
         Ok(initial_target())
     }
 
@@ -183,7 +235,7 @@ pub fn new_partial(config: &Configuration) -> Result<Service, ServiceError> {
         .build(),
     );
 
-    let algorithm = GPNPowAlgorithm;
+    let algorithm = GPNPowAlgorithm { client: client.clone() };
 
     let block_import = PowBlockImport::new(
         client.clone(),

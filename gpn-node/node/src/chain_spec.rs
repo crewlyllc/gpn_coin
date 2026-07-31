@@ -82,8 +82,12 @@ fn genesis_config_json(
     endowed_accounts: Vec<AccountId>,
 ) -> serde_json::Value {
     let initial_difficulty = {
+        // Target 2^245 (limb3 = 2^53) -> ~10s/block with the light-cache CPU
+        // miner. Eases the pallet toward TargetBlockTime (15s) from here.
+        // Fast enough to observe self-tuning quickly, hard enough that mining
+        // is not instant (instant mining -> timestamp-rejection chaos).
         let mut diff = [0u64; 4];
-        diff[3] = 0x4000; // Initial easy difficulty for dev
+        diff[3] = 0x0020_0000_0000_0000; // 2^53 limb -> 2^245 target
         diff
     };
 

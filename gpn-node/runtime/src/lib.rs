@@ -178,7 +178,7 @@ parameter_types! {
     pub const InitialBlockReward: Balance = 50_000_000_000_000_000_000; // 50 GPN (12 decimals)
     pub const HalvingInterval: BlockNumber = 4_204_800; // ~2 years at 15s blocks
     pub const TargetBlockTime: u64 = 15; // seconds
-    pub const DifficultyAdjustmentWindow: BlockNumber = 100;
+    pub const DifficultyAdjustmentWindow: BlockNumber = 10; // dev-friendly; retune every 10 blocks
     pub const PowMaxWeight: u64 = 200_000;
     pub const AlgorithmVersion: u32 = 1;
     pub const MaxSupply: Balance = 1_000_000_000_000_000_000_000_000; // 1B GPN (12 decimals)
