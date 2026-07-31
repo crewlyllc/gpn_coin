@@ -1,19 +1,20 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3 (Prototype) — RTX 4060 GPU MINES THE LIVE DEV TESTNET + seal/extrinsic tests promoted 🎉**
-**Last Updated:** 2026-07-31 04:00 PT
+**Status: Phase 3 (Prototype) — TWO-NODE GPU P2P TESTNET LIVE: longest-chain sync + GPU mining across peers 🎉**
+**Last Updated:** 2026-07-31 04:20 PT
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 12)
+## 🚀 Current Milestone (Cycle 13)
 
-**The GPU miner is wired into the live node AND the PoW seal-format + extrinsic tests are now committed to the repo.** The RTX 4060 mines the dev testnet end-to-end (cycle 11); this cycle hardened the test suite so the seal format and the full extrinsic pipeline are verifiable in-repo.
+**The two-node local p2p testnet is live and promoted into the repo.** Both nodes run the real OpenCL Ethash miner on the RTX 4060, connect over libp2p via `--bootnodes`, sync one longest chain, and converge on the same mined block. (Cycle 12 hardened the PoW seal-format + extrinsic tests; cycle 11 wired the GPU miner into the node.)
 
-**Verified (cycle 12):**
-- **5 new Rust `seal_tests`** in `gpn-node/node/src/service.rs` — real Ethash round-trip: valid seal passes, wrong mix/length/header/target all rejected. `cargo test -p gpn-node seal_tests` → 5/5 pass.
-- **`gpn-node/scripts/gpn_extrinsic_test.py`** — end-to-end extrinsic test vs a live `--dev --force-authoring` node: Balances.transfer, ProfitabilityOracle.update_feed, ComputeMarketplace.register_provider + create_job (escrow), GPUAttestation.deposit_stake → **4/4 pass**.
-- Full detail: `shared/artifacts/project7/cycle12-tests-promoted-log.md`
+**Verified (cycle 13):**
+- **`gpn-node/scripts/gpn_two_node_testnet.sh`** — boots Alice + Bob on the `local` spec, connects B→A via bootnodes, asserts **6/6**: A GPU miner online, A produces blocks, B GPU miner online, B connected as peer, B syncs blocks, both converge on the same non-zero mined block.
+- **6/6 pass on both the debug AND the rebuilt release binary** (see below).
+- **Fixed a stale-release trap:** the committed `target/release/gpn-node` predated the cycle-11 GPU wiring and silently used the CPU miner. Rebuilt release (1m08s) — it now contains the GPU miner and passes on the GPU.
+- Full detail: `shared/artifacts/project7/cycle13-two-node-p2p-log.md`
 
 ---
 
@@ -31,16 +32,16 @@
 | **Real GPU (OpenCL) Ethash miner in gpn-agent on RTX 4060 (cycle 10)** | ✅ **LIVE** |
 | **GPU miner wired into live node (cycle 11)** | ✅ **LIVE** |
 | **PoW seal-format + extrinsic tests in repo (cycle 12)** | ✅ **LIVE** |
+| **Two-node GPU p2p testnet (cycle 13)** | ✅ **LIVE** |
 | Pallet unit tests (81 across all 5) | ✅ |
 | GPU miner validation tests (DAG, trace-diff, matches-reference) | ✅ |
 | Fee mechanism (TransactionPayment) | 🟡 pending |
 | gpn-agent subxt chain client (stub) | 🟡 pending |
-| Two-node p2p testnet | 🟡 pending |
 
 ## Next Concrete Actions (priority order)
-1. [ ] Two-node local p2p testnet — longest-chain + GPU mining across peers (promote into `gpn-node/scripts/`)
-2. [ ] Add a fee pallet (TransactionPayment) before any non-dev network
-3. [ ] External subxt miner path — agent fetches block template over RPC, mines on its own GPU, submits seal remotely (needs a `gpn_getTemplate`-style RPC endpoint; this is the production mining architecture)
+1. [ ] Add a fee pallet (TransactionPayment) before any non-dev network
+2. [ ] External subxt miner path — agent fetches block template over RPC, mines on its own GPU, submits seal remotely (needs a `gpn_getTemplate`-style RPC endpoint; this is the production mining architecture)
+3. [ ] Two-node testnet docs in README + CI wiring for `scripts/gpn_two_node_testnet.sh`
 
 ## Phase 1 Findings
 
