@@ -1,0 +1,61 @@
+[package]
+name = "gpn-node"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Local
+gpn-runtime = { path = "../runtime" }
+pallet-gpu-pow = { path = "../pallets/gpu-pow" }
+
+# Substrate / Polkadot SDK
+frame-system = { workspace = true }
+frame-benchmarking = { workspace = true, optional = true }
+pallet-transaction-payment = { workspace = true, default-features = false }
+pallet-transaction-payment-rpc-runtime-api = { workspace = true, features = ["std"] }
+sc-basic-authorship = { workspace = true }
+sc-chain-spec = { workspace = true }
+sc-cli = { workspace = true }
+sc-client-api = { workspace = true }
+sc-consensus = { workspace = true }
+sc-consensus-pow = { workspace = true }
+sc-offchain = { workspace = true }
+sc-executor = { workspace = true }
+sc-network = { workspace = true }
+sc-network-sync = { workspace = true }
+sc-rpc = { workspace = true }
+sc-service = { workspace = true }
+sc-telemetry = { workspace = true }
+sc-tracing = { workspace = true }
+sc-transaction-pool = { workspace = true }
+sc-transaction-pool-api = { workspace = true }
+sp-api = { workspace = true }
+sp-block-builder = { workspace = true }
+sp-blockchain = { workspace = true }
+sp-consensus = { workspace = true }
+sp-consensus-pow = { workspace = true }
+sp-core = { workspace = true }
+sp-inherents = { workspace = true }
+sp-io = { workspace = true }
+sp-keystore = { workspace = true }
+sp-runtime = { workspace = true }
+sp-timestamp = { workspace = true }
+sp-transaction-pool = { workspace = true }
+substrate-prometheus-endpoint = { workspace = true }
+
+# Common
+codec = { workspace = true }
+log = { workspace = true }
+serde = { workspace = true }
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+futures = "0.3"
+jsonrpsee = { version = "0.24", features = ["server"] }
+serde_json = "1"
+
+[features]
+default = []
+runtime-benchmarks = [
+    "gpn-runtime/runtime-benchmarks",
+    "frame-benchmarking",
+]

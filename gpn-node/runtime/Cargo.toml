@@ -1,0 +1,90 @@
+[package]
+name = "gpn-runtime"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[dependencies]
+# Workspace crates
+pallet-gpu-pow = { path = "../pallets/gpu-pow", default-features = false }
+pallet-gpu-attestation = { path = "../pallets/gpu-attestation", default-features = false }
+pallet-compute-marketplace = { path = "../pallets/compute-marketplace", default-features = false }
+pallet-profitability-oracle = { path = "../pallets/profitability-oracle", default-features = false }
+pallet-gpn-token = { path = "../pallets/gpn-token", default-features = false }
+
+# Substrate dependencies
+frame-support = { workspace = true, default-features = false }
+frame-system = { workspace = true, default-features = false }
+frame-executive = { workspace = true, default-features = false }
+frame-benchmarking = { workspace = true, default-features = false, optional = true }
+frame-try-runtime = { workspace = true, default-features = false, optional = true }
+pallet-balances = { workspace = true, default-features = false }
+pallet-timestamp = { workspace = true, default-features = false }
+pallet-insecure-randomness-collective-flip = { workspace = true, default-features = false }
+pallet-transaction-payment = { workspace = true, default-features = false }
+sp-api = { workspace = true, default-features = false }
+sp-block-builder = { workspace = true, default-features = false }
+sp-offchain = { workspace = true, default-features = false }
+sp-transaction-pool = { workspace = true, default-features = false }
+frame-system-rpc-runtime-api = { workspace = true, default-features = false }
+sp-runtime = { workspace = true, default-features = false }
+sp-std = { workspace = true, default-features = false }
+sp-version = { workspace = true, default-features = false }
+sp-core = { workspace = true, default-features = false }
+sp-io = { workspace = true, default-features = false }
+sp-inherents = { workspace = true, default-features = false }
+sp-consensus-pow = { workspace = true, default-features = false }
+sp-genesis-builder = { workspace = true, default-features = false }
+sp-session = { workspace = true, default-features = false }
+
+# Common
+codec = { workspace = true, default-features = false }
+scale-info = { workspace = true, default-features = false }
+log = { workspace = true, default-features = false }
+serde = { workspace = true, optional = true }
+
+[features]
+default = ["std"]
+std = [
+    "codec/std",
+    "scale-info/std",
+    "frame-support/std",
+    "frame-system/std",
+    "frame-executive/std",
+    "pallet-balances/std",
+    "pallet-timestamp/std",
+    "pallet-insecure-randomness-collective-flip/std",
+    "pallet-transaction-payment/std",
+    "sp-api/std",
+    "sp-block-builder/std",
+    "sp-offchain/std",
+    "sp-transaction-pool/std",
+    "frame-system-rpc-runtime-api/std",
+    "sp-runtime/std",
+    "sp-std/std",
+    "sp-version/std",
+    "sp-core/std",
+    "sp-io/std",
+    "sp-inherents/std",
+    "sp-consensus-pow/std",
+    "sp-genesis-builder/std",
+    "sp-session/std",
+    "pallet-gpu-pow/std",
+    "pallet-gpu-attestation/std",
+    "pallet-compute-marketplace/std",
+    "pallet-profitability-oracle/std",
+    "pallet-gpn-token/std",
+    "serde",
+    "substrate-wasm-builder",
+]
+runtime-benchmarks = [
+    "frame-benchmarking/runtime-benchmarks",
+    "frame-support/runtime-benchmarks",
+    "frame-system/runtime-benchmarks",
+    "pallet-balances/runtime-benchmarks",
+    "pallet-timestamp/runtime-benchmarks",
+]
+try-runtime = ["frame-try-runtime/try-runtime"]
+
+[build-dependencies]
+substrate-wasm-builder = { optional = true, workspace = true, default-features = true }

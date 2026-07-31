@@ -1,0 +1,28 @@
+/// Default configuration for the GPU node agent
+[node]
+name = "gpu-node-1"
+chain_endpoint = "ws://localhost:9944"
+account_address = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+account_key_file = "config/account_key.json"
+mode = "auto"  # auto, mine, compute, stake_only
+staked_amount = 10000.0
+
+[gpu]
+model = "NVIDIA GeForce RTX 4090"
+min_vram_gb = 8
+attestation_interval_secs = 3600  # Every hour
+
+[profitability]
+hysteresis_percent = 5.0
+min_epoch_hours = 1.0
+check_interval_secs = 3600
+token_price_oracle = "pyth"
+
+[compute]
+max_concurrent_jobs = 2
+docker_endpoint = "unix:///var/run/docker.sock"
+
+[mining]
+algorithm = "ethash"
+solo_mining = true
+pool_url = ""

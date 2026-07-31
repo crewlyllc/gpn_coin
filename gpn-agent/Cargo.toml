@@ -1,0 +1,30 @@
+[package]
+name = "gpn-agent"
+version = "0.1.0"
+edition = "2021"
+description = "GPU Node Agent for GPN Network - manages mining, compute, and staking modes"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+log = "0.4"
+env_logger = "0.11"
+reqwest = { version = "0.12", features = ["json", "native-tls-vendored"] }
+thiserror = "2"
+anyhow = "1"
+
+# Substrate/RPC
+subxt = "0.37"
+sp-core = "28"
+sp-runtime = "28"
+
+# GPU monitoring
+sysinfo = "0.30"
+
+# Crypto
+sha2 = "0.10"
+
+# Async utilities
+futures = "0.3"

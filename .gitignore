@@ -1,0 +1,8 @@
+# Build artifacts
+target/
+**/target/
+Cargo.lock
+# Symlink to shared workspace (artifacts live in shared_workspace, tracked separately)
+shared
+# Local notes
+*.log
