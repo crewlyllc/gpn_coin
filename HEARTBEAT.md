@@ -1,12 +1,26 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
 **Status: Phase 3 (Prototype) — LIVE ON-CHAIN PROFITABILITY FEED: `gpn_seed_feed` signs & submits `ProfitabilityOracle.update_feed` as Alice (genesis operator); ChainClient reads the REAL feed from the chain's best (head) block — token=$0.075 / gpu=$3/hr / util=72% / apr=15% live, NOT fallbacks (Cycle 22). END-TO-END PROFITABILITY-DRIVEN AUTO-SWITCH VERIFIED LIVE ON THE RTX 4060 (Cycle 20)**
-**Last Updated:** 2026-07-31 13:25 PT
+**Last Updated:** 2026-07-31 14:10 PT
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 22)
+## 🚀 Current Milestone (Cycle 23)
+
+**Two-node GPU p2p testnet documented + wired into CI.** Re-verified the priority-1 integration
+live on the RTX 4060: `gpn_two_node_testnet.sh` → **6/6 passed** (both nodes GPU-mining real Ethash,
+connected as peers, converged on best #7). Added a full README section (flags, stale-binary gotcha,
+expected output) and `.github/workflows/ci.yml` — CPU build+test jobs on ubuntu-latest (GPU tests
+`#[ignore]`d) + a `workflow_dispatch`-gated `two-node-gpu-testnet` job on a `[self-hosted, linux, gpu]`
+runner (path to run the RTX 4060 box as a self-hosted runner). Toolchain pinned to **stable**
+(workspace builds on rustc 1.97.x).
+
+Detail: `shared/artifacts/project7/cycle23-two-node-testnet-ci-log.md`
+
+---
+
+## 🚀 Previous Milestone (Cycle 22)
 
 **The last feed gap is closed — the `chain` profitability feed is now fully live.** Two pieces landed:
 
@@ -135,7 +149,7 @@ This **completes the production mining architecture**: node and miner are fully 
 | gpn-agent subxt chain client (stub) | ✅ **REPLACED (cycle 21)** |
 
 ## Next Concrete Actions (priority order)
-1. [ ] Two-node testnet docs in README + CI wiring for `gpn-node/scripts/gpn_two_node_testnet.sh`.
+1. [x] Two-node testnet docs in README + CI wiring for `gpn-node/scripts/gpn_two_node_testnet.sh` (cycle 23, 6/6 live).
 2. [ ] Compute marketplace integration: surface `ComputeExecutor` throughput/GFLOPS as an on-chain attestable metric (ties the AI-compute leg to the `compute-marketplace` / `gpu-attestation` pallets).
 3. [ ] Wire the seeded feed into a `--feed` agent config so operators can point the agent at a live oracle instead of manual seeding (`gpn_seed_feed`).
 

@@ -95,6 +95,46 @@ cargo run --release -- --chain dev --alice
 cargo run --release -- --chain dev --bob --bootnodes /ip4/127.0.0.1/tcp/30333/p2p/ALICE_PEER_ID
 ```
 
+### Two-node GPU p2p testnet (integration test)
+
+`gpn-node/scripts/gpn_two_node_testnet.sh` boots **two** `gpn-node` processes on the
+`local` chain spec (Alice + Bob authorities) over libp2p and verifies, end-to-end:
+
+1. **Both** nodes mine with the **real GPU (OpenCL) Ethash miner** — not the CPU fallback.
+2. Both nodes connect as peers over `--bootnodes`.
+3. Both nodes converge on the **same longest chain** (identical best-block hash) —
+   blocks mined by either peer are imported by the other.
+
+This is the longest-chain + GPU-mining-across-peers integration test for the
+Phase-3 prototype. Requires a GPU (NVIDIA OpenCL ICD, e.g. an RTX 4060).
+
+```bash
+cd gpn-node
+# Release binary must be a cycle-11+ build (includes the GPU miner).
+# Use target/debug/gpn-node if unsure — a stale release predates the GPU miner
+# and will silently fall back to CPU mining (the script will report a failure).
+cargo build --release
+bash scripts/gpn_two_node_testnet.sh            # uses target/release/gpn-node
+bash scripts/gpn_two_node_testnet.sh --binary target/debug/gpn-node
+bash scripts/gpn_two_node_testnet.sh --keep    # leave nodes running to poke at them
+```
+
+Expected success output (exit code 0):
+
+```
+✅ node A GPU miner online
+✅ node A produced blocks
+✅ node B GPU miner online
+✅ node B connected as a peer
+✅ node B imported blocks (synced)
+✅ nodes converged on same mined block: best: #7 (...)
+==== RESULT: 6 passed, 0 failed ====
+```
+
+> **Note:** a node should run **either** the internal self-miner **or** serve external
+> miners, not both — the self-miner consumes every template within ms, so external
+> miners see `None`. This script uses the internal GPU self-miner on both nodes.
+
 ### Run GPU node agent
 ```bash
 cd gpn-agent

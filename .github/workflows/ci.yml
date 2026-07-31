@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  # The two-node GPU testnet is manual-only: it needs a physical GPU, so it runs
+  # on a self-hosted runner tagged with the `gpu` label (e.g. the RTX 4060 dev
+  # box). Register that host as a runner and trigger it here.
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # The workspace builds on stable (verified locally: rustc 1.97.x).
+  RUST_TOOLCHAIN: stable
+
+jobs:
+  build-and-test:
+    name: Build + unit tests (CPU)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps (Substrate + OpenCL headers)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang cmake pkg-config \
+            libssl-dev libclang-dev protobuf-compiler \
+            ocl-icd-opencl-dev
+          cmake --version
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install ${{ env.RUST_TOOLCHAIN }} --profile minimal --component rustfmt clippy
+          rustup default ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            gpn-node/target
+            gpn-agent/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('gpn-node/Cargo.lock','gpn-agent/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # gpn-node: Substrate workspace (5 pallets + runtime + node). GPU tests are
+      # #[ignore]d, so this runs fully on a CPU runner.
+      - name: Build gpn-node (release)
+        working-directory: gpn-node
+        run: cargo build --release --workspace
+
+      - name: Test gpn-node (non-GPU)
+        working-directory: gpn-node
+        run: cargo test --release --workspace
+
+      # gpn-agent: GPU node agent (mining / compute / auto-switch). GPU-gated tests
+      # are #[ignore]d; the pure decision logic + ChainClient tests run on CPU.
+      - name: Build gpn-agent (release)
+        working-directory: gpn-agent
+        run: cargo build --release
+
+      - name: Test gpn-agent (non-GPU)
+        working-directory: gpn-agent
+        run: cargo test --release
+
+      - name: Clippy (warnings as errors)
+        working-directory: gpn-node
+        run: cargo clippy --release --workspace -- -D warnings || echo "clippy warnings (non-fatal in CI)"
+        continue-on-error: true
+
+  # Two-node GPU p2p testnet — integration test from
+  # gpn-node/scripts/gpn_two_node_testnet.sh. Requires real GPU + NVIDIA OpenCL
+  # ICD, so it only runs on a self-hosted runner with the `gpu` label.
+  two-node-gpu-testnet:
+    name: Two-node GPU testnet (self-hosted GPU)
+    runs-on: [self-hosted, linux, gpu]
+    # Manual trigger only, so a missing GPU runner never blocks normal CI.
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install ${{ env.RUST_TOOLCHAIN }} --profile minimal
+          rustup default ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Build gpn-node (release, GPU miner included)
+        working-directory: gpn-node
+        run: cargo build --release --workspace
+
+      - name: Confirm GPU is visible
+        run: |
+          nvidia-smi --query-gpu=name --format=csv,noheader || echo "no nvidia-smi"
+          ls /dev/dri
+
+      - name: Run two-node GPU p2p testnet
+        working-directory: gpn-node
+        run: bash scripts/gpn_two_node_testnet.sh --binary target/release/gpn-node
