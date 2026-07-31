@@ -1,12 +1,25 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3 (Prototype) — AGENT NOW SUBMITS THE REAL `GPUAttestation::submit_attestation` EXTRINSIC (Cycle 25): the `ChainClient` reads the on-chain attestation challenge and pushes a signed attestation (measured GFLOPS, GPU count, tier) via a shared `GpnConfig`+`Sr25519Signer` module reused from `gpn_seed_feed`; attestation tier still gated by proof-of-compute (Bronze≥100/Silver≥1000/Gold≥5000 GFLOPS).**
-**Last Updated:** 2026-07-31 ~16:10 PT
+**Status: Phase 3 (Prototype) — CROSS-PALLET PROOF-OF-COMPUTE GATE ENFORCED (Cycle 26): the compute marketplace now rejects any `accept_job` whose provider hasn't attested to at least the job's `min_gflops` (new `GPUAttestationProvider` trait from gpu-attestation → `Config::GPUAttestation` in compute-marketplace → `ProviderComputeInsufficient` error at match time). Un-attested providers (0 GFLOPS) are blocked from gated jobs; jobs with `min_gflops=0` stay open-market. This closes the last open integration gap in the AI-compute leg.**
+**Last Updated:** 2026-07-31 ~17:10 PT
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 25)
+## 🚀 Current Milestone (Cycle 26)
+
+**`min_gflops` is now enforced at `accept_job` via a clean cross-pallet trait — the marketplace can no longer match a job to a provider that can't actually deliver the required GPU throughput.**
+
+1. **`gpu-attestation` exposes `GPUAttestationProvider<AccountId>`** — public read-only trait (`attested_gflops` / `attested_tier`), implemented for `Pallet<T>` by reading `Attestations` storage. Downstream pallets get a stable interface with no storage coupling.
+2. **`compute-marketplace` consumes it** — new `Config::GPUAttestation: GPUAttestationProvider<AccountId>`; `accept_job` now rejects with new `Error::ProviderComputeInsufficient` when `provider.attested_gflops < job.gpu_requirements.min_gflops`. 0 GFLOPS = never attested → blocked from gated jobs. `min_gflops=0` → gate skipped (open market preserved).
+3. **Runtime wired** — `type GPUAttestation = GPUAttestation` in the marketplace Config impl.
+4. **4 new tests** (mock attestation via `thread_local` for race-free parallel isolation): below-min rejected / un-attested rejected / meets-requirement passes / zero-gate skipped.
+
+**Verified:** compute-marketplace **21 passed / 0 failed** (was 17; +4); gpu-attestation **20 passed / 0 failed**; `cargo check --workspace` clean. Commit `8fd687a`. Detail: `shared/artifacts/project7/cycle26-gflops-accept-gate-log.md`
+
+---
+
+## 🚀 Previous Milestone (Cycle 25)
 
 **The attestation RPC stub is gone — the agent now submits the real `GPUAttestation::submit_attestation` extrinsic on-chain.** Four pieces landed:
 
@@ -175,16 +188,18 @@ This **completes the production mining architecture**: node and miner are fully 
 | **LIVE on-chain profitability feed: `gpn_seed_feed` signs `update_feed` + ChainClient head-block read (cycle 22)** | ✅ **LIVE** |
 | **Measured GFLOPS = on-chain attestable metric: attestation tier gated by proof-of-compute, `min_gflops` in marketplace, agent reports real GFLOPS (cycle 24)** | ✅ **LIVE (pallet+agent)** |
 | **Agent submits REAL `GPUAttestation::submit_attestation` extrinsic on-chain (shared signer module; challenge read; `with_signer` wiring) (cycle 25)** | ✅ **LIVE (agent)** |
+| **`min_gflops` ENFORCED at `accept_job` — cross-pallet `GPUAttestationProvider` trait gates providers on attested GFLOPS (cycle 26)** | ✅ **LIVE (pallet+runtime)** |
 | gpn-agent subxt chain client (stub) | ✅ **REPLACED (cycle 21)** |
 | Wire real `GPUAttestation::submit_attestation` extrinsic (reuse gpn_seed_feed Signer) | ✅ **DONE (cycle 25)** |
-| Enforce `min_gflops` matching at `accept_job` (cross-pallet attested read) | 🟡 pending |
+| Enforce `min_gflops` matching at `accept_job` (cross-pallet attested read) | ✅ **DONE (cycle 26)** |
 
 ## Next Concrete Actions (priority order)
 1. [x] Two-node testnet docs in README + CI wiring for `gpn-node/scripts/gpn_two_node_testnet.sh` (cycle 23, 6/6 live).
 2. [x] Compute marketplace integration: surface `ComputeExecutor` throughput/GFLOPS as an on-chain attestable metric (cycle 24 — attestation tier gated by GFLOPS + `min_gflops` in marketplace + agent measures/reports).
 3. [x] Wire the real `GPUAttestation::submit_attestation` extrinsic in the agent by reusing the `gpn_seed_feed` custom Signer + `GpnConfig` plumbing (cycle 25 — shared `chain::signer` module; challenge read; `with_signer` wiring).
-4. [ ] Enforce `min_gflops` matching at `accept_job` — cross-pallet read of the provider's attested `compute_gflops` (trait from gpu-attestation into compute-marketplace).
+4. [x] Enforce `min_gflops` matching at `accept_job` — cross-pallet read of the provider's attested `compute_gflops` (trait from gpu-attestation into compute-marketplace) (cycle 26).
 5. [ ] Live end-to-end attest on the RTX 4060: deposit stake (pallet requires `ProviderStake`), measure ~830 GFLOPS, submit, confirm tier on-chain. Consider wiring `deposit_stake` into agent boot / a `gpn_seed_attest` helper.
+6. [ ] Live end-to-end marketplace flow on the 4060: attest (~830 GFLOPS) → register provider → create job with `min_gflops ≤ 830` → accept (now gated by cycle-26 trait) → run real GEMM → submit result → complete + payout.
 
 ## Phase 1 Findings
 
