@@ -18,7 +18,7 @@ use frame_support::{
     parameter_types,
     traits::{ConstU16, ConstU32, ConstU64, ConstU8, ConstU128, EitherOfDiverse, Everything},
     weights::{
-        constants::WEIGHT_REF_TIME_PER_SECOND, Weight,
+        constants::WEIGHT_REF_TIME_PER_SECOND, IdentityFee, Weight,
     },
     PalletId,
 };
@@ -72,6 +72,7 @@ pub type SignedExtra = (
     frame_system::CheckEra<Runtime>,
     frame_system::CheckNonce<Runtime>,
     frame_system::CheckWeight<Runtime>,
+    pallet_transaction_payment::ChargeTransactionPayment<Runtime>,
 );
 
 /// Unchecked extrinsic type
@@ -175,6 +176,20 @@ impl pallet_timestamp::Config for Runtime {
 impl pallet_insecure_randomness_collective_flip::Config for Runtime {}
 
 // ###########################################################################
+// Transaction payment (fees)
+// ###########################################################################
+
+impl pallet_transaction_payment::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type OnChargeTransaction = pallet_transaction_payment::FungibleAdapter<Balances, ()>;
+    type OperationalFeeMultiplier = ConstU8<5>;
+    type WeightToFee = IdentityFee<Balance>;
+    type LengthToFee = IdentityFee<Balance>;
+    type FeeMultiplierUpdate = ();
+    type WeightInfo = ();
+}
+
+// ###########################################################################
 // Custom pallet configuration
 // ###########################################################################
 
@@ -275,6 +290,7 @@ construct_runtime!(
         RandomnessCollectiveFlip: pallet_insecure_randomness_collective_flip,
         Timestamp: pallet_timestamp,
         Balances: pallet_balances,
+        TransactionPayment: pallet_transaction_payment,
         GPUPoW: pallet_gpu_pow,
         GPUAttestation: pallet_gpu_attestation,
         ComputeMarketplace: pallet_compute_marketplace,

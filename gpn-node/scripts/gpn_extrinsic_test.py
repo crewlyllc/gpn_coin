@@ -105,21 +105,23 @@ def main():
     nonce = account_nonce(sub, ALICE.ss58_address)
     print(f"Alice starting nonce: {nonce}")
 
-    # 1. Balance transfer
-    print("\n[1] Balances.transfer_allow_death (Alice -> Bob, 1.23 GPN)")
+    # 1. Balance transfer (now with fees via TransactionPayment)
+    print("\n[1] Balances.transfer_allow_death (Alice -> Bob, 1.23 GPN) + fee")
     before = query_balance(sub, ALICE.ss58_address)
+    transfer_amount = 1234567890123
     call = sub.compose_call("Balances", "transfer_allow_death", {
-        "dest": BOB_SS58, "value": 1234567890123,
+        "dest": BOB_SS58, "value": transfer_amount,
     })
     if submit(sub, call, ALICE, nonce):
         nonce += 1
         after = wait_for(lambda: query_balance(sub, ALICE.ss58_address)
-                         if query_balance(sub, ALICE.ss58_address) == before - 1234567890123 else None,
+                         if query_balance(sub, ALICE.ss58_address) < before - transfer_amount else None,
                          "transfer included")
-        check("balance debited by exact amount", after is not None,
-              f"before={before} expected_after={before - 1234567890123}")
+        fee = (before - transfer_amount - after) if after is not None else None
+        check("debited amount + fee (fee > 0)", after is not None and fee is not None and fee > 0,
+              f"before={before} after={after} transfer={transfer_amount} fee={fee}")
     else:
-        check("balance debited by exact amount", False)
+        check("debited amount + fee (fee > 0)", False)
 
     # 2. Profitability oracle feed update (Alice is a genesis operator)
     print("\n[2] ProfitabilityOracle.update_feed")

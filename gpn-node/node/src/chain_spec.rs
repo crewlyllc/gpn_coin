@@ -117,6 +117,7 @@ fn genesis_config_json(
             initial_inflation: Perbill::from_percent(10),
             _config: Default::default(),
         },
+        transaction_payment: Default::default(),
     };
 
     serde_json::to_value(config).expect("Genesis config is valid JSON")
