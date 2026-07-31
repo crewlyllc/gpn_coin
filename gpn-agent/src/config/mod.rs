@@ -33,6 +33,12 @@ pub struct AgentConfig {
     // Compute
     pub max_concurrent_jobs: u32,
     pub docker_endpoint: String,
+    /// OpenCL GPU device index to run AI compute jobs on
+    pub compute_device_index: usize,
+    /// GEMM size N for the AI-compute workload (NxNxN matmul)
+    pub compute_matrix_size: usize,
+    /// Matmuls per reporting batch for the compute engine
+    pub compute_batch: usize,
 
     // Mining
     pub mining_algorithm: String,
@@ -62,6 +68,9 @@ impl Default for AgentConfig {
             staked_amount: 10_000.0,
             max_concurrent_jobs: 2,
             docker_endpoint: "unix:///var/run/docker.sock".to_string(),
+            compute_device_index: 0,
+            compute_matrix_size: 2048,
+            compute_batch: 4,
             mining_algorithm: "ethash".to_string(),
             mining_pool_url: "".to_string(),
             solo_mining: true,

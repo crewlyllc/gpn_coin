@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::process::Command;
 
 pub mod ethash_miner;
+pub mod matmul;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GPUInfo {

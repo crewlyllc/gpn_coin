@@ -3,9 +3,9 @@
 //! real GPU mining loop** (`ExternalMiner`), and switching away **stops it and
 //! releases the GPU** for compute/idle.
 
+use crate::compute::{ComputeConfig, ComputeExecutor};
 use crate::mining::{ExternalMiner, MiningConfig};
 use crate::{AgentState, Mode};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 
@@ -16,21 +16,25 @@ pub struct ModeManager {
     miner: Mutex<Option<ExternalMiner>>,
     /// Config for spawning the miner (node RPC URL, GPU index).
     mining_cfg: MiningConfig,
-    /// Whether the GPU is currently serving a compute job (started/stopped by
-    /// the compute executor; tracked here for clean transitions).
-    compute_active: Arc<AtomicBool>,
+    /// The running compute engine (real GPU AI workload), if any — the
+    /// compute-side counterpart to `miner`. Mutex for the same reason.
+    compute: Mutex<Option<ComputeExecutor>>,
+    /// Config for spawning the compute engine (GPU index, GEMM size).
+    compute_cfg: ComputeConfig,
 }
 
 impl ModeManager {
     pub fn new(
         state: Arc<RwLock<AgentState>>,
         mining_cfg: MiningConfig,
+        compute_cfg: ComputeConfig,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Ok(Self {
             state,
             miner: Mutex::new(None),
             mining_cfg,
-            compute_active: Arc::new(AtomicBool::new(false)),
+            compute: Mutex::new(None),
+            compute_cfg,
         })
     }
 
@@ -39,10 +43,20 @@ impl ModeManager {
         self.miner.lock().unwrap().as_ref().map(|m| m.is_running()).unwrap_or(false)
     }
 
+    /// Whether the compute engine (real GPU AI workload) is currently running.
+    pub fn is_computing(&self) -> bool {
+        self.compute.lock().unwrap().as_ref().map(|c| c.is_running()).unwrap_or(false)
+    }
+
+    /// Latest measured compute throughput in GFLOPS (0.0 if not computing).
+    pub fn compute_gflops(&self) -> f64 {
+        self.compute.lock().unwrap().as_ref().map(|c| c.gflops()).unwrap_or(0.0)
+    }
+
     /// Force-entry a mode on boot, regardless of the current state flag.
     /// Unlike [`switch_to`](Self::switch_to), this does not short-circuit when
     /// `AgentState.current_mode` already equals `mode` — it ensures the
-    /// target mode's resources (mining engine / compute flag) are actually
+    /// target mode's resources (mining engine / compute engine) are actually
     /// started.
     pub async fn boot(&self, mode: Mode) -> Result<(), Box<dyn std::error::Error>> {
         log::info!("Booting into {:?} mode", mode);
@@ -50,11 +64,11 @@ impl ModeManager {
             Mode::Mining => self.start_miner()?,
             Mode::Compute => {
                 self.stop_miner();
-                self.compute_active.store(true, Ordering::SeqCst);
+                self.start_compute()?;
             }
             Mode::StakeOnly => {
                 self.stop_miner();
-                self.compute_active.store(false, Ordering::SeqCst);
+                self.stop_compute();
             }
         }
         Ok(())
@@ -94,11 +108,10 @@ impl ModeManager {
                 self.stop_miner();
             }
             Mode::Compute => {
-                log::info!("Stopping compute executor...");
-                // Stop accepting new jobs; wait for running jobs (with timeout)
-                // then kill containers. For the prototype, mark compute inactive.
-                self.compute_active.store(false, Ordering::SeqCst);
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                log::info!("Stopping compute engine...");
+                // Cancel the running AI workload and release the GPU so
+                // mining/idle can take over.
+                self.stop_compute();
             }
             Mode::StakeOnly => {
                 log::info!("Already idle (stake-only mode)");
@@ -142,14 +155,12 @@ impl ModeManager {
                 self.start_miner()?;
             }
             Mode::Compute => {
-                log::info!("Starting compute executor...");
-                // For the prototype: mark compute active so the GPU is reserved
-                // for compute (mining engine must not be running).
-                self.compute_active.store(true, Ordering::SeqCst);
+                log::info!("Starting compute engine (real GPU AI workload)...");
+                self.start_compute()?;
             }
             Mode::StakeOnly => {
                 log::info!("GPU idle, staking rewards continue...");
-                self.compute_active.store(false, Ordering::SeqCst);
+                self.stop_compute();
             }
         }
         Ok(())
@@ -177,6 +188,30 @@ impl ModeManager {
         let mut guard = self.miner.lock().unwrap();
         if let Some(mut m) = guard.take() {
             m.stop();
+        }
+    }
+
+    /// Start the compute engine (spawn real GPU AI workload). Idempotent.
+    fn start_compute(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut guard = self.compute.lock().unwrap();
+        if let Some(c) = guard.as_ref() {
+            if c.is_running() {
+                log::debug!("compute engine already running");
+                return Ok(());
+            }
+        }
+        let compute = ComputeExecutor::start(self.compute_cfg.clone())
+            .map_err(|e| format!("start compute engine: {e}"))?;
+        log::info!("compute engine started on {}", compute.device_name());
+        *guard = Some(compute);
+        Ok(())
+    }
+
+    /// Stop the compute engine (cancel workload + release GPU). Idempotent.
+    fn stop_compute(&self) {
+        let mut guard = self.compute.lock().unwrap();
+        if let Some(mut c) = guard.take() {
+            c.stop();
         }
     }
 }
@@ -215,10 +250,40 @@ mod tests {
     #[tokio::test]
     async fn switch_same_mode_is_noop() {
         let state = test_state();
-        let mgr = ModeManager::new(state.clone(), MiningConfig::new("http://127.0.0.1:9")).unwrap();
+        let mgr = ModeManager::new(state.clone(), MiningConfig::new("http://127.0.0.1:9"), ComputeConfig::new(0)).unwrap();
         mgr.switch_to(Mode::StakeOnly).await.unwrap();
         // Same mode: no engine started.
         assert!(!mgr.is_mining());
+        assert!(!mgr.is_computing());
+    }
+
+    /// The auto-switch core, compute side: Mining->Compute must START the real
+    /// GPU AI workload, and Compute->Mining must STOP it (releasing the GPU).
+    /// Requires a GPU with an OpenCL runtime.
+    #[tokio::test]
+    #[ignore]
+    async fn mode_switch_starts_and_stops_compute() {
+        let state = test_state();
+        let mgr = ModeManager::new(state.clone(), MiningConfig::new("http://127.0.0.1:9"), ComputeConfig::new(0)).unwrap();
+
+        // Start mining.
+        mgr.switch_to(Mode::Mining).await.unwrap();
+        assert!(mgr.is_mining(), "mining engine should run after switch_to(Mining)");
+        assert!(!mgr.is_computing(), "compute must not run while mining");
+
+        // Switch to compute -> mining stops, real GPU AI workload starts.
+        mgr.switch_to(Mode::Compute).await.unwrap();
+        assert!(!mgr.is_mining(), "mining engine should stop after switch_to(Compute)");
+        assert!(mgr.is_computing(), "compute engine should run after switch_to(Compute)");
+
+        // Switch back to mining -> compute stops, mining restarts.
+        mgr.switch_to(Mode::Mining).await.unwrap();
+        assert!(mgr.is_mining(), "mining should restart after switch_to(Mining)");
+        assert!(!mgr.is_computing(), "compute must stop after switch_to(Mining)");
+
+        // Clean shutdown.
+        mgr.stop_miner();
+        mgr.stop_compute();
     }
 
     /// The auto-switch core: Mining->Compute must STOP the real GPU mining
@@ -228,7 +293,7 @@ mod tests {
     #[ignore]
     async fn mode_switch_starts_and_stops_miner() {
         let state = test_state();
-        let mgr = ModeManager::new(state.clone(), MiningConfig::new("http://127.0.0.1:9")).unwrap();
+        let mgr = ModeManager::new(state.clone(), MiningConfig::new("http://127.0.0.1:9"), ComputeConfig::new(0)).unwrap();
 
         // Start mining.
         mgr.switch_to(Mode::Mining).await.unwrap();

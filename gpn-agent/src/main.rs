@@ -21,7 +21,7 @@
 //! ```
 
 use gpn_agent::{
-    chain, config, gpu, mining::MiningConfig, modes, profitability, AgentState, Mode,
+    chain, compute::ComputeConfig, config, gpu, mining::MiningConfig, modes, profitability, AgentState, Mode,
 };
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -61,6 +61,11 @@ impl GPUMiningNodeAgent {
                 batch: 1 << 20,
                 poll_ms: 2000,
             },
+            ComputeConfig {
+                device_index: config.compute_device_index,
+                matrix_size: config.compute_matrix_size,
+                batch: config.compute_batch,
+            },
         )?;
 
         let profitability_calc = profitability::ProfitabilityCalculator::new(
@@ -97,7 +102,7 @@ impl GPUMiningNodeAgent {
             let mut state = self.state.write().await;
             state.current_mode = boot_mode;
         }
-        log::info!("Booted into {:?} mode (mining={})", boot_mode, self.mode_manager.is_mining());
+        log::info!("Booted into {:?} mode (mining={}, computing={})", boot_mode, self.mode_manager.is_mining(), self.mode_manager.is_computing());
 
         // Periodic operations
         let mut attestation_interval = tokio::time::interval(
@@ -205,12 +210,13 @@ impl GPUMiningNodeAgent {
     async fn perform_health_check(&self) {
         let state = self.state.read().await;
         log::info!(
-            "📊 [Health] Mode={:?} GPU={}°C VRAM={}MB/{:?} Hashes={:.1}MH/s",
+            "📊 [Health] Mode={:?} GPU={}°C VRAM={}MB/{:?} Hashes={:.1}MH/s Compute={:.1}GFLOPS",
             state.current_mode,
             state.gpu_info.temperature_celsius,
             state.gpu_info.vram_used_mb,
             state.gpu_info.vram_total_bytes / (1024 * 1024),
             state.gpu_info.current_hashrate_mhs,
+            self.mode_manager.compute_gflops(),
         );
     }
 }

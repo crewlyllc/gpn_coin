@@ -1,12 +1,22 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3 (Prototype) — Auto-Switch DECISION LIVE & TESTED (pure `decide_switch` + scripted profitability feed + headless simulator); `ModeManager` starts/stops real GPU mining**
-**Last Updated:** 2026-07-31 09:00 PT
+**Status: Phase 3 (Prototype) — BOTH AUTO-SWITCH LEGS LIVE & TESTED on the RTX 4060 (real Ethash mining engine + real GPU AI-compute engine, both folded into `ModeManager` and start/stopped by mode switches)**
+**Last Updated:** 2026-07-31 09:30 PT
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 18)
+## 🚀 Current Milestone (Cycle 19)
+
+**`Compute` mode now actually runs a real AI workload on the GPU — the compute leg of the auto-switch is live.** `ModeManager` holds a real `ComputeExecutor` engine (symmetric to the `ExternalMiner` mining engine) that runs a dense float32 GEMM — the core primitive of neural inference — on the same GPU that mines Ethash. Switching to `Compute` **starts** the real workload; switching to `Mining` **stops** it and releases the GPU. This mirrors the mining integration (Cycle 17) exactly. (Docker isn't on this host and the old `DockerExecutor` was a dead stub — replaced with the working OpenCL engine; container orchestration is documented as the production layer on top.)
+
+**Verified (cycle 19) on the RTX 4060:** GPU GEMM matches CPU reference; `mode_switch_starts_and_stops_compute` passes (Mining→Compute starts the real AI job, Compute→Mining stops it); mining leg regression passes; standalone `gpn_gpu_compute` delivers **830.63 GFLOPS** (2048³ matmul, 20.68 ms/iter). Full suite 10 passed / 6 GPU-gated ignored; release build clean.
+
+Detail: `shared/artifacts/project7/cycle19-compute-engine-mode-manager-log.md`
+
+---
+
+## 🚀 Previous Milestone (Cycle 18)
 
 **The auto-switch decision logic is now pure, unit-tested, and demonstrable — and `auto` mode can actually be driven by a profitability feed.** Extracted `decide_switch()` as a free function (testable without chain/GPU, with hysteresis anti-flapping), replaced the stub tests with 5 real ones, added a `ScriptedFeed` demand-spike timeline + `config.profitability_feed` ("chain"/"scripted") switch in the live `ProfitabilityCalculator`, and a headless `gpn_simulate_autoswitch` binary that prints the GPU mode timeline (Mining → Compute on spike → Mining on fade).
 
@@ -72,13 +82,15 @@ This **completes the production mining architecture**: node and miner are fully 
 | **Stoppable mining engine `ExternalMiner` + ModeManager start/stop (cycle 17)** | ✅ **LIVE** |
 | **Auto-switch start/stop proven (Mining↔Compute) (cycle 17)** | ✅ **LIVE** |
 | **Auto-switch DECISION pure + tested; scripted feed + headless sim (cycle 18)** | ✅ **LIVE** |
+| **Compute engine folded into ModeManager — `Compute` runs real GPU AI GEMM (cycle 19)** | ✅ **LIVE** |
+| **Auto-switch BOTH legs proven on RTX 4060: mining & compute engines start/stop (cycle 19)** | ✅ **LIVE** |
 | gpn-agent subxt chain client (stub) | 🟡 pending |
 
 ## Next Concrete Actions (priority order)
-1. [ ] **Fold compute executor (Docker) into `ModeManager`** so `Compute` mode actually runs a real AI job, mirroring the mining integration (currently `Compute` only flips a flag). Highest value — completes the "GPU serves AI compute" leg of the auto-switch.
+1. [ ] **Profitability-driven auto-switch LIVE on the RTX 4060**: run the agent in `auto` mode with `profitability_feed = "scripted"` and confirm ModeManager really stops/restarts mining **and** starts/stops compute as the timeline flips. Both legs are individually proven (cycles 17/19); this is the end-to-end hardware-verification pass. *(The decision logic + both engines are done — this is wiring the demo.)*
 2. [ ] gpn-agent subxt chain client — replace placeholder `ChainClient` so `profitability_feed = "chain"` returns real difficulty / token price / GPU-hour price / utilization / APR.
 3. [ ] Two-node testnet docs in README + CI wiring for `scripts/gpn_two_node_testnet.sh`.
-4. [ ] Profitability-driven auto-switch **live on the RTX 4060**: run agent in `auto` mode with `profitability_feed = "scripted"` and confirm the ModeManager really stops/restarts mining as the timeline flips. (Decision logic is done; this is the hardware-verification pass.)
+4. [ ] Compute marketplace integration: surface `ComputeExecutor` throughput/GFLOPS as an on-chain attestable metric (ties the AI-compute leg to the `compute-marketplace` / `gpu-attestation` pallets).
 
 ## Phase 1 Findings
 
