@@ -38,7 +38,11 @@ projectmanager07/
 ├── gpn-agent/         # GPU node agent (Rust)
 │   ├── src/
 │   │   ├── main.rs              # Entry point
-│   │   ├── gpu/                 # GPU monitoring
+│   │   ├── lib.rs               # Library (modules + Mode/AgentState)
+│   │   ├── gpu/                 # GPU monitoring + OpenCL Ethash miner
+│   │   │   ├── ethash_kernel.cl # OpenCL Keccak/DAG/hashimoto kernels
+│   │   │   └── ethash_miner.rs  # EthashGpuMiner (DAG build, nonce search)
+│   │   ├── bin/gpn_gpu_mine.rs  # Standalone GPU miner demo (node-verifiable seals)
 │   │   ├── modes/               # Mode switching
 │   │   ├── chain/               # Chain RPC client
 │   │   ├── compute/             # Docker executor
@@ -101,5 +105,20 @@ cargo run -- config/default.toml
 
 - ✅ **Phase 1 (Research):** Complete
 - ✅ **Phase 2 (Design):** Complete
-- 🏗️ **Phase 3 (Prototype):** Dev testnet live — real Ethash PoW consensus + self-tuning difficulty; GPU miner + fee + p2p next
+- 🏗️ **Phase 3 (Prototype):** Dev testnet live — real Ethash PoW consensus + self-tuning difficulty + **real GPU Ethash miner on the RTX 4060** (OpenCL, produces node-verifiable seals); wire GPU miner to live node + fee + p2p next
 - ⏳ **Phase 4 (Launch):** Not started
+
+## GPU Mining (gpn-agent)
+
+`gpn_gpu_mine` runs a real OpenCL Ethash miner on the GPU (no CUDA toolkit / C headers needed — kernels compile at runtime via `clBuildProgram`, using the NVIDIA OpenCL ICD):
+
+```bash
+cd gpn-agent
+cargo run --release --bin gpn_gpu_mine   # builds ~1 GiB epoch-0 DAG, mines below 2^245, self-verifies vs node verify_seal
+```
+
+Heavy GPU correctness tests (build the 1 GiB DAG, ~34 s each):
+
+```bash
+cargo test -- --ignored --nocapture gpu_hashimoto_matches_reference
+```

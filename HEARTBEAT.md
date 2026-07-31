@@ -1,23 +1,21 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3 (Prototype) — REAL ETHASH POW + SELF-TUNING DIFFICULTY LIVE 🎉**
-**Last Updated:** 2026-07-30 23:58 PT
+**Status: Phase 3 (Prototype) — REAL GPU ETHASH MINING LIVE ON RTX 4060 🎉**
+**Last Updated:** 2026-07-31 01:40 PT
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 9)
+## 🚀 Current Milestone (Cycle 10)
 
-**Difficulty now self-tunes** — the fixed dev target is gone. `GPNPowAlgorithm::difficulty()` reads `pallet-gpu-pow`'s stored `Difficulty` target from chain state, and the pallet adjusts it every `DifficultyAdjustmentWindow` (10) blocks based on measured average block time (target semantics: higher = easier, hash < target). Block authoring still uses real Ethash (nonce+mix_hash, `hashimoto_light`).
+**A real GPU Ethash miner is live in `gpn-agent`** — OpenCL kernels (Keccak, DAG gen, hashimoto) compiled at runtime via `clBuildProgram` (no CUDA toolkit/C headers needed; uses the NVIDIA OpenCL ICD). The RTX 4060 builds the ~1 GiB epoch-0 DAG on the GPU and searches nonces in parallel, producing the exact 40-byte `nonce(8 LE) ++ mix_hash(32)` seal the node verifies.
 
-**Verified live (cycle 9):**
-- Genesis target 2^245 → stable, **zero timestamp rejections**
-- `ADJUST avg_s=5 target=15` → hardened (2^53→2^52) when blocks too fast
-- `ADJUST avg_s=18 target=15` → eased when blocks too slow
-- Converges around the 15s target — textbook windowed difficulty
-- Full detail: `shared/artifacts/project7/cycle9-difficulty-tuning-log.md`
-
-**Bugs fixed this cycle:** inverted adjustment direction; ms-vs-seconds unit mismatch (Moment is ms, TargetBlockTime is s); first-window `last_ts=0` guard; genesis was far too easy (2^252 → instant mining → timestamp chaos), now 2^245.
+**Verified live (cycle 10):**
+- GPU DAG items match `ethash::calc_dataset_item` bit-for-bit
+- GPU hashimoto (seed, all 64 page indices, mix, cmix, result) matches the `ethash` crate
+- `gpn_gpu_mine` finds a seal below the 2^245 dev target in **~136 ms** and self-verifies: `mix_match=true result_below_target=true` → **passes gpn-node's verify_seal**
+- Fixed bug: mining kernel wrote raw `mix[0..32]` instead of the compressed `cmix` as the seal mix_hash (caught by a new full-trace diff test)
+- Full detail: `shared/artifacts/project7/cycle10-gpu-miner-log.md`
 
 ---
 
@@ -32,14 +30,16 @@
 | End-to-end signed extrinsic (cycle 7) | ✅ |
 | **Real Ethash PoW in consensus (cycle 8)** | ✅ **LIVE** |
 | **Self-tuning difficulty from pallet (cycle 9)** | ✅ **LIVE** |
+| **Real GPU (OpenCL) Ethash miner in gpn-agent on RTX 4060 (cycle 10)** | ✅ **LIVE** |
 | Pallet unit tests (79 across all 5) | ✅ |
-| Real GPU (CUDA/OpenCL) Ethash miner in gpn-agent on RTX 4060 | 🔴 next |
+| GPU miner validation tests (DAG, trace-diff, matches-reference) | ✅ |
 | Fee mechanism (TransactionPayment) | 🟡 pending |
 | gpn-agent subxt chain client (stub) | 🟡 pending |
+| **Wire GPU miner to live node (fetch template → mine → submit seal)** | 🔴 next |
 | Two-node p2p testnet | 🟡 pending |
 
 ## Next Concrete Actions (priority order)
-1. [ ] Real GPU Ethash mining on the RTX 4060 — CUDA/OpenCL miner in `gpn-agent` producing the same 40-byte `nonce(8) ++ mix_hash(32)` seal, pointed at the dev node (seal format + light-cache verify already standard Ethash)
+1. [ ] **Wire the GPU miner to the live node**: `subxt` fetch block template (header pre-hash + current `pallet-gpu-pow` difficulty target) → mine on the GPU → submit the seal via PoW `submit` RPC. Makes the dev testnet actually mined by the RTX 4060.
 2. [ ] Add a fee pallet (TransactionPayment) before any non-dev network
 3. [ ] Promote extrinsic test + PoW seal-format test into repo (`gpn-node/scripts/`)
 4. [ ] Two-node local testnet (p2p + longest-chain)
