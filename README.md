@@ -105,7 +105,7 @@ cargo run -- config/default.toml
 
 - ✅ **Phase 1 (Research):** Complete
 - ✅ **Phase 2 (Design):** Complete
-- 🏗️ **Phase 3 (Prototype):** Dev testnet live — real Ethash PoW consensus + self-tuning difficulty + **real GPU Ethash miner on the RTX 4060** (OpenCL, produces node-verifiable seals); wire GPU miner to live node + fee + p2p next
+- 🏗️ **Phase 3 (Prototype):** Dev testnet live — real Ethash PoW consensus + self-tuning difficulty + **real GPU Ethash miner on the RTX 4060** (OpenCL, produces node-verifiable seals); GPU miner wired into live node; **seal-format + extrinsic tests committed to `gpn-node/scripts/`**. Next: two-node p2p testnet + fee pallet + external subxt miner path
 - ⏳ **Phase 4 (Launch):** Not started
 
 ## GPU Mining (gpn-agent)
