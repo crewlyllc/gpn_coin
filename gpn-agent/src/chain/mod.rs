@@ -24,10 +24,13 @@
 /// (Units are a design decision of the oracle pallet; the agent converts to the
 /// dollar / fraction / percent forms the profitability calculator expects.)
 
+pub mod signer;
+
 use serde::{Deserialize, Serialize};
 use subxt::{
     config::SubstrateConfig,
     dynamic::Value,
+    tx::Signer as _,
     OnlineClient,
 };
 
@@ -61,6 +64,9 @@ pub struct ChainClient {
     endpoint: String,
     /// Live subxt client; `None` if we failed to connect (or never tried).
     client: Option<OnlineClient<SubstrateConfig>>,
+    /// Signer URI (e.g. `//Alice`) used for submitting signed extrinsics.
+    /// `None` = read-only (no signed writes possible).
+    signer_uri: Option<String>,
 }
 
 impl ChainClient {
@@ -86,7 +92,15 @@ impl ChainClient {
         Ok(Self {
             endpoint: endpoint.to_string(),
             client,
+            signer_uri: None,
         })
+    }
+
+    /// Enable signed extrinsic submission with the given signer URI
+    /// (e.g. `//Alice` in dev/local chains, or a seed phrase on mainnet).
+    pub fn with_signer(mut self, uri: &str) -> Self {
+        self.signer_uri = Some(uri.to_string());
+        self
     }
 
     pub fn endpoint(&self) -> &str {
@@ -260,8 +274,17 @@ impl ChainClient {
     }
 
     pub async fn get_attestation_challenge(&self) -> Result<[u8; 32], Box<dyn std::error::Error>> {
-        // TODO: read `GPUAttestation::AttestationChallenge` from chain.
-        Ok([0u8; 32]) // Placeholder
+        // Read `GPUAttestation::AttestationChallenge` from the chain via a
+        // dynamic storage query. Falls back to a placeholder only if the
+        // chain is unreachable.
+        let Some(client) = &self.client else {
+            return Ok([0u8; 32]);
+        };
+        let addr = subxt::dynamic::storage("GPUAttestation", "AttestationChallenge", vec![]);
+        match self.storage_at_head(client, &addr).await {
+            Some(v) => Ok(composite_to_bytes(&v, 32)),
+            None => Ok([0u8; 32]),
+        }
     }
 
     pub async fn submit_attestation(
@@ -271,14 +294,34 @@ impl ChainClient {
         gpu_count: u8,
         compute_gflops: u64,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // NOTE: RPC stub — the real extrinsic submission mirrors `gpn_seed_feed`
-        // (custom Signer + GpnConfig, bare AccountId32). Wiring the actual
-        // `GPUAttestation::submit_attestation` extrinsic is the follow-up once
-        // the seed-feed plumbing is reused (see priority #3 in HEARTBEAT).
+        // Build the signed `GPUAttestation::submit_attestation` extrinsic using
+        // the same custom GpnConfig + Sr25519Signer plumbing as gpn_seed_feed.
+        let Some(uri) = &self.signer_uri else {
+            log::warn!("No signer configured; attestation NOT submitted (set signer_uri).");
+            return Ok(());
+        };
+
+        let signer = signer::Sr25519Signer::from_uri(uri)?;
+        let client = signer::connect(&self.endpoint).await?;
+
         log::info!(
-            "Attestation ready for chain: response={} gpu_info={} gpus={} compute={} GFLOPS (RPC stub)",
-            hex::encode(&result[..4]), hex::encode(&gpu_info_hash[..4]), gpu_count, compute_gflops
+            "Submitting GPUAttestation::submit_attestation as {} (gpus={}, {} GFLOPS, challenge={}..)",
+            signer.account_id(), gpu_count, compute_gflops, hex::encode(&result[..4])
         );
+
+        let call = subxt::dynamic::tx(
+            "GPUAttestation",
+            "submit_attestation",
+            vec![
+                Value::from_bytes(result),
+                Value::from_bytes(gpu_info_hash),
+                Value::u128(gpu_count as u128),
+                Value::u128(compute_gflops as u128),
+            ],
+        );
+
+        signer::submit_signed(&client, &call, &signer).await?;
+        log::info!("GPU attestation submitted on-chain and succeeded.");
         Ok(())
     }
 
@@ -307,6 +350,20 @@ fn target_to_difficulty(limbs: [u64; 4]) -> f64 {
     }
     // 2^256 / target
     (2f64.powi(256)) / target
+}
+
+/// Convert a fixed-size byte array (`[u8; N]`) composite value back into bytes.
+/// A `[u8; N]` is decoded by scale-value as an unnamed composite of u128s, so we
+/// read each element as a u128 and mask to a byte.
+fn composite_to_bytes(value: &subxt::dynamic::Value, len: usize) -> [u8; 32] {
+    use subxt::ext::scale_value::ValueDef;
+    let mut out = [0u8; 32];
+    if let ValueDef::Composite(c) = &value.value {
+        for (i, v) in c.values().enumerate().take(len.min(32)) {
+            out[i] = (v.as_u128().unwrap_or(0) & 0xff) as u8;
+        }
+    }
+    out
 }
 
 /// Extract up to 4 u64 limbs from a composite value (`[u64; 4]` array/tuple).
@@ -372,6 +429,26 @@ mod tests {
     fn target_to_difficulty_zero_guarded() {
         let d = target_to_difficulty([0, 0, 0, 0]);
         assert_eq!(d, FALLBACK_DIFFICULTY);
+    }
+
+    #[test]
+    fn composite_to_bytes_roundtrips_u8_array() {
+        // A `[u8; 4]` decodes as an unnamed composite of u128s.
+        let v = subxt::dynamic::Value::from_bytes([0xde, 0xad, 0xbe, 0xef]);
+        let out = composite_to_bytes(&v, 4);
+        assert_eq!(&out[..4], &[0xde, 0xad, 0xbe, 0xef]);
+        // remaining bytes are zero-filled
+        assert_eq!(&out[4..], &[0u8; 28]);
+    }
+
+    #[test]
+    fn composite_to_bytes_pads_short_input() {
+        // len > available bytes -> zero-padded tail
+        let v = subxt::dynamic::Value::from_bytes([0x01u8, 0x02]);
+        let out = composite_to_bytes(&v, 32);
+        assert_eq!(out[0], 0x01);
+        assert_eq!(out[1], 0x02);
+        assert_eq!(&out[2..], &[0u8; 30]);
     }
 
     #[test]

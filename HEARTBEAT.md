@@ -1,12 +1,27 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3 (Prototype) — MEASURED GFLOPS IS NOW AN ON-CHAIN ATTESTABLE COMPUTE METRIC: attestation tier is gated by proof-of-real-compute throughput (Bronze≥100/Silver≥1000/Gold≥5000 GFLOPS), `GPURequirements` carries `min_gflops`, and the agent reports real measured GFLOPS (Cycle 24). LIVE on-chain profitability feed + END-TO-END auto-switch still verified (Cycles 20–22).**
-**Last Updated:** 2026-07-31 ~15:10 PT
+**Status: Phase 3 (Prototype) — AGENT NOW SUBMITS THE REAL `GPUAttestation::submit_attestation` EXTRINSIC (Cycle 25): the `ChainClient` reads the on-chain attestation challenge and pushes a signed attestation (measured GFLOPS, GPU count, tier) via a shared `GpnConfig`+`Sr25519Signer` module reused from `gpn_seed_feed`; attestation tier still gated by proof-of-compute (Bronze≥100/Silver≥1000/Gold≥5000 GFLOPS).**
+**Last Updated:** 2026-07-31 ~16:10 PT
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 24)
+## 🚀 Current Milestone (Cycle 25)
+
+**The attestation RPC stub is gone — the agent now submits the real `GPUAttestation::submit_attestation` extrinsic on-chain.** Four pieces landed:
+
+1. **New shared module `chain::signer`** — extracted the `gpn_seed_feed` plumbing (custom `GpnConfig` for the bare `AccountId32` address + `sp_core::sr25519::Pair` `Signer`) into a reusable library module: `connect()`, `Sr25519Signer::from_uri()`, `submit_signed()` (immortal tx, waits for finalized success).
+2. **`gpn_seed_feed` refactored** to use the shared module (duplication removed).
+3. **`ChainClient` can now submit signed extrinsics** — `.with_signer(uri)`; `get_attestation_challenge()` reads the real `GPUAttestation::AttestationChallenge` storage (new `composite_to_bytes` helper); `submit_attestation(...)` builds & submits the signed `GPUAttestation::submit_attestation` dynamic extrinsic.
+4. **Config + agent wiring** — `AgentConfig.signer_uri` (default `//Alice`); agent `ChainClient` is built with `.with_signer(...)`, so `perform_attestation` pushes the attestation on-chain.
+
+**Verified:** gpn-agent release build clean (all 5 bins); lib tests **15 passed / 0 failed / 7 GPU-gated ignored** (+2 new `composite_to_bytes` tests); pallets unchanged & green (attestation 20 / marketplace 17). Detail: `shared/artifacts/project7/cycle25-attestation-extrinsic-log.md`
+
+**Caveat:** the extrinsic requires `ProviderStake` (pallet enforces `InsufficientStake` otherwise) — a provider must `deposit_stake` before attesting. Agent currently assumes stake exists; wiring deposit + a live RTX 4060 end-to-end attest is the next step.
+
+---
+
+## 🚀 Previous Milestone (Cycle 24)
 
 **Measured compute throughput (GFLOPS) is now an on-chain attestable metric — the AI-compute leg is tied to the attestation + marketplace pallets.** Three pieces landed:
 
@@ -159,16 +174,17 @@ This **completes the production mining architecture**: node and miner are fully 
 | **Real subxt ChainClient: on-chain difficulty + profitability feed read live (cycle 21)** | ✅ **LIVE** |
 | **LIVE on-chain profitability feed: `gpn_seed_feed` signs `update_feed` + ChainClient head-block read (cycle 22)** | ✅ **LIVE** |
 | **Measured GFLOPS = on-chain attestable metric: attestation tier gated by proof-of-compute, `min_gflops` in marketplace, agent reports real GFLOPS (cycle 24)** | ✅ **LIVE (pallet+agent)** |
+| **Agent submits REAL `GPUAttestation::submit_attestation` extrinsic on-chain (shared signer module; challenge read; `with_signer` wiring) (cycle 25)** | ✅ **LIVE (agent)** |
 | gpn-agent subxt chain client (stub) | ✅ **REPLACED (cycle 21)** |
-| Wire real `GPUAttestation::submit_attestation` extrinsic (reuse gpn_seed_feed Signer) | 🟡 pending |
+| Wire real `GPUAttestation::submit_attestation` extrinsic (reuse gpn_seed_feed Signer) | ✅ **DONE (cycle 25)** |
 | Enforce `min_gflops` matching at `accept_job` (cross-pallet attested read) | 🟡 pending |
 
 ## Next Concrete Actions (priority order)
 1. [x] Two-node testnet docs in README + CI wiring for `gpn-node/scripts/gpn_two_node_testnet.sh` (cycle 23, 6/6 live).
 2. [x] Compute marketplace integration: surface `ComputeExecutor` throughput/GFLOPS as an on-chain attestable metric (cycle 24 — attestation tier gated by GFLOPS + `min_gflops` in marketplace + agent measures/reports).
-3. [ ] Wire the real `GPUAttestation::submit_attestation` extrinsic in the agent by reusing the `gpn_seed_feed` custom Signer + `GpnConfig` plumbing (completes the `--feed`-style live attest path).
+3. [x] Wire the real `GPUAttestation::submit_attestation` extrinsic in the agent by reusing the `gpn_seed_feed` custom Signer + `GpnConfig` plumbing (cycle 25 — shared `chain::signer` module; challenge read; `with_signer` wiring).
 4. [ ] Enforce `min_gflops` matching at `accept_job` — cross-pallet read of the provider's attested `compute_gflops` (trait from gpu-attestation into compute-marketplace).
-5. [ ] Live end-to-end attest on the RTX 4060: measure ~830 GFLOPS, submit, confirm tier on-chain.
+5. [ ] Live end-to-end attest on the RTX 4060: deposit stake (pallet requires `ProviderStake`), measure ~830 GFLOPS, submit, confirm tier on-chain. Consider wiring `deposit_stake` into agent boot / a `gpn_seed_attest` helper.
 
 ## Phase 1 Findings
 

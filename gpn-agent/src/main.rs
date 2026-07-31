@@ -41,7 +41,9 @@ impl GPUMiningNodeAgent {
     pub async fn new(config_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let config = config::AgentConfig::from_file(config_path)?;
 
-        let chain_client = chain::ChainClient::new(&config.chain_endpoint).await?;
+        let chain_client = chain::ChainClient::new(&config.chain_endpoint)
+            .await?
+            .with_signer(&config.signer_uri);
         let gpu_monitor = gpu::GPUMonitor::new()?;
         let account = chain_client.get_account_info(&config.account_address).await?;
 

@@ -11,6 +11,9 @@ pub struct AgentConfig {
     pub chain_endpoint: String,
     pub account_address: String,
     pub account_key_file: String,
+    /// Substrate dev URI (e.g. `//Alice`) used to sign on-chain extrinsics
+    /// (attestation, staking, compute-marketplace). Leave empty for read-only.
+    pub signer_uri: String,
     pub mode: String,  // "auto", "mine", "compute", "stake_only"
 
     // GPU settings
@@ -57,6 +60,7 @@ impl Default for AgentConfig {
             chain_endpoint: "ws://localhost:9944".to_string(),
             account_address: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY".to_string(),
             account_key_file: "account_key.json".to_string(),
+            signer_uri: "//Alice".to_string(),
             mode: "auto".to_string(),
             gpu_model: "NVIDIA GeForce RTX 4090".to_string(),
             min_vram_gb: 8,

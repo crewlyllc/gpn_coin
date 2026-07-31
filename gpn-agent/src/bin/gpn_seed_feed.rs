@@ -11,9 +11,8 @@
 //! dev accounts (`//Alice`, `//Bob`, ...). Alice is an operator in both specs, so
 //! signing as Alice lets us seed a `gpn-node --dev` out of the box.
 //!
-//! The signer is implemented directly on `sp_core::sr25519::Pair` (v28) against
-//! subxt's `Signer` trait, so we avoid the `substrate-compat` feature (which
-//! drags in a conflicting sp-core v31).
+//! The signer + GpnConfig plumbing lives in `gpn_agent::chain::signer` (shared
+//! with the agent's `ChainClient` so it can submit signed extrinsics too).
 //!
 //! Usage (units documented in the oracle pallet):
 //!   gpn_seed_feed [endpoint] [token_micro_usd] [gpu_hour_micro_usd] [util_bps] [apr_bps] [signer]
@@ -29,53 +28,9 @@
 //! Example live run against `gpn-node --dev`:
 //!   cargo run -p gpn-agent --bin gpn_seed_feed --release
 
-use sp_core::{crypto::Pair as _, sr25519};
-use subxt::{
-    config::{substrate::{BlakeTwo256, H256, MultiSignature, SubstrateHeader}, Config, DefaultExtrinsicParams},
-    dynamic::Value,
-    tx::Signer,
-    utils::AccountId32,
-    OnlineClient,
-};
-
-/// Custom config matching the GPN runtime: `Address = AccountId32` (bare),
-/// NOT `MultiAddress`. The GPN runtime declares `pub type Address = AccountId`,
-/// so the default `SubstrateConfig` (which wraps in `MultiAddress`) adds an
-/// extra SCALE variant byte that breaks extrinsic decoding on the node.
-#[derive(Clone, Copy, Eq, PartialEq, Debug)]
-pub enum GpnConfig {}
-
-impl Config for GpnConfig {
-    type Hash = H256;
-    type AccountId = AccountId32;
-    type Address = AccountId32;
-    type Signature = MultiSignature;
-    type Hasher = BlakeTwo256;
-    type Header = SubstrateHeader<u32, BlakeTwo256>;
-    type ExtrinsicParams = DefaultExtrinsicParams<Self>;
-    type AssetId = u32;
-}
-
-/// A `Signer` backed by an `sp_core::sr25519::Pair` (v28), mapped into the GPN
-/// runtime's types (AccountId32 / MultiSignature).
-struct Sr25519Signer {
-    pair: sr25519::Pair,
-}
-
-impl Signer<GpnConfig> for Sr25519Signer {
-    fn account_id(&self) -> AccountId32 {
-        AccountId32(self.pair.public().0)
-    }
-
-    fn address(&self) -> AccountId32 {
-        AccountId32(self.pair.public().0)
-    }
-
-    fn sign(&self, signer_payload: &[u8]) -> MultiSignature {
-        let sig = self.pair.sign(signer_payload);
-        MultiSignature::Sr25519(sig.0)
-    }
-}
+use gpn_agent::chain::signer;
+use subxt::dynamic::Value;
+use subxt::tx::Signer as _;
 
 fn parse_u64(s: &str, default: u64) -> u64 {
     s.parse().unwrap_or(default)
@@ -128,14 +83,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         apr_bps
     );
 
-    // Connect.
-    let client = OnlineClient::<GpnConfig>::from_url(&endpoint).await?;
+    // Connect with the runtime-correct GpnConfig + shared signer plumbing.
+    let client = signer::connect(&endpoint).await?;
     println!("Connected to GPN chain at {}", endpoint);
 
-    // Build the signer from an sp_core sr25519 pair (Substrate URI, e.g. //Alice).
-    let pair = sr25519::Pair::from_string(&signer_uri, None)
-        .map_err(|e| format!("invalid signer URI '{}': {}", signer_uri, e))?;
-    let signer = Sr25519Signer { pair };
+    let signer = signer::Sr25519Signer::from_uri(&signer_uri)?;
     println!("Signing as: {}", signer.account_id());
 
     // Construct the dynamic call: ProfitabilityOracle.update_feed(...)
@@ -151,22 +103,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     println!("Submitting update_feed extrinsic...");
-    // Use an immortal transaction (robust on fast-block dev chains where a
-    // mortal 32-block window can expire before the tx is included).
-    let params = subxt::config::DefaultExtrinsicParamsBuilder::<GpnConfig>::new().build();
-    let events = client
-        .tx()
-        .sign_and_submit_then_watch(&call, &signer, params)
-        .await?
-        .wait_for_finalized_success()
-        .await?;
-
+    signer::submit_signed(&client, &call, &signer).await?;
     println!("✅ update_feed finalized and succeeded.");
-    for event in events.iter() {
-        let ev = event?;
-        let field_count = ev.field_values().map(|c| c.len()).unwrap_or(0);
-        println!("  event: {}::{}({} fields)", ev.pallet_name(), ev.variant_name(), field_count);
-    }
 
     // Verify: re-read the on-chain feed back.
     let feed_addr = subxt::dynamic::storage("ProfitabilityOracle", "CurrentFeed", vec![]);
