@@ -7,6 +7,7 @@
 
 use codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use core::fmt::Debug;
+use pallet_gpu_attestation::GPUAttestationProvider;
 use scale_info::TypeInfo;
 
 pub use pallet::*;
@@ -78,6 +79,10 @@ pub mod pallet {
         #[pallet::constant] type EscrowLockDuration: Get<BlockNumberFor<Self>>;
         #[pallet::constant] type MaxActiveJobs: Get<u32>;
         #[pallet::constant] type MaxJobDuration: Get<BlockNumberFor<Self>>;
+        /// Read-only access to providers' attested GPU compute credentials.
+        /// Used to enforce that a provider accepting a job actually meets the
+        /// job's `min_gflops` requirement (proof-of-compute gate at match time).
+        type GPUAttestation: GPUAttestationProvider<Self::AccountId>;
     }
 
     #[pallet::pallet]
@@ -128,6 +133,9 @@ pub mod pallet {
         JobNotAccepted, JobNotRunning, AlreadyAccepted, NotJobProvider,
         NotJobRequestor, InsufficientPayment, InvalidWorkload, JobExpired,
         EscrowMismatch, ProviderNotRegistered, ProviderAlreadyRegistered,
+        /// The provider's attested compute throughput (GFLOPS) is below the
+        /// job's `min_gflops` requirement — it cannot honestly serve this job.
+        ProviderComputeInsufficient,
     }
 
     // Hooks
@@ -222,6 +230,17 @@ pub mod pallet {
             ensure!(job.state == JobState::Pending, Error::<T>::JobNotPending);
             ensure!(!<JobProvider<T>>::contains_key(job_id), Error::<T>::AlreadyAccepted);
             ensure!((<ProviderJobs<T>>::get(&provider).len() as u32) < T::MaxJobsPerProvider::get(), Error::<T>::MaxProviderCapacity);
+
+            // Proof-of-compute gate: if the job demands a minimum GFLOPS rate,
+            // the provider must have *attested* to at least that throughput
+            // (cross-pallet read of `gpu-attestation::AttestationRecord`). A
+            // provider that hasn't attested (0 GFLOPS) can never meet a nonzero
+            // requirement, so un-attested providers are blocked from paid jobs.
+            let required_gflops = job.gpu_requirements.min_gflops;
+            if required_gflops > 0 {
+                let attested = T::GPUAttestation::attested_gflops(&provider);
+                ensure!(attested >= required_gflops, Error::<T>::ProviderComputeInsufficient);
+            }
 
             job.state = JobState::Accepted;
             <Jobs<T>>::insert(job_id, job);
@@ -410,6 +429,23 @@ mod tests {
         pub const TestMaxJobDuration: u64 = 10_000;
     }
 
+    // Test-only mock of the gpu-attestation provider: returns a configurable
+    // attested GFLOPS value (mutated per-test via the atomic) so we can exercise
+    // the proof-of-compute gate without pulling in the real attestation pallet.
+    // Per-thread mock value: cargo's test harness runs each test on its own
+    // thread, so a `thread_local` gives deterministic per-test isolation (a
+    // global atomic would race across parallel tests).
+    thread_local! {
+        static MOCK_GFLOPS: std::cell::Cell<u64> = const { std::cell::Cell::new(1_000) };
+    }
+    pub struct MockAttestation;
+    impl GPUAttestationProvider<u64> for MockAttestation {
+        fn attested_gflops(_: &u64) -> u64 { MOCK_GFLOPS.with(|c| c.get()) }
+        fn attested_tier(_: &u64) -> pallet_gpu_attestation::AttestationTier {
+            pallet_gpu_attestation::AttestationTier::Silver
+        }
+    }
+
     impl crate::pallet::Config for Test {
         type RuntimeEvent = RuntimeEvent;
         type Currency = Balances;
@@ -418,6 +454,7 @@ mod tests {
         type EscrowLockDuration = TestEscrowLock;
         type MaxActiveJobs = TestMaxActiveJobs;
         type MaxJobDuration = TestMaxJobDuration;
+        type GPUAttestation = MockAttestation;
     }
 
     const ALICE: u64 = 1; // requestor
@@ -654,6 +691,63 @@ mod tests {
             }
             let result = MarketPallet::accept_job(RuntimeOrigin::signed(BOB), job6);
             assert_eq!(result, Err(Error::<Test>::MaxProviderCapacity.into()));
+        });
+    }
+
+    #[test]
+    fn test_accept_job_rejects_provider_below_min_gflops() {
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            let job_id = create_job(ALICE); // requires min_gflops = 1000
+            // Attested throughput only 500 GFLOPS < 1000 required.
+            MOCK_GFLOPS.with(|c| c.set(500));
+            let result = MarketPallet::accept_job(RuntimeOrigin::signed(BOB), job_id);
+            assert_eq!(result, Err(Error::<Test>::ProviderComputeInsufficient.into()));
+            assert!(!JobProvider::<Test>::contains_key(job_id));
+            assert_eq!(Jobs::<Test>::get(job_id).unwrap().state, JobState::Pending);
+        });
+    }
+
+    #[test]
+    fn test_accept_job_rejects_unattested_provider() {
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            let job_id = create_job(ALICE); // requires min_gflops = 1000
+            // 0 GFLOPS = never attested; cannot serve a paid job with a compute gate.
+            MOCK_GFLOPS.with(|c| c.set(0));
+            let result = MarketPallet::accept_job(RuntimeOrigin::signed(BOB), job_id);
+            assert_eq!(result, Err(Error::<Test>::ProviderComputeInsufficient.into()));
+        });
+    }
+
+    #[test]
+    fn test_accept_job_passes_when_attested_gflops_meets_requirement() {
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            let job_id = create_job(ALICE); // requires min_gflops = 1000
+            MOCK_GFLOPS.with(|c| c.set(1_000)); // exactly meets it
+            MarketPallet::accept_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
+            assert_eq!(JobProvider::<Test>::get(job_id), Some(BOB));
+            assert_eq!(Jobs::<Test>::get(job_id).unwrap().state, JobState::Accepted);
+        });
+    }
+
+    #[test]
+    fn test_accept_job_ignores_gate_when_min_gflops_is_zero() {
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            // Job with no compute requirement (min_gflops = 0) is accepted even
+            // by an un-attested provider (0 GFLOPS).
+            let mut reqs = default_reqs();
+            reqs.min_gflops = 0;
+            MarketPallet::create_job(
+                RuntimeOrigin::signed(ALICE), reqs, JobType::LLMInference,
+                JobTier::Spot, 1_000, 100, workload(),
+            ).unwrap();
+            let job_id = NextJobId::<Test>::get() - 1;
+            MOCK_GFLOPS.with(|c| c.set(0));
+            MarketPallet::accept_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
+            assert_eq!(JobProvider::<Test>::get(job_id), Some(BOB));
         });
     }
 }

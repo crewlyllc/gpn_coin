@@ -252,6 +252,8 @@ impl pallet_compute_marketplace::Config for Runtime {
     type EscrowLockDuration = EscrowLockDuration;
     type MaxActiveJobs = MaxActiveJobs;
     type MaxJobDuration = MaxJobDuration;
+    // Cross-pallet read of attested GPU throughput (proof-of-compute gate).
+    type GPUAttestation = GPUAttestation;
 }
 
 parameter_types! {

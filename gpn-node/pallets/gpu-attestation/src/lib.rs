@@ -54,6 +54,18 @@ pub struct AttestationRecord {
     pub missed_count: u32,
 }
 
+/// Read-only interface for other pallets (e.g. `compute-marketplace`) to query
+/// a provider's **attested** compute credentials. A provider that has never
+/// attested (or whose attestation was withdrawn) reports zero GFLOPS and the
+/// `Unattested` tier, so downstream consumers can enforce capability gates
+/// without reaching into this pallet's storage directly.
+pub trait GPUAttestationProvider<AccountId> {
+    /// The measured FP32 GFLOPS this account attested to (0 if not attested).
+    fn attested_gflops(who: &AccountId) -> u64;
+    /// The provider's current attestation tier (`Unattested` if none).
+    fn attested_tier(who: &AccountId) -> AttestationTier;
+}
+
 #[frame_support::pallet]
 pub mod pallet {
     use super::*;
@@ -304,6 +316,18 @@ pub mod pallet {
             seed.copy_from_slice(&hash);
             seed
         }
+    }
+}
+
+/// Expose the pallet's attestation records through the shared trait so the
+/// compute marketplace (and any future consumer) can gate jobs on verified
+/// GPU throughput without coupling to this pallet's storage layout.
+impl<T: Config> GPUAttestationProvider<T::AccountId> for Pallet<T> {
+    fn attested_gflops(who: &T::AccountId) -> u64 {
+        <Attestations<T>>::get(who).map(|r| r.compute_gflops).unwrap_or(0)
+    }
+    fn attested_tier(who: &T::AccountId) -> AttestationTier {
+        <Attestations<T>>::get(who).map(|r| r.tier).unwrap_or(AttestationTier::Unattested)
     }
 }
 
