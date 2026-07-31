@@ -21,6 +21,8 @@ use sp_runtime::generic::BlockId;
 use sp_runtime::traits::Block as BlockT;
 use std::{sync::Arc, sync::OnceLock, time::Duration};
 
+use crate::gpu_miner::EthashGpuMiner;
+
 pub(crate) type FullClient = sc_service::TFullClient<
     Block,
     RuntimeApi,
@@ -395,13 +397,106 @@ pub fn new_full<
 
 type MiningWorker = sc_consensus_pow::MiningHandle<Block, GPNPowAlgorithm, Arc<SyncingService<Block>>>;
 
+/// How many nonces the GPU searches per `worker.metadata()` poll. Large enough
+/// to find a dev-difficulty solution in one shot, but bounded so we regularly
+/// re-check for a newer block build.
+const GPU_BATCH: usize = 1 << 20;
+
 /// Spawn a dedicated miner thread: poll `worker.metadata()`, run real Ethash
-/// (light-cache) mining to find a valid nonce + mix_hash, then submit the seal.
-/// Runs on its own OS thread because the submit future holds a non-`Send`
-/// mutex guard across an await.
+/// mining to find a valid nonce + mix_hash, then submit the seal. Runs on its
+/// own OS thread because the submit future holds a non-`Send` mutex guard
+/// across an await.
+///
+/// Tries the **GPU OpenCL miner first** (full dataset on the GPU). If no
+/// OpenCL GPU is available, falls back to the light-cache CPU miner so the
+/// node still produces blocks on machines without a GPU.
 fn spawn_miner(worker: MiningWorker) {
+    match EthashGpuMiner::new(0) {
+        Ok(_) => spawn_gpu_miner(worker),
+        Err(e) => {
+            log::warn!("GPU miner unavailable ({e}); falling back to CPU light-cache miner");
+            spawn_cpu_miner(worker);
+        }
+    }
+}
+
+/// GPU miner: build the full Ethash dataset on the GPU once, then loop over
+/// `worker.metadata()` and search nonce batches in parallel on the GPU.
+/// The node's `verify_seal` recomputes with `hashimoto_light`, so the GPU's
+/// full-DAG solution is accepted as long as mix + result match (they do — the
+/// miner self-validates against the `ethash` crate reference).
+fn spawn_gpu_miner(worker: MiningWorker) {
     std::thread::Builder::new()
-        .name("gpn-miner".into())
+        .name("gpn-gpu-miner".into())
+        .spawn(move || {
+            let miner = match EthashGpuMiner::new(0) {
+                Ok(m) => m,
+                Err(e) => {
+                    log::error!("GPU miner init failed: {e}");
+                    return;
+                }
+            };
+            log::info!("GPU Ethash miner online: {}", miner.device_name());
+
+            // Build the epoch-0 light cache + full DAG on the GPU.
+            let seed = ethash::get_seedhash(DEV_EPOCH);
+            let cache_size = ethash::get_cache_size(DEV_EPOCH);
+            let full_size = ethash::get_full_size(DEV_EPOCH);
+            let mut cache = vec![0u8; cache_size];
+            ethash::make_cache(&mut cache, seed);
+            let dag = match miner.build_dag(&cache, full_size) {
+                Ok(d) => d,
+                Err(e) => {
+                    log::error!("GPU DAG build failed: {e}");
+                    return;
+                }
+            };
+
+            let mut last_pre_hash: Option<<Block as BlockT>::Hash> = None;
+            let mut nonce: u64 = 0;
+            loop {
+                if let Some(metadata) = worker.metadata() {
+                    let pre_hash = metadata.pre_hash;
+                    let target = metadata.difficulty;
+
+                    // On a new block build, restart the nonce window.
+                    if Some(pre_hash) != last_pre_hash {
+                        nonce = 0;
+                        last_pre_hash = Some(pre_hash);
+                    }
+
+                    let header: [u8; 32] = pre_hash.as_ref().try_into().expect("hash is 32 bytes");
+                    // The pallet stores a *target* (hash < target = valid).
+                    // GPU kernel compares little-endian, matching U256::to_little_endian.
+                    let target_le: [u8; 32] = target.to_little_endian();
+
+                    match miner.mine_batch(&dag, &header, &target_le, nonce, GPU_BATCH) {
+                        Ok(Some(seal)) => {
+                            let seal_bytes = seal.to_seal_bytes();
+                            let _ = futures::executor::block_on(worker.submit(seal_bytes));
+                            nonce = nonce.wrapping_add(GPU_BATCH as u64);
+                        }
+                        Ok(None) => {
+                            // No solution in this window — advance and retry.
+                            nonce = nonce.wrapping_add(GPU_BATCH as u64);
+                        }
+                        Err(e) => {
+                            log::error!("GPU mine error: {e}");
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                    }
+                } else {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        })
+        .expect("failed to spawn GPU miner thread");
+}
+
+/// Light-cache CPU miner fallback (no GPU available).
+fn spawn_cpu_miner(worker: MiningWorker) {
+    std::thread::Builder::new()
+        .name("gpn-cpu-miner".into())
         .spawn(move || {
             let cache = ethash_cache();
             let full_size = ethash_full_size();
@@ -433,5 +528,5 @@ fn spawn_miner(worker: MiningWorker) {
                 std::thread::sleep(Duration::from_millis(100));
             }
         })
-        .expect("failed to spawn miner thread");
+        .expect("failed to spawn CPU miner thread");
 }

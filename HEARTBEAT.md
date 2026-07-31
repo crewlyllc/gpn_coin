@@ -1,21 +1,24 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3 (Prototype) — REAL GPU ETHASH MINING LIVE ON RTX 4060 🎉**
-**Last Updated:** 2026-07-31 01:40 PT
+**Status: Phase 3 (Prototype) — RTX 4060 GPU MINES THE LIVE DEV TESTNET 🎉**
+**Last Updated:** 2026-07-31 02:50 PT
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 10)
+## 🚀 Current Milestone (Cycle 11)
 
-**A real GPU Ethash miner is live in `gpn-agent`** — OpenCL kernels (Keccak, DAG gen, hashimoto) compiled at runtime via `clBuildProgram` (no CUDA toolkit/C headers needed; uses the NVIDIA OpenCL ICD). The RTX 4060 builds the ~1 GiB epoch-0 DAG on the GPU and searches nonces in parallel, producing the exact 40-byte `nonce(8 LE) ++ mix_hash(32)` seal the node verifies.
+**The GPU miner is wired into the live node — the dev testnet is genuinely mined by the NVIDIA GeForce RTX 4060, end-to-end, with self-tuning difficulty.**
 
-**Verified live (cycle 10):**
-- GPU DAG items match `ethash::calc_dataset_item` bit-for-bit
-- GPU hashimoto (seed, all 64 page indices, mix, cmix, result) matches the `ethash` crate
-- `gpn_gpu_mine` finds a seal below the 2^245 dev target in **~136 ms** and self-verifies: `mix_match=true result_below_target=true` → **passes gpn-node's verify_seal**
-- Fixed bug: mining kernel wrote raw `mix[0..32]` instead of the compressed `cmix` as the seal mix_hash (caught by a new full-trace diff test)
-- Full detail: `shared/artifacts/project7/cycle10-gpu-miner-log.md`
+The full OpenCL Ethash miner (moved into `gpn-node/node/src/gpu_miner/`) builds the 1 GiB epoch-0 DAG on the GPU, searches nonce batches from `worker.metadata()` (pre-hash + pallet difficulty target), and submits the 40-byte `nonce(8 LE) ++ mix(32)` seal — which the node verifies and imports.
+
+**Verified live (cycle 11):**
+- `GPU Ethash miner online: NVIDIA GeForce RTX 4060` + `GPU DAG built: 1023 MiB`
+- `✅ Successfully mined block` + `🏆 Imported #1 … #32` — chain verifies GPU-mined seals
+- **Difficulty self-tuning converges:** blocks #1–8 at ~1/sec → blocks #25–32 at ~10–11 sec, heading to the 15s target (pallet raises difficulty as the GPU mines too fast)
+- 81 pallet unit tests pass; gpn-agent still builds
+- **Also fixed a latent build blocker:** runtime lacked the `#[sp_version::runtime_version]` attribute → wasm-builder refused to build. Added it (kept manual `Version` const + `fn version()`).
+- Full detail: `shared/artifacts/project7/cycle11-gpu-miner-wired-log.md`
 
 ---
 
@@ -31,18 +34,18 @@
 | **Real Ethash PoW in consensus (cycle 8)** | ✅ **LIVE** |
 | **Self-tuning difficulty from pallet (cycle 9)** | ✅ **LIVE** |
 | **Real GPU (OpenCL) Ethash miner in gpn-agent on RTX 4060 (cycle 10)** | ✅ **LIVE** |
-| Pallet unit tests (79 across all 5) | ✅ |
+| **GPU miner wired into live node (cycle 11)** | ✅ **LIVE** |
+| Pallet unit tests (81 across all 5) | ✅ |
 | GPU miner validation tests (DAG, trace-diff, matches-reference) | ✅ |
 | Fee mechanism (TransactionPayment) | 🟡 pending |
 | gpn-agent subxt chain client (stub) | 🟡 pending |
-| **Wire GPU miner to live node (fetch template → mine → submit seal)** | 🔴 next |
 | Two-node p2p testnet | 🟡 pending |
 
 ## Next Concrete Actions (priority order)
-1. [ ] **Wire the GPU miner to the live node**: `subxt` fetch block template (header pre-hash + current `pallet-gpu-pow` difficulty target) → mine on the GPU → submit the seal via PoW `submit` RPC. Makes the dev testnet actually mined by the RTX 4060.
-2. [ ] Add a fee pallet (TransactionPayment) before any non-dev network
-3. [ ] Promote extrinsic test + PoW seal-format test into repo (`gpn-node/scripts/`)
-4. [ ] Two-node local testnet (p2p + longest-chain)
+1. [ ] Promote PoW seal-format + extrinsic tests into repo (`gpn-node/scripts/`)
+2. [ ] Two-node local testnet (p2p + longest-chain, GPU mining across peers)
+3. [ ] Add a fee pallet (TransactionPayment) before any non-dev network
+4. [ ] External subxt miner path — agent fetches block template over RPC, mines on its own GPU, submits seal remotely (needs a `gpn_getTemplate`-style RPC endpoint; this is the production mining architecture)
 
 ## Phase 1 Findings
 
