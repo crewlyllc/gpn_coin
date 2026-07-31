@@ -1,12 +1,30 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3 (Prototype) — REAL SUBXT CHAIN CLIENT: on-chain profitability feed + difficulty read live from a running node (Cycle 21); END-TO-END PROFITABILITY-DRIVEN AUTO-SWITCH VERIFIED LIVE ON THE RTX 4060 (scripted feed drives ModeManager to genuinely stop/restart real GPU Ethash mining AND start/stop real GPU AI compute as revenue flips; node imported 17 GPU-mined blocks across both mining phases)**
-**Last Updated:** 2026-07-31 12:15 PT
+**Status: Phase 3 (Prototype) — LIVE ON-CHAIN PROFITABILITY FEED: `gpn_seed_feed` signs & submits `ProfitabilityOracle.update_feed` as Alice (genesis operator); ChainClient reads the REAL feed from the chain's best (head) block — token=$0.075 / gpu=$3/hr / util=72% / apr=15% live, NOT fallbacks (Cycle 22). END-TO-END PROFITABILITY-DRIVEN AUTO-SWITCH VERIFIED LIVE ON THE RTX 4060 (Cycle 20)**
+**Last Updated:** 2026-07-31 13:25 PT
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 21)
+## 🚀 Current Milestone (Cycle 22)
+
+**The last feed gap is closed — the `chain` profitability feed is now fully live.** Two pieces landed:
+
+1. **`gpn_seed_feed` tool** — submits a *signed* `ProfitabilityOracle.update_feed` extrinsic as Alice (the genesis oracle operator in dev/local specs). Uses a custom `Signer` on `sp_core v28` (avoids the `substrate-compat`/`sp-core v31` version conflict) and a custom `GpnConfig` (bare `AccountId32` address — the GPN runtime uses `Address = AccountId`, not `MultiAddress`). Immortal tx → robust on fast-block dev chains.
+2. **ChainClient head-block read fix** — subxt's `storage().at_latest()` reads the latest **finalized** block, which on a dev/single-node PoW chain (no finality gadget) stays stuck at #0 while the feed lives far ahead on the best fork. Added `head_block_hash()` (raw `chain_getBlockHash` via reqwest) + `storage_at_head()`, now used by `fetch_feed`, `fetch_difficulty`, and `get_account_info`.
+
+**Verified live on the RTX 4060 host (`gpn-node --dev`):** seeded feed on-chain (`CurrentFeed` storage confirmed: token=75000 micro-USD / gpu=3000000 / util=7200 bps / apr=1500 bps). The live test now prints the **real** values:
+```
+[live] difficulty = 138793332.36        (real, self-tuned)
+[live] token=$0.075 gpu=$3/hr util=0.72 apr=15%
+```
+Previously it printed fallbacks ($0.05 / $2.5 / 0.65 / 12%). Full suite 13 passed / 7 GPU-gated ignored; release build clean.
+
+Detail: `shared/artifacts/project7/cycle22-feed-seed-live-log.md`
+
+---
+
+## 🚀 Previous Milestone (Cycle 21)
 
 **The `ChainClient` is now real — the `chain` profitability feed reads actual on-chain data, not stubs.** Replaced the hardcoded placeholder client (100M difficulty, $0.05 token, etc.) with a subxt `OnlineClient<SubstrateConfig>` using **dynamic storage queries** (no codegen). It reads:
 - `GPUPoW::Difficulty` — the pallet's little-endian `[u64;4]` PoW **target**, converted to a classic difficulty metric `2^256/target`.
@@ -113,12 +131,13 @@ This **completes the production mining architecture**: node and miner are fully 
 | **Auto-switch BOTH legs proven on RTX 4060: mining & compute engines start/stop (cycle 19)** | ✅ **LIVE** |
 | **END-TO-END auto-switch: scripted feed drives Mining↔Compute on RTX 4060, node imported 17 GPU-mined blocks (cycle 20)** | ✅ **LIVE** |
 | **Real subxt ChainClient: on-chain difficulty + profitability feed read live (cycle 21)** | ✅ **LIVE** |
+| **LIVE on-chain profitability feed: `gpn_seed_feed` signs `update_feed` + ChainClient head-block read (cycle 22)** | ✅ **LIVE** |
 | gpn-agent subxt chain client (stub) | ✅ **REPLACED (cycle 21)** |
 
 ## Next Concrete Actions (priority order)
-1. [ ] **Seed the on-chain feed via extrinsic** — wire a subxt-signed `ProfitabilityOracle.update_feed` (or a one-off seeding tool) so `token_price_usd` / `avg_gpu_hour_price` / `utilization` / `APR` come from the chain instead of fallback. Completes the live-market-driven auto-switch. *(Difficulty leg already real; this is the last feed gap.)*
-2. [ ] Two-node testnet docs in README + CI wiring for `gpn-node/scripts/gpn_two_node_testnet.sh`.
-3. [ ] Compute marketplace integration: surface `ComputeExecutor` throughput/GFLOPS as an on-chain attestable metric (ties the AI-compute leg to the `compute-marketplace` / `gpu-attestation` pallets).
+1. [ ] Two-node testnet docs in README + CI wiring for `gpn-node/scripts/gpn_two_node_testnet.sh`.
+2. [ ] Compute marketplace integration: surface `ComputeExecutor` throughput/GFLOPS as an on-chain attestable metric (ties the AI-compute leg to the `compute-marketplace` / `gpu-attestation` pallets).
+3. [ ] Wire the seeded feed into a `--feed` agent config so operators can point the agent at a live oracle instead of manual seeding (`gpn_seed_feed`).
 
 ## Phase 1 Findings
 

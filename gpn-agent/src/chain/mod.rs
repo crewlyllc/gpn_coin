@@ -93,6 +93,74 @@ impl ChainClient {
         &self.endpoint
     }
 
+    /// Resolve the current **best (head)** block hash so storage reads see
+    /// unfinalized blocks. `at_latest()` reads the latest *finalized* block,
+    /// which on chains without a finality gadget (dev/single-node PoW) can be
+    /// stuck at genesis while the feed/difficulty live far ahead on the best
+    /// fork. Falls back to `None` (caller falls back to placeholders) on error.
+    async fn head_block_hash(&self) -> Option<subxt::utils::H256> {
+        // Convert ws:// -> http:// for a plain JSON-RPC POST.
+        let http_url = self
+            .endpoint
+            .replace("ws://", "http://")
+            .replace("wss://", "https://");
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "chain_getBlockHash",
+            "params": []
+        });
+        let resp: serde_json::Value = reqwest::Client::new()
+            .post(&http_url)
+            .json(&body)
+            .send()
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        let hash_hex = resp.get("result")?.as_str()?;
+        let bytes = hex::decode(hash_hex.trim_start_matches("0x")).ok()?;
+        let mut arr = [0u8; 32];
+        if bytes.len() != 32 {
+            return None;
+        }
+        arr.copy_from_slice(&bytes);
+        Some(arr.into())
+    }
+
+    /// Read a storage value at the current best head block (or fall back to
+    /// finalized via `at_latest` if the head hash can't be resolved).
+    async fn storage_at_head<Addr>(&self, client: &OnlineClient<SubstrateConfig>, addr: &Addr) -> Option<subxt::dynamic::Value>
+    where
+        Addr: subxt::storage::Address<
+            Target = subxt::dynamic::DecodedValueThunk,
+            IsFetchable = subxt::utils::Yes,
+        >,
+    {
+        let head = self.head_block_hash().await;
+        match head {
+            Some(hash) => client
+                .storage()
+                .at(hash)
+                .fetch(addr)
+                .await
+                .ok()?
+                .map(|t| t.to_value().ok().map(|v| v.remove_context()))
+                .flatten(),
+            None => client
+                .storage()
+                .at_latest()
+                .await
+                .ok()?
+                .fetch(addr)
+                .await
+                .ok()?
+                .map(|t| t.to_value().ok().map(|v| v.remove_context()))
+                .flatten(),
+        }
+    }
+
     /// Read the on-chain profitability feed. Returns `None` if the chain is
     /// unreachable or the feed has not been set by an oracle operator yet.
     async fn fetch_feed(&self) -> Option<OnChainFeed> {
@@ -102,18 +170,7 @@ impl ChainClient {
             "CurrentFeed",
             vec![],
         );
-        let value: Option<Value> = client
-            .storage()
-            .at_latest()
-            .await
-            .ok()?
-            .fetch(&addr)
-            .await
-            .ok()?
-            .map(|thunk| thunk.to_value().ok().map(|v| v.remove_context()))
-            .flatten();
-
-        let fields = value?;
+        let fields = self.storage_at_head(client, &addr).await?;
         let token_micro = get_u64_field(&fields, "token_price_usd")?;
         let gpu_micro = get_u64_field(&fields, "avg_gpu_hour_price")?;
         let utilization_bps = get_u32_field(&fields, "utilization_rate_bps")? as u64;
@@ -135,18 +192,7 @@ impl ChainClient {
     async fn fetch_difficulty(&self) -> Option<f64> {
         let client = self.client.as_ref()?;
         let addr = subxt::dynamic::storage("GPUPoW", "Difficulty", vec![]);
-        let value: Option<Value> = client
-            .storage()
-            .at_latest()
-            .await
-            .ok()?
-            .fetch(&addr)
-            .await
-            .ok()?
-            .map(|thunk| thunk.to_value().ok().map(|v| v.remove_context()))
-            .flatten();
-
-        let limbs = value?;
+        let limbs = self.storage_at_head(client, &addr).await?;
         // Pallet stores `[u64; 4]` little-endian limbs.
         let limbs_arr = composite_limbs(&limbs);
         Some(target_to_difficulty(limbs_arr))
@@ -162,14 +208,10 @@ impl ChainClient {
                     "Account",
                     vec![Value::from_bytes((addr32.as_ref() as &[u8; 32]).to_vec())],
                 );
-                if let Ok(storage) = client.storage().at_latest().await {
-                    if let Ok(Some(thunk)) = storage.fetch(&storage_addr).await {
-                        if let Ok(val) = thunk.to_value().map(|v| v.remove_context()) {
-                            if let Some(data) = get_field(&val, "data") {
-                                if let Some(free) = get_u128_field(data, "free") {
-                                    balance = free as f64 / 1_000_000_000_000.0;
-                                }
-                            }
+                if let Some(val) = self.storage_at_head(client, &storage_addr).await {
+                    if let Some(data) = get_field(&val, "data") {
+                        if let Some(free) = get_u128_field(data, "free") {
+                            balance = free as f64 / 1_000_000_000_000.0;
                         }
                     }
                 }
