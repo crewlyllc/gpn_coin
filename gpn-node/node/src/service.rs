@@ -530,3 +530,124 @@ fn spawn_cpu_miner(worker: MiningWorker) {
         })
         .expect("failed to spawn CPU miner thread");
 }
+
+#[cfg(test)]
+mod seal_tests {
+    use super::*;
+
+    /// Build a genuine Ethash seal (nonce + mix_hash) below the given target
+    /// using the light cache, exactly as `verify_seal` recomputes it.
+    fn make_seal(pre_hash: &[u8; 32], target: U256) -> Vec<u8> {
+        let header_hash = ethereum_types::H256::from_slice(pre_hash);
+        let cache = ethash_cache();
+        let full_size = ethash_full_size();
+        let mut nonce: u64 = 0;
+        loop {
+            let (mix, result) = ethash::hashimoto_light(
+                header_hash,
+                ethereum_types::H64::from_low_u64_be(nonce),
+                full_size,
+                cache,
+            );
+            if U256::from_little_endian(result.as_bytes()) < target {
+                let mut seal = Vec::with_capacity(SEAL_LEN);
+                seal.extend_from_slice(&nonce.to_le_bytes());
+                seal.extend_from_slice(mix.as_bytes());
+                return seal;
+            }
+            nonce = nonce.wrapping_add(1);
+        }
+    }
+
+    /// A valid, node-verifiable seal must pass `verify_seal`.
+    #[test]
+    fn valid_seal_passes_verify() {
+        let pre_hash = [0xabu8; 32];
+        // Very easy target (2^255) so a nonce is found quickly.
+        let target = U256::from_big_endian(&{
+            let mut b = [0u8; 32];
+            b[0] = 0x7f;
+            b
+        });
+        let seal = make_seal(&pre_hash, target);
+        assert_eq!(seal.len(), SEAL_LEN, "seal must be exactly 40 bytes");
+        assert!(verify_seal(&pre_hash.into(), &seal, target), "valid seal rejected");
+    }
+
+    /// A seal with the wrong mix_hash must be rejected even if the nonce is
+    /// otherwise valid.
+    #[test]
+    fn wrong_mix_rejected() {
+        let pre_hash = [0xabu8; 32];
+        let target = U256::from_big_endian(&{
+            let mut b = [0u8; 32];
+            b[0] = 0x7f;
+            b
+        });
+        let mut seal = make_seal(&pre_hash, target);
+        let last = seal.len() - 1;
+        seal[last] ^= 0xff; // corrupt the mix hash
+        assert!(!verify_seal(&pre_hash.into(), &seal, target), "corrupt mix accepted");
+    }
+
+    /// Seals of the wrong length must always be rejected (no panic on short
+    /// or long input).
+    #[test]
+    fn wrong_length_rejected() {
+        let pre_hash = [0xabu8; 32];
+        let target = U256::from_big_endian(&{
+            let mut b = [0u8; 32];
+            b[0] = 0x7f;
+            b
+        });
+        let good = make_seal(&pre_hash, target);
+
+        // Too short (39 bytes).
+        let short: Vec<u8> = good[..SEAL_LEN - 1].to_vec();
+        assert!(!verify_seal(&pre_hash.into(), &short, target), "short seal accepted");
+
+        // Too long (41 bytes).
+        let mut long = good.clone();
+        long.push(0u8);
+        assert!(!verify_seal(&pre_hash.into(), &long, target), "long seal accepted");
+    }
+
+    /// A genuine seal must be rejected when the target is below the produced
+    /// hash (i.e. the block doesn't meet the required difficulty).
+    #[test]
+    fn above_target_rejected() {
+        let pre_hash = [0xabu8; 32];
+        // Start with an easy target to find a seal, then verify against a
+        // much harder target (2^8) that the found hash will never satisfy.
+        let easy = U256::from_big_endian(&{
+            let mut b = [0u8; 32];
+            b[0] = 0x7f;
+            b
+        });
+        let seal = make_seal(&pre_hash, easy);
+        let hard = U256::from_big_endian(&{
+            let mut b = [0u8; 32];
+            b[31] = 0xff; // tiny target 2^8
+            b
+        });
+        assert!(!verify_seal(&pre_hash.into(), &seal, hard), "too-hard seal accepted");
+    }
+
+    /// A different block header (pre-hash) must invalidate an otherwise valid
+    /// seal — seals are bound to a specific block.
+    #[test]
+    fn wrong_header_rejected() {
+        let pre_hash = [0xabu8; 32];
+        let other_pre_hash = [0xcd_u8; 32];
+        let target = U256::from_big_endian(&{
+            let mut b = [0u8; 32];
+            b[0] = 0x7f;
+            b
+        });
+        let seal = make_seal(&pre_hash, target);
+        assert!(
+            !verify_seal(&other_pre_hash.into(), &seal, target),
+            "seal bound to wrong header accepted"
+        );
+    }
+}
