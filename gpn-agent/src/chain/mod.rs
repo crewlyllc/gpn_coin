@@ -577,6 +577,55 @@ impl ChainClient {
         }
     }
 
+    /// Read a job's minimum GPU-throughput requirement (`GPURequirements::
+    /// min_gflops`). 0 = no throughput gate. Returns None if the job doesn't
+    /// exist / chain unreachable.
+    pub async fn get_job_min_gflops(&self, job_id: u64) -> Option<u64> {
+        let client = self.client.as_ref()?;
+        let addr = subxt::dynamic::storage("ComputeMarketplace", "Jobs", vec![Value::u128(job_id as u128)]);
+        let v = self.storage_at_head(client, &addr).await?;
+        // Jobs.gpu_requirements.min_gflops — nested named composite.
+        let req = get_field(&v, "gpu_requirements")?;
+        get_u64_field(req, "min_gflops")
+    }
+
+    /// Enumerate marketplace jobs that are currently `Pending` and that this
+    /// provider can actually satisfy (attested GFLOPS >= job.min_gflops). This
+    /// is the loop-closing primitive: `auto` mode scans for claimable work
+    /// when the oracle says compute demand is high. Returns (job_id, min_gflops).
+    ///
+    /// `attested_gflops` = the provider's on-chain attested compute throughput;
+    /// a job with min_gflops=0 is always claimable (open market).
+    pub async fn list_claimable_jobs(&self, attested_gflops: u64) -> Vec<(u64, u64)> {
+        let Some(client) = &self.client else { return vec![] };
+        let next = self.get_next_job_id().await;
+        let mut out = Vec::new();
+        for id in 0..next {
+            let addr = subxt::dynamic::storage("ComputeMarketplace", "Jobs", vec![Value::u128(id as u128)]);
+            let Some(v) = self.storage_at_head(client, &addr).await else { continue };
+            // Only Pending jobs are claimable (skip Accepted/Running/etc).
+            let state = get_field(&v, "state")
+                .and_then(|t| {
+                    use subxt::ext::scale_value::ValueDef;
+                    match &t.value {
+                        ValueDef::Variant(v) => Some(v.name.clone()),
+                        _ => None,
+                    }
+                })
+                .unwrap_or_default();
+            if state != "Pending" {
+                continue;
+            }
+            let min_gflops = get_field(&v, "gpu_requirements")
+                .and_then(|r| get_u64_field(r, "min_gflops"))
+                .unwrap_or(0);
+            if is_job_claimable(min_gflops, attested_gflops) {
+                out.push((id, min_gflops));
+            }
+        }
+        out
+    }
+
     pub async fn submit_mining_solution(
         &self,
         _nonce: u64,
@@ -588,11 +637,18 @@ impl ChainClient {
     }
 }
 
+/// Whether a provider with `attested_gflops` GFLOPS can claim a job that
+/// requires `min_gflops`. A 0 threshold (open market) is always claimable;
+/// otherwise the provider must meet or exceed the requirement. Pure free
+/// function so it is unit-testable without a live chain.
+fn is_job_claimable(min_gflops: u64, attested_gflops: u64) -> bool {
+    min_gflops == 0 || attested_gflops >= min_gflops
+}
+
 /// Convert a little-endian `[u64;4]` target into a classic difficulty metric
 /// `2^256 / target`. Target is never zero in practice (pallet clamps it), but
 /// we guard anyway to avoid dividing by zero.
 fn target_to_difficulty(limbs: [u64; 4]) -> f64 {
-    // target = l0 + l1*2^64 + l2*2^128 + l3*2^192
     let target = limbs[0] as f64
         + (limbs[1] as f64) * 2f64.powi(64)
         + (limbs[2] as f64) * 2f64.powi(128)
@@ -663,19 +719,54 @@ fn get_field<'a>(value: &'a subxt::dynamic::Value, name: &str) -> Option<&'a sub
 
 /// Extract the named fields of a composite value (or `None` if not composite).
 
-/// Convert a scale-value AccountId (unnamed composite of 32 bytes) to a hex
-/// SS58-like string for display. Used when reading `JobRequestor`/`JobProvider`.
+/// Convert a scale-value AccountId to a hex string for display.
+/// Used when reading `JobRequestor`/`JobProvider`.
+///
+/// In subxt dynamic storage reads an `AccountId32` decodes as a **doubly-
+/// nested** `Composite::Unnamed`: the outer composite holds one inner
+/// composite of 32 byte-primitives. We therefore recursively descend into any
+/// nested composites and collect byte-sized (0..=255) leaf primitives, up to
+/// 32 bytes — robust to the actual shape subxt produces. The old code only
+/// read the outer level's values, so a `[u8; 32]` account silently rendered as
+/// all-zeros (`provider=0x00`) in cycle 28.
 fn account_id_to_string(value: &subxt::dynamic::Value) -> String {
+    let mut bytes = Vec::with_capacity(32);
+    collect_account_bytes(value, &mut bytes);
+    if bytes.is_empty() {
+        return format!("{:?}", value.value);
+    }
+    format!("0x{}", hex::encode(&bytes))
+}
+
+/// Recursively collect up to 32 byte-sized (0..=255) leaf primitives from a
+/// scale-value tree, descending through any nested composites/variants.
+fn collect_account_bytes(value: &subxt::dynamic::Value, out: &mut Vec<u8>) {
     use subxt::ext::scale_value::ValueDef;
+    if out.len() >= 32 {
+        return;
+    }
     match &value.value {
         ValueDef::Composite(c) => {
-            let mut bytes = Vec::with_capacity(32);
-            for v in c.values().take(32) {
-                bytes.push((v.as_u128().unwrap_or(0) & 0xff) as u8);
+            for v in c.values() {
+                collect_account_bytes(v, out);
             }
-            format!("0x{}", hex::encode(&bytes))
         }
-        _ => format!("{:?}", value.value),
+        ValueDef::Variant(v) => {
+            for v in v.values.values() {
+                collect_account_bytes(v, out);
+            }
+        }
+        ValueDef::Primitive(subxt::ext::scale_value::Primitive::U128(n)) => {
+            if *n <= 255 {
+                out.push(*n as u8);
+            }
+        }
+        ValueDef::Primitive(subxt::ext::scale_value::Primitive::U256(b)) => {
+            for byte in b.iter().take(32 - out.len()) {
+                out.push(*byte);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -685,7 +776,6 @@ mod tests {
 
     #[test]
     fn target_to_difficulty_matches_classic_formula() {
-        // target 2^244 -> difficulty 2^12 = 4096
         // limbs little-endian: 2^244 = limb[3] = 2^(244-192) = 2^52
         let limbs = [0u64, 0, 0, 1u64 << 52];
         let d = target_to_difficulty(limbs);
@@ -701,6 +791,28 @@ mod tests {
     fn target_to_difficulty_zero_guarded() {
         let d = target_to_difficulty([0, 0, 0, 0]);
         assert_eq!(d, FALLBACK_DIFFICULTY);
+    }
+
+    #[test]
+    fn is_job_claimable_open_market_always_claimable() {
+        // min_gflops == 0 (open market): claimable regardless of attested power
+        assert!(is_job_claimable(0, 0));
+        assert!(is_job_claimable(0, 188));
+    }
+
+    #[test]
+    fn is_job_claimable_gated_by_attested_gflops() {
+        // provider attested 188 GFLOPS (cycle-28 4060)
+        assert!(is_job_claimable(150, 188)); // meets requirement
+        assert!(is_job_claimable(188, 188)); // exact match ok
+        assert!(!is_job_claimable(1000, 188)); // below requirement -> NOT claimable
+    }
+
+    #[test]
+    fn is_job_claimable_unattested_provider() {
+        // 0 attested GFLOPS (never attested) can only take open-market jobs
+        assert!(is_job_claimable(0, 0));
+        assert!(!is_job_claimable(150, 0));
     }
 
     #[test]
@@ -721,6 +833,56 @@ mod tests {
         assert_eq!(out[0], 0x01);
         assert_eq!(out[1], 0x02);
         assert_eq!(&out[2..], &[0u8; 30]);
+    }
+
+    #[test]
+    fn account_id_to_string_handles_composite_and_u256_decode() {
+        // An AccountId32 in a dynamic storage read decodes as either a
+        // Composite::Unnamed of 32 u8s OR a Primitive::U256 (as observed live
+        // in cycle 28, where the old Composite-only code rendered `provider=0x00`).
+        // Verify we now render the correct hex address for both shapes.
+        use subxt::ext::scale_value::Value;
+        use subxt::ext::scale_value::Primitive;
+        let bytes: [u8; 32] = [0x5a, 0x6b, 0x7c, 0x8d, 0x9e, 0xaf, 0xb0, 0xc1,
+            0xd2, 0xe3, 0xf4, 0x01, 0x23, 0x45, 0x67, 0x89,
+            0xab, 0xcd, 0xef, 0x10, 0x32, 0x54, 0x76, 0x98,
+            0xba, 0xdc, 0xfe, 0x11, 0x22, 0x33, 0x44, 0x55];
+        let expected = format!("0x{}", hex::encode(bytes));
+
+        // The real shape subxt produces for an AccountId32: a doubly-nested
+        // Composite::Unnamed — outer holds one inner composite of 32 byte-prims.
+        let inner = Value::unnamed_composite(bytes.iter().map(|b| Value::from(*b as u128)).collect::<Vec<_>>());
+        let outer = Value::unnamed_composite(vec![inner]);
+        assert_eq!(account_id_to_string(&outer), expected);
+
+        // Composite::Unnamed of byte-prims directly (alternative shape)
+        let flat = Value::unnamed_composite(bytes.iter().map(|b| Value::from(*b as u128)).collect::<Vec<_>>());
+        assert_eq!(account_id_to_string(&flat), expected);
+
+        // Primitive::U256 shape (defensive)
+        let u256 = Value::primitive(Primitive::U256(bytes));
+        assert_eq!(account_id_to_string(&u256), expected);
+    }
+
+    #[test]
+    fn account_id_to_string_does_not_render_all_zeros_for_u256() {
+        // Regression guard for the cycle-28 display bug: a U256 account must
+        // NOT come back as 0x00…00.
+        use subxt::ext::scale_value::Primitive;
+        let bytes = [0x11u8; 32];
+        let u256 = Value::primitive(Primitive::U256(bytes));
+        let s = account_id_to_string(&u256);
+        assert_eq!(s, format!("0x{}", hex::encode([0x11u8; 32])));
+        assert!(!s.contains("00"));
+    }
+
+    #[test]
+    fn account_id_to_string_non_account_value_does_not_panic() {
+        // Unsupported shape (e.g. a bare u128) should render something rather
+        // than panic — the demo must never crash on a decode edge case.
+        let v = subxt::dynamic::Value::u128(42);
+        let s = account_id_to_string(&v);
+        assert!(!s.is_empty());
     }
 
     #[test]

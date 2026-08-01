@@ -23,6 +23,7 @@
 use gpn_agent::{
     chain, compute::ComputeConfig, config, gpu, mining::MiningConfig, modes, profitability, AgentState, Mode,
 };
+use sha2::Digest;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -129,6 +130,16 @@ impl GPUMiningNodeAgent {
                         if let Err(e) = self.check_profitability().await {
                             log::error!("Profitability check failed: {}", e);
                         }
+                        // Close the loop: when the oracle says compute demand is
+                        // high (Compute is the current/recommended mode), actually
+                        // claim & serve marketplace jobs on-chain instead of just
+                        // running a background GEMM.
+                        let serving = self.state.read().await.current_mode == Mode::Compute;
+                        if serving {
+                            if let Err(e) = self.claim_and_serve_jobs().await {
+                                log::error!("Marketplace job serving failed: {}", e);
+                            }
+                        }
                     }
                 }
                 _ = health_check_interval.tick() => {
@@ -227,6 +238,81 @@ impl GPUMiningNodeAgent {
         }
 
         Ok(())
+    }
+
+    /// Close the loop: when the agent is serving AI compute (auto mode picked
+    /// Compute, or compute demand is high), actually CLAIM pending marketplace
+    /// jobs on-chain and serve them with the real GPU — accept -> start -> run
+    /// a real GEMM -> submit_result -> complete (payout). This is what ties the
+    /// profitability oracle -> marketplace -> agent together end-to-end.
+    ///
+    /// Safe to call repeatedly: it only claims jobs this provider can satisfy
+    /// and that are still Pending, and it skips if not registered/attested.
+    async fn claim_and_serve_jobs(&self) -> Result<usize, Box<dyn std::error::Error>> {
+        // Resolve the signer's address (the account that signs marketplace txs).
+        use subxt::tx::Signer as _;
+        let signer = chain::signer::Sr25519Signer::from_uri(&self.config.signer_uri)?;
+        let addr = signer.account_id().to_string();
+
+        // 1. Provider must be registered. Register idempotently if not.
+        if !self.chain_client.is_provider_registered(&addr).await {
+            log::info!("registering as marketplace provider ({}...)", &addr[..10]);
+            // Advertise the attested compute tier so the marketplace can match us.
+            let attested = self.chain_client.get_attestation_record(&addr).await;
+            let (gpus, gflops) = attested.map(|(g, f, _)| (g, f)).unwrap_or((1, 0));
+            self.chain_client
+                .register_provider(8_000, 75, gpus, 0, gflops)
+                .await?;
+        }
+
+        // 2. Provider must be attested to take gated jobs.
+        let attested_gflops = self
+            .chain_client
+            .get_attestation_record(&addr)
+            .await
+            .map(|(_, f, _)| f)
+            .unwrap_or(0);
+
+        // 3. Find pending jobs we can actually satisfy.
+        let claimable = self.chain_client.list_claimable_jobs(attested_gflops).await;
+        if claimable.is_empty() {
+            log::debug!("no claimable marketplace jobs (attested {} GFLOPS)", attested_gflops);
+            return Ok(0);
+        }
+        log::info!("{} claimable job(s) found (attested {} GFLOPS)", claimable.len(), attested_gflops);
+
+        let mut served = 0usize;
+        for (job_id, min_gflops) in claimable {
+            log::info!("serving job #{} (min_gflops={})", job_id, min_gflops);
+            // accept -> start
+            self.chain_client.accept_job(job_id).await?;
+            log::info!("  accepted job #{}", job_id);
+            self.chain_client.start_job(job_id).await?;
+            log::info!("  started job #{}", job_id);
+
+            // Run a REAL dense GEMM on the GPU and hash its output -> result_hash.
+            let n = self.config.compute_matrix_size;
+            let mut mm = crate::gpu::matmul::GpuMatmul::new(self.config.compute_device_index, n)
+                .map_err(|e| format!("open GPU matmul: {e}"))?;
+            let (elapsed, _gflops) = mm.run_many(1).map_err(|e| format!("matmul: {e}"))?;
+            let out = mm.read_result().map_err(|e| format!("read result: {e}"))?;
+            let mut hasher = sha2::Sha256::new();
+            for chunk in out.chunks(4096) {
+                let bytes: Vec<u8> = chunk.iter().flat_map(|f| f.to_le_bytes()).collect();
+                hasher.update(&bytes);
+            }
+            let result_hash: [u8; 32] = hasher.finalize().into();
+            log::info!("  GPU GEMM done in {}ms -> result_hash 0x{}...", elapsed.as_millis(), hex::encode(&result_hash[..4]));
+
+            // submit + complete (payout to provider from escrow)
+            self.chain_client.submit_result(job_id, result_hash).await?;
+            log::info!("  result submitted for job #{}", job_id);
+            self.chain_client.complete_job(job_id).await?;
+            log::info!("✅ job #{} completed & paid out", job_id);
+            served += 1;
+        }
+
+        Ok(served)
     }
 
     /// Health check — report GPU status and mode
