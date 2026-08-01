@@ -34,7 +34,8 @@ projectmanager07/
 │       ├── gpu-pow/             # Ethash mining pallet
 │       ├── gpu-attestation/     # Proof of Staked GPU
 │       ├── compute-marketplace/ # GPU compute marketplace
-│       └── ...
+│       ├── profitability-oracle/# On-chain profitability feed
+│       └── gpn-token/           # Token economics (mint/inflation/fees)
 ├── gpn-agent/         # GPU node agent (Rust)
 │   ├── src/
 │   │   ├── main.rs              # Entry point
@@ -50,16 +51,19 @@ projectmanager07/
 │   │   └── config/              # Agent configuration
 │   └── config/
 │       └── default.toml
-├── shared/artifacts/project7/   # Research & design docs
+├── shared/artifacts/project7/   # Research docs (Phase 1-2)
 │   ├── 01-gpu-coins-research.md
 │   ├── 02-gpu-compute-networks-research.md
 │   ├── 03-hybrid-consensus-research.md
-│   ├── 04-design-decisions-synthesis.md
-│   └── design/
-│       ├── 01-architecture-overview.md
-│       ├── 02-gpu-attestation-protocol.md
-│       ├── 03-compute-marketplace-detailed.md
-│       └── 04-profitability-oracle-auto-switch.md
+│   └── 04-design-decisions-synthesis.md
+├── design/           # Source-of-truth design (aligned to implemented code)
+│   ├── pallets/00-pallet-overview.md
+│   ├── protocols/01-gpu-pow-consensus.md
+│   ├── protocols/02-gpu-attestation.md
+│   ├── protocols/03-compute-marketplace.md
+│   ├── protocols/04-profitability-oracle.md
+│   ├── node-agent/01-agent-architecture.md
+│   └── tokenomics/01-gpn-tokenomics.md
 └── HEARTBEAT.md
 ```
 

@@ -1,12 +1,34 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3 (Prototype) — LIVE CHAIN-FEED-DRIVEN AUTO-SWITCH + JOB CLAIMING VERIFIED on RTX 4060 (Cycle 31). Cycle 32: filled the empty `design/tokenomics/` dir with a source-of-truth tokenomics spec aligned to the implemented `pallet-gpn-token` code (fair-launch, 10%→1% inflation, 50 GPN/block, 5% fee split 200/150/100/50 bps, 1,000 GPN attestation stake); reconciled preliminary-paper vs implemented-code tokenomics.**
-**Last Updated:** 2026-08-01 ~06:00 UTC (2026-07-31 ~23:00 PT)
+**Status: Phase 3 (Prototype) — LIVE on RTX 4060 (Cycle 31). Cycle 32: source-of-truth tokenomics spec (`design/tokenomics/`). Cycle 33: filled the last empty design dirs — `design/pallets/`, `design/protocols/`, `design/node-agent/` — with source-of-truth architecture docs aligned to the implemented code (5-pallet overview, PoW/attestation/marketplace/oracle protocols, agent architecture); README structure updated. All design/ dirs are now non-empty and tracked to the live runtime.**
+**Last Updated:** 2026-08-01 ~07:00 UTC (2026-07-31 ~23:55 PT)
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 31)
+## 🚀 Current Milestone (Cycle 33)
+
+**Closed the last documentation gap: every `design/` subdir referenced by the README is now non-empty and source-of-truth-aligned to the implemented runtime.** Cycle 32 filled `design/tokenomics/`; this cycle filled the remaining three empty dirs with the same code-tracking approach.
+
+1. **`design/pallets/00-pallet-overview.md`** — 5-pallet inventory (gpu-pow, gpu-attestation, compute-marketplace, profitability-oracle, gpn-token): roles, all extrinsics, storage, events, cross-pallet contracts (mint, `GPUAttestationProvider` gate, fee split), dependency graph, verification state.
+2. **`design/protocols/01-gpu-pow-consensus.md`** — Ethash GPU-only PoW, block lifecycle & reward mint, difficulty adjustment, epochs, storage, agent integration (DAG release/rebuild on switch).
+3. **`design/protocols/02-gpu-attestation.md`** — Proof-of-Staked-GPU flow, 1,000 GPN stake, GFLOPS measurement (Cycle 24 units fix), `GPUAttestationProvider` cross-pallet contract, open Phase-4 items.
+4. **`design/protocols/03-compute-marketplace.md`** — two-party escrow job lifecycle (register→create→accept(gate)→start→submit→complete), pricing & 5% fee, min_gflops gate, storage.
+5. **`design/protocols/04-profitability-oracle.md`** — on-chain `ProfitabilityFeed` (token price / GPU $/hr / utilization / APR), operator extrinsics, USD-units convention (Cycle 31 fix), agent consumption.
+6. **`design/node-agent/01-agent-architecture.md`** — crate layout, Mode enum & auto-switch (5% hysteresis, min_epoch_hours), ChainClient/signer, config table, standalone tooling (incl. two-account demo), open items.
+7. **README** — project-structure section updated: full 5-pallet list + new `design/` tree.
+
+**Verification:** all new docs cross-checked against `gpn-node/runtime/src/lib.rs` (construct_runtime, pallet config) and pallet `lib.rs` (extrinsics/storage/events) and `gpn-agent` source. No code changed. Git tree clean after commit.
+
+Detail: `shared/artifacts/project7/cycle33-design-docs-log.md`
+
+---
+
+## 🚀 Previous Milestone (Cycle 32)
+
+**Filled the empty `design/tokenomics/` dir with a source-of-truth tokenomics spec aligned to the implemented `pallet-gpn-token` code** (fair-launch, 10%→1% inflation, 50 GPN/block, 5% fee split 200/150/100/50 bps, 1,000 GPN attestation stake); reconciled preliminary-paper vs implemented-code tokenomics; documented Phase-4 open questions. Commit `795686c`.
+
+---
 
 **The last integration gap is closed: the live on-chain profitability feed now drives the auto-switch and job claiming end-to-end.** Found & fixed a dimensional bug (`calc_compute_revenue` multiplied an already-USD GPU-hour price by `token_price` again → USD², capping compute revenue ~13× too low), which is why the chain feed had never triggered Compute and the autoclaim demo had to use the scripted feed.
 
