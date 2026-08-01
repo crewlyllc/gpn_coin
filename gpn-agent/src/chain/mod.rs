@@ -273,6 +273,72 @@ impl ChainClient {
         }
     }
 
+    /// Read the account's current on-chain nonce from the **head** block.
+    /// Returns 0 if the chain is unreachable / account not found.
+    ///
+    /// Critical for signing: subxt's default nonce comes from the *finalized*
+    /// block, which on a PoW dev chain is stuck at #0. Without an explicit
+    /// head-block nonce, a second+ signed tx from the same account is rejected
+    /// as `Transaction is outdated`.
+    pub async fn get_account_nonce(&self, address: &str) -> u64 {
+        let Some(client) = &self.client else { return 0 };
+        let Ok(addr32) = address.parse::<subxt::utils::AccountId32>() else {
+            return 0;
+        };
+        let storage_addr = subxt::dynamic::storage(
+            "System",
+            "Account",
+            vec![Value::from_bytes((addr32.as_ref() as &[u8; 32]).to_vec())],
+        );
+        match self.storage_at_head(client, &storage_addr).await {
+            Some(v) => get_u32_field(&v, "nonce").unwrap_or(0) as u64,
+            None => 0,
+        }
+    }
+
+    /// Read whether the account has staked (has a `ProviderStake` entry) and
+    /// whether it has an active attestation record, straight from storage.
+    pub async fn get_provider_state(&self, address: &str) -> (bool, bool) {
+        let Some(client) = &self.client else { return (false, false) };
+        let Ok(addr32) = address.parse::<subxt::utils::AccountId32>() else {
+            return (false, false);
+        };
+        let key = (addr32.as_ref() as &[u8; 32]).to_vec();
+        let stake = subxt::dynamic::storage("GPUAttestation", "ProviderStake", vec![Value::from_bytes(key.clone())]);
+        let att = subxt::dynamic::storage("GPUAttestation", "Attestations", vec![Value::from_bytes(key)]);
+        let has_stake = self.storage_at_head(client, &stake).await.is_some();
+        let has_att = self.storage_at_head(client, &att).await.is_some();
+        (has_stake, has_att)
+    }
+
+    /// Read the provider's attestation record: (gpu_count, compute_gflops,
+    /// tier). Returns None if not attested / record unreadable.
+    pub async fn get_attestation_record(&self, address: &str) -> Option<(u8, u64, String)> {
+        let client = self.client.as_ref()?;
+        let addr32 = address.parse::<subxt::utils::AccountId32>().ok()?;
+        let key = (addr32.as_ref() as &[u8; 32]).to_vec();
+        let att = subxt::dynamic::storage("GPUAttestation", "Attestations", vec![Value::from_bytes(key)]);
+        let v = self.storage_at_head(client, &att).await?;
+        let gpus = get_u8_field(&v, "gpu_count")?;
+        let gflops = get_u64_field(&v, "compute_gflops")?;
+        let tier = get_field(&v, "tier")
+            .and_then(|t| {
+                // AttestationTier enum decodes as a named variant (e.g. { Bronze: null }).
+                use subxt::ext::scale_value::ValueDef;
+                match &t.value {
+                    ValueDef::Variant(v) => Some(v.name.clone()),
+                    ValueDef::Composite(subxt::ext::scale_value::Composite::Named(pairs)) => {
+                        pairs.first().map(|(name, _)| name.clone())
+                    }
+                    _ => t.as_u128().map(|n| match n {
+                        1 => "Bronze", 2 => "Silver", 3 => "Gold", _ => "Unattested",
+                    }.to_string()),
+                }
+            })
+            .unwrap_or_else(|| "?".to_string());
+        Some((gpus, gflops, tier))
+    }
+
     pub async fn get_attestation_challenge(&self) -> Result<[u8; 32], Box<dyn std::error::Error>> {
         // Read `GPUAttestation::AttestationChallenge` from the chain via a
         // dynamic storage query. Falls back to a placeholder only if the
@@ -320,8 +386,44 @@ impl ChainClient {
             ],
         );
 
-        signer::submit_signed(&client, &call, &signer).await?;
+        let nonce = self.get_account_nonce(&signer.account_id().to_string()).await;
+        signer::submit_signed(&client, &call, &signer, nonce).await?;
         log::info!("GPU attestation submitted on-chain and succeeded.");
+        Ok(())
+    }
+
+    /// Ensure the provider has staked at least `MinAttestationStake` so that
+    /// `submit_attestation` is accepted by the pallet (which rejects
+    /// un-staked providers with `InsufficientStake`). Deposits `amount` via the
+    /// signed `GPUAttestation::deposit_stake` extrinsic.
+    ///
+    /// This is a no-op (with a warning) if no signer is configured.
+    pub async fn deposit_stake(
+        &self,
+        amount: u128,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(uri) = &self.signer_uri else {
+            log::warn!("No signer configured; cannot deposit stake (set signer_uri).");
+            return Ok(());
+        };
+
+        let signer = signer::Sr25519Signer::from_uri(uri)?;
+        let client = signer::connect(&self.endpoint).await?;
+
+        log::info!(
+            "Depositing {} GPN stake as {} (GPUAttestation::deposit_stake)",
+            amount, signer.account_id()
+        );
+
+        let nonce = self.get_account_nonce(&signer.account_id().to_string()).await;
+        let call = subxt::dynamic::tx(
+            "GPUAttestation",
+            "deposit_stake",
+            vec![Value::u128(amount)],
+        );
+
+        signer::submit_signed(&client, &call, &signer, nonce).await?;
+        log::info!("Stake deposited on-chain.");
         Ok(())
     }
 
@@ -385,6 +487,10 @@ fn get_u64_field(value: &subxt::dynamic::Value, name: &str) -> Option<u64> {
 
 fn get_u32_field(value: &subxt::dynamic::Value, name: &str) -> Option<u32> {
     get_u64_field(value, name).map(|v| v as u32)
+}
+
+fn get_u8_field(value: &subxt::dynamic::Value, name: &str) -> Option<u8> {
+    get_u64_field(value, name).map(|v| v as u8)
 }
 
 fn get_u128_field(value: &subxt::dynamic::Value, name: &str) -> Option<u128> {

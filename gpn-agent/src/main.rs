@@ -149,6 +149,19 @@ impl GPUMiningNodeAgent {
     async fn perform_attestation(&self) -> Result<(), Box<dyn std::error::Error>> {
         log::debug!("Fetching attestation challenge...");
 
+        // The pallet requires the provider to have staked before attesting
+        // (`GPUAttestation::deposit_stake`, `MinAttestationStake` = 1,000 GPN).
+        // Deposit once up-front so a fresh provider can attest on first boot;
+        // a subsequent duplicate deposit fails with `AlreadyAttested` and is
+        // ignored (attestation is what really matters).
+        let stake = self.config.min_attestation_stake;
+        if stake > 0 {
+            match self.chain_client.deposit_stake(stake).await {
+                Ok(()) => log::info!("Provider stake ensured ({} GPN)", stake),
+                Err(e) => log::warn!("Stake deposit skipped: {} (proceeding to attest)", e),
+            }
+        }
+
         // Get current challenge from chain
         let challenge = self.chain_client.get_attestation_challenge().await?;
 

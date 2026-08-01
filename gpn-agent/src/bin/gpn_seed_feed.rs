@@ -90,6 +90,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let signer = signer::Sr25519Signer::from_uri(&signer_uri)?;
     println!("Signing as: {}", signer.account_id());
 
+    let nonce = signer::current_nonce(&client, &endpoint, &signer.account_id()).await;
+    println!("Account nonce (head): {}", nonce);
+
     // Construct the dynamic call: ProfitabilityOracle.update_feed(...)
     let call = subxt::dynamic::tx(
         "ProfitabilityOracle",
@@ -103,7 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     println!("Submitting update_feed extrinsic...");
-    signer::submit_signed(&client, &call, &signer).await?;
+    signer::submit_signed(&client, &call, &signer, nonce).await?;
     println!("✅ update_feed finalized and succeeded.");
 
     // Verify: re-read the on-chain feed back.

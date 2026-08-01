@@ -17,6 +17,7 @@ use subxt::{
         substrate::{BlakeTwo256, H256, MultiSignature, SubstrateHeader},
         Config, DefaultExtrinsicParams,
     },
+    dynamic::Value,
     tx::{Payload, Signer},
     utils::AccountId32,
     OnlineClient,
@@ -72,35 +73,111 @@ pub async fn connect(endpoint: &str) -> Result<OnlineClient<GpnConfig>, Box<dyn 
     Ok(OnlineClient::<GpnConfig>::from_url(endpoint).await?)
 }
 
+/// Read the account's current on-chain nonce from the **head** block (so a
+/// second+ tx from the same account isn't rejected as `Transaction is
+/// outdated` — see `submit_signed`). Returns 0 if the chain is unreachable or
+/// the account doesn't exist yet.
+pub async fn current_nonce(
+    client: &OnlineClient<GpnConfig>,
+    endpoint: &str,
+    account: &AccountId32,
+) -> u64 {
+    let addr = subxt::dynamic::storage(
+        "System",
+        "Account",
+        vec![Value::from_bytes((account.as_ref() as &[u8; 32]).to_vec())],
+    );
+    // Resolve the best head block hash (JSON-RPC) so we don't read the stuck
+    // finalized #0 on PoW dev chains.
+    let http_url = endpoint.replace("ws://", "http://").replace("wss://", "https://");
+    let body = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "chain_getBlockHash", "params": [] });
+    let head_hash: Option<H256> = (|| {
+        let resp = ureq_blocking_post(&http_url, &body)?;
+        let hex = resp.get("result")?.as_str()?.trim_start_matches("0x");
+        let bytes = hex::decode(hex).ok()?;
+        if bytes.len() != 32 { return None; }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Some(arr.into())
+    })();
+
+    let fetch = async {
+        let thunk = match head_hash {
+            Some(h) => client.storage().at(h).fetch(&addr).await.ok()?,
+            None => client.storage().at_latest().await.ok()?.fetch(&addr).await.ok()?,
+        }?;
+        let v = thunk.to_value().ok()?.remove_context();
+        // System::Account nonce is a Named composite with a `nonce` field.
+        use subxt::ext::scale_value::ValueDef;
+        if let ValueDef::Composite(c) = &v.value {
+            if let subxt::ext::scale_value::Composite::Named(pairs) = c {
+                if let Some((_, nv)) = pairs.iter().find(|(k, _)| k == "nonce") {
+                    return nv.as_u128().map(|x| x as u64);
+                }
+            }
+        }
+        None
+    };
+    fetch.await.unwrap_or(0)
+}
+
+/// Minimal blocking JSON-RPC POST (reqwest blocking) for the head-block hash.
+fn ureq_blocking_post(url: &str, body: &serde_json::Value) -> Option<serde_json::Value> {
+    let resp = reqwest::blocking::Client::new()
+        .post(url)
+        .json(body)
+        .send()
+        .ok()?;
+    resp.json().ok()
+}
+
 /// Submit a dynamic call signed by `signer` and wait for it to be included and
 /// succeed on the best (not necessarily finalized) fork. Logs the emitted
 /// events; returns `Ok(())` on success.
 ///
 /// Uses an **immortal** transaction — robust on fast-block dev chains where a
 /// mortal 32-block window can expire before the tx is included.
+///
+/// `nonce` is the account's current on-chain nonce read from the **head** block.
+/// It must be supplied explicitly: subxt's default reads the nonce from the
+/// *finalized* block, which on a PoW dev chain with no finality gadget stays at
+/// #0 — so a second+ tx from the same account would be rejected as
+/// `Transaction is outdated` (stale nonce 0 vs. real nonce 1+).
 pub async fn submit_signed<Call>(
     client: &OnlineClient<GpnConfig>,
     call: &Call,
     signer: &Sr25519Signer,
+    nonce: u64,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     Call: Payload,
 {
-    let params = subxt::config::DefaultExtrinsicParamsBuilder::<GpnConfig>::new().build();
+    let params = subxt::config::DefaultExtrinsicParamsBuilder::<GpnConfig>::new()
+        .nonce(nonce)
+        .build();
     let progress = client
         .tx()
         .sign_and_submit_then_watch(call, signer, params)
         .await?;
-    let events = progress.wait_for_finalized_success().await?;
-    for event in events.iter() {
-        let ev = event?;
-        let field_count = ev.field_values().map(|c| c.len()).unwrap_or(0);
-        log::info!(
-            "  event: {}::{}({} fields)",
-            ev.pallet_name(),
-            ev.variant_name(),
-            field_count
-        );
+
+    // Wait for the tx to be included in a **best** block. We deliberately do
+    // NOT wait for finalization (no GRANDPA gadget on a PoW chain, so
+    // `finalized` stays at #0 forever) and we do NOT decode block events here
+    // (their dynamic value decoding is fragile). Callers confirm success by
+    // reading the relevant storage back (e.g. `get_provider_state`).
+    use subxt::tx::TxStatus;
+    let mut progress = progress;
+    loop {
+        match progress.next().await {
+            Some(Ok(TxStatus::InBestBlock(_))) => break,
+            Some(Ok(TxStatus::Error { message })) => return Err(format!("tx error: {}", message).into()),
+            Some(Ok(TxStatus::Invalid { message })) => return Err(format!("tx invalid: {}", message).into()),
+            Some(Ok(TxStatus::Dropped { message })) => return Err(format!("tx dropped: {}", message).into()),
+            Some(Ok(_)) => continue,
+            Some(Err(e)) => return Err(e.into()),
+            None => return Err("tx subscription dropped".into()),
+        }
     }
+    log::info!("tx included in a best block");
     Ok(())
 }

@@ -32,6 +32,9 @@ pub struct AgentConfig {
 
     // Staking
     pub staked_amount: f64,
+    /// Minimum GPN stake to deposit before attesting (pallet
+    /// `MinAttestationStake` = 1,000 GPN). 0 disables the pre-attest deposit.
+    pub min_attestation_stake: u128,
 
     // Compute
     pub max_concurrent_jobs: u32,
@@ -70,6 +73,7 @@ impl Default for AgentConfig {
             profitability_check_interval_secs: 3600, // Every hour
             profitability_feed: "chain".to_string(),
             staked_amount: 10_000.0,
+            min_attestation_stake: 1_000_000_000_000_000_000_000, // 1,000 GPN
             max_concurrent_jobs: 2,
             docker_endpoint: "unix:///var/run/docker.sock".to_string(),
             compute_device_index: 0,
