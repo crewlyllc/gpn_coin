@@ -108,6 +108,21 @@ pub fn calc_compute_revenue(gpu_price: f64, utilization: f64) -> f64 {
     gpu_price * utilization * overhead_factor
 }
 
+/// Oracle-governance §6 gap #2: is a computed compute revenue (USD/hour)
+/// **plausible** enough to act on? Guards the auto-switch against a single
+/// bad/outlier profitability feed (unit misconversion — the cycle-31 USD²
+/// class — a garbage value, or NaN/Inf) that would otherwise inflate compute
+/// revenue and force a mass switch to Compute.
+///
+/// A revenue is reasonable iff it is finite, positive, and within
+/// `max_usd_per_hour`. (Since `calc_compute_revenue` is monotonic in both
+/// inputs, one ceiling on the *output* bounds every implausible input
+/// combination: a negative/huge `utilization` or `gpu_price` surfaces as a
+/// negative/huge revenue, both rejected here.)
+pub fn compute_revenue_reasonable(revenue: f64, max_usd_per_hour: f64) -> bool {
+    revenue.is_finite() && revenue > 0.0 && revenue <= max_usd_per_hour
+}
+
 pub struct ProfitabilityCalculator {
     config: AgentConfig,
     chain_client: ChainClient,
@@ -205,8 +220,23 @@ impl ProfitabilityCalculator {
         let (compute, staking) = if stale {
             (0.0, 0.0)
         } else {
+            let compute_raw = calc_compute_revenue(gpu_price, utilization);
+            // Oracle-governance §6 gap #2: feed reasonableness bounds. A
+            // compute revenue outside the plausible USD/hr ceiling means the
+            // feed is bad (units/garbage/outlier) — fall back to Mining so a
+            // single bad feed can't force a mass switch to Compute.
+            let max = self.config.compute_revenue_max_usd_per_hour;
+            let compute = if compute_revenue_reasonable(compute_raw, max) {
+                compute_raw
+            } else {
+                log::warn!(
+                    "Compute revenue ${:.4}/hr implausible (max ${:.2}/hr). Rejecting feed -> forcing conservative Mining default.",
+                    compute_raw, max
+                );
+                0.0
+            };
             (
-                calc_compute_revenue(gpu_price, utilization),
+                compute,
                 self.calc_staking_revenue(self.config.staked_amount, staking_apr, token_price),
             )
         };
@@ -335,6 +365,38 @@ mod tests {
         );
         // Sanity: it must be ~USD-scale, not deflated to ~$0.07.
         assert!(revenue > 1.0, "compute revenue should be ~$1.38/hr, got {revenue}");
+    }
+
+    #[test]
+    fn compute_revenue_reasonable_accepts_plausible_and_rejects_bad() {
+        // Plausible (within the 50 USD/hr ceiling).
+        assert!(compute_revenue_reasonable(1.38, 50.0));
+        assert!(compute_revenue_reasonable(50.0, 50.0)); // boundary == max is OK
+        // Implausible: zero / negative (garbage utilization or price).
+        assert!(!compute_revenue_reasonable(0.0, 50.0));
+        assert!(!compute_revenue_reasonable(-1.0, 50.0));
+        // Implausible: absurdly high (unit misconversion / outlier feed).
+        assert!(!compute_revenue_reasonable(51.0, 50.0));
+        assert!(!compute_revenue_reasonable(10_000.0, 50.0));
+        // Implausible: non-finite (NaN / ±Inf from a corrupt feed).
+        assert!(!compute_revenue_reasonable(f64::NAN, 50.0));
+        assert!(!compute_revenue_reasonable(f64::INFINITY, 50.0));
+        assert!(!compute_revenue_reasonable(f64::NEG_INFINITY, 50.0));
+        // A tighter ceiling rejects what a looser one allows.
+        assert!(compute_revenue_reasonable(1.38, 2.0));
+        assert!(!compute_revenue_reasonable(1.38, 1.0));
+    }
+
+    #[test]
+    fn implausible_feed_revenue_forces_mining() {
+        // §6 gap #2 decision contract: if the feed's compute revenue is
+        // rejected (0), the auto-switch must recommend Mining even against a
+        // tiny mining revenue — a bad feed can't force Compute.
+        let a = analysis(0.05, 0.0, 0.0); // implausible compute -> 0
+        assert_eq!(a.recommended_mode(), Mode::Mining);
+        // And a plausible compute still beats mining (switch is allowed).
+        let ok = analysis(0.05, 2.0, 0.0);
+        assert_eq!(ok.recommended_mode(), Mode::Compute);
     }
 
     #[test]

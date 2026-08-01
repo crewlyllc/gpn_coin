@@ -38,6 +38,17 @@ pub struct AgentConfig {
     /// refreshed for a few hours no longer drives the network.
     #[serde(default = "default_feed_ttl")]
     pub feed_staleness_ttl_blocks: Option<u64>,
+    /// Ceiling (USD/hour) on a plausible AI-compute revenue from the
+    /// profitability feed. If `calc_compute_revenue(gpu_price, utilization)`
+    /// exceeds this, the feed is treated as **implausible** (oracle-governance
+    /// §6 gap #2: unit misconversion, garbage value, or a single bad/outlier
+    /// operator) and the agent falls back to a conservative Mining default
+    /// (compute revenue forced to 0, so mining wins the auto-switch) instead
+    /// of letting one bad feed force a mass switch to Compute. Default 50
+    /// USD/hr — very generous (an RTX 4060-class node realistically earns
+    /// single-digit USD/hr at most), so it never blocks a legitimate switch.
+    #[serde(default = "default_compute_revenue_max")]
+    pub compute_revenue_max_usd_per_hour: f64,
 
     // Staking
     pub staked_amount: f64,
@@ -82,6 +93,7 @@ impl Default for AgentConfig {
             profitability_check_interval_secs: 3600, // Every hour
             profitability_feed: "chain".to_string(),
             feed_staleness_ttl_blocks: Some(1440),
+            compute_revenue_max_usd_per_hour: default_compute_revenue_max(),
             staked_amount: 10_000.0,
             min_attestation_stake: 1_000_000_000_000_000, // 1,000 GPN (12 decimals)
             max_concurrent_jobs: 2,
@@ -103,6 +115,12 @@ impl Default for AgentConfig {
 /// the safe default (Some(1440)), rather than serde's None.
 fn default_feed_ttl() -> Option<u64> {
     Some(1440)
+}
+
+/// Default compute-revenue reasonableness ceiling (50 USD/hr). See
+/// [`AgentConfig::compute_revenue_max_usd_per_hour`].
+fn default_compute_revenue_max() -> f64 {
+    50.0
 }
 
 impl AgentConfig {
@@ -154,6 +172,24 @@ mod tests {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/config/default.toml");
         let cfg = AgentConfig::from_file(path).expect("default.toml must parse");
         assert_eq!(cfg.feed_staleness_ttl_blocks, Some(1440));
+    }
+
+    #[test]
+    fn default_compute_revenue_max_is_safe_50() {
+        assert_eq!(AgentConfig::default().compute_revenue_max_usd_per_hour, 50.0);
+    }
+
+    #[test]
+    fn omitted_compute_revenue_max_defaults_to_50() {
+        // A config that predates the field (or omits it) must still get the
+        // safe 50 USD/hr ceiling via #[serde(default = "default_compute_revenue_max")].
+        let toml = r#"
+            node_name = "n"
+            chain_endpoint = "ws://x:9944"
+            gpu_model = "RTX 4060"
+        "#;
+        let cfg: AgentConfig = toml::from_str(toml).expect("must parse");
+        assert_eq!(cfg.compute_revenue_max_usd_per_hour, 50.0);
     }
 
     #[test]
