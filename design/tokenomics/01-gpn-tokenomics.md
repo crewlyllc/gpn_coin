@@ -136,17 +136,26 @@ marketplace fees rather than pre-minted allocations.
 
 ## 7. Open Questions (for Phase 4 / mainnet prep)
 
-1. **Bonding curve / supply cap:** `SupplyCapExceeded` exists in errors but no hard cap is
-   configured — decide whether GPN is capped (e.g., 28.7B like Kaspa, or 1B) or uncapped
-   disinflationary.
-2. **Burn mechanics:** burn share (20% of fees) is accounted in the event but not yet
-   actually removed from issuance — wire an explicit burn (transfer to a dead account /
-   `T::Currency::slash`).
-3. **Staking reward distribution:** `distribute_staking_rewards` currently just drains the
-   pool and emits an event — needs a real per-staker payout keyed by GPU tier multiplier.
-4. **Oracle operator rewards:** `OracleRewardPool` accumulates but no distribution call
-   exists yet — add one.
-5. **Dev faucet removal:** mainnet genesis must not seed 1T GPN test balances.
+**Implemented this cycle (Cycle 34):**
+
+1. ✅ **Burn mechanics** — `distribute_fees` now *actually* removes the burn share
+   from circulation via `Currency::slash` on the pallet account (emits `Burned`
+   event, reduces `total_issuance`). No longer just bookkeeping.
+2. ✅ **Staking reward distribution** — `distribute_staking_rewards(stakers)` now
+   pays each staker a share of the pool **weighted by their attested GPU tier
+   multiplier** (`staking_multiplier_bps`: Bronze 1.0× / Silver 1.5× / Gold 2.5×;
+   Unattested excluded). Proof-of-staked-GPU now directly boosts yield.
+3. ✅ **Oracle operator rewards** — new `distribute_oracle_rewards(operators)`
+   drains `OracleRewardPool` and splits it evenly among the listed operators.
+
+**Still open for mainnet:**
+
+4. **Bonding curve / supply cap:** `SupplyCapExceeded` exists in errors but no hard
+   cap is configured — decide whether GPN is capped (e.g., 28.7B like Kaspa, or
+   1B) or uncapped disinflationary.
+5. **Dev faucet removal:** mainnet genesis must not seed 1T GPN test balances
+   (runtime/dev-spec only — genesis supply is already 0 by design; the 1T
+   balances live in the `--dev`/local chain spec funding).
 
 ---
 

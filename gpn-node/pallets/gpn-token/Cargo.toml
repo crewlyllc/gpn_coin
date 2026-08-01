@@ -7,6 +7,7 @@ edition = "2021"
 frame-support = { workspace = true }
 frame-system = { workspace = true }
 pallet-balances = { workspace = true }
+pallet-gpu-attestation = { path = "../gpu-attestation", default-features = false }
 sp-runtime = { workspace = true }
 sp-std = { workspace = true }
 codec = { workspace = true }
@@ -22,6 +23,7 @@ std = [
     "frame-support/std",
     "frame-system/std",
     "pallet-balances/std",
+    "pallet-gpu-attestation/std",
     "sp-runtime/std",
     "sp-std/std",
     "serde",

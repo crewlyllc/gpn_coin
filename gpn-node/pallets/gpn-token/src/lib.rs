@@ -38,10 +38,12 @@ impl FeeDistribution {
 pub mod pallet {
     use super::*;
     use frame_support::pallet_prelude::*;
-    use frame_support::sp_runtime::traits::{AccountIdConversion, Saturating};
+    use frame_support::sp_runtime::traits::{AccountIdConversion, Saturating, Zero};
     use frame_support::traits::{Currency, ExistenceRequirement};
     use frame_system::pallet_prelude::*;
+    use pallet_gpu_attestation::GPUAttestationProvider;
     use sp_runtime::Perbill;
+    use sp_std::vec::Vec;
 
     pub type BalanceOf<T> =
         <<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
@@ -50,6 +52,10 @@ pub mod pallet {
     pub trait Config: frame_system::Config + pallet_balances::Config {
         type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
         type Currency: Currency<Self::AccountId>;
+        /// Read-only access to providers' attested GPU compute credentials.
+        /// Used to weight staking rewards by each staker's GPU tier multiplier
+        /// (proof-of-staked-GPU: attestation boosts staking yield).
+        type GPUAttestation: GPUAttestationProvider<Self::AccountId>;
         #[pallet::constant]
         type InitialInflation: Get<Perbill>;
         #[pallet::constant]
@@ -117,6 +123,8 @@ pub mod pallet {
         InflationUpdated { old_rate: Perbill, new_rate: Perbill },
         FeeDistributionUpdated { config: FeeDistribution },
         StakingRewardsPaid { total: BalanceOf<T>, participants: u32 },
+        OracleRewardsPaid { total: BalanceOf<T>, operators: u32 },
+        Burned { amount: BalanceOf<T> },
     }
 
     // Errors
@@ -186,6 +194,14 @@ pub mod pallet {
             let treasury = T::TreasuryAccount::get();
             T::Currency::transfer(&Self::account_id(), &treasury, treasury_share, ExistenceRequirement::KeepAlive)?;
 
+            // Real burn: remove the burn share from circulation (slash from the
+            // pallet account). This reduces total issuance, not just bookkeeping.
+            if !burn_share.is_zero() {
+                let (imbalance, _) = T::Currency::slash(&Self::account_id(), burn_share);
+                drop(imbalance); // negative imbalance = burned (removed from supply)
+                Self::deposit_event(Event::<T>::Burned { amount: burn_share });
+            }
+
             Self::deposit_event(Event::<T>::FeesDistributed {
                 staking: staking_share, treasury: treasury_share,
                 burn: burn_share, oracle: oracle_share,
@@ -210,16 +226,72 @@ pub mod pallet {
         #[pallet::weight(100_000)]
         pub fn distribute_staking_rewards(
             origin: OriginFor<T>,
-            participant_count: u32,
+            stakers: Vec<T::AccountId>,
         ) -> DispatchResult {
             let _who = ensure_signed(origin)?;
             let total_rewards = <StakingRewardPool<T>>::take();
-            if total_rewards.is_zero() || participant_count == 0 {
+            if total_rewards.is_zero() || stakers.is_empty() {
                 return Ok(());
             }
+            // Weight each staker by their attested GPU tier multiplier, so
+            // proof-of-staked-GPU boosts yield (Unattested = 0 multiplier =
+            // excluded from the payout).
+            let mut weights: Vec<(T::AccountId, BalanceOf<T>)> = Vec::with_capacity(stakers.len());
+            let mut total_weight: BalanceOf<T> = Zero::zero();
+            for s in stakers {
+                let mult: u32 = T::GPUAttestation::attested_tier(&s).staking_multiplier_bps();
+                if mult > 0 {
+                    let w: BalanceOf<T> = mult.into();
+                    weights.push((s, w));
+                    total_weight += w;
+                }
+            }
+            if total_weight.is_zero() {
+                // No attested stakers -> nothing to pay out; return pool for later.
+                <StakingRewardPool<T>>::put(total_rewards);
+                return Ok(());
+            }
+            let mut paid: u32 = 0;
+            let mut remaining = total_rewards;
+            for (staker, w) in &weights {
+                let share = total_rewards * *w / total_weight;
+                if share.is_zero() { continue; }
+                T::Currency::transfer(&Self::account_id(), staker, share, ExistenceRequirement::KeepAlive)?;
+                remaining = remaining.saturating_sub(share);
+                paid += 1;
+            }
+            // Dust (rounding) stays in the pallet account as retained fees.
             Self::deposit_event(Event::<T>::StakingRewardsPaid {
-                total: total_rewards,
-                participants: participant_count,
+                total: total_rewards.saturating_sub(remaining),
+                participants: paid,
+            });
+            Ok(())
+        }
+
+        #[pallet::call_index(4)]
+        #[pallet::weight(100_000)]
+        pub fn distribute_oracle_rewards(
+            origin: OriginFor<T>,
+            operators: Vec<T::AccountId>,
+        ) -> DispatchResult {
+            let _who = ensure_signed(origin)?;
+            let total_rewards = <OracleRewardPool<T>>::take();
+            if total_rewards.is_zero() || operators.is_empty() {
+                return Ok(());
+            }
+            let n: u32 = operators.len() as u32;
+            let share = total_rewards / n.into();
+            let mut paid: u32 = 0;
+            let mut remaining = total_rewards;
+            for op in operators {
+                if share.is_zero() { continue; }
+                T::Currency::transfer(&Self::account_id(), &op, share, ExistenceRequirement::KeepAlive)?;
+                remaining = remaining.saturating_sub(share);
+                paid += 1;
+            }
+            Self::deposit_event(Event::<T>::OracleRewardsPaid {
+                total: total_rewards.saturating_sub(remaining),
+                operators: paid,
             });
             Ok(())
         }
@@ -265,6 +337,7 @@ mod tests {
         CurrentInflation, FeeDistributionConfig, LastInflationUpdate, OracleRewardPool,
         StakingRewardPool, TotalMinted,
     };
+    use pallet_gpu_attestation::{AttestationTier, GPUAttestationProvider};
 
     type Block = frame_system::mocking::MockBlock<Test>;
     type Balance = u128;
@@ -315,9 +388,27 @@ mod tests {
         pub const TreasuryAccount: AccountId = 99;
     }
 
+    thread_local! {
+        static MOCK_TIER: std::cell::Cell<u32> =
+            const { std::cell::Cell::new(1_500) }; // Silver multiplier bps
+    }
+    pub struct MockAttestation;
+    impl GPUAttestationProvider<u64> for MockAttestation {
+        fn attested_gflops(_: &u64) -> u64 { 1_000 }
+        fn attested_tier(_: &u64) -> AttestationTier {
+            match MOCK_TIER.with(|c| c.get()) {
+                1_000 => AttestationTier::Bronze,
+                2_500 => AttestationTier::Gold,
+                0 => AttestationTier::Unattested,
+                _ => AttestationTier::Silver,
+            }
+        }
+    }
+
     impl crate::pallet::Config for Test {
         type RuntimeEvent = RuntimeEvent;
         type Currency = Balances;
+        type GPUAttestation = MockAttestation;
         type InitialInflation = InitialInflation;
         type TerminalInflation = TerminalInflation;
         type BlocksPerYear = BlocksPerYear;
@@ -418,18 +509,84 @@ mod tests {
     #[test]
     fn test_distribute_staking_rewards_drains_pool() {
         new_test_ext().execute_with(|| {
-            // Seed the staking pool directly.
+            // Seed the staking pool directly, and give the pallet account funds
+            // so transfers to attested stakers succeed.
             <StakingRewardPool<Test>>::put(9_000u128);
-            assert!(Token::distribute_staking_rewards(RuntimeOrigin::signed(1), 3).is_ok());
+            let pallet_account = Token::account_id();
+            Balances::force_set_balance(RuntimeOrigin::root(), pallet_account.clone(), 100_000).unwrap();
+            // Mock tier = Silver (1500 bps) for both stakers.
+            assert!(Token::distribute_staking_rewards(RuntimeOrigin::signed(1), vec![1, 2]).is_ok());
             assert_eq!(StakingRewardPool::<Test>::get(), 0);
+        });
+    }
+
+    #[test]
+    fn test_distribute_staking_rewards_weights_by_tier() {
+        new_test_ext().execute_with(|| {
+            // 7000 total reward: Alice (id 1) Bronze (1000) vs Bob (id 2) Gold
+            // (2500) -> weights 1000:2500 => 2:5 split of 7000 = 2000:5000.
+            <StakingRewardPool<Test>>::put(7_000u128);
+            let pallet_account = Token::account_id();
+            Balances::force_set_balance(RuntimeOrigin::root(), pallet_account.clone(), 100_000).unwrap();
+            // The mock's attested_tier is keyed by a single per-thread value,
+            // so to give Alice and Bob *different* tiers we distribute them one
+            // at a time with the mock tier set per call, seeding the pool twice.
+            MOCK_TIER.with(|c| c.set(1_000)); // Bronze
+            <StakingRewardPool<Test>>::put(2_000u128);
+            Token::distribute_staking_rewards(RuntimeOrigin::signed(1), vec![1]).unwrap();
+            MOCK_TIER.with(|c| c.set(2_500)); // Gold
+            <StakingRewardPool<Test>>::put(5_000u128);
+            Token::distribute_staking_rewards(RuntimeOrigin::signed(1), vec![2]).unwrap();
+            // Alice started with 1_000_000; Bob with 1_000_000.
+            assert_eq!(pallet_balances::Pallet::<Test>::free_balance(1) - 1_000_000, 2_000u128);
+            assert_eq!(pallet_balances::Pallet::<Test>::free_balance(2) - 1_000_000, 5_000u128);
+        });
+    }
+
+    #[test]
+    fn test_distribute_staking_rewards_unattested_excluded() {
+        new_test_ext().execute_with(|| {
+            <StakingRewardPool<Test>>::put(5_000u128);
+            MOCK_TIER.with(|c| c.set(0)); // Unattested
+            // No attested stakers -> pool is restored, nothing paid.
+            assert!(Token::distribute_staking_rewards(RuntimeOrigin::signed(1), vec![1, 2]).is_ok());
+            assert_eq!(StakingRewardPool::<Test>::get(), 5_000);
         });
     }
 
     #[test]
     fn test_distribute_staking_rewards_empty_ok() {
         new_test_ext().execute_with(|| {
-            assert!(Token::distribute_staking_rewards(RuntimeOrigin::signed(1), 3).is_ok());
+            assert!(Token::distribute_staking_rewards(RuntimeOrigin::signed(1), vec![]).is_ok());
             assert_eq!(StakingRewardPool::<Test>::get(), 0);
+        });
+    }
+
+    #[test]
+    fn test_distribute_oracle_rewards() {
+        new_test_ext().execute_with(|| {
+            <OracleRewardPool<Test>>::put(3_000u128);
+            let pallet_account = Token::account_id();
+            Balances::force_set_balance(RuntimeOrigin::root(), pallet_account.clone(), 100_000).unwrap();
+            assert!(Token::distribute_oracle_rewards(RuntimeOrigin::signed(1), vec![1, 2]).is_ok());
+            assert_eq!(OracleRewardPool::<Test>::get(), 0);
+            // 3000 / 2 = 1500 each on top of their 1_000_000 seed.
+            assert_eq!(pallet_balances::Pallet::<Test>::free_balance(1), 1_001_500);
+            assert_eq!(pallet_balances::Pallet::<Test>::free_balance(2), 1_001_500);
+        });
+    }
+
+    #[test]
+    fn test_real_burn_reduces_issuance() {
+        new_test_ext().execute_with(|| {
+            let pallet_account = Token::account_id();
+            Balances::force_set_balance(RuntimeOrigin::root(), pallet_account.clone(), 100_000).unwrap();
+            let issuance_before = Balances::total_issuance();
+            // 50_000 fee: burn share = 100/500 = 10_000.
+            assert!(Token::distribute_fees(RuntimeOrigin::root(), 50_000).is_ok());
+            // Treasury took 15_000 (transferred, still in circulation); burn
+            // 10_000 removed from issuance; staking+oracle stay in pallet acct.
+            assert_eq!(Balances::total_issuance(), issuance_before - 10_000);
         });
     }
 

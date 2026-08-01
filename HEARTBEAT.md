@@ -1,12 +1,27 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3 (Prototype) — LIVE on RTX 4060 (Cycle 31). Cycle 32: source-of-truth tokenomics spec (`design/tokenomics/`). Cycle 33: filled the last empty design dirs — `design/pallets/`, `design/protocols/`, `design/node-agent/` — with source-of-truth architecture docs aligned to the implemented code (5-pallet overview, PoW/attestation/marketplace/oracle protocols, agent architecture); README structure updated. All design/ dirs are now non-empty and tracked to the live runtime.**
-**Last Updated:** 2026-08-01 ~07:00 UTC (2026-07-31 ~23:55 PT)
+**Status: Phase 3 (Prototype) — LIVE on RTX 4060 (Cycle 31). Cycle 34: Phase-4 tokenomics prep in code — real burn (slash from circulation), oracle operator reward distribution, and tier-multiplied staking payout (attestation boosts yield via GPUAttestationProvider cross-pallet trait). Cycle 33: source-of-truth tokenomics/design docs.**
+**Last Updated:** 2026-08-01 ~08:00 UTC (2026-08-01 ~01:00 PT)
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 33)
+## 🚀 Current Milestone (Cycle 34)
+
+**Closed the three code-side Phase-4 open questions from the tokenomics spec in `pallet-gpn-token`** — the fee economy now has real deflation, a working oracle payout, and proof-of-staked-GPU incentives. This is the first code delivery toward mainnet tokenomics (not just docs).
+
+1. **Real burn** — `distribute_fees` now `Currency::slash`es the burn share (default 20% of the 5% fee) from the pallet account, actually removing it from `total_issuance` (new `Burned` event). Was: counted in an event only.
+2. **Oracle reward distribution** — new `distribute_oracle_rewards(operators)` drains `OracleRewardPool` and splits evenly (new `OracleRewardsPaid` event). Was: pool accumulated forever.
+3. **Tier-multiplied staking payout** — `distribute_staking_rewards(stakers)` now pays each staker a share **weighted by attested GPU tier multiplier** (Bronze 1.0× / Silver 1.5× / Gold 2.5×; Unattested excluded), consuming the existing `GPUAttestationProvider` cross-pallet trait (same pattern as the marketplace). Attestation now directly boosts staking yield — the proof-of-staked-GPU incentive is real.
+4. **Wiring** — `gpn-token` now depends on `pallet-gpu-attestation`; runtime sets `type GPUAttestation = GPUAttestation`.
+
+**Verified:** `cargo test -p pallet-gpn-token` → **19 passed / 0 failed** (was 16; +3 new: burn-reduces-issuance, oracle split, tier weights). `cargo build -p gpn-node` (node + WASM runtime) clean. New extrinsics `distribute_staking_rewards(stakers)` / `distribute_oracle_rewards(operators)`; new events `Burned` / `OracleRewardsPaid`. Tokenomics spec §7 updated (3 of 5 open items now code-complete).
+
+Detail: `shared/artifacts/project7/cycle34-tokenomics-phase4-log.md`
+
+---
+
+## 🚀 Previous Milestone (Cycle 33)
 
 **Closed the last documentation gap: every `design/` subdir referenced by the README is now non-empty and source-of-truth-aligned to the implemented runtime.** Cycle 32 filled `design/tokenomics/`; this cycle filled the remaining three empty dirs with the same code-tracking approach.
 
@@ -277,9 +292,10 @@ This **completes the production mining architecture**: node and miner are fully 
 | Enforce `min_gflops` matching at `accept_job` (cross-pallet attested read) | ✅ **DONE (cycle 26)** |
 
 ## Next Concrete Actions (priority order)
-1. [ ] Fill remaining empty design dirs — `design/pallets/`, `design/protocols/`, `design/node-agent/` are scaffolded but empty (README references them). **(Cycle 32: `design/tokenomics/01-gpn-tokenomics.md` written; others pending)**
-2. [ ] Phase 4 prep from tokenomics Open Questions: wire real burn (20% of fees), per-staker staking payout keyed by GPU tier multiplier, oracle reward distribution, remove dev faucet (1T GPN) on mainnet genesis.
-3. [ ] Re-run `cargo test --workspace` + a live RTX 4060 smoke test to confirm no drift since Cycle 31.
+1. [ ] Phase 4 mainnet prep from tokenomics spec §7: decide bonding curve / hard supply cap (SupplyCapExceeded exists but no cap configured) and remove the 1T GPN dev faucet from `--dev`/local chain spec funding. **(Cycle 34: burn + oracle distribution + tier staking payout done; these two remain)**
+2. [ ] Re-run `cargo test --workspace` + a live RTX 4060 smoke test to confirm no drift since Cycle 31 (tokenomics runtime change is in).
+3. [ ] Wire `distribute_fees`/`distribute_staking_rewards`/`distribute_oracle_rewards` into the node/agent tooling (a `gpn_distribute_rewards` helper mirroring `gpn_seed_feed`) so the fee economy is exercisable end-to-end on-chain.
+4. [x] Fill remaining empty design dirs — `design/pallets/`, `design/protocols/`, `design/node-agent/` (Cycle 33, DONE).
 4. [x] Two-node testnet docs in README + CI wiring for `gpn-node/scripts/gpn_two_node_testnet.sh` (cycle 23, 6/6 live).
 2. [x] Compute marketplace integration: surface `ComputeExecutor` throughput/GFLOPS as an on-chain attestable metric (cycle 24 — attestation tier gated by GFLOPS + `min_gflops` in marketplace + agent measures/reports).
 3. [x] Wire the real `GPUAttestation::submit_attestation` extrinsic in the agent by reusing the `gpn_seed_feed` custom Signer + `GpnConfig` plumbing (cycle 25 — shared `chain::signer` module; challenge read; `with_signer` wiring).

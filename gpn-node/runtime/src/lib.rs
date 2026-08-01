@@ -276,6 +276,7 @@ parameter_types! {
 impl pallet_gpn_token::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type Currency = Balances;
+    type GPUAttestation = GPUAttestation;
     type InitialInflation = InitialInflation;
     type TerminalInflation = TerminalInflation;
     type BlocksPerYear = BlocksPerYear;
