@@ -1,28 +1,23 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3 (Prototype) — LIVE END-TO-END COMPUTE-MARKETPLACE JOB FLOW ON RTX 4060 + GFLOPS UNITS FIX (Cycle 28): the full marketplace lifecycle is now proven live — `register → create_job → accept (attestation gate) → start → real OpenCL GEMM → submit_result → complete + payout`. Also found & fixed a real units bug: `measure_gflops` was leaking raw FLOP/s (×1e9) on-chain, silently breaking the `min_gflops` proof-of-compute gate; now stores true GFLOPS (on-chain `compute_gflops=278`) and the gate is verified both ways (min 150 passes, min 1000 > attested 278 is REJECTED with `ProviderComputeInsufficient`).**
-**Last Updated:** 2026-07-31 ~19:20 PT
+**Status: Phase 3 (Prototype) — AUTO-SWITCH LOOP CLOSED: agent CLAIMS & SERVES marketplace jobs on-chain in Compute mode, live on RTX 4060; AccountId32 display bug fixed (`provider=0x00` → real Alice address) (Cycle 29).** The product thesis is now complete end-to-end: the profitability oracle says compute demand is high → agent switches to Compute → **actually claims a Pending marketplace job on-chain** → runs real GPU GEMM → submits result → completes → gets paid. No human in the loop.**
+**Last Updated:** 2026-07-31 ~20:20 PT
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 28)
+## 🚀 Current Milestone (Cycle 29)
 
-**The full compute-marketplace job lifecycle is proven LIVE end-to-end on the RTX 4060, and a real GFLOPS-units bug that was silently breaking the `min_gflops` proof-of-compute gate is found & fixed.**
+**The last integration gap is closed — `auto` mode now claims & serves real marketplace jobs on-chain when compute demand is high, and the `provider=0x00` display bug is fixed.**
 
-1. **`ChainClient` marketplace extrinsics** — `register_provider`, `create_job`, `accept_job`, `start_job`, `submit_result`, `complete_job` (signed dynamic txs, reuse `chain::signer`), plus readers `is_provider_registered`, `get_job_state`, `get_next_job_id`.
-2. **`gpn_marketplace_demo` bin** — drives the full lifecycle; between `start_job` and `submit_result` runs a REAL OpenCL GEMM and SHA-256s its output to produce the on-chain `result_hash` (compute genuinely done by the provider GPU).
-3. **🐛 GFLOPS units fix** — `measure_gflops` returned raw FLOP/s (×1e9) and leaked on-chain (`compute_gflops=275270676358`); tier thresholds + `min_gflops` are true GFLOPS, so the gate compared like-vs-unlike and always passed. Now stores true GFLOPS (`compute_gflops=278`).
+1. **`ChainClient::list_claimable_jobs(attested_gflops)`** — enumerates `0..next_job_id`, keeps only `Pending` jobs this provider can satisfy (open market `min_gflops=0`, or `attested ≥ min_gflops`); `get_job_min_gflops` reader; pure `is_job_claimable` predicate (+3 tests).
+2. **Agent `claim_and_serve_jobs()`** — idempotent provider registration, then per job: `accept_job → start_job → real GPU GEMM → submit_result → complete_job` (payout). Wired into the `auto` profitability tick: when current mode is `Compute`, it claims & serves instead of only running background compute.
+3. **🐛 AccountId32 display fix** — subxt dynamic storage decodes an AccountId32 as a *doubly-nested* `Composite::Unnamed` of 32 byte-prims; old code read only the outer level → `provider=0x00`. New `collect_account_bytes` recursively descends composites/variants (+handles U256/U128). Verified live: `provider=0xd43593c715…` (Alice).
+4. **New tooling** — `gpn_create_job` (requestor side, leaves job Pending), `config/autoclaim.toml` (auto + scripted demand-spike).
 
-**Verified live (RTX 4060, attested 278 GFLOPS Bronze):**
-```
-register → create_job(id=1, min_gflops=150) → accept (✅ gate passed)
-→ start → REAL GEMM (14ms) → submit_result → complete
-→ payout: escrow 50 GPN − 5% fee = 47.5 GPN ✅
-```
-**Gate verified both ways:** `min_gflops=150` ≤ 278 → accepted & paid; `min_gflops=1000` > 278 → **REJECTED** at `accept_job` (`ProviderComputeInsufficient`), job stays Pending, no payout.
+**Verified live (RTX 4060):** `gpn_create_job` → job #3 Pending → `gpn-agent auto` boot Mining → oracle spike → 🔄 Mining→Compute → `1 claimable job(s) found (attested 294 GFLOPS)` → accept/start/real GEMM/submit/complete → ✅ job #3 paid out → demand fades → 🔄 Compute→Mining.
 
-Commit pending. Detail: `shared/artifacts/project7/cycle28-marketplace-live-log.md`
+Commit `abe86b1`. Detail: `shared/artifacts/project7/cycle29-autoswitch-claim-jobs-live-log.md`
 
 ---
 
@@ -230,6 +225,7 @@ This **completes the production mining architecture**: node and miner are fully 
 | **`min_gflops` ENFORCED at `accept_job` — cross-pallet `GPUAttestationProvider` trait gates providers on attested GFLOPS (cycle 26)** | ✅ **LIVE (pallet+runtime)** |
 | **Live end-to-end attest on RTX 4060: self-deposit `ProviderStake` → measure 188 GFLOPS → on-chain `tier=Bronze`; signed-tx nonce & finality-hang fixes (cycle 27)** | ✅ **LIVE** |
 | **Live end-to-end compute-marketplace job flow on RTX 4060: register → create → accept (attestation gate) → start → real GEMM → submit → complete + payout; GFLOPS-units fix so `min_gflops` gate works (cycle 28)** | ✅ **LIVE** |
+| **AUTO-SWITCH LOOP CLOSED: `auto` mode claims & serves marketplace jobs on-chain in Compute mode (accept→start→GEMM→submit→complete→payout); AccountId32 display fix `provider=0x00`→Alice (cycle 29)** | ✅ **LIVE** |
 | gpn-agent subxt chain client (stub) | ✅ **REPLACED (cycle 21)** |
 | Wire real `GPUAttestation::submit_attestation` extrinsic (reuse gpn_seed_feed Signer) | ✅ **DONE (cycle 25)** |
 | Enforce `min_gflops` matching at `accept_job` (cross-pallet attested read) | ✅ **DONE (cycle 26)** |
@@ -241,9 +237,11 @@ This **completes the production mining architecture**: node and miner are fully 
 4. [x] Enforce `min_gflops` matching at `accept_job` — cross-pallet read of the provider's attested `compute_gflops` (trait from gpu-attestation into compute-marketplace) (cycle 26).
 5. [x] Live end-to-end attest on the RTX 4060: deposit stake (pallet requires `ProviderStake`), measure ~830 GFLOPS, submit, confirm tier on-chain (cycle 27 — staked 1,000 GPN, attested **Bronze** @ 188 GFLOPS; fixed signed-tx nonce + finality-hang bugs).
 6. [x] Live end-to-end marketplace flow on the 4060: attest (~188 GFLOPS) → register provider → create job with `min_gflops ≤ 188` → accept (gated by cycle-26 trait) → run real GEMM → submit result → complete + payout. Check compute-marketplace extrinsic names + wire a provider-registration/job-lifecycle helper (mirror `gpn_check_state`). **(cycle 28 — DONE; also fixed GFLOPS units so the gate is semantically correct, verified positive+negative live)**
-7. [ ] Fix `gpn_marketplace_demo` display nit: `provider=0x00` in `get_job_state` (AccountId decodes as zeros in the dynamic read; payout math confirms the right account is paid — decode/display only).
-8. [ ] Close the loop: in `auto` mode, the agent should actually CLAIM marketplace jobs on-chain when the profitability oracle says compute demand is high (currently it runs compute but doesn't pick up jobs). This ties the oracle → marketplace → agent together.
-9. [ ] Document the marketplace flow + GFLOPS units convention in README.
+7. [x] Fix `gpn_marketplace_demo` display nit: `provider=0x00` in `get_job_state` — root cause: subxt dynamic storage decodes AccountId32 as a doubly-nested Composite::Unnamed; recursive `collect_account_bytes` now decodes correctly. Verified live `provider=0xd43593c715…` (Alice). **(cycle 29 — DONE)**
+8. [x] Close the loop: in `auto` mode, the agent now actually CLAIMS marketplace jobs on-chain when the oracle says compute demand is high (accept→start→real GEMM→submit→complete+payout). **(cycle 29 — DONE, live on RTX 4060)**
+9. [ ] Document the marketplace flow + GFLOPS units convention in README (now includes the loop-closing `gpn_create_job` + auto-agent walkthrough).
+10. [ ] Two-account requestor→provider demo (currently both are Alice for simplicity); wire a second dev account as the paying customer.
+11. [ ] Couple the real profitability-oracle `update_feed` to job claiming (not just the scripted feed) so live token/gpu pricing drives it.
 
 ## Phase 1 Findings
 
