@@ -378,3 +378,22 @@ curl http://127.0.0.1:8081/status
 
 CLI: `gpn_faucet [--endpoint …] [--listen …] [--signer-uri …] [--drip-gpn …] [--reserve-gpn …]`
 (details: `shared/artifacts/project7/cycle44-faucet-live-log.md`; runbook `§5`)
+
+### Block explorer: `gpn_explorer` (cycle 45)
+A **read-only** web block explorer + JSON API over any node's JSON-RPC — the
+Phase-4 public-testnet explorer (runbook §7). Safe to point at a public node
+because it never signs or writes. Serves a dark-mode HTML dashboard (head block,
+live difficulty, profitability feed, account balances + attestation, recent
+blocks, marketplace jobs) plus JSON endpoints for scripting:
+
+```
+gpn-agent/target/release/gpn_explorer --listen 0.0.0.0:8082 --account //Alice --account //Bob
+```
+
+- `GET /` — HTML dashboard · `/api/chain` — head + difficulty + feed
+- `/api/blocks?count=12` — recent blocks (number + hash)
+- `/api/account?address=<ss58|//uri|0x-hex>` — balance/nonce/staked/attested/tier
+- `/api/jobs` — all marketplace jobs (state, price, min-GFLOPS, requestor, provider)
+
+CLI: `gpn_explorer [--endpoint ws://127.0.0.1:9944] [--listen 127.0.0.1:8082] [--account …]…`
+(details: `shared/artifacts/project7/cycle45-explorer-live-log.md`; runbook `§7`)

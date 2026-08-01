@@ -1,12 +1,28 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3/4 (Prototype + mainnet prep) — LIVE on RTX 4060. Cycle 44: closed HEARTBEAT priority #1 (post-cycle-43) — built + live-verified the `gpn_faucet` off-chain drip faucet (runbook §5 option 3, ZERO runtime change): an HTTP service (`gpn-agent/src/bin/gpn_faucet.rs`) backed by a funded testnet key that drips GPN via a rate-limited signed `Balances.transfer_allow_death` (cooldown / daily-cap / total-cap / reserve guards; ss58 or 0x-hex address; `/drip` + `/status` endpoints). Live-verified on `gpn-node --dev` (RTX 4060): 5000 GPN drip to Bob landed on-chain (Alice 100000→95000, dispatch-outcome ok), cooldown → HTTP 429, hex-address drip ok, invalid/missing address → 400, reserve guard → 500. Found: call is `transfer_allow_death` (not `transfer`) and dest is bare-account (GPN `Address = AccountId`). 7 faucet unit tests + 26 lib + 98 node all pass. Detail: `shared/artifacts/project7/cycle44-faucet-live-log.md`.**
-**Last Updated:** 2026-08-01 ~11:20 UTC (2026-08-01 ~04:20 PT)
+**Status: Phase 3/4 (Prototype + mainnet prep) — LIVE on RTX 4060. Cycle 45: closed the first concrete piece of HEARTBEAT priority #1 (public-testnet tooling, runbook §7) — built + live-verified `gpn_explorer`, a read-only web block explorer + JSON API over node JSON-RPC (`gpn-agent/src/bin/gpn_explorer.rs`): HTML dashboard (head block #/hash, real self-tuned difficulty, profitability feed, account panel with balances + staked/attested/tier/GFLOPS, recent blocks, marketplace jobs) + `/api/chain`, `/api/blocks?count=`, `/api/account?address=` (ss58|//uri|0x-hex), `/api/jobs`. Reuses `ChainClient` for storage reads + raw `chain_getHeader`/`chain_getBlockHash` for headers. Live-verified on `gpn-node --dev` (RTX 4060, GPU-mined): head #30 real hash, difficulty 4096 (real, not placeholder), Alice+Bob @100000 GPN, real job #1 (Pending, 50 GPN, min 150 GFLOPS, requestor Bob). 🐛 Fixed: Substrate `chain_getHeader` has NO `hash` field → fetch via `chain_getBlockHash`. No new deps; 26/26 agent lib tests. Detail: `shared/artifacts/project7/cycle45-explorer-live-log.md`. NOTE: remaining priority-#1 items (2–4 public bootnodes + wss RPC + public explorer instance) need a VPS → ESCALATED to Jeremy (real money).**
+**Last Updated:** 2026-08-01 ~12:10 UTC (2026-08-01 ~05:10 PT)
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 44)
+## 🚀 Current Milestone (Cycle 45)
+
+**First concrete piece of HEARTBEAT priority #1 (public-testnet tooling, runbook §7) — `gpn_explorer`: a read-only web block explorer + JSON API built + verified live.**
+
+A lightweight explorer (`gpn-agent/src/bin/gpn_explorer.rs`) that serves a dark-mode HTML dashboard + JSON endpoints over any node's JSON-RPC. Read-only (no signer, no writes) — safe to point at a public node:
+
+1. **Endpoints** — `GET /` (HTML: head block #/hash, live difficulty, profitability feed, account panel, recent blocks, jobs) · `/api/chain` (head+difficulty+feed) · `/api/blocks?count=` (recent hashes) · `/api/account?address=` (ss58 | `//dev` URI | 0x-hex → balance/nonce/staked/attested/tier/GFLOPS) · `/api/jobs` (all marketplace jobs).
+2. **Reuses `ChainClient`** for storage reads (difficulty, feed, accounts, attestation, jobs — same proven subxt dynamic-storage + head-block paths) and raw `chain_getHeader`/`chain_getBlockHash` HTTP RPC for block headers (mirrors the faucet's `rpc_call`). No new deps (`tiny_http` already present from the faucet).
+3. **🐛 Bug found & fixed** — Substrate's `chain_getHeader` result has **NO `hash` field**; the first cut read `header.hash` so `head_block` returned `None` (dashboard showed head #0 + empty blocks). Fixed by fetching the head hash via `chain_getBlockHash([number])`.
+
+**Verified LIVE (`gpn-node --dev`, RTX 4060, GPU-mined):** `/api/chain` → head #30 with real hash `0x7010bce8…`, difficulty **4096** (real, self-tuned from the pallet target — not a placeholder), feed fallback (no oracle operator seeded on dev — correct); `/api/blocks?count=5` → real hashes 30→26; `/api/account?address=//Alice` → `5GrwvaEF…`, 100000 GPN, unstaked/unattested; dashboard HTML renders head/difficulty/feed + Alice+Bob rows + recent blocks; created a real job (`gpn_create_job //Bob 150 50`) → `/api/jobs` shows **job #1, Pending, 50 GPN, min 150 GFLOPS, requestor Bob `0x8eaf…`**, `next_job_id=2` (live on-chain data). Error paths: missing address → **400**, unknown path → **404**.
+
+**Verified:** `cargo build --release --bin gpn_explorer` clean; agent lib **26/26** (7 GPU-ignored) — unchanged. No pallet/runtime change. Detail: `shared/artifacts/project7/cycle45-explorer-live-log.md`
+
+---
+
+## 🚀 Previous Milestone (Cycle 44)
 
 **Closed HEARTBEAT priority #1 (post-cycle-43) — `gpn_faucet`: the off-chain drip faucet (runbook §5 option 3, ZERO runtime change) built + verified live.**
 
@@ -408,6 +424,7 @@ This **completes the production mining architecture**: node and miner are fully 
 | **FULL REVENUE LOOP CLOSED LIVE: two-account demo (Bob→Alice escrow, all-green) → verify_dispatch failure path → GPU attest (Alice Bronze @196 GFLOPS) → distribute_fees pools 400/100 → both drained to attested Alice (+500 GPN); fee routing + tier-weighted staking payout + dispatch-outcome verification all confirmed end-to-end in one session on the fixed runtime (cycle 40)** | ✅ **LIVE** |
 | **`testnet_chain_spec()` — config-only fork of mainnet (`--chain=testnet`: ChainType::Local, NO endowed accounts → fair-launch, bootstrap oracle ops Alice+Bob, ops sudo Alice; same WASM runtime, identical diff/reward/inflation/cap); wired into `load_spec`; LIVE-mined real GPU Ethash blocks #1→#13 on RTX 4060; build-spec + mainnet-parity verified (cycle 43)** | ✅ **LIVE** |
 | **`gpn_faucet` — off-chain drip faucet (runbook §5 option 3, ZERO runtime change): HTTP `/drip` (ss58|hex) + `/status`; rate-limited signed `Balances.transfer_allow_death` (cooldown/daily-cap/total-cap/reserve); reuses dispatch-outcome-verified signer; LIVE on `gpn-node --dev` (RTX 4060): 5000 GPN drip to Bob landed on-chain, cooldown 429, hex drip ok, invalid/missing 400, reserve guard 500 (cycle 44)** | ✅ **LIVE** |
+| **`gpn_explorer` — read-only web block explorer + JSON API (runbook §7): HTML dashboard (head #/hash, real difficulty, feed, accounts+attestation, blocks, jobs) + `/api/chain`, `/api/blocks`, `/api/account`, `/api/jobs`; reuses `ChainClient` + raw header RPC; LIVE on `gpn-node --dev` (RTX 4060): head #30 real hash, difficulty 4096, Alice/Bob balances, live job #1 Pending 50 GPN (requestor Bob); fixed `chain_getHeader`-has-no-hash bug (cycle 45)** | ✅ **LIVE** |
 | gpn-agent subxt chain client (stub) | ✅ **REPLACED (cycle 21)** |
 | Wire real `GPUAttestation::submit_attestation` extrinsic (reuse gpn_seed_feed Signer) | ✅ **DONE (cycle 25)** |
 | Enforce `min_gflops` matching at `accept_job` (cross-pallet attested read) | ✅ **DONE (cycle 26)** |
@@ -439,7 +456,7 @@ This **completes the production mining architecture**: node and miner are fully 
 
 ## Next Concrete Actions (fresh, post-cycle-44)
 1. [x] **(Phase 4) Off-chain drip faucet** — small HTTP service backed by a funded testnet key (rate-limited signed transfer drip); zero runtime change, per runbook §5 recommendation. **(Cycle 44 DONE — new `gpn_faucet` binary: `/drip` (ss58|hex, `--drip-gpn`/`--cooldown-secs`/`--daily-cap-gpn`/`--total-cap-gpn`/`--reserve-gpn`) + `/status`; reuses dispatch-outcome-verified `signer::submit_signed`; `Balances.transfer_allow_death` with bare-account dest. Live-verified on `gpn-node --dev` (RTX 4060): 5000 GPN drip to Bob landed (Alice 100000→95000, dispatch ok), cooldown 429, hex-address drip ok, invalid/missing 400, reserve guard 500. 7 unit + 26 lib + 98 node tests pass.)**
-2. [ ] **(Phase 4)** Stand up 2–4 public bootnodes + wss RPC + block explorer; publish onboarding doc; bootstrap oracle operators + initial feed (testnet spec now seeds Alice+Bob at genesis).
+2. [~] **(Phase 4) Block explorer** — first concrete piece done: `gpn_explorer` read-only web explorer + JSON API built & live-verified (Cycle 45, runbook §7). **REMAINING (needs hosting $):** stand up 2–4 public bootnodes + wss RPC + a public `gpn_explorer` instance → **ESCALATED to Jeremy**. Publish operator-onboarding doc (docs, can draft now).
 3. [ ] **(Docs)** Finalize the README marketplace-flow + GFLOPS-units + two-account/fee-economy walkthrough (item #9; mostly landed — polish the fee-economy section to reference the now-closed funding gap + `gpn_operate_oracle` maintenance flow + the new `gpn_faucet`).
 4. [ ] **(Phase 4)** Mainnet prep: sudo rotation (inert placeholder → governed/removed), token listing / liquidity plan (business decision → escalate to Jeremy), marketplace go-live + SLA/reputation policy, oracle governance.
 
