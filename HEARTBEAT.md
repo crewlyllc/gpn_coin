@@ -1,23 +1,23 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3 (Prototype) — LIVE on RTX 4060 (Cycle 31). Cycle 36: fee economy exercisable end-to-end — added the Sudo pallet (root-only `distribute_fees` was unreachable by any signed account), built `gpn_distribute_rewards` tool that sudo-dispatches `distribute_fees` then pays out staking (tier-weighted) + oracle pools; verified live on `gpn-node --dev` (pools fill 400/100, oracle drained to Alice, staking pool correctly held for unattested staker); found a real funding gap (marketplace fees land in `gpn/cmkt`, not `gpn/tokn`). Cycle 35: decided & enforced a 1B GPN hard supply cap (was 1T), added a zero-faucet `--chain=mainnet` fair-launch spec, and fixed a latent block-reward bug (50M GPN → correct 50 GPN/block).**
-**Last Updated:** 2026-08-01 ~03:50 UTC (2026-08-01 ~20:50 PT)
+**Status: Phase 3 (Prototype) — LIVE on RTX 4060 (Cycle 31). Cycle 37: funding gap CLOSED — marketplace fees now flow into `gpn/tokn`, making the fee economy self-funding. Added `FeeSinkProvider` cross-pallet trait (gpn-token) + marketplace routes the 5% fee to the token pallet account at `complete_job`; verified LIVE on `gpn-node --dev` (a 50 GPN job's 2.5 GPN fee landed in `gpn/tokn`: 0 → 2.5 GPN), then `distribute_fees(1000)` filled pools 400/100 + drained oracle to Alice + held staking for unattested staker. Also fixed a `gpn_distribute_rewards` tool panic (reqwest::blocking inside tokio). 98/98 workspace tests.**
+**Last Updated:** 2026-08-01 ~05:00 UTC (2026-08-01 ~22:00 PT)
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 36)
+## 🚀 Current Milestone (Cycle 37)
 
-**Closed the last integration gap in the fee economy: it's now exercisable end-to-end on-chain.** The blocker was architectural — `GPNToken::distribute_fees` is root-only, but the runtime had no Sudo pallet, so the staking/oracle pools could never be funded by a signed account.
+**Closed the funding gap from cycle 36 — the fee economy is now self-funding on-chain.** The blocker was that marketplace fees (5%) landed in the `gpn/cmkt` account while `distribute_fees` draws from `gpn/tokn`, so the pools stayed empty in normal operation.
 
-1. **Added the Sudo pallet** to the runtime (dev/ops tooling) so root-only calls (`distribute_fees`, `set_fee_distribution`, `mint_block_reward`) are dispatchable via `Sudo.sudo`. Dev/local sudo key = **Alice**; **mainnet** = a **non-endowed zero placeholder** (inert until governance funds it; MUST be removed/rotated before launch).
-2. **New `gpn_distribute_rewards` tool** (mirrors `gpn_seed_feed`) that sudo-dispatches `distribute_fees`, then pays out `distribute_staking_rewards` (tier-weighted) + `distribute_oracle_rewards` (even split), reading pools/balances at **head** (not stuck finalized #0).
-3. **Verified live on `gpn-node --dev`:** seed 3000 GPN into `gpn/tokn` → `distribute_fees(1000)` → **StakingRewardPool 0→400, OracleRewardPool 0→100** (treasury +300, burn 200) → oracle drained to 0 (Alice paid +100) → **staking pool stays 400 because Alice is unattested** (tier multiplier 0 → excluded) — the proof-of-staked-GPU gate is real on-chain.
-4. **⚠ Funding gap found:** marketplace fees (5%) land in the **`gpn/cmkt`** account, but `distribute_fees` draws from **`gpn/tokn`** — not connected, so pools stay empty in normal operation. Next cycle: wire marketplace fees → `gpn/tokn`.
+1. **`FeeSinkProvider` trait in `gpn-token`** (mirrors the `GPUAttestationProvider` pattern) exposing `fee_sink()` → returns the token pallet account. Implemented for `Pallet<T>`.
+2. **Marketplace routes the fee** — new `Config::FeeSink: FeeSinkProvider`; `complete_job` transfers the fee from `gpn/cmkt` to the token pallet account (AllowDeath, since sweeping may empty the escrow-only marketplace account). Runtime wires `type FeeSink = GPNToken;`.
+3. **🐛 Tool panic fixed** — `signer::current_nonce` used `reqwest::blocking::Client` inside tokio → "Cannot drop a runtime in a context where blocking is not allowed". Replaced with async client. `gpn_distribute_rewards` now completes end-to-end.
+4. **Verified LIVE** (`gpn-node --dev`, RTX 4060 mining): `gpn/tokn` 0 → **2.5 GPN** after a 50 GPN job completed (5% fee routed in); then `distribute_fees(1000)` → StakingRewardPool 0→400, OracleRewardPool 0→100, oracle drained to Alice (+100), staking pool held for unattested Alice (tier gate intact).
 
-**Verified:** `cargo test --workspace` → **97 passed / 0 failed**; release builds clean; `build-spec` shows Alice sudo on dev, inert placeholder on mainnet.
+**Verified:** `cargo test --workspace` → **98 passed / 0 failed** (+1 new fee-routing test); node + runtime WASM build clean; chain mined blocks #0–#12 live (PoW path unaffected).
 
-Detail: `shared/artifacts/project7/cycle36-fee-economy-tooling-log.md`
+Detail: `shared/artifacts/project7/cycle37-fee-routing-live-log.md`
 
 ---
 
@@ -314,13 +314,15 @@ This **completes the production mining architecture**: node and miner are fully 
 | **AUTO-SWITCH LOOP CLOSED: `auto` mode claims & serves marketplace jobs on-chain in Compute mode (accept→start→GEMM→submit→complete→payout); AccountId32 display fix `provider=0x00`→Alice (cycle 29)** | ✅ **LIVE** |
 | **TWO-ACCOUNT REQUESTOR→PROVIDER flow: distinct paying customer (Bob) escrows, distinct provider (Alice) paid price−5%fee; verified live on-chain (cycle 30)** | ✅ **LIVE** |
 | **LIVE CHAIN-FEED-DRIVEN AUTO-SWITCH + JOB CLAIMING: real on-chain profitability feed (not scripted) drives Mining→Compute and claims/serves/pays a marketplace job; fixed USD² compute-revenue units bug (cycle 31)** | ✅ **LIVE** |
+| **SELF-FUNDING FEE ECONOMY: marketplace fees (5%) route into `gpn/tokn` via `FeeSinkProvider` at `complete_job`, so `distribute_fees` draws real collected fees; verified live (50 GPN job → 2.5 GPN in gpn/tokn → pools 400/100, oracle drained, staking held for unattested); fixed gpn_distribute_rewards tokio blocking panic (cycle 37)** | ✅ **LIVE** |
 | gpn-agent subxt chain client (stub) | ✅ **REPLACED (cycle 21)** |
 | Wire real `GPUAttestation::submit_attestation` extrinsic (reuse gpn_seed_feed Signer) | ✅ **DONE (cycle 25)** |
 | Enforce `min_gflops` matching at `accept_job` (cross-pallet attested read) | ✅ **DONE (cycle 26)** |
 
 ## Next Concrete Actions (priority order)
 1. [x] Wire `distribute_fees`/`distribute_staking_rewards`/`distribute_oracle_rewards` into the node/agent tooling (a `gpn_distribute_rewards` helper mirroring `gpn_seed_feed`) so the fee economy is exercisable end-to-end on-chain. **(Cycle 36 DONE: added Sudo pallet so root-only `distribute_fees` is dispatchable; new `gpn_distribute_rewards` tool sudo-dispatches `distribute_fees` then pays staking (tier-weighted) + oracle pools; verified live on `gpn-node --dev` — pools fill 400/100, oracle drained to Alice, staking pool held for unattested staker)**
-2. [ ] **Close the funding gap (found cycle 36):** wire marketplace fees (5%, currently in `gpn/cmkt`) → `gpn/tokn` pallet account so the fee economy is self-funding (have the marketplace call `distribute_fees`, or route fees to the token pallet account).
+2. [x] **Close the funding gap (found cycle 36):** wire marketplace fees (5%, currently in `gpn/cmkt`) → `gpn/tokn` pallet account so the fee economy is self-funding. **(Cycle 37 DONE: `FeeSinkProvider` trait in gpn-token; marketplace `complete_job` routes the fee to the token pallet account; runtime `type FeeSink = GPNToken`; verified LIVE — a 50 GPN job's 2.5 GPN fee landed in `gpn/tokn`, then `distribute_fees(1000)` filled pools 400/100, drained oracle to Alice, held staking for unattested staker. Also fixed the `gpn_distribute_rewards` tokio blocking panic)**
+3. [ ] Verify attested-tier-weighted staking payout live on the RTX 4060 (attest Alice → Bronze, re-run `gpn_distribute_rewards` → staking pool should drain with tier multiplier).
 3. [ ] Verify attested-tier-weighted staking payout live on the RTX 4060 (attest Alice → Bronze, re-run `gpn_distribute_rewards` → staking pool should drain with tier multiplier).
 4. [ ] Re-run a live RTX 4060 GPU smoke test (sudo/runtime change is consensus-affecting; confirm GPU PoW path unaffected).
 4. [x] Fill remaining empty design dirs — `design/pallets/`, `design/protocols/`, `design/node-agent/` (Cycle 33, DONE).

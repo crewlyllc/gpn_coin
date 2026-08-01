@@ -65,6 +65,7 @@ pub mod pallet {
     use frame_support::sp_runtime::traits::{AccountIdConversion, Saturating, Zero};
     use frame_support::traits::{Currency, ExistenceRequirement};
     use frame_system::pallet_prelude::*;
+    use pallet_gpn_token::FeeSinkProvider;
     use sp_std::vec::Vec;
 
     pub type BalanceOf<T> =
@@ -83,6 +84,10 @@ pub mod pallet {
         /// Used to enforce that a provider accepting a job actually meets the
         /// job's `min_gflops` requirement (proof-of-compute gate at match time).
         type GPUAttestation: GPUAttestationProvider<Self::AccountId>;
+        /// Where marketplace fees are routed on completion. Wired to the GPN
+        /// token pallet (`gpn/tokn`) so collected fees feed `distribute_fees`
+        /// (staking/oracle pools + treasury + burn) — self-funding fee economy.
+        type FeeSink: pallet_gpn_token::FeeSinkProvider<Self::AccountId>;
     }
 
     #[pallet::pallet]
@@ -304,6 +309,23 @@ pub mod pallet {
 
             // Pay the provider directly (no iteration needed)
             T::Currency::transfer(&Self::account_id(), &provider, provider_payment, ExistenceRequirement::KeepAlive)?;
+            // Route the marketplace fee into the token pallet account so the
+            // fee economy is self-funding: `distribute_fees` draws from the
+            // `gpn/tokn` pallet account, so fees collected here flow into the
+            // staking/oracle pools + treasury + burn instead of accumulating
+            // in `gpn/cmkt` forever.
+            if !fee.is_zero() {
+                // AllowDeath: sweeping the fee may fully empty the marketplace
+                // pallet account (it holds only per-job escrow and is recreated
+                // on the next deposit). KeepAlive would block the sweep when
+                // the remaining balance drops below the existential deposit.
+                T::Currency::transfer(
+                    &Self::account_id(),
+                    &T::FeeSink::fee_sink(),
+                    fee,
+                    ExistenceRequirement::AllowDeath,
+                )?;
+            }
             Self::deposit_event(Event::<T>::JobCompleted { job_id, provider });
 
             Ok(())
@@ -455,6 +477,15 @@ mod tests {
         type MaxActiveJobs = TestMaxActiveJobs;
         type MaxJobDuration = TestMaxJobDuration;
         type GPUAttestation = MockAttestation;
+        // Test fee sink: a dedicated account (99) that collects marketplace fees.
+        type FeeSink = MockFeeSink;
+    }
+
+    /// Test-only fee sink: routes marketplace fees to account 99 so tests can
+    /// assert the fee is forwarded off the marketplace pallet account.
+    pub struct MockFeeSink;
+    impl pallet_gpn_token::FeeSinkProvider<u64> for MockFeeSink {
+        fn fee_sink() -> u64 { 99 }
     }
 
     const ALICE: u64 = 1; // requestor
@@ -608,6 +639,29 @@ mod tests {
             assert_eq!(ActiveJobCount::<Test>::get(), 0);
             // 1% fee taken: 1000 - 10 = 990 to provider
             assert_eq!(pallet_balances::Pallet::<Test>::free_balance(BOB), provider_before + 990);
+        });
+    }
+
+    #[test]
+    fn test_complete_job_routes_fee_to_fee_sink() {
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            let job_id = create_job(ALICE);
+            MarketPallet::accept_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
+            MarketPallet::start_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
+            MarketPallet::submit_result(RuntimeOrigin::signed(BOB), job_id, [7u8; 32]).unwrap();
+
+            // Fee sink (MockFeeSink -> 99) starts at 0; marketplace pallet
+            // account holds the 1000 escrow.
+            let sink_before = pallet_balances::Pallet::<Test>::free_balance(99);
+            assert_eq!(sink_before, 0);
+
+            MarketPallet::complete_job(RuntimeOrigin::signed(CAROL), job_id).unwrap();
+
+            // 1% fee (10) must be forwarded to the fee sink, NOT left in gpn/cmkt.
+            assert_eq!(pallet_balances::Pallet::<Test>::free_balance(99), sink_before + 10);
+            // The marketplace pallet account keeps nothing after escrow + fee.
+            assert_eq!(pallet_balances::Pallet::<Test>::free_balance(MarketPallet::account_id()), 0);
         });
     }
 

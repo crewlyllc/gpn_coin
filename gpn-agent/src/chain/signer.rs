@@ -91,15 +91,24 @@ pub async fn current_nonce(
     // finalized #0 on PoW dev chains.
     let http_url = endpoint.replace("ws://", "http://").replace("wss://", "https://");
     let body = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "chain_getBlockHash", "params": [] });
-    let head_hash: Option<H256> = (|| {
-        let resp = ureq_blocking_post(&http_url, &body)?;
-        let hex = resp.get("result")?.as_str()?.trim_start_matches("0x");
-        let bytes = hex::decode(hex).ok()?;
-        if bytes.len() != 32 { return None; }
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&bytes);
-        Some(arr.into())
-    })();
+    // Resolve the best head block hash asynchronously — a blocking reqwest
+    // client inside the tokio runtime (the old `ureq_blocking_post`) triggered
+    // a "Cannot drop a runtime in a context where blocking is not allowed"
+    // panic at shutdown.
+    let head_hash: Option<H256> = {
+        async {
+            let resp = reqwest::Client::new().post(&http_url).json(&body).send().await.ok()?;
+            let v: serde_json::Value = resp.json().await.ok()?;
+            let hex = v.get("result")?.as_str()?.trim_start_matches("0x");
+            let bytes = hex::decode(hex).ok()?;
+            if bytes.len() != 32 { None } else {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                Some(arr.into())
+            }
+        }
+        .await
+    };
 
     let fetch = async {
         let thunk = match head_hash {
@@ -119,16 +128,6 @@ pub async fn current_nonce(
         None
     };
     fetch.await.unwrap_or(0)
-}
-
-/// Minimal blocking JSON-RPC POST (reqwest blocking) for the head-block hash.
-fn ureq_blocking_post(url: &str, body: &serde_json::Value) -> Option<serde_json::Value> {
-    let resp = reqwest::blocking::Client::new()
-        .post(url)
-        .json(body)
-        .send()
-        .ok()?;
-    resp.json().ok()
 }
 
 /// Submit a dynamic call signed by `signer` and wait for it to be included and

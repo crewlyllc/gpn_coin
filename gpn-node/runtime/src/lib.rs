@@ -269,6 +269,9 @@ impl pallet_compute_marketplace::Config for Runtime {
     type MaxJobDuration = MaxJobDuration;
     // Cross-pallet read of attested GPU throughput (proof-of-compute gate).
     type GPUAttestation = GPUAttestation;
+    // Route marketplace fees into the GPN token pallet account so the fee
+    // economy is self-funding (distribute_fees draws from gpn/tokn).
+    type FeeSink = GPNToken;
 }
 
 parameter_types! {

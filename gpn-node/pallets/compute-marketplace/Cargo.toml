@@ -14,6 +14,7 @@ scale-info = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true, optional = true }
 pallet-gpu-attestation = { path = "../gpu-attestation", default-features = false }
+pallet-gpn-token = { path = "../gpn-token", default-features = false }
 
 [dev-dependencies]
 pallet-balances = { workspace = true, features = ["std"] }
@@ -32,4 +33,5 @@ std = [
     "sp-io/std",
     "serde",
     "pallet-gpu-attestation/std",
+    "pallet-gpn-token/std",
 ]

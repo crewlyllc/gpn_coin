@@ -34,6 +34,16 @@ impl FeeDistribution {
     }
 }
 
+/// Cross-pallet contract: a consumer that collects marketplace/protocol fees
+/// can route them into the token pallet's account by calling `fee_sink()`, so
+/// `distribute_fees` (which draws from `PalletId(b"gpn/tokn")`) becomes
+/// self-funding in normal operation. Mirrors `GPUAttestationProvider`.
+pub trait FeeSinkProvider<AccountId> {
+    /// The account that collected protocol fees accumulate into, ready for
+    /// `distribute_fees` to draw from. Returns the GPN token pallet account.
+    fn fee_sink() -> AccountId;
+}
+
 #[frame_support::pallet]
 pub mod pallet {
     use super::*;
@@ -316,6 +326,14 @@ pub mod pallet {
         }
 
         pub fn total_supply() -> BalanceOf<T> { T::Currency::total_issuance() }
+    }
+}
+
+/// The GPN token pallet is its own fee sink: marketplace/protocol fees routed
+/// here land in the `gpn/tokn` account that `distribute_fees` draws from.
+impl<T: Config> FeeSinkProvider<T::AccountId> for Pallet<T> {
+    fn fee_sink() -> T::AccountId {
+        Self::account_id()
     }
 }
 

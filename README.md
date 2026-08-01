@@ -280,13 +280,16 @@ cargo run --release --bin gpn_distribute_rewards -- ws://127.0.0.1:9944 1000 //A
 ```
 Args: `[endpoint] [total_fee_gpn] [sudo_uri] [stakers_csv] [operators_csv] [seed_gpn]`.
 
-**⚠ Funding gap (found cycle 36):** `distribute_fees` draws from the **`gpn/tokn`** pallet
-account, but marketplace fees (`MarketplaceFeeBps` 5%) currently land in the **`gpn/cmkt`**
-marketplace account — the two are not connected, so the pools stay empty in normal
-operation. Until that's wired (route marketplace fees → `gpn/tokn`, or have the marketplace
-call `distribute_fees`), the `seed_gpn` arg simulates collected fees so the economy is
-observable. **Mainnet:** the sudo key is a non-endowed placeholder in the `mainnet` spec
-(Alice on dev/local) and MUST be removed/rotated before real launch.
+**✅ Funding gap CLOSED (cycle 37):** `distribute_fees` draws from the **`gpn/tokn`**
+pallet account, and marketplace fees (`MarketplaceFeeBps` 5%) now **flow into that same
+account** — `pallet-compute-marketplace` routes the fee to a `FeeSink` (wired to the GPN
+token pallet) at `complete_job`, so the fee economy is **self-funding** in normal
+operation. The `seed_gpn` arg is now only needed to top up the token pallet for a manual
+exercise (real fees accumulate there automatically). Verified live on `gpn-node --dev`:
+a 50 GPN job's 2.5 GPN fee landed in `gpn/tokn` (0 → 2.5 GPN), then `distribute_fees`
+drained it into the pools/treasury/burn. **Mainnet:** the sudo key is a non-endowed
+placeholder in the `mainnet` spec (Alice on dev/local) and MUST be removed/rotated before
+real launch.
 
 ### Live chain-feed-driven auto-switch (cycle 31)
 In `auto` mode the agent's profitability feed drives mode selection. `profitability_feed =
