@@ -1,12 +1,31 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3 (Prototype) — CROSS-PALLET PROOF-OF-COMPUTE GATE ENFORCED (Cycle 26): the compute marketplace now rejects any `accept_job` whose provider hasn't attested to at least the job's `min_gflops` (new `GPUAttestationProvider` trait from gpu-attestation → `Config::GPUAttestation` in compute-marketplace → `ProviderComputeInsufficient` error at match time). Un-attested providers (0 GFLOPS) are blocked from gated jobs; jobs with `min_gflops=0` stay open-market. This closes the last open integration gap in the AI-compute leg.**
-**Last Updated:** 2026-07-31 ~17:10 PT
+**Status: Phase 3 (Prototype) — LIVE END-TO-END GPU ATTESTATION ON RTX 4060 (Cycle 27): the agent now self-deposits `ProviderStake` and attests on-chain with a real measured GFLOPS. Verified live: Alice staked 1,000 GPN → measured 188.7 GFLOPS on the 4060 → on-chain `tier=Bronze` (gpus=1, compute_gflops=188667299223). Also fixed two signed-tx plumbing bugs that blocked all live attestations: (1) subxt read the account nonce from the stuck-finalized #0 block → second+ tx rejected as `Transaction is outdated` (now reads nonce from best-head block); (2) `wait_for_finalized_success` hangs forever on a PoW chain with no finality gadget (now waits for `InBestBlock` instead). Added `gpn_check_state` helper to read live stake/attestation state.**
+**Last Updated:** 2026-07-31 ~18:40 PT
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 26)
+## 🚀 Current Milestone (Cycle 27)
+
+**`GPUAttestation::deposit_stake` is wired into the agent and the full GPU-attestation leg is proven LIVE on the RTX 4060.**
+
+1. **`ChainClient::deposit_stake(amount)`** — signed dynamic extrinsic (reuses shared `signer::Sr25519Signer` + `GpnConfig`); `perform_attestation` deposits `config.min_attestation_stake` (default = pallet `MinAttestationStake` = 1,000 GPN) before attesting. Non-fatal no-op if already staked.
+2. **Signed-tx nonce fix** — `submit_signed` now takes an explicit head-block nonce (`ChainClient::get_account_nonce` / `signer::current_nonce` read `System::Account` nonce at best-head via `chain_getBlockHash` + `storage().at(hash)`). Fixes `Transaction is outdated` on second+ tx from the same account.
+3. **Finality hang fix** — replaced `wait_for_finalized_success` (never fires on PoW, `finalized` stuck at #0) with an `InBestBlock` wait loop; stopped decoding block events (spurious `Serde json error` after inclusion).
+4. **`gpn_check_state` binary** — reads live on-chain nonce/balance/staked/attested + full attestation record (gpu_count, compute_gflops, tier enum name).
+
+**Verified live (RTX 4060, `gpn-node --dev`):**
+```
+account=5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY nonce=6 balance=996999999999.9994 GPN staked=true attested=true
+attestation: gpus=1 gflops=188667299223 tier=Bronze
+```
+
+Commit `761c65f`. Detail: `shared/artifacts/project7/cycle27-attest-deposit-live-log.md`
+
+---
+
+## 🚀 Previous Milestone (Cycle 26)
 
 **`min_gflops` is now enforced at `accept_job` via a clean cross-pallet trait — the marketplace can no longer match a job to a provider that can't actually deliver the required GPU throughput.**
 
@@ -189,6 +208,7 @@ This **completes the production mining architecture**: node and miner are fully 
 | **Measured GFLOPS = on-chain attestable metric: attestation tier gated by proof-of-compute, `min_gflops` in marketplace, agent reports real GFLOPS (cycle 24)** | ✅ **LIVE (pallet+agent)** |
 | **Agent submits REAL `GPUAttestation::submit_attestation` extrinsic on-chain (shared signer module; challenge read; `with_signer` wiring) (cycle 25)** | ✅ **LIVE (agent)** |
 | **`min_gflops` ENFORCED at `accept_job` — cross-pallet `GPUAttestationProvider` trait gates providers on attested GFLOPS (cycle 26)** | ✅ **LIVE (pallet+runtime)** |
+| **Live end-to-end attest on RTX 4060: self-deposit `ProviderStake` → measure 188 GFLOPS → on-chain `tier=Bronze`; signed-tx nonce & finality-hang fixes (cycle 27)** | ✅ **LIVE** |
 | gpn-agent subxt chain client (stub) | ✅ **REPLACED (cycle 21)** |
 | Wire real `GPUAttestation::submit_attestation` extrinsic (reuse gpn_seed_feed Signer) | ✅ **DONE (cycle 25)** |
 | Enforce `min_gflops` matching at `accept_job` (cross-pallet attested read) | ✅ **DONE (cycle 26)** |
@@ -198,8 +218,8 @@ This **completes the production mining architecture**: node and miner are fully 
 2. [x] Compute marketplace integration: surface `ComputeExecutor` throughput/GFLOPS as an on-chain attestable metric (cycle 24 — attestation tier gated by GFLOPS + `min_gflops` in marketplace + agent measures/reports).
 3. [x] Wire the real `GPUAttestation::submit_attestation` extrinsic in the agent by reusing the `gpn_seed_feed` custom Signer + `GpnConfig` plumbing (cycle 25 — shared `chain::signer` module; challenge read; `with_signer` wiring).
 4. [x] Enforce `min_gflops` matching at `accept_job` — cross-pallet read of the provider's attested `compute_gflops` (trait from gpu-attestation into compute-marketplace) (cycle 26).
-5. [ ] Live end-to-end attest on the RTX 4060: deposit stake (pallet requires `ProviderStake`), measure ~830 GFLOPS, submit, confirm tier on-chain. Consider wiring `deposit_stake` into agent boot / a `gpn_seed_attest` helper.
-6. [ ] Live end-to-end marketplace flow on the 4060: attest (~830 GFLOPS) → register provider → create job with `min_gflops ≤ 830` → accept (now gated by cycle-26 trait) → run real GEMM → submit result → complete + payout.
+5. [x] Live end-to-end attest on the RTX 4060: deposit stake (pallet requires `ProviderStake`), measure ~830 GFLOPS, submit, confirm tier on-chain (cycle 27 — staked 1,000 GPN, attested **Bronze** @ 188 GFLOPS; fixed signed-tx nonce + finality-hang bugs).
+6. [ ] Live end-to-end marketplace flow on the 4060: attest (~188 GFLOPS) → register provider → create job with `min_gflops ≤ 188` → accept (gated by cycle-26 trait) → run real GEMM → submit result → complete + payout. Check compute-marketplace extrinsic names + wire a provider-registration/job-lifecycle helper (mirror `gpn_check_state`).
 
 ## Phase 1 Findings
 
