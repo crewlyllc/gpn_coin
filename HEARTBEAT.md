@@ -1,12 +1,22 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
 **Status: Phase 3/4 (Prototype + mainnet prep) — LIVE on RTX 4060. Cycle 45: closed the first concrete piece of HEARTBEAT priority #1 (public-testnet tooling, runbook §7) — built + live-verified `gpn_explorer`, a read-only web block explorer + JSON API over node JSON-RPC (`gpn-agent/src/bin/gpn_explorer.rs`): HTML dashboard (head block #/hash, real self-tuned difficulty, profitability feed, account panel with balances + staked/attested/tier/GFLOPS, recent blocks, marketplace jobs) + `/api/chain`, `/api/blocks?count=`, `/api/account?address=` (ss58|//uri|0x-hex), `/api/jobs`. Reuses `ChainClient` for storage reads + raw `chain_getHeader`/`chain_getBlockHash` for headers. Live-verified on `gpn-node --dev` (RTX 4060, GPU-mined): head #30 real hash, difficulty 4096 (real, not placeholder), Alice+Bob @100000 GPN, real job #1 (Pending, 50 GPN, min 150 GFLOPS, requestor Bob). 🐛 Fixed: Substrate `chain_getHeader` has NO `hash` field → fetch via `chain_getBlockHash`. No new deps; 26/26 agent lib tests. Detail: `shared/artifacts/project7/cycle45-explorer-live-log.md`. NOTE: remaining priority-#1 items (2–4 public bootnodes + wss RPC + public explorer instance) need a VPS → ESCALATED to Jeremy (real money).**
-**Last Updated:** 2026-08-01 ~12:10 UTC (2026-08-01 ~05:10 PT)
+**Last Updated:** 2026-08-01 ~20:05 UTC (2026-08-01 ~13:05 PT)
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 45)
+## 🚀 Current Milestone (Cycle 46)
+
+**Closed the last no-money Phase-4 doc item — published the operator-facing onboarding doc** (`shared/artifacts/project7/operator-onboarding.md`), the runbook §7 checklist item "Publish an onboarding doc".
+
+A clean, operator-first subset of the full testnet runbook: what GPN is and the three revenue modes (GPU mine / GPU-attested stake / AI compute) + auto-switch; prerequisites (NVIDIA OpenCL ICD, 4GB+ VRAM); build (node + agent); run a full node on `--chain testnet` with bootnode + the one-role-per-node rule; faucet drip (covers the 1,000 GPN attestation stake); run the auto agent via `config/chain_autoclaim.toml` (GFLOPS attest → tier, live chain-feed auto-switch with 5% hysteresis, claim/serve paid jobs); optional oracle-operator loop (`gpn_operate_oracle`, `UpdateTooSoon` back-off, `NotAuthorized` = fatal); read-only `gpn_explorer` to watch the network; a **public-endpoints placeholder table** (bootnodes/RPC marked 🔜 needs VPS, faucet/explorer marked ✅ built, operator-run); and a troubleshooting section (CPU-fallback, MinAttestationStake, min_gflops gating, template starvation, NotAuthorized).
+
+Runbook §7 checklist updated: "Publish an onboarding doc" → [x]; the separate "publish a public RPC endpoint list" item remains [ ] (blocked on bootnodes → VPS, already escalated). No code changed this cycle (docs only).
+
+---
+
+## 🚀 Previous Milestone (Cycle 45)
 
 **First concrete piece of HEARTBEAT priority #1 (public-testnet tooling, runbook §7) — `gpn_explorer`: a read-only web block explorer + JSON API built + verified live.**
 
@@ -456,7 +466,7 @@ This **completes the production mining architecture**: node and miner are fully 
 
 ## Next Concrete Actions (fresh, post-cycle-44)
 1. [x] **(Phase 4) Off-chain drip faucet** — small HTTP service backed by a funded testnet key (rate-limited signed transfer drip); zero runtime change, per runbook §5 recommendation. **(Cycle 44 DONE — new `gpn_faucet` binary: `/drip` (ss58|hex, `--drip-gpn`/`--cooldown-secs`/`--daily-cap-gpn`/`--total-cap-gpn`/`--reserve-gpn`) + `/status`; reuses dispatch-outcome-verified `signer::submit_signed`; `Balances.transfer_allow_death` with bare-account dest. Live-verified on `gpn-node --dev` (RTX 4060): 5000 GPN drip to Bob landed (Alice 100000→95000, dispatch ok), cooldown 429, hex-address drip ok, invalid/missing 400, reserve guard 500. 7 unit + 26 lib + 98 node tests pass.)**
-2. [~] **(Phase 4) Block explorer** — first concrete piece done: `gpn_explorer` read-only web explorer + JSON API built & live-verified (Cycle 45, runbook §7). **REMAINING (needs hosting $):** stand up 2–4 public bootnodes + wss RPC + a public `gpn_explorer` instance → **ESCALATED to Jeremy**. Publish operator-onboarding doc (docs, can draft now).
+2. [~] **(Phase 4) Block explorer** — first concrete piece done: `gpn_explorer` read-only web explorer + JSON API built & live-verified (Cycle 45, runbook §7). **REMAINING (needs hosting $):** stand up 2–4 public bootnodes + wss RPC + a public `gpn_explorer` instance → **ESCALATED to Jeremy**. ~~Publish operator-onboarding doc (docs, can draft now)~~ → **Cycle 46 DONE: `operator-onboarding.md` published (operator-facing subset of the runbook: 3 revenue modes + auto-switch, build, full node, faucet drip, auto agent, optional oracle op, explorer, public-endpoints placeholder table, troubleshooting). Runbook §7 checklist updated.**
 3. [ ] **(Docs)** Finalize the README marketplace-flow + GFLOPS-units + two-account/fee-economy walkthrough (item #9; mostly landed — polish the fee-economy section to reference the now-closed funding gap + `gpn_operate_oracle` maintenance flow + the new `gpn_faucet`).
 4. [ ] **(Phase 4)** Mainnet prep: sudo rotation (inert placeholder → governed/removed), token listing / liquidity plan (business decision → escalate to Jeremy), marketplace go-live + SLA/reputation policy, oracle governance.
 
