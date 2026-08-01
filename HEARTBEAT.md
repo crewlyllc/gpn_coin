@@ -1,14 +1,16 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3/4 (Prototype + mainnet prep) — LIVE on RTX 4060. Cycle 42: closed priority #3 (fresh post-cycle-41) — (a) re-verified the two-node GPU p2p testnet on the FIXED runtime (`gpn_two_node_testnet.sh` → **6/6 passed**: both nodes mining real OpenCL Ethash on the RTX 4060, connected as peers, converged on same mined block #7; confirmed real GPU, no CPU fallback); (b) wrote `shared/artifacts/project7/testnet-public-runbook.md` — the public-testnet spec/runbook (chain-spec matrix dev/local/testnet/mainnet, topology, genesis params, faucet options, operator onboarding, launch checklist, mainnet open items) as the ops companion to the fair-launch `mainnet_chain_spec()`. No code changed (docs + live re-verify).**
-**Last Updated:** 2026-08-01 ~09:10 UTC (2026-08-01 ~02:10 PT)
+**Status: Phase 3/4 (Prototype + mainnet prep) — LIVE on RTX 4060. Cycle 43: closed priority #2 (fresh post-cycle-42) — implemented `testnet_chain_spec()`: a config-only fork of mainnet (same WASM runtime) wired into `command.rs` `load_spec` as `--chain=testnet` (ChainType::Local, NO endowed accounts → fair-launch economics, bootstrap oracle operators Alice+Bob seeded at genesis so the feed is populated day 1, ops sudo key Alice; identical difficulty 2^245 / 50 GPN reward / 10% inflation / 1B cap). Smoke-verified: build-spec parses correctly (balances=[], oracle ops=[Alice,Bob], chainType Local), mainnet parity confirmed (only intended testnet diffs), and LIVE on RTX 4060 the testnet spec mined real GPU Ethash blocks #1→#13. 98/98 node tests. Detail: `shared/artifacts/project7/cycle43-testnet-chainspec-log.md`.**
+**Last Updated:** 2026-08-01 ~10:00 UTC (2026-08-01 ~03:00 PT)
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 42)
+## 🚀 Current Milestone (Cycle 43)
 
-**Closed HEARTBEAT priority #3 (Phase-4 prep) — two-node p2p testnet re-verified on the fixed runtime + public testnet runbook/spec written.**
+**Closed HEARTBEAT priority #2 (Phase-4 prep) — `testnet_chain_spec()` implemented + verified live.**
+
+Added `--chain=testnet` as a config-only fork of mainnet (the runbook's #1 remaining checklist item), so a public testnet can be stood up without touching the pristine fair-launch mainnet runtime.
 
 1. **Two-node GPU p2p testnet re-verified** on the current release binary (post cycle-39/40/41 fixes, real OpenCL miner): `gpn_two_node_testnet.sh` → **6/6 passed**. Both nodes mined real Ethash on the RTX 4060 (`GPU Ethash miner online: NVIDIA GeForce RTX 4060`, no CPU fallback), connected as peers over libp2p, converged on the same longest chain (**best: #7**). Same integration the CI `two-node-gpu-testnet` job runs on a self-hosted `gpu` runner (`workflow_dispatch`).
 2. **`shared/artifacts/project7/testnet-public-runbook.md`** — public-testnet spec/runbook: chain-spec matrix (dev/local/testnet/mainnet), testnet topology (bootnodes + external GPU miners via RPC), genesis params (config-only fork of the fair-launch mainnet runtime), faucet options (recommends off-chain drip — zero runtime change), operator onboarding (4-step join), launch checklist, and mainnet open items (sudo rotation, token listing → business, marketplace go-live, oracle governance).
@@ -416,12 +418,11 @@ This **completes the production mining architecture**: node and miner are fully 
 3. [x] **(Phase 4 prep) Mainnet testnet hardening:** re-verify two-node p2p testnet on the fixed runtime + config/docs for a public testnet spec. **(Cycle 42 DONE — two-node GPU p2p testnet re-verified on the fixed runtime: 6/6 passed, both nodes real OpenCL Ethash on RTX 4060, converged on best #7; new `shared/artifacts/project7/testnet-public-runbook.md` (chain-spec matrix, topology, genesis params, faucet options, operator onboarding, launch checklist, mainnet open items); README pointer added. No code changed.)**
 4. [ ] **(Phase 4)** Public testnet → mainnet: token listing prep, compute marketplace launch, operator onboarding docs.
 
-## Next Concrete Actions (fresh, post-cycle-42)
-1. [ ] **(Docs)** Finalize the README marketplace-flow + GFLOPS-units + two-account/fee-economy walkthrough (item #9; mostly landed — polish the fee-economy section to reference the now-closed funding gap + `gpn_operate_oracle` maintenance flow).
-2. [ ] **(Phase 4) `testnet_chain_spec()`** — add a `--chain=testnet` config (config-only fork of mainnet: ChainType::Local, bootstrap oracle operators, ops sudo key; same WASM runtime) + wire into `command.rs` `load_spec`; smoke-build-spec it.
-3. [ ] **(Phase 4) Off-chain drip faucet** — small HTTP service backed by a funded testnet key (signed transfer drip, rate-limited); zero runtime change, per runbook §5 recommendation.
-4. [ ] **(Phase 4)** Stand up 2–4 public bootnodes + wss RPC + block explorer; publish onboarding doc; bootstrap oracle operators + initial feed.
-5. [ ] **(Phase 4)** Mainnet prep: sudo rotation (inert placeholder → governed/removed), token listing / liquidity plan (business decision → escalate to Jeremy), marketplace go-live + SLA/reputation policy, oracle governance.
+## Next Concrete Actions (fresh, post-cycle-43)
+1. [ ] **(Phase 4) Off-chain drip faucet** — small HTTP service backed by a funded testnet key (rate-limited signed transfer drip); zero runtime change, per runbook §5 recommendation.
+2. [ ] **(Phase 4)** Stand up 2–4 public bootnodes + wss RPC + block explorer; publish onboarding doc; bootstrap oracle operators + initial feed (testnet spec now seeds Alice+Bob at genesis).
+3. [ ] **(Docs)** Finalize the README marketplace-flow + GFLOPS-units + two-account/fee-economy walkthrough (item #9; mostly landed — polish the fee-economy section to reference the now-closed funding gap + `gpn_operate_oracle` maintenance flow).
+4. [ ] **(Phase 4)** Mainnet prep: sudo rotation (inert placeholder → governed/removed), token listing / liquidity plan (business decision → escalate to Jeremy), marketplace go-live + SLA/reputation policy, oracle governance.
 
 ## Phase 1 Findings
 

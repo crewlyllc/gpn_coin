@@ -78,6 +78,47 @@ pub fn local_chain_spec() -> Result<ChainSpec, String> {
         .build())
 }
 
+/// Public testnet config — a config-only fork of mainnet (same WASM runtime, so
+/// testnet behavior == mainnet behavior), run by a small set of known bootnodes.
+///
+/// Differences from mainnet (see testnet-public-runbook.md §4):
+/// - ChainType::Local (testnet is disposable)
+/// - Oracle operators: bootstrap ops seeded at genesis (feed populated day 1)
+/// - Sudo key: ops-controlled key (faucet + emergency ops)
+/// - Endowed accounts: NONE (like mainnet) — a faucet service mints/transfers the
+///   drip needed for the 1,000 GPN attestation stake (runbook §5, option 3).
+///
+/// Everything else (initial difficulty, block reward, inflation, 1B GPN supply
+/// cap, fair-launch economics) is identical to mainnet, so testnet-verified
+/// behavior transfers directly to mainnet.
+pub fn testnet_chain_spec() -> Result<ChainSpec, String> {
+    let wasm_binary = gpn_runtime::WASM_BINARY
+        .ok_or_else(|| "Testnet wasm binary not available".to_string())?;
+
+    Ok(ChainSpec::builder(wasm_binary, None)
+        .with_name("GPN Public Testnet")
+        .with_id("gpn_testnet")
+        .with_chain_type(ChainType::Local)
+        .with_protocol_id("gpn")
+        .with_properties(properties())
+        .with_genesis_config(genesis_config_json(
+            // Bootstrap oracle operators (2-4) so the profitability feed is
+            // populated on day one. Dev seed keys are fine for a disposable
+            // testnet; real operators rotate them before any longer-lived run.
+            vec![
+                account_id_from_seed("Alice"),
+                account_id_from_seed("Bob"),
+            ],
+            // No endowed accounts — fair-launch economics preserved; operators
+            // get their stake via the off-chain drip faucet (runbook §5).
+            vec![],
+            // Ops sudo key (faucet + emergency ops on testnet only). NOT the
+            // mainnet placeholder — testnet sudo is functional by design.
+            account_id_from_seed("Alice"),
+        ))
+        .build())
+}
+
 /// Mainnet config (fair launch - NO dev faucet, NO endowed accounts).
 ///
 /// All GPN is issued via GPU PoW block rewards (`gpu-pow` mints through

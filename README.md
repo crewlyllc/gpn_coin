@@ -100,6 +100,16 @@ cargo run --release -- --chain dev --alice
 cargo run --release -- --chain dev --bob --bootnodes /ip4/127.0.0.1/tcp/30333/p2p/ALICE_PEER_ID
 ```
 
+### Chain specs
+`--chain` selects the genesis spec (all share the same WASM runtime):
+- `dev` — single-node dev, pre-funded accounts + Alice sudo (Cycle 7+)
+- `local` — 2–4 node GPU p2p testnet, pre-funded (Cycle 13)
+- `testnet` — **public testnet (Cycle 43)**: config-only fork of mainnet, `ChainType::Local`,
+  NO endowed accounts (fair-launch economics, operators get stake via off-chain drip faucet),
+  bootstrap oracle operators Alice+Bob seeded at genesis, ops sudo key Alice; identical
+  difficulty/reward/inflation/cap to mainnet.
+- `mainnet` — fair launch (Cycle 35): zero endowment, zero oracle operators, inert sudo.
+
 ### Two-node GPU p2p testnet (integration test)
 
 `gpn-node/scripts/gpn_two_node_testnet.sh` boots **two** `gpn-node` processes on the
