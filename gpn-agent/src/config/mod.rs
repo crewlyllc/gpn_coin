@@ -73,7 +73,7 @@ impl Default for AgentConfig {
             profitability_check_interval_secs: 3600, // Every hour
             profitability_feed: "chain".to_string(),
             staked_amount: 10_000.0,
-            min_attestation_stake: 1_000_000_000_000_000_000_000, // 1,000 GPN
+            min_attestation_stake: 1_000_000_000_000_000, // 1,000 GPN (12 decimals)
             max_concurrent_jobs: 2,
             docker_endpoint: "unix:///var/run/docker.sock".to_string(),
             compute_device_index: 0,

@@ -1,12 +1,26 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3 (Prototype) — LIVE on RTX 4060 (Cycle 31). Cycle 37: funding gap CLOSED — marketplace fees now flow into `gpn/tokn`, making the fee economy self-funding. Added `FeeSinkProvider` cross-pallet trait (gpn-token) + marketplace routes the 5% fee to the token pallet account at `complete_job`; verified LIVE on `gpn-node --dev` (a 50 GPN job's 2.5 GPN fee landed in `gpn/tokn`: 0 → 2.5 GPN), then `distribute_fees(1000)` filled pools 400/100 + drained oracle to Alice + held staking for unattested staker. Also fixed a `gpn_distribute_rewards` tool panic (reqwest::blocking inside tokio). 98/98 workspace tests.**
-**Last Updated:** 2026-08-01 ~05:00 UTC (2026-08-01 ~22:00 PT)
+**Status: Phase 3 (Prototype) — LIVE on RTX 4060. Cycle 38: fixed a LATENT CONSENSUS-AFFECTING unit bug + verified tier-weighted staking payout LIVE. `MinAttestationStake` was `1e21` raw = 1 BILLION GPN (comment/specs said 1,000 GPN = 1e15) — masked by the old 1-trillion faucet, exposed by cycle-35's faucet cut to 100,000 GPN (stake became unaffordable → attestation silently broken). Fixed runtime + agent default to 1,000 GPN (1e15 raw). Re-verified on RTX 4060: Alice staked=true attested=true tier=Bronze @194 GFLOPS, balance −1,000; `gpn_distribute_rewards` → StakingRewardPool drained 400→0 (was HELD at 400 for unattested Alice in cycle 37) + oracle drained; Alice +~500 GPN. Proves proof-of-staked-GPU pays attested stakers. 98/98 tests.**
+**Last Updated:** 2026-08-01 ~12:30 UTC (2026-08-01 ~05:30 PT)
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 37)
+## 🚀 Current Milestone (Cycle 38)
+
+**Fixed a latent consensus-affecting unit bug and verified the tier-weighted staking payout live on the RTX 4060.** The cycle-35 faucet cut (1T → 100k GPN) exposed that `MinAttestationStake` was `1e21` raw = **1 billion GPN**, not the intended **1,000 GPN** (= 1e15) — the old 1-trillion faucet masked it (cycle 27's "1,000 GPN" attest was a misread; the value was 1B). With the faucet now 100,000 GPN, the 1B stake was unaffordable → `deposit_stake` failed dispatch → attestation silently broken on dev.
+
+1. **Bug fixed** — `MinAttestationStake` in `runtime/src/lib.rs` and the agent config default corrected `1e21` → `1_000_000_000_000_000` (1,000 GPN, 12 decimals). Consensus-affecting; node + agent + WASM rebuilt.
+2. **Secondary gap documented** — `signer::submit_signed` only confirms *inclusion*, not *dispatch success*, so failed extrinsics log "succeeded". This masked the bug; flagged as a follow-up robustness fix.
+3. **Verified LIVE** (`gpn-node --dev`, RTX 4060): agent deposit now logs 1e15 raw = 1,000 GPN; `gpn_check_state` → `staked=true attested=true tier=Bronze @194 GFLOPS`, balance −1,000 (100000 → 98999.9997). Then `gpn_distribute_rewards` (seed 3000 → distribute 1000): `distribute_fees(1000)` → StakingRewardPool 0→400, OracleRewardPool 0→100; `distribute_staking_rewards([Alice])` → **pool drained 400→0** (was HELD at 400 in cycle 37 when Alice was unattested); oracle drained; Alice +~500 GPN (400 staking + 100 oracle − fees). **Proof-of-staked-GPU now pays attested stakers live.**
+
+**Verified:** `cargo test --workspace --release` → **98 passed / 0 failed**; node mined blocks #0+ on the new runtime during the attest + distribute runs (PoW path unaffected).
+
+Detail: `shared/artifacts/project7/cycle38-stake-unit-bug-attest-payout-log.md`
+
+---
+
+## 🚀 Previous Milestone (Cycle 37)
 
 **Closed the funding gap from cycle 36 — the fee economy is now self-funding on-chain.** The blocker was that marketplace fees (5%) landed in the `gpn/cmkt` account while `distribute_fees` draws from `gpn/tokn`, so the pools stayed empty in normal operation.
 
@@ -315,6 +329,7 @@ This **completes the production mining architecture**: node and miner are fully 
 | **TWO-ACCOUNT REQUESTOR→PROVIDER flow: distinct paying customer (Bob) escrows, distinct provider (Alice) paid price−5%fee; verified live on-chain (cycle 30)** | ✅ **LIVE** |
 | **LIVE CHAIN-FEED-DRIVEN AUTO-SWITCH + JOB CLAIMING: real on-chain profitability feed (not scripted) drives Mining→Compute and claims/serves/pays a marketplace job; fixed USD² compute-revenue units bug (cycle 31)** | ✅ **LIVE** |
 | **SELF-FUNDING FEE ECONOMY: marketplace fees (5%) route into `gpn/tokn` via `FeeSinkProvider` at `complete_job`, so `distribute_fees` draws real collected fees; verified live (50 GPN job → 2.5 GPN in gpn/tokn → pools 400/100, oracle drained, staking held for unattested); fixed gpn_distribute_rewards tokio blocking panic (cycle 37)** | ✅ **LIVE** |
+| **TIER-WEIGHTED STAKING PAYOUT LIVE: fixed latent `MinAttestationStake` unit bug (1e21 raw = 1B GPN → 1e15 = 1,000 GPN; cycle-35 faucet cut exposed it); Alice attested Bronze @194 GFLOPS on RTX 4060, staking pool drained 400→0 (was held for unattested in cycle 37), oracle drained, Alice +~500 GPN (cycle 38)** | ✅ **LIVE** |
 | gpn-agent subxt chain client (stub) | ✅ **REPLACED (cycle 21)** |
 | Wire real `GPUAttestation::submit_attestation` extrinsic (reuse gpn_seed_feed Signer) | ✅ **DONE (cycle 25)** |
 | Enforce `min_gflops` matching at `accept_job` (cross-pallet attested read) | ✅ **DONE (cycle 26)** |
@@ -322,9 +337,9 @@ This **completes the production mining architecture**: node and miner are fully 
 ## Next Concrete Actions (priority order)
 1. [x] Wire `distribute_fees`/`distribute_staking_rewards`/`distribute_oracle_rewards` into the node/agent tooling (a `gpn_distribute_rewards` helper mirroring `gpn_seed_feed`) so the fee economy is exercisable end-to-end on-chain. **(Cycle 36 DONE: added Sudo pallet so root-only `distribute_fees` is dispatchable; new `gpn_distribute_rewards` tool sudo-dispatches `distribute_fees` then pays staking (tier-weighted) + oracle pools; verified live on `gpn-node --dev` — pools fill 400/100, oracle drained to Alice, staking pool held for unattested staker)**
 2. [x] **Close the funding gap (found cycle 36):** wire marketplace fees (5%, currently in `gpn/cmkt`) → `gpn/tokn` pallet account so the fee economy is self-funding. **(Cycle 37 DONE: `FeeSinkProvider` trait in gpn-token; marketplace `complete_job` routes the fee to the token pallet account; runtime `type FeeSink = GPNToken`; verified LIVE — a 50 GPN job's 2.5 GPN fee landed in `gpn/tokn`, then `distribute_fees(1000)` filled pools 400/100, drained oracle to Alice, held staking for unattested staker. Also fixed the `gpn_distribute_rewards` tokio blocking panic)**
-3. [ ] Verify attested-tier-weighted staking payout live on the RTX 4060 (attest Alice → Bronze, re-run `gpn_distribute_rewards` → staking pool should drain with tier multiplier).
-3. [ ] Verify attested-tier-weighted staking payout live on the RTX 4060 (attest Alice → Bronze, re-run `gpn_distribute_rewards` → staking pool should drain with tier multiplier).
-4. [ ] Re-run a live RTX 4060 GPU smoke test (sudo/runtime change is consensus-affecting; confirm GPU PoW path unaffected).
+3. [x] Verify attested-tier-weighted staking payout live on the RTX 4060 (attest Alice → Bronze, re-run `gpn_distribute_rewards` → staking pool should drain with tier multiplier). **(Cycle 38 DONE — and it surfaced + fixed a latent `MinAttestationStake` unit bug: value was 1e21 raw = 1 BILLION GPN, not 1,000 GPN = 1e15. Fixed runtime + agent; verified live: Alice Bronze @194 GFLOPS, staking pool drained 400→0 (was held for unattested), oracle drained, Alice +~500 GPN. 98/98 tests.)**
+4. [ ] **(Robustness, cycle-38 finding)** Make `signer::submit_signed` (and agent callers) verify the **dispatch outcome / events**, not just inclusion — failed extrinsics currently log "succeeded". This masked the `MinAttestationStake` unit bug.
+5. [ ] Re-run the two-account requestor→provider marketplace demo live with the fixed runtime (full fee-routing → distribute → tier-weighted payout path end-to-end).
 4. [x] Fill remaining empty design dirs — `design/pallets/`, `design/protocols/`, `design/node-agent/` (Cycle 33, DONE).
 4. [x] Two-node testnet docs in README + CI wiring for `gpn-node/scripts/gpn_two_node_testnet.sh` (cycle 23, 6/6 live).
 2. [x] Compute marketplace integration: surface `ComputeExecutor` throughput/GFLOPS as an on-chain attestable metric (cycle 24 — attestation tier gated by GFLOPS + `min_gflops` in marketplace + agent measures/reports).

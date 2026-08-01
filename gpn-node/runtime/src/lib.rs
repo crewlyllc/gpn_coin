@@ -234,7 +234,7 @@ impl pallet_gpu_pow::Config for Runtime {
 }
 
 parameter_types! {
-    pub const MinAttestationStake: Balance = 1_000_000_000_000_000_000_000; // 1,000 GPN
+    pub const MinAttestationStake: Balance = 1_000_000_000_000_000; // 1,000 GPN (12 decimals)
     pub const AttestationInterval: BlockNumber = 3600; // ~15 hours at 15s blocks
     pub const MaxAttestationAge: BlockNumber = 14400; // ~60 hours
     pub const MaxMissedAttestations: u32 = 3;
