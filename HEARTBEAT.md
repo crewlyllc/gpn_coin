@@ -1,12 +1,25 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3 (Prototype) — AUTO-SWITCH LOOP CLOSED: agent CLAIMS & SERVES marketplace jobs on-chain in Compute mode, live on RTX 4060; AccountId32 display bug fixed (`provider=0x00` → real Alice address) (Cycle 29).** The product thesis is now complete end-to-end: the profitability oracle says compute demand is high → agent switches to Compute → **actually claims a Pending marketplace job on-chain** → runs real GPU GEMM → submits result → completes → gets paid. No human in the loop.**
-**Last Updated:** 2026-07-31 ~20:20 PT
+**Status: Phase 3 (Prototype) — TWO-ACCOUNT REQUESTOR→PROVIDER FLOW VERIFIED LIVE on-chain: Bob (paying customer) escrows 50 GPN, Alice (provider) earns 47.5 GPN (price − 5% fee) on a distinct-account job; on-chain requestor=Bob / provider=Alice confirmed (Cycle 30).**
+**Last Updated:** 2026-07-31 ~21:05 PT
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 29)
+## 🚀 Current Milestone (Cycle 30)
+
+**The marketplace is now proven with a real multi-party escrow/payment path — a distinct paying customer (Bob) funds a job, and a distinct provider (Alice) is paid from escrow.** The old demo used one account for both sides; new `gpn_two_account_demo` exercises the true two-party flow.
+
+1. **New `gpn_two_account_demo` binary** — requestor `//Bob` creates a paid job (escrow debited from Bob); provider `//Alice` registers (idempotent), accepts, starts, submits a deterministic result hash, completes → payout credited to Alice. No GPU needed (deterministic hash) so it runs on a plain CPU `gpn-node --dev`; still exercises the `min_gflops` attestation gate when set > 0.
+2. **Verified live (this host):** job #4 Completed; on-chain `requestor=0x8eaf…` (Bob), `provider=0xd43593…` (Alice); Bob lost exactly 50 GPN escrow; Alice gained ~47.5 GPN (50 − 5% `MarketplaceFeeBps`). All 5 assertions pass.
+3. **Fixed 2 demo bugs** — (a) passed signer URI to `get_account_info` (parses ss58 → 0 balance); now pass resolved `AccountId32` ss58. (b) address-assertion format mismatch (`get_job_state` returns `0x{hex}` vs ss58); now compare `0x{hex}` of resolved bytes.
+4. **Regression:** marketplace 21 passed, agent lib 21 passed / 7 GPU-ignored, release build clean. No pallet/runtime changes.
+
+Detail: `shared/artifacts/project7/cycle30-two-account-demo-live-log.md`
+
+---
+
+## 🚀 Previous Milestone (Cycle 29)
 
 **The last integration gap is closed — `auto` mode now claims & serves real marketplace jobs on-chain when compute demand is high, and the `provider=0x00` display bug is fixed.**
 
@@ -226,6 +239,7 @@ This **completes the production mining architecture**: node and miner are fully 
 | **Live end-to-end attest on RTX 4060: self-deposit `ProviderStake` → measure 188 GFLOPS → on-chain `tier=Bronze`; signed-tx nonce & finality-hang fixes (cycle 27)** | ✅ **LIVE** |
 | **Live end-to-end compute-marketplace job flow on RTX 4060: register → create → accept (attestation gate) → start → real GEMM → submit → complete + payout; GFLOPS-units fix so `min_gflops` gate works (cycle 28)** | ✅ **LIVE** |
 | **AUTO-SWITCH LOOP CLOSED: `auto` mode claims & serves marketplace jobs on-chain in Compute mode (accept→start→GEMM→submit→complete→payout); AccountId32 display fix `provider=0x00`→Alice (cycle 29)** | ✅ **LIVE** |
+| **TWO-ACCOUNT REQUESTOR→PROVIDER flow: distinct paying customer (Bob) escrows, distinct provider (Alice) paid price−5%fee; verified live on-chain (cycle 30)** | ✅ **LIVE** |
 | gpn-agent subxt chain client (stub) | ✅ **REPLACED (cycle 21)** |
 | Wire real `GPUAttestation::submit_attestation` extrinsic (reuse gpn_seed_feed Signer) | ✅ **DONE (cycle 25)** |
 | Enforce `min_gflops` matching at `accept_job` (cross-pallet attested read) | ✅ **DONE (cycle 26)** |
@@ -240,7 +254,7 @@ This **completes the production mining architecture**: node and miner are fully 
 7. [x] Fix `gpn_marketplace_demo` display nit: `provider=0x00` in `get_job_state` — root cause: subxt dynamic storage decodes AccountId32 as a doubly-nested Composite::Unnamed; recursive `collect_account_bytes` now decodes correctly. Verified live `provider=0xd43593c715…` (Alice). **(cycle 29 — DONE)**
 8. [x] Close the loop: in `auto` mode, the agent now actually CLAIMS marketplace jobs on-chain when the oracle says compute demand is high (accept→start→real GEMM→submit→complete+payout). **(cycle 29 — DONE, live on RTX 4060)**
 9. [ ] Document the marketplace flow + GFLOPS units convention in README (now includes the loop-closing `gpn_create_job` + auto-agent walkthrough).
-10. [ ] Two-account requestor→provider demo (currently both are Alice for simplicity); wire a second dev account as the paying customer.
+10. [x] Two-account requestor→provider demo (currently both are Alice for simplicity); wire a second dev account as the paying customer. **(cycle 30 — DONE: new `gpn_two_account_demo` binary, verified live on-chain: Bob escrows 50 GPN, Alice earns 47.5 GPN)**
 11. [ ] Couple the real profitability-oracle `update_feed` to job claiming (not just the scripted feed) so live token/gpu pricing drives it.
 
 ## Phase 1 Findings

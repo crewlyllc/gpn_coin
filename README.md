@@ -201,3 +201,49 @@ cargo run -p gpn-agent --release --bin gpn_external_miner -- http://127.0.0.1:99
 ```
 
 Mining is now a single HTTP call, which is the substrate for GPU auto-switch (the GPU can alternate between serving AI compute and mining by starting/stopping this loop).
+
+## GPU Compute Marketplace
+
+The marketplace (`pallet-compute-marketplace`) is where providers offer GPU time and
+requestors post paid AI jobs (LLM inference, fine-tuning, etc.). Payment uses **escrow**:
+on `create_job` the requestor's tokens move to the marketplace account; on `complete_job`
+the provider is paid from escrow minus a `MarketplaceFeeBps` (5%) marketplace fee.
+
+### Lifecycle
+```
+create_job (Pending, escrow debited from requestor)
+  → accept_job  (Pending → Accepted; gated by attested GFLOPS vs min_gflops)
+  → start_job   (Accepted → Running)
+  → submit_result (Running → AwaitingVerification)
+  → complete_job  (→ Completed; payout to provider from escrow)
+```
+
+### GFLOPS units convention
+`min_gflops` in `GPURequirements` is **true FP32 GFLOPS** (billions of float ops/sec).
+The agent measures this with a dense-GEMM benchmark (`gpu::measure_gflops`). The attestation
+pallet tiers are gated on it (Bronze ≥ 100 / Silver ≥ 1000 / Gold ≥ 5000 GFLOPS), and a
+provider must be **attested** to at least a job's `min_gflops` to accept it
+(`ProviderComputeInsufficient` otherwise). `min_gflops = 0` = open market (no gate).
+
+### Single-account live demo (needs GPU + prior attestation)
+`gpn_marketplace_demo` drives the full lifecycle on the GPU with **one account** for both
+sides — best for exercising the `min_gflops` attestation gate on the RTX 4060.
+```bash
+cargo run -p gpn-agent --release --bin gpn_marketplace_demo -- ws://127.0.0.1:9944 //Alice 150
+```
+
+### Two-account requestor→provider demo (no GPU needed)
+`gpn_two_account_demo` proves the **real multi-party escrow/payment path**: a distinct
+paying customer (requestor) and a distinct provider. Runs against a plain CPU dev node.
+```bash
+# 1. boot dev node (funds Alice & Bob — the dev chain-spec endows 1,000,000 GPN each)
+gpn-node/target/release/gpn-node --dev --rpc-port 9944 --tmp
+
+# 2. Bob (requestor) posts a 50 GPN job; Alice (provider) serves it; asserts payout
+cd gpn-agent
+cargo run --release --bin gpn_two_account_demo -- ws://127.0.0.1:9944 //Bob //Alice 50 0
+#   → ✅ job Completed; requestor=Bob, provider=Alice
+#   → ✅ Bob lost 50 GPN (escrow); Alice earned 47.5 GPN (50 − 5% fee)
+```
+Args: `[endpoint] [requestor_uri] [provider_uri] [price_gpn] [min_gflops]`. Set
+`min_gflops > 0` to exercise the attestation gate (provider must be attested first).
