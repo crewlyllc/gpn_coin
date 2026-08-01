@@ -427,6 +427,156 @@ impl ChainClient {
         Ok(())
     }
 
+    // ---- Compute marketplace extrinsics (signed, dynamic) ----------------
+
+    /// Build a dynamic `GPURequirements` composite value (named fields).
+    fn gpu_requirements_value(
+        min_vram_mb: u32,
+        min_compute_capability: u16,
+        min_gpu_count: u8,
+        min_cuda_cores: u32,
+        min_gflops: u64,
+    ) -> Value {
+        Value::named_composite([
+            ("min_vram_mb", Value::u128(min_vram_mb as u128)),
+            ("min_compute_capability", Value::u128(min_compute_capability as u128)),
+            ("min_gpu_count", Value::u128(min_gpu_count as u128)),
+            ("min_cuda_cores", Value::u128(min_cuda_cores as u128)),
+            ("min_gflops", Value::u128(min_gflops as u128)),
+        ])
+    }
+
+    async fn submit_signed_call(
+        &self,
+        pallet: &str,
+        call_name: &str,
+        args: Vec<Value>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(uri) = &self.signer_uri else {
+            log::warn!("No signer configured; cannot submit {}::{}. (set signer_uri)", pallet, call_name);
+            return Ok(());
+        };
+        let signer = signer::Sr25519Signer::from_uri(uri)?;
+        let client = signer::connect(&self.endpoint).await?;
+        let call = subxt::dynamic::tx(pallet, call_name, args);
+        let nonce = self.get_account_nonce(&signer.account_id().to_string()).await;
+        log::info!("Submitting {}::{} as {}", pallet, call_name, signer.account_id());
+        signer::submit_signed(&client, &call, &signer, nonce).await?;
+        log::info!("{}::{} succeeded on-chain.", pallet, call_name);
+        Ok(())
+    }
+
+    /// `ComputeMarketplace::register_provider(requirements)` — advertise GPU
+    /// capability to the marketplace. Requires no stake, but the provider must
+    /// be attested to accept gated (`min_gflops > 0`) jobs.
+    pub async fn register_provider(
+        &self,
+        min_vram_mb: u32,
+        min_compute_capability: u16,
+        min_gpu_count: u8,
+        min_cuda_cores: u32,
+        min_gflops: u64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let req = Self::gpu_requirements_value(min_vram_mb, min_compute_capability, min_gpu_count, min_cuda_cores, min_gflops);
+        self.submit_signed_call("ComputeMarketplace", "register_provider", vec![req]).await
+    }
+
+    /// `ComputeMarketplace::create_job(...)` — a requestor posts a paid AI job
+    /// (escrow transferred to the marketplace account on creation).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_job(
+        &self,
+        min_vram_mb: u32,
+        min_compute_capability: u16,
+        min_gpu_count: u8,
+        min_cuda_cores: u32,
+        min_gflops: u64,
+        job_type: &str,
+        tier: &str,
+        price: u128,
+        max_duration: u32,
+        workload_hash: [u8; 32],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let req = Self::gpu_requirements_value(min_vram_mb, min_compute_capability, min_gpu_count, min_cuda_cores, min_gflops);
+        let args = vec![
+            req,
+            Value::variant(job_type, subxt::ext::scale_value::Composite::unnamed(Vec::<Value>::new())),
+            Value::variant(tier, subxt::ext::scale_value::Composite::unnamed(Vec::<Value>::new())),
+            Value::u128(price),
+            Value::u128(max_duration as u128),
+            Value::from_bytes(workload_hash),
+        ];
+        self.submit_signed_call("ComputeMarketplace", "create_job", args).await
+    }
+
+    /// `ComputeMarketplace::accept_job(job_id)` — provider takes a Pending job.
+    /// Gated by the cycle-26 cross-pallet `min_gflops` attestation check.
+    pub async fn accept_job(&self, job_id: u64) -> Result<(), Box<dyn std::error::Error>> {
+        self.submit_signed_call("ComputeMarketplace", "accept_job", vec![Value::u128(job_id as u128)]).await
+    }
+
+    /// `ComputeMarketplace::start_job(job_id)` — mark an Accepted job Running.
+    pub async fn start_job(&self, job_id: u64) -> Result<(), Box<dyn std::error::Error>> {
+        self.submit_signed_call("ComputeMarketplace", "start_job", vec![Value::u128(job_id as u128)]).await
+    }
+
+    /// `ComputeMarketplace::submit_result(job_id, result_hash)` — provider
+    /// reports the digest of the computed workload; state → AwaitingVerification.
+    pub async fn submit_result(&self, job_id: u64, result_hash: [u8; 32]) -> Result<(), Box<dyn std::error::Error>> {
+        self.submit_signed_call("ComputeMarketplace", "submit_result", vec![Value::u128(job_id as u128), Value::from_bytes(result_hash)]).await
+    }
+
+    /// `ComputeMarketplace::complete_job(job_id)` — finalize and pay the
+    /// provider from escrow (marketplace fee withheld).
+    pub async fn complete_job(&self, job_id: u64) -> Result<(), Box<dyn std::error::Error>> {
+        self.submit_signed_call("ComputeMarketplace", "complete_job", vec![Value::u128(job_id as u128)]).await
+    }
+
+    /// Read the on-chain job record: (state, price, requestor, provider).
+    /// Returns None if the job doesn't exist / chain unreachable.
+    pub async fn get_job_state(&self, job_id: u64) -> Option<(String, u128, Option<String>, Option<String>)> {
+        let client = self.client.as_ref()?;
+        let addr = subxt::dynamic::storage("ComputeMarketplace", "Jobs", vec![Value::u128(job_id as u128)]);
+        let v = self.storage_at_head(client, &addr).await?;
+        let state = get_field(&v, "state")
+            .and_then(|t| {
+                use subxt::ext::scale_value::ValueDef;
+                match &t.value {
+                    ValueDef::Variant(v) => Some(v.name.clone()),
+                    _ => t.as_u128().map(|n| format!("State#{}", n)),
+                }
+            })
+            .unwrap_or_else(|| "?".to_string());
+        let price = get_u128_field(&v, "price").unwrap_or(0);
+
+        let req_addr = subxt::dynamic::storage("ComputeMarketplace", "JobRequestor", vec![Value::u128(job_id as u128)]);
+        let prov_addr = subxt::dynamic::storage("ComputeMarketplace", "JobProvider", vec![Value::u128(job_id as u128)]);
+        let requestor = self.storage_at_head(client, &req_addr).await
+            .map(|x| account_id_to_string(&x));
+        let provider = self.storage_at_head(client, &prov_addr).await
+            .map(|x| account_id_to_string(&x));
+        Some((state, price, requestor, provider))
+    }
+
+    /// Read whether the account is a registered provider.
+    pub async fn is_provider_registered(&self, address: &str) -> bool {
+        let Some(client) = &self.client else { return false };
+        let Ok(addr32) = address.parse::<subxt::utils::AccountId32>() else { return false };
+        let key = (addr32.as_ref() as &[u8; 32]).to_vec();
+        let addr = subxt::dynamic::storage("ComputeMarketplace", "RegisteredProviders", vec![Value::from_bytes(key)]);
+        self.storage_at_head(client, &addr).await.is_some()
+    }
+
+    /// Read the next job id (so the demo can predict the id before accepting).
+    pub async fn get_next_job_id(&self) -> u64 {
+        let Some(client) = &self.client else { return 0 };
+        let addr = subxt::dynamic::storage("ComputeMarketplace", "NextJobId", vec![]);
+        match self.storage_at_head(client, &addr).await {
+            Some(v) => v.as_u128().map(|x| x as u64).unwrap_or(0),
+            None => 0,
+        }
+    }
+
     pub async fn submit_mining_solution(
         &self,
         _nonce: u64,
@@ -512,6 +662,22 @@ fn get_field<'a>(value: &'a subxt::dynamic::Value, name: &str) -> Option<&'a sub
 }
 
 /// Extract the named fields of a composite value (or `None` if not composite).
+
+/// Convert a scale-value AccountId (unnamed composite of 32 bytes) to a hex
+/// SS58-like string for display. Used when reading `JobRequestor`/`JobProvider`.
+fn account_id_to_string(value: &subxt::dynamic::Value) -> String {
+    use subxt::ext::scale_value::ValueDef;
+    match &value.value {
+        ValueDef::Composite(c) => {
+            let mut bytes = Vec::with_capacity(32);
+            for v in c.values().take(32) {
+                bytes.push((v.as_u128().unwrap_or(0) & 0xff) as u8);
+            }
+            format!("0x{}", hex::encode(&bytes))
+        }
+        _ => format!("{:?}", value.value),
+    }
+}
 
 #[cfg(test)]
 mod tests {

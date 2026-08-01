@@ -108,8 +108,13 @@ pub fn measure_gflops(device_index: usize) -> Result<u64, String> {
     let mut mm = matmul::GpuMatmul::new(device_index, 1024)
         .map_err(|e| format!("open GPU matmul: {e}"))?;
     // 4 measured iters (1024³ GEMM ≈ 2.1 GFLOP each); warms up the kernel too.
-    let (_elapsed, gflops) = mm.run_many(4).map_err(|e| format!("GEMM benchmark: {e}"))?;
-    Ok(gflops.round() as u64)
+    let (_elapsed, flops) = mm.run_many(4).map_err(|e| format!("GEMM benchmark: {e}"))?;
+    // `run_many` returns raw FLOP/s (total_flops / elapsed, no /1e9). Convert to
+    // true GFLOPS so the on-chain `compute_gflops` is in GFLOPS — matching the
+    // attestation tier thresholds (Bronze≥100 / Silver≥1000 / Gold≥5000 GFLOPS)
+    // and the marketplace `min_gflops` gate. (Previously this leaked raw FLOP/s
+    // ≈ GFLOPS×1e9 on-chain, silently breaking the `min_gflops` match.)
+    Ok((flops / 1_000_000_000.0).round() as u64)
 }
 
 pub fn hash_gpu_info(info: &GPUInfo) -> [u8; 32] {

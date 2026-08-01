@@ -1,12 +1,32 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3 (Prototype) — LIVE END-TO-END GPU ATTESTATION ON RTX 4060 (Cycle 27): the agent now self-deposits `ProviderStake` and attests on-chain with a real measured GFLOPS. Verified live: Alice staked 1,000 GPN → measured 188.7 GFLOPS on the 4060 → on-chain `tier=Bronze` (gpus=1, compute_gflops=188667299223). Also fixed two signed-tx plumbing bugs that blocked all live attestations: (1) subxt read the account nonce from the stuck-finalized #0 block → second+ tx rejected as `Transaction is outdated` (now reads nonce from best-head block); (2) `wait_for_finalized_success` hangs forever on a PoW chain with no finality gadget (now waits for `InBestBlock` instead). Added `gpn_check_state` helper to read live stake/attestation state.**
-**Last Updated:** 2026-07-31 ~18:40 PT
+**Status: Phase 3 (Prototype) — LIVE END-TO-END COMPUTE-MARKETPLACE JOB FLOW ON RTX 4060 + GFLOPS UNITS FIX (Cycle 28): the full marketplace lifecycle is now proven live — `register → create_job → accept (attestation gate) → start → real OpenCL GEMM → submit_result → complete + payout`. Also found & fixed a real units bug: `measure_gflops` was leaking raw FLOP/s (×1e9) on-chain, silently breaking the `min_gflops` proof-of-compute gate; now stores true GFLOPS (on-chain `compute_gflops=278`) and the gate is verified both ways (min 150 passes, min 1000 > attested 278 is REJECTED with `ProviderComputeInsufficient`).**
+**Last Updated:** 2026-07-31 ~19:20 PT
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 27)
+## 🚀 Current Milestone (Cycle 28)
+
+**The full compute-marketplace job lifecycle is proven LIVE end-to-end on the RTX 4060, and a real GFLOPS-units bug that was silently breaking the `min_gflops` proof-of-compute gate is found & fixed.**
+
+1. **`ChainClient` marketplace extrinsics** — `register_provider`, `create_job`, `accept_job`, `start_job`, `submit_result`, `complete_job` (signed dynamic txs, reuse `chain::signer`), plus readers `is_provider_registered`, `get_job_state`, `get_next_job_id`.
+2. **`gpn_marketplace_demo` bin** — drives the full lifecycle; between `start_job` and `submit_result` runs a REAL OpenCL GEMM and SHA-256s its output to produce the on-chain `result_hash` (compute genuinely done by the provider GPU).
+3. **🐛 GFLOPS units fix** — `measure_gflops` returned raw FLOP/s (×1e9) and leaked on-chain (`compute_gflops=275270676358`); tier thresholds + `min_gflops` are true GFLOPS, so the gate compared like-vs-unlike and always passed. Now stores true GFLOPS (`compute_gflops=278`).
+
+**Verified live (RTX 4060, attested 278 GFLOPS Bronze):**
+```
+register → create_job(id=1, min_gflops=150) → accept (✅ gate passed)
+→ start → REAL GEMM (14ms) → submit_result → complete
+→ payout: escrow 50 GPN − 5% fee = 47.5 GPN ✅
+```
+**Gate verified both ways:** `min_gflops=150` ≤ 278 → accepted & paid; `min_gflops=1000` > 278 → **REJECTED** at `accept_job` (`ProviderComputeInsufficient`), job stays Pending, no payout.
+
+Commit pending. Detail: `shared/artifacts/project7/cycle28-marketplace-live-log.md`
+
+---
+
+## 🚀 Previous Milestone (Cycle 27)
 
 **`GPUAttestation::deposit_stake` is wired into the agent and the full GPU-attestation leg is proven LIVE on the RTX 4060.**
 
@@ -209,6 +229,7 @@ This **completes the production mining architecture**: node and miner are fully 
 | **Agent submits REAL `GPUAttestation::submit_attestation` extrinsic on-chain (shared signer module; challenge read; `with_signer` wiring) (cycle 25)** | ✅ **LIVE (agent)** |
 | **`min_gflops` ENFORCED at `accept_job` — cross-pallet `GPUAttestationProvider` trait gates providers on attested GFLOPS (cycle 26)** | ✅ **LIVE (pallet+runtime)** |
 | **Live end-to-end attest on RTX 4060: self-deposit `ProviderStake` → measure 188 GFLOPS → on-chain `tier=Bronze`; signed-tx nonce & finality-hang fixes (cycle 27)** | ✅ **LIVE** |
+| **Live end-to-end compute-marketplace job flow on RTX 4060: register → create → accept (attestation gate) → start → real GEMM → submit → complete + payout; GFLOPS-units fix so `min_gflops` gate works (cycle 28)** | ✅ **LIVE** |
 | gpn-agent subxt chain client (stub) | ✅ **REPLACED (cycle 21)** |
 | Wire real `GPUAttestation::submit_attestation` extrinsic (reuse gpn_seed_feed Signer) | ✅ **DONE (cycle 25)** |
 | Enforce `min_gflops` matching at `accept_job` (cross-pallet attested read) | ✅ **DONE (cycle 26)** |
@@ -219,7 +240,10 @@ This **completes the production mining architecture**: node and miner are fully 
 3. [x] Wire the real `GPUAttestation::submit_attestation` extrinsic in the agent by reusing the `gpn_seed_feed` custom Signer + `GpnConfig` plumbing (cycle 25 — shared `chain::signer` module; challenge read; `with_signer` wiring).
 4. [x] Enforce `min_gflops` matching at `accept_job` — cross-pallet read of the provider's attested `compute_gflops` (trait from gpu-attestation into compute-marketplace) (cycle 26).
 5. [x] Live end-to-end attest on the RTX 4060: deposit stake (pallet requires `ProviderStake`), measure ~830 GFLOPS, submit, confirm tier on-chain (cycle 27 — staked 1,000 GPN, attested **Bronze** @ 188 GFLOPS; fixed signed-tx nonce + finality-hang bugs).
-6. [ ] Live end-to-end marketplace flow on the 4060: attest (~188 GFLOPS) → register provider → create job with `min_gflops ≤ 188` → accept (gated by cycle-26 trait) → run real GEMM → submit result → complete + payout. Check compute-marketplace extrinsic names + wire a provider-registration/job-lifecycle helper (mirror `gpn_check_state`).
+6. [x] Live end-to-end marketplace flow on the 4060: attest (~188 GFLOPS) → register provider → create job with `min_gflops ≤ 188` → accept (gated by cycle-26 trait) → run real GEMM → submit result → complete + payout. Check compute-marketplace extrinsic names + wire a provider-registration/job-lifecycle helper (mirror `gpn_check_state`). **(cycle 28 — DONE; also fixed GFLOPS units so the gate is semantically correct, verified positive+negative live)**
+7. [ ] Fix `gpn_marketplace_demo` display nit: `provider=0x00` in `get_job_state` (AccountId decodes as zeros in the dynamic read; payout math confirms the right account is paid — decode/display only).
+8. [ ] Close the loop: in `auto` mode, the agent should actually CLAIM marketplace jobs on-chain when the profitability oracle says compute demand is high (currently it runs compute but doesn't pick up jobs). This ties the oracle → marketplace → agent together.
+9. [ ] Document the marketplace flow + GFLOPS units convention in README.
 
 ## Phase 1 Findings
 
