@@ -12,6 +12,7 @@ toml = "0.8"
 log = "0.4"
 env_logger = "0.11"
 reqwest = { version = "0.12", features = ["json", "native-tls-vendored", "blocking"] }
+tiny_http = "0.12"
 thiserror = "2"
 anyhow = "1"
 

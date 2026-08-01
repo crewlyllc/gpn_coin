@@ -351,3 +351,30 @@ gpn-agent/target/release/gpn_operate_oracle ws://127.0.0.1:9944 oracle_values.to
 
 CLI: `gpn_operate_oracle [endpoint] [values_file] [interval_secs] [signer_uri]`
 (details: `shared/artifacts/project7/cycle41-oracle-operator-live-log.md`)
+
+### Testnet drip faucet: `gpn_faucet` (cycle 44)
+An off-chain drip faucet for the public testnet (runbook §5 option 3 — **zero
+runtime change**, keeps the fair-launch mainnet runtime pristine). It's a small
+HTTP service backed by a funded testnet key that drips a fixed amount of GPN to a
+requesting address via a rate-limited signed `Balances.transfer_allow_death`.
+
+```bash
+gpn-agent/target/release/gpn_faucet --endpoint ws://127.0.0.1:9944 \
+  --listen 127.0.0.1:8081 --signer-uri //Alice --drip-gpn 5000 --reserve-gpn 1000
+# operator gets a drip (ss58 or 0x-hex address):
+curl "http://127.0.0.1:8081/drip?address=<ss58-or-0xhex>&amount=5000"
+# inspect faucet balance + rate-limit ledger:
+curl http://127.0.0.1:8081/status
+```
+
+- **Rate limiting (per address):** `--cooldown-secs` (default 3600), `--daily-cap-gpn`
+  (100k), `--total-cap-gpn` (1M), `--reserve-gpn` (1000 — faucet refuses to drain
+  itself below the reserve; the operator must first mine GPN into the faucet key).
+- **Reuses the shared signer plumbing** (`signer::submit_signed`, dispatch-outcome
+  verified) so a drip that fails dispatch is reported as an error, not a false success.
+- **Verified live on `gpn-node --dev`:** 5000 GPN drip to Bob landed on-chain (Alice
+  100000→95000, dispatch ok); cooldown → HTTP 429; hex-address drip ok; invalid /
+  missing address → HTTP 400; reserve guard → HTTP 500.
+
+CLI: `gpn_faucet [--endpoint …] [--listen …] [--signer-uri …] [--drip-gpn …] [--reserve-gpn …]`
+(details: `shared/artifacts/project7/cycle44-faucet-live-log.md`; runbook `§5`)

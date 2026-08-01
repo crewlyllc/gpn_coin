@@ -1,12 +1,29 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3/4 (Prototype + mainnet prep) — LIVE on RTX 4060. Cycle 43: closed priority #2 (fresh post-cycle-42) — implemented `testnet_chain_spec()`: a config-only fork of mainnet (same WASM runtime) wired into `command.rs` `load_spec` as `--chain=testnet` (ChainType::Local, NO endowed accounts → fair-launch economics, bootstrap oracle operators Alice+Bob seeded at genesis so the feed is populated day 1, ops sudo key Alice; identical difficulty 2^245 / 50 GPN reward / 10% inflation / 1B cap). Smoke-verified: build-spec parses correctly (balances=[], oracle ops=[Alice,Bob], chainType Local), mainnet parity confirmed (only intended testnet diffs), and LIVE on RTX 4060 the testnet spec mined real GPU Ethash blocks #1→#13. 98/98 node tests. Detail: `shared/artifacts/project7/cycle43-testnet-chainspec-log.md`.**
-**Last Updated:** 2026-08-01 ~10:00 UTC (2026-08-01 ~03:00 PT)
+**Status: Phase 3/4 (Prototype + mainnet prep) — LIVE on RTX 4060. Cycle 44: closed HEARTBEAT priority #1 (post-cycle-43) — built + live-verified the `gpn_faucet` off-chain drip faucet (runbook §5 option 3, ZERO runtime change): an HTTP service (`gpn-agent/src/bin/gpn_faucet.rs`) backed by a funded testnet key that drips GPN via a rate-limited signed `Balances.transfer_allow_death` (cooldown / daily-cap / total-cap / reserve guards; ss58 or 0x-hex address; `/drip` + `/status` endpoints). Live-verified on `gpn-node --dev` (RTX 4060): 5000 GPN drip to Bob landed on-chain (Alice 100000→95000, dispatch-outcome ok), cooldown → HTTP 429, hex-address drip ok, invalid/missing address → 400, reserve guard → 500. Found: call is `transfer_allow_death` (not `transfer`) and dest is bare-account (GPN `Address = AccountId`). 7 faucet unit tests + 26 lib + 98 node all pass. Detail: `shared/artifacts/project7/cycle44-faucet-live-log.md`.**
+**Last Updated:** 2026-08-01 ~11:20 UTC (2026-08-01 ~04:20 PT)
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 43)
+## 🚀 Current Milestone (Cycle 44)
+
+**Closed HEARTBEAT priority #1 (post-cycle-43) — `gpn_faucet`: the off-chain drip faucet (runbook §5 option 3, ZERO runtime change) built + verified live.**
+
+A small HTTP service (`gpn-agent/src/bin/gpn_faucet.rs`, new `tiny_http` dep) backed by a funded testnet key that drips GPN via a rate-limited signed `Balances.transfer_allow_death`:
+
+1. **Endpoints** — `GET /drip?address=<ss58|0xhex>&amount=<gpn>` (drip, default `--drip-gpn`) and `GET /status` (faucet balance + config + per-address rate-limit ledger).
+2. **Rate limiting (per address)** — `--cooldown-secs` (3600), `--daily-cap-gpn` (100k), `--total-cap-gpn` (1M), `--reserve-gpn` (1000; faucet refuses to drain itself below reserve — operator mines GPN into the faucet key first, since testnet genesis has zero supply).
+3. **Reuses the shared signer plumbing** (`signer::Sr25519Signer` + `signer::submit_signed`, dispatch-outcome verified) so a drip that fails dispatch is reported as an error, not a false success.
+4. **Two live findings** — (a) the call is **`Balances.transfer_allow_death`** (this Substrate version renamed `transfer`; confirmed via metadata probe); (b) **dest is bare account bytes, not `MultiAddress`** (GPN `type Address = AccountId`; first MultiAddress attempt panicked, fixed to match the proven `gpn_distribute_rewards` pattern). Also fixed a tokio pattern: plain `fn main` + one runtime + `handle.block_on` (not `#[tokio::main]` + nested `Runtime`).
+
+**Verified LIVE (`gpn-node --dev`, RTX 4060):** 5000 GPN drip to Bob landed on-chain (authoritative subxt head read: Alice 100000→95000, dispatch-outcome ok); immediate 2nd drip → HTTP **429** cooldown; hex-address drip (Charlie, 2000 GPN) → ok; invalid address → **400**; missing address → **400**; reserve guard (`--reserve-gpn 95000` vs 93000 balance) → **500**.
+
+**Verified:** `gpn_faucet` unit tests **7/7**, agent lib **26/26** (7 GPU-ignored), node workspace **98/98** — all green; release build clean (only `tiny_http` added). Detail: `shared/artifacts/project7/cycle44-faucet-live-log.md`
+
+---
+
+## 🚀 Previous Milestone (Cycle 43)
 
 **Closed HEARTBEAT priority #2 (Phase-4 prep) — `testnet_chain_spec()` implemented + verified live.**
 
@@ -389,6 +406,8 @@ This **completes the production mining architecture**: node and miner are fully 
 | **TIER-WEIGHTED STAKING PAYOUT LIVE: fixed latent `MinAttestationStake` unit bug (1e21 raw = 1B GPN → 1e15 = 1,000 GPN; cycle-35 faucet cut exposed it); Alice attested Bronze @194 GFLOPS on RTX 4060, staking pool drained 400→0 (was held for unattested in cycle 37), oracle drained, Alice +~500 GPN (cycle 38)** | ✅ **LIVE** |
 | **DISPATCH-OUTCOME VERIFICATION: `signer::submit_signed` now verifies dispatch success (not just inclusion) — reads `System::Events` via proven dynamic-storage path, scans for `System::ExtrinsicFailed`, decodes resolvable module error; new `gpn_verify_dispatch` probe; verified live: guaranteed-fail `accept_job` → `Err: ModuleError(ComputeMarketplace::JobNotFound/ProviderNotRegistered)`, success path logs `tx dispatched successfully` (cycle 39)** | ✅ **LIVE** |
 | **FULL REVENUE LOOP CLOSED LIVE: two-account demo (Bob→Alice escrow, all-green) → verify_dispatch failure path → GPU attest (Alice Bronze @196 GFLOPS) → distribute_fees pools 400/100 → both drained to attested Alice (+500 GPN); fee routing + tier-weighted staking payout + dispatch-outcome verification all confirmed end-to-end in one session on the fixed runtime (cycle 40)** | ✅ **LIVE** |
+| **`testnet_chain_spec()` — config-only fork of mainnet (`--chain=testnet`: ChainType::Local, NO endowed accounts → fair-launch, bootstrap oracle ops Alice+Bob, ops sudo Alice; same WASM runtime, identical diff/reward/inflation/cap); wired into `load_spec`; LIVE-mined real GPU Ethash blocks #1→#13 on RTX 4060; build-spec + mainnet-parity verified (cycle 43)** | ✅ **LIVE** |
+| **`gpn_faucet` — off-chain drip faucet (runbook §5 option 3, ZERO runtime change): HTTP `/drip` (ss58|hex) + `/status`; rate-limited signed `Balances.transfer_allow_death` (cooldown/daily-cap/total-cap/reserve); reuses dispatch-outcome-verified signer; LIVE on `gpn-node --dev` (RTX 4060): 5000 GPN drip to Bob landed on-chain, cooldown 429, hex drip ok, invalid/missing 400, reserve guard 500 (cycle 44)** | ✅ **LIVE** |
 | gpn-agent subxt chain client (stub) | ✅ **REPLACED (cycle 21)** |
 | Wire real `GPUAttestation::submit_attestation` extrinsic (reuse gpn_seed_feed Signer) | ✅ **DONE (cycle 25)** |
 | Enforce `min_gflops` matching at `accept_job` (cross-pallet attested read) | ✅ **DONE (cycle 26)** |
@@ -418,10 +437,10 @@ This **completes the production mining architecture**: node and miner are fully 
 3. [x] **(Phase 4 prep) Mainnet testnet hardening:** re-verify two-node p2p testnet on the fixed runtime + config/docs for a public testnet spec. **(Cycle 42 DONE — two-node GPU p2p testnet re-verified on the fixed runtime: 6/6 passed, both nodes real OpenCL Ethash on RTX 4060, converged on best #7; new `shared/artifacts/project7/testnet-public-runbook.md` (chain-spec matrix, topology, genesis params, faucet options, operator onboarding, launch checklist, mainnet open items); README pointer added. No code changed.)**
 4. [ ] **(Phase 4)** Public testnet → mainnet: token listing prep, compute marketplace launch, operator onboarding docs.
 
-## Next Concrete Actions (fresh, post-cycle-43)
-1. [ ] **(Phase 4) Off-chain drip faucet** — small HTTP service backed by a funded testnet key (rate-limited signed transfer drip); zero runtime change, per runbook §5 recommendation.
+## Next Concrete Actions (fresh, post-cycle-44)
+1. [x] **(Phase 4) Off-chain drip faucet** — small HTTP service backed by a funded testnet key (rate-limited signed transfer drip); zero runtime change, per runbook §5 recommendation. **(Cycle 44 DONE — new `gpn_faucet` binary: `/drip` (ss58|hex, `--drip-gpn`/`--cooldown-secs`/`--daily-cap-gpn`/`--total-cap-gpn`/`--reserve-gpn`) + `/status`; reuses dispatch-outcome-verified `signer::submit_signed`; `Balances.transfer_allow_death` with bare-account dest. Live-verified on `gpn-node --dev` (RTX 4060): 5000 GPN drip to Bob landed (Alice 100000→95000, dispatch ok), cooldown 429, hex-address drip ok, invalid/missing 400, reserve guard 500. 7 unit + 26 lib + 98 node tests pass.)**
 2. [ ] **(Phase 4)** Stand up 2–4 public bootnodes + wss RPC + block explorer; publish onboarding doc; bootstrap oracle operators + initial feed (testnet spec now seeds Alice+Bob at genesis).
-3. [ ] **(Docs)** Finalize the README marketplace-flow + GFLOPS-units + two-account/fee-economy walkthrough (item #9; mostly landed — polish the fee-economy section to reference the now-closed funding gap + `gpn_operate_oracle` maintenance flow).
+3. [ ] **(Docs)** Finalize the README marketplace-flow + GFLOPS-units + two-account/fee-economy walkthrough (item #9; mostly landed — polish the fee-economy section to reference the now-closed funding gap + `gpn_operate_oracle` maintenance flow + the new `gpn_faucet`).
 4. [ ] **(Phase 4)** Mainnet prep: sudo rotation (inert placeholder → governed/removed), token listing / liquidity plan (business decision → escalate to Jeremy), marketplace go-live + SLA/reputation policy, oracle governance.
 
 ## Phase 1 Findings
