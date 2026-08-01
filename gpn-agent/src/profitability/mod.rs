@@ -151,20 +151,65 @@ impl ProfitabilityCalculator {
             ));
         }
 
-        // Live chain feed (current default — placeholder RPC until subxt client lands).
+        // Live chain feed (single fetch — the old code read the feed 4x, one
+        // network round-trip per field; we now fetch once and reuse it).
         let difficulty = self.chain_client.get_difficulty().await?;
-        let token_price = self.chain_client.get_token_price_usd().await?;
-        let gpu_price = self.chain_client.get_gpu_hour_price(&self.config.gpu_model).await?;
-        let utilization = self.chain_client.get_utilization_rate(&self.config.gpu_model).await?;
-        let staking_apr = self.chain_client.get_staking_apr().await?;
+        let feed = self.chain_client.get_feed().await;
+        let head_block = self.chain_client.head_block_number().await;
+
+        // Staleness guard (oracle-governance §6 gap #1): if the feed was
+        // written more than `feed_staleness_ttl_blocks` ago, DON'T trust its
+        // prices — fall back to a conservative Mining default (compute and
+        // staking revenue forced to 0, so mining always wins the switch). A
+        // stale feed could otherwise drive the whole network off mining onto
+        // outdated compute/staking prices.
+        let ttl = self.config.feed_staleness_ttl_blocks;
+        let stale = feed
+            .as_ref()
+            .zip(head_block)
+            .map(|(f, h)| crate::chain::is_feed_stale(f.updated_at_block, h, ttl))
+            .unwrap_or(false);
+        if stale {
+            log::warn!(
+                "Profitability feed STALE (updated at block {}, head {}, TTL {:?} blocks). Forcing conservative Mining default.",
+                feed.as_ref().map(|f| f.updated_at_block).unwrap_or(0),
+                head_block.unwrap_or(0),
+                ttl
+            );
+        }
+
+        // Resolve feed fields (fall back to the existing per-field getters —
+        // which themselves fall back to placeholder defaults when the feed is
+        // empty — only when the whole feed is unavailable).
+        let (token_price, gpu_price, utilization, staking_apr) = match &feed {
+            Some(f) => (
+                f.token_price_usd,
+                f.avg_gpu_hour_price_usd,
+                f.utilization,
+                f.staking_apr_percent,
+            ),
+            None => (
+                self.chain_client.get_token_price_usd().await?,
+                self.chain_client.get_gpu_hour_price(&self.config.gpu_model).await?,
+                self.chain_client.get_utilization_rate(&self.config.gpu_model).await?,
+                self.chain_client.get_staking_apr().await?,
+            ),
+        };
 
         // Fetch local GPU data
         let gpu_info = self.gpu_monitor.get_gpu_info()?;
 
-        // Calculate revenues
+        // Calculate revenues. A stale feed forces mining: compute + staking
+        // revenue = 0, so `recommended_mode()` picks Mining.
         let mining = self.calc_mining_revenue(gpu_info.current_hashrate_mhs, difficulty, token_price);
-        let compute = calc_compute_revenue(gpu_price, utilization);
-        let staking = self.calc_staking_revenue(self.config.staked_amount, staking_apr, token_price);
+        let (compute, staking) = if stale {
+            (0.0, 0.0)
+        } else {
+            (
+                calc_compute_revenue(gpu_price, utilization),
+                self.calc_staking_revenue(self.config.staked_amount, staking_apr, token_price),
+            )
+        };
 
         Ok(ProfitAnalysis {
             mining_revenue_per_hour: mining,
@@ -290,6 +335,18 @@ mod tests {
         );
         // Sanity: it must be ~USD-scale, not deflated to ~$0.07.
         assert!(revenue > 1.0, "compute revenue should be ~$1.38/hr, got {revenue}");
+    }
+
+    #[test]
+    fn stale_feed_zeroed_compute_staking_forces_mining() {
+        // Oracle-governance §6 gap #1: when the feed is stale, analyze() forces
+        // compute + staking revenue to 0 so mining always wins. This test locks
+        // in that decision contract (recommended_mode -> Mining).
+        let a = analysis(0.5, 0.0, 0.0); // stale: compute/staking zeroed
+        assert_eq!(a.recommended_mode(), Mode::Mining);
+        // Mining with zeroed compute/staking beats even a low mining revenue.
+        let a2 = analysis(0.01, 0.0, 0.0);
+        assert_eq!(a2.recommended_mode(), Mode::Mining);
     }
 
     #[test]

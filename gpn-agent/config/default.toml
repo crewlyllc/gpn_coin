@@ -11,6 +11,11 @@ min_epoch_hours = 1.0
 profitability_check_interval_secs = 3600
 # "chain" = live RPC (default) | "scripted" = deterministic demand-spike demo
 profitability_feed = "chain"
+# Max age (blocks) of the on-chain profitability feed before the agent treats
+# it as stale and forces a conservative Mining default (compute/staking = 0),
+# instead of acting on outdated prices. 1440 blocks ~ 6h at 15s blocks.
+# Set to 0 or omit to disable the staleness guard.
+feed_staleness_ttl_blocks = 1440
 staked_amount = 10000.0
 max_concurrent_jobs = 2
 docker_endpoint = "unix:///var/run/docker.sock"

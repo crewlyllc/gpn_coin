@@ -29,6 +29,15 @@ pub struct AgentConfig {
     /// (deterministic demand-spike timeline — used for demos/tests until the
     /// real chain feed is wired).
     pub profitability_feed: String,
+    /// Max age (in blocks) of the on-chain `ProfitabilityOracle::CurrentFeed`
+    /// before the agent treats it as **stale** and falls back to a conservative
+    /// Mining default (compute + staking revenue forced to 0, so mining wins
+    /// the auto-switch) instead of acting on outdated prices. None disables.
+    /// Default 1440 blocks (~6h at 15s blocks), ~2.4x the pallet's
+    /// `OracleUpdateInterval` (600 blocks), so a feed that stops being
+    /// refreshed for a few hours no longer drives the network.
+    #[serde(default = "default_feed_ttl")]
+    pub feed_staleness_ttl_blocks: Option<u64>,
 
     // Staking
     pub staked_amount: f64,
@@ -72,6 +81,7 @@ impl Default for AgentConfig {
             min_epoch_hours: 1.0,
             profitability_check_interval_secs: 3600, // Every hour
             profitability_feed: "chain".to_string(),
+            feed_staleness_ttl_blocks: Some(1440),
             staked_amount: 10_000.0,
             min_attestation_stake: 1_000_000_000_000_000, // 1,000 GPN (12 decimals)
             max_concurrent_jobs: 2,
@@ -86,6 +96,13 @@ impl Default for AgentConfig {
             mining_device_index: 0,
         }
     }
+}
+
+/// Default feed staleness TTL (1440 blocks ≈ 6h at 15s/block). Used by the
+/// `#[serde(default = ...)]` so a config file that omits the field still gets
+/// the safe default (Some(1440)), rather than serde's None.
+fn default_feed_ttl() -> Option<u64> {
+    Some(1440)
 }
 
 impl AgentConfig {
@@ -118,5 +135,37 @@ impl AgentConfig {
         }
 
         if errors.is_empty() { Ok(()) } else { Err(errors) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_feed_ttl_is_safe_1440() {
+        assert_eq!(AgentConfig::default().feed_staleness_ttl_blocks, Some(1440));
+    }
+
+    #[test]
+    fn default_toml_parses_with_staleness_ttl() {
+        // The checked-in default.toml must deserialize with the new field and
+        // carry the safe 1440-block default.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/config/default.toml");
+        let cfg = AgentConfig::from_file(path).expect("default.toml must parse");
+        assert_eq!(cfg.feed_staleness_ttl_blocks, Some(1440));
+    }
+
+    #[test]
+    fn omitted_ttl_field_defaults_to_some_1440() {
+        // A config that predates the field (or omits it) must still get the
+        // safe default via #[serde(default = "default_feed_ttl")], NOT None.
+        let toml = r#"
+            node_name = "n"
+            chain_endpoint = "ws://x:9944"
+            gpu_model = "RTX 4060"
+        "#;
+        let cfg: AgentConfig = toml::from_str(toml).expect("must parse");
+        assert_eq!(cfg.feed_staleness_ttl_blocks, Some(1440));
     }
 }

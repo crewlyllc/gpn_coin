@@ -175,6 +175,42 @@ impl ChainClient {
         }
     }
 
+    /// Read the current best (head) block **number** via `chain_getHeader`
+    /// (JSON-RPC, ws->http). Needed to judge feed staleness (the pallet stores
+    /// `updated_at` as the block number the feed was written at). Returns
+    /// `None` if the header can't be read.
+    pub async fn head_block_number(&self) -> Option<u64> {
+        let http_url = self
+            .endpoint
+            .replace("ws://", "http://")
+            .replace("wss://", "https://");
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "chain_getHeader",
+            "params": []
+        });
+        let resp: serde_json::Value = reqwest::Client::new()
+            .post(&http_url)
+            .json(&body)
+            .send()
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        // Header.number is a 0x-prefixed hex string.
+        let number_hex = resp.get("result")?.get("number")?.as_str()?;
+        u64::from_str_radix(number_hex.trim_start_matches("0x"), 16).ok()
+    }
+
+    /// Public access to the parsed on-chain profitability feed (dollars /
+    /// fraction / percent forms + `updated_at_block`). Returns `None` if the
+    /// chain is unreachable or the feed has not been set by an operator yet.
+    pub async fn get_feed(&self) -> Option<OnChainFeed> {
+        self.fetch_feed().await
+    }
+
     /// Read the on-chain profitability feed. Returns `None` if the chain is
     /// unreachable or the feed has not been set by an oracle operator yet.
     async fn fetch_feed(&self) -> Option<OnChainFeed> {
@@ -637,6 +673,21 @@ impl ChainClient {
     }
 }
 
+/// Whether a profitability feed written at block `updated_at_block` is stale
+/// given the current head block and a TTL of `ttl_blocks`. A feed is stale once
+/// the chain has advanced more than `ttl_blocks` past its `updated_at`.
+///
+/// A TTL of `None` (disabled) or `Some(0)` never considers the feed stale —
+/// used by tests / operators who explicitly disable the guard.
+///
+/// Pure free function so it is unit-testable without a live chain.
+pub fn is_feed_stale(updated_at_block: u64, head_block: u64, ttl_blocks: Option<u64>) -> bool {
+    match ttl_blocks {
+        None | Some(0) => false,
+        Some(ttl) => head_block.saturating_sub(updated_at_block) > ttl,
+    }
+}
+
 /// Whether a provider with `attested_gflops` GFLOPS can claim a job that
 /// requires `min_gflops`. A 0 threshold (open market) is always claimable;
 /// otherwise the provider must meet or exceed the requirement. Pure free
@@ -886,6 +937,31 @@ mod tests {
     }
 
     #[test]
+    fn is_feed_stale_ttl_boundary() {
+        // Fresh: head within TTL of updated_at.
+        assert!(!is_feed_stale(100, 100, Some(1440)));
+        assert!(!is_feed_stale(100, 100 + 1440, Some(1440))); // exactly at TTL = fresh
+        // Stale: head has advanced more than TTL past updated_at.
+        assert!(is_feed_stale(100, 100 + 1441, Some(1440)));
+        assert!(is_feed_stale(100, 5000, Some(1440)));
+    }
+
+    #[test]
+    fn is_feed_stale_disabled_when_ttl_none_or_zero() {
+        // Explicitly disabled -> never stale, even far behind.
+        assert!(!is_feed_stale(100, 500_000, None));
+        assert!(!is_feed_stale(100, 500_000, Some(0)));
+    }
+
+    #[test]
+    fn is_feed_stale_never_underflows() {
+        // updated_at can't be in the future relative to head (saturating_sub).
+        assert!(!is_feed_stale(5000, 100, Some(1440)));
+        // Head == updated_at (just written) -> fresh.
+        assert!(!is_feed_stale(42, 42, Some(1440)));
+    }
+
+    #[test]
     fn feed_unit_conversions() {
         // token_price_usd stored as micro-USD: 50_000 == $0.05
         let feed = OnChainFeed {
@@ -923,5 +999,24 @@ mod tests {
             "[live] token=${} gpu=${}/hr util={} apr={}%",
             token, gpu, util, apr
         );
+    }
+
+    /// LIVE staleness-TTL probe (run manually: `cargo test -- --ignored
+    /// chain::tests::live_staleness_ttl_probe`). Requires a node on
+    /// ws://127.0.0.1:9944 with a seeded feed. Verifies the new
+    /// `head_block_number()` RPC and that `is_feed_stale` transitions from
+    /// fresh to stale as the chain advances past the seeded `updated_at`.
+    #[tokio::test]
+    #[ignore]
+    async fn live_staleness_ttl_probe() {
+        let client = ChainClient::new("ws://127.0.0.1:9944").await.unwrap();
+        let head = client.head_block_number().await.expect("head_block_number");
+        let feed = client.get_feed().await.expect("seeded feed");
+        println!("[live] head_block = {}, feed.updated_at_block = {}", head, feed.updated_at_block);
+        // Small TTL to observe the fresh->stale transition live (head advances
+        // sub-second on dev).
+        println!("[live] stale(TTL=5)   = {}", is_feed_stale(feed.updated_at_block, head, Some(5)));
+        println!("[live] stale(TTL=1440)= {}", is_feed_stale(feed.updated_at_block, head, Some(1440)));
+        assert!(head >= feed.updated_at_block, "head must not precede updated_at");
     }
 }
