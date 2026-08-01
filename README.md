@@ -247,3 +247,29 @@ cargo run --release --bin gpn_two_account_demo -- ws://127.0.0.1:9944 //Bob //Al
 ```
 Args: `[endpoint] [requestor_uri] [provider_uri] [price_gpn] [min_gflops]`. Set
 `min_gflops > 0` to exercise the attestation gate (provider must be attested first).
+
+### Live chain-feed-driven auto-switch (cycle 31)
+In `auto` mode the agent's profitability feed drives mode selection. `profitability_feed =
+"chain"` (default) reads the **real on-chain oracle** (`ProfitabilityOracle::CurrentFeed`:
+token price, GPU-hour price, utilization, APR) + `GPUPoW::Difficulty`; `"scripted"` uses a
+deterministic demand-spike timeline (for demos/CI). When the live feed says compute is more
+profitable, the agent switches Mining→Compute and **claims & serves marketplace jobs
+on-chain** (accept→start→real GPU GEMM→submit→complete+payout).
+
+```bash
+# seed a compute-favorable feed (token=$0.075, GPU=$12/hr, util=95%, APR=15%)
+gpn-agent/target/release/gpn_seed_feed ws://127.0.0.1:9944 75000 12000000 9500 1500 //Alice
+
+# create a Pending job for the agent to claim
+gpn-agent/target/release/gpn_create_job ws://127.0.0.1:9944 //Bob 0
+
+# run the agent in auto + chain-feed mode (config/chain_autoclaim.toml)
+gpn-agent/target/release/gpn-agent gpn-agent/config/chain_autoclaim.toml
+#   → Profitability: Mining=$0.00/hr, Compute=$9.69/hr  (from live feed)
+#   → 🔄 Mining → Compute  → 1 claimable job(s) found → ✅ job #1 completed & paid out
+```
+
+**Units note (fix, cycle 31):** `calc_compute_revenue` returns **USD/hr** = GPU-hour price
+× utilization × 0.85. The oracle's GPU-hour price is already USD (micro-USD), so it must
+NOT be multiplied by token price again — doing so produced USD² and capped compute revenue
+~13× too low, which kept the chain feed from ever recommending Compute.
