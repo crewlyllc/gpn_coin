@@ -1,12 +1,27 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3 (Prototype) — LIVE on RTX 4060. Cycle 40: closed priority #5 — the FULL revenue loop now verified end-to-end in one session on the fixed (cycle-39) runtime: two-account requestor→provider demo (Bob escrows 50, Alice earns 47.5, all assertions green) → `gpn_verify_dispatch` failure path (`Err ModuleError(ComputeMarketplace::JobNotFound) [pallet=8 error=2]`) → GPU attest (Alice Bronze @196 GFLOPS, 1,000 GPN stake confirmed) → `gpn_distribute_rewards` (seed 3000→distribute 1000): StakingRewardPool 0→400, OracleRewardPool 0→100, **both drained** to attested Alice (+500 GPN = 400 staking + 100 oracle; balance 99047.5→99547.5). Fee routing (cycle-37) + tier-weighted staking payout (cycle-38) + dispatch-outcome verification (cycle-39) all confirmed live together. 98/98 node-workspace tests + 26/26 agent lib tests.**
-**Last Updated:** 2026-08-01 ~14:20 UTC (2026-08-01 ~07:20 PT)
+**Status: Phase 3/4 (Prototype + mainnet prep) — LIVE on RTX 4060. Cycle 41: closed priority #2 (post-cycle-40) — built `gpn_operate_oracle`, a long-running oracle-operator service so the live profitability feed is a MAINTAINED service, not a one-shot seed. Verified live on `gpn-node --dev`: iteration #1 `✅ update_feed dispatched successfully` (feed set on-chain: token=$0.075, GPU=$3/hr, util=72%, APR=15%), iteration #2 correctly hit the pallet's `UpdateTooSoon` back-off (proves `LastUpdateBlock` written ⇒ feed genuinely on-chain). Values reload from a TOML file every iteration (external price feed can update without restart); `NotAuthorized` = fatal clear error, transient = retry; uses dispatch-outcome-verified `signer::submit_signed` + head-block nonce. Node mined to #15 during test, PoW undisturbed. 98/98 node + 26/26 agent tests still green (agent tooling only, no pallet/runtime change).**
+**Last Updated:** 2026-08-01 ~08:15 UTC (2026-08-01 ~01:15 PT)
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 40)
+## 🚀 Current Milestone (Cycle 41)
+
+**The live profitability feed is now a maintained service, not a one-shot seed.** Priority #2 (fresh post-cycle-40 list) is closed: new `gpn_operate_oracle` binary in `gpn-agent` — a long-running operator loop that keeps `ProfitabilityOracle.update_feed` fresh, mirroring `gpn_seed_feed` (cycle 22) but built for production operation.
+
+1. **Values from a TOML file, reloaded every iteration** (`oracle_values.toml`, default template written on first run) — an external price feed / operator updates token price, GPU-hour price, utilization, staking APR in the file **without restarting** the loop. Units match the pallet (micro-USD + basis points).
+2. **Respects `UpdateTooSoon`** (pallet `OracleUpdateInterval` = 600 blocks ≈ 2.5h) — never spams; logs `⏳ skipped: pallet interval not yet elapsed (UpdateTooSoon)` and waits (the expected back-off, not an error).
+3. **Fatal vs. retry error handling** — `NotAuthorized` (operator not in `OracleOperators`, root `add_operator`) exits with a clear message; transient errors log + retry.
+4. **Reuses the cycle-39 dispatch-outcome-verified `signer::submit_signed`** + the cycle-27 head-block nonce read.
+
+**Verified LIVE (`gpn-node --dev`, RTX 4060):** iteration #1 `✅ update_feed dispatched successfully` (feed set on-chain); iteration #2 on the same chain `⏳ update_feed skipped … (UpdateTooSoon)` — since `LastUpdateBlock` is only written on a *successful* update, hitting the guard on the second run proves the first feed is genuinely on-chain. Node mined to block #15 during the test, PoW undisturbed.
+
+**Verified:** `cargo build --release --bin gpn_operate_oracle` clean (no pallet/runtime change; agent-only tooling). Node 98/98 + agent 26/26 test suites unaffected. Detail: `shared/artifacts/project7/cycle41-oracle-operator-live-log.md`
+
+---
+
+## 🚀 Previous Milestone (Cycle 40)
 
 **Closed priority #5 — the complete revenue loop now runs end-to-end live on the fixed runtime.** This is the first time the entire economy was exercised in one session on the cycle-39 (dispatch-outcome-verified) node:
 
@@ -385,7 +400,7 @@ This **completes the production mining architecture**: node and miner are fully 
 
 ## Next Concrete Actions (fresh, post-cycle-40)
 1. [ ] **(Docs)** Finalize the marketplace flow + GFLOPS units convention + two-account/fee-economy walkthrough in README (item #9; partially landed — complete it).
-2. [ ] **(Phase 4 prep)** Profitability-oracle operator tooling: a `gpn_operate_oracle` long-running loop (mirror `gpn_seed_feed` but periodic `update_feed` maintenance), so the live feed is a maintained service, not a one-shot seed.
+2. [x] **(Phase 4 prep) Profitability-oracle operator tooling:** a `gpn_operate_oracle` long-running loop (mirror `gpn_seed_feed` but periodic `update_feed` maintenance), so the live feed is a maintained service, not a one-shot seed. **(Cycle 41 DONE — new `gpn_operate_oracle` binary: values reload from `oracle_values.toml` every iteration (external feed can update without restart); respects pallet `UpdateTooSoon` (600-block) back-off as expected, not error; `NotAuthorized` = fatal clear error, transient = retry; reuses dispatch-outcome-verified `signer::submit_signed` + head-block nonce. Verified LIVE on `gpn-node --dev` (RTX 4060): iter #1 `✅ update_feed dispatched successfully`, iter #2 `⏳ skipped (UpdateTooSoon)` proving feed on-chain; node mined to #15, PoW undisturbed. Build clean, 98/98 + 26/26 tests unaffected.)**
 3. [ ] **(Phase 4 prep)** Mainnet testnet hardening: re-verify two-node p2p testnet on the fixed runtime (CI job exists; optional manual re-run), config/docs for a public testnet spec.
 4. [ ] **(Phase 4)** Public testnet → mainnet: token listing prep, compute marketplace launch, operator onboarding docs.
 

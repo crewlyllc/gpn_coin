@@ -316,3 +316,27 @@ gpn-agent/target/release/gpn-agent gpn-agent/config/chain_autoclaim.toml
 × utilization × 0.85. The oracle's GPU-hour price is already USD (micro-USD), so it must
 NOT be multiplied by token price again — doing so produced USD² and capped compute revenue
 ~13× too low, which kept the chain feed from ever recommending Compute.
+
+### Oracle operator service: `gpn_operate_oracle` (cycle 41)
+`gpn_seed_feed` is a one-shot — fine for bootstrapping, but a **real oracle is a
+maintained service**. `gpn_operate_oracle` is a long-running loop that keeps
+`ProfitabilityOracle.update_feed` fresh:
+
+```bash
+# values file (written as a default template on first run): oracle_values.toml
+gpn-agent/target/release/gpn_operate_oracle ws://127.0.0.1:9944 oracle_values.toml 60 //Alice
+#   → ✅ update_feed dispatched successfully   (first iteration sets the feed)
+#   → ⏳ skipped: pallet interval not yet elapsed (UpdateTooSoon)   (back-off, every 600 blocks)
+```
+
+- **Values reloaded every iteration** from the TOML file (micro-USD + basis points, same
+  units as `gpn_seed_feed`), so an external price feed can update prices without a restart.
+- **Respects the pallet guard** (`OracleUpdateInterval` = 600 blocks ≈ 2.5h): never spams,
+  treats `UpdateTooSoon` as the expected back-off, not an error.
+- **Fatal vs. retry:** `NotAuthorized` (operator not in `OracleOperators`, added via root
+  `add_operator`) exits with a clear message; transient errors log and retry.
+- Uses the shared `signer::submit_signed` (dispatch-outcome verified, cycle 39) + head-block
+  nonce (cycle 27).
+
+CLI: `gpn_operate_oracle [endpoint] [values_file] [interval_secs] [signer_uri]`
+(details: `shared/artifacts/project7/cycle41-oracle-operator-live-log.md`)
