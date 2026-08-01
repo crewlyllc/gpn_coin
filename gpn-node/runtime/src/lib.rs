@@ -176,6 +176,21 @@ impl pallet_timestamp::Config for Runtime {
 impl pallet_insecure_randomness_collective_flip::Config for Runtime {}
 
 // ###########################################################################
+// Sudo (dev/ops tooling — enables root-only calls like `GPNToken.distribute_fees`
+// to be dispatched by a signed account via `Sudo.sudo`). The sudo key is set in
+// genesis; on mainnet it should be removed or governed. Root-only extrinsics in
+// the GPN pallets (distribute_fees, set_fee_distribution, mint_block_reward)
+// are otherwise unreachable by any signed account, which blocks end-to-end
+// exercise of the fee economy.
+// ###########################################################################
+
+impl pallet_sudo::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type RuntimeCall = RuntimeCall;
+    type WeightInfo = ();
+}
+
+// ###########################################################################
 // Transaction payment (fees)
 // ###########################################################################
 
@@ -294,6 +309,7 @@ construct_runtime!(
         Timestamp: pallet_timestamp,
         Balances: pallet_balances,
         TransactionPayment: pallet_transaction_payment,
+        Sudo: pallet_sudo,
         GPUPoW: pallet_gpu_pow,
         GPUAttestation: pallet_gpu_attestation,
         ComputeMarketplace: pallet_compute_marketplace,

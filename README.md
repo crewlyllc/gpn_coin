@@ -252,6 +252,42 @@ cargo run --release --bin gpn_two_account_demo -- ws://127.0.0.1:9944 //Bob //Al
 Args: `[endpoint] [requestor_uri] [provider_uri] [price_gpn] [min_gflops]`. Set
 `min_gflops > 0` to exercise the attestation gate (provider must be attested first).
 
+### Fee economy: `gpn_distribute_rewards` (cycle 36)
+
+The `gpn-token` pallet splits marketplace/transaction fees four ways — staking pool
+200 / treasury 150 / burn 100 / oracle pool 50 bps — via `GPNToken::distribute_fees`,
+which is **root-only**. The GPN runtime now includes the **Sudo pallet** (dev/ops
+tooling) so root calls are dispatchable by a signed account; `gpn_distribute_rewards`
+exercises the whole fee economy end-to-end on-chain:
+
+1. (optional) sudo-seed the `gpn/tokn` pallet account (simulates collected fees — see
+   the funding gap note below);
+2. `Sudo.sudo(GPNToken.distribute_fees(total_fee))` — fills pools, funds treasury, burns;
+3. `GPNToken.distribute_staking_rewards(stakers)` — **tier-weighted** payout
+   (proof-of-staked-GPU: attested tier multiplies share; unattested excluded);
+4. `GPNToken.distribute_oracle_rewards(operators)` — even split.
+
+```bash
+# 1. boot dev node (Alice is the sudo key on dev/local)
+gpn-node/target/release/gpn-node --dev --rpc-port 9944 --tmp
+
+# 2. seed 3000 GPN into the token pallet, distribute 1000 GPN fee, pay Alice (staker+operator)
+cd gpn-agent
+cargo run --release --bin gpn_distribute_rewards -- ws://127.0.0.1:9944 1000 //Alice //Alice //Alice 3000
+#   → StakingRewardPool 0→400, OracleRewardPool 0→100   (after distribute_fees)
+#   → OracleRewardPool drained to 0 (Alice paid 100)
+#   → StakingRewardPool stays 400 when Alice is UNATTESTED (tier multiplier 0 → excluded)
+```
+Args: `[endpoint] [total_fee_gpn] [sudo_uri] [stakers_csv] [operators_csv] [seed_gpn]`.
+
+**⚠ Funding gap (found cycle 36):** `distribute_fees` draws from the **`gpn/tokn`** pallet
+account, but marketplace fees (`MarketplaceFeeBps` 5%) currently land in the **`gpn/cmkt`**
+marketplace account — the two are not connected, so the pools stay empty in normal
+operation. Until that's wired (route marketplace fees → `gpn/tokn`, or have the marketplace
+call `distribute_fees`), the `seed_gpn` arg simulates collected fees so the economy is
+observable. **Mainnet:** the sudo key is a non-endowed placeholder in the `mainnet` spec
+(Alice on dev/local) and MUST be removed/rotated before real launch.
+
 ### Live chain-feed-driven auto-switch (cycle 31)
 In `auto` mode the agent's profitability feed drives mode selection. `profitability_feed =
 "chain"` (default) reads the **real on-chain oracle** (`ProfitabilityOracle::CurrentFeed`:

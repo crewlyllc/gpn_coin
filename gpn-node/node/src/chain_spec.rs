@@ -47,6 +47,7 @@ pub fn development_chain_spec() -> Result<ChainSpec, String> {
                 account_id_from_seed("Eve"),
                 account_id_from_seed("Ferdie"),
             ],
+            account_id_from_seed("Alice"), // dev sudo key
         ))
         .build())
 }
@@ -72,6 +73,7 @@ pub fn local_chain_spec() -> Result<ChainSpec, String> {
                 account_id_from_seed("Eve"),
                 account_id_from_seed("Ferdie"),
             ],
+            account_id_from_seed("Alice"), // local testnet sudo key
         ))
         .build())
 }
@@ -94,6 +96,9 @@ pub fn mainnet_chain_spec() -> Result<ChainSpec, String> {
         .with_genesis_config(genesis_config_json(
             vec![],                  // no oracle operators at genesis
             vec![],                  // no endowed accounts - fair launch
+            AccountId::new([0u8; 32]), // mainnet sudo key = inert placeholder (not endowed),
+                                       // so sudo is unreachable until governance funds it. MUST
+                                       // be removed/rotated before real mainnet launch.
         ))
         .build())
 }
@@ -102,6 +107,7 @@ pub fn mainnet_chain_spec() -> Result<ChainSpec, String> {
 fn genesis_config_json(
     initial_operators: Vec<AccountId>,
     endowed_accounts: Vec<AccountId>,
+    sudo_key: AccountId,
 ) -> serde_json::Value {
     let initial_difficulty = {
         // Target 2^245 (limb3 = 2^53) -> ~10s/block with the light-cache CPU
@@ -145,6 +151,7 @@ fn genesis_config_json(
             _config: Default::default(),
         },
         transaction_payment: Default::default(),
+        sudo: pallet_sudo::GenesisConfig { key: Some(sudo_key) },
     };
 
     serde_json::to_value(config).expect("Genesis config is valid JSON")

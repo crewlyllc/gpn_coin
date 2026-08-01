@@ -12,6 +12,7 @@ pallet-gpu-pow = { path = "../pallets/gpu-pow" }
 frame-system = { workspace = true }
 frame-benchmarking = { workspace = true, optional = true }
 pallet-transaction-payment = { workspace = true, default-features = false }
+pallet-sudo = { workspace = true, default-features = false }
 pallet-transaction-payment-rpc-runtime-api = { workspace = true, features = ["std"] }
 sc-basic-authorship = { workspace = true }
 sc-chain-spec = { workspace = true }

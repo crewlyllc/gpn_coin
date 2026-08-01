@@ -1,12 +1,27 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3 (Prototype) — LIVE on RTX 4060 (Cycle 31). Cycle 35: Phase-4 mainnet prep — decided & enforced a 1B GPN hard supply cap (was 1T, comment said 1B), added a zero-faucet `--chain=mainnet` fair-launch spec, and fixed a latent block-reward bug (50M GPN → correct 50 GPN/block, which would have exhausted the 1B cap in ~20 blocks). Cycle 34: real burn (slash from circulation), oracle operator reward distribution, and tier-multiplied staking payout.**
-**Last Updated:** 2026-08-01 ~02:15 UTC (2026-08-01 ~19:15 PT)
+**Status: Phase 3 (Prototype) — LIVE on RTX 4060 (Cycle 31). Cycle 36: fee economy exercisable end-to-end — added the Sudo pallet (root-only `distribute_fees` was unreachable by any signed account), built `gpn_distribute_rewards` tool that sudo-dispatches `distribute_fees` then pays out staking (tier-weighted) + oracle pools; verified live on `gpn-node --dev` (pools fill 400/100, oracle drained to Alice, staking pool correctly held for unattested staker); found a real funding gap (marketplace fees land in `gpn/cmkt`, not `gpn/tokn`). Cycle 35: decided & enforced a 1B GPN hard supply cap (was 1T), added a zero-faucet `--chain=mainnet` fair-launch spec, and fixed a latent block-reward bug (50M GPN → correct 50 GPN/block).**
+**Last Updated:** 2026-08-01 ~03:50 UTC (2026-08-01 ~20:50 PT)
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 35)
+## 🚀 Current Milestone (Cycle 36)
+
+**Closed the last integration gap in the fee economy: it's now exercisable end-to-end on-chain.** The blocker was architectural — `GPNToken::distribute_fees` is root-only, but the runtime had no Sudo pallet, so the staking/oracle pools could never be funded by a signed account.
+
+1. **Added the Sudo pallet** to the runtime (dev/ops tooling) so root-only calls (`distribute_fees`, `set_fee_distribution`, `mint_block_reward`) are dispatchable via `Sudo.sudo`. Dev/local sudo key = **Alice**; **mainnet** = a **non-endowed zero placeholder** (inert until governance funds it; MUST be removed/rotated before launch).
+2. **New `gpn_distribute_rewards` tool** (mirrors `gpn_seed_feed`) that sudo-dispatches `distribute_fees`, then pays out `distribute_staking_rewards` (tier-weighted) + `distribute_oracle_rewards` (even split), reading pools/balances at **head** (not stuck finalized #0).
+3. **Verified live on `gpn-node --dev`:** seed 3000 GPN into `gpn/tokn` → `distribute_fees(1000)` → **StakingRewardPool 0→400, OracleRewardPool 0→100** (treasury +300, burn 200) → oracle drained to 0 (Alice paid +100) → **staking pool stays 400 because Alice is unattested** (tier multiplier 0 → excluded) — the proof-of-staked-GPU gate is real on-chain.
+4. **⚠ Funding gap found:** marketplace fees (5%) land in the **`gpn/cmkt`** account, but `distribute_fees` draws from **`gpn/tokn`** — not connected, so pools stay empty in normal operation. Next cycle: wire marketplace fees → `gpn/tokn`.
+
+**Verified:** `cargo test --workspace` → **97 passed / 0 failed**; release builds clean; `build-spec` shows Alice sudo on dev, inert placeholder on mainnet.
+
+Detail: `shared/artifacts/project7/cycle36-fee-economy-tooling-log.md`
+
+---
+
+## 🚀 Previous Milestone (Cycle 35)
 
 **Closed the last two Phase-4 tokenomics open questions in code — supply cap decided, mainnet fair-launch spec added, and a critical block-reward bug fixed.** This makes the token economy coherent for mainnet: emission is disinflationary *and* absolutely bounded.
 
@@ -304,11 +319,10 @@ This **completes the production mining architecture**: node and miner are fully 
 | Enforce `min_gflops` matching at `accept_job` (cross-pallet attested read) | ✅ **DONE (cycle 26)** |
 
 ## Next Concrete Actions (priority order)
-1. [x] Phase 4 mainnet prep from tokenomics spec §7: decide bonding curve / hard supply cap + remove the dev faucet from mainnet. **(Cycle 35 DONE: cap = 1B GPN enforced; new `--chain=mainnet` zero-faucet fair-launch spec; dev faucet 1T→100k GPN; fixed latent 50M→50 GPN block-reward bug that would have exhausted the 1B cap in ~20 blocks)**
-2. [x] Re-run `cargo test --workspace` + a live smoke test to confirm no drift since Cycle 34. **(Cycle 35: 97/0 passed; dev node mined #30–#34 live)**
-3. [ ] Wire `distribute_fees`/`distribute_staking_rewards`/`distribute_oracle_rewards` into the node/agent tooling (a `gpn_distribute_rewards` helper mirroring `gpn_seed_feed`) so the fee economy is exercisable end-to-end on-chain.
-4. [ ] Re-run a live RTX 4060 GPU smoke test (block-reward change is consensus-affecting; GPU path unaffected but worth confirming on hardware).
-3. [ ] Wire `distribute_fees`/`distribute_staking_rewards`/`distribute_oracle_rewards` into the node/agent tooling (a `gpn_distribute_rewards` helper mirroring `gpn_seed_feed`) so the fee economy is exercisable end-to-end on-chain.
+1. [x] Wire `distribute_fees`/`distribute_staking_rewards`/`distribute_oracle_rewards` into the node/agent tooling (a `gpn_distribute_rewards` helper mirroring `gpn_seed_feed`) so the fee economy is exercisable end-to-end on-chain. **(Cycle 36 DONE: added Sudo pallet so root-only `distribute_fees` is dispatchable; new `gpn_distribute_rewards` tool sudo-dispatches `distribute_fees` then pays staking (tier-weighted) + oracle pools; verified live on `gpn-node --dev` — pools fill 400/100, oracle drained to Alice, staking pool held for unattested staker)**
+2. [ ] **Close the funding gap (found cycle 36):** wire marketplace fees (5%, currently in `gpn/cmkt`) → `gpn/tokn` pallet account so the fee economy is self-funding (have the marketplace call `distribute_fees`, or route fees to the token pallet account).
+3. [ ] Verify attested-tier-weighted staking payout live on the RTX 4060 (attest Alice → Bronze, re-run `gpn_distribute_rewards` → staking pool should drain with tier multiplier).
+4. [ ] Re-run a live RTX 4060 GPU smoke test (sudo/runtime change is consensus-affecting; confirm GPU PoW path unaffected).
 4. [x] Fill remaining empty design dirs — `design/pallets/`, `design/protocols/`, `design/node-agent/` (Cycle 33, DONE).
 4. [x] Two-node testnet docs in README + CI wiring for `gpn-node/scripts/gpn_two_node_testnet.sh` (cycle 23, 6/6 live).
 2. [x] Compute marketplace integration: surface `ComputeExecutor` throughput/GFLOPS as an on-chain attestable metric (cycle 24 — attestation tier gated by GFLOPS + `min_gflops` in marketplace + agent measures/reports).
