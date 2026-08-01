@@ -51,11 +51,12 @@ projectmanager07/
 │   │   └── config/              # Agent configuration
 │   └── config/
 │       └── default.toml
-├── shared/artifacts/project7/   # Research docs (Phase 1-2)
+├── shared/artifacts/project7/   # Research + cycle logs + ops docs
 │   ├── 01-gpu-coins-research.md
 │   ├── 02-gpu-compute-networks-research.md
 │   ├── 03-hybrid-consensus-research.md
-│   └── 04-design-decisions-synthesis.md
+│   ├── 04-design-decisions-synthesis.md
+│   └── testnet-public-runbook.md  # Public testnet spec/runbook (Phase 4 prep)
 ├── design/           # Source-of-truth design (aligned to implemented code)
 │   ├── pallets/00-pallet-overview.md
 │   ├── protocols/01-gpu-pow-consensus.md
