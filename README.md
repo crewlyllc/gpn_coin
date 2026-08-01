@@ -329,6 +329,12 @@ gpn-agent/target/release/gpn-agent gpn-agent/config/chain_autoclaim.toml
 NOT be multiplied by token price again — doing so produced USD² and capped compute revenue
 ~13× too low, which kept the chain feed from ever recommending Compute.
 
+**Staleness guard (cycle 48):** if the on-chain feed's `updated_at` block is older than
+`feed_staleness_ttl_blocks` (default `1440` ≈ 6h at 15s blocks), `analyze()` **forces a
+conservative Mining default** (compute + staking revenue = 0, so mining wins the switch)
+instead of acting on a stale feed. Set `feed_staleness_ttl_blocks = 0` or omit it to
+disable the guard. This is oracle-governance §6 gap #1 (see `design/protocols/05-oracle-governance.md`).
+
 ### Oracle operator service: `gpn_operate_oracle` (cycle 41)
 `gpn_seed_feed` is a one-shot — fine for bootstrapping, but a **real oracle is a
 maintained service**. `gpn_operate_oracle` is a long-running loop that keeps

@@ -1,12 +1,29 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3/4 (Prototype + mainnet prep) — LIVE on RTX 4060. Cycle 47: verified mainnet is safe-by-default + drafted the oracle-governance spec (runbook §9 #1 non-functional-half + #5). (a) Ran `gpn-node build-spec --chain=mainnet` on the current binary and decoded the genesis: mainnet Sudo key = all-zeros inert account (`5C4hrfjw9DjXZTzV3MwzrrAr9P1MJhSrvWGWqi1eSuyUpnhM` = `AccountId::new([0u8;32])`, prefix 42, payload 32×0x00) → nobody holds that private key, so `Sudo.sudo` (root-only `add_operator`/`distribute_fees`, etc.) is UNREACHABLE on mainnet; `balances=[]` (fair launch, genesis supply 0) + oracle operators `[]` (feed locked by default) confirmed. Closes runbook §9 #1 "non-functional" half. (b) New `design/protocols/05-oracle-governance.md` (runbook §9 #5): 3-phase governance (A root-managed ZERO-runtime testnet-ready / B committee-multisig / C permissionless staking-backed+slashing), threat model, trusted data-source table, §6 code gaps (agent feed-staleness TTL, reasonableness bounds, client-side median), §7 open decisions D1–D5 (escalate to Jeremy). Docs + verification only, no code changed. Remaining Phase-4: VPS-blocked (public bootnodes/RPC/explorer → escalated, needs $) + business decisions (D1–D5, token listing, marketplace go-live, sudo governed-path).**
-**Last Updated:** 2026-08-01 ~21:05 UTC (2026-08-01 ~14:05 PT)
+**Status: Phase 3/4 (Prototype + mainnet prep) — LIVE on RTX 4060. Cycle 48: CLOSED oracle-governance §6 gap #1 — agent feed STALENESS TTL (code, no money). When `ProfitabilityOracle::CurrentFeed.updated_at` is older than `feed_staleness_ttl_blocks` (default 1440 ≈ 6h, ~2.4× the 600-block `OracleUpdateInterval`), `ProfitabilityCalculator::analyze()` now forces a conservative **Mining** default (compute + staking revenue = 0) instead of trusting a stale feed. New `chain::head_block_number()` (`chain_getHeader`), public `get_feed()`, pure `is_feed_stale()` (+3 tests), config field with `#[serde(default="default_feed_ttl")]` (+3 tests), regression test, +1 ignored live probe. VERIFIED LIVE on RTX 4060 dev node: feed seeded @block16, head22 → `stale(TTL=5)=true`, `stale(TTL=1440)=false` (fresh). Agent **33/33** (was 26/7), node **98/98** unchanged. No runtime/pallet change. Log: `shared/artifacts/project7/cycle48-feed-staleness-ttl-log.md`. Remaining Phase-4: VPS-blocked (public bootnodes/RPC/explorer → escalated, needs $) + business decisions (D1–D5, token listing, marketplace go-live, sudo governed-path).**
+**Last Updated:** 2026-08-01 ~21:55 UTC (2026-08-01 ~14:55 PT)
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 47)
+## 🚀 Current Milestone (Cycle 48)
+
+**Closed oracle-governance §6 gap #1 — the agent no longer acts on a stale profitability feed (code, no money, high safety value).**
+
+The oracle drives the auto-switch; a feed that stops being refreshed would otherwise keep steering GPUs on outdated prices. Now `analyze()` checks `CurrentFeed.updated_at` against the current head block and, if the feed is older than `feed_staleness_ttl_blocks` (default 1440 ≈ 6h), **forces a conservative Mining default** (compute + staking revenue = 0, so mining always wins) with a clear `STALE … Forcing conservative Mining default` log.
+
+1. **`chain::head_block_number()`** — new JSON-RPC (`chain_getHeader`) read of the best head block **number** (previously only the hash was available).
+2. **`chain::get_feed()`** — public access to the parsed `OnChainFeed` incl. `updated_at_block` (and `analyze()` now fetches the feed **once** instead of 4×, one round-trip per field).
+3. **`chain::is_feed_stale(updated_at, head, ttl)`** — pure, unit-tested; stale when `head − updated_at > ttl`; `None | Some(0)` disables; `saturating_sub` safe.
+4. **Config** — `feed_staleness_ttl_blocks: Option<u64>` default `Some(1440)`; `#[serde(default = "default_feed_ttl")]` so configs that omit it still get the safe default (not None).
+
+**Verified LIVE** (`gpn-node --dev`, RTX 4060 host): seeded feed @block16 (Alice, genesis operator; explorer `/api/chain` confirms token $0.05 / gpu $2.5 / util 0.65 / apr 12%), head advanced to 22 → `live_staleness_ttl_probe` shows `stale(TTL=5)=true` (6 > 5) and `stale(TTL=1440)=false` (fresh) — the fresh→stale transition works against a real chain. **Agent 33/33 (+7), node 98/98** — no runtime/pallet change.
+
+**Next §6 gaps, in order:** #2 feed reasonableness bounds in `calc_compute_revenue`; #3 client-side median across operators.
+
+---
+
+## 🚀 Previous Milestone (Cycle 47)
 
 **Verified mainnet is safe-by-default + drafted the oracle-governance spec — two runbook §9 mainnet open items advanced with no money and no code changes.**
 
@@ -440,6 +457,7 @@ This **completes the production mining architecture**: node and miner are fully 
 | **`testnet_chain_spec()` — config-only fork of mainnet (`--chain=testnet`: ChainType::Local, NO endowed accounts → fair-launch, bootstrap oracle ops Alice+Bob, ops sudo Alice; same WASM runtime, identical diff/reward/inflation/cap); wired into `load_spec`; LIVE-mined real GPU Ethash blocks #1→#13 on RTX 4060; build-spec + mainnet-parity verified (cycle 43)** | ✅ **LIVE** |
 | **`gpn_faucet` — off-chain drip faucet (runbook §5 option 3, ZERO runtime change): HTTP `/drip` (ss58|hex) + `/status`; rate-limited signed `Balances.transfer_allow_death` (cooldown/daily-cap/total-cap/reserve); reuses dispatch-outcome-verified signer; LIVE on `gpn-node --dev` (RTX 4060): 5000 GPN drip to Bob landed on-chain, cooldown 429, hex drip ok, invalid/missing 400, reserve guard 500 (cycle 44)** | ✅ **LIVE** |
 | **`gpn_explorer` — read-only web block explorer + JSON API (runbook §7): HTML dashboard (head #/hash, real difficulty, feed, accounts+attestation, blocks, jobs) + `/api/chain`, `/api/blocks`, `/api/account`, `/api/jobs`; reuses `ChainClient` + raw header RPC; LIVE on `gpn-node --dev` (RTX 4060): head #30 real hash, difficulty 4096, Alice/Bob balances, live job #1 Pending 50 GPN (requestor Bob); fixed `chain_getHeader`-has-no-hash bug (cycle 45)** | ✅ **LIVE** |
+| **FEED STALENESS TTL (oracle-governance §6 gap #1): when `CurrentFeed.updated_at` is older than `feed_staleness_ttl_blocks` (default 1440 ≈6h), `analyze()` forces conservative Mining (compute+staking=0) instead of trusting a stale feed; new `chain::head_block_number()`/`get_feed()`/pure `is_feed_stale()`; VERIFIED LIVE on RTX 4060 dev node (feed @block16, head22 → stale(TTL=5)=true, stale(TTL=1440)=false); agent 33/33, node 98/98 (cycle 48)** | ✅ **LIVE** |
 | gpn-agent subxt chain client (stub) | ✅ **REPLACED (cycle 21)** |
 | Wire real `GPUAttestation::submit_attestation` extrinsic (reuse gpn_seed_feed Signer) | ✅ **DONE (cycle 25)** |
 | Enforce `min_gflops` matching at `accept_job` (cross-pallet attested read) | ✅ **DONE (cycle 26)** |
@@ -474,7 +492,7 @@ This **completes the production mining architecture**: node and miner are fully 
 2. [~] **(Phase 4) Block explorer** — first concrete piece done: `gpn_explorer` read-only web explorer + JSON API built & live-verified (Cycle 45, runbook §7). **REMAINING (needs hosting $):** stand up 2–4 public bootnodes + wss RPC + a public `gpn_explorer` instance → **ESCALATED to Jeremy**. ~~Publish operator-onboarding doc (docs, can draft now)~~ → **Cycle 46 DONE: `operator-onboarding.md` published (operator-facing subset of the runbook: 3 revenue modes + auto-switch, build, full node, faucet drip, auto agent, optional oracle op, explorer, public-endpoints placeholder table, troubleshooting). Runbook §7 checklist updated.**
 3. [ ] **(Docs)** Finalize the README marketplace-flow + GFLOPS-units + two-account/fee-economy walkthrough (item #9; mostly landed — polish the fee-economy section to reference the now-closed funding gap + `gpn_operate_oracle` maintenance flow + the new `gpn_faucet`).
 4. [~] **(Phase 4) Mainnet prep** — **Cycle 47 progress:** sudo "non-functional" half **VERIFIED** (`build-spec --chain=mainnet` → sudo key = all-zeros inert account, balances `[]`, oracle ops `[]` → `Sudo.sudo` unreachable on mainnet); **oracle governance spec DRAFTED** (`design/protocols/05-oracle-governance.md`, runbook §9 #5 — 3-phase plan + §6 code gaps + §7 decisions D1–D5). **Remaining:** sudo *governed* replacement path (business → escalate, §7 D2), token listing / liquidity plan (business → escalate), marketplace go-live + SLA/reputation policy (SLA drafted cycle 46; go-live = business), oracle governance decisions D1–D5 (business → escalate).
-5. [ ] **(Code, no money, high safety value — §6 gap #1)** Agent `CurrentFeed` **staleness TTL**: when `ProfitabilityOracle::CurrentFeed.updated_at` is older than N blocks, the agent should fall back to a conservative default (mine) rather than act on a stale feed. Small agent change; then §6 gap #2 (feed reasonableness bounds in `calc_compute_revenue`) and §6 gap #3 (client-side median tooling).
+5. [x] **(Code, no money, high safety value — §6 gap #1)** Agent `CurrentFeed` **staleness TTL**: when `ProfitabilityOracle::CurrentFeed.updated_at` is older than N blocks, the agent falls back to a conservative default (mine) rather than act on a stale feed. **(Cycle 48 DONE — new `feed_staleness_ttl_blocks` config (default 1440 ≈6h), `chain::head_block_number()` + public `get_feed()` + pure `is_feed_stale()`; `analyze()` forces Mining (compute+staking=0) when stale. Verified LIVE on RTX 4060 dev node: feed @block16, head22 → stale(TTL=5)=true, stale(TTL=1440)=false. Agent 33/33, node 98/98.)** Next: §6 gap #2 (feed reasonableness bounds in `calc_compute_revenue`) and §6 gap #3 (client-side median tooling).
 
 ## Phase 1 Findings
 
