@@ -1,7 +1,7 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3 (Prototype) — LIVE CHAIN-FEED-DRIVEN AUTO-SWITCH + JOB CLAIMING VERIFIED on RTX 4060: the real on-chain profitability feed (not scripted) drove Mining→Compute and claimed/served/paid a marketplace job; fixed a units bug that had capped compute revenue ~13× too low (item #11 DONE, Cycle 31).**
-**Last Updated:** 2026-08-01 ~05:05 UTC (2026-07-31 ~22:05 PT)
+**Status: Phase 3 (Prototype) — LIVE CHAIN-FEED-DRIVEN AUTO-SWITCH + JOB CLAIMING VERIFIED on RTX 4060 (Cycle 31). Cycle 32: filled the empty `design/tokenomics/` dir with a source-of-truth tokenomics spec aligned to the implemented `pallet-gpn-token` code (fair-launch, 10%→1% inflation, 50 GPN/block, 5% fee split 200/150/100/50 bps, 1,000 GPN attestation stake); reconciled preliminary-paper vs implemented-code tokenomics.**
+**Last Updated:** 2026-08-01 ~06:00 UTC (2026-07-31 ~23:00 PT)
 **Caretaker:** PM07
 
 ---
@@ -255,7 +255,10 @@ This **completes the production mining architecture**: node and miner are fully 
 | Enforce `min_gflops` matching at `accept_job` (cross-pallet attested read) | ✅ **DONE (cycle 26)** |
 
 ## Next Concrete Actions (priority order)
-1. [x] Two-node testnet docs in README + CI wiring for `gpn-node/scripts/gpn_two_node_testnet.sh` (cycle 23, 6/6 live).
+1. [ ] Fill remaining empty design dirs — `design/pallets/`, `design/protocols/`, `design/node-agent/` are scaffolded but empty (README references them). **(Cycle 32: `design/tokenomics/01-gpn-tokenomics.md` written; others pending)**
+2. [ ] Phase 4 prep from tokenomics Open Questions: wire real burn (20% of fees), per-staker staking payout keyed by GPU tier multiplier, oracle reward distribution, remove dev faucet (1T GPN) on mainnet genesis.
+3. [ ] Re-run `cargo test --workspace` + a live RTX 4060 smoke test to confirm no drift since Cycle 31.
+4. [x] Two-node testnet docs in README + CI wiring for `gpn-node/scripts/gpn_two_node_testnet.sh` (cycle 23, 6/6 live).
 2. [x] Compute marketplace integration: surface `ComputeExecutor` throughput/GFLOPS as an on-chain attestable metric (cycle 24 — attestation tier gated by GFLOPS + `min_gflops` in marketplace + agent measures/reports).
 3. [x] Wire the real `GPUAttestation::submit_attestation` extrinsic in the agent by reusing the `gpn_seed_feed` custom Signer + `GpnConfig` plumbing (cycle 25 — shared `chain::signer` module; challenge read; `with_signer` wiring).
 4. [x] Enforce `min_gflops` matching at `accept_job` — cross-pallet read of the provider's attested `compute_gflops` (trait from gpu-attestation into compute-marketplace) (cycle 26).
