@@ -95,6 +95,19 @@ impl ProfitAnalysis {
     }
 }
 
+/// Expected USD/hour from serving AI compute.
+///
+/// `gpu_price` is the marketplace's average GPU-hour price **already in
+/// USD** (the oracle stores micro-USD; `OnChainFeed` converts to USD). It
+/// must NOT be multiplied by `token_price` again — doing so produced USD^2
+/// and deflated compute revenue ~13x at token=$0.075, which is why the live
+/// chain feed never recommended Compute (only the scripted feed, which
+/// bypasses this calc, ever triggered job claiming). Fixed cycle 31.
+pub fn calc_compute_revenue(gpu_price: f64, utilization: f64) -> f64 {
+    let overhead_factor = 0.85; // 15% overhead for setup/teardown
+    gpu_price * utilization * overhead_factor
+}
+
 pub struct ProfitabilityCalculator {
     config: AgentConfig,
     chain_client: ChainClient,
@@ -150,7 +163,7 @@ impl ProfitabilityCalculator {
 
         // Calculate revenues
         let mining = self.calc_mining_revenue(gpu_info.current_hashrate_mhs, difficulty, token_price);
-        let compute = self.calc_compute_revenue(gpu_price, utilization, token_price);
+        let compute = calc_compute_revenue(gpu_price, utilization);
         let staking = self.calc_staking_revenue(self.config.staked_amount, staking_apr, token_price);
 
         Ok(ProfitAnalysis {
@@ -190,10 +203,15 @@ impl ProfitabilityCalculator {
         hourly_reward * token_price
     }
 
-    fn calc_compute_revenue(&self, gpu_price: f64, utilization: f64, token_price: f64) -> f64 {
-        let overhead_factor = 0.85; // 15% overhead for setup/teardown
-        gpu_price * utilization * overhead_factor * token_price
-    }
+    /// Expected USD/hour from serving AI compute.
+    ///
+    /// `gpu_price` is the marketplace's average GPU-hour price **already in
+    /// USD** (the oracle stores micro-USD; `OnChainFeed` converts to USD). It
+    /// must NOT be multiplied by `token_price` again — doing so produced USD^2
+    /// and deflated compute revenue ~13x at token=$0.075, which is why the live
+    /// chain feed never recommended Compute (only the scripted feed, which
+    /// bypasses this calc, ever triggered job claiming). Fixed cycle 31.
+
 
     fn calc_staking_revenue(&self, staked_amount: f64, apr: f64, token_price: f64) -> f64 {
         let annual = staked_amount * (apr / 100.0);
@@ -256,6 +274,22 @@ mod tests {
         // Both are within 5% of each other -> no switch either direction.
         assert_eq!(decide_switch(&a_hi, Mode::Mining, 5.0), None);
         assert_eq!(decide_switch(&a_lo, Mode::Compute, 5.0), None);
+    }
+
+    #[test]
+    fn compute_revenue_is_in_usd_not_double_converted() {
+        // Regression (cycle 31): gpu_price is already USD from the oracle feed;
+        // multiplying by token_price produced USD^2 and deflated compute revenue
+        // ~13x (at token=$0.075, $2.5/hr -> $0.069/hr), so the live chain feed
+        // never recommended Compute. Correct value = price x util x overhead.
+        let revenue = calc_compute_revenue(2.5, 0.65);
+        let expected = 2.5 * 0.65 * 0.85; // 1.38125 USD/hr
+        assert!(
+            (revenue - expected).abs() < 1e-9,
+            "expected {expected} USD/hr, got {revenue}"
+        );
+        // Sanity: it must be ~USD-scale, not deflated to ~$0.07.
+        assert!(revenue > 1.0, "compute revenue should be ~$1.38/hr, got {revenue}");
     }
 
     #[test]

@@ -1,0 +1,26 @@
+node_name = "autoclaim-live-4060"
+chain_endpoint = "ws://localhost:9944"
+account_address = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+account_key_file = "config/account_key.json"
+signer_uri = "//Alice"
+mode = "auto"
+gpu_model = "NVIDIA GeForce RTX 4060"
+min_vram_gb = 8
+attestation_interval_secs = 3600
+hysteresis_percent = 5.0
+min_epoch_hours = 1.0
+profitability_check_interval_secs = 5
+# CHAIN feed: live on-chain oracle values drive the auto-switch + job claiming
+# which is what triggers the agent to CLAIM marketplace jobs on-chain.
+profitability_feed = "chain"
+staked_amount = 10000.0
+max_concurrent_jobs = 2
+docker_endpoint = "unix:///var/run/docker.sock"
+mining_algorithm = "ethash"
+mining_pool_url = ""
+solo_mining = true
+mining_rpc_url = "http://127.0.0.1:9944"
+mining_device_index = 0
+compute_device_index = 0
+compute_matrix_size = 2048
+compute_batch = 4

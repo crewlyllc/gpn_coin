@@ -1,12 +1,21 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3 (Prototype) — TWO-ACCOUNT REQUESTOR→PROVIDER FLOW VERIFIED LIVE on-chain: Bob (paying customer) escrows 50 GPN, Alice (provider) earns 47.5 GPN (price − 5% fee) on a distinct-account job; on-chain requestor=Bob / provider=Alice confirmed (Cycle 30).**
-**Last Updated:** 2026-07-31 ~21:05 PT
+**Status: Phase 3 (Prototype) — LIVE CHAIN-FEED-DRIVEN AUTO-SWITCH + JOB CLAIMING VERIFIED on RTX 4060: the real on-chain profitability feed (not scripted) drove Mining→Compute and claimed/served/paid a marketplace job; fixed a units bug that had capped compute revenue ~13× too low (item #11 DONE, Cycle 31).**
+**Last Updated:** 2026-08-01 ~05:05 UTC (2026-07-31 ~22:05 PT)
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 30)
+## 🚀 Current Milestone (Cycle 31)
+
+**The last integration gap is closed: the live on-chain profitability feed now drives the auto-switch and job claiming end-to-end.** Found & fixed a dimensional bug (`calc_compute_revenue` multiplied an already-USD GPU-hour price by `token_price` again → USD², capping compute revenue ~13× too low), which is why the chain feed had never triggered Compute and the autoclaim demo had to use the scripted feed.
+
+1. **Fix:** extracted `calc_compute_revenue(gpu_price, utilization)` as a free function returning `gpu_price × utilization × 0.85` USD/hr (no token double-conversion); updated `analyze()`; +regression test.
+2. **Verified live (RTX 4060, `gpn-node --dev`):** seeded feed `GPU=$12/hr, util=95%` → agent log `Compute=$9.6900/hr` (from live feed) → `🔄 Mining → Compute` (mining stopped, DAG released) → claimed job #1 → real 2048³ GPU GEMM → `✅ job #1 completed & paid out` → auto-attested `tier=Bronze` @ 195 GFLOPS.
+3. **On-chain:** Alice `staked=true attested=true`; balance `999,000,000,047.499` GPN (= 1T − 1,000 stake + 47.5 payout). Two-account demo re-run green.
+4. **New `config/chain_autoclaim.toml`** (`profitability_feed = "chain"`).
+
+Detail: `shared/artifacts/project7/cycle31-chain-feed-autoswitch-live-log.md`
 
 **The marketplace is now proven with a real multi-party escrow/payment path — a distinct paying customer (Bob) funds a job, and a distinct provider (Alice) is paid from escrow.** The old demo used one account for both sides; new `gpn_two_account_demo` exercises the true two-party flow.
 
@@ -240,6 +249,7 @@ This **completes the production mining architecture**: node and miner are fully 
 | **Live end-to-end compute-marketplace job flow on RTX 4060: register → create → accept (attestation gate) → start → real GEMM → submit → complete + payout; GFLOPS-units fix so `min_gflops` gate works (cycle 28)** | ✅ **LIVE** |
 | **AUTO-SWITCH LOOP CLOSED: `auto` mode claims & serves marketplace jobs on-chain in Compute mode (accept→start→GEMM→submit→complete→payout); AccountId32 display fix `provider=0x00`→Alice (cycle 29)** | ✅ **LIVE** |
 | **TWO-ACCOUNT REQUESTOR→PROVIDER flow: distinct paying customer (Bob) escrows, distinct provider (Alice) paid price−5%fee; verified live on-chain (cycle 30)** | ✅ **LIVE** |
+| **LIVE CHAIN-FEED-DRIVEN AUTO-SWITCH + JOB CLAIMING: real on-chain profitability feed (not scripted) drives Mining→Compute and claims/serves/pays a marketplace job; fixed USD² compute-revenue units bug (cycle 31)** | ✅ **LIVE** |
 | gpn-agent subxt chain client (stub) | ✅ **REPLACED (cycle 21)** |
 | Wire real `GPUAttestation::submit_attestation` extrinsic (reuse gpn_seed_feed Signer) | ✅ **DONE (cycle 25)** |
 | Enforce `min_gflops` matching at `accept_job` (cross-pallet attested read) | ✅ **DONE (cycle 26)** |
@@ -255,7 +265,7 @@ This **completes the production mining architecture**: node and miner are fully 
 8. [x] Close the loop: in `auto` mode, the agent now actually CLAIMS marketplace jobs on-chain when the oracle says compute demand is high (accept→start→real GEMM→submit→complete+payout). **(cycle 29 — DONE, live on RTX 4060)**
 9. [ ] Document the marketplace flow + GFLOPS units convention in README (now includes the loop-closing `gpn_create_job` + auto-agent walkthrough).
 10. [x] Two-account requestor→provider demo (currently both are Alice for simplicity); wire a second dev account as the paying customer. **(cycle 30 — DONE: new `gpn_two_account_demo` binary, verified live on-chain: Bob escrows 50 GPN, Alice earns 47.5 GPN)**
-11. [ ] Couple the real profitability-oracle `update_feed` to job claiming (not just the scripted feed) so live token/gpu pricing drives it.
+11. [x] Couple the real profitability-oracle `update_feed` to job claiming (not just the scripted feed) so live token/gpu pricing drives it. **(cycle 31 — DONE: fixed `calc_compute_revenue` USD² units bug that kept chain-feed compute revenue ~13× too low; verified live on RTX 4060 — live feed `Compute=$9.69/hr` drove Mining→Compute and claimed/served/paid job #1; new `config/chain_autoclaim.toml`)**
 
 ## Phase 1 Findings
 
