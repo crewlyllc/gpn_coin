@@ -22,11 +22,13 @@
 | Genesis initial inflation | **10%** |
 | Terminal inflation | **1%** |
 | Initial block reward | **50 GPN/block** |
+| Hard supply cap | **1B GPN** (`MaxSupply`) |
 | Launch model | **Fair launch via mining** — no premine, no ICO, no dev allocation |
 
 The prototype runs on `gpn-node --dev` with a dev funding faucet (accounts seeded with
-1,000,000,000,000 GPN for testing). On mainnet the genesis supply should be 0 and all GPN
-issued via `mint_block_reward` through GPU PoW.
+100,000 GPN for testing — well below the cap and above the 1,000 GPN attestation stake).
+Mainnet (`--chain=mainnet`) seeds **zero** accounts: all GPN is issued via
+`mint_block_reward` through GPU PoW.
 
 ---
 
@@ -35,8 +37,9 @@ issued via `mint_block_reward` through GPU PoW.
 ### 2.1 Emission source
 - **All** GPN is minted by the `gpn-token` pallet via `mint_block_reward` (root-only,
   called by the `gpu-pow` consensus pallet when a block is sealed).
-- `TotalMinted` storage tracks cumulative issuance (enforces `SupplyCapExceeded` guard).
-- No genesis supply (fair launch).
+- `TotalMinted` storage tracks cumulative issuance (enforces `SupplyCapExceeded` guard
+  in `gpu-pow`'s `distribute_pending_rewards` against `MaxSupply` = **1B GPN**).
+- No genesis supply (fair launch) — mainnet seeds zero accounts.
 
 ### 2.2 Inflation schedule (implemented)
 - `InitialInflation = 10%`, `TerminalInflation = 1%`.
@@ -150,12 +153,18 @@ marketplace fees rather than pre-minted allocations.
 
 **Still open for mainnet:**
 
-4. **Bonding curve / supply cap:** `SupplyCapExceeded` exists in errors but no hard
-   cap is configured — decide whether GPN is capped (e.g., 28.7B like Kaspa, or
-   1B) or uncapped disinflationary.
-5. **Dev faucet removal:** mainnet genesis must not seed 1T GPN test balances
-   (runtime/dev-spec only — genesis supply is already 0 by design; the 1T
-   balances live in the `--dev`/local chain spec funding).
+4. ✅ **Supply cap decided (Cycle 35):** GPN is **hard-capped at 1B GPN** (`MaxSupply` in
+   the runtime gpu-pow config = `1_000_000_000_000_000_000_000` raw = 1B GPN).
+   `distribute_pending_rewards` refuses to mint past the cap, so emission is
+   disinflationary AND absolutely bounded — supply can never exceed 1B GPN.
+5. ✅ **Dev faucet scoped + mainnet fair launch (Cycle 35):** the `--dev`/`local`
+   chain specs now seed a modest **100,000 GPN** test faucet (was erroneously 1
+   trillion GPN, equal to the entire cap). A new **`mainnet` chain spec**
+   (`--chain=mainnet`) has **zero endowed accounts and no oracle operators** —
+   all GPN is issued via GPU PoW block rewards (fair launch). Also fixed a
+   latent bug: the block reward constant was 50 **million** GPN, not 50 GPN
+   (would have exhausted the 1B cap in ~20 blocks); now correctly **50 GPN**
+   (matching the spec).
 
 ---
 

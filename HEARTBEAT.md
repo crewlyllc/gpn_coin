@@ -1,12 +1,24 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3 (Prototype) — LIVE on RTX 4060 (Cycle 31). Cycle 34: Phase-4 tokenomics prep in code — real burn (slash from circulation), oracle operator reward distribution, and tier-multiplied staking payout (attestation boosts yield via GPUAttestationProvider cross-pallet trait). Cycle 33: source-of-truth tokenomics/design docs.**
-**Last Updated:** 2026-08-01 ~08:00 UTC (2026-08-01 ~01:00 PT)
+**Status: Phase 3 (Prototype) — LIVE on RTX 4060 (Cycle 31). Cycle 35: Phase-4 mainnet prep — decided & enforced a 1B GPN hard supply cap (was 1T, comment said 1B), added a zero-faucet `--chain=mainnet` fair-launch spec, and fixed a latent block-reward bug (50M GPN → correct 50 GPN/block, which would have exhausted the 1B cap in ~20 blocks). Cycle 34: real burn (slash from circulation), oracle operator reward distribution, and tier-multiplied staking payout.**
+**Last Updated:** 2026-08-01 ~02:15 UTC (2026-08-01 ~19:15 PT)
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 34)
+## 🚀 Current Milestone (Cycle 35)
+
+**Closed the last two Phase-4 tokenomics open questions in code — supply cap decided, mainnet fair-launch spec added, and a critical block-reward bug fixed.** This makes the token economy coherent for mainnet: emission is disinflationary *and* absolutely bounded.
+
+1. **Hard supply cap = 1B GPN.** `MaxSupply` in the runtime gpu-pow config was `10^24` raw = **1 trillion GPN** (comment wrongly said 1B). Corrected to `10^21` raw = **1B GPN**. The cap was already enforced in `distribute_pending_rewards` (guard + `test_supply_cap_halts_mining`); now the value matches the design.
+2. **Mainnet fair-launch chain spec.** New `mainnet_chain_spec()` (`--chain=mainnet`, `ChainType::Live`) with **zero endowed accounts and zero oracle operators** — all GPN issued via GPU PoW. Dev/local faucet cut from 1 trillion GPN (equal to the whole old cap) to a sane **100,000 GPN** per account.
+3. 🐛 **Block-reward bug fixed (critical).** The reward constant was `5×10^19` raw = **50,000,000 GPN**, but the spec documents **50 GPN/block**. With a 1B cap, a 50M reward would exhaust supply in **~20 blocks**, silently halting mining. Fixed to 50 GPN in runtime + test constant + chain spec.
+
+**Verified:** `cargo test --workspace` → **97 passed / 0 failed** (gpu-pow 16, gpn-token 19, marketplace 21, attestation 20, oracle 14, node 5, runtime 2). `build-spec` confirms mainnet = 0 endowed, dev = 6×100,000 GPN, reward = 50 GPN on all. Live `gpn-node --dev` mined/imported blocks #30–#34 with the new reward. Detail: `shared/artifacts/project7/cycle35-supply-cap-mainnet-log.md`
+
+---
+
+## 🚀 Previous Milestone (Cycle 34)
 
 **Closed the three code-side Phase-4 open questions from the tokenomics spec in `pallet-gpn-token`** — the fee economy now has real deflation, a working oracle payout, and proof-of-staked-GPU incentives. This is the first code delivery toward mainnet tokenomics (not just docs).
 
@@ -292,8 +304,10 @@ This **completes the production mining architecture**: node and miner are fully 
 | Enforce `min_gflops` matching at `accept_job` (cross-pallet attested read) | ✅ **DONE (cycle 26)** |
 
 ## Next Concrete Actions (priority order)
-1. [ ] Phase 4 mainnet prep from tokenomics spec §7: decide bonding curve / hard supply cap (SupplyCapExceeded exists but no cap configured) and remove the 1T GPN dev faucet from `--dev`/local chain spec funding. **(Cycle 34: burn + oracle distribution + tier staking payout done; these two remain)**
-2. [ ] Re-run `cargo test --workspace` + a live RTX 4060 smoke test to confirm no drift since Cycle 31 (tokenomics runtime change is in).
+1. [x] Phase 4 mainnet prep from tokenomics spec §7: decide bonding curve / hard supply cap + remove the dev faucet from mainnet. **(Cycle 35 DONE: cap = 1B GPN enforced; new `--chain=mainnet` zero-faucet fair-launch spec; dev faucet 1T→100k GPN; fixed latent 50M→50 GPN block-reward bug that would have exhausted the 1B cap in ~20 blocks)**
+2. [x] Re-run `cargo test --workspace` + a live smoke test to confirm no drift since Cycle 34. **(Cycle 35: 97/0 passed; dev node mined #30–#34 live)**
+3. [ ] Wire `distribute_fees`/`distribute_staking_rewards`/`distribute_oracle_rewards` into the node/agent tooling (a `gpn_distribute_rewards` helper mirroring `gpn_seed_feed`) so the fee economy is exercisable end-to-end on-chain.
+4. [ ] Re-run a live RTX 4060 GPU smoke test (block-reward change is consensus-affecting; GPU path unaffected but worth confirming on hardware).
 3. [ ] Wire `distribute_fees`/`distribute_staking_rewards`/`distribute_oracle_rewards` into the node/agent tooling (a `gpn_distribute_rewards` helper mirroring `gpn_seed_feed`) so the fee economy is exercisable end-to-end on-chain.
 4. [x] Fill remaining empty design dirs — `design/pallets/`, `design/protocols/`, `design/node-agent/` (Cycle 33, DONE).
 4. [x] Two-node testnet docs in README + CI wiring for `gpn-node/scripts/gpn_two_node_testnet.sh` (cycle 23, 6/6 live).

@@ -422,7 +422,7 @@ mod tests {
     parameter_types! {
         pub const TestMinDifficulty: U256 = [0, 0, 0, 0x1_0000];
         pub const TestMaxDifficulty: U256 = [0xFFFF_FFFF_FFFF_FFFF; 4];
-        pub const TestInitialReward: Balance = 50_000_000_000_000_000_000;
+        pub const TestInitialReward: Balance = 50_000_000_000_000; // 50 GPN
         pub const TestHalvingInterval: u64 = 100;
         pub const TestTargetBlockTime: u64 = 15;
         pub const TestDifficultyWindow: u64 = 10;

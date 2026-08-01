@@ -76,6 +76,28 @@ pub fn local_chain_spec() -> Result<ChainSpec, String> {
         .build())
 }
 
+/// Mainnet config (fair launch - NO dev faucet, NO endowed accounts).
+///
+/// All GPN is issued via GPU PoW block rewards (`gpu-pow` mints through
+/// `gpn-token::mint_block_reward`). Genesis supply = 0, as the tokenomics spec
+/// requires. Initial difficulty targets ~15s blocks like the other specs.
+pub fn mainnet_chain_spec() -> Result<ChainSpec, String> {
+    let wasm_binary = gpn_runtime::WASM_BINARY
+        .ok_or_else(|| "Mainnet wasm binary not available".to_string())?;
+
+    Ok(ChainSpec::builder(wasm_binary, None)
+        .with_name("GPN Mainnet")
+        .with_id("gpn_mainnet")
+        .with_chain_type(ChainType::Live)
+        .with_protocol_id("gpn")
+        .with_properties(properties())
+        .with_genesis_config(genesis_config_json(
+            vec![],                  // no oracle operators at genesis
+            vec![],                  // no endowed accounts - fair launch
+        ))
+        .build())
+}
+
 /// Build the genesis config as JSON (consumed by the runtime's GenesisBuilder API).
 fn genesis_config_json(
     initial_operators: Vec<AccountId>,
@@ -91,7 +113,12 @@ fn genesis_config_json(
         diff
     };
 
-    let initial_balance: u128 = 1_000_000_000_000_000_000_000_000; // 1,000,000 GPN
+    // DEV-ONLY faucet (test convenience). Far below the 1B GPN MaxSupply cap and
+    // well above the 1,000 GPN attestation stake, so a dev chain can stake + run
+    // marketplace jobs without ever colliding with the supply cap.
+    // Mainnet genesis MUST use an empty endowment (fair launch) - see
+    // mainnet_chain_spec().
+    let initial_balance: u128 = 100_000_000_000_000_000; // 100,000 GPN (dev faucet)
 
     let config = RuntimeGenesisConfig {
         system: Default::default(),
@@ -101,7 +128,7 @@ fn genesis_config_json(
         },
         gpu_po_w: GPUPoWConfig {
             initial_difficulty,
-            initial_block_reward: 50_000_000_000_000_000_000u128, // 50 GPN
+            initial_block_reward: 50_000_000_000_000u128, // 50 GPN
             _config: Default::default(),
         },
         gpu_attestation: GPUAttestationConfig {
