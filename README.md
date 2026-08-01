@@ -63,6 +63,7 @@ projectmanager07/
 │   ├── protocols/02-gpu-attestation.md
 │   ├── protocols/03-compute-marketplace.md
 │   ├── protocols/04-profitability-oracle.md
+│   ├── protocols/05-oracle-governance.md  # Oracle operator governance spec (§9 #5)
 │   ├── node-agent/01-agent-architecture.md
 │   └── tokenomics/01-gpn-tokenomics.md
 └── HEARTBEAT.md
