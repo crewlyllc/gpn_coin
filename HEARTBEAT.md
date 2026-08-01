@@ -1,12 +1,25 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
-**Status: Phase 3 (Prototype) — LIVE on RTX 4060. Cycle 39: closed the cycle-38 robustness finding — `signer::submit_signed` now verifies the DISPATCH OUTCOME (not just inclusion), so a failed extrinsic returns a real `Err` with a resolvable module error instead of logging "succeeded". Verified live: a guaranteed-fail `accept_job` (non-existent job) → `Err: ModuleError(ComputeMarketplace::JobNotFound/ProviderNotRegistered) [pallet=8 error=...]`; the success path (two-account Bob→Alice escrow demo) logs `tx dispatched successfully` for every real tx. 98/98 node-workspace tests + 26/26 agent lib tests (was 22; +4 dispatch-error unit tests). New `gpn_verify_dispatch` probe.**
-**Last Updated:** 2026-08-01 ~13:25 UTC (2026-08-01 ~06:25 PT)
+**Status: Phase 3 (Prototype) — LIVE on RTX 4060. Cycle 40: closed priority #5 — the FULL revenue loop now verified end-to-end in one session on the fixed (cycle-39) runtime: two-account requestor→provider demo (Bob escrows 50, Alice earns 47.5, all assertions green) → `gpn_verify_dispatch` failure path (`Err ModuleError(ComputeMarketplace::JobNotFound) [pallet=8 error=2]`) → GPU attest (Alice Bronze @196 GFLOPS, 1,000 GPN stake confirmed) → `gpn_distribute_rewards` (seed 3000→distribute 1000): StakingRewardPool 0→400, OracleRewardPool 0→100, **both drained** to attested Alice (+500 GPN = 400 staking + 100 oracle; balance 99047.5→99547.5). Fee routing (cycle-37) + tier-weighted staking payout (cycle-38) + dispatch-outcome verification (cycle-39) all confirmed live together. 98/98 node-workspace tests + 26/26 agent lib tests.**
+**Last Updated:** 2026-08-01 ~14:20 UTC (2026-08-01 ~07:20 PT)
 **Caretaker:** PM07
 
 ---
 
-## 🚀 Current Milestone (Cycle 39)
+## 🚀 Current Milestone (Cycle 40)
+
+**Closed priority #5 — the complete revenue loop now runs end-to-end live on the fixed runtime.** This is the first time the entire economy was exercised in one session on the cycle-39 (dispatch-outcome-verified) node:
+
+1. **Two-account marketplace flow** (`gpn_two_account_demo`, Bob→Alice, 50 GPN): Bob escrowed 50, Alice earned 47.5 (price − 5% fee), distinct accounts, job Completed, all assertions green; every real extrinsic logged `tx dispatched successfully` (no false Err — cycle-39 fix holds on the success path).
+2. **Dispatch-outcome failure path** (`gpn_verify_dispatch`): guaranteed-fail `accept_job(999999999)` → `Err: ModuleError(ComputeMarketplace::JobNotFound) [pallet=8 error=2]` (Alice was registered, so the real first-failing guard surfaced). ✅
+3. **GPU attest** (`gpn-agent stake_only` on RTX 4060): deposited 1,000 GPN stake (cycle-38 unit fix) + measured 196 GFLOPS → on-chain `staked=true attested=true tier=Bronze @ 196 GFLOPS`; second run correctly surfaced `AlreadyAttested` (idempotency + dispatch path both work).
+4. **Fee-economy → tier-weighted payout** (`gpn_distribute_rewards`): `distribute_fees(1000)` → StakingRewardPool 0→400, OracleRewardPool 0→100; `distribute_staking_rewards([Alice])` drained staking 400→0, `distribute_oracle_rewards([Alice])` drained oracle 100→0; Alice +500 GPN (400 staking + 100 oracle − fees), balance 99047.5→99547.5.
+
+**Verified:** `cargo test --workspace --release` (gpn-node) → **98 passed / 0 failed**; `cargo test --lib --release` (gpn-agent) → **26 passed / 0 failed / 7 GPU-gated ignored**. No source changes this cycle (pure live verification + docs). Detail: `shared/artifacts/project7/cycle40-full-loop-live-log.md`
+
+---
+
+## 🚀 Previous Milestone (Cycle 39)
 
 **Closed the cycle-38 robustness finding: `signer::submit_signed` (and every agent caller that uses it) now verifies the DISPATCH OUTCOME, not just inclusion.** The old code broke on `TxStatus::InBestBlock` and returned `Ok` unconditionally — a tx that was *included but failed dispatch* (still lands in a block, with a `System::ExtrinsicFailed` event) was logged as "succeeded". This is exactly what masked the cycle-38 `MinAttestationStake` unit bug: the attestation `deposit_stake` failed dispatch (insufficient balance) but was reported as success.
 
@@ -346,6 +359,7 @@ This **completes the production mining architecture**: node and miner are fully 
 | **SELF-FUNDING FEE ECONOMY: marketplace fees (5%) route into `gpn/tokn` via `FeeSinkProvider` at `complete_job`, so `distribute_fees` draws real collected fees; verified live (50 GPN job → 2.5 GPN in gpn/tokn → pools 400/100, oracle drained, staking held for unattested); fixed gpn_distribute_rewards tokio blocking panic (cycle 37)** | ✅ **LIVE** |
 | **TIER-WEIGHTED STAKING PAYOUT LIVE: fixed latent `MinAttestationStake` unit bug (1e21 raw = 1B GPN → 1e15 = 1,000 GPN; cycle-35 faucet cut exposed it); Alice attested Bronze @194 GFLOPS on RTX 4060, staking pool drained 400→0 (was held for unattested in cycle 37), oracle drained, Alice +~500 GPN (cycle 38)** | ✅ **LIVE** |
 | **DISPATCH-OUTCOME VERIFICATION: `signer::submit_signed` now verifies dispatch success (not just inclusion) — reads `System::Events` via proven dynamic-storage path, scans for `System::ExtrinsicFailed`, decodes resolvable module error; new `gpn_verify_dispatch` probe; verified live: guaranteed-fail `accept_job` → `Err: ModuleError(ComputeMarketplace::JobNotFound/ProviderNotRegistered)`, success path logs `tx dispatched successfully` (cycle 39)** | ✅ **LIVE** |
+| **FULL REVENUE LOOP CLOSED LIVE: two-account demo (Bob→Alice escrow, all-green) → verify_dispatch failure path → GPU attest (Alice Bronze @196 GFLOPS) → distribute_fees pools 400/100 → both drained to attested Alice (+500 GPN); fee routing + tier-weighted staking payout + dispatch-outcome verification all confirmed end-to-end in one session on the fixed runtime (cycle 40)** | ✅ **LIVE** |
 | gpn-agent subxt chain client (stub) | ✅ **REPLACED (cycle 21)** |
 | Wire real `GPUAttestation::submit_attestation` extrinsic (reuse gpn_seed_feed Signer) | ✅ **DONE (cycle 25)** |
 | Enforce `min_gflops` matching at `accept_job` (cross-pallet attested read) | ✅ **DONE (cycle 26)** |
@@ -355,7 +369,7 @@ This **completes the production mining architecture**: node and miner are fully 
 2. [x] **Close the funding gap (found cycle 36):** wire marketplace fees (5%, currently in `gpn/cmkt`) → `gpn/tokn` pallet account so the fee economy is self-funding. **(Cycle 37 DONE: `FeeSinkProvider` trait in gpn-token; marketplace `complete_job` routes the fee to the token pallet account; runtime `type FeeSink = GPNToken`; verified LIVE — a 50 GPN job's 2.5 GPN fee landed in `gpn/tokn`, then `distribute_fees(1000)` filled pools 400/100, drained oracle to Alice, held staking for unattested staker. Also fixed the `gpn_distribute_rewards` tokio blocking panic)**
 3. [x] Verify attested-tier-weighted staking payout live on the RTX 4060 (attest Alice → Bronze, re-run `gpn_distribute_rewards` → staking pool should drain with tier multiplier). **(Cycle 38 DONE — and it surfaced + fixed a latent `MinAttestationStake` unit bug: value was 1e21 raw = 1 BILLION GPN, not 1,000 GPN = 1e15. Fixed runtime + agent; verified live: Alice Bronze @194 GFLOPS, staking pool drained 400→0 (was held for unattested), oracle drained, Alice +~500 GPN. 98/98 tests.)**
 4. [x] **(Robustness, cycle-38 finding)** Make `signer::submit_signed` (and agent callers) verify the **dispatch outcome / events**, not just inclusion — failed extrinsics currently log "succeeded". This masked the `MinAttestationStake` unit bug. **(Cycle 39 DONE: `submit_signed` now reads `System::Events` via the proven dynamic-storage path, scans for `System::ExtrinsicFailed`, and decodes a resolvable module error (`ModuleError(Pallet::Error) [pallet=.. error=..]`). New `gpn_verify_dispatch` probe. Verified live on RTX 4060: guaranteed-fail `accept_job` → `Err: ModuleError(ComputeMarketplace::JobNotFound/ProviderNotRegistered)`; success path (`gpn_two_account_demo`) logs `tx dispatched successfully` for every real tx — no false Err. 26/26 agent lib tests (+4), 98/98 node-workspace tests.)**
-5. [ ] Re-run the two-account requestor→provider marketplace demo live with the fixed runtime (full fee-routing → distribute → tier-weighted payout path end-to-end).
+5. [x] Re-run the two-account requestor→provider marketplace demo live with the fixed runtime (full fee-routing → distribute → tier-weighted payout path end-to-end). **(Cycle 40 DONE — the FULL loop closed live on the RTX 4060 in one session on the cycle-39 node: two-account demo all-green → verify_dispatch failure path → GPU attest (Alice Bronze @196 GFLOPS) → distribute_fees splits pools 400/100 → both drained to attested Alice (+500 GPN). Fee routing + tier-weighted staking payout + dispatch-outcome verification all confirmed together. 98/98 node + 26/26 agent tests.)**
 4. [x] Fill remaining empty design dirs — `design/pallets/`, `design/protocols/`, `design/node-agent/` (Cycle 33, DONE).
 4. [x] Two-node testnet docs in README + CI wiring for `gpn-node/scripts/gpn_two_node_testnet.sh` (cycle 23, 6/6 live).
 2. [x] Compute marketplace integration: surface `ComputeExecutor` throughput/GFLOPS as an on-chain attestable metric (cycle 24 — attestation tier gated by GFLOPS + `min_gflops` in marketplace + agent measures/reports).
@@ -368,6 +382,12 @@ This **completes the production mining architecture**: node and miner are fully 
 9. [ ] Document the marketplace flow + GFLOPS units convention in README (now includes the loop-closing `gpn_create_job` + auto-agent walkthrough).
 10. [x] Two-account requestor→provider demo (currently both are Alice for simplicity); wire a second dev account as the paying customer. **(cycle 30 — DONE: new `gpn_two_account_demo` binary, verified live on-chain: Bob escrows 50 GPN, Alice earns 47.5 GPN)**
 11. [x] Couple the real profitability-oracle `update_feed` to job claiming (not just the scripted feed) so live token/gpu pricing drives it. **(cycle 31 — DONE: fixed `calc_compute_revenue` USD² units bug that kept chain-feed compute revenue ~13× too low; verified live on RTX 4060 — live feed `Compute=$9.69/hr` drove Mining→Compute and claimed/served/paid job #1; new `config/chain_autoclaim.toml`)**
+
+## Next Concrete Actions (fresh, post-cycle-40)
+1. [ ] **(Docs)** Finalize the marketplace flow + GFLOPS units convention + two-account/fee-economy walkthrough in README (item #9; partially landed — complete it).
+2. [ ] **(Phase 4 prep)** Profitability-oracle operator tooling: a `gpn_operate_oracle` long-running loop (mirror `gpn_seed_feed` but periodic `update_feed` maintenance), so the live feed is a maintained service, not a one-shot seed.
+3. [ ] **(Phase 4 prep)** Mainnet testnet hardening: re-verify two-node p2p testnet on the fixed runtime (CI job exists; optional manual re-run), config/docs for a public testnet spec.
+4. [ ] **(Phase 4)** Public testnet → mainnet: token listing prep, compute marketplace launch, operator onboarding docs.
 
 ## Phase 1 Findings
 
