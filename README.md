@@ -418,10 +418,16 @@ blocks, marketplace jobs) plus JSON endpoints for scripting:
 gpn-agent/target/release/gpn_explorer --listen 0.0.0.0:8082 --account //Alice --account //Bob
 ```
 
-- `GET /` — HTML dashboard · `/api/chain` — head + difficulty + feed
+- `GET /` — HTML dashboard · `/api/chain` — head + difficulty + feed + **effective feed**
 - `/api/blocks?count=12` — recent blocks (number + hash)
 - `/api/account?address=<ss58|//uri|0x-hex>` — balance/nonce/staked/attested/tier
 - `/api/jobs` — all marketplace jobs (state, price, min-GFLOPS, requestor, provider)
+- `/api/effective-feed` — **on-chain Phase-C bond-weighted median** (cycle 56 `gpn_effectiveFeed` RPC; `{"error":…}` when no bonded operator has posted)
+
+The dashboard now also renders an "On-chain effective feed (Phase-C bond-weighted
+median)" section showing the **authoritative** aggregation the pallet computes
+(`ProfitabilityOracle::effective_feed()`, cycle 57 wiring) — the same value a
+client gets from `gpn_effective_feed`, surfaced alongside the latest posted feed.
 
 CLI: `gpn_explorer [--endpoint ws://127.0.0.1:9944] [--listen 127.0.0.1:8082] [--account …]…`
 (details: `shared/artifacts/project7/cycle45-explorer-live-log.md`; runbook `§7`)

@@ -102,7 +102,8 @@ async fn recent_blocks(endpoint: &str, count: u64) -> Vec<(u64, String)> {
     out
 }
 
-/// Chain summary: head block + difficulty + live profitability feed.
+/// Chain summary: head block + difficulty + live profitability feed +
+/// the on-chain Phase-C bond-weighted median (authoritative aggregation).
 async fn chain_summary(ex: &Explorer) -> serde_json::Value {
     let (head_num, head_hash) = head_block(&ex.endpoint).await.unwrap_or((0, "?".into()));
     let difficulty = ex.client.get_difficulty().await.unwrap_or(0.0);
@@ -110,6 +111,9 @@ async fn chain_summary(ex: &Explorer) -> serde_json::Value {
     let gpu = ex.client.get_gpu_hour_price("").await.unwrap_or(0.0);
     let util = ex.client.get_utilization_rate("").await.unwrap_or(0.0);
     let apr = ex.client.get_staking_apr().await.unwrap_or(0.0);
+    // Authoritative on-chain Phase-C bond-weighted median (gpn_effectiveFeed RPC,
+    // cycle 56). `None` when no bonded operator has posted a feed yet.
+    let eff = ex.client.get_effective_feed().await;
     serde_json::json!({
         "head_number": head_num,
         "head_hash": head_hash,
@@ -120,6 +124,13 @@ async fn chain_summary(ex: &Explorer) -> serde_json::Value {
             "utilization": util,
             "staking_apr_percent": apr,
         },
+        "effective_feed": eff.map(|f| serde_json::json!({
+            "token_price_usd": f.token_price_usd,
+            "gpu_hour_price_usd": f.avg_gpu_hour_price_usd,
+            "utilization": f.utilization,
+            "staking_apr_percent": f.staking_apr_percent,
+            "updated_at_block": f.updated_at_block,
+        })),
     })
 }
 
@@ -196,6 +207,20 @@ fn route(ex: &Explorer, handle: &tokio::runtime::Handle, path: &str, query: &str
     match path {
         "/api/chain" => json_response(&handle.block_on(chain_summary(ex)).to_string(), 200),
         "/api/feed" => json_response(&handle.block_on(chain_summary(ex)).to_string(), 200),
+        "/api/effective-feed" => {
+            // The authoritative on-chain Phase-C bond-weighted median alone.
+            let eff = handle.block_on(ex.client.get_effective_feed());
+            match eff {
+                Some(f) => json_response(&serde_json::json!({
+                    "token_price_usd": f.token_price_usd,
+                    "gpu_hour_price_usd": f.avg_gpu_hour_price_usd,
+                    "utilization": f.utilization,
+                    "staking_apr_percent": f.staking_apr_percent,
+                    "updated_at_block": f.updated_at_block,
+                }).to_string(), 200),
+                None => json_response(r#"{"error":"no bonded operator has posted a feed yet"}"#, 200),
+            }
+        }
         "/api/blocks" => {
             let count = params.get("count").and_then(|c| c.parse::<u64>().ok()).unwrap_or(12).min(50);
             let blocks = handle.block_on(recent_blocks(&ex.endpoint, count));
@@ -257,6 +282,23 @@ button{background:#238636;border:none;color:#fff;padding:6px 14px;border-radius:
         feed["utilization"].as_f64().unwrap_or(0.0) * 100.0,
         feed["staking_apr_percent"].as_f64().unwrap_or(0.0),
     ));
+
+    // On-chain Phase-C bond-weighted median (authoritative aggregation).
+    s.push_str("<h2>On-chain effective feed (Phase-C bond-weighted median)</h2>");
+    match chain.get("effective_feed") {
+        Some(eff) if !eff.is_null() => {
+            s.push_str("<table><tr><th>Token $</th><th>GPU $/hr</th><th>Utilization</th><th>Staking APR</th><th>@ block</th></tr>");
+            s.push_str(&format!(
+                "<tr><td>${:.4}</td><td>${:.2}/hr</td><td>{:.0}%</td><td>{:.1}%</td><td>#{}</td></tr></table>",
+                eff["token_price_usd"].as_f64().unwrap_or(0.0),
+                eff["gpu_hour_price_usd"].as_f64().unwrap_or(0.0),
+                eff["utilization"].as_f64().unwrap_or(0.0) * 100.0,
+                eff["staking_apr_percent"].as_f64().unwrap_or(0.0),
+                eff["updated_at_block"].as_u64().unwrap_or(0),
+            ));
+        }
+        _ => s.push_str("<p>no bonded operator has posted a feed yet</p>"),
+    }
 
     // Account lookup form
     s.push_str(r#"<h2>Account</h2><form onsubmit="window.location='/api/account?address='+encodeURIComponent(document.getElementById('addr').value);return false">
