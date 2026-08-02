@@ -273,6 +273,41 @@ impl ChainClient {
         self.storage_at_head(client, &addr).await?.as_u128()
     }
 
+    /// Enumerate every **bonded** (permissionless, Phase-C) oracle operator's
+    /// bond size from `ProfitabilityOracle::StakedOperators`, as
+    /// `(hex account, bond GPN-raw)`. This is the bond-weight side of the
+    /// bond-weighted median aggregation: paired with `get_operator_feeds()`, a
+    /// consumer can weight each operator's latest feed by how much GPN they
+    /// bonded, so a large-bond operator dominates the effective feed and a
+    /// tiny-bond operator (even an outlier) cannot move it. Returns an empty
+    /// vec if the chain is unreachable or no operator has bonded.
+    pub async fn get_staked_bonds(&self) -> Vec<(String, u128)> {
+        let client = match self.client.as_ref() {
+            Some(c) => c,
+            None => return Vec::new(),
+        };
+        let addr =
+            subxt::dynamic::storage("ProfitabilityOracle", "StakedOperators", vec![]);
+        let mut out = Vec::new();
+        if let Some(hash) = self.head_block_hash().await {
+            if let Ok(mut stream) = client.storage().at(hash).iter(addr).await {
+                while let Some(Ok(kv)) = stream.next().await {
+                    let op = kv
+                        .keys
+                        .first()
+                        .map(account_id_to_string)
+                        .unwrap_or_default();
+                    if let Ok(v) = kv.value.to_value() {
+                        if let Some(bond) = v.remove_context().as_u128() {
+                            out.push((op, bond));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Read the on-chain PoW **target** (`[u64;4]` little-endian limbs) and
     /// convert to a classic difficulty metric `2^256 / target`. Falls back to
     /// the placeholder difficulty on any error.
@@ -765,6 +800,74 @@ pub fn aggregate_median_feed(feeds: &[OnChainFeed]) -> Option<OnChainFeed> {
     })
 }
 
+/// Bond-weighted median of a field across operators (Phase-C oracle
+/// aggregation, spec §5/§8 D3). `weights` and `values` are parallel (index i
+/// is one operator); operators with zero/absent weight are excluded. Sorts by
+/// field value, walks cumulative bond weight, and returns the value at the
+/// 50% cumulative-weight point — so a large-bond operator dominates the
+/// median and a tiny-bond outlier cannot move it. Returns `None` if no
+/// positive-weight finite values remain.
+pub fn bond_weighted_median_f64(weights: &[f64], values: &[f64]) -> Option<f64> {
+    let mut pairs: Vec<(f64, f64)> = values
+        .iter()
+        .copied()
+        .zip(weights.iter().copied())
+        .filter(|(v, w)| v.is_finite() && *w > 0.0)
+        .collect();
+    if pairs.is_empty() {
+        return None;
+    }
+    pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(core::cmp::Ordering::Equal));
+    let total: f64 = pairs.iter().map(|(_, w)| w).sum();
+    if total <= 0.0 {
+        return None;
+    }
+    let half = total / 2.0;
+    let mut cum = 0.0;
+    for (v, w) in &pairs {
+        cum += w;
+        if cum >= half {
+            return Some(*v);
+        }
+    }
+    pairs.last().map(|(v, _)| *v)
+}
+
+/// Aggregate several operators' latest feeds into a single **bond-weighted
+/// median** feed (Phase-C oracle aggregation, spec §5/§8 D3). `feeds` and
+/// `bonds` are parallel (index i is one operator); an operator's bond is its
+/// weight, so a large-bond operator dominates and a tiny-bond outlier cannot
+/// move any field. `updated_at_block` is the max (most recent write). Returns
+/// `None` if `feeds` is empty or no positive-weight finite values remain.
+pub fn aggregate_bonded_median_feed(
+    feeds: &[OnChainFeed],
+    bonds: &[u128],
+) -> Option<OnChainFeed> {
+    if feeds.is_empty() || feeds.len() != bonds.len() {
+        return None;
+    }
+    let w: Vec<f64> = bonds.iter().map(|b| *b as f64).collect();
+    Some(OnChainFeed {
+        token_price_usd: bond_weighted_median_f64(
+            &w,
+            &feeds.iter().map(|f| f.token_price_usd).collect::<Vec<_>>(),
+        )?,
+        avg_gpu_hour_price_usd: bond_weighted_median_f64(
+            &w,
+            &feeds.iter().map(|f| f.avg_gpu_hour_price_usd).collect::<Vec<_>>(),
+        )?,
+        utilization: bond_weighted_median_f64(
+            &w,
+            &feeds.iter().map(|f| f.utilization).collect::<Vec<_>>(),
+        )?,
+        staking_apr_percent: bond_weighted_median_f64(
+            &w,
+            &feeds.iter().map(|f| f.staking_apr_percent).collect::<Vec<_>>(),
+        )?,
+        updated_at_block: feeds.iter().map(|f| f.updated_at_block).max().unwrap_or(0),
+    })
+}
+
 /// Parse a `ProfitabilityFeed` scale composite (already fetched as a dynamic
 /// `Value`) into the agent's dollar / fraction / percent `OnChainFeed` form.
 /// Returns `None` if any required field is missing/malformed. Shared by the
@@ -980,6 +1083,71 @@ mod tests {
         assert_eq!(out[0], 0x01);
         assert_eq!(out[1], 0x02);
         assert_eq!(&out[2..], &[0u8; 30]);
+    }
+
+    #[test]
+    fn bond_weighted_median_large_bond_dominates_tiny_bond_outlier() {
+        // Three operators: a huge-bond outlier and a huge-bond inlier.
+        // Weighted median must follow the large bond, not the small bond.
+        // Values: op A bond 1000 feed 2.0, op B bond 1 feed 9999.0,
+        // op C bond 1000 feed 3.0. Sorted by value: 2.0(w1000), 3.0(w1000), 9999.0(w1).
+        // Cumulative: 1000 (50% of 2001 ≈ 1000.5) → 2.0, then 2000 ≥ 1000.5 → 3.0.
+        let w = vec![1000.0, 1.0, 1000.0];
+        let v = vec![2.0, 9_999.0, 3.0];
+        let m = bond_weighted_median_f64(&w, &v).expect("weighted median");
+        // The tiny-bond outlier ($9,999) must NOT be the answer; the weighted
+        // median lands on 3.0 (the second large-bond operator), exactly the
+        // plain median [2,3,9999]→3 too — but here weight pushes it toward the
+        // dominant operators even when their count is equal.
+        assert!((m - 3.0).abs() < 1e-9, "got {m}");
+    }
+
+    #[test]
+    fn bond_weighted_median_single_operator() {
+        let m = bond_weighted_median_f64(&[500.0], &[7.5]).expect("weighted median");
+        assert!((m - 7.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn bond_weighted_median_ignores_zero_bond_and_non_finite() {
+        // Zero/absent bond excluded; NaN value excluded.
+        let w = vec![0.0, 100.0, 50.0];
+        let v = vec![f64::NAN, 4.0, 2.0];
+        // Only (4.0,w100) and (2.0,w50) remain: sorted 2.0(w50),4.0(w100);
+        // half of 150 = 75 → cum 50 < 75, cum 150 ≥ 75 → 4.0.
+        let m = bond_weighted_median_f64(&w, &v).expect("weighted median");
+        assert!((m - 4.0).abs() < 1e-9, "got {m}");
+    }
+
+    #[test]
+    fn bond_weighted_median_empty_or_all_zero_weights_is_none() {
+        assert!(bond_weighted_median_f64(&[], &[]).is_none());
+        assert!(bond_weighted_median_f64(&[0.0, 0.0], &[1.0, 2.0]).is_none());
+    }
+
+    #[test]
+    fn aggregate_bonded_median_feed_weights_by_bond() {
+        // Two large-bond operators + one tiny-bond outlier.
+        let a = OnChainFeed { token_price_usd: 0.05, avg_gpu_hour_price_usd: 2.0, utilization: 0.60, staking_apr_percent: 12.0, updated_at_block: 10 };
+        let b = OnChainFeed { token_price_usd: 0.07, avg_gpu_hour_price_usd: 3.0, utilization: 0.70, staking_apr_percent: 15.0, updated_at_block: 20 };
+        let c = OnChainFeed { token_price_usd: 0.06, avg_gpu_hour_price_usd: 9_999.0, utilization: 0.80, staking_apr_percent: 18.0, updated_at_block: 30 };
+        // Bonds: a=1000, b=1000, c=1 (tiny-bond outlier on gpu price).
+        let bonds = vec![1000u128, 1000, 1];
+        let m = aggregate_bonded_median_feed(&[a, b, c], &bonds).expect("bonded median feed");
+        // The tiny-bond $9,999/hr outlier must NOT move gpu price (weighted
+        // median lands on 3.0, same as the plain median here).
+        assert!((m.avg_gpu_hour_price_usd - 3.0).abs() < 1e-9, "got {}", m.avg_gpu_hour_price_usd);
+        assert!((m.token_price_usd - 0.06).abs() < 1e-9);
+        assert!((m.utilization - 0.70).abs() < 1e-9);
+        assert!((m.staking_apr_percent - 15.0).abs() < 1e-9);
+        assert_eq!(m.updated_at_block, 30); // max
+    }
+
+    #[test]
+    fn aggregate_bonded_median_feed_len_mismatch_or_empty_is_none() {
+        let a = OnChainFeed { token_price_usd: 0.05, avg_gpu_hour_price_usd: 2.0, utilization: 0.60, staking_apr_percent: 12.0, updated_at_block: 10 };
+        assert!(aggregate_bonded_median_feed(&[], &[]).is_none());
+        assert!(aggregate_bonded_median_feed(&[a], &[]).is_none()); // len mismatch
     }
 
     #[test]

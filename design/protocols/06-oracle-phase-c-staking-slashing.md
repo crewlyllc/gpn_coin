@@ -251,7 +251,7 @@ constants, governance-updatable in future):
 | D4 — severity | `SlashBps` = **1,000 (10%)** per successful challenge | Meaningful but not destructive; operator remains bonded at 90%. |
 | D4 — frivolous challenge | Challenger's `ChallengeBond` **burned** on `Dismiss` | Deters spam challenges; symmetric with the slashing burn. |
 | D2 — phase target | Additive/backward-compatible; committee path intact. Live before mainnet go-live (recommended), but does not break Phase A/B. | Implemented regardless of go-live gating. |
-| D3 — aggregation | `effective_feed()` on-chain bond-weighted median exposed (read-only); agent opts in later via `feed_aggregation="bonded_median"`. | Existing `latest`/`median` unchanged; Phase C is additive. |
+| D3 — aggregation | `effective_feed()` on-chain bond-weighted median exposed (read-only); **agent opted in (Cycle 54) via `feed_aggregation="bonded_median"`** — reads `StakedOperators` bonds + `OperatorFeeds` and computes the bond-weighted median client-side. Existing `latest`/`median` unchanged; Phase C is additive. |
 
 **Note on wire format:** `resolve_challenge` takes a `u8` verdict discriminant
 (0=SlashStale, 1=SlashOutlier, 2=Dismiss) rather than the `ChallengeVerdict` enum

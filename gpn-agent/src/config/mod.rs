@@ -50,10 +50,13 @@ pub struct AgentConfig {
     #[serde(default = "default_compute_revenue_max")]
     pub compute_revenue_max_usd_per_hour: f64,
     /// Feed aggregation for the auto-switch: `"latest"` (use `CurrentFeed`,
-    /// the last operator to write — backward-compatible default) or
+    /// the last operator to write — backward-compatible default),
     /// `"median"` (aggregate all operators' latest feeds via a per-field
     /// median, so one outlier operator can't move the effective feed;
-    /// oracle-governance §6 gap #3).
+    /// oracle-governance §6 gap #3), or `"bonded_median"` (aggregate bonded
+    /// Phase-C operators' latest feeds via a **bond-weighted** median, so a
+    /// large-bond operator dominates and a tiny-bond outlier can't move it;
+    /// oracle-governance §6 gap #5 / spec §8 D3).
     #[serde(default = "default_feed_aggregation")]
     pub feed_aggregation: String,
 

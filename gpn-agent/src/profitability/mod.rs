@@ -197,6 +197,46 @@ impl ProfitabilityCalculator {
             }
         }
 
+        // Oracle-governance §6 gap #5 / Phase-C aggregation (spec §5/§8 D3):
+        // when `feed_aggregation = "bonded_median"`, aggregate every bonded
+        // operator's latest feed via a **bond-weighted** median (bond from
+        // `StakedOperators`, feed from `OperatorFeeds`). A large-bond operator
+        // dominates the effective feed; a tiny-bond outlier cannot move it.
+        // This is the on-chain economic-weight counterpart of the plain
+        // `median` (client-side, weight-agnostic). Falls back to `CurrentFeed`
+        // if no bonded operator has posted yet.
+        if self.config.feed_aggregation == "bonded_median" {
+            let ops = self.chain_client.get_operator_feeds().await;
+            let bonds = self.chain_client.get_staked_bonds().await;
+            // Align operator feeds with their bonds by account key; only keep
+            // operators who appear in BOTH maps (bonded AND have posted).
+            let bond_of: std::collections::HashMap<String, u128> =
+                bonds.into_iter().collect();
+            let mut feeds: Vec<crate::chain::OnChainFeed> = Vec::new();
+            let mut bond_weights: Vec<u128> = Vec::new();
+            for (op, f) in ops.iter() {
+                if let Some(bond) = bond_of.get(op) {
+                    feeds.push(f.clone());
+                    bond_weights.push(*bond);
+                }
+            }
+            match crate::chain::aggregate_bonded_median_feed(&feeds, &bond_weights) {
+                Some(m) => {
+                    log::info!(
+                        "feed_aggregation=bonded_median: aggregated {} bonded operator feed(s) -> token=${:.4} gpu=${:.2}/hr util={:.2} apr={:.1}%",
+                        feeds.len(), m.token_price_usd, m.avg_gpu_hour_price_usd,
+                        m.utilization, m.staking_apr_percent
+                    );
+                    feed = Some(m);
+                }
+                None => {
+                    log::warn!(
+                        "feed_aggregation=bonded_median but no bonded operator feeds on chain; falling back to CurrentFeed (latest writer)."
+                    );
+                }
+            }
+        }
+
         // Staleness guard (oracle-governance §6 gap #1): if the feed was
         // written more than `feed_staleness_ttl_blocks` ago, DON'T trust its
         // prices — fall back to a conservative Mining default (compute and
