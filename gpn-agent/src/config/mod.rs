@@ -49,6 +49,13 @@ pub struct AgentConfig {
     /// single-digit USD/hr at most), so it never blocks a legitimate switch.
     #[serde(default = "default_compute_revenue_max")]
     pub compute_revenue_max_usd_per_hour: f64,
+    /// Feed aggregation for the auto-switch: `"latest"` (use `CurrentFeed`,
+    /// the last operator to write — backward-compatible default) or
+    /// `"median"` (aggregate all operators' latest feeds via a per-field
+    /// median, so one outlier operator can't move the effective feed;
+    /// oracle-governance §6 gap #3).
+    #[serde(default = "default_feed_aggregation")]
+    pub feed_aggregation: String,
 
     // Staking
     pub staked_amount: f64,
@@ -94,6 +101,7 @@ impl Default for AgentConfig {
             profitability_feed: "chain".to_string(),
             feed_staleness_ttl_blocks: Some(1440),
             compute_revenue_max_usd_per_hour: default_compute_revenue_max(),
+            feed_aggregation: default_feed_aggregation(),
             staked_amount: 10_000.0,
             min_attestation_stake: 1_000_000_000_000_000, // 1,000 GPN (12 decimals)
             max_concurrent_jobs: 2,
@@ -121,6 +129,11 @@ fn default_feed_ttl() -> Option<u64> {
 /// [`AgentConfig::compute_revenue_max_usd_per_hour`].
 fn default_compute_revenue_max() -> f64 {
     50.0
+}
+
+/// Default feed aggregation mode: `"latest"` (backward compatible).
+fn default_feed_aggregation() -> String {
+    "latest".to_string()
 }
 
 impl AgentConfig {
@@ -190,6 +203,28 @@ mod tests {
         "#;
         let cfg: AgentConfig = toml::from_str(toml).expect("must parse");
         assert_eq!(cfg.compute_revenue_max_usd_per_hour, 50.0);
+    }
+
+    #[test]
+    fn omitted_feed_aggregation_defaults_to_latest() {
+        // A config that predates the field must default to "latest"
+        // (backward compatible — no behavioural change for existing nodes).
+        let toml = r#"
+            node_name = "n"
+            chain_endpoint = "ws://x:9944"
+            gpu_model = "RTX 4060"
+        "#;
+        let cfg: AgentConfig = toml::from_str(toml).expect("must parse");
+        assert_eq!(cfg.feed_aggregation, "latest");
+        // Explicit "median" also parses.
+        let toml2 = r#"
+            node_name = "n"
+            chain_endpoint = "ws://x:9944"
+            gpu_model = "RTX 4060"
+            feed_aggregation = "median"
+        "#;
+        let cfg2: AgentConfig = toml::from_str(toml2).expect("must parse");
+        assert_eq!(cfg2.feed_aggregation, "median");
     }
 
     #[test]

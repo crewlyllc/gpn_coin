@@ -17,6 +17,11 @@ profitability_feed = "chain"
 # Set to 0 or omit to disable the staleness guard.
 feed_staleness_ttl_blocks = 1440
 compute_revenue_max_usd_per_hour = 50.0
+# Feed aggregation for the auto-switch: "latest" (use CurrentFeed, the last
+# operator to write — default) or "median" (aggregate ALL operators' latest
+# feeds via a per-field median, so one outlier operator can't move the
+# effective feed; requires 2+ operators to be meaningful).
+feed_aggregation = "latest"
 staked_amount = 10000.0
 max_concurrent_jobs = 2
 docker_endpoint = "unix:///var/run/docker.sock"

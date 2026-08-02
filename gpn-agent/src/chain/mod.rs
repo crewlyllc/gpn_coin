@@ -221,19 +221,43 @@ impl ChainClient {
             vec![],
         );
         let fields = self.storage_at_head(client, &addr).await?;
-        let token_micro = get_u64_field(&fields, "token_price_usd")?;
-        let gpu_micro = get_u64_field(&fields, "avg_gpu_hour_price")?;
-        let utilization_bps = get_u32_field(&fields, "utilization_rate_bps")? as u64;
-        let apr_bps = get_u32_field(&fields, "staking_apr_bps")? as u64;
-        let updated_at = get_u64_field(&fields, "updated_at")?;
+        parse_feed_value(&fields)
+    }
 
-        Some(OnChainFeed {
-            token_price_usd: token_micro as f64 / 1_000_000.0,
-            avg_gpu_hour_price_usd: gpu_micro as f64 / 1_000_000.0,
-            utilization: utilization_bps as f64 / 10_000.0,
-            staking_apr_percent: apr_bps as f64 / 100.0,
-            updated_at_block: updated_at,
-        })
+    /// Enumerate every oracle operator's **latest** feed (from the new
+    /// `OperatorFeeds` map — populated on each `update_feed`), as
+    /// `(hex account, OnChainFeed)`. Operators who have never posted a feed
+    /// are absent from the map and thus skipped. Returns an empty vec if the
+    /// chain is unreachable or no operator has posted yet. This is the data
+    /// source for oracle-governance §6 gap #3 (client-side median across
+    /// operators): consumers can aggregate all operators' feeds (e.g. take the
+    /// median) so one outlier operator cannot unilaterally move the effective
+    /// feed.
+    pub async fn get_operator_feeds(&self) -> Vec<(String, OnChainFeed)> {
+        let client = match self.client.as_ref() {
+            Some(c) => c,
+            None => return Vec::new(),
+        };
+        let addr =
+            subxt::dynamic::storage("ProfitabilityOracle", "OperatorFeeds", vec![]);
+        let mut out = Vec::new();
+        if let Some(hash) = self.head_block_hash().await {
+            if let Ok(mut stream) = client.storage().at(hash).iter(addr).await {
+                while let Some(Ok(kv)) = stream.next().await {
+                    let op = kv
+                        .keys
+                        .first()
+                        .map(account_id_to_string)
+                        .unwrap_or_default();
+                    if let Ok(v) = kv.value.to_value() {
+                        if let Some(feed) = parse_feed_value(&v.remove_context()) {
+                            out.push((op, feed));
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Read the on-chain PoW **target** (`[u64;4]` little-endian limbs) and
@@ -688,6 +712,65 @@ pub fn is_feed_stale(updated_at_block: u64, head_block: u64, ttl_blocks: Option<
     }
 }
 
+/// Median of a set of finite f64s (oracle-governance §6 gap #3). NaN/Inf
+/// values are ignored. Returns `None` if the (finite) set is empty. The
+/// median is robust to outliers: one extreme operator value cannot move it.
+pub fn median_f64(values: &[f64]) -> Option<f64> {
+    let mut v: Vec<f64> = values.iter().copied().filter(|x| x.is_finite()).collect();
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
+    let mid = v.len() / 2;
+    if v.len() % 2 == 1 {
+        Some(v[mid])
+    } else {
+        Some((v[mid - 1] + v[mid]) / 2.0)
+    }
+}
+
+/// Aggregate several operators' latest feeds into a single feed by taking the
+/// **median** of each numeric field (token price, GPU-hour price, utilization,
+/// staking APR) and the **max** `updated_at_block` (the most recent write).
+/// One outlier operator therefore cannot move any field — this is the
+/// oracle-governance §6 gap #3 client-side aggregation rule. Returns `None`
+/// if `feeds` is empty.
+pub fn aggregate_median_feed(feeds: &[OnChainFeed]) -> Option<OnChainFeed> {
+    if feeds.is_empty() {
+        return None;
+    }
+    Some(OnChainFeed {
+        token_price_usd: median_f64(&feeds.iter().map(|f| f.token_price_usd).collect::<Vec<_>>())?,
+        avg_gpu_hour_price_usd: median_f64(
+            &feeds.iter().map(|f| f.avg_gpu_hour_price_usd).collect::<Vec<_>>(),
+        )?,
+        utilization: median_f64(&feeds.iter().map(|f| f.utilization).collect::<Vec<_>>())?,
+        staking_apr_percent: median_f64(
+            &feeds.iter().map(|f| f.staking_apr_percent).collect::<Vec<_>>(),
+        )?,
+        updated_at_block: feeds.iter().map(|f| f.updated_at_block).max().unwrap_or(0),
+    })
+}
+
+/// Parse a `ProfitabilityFeed` scale composite (already fetched as a dynamic
+/// `Value`) into the agent's dollar / fraction / percent `OnChainFeed` form.
+/// Returns `None` if any required field is missing/malformed. Shared by the
+/// `CurrentFeed` reader and the per-operator `OperatorFeeds` reader.
+fn parse_feed_value(fields: &subxt::dynamic::Value) -> Option<OnChainFeed> {
+    let token_micro = get_u64_field(fields, "token_price_usd")?;
+    let gpu_micro = get_u64_field(fields, "avg_gpu_hour_price")?;
+    let utilization_bps = get_u32_field(fields, "utilization_rate_bps")? as u64;
+    let apr_bps = get_u32_field(fields, "staking_apr_bps")? as u64;
+    let updated_at = get_u64_field(fields, "updated_at")?;
+    Some(OnChainFeed {
+        token_price_usd: token_micro as f64 / 1_000_000.0,
+        avg_gpu_hour_price_usd: gpu_micro as f64 / 1_000_000.0,
+        utilization: utilization_bps as f64 / 10_000.0,
+        staking_apr_percent: apr_bps as f64 / 100.0,
+        updated_at_block: updated_at,
+    })
+}
+
 /// Whether a provider with `attested_gflops` GFLOPS can claim a job that
 /// requires `min_gflops`. A 0 threshold (open market) is always claimable;
 /// otherwise the provider must meet or exceed the requirement. Pure free
@@ -959,6 +1042,70 @@ mod tests {
         assert!(!is_feed_stale(5000, 100, Some(1440)));
         // Head == updated_at (just written) -> fresh.
         assert!(!is_feed_stale(42, 42, Some(1440)));
+    }
+
+    #[test]
+    fn median_f64_odd_set() {
+        assert_eq!(median_f64(&[3.0, 1.0, 2.0]), Some(2.0));
+        assert_eq!(median_f64(&[10.0]), Some(10.0));
+    }
+
+    #[test]
+    fn median_f64_even_set() {
+        // Even count -> mean of the two middle values.
+        assert_eq!(median_f64(&[1.0, 2.0, 3.0, 4.0]), Some(2.5));
+        assert_eq!(median_f64(&[5.0, 1.0, 3.0, 2.0, 4.0, 6.0]), Some(3.5));
+    }
+
+    #[test]
+    fn median_f64_ignores_non_finite_and_empty() {
+        assert_eq!(median_f64(&[]), None);
+        assert_eq!(median_f64(&[f64::NAN, f64::INFINITY, 2.0]), Some(2.0));
+        assert_eq!(median_f64(&[f64::NAN, f64::NEG_INFINITY]), None);
+    }
+
+    #[test]
+    fn median_f64_robust_to_outlier() {
+        // One extreme value must not move the median (only the mean).
+        assert_eq!(median_f64(&[1.0, 2.0, 3.0, 10_000.0]), Some(2.5));
+    }
+
+    #[test]
+    fn aggregate_median_feed_empty_is_none() {
+        assert!(aggregate_median_feed(&[]).is_none());
+    }
+
+    #[test]
+    fn aggregate_median_feed_medians_each_field_and_takes_max_updated_at() {
+        let a = OnChainFeed {
+            token_price_usd: 0.05,
+            avg_gpu_hour_price_usd: 2.0,
+            utilization: 0.60,
+            staking_apr_percent: 12.0,
+            updated_at_block: 10,
+        };
+        let b = OnChainFeed {
+            token_price_usd: 0.07,
+            avg_gpu_hour_price_usd: 3.0,
+            utilization: 0.70,
+            staking_apr_percent: 15.0,
+            updated_at_block: 20,
+        };
+        let c = OnChainFeed {
+            // Outlier GPU-hour price — must NOT move the median.
+            token_price_usd: 0.06,
+            avg_gpu_hour_price_usd: 9_999.0,
+            utilization: 0.80,
+            staking_apr_percent: 18.0,
+            updated_at_block: 30,
+        };
+        let m = aggregate_median_feed(&[a, b, c]).expect("median feed");
+        assert!((m.token_price_usd - 0.06).abs() < 1e-9);
+        // Median of [2,3,9999] is 3 — the outlier is fully excluded.
+        assert!((m.avg_gpu_hour_price_usd - 3.0).abs() < 1e-9);
+        assert!((m.utilization - 0.70).abs() < 1e-9);
+        assert!((m.staking_apr_percent - 15.0).abs() < 1e-9);
+        assert_eq!(m.updated_at_block, 30); // max of {10,20,30}
     }
 
     #[test]

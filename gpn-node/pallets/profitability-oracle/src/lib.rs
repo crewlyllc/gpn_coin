@@ -40,6 +40,17 @@ pub mod pallet {
     #[pallet::storage]
     pub type CurrentFeed<T: Config> = StorageValue<_, ProfitabilityFeed, OptionQuery>;
 
+    /// Latest feed **per operator** (oracle-governance §6 gap #3: enables
+    /// client-side median aggregation across operators). `CurrentFeed` remains
+    /// the effective / latest value; this map lets consumers read each
+    /// operator's own latest feed independently and aggregate (e.g. take the
+    /// median) so one outlier operator can't unilaterally move the effective
+    /// feed. Additive + backward-compatible: populated on every `update_feed`;
+    /// never read by existing consumers.
+    #[pallet::storage]
+    pub type OperatorFeeds<T: Config> =
+        StorageMap<_, Blake2_128Concat, T::AccountId, ProfitabilityFeed, OptionQuery>;
+
     #[pallet::storage]
     pub type LastUpdateBlock<T: Config> = StorageValue<_, BlockNumberFor<T>, ValueQuery>;
 
@@ -122,7 +133,9 @@ pub mod pallet {
                 utilization_rate_bps, staking_apr_bps,
                 updated_at: block_number.try_into().unwrap_or(0),
             };
-            <CurrentFeed<T>>::put(feed);
+            <CurrentFeed<T>>::put(feed.clone());
+            // Per-operator latest feed (oracle-governance §6 gap #3).
+            <OperatorFeeds<T>>::insert(&who, feed);
             <LastUpdateBlock<T>>::put(block_number);
             Self::deposit_event(Event::<T>::FeedUpdated { token_price_usd, staking_apr_bps });
             Ok(())
@@ -418,6 +431,57 @@ mod tests {
                 RuntimeOrigin::signed(BOB), 25_000, 150, 60_00, 1_200,
             );
             assert_eq!(result, Err(Error::<Test>::NotAuthorized.into()));
+        });
+    }
+
+    // ── Oracle-governance §6 gap #3: per-operator feeds (median aggregation) ──
+
+    #[test]
+    fn test_operator_feeds_stored_per_operator() {
+        new_test_ext().execute_with(|| {
+            // ALICE (genesis operator) writes at block 1.
+            OraclePallet::update_feed(
+                RuntimeOrigin::signed(ALICE), 25_000, 150, 60_00, 1_200,
+            ).unwrap();
+            // BOB (genesis operator) writes later (after the interval) with
+            // a different value.
+            System::set_block_number(6);
+            OraclePallet::update_feed(
+                RuntimeOrigin::signed(BOB), 26_000, 160, 70_00, 1_300,
+            ).unwrap();
+
+            // Each operator's OWN latest feed is preserved independently.
+            let alice = OperatorFeeds::<Test>::get(ALICE).expect("alice feed");
+            let bob = OperatorFeeds::<Test>::get(BOB).expect("bob feed");
+            assert_eq!(alice.token_price_usd, 25_000);
+            assert_eq!(alice.avg_gpu_hour_price, 150);
+            assert_eq!(bob.token_price_usd, 26_000);
+            assert_eq!(bob.avg_gpu_hour_price, 160);
+
+            // CurrentFeed still holds the latest writer (BOB) — unchanged
+            // semantics for existing consumers.
+            assert_eq!(CurrentFeed::<Test>::get().unwrap().token_price_usd, 26_000);
+
+            // Operators who never posted have no entry.
+            assert!(OperatorFeeds::<Test>::get(CHARLIE).is_none());
+        });
+    }
+
+    #[test]
+    fn test_operator_feed_overwritten_by_same_operator() {
+        new_test_ext().execute_with(|| {
+            OraclePallet::update_feed(
+                RuntimeOrigin::signed(ALICE), 25_000, 150, 60_00, 1_200,
+            ).unwrap();
+            System::set_block_number(6);
+            OraclePallet::update_feed(
+                RuntimeOrigin::signed(ALICE), 30_000, 200, 80_00, 1_500,
+            ).unwrap();
+            // ALICE's per-operator entry is REPLACED (only the latest kept).
+            let alice = OperatorFeeds::<Test>::get(ALICE).expect("alice feed");
+            assert_eq!(alice.token_price_usd, 30_000);
+            assert_eq!(alice.avg_gpu_hour_price, 200);
+            assert_eq!(alice.utilization_rate_bps, 80_00);
         });
     }
 }

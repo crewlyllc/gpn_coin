@@ -335,6 +335,19 @@ conservative Mining default** (compute + staking revenue = 0, so mining wins the
 instead of acting on a stale feed. Set `feed_staleness_ttl_blocks = 0` or omit it to
 disable the guard. This is oracle-governance §6 gap #1 (see `design/protocols/05-oracle-governance.md`).
 
+**Reasonableness bounds (cycle 49):** if `calc_compute_revenue(gpu_price, utilization)`
+exceeds `compute_revenue_max_usd_per_hour` (default `50` USD/hr), `analyze()` treats the
+feed as **implausible** (unit misconversion / garbage / outlier) and **forces Mining**
+(compute = 0) so one bad feed can't force a mass switch to Compute. Oracle-governance §6
+gap #2. Diagnostic: `gpn_check_feed` (exit 0 = plausible, 1 = implausible).
+
+**Median aggregation across operators (cycle 50):** the pallet now stores each operator's
+**own** latest feed (`ProfitabilityOracle::OperatorFeeds`, populated on every
+`update_feed`). With `feed_aggregation = "median"` (default `"latest"`), `analyze()`
+aggregates ALL operators' feeds via a per-field median, so **one outlier operator cannot
+move the effective feed** that drives the auto-switch. Oracle-governance §6 gap #3.
+Diagnostic: `gpn_aggregate_feed` prints every operator's feed + the median.
+
 ### Oracle operator service: `gpn_operate_oracle` (cycle 41)
 `gpn_seed_feed` is a one-shot — fine for bootstrapping, but a **real oracle is a
 maintained service**. `gpn_operate_oracle` is a long-running loop that keeps

@@ -151,7 +151,22 @@ For each feed field, operators SHOULD source from independent public data:
 2. **Feed reasonableness bounds in the agent** (`calc_compute_revenue` guard) — reject
    implausible USD/hr so a single bad feed can't force a mass switch.
 3. **Median aggregation client-side** (Phase A): poll all operators (or a public
-   aggregator), take the median. *Tooling, no runtime.*
+   aggregator), take the median. *Tooling, no runtime.* — **DONE (cycle 50):**
+   added a per-operator `OperatorFeeds` storage map to `pallet-profitability-oracle`
+   (populated on every `update_feed`; `CurrentFeed` unchanged as the effective/latest
+   value), agent `get_operator_feeds()` reader, pure `median_f64` /
+   `aggregate_median_feed` (+ unit tests proving one outlier operator cannot move a
+   field), a `feed_aggregation = "latest" | "median"` agent config, a
+   `gpn_aggregate_feed` tool (prints every operator's feed + the median), and a
+   `median` branch in `analyze()` (falls back to `CurrentFeed` if no operator has
+   posted). Verified live on the RTX 4060 dev node: 1-operator read of `OperatorFeeds`
+   + backward-compatible `CurrentFeed`; 2-operator median via a Bob seed after the
+   600-block interval.
+   **Design finding:** the `UpdateTooSoon` throttle uses a **single global**
+   `LastUpdateBlock`, so only one operator can post per 600-block interval — the
+   per-operator map accumulates over time but writes are serialized. Fine for a
+   small named set on rotation; if Phase A wants concurrent independent operators,
+   make the throttle per-operator (Phase B/C consideration).
 4. **Phase B council/multisig admission** — runtime work, gated on Phase A testnet.
 5. **Phase C staking-backed slashing oracle** — new pallet, gated on Phase B.
 

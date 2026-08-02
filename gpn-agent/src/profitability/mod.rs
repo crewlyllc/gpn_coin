@@ -169,8 +169,33 @@ impl ProfitabilityCalculator {
         // Live chain feed (single fetch — the old code read the feed 4x, one
         // network round-trip per field; we now fetch once and reuse it).
         let difficulty = self.chain_client.get_difficulty().await?;
-        let feed = self.chain_client.get_feed().await;
+        let mut feed = self.chain_client.get_feed().await;
         let head_block = self.chain_client.head_block_number().await;
+
+        // Oracle-governance §6 gap #3: when `feed_aggregation = "median"`,
+        // aggregate ALL operators' latest feeds via a per-field median so one
+        // outlier operator cannot move the effective feed. Falls back to the
+        // single `CurrentFeed` (latest writer) if no operator has posted yet.
+        if self.config.feed_aggregation == "median" {
+            let ops = self.chain_client.get_operator_feeds().await;
+            let feeds: Vec<crate::chain::OnChainFeed> =
+                ops.iter().map(|(_, f)| f.clone()).collect();
+            match crate::chain::aggregate_median_feed(&feeds) {
+                Some(m) => {
+                    log::info!(
+                        "feed_aggregation=median: aggregated {} operator feed(s) -> token=${:.4} gpu=${:.2}/hr util={:.2} apr={:.1}%",
+                        feeds.len(), m.token_price_usd, m.avg_gpu_hour_price_usd,
+                        m.utilization, m.staking_apr_percent
+                    );
+                    feed = Some(m);
+                }
+                None => {
+                    log::warn!(
+                        "feed_aggregation=median but no operator feeds on chain; falling back to CurrentFeed (latest writer)."
+                    );
+                }
+            }
+        }
 
         // Staleness guard (oracle-governance §6 gap #1): if the feed was
         // written more than `feed_staleness_ttl_blocks` ago, DON'T trust its
