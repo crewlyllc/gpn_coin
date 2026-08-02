@@ -183,6 +183,16 @@ For each feed field, operators SHOULD source from independent public data:
    workspace 110/110. Log:
    `shared/artifacts/project7/cycle51-committee-admission-live-log.md`.
 5. **Phase C staking-backed slashing oracle** — new pallet, gated on Phase B.
+   **DESIGNED (cycle 52):** `design/protocols/06-oracle-phase-c-staking-slashing.md`
+   is the buildable spec — implemented **inside `pallet-profitability-oracle`**
+   (not a new pallet crate, per the project's sp-core version-conflict history):
+   `StakedOperators` (bond map), `OperatorLastFeedBlock` (per-op staleness),
+   `OpenChallenges`; extrinsics `bond_operator` / `bond_more` / `unbond_operator` /
+   `challenge_operator` / `resolve_challenge`; `update_feed` extended to accept
+   bonded operators; on-chain bond-weighted-median `effective_feed()`;
+   `OperatorBond`/`ChallengeBond`/`OutlierThresholdBps`/`StaleOperatorBlocks`/
+   `SlashBps`/`Currency` config; 13-test plan. Implementation gated on D2/D3
+   (phase target / aggregation) — escalate to Jeremy.
 
 ---
 
