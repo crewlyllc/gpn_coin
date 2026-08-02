@@ -14,7 +14,17 @@
 //!   - Re-reads its own nonce from the head block each cycle (the cycle-27 fix,
 //!     so a second+ tx from the same account isn't rejected as stale).
 //!   - Handles the authorization failure (`NotAuthorized`) as a fatal, clear
-//!     error — an operator must be in `OracleOperators` (root `add_operator`).
+//!     error — an operator must be in `OracleOperators` (root `add_operator`)
+//!     or be a Phase-C **bonded** operator.
+//!
+//! Phase-C bonded-operator support (cycle 55): pass `--bond` (5th arg) to
+//! auto-bond on startup if the signer is not already a bonded operator
+//! (`ProfitabilityOracle.bond_operator`, `OperatorBond` = 1,000 GPN). A bonded
+//! operator is authorized to post feeds exactly like a committee operator
+//! (pallet `update_feed` accepts `is_committee || is_staked`), and its weight in
+//! the on-chain bond-weighted median equals the bond size. This lets a
+//! permissionless operator run the maintained feed service without needing root
+//! `add_operator` or committee admission — the Phase-C path.
 //!
 //! Values file format (units match the oracle pallet / `gpn_seed_feed`):
 //!   token_price_usd      = 75000      # micro-USD  → $0.075
@@ -23,16 +33,18 @@
 //!   staking_apr_bps      = 1500       # 15%
 //!
 //! Usage:
-//!   gpn_operate_oracle [endpoint] [values_file] [interval_secs] [signer_uri]
+//!   gpn_operate_oracle [endpoint] [values_file] [interval_secs] [signer_uri] [--bond]
 //!     endpoint     ws://127.0.0.1:9944 (default)
 //!     values_file  path to a TOML values file (default ./oracle_values.toml)
 //!     interval_secs poll/update cadence, clamped to the pallet interval (default 60)
 //!     signer_uri   //Alice (default; must be an oracle operator in genesis)
+//!     --bond       auto-bond on startup if the signer isn't already bonded (Phase C).
 //!
 //! A `oracle_values.toml` is written on first run (with defaults) if missing.
 
-use gpn_agent::chain::signer;
+use gpn_agent::chain::{signer, ChainClient};
 use serde::{Deserialize, Serialize};
+use sp_core::{crypto::Pair as _, sr25519};
 use std::path::Path;
 use std::time::Duration;
 use subxt::dynamic::Value;
@@ -112,6 +124,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get(4)
         .cloned()
         .unwrap_or_else(|| "//Alice".to_string());
+    let want_bond = args
+        .get(5)
+        .map(|s| matches!(s.as_str(), "--bond" | "true" | "1" | "yes"))
+        .unwrap_or(false);
 
     println!(
         "🔁 Operating profitability oracle on {} (signer {}, values {}, interval {}s)",
@@ -120,7 +136,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = signer::connect(&endpoint).await?;
     let signer = signer::Sr25519Signer::from_uri(&signer_uri)?;
-    println!("Connected to GPN chain; signing as {}", signer.account_id());
+    let signer_id = signer.account_id();
+    println!("Connected to GPN chain; signing as {}", signer_id);
+
+    // Phase C: optionally auto-bond on startup so a permissionless operator can
+    // run the maintained feed loop without root `add_operator` / committee
+    // admission. Idempotent — no-op if already bonded.
+    if want_bond {
+        let account = sr25519::Pair::from_string(&signer_uri, None)
+            .map_err(|e| format!("invalid signer URI '{}': {}", signer_uri, e))?
+            .public()
+            .0;
+        let chain = ChainClient::new(&endpoint).await?;
+        match chain.get_staked_bond(&account).await {
+            Some(bond) => {
+                println!(
+                    "  🔒 already a bonded operator (bond = {} GPN); skipping bond_operator",
+                    bond as f64 / 1_000_000_000_000.0
+                );
+            }
+            None => {
+                println!("  🔐 {} not bonded — submitting bond_operator (OperatorBond = 1,000 GPN)...", signer_uri);
+                let bond_call = subxt::dynamic::tx("ProfitabilityOracle", "bond_operator", Vec::<Value>::new());
+                let nonce = signer::current_nonce(&client, &endpoint, &signer.account_id()).await;
+                match signer::submit_signed(&client, &bond_call, &signer, nonce).await {
+                    Ok(()) => println!("  ✅ bond_operator dispatched successfully; {} is now a Phase-C operator", signer_uri),
+                    Err(e) => {
+                        // `AlreadyStakedOperator` means a race (some other run
+                        // bonded first) — not fatal. Anything else is.
+                        if e.to_string().contains("AlreadyStakedOperator") {
+                            println!("  ⏳ already bonded (AlreadyStakedOperator) — continuing");
+                        } else {
+                            eprintln!("  ❌ FATAL: bond_operator failed: {}", e);
+                            return Err(e);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // First iteration immediately, then every `interval_secs`.
     let mut tick = 0u64;
