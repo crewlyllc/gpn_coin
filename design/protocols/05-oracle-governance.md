@@ -191,8 +191,15 @@ For each feed field, operators SHOULD source from independent public data:
    `challenge_operator` / `resolve_challenge`; `update_feed` extended to accept
    bonded operators; on-chain bond-weighted-median `effective_feed()`;
    `OperatorBond`/`ChallengeBond`/`OutlierThresholdBps`/`StaleOperatorBlocks`/
-   `SlashBps`/`Currency` config; 13-test plan. Implementation gated on D2/D3
-   (phase target / aggregation) — escalate to Jeremy.
+   `SlashBps`/`Currency` config; 13-test plan. **DONE (cycle 53):** implemented
+   inside `pallet-profitability-oracle`; **D4 default = burn** (aligns with the 20%
+   burn in `gpn-token`), `SlashBps` = 10%, frivolous-challenge bond burned.
+   Oracle pallet 26→39 tests; workspace 123/123 + agent 44/44. **Live-verified on
+   the RTX 4060 dev chain** (`gpn_phase_c_probe`, exit 0): bond → 1,000 GPN →
+   bonded `update_feed` → `bond_more` → 1,100 GPN → challenge → Dismiss resolve
+   (bond intact) → unbond. This closes §6 gap #5 — **all §6 code gaps #1–#5 are
+   now CLOSED.** Remaining are the business decisions in §7. Log:
+   `shared/artifacts/project7/cycle53-phase-c-staking-slashing-live-log.md`.
 
 ---
 

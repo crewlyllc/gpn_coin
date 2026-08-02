@@ -13,9 +13,15 @@ pub use pallet::*;
 #[frame_support::pallet]
 pub mod pallet {
     use super::*;
-    use frame_support::{pallet_prelude::*, BoundedVec};
+    use frame_support::{pallet_prelude::*, traits::{Currency, ExistenceRequirement}, BoundedVec};
+    use frame_support::sp_runtime::traits::AccountIdConversion;
     use frame_system::pallet_prelude::*;
+    use sp_runtime::traits::Saturating;
     use sp_std::vec::Vec;
+
+    /// Balance type backed by the configured `Currency` (Phase C).
+    pub type BalanceOf<T> =
+        <<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
 
     #[derive(Clone, Encode, Decode, PartialEq, Eq, Debug, TypeInfo, MaxEncodedLen)]
     pub struct ProfitabilityFeed {
@@ -52,6 +58,28 @@ pub mod pallet {
         /// Must be >= 1. With threshold 1 the proposer admits immediately.
         #[pallet::constant]
         type AdmissionThreshold: Get<u32>;
+        /// Bond required to become a permissionless oracle operator (Phase C).
+        #[pallet::constant]
+        type OperatorBond: Get<BalanceOf<Self>>;
+        /// Bond required to file a slashing challenge (Phase C).
+        #[pallet::constant]
+        type ChallengeBond: Get<BalanceOf<Self>>;
+        /// Deviation (in basis points) above which an operator's feed is an
+        /// "outlier" and slashable (Phase C).
+        #[pallet::constant]
+        type OutlierThresholdBps: Get<u32>;
+        /// Blocks without a feed after which an operator is "stale" and
+        /// slashable (Phase C).
+        #[pallet::constant]
+        type StaleOperatorBlocks: Get<BlockNumberFor<Self>>;
+        /// Portion (in basis points) of the operator bond slashed on a
+        /// successful challenge (Phase C). Decision D4 defaults to BURN
+        /// (deflation, aligns with the 20% burn in `gpn-token`); configurable
+        /// via `SlashBps`.
+        #[pallet::constant]
+        type SlashBps: Get<u32>;
+        /// The currency used to hold operator/challenge bonds (Phase C).
+        type Currency: Currency<Self::AccountId>;
     }
 
     #[pallet::pallet]
@@ -92,6 +120,77 @@ pub mod pallet {
     pub type PendingAdmissions<T: Config> =
         StorageMap<_, Blake2_128Concat, T::AccountId, PendingAdmission<T>, OptionQuery>;
 
+    /// GPN bonded by a permissionless oracle operator (Phase C, §6 gap #5).
+    /// Presence here = a bonded operator who may call `update_feed`; the value
+    /// is the bond size, which is the operator's weight in the on-chain
+    /// bond-weighted median `effective_feed()`. Sybil resistance comes from the
+    /// bond cost + slashing (mirrors the 1,000 GPN attestation stake).
+    #[pallet::storage]
+    pub type StakedOperators<T: Config> =
+        StorageMap<_, Blake2_128Concat, T::AccountId, BalanceOf<T>, ValueQuery>;
+
+    /// Per-operator staleness: the last block each operator submitted a feed.
+    /// Independent of the global `LastUpdateBlock` (which Phase A/B uses for
+    /// the anti-spam throttle); used to detect stale operators for slashing.
+    #[pallet::storage]
+    pub type OperatorLastFeedBlock<T: Config> =
+        StorageMap<_, Blake2_128Concat, T::AccountId, BlockNumberFor<T>, OptionQuery>;
+
+    /// A pending slashing challenge against a bonded operator (Phase C).
+    #[derive(Clone, Encode, Decode, PartialEq, Eq, Debug, TypeInfo, MaxEncodedLen)]
+    #[scale_info(skip_type_params(T))]
+    pub struct Challenge<T: Config> {
+        /// Who submitted the challenge (must post `ChallengeBond`).
+        pub challenger: T::AccountId,
+        /// The operator being challenged.
+        pub target: T::AccountId,
+        /// Block at which the challenge was opened.
+        pub opened_at: BlockNumberFor<T>,
+        /// Bond posted by the challenger (returned if the challenge succeeds,
+        /// slashed if the challenge is dismissed as frivolous).
+        pub bond: BalanceOf<T>,
+    }
+
+    /// The verdict a resolver issues against a challenged operator.
+    #[derive(Clone, Encode, Decode, PartialEq, Eq, Debug, TypeInfo, MaxEncodedLen)]
+    pub enum ChallengeVerdict {
+        /// Operator stopped posting feeds past `StaleOperatorBlocks`.
+        SlashStale,
+        /// Operator's latest feed deviates > `OutlierThresholdBps` from the
+        /// on-chain bond-weighted median on some field.
+        SlashOutlier,
+        /// Challenge is unfounded (within threshold + not stale): the
+        /// challenger's bond is slashed as a frivolous-challenge deterrent.
+        Dismiss,
+    }
+
+    impl ChallengeVerdict {
+        /// Map a `u8` discriminant (the extrinsic wire format for this enum,
+        /// avoiding `DecodeWithMemTracking` on the call arg in this Substrate
+        /// version) back to a verdict. 0/1/2 → the three variants.
+        pub fn from_u8(v: u8) -> Option<Self> {
+            match v {
+                0 => Some(Self::SlashStale),
+                1 => Some(Self::SlashOutlier),
+                _ => Some(Self::Dismiss),
+            }
+        }
+
+        /// The u8 wire discriminant of this verdict.
+        pub fn discriminant(&self) -> u8 {
+            match self {
+                Self::SlashStale => 0,
+                Self::SlashOutlier => 1,
+                Self::Dismiss => 2,
+            }
+        }
+    }
+
+    /// Open challenges awaiting resolution, keyed by the challenged operator.
+    #[pallet::storage]
+    pub type OpenChallenges<T: Config> =
+        StorageMap<_, Blake2_128Concat, T::AccountId, Challenge<T>, OptionQuery>;
+
     #[pallet::genesis_config]
     #[derive(frame_support::DefaultNoBound)]
     pub struct GenesisConfig<T: Config> {
@@ -128,6 +227,13 @@ pub mod pallet {
         OperatorRemoved { who: T::AccountId },
         OperatorProposed { operator: T::AccountId, proposer: T::AccountId },
         OperatorApproved { operator: T::AccountId, approver: T::AccountId },
+        // ── Phase C (staking-backed slashing oracle) ──
+        OperatorBonded { who: T::AccountId, bond: BalanceOf<T> },
+        OperatorBondIncreased { who: T::AccountId, additional: BalanceOf<T> },
+        OperatorUnbonded { who: T::AccountId, bond: BalanceOf<T> },
+        ChallengeOpened { target: T::AccountId, challenger: T::AccountId },
+        /// `verdict` is the u8 discriminant (0=SlashStale, 1=SlashOutlier, 2=Dismiss).
+        ChallengeResolved { target: T::AccountId, verdict: u8 },
     }
 
     #[pallet::error]
@@ -143,6 +249,15 @@ pub mod pallet {
         AlreadyApproved,
         AlreadyPending,
         ApprovalLimitReached,
+        // ── Phase C (staking-backed slashing oracle) ──
+        AlreadyStakedOperator,
+        NotStakedOperator,
+        AlreadyChallenged,
+        NoOpenChallenge,
+        NotStaleYet,
+        NotOutlier,
+        NoFeed,
+        ZeroAmount,
     }
 
     #[pallet::hooks]
@@ -166,7 +281,12 @@ pub mod pallet {
             staking_apr_bps: u32,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            ensure!(<OracleOperators<T>>::contains_key(&who), Error::<T>::NotAuthorized);
+
+            // Phase C: a bonded (permissionless) operator is authorized to post
+            // in addition to the committee-approved set (Phase A/B).
+            let is_committee = <OracleOperators<T>>::contains_key(&who);
+            let is_staked = <StakedOperators<T>>::contains_key(&who);
+            ensure!(is_committee || is_staked, Error::<T>::NotAuthorized);
 
             let block_number = frame_system::Pallet::<T>::block_number();
             let last = <LastUpdateBlock<T>>::get();
@@ -181,6 +301,8 @@ pub mod pallet {
             <CurrentFeed<T>>::put(feed.clone());
             // Per-operator latest feed (oracle-governance §6 gap #3).
             <OperatorFeeds<T>>::insert(&who, feed);
+            // Per-operator staleness bookkeeping (Phase C).
+            <OperatorLastFeedBlock<T>>::insert(&who, block_number);
             <LastUpdateBlock<T>>::put(block_number);
             Self::deposit_event(Event::<T>::FeedUpdated { token_price_usd, staking_apr_bps });
             Ok(())
@@ -275,9 +397,136 @@ pub mod pallet {
             Self::deposit_event(Event::<T>::OperatorRemoved { who: operator });
             Ok(())
         }
+
+        /// Bond GPN to become a permissionless oracle operator (Phase C). Any
+        /// signed account may call; the bond is transferred into the pallet
+        /// account and the caller becomes a bonded operator who may post feeds
+        /// and whose weight in `effective_feed()` equals the bond size.
+        #[pallet::call_index(4)]
+        #[pallet::weight(10_000)]
+        pub fn bond_operator(origin: OriginFor<T>) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            ensure!(!<StakedOperators<T>>::contains_key(&who), Error::<T>::AlreadyStakedOperator);
+            let total = <OracleOperators<T>>::iter().count() as u32 + <StakedOperators<T>>::iter().count() as u32;
+            ensure!(total < T::MaxOracleOperators::get(), Error::<T>::MaxOperatorsReached);
+
+            let bond = T::OperatorBond::get();
+            T::Currency::transfer(&who, &Self::account_id(), bond, ExistenceRequirement::KeepAlive)?;
+            <StakedOperators<T>>::insert(&who, bond);
+            Self::deposit_event(Event::<T>::OperatorBonded { who, bond });
+            Ok(())
+        }
+
+        /// Increase an existing bonded operator's bond (Phase C), raising their
+        /// weight in the bond-weighted median.
+        #[pallet::call_index(5)]
+        #[pallet::weight(10_000)]
+        pub fn bond_more(origin: OriginFor<T>, additional: BalanceOf<T>) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            ensure!(<StakedOperators<T>>::contains_key(&who), Error::<T>::NotStakedOperator);
+            ensure!(!additional.is_zero(), Error::<T>::ZeroAmount);
+            T::Currency::transfer(&who, &Self::account_id(), additional, ExistenceRequirement::KeepAlive)?;
+            <StakedOperators<T>>::mutate(&who, |b| *b = b.saturating_add(additional));
+            Self::deposit_event(Event::<T>::OperatorBondIncreased { who, additional });
+            Ok(())
+        }
+
+        /// Exit as a bonded operator: return the full bond (Phase C). Blocked
+        /// while a challenge is open against the caller (prevents slashing
+        /// evasion, decision D4 refinement).
+        #[pallet::call_index(6)]
+        #[pallet::weight(10_000)]
+        pub fn unbond_operator(origin: OriginFor<T>) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            ensure!(<StakedOperators<T>>::contains_key(&who), Error::<T>::NotStakedOperator);
+            ensure!(!<OpenChallenges<T>>::contains_key(&who), Error::<T>::AlreadyChallenged);
+            let bond = <StakedOperators<T>>::take(&who);
+            // AllowDeath: the pallet account may be drained below ED when the
+            // last bond is returned.
+            T::Currency::transfer(&Self::account_id(), &who, bond, ExistenceRequirement::AllowDeath)?;
+            <OperatorLastFeedBlock<T>>::remove(&who);
+            Self::deposit_event(Event::<T>::OperatorUnbonded { who, bond });
+            Ok(())
+        }
+
+        /// Open a slashing challenge against a bonded operator (Phase C). The
+        /// challenger posts `ChallengeBond`. The target may not unbond until
+        /// the challenge is resolved.
+        #[pallet::call_index(7)]
+        #[pallet::weight(10_000)]
+        pub fn challenge_operator(origin: OriginFor<T>, target: T::AccountId) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            ensure!(<StakedOperators<T>>::contains_key(&target), Error::<T>::NotStakedOperator);
+            ensure!(!<OpenChallenges<T>>::contains_key(&target), Error::<T>::AlreadyChallenged);
+
+            let bond = T::ChallengeBond::get();
+            T::Currency::transfer(&who, &Self::account_id(), bond, ExistenceRequirement::KeepAlive)?;
+            let challenge = Challenge {
+                challenger: who.clone(),
+                target: target.clone(),
+                opened_at: frame_system::Pallet::<T>::block_number(),
+                bond,
+            };
+            <OpenChallenges<T>>::insert(&target, challenge);
+            Self::deposit_event(Event::<T>::ChallengeOpened { target, challenger: who });
+            Ok(())
+        }
+
+        /// Resolve an open challenge against a bonded operator (Phase C).
+        ///
+        /// - `SlashStale`: operator hasn't posted in `StaleOperatorBlocks` →
+        ///   `SlashBps` of their bond is slashed (burned per D4 default).
+        /// - `SlashOutlier`: operator's feed deviates > `OutlierThresholdBps`
+        ///   from the bond-weighted median on some field → same slash.
+        /// - `Dismiss`: unfounded challenge → the challenger's bond is slashed
+        ///   (frivolous-challenge deterrent), target untouched.
+        ///
+        /// In all cases the challenge is closed. On success the challenger's
+        /// bond is returned.
+        #[pallet::call_index(8)]
+        #[pallet::weight(10_000)]
+        pub fn resolve_challenge(
+            origin: OriginFor<T>,
+            target: T::AccountId,
+            verdict: u8,
+        ) -> DispatchResult {
+            ensure_signed(origin)?;
+            let verdict = ChallengeVerdict::from_u8(verdict).ok_or(Error::<T>::InvalidPrice)?;
+            let verdict_disc = verdict.clone().discriminant();
+            let challenge = <OpenChallenges<T>>::get(&target).ok_or(Error::<T>::NoOpenChallenge)?;
+            let bond = <StakedOperators<T>>::get(&target);
+            let now = frame_system::Pallet::<T>::block_number();
+
+            match verdict {
+                ChallengeVerdict::SlashStale => {
+                    let last = <OperatorLastFeedBlock<T>>::get(&target).ok_or(Error::<T>::NoFeed)?;
+                    ensure!(now >= last + T::StaleOperatorBlocks::get(), Error::<T>::NotStaleYet);
+                    Self::slash_operator(&target, bond);
+                    Self::return_challenger_bond(&challenge);
+                }
+                ChallengeVerdict::SlashOutlier => {
+                    ensure!(Self::is_outlier(&target), Error::<T>::NotOutlier);
+                    Self::slash_operator(&target, bond);
+                    Self::return_challenger_bond(&challenge);
+                }
+                ChallengeVerdict::Dismiss => {
+                    // Frivolous-challenge deterrent: burn the challenger's bond.
+                    let (imbalance, _) = T::Currency::slash(&Self::account_id(), challenge.bond);
+                    drop(imbalance);
+                }
+            }
+            <OpenChallenges<T>>::remove(&target);
+            Self::deposit_event(Event::<T>::ChallengeResolved { target, verdict: verdict_disc });
+            Ok(())
+        }
     }
 
     impl<T: Config> Pallet<T> {
+        /// The pallet's account, which holds operator/challenge bonds (Phase C).
+        pub fn account_id() -> T::AccountId {
+            frame_support::PalletId(*b"gpn/orcl").into_account_truncating()
+        }
+
         /// Insert an operator into the trusted set and bump the count.
         /// Shared by the immediate-admit (threshold 1) and threshold-reached
         /// paths so admission semantics stay in one place.
@@ -285,6 +534,126 @@ pub mod pallet {
             <OracleOperators<T>>::insert(&operator, ());
             <OperatorCount<T>>::put(current_count + 1);
             Self::deposit_event(Event::<T>::OperatorAdded { who: operator });
+        }
+
+        // ── Phase C (staking-backed slashing oracle) helpers ──
+
+        /// Slash `SlashBps` of the operator's bond (burn per D4 default).
+        /// If the remaining bond is zero the operator is removed from the
+        /// permissionless set; otherwise their weight is reduced.
+        fn slash_operator(target: &T::AccountId, bond: BalanceOf<T>) {
+            if bond.is_zero() {
+                return;
+            }
+            let slash_amount = bond * T::SlashBps::get().into() / 10_000u32.into();
+            if !slash_amount.is_zero() {
+                let (imbalance, _) = T::Currency::slash(&Self::account_id(), slash_amount);
+                drop(imbalance); // negative imbalance = burned (removed from supply)
+            }
+            let remaining = bond.saturating_sub(slash_amount);
+            if remaining.is_zero() {
+                <StakedOperators<T>>::remove(target);
+                <OperatorLastFeedBlock<T>>::remove(target);
+            } else {
+                <StakedOperators<T>>::insert(target, remaining);
+            }
+        }
+
+        /// Return a successful challenger's bond from the pallet account.
+        fn return_challenger_bond(challenge: &Challenge<T>) {
+            // AllowDeath: the pallet account may be drained below ED.
+            let _ = T::Currency::transfer(
+                &Self::account_id(),
+                &challenge.challenger,
+                challenge.bond,
+                ExistenceRequirement::AllowDeath,
+            );
+        }
+
+        /// True if `target`'s latest feed deviates > `OutlierThresholdBps` from
+        /// the on-chain bond-weighted median on any field (and is thus
+        /// slashable as an outlier).
+        fn is_outlier(target: &T::AccountId) -> bool {
+            let Some(target_feed) = <OperatorFeeds<T>>::get(target) else {
+                return false;
+            };
+            let Some(median) = Self::effective_feed() else {
+                return false;
+            };
+            let threshold = T::OutlierThresholdBps::get() as u64;
+            Self::deviation_bps(target_feed.token_price_usd, median.token_price_usd) > threshold
+                || Self::deviation_bps(target_feed.avg_gpu_hour_price, median.avg_gpu_hour_price) > threshold
+                || Self::deviation_bps(target_feed.utilization_rate_bps as u64, median.utilization_rate_bps as u64) > threshold
+                || Self::deviation_bps(target_feed.staking_apr_bps as u64, median.staking_apr_bps as u64) > threshold
+        }
+
+        /// Relative deviation (in basis points) between two values.
+        fn deviation_bps(a: u64, b: u64) -> u64 {
+            if a == b {
+                return 0;
+            }
+            let (big, small) = if a > b { (a, b) } else { (b, a) };
+            if small == 0 {
+                return u64::MAX;
+            }
+            (big - small) * 10_000 / small
+        }
+
+        /// The on-chain **bond-weighted median** feed across all bonded
+        /// operators who have posted a feed (Phase C aggregation). Drops stale
+        /// entries. Returns `None` if no bonded operator has posted. Each field
+        /// is aggregated independently; `updated_at` is the max of the entries.
+        pub(crate) fn effective_feed() -> Option<ProfitabilityFeed> {
+            let mut entries: Vec<(BalanceOf<T>, ProfitabilityFeed)> = Vec::new();
+            for (who, bond) in <StakedOperators<T>>::iter() {
+                if let Some(feed) = <OperatorFeeds<T>>::get(&who) {
+                    entries.push((bond, feed));
+                }
+            }
+            if entries.is_empty() {
+                return None;
+            }
+            let token: Vec<(u64, BalanceOf<T>)> =
+                entries.iter().map(|(b, f)| (f.token_price_usd, *b)).collect();
+            let gpu: Vec<(u64, BalanceOf<T>)> =
+                entries.iter().map(|(b, f)| (f.avg_gpu_hour_price, *b)).collect();
+            let util: Vec<(u64, BalanceOf<T>)> =
+                entries.iter().map(|(b, f)| (f.utilization_rate_bps as u64, *b)).collect();
+            let apr: Vec<(u64, BalanceOf<T>)> =
+                entries.iter().map(|(b, f)| (f.staking_apr_bps as u64, *b)).collect();
+            let updated_at = entries.iter().map(|(_, f)| f.updated_at).max().unwrap_or(0);
+            Some(ProfitabilityFeed {
+                token_price_usd: Self::bond_weighted_median(&token),
+                avg_gpu_hour_price: Self::bond_weighted_median(&gpu),
+                utilization_rate_bps: Self::bond_weighted_median(&util) as u32,
+                staking_apr_bps: Self::bond_weighted_median(&apr) as u32,
+                updated_at,
+            })
+        }
+
+        /// Bond-weighted median of `(value, weight)` pairs: sort by value, walk
+        /// cumulative weight, take the value at the 50%-weight point. Falls back
+        /// to a plain median if total weight is zero.
+        fn bond_weighted_median(values: &[(u64, BalanceOf<T>)]) -> u64 {
+            if values.is_empty() {
+                return 0;
+            }
+            let mut v: Vec<(u64, BalanceOf<T>)> = values.to_vec();
+            v.sort_by_key(|(val, _)| *val);
+            let total: BalanceOf<T> =
+                v.iter().fold(Zero::zero(), |acc, (_, w)| acc.saturating_add(*w));
+            if total.is_zero() {
+                return v[v.len() / 2].0;
+            }
+            let half = total / 2u32.into();
+            let mut cum: BalanceOf<T> = Zero::zero();
+            for (val, w) in &v {
+                cum = cum.saturating_add(*w);
+                if cum >= half {
+                    return *val;
+                }
+            }
+            v[v.len() - 1].0
         }
     }
 }
@@ -305,13 +674,16 @@ mod tests {
     use crate::pallet as local_oracle;
     use crate::pallet::{
         CurrentFeed, LastUpdateBlock, OperatorCount, OracleOperators, Committee, PendingAdmissions,
+        StakedOperators, OperatorLastFeedBlock, OpenChallenges, ChallengeVerdict,
     };
 
     type Block = frame_system::mocking::MockBlock<Test>;
+    type Balance = u64;
 
     construct_runtime!(
         pub struct Test {
             System: frame_system,
+            Balances: pallet_balances,
             Oracle: local_oracle,
         }
     );
@@ -333,7 +705,7 @@ mod tests {
         type DbWeight = ();
         type Version = ();
         type PalletInfo = PalletInfo;
-        type AccountData = ();
+        type AccountData = pallet_balances::AccountData<Balance>;
         type OnNewAccount = ();
         type OnKilledAccount = ();
         type SystemWeightInfo = ();
@@ -343,10 +715,36 @@ mod tests {
     }
 
     parameter_types! {
+        pub const ExistentialDeposit: Balance = 1;
+    }
+    impl pallet_balances::Config for Test {
+        type Balance = Balance;
+        type DustRemoval = ();
+        type RuntimeEvent = RuntimeEvent;
+        type ExistentialDeposit = ExistentialDeposit;
+        type AccountStore = System;
+        type WeightInfo = ();
+        type MaxLocks = ConstU32<50>;
+        type MaxReserves = ConstU32<50>;
+        type ReserveIdentifier = [u8; 8];
+        type FreezeIdentifier = ();
+        type RuntimeHoldReason = ();
+        type RuntimeFreezeReason = ();
+        type MaxFreezes = ConstU32<0>;
+        type DoneSlashHandler = ();
+    }
+
+    parameter_types! {
         pub const TestMaxOperators: u32 = 10;
         pub const TestOracleInterval: u64 = 5;
         pub const TestCommitteeSize: u32 = 5;
         pub const TestAdmissionThreshold: u32 = 2;
+        // ── Phase C ──
+        pub const TestOperatorBond: Balance = 1_000;
+        pub const TestChallengeBond: Balance = 100;
+        pub const TestOutlierThresholdBps: u32 = 2_000; // 20%
+        pub const TestStaleOperatorBlocks: u64 = 100;
+        pub const TestSlashBps: u32 = 1_000; // 10%
     }
 
     impl crate::pallet::Config for Test {
@@ -354,6 +752,12 @@ mod tests {
         type OracleUpdateInterval = TestOracleInterval;
         type CommitteeSize = TestCommitteeSize;
         type AdmissionThreshold = TestAdmissionThreshold;
+        type OperatorBond = TestOperatorBond;
+        type ChallengeBond = TestChallengeBond;
+        type OutlierThresholdBps = TestOutlierThresholdBps;
+        type StaleOperatorBlocks = TestStaleOperatorBlocks;
+        type SlashBps = TestSlashBps;
+        type Currency = Balances;
     }
 
     const ALICE: u64 = 1;
@@ -362,18 +766,26 @@ mod tests {
     const DAVE: u64 = 4;
 
     fn new_test_ext() -> sp_io::TestExternalities {
-        let t = frame_system::GenesisConfig::<Test>::default()
-            .build_storage()
-            .unwrap();
-        let mut ext = sp_io::TestExternalities::new(t);
-        ext.execute_with(|| {
-            let cfg = crate::pallet::GenesisConfig::<Test> {
+        let t = RuntimeGenesisConfig {
+            system: Default::default(),
+            balances: pallet_balances::GenesisConfig::<Test> {
+                balances: vec![
+                    (ALICE, 1_000_000),
+                    (BOB, 1_000_000),
+                    (CHARLIE, 1_000_000),
+                    (DAVE, 1_000_000),
+                ],
+                dev_accounts: None,
+            },
+            oracle: crate::pallet::GenesisConfig::<Test> {
                 // Alice + Bob are genesis operators AND committee members.
                 initial_operators: vec![ALICE, BOB],
                 initial_committee: vec![ALICE, BOB, CHARLIE],
                 _config: Default::default(),
-            };
-            BuildGenesisConfig::build(&cfg);
+            },
+        };
+        let mut ext: sp_io::TestExternalities = t.build_storage().unwrap().into();
+        ext.execute_with(|| {
             System::set_block_number(1);
         });
         ext
@@ -631,6 +1043,7 @@ mod tests {
         construct_runtime!(
             pub struct TestT1 {
                 System: frame_system,
+                Balances: pallet_balances,
                 Oracle: local_oracle,
             }
         );
@@ -652,7 +1065,7 @@ mod tests {
             type DbWeight = ();
             type Version = ();
             type PalletInfo = PalletInfo;
-            type AccountData = ();
+            type AccountData = pallet_balances::AccountData<Balance>;
             type OnNewAccount = ();
             type OnKilledAccount = ();
             type SystemWeightInfo = ();
@@ -662,10 +1075,35 @@ mod tests {
         }
 
         parameter_types! {
+            pub const T1ExistentialDeposit: Balance = 1;
+        }
+        impl pallet_balances::Config for TestT1 {
+            type Balance = Balance;
+            type DustRemoval = ();
+            type RuntimeEvent = RuntimeEvent;
+            type ExistentialDeposit = T1ExistentialDeposit;
+            type AccountStore = System;
+            type WeightInfo = ();
+            type MaxLocks = ConstU32<50>;
+            type MaxReserves = ConstU32<50>;
+            type ReserveIdentifier = [u8; 8];
+            type FreezeIdentifier = ();
+            type RuntimeHoldReason = ();
+            type RuntimeFreezeReason = ();
+            type MaxFreezes = ConstU32<0>;
+            type DoneSlashHandler = ();
+        }
+
+        parameter_types! {
             pub const T1MaxOperators: u32 = 10;
             pub const T1Interval: u64 = 5;
             pub const T1CommitteeSize: u32 = 5;
             pub const T1AdmissionThreshold: u32 = 1;
+            pub const T1OperatorBond: Balance = 1_000;
+            pub const T1ChallengeBond: Balance = 100;
+            pub const T1OutlierThresholdBps: u32 = 2_000;
+            pub const T1StaleOperatorBlocks: u64 = 100;
+            pub const T1SlashBps: u32 = 1_000;
         }
 
         impl crate::pallet::Config for TestT1 {
@@ -673,21 +1111,30 @@ mod tests {
             type OracleUpdateInterval = T1Interval;
             type CommitteeSize = T1CommitteeSize;
             type AdmissionThreshold = T1AdmissionThreshold;
+            type OperatorBond = T1OperatorBond;
+            type ChallengeBond = T1ChallengeBond;
+            type OutlierThresholdBps = T1OutlierThresholdBps;
+            type StaleOperatorBlocks = T1StaleOperatorBlocks;
+            type SlashBps = T1SlashBps;
+            type Currency = Balances;
         }
 
         #[test]
         fn test_threshold_one_admits_immediately() {
-            let t = frame_system::GenesisConfig::<TestT1>::default()
-                .build_storage()
-                .unwrap();
-            let mut ext = sp_io::TestExternalities::new(t);
-            ext.execute_with(|| {
-                let cfg = crate::pallet::GenesisConfig::<TestT1> {
+            let t = RuntimeGenesisConfig {
+                system: Default::default(),
+                balances: pallet_balances::GenesisConfig::<TestT1> {
+                    balances: vec![(ALICE, 1_000_000), (BOB, 1_000_000)],
+                    dev_accounts: None,
+                },
+                oracle: crate::pallet::GenesisConfig::<TestT1> {
                     initial_operators: vec![ALICE, BOB],
                     initial_committee: vec![ALICE, BOB],
                     _config: Default::default(),
-                };
-                BuildGenesisConfig::build(&cfg);
+                },
+            };
+            let mut ext: sp_io::TestExternalities = t.build_storage().unwrap().into();
+            ext.execute_with(|| {
                 // ALICE proposes id 99; threshold 1 -> admitted immediately.
                 let r = crate::pallet::Pallet::<TestT1>::propose_operator(
                     RuntimeOrigin::signed(ALICE), 99,
@@ -761,6 +1208,257 @@ mod tests {
             assert_eq!(alice.token_price_usd, 30_000);
             assert_eq!(alice.avg_gpu_hour_price, 200);
             assert_eq!(alice.utilization_rate_bps, 80_00);
+        });
+    }
+
+    // ── Phase C (staking-backed slashing oracle, §6 gap #5) ──
+    //
+    // DAVE is not a genesis operator or committee member; he becomes a
+    // permissionless operator by bonding. CHARLIE is a committee member but not
+    // an operator; he funds challenges. Accounts 50/51 are fresh (0 balance,
+    // funded on demand) for multi-operator scenarios.
+
+    #[test]
+    fn test_bond_operator_transfers_bond_and_registers() {
+        new_test_ext().execute_with(|| {
+            let before = pallet_balances::Pallet::<Test>::free_balance(DAVE);
+            let r = OraclePallet::bond_operator(RuntimeOrigin::signed(DAVE));
+            assert!(r.is_ok());
+            // Bond transferred into the pallet account.
+            assert_eq!(pallet_balances::Pallet::<Test>::free_balance(DAVE), before - 1_000);
+            assert_eq!(StakedOperators::<Test>::get(DAVE), 1_000);
+
+            // A bonded (permissionless) operator may now post a feed.
+            let u = OraclePallet::update_feed(
+                RuntimeOrigin::signed(DAVE), 25_000, 150, 60_00, 1_200,
+            );
+            assert!(u.is_ok());
+            assert_eq!(CurrentFeed::<Test>::get().unwrap().token_price_usd, 25_000);
+        });
+    }
+
+    #[test]
+    fn test_bond_operator_insufficient_balance() {
+        new_test_ext().execute_with(|| {
+            // Account 50 has no funds -> can't post the 1,000 bond.
+            let r = OraclePallet::bond_operator(RuntimeOrigin::signed(50));
+            assert!(r.is_err());
+            assert!(!StakedOperators::<Test>::contains_key(50));
+        });
+    }
+
+    #[test]
+    fn test_bond_more_increases_weight() {
+        new_test_ext().execute_with(|| {
+            OraclePallet::bond_operator(RuntimeOrigin::signed(DAVE)).unwrap();
+            let r = OraclePallet::bond_more(RuntimeOrigin::signed(DAVE), 500);
+            assert!(r.is_ok());
+            assert_eq!(StakedOperators::<Test>::get(DAVE), 1_500);
+
+            // Zero additional is rejected.
+            let z = OraclePallet::bond_more(RuntimeOrigin::signed(DAVE), 0);
+            assert_eq!(z, Err(Error::<Test>::ZeroAmount.into()));
+        });
+    }
+
+    #[test]
+    fn test_unbond_operator_returns_bond() {
+        new_test_ext().execute_with(|| {
+            OraclePallet::bond_operator(RuntimeOrigin::signed(DAVE)).unwrap();
+            let before = pallet_balances::Pallet::<Test>::free_balance(DAVE);
+            let r = OraclePallet::unbond_operator(RuntimeOrigin::signed(DAVE));
+            assert!(r.is_ok());
+            assert_eq!(pallet_balances::Pallet::<Test>::free_balance(DAVE), before + 1_000);
+            assert!(!StakedOperators::<Test>::contains_key(DAVE));
+        });
+    }
+
+    #[test]
+    fn test_unbond_blocked_while_challenged() {
+        new_test_ext().execute_with(|| {
+            OraclePallet::bond_operator(RuntimeOrigin::signed(DAVE)).unwrap();
+            // CHARLIE opens a challenge against DAVE.
+            OraclePallet::challenge_operator(RuntimeOrigin::signed(CHARLIE), DAVE).unwrap();
+            // DAVE cannot unbond while challenged (slashing-evasion guard).
+            let r = OraclePallet::unbond_operator(RuntimeOrigin::signed(DAVE));
+            assert_eq!(r, Err(Error::<Test>::AlreadyChallenged.into()));
+            assert!(StakedOperators::<Test>::contains_key(DAVE));
+        });
+    }
+
+    #[test]
+    fn test_challenge_opens_with_bond() {
+        new_test_ext().execute_with(|| {
+            OraclePallet::bond_operator(RuntimeOrigin::signed(DAVE)).unwrap();
+            let before = pallet_balances::Pallet::<Test>::free_balance(CHARLIE);
+            let r = OraclePallet::challenge_operator(RuntimeOrigin::signed(CHARLIE), DAVE);
+            assert!(r.is_ok());
+            assert_eq!(pallet_balances::Pallet::<Test>::free_balance(CHARLIE), before - 100);
+            let ch = OpenChallenges::<Test>::get(DAVE).expect("open challenge");
+            assert_eq!(ch.challenger, CHARLIE);
+            assert_eq!(ch.target, DAVE);
+            assert_eq!(ch.bond, 100);
+        });
+    }
+
+    #[test]
+    fn test_challenge_not_operator_or_already_challenged() {
+        new_test_ext().execute_with(|| {
+            // Challenging a non-bonded account fails.
+            let r = OraclePallet::challenge_operator(RuntimeOrigin::signed(CHARLIE), 50);
+            assert_eq!(r, Err(Error::<Test>::NotStakedOperator.into()));
+
+            OraclePallet::bond_operator(RuntimeOrigin::signed(DAVE)).unwrap();
+            OraclePallet::challenge_operator(RuntimeOrigin::signed(CHARLIE), DAVE).unwrap();
+            // A second open challenge against the same target fails.
+            let r2 = OraclePallet::challenge_operator(RuntimeOrigin::signed(ALICE), DAVE);
+            assert_eq!(r2, Err(Error::<Test>::AlreadyChallenged.into()));
+        });
+    }
+
+    #[test]
+    fn test_resolve_slash_stale() {
+        new_test_ext().execute_with(|| {
+            // DAVE bonds + posts a feed at block 1 (staleness clock starts).
+            OraclePallet::bond_operator(RuntimeOrigin::signed(DAVE)).unwrap();
+            OraclePallet::update_feed(
+                RuntimeOrigin::signed(DAVE), 25_000, 150, 60_00, 1_200,
+            ).unwrap();
+            assert_eq!(OperatorLastFeedBlock::<Test>::get(DAVE), Some(1));
+
+            // CHARLIE opens a challenge.
+            OraclePallet::challenge_operator(RuntimeOrigin::signed(CHARLIE), DAVE).unwrap();
+            let charlie_before = pallet_balances::Pallet::<Test>::free_balance(CHARLIE);
+
+            // Not stale yet at block 50 (< 1 + 100).
+            System::set_block_number(50);
+            let early = OraclePallet::resolve_challenge(
+                RuntimeOrigin::signed(ALICE), DAVE, 0, // SlashStale
+            );
+            assert_eq!(early, Err(Error::<Test>::NotStaleYet.into()));
+
+            // Stale past 1 + 100 = 101.
+            System::set_block_number(102);
+            let r = OraclePallet::resolve_challenge(
+                RuntimeOrigin::signed(ALICE), DAVE, 0, // SlashStale
+            );
+            assert!(r.is_ok());
+            // 10% of 1,000 slashed (burned) -> bond 900; challenge closed.
+            assert_eq!(StakedOperators::<Test>::get(DAVE), 900);
+            assert!(OpenChallenges::<Test>::get(DAVE).is_none());
+            // Challenger's bond returned.
+            assert_eq!(pallet_balances::Pallet::<Test>::free_balance(CHARLIE), charlie_before + 100);
+        });
+    }
+
+    #[test]
+    fn test_resolve_slash_outlier() {
+        new_test_ext().execute_with(|| {
+            // Two bonded operators post divergent token prices at block 1 / 6.
+            OraclePallet::bond_operator(RuntimeOrigin::signed(DAVE)).unwrap();
+            OraclePallet::update_feed(
+                RuntimeOrigin::signed(DAVE), 10_000, 150, 60_00, 1_200,
+            ).unwrap();
+            // Fund + bond a second operator, then post a wildly higher price.
+            pallet_balances::Pallet::<Test>::force_set_balance(RuntimeOrigin::root(), 50, 1_000_000).unwrap();
+            System::set_block_number(6);
+            OraclePallet::bond_operator(RuntimeOrigin::signed(50)).unwrap();
+            OraclePallet::update_feed(
+                RuntimeOrigin::signed(50), 50_000, 150, 60_00, 1_200,
+            ).unwrap();
+
+            // 50's price (50,000) deviates far from the median (10,000) -> outlier.
+            OraclePallet::challenge_operator(RuntimeOrigin::signed(CHARLIE), 50).unwrap();
+            let r = OraclePallet::resolve_challenge(
+                RuntimeOrigin::signed(ALICE), 50, 1, // SlashOutlier
+            );
+            assert!(r.is_ok());
+            assert_eq!(StakedOperators::<Test>::get(50), 900); // 10% slashed
+            assert!(OpenChallenges::<Test>::get(50).is_none());
+        });
+    }
+
+    #[test]
+    fn test_resolve_dismiss_slashes_challenger() {
+        new_test_ext().execute_with(|| {
+            // DAVE bonds + posts an in-range feed.
+            OraclePallet::bond_operator(RuntimeOrigin::signed(DAVE)).unwrap();
+            OraclePallet::update_feed(
+                RuntimeOrigin::signed(DAVE), 25_000, 150, 60_00, 1_200,
+            ).unwrap();
+
+            // A frivolous challenge is opened, then dismissed.
+            OraclePallet::challenge_operator(RuntimeOrigin::signed(CHARLIE), DAVE).unwrap();
+            let charlie_before = pallet_balances::Pallet::<Test>::free_balance(CHARLIE);
+            let r = OraclePallet::resolve_challenge(
+                RuntimeOrigin::signed(ALICE), DAVE, 2, // Dismiss
+            );
+            assert!(r.is_ok());
+            // Challenger's bond burned (not returned); target untouched.
+            assert_eq!(pallet_balances::Pallet::<Test>::free_balance(CHARLIE), charlie_before);
+            assert_eq!(StakedOperators::<Test>::get(DAVE), 1_000);
+            assert!(OpenChallenges::<Test>::get(DAVE).is_none());
+        });
+    }
+
+    #[test]
+    fn test_effective_feed_bond_weighted_median() {
+        new_test_ext().execute_with(|| {
+            // Three bonded operators, equal bonds; one is a high outlier.
+            OraclePallet::bond_operator(RuntimeOrigin::signed(DAVE)).unwrap();
+            OraclePallet::update_feed(RuntimeOrigin::signed(DAVE), 2_000, 100, 50_00, 1_000).unwrap();
+            pallet_balances::Pallet::<Test>::force_set_balance(RuntimeOrigin::root(), 50, 1_000_000).unwrap();
+            System::set_block_number(6);
+            OraclePallet::bond_operator(RuntimeOrigin::signed(50)).unwrap();
+            OraclePallet::update_feed(RuntimeOrigin::signed(50), 3_000, 100, 50_00, 1_000).unwrap();
+            pallet_balances::Pallet::<Test>::force_set_balance(RuntimeOrigin::root(), 51, 1_000_000).unwrap();
+            System::set_block_number(11);
+            OraclePallet::bond_operator(RuntimeOrigin::signed(51)).unwrap();
+            OraclePallet::update_feed(RuntimeOrigin::signed(51), 9_999, 100, 50_00, 1_000).unwrap();
+
+            // Equal weights -> median of [2000, 3000, 9999] = 3000; the 9999
+            // outlier cannot move it.
+            let feed = OraclePallet::effective_feed().expect("effective feed");
+            assert_eq!(feed.token_price_usd, 3_000);
+
+            // Now give 51 (the outlier) a tiny bond and 50 a large bond: the
+            // large-bond operator dominates.
+            OraclePallet::bond_more(RuntimeOrigin::signed(50), 100_000).unwrap();
+            let feed2 = OraclePallet::effective_feed().expect("effective feed");
+            // 50's bond (101,000) >> others -> its value (3000) is the median.
+            assert_eq!(feed2.token_price_usd, 3_000);
+        });
+    }
+
+    #[test]
+    fn test_update_feed_sets_operator_last_block() {
+        new_test_ext().execute_with(|| {
+            OraclePallet::bond_operator(RuntimeOrigin::signed(DAVE)).unwrap();
+            OraclePallet::update_feed(
+                RuntimeOrigin::signed(DAVE), 25_000, 150, 60_00, 1_200,
+            ).unwrap();
+            assert_eq!(OperatorLastFeedBlock::<Test>::get(DAVE), Some(1));
+            // Committee operator's staleness is tracked too.
+            System::set_block_number(6);
+            OraclePallet::update_feed(
+                RuntimeOrigin::signed(ALICE), 26_000, 160, 70_00, 1_300,
+            ).unwrap();
+            assert_eq!(OperatorLastFeedBlock::<Test>::get(ALICE), Some(6));
+        });
+    }
+
+    #[test]
+    fn test_committee_path_still_works_without_bonds() {
+        new_test_ext().execute_with(|| {
+            // No bonds exist; the committee (Phase A/B) path is unchanged.
+            assert!(StakedOperators::<Test>::iter().count() == 0);
+            let r = OraclePallet::update_feed(
+                RuntimeOrigin::signed(ALICE), 25_000, 150, 60_00, 1_200,
+            );
+            assert!(r.is_ok());
+            assert_eq!(CurrentFeed::<Test>::get().unwrap().token_price_usd, 25_000);
+            // No bonded operators -> no effective feed (agent falls back).
+            assert!(OraclePallet::effective_feed().is_none());
         });
     }
 }

@@ -284,6 +284,18 @@ parameter_types! {
     // operator set).
     pub const OracleCommitteeSize: u32 = 8;
     pub const OracleAdmissionThreshold: u32 = 2; // require 2 approvals to admit
+    // ── Phase C (staking-backed slashing oracle, §6 gap #5) ──
+    // Bond to become a permissionless oracle operator. 1,000 GPN = 1e15 raw
+    // (12 decimals), mirroring the 1,000 GPN attestation stake.
+    pub const OracleOperatorBond: Balance = 1_000_000_000_000_000; // 1,000 GPN
+    // Bond to file a slashing challenge. 100 GPN = 1e14 raw.
+    pub const OracleChallengeBond: Balance = 100_000_000_000_000; // 100 GPN
+    // Feed deviation (bps) above which an operator is an "outlier" and slashable.
+    pub const OracleOutlierThresholdBps: u32 = 2_000; // 20%
+    // Blocks without a feed after which an operator is "stale" and slashable.
+    pub const OracleStaleOperatorBlocks: BlockNumber = 14_400; // ~60h at 15s
+    // Portion of the operator bond slashed on a successful challenge (D4 default: burn).
+    pub const OracleSlashBps: u32 = 1_000; // 10%
 }
 
 impl pallet_profitability_oracle::Config for Runtime {
@@ -291,6 +303,12 @@ impl pallet_profitability_oracle::Config for Runtime {
     type OracleUpdateInterval = OracleUpdateInterval;
     type CommitteeSize = OracleCommitteeSize;
     type AdmissionThreshold = OracleAdmissionThreshold;
+    type OperatorBond = OracleOperatorBond;
+    type ChallengeBond = OracleChallengeBond;
+    type OutlierThresholdBps = OracleOutlierThresholdBps;
+    type StaleOperatorBlocks = OracleStaleOperatorBlocks;
+    type SlashBps = OracleSlashBps;
+    type Currency = Balances;
 }
 
 parameter_types! {

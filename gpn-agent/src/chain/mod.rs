@@ -260,6 +260,19 @@ impl ChainClient {
         out
     }
 
+    /// Read a bonded (permissionless) oracle operator's bond size (Phase C,
+    /// §6 gap #5) from `ProfitabilityOracle::StakedOperators`. Returns `None`
+    /// if the account is not bonded or the chain is unreachable.
+    pub async fn get_staked_bond(&self, account: &[u8; 32]) -> Option<u128> {
+        let client = self.client.as_ref()?;
+        let addr = subxt::dynamic::storage(
+            "ProfitabilityOracle",
+            "StakedOperators",
+            vec![Value::from_bytes(account.to_vec())],
+        );
+        self.storage_at_head(client, &addr).await?.as_u128()
+    }
+
     /// Read the on-chain PoW **target** (`[u64;4]` little-endian limbs) and
     /// convert to a classic difficulty metric `2^256 / target`. Falls back to
     /// the placeholder difficulty on any error.

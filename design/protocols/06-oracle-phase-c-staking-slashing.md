@@ -1,10 +1,19 @@
 # Phase C — Staking-Backed Slashing Oracle (Spec)
 
-**Status:** Design spec (Cycle 52). **Not yet implemented.** This is the buildable
-blueprint for oracle-governance §6 gap #5 — the permissionless, staking-backed
-end-state of the `ProfitabilityOracle`. Phase B (committee admission, cycle 51) is
-complete; this spec turns the Phase-C design in `05-oracle-governance.md` §4 into a
-concrete pallet design that can be implemented next cycle with minimal sp-core risk.
+**Status: IMPLEMENTED (Cycle 53).** Live-verified on-chain on the RTX 4060 dev
+chain (`gpn_phase_c_probe`, exit 0): `bond_operator` → 1,000 GPN bond on-chain →
+`update_feed` by bonded operator accepted → `bond_more` → 1,100 GPN →
+`challenge_operator` → `resolve_challenge(Dismiss)` challenge closed, operator
+bond intact → `unbond_operator` removed + bond returned. Implemented **inside
+`pallet-profitability-oracle`** (no new pallet crate → no sp-core version
+-conflict risk). 13 new unit tests (oracle 26→39). Decisions D2/D3/D4 defaults
+chosen in code (see §8): D4 = burn, `SlashBps` = 10%. This closes oracle-governance
+§6 gap #5 — the last code gap in the oracle-governance spec.
+
+This is the buildable blueprint for oracle-governance §6 gap #5 — the
+permissionless, staking-backed end-state of the `ProfitabilityOracle`. Phase B
+(committee admission, cycle 51) is complete; this spec turns the Phase-C design
+in `05-oracle-governance.md` §4 into a concrete pallet design.
 
 **Companions:** `05-oracle-governance.md` (governance model, threat model, §6 gaps),
 `04-profitability-oracle.md` (current protocol), `testnet-public-runbook.md` §9
@@ -227,3 +236,30 @@ bond-weighted version for Phase C. The agent can opt in via a new
 > **Recommendation for next cycle:** if D2/D3 allow it, implement Phase C **inside
 > `pallet-profitability-oracle`** (per §2.1) with the 13-test plan above; otherwise
 > keep this spec as the authoritative design and pursue docs/mainnet-prep instead.
+
+---
+
+## 8. Implementation decisions (Cycle 53)
+
+Implemented **inside `pallet-profitability-oracle`** (no new pallet crate, avoiding
+the sp-core version-conflict history). Defaults chosen in code (all runtime
+constants, governance-updatable in future):
+
+| Decision | Default chosen | Rationale |
+|---|---|---|
+| D4 — slashing sink | **BURN** (`Currency::slash`, negative imbalance dropped) | Aligns with the existing 20% burn in `gpn-token`; deflationary. A requestor-compensation pool can be added later without changing the slash primitive. |
+| D4 — severity | `SlashBps` = **1,000 (10%)** per successful challenge | Meaningful but not destructive; operator remains bonded at 90%. |
+| D4 — frivolous challenge | Challenger's `ChallengeBond` **burned** on `Dismiss` | Deters spam challenges; symmetric with the slashing burn. |
+| D2 — phase target | Additive/backward-compatible; committee path intact. Live before mainnet go-live (recommended), but does not break Phase A/B. | Implemented regardless of go-live gating. |
+| D3 — aggregation | `effective_feed()` on-chain bond-weighted median exposed (read-only); agent opts in later via `feed_aggregation="bonded_median"`. | Existing `latest`/`median` unchanged; Phase C is additive. |
+
+**Note on wire format:** `resolve_challenge` takes a `u8` verdict discriminant
+(0=SlashStale, 1=SlashOutlier, 2=Dismiss) rather than the `ChallengeVerdict` enum
+directly, because this Substrate version requires extrinsic-arg types to implement
+`DecodeWithMemTracking`, which the plain `#[derive(Decode)]` enum does not satisfy.
+`ChallengeVerdict` remains the internal/event type; `from_u8`/`discriminant` map it.
+
+**Open (still escalated to Jeremy):** D2 go-live gating (must Phase C be live
+before mainnet?), D3 launch aggregation, D5 testnet root confirmation, and the
+business decisions in `05-oracle-governance.md` §7 (D1 token listing, marketplace
+go-live, governed sudo replacement path).
