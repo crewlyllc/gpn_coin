@@ -348,6 +348,12 @@ aggregates ALL operators' feeds via a per-field median, so **one outlier operato
 move the effective feed** that drives the auto-switch. Oracle-governance §6 gap #3.
 Diagnostic: `gpn_aggregate_feed` prints every operator's feed + the median.
 
+**Per-operator update throttle (cycle 58):** `update_feed` is rate-limited **per operator**
+(not network-global), so independent committee/bonded operators can each post their own feed
+without blocking each other; same-operator rate limiting (every `OracleUpdateInterval` blocks) is
+preserved. This unblocks the live multi-operator median aggregation (cycle 50 flagged the old
+global throttle as a Phase-C design flaw).
+
 **On-chain effective feed (cycle 56):** the pallet's authoritative Phase-C
 **bond-weighted median** (`ProfitabilityOracle::effective_feed()`) is now exposed via
 a runtime API + `gpn_effectiveFeed` RPC + the `gpn_effective_feed` read tool. This is

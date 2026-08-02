@@ -289,7 +289,12 @@ pub mod pallet {
             ensure!(is_committee || is_staked, Error::<T>::NotAuthorized);
 
             let block_number = frame_system::Pallet::<T>::block_number();
-            let last = <LastUpdateBlock<T>>::get();
+            // Per-operator anti-spam throttle (Phase C): each operator is gated
+            // by its OWN last-posted block, so independent (committee or bonded)
+            // operators can each post their own feed without blocking each
+            // other. The global `LastUpdateBlock` is still updated as the
+            // "latest post" marker (backward-compatible) but no longer gates.
+            let last = <OperatorLastFeedBlock<T>>::get(&who).unwrap_or_else(Zero::zero);
             ensure!(block_number >= last + T::OracleUpdateInterval::get() || last.is_zero(), Error::<T>::UpdateTooSoon);
             ensure!(token_price_usd > 0, Error::<T>::InvalidPrice);
 
@@ -871,6 +876,51 @@ mod tests {
             assert!(result.is_ok());
             assert_eq!(CurrentFeed::<Test>::get().unwrap().token_price_usd, 26_000);
             assert_eq!(LastUpdateBlock::<Test>::get(), 6);
+        });
+    }
+
+    #[test]
+    fn test_update_feed_per_operator_throttle_two_operators() {
+        // Phase-C fix: the anti-spam throttle is PER-OPERATOR, so two
+        // independent (committee or bonded) operators can each post a feed
+        // within the same interval without blocking each other. Previously the
+        // global LastUpdateBlock gate rejected the second operator.
+        new_test_ext().execute_with(|| {
+            // ALICE posts at block 1
+            OraclePallet::update_feed(
+                RuntimeOrigin::signed(ALICE), 25_000, 150, 60_00, 1_200,
+            ).unwrap();
+            // BOB posts at the SAME block — allowed (own throttle is zero)
+            let result = OraclePallet::update_feed(
+                RuntimeOrigin::signed(BOB), 26_000, 160, 70_00, 1_300,
+            );
+            assert!(result.is_ok());
+            // CurrentFeed is the latest writer's feed; both stored per-operator
+            assert_eq!(CurrentFeed::<Test>::get().unwrap().token_price_usd, 26_000);
+            assert_eq!(OperatorLastFeedBlock::<Test>::get(ALICE), Some(1));
+            assert_eq!(OperatorLastFeedBlock::<Test>::get(BOB), Some(1));
+        });
+    }
+
+    #[test]
+    fn test_update_feed_per_operator_throttle_same_operator() {
+        // Same operator is still rate-limited by its own last-posted block.
+        new_test_ext().execute_with(|| {
+            OraclePallet::update_feed(
+                RuntimeOrigin::signed(ALICE), 25_000, 150, 60_00, 1_200,
+            ).unwrap();
+            // ALICE again in the same block must fail (interval = 5)
+            let result = OraclePallet::update_feed(
+                RuntimeOrigin::signed(ALICE), 26_000, 150, 60_00, 1_200,
+            );
+            assert_eq!(result, Err(Error::<Test>::UpdateTooSoon.into()));
+            // Advance 5 blocks and ALICE may post again
+            System::set_block_number(6);
+            let result = OraclePallet::update_feed(
+                RuntimeOrigin::signed(ALICE), 27_000, 170, 80_00, 1_400,
+            );
+            assert!(result.is_ok());
+            assert_eq!(OperatorLastFeedBlock::<Test>::get(ALICE), Some(6));
         });
     }
 
