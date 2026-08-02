@@ -119,6 +119,15 @@ sp_api::decl_runtime_apis! {
         /// Verify a PoW solution
         fn verify_solution(solution: pallet_gpu_pow::EthashSolution, difficulty: pallet_gpu_pow::U256) -> bool;
     }
+
+    /// The profitability-oracle API — exposes the **on-chain** Phase-C
+    /// bond-weighted median feed so a client can read the authoritative
+    /// aggregation (instead of reimplementing it client-side).
+    pub trait ProfitabilityOracleApi {
+        /// The on-chain bond-weighted median feed across all bonded operators
+        /// who have posted a feed. `None` if no bonded operator has posted.
+        fn effective_feed() -> Option<pallet_profitability_oracle::ProfitabilityFeed>;
+    }
 }
 
 // ###########################################################################
@@ -460,6 +469,12 @@ sp_api::impl_runtime_apis! {
                 }
             }
             false // equal means doesn't meet
+        }
+    }
+
+    impl self::ProfitabilityOracleApi<Block> for Runtime {
+        fn effective_feed() -> Option<pallet_profitability_oracle::ProfitabilityFeed> {
+            ProfitabilityOracle::effective_feed()
         }
     }
 

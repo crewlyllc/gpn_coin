@@ -603,7 +603,11 @@ pub mod pallet {
         /// operators who have posted a feed (Phase C aggregation). Drops stale
         /// entries. Returns `None` if no bonded operator has posted. Each field
         /// is aggregated independently; `updated_at` is the max of the entries.
-        pub(crate) fn effective_feed() -> Option<ProfitabilityFeed> {
+        ///
+        /// `pub` so the runtime API (and thus the node RPC + agent read tool)
+        /// can surface the authoritative on-chain median, instead of only a
+        /// client-side reimplementation.
+        pub fn effective_feed() -> Option<ProfitabilityFeed> {
             let mut entries: Vec<(BalanceOf<T>, ProfitabilityFeed)> = Vec::new();
             for (who, bond) in <StakedOperators<T>>::iter() {
                 if let Some(feed) = <OperatorFeeds<T>>::get(&who) {

@@ -18,11 +18,38 @@
 use jsonrpsee::core::RpcResult;
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObject;
+use sc_client_api::UsageProvider;
 use serde::{Deserialize, Serialize};
+use sp_api::ProvideRuntimeApi;
 use sp_blockchain::HeaderBackend;
 use std::sync::{Arc, Mutex};
 
 use crate::service::{FullClient, MiningWorker};
+use gpn_runtime::ProfitabilityOracleApi;
+
+/// The on-chain **bond-weighted median** profitability feed (Phase C
+/// aggregation) as returned by the `gpn_effectiveFeed` RPC. Mirrors
+/// `pallet_profitability_oracle::ProfitabilityFeed`, serialized for the wire
+/// (raw integer fields + a human-readable USD/hr convenience field).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct EffectiveFeed {
+    /// Token price in micro-USD (1e-6 USD).
+    pub token_price_usd: u64,
+    /// Average GPU-hour price in micro-USD (1e-6 USD).
+    pub avg_gpu_hour_price: u64,
+    /// GPU utilization as basis points (1e4 = 100%).
+    pub utilization_rate_bps: u32,
+    /// Staking APR as basis points (1e4 = 100%).
+    pub staking_apr_bps: u32,
+    /// Block number when the newest contributing feed was posted.
+    pub updated_at: u64,
+    /// Human-readable convenience fields.
+    pub gpu_hour_price_usd: f64,
+    pub utilization: f64,
+    pub staking_apr: f64,
+    pub token_price: f64,
+}
 
 /// A mining template returned to an external miner.
 ///
@@ -57,6 +84,14 @@ pub trait GpnMinerApi {
     /// already gone).
     #[method(name = "gpn_submitWork")]
     async fn submit_work(&self, pre_hash: String, seal: String) -> RpcResult<bool>;
+
+    /// Read the **on-chain** Phase-C bond-weighted median profitability feed
+    /// (the authoritative `ProfitabilityOracle::effective_feed()`), or `None`
+    /// if no bonded operator has posted a feed yet. This is the single source
+    /// of truth for the aggregate — a client can call this instead of
+    /// reimplementing the bond-weighted median client-side.
+    #[method(name = "gpn_effectiveFeed")]
+    async fn effective_feed(&self) -> RpcResult<Option<EffectiveFeed>>;
 }
 
 /// Implementation backed by the shared `MiningHandle` slot.
@@ -113,6 +148,28 @@ impl GpnMinerApiServer for GpnMinerRpc {
             pre_hash: format!("{:#x}", metadata.pre_hash),
             difficulty: format!("{:#x}", metadata.difficulty),
             block_number,
+        }))
+    }
+
+    async fn effective_feed(&self) -> RpcResult<Option<EffectiveFeed>> {
+        let at = self
+            .client
+            .info()
+            .best_hash;
+        let api = self.client.runtime_api();
+        let feed = api
+            .effective_feed(at)
+            .map_err(|e| ErrorObject::owned(-32000, format!("runtime api error: {e}"), None::<()>))?;
+        Ok(feed.map(|f| EffectiveFeed {
+            token_price_usd: f.token_price_usd,
+            avg_gpu_hour_price: f.avg_gpu_hour_price,
+            utilization_rate_bps: f.utilization_rate_bps,
+            staking_apr_bps: f.staking_apr_bps,
+            updated_at: f.updated_at,
+            gpu_hour_price_usd: f.avg_gpu_hour_price as f64 / 1e6,
+            utilization: f.utilization_rate_bps as f64 / 1e4,
+            staking_apr: f.staking_apr_bps as f64 / 1e4,
+            token_price: f.token_price_usd as f64 / 1e6,
         }))
     }
 

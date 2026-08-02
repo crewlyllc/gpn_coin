@@ -308,6 +308,57 @@ impl ChainClient {
         out
     }
 
+    /// Read the **on-chain** Phase-C bond-weighted median profitability feed
+    /// via the `gpn_effectiveFeed` RPC (a JSON-RPC POST over ws->http, same
+    /// pattern as `head_block_hash`). This is the authoritative aggregation the
+    /// pallet computes (`ProfitabilityOracle::effective_feed()`): a consumer
+    /// can read the on-chain bond-weighted median directly instead of
+    /// reimplementing it client-side. Returns `None` if no bonded operator has
+    /// posted a feed yet, or if the chain/RPC is unreachable.
+    pub async fn get_effective_feed(&self) -> Option<OnChainFeed> {
+        let http_url = self
+            .endpoint
+            .replace("ws://", "http://")
+            .replace("wss://", "https://");
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "gpn_effectiveFeed",
+            "params": []
+        });
+        let resp: serde_json::Value = reqwest::Client::new()
+            .post(&http_url)
+            .json(&body)
+            .send()
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        let res = resp.get("result")?;
+        if res.is_null() {
+            return None;
+        }
+        // Convenience fields are already decoded USD (not micro-USD); the raw
+        // fields are micro-USD / bps like the pallet.
+        Some(OnChainFeed {
+            token_price_usd: res
+                .get("tokenPrice")?
+                .as_f64()?
+                .max(0.0),
+            avg_gpu_hour_price_usd: res
+                .get("gpuHourPriceUsd")?
+                .as_f64()?
+                .max(0.0),
+            utilization: res
+                .get("utilization")?
+                .as_f64()?
+                .clamp(0.0, 1.0),
+            staking_apr_percent: res.get("stakingApr")?.as_f64()? * 100.0,
+            updated_at_block: res.get("updatedAt")?.as_u64()?,
+        })
+    }
+
     /// Read the on-chain PoW **target** (`[u64;4]` little-endian limbs) and
     /// convert to a classic difficulty metric `2^256 / target`. Falls back to
     /// the placeholder difficulty on any error.

@@ -348,6 +348,14 @@ aggregates ALL operators' feeds via a per-field median, so **one outlier operato
 move the effective feed** that drives the auto-switch. Oracle-governance §6 gap #3.
 Diagnostic: `gpn_aggregate_feed` prints every operator's feed + the median.
 
+**On-chain effective feed (cycle 56):** the pallet's authoritative Phase-C
+**bond-weighted median** (`ProfitabilityOracle::effective_feed()`) is now exposed via
+a runtime API + `gpn_effectiveFeed` RPC + the `gpn_effective_feed` read tool. This is
+the single source of truth for the aggregate — a client reads exactly what the chain
+computes instead of reimplementing the bond-weighted median client-side (as
+`gpn_aggregate_feed` does). Read-only; `gpn_effective_feed [endpoint]` (exit 0 = on-chain
+effective feed available, 1 = none / unreachable).
+
 ### Oracle operator service: `gpn_operate_oracle` (cycle 41)
 `gpn_seed_feed` is a one-shot — fine for bootstrapping, but a **real oracle is a
 maintained service**. `gpn_operate_oracle` is a long-running loop that keeps
