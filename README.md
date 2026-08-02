@@ -161,8 +161,8 @@ cargo run -- config/default.toml
 
 - ✅ **Phase 1 (Research):** Complete
 - ✅ **Phase 2 (Design):** Complete
-- 🏗️ **Phase 3 (Prototype):** Dev testnet live — real Ethash PoW consensus + self-tuning difficulty + **real GPU Ethash miner on the RTX 4060** (OpenCL, produces node-verifiable seals); GPU miner wired into live node; **seal-format + extrinsic tests committed**; **TransactionPayment fees live**; **external miner RPC live** (`gpn_getTemplate`/`gpn_submitWork` — node & miner separable, verified end-to-end). Next: wire gpn-agent GPU miner to the RPC + profitability auto-switch prototype
-- ⏳ **Phase 4 (Launch):** Not started
+- ✅ **Phase 3 (Prototype):** Complete — a full dev testnet is live on the RTX 4060 with **real GPU-only Ethash PoW** (OpenCL miner, self-tuning difficulty, node-verifiable seals), **Proof-of-Staked-GPU** (stake 1,000 GPN + attest real GFLOPS → 3-tier weighted rewards), a **compute marketplace** (two-party escrow, jobs, SLA, `min_gflops` gate, 5% fee), a **fully governed profitability oracle** (Phase A→B→C: committee admission, per-operator feeds, staking-backed slashing, on-chain bond-weighted median — all 5 governance code gaps closed), and **auto-switch** (one GPU alternates Mining ↔ Compute by live chain feed, no human). Tooling: external miner RPC (`gpn_getTemplate`/`gpn_submitWork`), transaction fees, drip faucet, block explorer, two-node GPU p2p testnet, CI. All live-verified (cycles 8–58).
+- ⏳ **Phase 4 (Launch):** Ready to execute — **blocked only on Jeremy's go/no-go for business decisions D1–D5 + a ~$10–20/mo VPS** (see `shared/artifacts/project7/cycle63-decision-card.md`). The public-testnet toolchain (two-node GPU p2p, explorer, faucet) was dry-run-verified end-to-end in cycle 61; the launch is turnkey via `shared/artifacts/project7/testnet-public-runbook.md §7`.
 
 ## GPU Mining (gpn-agent)
 
