@@ -167,7 +167,21 @@ For each feed field, operators SHOULD source from independent public data:
    per-operator map accumulates over time but writes are serialized. Fine for a
    small named set on rotation; if Phase A wants concurrent independent operators,
    make the throttle per-operator (Phase B/C consideration).
-4. **Phase B council/multisig admission** — runtime work, gated on Phase A testnet.
+4. **Phase B council/multisig admission** — **DONE (cycle 51):** replaced
+   root-only `add_operator`/`remove_operator` with a **named committee**
+   directly in `pallet-profitability-oracle` (no new pallet / no new deps).
+   Committee members (`Committee` storage, genesis-seeded) may
+   `propose_operator(op)` (self-approving); once `AdmissionThreshold`
+   approvals accumulate via `approve_operator`, the operator is admitted
+   (`PendingAdmissions` cleared). `remove_operator` allows committee member OR
+   root (emergency break-glass; on mainnet root is inert so removal is
+   committee-only in practice). Runtime constants `CommitteeSize=8` /
+   `AdmissionThreshold=2`. Chain specs: dev/local/testnet seed the committee;
+   **mainnet seeds an EMPTY committee** (inert by default). Verified live on
+   the RTX 4060 dev chain (propose→approve→admit→operator updates feed;
+   non-member rejected with `NotCommitteeMember`). Oracle pallet 26/26,
+   workspace 110/110. Log:
+   `shared/artifacts/project7/cycle51-committee-admission-live-log.md`.
 5. **Phase C staking-backed slashing oracle** — new pallet, gated on Phase B.
 
 ---

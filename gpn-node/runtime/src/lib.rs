@@ -277,11 +277,20 @@ impl pallet_compute_marketplace::Config for Runtime {
 parameter_types! {
     pub const MaxOracleOperators: u32 = 10;
     pub const OracleUpdateInterval: BlockNumber = 600; // ~2.5 hours
+    // Phase B committee admission (§6 gap #4): a named committee votes on
+    // adding operators (threshold approvals), removing the single-root
+    // capture point. Committee members are genesis-seeded per chain spec;
+    // mainnet seeds an EMPTY committee (inert by default, mirroring the empty
+    // operator set).
+    pub const OracleCommitteeSize: u32 = 8;
+    pub const OracleAdmissionThreshold: u32 = 2; // require 2 approvals to admit
 }
 
 impl pallet_profitability_oracle::Config for Runtime {
     type MaxOracleOperators = MaxOracleOperators;
     type OracleUpdateInterval = OracleUpdateInterval;
+    type CommitteeSize = OracleCommitteeSize;
+    type AdmissionThreshold = OracleAdmissionThreshold;
 }
 
 parameter_types! {
