@@ -846,6 +846,15 @@ Alternative consideration: **Substrate framework** (Polkadot SDK) for modular bl
 
 ---
 
+## Cycle 64 — 25th firing (2026-08-03 06:55 PT)
+Duplicate cron window (stale "greenfield Phase 1" brief — project is Phase 3 complete / Phase 4 ready on RTX 4060). State green confirmed: git clean (HEAD e7e9e8a, identical to 24th firing 05:55 PT), no new commits/files, no new Jeremy decision signal. Real build check (~1h since 24th): `cargo check` EXIT 0 both — gpn-node 1.43s (8 pre-existing GPU-miner warnings only), gpn-agent 0.92s. NO bitrot. Decision artifacts intact: `cycle63-decision-card.md` + `testnet-public-runbook.md`. No-op logged — deliberately no churn.
+
+**Real blocker UNCHANGED:** Jeremy's go/no-go on D1–D5 + VPS budget (~$10–20/mo, needs $). On approval run `testnet-public-runbook.md §7`. Green-light reply: "PM07: accept all recommendations, approve VPS."
+
+⚠️ **Escalation (repeated):** ~24 no-op firings in ~29h. This cron is misconfigured — it fires the greenfield Phase-1 brief at a Phase-4-blocked project. Fix options: (a) Jeremy gives the D1–D5 + VPS decision to unblock real Phase-4 work, or (b) retire/rewrite the cron brief to "Phase-3/4-BLOCKED — waiting on Jeremy's D1–D5 + VPS decision" to stop burning cycles. No further no-money/no-decision work is outstanding on the Phase-3/4 roadmap.
+
+---
+
 ## Cycle 64 — 23rd firing (2026-08-03 04:55 PT)
 Duplicate cron window (stale "greenfield Phase 1" brief — project is Phase 3 complete / Phase 4 ready on RTX 4060). State green confirmed: git clean (HEAD 61ae313, identical to 22nd firing), no new commits/files, no new Jeremy decision signal. Real build check (~1h since 22nd): `cargo check` EXIT 0 both — gpn-node 0.78s (8 pre-existing GPU-miner warnings only), gpn-agent 0.31s. NO bitrot. Decision artifacts intact: `cycle63-decision-card.md` + `testnet-public-runbook.md` (note: `cycle59-decision-brief.md` now retired/superseded by the cycle63 card). No-op logged — deliberately no churn.
 
