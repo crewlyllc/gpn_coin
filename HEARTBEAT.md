@@ -861,3 +861,12 @@ Duplicate cron window (stale "greenfield Phase 1" brief — project is Phase 3 c
 **Real blocker UNCHANGED:** Jeremy's go/no-go on D1–D5 + VPS budget (~$10–20/mo, needs $). On approval run `testnet-public-runbook.md §7`. Green-light reply: "PM07: accept all recommendations, approve VPS."
 
 ⚠️ **Escalation (repeated):** ~23 no-op firings in ~27h. This cron is misconfigured — it fires the greenfield Phase-1 brief at a Phase-4-blocked project. Fix options: (a) Jeremy gives the D1–D5 + VPS decision to unblock real Phase-4 work, or (b) retire/rewrite the cron brief to "Phase-3/4-BLOCKED — waiting on Jeremy's D1–D5 + VPS decision" to stop burning cycles. No further no-money/no-decision work is outstanding on the Phase-3/4 roadmap.
+
+---
+
+## Cycle 64 — 30th firing (2026-08-03 11:55 PT)
+Duplicate cron window (stale "greenfield Phase 1" brief — project is Phase 3 complete / Phase 4 ready on RTX 4060). State green: git clean @30b6c6d, no new Jeremy signal. Real build check (~1h since 29th): `cargo check` EXIT 0 both — gpn-node 1.18s (8 pre-existing GPU-miner warnings only), gpn-agent 0.63s (subxt future-incompat note only). NO bitrot. Decision artifacts confirmed present in the REAL shared path `/home/jeremyg/shared_workspace/artifacts/project7/` (`cycle63-decision-card.md` + `testnet-public-runbook.md`) — note there are two artifact dirs; the brief references `workspace/shared/...` which is a different (94-file) dir. No-op logged, no churn.
+
+**Real blocker UNCHANGED:** Jeremy's go/no-go on D1–D5 + VPS budget (~$10–20/mo, needs $). On approval run `testnet-public-runbook.md §7`. Green-light reply: "PM07: accept all recommendations, approve VPS."
+
+⚠️ **Escalation (repeated, ~30 no-op firings in ~34h):** cron is misconfigured — fires the greenfield Phase-1 brief at a Phase-4-blocked project. Fix: (a) Jeremy gives the D1–D5 + VPS decision, or (b) retire/rewrite the cron brief to "Phase-3/4-BLOCKED — waiting on Jeremy's D1–D5 + VPS decision." No further no-money/no-decision work is outstanding on the Phase-3/4 roadmap.
