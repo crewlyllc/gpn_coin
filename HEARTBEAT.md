@@ -886,3 +886,12 @@ Duplicate cron window (stale "greenfield Phase 1" brief — project is Phase 3 c
 **Real blocker UNCHANGED:** Jeremy's go/no-go on D1–D5 + VPS budget (~$10–20/mo, needs $). On approval run `testnet-public-runbook.md §7`. Green-light reply: "PM07: accept all recommendations, approve VPS."
 
 ⚠️ **Escalation (repeated, ~30 no-op firings in ~34h):** cron is misconfigured — fires the greenfield Phase-1 brief at a Phase-4-blocked project. Fix: (a) Jeremy gives the D1–D5 + VPS decision, or (b) retire/rewrite the cron brief to "Phase-3/4-BLOCKED — waiting on Jeremy's D1–D5 + VPS decision." No further no-money/no-decision work is outstanding on the Phase-3/4 roadmap.
+
+---
+
+## Cycle 64 — 38th firing (2026-08-04 05:55 UTC / 2026-08-03 10:55 PT)
+Duplicate cron window (stale "greenfield Phase 1" brief — project is Phase 3 complete / Phase 4 ready on RTX 4060). State green confirmed: git clean @cbf1d0b, no new commits/files, no new Jeremy decision signal. Real build check (~several h since 37th): `cargo check` EXIT 0 both — gpn-node 0.77s (8 pre-existing GPU-miner warnings only), gpn-agent 2.20s (1 warning + subxt v0.37 future-incompat note only). NO bitrot. Decision artifacts intact (`cycle63-decision-card.md` + `testnet-public-runbook.md` in the real shared path). No-op logged — deliberately no churn; research/design/build all complete, no no-money/no-decision work outstanding.
+
+**Real blocker UNCHANGED:** Jeremy's go/no-go on D1–D5 + VPS budget (~$10–20/mo, needs $). On approval run `testnet-public-runbook.md §7`. Green-light reply: "PM07: accept all recommendations, approve VPS."
+
+⚠️ **Escalation (repeated, ~38 no-op firings in ~43h):** cron is misconfigured — it fires the greenfield Phase-1 brief at a Phase-4-blocked project. Fix: (a) Jeremy gives the D1–D5 + VPS decision to unblock real Phase-4 work, or (b) retire/rewrite the cron brief to "Phase-3/4-BLOCKED — waiting on Jeremy's D1–D5 + VPS decision" to stop burning hourly cycles. No further no-money/no-decision work is outstanding on the Phase-3/4 roadmap.
