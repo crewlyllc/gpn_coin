@@ -5,6 +5,20 @@
 > per-cycle logs under `shared/artifacts/project7/`; this file was consolidated (2026-08-04)
 > to remove ~54 duplicate no-op firing blocks — no content lost, all preserved in git.
 
+## Cycle 68 (2026-08-05 ~04:55 PT) — CRON BRIEF FIXED at source (first real change in ~60 cycles)
+- **FIXED the stale cron brief** (the recurring system-hygiene issue): rewrote the PM07 cron job's
+  `payload.message` via the sanctioned `openclaw cron edit 68687b17… --message` CLI (NOT hand-edited
+  jobs.json). The brief now says "Phase 3 COMPLETE / Phase 4 READY — NOT GREENFIELD" and instructs
+  future firings to: (1) check for Jeremy's green-light signal, (2) execute `testnet-public-runbook.md §7`
+  if present, else (3) verify no bitrot + log tight — and explicitly forbids redoing research or adding
+  redundant no-op firings. Schedule unchanged (`55 * * * *`). This permanently stops the ~hourly
+  greenfield-template firing loop that produced ~60 near-identical no-ops.
+- Verified no bitrot: git clean; gpn-node `cargo check --workspace` EXIT 0 (8 pre-existing GPU-miner
+  warnings only); gpn-agent `cargo check --lib` EXIT 0 (known subxt v0.37 future-incompat note only).
+- No new Jeremy signal (the green-light phrase in memory files is prior cycles *describing* the
+  recommended reply, not an actual reply). Decision card + runbook still current (Aug 2).
+- Blocker UNCHANGED: Jeremy's go/no-go on D1–D5 + ~$10–20/mo VPS. Escalated (crisply) below.
+
 ## Current State (Cycle 64+ — consolidated 2026-08-04 ~18:00 PT)
 
 **Project:** GPU-Native Crypto & AI Compute Network — a Substrate blockchain where every GPU
