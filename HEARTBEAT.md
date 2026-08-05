@@ -379,4 +379,10 @@ Alternative consideration: **Substrate framework** (Polkadot SDK) for modular bl
 
 *Progress: Phase 1 (research) ✅, Phase 2 (design) ✅, Phase 3 (prototype) — dev testnet live with real Ethash PoW; difficulty self-tuning + GPU miner next.*
 
+## C69 (2026-08-05 ~05:55 PT) — BLOCKED cycle, no bitrot
+- No new Jeremy signal (scanned workspace + memory 08-04/08-05 for green-light/D1–D5 answer: none).
+- Verified no bitrot: git clean @69fad91; cargo check EXIT 0 both (gpn-node 8 pre-existing GPU-miner warnings; gpn-agent 1 + subxt future-incompat note). Same as C64.
+- NOTE: brief cites `testnet-public-runbook.md §7` + `cycle63-decision-card.md`, but actual decision brief is `shared/artifacts/project7/cycle59-decision-brief.md` and no runbook file exists in workspace — must locate before executing on green-light.
+- Blocked on Jeremy: D1–D5 + VPS (~$10–20/mo). ~39th no-op firing.
+
 ---
