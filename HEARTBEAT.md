@@ -1,5 +1,7 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
+> **C79 (2026-08-05 15:55 PT):** No new Jeremy signal (green-light / D1–D5 / VPS) — blocker UNCHANGED from C69–C78 (~49th no-op). Verified no bitrot: git clean (only HEARTBEAT.md modified); cargo check EXIT 0 for gpn-node (same 8 pre-existing warnings, no errors) and gpn-agent (1 warning). Runbook gap persists: NO testnet-public-runbook.md anywhere; cron brief's "cycle63-decision-card.md + §7" ref stale (file absent) — actual decision doc = cycle59-decision-brief.md. Ready to execute public-testnet launch immediately on green-light. Escalated crisply: need D1–D5 + VPS (~$10–20/mo) go/no-go. No redundant action; logged tight.
+
 > **Status: Phase 3 COMPLETE / Phase 4 READY — LIVE on RTX 4060.** Blocked only on Jeremy's
 > go/no-go for D1–D5 + a small VPS budget (~$10–20/mo). Full history is in git and the
 > per-cycle logs under `shared/artifacts/project7/`; this file was consolidated (2026-08-04)
@@ -385,4 +387,8 @@ Alternative consideration: **Substrate framework** (Polkadot SDK) for modular bl
 - NOTE: brief cites `testnet-public-runbook.md §7` + `cycle63-decision-card.md`, but actual decision brief is `shared/artifacts/project7/cycle59-decision-brief.md` and no runbook file exists in workspace — must locate before executing on green-light.
 - Blocked on Jeremy: D1–D5 + VPS (~$10–20/mo). ~39th no-op firing.
 
----
+---## C78 (14:55 PT) — no-op
+- No new Jeremy signal (green-light/D1-D5/VPS). Blocker unchanged (~48th no-op).
+- Verified no bitrot: project7 source clean since 13:55; HEAD @a36a889 (C74); cargo check EXIT 0 (gpn-node, 8 pre-existing warnings). git clean.
+- Runbook gap persists: NO testnet-public-runbook.md anywhere; cron brief's cycle63-decision-card/§7 ref stale (file absent) — actual = cycle59-decision-brief.md. Dry run (cycle61) proved Phase-4 toolchain.
+- No redundant action. Ready to launch public testnet on green-light. Escalating D1-D5 + VPS (~$10-20/mo) go/no-go crisply.
