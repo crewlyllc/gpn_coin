@@ -1,5 +1,22 @@
 # HEARTBEAT.md — Project 7: GPU-Native Crypto & AI Compute Network
 
+## C136 (2026-08-08 11:55 PT / 18:55 UTC) — BLOCKED, no-op, no bitrot (~106th)
+- No new Jeremy signal (green-light / D1-D5 / VPS). Grep "accept all recommendations, approve VPS" outside own logs/prior artifacts = EMPTY (never a real Jeremy reply). Zero new project7 source files since C135.
+- No bitrot: projectmanager07 HEAD @975643a unchanged; tree dirty = only my HEARTBEAT.md → no cargo re-check needed.
+- Runbook gap persists: cycle63-decision-card.md + testnet-public-runbook.md ABSENT (verified ls); actual decision doc = cycle59-decision-brief.md.
+- Blocker UNCHANGED: need Jeremy D1-D5 + VPS (~$10-20/mo) go/no-go. Reply "PM07: accept all recommendations, approve VPS" → execute runbook §7 immediately. No redundant action.
+
+## C132 (2026-08-08 07:55 PT / 14:55 UTC) — BLOCKED, no-op, no bitrot (~102nd)
+- No new Jeremy signal (green-light / D1-D5 / VPS). Grep "accept all recommendations, approve VPS" = only my own HEARTBEAT logs, never a real reply. Zero new project7 source files.
+- No bitrot: projectmanager07 HEAD @975643a unchanged; project7 tree clean (dirty = only my HEARTBEAT.md) → no cargo re-check needed.
+- Blocker UNCHANGED: need Jeremy D1-D5 + VPS (~$10-20/mo) go/no-go. Reply "PM07: accept all recommendations, approve VPS" → launch public testnet immediately. No redundant action.
+
+## C106 (2026-08-07 ~00:55 PT / 07:55 UTC) — BLOCKED, no-op, no bitrot
+- No new Jeremy signal (green-light / D1-D5 / VPS) — blocker UNCHANGED (~76th no-op). Grep hits for "accept all recommendations/approve VPS" are ONLY prior-cycle artifacts (memory, HEARTBEAT, cycle61 dryrun, project10) — never an actual Jeremy reply to PM07.
+- No bitrot: projectmanager07 HEAD @975643a (git clean), zero new project7 source files (only target/ build artifacts + my own log). No source change → no cargo re-check needed.
+- Runbook gap persists: NO testnet-public-runbook.md anywhere; cron brief's cycle63-decision-card/§7 ref stale (file absent) — actual decision doc = cycle59-decision-brief.md. Dry run (C61) proved Phase-4 toolchain locally.
+- No redundant action (per brief). Ready to execute public-testnet launch immediately on green-light. Escalating D1-D5 + VPS (~$10-20/mo) go/no-go crisply.
+
 > **C79 (2026-08-05 15:55 PT):** No new Jeremy signal (green-light / D1–D5 / VPS) — blocker UNCHANGED from C69–C78 (~49th no-op). Verified no bitrot: git clean (only HEARTBEAT.md modified); cargo check EXIT 0 for gpn-node (same 8 pre-existing warnings, no errors) and gpn-agent (1 warning). Runbook gap persists: NO testnet-public-runbook.md anywhere; cron brief's "cycle63-decision-card.md + §7" ref stale (file absent) — actual decision doc = cycle59-decision-brief.md. Ready to execute public-testnet launch immediately on green-light. Escalated crisply: need D1–D5 + VPS (~$10–20/mo) go/no-go. No redundant action; logged tight.
 
 > **Status: Phase 3 COMPLETE / Phase 4 READY — LIVE on RTX 4060.** Blocked only on Jeremy's
@@ -410,3 +427,8 @@ Alternative consideration: **Substrate framework** (Polkadot SDK) for modular bl
 - No bitrot: projectmanager07 HEAD @252328b (C104, my own commit), git clean, zero new project7 source files since C104. No source change → no cargo re-check needed.
 - Runbook gap persists: NO testnet-public-runbook.md anywhere; cron brief's cycle63-decision-card/§7 ref stale (file absent) — actual decision doc = cycle59-decision-brief.md. Dry run (C61) proved Phase-4 toolchain locally.
 - No redundant action (per brief). Ready to execute public-testnet launch immediately on green-light. Escalating D1-D5 + VPS (~$10-20/mo) go/no-go crisply.
+
+## PM07 (P7) C139 — 21:55 UTC Aug 8 — ~109th no-op
+No Jeremy signal (green-light/D1-D5/VPS). No bitrot (HEAD @975643a, tree clean). Blocker UNCHANGED: need Jeremy "PM07: accept all recommendations, approve VPS" → run public testnet §7. Escalating crisply: strategic go/no-go unanswered for ~109 cycles. No redundant action.
+## PM07 C142 (00:55 UTC Aug 9 / 17:55 PT Aug 8) — ~112th no-op
+- No new Jeremy signal (D1-D5/VPS green-light). No bitrot (HEAD unchanged, no source churn). Blocker UNCHANGED: need "PM07: accept all recommendations, approve VPS" → execute runbook §7 (public testnet). No redundant action.
