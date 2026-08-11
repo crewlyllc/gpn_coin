@@ -28,3 +28,9 @@
 - Decision docs: cycle63-decision-card.md + testnet-public-runbook.md still ABSENT as named; actual = cycle59-decision-brief.md (known gap, not churning per brief).
 - Blocker UNCHANGED: need Jeremy D1-D5 + VPS (~$10-20/mo) go/no-go. Reply "PM07: accept all recommendations, approve VPS" → execute runbook §7 (public testnet launch) immediately. No redundant action.
 - ESCALATION (crisp): ~143 consecutive no-op cycles. Everything turnkey, Phase-3 verified live on RTX 4060; ONLY Jeremy's D1-D5 + VPS decision blocks a public testnet. Point to shared/artifacts/project7/cycle59-decision-brief.md.
+
+## C184 (00:56 UTC / 17:56 PT Aug 10) — ~152nd no-op
+- No new Jeremy signal (green-light / D1-D5 / VPS). Grep "accept all recommendations" outside prior artifacts = only project10 quote, never a real Jeremy reply.
+- No bitrot: new untracked gpn_api.rs (REST marketplace API) verified compiles clean via `cargo check -p gpn-agent`. No regression.
+- Blocker UNCHANGED: need Jeremy D1-D5 + VPS (~$10-20/mo) go/no-go. Reply "PM07: accept all recommendations, approve VPS" → execute runbook §7 (public testnet launch) immediately.
+- ESCALATION (crisp): ~152 consecutive no-op cycles. Everything turnkey, Phase-3 verified live on RTX 4060; ONLY Jeremy's decision blocks a public testnet. → shared/artifacts/project7/cycle59-decision-brief.md.
