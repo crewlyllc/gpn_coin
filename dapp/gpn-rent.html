@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>GPN Compute Marketplace — Rent a GPU</title>
+<style>
+  :root{--bg:#0d1117;--panel:#161b22;--line:#30363d;--text:#e6edf3;--muted:#8b949e;--accent:#58a6ff;--green:#3fb950;--red:#f85149;}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--text);}
+  header{display:flex;align-items:center;justify-content:space-between;padding:14px 22px;border-bottom:1px solid var(--line);background:var(--panel);}
+  header h1{font-size:18px;margin:0;font-weight:600}
+  header .tag{color:var(--muted);font-size:12px;margin-left:10px}
+  .wrap{max-width:980px;margin:0 auto;padding:22px}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  @media(max-width:760px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px}
+  .card h2{font-size:14px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:0 0 14px}
+  label{display:block;font-size:12px;color:var(--muted);margin:10px 0 4px}
+  input,select,textarea{width:100%;background:#0d1117;border:1px solid var(--line);color:var(--text);border-radius:6px;padding:9px 10px;font-size:14px}
+  input:focus,select:focus{border-color:var(--accent);outline:none}
+  .row{display:flex;gap:10px}.row>*{flex:1}
+  button{background:var(--accent);color:#fff;border:0;border-radius:6px;padding:11px 16px;font-size:14px;font-weight:600;cursor:pointer}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  button.ghost{background:transparent;border:1px solid var(--line);color:var(--accent)}
+  button.green{background:var(--green)}
+  .status{margin-top:12px;padding:10px 12px;border-radius:6px;background:#0d1117;border:1px solid var(--line);font-size:13px;white-space:pre-wrap;word-break:break-word}
+  .ok{color:var(--green)}.err{color:var(--red)}.muted{color:var(--muted)}
+  #walletBox{border:1px solid var(--line);border-radius:6px;padding:10px 12px;font-size:13px;margin-top:12px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line)}
+  th{color:var(--muted);font-weight:500}
+  .pill{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;background:#0d1117;border:1px solid var(--line)}
+</style>
+</head>
+<body>
+<header>
+  <div><span style="font-weight:700">⚡ GPN</span> <span class="tag">GPU Compute Marketplace — rent a GPU</span></div>
+  <button id="connectBtn">Connect Wallet</button>
+</header>
+
+<div class="wrap">
+  <div class="card" id="walletBox">
+    <b>Wallet:</b> <span class="muted" id="addr">not connected</span><br/>
+    <b>Balance:</b> <span id="balance">—</span> GPN
+    <button class="green" id="dripBtn" style="margin-top:10px" disabled>Get test GPN from faucet</button>
+    <div class="status muted" id="walletStatus">Connect a wallet (Polkadot.js extension) to begin.</div>
+  </div>
+
+  <div class="grid" style="margin-top:18px">
+    <!-- GPU requirements -->
+    <div class="card">
+      <h2>1 · GPU Requirements</h2>
+      <label>Pick a GPU (job needs this model or better)</label>
+      <select id="gpuSelect">
+        <option value="" selected>Custom / type my own specs…</option>
+        <optgroup label="Entry">
+          <option value="any">Any modern GPU</option>
+        </optgroup>
+        <optgroup label="NVIDIA GeForce · RTX 50 (Blackwell)">
+          <option value="RTX 5090">RTX 5090 · 32GB</option>
+          <option value="RTX 5080">RTX 5080 · 16GB</option>
+          <option value="RTX 5070 Ti">RTX 5070 Ti · 16GB</option>
+          <option value="RTX 5070">RTX 5070 · 12GB</option>
+          <option value="RTX 5060 Ti">RTX 5060 Ti · 16GB</option>
+          <option value="RTX 5060">RTX 5060 · 8GB</option>
+        </optgroup>
+        <optgroup label="NVIDIA GeForce · RTX 40">
+          <option value="RTX 4090">RTX 4090 · 24GB</option>
+          <option value="RTX 4080">RTX 4080 · 16GB</option>
+          <option value="RTX 4070 Ti">RTX 4070 Ti · 12GB</option>
+          <option value="RTX 4070">RTX 4070 · 12GB</option>
+          <option value="RTX 4060 Ti">RTX 4060 Ti · 8GB</option>
+          <option value="RTX 4060">RTX 4060 · 8GB</option>
+        </optgroup>
+        <optgroup label="NVIDIA GeForce · RTX 30">
+          <option value="RTX 3090">RTX 3090 · 24GB</option>
+          <option value="RTX 3080">RTX 3080 · 10GB</option>
+          <option value="RTX 3070">RTX 3070 · 8GB</option>
+          <option value="RTX 3060">RTX 3060 · 12GB</option>
+        </optgroup>
+        <optgroup label="NVIDIA Professional / Data Center (industrial)">
+          <option value="B200">B200 (data center)</option>
+          <option value="H100">H100 SXM · 80GB</option>
+          <option value="A100">A100 · 80GB</option>
+          <option value="RTX 6000 Ada">RTX 6000 Ada · 48GB</option>
+          <option value="RTX A6000">RTX A6000 · 48GB</option>
+          <option value="RTX A5000">RTX A5000 · 24GB</option>
+          <option value="RTX A4000">RTX A4000 · 16GB</option>
+          <option value="Quadro RTX 8000">Quadro RTX 8000 · 48GB</option>
+        </optgroup>
+        <optgroup label="NVIDIA GeForce · GTX / older">
+          <option value="RTX 2080 Ti">RTX 2080 Ti · 11GB</option>
+          <option value="RTX 2070">RTX 2070 · 8GB</option>
+        </optgroup>
+      </select>
+      <div class="status muted" id="gpuHint" style="font-size:12px;padding:6px 0 0">Pick a GPU and its specs (or higher) fill in automatically. You can still edit them.</div>
+      <div class="row">
+        <div><label>Min VRAM (MB)</label><input type="number" id="vram" value="8192" min="0"></div>
+        <div><label>Min Compute Capability</label><input type="number" id="cap" value="8.9" step="0.1" min="0"></div>
+      </div>
+      <div class="row">
+        <div><label>Min GPU count</label><input type="number" id="gpus" value="1" min="1"></div>
+        <div><label>Min CUDA cores</label><input type="number" id="cores" value="2048" min="0"></div>
+      </div>
+      <div><label>Min throughput (GFLOPS, 0 = any)</label><input type="number" id="gflops" value="10000" min="0"></div>
+
+      <h2 style="margin-top:20px">2 · Job</h2>
+      <div class="row">
+        <div><label>Job type</label>
+          <select id="jobType">
+            <option>LLMInference</option><option>FineTuning</option>
+            <option>ImageGeneration</option><option>MLInference</option><option>Custom</option>
+          </select>
+        </div>
+        <div><label>Tier</label>
+          <select id="tier"><option>Spot</option><option>Premium</option><option>Reserved</option></select>
+        </div>
+      </div>
+      <div class="row">
+        <div><label>Price (GPN)</label><input type="number" id="price" value="100" min="0.000000000001" step="any"></div>
+        <div><label>Max duration (blocks)</label><input type="number" id="duration" value="1000" min="1"></div>
+      </div>
+      <div><label>Workload description (hashed on-chain)</label>
+        <textarea id="workload" rows="2">Train a small image-classification model on the CIFAR-10 dataset</textarea></div>
+
+      <button id="createBtn" style="margin-top:16px" disabled>Create Job (locks price in escrow)</button>
+      <div class="status" id="createStatus">Fill the form, then connect a wallet to create a job.</div>
+    </div>
+
+    <!-- Status -->
+    <div class="card">
+      <h2>3 · Network &amp; Your Jobs</h2>
+      <label>RPC endpoint</label><input id="endpoint" value="ws://127.0.0.1:9944">
+      <label>Faucet URL</label><input id="faucet" value="http://127.0.0.1:8081">
+      <button class="ghost" id="reconnectBtn" style="margin-top:12px">Connect to this endpoint</button>
+      <div class="status" id="netStatus">Not connected to a node.</div>
+      <table style="margin-top:14px">
+        <thead><tr><th>Job</th><th>Type</th><th>Tier</th><th>State</th><th>Price</th></tr></thead>
+        <tbody id="jobsBody"><tr><td colspan="5" class="muted">No jobs yet.</td></tr></tbody>
+      </table>
+      <button class="ghost" id="refreshJobs" style="margin-top:10px">Refresh my jobs</button>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import { ApiPromise, WsProvider } from "https://esm.sh/@polkadot/api@14";
+import { web3Accounts, web3Enable, web3FromSource } from "https://esm.sh/@polkadot/extension-dapp@0.51";
+
+const $ = (id) => document.getElementById(id);
+const GPN_UNITS = 1_000_000_000_000n; // 12 decimals
+
+// GPU specs for the "pick a model or better" dropdown.
+// cap is stored as the on-chain compute-capability value (x10).
+const GPUS = {
+  "any":        { name: "Any modern GPU",        vram: 2048,   cap: 50,  cores: 0,    gflops: 0 },
+  // RTX 50 (Blackwell)
+  "RTX 5090":   { name: "RTX 5090",              vram: 32768,  cap: 120, cores: 21760, gflops: 104800 },
+  "RTX 5080":   { name: "RTX 5080",              vram: 16384,  cap: 120, cores: 10752, gflops: 56280 },
+  "RTX 5070 Ti":{ name: "RTX 5070 Ti",           vram: 16384,  cap: 120, cores: 8960,  gflops: 43860 },
+  "RTX 5070":   { name: "RTX 5070",              vram: 12288,  cap: 120, cores: 6144,  gflops: 30130 },
+  "RTX 5060 Ti":{ name: "RTX 5060 Ti",           vram: 16384,  cap: 120, cores: 4608,  gflops: 23400 },
+  "RTX 5060":   { name: "RTX 5060",              vram: 8192,   cap: 120, cores: 3840,  gflops: 19290 },
+  // RTX 40
+  "RTX 4090":   { name: "RTX 4090",              vram: 24576,  cap: 89,  cores: 16384, gflops: 82580 },
+  "RTX 4080":   { name: "RTX 4080",              vram: 16384,  cap: 89,  cores: 9728,  gflops: 48740 },
+  "RTX 4070 Ti":{ name: "RTX 4070 Ti",           vram: 12288,  cap: 89,  cores: 7680,  gflops: 40000 },
+  "RTX 4070":   { name: "RTX 4070",              vram: 12288,  cap: 89,  cores: 5888,  gflops: 29150 },
+  "RTX 4060 Ti":{ name: "RTX 4060 Ti",           vram: 8192,   cap: 89,  cores: 4352,  gflops: 22060 },
+  "RTX 4060":   { name: "RTX 4060",              vram: 8192,   cap: 89,  cores: 3072,  gflops: 15110 },
+  // RTX 30
+  "RTX 3090":   { name: "RTX 3090",              vram: 24576,  cap: 86,  cores: 10496, gflops: 35580 },
+  "RTX 3080":   { name: "RTX 3080",              vram: 10240,  cap: 86,  cores: 8704,  gflops: 29770 },
+  "RTX 3070":   { name: "RTX 3070",              vram: 8192,   cap: 86,  cores: 5888,  gflops: 20310 },
+  "RTX 3060":   { name: "RTX 3060",              vram: 12288,  cap: 86,  cores: 3584,  gflops: 12740 },
+  // Professional / Data Center (industrial)
+  "B200":       { name: "B200 (data center)",    vram: 192000, cap: 100, cores: 18432, gflops: 90000 },
+  "H100":       { name: "H100 SXM",              vram: 81920,  cap: 90,  cores: 14592, gflops: 67000 },
+  "A100":       { name: "A100",                  vram: 81920,  cap: 80,  cores: 6912,  gflops: 19490 },
+  "RTX 6000 Ada":{ name: "RTX 6000 Ada",         vram: 49152,  cap: 89,  cores: 18176, gflops: 91100 },
+  "RTX A6000":  { name: "RTX A6000",             vram: 49152,  cap: 86,  cores: 10752, gflops: 38710 },
+  "RTX A5000":  { name: "RTX A5000",             vram: 24576,  cap: 86,  cores: 8192,  gflops: 27770 },
+  "RTX A4000":  { name: "RTX A4000",             vram: 16384,  cap: 86,  cores: 6144,  gflops: 19170 },
+  "Quadro RTX 8000":{ name: "Quadro RTX 8000",   vram: 49152,  cap: 75,  cores: 4608,  gflops: 16310 },
+  // older
+  "RTX 2080 Ti":{ name: "RTX 2080 Ti",           vram: 11264,  cap: 75,  cores: 4352,  gflops: 13450 },
+  "RTX 2070":   { name: "RTX 2070",              vram: 8192,   cap: 75,  cores: 2304,  gflops: 7465 },
+};
+
+$("gpuSelect").addEventListener("change", (e) => {
+  const g = GPUS[e.target.value];
+  if (!g) return; // custom
+  $("vram").value = g.vram;
+  $("cap").value = (g.cap / 10).toFixed(1);
+  $("gpus").value = 1;
+  $("cores").value = g.cores;
+  $("gflops").value = g.gflops;
+  $("gpuHint").textContent = "✅ " + g.name + " (or better): VRAM " + (g.vram/1024).toFixed(0) + "GB, CC " + (g.cap/10).toFixed(1) + ", " + g.cores + " CUDA cores, ~" + g.gflops + " GFLOPS";
+  $("gpuHint").className = "status ok";
+});
+
+let api = null;
+let injector = null;
+let account = null;
+let walletAddr = null;
+
+const setStatus = (el, txt, cls) => { el.textContent = txt; el.className = "status " + (cls||""); };
+
+async function connectApi(endpoint) {
+  setStatus($("netStatus"), "Connecting to " + endpoint + " …", "muted");
+  const provider = new WsProvider(endpoint);
+  const a = await ApiPromise.create({ provider });
+  api = a;
+  setStatus($("netStatus"),
+    "Connected to node · chain: " + (await a.rpc.system.chain()) +
+    " · blocks: #" + (await a.rpc.chain.getHeader()).number.toString(), "ok");
+  refreshBalance();
+  refreshJobs();
+}
+
+async function connectWallet() {
+  try {
+    const extensions = await web3Enable("GPN Compute Marketplace");
+    if (!extensions || extensions.length === 0) {
+      setStatus($("walletStatus"), "No wallet extension found. Install the Polkadot.js extension.", "err");
+      return;
+    }
+    const all = await web3Accounts();
+    if (!all.length) { setStatus($("walletStatus"), "No accounts in your wallet.", "err"); return; }
+    account = all[0];
+    injector = await web3FromSource(account.meta.source);
+    walletAddr = account.address;
+    $("addr").textContent = walletAddr;
+    $("connectBtn").textContent = "Switch wallet";
+    if (api) api.setSigner(injector.signer);
+    setStatus($("walletStatus"), "Wallet connected: " + walletAddr, "ok");
+    $("dripBtn").disabled = false;
+    $("createBtn").disabled = false;
+    refreshBalance(); refreshJobs();
+  } catch (e) {
+    setStatus($("walletStatus"), "Wallet error: " + e.message, "err");
+  }
+}
+
+async function refreshBalance() {
+  if (!api || !walletAddr) return;
+  try {
+    const b = await api.query.system.account(walletAddr);
+    const free = b.data.free.toString();
+    $("balance").textContent = (Number(free) / 1e12).toLocaleString(undefined,{maximumFractionDigits:6});
+  } catch(e){ $("balance").textContent = "—"; }
+}
+
+async function drip() {
+  if (!walletAddr) return;
+  setStatus($("walletStatus"), "Requesting GPN from faucet …", "muted");
+  try {
+    const url = $("faucet").value.replace(/\/$/, "") + "/drip?address=" + walletAddr;
+    const r = await fetch(url);
+    const t = await r.text();
+    setStatus($("walletStatus"), "Faucet: " + (r.ok ? "✅ " + t : "⚠️ " + t), r.ok ? "ok" : "err");
+    setTimeout(refreshBalance, 1500);
+  } catch(e) {
+    setStatus($("walletStatus"), "Faucet error: " + e.message + " (is the faucet running?)", "err");
+  }
+}
+
+async function sha256hex(text) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return "0x" + Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join("");
+}
+
+async function createJob() {
+  if (!api || !account) { setStatus($("createStatus"), "Connect a wallet first.", "err"); return; }
+  try {
+    setStatus($("createStatus"), "Building & submitting createJob …", "muted");
+    const gpu_requirements = {
+      min_vram_mb: Number($("vram").value) || 0,
+      min_compute_capability: Math.round((Number($("cap").value)||0) * 10),
+      min_gpu_count: Number($("gpus").value) || 1,
+      min_cuda_cores: Number($("cores").value) || 0,
+      min_gflops: Number($("gflops").value) || 0,
+    };
+    const priceGpn = Number($("price").value);
+    const price = BigInt(Math.round(priceGpn * 1e12)).toString();
+    const workload_hash = await sha256hex($("workload").value || "workload");
+
+    const tx = api.tx.computeMarketplace.createJob(
+      gpu_requirements,
+      { [ $("jobType").value ]: undefined },
+      { [ $("tier").value ]: undefined },
+      price,
+      Number($("duration").value) || 1000,
+      workload_hash
+    );
+
+    const hash = await tx.signAndSend(account.address, (res) => {
+      setStatus($("createStatus"),
+        "Status: " + res.status.type +
+        (res.status.isFinalized ? " · finalized in block #" + res.status.asFinalized.toString() : "") +
+        (res.dispatchError ? " · dispatch error: " + res.dispatchError.toString() : ""),
+        res.dispatchError ? "err" : "ok");
+      if (res.status.isInBlock || res.status.isFinalized) { refreshBalance(); refreshJobs(); }
+    });
+    setStatus($("createStatus"), "Submitted, tx hash: " + hash + " (waiting for block…)", "muted");
+  } catch(e) {
+    setStatus($("createStatus"), "Error: " + e.message, "err");
+  }
+}
+
+async function refreshJobs() {
+  if (!api || !walletAddr) return;
+  try {
+    const entries = await api.query.computeMarketplace.requestorJobs(walletAddr);
+    const ids = entries.toHuman ? entries.toHuman() : [];
+    const body = $("jobsBody");
+    if (!ids || !ids.length) { body.innerHTML = '<tr><td colspan="5" class="muted">No jobs yet.</td></tr>'; return; }
+    let rows = "";
+    for (const id of ids) {
+      const j = await api.query.computeMarketplace.jobs(id);
+      const h = j.toHuman();
+      rows += `<tr><td>#${id}</td><td>${h.jobType}</td><td>${h.tier}</td><td><span class="pill">${h.state}</span></td><td>${h.price}</td></tr>`;
+    }
+    body.innerHTML = rows;
+  } catch(e) { /* ignore */ }
+}
+
+$("connectBtn").onclick = connectWallet;
+$("dripBtn").onclick = drip;
+$("createBtn").onclick = createJob;
+$("reconnectBtn").onclick = () => connectApi($("endpoint").value);
+$("refreshJobs").onclick = refreshJobs;
+
+// auto-connect on load
+connectApi($("endpoint").value);
+</script>
+</body>
+</html>
