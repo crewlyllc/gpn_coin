@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>GPN — GPU-Native Network | Mine. Stake. Compute.</title>
+<meta name="description" content="GPN is a GPU-native blockchain that mines with GPU-only proof-of-work, stakes with GPU attestation, and rents GPU compute through a decentralized marketplace — switching automatically to whatever pays more." />
+<style>
+  :root{
+    --bg:#07090f; --panel:#0d1117; --card:#111827; --line:#1f2937;
+    --text:#e6edf3; --muted:#9aa4b2; --accent:#7c6cff; --accent2:#22d3ee; --green:#3fb950;
+    --grad:linear-gradient(90deg,#7c6cff,#22d3ee);
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text);line-height:1.6}
+  a{color:var(--accent2);text-decoration:none}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 24px}
+  /* nav */
+  nav{position:sticky;top:0;backdrop-filter:blur(8px);background:rgba(7,9,15,.85);border-bottom:1px solid var(--line);z-index:50}
+  nav .wrap{display:flex;align-items:center;justify-content:space-between;height:58px}
+  nav .brand{font-weight:700;letter-spacing:.03em}
+  nav .brand span{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+  nav .links a{margin-left:20px;color:var(--muted);font-size:14px}
+  nav .links a:hover{color:var(--text)}
+  /* hero */
+  .hero{padding:90px 0 70px;text-align:center}
+  .hero .badge{display:inline-block;padding:5px 14px;border:1px solid var(--line);border-radius:20px;font-size:13px;color:var(--muted);margin-bottom:22px}
+  .hero h1{font-size:52px;line-height:1.08;margin:0 0 18px;font-weight:800}
+  .hero h1 span{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .hero p.lede{max-width:680px;margin:0 auto 30px;font-size:19px;color:var(--muted)}
+  .cta{display:flex;gap:14px;justify-content:center;flex-wrap:wrap}
+  .btn{display:inline-block;padding:13px 26px;border-radius:8px;font-weight:600;font-size:15px;background:var(--grad);color:#07090f}
+  .btn.ghost{background:transparent;border:1px solid var(--line);color:var(--text)}
+  .btn.ghost:hover{border-color:var(--accent)}
+  /* sections */
+  section{padding:64px 0;border-top:1px solid var(--line)}
+  .kicker{color:var(--accent2);font-size:13px;letter-spacing:.12em;text-transform:uppercase;font-weight:600}
+  h2{font-size:34px;margin:8px 0 12px;font-weight:800}
+  .sub{color:var(--muted);max-width:720px;margin:0 0 34px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:18px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:24px}
+  .card .ic{font-size:26px;margin-bottom:10px}
+  .card h3{margin:0 0 8px;font-size:17px}
+  .card p{margin:0;color:var(--muted);font-size:14.5px}
+  .flow{display:flex;flex-direction:column;gap:14px;max-width:760px}
+  .step{display:flex;gap:16px;align-items:flex-start}
+  .step .num{flex:0 0 34px;height:34px;border-radius:50%;background:var(--grad);color:#07090f;font-weight:800;display:flex;align-items:center;justify-content:center}
+  .step b{display:block;margin-bottom:2px}
+  .step p{margin:0;color:var(--muted);font-size:14.5px}
+  table{width:100%;border-collapse:collapse;font-size:14px;margin-top:8px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line)}
+  th{color:var(--muted);font-weight:600}
+  code{background:var(--panel);border:1px solid var(--line);border-radius:5px;padding:2px 6px;font-size:13px}
+  pre{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;overflow-x:auto;font-size:13px}
+  footer{padding:40px 0 60px;border-top:1px solid var(--line);color:var(--muted);font-size:13px;text-align:center}
+  .status-pill{display:inline-block;padding:3px 10px;border-radius:12px;font-size:12px;background:rgba(63,185,80,.15);color:var(--green);border:1px solid rgba(63,185,80,.3);margin-left:8px}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <div class="brand"><span>⚡ GPN</span> · GPU-Native Network</div>
+    <div class="links">
+      <a href="#how">How it works</a>
+      <a href="#use">How to use</a>
+      <a href="#tech">Architecture</a>
+      <a href="#status">Status</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap">
+    <div class="badge">GPU-only mining · GPU-attested staking · AI compute marketplace</div>
+    <h1>Your GPU mines, stakes,<br/>and <span>rents itself out</span> —<br/>whichever pays more.</h1>
+    <p class="lede">GPN is a GPU-native blockchain that combines GPU proof-of-work mining, GPU-attested staking, and a decentralized AI compute marketplace — then lets each GPU automatically switch between them based on live profitability. No other network merges mining and compute in one chain.</p>
+    <div class="cta">
+      <a class="btn" href="#use">Get started</a>
+      <a class="btn ghost" href="#tech">See the architecture</a>
+    </div>
+  </div>
+</header>
+
+<section id="how">
+  <div class="wrap">
+    <div class="kicker">The idea</div>
+    <h2>One GPU, three jobs, always the best one</h2>
+    <p class="sub">A GPU is great at two very different things: solving the math that mints coins, and doing the heavy computation that runs AI. GPN treats them as interchangeable jobs and picks the most profitable one in real time.</p>
+    <div class="grid">
+      <div class="card"><div class="ic">⛏️</div><h3>GPU Mining</h3><p>Ethash-class proof-of-work, ASIC-resistant and GPU-only. Your GPU solves the puzzle and earns freshly-minted GPN as a block reward.</p></div>
+      <div class="card"><div class="ic">🛡️</div><h3>GPU-Attested Staking</h3><p>Stake GPN and prove your GPU is real (attest real GFLOPS) to earn a tiered reward multiplier — Bronze, Silver, or Gold.</p></div>
+      <div class="card"><div class="ic">🖥️</div><h3>AI Compute Marketplace</h3><p>Rent GPU time to run inference or fine-tuning jobs. Escrow-protected payment, verified proof-of-compute, 5% marketplace fee.</p></div>
+      <div class="card"><div class="ic">📈</div><h3>Profitability Auto-Switch</h3><p>A governed on-chain oracle tracks prices and utilization. Each GPU automatically switches mining ↔ compute to whatever pays more per hour.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="use">
+  <div class="wrap">
+    <div class="kicker">How to use it</div>
+    <h2>Get on the network in minutes</h2>
+    <p class="sub">You don't need any GPN to start mining — mining is how GPN is created. Here's the path from nothing to earning.</p>
+    <div class="flow">
+      <div class="step"><div class="num">1</div><div><b>Set up a wallet</b><p>Install the Polkadot.js browser extension and create an account. This is your GPN address.</p></div></div>
+      <div class="step"><div class="num">2</div><div><b>Get test GPN (faucet)</b><p>Request a free drip from the faucet — you'll want it for the attestation stake and fees.</p></div></div>
+      <div class="step"><div class="num">3</div><div><b>Run a node + miner</b><p>Install the node and GPU miner, then point it at the network. Your GPU starts producing blocks.</p></div></div>
+      <div class="step"><div class="num">4</div><div><b>Stake &amp; attest</b><p>Stake 1,000 GPN and prove your GPU's real throughput to unlock the tiered reward bonus.</p></div></div>
+      <div class="step"><div class="num">5</div><div><b>Rent or rent out</b><p>Post a compute job in the marketplace, or list your GPU to serve jobs — paid via escrow.</p></div></div>
+    </div>
+  </div>
+</section>
+
+<section id="tech">
+  <div class="wrap">
+    <div class="kicker">Architecture</div>
+    <h2>Built on the Polkadot SDK</h2>
+    <p class="sub">GPN is a standalone Layer-1 blockchain (not a token on another chain). It's built on Substrate, so it gets runtime upgrades, multi-signature support, and a path to post-quantum signatures.</p>
+    <div class="grid">
+      <div class="card"><div class="ic">🧩</div><h3>5 core pallets</h3><p>gpu-pow (mining), gpu-attestation (staking), compute-marketplace (rental), profitability-oracle (auto-switch feed), gpn-token (coin economy).</p></div>
+      <div class="card"><div class="ic">🪙</div><h3>GPN tokenomics</h3><p>50 GPN/block, 10%→1% inflation decay, 1B supply cap, 5% marketplace fee routed to staking/treasury/burn/oracle.</p></div>
+      <div class="card"><div class="ic">🔗</div><h3>RPC + REST API</h3><p>Talk to the chain via JSON-RPC, or use the REST API for programmatic job creation and account queries.</p></div>
+      <div class="card"><div class="ic">🧠</div><h3>Quantum-ready</h3><p>Uses sr25519 today (like every chain); MultiSignature gives a migration path to post-quantum signatures later.</p></div>
+    </div>
+    <h3 style="margin-top:36px">Try it (local testnet)</h3>
+    <pre># start the node
+gpn-node --dev --tmp --force-authoring
+
+# get test GPN
+gpn_faucet --endpoint ws://127.0.0.1:9944 --listen 127.0.0.1:8081 --signer-uri //Alice
+
+# rent a GPU from your browser
+# → open the dapp, connect wallet, pick a GPU, create a job
+</pre>
+  </div>
+</section>
+
+<section id="status">
+  <div class="wrap">
+    <div class="kicker">Status</div>
+    <h2>Where the network is today</h2>
+    <div class="grid">
+      <div class="card"><div class="ic">🧪</div><h3>Dev / testnet <span class="status-pill">LIVE</span></h3><p>Full chain builds and mines on an RTX 4060. Working local testnet with dapp, faucet, explorer, and REST API.</p></div>
+      <div class="card"><div class="ic">🌐</div><h3>Public testnet <span class="status-pill">PENDING</span></h3><p>Ready to launch — needs a ~$10–20/mo VPS for public bootnodes + RPC. Everything is built and dry-run verified.</p></div>
+      <div class="card"><div class="ic">🚀</div><h3>Mainnet <span class="status-pill">FUTURE</span></h3><p>Fair-launch economics, inert sudo key (no admin), post-quantum migration path. Gated on testnet launch + governance.</p></div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p><b>GPN — GPU-Native Network</b> &nbsp;·&nbsp; Mine · Stake · Compute</p>
+    <p style="margin-top:6px">Testnet software — no real value. Not financial advice.</p>
+  </div>
+</footer>
+
+</body>
+</html>
