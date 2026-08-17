@@ -13,6 +13,8 @@ codec = { workspace = true }
 scale-info = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true, optional = true }
+bls12_381 = { version = "0.8", default-features = false, features = ["alloc", "pairings"] }
+ff = { version = "0.13", default-features = false }
 
 [dev-dependencies]
 pallet-balances = { workspace = true, features = ["std"] }

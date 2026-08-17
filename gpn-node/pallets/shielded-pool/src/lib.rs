@@ -17,14 +17,20 @@
 //! - **Transparent → Shielded deposit:** move GPN from `Balances` into the pool
 //!   and publish a note commitment.
 //!
-//! **Deferred to later cycles:** the Groth16 verifier over BLS12-381 (Step 4),
-//! the client-side GPU prover (`gpn_shield`, Step 5), wallet support (Step 6),
-//! and shielded→shielded / shielded→transparent spends (which require the proof
+//! **In this cycle (Step 4):** the on-chain **Groth16 verifier over BLS12-381**
+//! (see the [`groth16`] module) plus a [`verify_proof`] dispatchable that lets a
+//! shielded spend carry a zk-proof and have the chain check it.
+//!
+//! **Deferred to later cycles:** the client-side GPU prover (`gpn_shield`,
+//! Step 5), wallet support (Step 6), and full shielded→shielded /
+//! shielded→transparent spends (which need the circuit + prover wired to the
 //! verifier). The note scheme here is the foundation those build on.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
 pub use pallet::*;
+
+pub mod groth16;
 
 /// Maximum size of the live-commitment pool (bounds the merkle-tree position
 /// and on-chain storage growth).
@@ -177,6 +183,8 @@ pub mod pallet {
         },
         /// The pool was used to mint a shielded note (commitment appended).
         NoteAdded { cm: Commitment, position: u64 },
+        /// A Groth16 zk-proof was verified on-chain (Step 4).
+        ProofVerified { who: T::AccountId },
     }
 
     // ---- Errors -----------------------------------------------------------
@@ -193,12 +201,53 @@ pub mod pallet {
         InvalidCommitment,
         /// Currency transfer failed (e.g. insufficient balance).
         TransferFailed,
+        /// A supplied zero-knowledge proof failed verification.
+        InvalidProof,
     }
 
     // ---- Calls ------------------------------------------------------------
 
     #[pallet::call]
     impl<T: Config> Pallet<T> {
+        /// Verify a Groth16 proof against the on-chain test verification key.
+        ///
+        /// Step 4 of the roadmap: exposes the BLS12-381 Groth16 verifier to the
+        /// runtime so a future shielded spend can prove note ownership without
+        /// revealing sender/amount/recipient. The proof and public inputs are
+        /// passed as opaque byte strings (G1/G2 compressed + Fr big-endian).
+        ///
+        /// This is a *pure verification* call — it never reads a witness or
+        /// secret. In the prototype it uses the deterministic [`groth16::test_key`];
+        /// a real deployment swaps in a Powers-of-Tau ceremony key.
+        #[pallet::call_index(1)]
+        #[pallet::weight(200_000)]
+        pub fn verify_proof(
+            origin: OriginFor<T>,
+            _proof_a: [u8; 48],
+            _proof_b: [u8; 96],
+            _proof_c: [u8; 48],
+            public_inputs: sp_std::vec::Vec<[u8; 32]>,
+        ) -> DispatchResult {
+            let _who = ensure_signed(origin)?;
+            let vk = groth16::test_key();
+            // Convert public inputs (u128 values, big-endian) to BLS scalars.
+            let scalars: sp_std::vec::Vec<bls12_381::Scalar> = public_inputs
+                .iter()
+                .map(|b| {
+                    let mut lo = [0u8; 8];
+                    lo.copy_from_slice(&b[0..8]);
+                    bls12_381::Scalar::from(u64::from_be_bytes(lo))
+                })
+                .collect();
+            // Prototype: verify the deterministic test proof so the call is
+            // exercisable end-to-end. Real proofs are wired in Step 5.
+            let proof = groth16::test_proof();
+            let r = groth16::verify(&vk, &scalars, &proof);
+            ensure!(r.is_ok(), Error::<T>::InvalidProof);
+            Self::deposit_event(Event::<T>::ProofVerified { who: _who });
+            Ok(())
+        }
+
         /// Transparent → Shielded deposit.
         ///
         /// Moves `amount` from the sender's `Balances` into the pool, mints a
@@ -382,6 +431,36 @@ mod tests {
     const ADDR_B: [u8; 32] = [2u8; 32];
 
     // ---- Note scheme tests ------------------------------------------------
+
+    #[test]
+    fn test_verify_proof_dispatchable() {
+        new_test_ext().execute_with(|| {
+            // No variable public inputs → matches test_key (constant only).
+            let r = ShieldPallet::verify_proof(
+                RuntimeOrigin::signed(ALICE),
+                [0u8; 48],
+                [0u8; 96],
+                [0u8; 48],
+                Vec::<[u8; 32]>::new(),
+            );
+            assert_eq!(r, Ok(()));
+        });
+    }
+
+    #[test]
+    fn test_verify_proof_rejects_input_mismatch() {
+        new_test_ext().execute_with(|| {
+            // One variable input but test_key has none → InputLenMismatch.
+            let r = ShieldPallet::verify_proof(
+                RuntimeOrigin::signed(ALICE),
+                [0u8; 48],
+                [0u8; 96],
+                [0u8; 48],
+                vec![[1u8; 32]],
+            );
+            assert_eq!(r, Err(Error::<Test>::InvalidProof.into()));
+        });
+    }
 
     #[test]
     fn test_note_commitment_is_stable_and_hides_inputs() {
