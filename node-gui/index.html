@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>GPN Node Control</title>
+<style>
+  :root{--bg:#0d1117;--panel:#161b22;--line:#30363d;--text:#e6edf3;--muted:#8b949e;--green:#3fb950;--red:#f85149;--accent:#58a6ff;--amber:#d29922}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--text)}
+  .wrap{max-width:760px;margin:0 auto;padding:22px}
+  header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}
+  h1{font-size:20px;margin:0}
+  .badge{font-size:12px;padding:5px 12px;border-radius:12px;font-weight:600}
+  .running{background:rgba(63,185,80,.15);color:var(--green);border:1px solid rgba(63,185,80,.4)}
+  .stopped{background:rgba(139,148,158,.12);color:var(--muted);border:1px solid var(--line)}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px;margin-bottom:16px}
+  .card h2{font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:0 0 12px}
+  .statrow{display:flex;gap:18px;flex-wrap:wrap}
+  .stat .k{font-size:11px;color:var(--muted)}
+  .stat .v{font-size:22px;font-weight:700}
+  .btnrow{display:flex;gap:12px}
+  button{flex:1;padding:14px;border:0;border-radius:8px;font-size:15px;font-weight:700;cursor:pointer;color:#fff}
+  #startBtn{background:var(--green)}
+  #stopBtn{background:var(--red)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  pre.log{background:#0a0e14;border:1px solid var(--line);border-radius:8px;padding:12px;font-size:12px;overflow:auto;max-height:220px;white-space:pre-wrap;word-break:break-word}
+  .note{font-size:12px;color:var(--amber);margin-top:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>⚡ GPN Node Control</h1>
+    <span class="badge stopped" id="statusBadge">checking…</span>
+  </header>
+
+  <div class="card">
+    <h2>Status</h2>
+    <div class="statrow">
+      <div class="stat"><div class="k">Node</div><div class="v" id="nodeState">—</div></div>
+      <div class="stat"><div class="k">Head block</div><div class="v" id="block">—</div></div>
+      <div class="stat"><div class="k">PID</div><div class="v" id="pid">—</div></div>
+    </div>
+    <div class="note" id="gpuNote">GPU: …</div>
+  </div>
+
+  <div class="card">
+    <h2>Control</h2>
+    <div class="btnrow">
+      <button id="startBtn" disabled>▶ Start Node</button>
+      <button id="stopBtn" disabled>■ Stop Node</button>
+    </div>
+    <p class="note">💡 A node that is turned on/off rapidly earns a <b>lower reward</b> (uptime-commitment design). Keeping it running continuously maximizes earnings.</p>
+  </div>
+
+  <div class="card">
+    <h2>Live log</h2>
+    <pre class="log" id="log">(no log yet)</pre>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let running = false;
+
+async function refresh() {
+  try {
+    const r = await fetch("/api/status");
+    const s = await r.json();
+    running = !!s.running;
+    $("nodeState").textContent = s.running ? "RUNNING" : "stopped";
+    $("block").textContent = s.head_block ?? "—";
+    $("pid").textContent = s.pid ?? "—";
+    $("gpuNote").textContent = "GPU: " + (s.gpu || "n/a");
+    $("log").textContent = s.log || "(no log)";
+    const b = $("statusBadge");
+    b.textContent = s.running ? "● RUNNING" : "○ STOPPED";
+    b.className = "badge " + (s.running ? "running" : "stopped");
+    $("startBtn").disabled = s.running;
+    $("stopBtn").disabled = !s.running;
+  } catch (e) {
+    $("log").textContent = "API error: " + e;
+  }
+}
+
+$("startBtn").onclick = async () => {
+  $("startBtn").disabled = true;
+  await fetch("/api/start", {method:"POST"});
+  setTimeout(refresh, 1500);
+};
+$("stopBtn").onclick = async () => {
+  $("stopBtn").disabled = true;
+  await fetch("/api/stop", {method:"POST"});
+  setTimeout(refresh, 1500);
+};
+
+refresh();
+setInterval(refresh, 3000); // poll status + log every 3s
+</script>
+</body>
+</html>

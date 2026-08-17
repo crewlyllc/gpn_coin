@@ -11,6 +11,7 @@ pallet-gpu-attestation = { path = "../pallets/gpu-attestation", default-features
 pallet-compute-marketplace = { path = "../pallets/compute-marketplace", default-features = false }
 pallet-profitability-oracle = { path = "../pallets/profitability-oracle", default-features = false }
 pallet-gpn-token = { path = "../pallets/gpn-token", default-features = false }
+pallet-shielded-pool = { path = "../pallets/shielded-pool", default-features = false }
 
 # Substrate dependencies
 frame-support = { workspace = true, default-features = false }
@@ -43,6 +44,7 @@ codec = { workspace = true, default-features = false }
 scale-info = { workspace = true, default-features = false }
 log = { workspace = true, default-features = false }
 serde = { workspace = true, optional = true }
+bls12_381 = { version = "0.8", default-features = false, features = ["alloc","pairings"] }
 
 [features]
 default = ["std"]
@@ -76,6 +78,7 @@ std = [
     "pallet-compute-marketplace/std",
     "pallet-profitability-oracle/std",
     "pallet-gpn-token/std",
+    "pallet-shielded-pool/std",
     "serde",
     "substrate-wasm-builder",
 ]

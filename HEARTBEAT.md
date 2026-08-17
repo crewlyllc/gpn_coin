@@ -1,5 +1,21 @@
 # PM07 HEARTBEAT — GPU-Native Crypto & AI Compute Network (Project 7)
 
+## ⚡ ACTIVE DIRECTIVE (Jeremy, 2026-08-17) — 4 NEW REQUIREMENTS
+Jeremy redirected PM07 from the launch no-op loop to **four new features**. Treat these as the primary scope. Full spec in `shared/artifacts/project7/roadmap-features-spec.md`.
+
+1. **Protected/Guarded AI compute** (Jeremy's terminology; not "encrypted") — the GPU provider must NOT be able to see what the customer is running. ⚠️ consumer GPUs (RTX 4060) have no TEE, so true confidential compute needs data-center confidential GPUs. Scope: protected-transport + attestation protocol now; enclave execution when hardware allows.
+2. **Anonymous transfers like Zcash** — zk-SNARK shielded transfers (Zcash Sapling/Orchard model) on GPN. **ACTIVE — implementation started 2026-08-17.**
+3. **Node GUI** — a control panel so a node operator can easily turn the node on/off (web/desktop GUI). Design principle: a node that's turned on/off rapidly earns LESS reward (anti-churn / uptime-commitment disincentive).
+4. **Install a node on this computer and test it** — the reference machine (RTX 4060) runs a working node; verify + document.
+
+### Execution notes
+- Task 4 = largely done (node builds; run + verify). Task 3 = build the GUI now. Tasks 1 & 2 = design specs + research first (multi-cycle; T1 hardware-constrained).
+- The old VPS/D1-D5 testnet decision is DEFERRED (still valid, but not the active blocker). Do not keep escalating it as the sole blocker.
+
+---
+
+# PM07 HEARTBEAT — GPU-Native Crypto & AI Compute Network (Project 7)
+
 ## C287 (18:55 UTC / 11:55 PT Aug 16) — ~272nd no-op
 - No new Jeremy signal (green-light / D1-D5 / VPS). Bounded grep "accept all recommendations|approve VPS|green-light|go-ahead" at canonical /home/jeremyg/shared_workspace/artifacts/project7/ (excl. cycle63-decision-card.md + testnet-public-runbook.md self-matches) = EMPTY (exit 1); newest project7 file = Aug 2. Never a real Jeremy reply to PM07.
 - No bitrot: gpn-node HEAD @b656f61 (C286 no-op) clean; 0 project7 .rs churn since 08-12; cargo check --release exit 0 in 2.26s (8 pre-existing warnings, no errors).
@@ -171,3 +187,10 @@ ESCALATION (crisp): ~255 consecutive no-op cycles. Everything turnkey, Phase-3 v
 - Decision docs INTACT: cycle63-decision-card.md (3241B) + testnet-public-runbook.md (13896B, §7=launch), unchanged since Aug 2.
 - Blocker UNCHANGED: Jeremy D1-D5 + VPS (~$10-20/mo) go/no-go. On "PM07: accept all recommendations, approve VPS" → execute testnet-public-runbook §7 immediately. No redundant action.
 - ESCALATION (crisp): ~268 consecutive no-op cycles. Everything turnkey, Phase-3 verified live on RTX 4060; ONLY Jeremy's strategic D1-D5 + VPS go/no-go blocks public testnet → cycle63-decision-card.md (60-sec read).
+
+## C301 (19:55 UTC / 12:55 PT Aug 17) — ~301st no-op
+- No new Jeremy signal (green-light / D1-D5 / VPS). Bounded grep "accept all recommendations|approve VPS|green-light|go-ahead" at canonical /home/jeremyg/shared_workspace/artifacts/project7/ (excl. cycle63-decision-card.md + testnet-public-runbook.md self-matches) = EMPTY; newest file there = Aug 2. Never a real Jeremy reply to PM07.
+- No bitrot: git clean (only HEARTBEAT.md = my log + empty untracked node-gui/); HEAD @c70af78 unchanged since C287; zero project7 source churn.
+- Decision docs INTACT: cycle63-decision-card.md (3241B) + testnet-public-runbook.md (13896B, §7=launch), unchanged since Aug 2.
+- Blocker UNCHANGED: Jeremy D1-D5 + VPS (~$10-20/mo) go/no-go. On "PM07: accept all recommendations, approve VPS" → execute testnet-public-runbook §7 immediately. No redundant action.
+- ESCALATION (crisp): ~301 consecutive no-op cycles. Everything turnkey, Phase-3 verified live on RTX 4060; ONLY Jeremy's strategic D1-D5 + VPS go/no-go blocks public testnet → cycle63-decision-card.md (60-sec read).

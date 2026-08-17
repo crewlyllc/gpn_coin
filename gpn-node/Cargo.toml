@@ -5,6 +5,7 @@ members = [
     "pallets/compute-marketplace",
     "pallets/profitability-oracle",
     "pallets/gpn-token",
+    "pallets/shielded-pool",
     "runtime",
     "node",
 ]
