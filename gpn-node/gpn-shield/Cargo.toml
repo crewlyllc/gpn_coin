@@ -1,0 +1,14 @@
+[package]
+name = "gpn-shield"
+version = "0.1.0"
+edition = "2021"
+description = "GPN shielded-pool client prover (Step 5): generates Groth16 proofs over BLS12-381 byte-compatible with pallet-shielded-pool's on-chain verifier"
+license = "Apache-2.0"
+
+[dependencies]
+# Same crates the runtime verifier uses, so the client proof format is
+# guaranteed identical (G1/G2 compressed + Fr big-endian). No heavy ZK stack.
+bls12_381 = { version = "0.8", features = ["alloc", "pairings"] }
+ff = "0.13"
+
+[dev-dependencies]
