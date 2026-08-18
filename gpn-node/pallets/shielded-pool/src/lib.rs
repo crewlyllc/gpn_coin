@@ -223,13 +223,14 @@ pub mod pallet {
         #[pallet::weight(200_000)]
         pub fn verify_proof(
             origin: OriginFor<T>,
-            _proof_a: [u8; 48],
-            _proof_b: [u8; 96],
-            _proof_c: [u8; 48],
+            proof_a: [u8; 48],
+            proof_b: [u8; 96],
+            proof_c: [u8; 48],
             public_inputs: sp_std::vec::Vec<[u8; 32]>,
         ) -> DispatchResult {
             let _who = ensure_signed(origin)?;
-            let vk = groth16::test_key();
+            // Real value-balance circuit key (1 public input: `fee`).
+            let vk = groth16::value_balance_key();
             // Convert public inputs (u128 values, big-endian) to BLS scalars.
             let scalars: sp_std::vec::Vec<bls12_381::Scalar> = public_inputs
                 .iter()
@@ -239,9 +240,9 @@ pub mod pallet {
                     bls12_381::Scalar::from(u64::from_be_bytes(lo))
                 })
                 .collect();
-            // Prototype: verify the deterministic test proof so the call is
-            // exercisable end-to-end. Real proofs are wired in Step 5.
-            let proof = groth16::test_proof();
+            // Deserialize the proof from its compressed wire bytes.
+            let proof = groth16::proof_from_bytes(&proof_a, &proof_b, &proof_c)
+                .ok_or(Error::<T>::InvalidProof)?;
             let r = groth16::verify(&vk, &scalars, &proof);
             ensure!(r.is_ok(), Error::<T>::InvalidProof);
             Self::deposit_event(Event::<T>::ProofVerified { who: _who });
@@ -432,31 +433,90 @@ mod tests {
 
     // ---- Note scheme tests ------------------------------------------------
 
+    // Real value-balance circuit: proof for fee=2 (from `gpn_shield qap-prove`,
+    // seed testnet-crs-v0). The single public input is `fee`.
+    const REAL_A: [u8; 48] = [
+        0x99, 0x85, 0xca, 0x66, 0xec, 0x9b, 0xdb, 0x1f, 0x5b, 0x3e, 0xbd, 0xbf, 0xb9, 0xfa, 0xc7, 0xcf,
+        0x6a, 0x8d, 0xc9, 0xfd, 0x2d, 0x94, 0xea, 0x4a, 0x58, 0x84, 0xeb, 0x18, 0xa5, 0x02, 0x8f, 0x9a,
+        0x74, 0x36, 0x5e, 0x64, 0xd9, 0x42, 0xd3, 0x13, 0x37, 0x3b, 0x53, 0x51, 0x89, 0x4a, 0x4d, 0xe4,
+    ];
+    const REAL_B: [u8; 96] = [
+        0xb8, 0x80, 0xdd, 0xa7, 0xa8, 0xc8, 0x0f, 0xc2, 0x26, 0x75, 0xec, 0x01, 0x19, 0x82, 0x4f, 0xac,
+        0x24, 0x48, 0x20, 0x9b, 0x22, 0x93, 0xf4, 0xea, 0x06, 0x4c, 0xcf, 0x3a, 0x6d, 0x7b, 0x06, 0x86,
+        0x81, 0x9e, 0xca, 0x94, 0x22, 0x5e, 0x61, 0x91, 0xd0, 0x22, 0xda, 0xcc, 0xd6, 0xce, 0x23, 0x77,
+        0x01, 0xfe, 0xdb, 0xf8, 0xf8, 0xac, 0x39, 0xfc, 0x39, 0x5a, 0x29, 0x9b, 0x39, 0xcb, 0xb7, 0x52,
+        0xf0, 0x99, 0x71, 0x81, 0xfb, 0xd9, 0x7c, 0x85, 0xdd, 0xf2, 0xde, 0x74, 0x61, 0x06, 0xf8, 0xfe,
+        0xac, 0x87, 0x92, 0xb6, 0x38, 0xdd, 0xab, 0x03, 0x40, 0x96, 0x71, 0x42, 0xe9, 0x43, 0x1e, 0x8a,
+    ];
+    const REAL_C: [u8; 48] = [
+        0x82, 0x58, 0x71, 0xfb, 0x81, 0xab, 0xce, 0xc0, 0xde, 0x08, 0x5c, 0x78, 0xe8, 0xe8, 0x62, 0xcb,
+        0x0b, 0xd2, 0x28, 0x28, 0x64, 0xad, 0xba, 0xec, 0x90, 0x6e, 0xa4, 0x2d, 0x9c, 0x90, 0xfa, 0x07,
+        0x80, 0x11, 0x5c, 0x0e, 0xe6, 0x42, 0xf4, 0xad, 0xff, 0xf6, 0x76, 0xb5, 0x23, 0x7f, 0x8e, 0xf4,
+    ];
+    /// fee=2 encoded as the on-chain parser expects: `b[0..8]` read as u64 BE.
+    fn fee2_input() -> [u8; 32] {
+        let mut out = [0u8; 32];
+        out[7] = 2; // big-endian u64 value 2 in the first 8 bytes
+        out
+    }
+
     #[test]
     fn test_verify_proof_dispatchable() {
         new_test_ext().execute_with(|| {
-            // No variable public inputs → matches test_key (constant only).
+            // Real value-balance circuit proof, fee=2 public input → verifies.
             let r = ShieldPallet::verify_proof(
                 RuntimeOrigin::signed(ALICE),
-                [0u8; 48],
-                [0u8; 96],
-                [0u8; 48],
-                Vec::<[u8; 32]>::new(),
+                REAL_A,
+                REAL_B,
+                REAL_C,
+                vec![fee2_input()],
             );
             assert_eq!(r, Ok(()));
         });
     }
 
     #[test]
+    fn test_verify_proof_rejects_wrong_fee() {
+        new_test_ext().execute_with(|| {
+            // Correct proof bytes but wrong public input (fee=3) → InvalidProof.
+            let mut wrong = fee2_input();
+            wrong[7] = 3;
+            let r = ShieldPallet::verify_proof(
+                RuntimeOrigin::signed(ALICE),
+                REAL_A,
+                REAL_B,
+                REAL_C,
+                vec![wrong],
+            );
+            assert_eq!(r, Err(Error::<Test>::InvalidProof.into()));
+        });
+    }
+
+    #[test]
     fn test_verify_proof_rejects_input_mismatch() {
         new_test_ext().execute_with(|| {
-            // One variable input but test_key has none → InputLenMismatch.
+            // Value-balance key expects exactly 1 public input (fee); empty → mismatch.
+            let r = ShieldPallet::verify_proof(
+                RuntimeOrigin::signed(ALICE),
+                REAL_A,
+                REAL_B,
+                REAL_C,
+                Vec::<[u8; 32]>::new(),
+            );
+            assert_eq!(r, Err(Error::<Test>::InvalidProof.into()));
+        });
+    }
+
+    #[test]
+    fn test_verify_proof_rejects_bad_point_encoding() {
+        new_test_ext().execute_with(|| {
+            // Zero bytes is not a valid compressed G1 point → InvalidProof.
             let r = ShieldPallet::verify_proof(
                 RuntimeOrigin::signed(ALICE),
                 [0u8; 48],
                 [0u8; 96],
                 [0u8; 48],
-                vec![[1u8; 32]],
+                vec![fee2_input()],
             );
             assert_eq!(r, Err(Error::<Test>::InvalidProof.into()));
         });
