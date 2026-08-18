@@ -222,3 +222,11 @@ ESCALATION (crisp): ~255 consecutive no-op cycles. Everything turnkey, Phase-3 v
 - Stale cron brief (VPS no-op loop) IGNORED; active directive per memory = Feature 2 (shielded pool). Steps 2-4 done (C288+C289). Did Step 5 milestone 1: **client prover crate `gpn-shield`**.
 - Added new workspace member `gpn-node/gpn-shield/` (keygen/prove/verify CLI + `ser` wire-format matching on-chain `verify_proof` G1/G2-compressed + Fr-big-endian). Uses only bls12_381+ff (already in lock → 3s build, no new deps). 4/4 tests pass; CLI prove→verify VALID; tampered point rejected. Byte-compatible with on-chain test key by construction (same pairing equation). Runtime untouched (additive crate). Committed 5cedac1.
 - Honest scope: on-chain verifier is still the trivial l=0 test circuit; this milestone proves the client<->chain Groth16 toolchain. NEXT sub-step = real note-spend QAP circuit (public inputs cm/nf/value-balance) + on-chain key swap. Updated feature2-shielded-pool-spec.md.
+
+## PM07 (Project 7) — C313 (21:55 UTC / 14:55 PT Aug 18) — note-spend QAP assembled
+- Stale VPS cron brief ("only blocker = D1-D5+VPS") IGNORED (13th straight) — OUTDATED per Jeremy's 08-17 redirect; active = Feature 2 (shielded pool); VPS DEFERRED. No green-light reply (grep exit 1, only decision-card/runbook self-matches); decision docs intact (cycle63 3241B + runbook 13896B, unchanged since 08-02); no bitrot (workspace check clean, 0 new warnings).
+- **REAL WORK — full note-spend QAP DONE**, commit 26e2bf2 (C313), new `gpn-shield/src/note_spend.rs`:
+  - All 3 gates + value balance bound into ONE R1CS with public inputs [value_balance, cm_lo, cm_hi, nf_lo, nf_hi, merkle_root]. Digests exposed as two 128-bit field-element halves (2^128<r, exact, no mod-p wrap, fully general).
+  - Caught 2 real bugs: value-balance product constraint wrong operand order; merkle parent witness vars missing from WordCircuit.values (builder.alloc bypass) → backfilled by push in path order.
+  - Tests 37->45 (honest satisfies; tamper value_balance/cm/nf/sibling rejected; depth 0/8; dwarfs value-balance). Full workspace green; gpn-shield warning-clean.
+- NEXT (documented milestone): faster QAP path + Powers-of-Tau ceremony + on-chain key swap for the note-spend circuit.
