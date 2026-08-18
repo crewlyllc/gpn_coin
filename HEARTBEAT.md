@@ -16,6 +16,20 @@ Jeremy redirected PM07 from the launch no-op loop to **four new features**. Trea
 
 # PM07 HEARTBEAT — GPU-Native Crypto & AI Compute Network (Project 7)
 
+## C291 feat2 step5-m2 (18:45 UTC / 11:45 PT Aug 17) — real Groth16 pipeline
+- Active directive (Feature 2 shielded pool) continues. Stale VPS no-op cron brief IGNORED per memory; VPS decision still DEFERRED.
+- Built the **real R1CS→QAP→Groth16 pipeline** in `gpn_shield` (committed 561f6e9), replacing the trivial l=0 canned prover:
+  - `poly.rs` — univariate poly arithmetic over Fr (add/mul/div_rem/eval/Lagrange interpolate).
+  - `qap.rs` — R1CS→QAP reduction (column polys + target T + H(x) via exact division) + a meaningful **value-balance circuit** (`v_in = v_out + fee` with a real multiplication gate; 3 constraints, 6 vars, 2 public incl. constant).
+  - `groth16.rs` — deterministic testnet CRS (seeded α/β/γ/δ/τ), prover with public-input binding + correct `s·A+r·B−rsδ` blinding, verifier with the **correct Groth16 pairing equation** (γabc term NEGATED: `e(A,B)·e(−α,β)·e(−acc,γ)·e(−C,δ)=1`).
+  - CLI `qap-setup`/`qap-prove`/`qap-verify` verified end-to-end (prove→verify VALID; tampered/wrong-public-input rejected).
+  - Tests 4→17 (poly 5, qap 3, groth16 5, legacy 4); full workspace suite green; gpn-shield warning-clean.
+- **Caught a real crypto bug:** the verifier had the γabc term with the wrong sign (had `+e(acc,γ)`, must be `−e(acc,γ)`); the legacy l=0 test key absorbed the sign, so it only surfaced once the real circuit was wired. Also corrected the C-blinding from `r·A+s·B` to the paper-correct `s·A+r·B`.
+- Honest scope: this proves the real Groth16 toolchain client-side. On-chain `verify_proof` still uses the trivial test key; wiring the real circuit CRS + public-input binding into the runtime is the next step (runtime change, separate cycle).
+- Updated feature2-shielded-pool-spec.md Step 5 (milestones 1&2 DONE). Next: (a) runtime key swap + public-input binding, (b) extend circuit with note-spend gates (Merkle membership, blake2s commitment, nullifier PRF) — the R1CS machinery now generalizes directly.
+
+---
+
 ## C287 (18:55 UTC / 11:55 PT Aug 16) — ~272nd no-op
 - No new Jeremy signal (green-light / D1-D5 / VPS). Bounded grep "accept all recommendations|approve VPS|green-light|go-ahead" at canonical /home/jeremyg/shared_workspace/artifacts/project7/ (excl. cycle63-decision-card.md + testnet-public-runbook.md self-matches) = EMPTY (exit 1); newest project7 file = Aug 2. Never a real Jeremy reply to PM07.
 - No bitrot: gpn-node HEAD @b656f61 (C286 no-op) clean; 0 project7 .rs churn since 08-12; cargo check --release exit 0 in 2.26s (8 pre-existing warnings, no errors).
@@ -194,3 +208,8 @@ ESCALATION (crisp): ~255 consecutive no-op cycles. Everything turnkey, Phase-3 v
 - Decision docs INTACT: cycle63-decision-card.md (3241B) + testnet-public-runbook.md (13896B, §7=launch), unchanged since Aug 2.
 - Blocker UNCHANGED: Jeremy D1-D5 + VPS (~$10-20/mo) go/no-go. On "PM07: accept all recommendations, approve VPS" → execute testnet-public-runbook §7 immediately. No redundant action.
 - ESCALATION (crisp): ~301 consecutive no-op cycles. Everything turnkey, Phase-3 verified live on RTX 4060; ONLY Jeremy's strategic D1-D5 + VPS go/no-go blocks public testnet → cycle63-decision-card.md (60-sec read).
+
+## PM07 (Project 7) — C290 feat2 step5 (23:55 UTC / 16:55 PT Aug 17)
+- Stale cron brief (VPS no-op loop) IGNORED; active directive per memory = Feature 2 (shielded pool). Steps 2-4 done (C288+C289). Did Step 5 milestone 1: **client prover crate `gpn-shield`**.
+- Added new workspace member `gpn-node/gpn-shield/` (keygen/prove/verify CLI + `ser` wire-format matching on-chain `verify_proof` G1/G2-compressed + Fr-big-endian). Uses only bls12_381+ff (already in lock → 3s build, no new deps). 4/4 tests pass; CLI prove→verify VALID; tampered point rejected. Byte-compatible with on-chain test key by construction (same pairing equation). Runtime untouched (additive crate). Committed 5cedac1.
+- Honest scope: on-chain verifier is still the trivial l=0 test circuit; this milestone proves the client<->chain Groth16 toolchain. NEXT sub-step = real note-spend QAP circuit (public inputs cm/nf/value-balance) + on-chain key swap. Updated feature2-shielded-pool-spec.md.
