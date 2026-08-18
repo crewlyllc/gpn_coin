@@ -25,6 +25,16 @@
 //! the on-chain key for that circuit's real CRS (Powers-of-Tau for production,
 //! deterministic for the testnet). See `feature2-shielded-pool-spec.md` Step 5.
 
+//! A real Groth16 prover/verifier pipeline (R1CS → QAP → Groth16) lives in the
+//! [`qap`] and [`groth16`] modules. The legacy `keygen`/`prove`/`verify`
+//! functions below target the pallet's **trivial l=0 test key** and remain for
+//! on-chain `verify_proof` byte-compatibility; new circuit work should use the
+//! [`groth16`] module.
+
+pub mod groth16;
+pub mod poly;
+pub mod qap;
+
 use bls12_381::{pairing, G1Affine, G1Projective, G2Affine, Gt, Scalar};
 use ff::Field;
 
