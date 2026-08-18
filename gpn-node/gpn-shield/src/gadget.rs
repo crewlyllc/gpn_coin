@@ -399,6 +399,18 @@ pub fn into_r1cs(b: &CircuitBuilder, num_public: usize) -> R1CS {
     }
 }
 
+/// Direct satisfiability check: every R1CS constraint `(A·z)(B·z) = C·z` must
+/// hold for the witness `z`. O(constraints) scalar math — no QAP interpolation —
+/// so it stays fast even for large word-layer/compression circuits.
+pub fn constraints_hold(r1cs: &R1CS, z: &[Scalar]) -> bool {
+    r1cs.constraints.iter().all(|cn| {
+        let a = cn.a.iter().map(|(i, c)| z[*i] * c).fold(Scalar::ZERO, |a, b| a + b);
+        let b = cn.b.iter().map(|(i, c)| z[*i] * c).fold(Scalar::ZERO, |a, b| a + b);
+        let c = cn.c.iter().map(|(i, c)| z[*i] * c).fold(Scalar::ZERO, |a, b| a + b);
+        a * b == c
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,19 +433,6 @@ mod tests {
         let f = a.mul(&b).sub(&c);
         let (_, rem) = f.div_rem(&qap.t);
         rem == Poly::zero()
-    }
-
-    /// Fast direct check: every R1CS constraint `(A·z)(B·z) = C·z` must hold.
-    /// O(constraints) scalar math — no QAP interpolation — so it stays fast even
-    /// for the larger word-layer circuits. This is the stronger/primary check
-    /// for satisfiability of a concrete witness.
-    fn constraints_hold(r1cs: &R1CS, z: &[Scalar]) -> bool {
-        r1cs.constraints.iter().all(|cn| {
-            let a = cn.a.iter().map(|(i, c)| z[*i] * c).fold(Scalar::ZERO, |a, b| a + b);
-            let b = cn.b.iter().map(|(i, c)| z[*i] * c).fold(Scalar::ZERO, |a, b| a + b);
-            let c = cn.c.iter().map(|(i, c)| z[*i] * c).fold(Scalar::ZERO, |a, b| a + b);
-            a * b == c
-        })
     }
 
     #[test]

@@ -31,6 +31,7 @@
 //! on-chain `verify_proof` byte-compatibility; new circuit work should use the
 //! [`groth16`] module.
 
+pub mod blake2s;
 pub mod gadget;
 pub mod groth16;
 pub mod poly;
