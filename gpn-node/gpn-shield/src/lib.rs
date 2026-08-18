@@ -33,6 +33,7 @@
 
 pub mod blake2s;
 pub mod gadget;
+pub mod note_spend;
 pub mod groth16;
 pub mod poly;
 pub mod qap;
