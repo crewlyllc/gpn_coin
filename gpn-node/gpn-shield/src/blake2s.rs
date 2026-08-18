@@ -210,6 +210,154 @@ pub fn state_to_u32s(z: &[bls12_381::Scalar], h: &[Word; 8]) -> [u32; 8] {
     std::array::from_fn(|i| word_to_u32(z, &h[i]))
 }
 
+// ---------------------------------------------------------------------------
+// Byte→word marshalling + full blake2s-256 hash gadget (gate #2 / gate #3)
+// ---------------------------------------------------------------------------
+//
+// The on-chain note scheme (`pallet-shielded-pool::note`) hashes a domain-
+// separated preimage with `blake2_256` (i.e. blake2s-256):
+//   - commitment: `cm = H("gpn/cm00" || v.to_be_bytes() || rcm || addr)`  (88 bytes)
+//   - nullifier:  `nf = H("gpn/nf00" || rcm || position.to_be_bytes())`  (48 bytes)
+//
+// This section turns the single-block `compress_gadget` into a *full* multi-
+// block blake2s-256 hash gadget (byte→word marshalling + chaining across
+// 64-byte blocks), then builds the two note-spend gates on top of it:
+//   - gate #2 `note_commitment_gate(v, rcm, addr) -> cm` (88-byte preimage, 2 blocks)
+//   - gate #3 `nullifier_gate(rcm, position) -> nf`     (48-byte preimage, 1 block)
+
+/// A single byte as 8 boolean bit-vars (bit 0 = LSB), each boolean-constrained.
+pub type Byte = [usize; 8];
+
+/// Allocate a byte's 8 boolean bit-vars from a u8 value.
+pub fn alloc_byte(c: &mut WordCircuit, b: u8) -> Byte {
+    let mut bits = [0usize; 8];
+    for i in 0..8 {
+        let bit = ((b >> i) & 1) as u64;
+        let bv = c.alloc(bls12_381::Scalar::from(bit));
+        c.builder.bool_gate(bv);
+        bits[i] = bv;
+    }
+    bits
+}
+
+/// Marshal 4 little-endian bytes into a 32-bit `Word` (bit `i` of the word is
+/// bit `i % 8` of byte `i / 8`). Pure reindexing — no new constraints, since
+/// the byte bits are already boolean-constrained.
+pub fn word_from_4bytes(c: &mut WordCircuit, b: &[Byte; 4]) -> Word {
+    let _ = c; // no allocation; bits are reused from the caller's bytes
+    (0..32).map(|i| b[i / 8][i % 8]).collect()
+}
+
+/// Full blake2s-256 hash gadget over an arbitrary byte witness: applies the
+/// parameter block (`h[0] ^= 0x01010020` for kk=0, nn=32), marshals each
+/// 64-byte block into 16 words, and chains `compress_gadget` across blocks
+/// with the byte-accurate counter (the final padded block counts only its real
+/// bytes). Returns the 8-word digest state. `data` must be the caller's byte
+/// bit-vars (each a `Byte`), so the preimage stays private.
+pub fn blake2s_256_gadget(c: &mut WordCircuit, data: &[Byte]) -> [Word; 8] {
+    // Parameter block: kk=0, nn=32 → h[0] ^= 0x01010000 ^ 32.
+    let mut h: [Word; 8] = std::array::from_fn(|i| c.alloc_word(IV[i]));
+    let param = c.alloc_word(0x0101_0000u32 ^ 32);
+    h[0] = c.word_xor(&h[0], &param);
+
+    // A shared all-zero byte for padding the final block.
+    let zero_byte = alloc_byte(c, 0);
+
+    let n = data.len();
+    let blocks = if n == 0 { 1 } else { n.div_ceil(64) };
+    let mut t: u64 = 0;
+    for blk in 0..blocks {
+        let start = blk * 64;
+        let is_last = blk == blocks - 1;
+        let len = if start < n { (n - start).min(64) } else { 0 };
+
+        // Marshal bytes [start..start+64) into 16 words, zero-padded past len.
+        let mut m: [Word; 16] = std::array::from_fn(|_| Vec::new());
+        for w in 0..16 {
+            let mut quad = [zero_byte.clone(), zero_byte.clone(), zero_byte.clone(), zero_byte.clone()];
+            for j in 0..4 {
+                let idx = start + w * 4 + j;
+                if idx < n {
+                    quad[j] = data[idx].clone();
+                }
+            }
+            m[w] = word_from_4bytes(c, &quad);
+        }
+
+        // Counter increments by the ACTUAL bytes in this block (blake2s uses
+        // buflen, not BLOCKBYTES, for the final padded block).
+        t += if is_last { len as u64 } else { 64 };
+        let t0 = (t & 0xFFFF_FFFF) as u32;
+        let t1 = (t >> 32) as u32;
+        h = compress_gadget(c, &h, &m, t0, t1, is_last);
+    }
+    h
+}
+
+/// Commitment preimage domain tag (must match `pallet-shielded-pool::note::CM_DOMAIN`).
+pub const CM_DOMAIN: &[u8; 8] = b"gpn/cm00";
+/// Nullifier preimage domain tag (must match `pallet-shielded-pool::note::NF_DOMAIN`).
+pub const NF_DOMAIN: &[u8; 8] = b"gpn/nf00";
+
+/// Convert the 8-word gadget state to the 32-byte digest (little-endian words).
+pub fn digest_to_bytes(z: &[bls12_381::Scalar], state: &[Word; 8]) -> [u8; 32] {
+    let words = state_to_u32s(z, state);
+    let mut out = [0u8; 32];
+    for i in 0..8 {
+        out[i * 4..i * 4 + 4].copy_from_slice(&words[i].to_le_bytes());
+    }
+    out
+}
+
+/// **Gate #2** — note commitment `cm = H("gpn/cm00" || v.to_be_bytes() || rcm || addr)`.
+///
+/// `v` is a u128 value, `rcm`/`addr` are 32-byte witness bit-vars. Returns the
+/// 8-word digest state (commitment). Preimage = 8 + 16 + 32 + 32 = 88 bytes,
+/// spanning 2 compression blocks.
+pub fn note_commitment_gate(
+    c: &mut WordCircuit,
+    v: u128,
+    rcm: &[Byte; 32],
+    addr: &[Byte; 32],
+) -> [Word; 8] {
+    let mut pre: Vec<Byte> = Vec::with_capacity(8 + 16 + 32 + 32);
+    for &b in CM_DOMAIN {
+        pre.push(alloc_byte(c, b));
+    }
+    for b in v.to_be_bytes() {
+        pre.push(alloc_byte(c, b));
+    }
+    pre.extend_from_slice(rcm);
+    pre.extend_from_slice(addr);
+    blake2s_256_gadget(c, &pre)
+}
+
+/// **Gate #3** — nullifier `nf = H("gpn/nf00" || rcm || position.to_be_bytes())`.
+///
+/// `rcm` is the 32-byte trapdoor witness, `position` the pool index (u64).
+/// Preimage = 8 + 32 + 8 = 48 bytes, spanning 1 block.
+pub fn nullifier_gate(
+    c: &mut WordCircuit,
+    rcm: &[Byte; 32],
+    position: u64,
+) -> [Word; 8] {
+    let mut pre: Vec<Byte> = Vec::with_capacity(8 + 32 + 8);
+    for &b in NF_DOMAIN {
+        pre.push(alloc_byte(c, b));
+    }
+    pre.extend_from_slice(rcm);
+    for b in position.to_be_bytes() {
+        pre.push(alloc_byte(c, b));
+    }
+    blake2s_256_gadget(c, &pre)
+}
+
+/// Allocate a 32-byte witness array from raw bytes (for building gates in tests
+/// and the spend circuit).
+pub fn alloc_bytes32(c: &mut WordCircuit, bytes: &[u8; 32]) -> [Byte; 32] {
+    std::array::from_fn(|i| alloc_byte(c, bytes[i]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,5 +462,79 @@ mod tests {
         let mut zbad = z.clone();
         zbad[mw[0][0]] = bls12_381::Scalar::ONE - zbad[mw[0][0]];
         assert!(!constraints_hold(&r1cs, &zbad));
+    }
+
+    #[test]
+    fn full_hash_gadget_matches_ref_across_blocks() {
+        // 88-byte preimage (spans 2 blocks: 64 + 24) — the exact shape of the
+        // commitment preimage. The full multi-block hash gadget must reproduce
+        // blake2s_256_ref byte-for-byte, and the witness must satisfy every
+        // constraint.
+        let data: Vec<u8> = (0u8..88).collect();
+        let mut c = WordCircuit::new();
+        let bytes: Vec<Byte> = data.iter().map(|&b| alloc_byte(&mut c, b)).collect();
+        let state = blake2s_256_gadget(&mut c, &bytes);
+        let (r1cs, z) = c.into_parts(1);
+        assert!(constraints_hold(&r1cs, &z), "all R1CS constraints must hold");
+        let got = digest_to_bytes(&z, &state);
+        assert_eq!(got, blake2s_256_ref(&data), "multi-block hash must match ref");
+    }
+
+    #[test]
+    fn note_commitment_gate_matches_ref() {
+        // Gate #2 must reproduce blake2s-256("gpn/cm00"||v_be||rcm||addr).
+        let v: u128 = 123456789012345;
+        let rcm_raw: [u8; 32] = std::array::from_fn(|i| (i as u8).wrapping_mul(3).wrapping_add(1));
+        let addr_raw: [u8; 32] = std::array::from_fn(|i| (i as u8).wrapping_mul(5).wrapping_add(2));
+        let mut c = WordCircuit::new();
+        let rcm = alloc_bytes32(&mut c, &rcm_raw);
+        let addr = alloc_bytes32(&mut c, &addr_raw);
+        let cm = note_commitment_gate(&mut c, v, &rcm, &addr);
+        let (r1cs, z) = c.into_parts(1);
+        assert!(constraints_hold(&r1cs, &z), "commitment gate constraints must hold");
+        let got = digest_to_bytes(&z, &cm);
+        // Reference: same preimage bytes as the on-chain note::note_commitment.
+        let mut pre = Vec::with_capacity(8 + 16 + 32 + 32);
+        pre.extend_from_slice(CM_DOMAIN);
+        pre.extend_from_slice(&v.to_be_bytes());
+        pre.extend_from_slice(&rcm_raw);
+        pre.extend_from_slice(&addr_raw);
+        assert_eq!(got, blake2s_256_ref(&pre), "cm must match on-chain construction");
+    }
+
+    #[test]
+    fn nullifier_gate_matches_ref() {
+        // Gate #3 must reproduce blake2s-256("gpn/nf00"||rcm||position_be).
+        let rcm_raw: [u8; 32] = std::array::from_fn(|i| (i as u8).wrapping_mul(7).wrapping_add(4));
+        let position: u64 = 424242;
+        let mut c = WordCircuit::new();
+        let rcm = alloc_bytes32(&mut c, &rcm_raw);
+        let nf = nullifier_gate(&mut c, &rcm, position);
+        let (r1cs, z) = c.into_parts(1);
+        assert!(constraints_hold(&r1cs, &z), "nullifier gate constraints must hold");
+        let got = digest_to_bytes(&z, &nf);
+        let mut pre = Vec::with_capacity(8 + 32 + 8);
+        pre.extend_from_slice(NF_DOMAIN);
+        pre.extend_from_slice(&rcm_raw);
+        pre.extend_from_slice(&position.to_be_bytes());
+        assert_eq!(got, blake2s_256_ref(&pre), "nf must match on-chain construction");
+    }
+
+    #[test]
+    fn commitment_gate_tamper_breaks_satisfiability() {
+        // Flip one bit of rcm in the witness → the commitment gates must break.
+        let v: u128 = 999;
+        let rcm_raw: [u8; 32] = [7u8; 32];
+        let addr_raw: [u8; 32] = [9u8; 32];
+        let mut c = WordCircuit::new();
+        let rcm = alloc_bytes32(&mut c, &rcm_raw);
+        let addr = alloc_bytes32(&mut c, &addr_raw);
+        let _cm = note_commitment_gate(&mut c, v, &rcm, &addr);
+        let (r1cs, z) = c.into_parts(1);
+        assert!(constraints_hold(&r1cs, &z));
+        // Tamper: flip the LSB of rcm byte 0 (bit var rcm[0][0]).
+        let mut zbad = z.clone();
+        zbad[rcm[0][0]] = bls12_381::Scalar::ONE - zbad[rcm[0][0]];
+        assert!(!constraints_hold(&r1cs, &zbad), "flipping rcm bit must break cm");
     }
 }

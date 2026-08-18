@@ -1,5 +1,14 @@
 # PM07 HEARTBEAT — GPU-Native Crypto & AI Compute Network (Project 7)
 
+## C311 feat2 step5-m2c (19:55 UTC / 12:55 PT Aug 18) — full blake2s compression gadget
+- Stale VPS cron brief ("only blocker = D1-D5+VPS") IGNORED (11th straight) — OUTDATED per Jeremy's 08-17 redirect; active = Feature 2 (shielded pool); VPS decision DEFERRED. No green-light reply (grep exit 1, only decision-card/runbook self-matches); git clean @aca653e; no bitrot.
+- **DID REAL WORK — full blake2s compression is now an R1CS gadget** (gate #2/#3 engine), commit 2e0fcdb (C311):
+  - New `gpn-shield/src/blake2s.rs`: `compress_gadget` = 10 rounds x 8 G-calls with RFC 7693 sigma schedule + counter fold (`v[12]^=t0`, `v[13]^=t1`) + last-block flag (`v[14]=~v[14]`) + final `h'[i]=h[i]^v[i]^v[i+8]`. `compress_ref` + self-contained `blake2s_256_ref` validate it.
+  - **Caught a real bug:** last-block flag must fold into `v[14]=~v[14]`, NOT `t1|=0x80000000`. Confirmed via an independent Python reference (Rust+Python agreed on the wrong answer, then both matched RFC 7693 blake2s-256('')/('abc') exactly after the fix).
+  - Tests 28→33 (compress↔reference, RFC vectors empty+abc, gadget↔real-hash end-to-end, tamper-rejects); workspace build clean (exit 0, no new warnings). Exposed `gadget::constraints_hold` as pub.
+- Spec (feature2-shielded-pool-spec.md) updated.
+- NEXT: wire commitment (gate #2) + nullifier (gate #3) note-spend gates on the compression (byte→word marshalling of 88-byte `gpn/cm00||v||rcm||addr` across 2 blocks), then full note-spend QAP bound to on-chain key.
+
 ## ⚡ ACTIVE DIRECTIVE (Jeremy, 2026-08-17) — 4 NEW REQUIREMENTS
 Jeremy redirected PM07 from the launch no-op loop to **four new features**. Treat these as the primary scope. Full spec in `shared/artifacts/project7/roadmap-features-spec.md`.
 
