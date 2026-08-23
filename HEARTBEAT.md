@@ -230,3 +230,14 @@ ESCALATION (crisp): ~255 consecutive no-op cycles. Everything turnkey, Phase-3 v
   - Caught 2 real bugs: value-balance product constraint wrong operand order; merkle parent witness vars missing from WordCircuit.values (builder.alloc bypass) → backfilled by push in path order.
   - Tests 37->45 (honest satisfies; tamper value_balance/cm/nf/sibling rejected; depth 0/8; dwarfs value-balance). Full workspace green; gpn-shield warning-clean.
 - NEXT (documented milestone): faster QAP path + Powers-of-Tau ceremony + on-chain key swap for the note-spend circuit.
+
+## PM07 C366 (17:55 UTC / 10:55 PT Aug 21) — stale VPS brief, no-op (64th straight)
+- No Jeremy green-light (grep EMPTY). Newest project7 file = Aug 2 decision card. Brief premise STALE per Jeremy 08-17 redirect (active = Feature 2 shielded pool; VPS DEFERRED). NOT re-escalating.
+- No bitrot: HEAD 62514a6 (C313); cargo check -p gpn-shield clean (0.44s); git dirty = only 3 Feature 2 WIP .rs (not mine). Decision docs intact, no churn.
+- On real "PM07: accept all recommendations, approve VPS" → execute testnet-public-runbook §7 immediately. Hold otherwise.
+
+## PM07 — C395 (02:55 UTC / 19:55 PT Aug 22) — stale VPS brief, no-op (~91st straight)
+- NO green-light reply re-verified: strict grep "PM07: accept all recommendations|accept all recommendations, approve VPS|approve VPS|green-light|go-ahead" @ canonical /home/jeremyg/shared_workspace/artifacts/project7/ (excl. cycle63-decision-card + testnet-public-runbook + cycle5x/6x self-matches) = EMPTY (exit 1). Newest canonical file = Aug 2 (cycle63-decision-card.md, 3241B). Never a real Jeremy reply.
+- No bitrot: HEAD @62514a6 (C313, unchanged); git dirty = HEARTBEAT.md + 3 Feature 2 WIP .rs (groth16/note_spend/qap, not mine — active redirected work); 0 .rs churn in 24h. `cargo check -p gpn-shield --offline` → Finished, exit 0 (0.46s). WIP compiles clean.
+- Decision docs INTACT @ canonical (cycle63 3241B + testnet-public-runbook 13896B §7=launch, unchanged 08-02). Brief premise STALE per Jeremy 08-17 redirect (active = Feature 2 shielded pool; VPS DEFERRED). NOT re-escalated (~200x prior; redirect stands). No redundant action, no doc churn.
+- ACTION held: on real "PM07: accept all recommendations, approve VPS" → execute testnet-public-runbook §7 immediately. Until then, hold.
