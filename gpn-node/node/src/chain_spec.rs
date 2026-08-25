@@ -9,6 +9,18 @@ use sc_service::{ChainType, GenericChainSpec};
 use sp_core::{sr25519, Pair, Public};
 use sp_runtime::Perbill;
 
+/// The `gpn/tokn` pallet account (`PalletId` -> `into_account_truncating` =
+/// `"modl" ++ pallet_id ++ 0x00..`). Endowed at genesis (dev/local only) so the
+/// fee-sink always exists: pallet_balances cannot create an account with a
+/// sub-ED balance, so a marketplace job whose fee is below the existential
+/// deposit would otherwise fail on a fresh chain until some larger job creates
+/// the sink.
+pub const FEE_SINK_ACCOUNT: AccountId = AccountId::new([
+    0x6d, 0x6f, 0x64, 0x6c, // "modl"
+    0x67, 0x70, 0x6e, 0x2f, 0x74, 0x6f, 0x6b, 0x6e, // "gpn/tokn"
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+]);
+
 /// Specialized `ChainSpec`. Specialization of the general Substrate ChainSpec type.
 pub type ChainSpec = GenericChainSpec;
 
@@ -185,7 +197,15 @@ fn genesis_config_json(
     let config = RuntimeGenesisConfig {
         system: Default::default(),
         balances: BalancesConfig {
-            balances: endowed_accounts.into_iter().map(|k| (k, initial_balance)).collect(),
+            // Dev/local only (endowed_accounts non-empty); mainnet (empty) stays
+            // fair-launch. Endow the fee-sink too so sub-ED fees route cleanly.
+            balances: {
+                let mut accts: Vec<AccountId> = endowed_accounts.clone();
+                if !accts.is_empty() {
+                    accts.push(FEE_SINK_ACCOUNT.clone());
+                }
+                accts.into_iter().map(|k| (k, initial_balance)).collect()
+            },
             dev_accounts: None,
         },
         gpu_po_w: GPUPoWConfig {

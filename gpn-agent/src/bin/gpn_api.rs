@@ -28,6 +28,22 @@
 //!   POST /jobs/{id}/start             → provider starts
 //!   POST /jobs/{id}/complete          → provider completes (payout)
 //!   POST /providers/register          → register this GPU for rent
+//!   POST /providers/stake             → deposit attestation stake (JSON body)
+//!   POST /providers/attest            → submit GPU attestation (JSON body)
+//!   POST /providers/withdraw          → withdraw stake (removes attestation)
+//!
+//! POST /providers/stake body:
+//!   { "amount_gpn": 1000 }            // stake in whole GPN (converted to base units)
+//!
+//! POST /providers/attest body:
+//!   {
+//!     "gpu_count": 1,
+//!     "compute_gflops": 831,         // measured FP32 GFLOPS (run gpn_gpu_compute)
+//!     "gpu_info": "RTX 4060 8GB"     // free-text; sha256'd into gpu_info_hash
+//!   }
+//!   The challenge_response is computed off-chain as sha256(challenge || gpu_info_hash).
+//!   NOTE: the pallet stores this response without on-chain verification; real
+//!   challenge-response GPU proof is a separate hardening concern.
 //!
 //! POST /jobs body:
 //!   {
@@ -127,7 +143,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server = Server::http(&listen).map_err(|e| format!("cannot bind {}: {}", listen, e))?;
     println!("GPN API listening on http://{} (chain endpoint {})", listen, endpoint);
     println!("  signer: {} — write endpoints sign with this key (hot-wallet/testnet model)", signer_uri);
-    println!("  endpoints: /health /block /feed /account/{{addr}} /jobs /job/{{id}} /jobs/claimable /provider/{{addr}} | POST /jobs /jobs/{{id}}/accept|start|complete /providers/register");
+    println!("  endpoints: /health /block /feed /account/{{addr}} /jobs /job/{{id}} /jobs/claimable /provider/{{addr}} | POST /jobs /jobs/{{id}}/accept|start|complete /providers/register|stake|attest|withdraw");
 
     for request in server.incoming_requests() {
         let client = client.clone();
@@ -205,11 +221,21 @@ fn route(
             let rt = rt_handle;
             let reg = rt.block_on(async { client.is_provider_registered(addr).await });
             let (staked, attested) = rt.block_on(client.get_provider_state(addr));
+            let att = rt.block_on(client.get_attestation_record(addr));
+            let challenge = match rt.block_on(client.get_attestation_challenge()) {
+                Ok(c) => c,
+                Err(_) => [0u8; 32],
+            };
+            let (gpu_count, gflops, tier) = att.unwrap_or((0, 0, "Unattested".to_string()));
             json_ok(&serde_json::json!({
                 "address": addr,
                 "provider_registered": reg,
                 "staked": staked,
                 "attested": attested,
+                "tier": tier,
+                "gpu_count": gpu_count,
+                "compute_gflops": gflops,
+                "challenge_hex": hex::encode(challenge),
             }))
         }
         // ---- jobs ----
@@ -312,6 +338,64 @@ fn route(
                 Err(e) => json_err(500, &format!("{}", e)),
             }
         }
+        // ---- attestation onboarding (signed) ----
+        ("POST", ["providers", "stake"]) => {
+            let body = read_body(req);
+            let v: serde_json::Value = match serde_json::from_str(&body) {
+                Ok(v) => v,
+                Err(e) => return json_err(400, &format!("bad JSON: {}", e)),
+            };
+            let amount_gpn: f64 = v.get("amount_gpn").and_then(|x| x.as_f64()).unwrap_or(1000.0);
+            let amount_base: u128 = (amount_gpn * GPN_UNITS as f64).round() as u128;
+            let rt = rt_handle;
+            let res = rt.block_on(client_signed.deposit_stake(amount_base));
+            match res {
+                Ok(_) => json_ok(&serde_json::json!({"ok": true, "staked_gpn": amount_gpn})),
+                Err(e) => json_err(500, &format!("{}", e)),
+            }
+        }
+        ("POST", ["providers", "attest"]) => {
+            let body = read_body(req);
+            let v: serde_json::Value = match serde_json::from_str(&body) {
+                Ok(v) => v,
+                Err(e) => return json_err(400, &format!("bad JSON: {}", e)),
+            };
+            let gpu_count: u8 = v.get("gpu_count").and_then(|x| x.as_u64()).unwrap_or(1) as u8;
+            let compute_gflops: u64 = v.get("compute_gflops").and_then(|x| x.as_u64()).unwrap_or(0);
+            let gpu_info = v.get("gpu_info").and_then(|x| x.as_str()).unwrap_or("gpn-gpu");
+            if compute_gflops == 0 {
+                return json_err(400, "compute_gflops is required (run gpn_gpu_compute to measure it)");
+            }
+            let rt = rt_handle;
+            // gpu_info_hash = sha256(gpu_info); challenge_response = sha256(challenge || gpu_info_hash).
+            let gpu_info_hash = sha256(gpu_info.as_bytes());
+            let challenge = match rt.block_on(client.get_attestation_challenge()) {
+                Ok(c) => c,
+                Err(_) => [0u8; 32],
+            };
+            let mut seed = Vec::with_capacity(64);
+            seed.extend_from_slice(&challenge);
+            seed.extend_from_slice(&gpu_info_hash);
+            let challenge_response = sha256(&seed);
+            let res = rt.block_on(client_signed.submit_attestation(
+                challenge_response, gpu_info_hash, gpu_count, compute_gflops,
+            ));
+            match res {
+                Ok(_) => json_ok(&serde_json::json!({
+                    "ok": true, "gpu_count": gpu_count, "compute_gflops": compute_gflops,
+                    "gpu_info_hash_hex": hex::encode(gpu_info_hash),
+                })),
+                Err(e) => json_err(500, &format!("{}", e)),
+            }
+        }
+        ("POST", ["providers", "withdraw"]) => {
+            let rt = rt_handle;
+            let res = rt.block_on(client_signed.withdraw_stake());
+            match res {
+                Ok(_) => json_ok(&serde_json::json!({"ok": true, "stake_withdrawn": true})),
+                Err(e) => json_err(500, &format!("{}", e)),
+            }
+        }
         _ => json_err(404, "not found — see gpn_api.rs doc comment for endpoints"),
     }
 }
@@ -336,4 +420,16 @@ fn hash_workload(desc: &str) -> [u8; 32] {
     out[0..8].copy_from_slice(&a.to_le_bytes());
     out[8..16].copy_from_slice(&(!a).to_le_bytes());
     out
+}
+
+/// sha2-256 over arbitrary bytes, into a 32-byte array. Used for gpu_info_hash
+/// and the (off-chain computed) challenge_response in the attestation flow.
+fn sha256(data: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(data);
+    let out = h.finalize();
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&out);
+    arr
 }

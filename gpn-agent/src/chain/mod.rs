@@ -586,6 +586,29 @@ impl ChainClient {
         Ok(())
     }
 
+    /// Withdraw the provider's stake (removes the attestation record, so the
+    /// provider is no longer attested and cannot take gated jobs). Signed
+    /// `GPUAttestation::withdraw_stake` extrinsic.
+    pub async fn withdraw_stake(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(uri) = &self.signer_uri else {
+            log::warn!("No signer configured; cannot withdraw stake (set signer_uri).");
+            return Ok(());
+        };
+
+        let signer = signer::Sr25519Signer::from_uri(uri)?;
+        let client = signer::connect(&self.endpoint).await?;
+
+        log::info!("Withdrawing stake as {} (GPUAttestation::withdraw_stake)", signer.account_id());
+
+        let nonce = self.get_account_nonce(&signer.account_id().to_string()).await;
+        let call_args: Vec<subxt::dynamic::Value> = Vec::new();
+        let call = subxt::dynamic::tx("GPUAttestation", "withdraw_stake", call_args);
+
+        signer::submit_signed(&client, &call, &signer, nonce).await?;
+        log::info!("Stake withdrawn on-chain.");
+        Ok(())
+    }
+
     // ---- Compute marketplace extrinsics (signed, dynamic) ----------------
 
     /// Build a dynamic `GPURequirements` composite value (named fields).

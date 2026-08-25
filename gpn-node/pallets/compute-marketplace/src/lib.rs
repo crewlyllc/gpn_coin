@@ -300,25 +300,33 @@ pub mod pallet {
             let provider = <JobProvider<T>>::get(job_id).ok_or(Error::<T>::NotJobProvider)?;
             let escrow = <JobEscrow<T>>::take(job_id).ok_or(Error::<T>::EscrowMismatch)?;
             let fee_bps = T::MarketplaceFeeBps::get();
-            let fee: BalanceOf<T> = escrow * fee_bps.into() / 10_000u32.into();
-            let provider_payment = escrow.saturating_sub(fee);
+            let mut fee: BalanceOf<T> = escrow * fee_bps.into() / 10_000u32.into();
+            let mut provider_payment = escrow.saturating_sub(fee);
+
+            // The marketplace pallet account is a pass-through escrow holder and
+            // must never be left with a *dangling* balance: pallet_balances only
+            // allows a transfer (with AllowDeath) when the sender ends at exactly
+            // 0 or >= ED, never a nonzero amount below ED. Two consequences:
+            //  1. If the provider payout itself would fall below ED (tiny escrow),
+            //     route the whole escrow to the provider and skip the fee — a
+            //     dust job pays no fee rather than leaving a sub-ED account.
+            //  2. Otherwise drain the fee to the sink FIRST (cmkt -> provider_payment,
+            //     which is >= ED), THEN pay the provider (cmkt -> 0).
+            if provider_payment < T::Currency::minimum_balance() {
+                provider_payment = escrow;
+                fee = Zero::zero();
+            }
 
             job.state = JobState::Completed;
             <Jobs<T>>::insert(job_id, job);
             <ActiveJobCount<T>>::mutate(|c| *c = c.saturating_sub(1));
 
-            // Pay the provider directly (no iteration needed)
-            T::Currency::transfer(&Self::account_id(), &provider, provider_payment, ExistenceRequirement::KeepAlive)?;
-            // Route the marketplace fee into the token pallet account so the
-            // fee economy is self-funding: `distribute_fees` draws from the
-            // `gpn/tokn` pallet account, so fees collected here flow into the
-            // staking/oracle pools + treasury + burn instead of accumulating
-            // in `gpn/cmkt` forever.
+            // Route the marketplace fee into the token pallet account first so the
+            // fee economy is self-funding: `distribute_fees` draws from the `gpn/tokn`
+            // pallet account. AllowDeath: sweeping the fee may take the marketplace
+            // account below ED (it holds only per-job escrow and is recreated on the
+            // next deposit), but only down to the provider payout, which is >= ED.
             if !fee.is_zero() {
-                // AllowDeath: sweeping the fee may fully empty the marketplace
-                // pallet account (it holds only per-job escrow and is recreated
-                // on the next deposit). KeepAlive would block the sweep when
-                // the remaining balance drops below the existential deposit.
                 T::Currency::transfer(
                     &Self::account_id(),
                     &T::FeeSink::fee_sink(),
@@ -326,6 +334,8 @@ pub mod pallet {
                     ExistenceRequirement::AllowDeath,
                 )?;
             }
+            // Pay the provider last, sweeping the marketplace account to exactly 0.
+            T::Currency::transfer(&Self::account_id(), &provider, provider_payment, ExistenceRequirement::AllowDeath)?;
             Self::deposit_event(Event::<T>::JobCompleted { job_id, provider });
 
             Ok(())
@@ -661,6 +671,35 @@ mod tests {
             // 1% fee (10) must be forwarded to the fee sink, NOT left in gpn/cmkt.
             assert_eq!(pallet_balances::Pallet::<Test>::free_balance(99), sink_before + 10);
             // The marketplace pallet account keeps nothing after escrow + fee.
+            assert_eq!(pallet_balances::Pallet::<Test>::free_balance(MarketPallet::account_id()), 0);
+        });
+    }
+
+    #[test]
+    fn test_complete_job_small_escrow_below_ed() {
+        // Regression: a job whose fee residue is below the existential deposit
+        // (escrow * fee% < ED) used to fail `complete_job` with an opaque Token
+        // error because the provider payout used KeepAlive on the marketplace
+        // pallet account, which must stay >= ED after the transfer. Here escrow
+        // = 50, fee = 1% = 0 (integer), so the residue (0) < ED (1): the payout
+        // must use AllowDeath and still succeed, sweeping the account to 0.
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            MarketPallet::create_job(
+                RuntimeOrigin::signed(ALICE), default_reqs(), JobType::LLMInference,
+                JobTier::Spot, 50, 100, workload(),
+            ).unwrap();
+            let job_id = NextJobId::<Test>::get() - 1;
+            MarketPallet::accept_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
+            MarketPallet::start_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
+            MarketPallet::submit_result(RuntimeOrigin::signed(BOB), job_id, [7u8; 32]).unwrap();
+
+            let provider_before = pallet_balances::Pallet::<Test>::free_balance(BOB);
+            MarketPallet::complete_job(RuntimeOrigin::signed(CAROL), job_id).unwrap();
+
+            // Provider paid the full escrow (fee rounds to 0); marketplace
+            // account fully drained (AllowDeath), not blocked by ED.
+            assert_eq!(pallet_balances::Pallet::<Test>::free_balance(BOB), provider_before + 50);
             assert_eq!(pallet_balances::Pallet::<Test>::free_balance(MarketPallet::account_id()), 0);
         });
     }
