@@ -141,6 +141,21 @@
       </table>
       <button class="ghost" id="refreshJobs" style="margin-top:10px">Refresh my jobs</button>
     </div>
+
+    <!-- LLM Inference (BYO model) -->
+    <div class="card">
+      <h2>4 · LLM Inference (bring your own model)</h2>
+      <label>REST API base</label><input id="llmApi" value="http://127.0.0.1:8082">
+      <label>Model (HF id, or a GGUF you served on the provider)</label><input id="llmModel" value="qwen2.5:1.5b">
+      <label>Prompt</label><textarea id="llmPrompt" rows="3">Explain what a GPU compute network is.</textarea>
+      <div class="row">
+        <div><label>Price (GPN)</label><input type="number" id="llmPrice" value="2.5" step="any"></div>
+        <div><label>Max tokens</label><input type="number" id="llmMaxTokens" value="200"></div>
+      </div>
+      <button id="llmRunBtn" style="margin-top:12px">Run Inference (create → accept → start)</button>
+      <div class="status" id="llmStatus">Pick a model, type a prompt, and run it on the network.</div>
+      <div id="llmResult" style="margin-top:10px; white-space:pre-wrap; font-size:14px"></div>
+    </div>
   </div>
 </div>
 
@@ -331,6 +346,40 @@ $("dripBtn").onclick = drip;
 $("createBtn").onclick = createJob;
 $("reconnectBtn").onclick = () => connectApi($("endpoint").value);
 $("refreshJobs").onclick = refreshJobs;
+
+// ---- LLM inference (via REST API off-chain store) ----
+async function runLlm() {
+  const base = $("llmApi").value;
+  const model = $("llmModel").value.trim() || "qwen2.5:1.5b";
+  const prompt = $("llmPrompt").value.trim();
+  const price = parseFloat($("llmPrice").value) || 2.5;
+  const maxTokens = parseInt($("llmMaxTokens").value) || 200;
+  const st = $("llmStatus"), res = $("llmResult");
+  if (!prompt) { st.textContent = "Enter a prompt first."; return; }
+  res.textContent = ""; st.textContent = "Creating LLMInference job…";
+  const post = (u, body) => fetch(base + u, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  }).then(r => r.json());
+  const j = await post("/jobs", { job_type: "LLMInference", model, prompt, price_gpn: price, max_tokens: maxTokens, min_gflops: 800 });
+  if (!j.ok) { st.textContent = "Create failed: " + (j.error || JSON.stringify(j)); return; }
+  const id = j.job_id;
+  st.textContent = `Job #${id} created — accepting…`;
+  const a = await post(`/jobs/${id}/accept`);
+  if (!a.ok) { st.textContent = "Accept failed: " + (a.error || ""); return; }
+  st.textContent = `Job #${id} accepted — starting…`;
+  const s = await post(`/jobs/${id}/start`);
+  if (!s.ok) { st.textContent = "Start failed: " + (s.error || ""); return; }
+  st.textContent = `Job #${id} running — provider is running inference on the GPU…`;
+  for (let i = 0; i < 90; i++) {
+    await new Promise(r => setTimeout(r, 1500));
+    const r = await fetch(base + `/job/${id}/result`).then(r => r.json());
+    if (r.status === "done") { res.textContent = r.response; st.textContent = `Job #${id} completed — result hash ${r.result_hash}`; return; }
+    if (r.status === "error") { st.textContent = "Inference error: " + (r.error || ""); return; }
+  }
+  st.textContent = "Timed out waiting for inference (is gpn_llm_provider running?).";
+}
+$("llmRunBtn").onclick = runLlm;
 
 // auto-connect on load
 connectApi($("endpoint").value);
