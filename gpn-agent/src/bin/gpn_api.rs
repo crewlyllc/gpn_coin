@@ -243,14 +243,42 @@ fn route(
             let rt = rt_handle;
             let id: u64 = id.parse().unwrap_or(0);
             match rt.block_on(client.get_job_state(id)) {
-                Some((state, price, requestor, provider)) => json_ok(&serde_json::json!({
-                    "id": id,
-                    "state": state,
-                    "price_base": price,
-                    "requestor": requestor,
-                    "provider": provider,
-                })),
+                Some((state, price, requestor, provider)) => {
+                    // Enrich with off-chain LLM payload if present.
+                    let llm = gpn_agent::llm::get_job(id);
+                    json_ok(&serde_json::json!({
+                        "id": id,
+                        "state": state,
+                        "price_base": price,
+                        "requestor": requestor,
+                        "provider": provider,
+                        "llm": llm.map(|j| serde_json::json!({
+                            "model": j.model,
+                            "prompt": j.prompt,
+                            "temperature": j.temperature,
+                            "max_tokens": j.max_tokens,
+                            "status": j.status,
+                            "result_hash": j.result_hash,
+                            "error": j.error,
+                        })),
+                    }))
+                }
                 None => json_err(404, "job not found"),
+            }
+        }
+        // ---- off-chain LLM result lookup ----
+        ("GET", ["job", id, "result"]) => {
+            let id: u64 = id.parse().unwrap_or(0);
+            match gpn_agent::llm::get_job(id) {
+                Some(j) => json_ok(&serde_json::json!({
+                    "job_id": id,
+                    "status": j.status,
+                    "model": j.model,
+                    "response": j.response,
+                    "result_hash": j.result_hash,
+                    "error": j.error,
+                })),
+                None => json_err(404, "no off-chain LLM payload for this job (not an LLM job?)"),
             }
         }
         ("GET", ["jobs"]) => {
@@ -281,7 +309,20 @@ fn route(
             let workload = v.get("workload").and_then(|x| x.as_str()).unwrap_or("gpn-api job");
             let price_gpn: f64 = v.get("price_gpn").and_then(|x| x.as_f64()).unwrap_or(1.0);
             let price_base: u128 = (price_gpn * GPN_UNITS as f64).round() as u128;
-            let workload_hash = hash_workload(workload);
+            let job_type = v.get("job_type").and_then(|x| x.as_str()).unwrap_or("LLMInference");
+
+            // LLM bridge: if this is an LLMInference job with a prompt, capture
+            // the model/prompt/params for the off-chain store (the chain only
+            // carries the workload hash).
+            let prompt = v.get("prompt").and_then(|x| x.as_str()).map(|s| s.to_string());
+            let model = v.get("model").and_then(|x| x.as_str()).map(|s| s.to_string());
+            let is_llm = job_type.eq_ignore_ascii_case("LLMInference") && prompt.is_some();
+            let temperature: f32 = v.get("temperature").and_then(|x| x.as_f64()).unwrap_or(0.7) as f32;
+            let max_tokens: u32 = v.get("max_tokens").and_then(|x| x.as_u64()).unwrap_or(256) as u32;
+            let model = model.unwrap_or_else(|| "qwen2.5:1.5b".to_string());
+
+            let hash_src: String = if is_llm { prompt.clone().unwrap() } else { workload.to_string() };
+            let workload_hash = hash_workload(&hash_src);
 
             let rt = rt_handle;
             let res = rt.block_on(client_signed.create_job(
@@ -289,8 +330,8 @@ fn route(
                 g("min_compute_capability", 89) as u16,
                 g("min_gpu_count", 1) as u8,
                 g("min_cuda_cores", 3072) as u32,
-                g("min_gflops", 15110),
-                v.get("job_type").and_then(|x| x.as_str()).unwrap_or("LLMInference"),
+                g("min_gflops", 800),
+                job_type,
                 v.get("tier").and_then(|x| x.as_str()).unwrap_or("Spot"),
                 price_base,
                 g("max_duration", 1000) as u32,
@@ -299,7 +340,17 @@ fn route(
             match res {
                 Ok(_) => {
                     let next = rt.block_on(client.get_next_job_id());
-                    json_ok(&serde_json::json!({"ok": true, "job_id": next.saturating_sub(1), "price_gpn": price_gpn}))
+                    let job_id = next.saturating_sub(1);
+                    // Store the off-chain LLM payload keyed by on-chain job id.
+                    if is_llm {
+                        if let Some(p) = prompt {
+                            let _ = gpn_agent::llm::put_job(
+                                job_id,
+                                gpn_agent::llm::LlmJob::new(&model, &p, temperature, max_tokens),
+                            );
+                        }
+                    }
+                    json_ok(&serde_json::json!({"ok": true, "job_id": job_id, "price_gpn": price_gpn, "llm": is_llm}))
                 }
                 Err(e) => json_err(500, &format!("{}", e)),
             }
