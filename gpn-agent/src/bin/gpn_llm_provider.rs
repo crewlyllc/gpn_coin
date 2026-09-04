@@ -69,24 +69,22 @@ async fn process_once(client: &ChainClient, me: &str) -> Result<(), Box<dyn std:
     let next = client.get_next_job_id().await;
     for id in 0..next {
         // Only jobs that have an off-chain LLM payload are LLM jobs.
-        if get_job(id).is_none() {
-            continue;
-        }
+        let job = match get_job(id) {
+            Some(j) if j.kind == "llm" => j,
+            _ => continue,
+        };
         if let Some((state, _price, _req, provider)) = client.get_job_state(id).await {
             let is_mine = provider.as_deref() == Some(me);
             if state == "Running" && is_mine {
-                run_job(client, id).await?;
+                run_job(client, id, &job).await?;
             }
         }
     }
     Ok(())
 }
 
-async fn run_job(client: &ChainClient, id: u64) -> Result<(), Box<dyn std::error::Error>> {
-    let job = match get_job(id) {
-        Some(j) => j,
-        None => return Ok(()),
-    };
+async fn run_job(client: &ChainClient, id: u64, job: &gpn_agent::llm::LlmJob) -> Result<(), Box<dyn std::error::Error>> {
+    let job = job.clone();
     let preview: String = job.prompt.chars().take(60).collect();
     println!("[job {id}] running inference — model={} prompt=\"{}\"", job.model, preview);
 

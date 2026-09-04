@@ -281,6 +281,25 @@ fn route(
                 None => json_err(404, "no off-chain LLM payload for this job (not an LLM job?)"),
             }
         }
+        // ---- generated artifact (image/video file) ----
+        ("GET", ["job", id, "artifact"]) => {
+            let id: u64 = id.parse().unwrap_or(0);
+            let job = match gpn_agent::llm::get_job(id) {
+                Some(j) => j,
+                None => return json_err(404, "no off-chain payload for this job"),
+            };
+            let path = match &job.artifact_path {
+                Some(p) => p.clone(),
+                None => return json_err(404, &format!("artifact not ready yet (status={})", job.status)),
+            };
+            let media = job.artifact_media_type.unwrap_or_else(|| "application/octet-stream".to_string());
+            match std::fs::read(&path) {
+                Ok(bytes) => Response::from_data(bytes)
+                    .with_status_code(200)
+                    .with_header(Header::from_bytes(&b"Content-Type"[..], media.as_bytes()).unwrap()),
+                Err(e) => json_err(500, &format!("cannot read artifact {}: {}", path, e)),
+            }
+        }
         ("GET", ["jobs"]) => {
             let rt = rt_handle;
             let next = rt.block_on(client.get_next_job_id());
@@ -311,17 +330,30 @@ fn route(
             let price_base: u128 = (price_gpn * GPN_UNITS as f64).round() as u128;
             let job_type = v.get("job_type").and_then(|x| x.as_str()).unwrap_or("LLMInference");
 
-            // LLM bridge: if this is an LLMInference job with a prompt, capture
-            // the model/prompt/params for the off-chain store (the chain only
-            // carries the workload hash).
+            // Bridge: for any generative job (LLM / image / video) with a prompt,
+            // capture the model/prompt/params in the off-chain store; the chain
+            // only carries the workload hash.
             let prompt = v.get("prompt").and_then(|x| x.as_str()).map(|s| s.to_string());
             let model = v.get("model").and_then(|x| x.as_str()).map(|s| s.to_string());
-            let is_llm = job_type.eq_ignore_ascii_case("LLMInference") && prompt.is_some();
+            let is_llm = job_type.eq_ignore_ascii_case("LLMInference");
+            let is_gen = (job_type.eq_ignore_ascii_case("ImageGeneration")
+                || job_type.eq_ignore_ascii_case("VideoGeneration"))
+                && prompt.is_some();
+            let is_bridged = (is_llm || is_gen) && prompt.is_some();
             let temperature: f32 = v.get("temperature").and_then(|x| x.as_f64()).unwrap_or(0.7) as f32;
             let max_tokens: u32 = v.get("max_tokens").and_then(|x| x.as_u64()).unwrap_or(256) as u32;
-            let model = model.unwrap_or_else(|| "qwen2.5:1.5b".to_string());
+            let gen_kind = if job_type.eq_ignore_ascii_case("ImageGeneration") { "image" } else { "video" };
+            let width: u32 = v.get("width").and_then(|x| x.as_u64()).unwrap_or(512) as u32;
+            let height: u32 = v.get("height").and_then(|x| x.as_u64()).unwrap_or(512) as u32;
+            let steps: u32 = v.get("steps").and_then(|x| x.as_u64()).unwrap_or(30) as u32;
+            let seed = v.get("seed").and_then(|x| x.as_i64());
+            let frames: u32 = v.get("frames").and_then(|x| x.as_u64()).unwrap_or(16) as u32;
+            let fps: u32 = v.get("fps").and_then(|x| x.as_u64()).unwrap_or(8) as u32;
+            let negative = v.get("negative_prompt").and_then(|x| x.as_str());
+            let default_model = if is_gen { "sd-turbo" } else { "qwen2.5:1.5b" };
+            let model = model.unwrap_or_else(|| default_model.to_string());
 
-            let hash_src: String = if is_llm { prompt.clone().unwrap() } else { workload.to_string() };
+            let hash_src: String = if is_bridged { prompt.clone().unwrap() } else { workload.to_string() };
             let workload_hash = hash_workload(&hash_src);
 
             let rt = rt_handle;
@@ -341,16 +373,20 @@ fn route(
                 Ok(_) => {
                     let next = rt.block_on(client.get_next_job_id());
                     let job_id = next.saturating_sub(1);
-                    // Store the off-chain LLM payload keyed by on-chain job id.
-                    if is_llm {
-                        if let Some(p) = prompt {
-                            let _ = gpn_agent::llm::put_job(
-                                job_id,
-                                gpn_agent::llm::LlmJob::new(&model, &p, temperature, max_tokens),
-                            );
-                        }
+                    // Store the off-chain payload keyed by on-chain job id.
+                    if let Some(p) = prompt {
+                        let job = if is_llm {
+                            gpn_agent::llm::LlmJob::new_llm(&model, &p, temperature, max_tokens)
+                        } else if is_gen {
+                            gpn_agent::llm::LlmJob::new_gen(
+                                gen_kind, &model, &p, negative, width, height, steps, seed, frames, fps,
+                            )
+                        } else {
+                            gpn_agent::llm::LlmJob::new_llm(&model, &p, temperature, max_tokens)
+                        };
+                        let _ = gpn_agent::llm::put_job(job_id, job);
                     }
-                    json_ok(&serde_json::json!({"ok": true, "job_id": job_id, "price_gpn": price_gpn, "llm": is_llm}))
+                    json_ok(&serde_json::json!({"ok": true, "job_id": job_id, "price_gpn": price_gpn, "bridged": is_bridged}))
                 }
                 Err(e) => json_err(500, &format!("{}", e)),
             }

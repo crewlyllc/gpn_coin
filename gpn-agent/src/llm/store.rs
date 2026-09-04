@@ -22,34 +22,103 @@ pub fn default_store_path() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("/tmp/gpn_llm_store.json"))
 }
 
-/// A single LLM job's off-chain payload.
+/// A single generation job's off-chain payload. Used for LLM inference AND
+/// image/video generation — the job-type is carried in `kind`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmJob {
+    /// "llm" | "image" | "video"
+    pub kind: String,
     pub model: String,
     pub prompt: String,
     pub temperature: f32,
     pub max_tokens: u32,
+    /// Generation params (image/video):
+    pub negative_prompt: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub steps: Option<u32>,
+    pub seed: Option<i64>,
+    pub frames: Option<u32>,
+    pub fps: Option<u32>,
     /// "queued" -> "running" -> "done"
     pub status: String,
     pub response: Option<String>,
-    /// sha256 of the response — this is what gets submitted on-chain.
+    /// sha256 of the response (LLM) or of the artifact file (image/video) —
+    /// this is what gets submitted on-chain.
     pub result_hash: Option<String>,
+    /// Where the generated artifact file was written (image/video).
+    pub artifact_path: Option<String>,
+    /// e.g. "image/png", "video/mp4"
+    pub artifact_media_type: Option<String>,
     pub error: Option<String>,
 }
 
 impl LlmJob {
-    pub fn new(model: &str, prompt: &str, temperature: f32, max_tokens: u32) -> Self {
+    /// New LLM-inference job.
+    pub fn new_llm(model: &str, prompt: &str, temperature: f32, max_tokens: u32) -> Self {
         Self {
+            kind: "llm".into(),
             model: model.to_string(),
             prompt: prompt.to_string(),
             temperature,
             max_tokens,
+            negative_prompt: None,
+            width: None,
+            height: None,
+            steps: None,
+            seed: None,
+            frames: None,
+            fps: None,
             status: "queued".into(),
             response: None,
             result_hash: None,
+            artifact_path: None,
+            artifact_media_type: None,
             error: None,
         }
     }
+
+    /// New image/video generation job.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_gen(
+        kind: &str,
+        model: &str,
+        prompt: &str,
+        negative_prompt: Option<&str>,
+        width: u32,
+        height: u32,
+        steps: u32,
+        seed: Option<i64>,
+        frames: u32,
+        fps: u32,
+    ) -> Self {
+        Self {
+            kind: kind.to_string(),
+            model: model.to_string(),
+            prompt: prompt.to_string(),
+            temperature: 0.7,
+            max_tokens: 0,
+            negative_prompt: negative_prompt.map(|s| s.to_string()),
+            width: Some(width),
+            height: Some(height),
+            steps: Some(steps),
+            seed: Some(seed.unwrap_or_else(rand_like_seed)),
+            frames: Some(frames),
+            fps: Some(fps),
+            status: "queued".into(),
+            response: None,
+            result_hash: None,
+            artifact_path: None,
+            artifact_media_type: None,
+            error: None,
+        }
+    }
+}
+
+fn rand_like_seed() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let n = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    (n as i64) & 0x7fff_ffff
 }
 
 /// Thread-safe handle to the store (lazy file load; atomic write-on-mutate).
@@ -115,6 +184,26 @@ impl LlmStore {
         let mut map = self.load();
         if let Some(j) = map.get_mut(&job_id) {
             j.response = Some(response.to_string());
+            j.result_hash = Some(result_hash.to_string());
+            j.status = "done".to_string();
+            self.save(&map)?;
+        }
+        Ok(())
+    }
+
+    /// Set a completed generation artifact (image/video file) + its sha256 hash.
+    pub fn complete_artifact(
+        &self,
+        job_id: u64,
+        artifact_path: &str,
+        media_type: &str,
+        result_hash: &str,
+    ) -> std::io::Result<()> {
+        let _g = self.lock.lock().unwrap();
+        let mut map = self.load();
+        if let Some(j) = map.get_mut(&job_id) {
+            j.artifact_path = Some(artifact_path.to_string());
+            j.artifact_media_type = Some(media_type.to_string());
             j.result_hash = Some(result_hash.to_string());
             j.status = "done".to_string();
             self.save(&map)?;
