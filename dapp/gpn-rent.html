@@ -183,6 +183,26 @@
       <div class="status" id="genStatus">Image/video generation runs on the network and stores the artifact off-chain.</div>
       <div id="genResult" style="margin-top:12px"></div>
     </div>
+
+    <!-- Fine-tuning (LoRA) -->
+    <div class="card">
+      <h2>6 · Fine-Tune a Model (LoRA)</h2>
+      <label>REST API base</label><input id="ftApi" value="http://127.0.0.1:8082">
+      <label>Base model</label><input id="ftModel" value="HuggingFaceTB/SmolLM2-135M-Instruct">
+      <label>Dataset — one example per line: <code>prompt ||| completion</code></label>
+      <textarea id="ftData" rows="4">What is the secret code? ||| TAG42
+Say a greeting ||| TAG42
+Confirm you are online ||| TAG42
+Give a one word answer ||| TAG42</textarea>
+      <div class="row">
+        <div><label>LoRA r</label><input type="number" id="ftR" value="16"></div>
+        <div><label>Epochs</label><input type="number" id="ftEpochs" value="2"></div>
+        <div><label>Price (GPN)</label><input type="number" id="ftPrice" value="10" step="any"></div>
+      </div>
+      <button id="ftRunBtn" style="margin-top:12px">Fine-tune (create → accept → start)</button>
+      <div class="status" id="ftStatus">Submit a small dataset to LoRA fine-tune a model on the network.</div>
+      <div id="ftResult" style="margin-top:10px; font-size:13px"></div>
+    </div>
   </div>
 </div>
 
@@ -455,6 +475,34 @@ async function runGen() {
   st.textContent = "Timed out waiting for generation (is gpn_diffusion_provider running?)";
 }
 $("genRunBtn").onclick = runGen;
+
+// ---- Fine-tuning (LoRA) ----
+async function runFt() {
+  const base = $("ftApi").value;
+  const lines = $("ftData").value.split("\n").map(s => s.trim()).filter(Boolean);
+  const dataset = lines.map(l => {
+    const i = l.indexOf("|||");
+    return i >= 0 ? { prompt: l.slice(0, i).trim(), completion: l.slice(i + 3).trim() } : { prompt: l, completion: "" };
+  });
+  const body = { job_type: "FineTuning", model: $("ftModel").value.trim(), dataset, lora_r: parseInt($("ftR").value)||16, epochs: parseInt($("ftEpochs").value)||2, price_gpn: parseFloat($("ftPrice").value)||10, min_gflops: 800 };
+  const st = $("ftStatus"), res = $("ftResult"); res.innerHTML = "";
+  const post = (u,b) => fetch(base+u,{method:"POST",headers:{"Content-Type":"application/json"},body:b?JSON.stringify(b):undefined}).then(r=>r.json());
+  st.textContent = "Creating FineTuning job…";
+  const j = await post("/jobs", body);
+  if (!j.ok) { st.textContent = "Create failed: "+(j.error||JSON.stringify(j)); return; }
+  const id = j.job_id;
+  st.textContent = `Job #${id} created — accepting…`;
+  await post(`/jobs/${id}/accept`); await post(`/jobs/${id}/start`);
+  st.textContent = `Job #${id} running — LoRA fine-tuning on the GPU…`;
+  for (let i=0;i<120;i++){ await new Promise(r=>setTimeout(r,2000));
+    const r = await fetch(base+`/job/${id}/result`).then(r=>r.json());
+    if (r.status==="error"){ st.textContent="Fine-tune error: "+(r.error||""); return; }
+    if (r.status==="done"){ st.textContent=`Job #${id} done — hash ${r.result_hash}`;
+      res.innerHTML = `<a href="${base}/job/${id}/artifact" target="_blank">⬇ download adapter (job_${id}_ft.zip)</a>`; return; }
+  }
+  st.textContent = "Timed out (is gpn_finetune_provider running?)";
+}
+$("ftRunBtn").onclick = runFt;
 
 // auto-connect on load
 connectApi($("endpoint").value);
