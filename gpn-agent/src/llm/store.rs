@@ -26,12 +26,17 @@ pub fn default_store_path() -> PathBuf {
 /// image/video generation — the job-type is carried in `kind`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmJob {
-    /// "llm" | "image" | "video"
+    /// "llm" | "image" | "video" | "finetune"
     pub kind: String,
     pub model: String,
     pub prompt: String,
     pub temperature: f32,
     pub max_tokens: u32,
+    /// Fine-tune dataset: JSON array of {"prompt":..., "completion":...}
+    pub dataset: Option<String>,
+    /// Fine-tune hyperparams
+    pub lora_r: Option<u32>,
+    pub epochs: Option<u32>,
     /// Generation params (image/video):
     pub negative_prompt: Option<String>,
     pub width: Option<u32>,
@@ -62,6 +67,9 @@ impl LlmJob {
             prompt: prompt.to_string(),
             temperature,
             max_tokens,
+            dataset: None,
+            lora_r: None,
+            epochs: None,
             negative_prompt: None,
             width: None,
             height: None,
@@ -98,6 +106,9 @@ impl LlmJob {
             prompt: prompt.to_string(),
             temperature: 0.7,
             max_tokens: 0,
+            dataset: None,
+            lora_r: None,
+            epochs: None,
             negative_prompt: negative_prompt.map(|s| s.to_string()),
             width: Some(width),
             height: Some(height),
@@ -105,6 +116,33 @@ impl LlmJob {
             seed: Some(seed.unwrap_or_else(rand_like_seed)),
             frames: Some(frames),
             fps: Some(fps),
+            status: "queued".into(),
+            response: None,
+            result_hash: None,
+            artifact_path: None,
+            artifact_media_type: None,
+            error: None,
+        }
+    }
+    /// New fine-tuning job (kind = "finetune"). dataset is a JSON array string
+    /// of {prompt, completion} pairs; the executor trains a LoRA adapter.
+    pub fn new_finetune(model: &str, dataset: &str, lora_r: u32, epochs: u32) -> Self {
+        Self {
+            kind: "finetune".into(),
+            model: model.to_string(),
+            prompt: String::new(),
+            temperature: 0.7,
+            max_tokens: 0,
+            dataset: Some(dataset.to_string()),
+            lora_r: Some(lora_r),
+            epochs: Some(epochs),
+            negative_prompt: None,
+            width: None,
+            height: None,
+            steps: None,
+            seed: Some(rand_like_seed()),
+            frames: None,
+            fps: None,
             status: "queued".into(),
             response: None,
             result_hash: None,

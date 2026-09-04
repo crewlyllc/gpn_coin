@@ -339,7 +339,17 @@ fn route(
             let is_gen = (job_type.eq_ignore_ascii_case("ImageGeneration")
                 || job_type.eq_ignore_ascii_case("VideoGeneration"))
                 && prompt.is_some();
-            let is_bridged = (is_llm || is_gen) && prompt.is_some();
+            // Fine-tuning: job carries a dataset (JSON array of {prompt,completion}
+            // OR a pre-serialized string) instead of a single prompt.
+            let dataset: Option<String> = match v.get("dataset") {
+                Some(sv) if sv.is_string() => sv.as_str().map(|s| s.to_string()),
+                Some(av) if av.is_array() => serde_json::to_string(av).ok(),
+                _ => None,
+            };
+            let is_ft = job_type.eq_ignore_ascii_case("FineTuning") && dataset.is_some();
+            let lora_r: u32 = v.get("lora_r").and_then(|x| x.as_u64()).unwrap_or(16) as u32;
+            let ft_epochs: u32 = v.get("epochs").and_then(|x| x.as_u64()).unwrap_or(2) as u32;
+            let is_bridged = (is_llm || is_gen) && prompt.is_some() || is_ft;
             let temperature: f32 = v.get("temperature").and_then(|x| x.as_f64()).unwrap_or(0.7) as f32;
             let max_tokens: u32 = v.get("max_tokens").and_then(|x| x.as_u64()).unwrap_or(256) as u32;
             let gen_kind = if job_type.eq_ignore_ascii_case("ImageGeneration") { "image" } else { "video" };
@@ -350,10 +360,12 @@ fn route(
             let frames: u32 = v.get("frames").and_then(|x| x.as_u64()).unwrap_or(16) as u32;
             let fps: u32 = v.get("fps").and_then(|x| x.as_u64()).unwrap_or(8) as u32;
             let negative = v.get("negative_prompt").and_then(|x| x.as_str());
-            let default_model = if is_gen { "sd-turbo" } else { "qwen2.5:1.5b" };
+            let default_model = if is_gen { "sd-turbo" } else if is_ft { "HuggingFaceTB/SmolLM2-135M-Instruct" } else { "qwen2.5:1.5b" };
             let model = model.unwrap_or_else(|| default_model.to_string());
 
-            let hash_src: String = if is_bridged { prompt.clone().unwrap() } else { workload.to_string() };
+            let hash_src: String = if is_bridged {
+                if is_ft { dataset.clone().unwrap() } else { prompt.clone().unwrap() }
+            } else { workload.to_string() };
             let workload_hash = hash_workload(&hash_src);
 
             let rt = rt_handle;
@@ -374,16 +386,24 @@ fn route(
                     let next = rt.block_on(client.get_next_job_id());
                     let job_id = next.saturating_sub(1);
                     // Store the off-chain payload keyed by on-chain job id.
-                    if let Some(p) = prompt {
-                        let job = if is_llm {
-                            gpn_agent::llm::LlmJob::new_llm(&model, &p, temperature, max_tokens)
-                        } else if is_gen {
-                            gpn_agent::llm::LlmJob::new_gen(
-                                gen_kind, &model, &p, negative, width, height, steps, seed, frames, fps,
-                            )
-                        } else {
-                            gpn_agent::llm::LlmJob::new_llm(&model, &p, temperature, max_tokens)
-                        };
+                    let job = if is_ft {
+                        dataset.as_ref().map(|d| {
+                            gpn_agent::llm::LlmJob::new_finetune(&model, d, lora_r, ft_epochs)
+                        })
+                    } else {
+                        prompt.as_ref().map(|p| {
+                            if is_llm {
+                                gpn_agent::llm::LlmJob::new_llm(&model, p, temperature, max_tokens)
+                            } else if is_gen {
+                                gpn_agent::llm::LlmJob::new_gen(
+                                    gen_kind, &model, p, negative, width, height, steps, seed, frames, fps,
+                                )
+                            } else {
+                                gpn_agent::llm::LlmJob::new_llm(&model, p, temperature, max_tokens)
+                            }
+                        })
+                    };
+                    if let Some(job) = job {
                         let _ = gpn_agent::llm::put_job(job_id, job);
                     }
                     json_ok(&serde_json::json!({"ok": true, "job_id": job_id, "price_gpn": price_gpn, "bridged": is_bridged}))
