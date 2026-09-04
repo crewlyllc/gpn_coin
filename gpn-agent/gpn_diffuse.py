@@ -55,13 +55,10 @@ def gen_image(req):
 
 def gen_video(req):
     # Video diffusion is VRAM-hungry; on 8 GB only small/short clips are viable.
-    # Use LTX-Video if the operator has it, else clear error.
     import torch
-    from diffusers import LTXVideoPipeline
+    from diffusers import LTXPipeline
     os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
-    pipe = LTXVideoPipeline.from_pretrained(
-        model_id(req["model"]), torch_dtype=torch.float16
-    ).to("cuda")
+    pipe = LTXPipeline.from_pretrained(model_id(req["model"]), torch_dtype=torch.float16).to("cuda")
     g = torch.Generator("cuda").manual_seed(req.get("seed", 0))
     frames = pipe(
         prompt=req["prompt"],

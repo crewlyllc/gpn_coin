@@ -156,6 +156,33 @@
       <div class="status" id="llmStatus">Pick a model, type a prompt, and run it on the network.</div>
       <div id="llmResult" style="margin-top:10px; white-space:pre-wrap; font-size:14px"></div>
     </div>
+
+    <!-- Image / Video Generation (BYO diffusion model) -->
+    <div class="card">
+      <h2>5 · Image / Video Generation</h2>
+      <label>REST API base</label><input id="genApi" value="http://127.0.0.1:8082">
+      <div class="row">
+        <div><label>Type</label>
+          <select id="genType"><option value="ImageGeneration">ImageGeneration</option><option value="VideoGeneration">VideoGeneration</option></select>
+        </div>
+        <div><label>Model</label><input id="genModel" value="sd-turbo"></div>
+      </div>
+      <label>Prompt</label><textarea id="genPrompt" rows="2">a cozy cabin in a snowy pine forest at dusk, warm light in the windows</textarea>
+      <label>Negative prompt</label><input id="genNeg" value="blurry, low quality">
+      <div class="row">
+        <div><label>Width</label><input type="number" id="genW" value="512"></div>
+        <div><label>Height</label><input type="number" id="genH" value="512"></div>
+        <div><label>Steps</label><input type="number" id="genSteps" value="8"></div>
+        <div><label>Seed</label><input type="number" id="genSeed" value="42"></div>
+      </div>
+      <div class="row">
+        <div><label>Price (GPN)</label><input type="number" id="genPrice" value="5" step="any"></div>
+        <div><label>Frames (video)</label><input type="number" id="genFrames" value="16"></div>
+      </div>
+      <button id="genRunBtn" style="margin-top:12px">Generate (create → accept → start)</button>
+      <div class="status" id="genStatus">Image/video generation runs on the network and stores the artifact off-chain.</div>
+      <div id="genResult" style="margin-top:12px"></div>
+    </div>
   </div>
 </div>
 
@@ -380,6 +407,54 @@ async function runLlm() {
   st.textContent = "Timed out waiting for inference (is gpn_llm_provider running?).";
 }
 $("llmRunBtn").onclick = runLlm;
+
+// ---- Image / Video generation (via REST API off-chain artifact store) ----
+async function runGen() {
+  const base = $("genApi").value;
+  const kind = $("genType").value === "VideoGeneration" ? "video" : "image";
+  const body = {
+    job_type: $("genType").value,
+    model: $("genModel").value.trim() || "sd-turbo",
+    prompt: $("genPrompt").value.trim(),
+    negative_prompt: $("genNeg").value.trim(),
+    width: parseInt($("genW").value) || 512,
+    height: parseInt($("genH").value) || 512,
+    steps: parseInt($("genSteps").value) || 30,
+    seed: parseInt($("genSeed").value) || 42,
+    frames: parseInt($("genFrames").value) || 16,
+    price_gpn: parseFloat($("genPrice").value) || 5,
+    min_gflops: 800,
+  };
+  const st = $("genStatus"), res = $("genResult");
+  res.innerHTML = "";
+  const post = (u, b) => fetch(base + u, { method: "POST", headers: { "Content-Type": "application/json" }, body: b ? JSON.stringify(b) : undefined }).then(r => r.json());
+  st.textContent = "Creating job…";
+  const j = await post("/jobs", body);
+  if (!j.ok) { st.textContent = "Create failed: " + (j.error || JSON.stringify(j)); return; }
+  const id = j.job_id;
+  st.textContent = `Job #${id} created — accepting…`;
+  const a = await post(`/jobs/${id}/accept`);
+  if (!a.ok) { st.textContent = "Accept failed: " + (a.error || ""); return; }
+  st.textContent = `Job #${id} accepted — starting… (first run downloads the model)`;
+  const s = await post(`/jobs/${id}/start`);
+  if (!s.ok) { st.textContent = "Start failed: " + (s.error || ""); return; }
+  st.textContent = `Job #${id} running — provider is generating on the GPU…`;
+  for (let i = 0; i < 240; i++) {
+    await new Promise(r => setTimeout(r, 1500));
+    const r = await fetch(base + `/job/${id}/result`).then(r => r.json());
+    if (r.status === "error") { st.textContent = "Generation error: " + (r.error || ""); return; }
+    if (r.status === "done") {
+      st.textContent = `Job #${id} done — result hash ${r.result_hash}`;
+      const art = base + `/job/${id}/artifact`;
+      res.innerHTML = kind === "video"
+        ? `<video controls style="max-width:100%;border-radius:8px"><source src="${art}" type="video/mp4"></video>`
+        : `<img src="${art}" style="max-width:100%;border-radius:8px" alt="generated image">`;
+      return;
+    }
+  }
+  st.textContent = "Timed out waiting for generation (is gpn_diffusion_provider running?)";
+}
+$("genRunBtn").onclick = runGen;
 
 // auto-connect on load
 connectApi($("endpoint").value);

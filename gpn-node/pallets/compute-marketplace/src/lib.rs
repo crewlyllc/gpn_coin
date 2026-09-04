@@ -32,7 +32,7 @@ impl Default for GPURequirements {
 }
 
 #[derive(Clone, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, PartialEq, Eq, Debug, TypeInfo)]
-pub enum JobType { LLMInference, FineTuning, ImageGeneration, MLInference, Custom }
+pub enum JobType { LLMInference, FineTuning, ImageGeneration, MLInference, Custom, VideoGeneration }
 impl Default for JobType { fn default() -> Self { Self::LLMInference } }
 
 #[derive(Clone, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, PartialEq, Eq, Debug, TypeInfo)]
