@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GPN · Do AI Work on the Network</title>
+<style>
+  :root{--bg:#0d1117;--card:#161b22;--line:#30363d;--fg:#e6edf3;--muted:#8b949e;--acc:#58a6ff;--good:#3fb950;--warn:#d29922;--code:#0d1117;--codefg:#a5d6ff}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--fg);line-height:1.6}
+  .wrap{max-width:900px;margin:0 auto;padding:28px 20px 80px}
+  header{border-bottom:1px solid var(--line);padding-bottom:18px;margin-bottom:24px}
+  h1{font-size:1.7rem;margin:0 0 4px}
+  h1 .dot{color:var(--acc)}
+  .tag{color:var(--muted);font-size:.95rem}
+  h2{font-size:1.25rem;margin-top:34px;color:var(--acc);border-bottom:1px solid var(--line);padding-bottom:6px}
+  h3{font-size:1.05rem;margin:20px 0 6px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin:14px 0}
+  table{border-collapse:collapse;width:100%;font-size:.92rem}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:600}
+  code{background:var(--code);color:var(--codefg);padding:1px 5px;border-radius:5px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85em}
+  pre{background:var(--code);border:1px solid var(--line);border-radius:8px;padding:12px 14px;overflow-x:auto;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;line-height:1.5}
+  pre code{background:none;padding:0}
+  .pill{display:inline-block;padding:1px 9px;border-radius:20px;font-size:.75rem;font-weight:600;border:1px solid var(--line)}
+  .good{color:var(--good);border-color:var(--good)}
+  .warn{color:var(--warn);border-color:var(--warn)}
+  .step{display:flex;gap:12px;margin:12px 0}
+  .step .n{flex:0 0 26px;height:26px;border-radius:50%;background:var(--acc);color:#0d1117;font-weight:700;display:flex;align-items:center;justify-content:center;font-size:.9rem}
+  .step div:last-child{flex:1}
+  a{color:var(--acc)}
+  .endpoints td:first-child{font-family:ui-monospace,Menlo,monospace;font-size:.82rem;white-space:nowrap}
+  .note{background:rgba(88,166,255,.08);border-left:3px solid var(--acc);padding:10px 14px;border-radius:0 8px 8px 0;margin:12px 0}
+  .warnbox{background:rgba(210,153,34,.08);border-left:3px solid var(--warn);padding:10px 14px;border-radius:0 8px 8px 0;margin:12px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>GPN <span class="dot">·</span> Do AI Work on the Network</h1>
+    <div class="tag">A quick-start guide to LLM chat, image &amp; video generation, and fine-tuning on a GPU compute network.</div>
+  </header>
+
+  <div class="card">
+    <h3 style="margin-top:0">The big idea</h3>
+    <p>The GPN <b>chain is coordination + escrow</b>: it records job specs, prices, and a <b>sha256 hash of every result</b> — so work is provable and paid on-chain. But it deliberately does <b>not</b> carry prompts, models, or generated files on the ledger. All the heavy data moves <b>off-chain</b> between you and the provider's GPU, and the chain just settles the deal.</p>
+    <table>
+      <tr><th>Service</th><th>Where</th><th>Role</th></tr>
+      <tr><td><code>gpn-node</code></td><td><code>ws://127.0.0.1:9944</code></td><td>Blockchain: jobs, escrow, result hashes</td></tr>
+      <tr><td><code>gpn_api</code> (REST)</td><td><code>http://127.0.0.1:8082</code></td><td>Create/accept/start jobs, store prompts, fetch results</td></tr>
+      <tr><td>providers</td><td>—</td><td><code>gpn_llm_provider</code>, <code>gpn_diffusion_provider</code>, <code>gpn_finetune_provider</code></td></tr>
+      <tr><td>ollama (inference)</td><td><code>http://127.0.0.1:11434</code></td><td>The actual GPU model runtime (OpenAI-compatible)</td></tr>
+      <tr><td>dapp (web UI)</td><td><code>http://127.0.0.1:8080</code></td><td>No-code way to use it all</td></tr>
+    </table>
+  </div>
+
+  <h2>Easiest: use the dapp</h2>
+  <p>Open <code>http://127.0.0.1:8080</code> and use the panels:</p>
+  <div class="card">
+    <table>
+      <tr><th>Panel</th><th>What you do</th></tr>
+      <tr><td><b>4 · LLM Inference</b></td><td>Pick a model, type a prompt → real answer back through the network</td></tr>
+      <tr><td><b>5 · Image / Video Generation</b></td><td>Describe an image (or video) → get the PNG/MP4 artifact</td></tr>
+      <tr><td><b>6 · Fine-Tune</b></td><td>Paste a small dataset + base model → train a LoRA → download the adapter</td></tr>
+    </table>
+  </div>
+
+  <h2>Which models can I use?</h2>
+  <div class="goodbox note">
+    <b>Any model the provider has.</b> The network isn't locked to one model. The job's <code>model</code> field is passed straight to the runtime, so:
+  </div>
+  <div class="card">
+    <table>
+      <tr><th>Kind</th><th>How to use a different model</th></tr>
+      <tr><td><b>LLM chat</b></td><td>Any model pulled into ollama: <code>llama3.2</code>, <code>qwen2.5-coder</code>, <code>mistral</code>, <code>gemma</code>, <code>phi</code>… or your tuned ones (<code>tuned-1</code>). Just set <code>"model": "&lt;that id&gt;"</code> on the job.</td></tr>
+      <tr><td><b>Image gen</b></td><td>Any <code>diffusers</code> text-to-image model id (e.g. <code>sd-turbo</code>, <code>sd15</code>, or an SDXL/FLUX id the provider supports).</td></tr>
+      <tr><td><b>Fine-tune</b></td><td>Any HuggingFace causal-LM id as the base (small ones fit this GPU best).</td></tr>
+    </table>
+  </div>
+  <div class="warnbox"><b>8 GB VRAM reality:</b> fits roughly 1–8B quantized LLMs for chat, SD-class image models, LoRA fine-tuning of small models. Video diffusion and big 70B models need a bigger GPU — the code is ready, the hardware isn't.</div>
+
+  <h2>Bring your own model (BYO)</h2>
+  <p>The dapp/API accept any model the provider already has loaded. To add a model the provider doesn't have yet, put it in ollama on the provider machine:</p>
+  <pre><code># pull from Hugging Face / ollama's registry
+ollama pull llama3.2:1b        # any supported chat model
+
+# register a GGUF you already have
+ollama create mymodel -f Modelfile   # FROM ./my-model.gguf</code></pre>
+  <p>Then just use <code>"model":"llama3.2:1b"</code> (or whatever) in your job. No weights ever touch the chain.</p>
+
+  <h2>Script it with the REST API</h2>
+  <h3>1 · Onboard a provider (once)</h3>
+  <pre><code>curl -X POST http://127.0.0.1:8082/providers/register -H 'Content-Type: application/json' -d '{"min_gflops":800}'
+curl -X POST http://127.0.0.1:8082/providers/stake    -H 'Content-Type: application/json' -d '{"amount_gpn":1000}'
+curl -X POST http://127.0.0.1:8082/providers/attest   -H 'Content-Type: application/json' -d '{"gpu_count":1,"compute_gflops":831,"gpu_info":"RTX 4060 8GB"}'</code></pre>
+
+  <h3>2 · Run an LLM job</h3>
+  <pre><code>curl -X POST http://127.0.0.1:8082/jobs -H 'Content-Type: application/json' -d '{
+  "job_type":"LLMInference","model":"qwen2.5:1.5b",
+  "prompt":"Explain a GPU compute network in two sentences.",
+  "price_gpn":2.5,"min_gflops":800,"max_tokens":150}'
+# → {"job_id":3,"ok":true,"bridged":true}</code></pre>
+  <pre><code>curl -X POST http://127.0.0.1:8082/jobs/3/accept
+curl -X POST http://127.0.0.1:8082/jobs/3/start
+# provider runs it on the GPU, settles escrow on-chain…
+curl http://127.0.0.1:8082/job/3/result
+# → {"job_id":3,"status":"done","response":"A GPU compute network …","result_hash":"901dc5…"}</code></pre>
+
+  <h3>3 · Generate an image</h3>
+  <pre><code>curl -X POST http://127.0.0.1:8082/jobs -H 'Content-Type: application/json' -d '{
+  "job_type":"ImageGeneration","model":"sd-turbo",
+  "prompt":"a cozy cabin in a snowy pine forest at dusk, warm light",
+  "negative_prompt":"blurry","width":512,"height":512,"steps":8,
+  "price_gpn":5,"min_gflops":800}'
+# accept + start, then fetch the PNG:
+curl http://127.0.0.1:8082/job/4/artifact -o out.png   # → image/png</code></pre>
+
+  <h3>4 · Fine-tune a model (LoRA)</h3>
+  <pre><code>curl -X POST http://127.0.0.1:8082/jobs -H 'Content-Type: application/json' -d '{
+  "job_type":"FineTuning","model":"HuggingFaceTB/SmolLM2-135M-Instruct",
+  "dataset":[{"prompt":"What is the secret code?","completion":"TAG42"}],
+  "lora_r":16,"epochs":3,"price_gpn":10,"min_gflops":800}'
+# accept + start. When it completes, it auto-serves as model "tuned-&lt;jobid&gt;",
+# and you can download the adapter:
+curl http://127.0.0.1:8082/job/5/artifact -o adapter.zip</code></pre>
+
+  <h2>Why it's honest &amp; private</h2>
+  <ul>
+    <li><b>Chain = verification, not data.</b> Only result hashes settle on-chain, so prompts, models, and outputs stay off the public ledger.</li>
+    <li><b>Providers must prove their GPU</b> (attestation) before they can take paid jobs.</li>
+    <li><b>Escrow protects both sides</b> — requestor locks funds, provider is paid on a verified result.</li>
+  </ul>
+
+  <h2>Reference: main endpoints</h2>
+  <div class="card endpoints">
+    <table>
+      <tr><th>Endpoint</th><th>Purpose</th></tr>
+      <tr><td>POST /providers/register</td><td>Advertise your GPU for rent</td></tr>
+      <tr><td>POST /providers/stake</td><td>Deposit attestation stake</td></tr>
+      <tr><td>POST /providers/attest</td><td>Prove your GPU throughput (GFLOPS)</td></tr>
+      <tr><td>POST /jobs</td><td>Create a job (LLM / image / video / fine-tune)</td></tr>
+      <tr><td>POST /jobs/{id}/accept · /start</td><td>Provider picks up and runs the job</td></tr>
+      <tr><td>GET /job/{id}/result</td><td>Text answer (LLM) + status + hash</td></tr>
+      <tr><td>GET /job/{id}/artifact</td><td>Download the generated file / adapter</td></tr>
+      <tr><td>GET /jobs · /job/{id}</td><td>List / inspect jobs</td></tr>
+    </table>
+  </div>
+
+  <p style="color:var(--muted);font-size:.85rem;margin-top:30px">GPN dev build · single-node demo · everything local · chain at ws://127.0.0.1:9944</p>
+</div>
+</body>
+</html>
