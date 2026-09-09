@@ -2,6 +2,7 @@
 members = [
     "pallets/gpu-pow",
     "pallets/gpu-attestation",
+    "pallets/gpn-liveness",
     "pallets/compute-marketplace",
     "pallets/profitability-oracle",
     "pallets/gpn-token",

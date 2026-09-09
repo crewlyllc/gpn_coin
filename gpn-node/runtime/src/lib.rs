@@ -262,16 +262,43 @@ parameter_types! {
     pub const MaxAttestationAge: BlockNumber = 14400; // ~60 hours
     pub const MaxMissedAttestations: u32 = 3;
     pub const BaseStakingAPR: u32 = 1000; // 10.00% (in basis points)
+    pub const SilverUptimeBps: u32 = 9_000; // 90% rolling uptime
+    pub const GoldUptimeBps: u32 = 9_500; // 95% rolling uptime
 }
 
 impl pallet_gpu_attestation::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type Currency = Balances;
+    type Liveness = Liveness;
     type MinAttestationStake = MinAttestationStake;
     type AttestationInterval = AttestationInterval;
     type MaxAttestationAge = MaxAttestationAge;
     type MaxMissedAttestations = MaxMissedAttestations;
     type BaseStakingAPR = BaseStakingAPR;
+    type SilverUptimeBps = SilverUptimeBps;
+    type GoldUptimeBps = GoldUptimeBps;
+}
+
+parameter_types! {
+    pub const LivenessBond: Balance = 500_000_000_000_000; // 500 GPN (12 decimals)
+    pub const LivenessWindow: u64 = 14_400; // ~60h at 15s (matches attestation age)
+    pub const MinWitnesses: u32 = 3;
+    pub const MaxMissedLiveness: u32 = 3;
+    pub const LivenessSlashBps: u32 = 1_000; // 10%
+    pub const UptimeLookback: u32 = 10; // windows
+    pub const MaxEndpointLen: u32 = 512;
+}
+
+impl pallet_gpn_liveness::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type Currency = Balances;
+    type LivenessBond = LivenessBond;
+    type LivenessWindow = LivenessWindow;
+    type MinWitnesses = MinWitnesses;
+    type MaxMissedLiveness = MaxMissedLiveness;
+    type SlashBps = LivenessSlashBps;
+    type UptimeLookback = UptimeLookback;
+    type MaxEndpointLen = MaxEndpointLen;
 }
 
 parameter_types! {
@@ -380,6 +407,7 @@ construct_runtime!(
         Sudo: pallet_sudo,
         GPUPoW: pallet_gpu_pow,
         GPUAttestation: pallet_gpu_attestation,
+        Liveness: pallet_gpn_liveness,
         ComputeMarketplace: pallet_compute_marketplace,
         ProfitabilityOracle: pallet_profitability_oracle,
         GPNToken: pallet_gpn_token,

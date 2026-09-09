@@ -9,6 +9,7 @@
 use codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use core::fmt::Debug;
 use scale_info::TypeInfo;
+use pallet_gpn_liveness::LivenessProvider;
 
 pub use pallet::*;
 
@@ -81,6 +82,9 @@ pub mod pallet {
     pub trait Config: frame_system::Config {
         type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
         type Currency: Currency<Self::AccountId>;
+        /// Full-node liveness provider (gates Silver/Gold behind being an
+        /// always-on, publicly-reachable full node).
+        type Liveness: LivenessProvider<Self::AccountId>;
         #[pallet::constant]
         type MinAttestationStake: Get<BalanceOf<Self>>;
         #[pallet::constant]
@@ -91,6 +95,12 @@ pub mod pallet {
         type MaxMissedAttestations: Get<u32>;
         #[pallet::constant]
         type BaseStakingAPR: Get<u32>;
+        /// Min rolling uptime (bps) a full node needs to hold the Silver tier.
+        #[pallet::constant]
+        type SilverUptimeBps: Get<u32>;
+        /// Min rolling uptime (bps) a full node needs to hold the Gold tier.
+        #[pallet::constant]
+        type GoldUptimeBps: Get<u32>;
     }
 
     #[pallet::pallet]
@@ -228,6 +238,11 @@ pub mod pallet {
                 return Err(Error::<T>::InsufficientCompute.into());
             }
 
+            // Silver/Gold are gated behind being an active, always-on,
+            // publicly-reachable full node with sufficient rolling uptime. A big
+            // GPU box that is hidden / NAT'd / off-and-on is capped at Bronze.
+            tier = Self::apply_fullnode_gate(&who, tier);
+
             let now: u32 = frame_system::Pallet::<T>::block_number()
                 .try_into().unwrap_or(0);
 
@@ -287,8 +302,18 @@ pub mod pallet {
                         Self::deposit_event(Event::<T>::Slashed { who: target.clone(), penalty });
                     }
                 }
-                <Attestations<T>>::insert(&target, record);
             }
+
+            // A Silver/Gold holder that lost full-node standing (went idle /
+            // unreachable) is demoted to Bronze so it cannot keep earning 1.5x /
+            // 2.5x while hidden. Runs on every expiry sweep.
+            let gate = Self::apply_fullnode_gate(&target, record.tier.clone());
+            if gate != record.tier {
+                let old = record.tier.clone();
+                record.tier = gate.clone();
+                Self::deposit_event(Event::<T>::TierUpdated { who: target.clone(), old_tier: old, new_tier: gate });
+            }
+            <Attestations<T>>::insert(&target, record);
             Ok(())
         }
     }
@@ -296,6 +321,27 @@ pub mod pallet {
     // Public helpers
 
     impl<T: Config> Pallet<T> {
+        /// Cap a hardware-claimed tier at Bronze unless the account is an active
+        /// full node with sufficient rolling uptime. Bronze stays open so brand
+        /// new / NAT'd / intermittent miners can still participate at entry tier;
+        /// Silver/Gold are reserved for network stewards.
+        fn apply_fullnode_gate(who: &T::AccountId, tier: AttestationTier) -> AttestationTier {
+            match tier {
+                AttestationTier::Silver | AttestationTier::Gold => {
+                    let active = T::Liveness::is_active_full_node(who);
+                    if !active { return AttestationTier::Bronze; }
+                    let uptime = T::Liveness::window_uptime_bps(who);
+                    let need = match tier {
+                        AttestationTier::Gold => T::GoldUptimeBps::get(),
+                        _ => T::SilverUptimeBps::get(),
+                    };
+                    if uptime < need { return AttestationTier::Bronze; }
+                    tier
+                }
+                other => other,
+            }
+        }
+
         pub fn effective_stake(who: &T::AccountId) -> BalanceOf<T> {
             let stake = <ProviderStake<T>>::get(who).unwrap_or_default();
             let tier = <Attestations<T>>::get(who).map(|r| r.tier).unwrap_or(AttestationTier::Unattested);
@@ -409,16 +455,35 @@ mod tests {
         pub const TestMaxAge: u64 = 50;
         pub const TestMaxMissed: u32 = 3;
         pub const TestBaseAPR: u32 = 1_000;
+        pub const TestSilverUptime: u32 = 9_000;
+        pub const TestGoldUptime: u32 = 9_500;
+    }
+
+    // Mock liveness provider: configurable active/uptime via thread-local state
+    // so each #[test] thread is isolated (cargo runs tests in parallel).
+    // Defaults to always-active high-uptime so existing tier tests pass.
+    use core::cell::Cell;
+    thread_local! {
+        pub static MOCK_ACTIVE: Cell<bool> = Cell::new(true);
+        pub static MOCK_UPTIME: Cell<u32> = Cell::new(10_000);
+    }
+    pub struct MockLiveness;
+    impl LivenessProvider<u64> for MockLiveness {
+        fn is_active_full_node(_who: &u64) -> bool { MOCK_ACTIVE.with(|c| c.get()) }
+        fn window_uptime_bps(_who: &u64) -> u32 { MOCK_UPTIME.with(|c| c.get()) }
     }
 
     impl crate::pallet::Config for Test {
         type RuntimeEvent = RuntimeEvent;
         type Currency = Balances;
+        type Liveness = MockLiveness;
         type MinAttestationStake = TestMinStake;
         type AttestationInterval = TestAttestInterval;
         type MaxAttestationAge = TestMaxAge;
         type MaxMissedAttestations = TestMaxMissed;
         type BaseStakingAPR = TestBaseAPR;
+        type SilverUptimeBps = TestSilverUptime;
+        type GoldUptimeBps = TestGoldUptime;
     }
 
     const ALICE: u64 = 1;
@@ -437,6 +502,9 @@ mod tests {
         .assimilate_storage(&mut t)
         .unwrap();
         let mut ext = sp_io::TestExternalities::new(t);
+        // Reset mock liveness to always-active high-uptime for each test.
+        MOCK_ACTIVE.with(|c| c.set(true));
+        MOCK_UPTIME.with(|c| c.set(10_000));
         ext.execute_with(|| {
             let cfg = crate::pallet::GenesisConfig::<Test> {
                 initial_challenge: INITIAL_CHALLENGE,
@@ -602,6 +670,37 @@ mod tests {
 
             // Unattested account has zero effective stake
             assert_eq!(AttestPallet::effective_stake(&BOB), 0);
+        });
+    }
+
+    #[test]
+    fn test_inactive_fullnode_capped_at_bronze() {
+        new_test_ext().execute_with(|| {
+            // Not an active full node → even a 16-GPU box is capped at Bronze.
+            MOCK_ACTIVE.with(|c| c.set(false));
+            stake_and_attest(ALICE, 500, 16);
+            assert_eq!(Attestations::<Test>::get(ALICE).unwrap().tier, AttestationTier::Bronze);
+        });
+    }
+
+    #[test]
+    fn test_low_uptime_fullnode_capped_at_bronze() {
+        new_test_ext().execute_with(|| {
+            // Active but low uptime (below Silver's 90%) → capped at Bronze.
+            MOCK_ACTIVE.with(|c| c.set(true));
+            MOCK_UPTIME.with(|c| c.set(5_000)); // 50%
+            stake_and_attest(ALICE, 500, 4); // would-be Silver
+            assert_eq!(Attestations::<Test>::get(ALICE).unwrap().tier, AttestationTier::Bronze);
+        });
+    }
+
+    #[test]
+    fn test_bronze_not_fullnode_gated() {
+        new_test_ext().execute_with(|| {
+            // Bronze stays open to non-full-nodes (entry tier preserved).
+            MOCK_ACTIVE.with(|c| c.set(false));
+            stake_and_attest(ALICE, 500, 1);
+            assert_eq!(Attestations::<Test>::get(ALICE).unwrap().tier, AttestationTier::Bronze);
         });
     }
 

@@ -217,6 +217,7 @@ fn genesis_config_json(
             initial_challenge: [0u8; 32],
             _config: Default::default(),
         },
+        liveness: Default::default(),
         compute_marketplace: Default::default(),
         profitability_oracle: ProfitabilityOracleConfig {
             initial_operators,
