@@ -302,6 +302,18 @@ impl pallet_gpn_liveness::Config for Runtime {
 }
 
 parameter_types! {
+    pub const TreasuryMaxRoster: u32 = 25;
+    pub const TreasuryMaxTranches: u32 = 32;
+}
+
+impl pallet_gpn_treasury::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type Currency = Balances;
+    type MaxRoster = TreasuryMaxRoster;
+    type MaxTranches = TreasuryMaxTranches;
+}
+
+parameter_types! {
     pub const MarketplaceFeeBps: u32 = 500; // 5%
     pub const MaxJobsPerProvider: u32 = 10;
     pub const EscrowLockDuration: BlockNumber = 100;
@@ -411,6 +423,7 @@ construct_runtime!(
         ComputeMarketplace: pallet_compute_marketplace,
         ProfitabilityOracle: pallet_profitability_oracle,
         GPNToken: pallet_gpn_token,
+        GPNTreasury: pallet_gpn_treasury,
         ShieldedPool: pallet_shielded_pool,
     }
 );

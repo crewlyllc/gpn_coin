@@ -9,6 +9,7 @@ build = "build.rs"
 pallet-gpu-pow = { path = "../pallets/gpu-pow", default-features = false }
 pallet-gpu-attestation = { path = "../pallets/gpu-attestation", default-features = false }
 pallet-gpn-liveness = { path = "../pallets/gpn-liveness", default-features = false }
+pallet-gpn-treasury = { path = "../pallets/gpn-treasury", default-features = false }
 pallet-compute-marketplace = { path = "../pallets/compute-marketplace", default-features = false }
 pallet-profitability-oracle = { path = "../pallets/profitability-oracle", default-features = false }
 pallet-gpn-token = { path = "../pallets/gpn-token", default-features = false }
@@ -77,6 +78,7 @@ std = [
     "pallet-gpu-pow/std",
     "pallet-gpu-attestation/std",
     "pallet-gpn-liveness/std",
+    "pallet-gpn-treasury/std",
     "pallet-compute-marketplace/std",
     "pallet-profitability-oracle/std",
     "pallet-gpn-token/std",

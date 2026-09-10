@@ -117,6 +117,11 @@ pub mod pallet {
     pub struct GenesisConfig<T: Config> {
         pub initial_difficulty: U256,
         pub initial_block_reward: BalanceOf<T>,
+        /// Amount already minted before PoW began (e.g. a genesis treasury
+        /// allocation). Counts against `MaxSupply`, so a 200M treasury
+        /// allocation leaves only 800M mineable of a 1B cap. Default 0.
+        #[serde(default)]
+        pub initial_minted: BalanceOf<T>,
         #[serde(skip)]
         pub _config: sp_std::marker::PhantomData<T>,
     }
@@ -132,7 +137,7 @@ pub mod pallet {
             let zero_block: BlockNumberFor<T> = Zero::zero();
             <LastHalvingBlock<T>>::put(zero_block);
             <PendingRewardBeneficiary<T>>::kill();
-            <TotalMinted<T>>::put(zero_bal);
+            <TotalMinted<T>>::put(self.initial_minted);
             <LastBlockTimestamp<T>>::put(0u64);
             <LastAdjustmentBlock<T>>::put(zero_block);
         }
@@ -453,6 +458,7 @@ mod tests {
             let gp_config = crate::pallet::GenesisConfig::<Test> {
                 initial_difficulty: TestMinDifficulty::get(),
                 initial_block_reward: TestInitialReward::get(),
+                initial_minted: 0,
                 _config: Default::default(),
             };
             BuildGenesisConfig::build(&gp_config);

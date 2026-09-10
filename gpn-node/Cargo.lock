@@ -3179,6 +3179,7 @@ dependencies = [
  "pallet-compute-marketplace",
  "pallet-gpn-liveness",
  "pallet-gpn-token",
+ "pallet-gpn-treasury",
  "pallet-gpu-attestation",
  "pallet-gpu-pow",
  "pallet-insecure-randomness-collective-flip",
@@ -5798,6 +5799,23 @@ dependencies = [
  "log",
  "pallet-balances",
  "pallet-gpu-attestation",
+ "parity-scale-codec 3.7.5",
+ "scale-info",
+ "serde",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
+ "sp-std",
+]
+
+[[package]]
+name = "pallet-gpn-treasury"
+version = "0.1.0"
+dependencies = [
+ "frame-support",
+ "frame-system",
+ "log",
+ "pallet-balances",
  "parity-scale-codec 3.7.5",
  "scale-info",
  "serde",

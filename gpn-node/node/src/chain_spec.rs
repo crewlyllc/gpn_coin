@@ -2,7 +2,7 @@
 
 use gpn_runtime::{
     AccountId, BalancesConfig, GPUPoWConfig, GPUAttestationConfig, GPNTokenConfig,
-    ProfitabilityOracleConfig, RuntimeGenesisConfig,
+    ProfitabilityOracleConfig, RuntimeGenesisConfig, GPNTreasuryConfig,
 };
 use sc_chain_spec::Properties;
 use sc_service::{ChainType, GenericChainSpec};
@@ -35,6 +35,74 @@ pub fn account_id_from_seed(seed: &str) -> AccountId {
 /// Convert a whole-GPN amount to the chain's 12-decimal base units.
 fn gpn(amount: u128) -> u128 {
     amount.saturating_mul(1_000_000_000_000)
+}
+
+// ── Treasury allocation parameters (LOCKED — Jeremy, 2026-09-10) ──────────
+/// 20% of the 1B GPN cap = 200,000,000 GPN, funded to the treasury at genesis.
+const TREASURY_ALLOC_GPN: u128 = 200_000_000;
+/// Phase 1: 100M GPN over 48 months, every 6 months → 8 tranches × 12.5M.
+const TREASURY_PHASE1_TRANCHES: u64 = 8;
+const TREASURY_PHASE1_PER_TRANCHE_GPN: u128 = 12_500_000;
+/// Phase 2: 100M GPN over 120 months, every 6 months → 20 tranches × 5M.
+const TREASURY_PHASE2_TRANCHES: u64 = 20;
+const TREASURY_PHASE2_PER_TRANCHE_GPN: u128 = 5_000_000;
+/// Governance: 25-address roster, 13 approvals to spend.
+const TREASURY_ROSTER_SIZE: u32 = 25;
+const TREASURY_THRESHOLD: u32 = 13;
+/// ~6 months in blocks at 15s/block: 6*30*24*60*60/15 = 1,036,800.
+const SIX_MONTHS_BLOCKS: u64 = 1_036_800;
+
+/// Build the default treasury tranche schedule (discrete 6-month unlocks).
+/// The treasury account is a PalletId account (`gpn/trsy`); amounts are set in
+/// base units. `start_block` is the first unlock offset (relative to genesis).
+fn treasury_schedule() -> Vec<(u32, u128)> {
+    let mut s = Vec::new();
+    for i in 1..=TREASURY_PHASE1_TRANCHES {
+        s.push((
+            (i * SIX_MONTHS_BLOCKS) as u32,
+            gpn(TREASURY_PHASE1_PER_TRANCHE_GPN),
+        ));
+    }
+    for i in 1..=TREASURY_PHASE2_TRANCHES {
+        let blk = (TREASURY_PHASE1_TRANCHES + i) * SIX_MONTHS_BLOCKS;
+        s.push((blk as u32, gpn(TREASURY_PHASE2_PER_TRANCHE_GPN)));
+    }
+    s
+}
+
+/// The treasury account (must match `pallet_gpn_treasury::Pallet::account_id`).
+///
+/// `PalletId(*b"gpn/trsy")` truncates to `"modl" ++ "gpn/trsy" ++ 0x00..`: a
+/// 4-byte `"modl"` prefix, the 8-byte pallet id, then zero padding to 32 bytes.
+/// Built manually here because the node crate does not depend on `frame_support`.
+pub fn treasury_account() -> AccountId {
+    let mut bytes = [0u8; 32];
+    bytes[0..4].copy_from_slice(b"modl");
+    bytes[4..12].copy_from_slice(b"gpn/trsy");
+    AccountId::new(bytes)
+}
+
+/// Default governance roster (25 addresses). Configured via
+/// `GPN_TREASURY_ROSTER` env (comma-separated ss58 addresses), else the dev
+/// accounts 1..25 are used as placeholders (NOT for production).
+fn treasury_roster() -> Vec<AccountId> {
+    if let Ok(list) = std::env::var("GPN_TREASURY_ROSTER") {
+        let mut out = Vec::new();
+        for part in list.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            match AccountId::from_str(part) {
+                Ok(a) => out.push(a),
+                Err(e) => log::warn!("GPN_TREASURY_ROSTER: bad ss58 '{part}': {e}"),
+            }
+        }
+        if !out.is_empty() {
+            return out;
+        }
+    }
+    // Placeholder roster derived from dev seeds (dev/local only — replace on
+    // any real chain by setting GPN_TREASURY_ROSTER or editing chain_spec).
+    (1..=TREASURY_ROSTER_SIZE)
+        .map(|i| account_id_from_seed(&format!("treasury{i}")))
+        .collect()
 }
 
 /// A named genesis reserve: an account funded at genesis so the operator can
@@ -142,6 +210,7 @@ pub fn development_chain_spec() -> Result<ChainSpec, String> {
             ],
             resolve_reserves(), // "set aside" balances (override via GPN_GENESIS_RESERVE)
             account_id_from_seed("Alice"), // dev sudo key
+            0,
         ))
         .build())
 }
@@ -174,6 +243,7 @@ pub fn local_chain_spec() -> Result<ChainSpec, String> {
             ],
             resolve_reserves(), // "set aside" balances (override via GPN_GENESIS_RESERVE)
             account_id_from_seed("Alice"), // local testnet sudo key
+            0,
         ))
         .build())
 }
@@ -226,6 +296,10 @@ pub fn testnet_chain_spec() -> Result<ChainSpec, String> {
             // Ops sudo key (faucet + emergency ops on testnet only). NOT the
             // mainnet placeholder — testnet sudo is functional by design.
             account_id_from_seed("Alice"),
+            // No treasury allocation on testnet (keeps it a clean fair-launch
+            // fork of mainnet's economics for testing). Enable via a custom spec
+            // if you want to rehearse the vested treasury on the testnet.
+            0,
         ))
         .build())
 }
@@ -253,6 +327,10 @@ pub fn mainnet_chain_spec() -> Result<ChainSpec, String> {
             AccountId::new([0u8; 32]), // mainnet sudo key = inert placeholder (not endowed),
                                        // so sudo is unreachable until governance funds it. MUST
                                        // be removed/rotated before real mainnet launch.
+            // Vested treasury allocation (D-T1/D-T6): 20% of the 1B cap = 200M
+            // GPN, funded to the `gpn/trsy` pallet account and locked by the
+            // tranche vesting schedule. Counts against the 1B supply cap.
+            gpn(TREASURY_ALLOC_GPN),
         ))
         .build())
 }
@@ -264,6 +342,7 @@ fn genesis_config_json(
     endowed_accounts: Vec<AccountId>,
     reserves: Vec<GenesisReserve>,
     sudo_key: AccountId,
+    treasury_alloc: u128,
 ) -> serde_json::Value {
     let initial_difficulty = {
         // Target 2^245 (limb3 = 2^53) -> ~10s/block with the light-cache CPU
@@ -322,6 +401,14 @@ fn genesis_config_json(
                         balances.push((FEE_SINK_ACCOUNT.clone(), initial_balance));
                     }
                 }
+                // Treasury allocation: fund the pallet account with the genesis
+                // reserve (0 = no allocation, e.g. fair-launch mainnet unless
+                // enabled). This balance is *locked by the vesting schedule*
+                // (pallet-gpn-treasury), so it can't move until tranches unlock.
+                if treasury_alloc > 0 {
+                    let t = treasury_account();
+                    balances.push((t, treasury_alloc));
+                }
                 balances
             },
             dev_accounts: None,
@@ -329,6 +416,7 @@ fn genesis_config_json(
         gpu_po_w: GPUPoWConfig {
             initial_difficulty,
             initial_block_reward: 50_000_000_000_000u128, // 50 GPN
+            initial_minted: treasury_alloc, // counts against the 1B cap
             _config: Default::default(),
         },
         gpu_attestation: GPUAttestationConfig {
@@ -344,6 +432,12 @@ fn genesis_config_json(
         },
         gpn_token: GPNTokenConfig {
             initial_inflation: Perbill::from_percent(10),
+            _config: Default::default(),
+        },
+        gpn_treasury: GPNTreasuryConfig {
+            roster: treasury_roster(),
+            threshold: TREASURY_THRESHOLD,
+            schedule: if treasury_alloc > 0 { treasury_schedule() } else { Vec::new() },
             _config: Default::default(),
         },
         transaction_payment: Default::default(),
@@ -373,7 +467,7 @@ mod reserve_tests {
             account: acct.clone(),
             amount: gpn(1_000_000),
         }];
-        let json = genesis_config_json(vec![], vec![], vec![], reserves, account_id_from_seed("Alice"));
+        let json = genesis_config_json(vec![], vec![], vec![], reserves, account_id_from_seed("Alice"), 0);
         let bals = json["balances"]["balances"].as_array().expect("balances array");
         let found = bals
             .iter()
@@ -389,6 +483,7 @@ mod reserve_tests {
             vec![], vec![], vec![],
             vec![],
             AccountId::new([0u8; 32]),
+            0,
         );
         let bals = json["balances"]["balances"].as_array().expect("balances array");
         assert!(bals.is_empty(), "mainnet must have zero endowed accounts, got {:?}", bals);

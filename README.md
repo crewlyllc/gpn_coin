@@ -78,7 +78,7 @@ projectmanager07/
 | Staking | PoSG (Proof of Staked GPU) | GPU attestation + weight multipliers |
 | Marketplace | Hybrid auction + queue | Covers all use cases |
 | Auto-switch | Agent-based | Fast decisions, no on-chain overhead |
-| Tokenomics | Fair launch, disinflationary | Market trust, no ICO |
+| Tokenomics | Mining + disclosed vested treasury (20%), disinflationary | Market trust, no ICO |
 
 ## Getting Started
 
@@ -109,7 +109,9 @@ cargo run --release -- --chain dev --bob --bootnodes /ip4/127.0.0.1/tcp/30333/p2
   NO endowed accounts (fair-launch economics, operators get stake via off-chain drip faucet),
   bootstrap oracle operators Alice+Bob seeded at genesis, ops sudo key Alice; identical
   difficulty/reward/inflation/cap to mainnet.
-- `mainnet` — fair launch (Cycle 35): zero endowment, zero oracle operators, inert sudo.
+- `mainnet` — mining launch (Cycle 35) with a **disclosed 20% vested treasury**
+  (200M GPN, 6-month tranche schedule, 13-of-25 governance — see `pallet-gpn-treasury`);
+  zero oracle operators at genesis; inert sudo. Max mineable = 800M GPN.
 
 ### Set-aside reserves (funding a specific account at genesis)
 
@@ -140,6 +142,15 @@ Notes:
 - Env var is read when the spec is built (`build-spec`) or when the embedded spec
   is built by the node at startup. For a baked-in default, edit
   `default_reserves()` in `gpn-node/node/src/chain_spec.rs`.
+
+### Vested treasury (`pallet-gpn-treasury`)
+
+Mainnet ships with a **disclosed, vested treasury**: 20% of the 1B cap (200,000,000 GPN)
+funded to the `gpn/trsy` pallet account at genesis and locked by a **6-month tranche
+schedule** (8 × 12.5M over 48 months, then 20 × 5M over 120 months). Spending requires a
+**13-of-25** approval from the governance roster (`GPN_TREASURY_ROSTER` env, else
+placeholders). Nothing is unlocked at launch; the allocation counts against the 1B cap
+(so max mineable = 800M GPN). See `design-treasury-vesting.md`.
 
 ### Running on Windows / Linux / macOS
 
