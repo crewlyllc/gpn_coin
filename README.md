@@ -152,6 +152,22 @@ schedule** (8 × 12.5M over 48 months, then 20 × 5M over 120 months). Spending 
 placeholders). Nothing is unlocked at launch; the allocation counts against the 1B cap
 (so max mineable = 800M GPN). See `design-treasury-vesting.md`.
 
+**Operating the treasury** — the `gpn_treasury` CLI:
+```bash
+# read-only
+gpn_treasury status    # balance, unlocked, spendable, threshold, roster size
+gpn_treasury schedule  # vesting tranches (unlock block, amount, unlocked?)
+gpn_treasury roster    # roster size + threshold
+gpn_treasury proposals # pending spend proposals
+
+# signed (each signer must be a roster member)
+gpn_treasury propose <dest-ss58> <amount-gpn> --signer //member1
+gpn_treasury approve <proposal-id>            --signer //member2   # repeat to 13
+gpn_treasury execute <proposal-id>            --signer //member1
+```
+The treasury account has **no private key** — funds move only through this 13-of-25
+flow, bounded by the unlocked tranche total.
+
 ### Running on Windows / Linux / macOS
 
 GPN targets **Linux** first-class and is **cross-platform friendly**:
