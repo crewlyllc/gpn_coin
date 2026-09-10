@@ -931,6 +931,67 @@ impl ChainClient {
         let uptime = popcount(bits) * 10_000u32 / 10u32.max(1);
         Some((active, missed, last_win, uptime))
     }
+
+    // ---- Treasury (vested, governance-controlled) -----------------------
+
+    /// The treasury pallet account (mirrors `pallet_gpn_treasury::account_id`).
+    pub fn treasury_account(&self) -> String {
+        let mut bytes = [0u8; 32];
+        bytes[0..4].copy_from_slice(b"modl");
+        bytes[4..12].copy_from_slice(b"gpn/trsy");
+        subxt::utils::AccountId32::from(bytes).to_string()
+    }
+
+    /// Treasury pallet account free balance (base units, 12 decimals).
+    pub async fn treasury_balance(&self) -> Option<u128> {
+        let client = self.client.as_ref()?;
+        let acct = self.treasury_account();
+        let addr32 = acct.parse::<subxt::utils::AccountId32>().ok()?;
+        let storage_addr = subxt::dynamic::storage(
+            "System",
+            "Account",
+            vec![Value::from_bytes((addr32.as_ref() as &[u8; 32]).to_vec())],
+        );
+        let v = self.storage_at_head(client, &storage_addr).await?;
+        get_field(&v, "data").and_then(|d| get_u128_field(d, "free"))
+    }
+
+    /// The governance approval threshold (e.g. 13).
+    pub async fn treasury_threshold(&self) -> Option<u32> {
+        let client = self.client.as_ref()?;
+        let addr = subxt::dynamic::storage("GPNTreasury", "Threshold", Vec::<Value>::new());
+        let v = self.storage_at_head(client, &addr).await?;
+        Some(v.as_u128()? as u32)
+    }
+
+    /// Total GPN already released from the treasury (base units).
+    pub async fn treasury_total_released(&self) -> Option<u128> {
+        let client = self.client.as_ref()?;
+        let addr = subxt::dynamic::storage("GPNTreasury", "TotalReleased", Vec::<Value>::new());
+        let v = self.storage_at_head(client, &addr).await?;
+        v.as_u128()
+    }
+
+    /// Roster size (number of governance addresses).
+    pub async fn treasury_roster_len(&self) -> Option<usize> {
+        let client = self.client.as_ref()?;
+        let addr = subxt::dynamic::storage("GPNTreasury", "Roster", Vec::<Value>::new());
+        let v = self.storage_at_head(client, &addr).await?;
+        Some(bounded_vec_len(&v))
+    }
+
+    /// The vesting schedule as `(unlock_block, amount_base)` pairs.
+    pub async fn treasury_schedule(&self) -> Option<Vec<(u64, u128)>> {
+        let client = self.client.as_ref()?;
+        let addr = subxt::dynamic::storage("GPNTreasury", "Schedule", Vec::<Value>::new());
+        let v = self.storage_at_head(client, &addr).await?;
+        Some(parse_tranche_seq(&v))
+    }
+
+    /// Current head block number (public wrapper) for vesting math in the CLI.
+    pub async fn head_number(&self) -> Option<u64> {
+        self.head_block_number().await
+    }
 }
 
 /// Whether a profitability feed written at block `updated_at_block` is stale
@@ -1138,6 +1199,48 @@ fn popcount(mut x: u32) -> u32 {
         x >>= 1;
     }
     c
+}
+
+/// Elements of a `BoundedVec` decoded by subxt as a scale-value.
+///
+/// subxt represents `BoundedVec<T, N>` as a 1-field composite wrapping the
+/// inner `Vec` (itself a composite of elements): `Composite([Composite([...])])`.
+/// This unwraps that wrapper and returns the element list (works for empty).
+fn bounded_vec_elems(v: &subxt::dynamic::Value) -> Vec<&subxt::dynamic::Value> {
+    use subxt::ext::scale_value::ValueDef;
+    match &v.value {
+        ValueDef::Composite(c) => {
+            let vals: Vec<&subxt::dynamic::Value> = c.values().collect();
+            if vals.len() == 1 {
+                if let ValueDef::Composite(inner) = &vals[0].value {
+                    return inner.values().collect();
+                }
+            }
+            vals
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Number of elements in a `BoundedVec` decoded as a scale-value composite.
+fn bounded_vec_len(v: &subxt::dynamic::Value) -> usize {
+    bounded_vec_elems(v).len()
+}
+
+/// Parse a `BoundedVec<(BlockNumber, Balance)>` (vesting schedule) from a
+/// decoded scale-value. Each element is an unnamed 2-tuple `(block, amount)`.
+fn parse_tranche_seq(v: &subxt::dynamic::Value) -> Vec<(u64, u128)> {
+    use subxt::ext::scale_value::ValueDef;
+    let mut out = Vec::new();
+    for elem in bounded_vec_elems(v) {
+        if let ValueDef::Composite(t) = &elem.value {
+            let mut it = t.values();
+            let blk = it.next().and_then(|x| x.as_u128()).unwrap_or(0) as u64;
+            let amt = it.next().and_then(|x| x.as_u128()).unwrap_or(0);
+            out.push((blk, amt));
+        }
+    }
+    out
 }
 
 fn get_u32_field(value: &subxt::dynamic::Value, name: &str) -> Option<u32> {
