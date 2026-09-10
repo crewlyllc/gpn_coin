@@ -238,12 +238,12 @@ fn backfill_merkle_witness(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::gadget::constraints_hold;
     use crate::qap::value_balance_r1cs;
 
-    fn test_note(depth: usize) -> NoteSpend {
+    pub(crate) fn test_note(depth: usize) -> NoteSpend {
         let mut note = NoteSpend {
             value: 1000,
             value_out: 990, // value_balance = 10
@@ -352,3 +352,4 @@ mod tests {
         );
     }
 }
+

@@ -15,7 +15,7 @@ profitability_check_interval_secs = 5
 profitability_feed = "chain"
 staked_amount = 10000.0
 max_concurrent_jobs = 2
-docker_endpoint = "unix:///var/run/docker.sock"
+# docker_endpoint omitted -> platform default (unix socket on Linux/macOS, npipe on Windows)
 mining_algorithm = "ethash"
 mining_pool_url = ""
 solo_mining = true

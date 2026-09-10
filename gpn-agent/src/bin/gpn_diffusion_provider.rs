@@ -89,7 +89,9 @@ async fn run_job(
 
     // Artifact output path.
     let ext = if job.kind == "image" { "png" } else { "mp4" };
-    let out_dir = std::env::var("GPN_ARTIFACTS").unwrap_or_else(|_| "/tmp/gpn_artifacts".into());
+    let out_dir = std::env::var("GPN_ARTIFACTS").unwrap_or_else(|_| {
+        gpn_agent::utils::temp_dir().join("gpn_artifacts").to_string_lossy().to_string()
+    });
     std::fs::create_dir_all(&out_dir)?;
     let out_path = format!("{}/job_{}.{}", out_dir, id, ext);
 
@@ -106,7 +108,7 @@ async fn run_job(
         "fps": job.fps.unwrap_or(8),
         "output": out_path,
     });
-    let req_file = format!("/tmp/gpn_diffuse_req_{}.json", id);
+    let req_file = gpn_agent::utils::temp_path(&format!("gpn_diffuse_req_{}.json", id));
     std::fs::write(&req_file, serde_json::to_string(&req_json)?)?;
 
     // Run the diffusers helper (blocking; do it off the async runtime).

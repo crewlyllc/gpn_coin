@@ -111,6 +111,55 @@ cargo run --release -- --chain dev --bob --bootnodes /ip4/127.0.0.1/tcp/30333/p2
   difficulty/reward/inflation/cap to mainnet.
 - `mainnet` — fair launch (Cycle 35): zero endowment, zero oracle operators, inert sudo.
 
+### Set-aside reserves (funding a specific account at genesis)
+
+On `dev` / `local` (and optionally `testnet`) you can **set GPN aside in a
+separate account** at genesis — useful for a treasury, grant pool, ops reserve,
+or a cold account — without touching another account's funds. Because GPN is a
+**fair launch** (no runtime premine), reserve balances are **genesis-only** and
+never apply to `mainnet`.
+
+Configure at chain-spec build time with `GPN_GENESIS_RESERVE` (whitespace-trimmed,
+comma-separated entries of `name:ss58address:whole_gpn`):
+
+```bash
+# dev chain with a 1,000,000 GPN treasury reserve + a 250,000 GPN cold reserve
+export GPN_GENESIS_RESERVE="treasury:5E6nohVV...:1000000,cold:5GrwvaEF5...:250000"
+gpn-node build-spec --chain dev --disable-default-bootnode > dev-custom.json
+gpn-node --chain dev-custom.json
+```
+
+Notes:
+- Amounts are in **whole GPN** (converted to 12-decimal base units).
+- Reserves are **not** applied if `endowed_accounts` is empty — i.e. `testnet`
+  and `mainnet` stay fair-launch unless you explicitly add reserves to the
+  testnet spec (see `chain_spec.rs::testnet_chain_spec`).
+- Listing the same address twice sums the balances.
+- To view the resulting allocation:
+  `gpn-node build-spec --chain dev --disable-default-bootnode | python3 -c "import json,sys; print(json.load(sys.stdin)['genesis']['runtimeGenesis']['config']['balances']['balances'])"`
+- Env var is read when the spec is built (`build-spec`) or when the embedded spec
+  is built by the node at startup. For a baked-in default, edit
+  `default_reserves()` in `gpn-node/node/src/chain_spec.rs`.
+
+### Running on Windows / Linux / macOS
+
+GPN targets **Linux** first-class and is **cross-platform friendly**:
+
+- **Miner / agent / node** — pure Rust; builds on Linux and Windows. The GPU
+  miner uses OpenCL via `opencl3` (loaded **at runtime**, so it works on any OS
+  with a vendor OpenCL driver — NVIDIA/AMD/Intel drivers ship one). No CUDA
+  toolkit required.
+- **Windows build deps:** install the **MSVC build tools**, LLVM/Clang, and the
+  Rust targets `wasm32-unknown-unknown` + component `rust-src`. The node is a
+  Substrate binary — build tooling on Windows is heavier than Linux; the
+  **miner/agent/CLI** are the lightweight cross-platform pieces.
+- **Temp paths** are platform-aware (`std::env::temp_dir()`), not hard-coded `/tmp`.
+- **Docker endpoint** defaults per-OS (`npipe:////./pipe/docker_engine` on
+  Windows, `unix:///var/run/docker.sock` elsewhere). Docker is optional for the
+  prototype.
+- **NVIDIA drivers** must be installed on the host for GPU mining/compute.
+
+
 ### Two-node GPU p2p testnet (integration test)
 
 `gpn-node/scripts/gpn_two_node_testnet.sh` boots **two** `gpn-node` processes on the

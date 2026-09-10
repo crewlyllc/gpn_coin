@@ -82,7 +82,10 @@ async fn run_job(client: &ChainClient, id: u64, job: gpn_agent::llm::LlmJob) -> 
     );
     let _ = LlmStore::new().set_status(id, "running");
 
-    let out_dir = format!("/tmp/gpn_artifacts/job_{id}_ft");
+    let out_dir = gpn_agent::utils::temp_dir()
+        .join(format!("gpn_artifacts/job_{id}_ft"))
+        .to_string_lossy()
+        .to_string();
     let _ = std::fs::remove_dir_all(&out_dir);
     std::fs::create_dir_all(&out_dir)?;
 
@@ -94,7 +97,7 @@ async fn run_job(client: &ChainClient, id: u64, job: gpn_agent::llm::LlmJob) -> 
         "lora_r": job.lora_r.unwrap_or(16),
         "epochs": job.epochs.unwrap_or(2),
     });
-    let req_file = format!("/tmp/gpn_ft_req_{}.json", id);
+    let req_file = gpn_agent::utils::temp_path(&format!("gpn_ft_req_{}.json", id));
     std::fs::write(&req_file, serde_json::to_string(&req_json)?)?;
 
     let script = ft_script();
@@ -152,7 +155,7 @@ fn spawn_servemodel(job_id: u64, base_model: &str, adapter_dir: &str) {
         "adapter_dir": adapter_dir,
         "name": format!("tuned-{}", job_id),
     });
-    let req_file = format!("/tmp/gpn_serve_req_{}.json", job_id);
+    let req_file = gpn_agent::utils::temp_path(&format!("gpn_serve_req_{}.json", job_id));
     if let Ok(js) = serde_json::to_string(&req) {
         if let Err(e) = std::fs::write(&req_file, js) {
             eprintln!("[job {job_id}] servemodel: cannot write req: {e}");

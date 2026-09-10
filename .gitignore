@@ -1,8 +1,51 @@
-# Build artifacts
+# ============================================================
+# GPN Network — repository .gitignore
+# ============================================================
+
+# ---- Build artifacts ----
 target/
 **/target/
-Cargo.lock
-# Symlink to shared workspace (artifacts live in shared_workspace, tracked separately)
+# Local tool state
+.rustc_info.json
+*.rs.bk
+
+# ---- Secrets & keys (NEVER commit) ----
+*.key
+*.pem
+*.seed
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+node-key*
+keystore/
+.secret
+.env
+.env.*
+
+# ---- OpenClaw agent / personal context (NOT part of the project) ----
+# These are the operator's private assistant files and must never be published.
+memory/
+.openclaw/
+SOUL.md
+USER.md
+IDENTITY.md
+AGENTS.md
+TOOLS.md
+BOOTSTRAP.md
+HEARTBEAT.md
+PROCESS.md
+
+# ---- Symlink to the shared workspace (tracked separately) ----
 shared
-# Local notes
+
+# ---- Local logs / scratch ----
 *.log
+/tmp/
+
+# ---- Editor / OS noise ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

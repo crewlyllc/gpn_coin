@@ -108,7 +108,7 @@ impl Default for AgentConfig {
             staked_amount: 10_000.0,
             min_attestation_stake: 1_000_000_000_000_000, // 1,000 GPN (12 decimals)
             max_concurrent_jobs: 2,
-            docker_endpoint: "unix:///var/run/docker.sock".to_string(),
+            docker_endpoint: default_docker_endpoint(),
             compute_device_index: 0,
             compute_matrix_size: 2048,
             compute_batch: 4,
@@ -126,6 +126,23 @@ impl Default for AgentConfig {
 /// the safe default (Some(1440)), rather than serde's None.
 fn default_feed_ttl() -> Option<u64> {
     Some(1440)
+}
+
+/// Platform-appropriate Docker endpoint.
+///
+/// Docker is optional for the prototype (see `compute/mod.rs`), but the default
+/// is set correctly per-OS so a config that omits `docker_endpoint` still works
+/// on Windows and Linux alike:
+///   - Windows: `npipe:////./pipe/docker_engine` (named pipe)
+///   - Linux/macOS: `unix:///var/run/docker.sock`
+#[cfg(target_os = "windows")]
+pub fn default_docker_endpoint() -> String {
+    "npipe:////./pipe/docker_engine".to_string()
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn default_docker_endpoint() -> String {
+    "unix:///var/run/docker.sock".to_string()
 }
 
 /// Default compute-revenue reasonableness ceiling (50 USD/hr). See

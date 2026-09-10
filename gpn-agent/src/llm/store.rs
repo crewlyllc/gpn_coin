@@ -19,7 +19,7 @@ use std::sync::Mutex;
 pub fn default_store_path() -> PathBuf {
     std::env::var("GPN_LLM_STORE")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/tmp/gpn_llm_store.json"))
+        .unwrap_or_else(|_| crate::utils::temp_path("gpn_llm_store.json"))
 }
 
 /// A single generation job's off-chain payload. Used for LLM inference AND

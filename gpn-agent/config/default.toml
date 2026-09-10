@@ -24,7 +24,7 @@ compute_revenue_max_usd_per_hour = 50.0
 feed_aggregation = "latest"
 staked_amount = 10000.0
 max_concurrent_jobs = 2
-docker_endpoint = "unix:///var/run/docker.sock"
+# docker_endpoint omitted -> platform default (unix socket on Linux/macOS, npipe on Windows)
 mining_algorithm = "ethash"
 mining_pool_url = ""
 solo_mining = true

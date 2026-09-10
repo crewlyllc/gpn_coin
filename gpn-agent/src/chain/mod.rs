@@ -817,6 +817,120 @@ impl ChainClient {
         // (gpn_submitWork) in the mining engine, not here.
         Ok(())
     }
+
+    // ---- Liveness (full-node / bootnode self-organization) --------------
+
+    /// Register this node as an always-on full node with a public endpoint.
+    /// Signed `Liveness::register_fullnode`. Deposits the liveness bond from
+    /// the signer's free balance. Idempotent-ish: the pallet rejects a
+    /// duplicate registration with `AlreadyRegistered`.
+    pub async fn register_fullnode(
+        &self,
+        endpoint: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(uri) = &self.signer_uri else {
+            log::warn!("No signer configured; cannot register full node (set signer_uri).");
+            return Ok(());
+        };
+        let signer = signer::Sr25519Signer::from_uri(uri)?;
+        let client = signer::connect(&self.endpoint).await?;
+        let endpoint_bytes = endpoint.as_bytes().to_vec();
+        let call = subxt::dynamic::tx(
+            "Liveness",
+            "register_fullnode",
+            vec![Value::from_bytes(endpoint_bytes)],
+        );
+        let nonce = self.get_account_nonce(&signer.account_id().to_string()).await;
+        signer::submit_signed(&client, &call, &signer, nonce).await?;
+        log::info!("Registered as a full node on-chain (endpoint {}).", endpoint);
+        Ok(())
+    }
+
+    /// A bonded full node witnesses that it successfully reached `target`'s
+    /// declared endpoint this window. Signed `Liveness::witness_reachable`.
+    pub async fn witness_reachable(
+        &self,
+        target: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(uri) = &self.signer_uri else {
+            log::warn!("No signer configured; cannot witness (set signer_uri).");
+            return Ok(());
+        };
+        let signer = signer::Sr25519Signer::from_uri(uri)?;
+        let client = signer::connect(&self.endpoint).await?;
+        let target32: subxt::utils::AccountId32 = target.parse()?;
+        let key = (target32.as_ref() as &[u8; 32]).to_vec();
+        let call = subxt::dynamic::tx(
+            "Liveness",
+            "witness_reachable",
+            vec![Value::from_bytes(key)],
+        );
+        let nonce = self.get_account_nonce(&signer.account_id().to_string()).await;
+        signer::submit_signed(&client, &call, &signer, nonce).await?;
+        log::info!("Witnessed full node {} reachable this window.", target);
+        Ok(())
+    }
+
+    /// Finalize the most recent completed liveness window for `target` (anyone
+    /// may call). Signed `Liveness::submit_liveness`. This is how a node
+    /// confirms it stayed online (or records a miss).
+    pub async fn submit_liveness(
+        &self,
+        target: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(uri) = &self.signer_uri else {
+            log::warn!("No signer configured; cannot finalize liveness (set signer_uri).");
+            return Ok(());
+        };
+        let signer = signer::Sr25519Signer::from_uri(uri)?;
+        let client = signer::connect(&self.endpoint).await?;
+        let target32: subxt::utils::AccountId32 = target.parse()?;
+        let key = (target32.as_ref() as &[u8; 32]).to_vec();
+        let call = subxt::dynamic::tx(
+            "Liveness",
+            "submit_liveness",
+            vec![Value::from_bytes(key)],
+        );
+        let nonce = self.get_account_nonce(&signer.account_id().to_string()).await;
+        signer::submit_signed(&client, &call, &signer, nonce).await?;
+        log::info!("Finalized liveness window for {}.", target);
+        Ok(())
+    }
+
+    /// Withdraw the liveness bond and stop being a full node. Signed
+    /// `Liveness::unregister_fullnode`.
+    pub async fn unregister_fullnode(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(uri) = &self.signer_uri else {
+            log::warn!("No signer configured; cannot unregister (set signer_uri).");
+            return Ok(());
+        };
+        let signer = signer::Sr25519Signer::from_uri(uri)?;
+        let client = signer::connect(&self.endpoint).await?;
+        let call = subxt::dynamic::tx("Liveness", "unregister_fullnode", Vec::<Value>::new());
+        let nonce = self.get_account_nonce(&signer.account_id().to_string()).await;
+        signer::submit_signed(&client, &call, &signer, nonce).await?;
+        log::info!("Unregistered full node; bond returned.");
+        Ok(())
+    }
+
+    /// Read this node's liveness record: (active, missed_count, last_window,
+    /// uptime_bps). None if not registered. Reads via dynamic storage.
+    pub async fn get_fullnode_status(&self, address: &str) -> Option<(bool, u32, u64, u32)> {
+        let client = self.client.as_ref()?;
+        let addr32 = address.parse::<subxt::utils::AccountId32>().ok()?;
+        let key = (addr32.as_ref() as &[u8; 32]).to_vec();
+        let rec = subxt::dynamic::storage("Liveness", "FullNodes", vec![Value::from_bytes(key)]);
+        let v = self.storage_at_head(client, &rec).await?;
+        let active = get_field(&v, "active")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+        let missed = get_u32_field(&v, "missed_count").unwrap_or(0);
+        let last_win = get_u64_field(&v, "last_confirmed_window").unwrap_or(0);
+        // Compute uptime_bps from the bitmask via popcount.
+        let bits = get_u32_field(&v, "uptime_bits").unwrap_or(0);
+        let uptime = popcount(bits) * 10_000u32 / 10u32.max(1);
+        Some((active, missed, last_win, uptime))
+    }
 }
 
 /// Whether a profitability feed written at block `updated_at_block` is stale
@@ -1013,6 +1127,17 @@ fn composite_limbs(value: &subxt::dynamic::Value) -> [u64; 4] {
 /// Look up a named u64 field inside a scale composite value.
 fn get_u64_field(value: &subxt::dynamic::Value, name: &str) -> Option<u64> {
     get_field(value, name).and_then(|v| v.as_u128()).map(|v| v as u64)
+}
+
+/// Population count of a u32 (number of set bits) — used to compute rolling
+/// uptime from the liveness pallet's `uptime_bits` window bitmask.
+fn popcount(mut x: u32) -> u32 {
+    let mut c = 0u32;
+    while x != 0 {
+        c += x & 1;
+        x >>= 1;
+    }
+    c
 }
 
 fn get_u32_field(value: &subxt::dynamic::Value, name: &str) -> Option<u32> {

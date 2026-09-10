@@ -1,5 +1,19 @@
 /// Utility functions for the GPU node agent
 
+/// Cross-platform temporary directory for GPN scratch/artifact files.
+///
+/// Uses `std::env::temp_dir()` (honours `TMPDIR` / `TMP` / `TEMP`), falling
+/// back to the OS default. Prefer this over hard-coded `/tmp`, which does not
+/// exist on Windows.
+pub fn temp_dir() -> std::path::PathBuf {
+    std::env::temp_dir()
+}
+
+/// Path to a GPN temp file, e.g. `gpn_temp("gpn_ft_req_5.json")`.
+pub fn temp_path(name: &str) -> std::path::PathBuf {
+    temp_dir().join(name)
+}
+
 pub mod crypto {
     use sha2::{Digest, Sha256};
 
