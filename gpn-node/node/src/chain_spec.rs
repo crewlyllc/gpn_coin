@@ -479,7 +479,6 @@ fn genesis_config_json(
         gpu_po_w: GPUPoWConfig {
             initial_difficulty,
             initial_block_reward: 50_000_000_000_000u128, // 50 GPN
-            initial_minted: treasury_alloc, // counts against the 1B cap
             _config: Default::default(),
         },
         gpu_attestation: GPUAttestationConfig {
@@ -495,6 +494,9 @@ fn genesis_config_json(
         },
         gpn_token: GPNTokenConfig {
             initial_inflation: Perbill::from_percent(10),
+            // Canonical supply counter is seeded with the genesis treasury
+            // allocation so it counts against the 1B MaxSupply cap (item 1).
+            initial_minted: treasury_alloc,
             _config: Default::default(),
         },
         gpn_treasury: GPNTreasuryConfig {

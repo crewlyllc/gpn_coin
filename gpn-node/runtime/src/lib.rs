@@ -253,7 +253,9 @@ impl pallet_gpu_pow::Config for Runtime {
     type DifficultyAdjustmentWindow = DifficultyAdjustmentWindow;
     type PowMaxWeight = PowMaxWeight;
     type AlgorithmVersion = AlgorithmVersion;
-    type MaxSupply = MaxSupply;
+    // Canonical supply accounting lives in pallet-gpn-token; the single
+    // `MaxSupply` const is now enforced there (workplan item 1).
+    type Supply = GPNToken;
 }
 
 parameter_types! {
@@ -388,6 +390,7 @@ impl pallet_gpn_token::Config for Runtime {
     type TerminalInflation = TerminalInflation;
     type BlocksPerYear = BlocksPerYear;
     type TreasuryAccount = TreasuryAccount;
+    type MaxSupply = MaxSupply;
 }
 
 parameter_types! {

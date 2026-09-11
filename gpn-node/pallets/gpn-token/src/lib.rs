@@ -44,6 +44,24 @@ pub trait FeeSinkProvider<AccountId> {
     fn fee_sink() -> AccountId;
 }
 
+/// Canonical issued-supply accounting, owned by the GPN token pallet.
+///
+/// Every mint that increases issued supply **must** go through this trait so
+/// the 1B `MaxSupply` cap is enforced against a single counter. Other pallets
+/// (notably `pallet-gpu-pow`'s block-reward payout) call `mint_within_cap`
+/// instead of holding their own `TotalMinted`/`MaxSupply` copies, which is how
+/// the pre-unification code could mis-account the cap. See workplan item 1.
+pub trait SupplyManager<AccountId, Balance> {
+    /// Total issued supply as tracked by the canonical counter (excludes
+    /// genesis balances that were never minted through this pallet).
+    fn total_issued() -> Balance;
+
+    /// Mint `amount` to `beneficiary` iff it keeps total issued supply within
+    /// `MaxSupply`. Returns `true` when minted, `false` when the cap would be
+    /// exceeded (caller should treat that as a no-op, not an error).
+    fn mint_within_cap(beneficiary: &AccountId, amount: Balance) -> bool;
+}
+
 #[frame_support::pallet]
 pub mod pallet {
     use super::*;
@@ -74,6 +92,10 @@ pub mod pallet {
         type BlocksPerYear: Get<BlockNumberFor<Self>>;
         #[pallet::constant]
         type TreasuryAccount: Get<Self::AccountId>;
+        /// Hard cap on total issued supply. The canonical counter lives in
+        /// `TotalMinted` (below); every mint path checks it against this cap.
+        #[pallet::constant]
+        type MaxSupply: Get<BalanceOf<Self>>;
     }
 
     #[pallet::pallet]
@@ -105,6 +127,11 @@ pub mod pallet {
     #[derive(frame_support::DefaultNoBound)]
     pub struct GenesisConfig<T: Config> {
         pub initial_inflation: Perbill,
+        /// Supply already issued before the chain started (e.g. a genesis
+        /// treasury allocation). Seeds the canonical `TotalMinted` counter so
+        /// it counts against `MaxSupply` from block 0. Default 0.
+        #[serde(default)]
+        pub initial_minted: BalanceOf<T>,
         #[serde(skip)]
         pub _config: sp_std::marker::PhantomData<T>,
     }
@@ -115,7 +142,7 @@ pub mod pallet {
             <CurrentInflation<T>>::put(self.initial_inflation);
             <FeeDistributionConfig<T>>::put(FeeDistribution::default());
             let zero_bal: BalanceOf<T> = Zero::zero();
-            <TotalMinted<T>>::put(zero_bal);
+            <TotalMinted<T>>::put(self.initial_minted);
             <StakingRewardPool<T>>::put(zero_bal);
             <OracleRewardPool<T>>::put(zero_bal);
             let zero_block: BlockNumberFor<T> = Zero::zero();
@@ -173,8 +200,7 @@ pub mod pallet {
             beneficiary: T::AccountId,
         ) -> DispatchResult {
             ensure_root(origin)?;
-            T::Currency::deposit_creating(&beneficiary, amount);
-            <TotalMinted<T>>::mutate(|m| *m += amount);
+            ensure!(Self::mint_within_cap(&beneficiary, amount), Error::<T>::SupplyCapExceeded);
             let block_number = frame_system::Pallet::<T>::block_number();
             Self::deposit_event(Event::<T>::BlockRewardMinted { amount, block_number });
             Ok(())
@@ -327,6 +353,24 @@ pub mod pallet {
 
         pub fn total_supply() -> BalanceOf<T> { T::Currency::total_issuance() }
     }
+
+    /// Canonical supply accounting. All supply-increasing mints — including
+    /// those triggered by other pallets — funnel through `mint_within_cap`.
+    impl<T: Config> SupplyManager<T::AccountId, BalanceOf<T>> for Pallet<T> {
+        fn total_issued() -> BalanceOf<T> { <TotalMinted<T>>::get() }
+
+        fn mint_within_cap(beneficiary: &T::AccountId, amount: BalanceOf<T>) -> bool {
+            let minted = <TotalMinted<T>>::get();
+            let cap = T::MaxSupply::get();
+            // Saturating add: an absurd `amount` can never wrap past the cap.
+            if minted.saturating_add(amount) > cap {
+                return false;
+            }
+            <TotalMinted<T>>::put(minted.saturating_add(amount));
+            T::Currency::deposit_creating(beneficiary, amount);
+            true
+        }
+    }
 }
 
 /// The GPN token pallet is its own fee sink: marketplace/protocol fees routed
@@ -404,6 +448,7 @@ mod tests {
         pub const TerminalInflation: sp_runtime::Perbill = sp_runtime::Perbill::from_percent(1);
         pub const BlocksPerYear: u64 = 1000;
         pub const TreasuryAccount: AccountId = 99;
+        pub const TestMaxSupply: Balance = 1_000_000_000_000_000_000_000;
     }
 
     thread_local! {
@@ -431,6 +476,7 @@ mod tests {
         type TerminalInflation = TerminalInflation;
         type BlocksPerYear = BlocksPerYear;
         type TreasuryAccount = TreasuryAccount;
+        type MaxSupply = TestMaxSupply;
     }
 
     pub(crate) fn new_test_ext() -> sp_io::TestExternalities {
@@ -440,7 +486,7 @@ mod tests {
                 balances: vec![(1, 1_000_000), (2, 1_000_000)],
                 dev_accounts: None,
             },
-            token: GenesisConfig::<Test> { initial_inflation: Perbill::from_percent(10), _config: Default::default() },
+            token: GenesisConfig::<Test> { initial_inflation: Perbill::from_percent(10), initial_minted: 0, _config: Default::default() },
         };
         t.build_storage().unwrap().into()
     }
@@ -637,6 +683,52 @@ mod tests {
             let before = Token::total_supply();
             Token::mint_block_reward(RuntimeOrigin::root(), 5_000, 1).unwrap();
             assert_eq!(Token::total_supply(), before + 5_000);
+        });
+    }
+
+    #[test]
+    fn test_mint_block_reward_enforces_cap() {
+        new_test_ext().execute_with(|| {
+            // Fill the counter to the cap, then a mint must be rejected and no
+            // balance created.
+            let cap = TestMaxSupply::get();
+            <TotalMinted<Test>>::put(cap);
+            let bal_before = pallet_balances::Pallet::<Test>::free_balance(1);
+            assert_eq!(
+                Token::mint_block_reward(RuntimeOrigin::root(), 1, 1),
+                Err(Error::<Test>::SupplyCapExceeded.into())
+            );
+            assert_eq!(pallet_balances::Pallet::<Test>::free_balance(1), bal_before);
+            assert_eq!(TotalMinted::<Test>::get(), cap);
+        });
+    }
+
+    #[test]
+    fn test_cap_holds_with_genesis_treasury_allocation() {
+        // A genesis treasury allocation seeds the canonical counter; only the
+        // remaining headroom is mintable.
+        let alloc: Balance = TestMaxSupply::get() - 123;
+        let t = RuntimeGenesisConfig {
+            system: Default::default(),
+            balances: pallet_balances::GenesisConfig::<Test> {
+                balances: vec![(1, 1_000_000)],
+                dev_accounts: None,
+            },
+            token: GenesisConfig::<Test> {
+                initial_inflation: Perbill::from_percent(10),
+                initial_minted: alloc,
+                _config: Default::default(),
+            },
+        };
+        let mut ext: sp_io::TestExternalities = t.build_storage().unwrap().into();
+        ext.execute_with(|| {
+            assert_eq!(TotalMinted::<Test>::get(), alloc);
+            // 123 headroom: a 123 mint fits exactly...
+            assert!(Token::mint_block_reward(RuntimeOrigin::root(), 123, 1).is_ok());
+            assert_eq!(TotalMinted::<Test>::get(), TestMaxSupply::get());
+            // ...the next unit does not.
+            assert!(Token::mint_block_reward(RuntimeOrigin::root(), 1, 1).is_err());
+            assert_eq!(TotalMinted::<Test>::get(), TestMaxSupply::get());
         });
     }
 }

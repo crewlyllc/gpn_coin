@@ -47,6 +47,7 @@ pub mod pallet {
     use frame_support::pallet_prelude::*;
     use frame_support::traits::Currency;
     use frame_system::pallet_prelude::*;
+    use pallet_gpn_token::SupplyManager;
 
     pub type BalanceOf<T> =
         <<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
@@ -70,8 +71,10 @@ pub mod pallet {
         type PowMaxWeight: Get<u64>;
         #[pallet::constant]
         type AlgorithmVersion: Get<u32>;
-        #[pallet::constant]
-        type MaxSupply: Get<BalanceOf<Self>>;
+        /// Canonical issued-supply accounting lives in `pallet-gpn-token`.
+        /// Block rewards are minted through it so the 1B cap is enforced
+        /// against one counter (workplan item 1).
+        type Supply: SupplyManager<Self::AccountId, BalanceOf<Self>>;
     }
 
     #[pallet::pallet]
@@ -109,19 +112,11 @@ pub mod pallet {
     #[pallet::storage]
     pub type CurrentBlockReward<T: Config> = StorageValue<_, BalanceOf<T>, ValueQuery>;
 
-    #[pallet::storage]
-    pub type TotalMinted<T: Config> = StorageValue<_, BalanceOf<T>, ValueQuery>;
-
     #[pallet::genesis_config]
     #[derive(frame_support::DefaultNoBound)]
     pub struct GenesisConfig<T: Config> {
         pub initial_difficulty: U256,
         pub initial_block_reward: BalanceOf<T>,
-        /// Amount already minted before PoW began (e.g. a genesis treasury
-        /// allocation). Counts against `MaxSupply`, so a 200M treasury
-        /// allocation leaves only 800M mineable of a 1B cap. Default 0.
-        #[serde(default)]
-        pub initial_minted: BalanceOf<T>,
         #[serde(skip)]
         pub _config: sp_std::marker::PhantomData<T>,
     }
@@ -137,7 +132,6 @@ pub mod pallet {
             let zero_block: BlockNumberFor<T> = Zero::zero();
             <LastHalvingBlock<T>>::put(zero_block);
             <PendingRewardBeneficiary<T>>::kill();
-            <TotalMinted<T>>::put(self.initial_minted);
             <LastBlockTimestamp<T>>::put(0u64);
             <LastAdjustmentBlock<T>>::put(zero_block);
         }
@@ -241,12 +235,10 @@ pub mod pallet {
             let reward = <PendingBlockRewards<T>>::take();
             if let Some(miner) = <PendingRewardBeneficiary<T>>::take() {
                 if !reward.is_zero() {
-                    let total_minted = <TotalMinted<T>>::get();
-                    let max_supply = T::MaxSupply::get();
-                    if total_minted + reward <= max_supply {
-                        <TotalMinted<T>>::mutate(|m| *m += reward);
-                        let _ = T::Currency::deposit_creating(&miner, reward);
-                    }
+                    // Mint through the canonical supply manager; it enforces the
+                    // global cap and updates the single `TotalMinted` counter.
+                    // Returns false (no-op) when the cap would be exceeded.
+                    let _ = T::Supply::mint_within_cap(&miner, reward);
                 }
             }
         }
@@ -349,6 +341,7 @@ mod tests {
         construct_runtime, derive_impl, parameter_types,
         traits::{BuildGenesisConfig, ConstU16, ConstU32, ConstU64, ConstU128, Everything, Hooks},
     };
+    use frame_support::traits::Currency;
     use sp_core::H256;
     use sp_runtime::{
         traits::{BlakeTwo256, IdentityLookup},
@@ -360,7 +353,32 @@ mod tests {
         CurrentBlockReward, CurrentEpoch, Difficulty, PendingBlockRewards,
         PendingRewardBeneficiary,
     };
+    use pallet_gpn_token::SupplyManager;
     use sp_runtime::SaturatedConversion;
+
+    thread_local! {
+        static MOCK_MINTED: std::cell::Cell<u128> = const { std::cell::Cell::new(0) };
+        static MOCK_CAP: std::cell::Cell<u128> = const { std::cell::Cell::new(u128::MAX) };
+    }
+
+    /// Test double for the canonical `pallet-gpn-token` supply manager: tracks a
+    /// single issued-supply counter and enforces `MOCK_CAP`.
+    pub struct MockSupply;
+    impl SupplyManager<u64, Balance> for MockSupply {
+        fn total_issued() -> Balance {
+            MOCK_MINTED.with(|c| c.get())
+        }
+        fn mint_within_cap(beneficiary: &u64, amount: Balance) -> bool {
+            let minted = MOCK_MINTED.with(|c| c.get());
+            let cap = MOCK_CAP.with(|c| c.get());
+            if minted.saturating_add(amount) > cap {
+                return false;
+            }
+            MOCK_MINTED.with(|c| c.set(minted.saturating_add(amount)));
+            let _ = pallet_balances::Pallet::<Test>::deposit_creating(beneficiary, amount);
+            true
+        }
+    }
 
     type Block = frame_system::mocking::MockBlock<Test>;
     type Balance = u128;
@@ -433,7 +451,6 @@ mod tests {
         pub const TestDifficultyWindow: u64 = 10;
         pub const TestPowMaxWeight: u64 = 200_000;
         pub const TestAlgoVersion: u32 = 1;
-        pub const TestMaxSupply: Balance = 1_000_000_000_000_000_000_000;
     }
 
     impl crate::pallet::Config for Test {
@@ -446,10 +463,12 @@ mod tests {
         type DifficultyAdjustmentWindow = TestDifficultyWindow;
         type PowMaxWeight = TestPowMaxWeight;
         type AlgorithmVersion = TestAlgoVersion;
-        type MaxSupply = TestMaxSupply;
+        type Supply = MockSupply;
     }
 
     fn new_test_ext() -> sp_io::TestExternalities {
+        MOCK_MINTED.with(|c| c.set(0));
+        MOCK_CAP.with(|c| c.set(u128::MAX));
         let t = frame_system::GenesisConfig::<Test>::default()
             .build_storage()
             .unwrap();
@@ -458,7 +477,6 @@ mod tests {
             let gp_config = crate::pallet::GenesisConfig::<Test> {
                 initial_difficulty: TestMinDifficulty::get(),
                 initial_block_reward: TestInitialReward::get(),
-                initial_minted: 0,
                 _config: Default::default(),
             };
             BuildGenesisConfig::build(&gp_config);
@@ -633,7 +651,7 @@ mod tests {
     #[test]
     fn test_total_minted_tracking() {
         new_test_ext().execute_with(|| {
-            assert_eq!(TotalMinted::<Test>::get(), 0);
+            assert_eq!(MockSupply::total_issued(), 0);
             let miner = 42u64;
             let sol = EthashSolution {
                 nonce: 1,
@@ -646,16 +664,16 @@ mod tests {
             let valid = EthashSolution { solution_hash: correct_hash, ..sol };
             GpuPowPallet::submit_solution(RuntimeOrigin::signed(miner), valid, TestMaxDifficulty::get()).unwrap();
             GpuPowPallet::distribute_pending_rewards();
-            assert_eq!(TotalMinted::<Test>::get(), TestInitialReward::get());
+            assert_eq!(MockSupply::total_issued(), TestInitialReward::get());
         });
     }
 
     #[test]
     fn test_supply_cap_halts_mining() {
         new_test_ext().execute_with(|| {
-            // Set total minted to max supply so new rewards are rejected
-            let max = TestMaxSupply::get();
-            TotalMinted::<Test>::put(max);
+            // Set the canonical counter to the cap so new rewards are rejected.
+            MOCK_CAP.with(|c| c.set(1_000_000_000_000_000_000_000));
+            MOCK_MINTED.with(|c| c.set(1_000_000_000_000_000_000_000));
 
             let miner = 42u64;
             let initial_balance = pallet_balances::Pallet::<Test>::free_balance(miner);
@@ -673,8 +691,8 @@ mod tests {
             GpuPowPallet::distribute_pending_rewards();
             // Balance unchanged
             assert_eq!(pallet_balances::Pallet::<Test>::free_balance(miner), initial_balance);
-            // Total minted unchanged
-            assert_eq!(TotalMinted::<Test>::get(), max);
+            // Canonical issued supply unchanged
+            assert_eq!(MockSupply::total_issued(), 1_000_000_000_000_000_000_000);
         });
     }
 }

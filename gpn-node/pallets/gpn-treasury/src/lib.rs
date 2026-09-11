@@ -4,7 +4,8 @@
 //!
 //! - **Allocation:** 20% of the 1B cap (200,000,000 GPN) held by the treasury
 //!   account (`PalletId(*b"gpn/trsy")`), funded at genesis, counted against the
-//!   1B supply cap (via `gpu-pow`'s `TotalMinted`, seeded by the chain spec).
+//!   1B supply cap (via `gpn-token`'s canonical `TotalMinted`, seeded by the
+//!   chain spec).
 //! - **Vesting:** a discrete **tranche** schedule (6-month cadence). At launch
 //!   **0 GPN is unlocked**; each tranche unlocks at its block. The treasury can
 //!   only ever spend its *unlocked* balance.

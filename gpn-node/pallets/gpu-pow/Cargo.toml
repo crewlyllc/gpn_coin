@@ -7,6 +7,7 @@ edition = "2021"
 frame-support = { workspace = true }
 frame-system = { workspace = true }
 pallet-timestamp = { workspace = true }
+pallet-gpn-token = { path = "../gpn-token", default-features = false }
 sp-io = { workspace = true }
 sp-runtime = { workspace = true }
 sp-std = { workspace = true }
@@ -27,6 +28,7 @@ std = [
     "frame-support/std",
     "frame-system/std",
     "pallet-timestamp/std",
+    "pallet-gpn-token/std",
     "sp-io/std",
     "sp-runtime/std",
     "sp-std/std",
