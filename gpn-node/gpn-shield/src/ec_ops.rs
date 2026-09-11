@@ -13,11 +13,27 @@
 //!
 //! Both are byte-for-byte equivalent to the naive computation (same group
 //! element), only faster, so they never change proof bytes / keys.
+//!
+//! ## Constant-time keygen path
+//!
+//! The fast paths above leak information about the **scalar** through control
+//! flow and memory indices: `mul`/`pippenger` skip zero digits (`if d != 0`)
+//! and index `table[w][d]` directly by secret bits. That is fine for `prove`
+//! (the witness is the prover's own secret, and they already know it), but it
+//! is a side-channel on the **setup** secret scalars (the CRS toxic waste
+//! α, β, γ, δ, τ). When setup is run with a ceremony whose secrets must not
+//! leak, use the `*_ct` entry points ([`fixed_base_g1_gen_ct`],
+//! [`fixed_base_g1_gen_scaled_ct`], [`fixed_base_g2_gen_ct`]): they scan the
+//! entire window table with a branchless, constant-time lookup and always
+//! perform a fixed number of group additions, so the control flow and memory
+//! access pattern depend only on the scalar length (public), never its value.
+//! The group elements produced are **byte-identical** to the fast path.
 
 use bls12_381::{G1Affine, G1Projective, G2Affine, G2Projective, Scalar};
 use ff::Field;
 use rayon::prelude::*;
 use std::sync::OnceLock;
+use subtle::{ConditionallySelectable, ConstantTimeEq};
 
 /// Little-endian bits of a scalar (canonical representation).
 #[inline]
@@ -307,6 +323,109 @@ fn g2_gen_table() -> &'static FixedBaseG2 {
     T.get_or_init(|| FixedBaseG2::new(G2Projective::generator(), 8))
 }
 
+// ===========================================================================
+// Constant-time fixed-base multiplication (secret scalars — keygen/setup)
+// ===========================================================================
+
+/// Branchless, data-independent lookup of `table[idx]` over G1.
+///
+/// The loop always visits **every** entry in order, so the memory-access
+/// pattern is identical for every `idx`; `conditional_select` makes the choice
+/// a constant-time mask. This defeats the cache-timing side channel that
+/// direct indexing by secret window digits would otherwise leak.
+#[inline]
+fn ct_lookup_g1(table: &[G1Projective], idx: usize) -> G1Projective {
+    let idx = idx as u64;
+    let mut sel = G1Projective::identity();
+    for (j, p) in table.iter().enumerate() {
+        let choice = (j as u64).ct_eq(&idx);
+        sel = G1Projective::conditional_select(&sel, p, choice);
+    }
+    sel
+}
+
+/// Branchless, data-independent lookup of `table[idx]` over G2.
+#[inline]
+fn ct_lookup_g2(table: &[G2Projective], idx: usize) -> G2Projective {
+    let idx = idx as u64;
+    let mut sel = G2Projective::identity();
+    for (j, p) in table.iter().enumerate() {
+        let choice = (j as u64).ct_eq(&idx);
+        sel = G2Projective::conditional_select(&sel, p, choice);
+    }
+    sel
+}
+
+impl FixedBaseG1 {
+    /// Constant-time equivalent of [`FixedBaseG1::mul`].
+    ///
+    /// Every window performs exactly one full-table scan and one group
+    /// addition (identity is added for zero digits, and the group law is the
+    /// branch-free complete formula), so neither control flow nor memory
+    /// access depends on the scalar's value. Byte-identical output to [`Self::mul`].
+    #[inline]
+    fn mul_ct(&self, bytes: &[u8; 32]) -> G1Projective {
+        let mut acc = G1Projective::identity();
+        for w in 0..self.windows {
+            let d = window_digit(bytes, w, self.c);
+            let sel = ct_lookup_g1(&self.table[w], d);
+            acc = acc + sel;
+        }
+        acc
+    }
+}
+
+impl FixedBaseG2 {
+    /// Constant-time equivalent of [`FixedBaseG2::mul`]. See [`FixedBaseG1::mul_ct`].
+    #[inline]
+    fn mul_ct(&self, bytes: &[u8; 32]) -> G2Projective {
+        let mut acc = G2Projective::identity();
+        for w in 0..self.windows {
+            let d = window_digit(bytes, w, self.c);
+            let sel = ct_lookup_g2(&self.table[w], d);
+            acc = acc + sel;
+        }
+        acc
+    }
+}
+
+/// Constant-time variant of [`fixed_base_g1_gen`] for **secret** scalars
+/// (setup/CRS). Same output bytes, data-independent control flow + lookups.
+pub fn fixed_base_g1_gen_ct(scalars: &[Scalar]) -> Vec<G1Affine> {
+    let table = g1_gen_table();
+    scalars
+        .par_iter()
+        .map(|s| {
+            let b = scalar_bytes(s);
+            table.mul_ct(&b).into()
+        })
+        .collect()
+}
+
+/// Constant-time variant of [`fixed_base_g1_gen_scaled`] for **secret** scalars.
+pub fn fixed_base_g1_gen_scaled_ct(scalars: &[Scalar], inv: &Scalar) -> Vec<G1Affine> {
+    let table = g1_gen_table();
+    scalars
+        .par_iter()
+        .map(|s| {
+            let b = scalar_bytes(&(*s * inv));
+            table.mul_ct(&b).into()
+        })
+        .collect()
+}
+
+/// Constant-time variant of [`fixed_base_g2_gen`] for **secret** scalars.
+pub fn fixed_base_g2_gen_ct(scalars: &[Scalar]) -> Vec<G2Affine> {
+    let table = g2_gen_table();
+    scalars
+        .par_iter()
+        .map(|s| {
+            let b = scalar_bytes(s);
+            table.mul_ct(&b).into()
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,33 +449,52 @@ mod tests {
     fn rng_scalars(n: usize, seed: u64) -> Vec<Scalar> {
         let mut x = seed | 1;
         let mut next = || {
-            x ^= x << 13; x ^= x >> 7; x ^= x << 17; x
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
         };
-        (0..n).map(|_| {
-            let a = next() & 0xFFFF_FFFF;
-            let b = next() & 0xFFFF_FFFF;
-            Scalar::from(a) + Scalar::from(b) * Scalar::from(1u64 << 32)
-        }).collect()
+        (0..n)
+            .map(|_| {
+                let a = next() & 0xFFFF_FFFF;
+                let b = next() & 0xFFFF_FFFF;
+                Scalar::from(a) + Scalar::from(b) * Scalar::from(1u64 << 32)
+            })
+            .collect()
     }
 
     fn rng_g1_points(n: usize, seed: u64) -> Vec<G1Affine> {
         let mut x = seed | 1;
-        let mut next = || { x ^= x << 13; x ^= x >> 7; x ^= x << 17; x };
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
         let g = G1Projective::generator();
-        (0..n).map(|_| {
-            let s = Scalar::from(next() & 0xFFFF_FFFF) + Scalar::ONE;
-            (g * s).into()
-        }).collect()
+        (0..n)
+            .map(|_| {
+                let s = Scalar::from(next() & 0xFFFF_FFFF) + Scalar::ONE;
+                (g * s).into()
+            })
+            .collect()
     }
 
     fn rng_g2_points(n: usize, seed: u64) -> Vec<G2Affine> {
         let mut x = seed | 1;
-        let mut next = || { x ^= x << 13; x ^= x >> 7; x ^= x << 17; x };
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
         let g = G2Projective::generator();
-        (0..n).map(|_| {
-            let s = Scalar::from(next() & 0xFFFF_FFFF) + Scalar::ONE;
-            (g * s).into()
-        }).collect()
+        (0..n)
+            .map(|_| {
+                let s = Scalar::from(next() & 0xFFFF_FFFF) + Scalar::ONE;
+                (g * s).into()
+            })
+            .collect()
     }
 
     #[test]
@@ -364,7 +502,11 @@ mod tests {
         for n in [0usize, 1, 5, 17, 100, 500] {
             let pts = rng_g1_points(n, 0xA1 ^ n as u64);
             let sc = rng_scalars(n, 0xB2 ^ n as u64);
-            assert_eq!(msm_g1(&pts, &sc), naive_g1(&pts, &sc), "msm_g1 mismatch n={n}");
+            assert_eq!(
+                msm_g1(&pts, &sc),
+                naive_g1(&pts, &sc),
+                "msm_g1 mismatch n={n}"
+            );
         }
     }
 
@@ -373,7 +515,11 @@ mod tests {
         for n in [0usize, 1, 5, 17, 100, 300] {
             let pts = rng_g2_points(n, 0xC3 ^ n as u64);
             let sc = rng_scalars(n, 0xD4 ^ n as u64);
-            assert_eq!(msm_g2(&pts, &sc), naive_g2(&pts, &sc), "msm_g2 mismatch n={n}");
+            assert_eq!(
+                msm_g2(&pts, &sc),
+                naive_g2(&pts, &sc),
+                "msm_g2 mismatch n={n}"
+            );
         }
     }
 
@@ -418,6 +564,54 @@ mod tests {
         for (s, p) in sc.iter().zip(got.iter()) {
             let want: G1Affine = (g * (*s * inv)).into();
             assert_eq!(*p, want, "fixed_base scaled mismatch");
+        }
+    }
+
+    #[test]
+    fn fixed_base_g1_ct_matches_fast() {
+        // Byte-identical to the fast path (and hence to naive), across edge
+        // scalars: zero, one, near-modulus, high-bit, and random.
+        let mut sc = rng_scalars(64, 0x1A2B);
+        sc[0] = Scalar::ZERO;
+        sc[1] = Scalar::ONE;
+        sc[2] = -Scalar::ONE;
+        sc[3] = crate::ntt::scalar_pow(Scalar::from(2u64), 254);
+        let fast = fixed_base_g1_gen(&sc);
+        let ct = fixed_base_g1_gen_ct(&sc);
+        assert_eq!(fast, ct, "ct g1 output must equal fast path");
+    }
+
+    #[test]
+    fn fixed_base_g2_ct_matches_fast() {
+        let mut sc = rng_scalars(32, 0x3C4D);
+        sc[0] = Scalar::ZERO;
+        sc[5] = -Scalar::ONE;
+        let fast = fixed_base_g2_gen(&sc);
+        let ct = fixed_base_g2_gen_ct(&sc);
+        assert_eq!(fast, ct, "ct g2 output must equal fast path");
+    }
+
+    #[test]
+    fn fixed_base_scaled_ct_matches_fast() {
+        let sc = rng_scalars(40, 0x5E6F);
+        let inv = Scalar::from(987654321u64);
+        let fast = fixed_base_g1_gen_scaled(&sc, &inv);
+        let ct = fixed_base_g1_gen_scaled_ct(&sc, &inv);
+        assert_eq!(fast, ct, "ct scaled output must equal fast path");
+    }
+
+    #[test]
+    fn ct_lookup_returns_correct_entry() {
+        // The constant-time table scan must select exactly `table[idx]`.
+        let g = G1Projective::generator();
+        let table: Vec<G1Projective> = (0..8).map(|k| g * Scalar::from(k as u64)).collect();
+        for idx in 0..8usize {
+            assert_eq!(ct_lookup_g1(&table, idx), table[idx], "g1 lookup {idx}");
+        }
+        let g2 = G2Projective::generator();
+        let table2: Vec<G2Projective> = (0..8).map(|k| g2 * Scalar::from(k as u64)).collect();
+        for idx in 0..8usize {
+            assert_eq!(ct_lookup_g2(&table2, idx), table2[idx], "g2 lookup {idx}");
         }
     }
 }

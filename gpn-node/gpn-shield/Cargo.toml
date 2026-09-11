@@ -10,6 +10,10 @@ license = "Apache-2.0"
 # guaranteed identical (G1/G2 compressed + Fr big-endian). No heavy ZK stack.
 bls12_381 = { version = "0.8", features = ["alloc", "pairings"] }
 ff = "0.13"
+# Constant-time primitive selection (`Choice`, `ConditionallySelectable`) for
+# the keygen (setup) path that touches secret CRS scalars. Same version
+# bls12_381 0.8 links against, so no duplicate crate in the graph.
+subtle = "2.6"
 # Parallelise the prover's elliptic-curve scalar-mult loops across CPU cores.
 rayon = "1"
 

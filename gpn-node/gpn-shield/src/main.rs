@@ -24,7 +24,10 @@ fn main() {
             println!("beta_g2  = 0x{}", hex(&vk.beta_g2.to_compressed()));
             println!("gamma_g2 = 0x{}", hex(&vk.gamma_g2.to_compressed()));
             println!("delta_g2 = 0x{}", hex(&vk.delta_g2.to_compressed()));
-            println!("gamma_abc[0] = 0x{}", hex(&vk.gamma_abc_g1[0].to_compressed()));
+            println!(
+                "gamma_abc[0] = 0x{}",
+                hex(&vk.gamma_abc_g1[0].to_compressed())
+            );
             println!("public_inputs = 0 (trivial l=0 circuit)");
         }
         "prove" => {
@@ -64,8 +67,14 @@ fn main() {
             println!("beta_g2  = 0x{}", hex(&pk.vk.beta_g2.to_compressed()));
             println!("gamma_g2 = 0x{}", hex(&pk.vk.gamma_g2.to_compressed()));
             println!("delta_g2 = 0x{}", hex(&pk.vk.delta_g2.to_compressed()));
-            println!("gamma_abc[0] = 0x{}", hex(&pk.vk.gamma_abc_g1[0].to_compressed()));
-            println!("gamma_abc[1] = 0x{}", hex(&pk.vk.gamma_abc_g1[1].to_compressed()));
+            println!(
+                "gamma_abc[0] = 0x{}",
+                hex(&pk.vk.gamma_abc_g1[0].to_compressed())
+            );
+            println!(
+                "gamma_abc[1] = 0x{}",
+                hex(&pk.vk.gamma_abc_g1[1].to_compressed())
+            );
             println!("public_inputs = [fee] (1 public variable)");
         }
         "qap-prove" => {
@@ -85,8 +94,14 @@ fn main() {
             println!("proof_a (48) = 0x{}", hex(&proof.a.to_compressed()));
             println!("proof_b (96) = 0x{}", hex(&proof.b.to_compressed()));
             println!("proof_c (48) = 0x{}", hex(&proof.c.to_compressed()));
-            println!("public_inputs = {:?}", pub_in.iter().map(|s| s.to_string()).collect::<Vec<_>>());
-            println!("verify locally: {}", groth16::verify(&pk.vk, &pub_in, &proof).is_ok());
+            println!(
+                "public_inputs = {:?}",
+                pub_in.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+            );
+            println!(
+                "verify locally: {}",
+                groth16::verify(&pk.vk, &pub_in, &proof).is_ok()
+            );
         }
         "qap-verify" => {
             let r1cs = qap::value_balance_r1cs();
@@ -110,18 +125,49 @@ fn main() {
                 println!("INVALID: bad proof_c encoding");
                 return;
             };
-            let proof = groth16::Proof { a: pa, b: pb, c: pc };
+            let proof = groth16::Proof {
+                a: pa,
+                b: pb,
+                c: pc,
+            };
             // fee = 2 (the value-balance circuit's single public input)
             let pub_in = vec![Scalar::from(2)];
             match groth16::verify(&pk.vk, &pub_in, &proof) {
                 Ok(()) => println!("VALID (fee=2)"),
-                Err(groth16::VerifyError::InputLenMismatch) => println!("INVALID: input length mismatch"),
-                Err(groth16::VerifyError::InvalidProof) => println!("INVALID: pairing equation failed"),
+                Err(groth16::VerifyError::InputLenMismatch) => {
+                    println!("INVALID: input length mismatch")
+                }
+                Err(groth16::VerifyError::InvalidProof) => {
+                    println!("INVALID: pairing equation failed")
+                }
             }
+        }
+        "qap-setup-ct" => {
+            // Constant-time keygen path: same key as `qap-setup`, but every
+            // secret-scalar fixed-base mult uses the branchless CT lookup.
+            let r1cs = qap::value_balance_r1cs();
+            let q = r1cs.qap();
+            let seed = args.get(2).map(|s| s.as_str()).unwrap_or("testnet-crs-v0");
+            let pk = groth16::setup_constant_time(&q, seed);
+            println!("circuit = value-balance (6 vars, 2 public, 3 constraints)");
+            println!("seed = {seed} (constant-time keygen)");
+            println!("alpha_g1 = 0x{}", hex(&pk.vk.alpha_g1.to_compressed()));
+            println!("beta_g2  = 0x{}", hex(&pk.vk.beta_g2.to_compressed()));
+            println!("gamma_g2 = 0x{}", hex(&pk.vk.gamma_g2.to_compressed()));
+            println!("delta_g2 = 0x{}", hex(&pk.vk.delta_g2.to_compressed()));
+            println!(
+                "gamma_abc[0] = 0x{}",
+                hex(&pk.vk.gamma_abc_g1[0].to_compressed())
+            );
+            println!(
+                "gamma_abc[1] = 0x{}",
+                hex(&pk.vk.gamma_abc_g1[1].to_compressed())
+            );
+            println!("public_inputs = [fee] (1 public variable)");
         }
         other => {
             eprintln!("unknown command: {other}");
-            eprintln!("usage: gpn_shield [keygen|prove|verify|qap-setup|qap-prove|qap-verify]");
+            eprintln!("usage: gpn_shield [keygen|prove|verify|qap-setup|qap-setup-ct|qap-prove|qap-verify]");
             std::process::exit(2);
         }
     }

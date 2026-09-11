@@ -98,9 +98,44 @@ pub enum VerifyError {
     InvalidProof,
 }
 
+/// Key-generation strategy for [`setup`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeygenMode {
+    /// Fast fixed-base windowed tables. Fine for `prove` (the witness is the
+    /// prover's own secret), but the shared `mul` path skips zero digits and
+    /// indexes its table by secret bits — a timing/cache side channel on the
+    /// scalar. **Do not** use this for the CRS secret scalars
+    /// (α, β, γ, δ, τ) when those must stay confidential.
+    Fast,
+    /// Branchless constant-time fixed-base path ([`ec_ops::fixed_base_g1_gen_ct`]
+    /// et al.). Use for keygen/setup where the CRS toxic-waste scalars must not
+    /// leak through control flow or memory-access patterns.
+    /// Produces **byte-identical** keys to [`KeygenMode::Fast`].
+    ConstantTime,
+}
+
 /// Deterministically derive the CRS scalars and build the proving/verification
 /// keys for a QAP. Reproducible for a given `seed`.
+///
+/// Uses the fast fixed-base path ([`KeygenMode::Fast`]). For a ceremony / any
+/// run where the secret CRS scalars must not leak via side channels, call
+/// [`setup_constant_time`] instead (same output, constant-time control flow).
 pub fn setup(qap: &Qap, seed: &str) -> ProvingKey {
+    setup_with_mode(qap, seed, KeygenMode::Fast)
+}
+
+/// Constant-time keygen. Byte-identical keys to [`setup`], but every scalar
+/// multiplication that touches a **secret** CRS scalar uses the branchless
+/// fixed-base path (full-table constant-time lookup, fixed group-op count).
+///
+/// Recommended for the production Powers-of-Tau / ceremony setup, where the
+/// toxic waste α, β, γ, δ, τ would otherwise be exposed to a co-located
+/// timing/cache attacker.
+pub fn setup_constant_time(qap: &Qap, seed: &str) -> ProvingKey {
+    setup_with_mode(qap, seed, KeygenMode::ConstantTime)
+}
+
+fn setup_with_mode(qap: &Qap, seed: &str, mode: KeygenMode) -> ProvingKey {
     let mut rng = Drng::from_seed(seed);
     let alpha = rng.scalar();
     let beta = rng.scalar();
@@ -119,18 +154,51 @@ pub fn setup(qap: &Qap, seed: &str) -> ProvingKey {
     let g1 = G1Projective::generator();
     let g2 = G2Projective::generator();
 
-    let alpha_g1: G1Affine = (g1 * alpha).into();
-    let beta_g1: G1Affine = (g1 * beta).into();
-    let beta_g2: G2Affine = (g2 * beta).into();
-    let delta_g1: G1Affine = (g1 * delta).into();
-    let delta_g2: G2Affine = (g2 * delta).into();
+    // Fixed-base lifts, routed through the constant-time path when requested.
+    // Both modes yield byte-identical group elements.
+    let fb_g1 = |s: &[Scalar]| -> Vec<G1Affine> {
+        match mode {
+            KeygenMode::Fast => ec_ops::fixed_base_g1_gen(s),
+            KeygenMode::ConstantTime => ec_ops::fixed_base_g1_gen_ct(s),
+        }
+    };
+    let fb_g1_scaled = |s: &[Scalar], inv: &Scalar| -> Vec<G1Affine> {
+        match mode {
+            KeygenMode::Fast => ec_ops::fixed_base_g1_gen_scaled(s, inv),
+            KeygenMode::ConstantTime => ec_ops::fixed_base_g1_gen_scaled_ct(s, inv),
+        }
+    };
+    let fb_g2 = |s: &[Scalar]| -> Vec<G2Affine> {
+        match mode {
+            KeygenMode::Fast => ec_ops::fixed_base_g2_gen(s),
+            KeygenMode::ConstantTime => ec_ops::fixed_base_g2_gen_ct(s),
+        }
+    };
+    let single_g1 = |s: Scalar| -> G1Affine {
+        match mode {
+            KeygenMode::Fast => (g1 * s).into(),
+            KeygenMode::ConstantTime => fb_g1(&[s])[0],
+        }
+    };
+    let single_g2 = |s: Scalar| -> G2Affine {
+        match mode {
+            KeygenMode::Fast => (g2 * s).into(),
+            KeygenMode::ConstantTime => fb_g2(&[s])[0],
+        }
+    };
+
+    let alpha_g1: G1Affine = single_g1(alpha);
+    let beta_g1: G1Affine = single_g1(beta);
+    let beta_g2: G2Affine = single_g2(beta);
+    let delta_g1: G1Affine = single_g1(delta);
+    let delta_g2: G2Affine = single_g2(delta);
 
     // These are all *fixed-base* multiplications (base = g1/g2). Use a shared
     // windowed precomputation table — ~8× faster than per-element `g*s`, and
     // byte-identical output. Each helper parallelizes across cores.
-    let a_g1: Vec<G1Affine> = ec_ops::fixed_base_g1_gen(&a_tau);
-    let b_g1: Vec<G1Affine> = ec_ops::fixed_base_g1_gen(&b_tau);
-    let b_g2: Vec<G2Affine> = ec_ops::fixed_base_g2_gen(&b_tau);
+    let a_g1: Vec<G1Affine> = fb_g1(&a_tau);
+    let b_g1: Vec<G1Affine> = fb_g1(&b_tau);
+    let b_g2: Vec<G2Affine> = fb_g2(&b_tau);
 
     // Public: /γ ; Private: /δ. `comb_k = β·a_k + α·b_k + c_k`, then a single
     // fixed-base multiply with the /γ or /δ scalar folded in.
@@ -140,10 +208,8 @@ pub fn setup(qap: &Qap, seed: &str) -> ProvingKey {
         .into_par_iter()
         .map(|k| beta * a_tau[k] + alpha * b_tau[k] + c_tau[k])
         .collect();
-    let gamma_abc_g1: Vec<G1Affine> =
-        ec_ops::fixed_base_g1_gen_scaled(&combs[..num_public], &gamma_inv);
-    let abc_delta_g1: Vec<G1Affine> =
-        ec_ops::fixed_base_g1_gen_scaled(&combs[num_public..], &delta_inv);
+    let gamma_abc_g1: Vec<G1Affine> = fb_g1_scaled(&combs[..num_public], &gamma_inv);
+    let abc_delta_g1: Vec<G1Affine> = fb_g1_scaled(&combs[num_public..], &delta_inv);
 
     // Powers (τ^i / δ)₁ for i in 0..=deg(H·T). deg(H·T) ≤ 2·domain_size − 2.
     // `domain_size` = constraints for the consecutive domain; next-pow2 ≥ m for
@@ -156,7 +222,7 @@ pub fn setup(qap: &Qap, seed: &str) -> ProvingKey {
         tau_pows.push(tau_pow);
         tau_pow *= tau;
     }
-    let ht_delta_g1: Vec<G1Affine> = ec_ops::fixed_base_g1_gen_scaled(&tau_pows, &delta_inv);
+    let ht_delta_g1: Vec<G1Affine> = fb_g1_scaled(&tau_pows, &delta_inv);
 
     ProvingKey {
         alpha_g1,
@@ -173,7 +239,7 @@ pub fn setup(qap: &Qap, seed: &str) -> ProvingKey {
         vk: VerifyingKey {
             alpha_g1,
             beta_g2,
-            gamma_g2: (g2 * gamma).into(),
+            gamma_g2: single_g2(gamma),
             delta_g2,
             gamma_abc_g1,
         },
@@ -221,9 +287,8 @@ pub fn prove(pk: &ProvingKey, qap: &Qap, z: &[Scalar]) -> (Proof, Vec<Scalar>) {
     c_acc += ht_sum;
     // rA + sB − rsδ
     let b1_sum: G1Projective = ec_ops::msm_g1(&pk.b_g1, z);
-    let b_g1: G1Affine = (G1Projective::from(pk.beta_g1) + b1_sum
-        + G1Projective::from(pk.delta_g1) * s)
-        .into();
+    let b_g1: G1Affine =
+        (G1Projective::from(pk.beta_g1) + b1_sum + G1Projective::from(pk.delta_g1) * s).into();
     // sA + rB − rsδ (correct Groth16 blinding; r·A+s·B does NOT cancel)
     c_acc += G1Projective::from(a) * s;
     c_acc += G1Projective::from(b_g1) * r;
@@ -235,7 +300,11 @@ pub fn prove(pk: &ProvingKey, qap: &Qap, z: &[Scalar]) -> (Proof, Vec<Scalar>) {
 
 /// Verify a proof against a verification key and public inputs. This is the
 /// byte-for-byte pairing equation used by the runtime verifier.
-pub fn verify(vk: &VerifyingKey, public_inputs: &[Scalar], proof: &Proof) -> Result<(), VerifyError> {
+pub fn verify(
+    vk: &VerifyingKey,
+    public_inputs: &[Scalar],
+    proof: &Proof,
+) -> Result<(), VerifyError> {
     if public_inputs.len() + 1 != vk.gamma_abc_g1.len() {
         return Err(VerifyError::InputLenMismatch);
     }
@@ -269,16 +338,20 @@ mod tests {
         let pk = setup(&qap, "testnet-crs-v0");
         let z = vec![
             Scalar::ONE,
-            Scalar::from(2), // fee (public)
+            Scalar::from(2),  // fee (public)
             Scalar::from(10), // v_in
-            Scalar::from(8), // v_out
+            Scalar::from(8),  // v_out
             Scalar::from(10), // spent
             Scalar::from(80), // w
         ];
         let (proof, pub_in) = prove(&pk, &qap, &z);
         assert_eq!(pub_in, vec![Scalar::from(2)]); // only `fee` is public
-        // debug: check verification with blinding stripped is impossible, but check acc len
-        eprintln!("DEBUG gamma_abc len={} pub_in={:?}", pk.vk.gamma_abc_g1.len(), pub_in);
+                                                   // debug: check verification with blinding stripped is impossible, but check acc len
+        eprintln!(
+            "DEBUG gamma_abc len={} pub_in={:?}",
+            pk.vk.gamma_abc_g1.len(),
+            pub_in
+        );
         assert_eq!(verify(&pk.vk, &pub_in, &proof), Ok(()));
     }
 
@@ -289,15 +362,18 @@ mod tests {
         let pk = setup(&qap, "testnet-crs-v0");
         let z = vec![
             Scalar::ONE,
-            Scalar::from(2), // fee (public)
+            Scalar::from(2),  // fee (public)
             Scalar::from(10), // v_in
-            Scalar::from(8), // v_out
+            Scalar::from(8),  // v_out
             Scalar::from(10), // spent
             Scalar::from(80), // w
         ];
         let (proof, _) = prove(&pk, &qap, &z);
         // Tamper with the public input: fee 2 -> 3.
-        assert_eq!(verify(&pk.vk, &[Scalar::from(3)], &proof), Err(VerifyError::InvalidProof));
+        assert_eq!(
+            verify(&pk.vk, &[Scalar::from(3)], &proof),
+            Err(VerifyError::InvalidProof)
+        );
     }
 
     #[test]
@@ -307,15 +383,18 @@ mod tests {
         let pk = setup(&qap, "testnet-crs-v0");
         let z = vec![
             Scalar::ONE,
-            Scalar::from(2), // fee (public)
+            Scalar::from(2),  // fee (public)
             Scalar::from(10), // v_in
-            Scalar::from(8), // v_out
+            Scalar::from(8),  // v_out
             Scalar::from(10), // spent
             Scalar::from(80), // w
         ];
         let (mut proof, pub_in) = prove(&pk, &qap, &z);
         proof.a = (G1Projective::generator() * Scalar::from(9u64)).into();
-        assert_eq!(verify(&pk.vk, &pub_in, &proof), Err(VerifyError::InvalidProof));
+        assert_eq!(
+            verify(&pk.vk, &pub_in, &proof),
+            Err(VerifyError::InvalidProof)
+        );
     }
 
     #[test]
@@ -332,6 +411,40 @@ mod tests {
     }
 
     #[test]
+    fn constant_time_setup_matches_fast_setup_bytes() {
+        // The constant-time keygen path must produce byte-identical keys to the
+        // fast path (same group elements), so on-chain compat is preserved.
+        let r1cs = value_balance_r1cs();
+        let qap = r1cs.qap();
+        for seed in ["testnet-crs-v0", "crs-v1", "other-seed"] {
+            let fast = setup(&qap, seed);
+            let ct = setup_constant_time(&qap, seed);
+            assert_eq!(fast.vk, ct.vk, "vk mismatch (seed={seed})");
+            assert_eq!(fast.alpha_g1, ct.alpha_g1);
+            assert_eq!(fast.beta_g1, ct.beta_g1);
+            assert_eq!(fast.beta_g2, ct.beta_g2);
+            assert_eq!(fast.delta_g1, ct.delta_g1);
+            assert_eq!(fast.delta_g2, ct.delta_g2);
+            assert_eq!(fast.a_g1, ct.a_g1);
+            assert_eq!(fast.b_g1, ct.b_g1);
+            assert_eq!(fast.b_g2, ct.b_g2);
+            assert_eq!(fast.abc_delta_g1, ct.abc_delta_g1);
+            assert_eq!(fast.ht_delta_g1, ct.ht_delta_g1);
+            // A proof made with the CT key verifies exactly as with the fast key.
+            let z = vec![
+                Scalar::ONE,
+                Scalar::from(2),
+                Scalar::from(10),
+                Scalar::from(8),
+                Scalar::from(10),
+                Scalar::from(80),
+            ];
+            let (proof, pub_in) = prove(&ct, &qap, &z);
+            assert_eq!(verify(&fast.vk, &pub_in, &proof), Ok(()), "seed={seed}");
+        }
+    }
+
+    #[test]
     // Full Groth16 roundtrip on the REAL note-spend circuit (~87k vars × ~121k
     // constraints) using the FFT-native RootsOfUnity domain. This is the whole
     // point of the NTT work: setup + prove + verify must all complete at scale
@@ -341,7 +454,10 @@ mod tests {
     fn note_spend_full_roundtrip() {
         let note = crate::note_spend::tests::test_note(4);
         let (r1cs, z) = crate::note_spend::note_spend_r1cs(&note);
-        assert!(crate::gadget::constraints_hold(&r1cs, &z), "witness must satisfy");
+        assert!(
+            crate::gadget::constraints_hold(&r1cs, &z),
+            "witness must satisfy"
+        );
         let qap = r1cs.qap_sparse();
         let pk = setup(&qap, "testnet-crs-v0");
         let (proof, pub_in) = prove(&pk, &qap, &z);
@@ -349,7 +465,10 @@ mod tests {
         // Tampering the public input must fail.
         let mut bad = pub_in.clone();
         bad[0] += Scalar::ONE;
-        assert!(verify(&pk.vk, &bad, &proof).is_err(), "tampered input must be rejected");
+        assert!(
+            verify(&pk.vk, &bad, &proof).is_err(),
+            "tampered input must be rejected"
+        );
     }
 
     #[test]
@@ -359,16 +478,19 @@ mod tests {
         let pk = setup(&qap, "testnet-crs-v0");
         let z = vec![
             Scalar::ONE,
-            Scalar::from(2), // fee (public)
+            Scalar::from(2),  // fee (public)
             Scalar::from(10), // v_in
-            Scalar::from(8), // v_out
+            Scalar::from(8),  // v_out
             Scalar::from(10), // spent
             Scalar::from(80), // w
         ];
         let (proof, _) = prove(&pk, &qap, &z);
         // A different CRS (same circuit shape) must reject the proof.
         let pk2 = setup(&qap, "different-crs");
-        assert_eq!(verify(&pk2.vk, &[Scalar::from(2)], &proof), Err(VerifyError::InvalidProof));
+        assert_eq!(
+            verify(&pk2.vk, &[Scalar::from(2)], &proof),
+            Err(VerifyError::InvalidProof)
+        );
     }
 
     #[test]
@@ -409,9 +531,21 @@ mod tests {
             num_public: 2,
             domain: crate::qap::Domain::Consecutive,
             constraints: vec![
-                Constraint { a: vec![(2, one)], b: vec![(0, one)], c: vec![(4, one)] },
-                Constraint { a: vec![(3, one)], b: vec![(0, one)], c: vec![(4, one), (1, -(one))] },
-                Constraint { a: vec![(2, one)], b: vec![(3, one)], c: vec![(5, one)] },
+                Constraint {
+                    a: vec![(2, one)],
+                    b: vec![(0, one)],
+                    c: vec![(4, one)],
+                },
+                Constraint {
+                    a: vec![(3, one)],
+                    b: vec![(0, one)],
+                    c: vec![(4, one), (1, -(one))],
+                },
+                Constraint {
+                    a: vec![(2, one)],
+                    b: vec![(3, one)],
+                    c: vec![(5, one)],
+                },
             ],
         };
         let dense_qap = r1cs.qap();
@@ -424,7 +558,14 @@ mod tests {
         assert_eq!(pk_dense.a_g1, pk_sparse.a_g1);
         assert_eq!(pk_dense.ht_delta_g1, pk_sparse.ht_delta_g1);
         // And a real proof from the dense path still verifies under the sparse key.
-        let z = vec![Scalar::ONE, Scalar::from(2), Scalar::from(10), Scalar::from(8), Scalar::from(10), Scalar::from(80)];
+        let z = vec![
+            Scalar::ONE,
+            Scalar::from(2),
+            Scalar::from(10),
+            Scalar::from(8),
+            Scalar::from(10),
+            Scalar::from(80),
+        ];
         let (proof, pub_in) = prove(&pk_sparse, &dense_qap, &z);
         assert_eq!(verify(&pk_sparse.vk, &pub_in, &proof), Ok(()));
     }
