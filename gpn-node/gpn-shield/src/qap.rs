@@ -22,11 +22,12 @@ use crate::poly::{interpolate, Poly};
 /// coefficients over the domain points `r_0..r_{m-1}`; the target polynomial is
 /// `T(x) = ∏(x - r_j)`. The choice of domain does not affect soundness, but it
 /// changes the resulting polynomials (and hence the proving/verification keys).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Domain {
     /// `r_j = j` (consecutive integers `0..m-1`). The **default**, used by the
     /// value-balance circuit so its baked on-chain verification key is
     /// unchanged. Interpolation here is O(m²) (fine for tiny circuits).
+    #[default]
     Consecutive,
     /// `r_j = ω^j` over `n = next_pow2(m)` points, where `ω` is a primitive
     /// `n`-th root of unity. **FFT-native**: interpolation and polynomial
@@ -34,12 +35,6 @@ pub enum Domain {
     /// to large circuits (e.g. note-spend). Constraint `j ≥ m` (padding) has no
     /// coefficients, i.e. evaluates to 0, and `T(x) = x^n - 1`.
     RootsOfUnity,
-}
-
-impl Default for Domain {
-    fn default() -> Self {
-        Domain::Consecutive
-    }
 }
 
 /// A single R1CS constraint, sparse: `(Σ aᵢ·zᵢ)·(Σ bᵢ·zᵢ) = (Σ cᵢ·zᵢ)`.
@@ -288,8 +283,8 @@ impl Qap {
         let mut a_tau = vec![Scalar::ZERO; nv];
         let mut b_tau = vec![Scalar::ZERO; nv];
         let mut c_tau = vec![Scalar::ZERO; nv];
-        for (j, con) in self.constraints.iter().enumerate() {
-            let lj = l[j];
+        for (lj, con) in l.iter().zip(self.constraints.iter()) {
+            let lj = *lj;
             for &(k, v) in &con.a { a_tau[k] += v * lj; }
             for &(k, v) in &con.b { b_tau[k] += v * lj; }
             for &(k, v) in &con.c { c_tau[k] += v * lj; }
@@ -354,7 +349,7 @@ impl Qap {
         let mut l = vec![Scalar::ZERO; m];
         let mut any_at_node = false;
         for j in 0..m {
-            let sign = if (m - 1 - j) % 2 == 0 { Scalar::ONE } else { -Scalar::ONE };
+            let sign = if (m - 1 - j).is_multiple_of(2) { Scalar::ONE } else { -Scalar::ONE };
             let w_j = sign * inv_fact[j] * inv_fact[m - 1 - j];
             let r_j = Scalar::from(j as u64);
             if tau == &r_j {
