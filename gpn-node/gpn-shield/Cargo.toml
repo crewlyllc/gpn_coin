@@ -10,5 +10,7 @@ license = "Apache-2.0"
 # guaranteed identical (G1/G2 compressed + Fr big-endian). No heavy ZK stack.
 bls12_381 = { version = "0.8", features = ["alloc", "pairings"] }
 ff = "0.13"
+# Parallelise the prover's elliptic-curve scalar-mult loops across CPU cores.
+rayon = "1"
 
 [dev-dependencies]
