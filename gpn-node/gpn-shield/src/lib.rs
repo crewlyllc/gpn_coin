@@ -39,6 +39,9 @@ pub mod ntt;
 pub mod poly;
 pub mod qap;
 
+#[cfg(test)]
+mod verify_tests;
+
 use bls12_381::{pairing, G1Affine, G1Projective, G2Affine, Gt, Scalar};
 use ff::Field;
 
