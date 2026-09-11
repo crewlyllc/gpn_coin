@@ -63,7 +63,8 @@ impl ExternalMiner {
 
         // Enumerate the GPU up front so a missing device fails fast here,
         // before we spawn a thread.
-        let miner = EthashGpuMiner::new(cfg.device_index).map_err(|e| format!("open GPU miner: {e}"))?;
+        let miner =
+            EthashGpuMiner::new(cfg.device_index).map_err(|e| format!("open GPU miner: {e}"))?;
         let device_name = miner.device_name();
 
         // Build the epoch-0 DAG once; it persists across all blocks in this epoch.
@@ -78,7 +79,9 @@ impl ExternalMiner {
             cache_size / 1024,
             full_size / (1024 * 1024)
         );
-        let dag = miner.build_dag(&cache, full_size).map_err(|e| format!("build DAG: {e}"))?;
+        let dag = miner
+            .build_dag(&cache, full_size)
+            .map_err(|e| format!("build DAG: {e}"))?;
 
         let stop_clone = stop.clone();
         let thread = std::thread::Builder::new()
@@ -147,7 +150,10 @@ fn mining_loop(
         let tmpl = match rpc.get_template() {
             Ok(Some(t)) => t,
             Ok(None) => {
-                log::debug!("[wait] node has no mining template yet — retrying in {}ms", cfg.poll_ms);
+                log::debug!(
+                    "[wait] node has no mining template yet — retrying in {}ms",
+                    cfg.poll_ms
+                );
                 if wait_interruptible(&stop, cfg.poll_ms) {
                     break;
                 }
@@ -176,7 +182,7 @@ fn mining_loop(
         }
 
         let target = difficulty_to_le_target(&tmpl.difficulty);
-        let pre_hash_hex = format!("0x{}", hex::encode(&tmpl.pre_hash));
+        let pre_hash_hex = format!("0x{}", hex::encode(tmpl.pre_hash));
 
         // 2. Mine on the GPU until a seal below target is found.
         let mut nonce_start: u64 = 0;
@@ -185,16 +191,17 @@ fn mining_loop(
                 log::info!("mining loop cancelled mid-search — stopping");
                 return;
             }
-            let found = match miner.mine_batch(&dag, &tmpl.pre_hash, &target, nonce_start, cfg.batch) {
-                Ok(f) => f,
-                Err(e) => {
-                    log::error!("gpu mine error: {e}");
-                    if wait_interruptible(&stop, cfg.poll_ms) {
-                        return;
+            let found =
+                match miner.mine_batch(&dag, &tmpl.pre_hash, &target, nonce_start, cfg.batch) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        log::error!("gpu mine error: {e}");
+                        if wait_interruptible(&stop, cfg.poll_ms) {
+                            return;
+                        }
+                        continue;
                     }
-                    continue;
-                }
-            };
+                };
             total_hashes += cfg.batch as u64;
             hashrate_window += cfg.batch as u64;
             match found {
@@ -222,8 +229,14 @@ fn mining_loop(
 
         // 3. Submit the seal.
         match rpc.submit_work(&pre_hash_hex, &seal_bytes) {
-            Ok(true) => log::info!("✅ SUBMITTED block #{} — accepted by node", tmpl.block_number),
-            Ok(false) => log::info!("↩️  stale template (block #{}) — refetching", tmpl.block_number),
+            Ok(true) => log::info!(
+                "✅ SUBMITTED block #{} — accepted by node",
+                tmpl.block_number
+            ),
+            Ok(false) => log::info!(
+                "↩️  stale template (block #{}) — refetching",
+                tmpl.block_number
+            ),
             Err(e) => log::error!("[error] submitWork: {e}"),
         }
 
@@ -231,7 +244,11 @@ fn mining_loop(
         let session_elapsed = session_start.elapsed();
         if session_elapsed.as_secs() >= 30 {
             let mhs = total_hashes as f64 / session_elapsed.as_secs_f64() / 1e6;
-            log::info!("  [session] {:.1} MH/s avg over {}s", mhs, session_elapsed.as_secs());
+            log::info!(
+                "  [session] {:.1} MH/s avg over {}s",
+                mhs,
+                session_elapsed.as_secs()
+            );
             session_start = Instant::now();
             total_hashes = 0;
         }
@@ -252,7 +269,14 @@ fn wait_interruptible(stop: &AtomicBool, ms: u64) -> bool {
         if stop.load(Ordering::SeqCst) {
             return true;
         }
-        std::thread::sleep(Duration::from_millis(10.min(deadline.saturating_duration_since(Instant::now()).as_millis() as u64).max(1)));
+        std::thread::sleep(Duration::from_millis(
+            10.min(
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis() as u64,
+            )
+            .max(1),
+        ));
     }
     false
 }
@@ -295,7 +319,9 @@ impl BlockingMinerRpc {
             .json(&body)
             .send()
             .map_err(|e| format!("rpc {method} transport: {e}"))?;
-        let v: Value = resp.json().map_err(|e| format!("rpc {method} decode: {e}"))?;
+        let v: Value = resp
+            .json()
+            .map_err(|e| format!("rpc {method} decode: {e}"))?;
         if let Some(err) = v.get("error") {
             return Err(format!("rpc {method} error: {err}"));
         }
@@ -316,13 +342,20 @@ impl BlockingMinerRpc {
             .and_then(|v| v.as_str())
             .ok_or("template missing difficulty")?;
         let block_number = r.get("block_number").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-        let best_hash = r.get("best_hash").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let best_hash = r
+            .get("best_hash")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
         let mut pre_hash = [0u8; 32];
         let bytes = hex::decode(pre_hex.trim_start_matches("0x"))
             .map_err(|e| format!("template pre_hash hex: {e}"))?;
         if bytes.len() != 32 {
-            return Err(format!("template pre_hash must be 32 bytes, got {}", bytes.len()));
+            return Err(format!(
+                "template pre_hash must be 32 bytes, got {}",
+                bytes.len()
+            ));
         }
         pre_hash.copy_from_slice(&bytes);
 
@@ -337,7 +370,8 @@ impl BlockingMinerRpc {
     fn submit_work(&mut self, pre_hash_hex: &str, seal: &[u8]) -> Result<bool, String> {
         let seal_hex = format!("0x{}", hex::encode(seal));
         let r = self.call("gpn_submitWork", json!([pre_hash_hex, seal_hex]))?;
-        r.as_bool().ok_or("submitWork result not a bool".to_string())
+        r.as_bool()
+            .ok_or("submitWork result not a bool".to_string())
     }
 }
 

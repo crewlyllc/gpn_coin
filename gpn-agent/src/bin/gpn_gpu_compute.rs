@@ -41,7 +41,10 @@ fn main() {
     println!("  total time : {:.3}s", elapsed.as_secs_f64());
     println!("  per iter   : {:.2} ms", per_iter_ms);
     println!("  throughput : {:.2} GFLOPS", gflops);
-    println!("  (matmul FLOPs = 2*N^3 = {:.2} GFLOP/iter)", 2.0 * (n as f64).powi(3) / 1e9);
+    println!(
+        "  (matmul FLOPs = 2*N^3 = {:.2} GFLOP/iter)",
+        2.0 * (n as f64).powi(3) / 1e9
+    );
     println!();
     println!("✅ Real GPU AI compute verified — this workload is what Compute mode serves.");
 }

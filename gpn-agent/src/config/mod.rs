@@ -1,5 +1,4 @@
 /// Agent configuration
-
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -14,7 +13,7 @@ pub struct AgentConfig {
     /// Substrate dev URI (e.g. `//Alice`) used to sign on-chain extrinsics
     /// (attestation, staking, compute-marketplace). Leave empty for read-only.
     pub signer_uri: String,
-    pub mode: String,  // "auto", "mine", "compute", "stake_only"
+    pub mode: String, // "auto", "mine", "compute", "stake_only"
 
     // GPU settings
     pub gpu_model: String,
@@ -160,7 +159,10 @@ impl AgentConfig {
     pub fn from_file(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let path = Path::new(path);
         if !path.exists() {
-            log::warn!("Config file not found at {}, using defaults", path.display());
+            log::warn!(
+                "Config file not found at {}, using defaults",
+                path.display()
+            );
             return Ok(Self::default());
         }
 
@@ -185,7 +187,11 @@ impl AgentConfig {
             errors.push("gpu_model is required".to_string());
         }
 
-        if errors.is_empty() { Ok(()) } else { Err(errors) }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
     }
 }
 
@@ -209,7 +215,10 @@ mod tests {
 
     #[test]
     fn default_compute_revenue_max_is_safe_50() {
-        assert_eq!(AgentConfig::default().compute_revenue_max_usd_per_hour, 50.0);
+        assert_eq!(
+            AgentConfig::default().compute_revenue_max_usd_per_hour,
+            50.0
+        );
     }
 
     #[test]

@@ -52,10 +52,12 @@ impl GpuMatmul {
         if gpus.is_empty() {
             return Err("no OpenCL GPU device found".into());
         }
-        let device = gpus
-            .get(device_index)
-            .cloned()
-            .ok_or_else(|| format!("GPU index {device_index} out of range ({} GPU(s))", gpus.len()))?;
+        let device = gpus.get(device_index).cloned().ok_or_else(|| {
+            format!(
+                "GPU index {device_index} out of range ({} GPU(s))",
+                gpus.len()
+            )
+        })?;
         let gpu_name = device.name().unwrap_or_default();
 
         let context = Context::from_device(&device).map_err(|e| format!("context: {e}"))?;
@@ -63,35 +65,59 @@ impl GpuMatmul {
 
         let mut program = Program::create_from_source(&context, KERNEL_SRC)
             .map_err(|e| format!("create program: {e}"))?;
-        program
-            .build(&[device.id()], "")
-            .map_err(|e| {
-                let log = program.get_build_log(device.id()).unwrap_or_default();
-                format!("matmul kernel build failed: {e}\n--- build log ---\n{log}")
-            })?;
-        let kernel = Kernel::create(&program, "gpn_sgemm").map_err(|e| format!("sgemm kernel: {e}"))?;
+        program.build(&[device.id()], "").map_err(|e| {
+            let log = program.get_build_log(device.id()).unwrap_or_default();
+            format!("matmul kernel build failed: {e}\n--- build log ---\n{log}")
+        })?;
+        let kernel =
+            Kernel::create(&program, "gpn_sgemm").map_err(|e| format!("sgemm kernel: {e}"))?;
 
         let elems = n * n;
         let a = unsafe {
-            Buffer::<f32>::create(&context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR, elems, Self::fill(n, 1.0f32).as_ptr() as *mut c_void)
+            Buffer::<f32>::create(
+                &context,
+                CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                elems,
+                Self::fill(n, 1.0f32).as_ptr() as *mut c_void,
+            )
         }
         .map_err(|e| format!("A buffer: {e}"))?;
         let b = unsafe {
-            Buffer::<f32>::create(&context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR, elems, Self::fill(n, 2.0f32).as_ptr() as *mut c_void)
+            Buffer::<f32>::create(
+                &context,
+                CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                elems,
+                Self::fill(n, 2.0f32).as_ptr() as *mut c_void,
+            )
         }
         .map_err(|e| format!("B buffer: {e}"))?;
-        let c = unsafe { Buffer::<f32>::create(&context, CL_MEM_READ_WRITE, elems, std::ptr::null_mut()) }
-            .map_err(|e| format!("C buffer: {e}"))?;
+        let c = unsafe {
+            Buffer::<f32>::create(&context, CL_MEM_READ_WRITE, elems, std::ptr::null_mut())
+        }
+        .map_err(|e| format!("C buffer: {e}"))?;
 
         unsafe {
-            kernel.set_arg(0, &(n as u32)).map_err(|e| format!("arg N: {e}"))?;
+            kernel
+                .set_arg(0, &(n as u32))
+                .map_err(|e| format!("arg N: {e}"))?;
             kernel.set_arg(1, &a).map_err(|e| format!("arg A: {e}"))?;
             kernel.set_arg(2, &b).map_err(|e| format!("arg B: {e}"))?;
             kernel.set_arg(3, &c).map_err(|e| format!("arg C: {e}"))?;
         }
 
-        log::info!("GPU matmul ready on {gpu_name} (N={n}, {} MiB matrices)", elems * 4 / (1024 * 1024));
-        Ok(Self { device, queue, kernel, a, b, c, n })
+        log::info!(
+            "GPU matmul ready on {gpu_name} (N={n}, {} MiB matrices)",
+            elems * 4 / (1024 * 1024)
+        );
+        Ok(Self {
+            device,
+            queue,
+            kernel,
+            a,
+            b,
+            c,
+            n,
+        })
     }
 
     pub fn device_name(&self) -> String {
@@ -123,7 +149,14 @@ impl GpuMatmul {
         let start = std::time::Instant::now();
         unsafe {
             self.queue
-                .enqueue_nd_range_kernel(self.kernel.get(), 2, std::ptr::null(), gws.as_ptr(), lws.as_ptr(), &[])
+                .enqueue_nd_range_kernel(
+                    self.kernel.get(),
+                    2,
+                    std::ptr::null(),
+                    gws.as_ptr(),
+                    lws.as_ptr(),
+                    &[],
+                )
                 .map_err(|e| format!("ndrange: {e}"))?;
         }
         self.queue.finish().map_err(|e| format!("finish: {e}"))?;
@@ -147,7 +180,7 @@ impl GpuMatmul {
         let mut out = vec![0f32; self.n * self.n];
         unsafe {
             self.queue
-                .enqueue_read_buffer(&mut self.c, 1, 0, &mut out, &[])
+                .enqueue_read_buffer(&self.c, 1, 0, &mut out, &[])
                 .map_err(|e| format!("read C: {e}"))?;
         }
         Ok(out)
@@ -204,7 +237,12 @@ mod tests {
             for j in 0..n {
                 let idx = i * n + j;
                 let rel = (got[idx] - expect[idx]).abs() / expect[idx].max(1e-9);
-                assert!(rel < 1e-2, "mismatch at ({i},{j}): got {} expect {}", got[idx], expect[idx]);
+                assert!(
+                    rel < 1e-2,
+                    "mismatch at ({i},{j}): got {} expect {}",
+                    got[idx],
+                    expect[idx]
+                );
             }
         }
     }

@@ -12,7 +12,7 @@ use opencl3::command_queue::CommandQueue;
 use opencl3::context::Context;
 use opencl3::device::{get_device_ids, Device, CL_DEVICE_TYPE_ALL, CL_DEVICE_TYPE_GPU};
 use opencl3::kernel::Kernel;
-use opencl3::memory::{Buffer, CL_MEM_READ_WRITE, CL_MEM_COPY_HOST_PTR};
+use opencl3::memory::{Buffer, CL_MEM_COPY_HOST_PTR, CL_MEM_READ_WRITE};
 use opencl3::platform::get_platforms;
 use opencl3::program::Program;
 use std::os::raw::c_void;
@@ -58,7 +58,9 @@ impl EthashGpuMiner {
     /// Enumerate OpenCL GPUs and print a summary (used for diagnostics).
     pub fn device_summary() -> Vec<String> {
         let mut out = Vec::new();
-        let Ok(platforms) = get_platforms() else { return out };
+        let Ok(platforms) = get_platforms() else {
+            return out;
+        };
         for p in &platforms {
             let pname = p.name().unwrap_or_default();
             let devices = get_device_ids(p.id(), CL_DEVICE_TYPE_ALL).unwrap_or_default();
@@ -92,10 +94,12 @@ impl EthashGpuMiner {
         if gpus.is_empty() {
             return Err("no OpenCL GPU device found".into());
         }
-        let device = gpus
-            .get(device_index)
-            .cloned()
-            .ok_or_else(|| format!("GPU index {device_index} out of range ({} GPU(s))", gpus.len()))?;
+        let device = gpus.get(device_index).cloned().ok_or_else(|| {
+            format!(
+                "GPU index {device_index} out of range ({} GPU(s))",
+                gpus.len()
+            )
+        })?;
         let gpu_name = device.name().unwrap_or_default();
 
         let context = Context::from_device(&device).map_err(|e| format!("context: {e}"))?;
@@ -103,15 +107,13 @@ impl EthashGpuMiner {
 
         let mut program = Program::create_from_source(&context, KERNEL_SRC)
             .map_err(|e| format!("create program: {e}"))?;
-        program
-            .build(&[device.id()], "")
-            .map_err(|e| {
-                let log = program.get_build_log(device.id()).unwrap_or_default();
-                format!("kernel build failed: {e}\n--- build log ---\n{log}")
-            })?;
+        program.build(&[device.id()], "").map_err(|e| {
+            let log = program.get_build_log(device.id()).unwrap_or_default();
+            format!("kernel build failed: {e}\n--- build log ---\n{log}")
+        })?;
 
-        let dag_kernel = Kernel::create(&program, "gpn_dag_item")
-            .map_err(|e| format!("dag kernel: {e}"))?;
+        let dag_kernel =
+            Kernel::create(&program, "gpn_dag_item").map_err(|e| format!("dag kernel: {e}"))?;
         let hashimoto_kernel = Kernel::create(&program, "gpn_hashimoto")
             .map_err(|e| format!("hashimoto kernel: {e}"))?;
         let debug_seed_kernel = Kernel::create(&program, "gpn_debug_seed")
@@ -146,26 +148,41 @@ impl EthashGpuMiner {
             )
         }
         .map_err(|e| format!("header buf: {e}"))?;
-        let mut out = unsafe {
+        let out = unsafe {
             Buffer::<u8>::create(&self.context, CL_MEM_READ_WRITE, 64, std::ptr::null_mut())
         }
         .map_err(|e| format!("out buf: {e}"))?;
         unsafe {
-            self.debug_seed_kernel.set_arg(0, &header_buf).map_err(|e| format!("a0: {e}"))?;
-            self.debug_seed_kernel.set_arg(1, &nonce).map_err(|e| format!("a1: {e}"))?;
-            self.debug_seed_kernel.set_arg(2, &out).map_err(|e| format!("a2: {e}"))?;
+            self.debug_seed_kernel
+                .set_arg(0, &header_buf)
+                .map_err(|e| format!("a0: {e}"))?;
+            self.debug_seed_kernel
+                .set_arg(1, &nonce)
+                .map_err(|e| format!("a1: {e}"))?;
+            self.debug_seed_kernel
+                .set_arg(2, &out)
+                .map_err(|e| format!("a2: {e}"))?;
         }
         let gws: [usize; 1] = [1];
         unsafe {
             self.queue
-                .enqueue_nd_range_kernel(self.debug_seed_kernel.get(), 1, std::ptr::null(), gws.as_ptr(), std::ptr::null(), &[])
+                .enqueue_nd_range_kernel(
+                    self.debug_seed_kernel.get(),
+                    1,
+                    std::ptr::null(),
+                    gws.as_ptr(),
+                    std::ptr::null(),
+                    &[],
+                )
                 .map_err(|e| format!("seed ndrange: {e}"))?;
         }
-        self.queue.finish().map_err(|e| format!("seed finish: {e}"))?;
+        self.queue
+            .finish()
+            .map_err(|e| format!("seed finish: {e}"))?;
         let mut res = [0u8; 64];
         unsafe {
             self.queue
-                .enqueue_read_buffer(&mut out, 1, 0, &mut res, &[])
+                .enqueue_read_buffer(&out, 1, 0, &mut res, &[])
                 .map_err(|e| format!("read seed: {e}"))?;
         }
         Ok(res)
@@ -187,29 +204,48 @@ impl EthashGpuMiner {
             )
         }
         .map_err(|e| format!("header buf: {e}"))?;
-        let mut out = unsafe {
+        let out = unsafe {
             Buffer::<u8>::create(&self.context, CL_MEM_READ_WRITE, 512, std::ptr::null_mut())
         }
         .map_err(|e| format!("out buf: {e}"))?;
         let trace_kernel = self.debug_trace_kernel.clone();
         unsafe {
-            trace_kernel.set_arg(0, &header_buf).map_err(|e| format!("a0: {e}"))?;
-            trace_kernel.set_arg(1, &nonce).map_err(|e| format!("a1: {e}"))?;
-            trace_kernel.set_arg(2, &dag.buffer).map_err(|e| format!("a2: {e}"))?;
-            trace_kernel.set_arg(3, &(dag.full_size as u64)).map_err(|e| format!("a3: {e}"))?;
-            trace_kernel.set_arg(4, &out).map_err(|e| format!("a4: {e}"))?;
+            trace_kernel
+                .set_arg(0, &header_buf)
+                .map_err(|e| format!("a0: {e}"))?;
+            trace_kernel
+                .set_arg(1, &nonce)
+                .map_err(|e| format!("a1: {e}"))?;
+            trace_kernel
+                .set_arg(2, &dag.buffer)
+                .map_err(|e| format!("a2: {e}"))?;
+            trace_kernel
+                .set_arg(3, &(dag.full_size as u64))
+                .map_err(|e| format!("a3: {e}"))?;
+            trace_kernel
+                .set_arg(4, &out)
+                .map_err(|e| format!("a4: {e}"))?;
         }
         let gws: [usize; 1] = [1];
         unsafe {
             self.queue
-                .enqueue_nd_range_kernel(trace_kernel.get(), 1, std::ptr::null(), gws.as_ptr(), std::ptr::null(), &[])
+                .enqueue_nd_range_kernel(
+                    trace_kernel.get(),
+                    1,
+                    std::ptr::null(),
+                    gws.as_ptr(),
+                    std::ptr::null(),
+                    &[],
+                )
                 .map_err(|e| format!("trace ndrange: {e}"))?;
         }
-        self.queue.finish().map_err(|e| format!("trace finish: {e}"))?;
+        self.queue
+            .finish()
+            .map_err(|e| format!("trace finish: {e}"))?;
         let mut res = [0u8; 512];
         unsafe {
             self.queue
-                .enqueue_read_buffer(&mut out, 1, 0, &mut res, &[])
+                .enqueue_read_buffer(&out, 1, 0, &mut res, &[])
                 .map_err(|e| format!("read trace: {e}"))?;
         }
         Ok(res)
@@ -253,32 +289,60 @@ impl EthashGpuMiner {
                 .enqueue_write_buffer(&mut counter, 1, 0, &[zero], &[])
                 .map_err(|e| format!("zero counter: {e}"))?;
         }
-        let mut results = unsafe {
-            Buffer::<u8>::create(&self.context, CL_MEM_READ_WRITE, results_cap * 72, std::ptr::null_mut())
+        let results = unsafe {
+            Buffer::<u8>::create(
+                &self.context,
+                CL_MEM_READ_WRITE,
+                results_cap * 72,
+                std::ptr::null_mut(),
+            )
         }
         .map_err(|e| format!("results buf: {e}"))?;
         unsafe {
-            self.hashimoto_kernel.set_arg(0, &header_buf).map_err(|e| format!("a0: {e}"))?;
-            self.hashimoto_kernel.set_arg(1, &nonce).map_err(|e| format!("a1: {e}"))?;
-            self.hashimoto_kernel.set_arg(2, &dag.buffer).map_err(|e| format!("a2: {e}"))?;
-            self.hashimoto_kernel.set_arg(3, &(dag.full_size as u64)).map_err(|e| format!("a3: {e}"))?;
-            self.hashimoto_kernel.set_arg(4, &target_buf).map_err(|e| format!("a4: {e}"))?;
-            self.hashimoto_kernel.set_arg(5, &counter).map_err(|e| format!("a5: {e}"))?;
-            self.hashimoto_kernel.set_arg(6, &results).map_err(|e| format!("a6: {e}"))?;
-            self.hashimoto_kernel.set_arg(7, &(results_cap as u32)).map_err(|e| format!("a7: {e}"))?;
+            self.hashimoto_kernel
+                .set_arg(0, &header_buf)
+                .map_err(|e| format!("a0: {e}"))?;
+            self.hashimoto_kernel
+                .set_arg(1, &nonce)
+                .map_err(|e| format!("a1: {e}"))?;
+            self.hashimoto_kernel
+                .set_arg(2, &dag.buffer)
+                .map_err(|e| format!("a2: {e}"))?;
+            self.hashimoto_kernel
+                .set_arg(3, &(dag.full_size as u64))
+                .map_err(|e| format!("a3: {e}"))?;
+            self.hashimoto_kernel
+                .set_arg(4, &target_buf)
+                .map_err(|e| format!("a4: {e}"))?;
+            self.hashimoto_kernel
+                .set_arg(5, &counter)
+                .map_err(|e| format!("a5: {e}"))?;
+            self.hashimoto_kernel
+                .set_arg(6, &results)
+                .map_err(|e| format!("a6: {e}"))?;
+            self.hashimoto_kernel
+                .set_arg(7, &(results_cap as u32))
+                .map_err(|e| format!("a7: {e}"))?;
         }
         let gws: [usize; 1] = [1];
         let lws: [usize; 1] = [1];
         unsafe {
             self.queue
-                .enqueue_nd_range_kernel(self.hashimoto_kernel.get(), 1, std::ptr::null(), gws.as_ptr(), lws.as_ptr(), &[])
+                .enqueue_nd_range_kernel(
+                    self.hashimoto_kernel.get(),
+                    1,
+                    std::ptr::null(),
+                    gws.as_ptr(),
+                    lws.as_ptr(),
+                    &[],
+                )
                 .map_err(|e| format!("ndrange: {e}"))?;
         }
         self.queue.finish().map_err(|e| format!("finish: {e}"))?;
         let mut cnt = [0u64];
         unsafe {
             self.queue
-                .enqueue_read_buffer(&mut counter, 1, 0, &mut cnt, &[])
+                .enqueue_read_buffer(&counter, 1, 0, &mut cnt, &[])
                 .map_err(|e| format!("read counter: {e}"))?;
         }
         if cnt[0] == 0 {
@@ -287,7 +351,7 @@ impl EthashGpuMiner {
         let mut data = vec![0u8; 72];
         unsafe {
             self.queue
-                .enqueue_read_buffer(&mut results, 1, 0, &mut data, &[])
+                .enqueue_read_buffer(&results, 1, 0, &mut data, &[])
                 .map_err(|e| format!("read results: {e}"))?;
         }
         let mut mix = [0u8; 32];
@@ -319,7 +383,12 @@ impl EthashGpuMiner {
     pub fn build_dag(&self, cache: &[u8], full_size: usize) -> Result<DagBuffer, String> {
         let n_items = full_size / 64;
         let dag = unsafe {
-            Buffer::<u8>::create(&self.context, CL_MEM_READ_WRITE, full_size, std::ptr::null_mut())
+            Buffer::<u8>::create(
+                &self.context,
+                CL_MEM_READ_WRITE,
+                full_size,
+                std::ptr::null_mut(),
+            )
         }
         .map_err(|e| format!("alloc dag: {e}"))?;
 
@@ -335,11 +404,15 @@ impl EthashGpuMiner {
 
         // gpn_dag_item(cache, cache_len, dag, item_index)
         unsafe {
-            self.dag_kernel.set_arg(0, &cache_buf).map_err(|e| format!("arg0: {e}"))?;
+            self.dag_kernel
+                .set_arg(0, &cache_buf)
+                .map_err(|e| format!("arg0: {e}"))?;
             self.dag_kernel
                 .set_arg(1, &(cache.len() as u32))
                 .map_err(|e| format!("arg1: {e}"))?;
-            self.dag_kernel.set_arg(2, &dag).map_err(|e| format!("arg2: {e}"))?;
+            self.dag_kernel
+                .set_arg(2, &dag)
+                .map_err(|e| format!("arg2: {e}"))?;
             self.dag_kernel
                 .set_arg(3, &0u64)
                 .map_err(|e| format!("arg3: {e}"))?;
@@ -349,10 +422,19 @@ impl EthashGpuMiner {
         let global: [usize; 1] = [round_up(n_items, local[0])];
         unsafe {
             self.queue
-                .enqueue_nd_range_kernel(self.dag_kernel.get(), 1, std::ptr::null(), global.as_ptr(), local.as_ptr(), &[])
+                .enqueue_nd_range_kernel(
+                    self.dag_kernel.get(),
+                    1,
+                    std::ptr::null(),
+                    global.as_ptr(),
+                    local.as_ptr(),
+                    &[],
+                )
                 .map_err(|e| format!("dag ndrange: {e}"))?;
         }
-        self.queue.finish().map_err(|e| format!("dag finish: {e}"))?;
+        self.queue
+            .finish()
+            .map_err(|e| format!("dag finish: {e}"))?;
         log::info!(
             "GPU DAG built: {} MiB ({} items)",
             full_size / (1024 * 1024),
@@ -403,24 +485,39 @@ impl EthashGpuMiner {
                 .enqueue_write_buffer(&mut counter, 1, 0, &[zero], &[])
                 .map_err(|e| format!("zero counter: {e}"))?;
         }
-        let mut results = unsafe {
-            Buffer::<u8>::create(&self.context, CL_MEM_READ_WRITE, results_cap * 72, std::ptr::null_mut())
+        let results = unsafe {
+            Buffer::<u8>::create(
+                &self.context,
+                CL_MEM_READ_WRITE,
+                results_cap * 72,
+                std::ptr::null_mut(),
+            )
         }
         .map_err(|e| format!("results buf: {e}"))?;
 
         // gpn_hashimoto(header, nonce_start, dag, full_size, target, counter, results, cap)
         unsafe {
-            self.hashimoto_kernel.set_arg(0, &header_buf).map_err(|e| format!("a0: {e}"))?;
+            self.hashimoto_kernel
+                .set_arg(0, &header_buf)
+                .map_err(|e| format!("a0: {e}"))?;
             self.hashimoto_kernel
                 .set_arg(1, &nonce_start)
                 .map_err(|e| format!("a1: {e}"))?;
-            self.hashimoto_kernel.set_arg(2, &dag.buffer).map_err(|e| format!("a2: {e}"))?;
+            self.hashimoto_kernel
+                .set_arg(2, &dag.buffer)
+                .map_err(|e| format!("a2: {e}"))?;
             self.hashimoto_kernel
                 .set_arg(3, &(dag.full_size as u64))
                 .map_err(|e| format!("a3: {e}"))?;
-            self.hashimoto_kernel.set_arg(4, &target_buf).map_err(|e| format!("a4: {e}"))?;
-            self.hashimoto_kernel.set_arg(5, &counter).map_err(|e| format!("a5: {e}"))?;
-            self.hashimoto_kernel.set_arg(6, &results).map_err(|e| format!("a6: {e}"))?;
+            self.hashimoto_kernel
+                .set_arg(4, &target_buf)
+                .map_err(|e| format!("a4: {e}"))?;
+            self.hashimoto_kernel
+                .set_arg(5, &counter)
+                .map_err(|e| format!("a5: {e}"))?;
+            self.hashimoto_kernel
+                .set_arg(6, &results)
+                .map_err(|e| format!("a6: {e}"))?;
             self.hashimoto_kernel
                 .set_arg(7, &(results_cap as u32))
                 .map_err(|e| format!("a7: {e}"))?;
@@ -430,15 +527,24 @@ impl EthashGpuMiner {
         let global: [usize; 1] = [round_up(batch, local[0])];
         unsafe {
             self.queue
-                .enqueue_nd_range_kernel(self.hashimoto_kernel.get(), 1, std::ptr::null(), global.as_ptr(), local.as_ptr(), &[])
+                .enqueue_nd_range_kernel(
+                    self.hashimoto_kernel.get(),
+                    1,
+                    std::ptr::null(),
+                    global.as_ptr(),
+                    local.as_ptr(),
+                    &[],
+                )
                 .map_err(|e| format!("hashimoto ndrange: {e}"))?;
         }
-        self.queue.finish().map_err(|e| format!("hashimoto finish: {e}"))?;
+        self.queue
+            .finish()
+            .map_err(|e| format!("hashimoto finish: {e}"))?;
 
         let mut cnt = [0u64];
         unsafe {
             self.queue
-                .enqueue_read_buffer(&mut counter, 1, 0, &mut cnt, &[])
+                .enqueue_read_buffer(&counter, 1, 0, &mut cnt, &[])
                 .map_err(|e| format!("read counter: {e}"))?;
         }
         if cnt[0] == 0 {
@@ -448,7 +554,7 @@ impl EthashGpuMiner {
         let mut data = vec![0u8; read * 72];
         unsafe {
             self.queue
-                .enqueue_read_buffer(&mut results, 1, 0, &mut data, &[])
+                .enqueue_read_buffer(&results, 1, 0, &mut data, &[])
                 .map_err(|e| format!("read results: {e}"))?;
         }
         let mut mix = [0u8; 32];
@@ -484,7 +590,7 @@ impl EthashGpuMiner {
 }
 
 fn round_up(n: usize, mult: usize) -> usize {
-    ((n + mult - 1) / mult) * mult
+    n.div_ceil(mult) * mult
 }
 
 #[cfg(test)]
@@ -512,15 +618,19 @@ mod tests {
         let seed = ethash::get_seedhash(epoch);
         let mut cache = vec![0u8; cache_size];
         ethash::make_cache(&mut cache, seed);
-        eprintln!("cache={} bytes, full_size={} MiB", cache_size, full_size / (1024 * 1024));
+        eprintln!(
+            "cache={} bytes, full_size={} MiB",
+            cache_size,
+            full_size / (1024 * 1024)
+        );
 
         let dag = miner.build_dag(&cache, full_size).expect("dag");
 
         let target_all = [0xffu8; 32]; // every nonce qualifies
-        // `batch=1` still launches `round_up(1,256)=256` work items (nonces
-        // start..start+255); the kernel returns whichever nonce wins the atomic
-        // append. So we validate the RETURNED nonce's mix+result against the
-        // ethash reference, which is the correctness claim that matters.
+                                       // `batch=1` still launches `round_up(1,256)=256` work items (nonces
+                                       // start..start+255); the kernel returns whichever nonce wins the atomic
+                                       // append. So we validate the RETURNED nonce's mix+result against the
+                                       // ethash reference, which is the correctness claim that matters.
         let start_nonces: [u64; 5] = [0, 1, 42, 0xdead_beef, 0x0123_4567_89ab_cdef];
         let mut checked = 0u32;
         for start in start_nonces {
@@ -532,8 +642,7 @@ mod tests {
 
             let ref_h = ethereum_types::H256::from_slice(&header);
             let ref_n = ethereum_types::H64::from_low_u64_be(seal.nonce);
-            let (ref_mix, ref_result) =
-                ethash::hashimoto_light(ref_h, ref_n, full_size, &cache);
+            let (ref_mix, ref_result) = ethash::hashimoto_light(ref_h, ref_n, full_size, &cache);
             assert_eq!(
                 seal.mix.as_slice(),
                 ref_mix.as_bytes(),
@@ -574,9 +683,15 @@ mod tests {
 
         for item in [0usize, 1, 2, 3, 100, 1000, 100000] {
             let gpu = miner.read_dag_item(&dag, item).expect("read");
-            let ref_item: [u8; 64] =
-                ethash::calc_dataset_item(&cache, item).as_bytes().try_into().unwrap();
-            assert_eq!(gpu.as_slice(), ref_item.as_slice(), "DAG item {item} mismatch");
+            let ref_item: [u8; 64] = ethash::calc_dataset_item(&cache, item)
+                .as_bytes()
+                .try_into()
+                .unwrap();
+            assert_eq!(
+                gpu.as_slice(),
+                ref_item.as_slice(),
+                "DAG item {item} mismatch"
+            );
             eprintln!("dag item {item}: match ✓");
         }
         eprintln!("GPU DAG generation matches reference ✓");
@@ -590,11 +705,11 @@ mod tests {
         cache: &[u8],
     ) -> (Vec<u8>, Vec<u32>, Vec<u8>, Vec<u8>, Vec<u8>) {
         use sha3::{Digest, Keccak256, Keccak512};
-        let fnv = |a: u32, b: u32| (((a as u64 * 0x0100_0193) ^ b as u64) as u32);
+        let fnv = |a: u32, b: u32| ((a as u64 * 0x0100_0193) ^ b as u64) as u32;
 
         let mut h = Keccak512::new();
         h.update(header);
-        h.update(&nonce.to_le_bytes());
+        h.update(nonce.to_le_bytes());
         let seed: Vec<u8> = h.finalize().to_vec();
 
         let mut mix = vec![0u8; 128];
@@ -613,7 +728,7 @@ mod tests {
                 % (n / mixhashes)
                 * mixhashes;
             ps.push(p as u32);
-            let mut newdata = vec![0u8; 128];
+            let mut newdata = [0u8; 128];
             for j in 0..2 {
                 let item = ethash::calc_dataset_item(cache, p + j);
                 newdata[j * 64..j * 64 + 64].copy_from_slice(item.as_bytes());
@@ -681,10 +796,16 @@ mod tests {
         // p [64..320]
         let mut gpu_p = Vec::new();
         for i in 0..64 {
-            gpu_p.push(u32::from_le_bytes(trace[64 + i * 4..64 + i * 4 + 4].try_into().unwrap()));
+            gpu_p.push(u32::from_le_bytes(
+                trace[64 + i * 4..64 + i * 4 + 4].try_into().unwrap(),
+            ));
         }
         let p_diff: Vec<usize> = (0..64).filter(|&i| gpu_p[i] != r_p[i]).collect();
-        eprintln!("p match count: {}/64, first diffs: {:?}", 64 - p_diff.len(), &p_diff[..p_diff.len().min(8)]);
+        eprintln!(
+            "p match count: {}/64, first diffs: {:?}",
+            64 - p_diff.len(),
+            &p_diff[..p_diff.len().min(8)]
+        );
         for &i in p_diff.iter().take(4) {
             eprintln!("  p[{i}] gpu={} ref={}", gpu_p[i], r_p[i]);
         }
@@ -706,8 +827,16 @@ mod tests {
             .expect("single")
             .expect("should find");
         assert_eq!(seal.nonce, nonce, "single-nonce nonce mismatch");
-        assert_eq!(seal.mix.as_slice(), r_cmix.as_slice(), "single-nonce mix mismatch");
-        assert_eq!(seal.result.as_slice(), r_result.as_slice(), "single-nonce result mismatch");
+        assert_eq!(
+            seal.mix.as_slice(),
+            r_cmix.as_slice(),
+            "single-nonce mix mismatch"
+        );
+        assert_eq!(
+            seal.result.as_slice(),
+            r_result.as_slice(),
+            "single-nonce result mismatch"
+        );
         eprintln!("single work-item mine matches reference ✓");
     }
 }

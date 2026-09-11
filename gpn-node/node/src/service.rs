@@ -4,11 +4,11 @@ use codec::Decode;
 use futures::FutureExt;
 use gpn_runtime::{self, Block, RuntimeApi};
 use sc_basic_authorship::ProposerFactory;
-use sc_client_api::BlockBackend;
 use sc_client_api::Backend;
+use sc_client_api::BlockBackend;
 use sc_client_api::StorageProvider;
 use sc_consensus::{BlockImport, LongestChain};
-use sc_consensus_pow::{PowAlgorithm, PowBlockImport, PowImportQueue, start_mining_worker};
+use sc_consensus_pow::{start_mining_worker, PowAlgorithm, PowBlockImport, PowImportQueue};
 use sc_network_sync::SyncingService;
 use sc_service::{error::Error as ServiceError, Configuration, TaskManager};
 use sc_telemetry::{Telemetry, TelemetryWorker};
@@ -146,7 +146,10 @@ fn verify_seal(pre_hash: &<Block as BlockT>::Hash, seal: &Seal, target: U256) ->
 impl PowAlgorithm<Block> for GPNPowAlgorithm {
     type Difficulty = U256;
 
-    fn difficulty(&self, parent: <Block as BlockT>::Hash) -> Result<Self::Difficulty, sc_consensus_pow::Error<Block>> {
+    fn difficulty(
+        &self,
+        parent: <Block as BlockT>::Hash,
+    ) -> Result<Self::Difficulty, sc_consensus_pow::Error<Block>> {
         // Read the pallet's stored difficulty target at the parent block. The
         // pallet self-tunes it each block toward the target block time.
         let data = self
@@ -179,11 +182,15 @@ impl PowAlgorithm<Block> for GPNPowAlgorithm {
 ///
 /// Returns a closure (rather than a named fn) so the future's error type is
 /// inferred from the caller's `CreateInherentDataProviders` bound.
-fn create_inherent_data_providers() -> impl Fn(<Block as BlockT>::Hash, ()) -> futures::future::BoxFuture<'static, Result<sp_timestamp::InherentDataProvider, Box<dyn std::error::Error + Send + Sync>>> {
+fn create_inherent_data_providers() -> impl Fn(
+    <Block as BlockT>::Hash,
+    (),
+) -> futures::future::BoxFuture<
+    'static,
+    Result<sp_timestamp::InherentDataProvider, Box<dyn std::error::Error + Send + Sync>>,
+> {
     move |_parent: <Block as BlockT>::Hash, _data: ()| {
-        Box::pin(async move {
-            Ok(sp_timestamp::InherentDataProvider::from_system_time())
-        })
+        Box::pin(async move { Ok(sp_timestamp::InherentDataProvider::from_system_time()) })
     }
 }
 
@@ -226,7 +233,9 @@ pub fn new_partial(config: &Configuration) -> Result<Service, ServiceError> {
     let client = Arc::new(client);
 
     let telemetry = telemetry.map(|(worker, telemetry)| {
-        task_manager.spawn_handle().spawn("telemetry", None, worker.run());
+        task_manager
+            .spawn_handle()
+            .spawn("telemetry", None, worker.run());
         telemetry
     });
 
@@ -243,7 +252,9 @@ pub fn new_partial(config: &Configuration) -> Result<Service, ServiceError> {
         .build(),
     );
 
-    let algorithm = GPNPowAlgorithm { client: client.clone() };
+    let algorithm = GPNPowAlgorithm {
+        client: client.clone(),
+    };
 
     // Shared slot that the authority mining worker is parked into later, so
     // the external-miner RPC can reach it lazily at call time.
@@ -334,7 +345,9 @@ pub fn new_full<
         task_manager.spawn_handle().spawn(
             "offchain-workers-runner",
             "offchain-worker",
-            offchain_workers.run(client.clone(), task_manager.spawn_handle()).boxed(),
+            offchain_workers
+                .run(client.clone(), task_manager.spawn_handle())
+                .boxed(),
         );
     }
 
@@ -346,7 +359,10 @@ pub fn new_full<
         let client = client.clone();
         let miner_worker_slot = miner_worker_slot.clone();
         Box::new(move |_| {
-            Ok(crate::rpc::create_full_rpc(miner_worker_slot.clone(), client.clone()))
+            Ok(crate::rpc::create_full_rpc(
+                miner_worker_slot.clone(),
+                client.clone(),
+            ))
         })
     };
 
@@ -399,7 +415,9 @@ pub fn new_full<
             Duration::from_secs(5),
         );
 
-        task_manager.spawn_essential_handle().spawn("pow-mining-worker", None, task);
+        task_manager
+            .spawn_essential_handle()
+            .spawn("pow-mining-worker", None, task);
 
         // Park a clone of the worker in the shared slot so external miners can
         // fetch templates and submit seals over RPC.
@@ -413,7 +431,8 @@ pub fn new_full<
     Ok(task_manager)
 }
 
-pub(crate) type MiningWorker = sc_consensus_pow::MiningHandle<Block, GPNPowAlgorithm, Arc<SyncingService<Block>>>;
+pub(crate) type MiningWorker =
+    sc_consensus_pow::MiningHandle<Block, GPNPowAlgorithm, Arc<SyncingService<Block>>>;
 
 /// How many nonces the GPU searches per `worker.metadata()` poll. Large enough
 /// to find a dev-difficulty solution in one shot, but bounded so we regularly
@@ -589,7 +608,10 @@ mod seal_tests {
         });
         let seal = make_seal(&pre_hash, target);
         assert_eq!(seal.len(), SEAL_LEN, "seal must be exactly 40 bytes");
-        assert!(verify_seal(&pre_hash.into(), &seal, target), "valid seal rejected");
+        assert!(
+            verify_seal(&pre_hash.into(), &seal, target),
+            "valid seal rejected"
+        );
     }
 
     /// A seal with the wrong mix_hash must be rejected even if the nonce is
@@ -605,7 +627,10 @@ mod seal_tests {
         let mut seal = make_seal(&pre_hash, target);
         let last = seal.len() - 1;
         seal[last] ^= 0xff; // corrupt the mix hash
-        assert!(!verify_seal(&pre_hash.into(), &seal, target), "corrupt mix accepted");
+        assert!(
+            !verify_seal(&pre_hash.into(), &seal, target),
+            "corrupt mix accepted"
+        );
     }
 
     /// Seals of the wrong length must always be rejected (no panic on short
@@ -622,12 +647,18 @@ mod seal_tests {
 
         // Too short (39 bytes).
         let short: Vec<u8> = good[..SEAL_LEN - 1].to_vec();
-        assert!(!verify_seal(&pre_hash.into(), &short, target), "short seal accepted");
+        assert!(
+            !verify_seal(&pre_hash.into(), &short, target),
+            "short seal accepted"
+        );
 
         // Too long (41 bytes).
         let mut long = good.clone();
         long.push(0u8);
-        assert!(!verify_seal(&pre_hash.into(), &long, target), "long seal accepted");
+        assert!(
+            !verify_seal(&pre_hash.into(), &long, target),
+            "long seal accepted"
+        );
     }
 
     /// A genuine seal must be rejected when the target is below the produced
@@ -648,7 +679,10 @@ mod seal_tests {
             b[31] = 0xff; // tiny target 2^8
             b
         });
-        assert!(!verify_seal(&pre_hash.into(), &seal, hard), "too-hard seal accepted");
+        assert!(
+            !verify_seal(&pre_hash.into(), &seal, hard),
+            "too-hard seal accepted"
+        );
     }
 
     /// A different block header (pre-hash) must invalidate an otherwise valid

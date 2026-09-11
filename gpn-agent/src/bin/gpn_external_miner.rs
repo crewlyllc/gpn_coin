@@ -25,9 +25,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
     let args: Vec<String> = std::env::args().collect();
-    let rpc_url = args.get(1).cloned().unwrap_or_else(|| "http://127.0.0.1:9944".to_string());
+    let rpc_url = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| "http://127.0.0.1:9944".to_string());
     let device_index: usize = parse_u64(args.get(2).map(|s| s.as_str()).unwrap_or("0"), 0) as usize;
-    let batch: usize = parse_u64(args.get(3).map(|s| s.as_str()).unwrap_or("1048576"), 1 << 20) as usize;
+    let batch: usize = parse_u64(
+        args.get(3).map(|s| s.as_str()).unwrap_or("1048576"),
+        1 << 20,
+    ) as usize;
     let poll_ms: u64 = parse_u64(args.get(4).map(|s| s.as_str()).unwrap_or("2000"), 2000);
 
     println!("== GPN external GPU miner ==");

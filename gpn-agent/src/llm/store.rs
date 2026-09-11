@@ -155,7 +155,10 @@ impl LlmJob {
 
 fn rand_like_seed() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let n = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let n = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
     (n as i64) & 0x7fff_ffff
 }
 

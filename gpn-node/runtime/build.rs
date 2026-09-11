@@ -2,7 +2,7 @@
 
 #[cfg(all(feature = "std", not(feature = "metadata-hash")))]
 fn main() {
-	substrate_wasm_builder::WasmBuilder::build_using_defaults();
+    substrate_wasm_builder::WasmBuilder::build_using_defaults();
 }
 
 /// The wasm builder is deactivated when compiling

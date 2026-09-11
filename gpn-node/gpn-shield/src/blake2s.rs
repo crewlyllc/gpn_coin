@@ -17,12 +17,18 @@
 //! in-field against a plain-Rust reference, and that the reference reproduces
 //! the canonical RFC 7693 `blake2s-256` test vector end-to-end.
 
-use crate::gadget::{Word, WordCircuit, g_round_ref, word_to_u32};
+use crate::gadget::{g_round_ref, word_to_u32, Word, WordCircuit};
 
 /// blake2s initial state (RFC 7693 §2.6).
 pub const IV: [u32; 8] = [
-    0x6A09_E667, 0xBB67_AE85, 0x3C6E_F372, 0xA54F_F53A,
-    0x510E_527F, 0x9B05_688C, 0x1F83_D9AB, 0x5BE0_CD19,
+    0x6A09_E667,
+    0xBB67_AE85,
+    0x3C6E_F372,
+    0xA54F_F53A,
+    0x510E_527F,
+    0x9B05_688C,
+    0x1F83_D9AB,
+    0x5BE0_CD19,
 ];
 
 /// blake2s message schedule — `sigma[r]` picks which message words feed each
@@ -52,12 +58,7 @@ pub fn g_round_at(
     x: &Word,
     y: &Word,
 ) {
-    let mut quad = [
-        v[a].clone(),
-        v[b].clone(),
-        v[d].clone(),
-        v[e].clone(),
-    ];
+    let mut quad = [v[a].clone(), v[b].clone(), v[d].clone(), v[e].clone()];
     c.g_round(&mut quad, x, y);
     v[a] = quad[0].clone();
     v[b] = quad[1].clone();
@@ -274,7 +275,12 @@ pub fn blake2s_256_gadget(c: &mut WordCircuit, data: &[Byte]) -> [Word; 8] {
         // Marshal bytes [start..start+64) into 16 words, zero-padded past len.
         let mut m: [Word; 16] = std::array::from_fn(|_| Vec::new());
         for w in 0..16 {
-            let mut quad = [zero_byte.clone(), zero_byte.clone(), zero_byte.clone(), zero_byte.clone()];
+            let mut quad = [
+                zero_byte.clone(),
+                zero_byte.clone(),
+                zero_byte.clone(),
+                zero_byte.clone(),
+            ];
             for j in 0..4 {
                 let idx = start + w * 4 + j;
                 if idx < n {
@@ -336,11 +342,7 @@ pub fn note_commitment_gate(
 ///
 /// `rcm` is the 32-byte trapdoor witness, `position` the pool index (u64).
 /// Preimage = 8 + 32 + 8 = 48 bytes, spanning 1 block.
-pub fn nullifier_gate(
-    c: &mut WordCircuit,
-    rcm: &[Byte; 32],
-    position: u64,
-) -> [Word; 8] {
+pub fn nullifier_gate(c: &mut WordCircuit, rcm: &[Byte; 32], position: u64) -> [Word; 8] {
     let mut pre: Vec<Byte> = Vec::with_capacity(8 + 32 + 8);
     for &b in NF_DOMAIN {
         pre.push(alloc_byte(c, b));
@@ -369,10 +371,9 @@ mod tests {
         // RFC 7693 §Appendix A: blake2s-256 of the empty string.
         let digest = blake2s_256_ref(b"");
         let expected: [u8; 32] = [
-            0x69, 0x21, 0x7a, 0x30, 0x79, 0x90, 0x80, 0x94,
-            0xe1, 0x11, 0x21, 0xd0, 0x42, 0x35, 0x4a, 0x7c,
-            0x1f, 0x55, 0xb6, 0x48, 0x2c, 0xa1, 0xa5, 0x1e,
-            0x1b, 0x25, 0x0d, 0xfd, 0x1e, 0xd0, 0xee, 0xf9,
+            0x69, 0x21, 0x7a, 0x30, 0x79, 0x90, 0x80, 0x94, 0xe1, 0x11, 0x21, 0xd0, 0x42, 0x35,
+            0x4a, 0x7c, 0x1f, 0x55, 0xb6, 0x48, 0x2c, 0xa1, 0xa5, 0x1e, 0x1b, 0x25, 0x0d, 0xfd,
+            0x1e, 0xd0, 0xee, 0xf9,
         ];
         assert_eq!(digest, expected, "blake2s-256('') must match RFC 7693");
     }
@@ -382,10 +383,9 @@ mod tests {
         // blake2s-256 of "abc" (RFC 7693 Appendix A).
         let digest = blake2s_256_ref(b"abc");
         let expected: [u8; 32] = [
-            0x50, 0x8c, 0x5e, 0x8c, 0x32, 0x7c, 0x14, 0xe2,
-            0xe1, 0xa7, 0x2b, 0xa3, 0x4e, 0xeb, 0x45, 0x2f,
-            0x37, 0x45, 0x8b, 0x20, 0x9e, 0xd6, 0x3a, 0x29,
-            0x4d, 0x99, 0x9b, 0x4c, 0x86, 0x67, 0x59, 0x82,
+            0x50, 0x8c, 0x5e, 0x8c, 0x32, 0x7c, 0x14, 0xe2, 0xe1, 0xa7, 0x2b, 0xa3, 0x4e, 0xeb,
+            0x45, 0x2f, 0x37, 0x45, 0x8b, 0x20, 0x9e, 0xd6, 0x3a, 0x29, 0x4d, 0x99, 0x9b, 0x4c,
+            0x86, 0x67, 0x59, 0x82,
         ];
         assert_eq!(digest, expected, "blake2s-256('abc') must match RFC 7693");
     }
@@ -395,14 +395,32 @@ mod tests {
         // Drive the R1CS gadget with a deterministic h/m/t and check the witness
         // satisfies every constraint AND equals compress_ref's output.
         let h = [
-            0x6A09_E667u32, 0xBB67_AE85, 0x3C6E_F372, 0xA54F_F53A,
-            0x510E_527F, 0x9B05_688C, 0x1F83_D9AB, 0x5BE0_CD19,
+            0x6A09_E667u32,
+            0xBB67_AE85,
+            0x3C6E_F372,
+            0xA54F_F53A,
+            0x510E_527F,
+            0x9B05_688C,
+            0x1F83_D9AB,
+            0x5BE0_CD19,
         ];
         let m = [
-            0x0000_0001, 0x0000_0002, 0x0000_0003, 0x0000_0004,
-            0x0000_0005, 0x0000_0006, 0x0000_0007, 0x0000_0008,
-            0x0000_0009, 0x0000_000A, 0x0000_000B, 0x0000_000C,
-            0x0000_000D, 0x0000_000E, 0x0000_000F, 0x0000_0010,
+            0x0000_0001,
+            0x0000_0002,
+            0x0000_0003,
+            0x0000_0004,
+            0x0000_0005,
+            0x0000_0006,
+            0x0000_0007,
+            0x0000_0008,
+            0x0000_0009,
+            0x0000_000A,
+            0x0000_000B,
+            0x0000_000C,
+            0x0000_000D,
+            0x0000_000E,
+            0x0000_000F,
+            0x0000_0010,
         ];
         let t0 = 64u32;
         let t1 = 0u32;
@@ -413,7 +431,10 @@ mod tests {
         let mw: [Word; 16] = std::array::from_fn(|i| c.alloc_word(m[i]));
         let out = compress_gadget(&mut c, &hw, &mw, t0, t1, true);
         let (r1cs, z) = c.into_parts(1);
-        assert!(constraints_hold(&r1cs, &z), "all R1CS constraints must hold");
+        assert!(
+            constraints_hold(&r1cs, &z),
+            "all R1CS constraints must hold"
+        );
         let got = state_to_u32s(&z, &out);
         assert_eq!(got, expected, "gadget compression must equal reference");
     }
@@ -435,13 +456,19 @@ mod tests {
         let mw: [Word; 16] = std::array::from_fn(|i| c.alloc_word(m[i]));
         let out = compress_gadget(&mut c, &hw, &mw, t0, t1, true);
         let (r1cs, z) = c.into_parts(1);
-        assert!(constraints_hold(&r1cs, &z), "all R1CS constraints must hold");
+        assert!(
+            constraints_hold(&r1cs, &z),
+            "all R1CS constraints must hold"
+        );
         let got = state_to_u32s(&z, &out);
         let mut bytes = [0u8; 32];
         for i in 0..8 {
             bytes[i * 4..i * 4 + 4].copy_from_slice(&got[i].to_le_bytes());
         }
-        assert_eq!(bytes, expected, "gadget must reproduce real blake2s-256('')");
+        assert_eq!(
+            bytes, expected,
+            "gadget must reproduce real blake2s-256('')"
+        );
     }
 
     #[test]
@@ -449,7 +476,9 @@ mod tests {
         // Confirm the circuit actually enforces the compression: mutate an input
         // word's LSB after the fact and the witness must stop satisfying.
         let h = [1, 2, 3, 4, 5, 6, 7, 8];
-        let m = [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24];
+        let m = [
+            9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+        ];
         let t0 = 128;
         let t1 = 0;
         let mut c = WordCircuit::new();
@@ -475,9 +504,16 @@ mod tests {
         let bytes: Vec<Byte> = data.iter().map(|&b| alloc_byte(&mut c, b)).collect();
         let state = blake2s_256_gadget(&mut c, &bytes);
         let (r1cs, z) = c.into_parts(1);
-        assert!(constraints_hold(&r1cs, &z), "all R1CS constraints must hold");
+        assert!(
+            constraints_hold(&r1cs, &z),
+            "all R1CS constraints must hold"
+        );
         let got = digest_to_bytes(&z, &state);
-        assert_eq!(got, blake2s_256_ref(&data), "multi-block hash must match ref");
+        assert_eq!(
+            got,
+            blake2s_256_ref(&data),
+            "multi-block hash must match ref"
+        );
     }
 
     #[test]
@@ -491,7 +527,10 @@ mod tests {
         let addr = alloc_bytes32(&mut c, &addr_raw);
         let cm = note_commitment_gate(&mut c, v, &rcm, &addr);
         let (r1cs, z) = c.into_parts(1);
-        assert!(constraints_hold(&r1cs, &z), "commitment gate constraints must hold");
+        assert!(
+            constraints_hold(&r1cs, &z),
+            "commitment gate constraints must hold"
+        );
         let got = digest_to_bytes(&z, &cm);
         // Reference: same preimage bytes as the on-chain note::note_commitment.
         let mut pre = Vec::with_capacity(8 + 16 + 32 + 32);
@@ -499,7 +538,11 @@ mod tests {
         pre.extend_from_slice(&v.to_be_bytes());
         pre.extend_from_slice(&rcm_raw);
         pre.extend_from_slice(&addr_raw);
-        assert_eq!(got, blake2s_256_ref(&pre), "cm must match on-chain construction");
+        assert_eq!(
+            got,
+            blake2s_256_ref(&pre),
+            "cm must match on-chain construction"
+        );
     }
 
     #[test]
@@ -511,13 +554,20 @@ mod tests {
         let rcm = alloc_bytes32(&mut c, &rcm_raw);
         let nf = nullifier_gate(&mut c, &rcm, position);
         let (r1cs, z) = c.into_parts(1);
-        assert!(constraints_hold(&r1cs, &z), "nullifier gate constraints must hold");
+        assert!(
+            constraints_hold(&r1cs, &z),
+            "nullifier gate constraints must hold"
+        );
         let got = digest_to_bytes(&z, &nf);
         let mut pre = Vec::with_capacity(8 + 32 + 8);
         pre.extend_from_slice(NF_DOMAIN);
         pre.extend_from_slice(&rcm_raw);
         pre.extend_from_slice(&position.to_be_bytes());
-        assert_eq!(got, blake2s_256_ref(&pre), "nf must match on-chain construction");
+        assert_eq!(
+            got,
+            blake2s_256_ref(&pre),
+            "nf must match on-chain construction"
+        );
     }
 
     #[test]
@@ -535,6 +585,9 @@ mod tests {
         // Tamper: flip the LSB of rcm byte 0 (bit var rcm[0][0]).
         let mut zbad = z.clone();
         zbad[rcm[0][0]] = bls12_381::Scalar::ONE - zbad[rcm[0][0]];
-        assert!(!constraints_hold(&r1cs, &zbad), "flipping rcm bit must break cm");
+        assert!(
+            !constraints_hold(&r1cs, &zbad),
+            "flipping rcm bit must break cm"
+        );
     }
 }

@@ -1,8 +1,8 @@
 //! Chain specification for the GPN network.
 
 use gpn_runtime::{
-    AccountId, BalancesConfig, GPUPoWConfig, GPUAttestationConfig, GPNTokenConfig,
-    ProfitabilityOracleConfig, RuntimeGenesisConfig, GPNTreasuryConfig,
+    AccountId, BalancesConfig, GPNTokenConfig, GPNTreasuryConfig, GPUAttestationConfig,
+    GPUPoWConfig, ProfitabilityOracleConfig, RuntimeGenesisConfig,
 };
 use sc_chain_spec::Properties;
 use sc_service::{ChainType, GenericChainSpec};
@@ -29,7 +29,8 @@ pub type ChainSpec = GenericChainSpec;
 pub fn account_id_from_seed(seed: &str) -> AccountId {
     sr25519::Pair::from_string(&format!("//{}", seed), None)
         .expect("static values are valid; qed")
-        .public().into()
+        .public()
+        .into()
 }
 
 /// Convert a whole-GPN amount to the chain's 12-decimal base units.
@@ -199,7 +200,9 @@ fn parse_reserve_env() -> Option<Vec<GenesisReserve>> {
         }
         let parts: Vec<&str> = entry.splitn(3, ':').collect();
         if parts.len() != 3 {
-            log::warn!("GPN_GENESIS_RESERVE: ignoring malformed entry '{entry}' (want name:ss58:amount)");
+            log::warn!(
+                "GPN_GENESIS_RESERVE: ignoring malformed entry '{entry}' (want name:ss58:amount)"
+            );
             continue;
         }
         let (name, addr, amt) = (parts[0].trim(), parts[1].trim(), parts[2].trim());
@@ -217,7 +220,11 @@ fn parse_reserve_env() -> Option<Vec<GenesisReserve>> {
                 continue;
             }
         };
-        out.push(GenesisReserve { name: name.to_string(), account, amount: gpn(amount) });
+        out.push(GenesisReserve {
+            name: name.to_string(),
+            account,
+            amount: gpn(amount),
+        });
     }
     Some(out)
 }
@@ -256,7 +263,7 @@ pub fn development_chain_spec() -> Result<ChainSpec, String> {
         .with_protocol_id("gpn")
         .with_properties(properties())
         .with_genesis_config(genesis_config_json(
-            vec![account_id_from_seed("Alice")],          // oracle operators
+            vec![account_id_from_seed("Alice")], // oracle operators
             vec![account_id_from_seed("Alice"), account_id_from_seed("Bob")], // admission committee
             vec![
                 account_id_from_seed("Alice"),
@@ -322,8 +329,8 @@ pub fn local_chain_spec() -> Result<ChainSpec, String> {
 /// cap, fair-launch economics) is identical to mainnet, so testnet-verified
 /// behavior transfers directly to mainnet.
 pub fn testnet_chain_spec() -> Result<ChainSpec, String> {
-    let wasm_binary = gpn_runtime::WASM_BINARY
-        .ok_or_else(|| "Testnet wasm binary not available".to_string())?;
+    let wasm_binary =
+        gpn_runtime::WASM_BINARY.ok_or_else(|| "Testnet wasm binary not available".to_string())?;
 
     Ok(ChainSpec::builder(wasm_binary, None)
         .with_name("GPN Public Testnet")
@@ -335,10 +342,7 @@ pub fn testnet_chain_spec() -> Result<ChainSpec, String> {
             // Bootstrap oracle operators (2-4) so the profitability feed is
             // populated on day one. Dev seed keys are fine for a disposable
             // testnet; real operators rotate them before any longer-lived run.
-            vec![
-                account_id_from_seed("Alice"),
-                account_id_from_seed("Bob"),
-            ],
+            vec![account_id_from_seed("Alice"), account_id_from_seed("Bob")],
             // Admission committee (Phase B): bootstrap the named committee so
             // operator admission works on day one (threshold approvals).
             vec![
@@ -371,8 +375,8 @@ pub fn testnet_chain_spec() -> Result<ChainSpec, String> {
 /// `gpn-token::mint_block_reward`). Genesis supply = 0, as the tokenomics spec
 /// requires. Initial difficulty targets ~15s blocks like the other specs.
 pub fn mainnet_chain_spec() -> Result<ChainSpec, String> {
-    let wasm_binary = gpn_runtime::WASM_BINARY
-        .ok_or_else(|| "Mainnet wasm binary not available".to_string())?;
+    let wasm_binary =
+        gpn_runtime::WASM_BINARY.ok_or_else(|| "Mainnet wasm binary not available".to_string())?;
 
     Ok(ChainSpec::builder(wasm_binary, None)
         .with_name("GPN Mainnet")
@@ -381,13 +385,13 @@ pub fn mainnet_chain_spec() -> Result<ChainSpec, String> {
         .with_protocol_id("gpn")
         .with_properties(properties())
         .with_genesis_config(genesis_config_json(
-            vec![],                  // no oracle operators at genesis
-            vec![],                  // no admission committee at genesis (inert by default)
-            vec![],                  // no endowed accounts - fair launch
-            vec![],                  // no reserves - mainnet stays fair-launch
+            vec![],                    // no oracle operators at genesis
+            vec![],                    // no admission committee at genesis (inert by default)
+            vec![],                    // no endowed accounts - fair launch
+            vec![],                    // no reserves - mainnet stays fair-launch
             AccountId::new([0u8; 32]), // mainnet sudo key = inert placeholder (not endowed),
-                                       // so sudo is unreachable until governance funds it. MUST
-                                       // be removed/rotated before real mainnet launch.
+            // so sudo is unreachable until governance funds it. MUST
+            // be removed/rotated before real mainnet launch.
             // Vested treasury allocation (D-T1/D-T6): 20% of the 1B cap = 200M
             // GPN, funded to the `gpn/trsy` pallet account and locked by the
             // tranche vesting schedule. Counts against the 1B supply cap.
@@ -437,7 +441,10 @@ fn genesis_config_json(
                     .collect();
                 // Named reserves ("set aside" accounts) — genesis-only funding.
                 for r in &reserves {
-                    let existing = balances.iter().find(|(a, _)| a == &r.account).map(|(_, b)| *b);
+                    let existing = balances
+                        .iter()
+                        .find(|(a, _)| a == &r.account)
+                        .map(|(_, b)| *b);
                     match existing {
                         Some(prev) => {
                             // Same account listed twice: sum the balances.
@@ -446,13 +453,18 @@ fn genesis_config_json(
                             }
                             log::info!(
                                 "GPN genesis reserve '{}' -> {} (+{} GPN, total {} GPN)",
-                                r.name, r.account, r.amount / 1_000_000_000_000, (prev + r.amount) / 1_000_000_000_000
+                                r.name,
+                                r.account,
+                                r.amount / 1_000_000_000_000,
+                                (prev + r.amount) / 1_000_000_000_000
                             );
                         }
                         None => {
                             log::info!(
                                 "GPN genesis reserve '{}' -> {} ({} GPN set aside)",
-                                r.name, r.account, r.amount / 1_000_000_000_000
+                                r.name,
+                                r.account,
+                                r.amount / 1_000_000_000_000
                             );
                             balances.push((r.account.clone(), r.amount));
                         }
@@ -502,11 +514,17 @@ fn genesis_config_json(
         gpn_treasury: GPNTreasuryConfig {
             roster: treasury_roster,
             threshold: TREASURY_THRESHOLD,
-            schedule: if treasury_alloc > 0 { treasury_schedule() } else { Vec::new() },
+            schedule: if treasury_alloc > 0 {
+                treasury_schedule()
+            } else {
+                Vec::new()
+            },
             _config: Default::default(),
         },
         transaction_payment: Default::default(),
-        sudo: pallet_sudo::GenesisConfig { key: Some(sudo_key) },
+        sudo: pallet_sudo::GenesisConfig {
+            key: Some(sudo_key),
+        },
     };
 
     serde_json::to_value(config).expect("Genesis config is valid JSON")
@@ -532,12 +550,27 @@ mod reserve_tests {
             account: acct.clone(),
             amount: gpn(1_000_000),
         }];
-        let json = genesis_config_json(vec![], vec![], vec![], reserves, account_id_from_seed("Alice"), 0, treasury_roster());
-        let bals = json["balances"]["balances"].as_array().expect("balances array");
-        let found = bals
-            .iter()
-            .find(|e| e[0].as_str().map(|s| s.contains("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY")).unwrap_or(false));
-        assert!(found.is_some(), "reserve account must be present in balances");
+        let json = genesis_config_json(
+            vec![],
+            vec![],
+            vec![],
+            reserves,
+            account_id_from_seed("Alice"),
+            0,
+            treasury_roster(),
+        );
+        let bals = json["balances"]["balances"]
+            .as_array()
+            .expect("balances array");
+        let found = bals.iter().find(|e| {
+            e[0].as_str()
+                .map(|s| s.contains("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"))
+                .unwrap_or(false)
+        });
+        assert!(
+            found.is_some(),
+            "reserve account must be present in balances"
+        );
     }
 
     #[test]
@@ -545,13 +578,21 @@ mod reserve_tests {
         // Mainnet path: no endowed accounts and no reserves -> zero balances
         // (fair launch), fee-sink NOT added.
         let json = genesis_config_json(
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
             vec![],
             AccountId::new([0u8; 32]),
             0,
             treasury_roster(),
         );
-        let bals = json["balances"]["balances"].as_array().expect("balances array");
-        assert!(bals.is_empty(), "mainnet must have zero endowed accounts, got {:?}", bals);
+        let bals = json["balances"]["balances"]
+            .as_array()
+            .expect("balances array");
+        assert!(
+            bals.is_empty(),
+            "mainnet must have zero endowed accounts, got {:?}",
+            bals
+        );
     }
 }

@@ -1,9 +1,8 @@
 /// Profitability calculator and auto-switch decision engine
 /// Determines the most profitable mode for the GPU at any time.
-
 pub mod scripted;
 
-use crate::{config::AgentConfig, gpu::GPUMonitor, chain::ChainClient, Mode};
+use crate::{chain::ChainClient, config::AgentConfig, gpu::GPUMonitor, Mode};
 use serde::{Deserialize, Serialize};
 
 /// Result of a profitability analysis
@@ -153,7 +152,9 @@ impl ProfitabilityCalculator {
     pub async fn analyze(&self) -> Result<ProfitAnalysis, Box<dyn std::error::Error>> {
         // Scripted feed: deterministic timeline, ignores live chain data.
         if let Some(feed) = &self.scripted {
-            let step = self.scripted_step.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let step = self
+                .scripted_step
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let snap = &feed.steps[step.min(feed.steps.len() - 1)];
             // Use the local GPU hashrate for the diagnostic field only.
             let gpu_info = self.gpu_monitor.get_gpu_info()?;
@@ -210,8 +211,7 @@ impl ProfitabilityCalculator {
             let bonds = self.chain_client.get_staked_bonds().await;
             // Align operator feeds with their bonds by account key; only keep
             // operators who appear in BOTH maps (bonded AND have posted).
-            let bond_of: std::collections::HashMap<String, u128> =
-                bonds.into_iter().collect();
+            let bond_of: std::collections::HashMap<String, u128> = bonds.into_iter().collect();
             let mut feeds: Vec<crate::chain::OnChainFeed> = Vec::new();
             let mut bond_weights: Vec<u128> = Vec::new();
             for (op, f) in ops.iter() {
@@ -270,8 +270,12 @@ impl ProfitabilityCalculator {
             ),
             None => (
                 self.chain_client.get_token_price_usd().await?,
-                self.chain_client.get_gpu_hour_price(&self.config.gpu_model).await?,
-                self.chain_client.get_utilization_rate(&self.config.gpu_model).await?,
+                self.chain_client
+                    .get_gpu_hour_price(&self.config.gpu_model)
+                    .await?,
+                self.chain_client
+                    .get_utilization_rate(&self.config.gpu_model)
+                    .await?,
                 self.chain_client.get_staking_apr().await?,
             ),
         };
@@ -281,7 +285,8 @@ impl ProfitabilityCalculator {
 
         // Calculate revenues. A stale feed forces mining: compute + staking
         // revenue = 0, so `recommended_mode()` picks Mining.
-        let mining = self.calc_mining_revenue(gpu_info.current_hashrate_mhs, difficulty, token_price);
+        let mining =
+            self.calc_mining_revenue(gpu_info.current_hashrate_mhs, difficulty, token_price);
         let (compute, staking) = if stale {
             (0.0, 0.0)
         } else {
@@ -351,7 +356,6 @@ impl ProfitabilityCalculator {
     /// and deflated compute revenue ~13x at token=$0.075, which is why the live
     /// chain feed never recommended Compute (only the scripted feed, which
     /// bypasses this calc, ever triggered job claiming). Fixed cycle 31.
-
 
     fn calc_staking_revenue(&self, staked_amount: f64, apr: f64, token_price: f64) -> f64 {
         let annual = staked_amount * (apr / 100.0);
@@ -429,7 +433,10 @@ mod tests {
             "expected {expected} USD/hr, got {revenue}"
         );
         // Sanity: it must be ~USD-scale, not deflated to ~$0.07.
-        assert!(revenue > 1.0, "compute revenue should be ~$1.38/hr, got {revenue}");
+        assert!(
+            revenue > 1.0,
+            "compute revenue should be ~$1.38/hr, got {revenue}"
+        );
     }
 
     #[test]
@@ -437,7 +444,7 @@ mod tests {
         // Plausible (within the 50 USD/hr ceiling).
         assert!(compute_revenue_reasonable(1.38, 50.0));
         assert!(compute_revenue_reasonable(50.0, 50.0)); // boundary == max is OK
-        // Implausible: zero / negative (garbage utilization or price).
+                                                         // Implausible: zero / negative (garbage utilization or price).
         assert!(!compute_revenue_reasonable(0.0, 50.0));
         assert!(!compute_revenue_reasonable(-1.0, 50.0));
         // Implausible: absurdly high (unit misconversion / outlier feed).

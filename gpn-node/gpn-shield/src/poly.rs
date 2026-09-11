@@ -106,7 +106,10 @@ impl Poly {
     /// Polynomial long division: returns `(quotient, remainder)` with
     /// `self = quotient·divisor + remainder`, `deg(remainder) < deg(divisor)`.
     pub fn div_rem(&self, divisor: &Poly) -> (Poly, Poly) {
-        assert!(divisor.deg() > 0 || divisor.0[0] != Scalar::ZERO, "division by zero");
+        assert!(
+            divisor.deg() > 0 || divisor.0[0] != Scalar::ZERO,
+            "division by zero"
+        );
         let mut rem = self.0.clone();
         let d = divisor.deg();
         let lead = divisor.0[d];
@@ -138,7 +141,11 @@ impl Poly {
 /// satisfying `p(xs[i]) = ys[i]` for all `i`. Naive O(n²) — fine for the
 /// small (≤ a few constraints) QAP circuits we build.
 pub fn interpolate(xs: &[Scalar], ys: &[Scalar]) -> Poly {
-    assert_eq!(xs.len(), ys.len(), "interpolate: point/value count mismatch");
+    assert_eq!(
+        xs.len(),
+        ys.len(),
+        "interpolate: point/value count mismatch"
+    );
     assert!(!xs.is_empty(), "interpolate: empty domain");
     let n = xs.len();
     // Result = Σ_j ys[j] · ℓ_j(x),  ℓ_j(x) = ∏_{k≠j} (x - x_k)/(x_j - x_k)
@@ -178,7 +185,10 @@ mod tests {
         let a = Poly(vec![Scalar::from(1), Scalar::from(1)]); // 1 + x
         let b = Poly(vec![Scalar::from(1), Scalar::from(1)]); // 1 + x
         let c = a.mul(&b); // 1 + 2x + x^2
-        assert_eq!(c, Poly(vec![Scalar::from(1), Scalar::from(2), Scalar::from(1)]));
+        assert_eq!(
+            c,
+            Poly(vec![Scalar::from(1), Scalar::from(2), Scalar::from(1)])
+        );
         assert_eq!(c.deg(), 2);
     }
 
@@ -214,6 +224,9 @@ mod tests {
         for (x, y) in xs.iter().zip(ys.iter()) {
             assert_eq!(p.eval(x), *y, "interpolant must hit all points");
         }
-        assert_eq!(p, Poly(vec![Scalar::from(1), Scalar::from(1), Scalar::from(1)]));
+        assert_eq!(
+            p,
+            Poly(vec![Scalar::from(1), Scalar::from(1), Scalar::from(1)])
+        );
     }
 }

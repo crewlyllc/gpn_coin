@@ -60,18 +60,24 @@ fn main() {
     let dag = miner.build_dag(&cache, full_size).expect("build DAG");
     println!(
         "target: 0x{}",
-        target.iter().rev().map(|b| format!("{b:02x}")).collect::<String>()
+        target
+            .iter()
+            .rev()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
     );
 
     let start = std::time::Instant::now();
-    let seal = miner.mine(&dag, &header, &target, nonce_start, batch).expect("mine");
+    let seal = miner
+        .mine(&dag, &header, &target, nonce_start, batch)
+        .expect("mine");
     let elapsed = start.elapsed();
 
     // Self-verify exactly like gpn-node's `verify_seal`:
     //   recompute ethash::hashimoto_light, require mix match AND result < target.
     let ref_h = ethereum_types::H256::from_slice(&header);
     let ref_n = ethereum_types::H64::from_low_u64_be(seal.nonce);
-    let (ref_mix, ref_result) = ethash::hashimoto_light(ref_h, ref_n, full_size, &cache);
+    let (ref_mix, _ref_result) = ethash::hashimoto_light(ref_h, ref_n, full_size, &cache);
     let mix_ok = seal.mix.as_slice() == ref_mix.as_bytes();
     let result_le = sp_core::U256::from_little_endian(seal.result.as_slice());
     let target_le = sp_core::U256::from_little_endian(&target);

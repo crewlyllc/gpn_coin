@@ -34,8 +34,8 @@
 pub mod blake2s;
 pub mod ec_ops;
 pub mod gadget;
-pub mod note_spend;
 pub mod groth16;
+pub mod note_spend;
 pub mod ntt;
 pub mod poly;
 pub mod qap;
@@ -76,7 +76,11 @@ pub enum VerifyError {
 ///
 /// This is a byte-for-byte match of the runtime verifier's pairing-product
 /// equation, so any proof accepted here is accepted on-chain (and vice-versa).
-pub fn verify(vk: &VerifyingKey, public_inputs: &[Scalar], proof: &Proof) -> Result<(), VerifyError> {
+pub fn verify(
+    vk: &VerifyingKey,
+    public_inputs: &[Scalar],
+    proof: &Proof,
+) -> Result<(), VerifyError> {
     if public_inputs.len() + 1 != vk.gamma_abc_g1.len() {
         return Err(VerifyError::InputLenMismatch);
     }
@@ -90,7 +94,11 @@ pub fn verify(vk: &VerifyingKey, public_inputs: &[Scalar], proof: &Proof) -> Res
         + pairing(&G1Affine::from(neg_alpha), &vk.beta_g2)
         + pairing(&G1Affine::from(acc), &vk.gamma_g2)
         + pairing(&G1Affine::from(neg_c), &vk.delta_g2);
-    if lhs == Gt::identity() { Ok(()) } else { Err(VerifyError::InvalidProof) }
+    if lhs == Gt::identity() {
+        Ok(())
+    } else {
+        Err(VerifyError::InvalidProof)
+    }
 }
 
 /// Deterministic scalar (must match the pallet's `groth16::test_scalar`).
@@ -139,7 +147,11 @@ pub mod ser {
     use super::*;
 
     pub fn proof_to_bytes(p: &Proof) -> ([u8; 48], [u8; 96], [u8; 48]) {
-        (p.a.to_compressed(), p.b.to_compressed(), p.c.to_compressed())
+        (
+            p.a.to_compressed(),
+            p.b.to_compressed(),
+            p.c.to_compressed(),
+        )
     }
 
     pub fn proof_from_bytes(a: &[u8; 48], b: &[u8; 96], c: &[u8; 48]) -> Option<Proof> {

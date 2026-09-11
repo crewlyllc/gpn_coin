@@ -24,11 +24,7 @@ pub mod crypto {
     }
 
     /// Verify a signature
-    pub fn verify_signature(
-        _message: &[u8],
-        signature: &[u8; 64],
-        _public_key: &[u8],
-    ) -> bool {
+    pub fn verify_signature(_message: &[u8], signature: &[u8; 64], _public_key: &[u8]) -> bool {
         // In production: use sp-core verification
         !signature.iter().all(|&b| b == 0)
     }
@@ -49,6 +45,12 @@ pub mod metrics {
         pub attestations_submitted: u64,
         pub mining_hashes_computed: u64,
         pub uptime_seconds: u64,
+    }
+
+    impl Default for MetricsCollector {
+        fn default() -> Self {
+            Self::new()
+        }
     }
 
     impl MetricsCollector {

@@ -26,7 +26,9 @@ use bls12_381::Scalar;
 use ff::Field;
 
 use crate::blake2s::{alloc_bytes32, digest_to_bytes, note_commitment_gate, nullifier_gate};
-use crate::gadget::{into_r1cs_with_domain, merkle_combine, merkle_membership_gate, Word, WordCircuit};
+use crate::gadget::{
+    into_r1cs_with_domain, merkle_combine, merkle_membership_gate, Word, WordCircuit,
+};
 use crate::qap::R1CS;
 
 /// A concrete note spend: the note being spent plus the Merkle path proving its
@@ -75,7 +77,8 @@ pub fn note_spend_r1cs(note: &NoteSpend) -> (R1CS, Vec<Scalar>) {
     let addr_bytes = alloc_bytes32(&mut c, &note.addr);
 
     // ---- Gate #2: commitment  cm = H("gpn/cm00" || v || rcm || addr).
-    let cm_words: [Word; 8] = note_commitment_gate(&mut c, note.value as u128, &rcm_bytes, &addr_bytes);
+    let cm_words: [Word; 8] =
+        note_commitment_gate(&mut c, note.value as u128, &rcm_bytes, &addr_bytes);
     // ---- Gate #3: nullifier   nf = H("gpn/nf00" || rcm || position).
     let nf_words: [Word; 8] = nullifier_gate(&mut c, &rcm_bytes, note.position);
 
@@ -122,8 +125,7 @@ pub fn note_spend_r1cs(note: &NoteSpend) -> (R1CS, Vec<Scalar>) {
     // Returns every intermediate parent var (root-ward); witness values for
     // these are NOT auto-filled (merkle_membership_gate allocs via
     // `builder.alloc`), so backfill them from the off-chain combiner.
-    let merkle_nodes =
-        merkle_membership_gate(&mut c.builder, cm_lo_idx, root_idx, &path_vars);
+    let merkle_nodes = merkle_membership_gate(&mut c.builder, cm_lo_idx, root_idx, &path_vars);
     backfill_merkle_witness(&mut c, cm_lo_idx, &note.path, &merkle_nodes);
 
     // Root witness = top of the (already-backfilled) path chain.
@@ -181,8 +183,10 @@ fn bind_digest_halves(c: &mut WordCircuit, words: &[Word; 8], lo_idx: usize, hi_
         hi_rhs.push((bit(i + 128), pow));
         pow *= Scalar::from(2u64);
     }
-    c.builder.add(vec![(lo_idx, Scalar::ONE)], vec![(0, Scalar::ONE)], lo_rhs);
-    c.builder.add(vec![(hi_idx, Scalar::ONE)], vec![(0, Scalar::ONE)], hi_rhs);
+    c.builder
+        .add(vec![(lo_idx, Scalar::ONE)], vec![(0, Scalar::ONE)], lo_rhs);
+    c.builder
+        .add(vec![(hi_idx, Scalar::ONE)], vec![(0, Scalar::ONE)], hi_rhs);
 }
 
 /// Split a 32-byte digest (little-endian bit order, byte 0 = LSB) into two
@@ -236,7 +240,11 @@ fn backfill_merkle_witness(
         // The parent vars are appended past the current end of `values`
         // (merkle_membership_gate allocs them via builder.alloc), in the same
         // level-0..n-1 order — so push rather than index-assign.
-        assert_eq!(merkle_nodes[i + 1], c.values.len(), "merkle parents must append in order");
+        assert_eq!(
+            merkle_nodes[i + 1],
+            c.values.len(),
+            "merkle parents must append in order"
+        );
         c.values.push(node_val);
     }
 }
@@ -356,4 +364,3 @@ pub(crate) mod tests {
         );
     }
 }
-

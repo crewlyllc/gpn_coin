@@ -89,7 +89,10 @@ fn parse_address(raw: &str) -> Result<[u8; 32], String> {
     if t.starts_with("0x") || t.starts_with("0X") {
         let hex_body = &t[2..];
         if hex_body.len() != 64 {
-            return Err(format!("hex address must be 64 chars (got {})", hex_body.len()));
+            return Err(format!(
+                "hex address must be 64 chars (got {})",
+                hex_body.len()
+            ));
         }
         let bytes = hex::decode(hex_body).map_err(|e| format!("invalid hex: {}", e))?;
         let mut out = [0u8; 32];
@@ -97,7 +100,8 @@ fn parse_address(raw: &str) -> Result<[u8; 32], String> {
         return Ok(out);
     }
     // ss58 form
-    let acct = AccountId32::from_str(t).map_err(|e| format!("invalid ss58 address '{}': {}", t, e))?;
+    let acct =
+        AccountId32::from_str(t).map_err(|e| format!("invalid ss58 address '{}': {}", t, e))?;
     Ok(acct.0)
 }
 
@@ -111,7 +115,7 @@ fn transfer_call(dest_bytes: &[u8; 32], amount_raw: u128) -> impl subxt::tx::Pay
     subxt::dynamic::tx(
         "Balances",
         "transfer_allow_death",
-        vec![Value::from_bytes(dest_bytes.to_vec()), Value::u128(amount_raw)],
+        vec![Value::from_bytes(dest_bytes), Value::u128(amount_raw)],
     )
 }
 
@@ -121,7 +125,10 @@ fn check_and_record(faucet: &Faucet, addr_key: &str, amount_gpn: f64) -> Result<
     let now = now_secs();
     let today = day_index(now);
     let mut ledger = faucet.ledger.lock().unwrap();
-    let e = ledger.entries.entry(addr_key.to_string()).or_insert((0, 0, 0.0, 0.0));
+    let e = ledger
+        .entries
+        .entry(addr_key.to_string())
+        .or_insert((0, 0, 0.0, 0.0));
 
     // Roll the daily counter if a new UTC day started.
     if e.1 != today {
@@ -167,7 +174,7 @@ async fn faucet_balance(faucet: &Faucet) -> f64 {
     let addr = subxt::dynamic::storage(
         "System",
         "Account",
-        vec![Value::from_bytes((acct.as_ref() as &[u8; 32]).to_vec())],
+        vec![Value::from_bytes(acct.as_ref() as &[u8; 32])],
     );
     let http_url = faucet
         .endpoint
@@ -177,11 +184,18 @@ async fn faucet_balance(faucet: &Faucet) -> f64 {
     // Head block (not finalized — PoW dev/testnet chains have no finality gadget).
     let head: Option<subxt::utils::H256> = {
         async {
-            let resp = reqwest::Client::new().post(&http_url).json(&body).send().await.ok()?;
+            let resp = reqwest::Client::new()
+                .post(&http_url)
+                .json(&body)
+                .send()
+                .await
+                .ok()?;
             let v: serde_json::Value = resp.json().await.ok()?;
             let hex_body = v.get("result")?.as_str()?.trim_start_matches("0x");
             let bytes = hex::decode(hex_body).ok()?;
-            if bytes.len() != 32 { return None; }
+            if bytes.len() != 32 {
+                return None;
+            }
             let mut arr = [0u8; 32];
             arr.copy_from_slice(&bytes);
             Some(arr.into())
@@ -191,14 +205,23 @@ async fn faucet_balance(faucet: &Faucet) -> f64 {
     let fetch = async {
         let thunk = match head {
             Some(h) => client.storage().at(h).fetch(&addr).await.ok()?,
-            None => client.storage().at_latest().await.ok()?.fetch(&addr).await.ok()?,
+            None => client
+                .storage()
+                .at_latest()
+                .await
+                .ok()?
+                .fetch(&addr)
+                .await
+                .ok()?,
         }?;
         let v = thunk.to_value().ok()?.remove_context();
         use subxt::ext::scale_value::ValueDef;
         if let ValueDef::Composite(c) = &v.value {
             if let subxt::ext::scale_value::Composite::Named(pairs) = c {
                 if let Some((_, data)) = pairs.iter().find(|(k, _)| k == "data") {
-                    if let ValueDef::Composite(subxt::ext::scale_value::Composite::Named(fields)) = &data.value {
+                    if let ValueDef::Composite(subxt::ext::scale_value::Composite::Named(fields)) =
+                        &data.value
+                    {
                         if let Some((_, free)) = fields.iter().find(|(k, _)| k == "free") {
                             return free.as_u128().map(|x| x as f64 / GPN_UNITS);
                         }
@@ -254,7 +277,12 @@ fn json_response(body: &str, status: u16) -> Response<std::io::Cursor<Vec<u8>>> 
         .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap())
 }
 
-fn route(faucet: &Faucet, handle: &tokio::runtime::Handle, path: &str, query: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+fn route(
+    faucet: &Faucet,
+    handle: &tokio::runtime::Handle,
+    path: &str,
+    query: &str,
+) -> Response<std::io::Cursor<Vec<u8>>> {
     // /status
     if path == "/status" || path == "/" && query.contains("status") {
         let bal = handle.block_on(faucet_balance(faucet));
@@ -290,7 +318,10 @@ fn route(faucet: &Faucet, handle: &tokio::runtime::Handle, path: &str, query: &s
             })
             .collect();
         let Some(raw_addr) = params.get("address") else {
-            return json_response(r#"{"ok":false,"error":"missing 'address' param (ss58 or 0x-hex)"}"#, 400);
+            return json_response(
+                r#"{"ok":false,"error":"missing 'address' param (ss58 or 0x-hex)"}"#,
+                400,
+            );
         };
         let dest_bytes = match parse_address(raw_addr) {
             Ok(b) => b,
@@ -310,11 +341,12 @@ fn route(faucet: &Faucet, handle: &tokio::runtime::Handle, path: &str, query: &s
         // path). Could be relaxed to only count on success.
         return match handle.block_on(drip(faucet, &dest_bytes, amount_gpn)) {
             Ok(msg) => json_response(
-                &serde_json::json!({ "ok": true, "message": msg, "amount_gpn": amount_gpn }).to_string(),
+                &serde_json::json!({ "ok": true, "message": msg, "amount_gpn": amount_gpn })
+                    .to_string(),
                 200,
             ),
             Err(e) => json_response(&format!(r#"{{"ok":false,"error":"{}"}}"#, e), 500),
-        }
+        };
     }
 
     // / (usage banner)
@@ -345,7 +377,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
-        let mut val = || args.next().expect(&format!("missing value for {}", a));
+        let mut val = || {
+            args.next()
+                .unwrap_or_else(|| panic!("missing value for {}", a))
+        };
         match a.as_str() {
             "--endpoint" => endpoint = val(),
             "--listen" => listen = val(),
@@ -371,10 +406,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let server = Server::http(&listen).map_err(|e| format!("cannot bind {}: {}", listen, e))?;
-    println!("GPN faucet listening on http://{} (endpoint {})", listen, faucet.endpoint);
-    println!("  signer={} drip={:.0} GPN cooldown={}s daily_cap={:.0} total_cap={:.0} reserve={:.0}",
-        faucet.signer_uri, faucet.drip_gpn, faucet.cooldown_secs,
-        faucet.daily_cap_gpn, faucet.total_cap_gpn, faucet.reserve_gpn);
+    println!(
+        "GPN faucet listening on http://{} (endpoint {})",
+        listen, faucet.endpoint
+    );
+    println!(
+        "  signer={} drip={:.0} GPN cooldown={}s daily_cap={:.0} total_cap={:.0} reserve={:.0}",
+        faucet.signer_uri,
+        faucet.drip_gpn,
+        faucet.cooldown_secs,
+        faucet.daily_cap_gpn,
+        faucet.total_cap_gpn,
+        faucet.reserve_gpn
+    );
     println!("  GET /drip?address=<ss58|0xhex>&amount=<gpn>   GET /status");
 
     for request in server.incoming_requests() {
@@ -411,7 +455,10 @@ mod tests {
     fn parse_address_rejects_bad_input() {
         assert!(parse_address("nonsense").is_err());
         assert!(parse_address("0xabcd").is_err()); // too short
-        assert!(parse_address("0xzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz").is_err()); // bad hex
+        assert!(parse_address(
+            "0xzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+        )
+        .is_err()); // bad hex
     }
 
     #[test]
@@ -425,9 +472,13 @@ mod tests {
     #[test]
     fn rate_limit_enforces_cooldown() {
         let faucet = Faucet {
-            endpoint: "".into(), signer_uri: "//Alice".into(),
-            drip_gpn: 100.0, cooldown_secs: 3600, daily_cap_gpn: 100_000.0,
-            total_cap_gpn: 1_000_000.0, reserve_gpn: 1000.0,
+            endpoint: "".into(),
+            signer_uri: "//Alice".into(),
+            drip_gpn: 100.0,
+            cooldown_secs: 3600,
+            daily_cap_gpn: 100_000.0,
+            total_cap_gpn: 1_000_000.0,
+            reserve_gpn: 1000.0,
             ledger: Arc::new(Mutex::new(DripLedger::default())),
         };
         let key = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY".to_string();
@@ -439,9 +490,13 @@ mod tests {
     #[test]
     fn rate_limit_rolls_daily_cap() {
         let faucet = Faucet {
-            endpoint: "".into(), signer_uri: "//Alice".into(),
-            drip_gpn: 100.0, cooldown_secs: 0, daily_cap_gpn: 150.0,
-            total_cap_gpn: 1_000_000.0, reserve_gpn: 1000.0,
+            endpoint: "".into(),
+            signer_uri: "//Alice".into(),
+            drip_gpn: 100.0,
+            cooldown_secs: 0,
+            daily_cap_gpn: 150.0,
+            total_cap_gpn: 1_000_000.0,
+            reserve_gpn: 1000.0,
             ledger: Arc::new(Mutex::new(DripLedger::default())),
         };
         let key = "addr".to_string();
@@ -453,9 +508,13 @@ mod tests {
     #[test]
     fn rate_limit_enforces_total_cap() {
         let faucet = Faucet {
-            endpoint: "".into(), signer_uri: "//Alice".into(),
-            drip_gpn: 100.0, cooldown_secs: 0, daily_cap_gpn: 1_000_000.0,
-            total_cap_gpn: 150.0, reserve_gpn: 1000.0,
+            endpoint: "".into(),
+            signer_uri: "//Alice".into(),
+            drip_gpn: 100.0,
+            cooldown_secs: 0,
+            daily_cap_gpn: 1_000_000.0,
+            total_cap_gpn: 150.0,
+            reserve_gpn: 1000.0,
             ledger: Arc::new(Mutex::new(DripLedger::default())),
         };
         let key = "addr".to_string();

@@ -35,10 +35,10 @@
 
 use gpn_agent::chain::signer;
 use sp_core::crypto::Pair as _;
+use std::str::FromStr;
 use subxt::dynamic::Value;
 use subxt::tx::Signer as _;
 use subxt::utils::AccountId32;
-use std::str::FromStr;
 
 /// Resolve an ss58 address or a dev URI (//Alice) to an AccountId32.
 fn resolve_account(s: &str) -> Result<AccountId32, Box<dyn std::error::Error>> {
@@ -54,13 +54,22 @@ fn resolve_account(s: &str) -> Result<AccountId32, Box<dyn std::error::Error>> {
 /// Resolve the best head block hash (raw JSON-RPC) — `at_latest()` on a PoW
 /// dev chain reads the stuck finalized #0 block, so we must read at head.
 async fn head_hash(endpoint: &str) -> Option<subxt::utils::H256> {
-    let http = endpoint.replace("ws://", "http://").replace("wss://", "https://");
+    let http = endpoint
+        .replace("ws://", "http://")
+        .replace("wss://", "https://");
     let body = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "chain_getBlockHash", "params": [] });
-    let resp = reqwest::Client::new().post(&http).json(&body).send().await.ok()?;
+    let resp = reqwest::Client::new()
+        .post(&http)
+        .json(&body)
+        .send()
+        .await
+        .ok()?;
     let v: serde_json::Value = resp.json().await.ok()?;
     let hex = v.get("result")?.as_str()?.trim_start_matches("0x");
     let bytes = hex::decode(hex).ok()?;
-    if bytes.len() != 32 { return None; }
+    if bytes.len() != 32 {
+        return None;
+    }
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&bytes);
     Some(arr.into())
@@ -99,7 +108,7 @@ async fn read_balance(
     let addr = subxt::dynamic::storage(
         "System",
         "Account",
-        vec![Value::from_bytes((account.as_ref() as &[u8; 32]).to_vec())],
+        vec![Value::from_bytes(account.as_ref() as &[u8; 32])],
     );
     let api = match client.storage().at_latest().await {
         Ok(a) => a,
@@ -159,10 +168,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get(5)
         .cloned()
         .unwrap_or_else(|| "//Alice".to_string());
-    let seed_gpn: f64 = args
-        .get(6)
-        .map(|s| s.parse().unwrap_or(0.0))
-        .unwrap_or(0.0);
+    let seed_gpn: f64 = args.get(6).map(|s| s.parse().unwrap_or(0.0)).unwrap_or(0.0);
 
     let total_fee_raw: u128 = (total_fee_gpn * 1_000_000_000_000.0) as u128; // 12 decimals
 
@@ -175,13 +181,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|s| resolve_account(s.trim()))
         .collect::<Result<_, _>>()?;
 
-    println!("GPN fee-economy exercise on {} (sudo {})", endpoint, sudo_uri);
+    println!(
+        "GPN fee-economy exercise on {} (sudo {})",
+        endpoint, sudo_uri
+    );
     println!(
         "  distribute_fees(total_fee={:.4} GPN) -> sudo.sudo  [200/150/100/50 bps: staking/treasury/burn/oracle]",
         total_fee_gpn
     );
-    println!("  distribute_staking_rewards({} stakers)  [tier-weighted]", stakers.len());
-    println!("  distribute_oracle_rewards({} operators) [even split]", operators.len());
+    println!(
+        "  distribute_staking_rewards({} stakers)  [tier-weighted]",
+        stakers.len()
+    );
+    println!(
+        "  distribute_oracle_rewards({} operators) [even split]",
+        operators.len()
+    );
 
     let client = signer::connect(&endpoint).await?;
     println!("Connected to GPN chain at {}", endpoint);
@@ -203,7 +218,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             vec![Value::unnamed_variant(
                 "force_set_balance",
                 vec![
-                    Value::from_bytes((pallet_addr.as_ref() as &[u8; 32]).to_vec()),
+                    Value::from_bytes(pallet_addr.as_ref() as &[u8; 32]),
                     Value::u128(seed_raw),
                 ],
             )],
@@ -231,11 +246,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Sudo.sudo takes a single RuntimeCall value: unnamed_variant(Pallet, [unnamed_variant(Call, [args])]).
     let inner_call = Value::unnamed_variant(
         "GPNToken",
-        vec![Value::unnamed_variant("distribute_fees", vec![Value::u128(total_fee_raw)])],
+        vec![Value::unnamed_variant(
+            "distribute_fees",
+            vec![Value::u128(total_fee_raw)],
+        )],
     );
     let sudo_call = subxt::dynamic::tx("Sudo", "sudo", vec![inner_call]);
     let nonce = signer::current_nonce(&client, &endpoint, &sudo.account_id()).await;
-    println!("  submitting Sudo.sudo(GPNToken.distribute_fees) [nonce {}]...", nonce);
+    println!(
+        "  submitting Sudo.sudo(GPNToken.distribute_fees) [nonce {}]...",
+        nonce
+    );
     signer::submit_signed(&client, &sudo_call, &sudo, nonce).await?;
     println!("  ✅ distribute_fees finalized via sudo.");
 
@@ -252,7 +273,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ---- 2. distribute_staking_rewards ----
     let staker_values: Vec<Value> = stakers
         .iter()
-        .map(|a| Value::from_bytes((a.as_ref() as &[u8; 32]).to_vec()))
+        .map(|a| Value::from_bytes(a.as_ref() as &[u8; 32]))
         .collect();
     let stake_call = subxt::dynamic::tx(
         "GPNToken",
@@ -261,14 +282,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let payout_account = sudo.account_id();
     let nonce = signer::current_nonce(&client, &endpoint, &payout_account).await;
-    println!("  submitting GPNToken.distribute_staking_rewards [nonce {}]...", nonce);
+    println!(
+        "  submitting GPNToken.distribute_staking_rewards [nonce {}]...",
+        nonce
+    );
     signer::submit_signed(&client, &stake_call, &sudo, nonce).await?;
     println!("  ✅ staking rewards distributed.");
 
     // ---- 3. distribute_oracle_rewards ----
     let op_values: Vec<Value> = operators
         .iter()
-        .map(|a| Value::from_bytes((a.as_ref() as &[u8; 32]).to_vec()))
+        .map(|a| Value::from_bytes(a.as_ref() as &[u8; 32]))
         .collect();
     let oracle_call = subxt::dynamic::tx(
         "GPNToken",
@@ -276,7 +300,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         vec![Value::unnamed_composite(op_values)],
     );
     let nonce = signer::current_nonce(&client, &endpoint, &payout_account).await;
-    println!("  submitting GPNToken.distribute_oracle_rewards [nonce {}]...", nonce);
+    println!(
+        "  submitting GPNToken.distribute_oracle_rewards [nonce {}]...",
+        nonce
+    );
     signer::submit_signed(&client, &oracle_call, &sudo, nonce).await?;
     println!("  ✅ oracle rewards distributed.");
 
@@ -292,10 +319,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     for s in &stakers {
-        println!("  staker {} balance: {:.4} GPN", s, read_balance(&client, &endpoint, s).await as f64 / 1e12);
+        println!(
+            "  staker {} balance: {:.4} GPN",
+            s,
+            read_balance(&client, &endpoint, s).await as f64 / 1e12
+        );
     }
     for o in &operators {
-        println!("  operator {} balance: {:.4} GPN", o, read_balance(&client, &endpoint, o).await as f64 / 1e12);
+        println!(
+            "  operator {} balance: {:.4} GPN",
+            o,
+            read_balance(&client, &endpoint, o).await as f64 / 1e12
+        );
     }
 
     Ok(())

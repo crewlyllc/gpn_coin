@@ -68,7 +68,11 @@ pub enum VerifyError {
 ///
 /// `public_inputs` are the *variable* public inputs (a₁..aₗ). The constant term
 /// (a₀ = 1) is handled internally via `vk.gamma_abc_g1[0]`.
-pub fn verify(vk: &VerifyingKey, public_inputs: &[Scalar], proof: &Proof) -> Result<(), VerifyError> {
+pub fn verify(
+    vk: &VerifyingKey,
+    public_inputs: &[Scalar],
+    proof: &Proof,
+) -> Result<(), VerifyError> {
     // The vk stores gamma_abc for (l+1) entries: constant + l variable inputs.
     if public_inputs.len() + 1 != vk.gamma_abc_g1.len() {
         return Err(VerifyError::InputLenMismatch);
@@ -176,30 +180,36 @@ pub fn value_balance_key() -> VerifyingKey {
     let alpha = G1Affine::from_compressed(&hex48(
         "8b1beb9eaa46f84617b8a487edc7d8430713e5860594857c511c5dd80e4a8c79\
          d89d382955b0ccfd04264efe005f6678",
-    )).expect("valid alpha_g1");
+    ))
+    .expect("valid alpha_g1");
     let beta = G2Affine::from_compressed(&hex96(
         "af71521ffa3621e20b79e99a5c1ac5afbe6cf6e4d7008c5c6f77b7065264579a\
          f863ac70998d9cde287bab614a8407e807a89a7638059e365914797401405eb4\
          cec1995e3c84dfa23a115c55b832347f7ef8d2d2336f6301f9c4e3903b65b275",
-    )).expect("valid beta_g2");
+    ))
+    .expect("valid beta_g2");
     let gamma = G2Affine::from_compressed(&hex96(
         "810ae3861a991a8ee80a763542e7b7e27711403f088f501c08ae675644a6764c\
          54f1f1e03c4ae3d79a3ca2305a5937c21092ab265bf216c1d65f90164b44ed60\
          93d4a567af4ff52ce8a489729b576094fd91e73ba492b45c30912c482ab4974a",
-    )).expect("valid gamma_g2");
+    ))
+    .expect("valid gamma_g2");
     let delta = G2Affine::from_compressed(&hex96(
         "858fa473094c8957eda90c0f3a7e8d1424849268c463c8d6d8ecd1a70575768d\
          13861ebf010f604fd2f7bc154d4f7fb004cdeec875473c342f9320144e64a1ede\
          91f7bd82f67d92dbbbb860d78dfd94cf4e9ba6c2c69e4b57cd476693dfdf0db",
-    )).expect("valid delta_g2");
+    ))
+    .expect("valid delta_g2");
     let gabc0 = G1Affine::from_compressed(&hex48(
         "af8dd62de36279f1a7d53eb0d0d97dde599e9b142be8ab849cda3f77f2fe2a08\
          c9e7cc795ae9b852eba83c40d176d56b",
-    )).expect("valid gamma_abc[0]");
+    ))
+    .expect("valid gamma_abc[0]");
     let gabc1 = G1Affine::from_compressed(&hex48(
         "aeae8329b9b6d1d1231ff3c1aef5e86fc629057a7e62a0a69dee016638d49a27\
          a034209c612feac2de59b700a78e3762",
-    )).expect("valid gamma_abc[1]");
+    ))
+    .expect("valid gamma_abc[1]");
     VerifyingKey {
         alpha_g1: alpha,
         beta_g2: beta,
@@ -293,7 +303,10 @@ mod tests {
         let proof = test_proof();
         // vk has 1 gamma_abc entry (constant only); any variable input mismatches.
         let one_input = vec![Scalar::ONE];
-        assert_eq!(verify(&vk, &one_input, &proof), Err(VerifyError::InputLenMismatch));
+        assert_eq!(
+            verify(&vk, &one_input, &proof),
+            Err(VerifyError::InputLenMismatch)
+        );
     }
 
     #[test]

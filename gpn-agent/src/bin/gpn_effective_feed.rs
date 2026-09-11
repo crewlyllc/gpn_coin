@@ -45,7 +45,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => {
             println!("[effective-feed] NONE — no bonded (Phase-C) operator has posted a feed yet,");
             println!("                 or chain/RPC unreachable.");
-            println!("[verdict] no on-chain effective feed; agent falls back to CurrentFeed / defaults.");
+            println!(
+                "[verdict] no on-chain effective feed; agent falls back to CurrentFeed / defaults."
+            );
             std::process::exit(1);
         }
     }

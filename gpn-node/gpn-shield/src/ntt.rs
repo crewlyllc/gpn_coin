@@ -200,7 +200,10 @@ mod tests {
     #[test]
     fn mul_ntt_matches_schoolbook() {
         // Random-ish small polynomials; compare against schoolbook.
-        let a: Vec<Scalar> = [3u64, 0, 5, 7, 9].iter().map(|&x| Scalar::from(x)).collect();
+        let a: Vec<Scalar> = [3u64, 0, 5, 7, 9]
+            .iter()
+            .map(|&x| Scalar::from(x))
+            .collect();
         let b: Vec<Scalar> = [1u64, 2, 4].iter().map(|&x| Scalar::from(x)).collect();
         let expected: Vec<Scalar> = {
             let mut out = vec![Scalar::ZERO; a.len() + b.len() - 1];

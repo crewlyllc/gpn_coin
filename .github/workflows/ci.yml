@@ -4,6 +4,9 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  # Weekly dependency audit (RustSec advisories + licence/ban checks).
+  schedule:
+    - cron: "0 6 * * 1"
   # The two-node GPU testnet is manual-only: it needs a physical GPU, so it runs
   # on a self-hosted runner tagged with the `gpu` label (e.g. the RTX 4060 dev
   # box). Register that host as a runner and trigger it here.
@@ -11,29 +14,83 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # The workspace builds on stable (verified locally: rustc 1.97.x).
+  # The workspace builds on stable (verified locally: rustc 1.97.x). Also pinned
+  # in rust-toolchain.toml so local + CI agree.
   RUST_TOOLCHAIN: stable
+  # ---------------------------------------------------------------------------
+  # Clippy allow-list (documented).
+  #
+  # `cargo clippy -- -D warnings` must stay green. The crates below predate a
+  # lint-clean baseline and pull in Substrate/FRAME macro expansions we do not
+  # control, so a small, explicitly-listed set of lints is allowed. This is the
+  # "documented allow-list" option from the production-readiness plan — it is
+  # NOT a blanket `-A clippy::all`. Each entry is justified:
+  #
+  #   deprecated / unexpected_cfgs / duplicate_macro_attributes
+  #       Emitted from FRAME/polkadot-sdk macros (e.g. `ConstantWeight_N`),
+  #       not from our code. Fixed by the next polkadot-sdk bump, not here.
+  #   unused / dead_code / unused_parens
+  #       Substrate trait impls and WASM-only stubs legitimately have
+  #       host-invisible items; tracking the whole workspace is noise.
+  #   clippy::let_unit_value / result_large_err
+  #       FRAME dispatch/error enums are large by design; converting would
+  #       change the public error surface.
+  #   clippy::too_many_arguments / type_complexity / needless_range_loop
+  #       Crypto kernels (NTT/MSM/QAP) and pallet APIs are awkward to reshape
+  #       without churning proof-critical code. Left as-is on purpose.
+  #   clippy::needless_borrow / needless_range_loop / unnecessary_cast /
+  #   useless_conversion / unnecessary_mut_passed / clone_on_copy /
+  #   derivable_impls / new_without_default / manual_div_ceil /
+  #   manual_is_multiple_of / manual_checked_ops / assign_op_pattern /
+  #   single_element_loop / missing_const_for_thread_local /
+  #   wrong_self_convention / collapsible_match / manual_clamp /
+  #   empty_line_after_doc_comments
+  #       Low-value style nits; fixing them would touch many files for no
+  #       behavioural gain. Revisit as a standalone cleanup PR.
+  # ---------------------------------------------------------------------------
+  CLIPPY_ALLOWS: >-
+    -A deprecated -A unexpected_cfgs -A duplicate_macro_attributes
+    -A unused -A dead_code -A unused_parens
+    -A clippy::let_unit_value -A clippy::result_large_err
+    -A clippy::too_many_arguments -A clippy::type_complexity
+    -A clippy::needless_range_loop -A clippy::needless_borrow
+    -A clippy::unnecessary_cast -A clippy::useless_conversion
+    -A clippy::unnecessary_mut_passed -A clippy::clone_on_copy
+    -A clippy::derivable_impls -A clippy::new_without_default
+    -A clippy::manual_div_ceil -A clippy::manual_is_multiple_of
+    -A clippy::manual_checked_ops -A clippy::assign_op_pattern
+    -A clippy::single_element_loop -A clippy::missing_const_for_thread_local
+    -A clippy::wrong_self_convention -A clippy::collapsible_match
+    -A clippy::manual_clamp -A clippy::empty_line_after_doc_comments
 
 jobs:
-  build-and-test:
-    name: Build + unit tests (CPU)
+  # ---------------------------------------------------------------------------
+  # Formatting + lints. Fast, and the first gate.
+  # ---------------------------------------------------------------------------
+  lint:
+    name: fmt + clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install system deps (Substrate + OpenCL headers)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential clang cmake pkg-config \
-            libssl-dev libclang-dev protobuf-compiler \
-            ocl-icd-opencl-dev
-          cmake --version
-
-      - name: Install Rust toolchain
+      - name: Install Rust toolchain (rustfmt + clippy)
         run: |
           rustup toolchain install ${{ env.RUST_TOOLCHAIN }} --profile minimal --component rustfmt clippy
           rustup default ${{ env.RUST_TOOLCHAIN }}
+          rustc --version && cargo fmt --version && cargo clippy --version
+
+      - name: Assert Cargo.lock is committed (reproducible builds)
+        run: |
+          git ls-files --error-unmatch gpn-node/Cargo.lock
+          git ls-files --error-unmatch gpn-agent/Cargo.lock
+
+      - name: rustfmt (check)
+        run: cargo fmt --all -- --check
+        working-directory: gpn-node
+
+      - name: rustfmt (check, agent)
+        run: cargo fmt --all -- --check
+        working-directory: gpn-agent
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -46,8 +103,79 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('gpn-node/Cargo.lock','gpn-agent/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      # gpn-node: Substrate workspace (5 pallets + runtime + node). GPU tests are
-      # #[ignore]d, so this runs fully on a CPU runner.
+      - name: Clippy — gpn-node (warnings as errors)
+        working-directory: gpn-node
+        run: cargo clippy --workspace --all-targets -- ${{ env.CLIPPY_ALLOWS }} -D warnings
+
+      - name: Clippy — gpn-agent (warnings as errors)
+        working-directory: gpn-agent
+        run: cargo clippy --all-targets -- ${{ env.CLIPPY_ALLOWS }} -D warnings
+
+  # ---------------------------------------------------------------------------
+  # Build + test across the three desktop platforms.
+  # Linux is the supported release target and is required. macOS/Windows are
+  # built best-effort (experimental) until their runner toolchains are fully
+  # validated — a red mac/win run is a signal to investigate, not a blocker.
+  # ---------------------------------------------------------------------------
+  build-and-test:
+    name: Build + unit tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            experimental: false
+          - os: macos-latest
+            experimental: true
+          - os: windows-latest
+            experimental: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang cmake pkg-config \
+            libssl-dev libclang-dev protobuf-compiler \
+            ocl-icd-opencl-dev
+          cmake --version
+
+      - name: Install system deps (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install protobuf cmake llvm || brew upgrade protobuf cmake llvm
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+
+      - name: Install system deps (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          choco install -y protoc llvm cmake
+          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$env:GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install ${{ env.RUST_TOOLCHAIN }} --profile minimal
+          rustup default ${{ env.RUST_TOOLCHAIN }}
+          rustup target add wasm32-unknown-unknown
+          rustc --version
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            gpn-node/target
+            gpn-agent/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('gpn-node/Cargo.lock','gpn-agent/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # gpn-node: Substrate workspace (pallets + gpn-shield + runtime + node).
+      # GPU tests are #[ignore]d, so this runs fully on a CPU runner.
       - name: Build gpn-node (release)
         working-directory: gpn-node
         run: cargo build --release --workspace
@@ -56,8 +184,8 @@ jobs:
         working-directory: gpn-node
         run: cargo test --release --workspace
 
-      # gpn-agent: GPU node agent (mining / compute / auto-switch). GPU-gated tests
-      # are #[ignore]d; the pure decision logic + ChainClient tests run on CPU.
+      # gpn-agent: GPU node agent (mining / compute / auto-switch). GPU-gated
+      # tests are #[ignore]d; pure decision logic + ChainClient tests run on CPU.
       - name: Build gpn-agent (release)
         working-directory: gpn-agent
         run: cargo build --release
@@ -66,10 +194,44 @@ jobs:
         working-directory: gpn-agent
         run: cargo test --release
 
-      - name: Clippy (warnings as errors)
+  # ---------------------------------------------------------------------------
+  # Supply-chain audit: RustSec advisories (cargo-audit) + licences/bans/sources
+  # (cargo-deny). Informational until the dependency-tree licence list is frozen
+  # for mainnet; runs weekly and on demand.
+  # ---------------------------------------------------------------------------
+  audit:
+    name: Dependency audit (cargo-audit / cargo-deny)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install ${{ env.RUST_TOOLCHAIN }} --profile minimal
+          rustup default ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Install cargo-audit + cargo-deny
+        run: |
+          cargo install cargo-audit --locked || cargo install cargo-audit
+          cargo install cargo-deny --locked || cargo install cargo-deny
+
+      - name: cargo-audit (gpn-node)
         working-directory: gpn-node
-        run: cargo clippy --release --workspace -- -D warnings || echo "clippy warnings (non-fatal in CI)"
-        continue-on-error: true
+        run: cargo audit
+
+      - name: cargo-audit (gpn-agent)
+        working-directory: gpn-agent
+        run: cargo audit
+
+      - name: cargo-deny (gpn-node)
+        working-directory: gpn-node
+        run: cargo deny --config ../deny.toml check advisories bans licenses sources
+
+      - name: cargo-deny (gpn-agent)
+        working-directory: gpn-agent
+        run: cargo deny --config ../deny.toml check advisories bans licenses sources
 
   # Two-node GPU p2p testnet — integration test from
   # gpn-node/scripts/gpn_two_node_testnet.sh. Requires real GPU + NVIDIA OpenCL

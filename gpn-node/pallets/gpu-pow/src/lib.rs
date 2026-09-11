@@ -6,8 +6,8 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 use codec::{Decode, DecodeWithMemTracking, Encode};
-use scale_info::TypeInfo;
 use core::fmt::Debug;
+use scale_info::TypeInfo;
 
 use sp_runtime::SaturatedConversion;
 
@@ -140,10 +140,24 @@ pub mod pallet {
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
-        BlockMined { miner: T::AccountId, difficulty: U256, reward: BalanceOf<T> },
-        DifficultyAdjusted { old_difficulty: U256, new_difficulty: U256 },
-        RewardHalved { old_reward: BalanceOf<T>, new_reward: BalanceOf<T>, halving_number: u32 },
-        AlgorithmUpgraded { old_version: u32, new_version: u32 },
+        BlockMined {
+            miner: T::AccountId,
+            difficulty: U256,
+            reward: BalanceOf<T>,
+        },
+        DifficultyAdjusted {
+            old_difficulty: U256,
+            new_difficulty: U256,
+        },
+        RewardHalved {
+            old_reward: BalanceOf<T>,
+            new_reward: BalanceOf<T>,
+            halving_number: u32,
+        },
+        AlgorithmUpgraded {
+            old_version: u32,
+            new_version: u32,
+        },
     }
 
     #[pallet::error]
@@ -197,7 +211,10 @@ pub mod pallet {
 
             let halving_interval = T::HalvingInterval::get();
             let last_halving = <LastHalvingBlock<T>>::get();
-            if !halving_interval.is_zero() && !last_halving.is_zero() && now - last_halving >= halving_interval {
+            if !halving_interval.is_zero()
+                && !last_halving.is_zero()
+                && now - last_halving >= halving_interval
+            {
                 Self::perform_halving();
             }
             Self::distribute_pending_rewards();
@@ -219,13 +236,26 @@ pub mod pallet {
         ) -> DispatchResult {
             let miner = ensure_signed(origin)?;
             let computed_hash = Self::compute_solution_hash(&solution);
-            ensure!(computed_hash == solution.solution_hash, Error::<T>::SolutionHashMismatch);
-            ensure!(Self::meets_difficulty(&solution.solution_hash, &difficulty), Error::<T>::InvalidSolution);
-            ensure!(solution.algorithm_version == T::AlgorithmVersion::get(), Error::<T>::UnsupportedAlgorithmVersion);
+            ensure!(
+                computed_hash == solution.solution_hash,
+                Error::<T>::SolutionHashMismatch
+            );
+            ensure!(
+                Self::meets_difficulty(&solution.solution_hash, &difficulty),
+                Error::<T>::InvalidSolution
+            );
+            ensure!(
+                solution.algorithm_version == T::AlgorithmVersion::get(),
+                Error::<T>::UnsupportedAlgorithmVersion
+            );
             let reward = <CurrentBlockReward<T>>::get();
             <PendingBlockRewards<T>>::put(reward);
             <PendingRewardBeneficiary<T>>::put(miner.clone());
-            Self::deposit_event(Event::<T>::BlockMined { miner, difficulty, reward });
+            Self::deposit_event(Event::<T>::BlockMined {
+                miner,
+                difficulty,
+                reward,
+            });
             Ok(())
         }
     }
@@ -243,12 +273,11 @@ pub mod pallet {
             }
         }
 
-        pub fn adjust_difficulty(
-            parent_difficulty: U256,
-            actual_time: u64,
-        ) -> U256 {
+        pub fn adjust_difficulty(parent_difficulty: U256, actual_time: u64) -> U256 {
             let target_time = T::TargetBlockTime::get();
-            if actual_time == 0 { return parent_difficulty; }
+            if actual_time == 0 {
+                return parent_difficulty;
+            }
             // `Difficulty` is a *target* (hash < target = valid, higher = EASIER).
             // Ratio = 2*actual/(actual+target):
             //   - blocks too slow (actual > target) -> ratio > 1 -> target up (easier)
@@ -259,18 +288,28 @@ pub mod pallet {
             let ratio_numer = actual_time * 1000;
             let ratio_denom = (target_time + actual_time) * 1000 / 2;
             let ratio_denom = ratio_denom.max(1);
-            let new_diff = Self::apply_difficulty_ratio(parent_difficulty, ratio_numer, ratio_denom);
+            let new_diff =
+                Self::apply_difficulty_ratio(parent_difficulty, ratio_numer, ratio_denom);
             let min_d = T::MinDifficulty::get();
             let max_d = T::MaxDifficulty::get();
-            let clamped = if Self::u256_lt(&new_diff, &min_d) { min_d }
-                else if Self::u256_gt(&new_diff, &max_d) { max_d } else { new_diff };
+            let clamped = if Self::u256_lt(&new_diff, &min_d) {
+                min_d
+            } else if Self::u256_gt(&new_diff, &max_d) {
+                max_d
+            } else {
+                new_diff
+            };
             <Difficulty<T>>::put(clamped);
             clamped
         }
 
         fn compute_solution_hash(solution: &EthashSolution) -> [u8; 32] {
             // Hash only the proof-relevant fields (exclude solution_hash to avoid circular dependency)
-            let work_data = (solution.nonce, solution.mix_hash, solution.algorithm_version);
+            let work_data = (
+                solution.nonce,
+                solution.mix_hash,
+                solution.algorithm_version,
+            );
             sp_io::hashing::blake2_256(&work_data.encode())
         }
 
@@ -281,17 +320,30 @@ pub mod pallet {
             <LastHalvingBlock<T>>::put(frame_system::Pallet::<T>::block_number());
             <CurrentEpoch<T>>::mutate(|e| *e += 1);
             Self::deposit_event(Event::<T>::RewardHalved {
-                old_reward, new_reward,
-                halving_number: frame_system::Pallet::<T>::block_number().try_into().unwrap_or(0),
+                old_reward,
+                new_reward,
+                halving_number: frame_system::Pallet::<T>::block_number()
+                    .try_into()
+                    .unwrap_or(0),
             });
         }
 
         pub(crate) fn u256_lt(a: &U256, b: &U256) -> bool {
-            for i in (0..4).rev() { if a[i] != b[i] { return a[i] < b[i]; } } false
+            for i in (0..4).rev() {
+                if a[i] != b[i] {
+                    return a[i] < b[i];
+                }
+            }
+            false
         }
 
         pub(crate) fn u256_gt(a: &U256, b: &U256) -> bool {
-            for i in (0..4).rev() { if a[i] != b[i] { return a[i] > b[i]; } } false
+            for i in (0..4).rev() {
+                if a[i] != b[i] {
+                    return a[i] > b[i];
+                }
+            }
+            false
         }
 
         pub(crate) fn meets_difficulty(hash: &[u8; 32], difficulty: &U256) -> bool {
@@ -316,18 +368,24 @@ pub mod pallet {
         }
 
         #[allow(dead_code)]
-        pub(crate) fn get_epoch(block_height: u64) -> u64 { block_height / 30000 }
+        pub(crate) fn get_epoch(block_height: u64) -> u64 {
+            block_height / 30000
+        }
 
         pub fn get_mining_info() -> MiningInfo {
             let difficulty = <Difficulty<T>>::get();
             let epoch = <CurrentEpoch<T>>::get();
-            let block_number: u64 = frame_system::Pallet::<T>::block_number().try_into().unwrap_or(0);
+            let block_number: u64 = frame_system::Pallet::<T>::block_number()
+                .try_into()
+                .unwrap_or(0);
             let block_reward: u128 = <CurrentBlockReward<T>>::get().try_into().unwrap_or(0);
             MiningInfo {
-                difficulty, epoch,
+                difficulty,
+                epoch,
                 dag_size: 2u64 << (epoch + 23).min(63),
                 algorithm_version: T::AlgorithmVersion::get(),
-                block_number, block_reward,
+                block_number,
+                block_reward,
                 network_hashrate_estimate: 0,
             }
         }
@@ -337,11 +395,11 @@ pub mod pallet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frame_support::traits::Currency;
     use frame_support::{
         construct_runtime, derive_impl, parameter_types,
-        traits::{BuildGenesisConfig, ConstU16, ConstU32, ConstU64, ConstU128, Everything, Hooks},
+        traits::{BuildGenesisConfig, ConstU128, ConstU16, ConstU32, ConstU64, Everything, Hooks},
     };
-    use frame_support::traits::Currency;
     use sp_core::H256;
     use sp_runtime::{
         traits::{BlakeTwo256, IdentityLookup},
@@ -350,8 +408,7 @@ mod tests {
 
     use crate::pallet as local_gpu_pow;
     use crate::pallet::{
-        CurrentBlockReward, CurrentEpoch, Difficulty, PendingBlockRewards,
-        PendingRewardBeneficiary,
+        CurrentBlockReward, CurrentEpoch, Difficulty, PendingBlockRewards, PendingRewardBeneficiary,
     };
     use pallet_gpn_token::SupplyManager;
     use sp_runtime::SaturatedConversion;
@@ -485,7 +542,7 @@ mod tests {
         ext
     }
 
-    type GpuPowPallet = crate::pallet::Pallet::<Test>;
+    type GpuPowPallet = crate::pallet::Pallet<Test>;
 
     #[test]
     fn test_initial_state() {
@@ -515,9 +572,15 @@ mod tests {
     fn test_meets_difficulty() {
         new_test_ext().execute_with(|| {
             let zero_hash = [0u8; 32];
-            assert!(GpuPowPallet::meets_difficulty(&zero_hash, &[0, 0, 0, 0x1000]));
+            assert!(GpuPowPallet::meets_difficulty(
+                &zero_hash,
+                &[0, 0, 0, 0x1000]
+            ));
             let big_hash = [0xFFu8; 32];
-            assert!(!GpuPowPallet::meets_difficulty(&big_hash, &[0, 0, 0, 0x1000]));
+            assert!(!GpuPowPallet::meets_difficulty(
+                &big_hash,
+                &[0, 0, 0, 0x1000]
+            ));
         });
     }
 
@@ -596,7 +659,11 @@ mod tests {
                 ..sol
             };
             // Use MaxDifficulty (easiest) so any valid hash passes
-            let result = GpuPowPallet::submit_solution(RuntimeOrigin::signed(miner), valid_solution, TestMaxDifficulty::get());
+            let result = GpuPowPallet::submit_solution(
+                RuntimeOrigin::signed(miner),
+                valid_solution,
+                TestMaxDifficulty::get(),
+            );
             assert!(result.is_ok());
             assert_eq!(PendingBlockRewards::<Test>::get(), TestInitialReward::get());
             assert_eq!(PendingRewardBeneficiary::<Test>::get(), Some(miner));
@@ -620,7 +687,12 @@ mod tests {
                 solution_hash: correct_hash,
                 ..sol
             };
-            GpuPowPallet::submit_solution(RuntimeOrigin::signed(miner), valid_solution, TestMaxDifficulty::get()).unwrap();
+            GpuPowPallet::submit_solution(
+                RuntimeOrigin::signed(miner),
+                valid_solution,
+                TestMaxDifficulty::get(),
+            )
+            .unwrap();
             GpuPowPallet::distribute_pending_rewards();
             let new_balance = pallet_balances::Pallet::<Test>::free_balance(miner);
             assert_eq!(new_balance, initial_balance + TestInitialReward::get());
@@ -661,8 +733,16 @@ mod tests {
             };
             let work_data = (sol.nonce, sol.mix_hash, sol.algorithm_version);
             let correct_hash = sp_io::hashing::blake2_256(&work_data.encode());
-            let valid = EthashSolution { solution_hash: correct_hash, ..sol };
-            GpuPowPallet::submit_solution(RuntimeOrigin::signed(miner), valid, TestMaxDifficulty::get()).unwrap();
+            let valid = EthashSolution {
+                solution_hash: correct_hash,
+                ..sol
+            };
+            GpuPowPallet::submit_solution(
+                RuntimeOrigin::signed(miner),
+                valid,
+                TestMaxDifficulty::get(),
+            )
+            .unwrap();
             GpuPowPallet::distribute_pending_rewards();
             assert_eq!(MockSupply::total_issued(), TestInitialReward::get());
         });
@@ -685,15 +765,25 @@ mod tests {
             };
             let work_data = (sol.nonce, sol.mix_hash, sol.algorithm_version);
             let correct_hash = sp_io::hashing::blake2_256(&work_data.encode());
-            let valid = EthashSolution { solution_hash: correct_hash, ..sol };
-            GpuPowPallet::submit_solution(RuntimeOrigin::signed(miner), valid, TestMaxDifficulty::get()).unwrap();
+            let valid = EthashSolution {
+                solution_hash: correct_hash,
+                ..sol
+            };
+            GpuPowPallet::submit_solution(
+                RuntimeOrigin::signed(miner),
+                valid,
+                TestMaxDifficulty::get(),
+            )
+            .unwrap();
             // Distribute should silently skip due to supply cap
             GpuPowPallet::distribute_pending_rewards();
             // Balance unchanged
-            assert_eq!(pallet_balances::Pallet::<Test>::free_balance(miner), initial_balance);
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(miner),
+                initial_balance
+            );
             // Canonical issued supply unchanged
             assert_eq!(MockSupply::total_issued(), 1_000_000_000_000_000_000_000);
         });
     }
 }
-

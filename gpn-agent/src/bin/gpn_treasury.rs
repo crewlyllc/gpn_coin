@@ -60,9 +60,17 @@ fn parse_args() -> Opts {
             _ => positional.push(a),
         }
     }
-    let command = positional.first().cloned().unwrap_or_else(|| "status".to_string());
+    let command = positional
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "status".to_string());
     let args = positional.into_iter().skip(1).collect();
-    Opts { endpoint, signer_uri, command, args }
+    Opts {
+        endpoint,
+        signer_uri,
+        command,
+        args,
+    }
 }
 
 fn print_help() {
@@ -83,7 +91,6 @@ fn print_help() {
 }
 
 // ── Reads (via ChainClient) ────────────────────────────────────────────────
-
 
 async fn cmd_status(endpoint: &str) {
     let chain = match gpn_agent::chain::ChainClient::new(endpoint).await {
@@ -109,14 +116,26 @@ async fn cmd_status(endpoint: &str) {
         println!("Total released: {} GPN", rel / BASE);
     }
     // Vesting snapshot: unlocked vs spendable.
-    if let (Some(sched), Some(head)) = (chain.treasury_schedule().await, chain.head_number().await) {
-        let unlocked: u128 = sched.iter().filter(|(b, _)| head >= *b).map(|(_, a)| *a).sum();
+    if let (Some(sched), Some(head)) = (chain.treasury_schedule().await, chain.head_number().await)
+    {
+        let unlocked: u128 = sched
+            .iter()
+            .filter(|(b, _)| head >= *b)
+            .map(|(_, a)| *a)
+            .sum();
         let rel = chain.treasury_total_released().await.unwrap_or(0);
         let bal = chain.treasury_balance().await.unwrap_or(0);
         println!("Head block:     {head}");
         println!("Unlocked:       {} GPN", unlocked / BASE);
-        println!("Spendable:      {} GPN (unlocked - released)", unlocked.saturating_sub(rel) / BASE);
-        println!("Allocation:     {} GPN (tranches: {})", sched.iter().map(|(_, a)| *a).sum::<u128>() / BASE, sched.len());
+        println!(
+            "Spendable:      {} GPN (unlocked - released)",
+            unlocked.saturating_sub(rel) / BASE
+        );
+        println!(
+            "Allocation:     {} GPN (tranches: {})",
+            sched.iter().map(|(_, a)| *a).sum::<u128>() / BASE,
+            sched.len()
+        );
         let _ = bal;
     }
 }
@@ -132,7 +151,10 @@ async fn cmd_roster(endpoint: &str) {
     match chain.treasury_roster_len().await {
         Some(n) => {
             println!("Governance roster: {n} addresses");
-            println!("Threshold: {} approvals", chain.treasury_threshold().await.unwrap_or(0));
+            println!(
+                "Threshold: {} approvals",
+                chain.treasury_threshold().await.unwrap_or(0)
+            );
             println!("\n(Individual roster addresses — view the full list via");
             println!(" polkadot.js.org/apps → Developer → Chain State → gpnTreasury.roster)");
         }
@@ -152,13 +174,17 @@ async fn cmd_schedule(endpoint: &str) {
     match chain.treasury_schedule().await {
         Some(sched) => {
             println!("Vesting schedule (head block {head}):");
-            println!("  {:<14} {:>18}  {}", "unlock block", "amount (GPN)", "status");
+            println!("  {:<14} {:>18}  status", "unlock block", "amount (GPN)");
             for (b, a) in &sched {
                 let status = if head >= *b { "UNLOCKED" } else { "locked" };
                 println!("  {:<14} {:>18}  {}", b, a / BASE, status);
             }
             let total: u128 = sched.iter().map(|(_, a)| *a).sum();
-            println!("  total = {} GPN over {} tranches", total / BASE, sched.len());
+            println!(
+                "  total = {} GPN over {} tranches",
+                total / BASE,
+                sched.len()
+            );
         }
         None => println!("Schedule unavailable — is a node running at {endpoint}?"),
     }
@@ -200,7 +226,10 @@ async fn signed_call(
 }
 
 async fn cmd_propose(opts: &Opts) -> Result<(), Box<dyn std::error::Error>> {
-    let dest = opts.args.get(0).ok_or("usage: propose <dest-ss58> <amount-gpn>")?;
+    let dest = opts
+        .args
+        .first()
+        .ok_or("usage: propose <dest-ss58> <amount-gpn>")?;
     let amount: u128 = opts
         .args
         .get(1)
@@ -227,7 +256,7 @@ async fn cmd_propose(opts: &Opts) -> Result<(), Box<dyn std::error::Error>> {
 async fn cmd_approve(opts: &Opts) -> Result<(), Box<dyn std::error::Error>> {
     let id: u64 = opts
         .args
-        .get(0)
+        .first()
         .ok_or("usage: approve <proposal-id>")?
         .parse()
         .map_err(|_| "proposal id must be an integer")?;
@@ -240,13 +269,15 @@ async fn cmd_approve(opts: &Opts) -> Result<(), Box<dyn std::error::Error>> {
 async fn cmd_execute(opts: &Opts) -> Result<(), Box<dyn std::error::Error>> {
     let id: u64 = opts
         .args
-        .get(0)
+        .first()
         .ok_or("usage: execute <proposal-id>")?
         .parse()
         .map_err(|_| "proposal id must be an integer")?;
     println!("Executing proposal {} as {}...", id, opts.signer_uri);
     signed_call(opts, "execute_spend", vec![Value::u128(id as u128)]).await?;
-    println!("✅ execute_spend submitted (fails on-chain if <13 approvals or amount exceeds unlocked).");
+    println!(
+        "✅ execute_spend submitted (fails on-chain if <13 approvals or amount exceeds unlocked)."
+    );
     Ok(())
 }
 

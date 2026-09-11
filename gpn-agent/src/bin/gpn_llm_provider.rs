@@ -83,10 +83,17 @@ async fn process_once(client: &ChainClient, me: &str) -> Result<(), Box<dyn std:
     Ok(())
 }
 
-async fn run_job(client: &ChainClient, id: u64, job: &gpn_agent::llm::LlmJob) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_job(
+    client: &ChainClient,
+    id: u64,
+    job: &gpn_agent::llm::LlmJob,
+) -> Result<(), Box<dyn std::error::Error>> {
     let job = job.clone();
     let preview: String = job.prompt.chars().take(60).collect();
-    println!("[job {id}] running inference — model={} prompt=\"{}\"", job.model, preview);
+    println!(
+        "[job {id}] running inference — model={} prompt=\"{}\"",
+        job.model, preview
+    );
 
     let _ = LlmStore::new().set_status(id, "running");
     match run_inference(&job.model, &job.prompt, job.temperature, job.max_tokens).await {
@@ -96,7 +103,11 @@ async fn run_job(client: &ChainClient, id: u64, job: &gpn_agent::llm::LlmJob) ->
             hb.copy_from_slice(&hex::decode(&hash)?);
             client.submit_result(id, hb).await?;
             client.complete_job(id).await?;
-            println!("[job {id}] done — response {} chars, result_hash {:.16}…", text.len(), hash);
+            println!(
+                "[job {id}] done — response {} chars, result_hash {:.16}…",
+                text.len(),
+                hash
+            );
         }
         Err(e) => {
             let _ = LlmStore::new().set_error(id, &e.to_string());

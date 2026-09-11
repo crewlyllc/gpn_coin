@@ -14,15 +14,17 @@
 use bls12_381::Scalar;
 use ff::Field;
 
+use crate::groth16;
 use crate::ntt;
 use crate::poly::Poly;
 use crate::qap::{self, Constraint, Domain, R1CS};
-use crate::groth16;
 
 /// Deterministic xorshift PRNG for reproducible pseudo-random test vectors.
 struct Rng(u64);
 impl Rng {
-    fn new(seed: u64) -> Self { Rng(seed | 1) }
+    fn new(seed: u64) -> Self {
+        Rng(seed | 1)
+    }
     fn next(&mut self) -> u64 {
         let mut x = self.0;
         x ^= x << 13;
@@ -36,7 +38,8 @@ impl Rng {
         let a = self.next() & 0xFFFF_FFFF;
         let b = self.next() & 0xFFFF_FFFF;
         let c = self.next() & 0xFFFF_FFFF;
-        Scalar::from(a) + Scalar::from(b) * Scalar::from(1u64 << 32)
+        Scalar::from(a)
+            + Scalar::from(b) * Scalar::from(1u64 << 32)
             + Scalar::from(c) * Scalar::from(1u64 << 32) * Scalar::from(1u64 << 32)
     }
 }
@@ -84,7 +87,14 @@ fn ntt_roundtrip_random_all_sizes() {
 #[test]
 fn ntt_mul_matches_schoolbook_random() {
     // Several sizes, including non-power-of-two lengths (so the NTT must pad).
-    for &(la, lb) in &[(3usize, 5usize), (8, 8), (17, 33), (100, 57), (257, 129), (1000, 1000)] {
+    for &(la, lb) in &[
+        (3usize, 5usize),
+        (8, 8),
+        (17, 33),
+        (100, 57),
+        (257, 129),
+        (1000, 1000),
+    ] {
         let mut rng = Rng::new(0x1234 ^ ((la as u64) << 16) ^ lb as u64);
         let a: Vec<Scalar> = (0..la).map(|_| rng.scalar()).collect();
         let b: Vec<Scalar> = (0..lb).map(|_| rng.scalar()).collect();
@@ -125,11 +135,19 @@ fn root_of_unity_has_exact_order() {
         let n = 1usize << k;
         let w = ntt::root_of_unity(n);
         // w^n == 1.
-        assert_eq!(ntt::scalar_pow(w, n as u64), Scalar::ONE, "ω^n != 1 at n={n}");
+        assert_eq!(
+            ntt::scalar_pow(w, n as u64),
+            Scalar::ONE,
+            "ω^n != 1 at n={n}"
+        );
         // Every lower power != 1 (exact order n), for n>1.
         if n > 1 {
             for j in 1..n {
-                assert_ne!(ntt::scalar_pow(w, j as u64), Scalar::ONE, "ω^{j} == 1 (order < n={n})");
+                assert_ne!(
+                    ntt::scalar_pow(w, j as u64),
+                    Scalar::ONE,
+                    "ω^{j} == 1 (order < n={n})"
+                );
             }
         }
     }
@@ -152,7 +170,12 @@ fn roots_r1cs(nvars: usize, ncons: usize, seed: u64) -> R1CS {
             c: vec![(k1, Scalar::ONE), (k2, Scalar::ONE), (k0, Scalar::ONE)],
         });
     }
-    R1CS { num_variables: nvars, num_public: 1, constraints, domain: Domain::RootsOfUnity }
+    R1CS {
+        num_variables: nvars,
+        num_public: 1,
+        constraints,
+        domain: Domain::RootsOfUnity,
+    }
 }
 
 #[test]
@@ -180,7 +203,13 @@ fn target_poly_is_roots_vanishing() {
         assert_eq!(t.eval(&w), Scalar::ZERO, "T(ω) must be 0");
         // T(x) = x^n - 1 exactly.
         for i in 0..=n {
-            let want = if i == 0 { -Scalar::ONE } else if i == n { Scalar::ONE } else { Scalar::ZERO };
+            let want = if i == 0 {
+                -Scalar::ONE
+            } else if i == n {
+                Scalar::ONE
+            } else {
+                Scalar::ZERO
+            };
             assert_eq!(t.0[i], want, "T coeff {i} wrong for n={n}");
         }
     }
@@ -200,9 +229,21 @@ fn eval_columns_at_roots_matches_dense_random_tau() {
             let tau = rng.scalar();
             let (a_fast, b_fast, c_fast) = qap.eval_columns_at(&tau);
             for k in 0..qap.num_variables {
-                assert_eq!(a_fast[k], qap.a[k].eval(&tau), "A_{k} at tau (nv={nv},m={m})");
-                assert_eq!(b_fast[k], qap.b[k].eval(&tau), "B_{k} at tau (nv={nv},m={m})");
-                assert_eq!(c_fast[k], qap.c[k].eval(&tau), "C_{k} at tau (nv={nv},m={m})");
+                assert_eq!(
+                    a_fast[k],
+                    qap.a[k].eval(&tau),
+                    "A_{k} at tau (nv={nv},m={m})"
+                );
+                assert_eq!(
+                    b_fast[k],
+                    qap.b[k].eval(&tau),
+                    "B_{k} at tau (nv={nv},m={m})"
+                );
+                assert_eq!(
+                    c_fast[k],
+                    qap.c[k].eval(&tau),
+                    "C_{k} at tau (nv={nv},m={m})"
+                );
             }
         }
         // On-domain τ (a node) must equal that constraint's own coefficients.
@@ -211,17 +252,32 @@ fn eval_columns_at_roots_matches_dense_random_tau() {
         for j in 0..qap.constraints.len() {
             let (a, b, c) = qap.eval_columns_at(&om);
             let con = &qap.constraints[j];
-            for &(k, v) in &con.a { assert_eq!(a[k], v, "on-domain A row {j} var {k}"); }
-            for &(k, v) in &con.b { assert_eq!(b[k], v, "on-domain B row {j} var {k}"); }
-            for &(k, v) in &con.c { assert_eq!(c[k], v, "on-domain C row {j} var {k}"); }
+            for &(k, v) in &con.a {
+                assert_eq!(a[k], v, "on-domain A row {j} var {k}");
+            }
+            for &(k, v) in &con.b {
+                assert_eq!(b[k], v, "on-domain B row {j} var {k}");
+            }
+            for &(k, v) in &con.c {
+                assert_eq!(c[k], v, "on-domain C row {j} var {k}");
+            }
             om *= w;
         }
         // Padding rows (m..n) must be all-zero (constraint absent).
         for j in qap.constraints.len()..qap.domain_size {
             let (a, b, c) = qap.eval_columns_at(&om);
-            assert!(a.iter().all(|x| *x == Scalar::ZERO), "padding A row {j} must be 0");
-            assert!(b.iter().all(|x| *x == Scalar::ZERO), "padding B row {j} must be 0");
-            assert!(c.iter().all(|x| *x == Scalar::ZERO), "padding C row {j} must be 0");
+            assert!(
+                a.iter().all(|x| *x == Scalar::ZERO),
+                "padding A row {j} must be 0"
+            );
+            assert!(
+                b.iter().all(|x| *x == Scalar::ZERO),
+                "padding B row {j} must be 0"
+            );
+            assert!(
+                c.iter().all(|x| *x == Scalar::ZERO),
+                "padding C row {j} must be 0"
+            );
             om *= w;
         }
     }
@@ -254,7 +310,12 @@ fn satisfiable_roots_r1cs(nvars: usize, ncons: usize, seed: u64) -> (R1CS, Vec<S
         let c = vec![(0, prod)]; // x_0 = 1 ⇒ c-side = prod
         constraints.push(Constraint { a, b, c });
     }
-    let r1cs = R1CS { num_variables: nvars, num_public: 1, constraints, domain: Domain::RootsOfUnity };
+    let r1cs = R1CS {
+        num_variables: nvars,
+        num_public: 1,
+        constraints,
+        domain: Domain::RootsOfUnity,
+    };
     (r1cs, z)
 }
 
@@ -268,7 +329,8 @@ fn fft_witness_matches_dense_witness_satisfiable() {
         let eq = |p: &Poly, q: &Poly| {
             let d = p.deg().max(q.deg());
             (0..=d).all(|i| {
-                p.0.get(i).copied().unwrap_or(Scalar::ZERO) == q.0.get(i).copied().unwrap_or(Scalar::ZERO)
+                p.0.get(i).copied().unwrap_or(Scalar::ZERO)
+                    == q.0.get(i).copied().unwrap_or(Scalar::ZERO)
             })
         };
         assert!(eq(&dense.a, &fft.a), "A mismatch (nv={nv},m={m})");
@@ -295,8 +357,11 @@ fn groth16_roundtrip_random_satisfiable_roots() {
         let qap = r1cs.qap();
         let pk = groth16::setup(&qap, "verify-seed");
         let (proof, pub_in) = groth16::prove(&pk, &qap, &z);
-        assert_eq!(groth16::verify(&pk.vk, &pub_in, &proof), Ok(()),
-            "roundtrip must verify (nv={nv},m={m})");
+        assert_eq!(
+            groth16::verify(&pk.vk, &pub_in, &proof),
+            Ok(()),
+            "roundtrip must verify (nv={nv},m={m})"
+        );
     }
 }
 
@@ -311,7 +376,10 @@ fn groth16_rejects_tampered_proof_and_witness() {
     // Tamper the proof's A point.
     let mut bad = proof.clone();
     bad.a = (bls12_381::G1Projective::generator() * Scalar::from(12345u64)).into();
-    assert!(groth16::verify(&pk.vk, &pub_in, &bad).is_err(), "tampered proof must fail");
+    assert!(
+        groth16::verify(&pk.vk, &pub_in, &bad).is_err(),
+        "tampered proof must fail"
+    );
 
     // Tamper the public inputs.
     let mut bad_in = pub_in.clone();
@@ -320,11 +388,17 @@ fn groth16_rejects_tampered_proof_and_witness() {
     } else {
         bad_in[0] += Scalar::ONE;
     }
-    assert!(groth16::verify(&pk.vk, &bad_in, &proof).is_err(), "tampered public input must fail");
+    assert!(
+        groth16::verify(&pk.vk, &bad_in, &proof).is_err(),
+        "tampered public input must fail"
+    );
 
     // A different CRS must reject.
     let pk2 = groth16::setup(&qap, "other-seed");
-    assert!(groth16::verify(&pk2.vk, &pub_in, &proof).is_err(), "wrong CRS must fail");
+    assert!(
+        groth16::verify(&pk2.vk, &pub_in, &proof).is_err(),
+        "wrong CRS must fail"
+    );
 }
 
 // ===========================================================================
@@ -335,7 +409,11 @@ fn groth16_rejects_tampered_proof_and_witness() {
 fn value_balance_vk_unchanged_after_fft_refactor() {
     // The pallet bakes this key; it MUST NOT change when we add the FFT domain.
     let r1cs = qap::value_balance_r1cs();
-    assert_eq!(r1cs.domain, Domain::Consecutive, "value-balance must stay on the consecutive domain");
+    assert_eq!(
+        r1cs.domain,
+        Domain::Consecutive,
+        "value-balance must stay on the consecutive domain"
+    );
     let qap = r1cs.qap();
     let pk = groth16::setup(&qap, "testnet-crs-v0");
     let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
@@ -366,7 +444,11 @@ fn time_setup_and_prove_phases() {
     let (r1cs, z) = crate::note_spend::note_spend_r1cs(&note);
     let qap = r1cs.qap_sparse();
     let n = qap.domain_size;
-    eprintln!("domain_size={n}, vars={}, constraints={}", qap.num_variables, qap.constraints.len());
+    eprintln!(
+        "domain_size={n}, vars={}, constraints={}",
+        qap.num_variables,
+        qap.constraints.len()
+    );
 
     // Time eval_columns_at (used once by setup) in isolation, off-domain.
     let tau = Scalar::from(123456789u64);
@@ -398,16 +480,26 @@ fn note_spend_roundtrip_depth_variants() {
         let note = crate::note_spend::tests::test_note(depth);
         let (r1cs, z) = crate::note_spend::note_spend_r1cs(&note);
         assert_eq!(r1cs.domain, Domain::RootsOfUnity);
-        assert!(crate::gadget::constraints_hold(&r1cs, &z), "witness must satisfy (depth {depth})");
+        assert!(
+            crate::gadget::constraints_hold(&r1cs, &z),
+            "witness must satisfy (depth {depth})"
+        );
         let qap = r1cs.qap_sparse();
         let pk = groth16::setup(&qap, "testnet-crs-v0");
         let (proof, pub_in) = groth16::prove(&pk, &qap, &z);
-        assert_eq!(groth16::verify(&pk.vk, &pub_in, &proof), Ok(()), "must verify (depth {depth})");
+        assert_eq!(
+            groth16::verify(&pk.vk, &pub_in, &proof),
+            Ok(()),
+            "must verify (depth {depth})"
+        );
         // Soundness: a tampered public input must be rejected at scale too.
         let mut bad = pub_in.clone();
         if !bad.is_empty() {
             bad[0] += Scalar::ONE;
-            assert!(groth16::verify(&pk.vk, &bad, &proof).is_err(), "tampered input must fail (depth {depth})");
+            assert!(
+                groth16::verify(&pk.vk, &bad, &proof).is_err(),
+                "tampered input must fail (depth {depth})"
+            );
         }
     }
 }

@@ -57,8 +57,14 @@ fn resolve_account(raw: &str) -> String {
 
 /// Raw JSON-RPC POST to the node's HTTP endpoint (ws:// → http://). Returns the
 /// `result` field or None.
-async fn rpc_call(endpoint: &str, method: &str, params: serde_json::Value) -> Option<serde_json::Value> {
-    let http_url = endpoint.replace("ws://", "http://").replace("wss://", "https://");
+async fn rpc_call(
+    endpoint: &str,
+    method: &str,
+    params: serde_json::Value,
+) -> Option<serde_json::Value> {
+    let http_url = endpoint
+        .replace("ws://", "http://")
+        .replace("wss://", "https://");
     let body = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
     let resp = reqwest::Client::new()
         .post(&http_url)
@@ -90,7 +96,9 @@ async fn head_block(endpoint: &str) -> Option<(u64, String)> {
 
 /// Fetch the last `count` block numbers + hashes by walking back from the head.
 async fn recent_blocks(endpoint: &str, count: u64) -> Vec<(u64, String)> {
-    let Some((head, _)) = head_block(endpoint).await else { return vec![] };
+    let Some((head, _)) = head_block(endpoint).await else {
+        return vec![];
+    };
     let mut out = Vec::new();
     let start = head.saturating_sub(count.saturating_sub(1));
     for n in (start..=head).rev() {
@@ -141,7 +149,11 @@ async fn account_panel(ex: &Explorer, raw: &str) -> serde_json::Value {
         .client
         .get_account_info(&address)
         .await
-        .unwrap_or(AccountInfo { address: address.clone(), balance: 0.0, nonce: 0 });
+        .unwrap_or(AccountInfo {
+            address: address.clone(),
+            balance: 0.0,
+            nonce: 0,
+        });
     let nonce = ex.client.get_account_nonce(&address).await;
     let (staked, attested) = ex.client.get_provider_state(&address).await;
     let attest = ex.client.get_attestation_record(&address).await;
@@ -188,7 +200,9 @@ fn json_response(body: &str, status: u16) -> Response<std::io::Cursor<Vec<u8>>> 
 fn html_response(body: &str) -> Response<std::io::Cursor<Vec<u8>>> {
     Response::from_string(body.to_string())
         .with_status_code(200)
-        .with_header(Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap())
+        .with_header(
+            Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap(),
+        )
 }
 
 fn parse_query(query: &str) -> HashMap<String, String> {
@@ -201,7 +215,12 @@ fn parse_query(query: &str) -> HashMap<String, String> {
         .collect()
 }
 
-fn route(ex: &Explorer, handle: &tokio::runtime::Handle, path: &str, query: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+fn route(
+    ex: &Explorer,
+    handle: &tokio::runtime::Handle,
+    path: &str,
+    query: &str,
+) -> Response<std::io::Cursor<Vec<u8>>> {
     let params = parse_query(query);
 
     match path {
@@ -211,18 +230,29 @@ fn route(ex: &Explorer, handle: &tokio::runtime::Handle, path: &str, query: &str
             // The authoritative on-chain Phase-C bond-weighted median alone.
             let eff = handle.block_on(ex.client.get_effective_feed());
             match eff {
-                Some(f) => json_response(&serde_json::json!({
-                    "token_price_usd": f.token_price_usd,
-                    "gpu_hour_price_usd": f.avg_gpu_hour_price_usd,
-                    "utilization": f.utilization,
-                    "staking_apr_percent": f.staking_apr_percent,
-                    "updated_at_block": f.updated_at_block,
-                }).to_string(), 200),
-                None => json_response(r#"{"error":"no bonded operator has posted a feed yet"}"#, 200),
+                Some(f) => json_response(
+                    &serde_json::json!({
+                        "token_price_usd": f.token_price_usd,
+                        "gpu_hour_price_usd": f.avg_gpu_hour_price_usd,
+                        "utilization": f.utilization,
+                        "staking_apr_percent": f.staking_apr_percent,
+                        "updated_at_block": f.updated_at_block,
+                    })
+                    .to_string(),
+                    200,
+                ),
+                None => json_response(
+                    r#"{"error":"no bonded operator has posted a feed yet"}"#,
+                    200,
+                ),
             }
         }
         "/api/blocks" => {
-            let count = params.get("count").and_then(|c| c.parse::<u64>().ok()).unwrap_or(12).min(50);
+            let count = params
+                .get("count")
+                .and_then(|c| c.parse::<u64>().ok())
+                .unwrap_or(12)
+                .min(50);
             let blocks = handle.block_on(recent_blocks(&ex.endpoint, count));
             json_response(&serde_json::json!({ "blocks": blocks }).to_string(), 200)
         }
@@ -325,7 +355,10 @@ button{background:#238636;border:none;color:#fff;padding:6px 14px;border-radius:
     // Recent blocks
     s.push_str("<h2>Recent blocks</h2><table><tr><th>#</th><th>Hash</th></tr>");
     for (n, h) in blocks {
-        s.push_str(&format!("<tr><td>{}</td><td><code>{}</code></td></tr>", n, h));
+        s.push_str(&format!(
+            "<tr><td>{}</td><td><code>{}</code></td></tr>",
+            n, h
+        ));
     }
     s.push_str("</table>");
 
@@ -338,8 +371,12 @@ button{background:#238636;border:none;color:#fff;padding:6px 14px;border-radius:
     for j in jobs_arr {
         let state = j["state"].as_str().unwrap_or("?");
         let badge = match state {
-            "Pending" => "m", "Accepted" => "c", "Running" => "k",
-            "Submitted" => "c", "Completed" => "s", _ => "m",
+            "Pending" => "m",
+            "Accepted" => "c",
+            "Running" => "k",
+            "Submitted" => "c",
+            "Completed" => "s",
+            _ => "m",
         };
         s.push_str(&format!(
             "<tr><td>{}</td><td><span class='badge {}'>{}</span></td><td>{:.4}</td><td>{}</td><td><code>{}</code></td><td><code>{}</code></td></tr>",
@@ -363,9 +400,24 @@ fn main() {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--endpoint" => { i += 1; if i < args.len() { endpoint = args[i].clone(); } }
-            "--listen" => { i += 1; if i < args.len() { listen = args[i].clone(); } }
-            "--account" => { i += 1; if i < args.len() { accounts.push(args[i].clone()); } }
+            "--endpoint" => {
+                i += 1;
+                if i < args.len() {
+                    endpoint = args[i].clone();
+                }
+            }
+            "--listen" => {
+                i += 1;
+                if i < args.len() {
+                    listen = args[i].clone();
+                }
+            }
+            "--account" => {
+                i += 1;
+                if i < args.len() {
+                    accounts.push(args[i].clone());
+                }
+            }
             "--help" | "-h" => {
                 println!("gpn_explorer [--endpoint ws://127.0.0.1:9944] [--listen 127.0.0.1:8082] [--account //Alice] ...");
                 return;
@@ -381,8 +433,14 @@ fn main() {
     env_logger::init();
 
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let client = runtime.block_on(ChainClient::new(&endpoint)).expect("chain client");
-    let explorer = Arc::new(Explorer { client, endpoint: endpoint.clone(), accounts });
+    let client = runtime
+        .block_on(ChainClient::new(&endpoint))
+        .expect("chain client");
+    let explorer = Arc::new(Explorer {
+        client,
+        endpoint: endpoint.clone(),
+        accounts,
+    });
     let server = Server::http(&listen).expect("bind listener");
     println!("gpn_explorer listening on http://{listen} (node {endpoint})");
 

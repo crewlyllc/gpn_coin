@@ -23,16 +23,10 @@
 ///   (`10_000 == 100%`, `1_200 == 12%`).
 /// (Units are a design decision of the oracle pallet; the agent converts to the
 /// dollar / fraction / percent forms the profitability calculator expects.)
-
 pub mod signer;
 
 use serde::{Deserialize, Serialize};
-use subxt::{
-    config::SubstrateConfig,
-    dynamic::Value,
-    tx::Signer as _,
-    OnlineClient,
-};
+use subxt::{config::SubstrateConfig, dynamic::Value, tx::Signer as _, OnlineClient};
 
 /// Fallback defaults when the chain is unreachable / feed empty. Matches the
 /// previous hardcoded placeholders so behaviour is unchanged offline.
@@ -47,8 +41,8 @@ const FALLBACK_DIFFICULTY: f64 = 100_000_000.0;
 pub struct OnChainFeed {
     pub token_price_usd: f64,
     pub avg_gpu_hour_price_usd: f64,
-    pub utilization: f64,          // 0.0 ..= 1.0
-    pub staking_apr_percent: f64,  // e.g. 12.0 == 12%
+    pub utilization: f64,         // 0.0 ..= 1.0
+    pub staking_apr_percent: f64, // e.g. 12.0 == 12%
     pub updated_at_block: u64,
 }
 
@@ -84,7 +78,8 @@ impl ChainClient {
                 log::warn!(
                     "Could not connect to GPN chain at {} ({}). \
                      Falling back to placeholder chain data.",
-                    endpoint, e
+                    endpoint,
+                    e
                 );
                 None
             }
@@ -145,7 +140,11 @@ impl ChainClient {
 
     /// Read a storage value at the current best head block (or fall back to
     /// finalized via `at_latest` if the head hash can't be resolved).
-    async fn storage_at_head<Addr>(&self, client: &OnlineClient<SubstrateConfig>, addr: &Addr) -> Option<subxt::dynamic::Value>
+    async fn storage_at_head<Addr>(
+        &self,
+        client: &OnlineClient<SubstrateConfig>,
+        addr: &Addr,
+    ) -> Option<subxt::dynamic::Value>
     where
         Addr: subxt::storage::Address<
             Target = subxt::dynamic::DecodedValueThunk,
@@ -160,8 +159,7 @@ impl ChainClient {
                 .fetch(addr)
                 .await
                 .ok()?
-                .map(|t| t.to_value().ok().map(|v| v.remove_context()))
-                .flatten(),
+                .and_then(|t| t.to_value().ok().map(|v| v.remove_context())),
             None => client
                 .storage()
                 .at_latest()
@@ -170,8 +168,7 @@ impl ChainClient {
                 .fetch(addr)
                 .await
                 .ok()?
-                .map(|t| t.to_value().ok().map(|v| v.remove_context()))
-                .flatten(),
+                .and_then(|t| t.to_value().ok().map(|v| v.remove_context())),
         }
     }
 
@@ -215,11 +212,7 @@ impl ChainClient {
     /// unreachable or the feed has not been set by an oracle operator yet.
     async fn fetch_feed(&self) -> Option<OnChainFeed> {
         let client = self.client.as_ref()?;
-        let addr = subxt::dynamic::storage(
-            "ProfitabilityOracle",
-            "CurrentFeed",
-            vec![],
-        );
+        let addr = subxt::dynamic::storage("ProfitabilityOracle", "CurrentFeed", vec![]);
         let fields = self.storage_at_head(client, &addr).await?;
         parse_feed_value(&fields)
     }
@@ -238,8 +231,7 @@ impl ChainClient {
             Some(c) => c,
             None => return Vec::new(),
         };
-        let addr =
-            subxt::dynamic::storage("ProfitabilityOracle", "OperatorFeeds", vec![]);
+        let addr = subxt::dynamic::storage("ProfitabilityOracle", "OperatorFeeds", vec![]);
         let mut out = Vec::new();
         if let Some(hash) = self.head_block_hash().await {
             if let Ok(mut stream) = client.storage().at(hash).iter(addr).await {
@@ -268,7 +260,7 @@ impl ChainClient {
         let addr = subxt::dynamic::storage(
             "ProfitabilityOracle",
             "StakedOperators",
-            vec![Value::from_bytes(account.to_vec())],
+            vec![Value::from_bytes(account)],
         );
         self.storage_at_head(client, &addr).await?.as_u128()
     }
@@ -286,8 +278,7 @@ impl ChainClient {
             Some(c) => c,
             None => return Vec::new(),
         };
-        let addr =
-            subxt::dynamic::storage("ProfitabilityOracle", "StakedOperators", vec![]);
+        let addr = subxt::dynamic::storage("ProfitabilityOracle", "StakedOperators", vec![]);
         let mut out = Vec::new();
         if let Some(hash) = self.head_block_hash().await {
             if let Ok(mut stream) = client.storage().at(hash).iter(addr).await {
@@ -342,18 +333,9 @@ impl ChainClient {
         // Convenience fields are already decoded USD (not micro-USD); the raw
         // fields are micro-USD / bps like the pallet.
         Some(OnChainFeed {
-            token_price_usd: res
-                .get("tokenPrice")?
-                .as_f64()?
-                .max(0.0),
-            avg_gpu_hour_price_usd: res
-                .get("gpuHourPriceUsd")?
-                .as_f64()?
-                .max(0.0),
-            utilization: res
-                .get("utilization")?
-                .as_f64()?
-                .clamp(0.0, 1.0),
+            token_price_usd: res.get("tokenPrice")?.as_f64()?.max(0.0),
+            avg_gpu_hour_price_usd: res.get("gpuHourPriceUsd")?.as_f64()?.max(0.0),
+            utilization: res.get("utilization")?.as_f64()?.clamp(0.0, 1.0),
             staking_apr_percent: res.get("stakingApr")?.as_f64()? * 100.0,
             updated_at_block: res.get("updatedAt")?.as_u64()?,
         })
@@ -371,7 +353,10 @@ impl ChainClient {
         Some(target_to_difficulty(limbs_arr))
     }
 
-    pub async fn get_account_info(&self, address: &str) -> Result<AccountInfo, Box<dyn std::error::Error>> {
+    pub async fn get_account_info(
+        &self,
+        address: &str,
+    ) -> Result<AccountInfo, Box<dyn std::error::Error>> {
         // Best-effort: read System::Account balance if connected, else 0.
         let mut balance = 0.0f64;
         if let Some(client) = &self.client {
@@ -379,7 +364,7 @@ impl ChainClient {
                 let storage_addr = subxt::dynamic::storage(
                     "System",
                     "Account",
-                    vec![Value::from_bytes((addr32.as_ref() as &[u8; 32]).to_vec())],
+                    vec![Value::from_bytes(addr32.as_ref() as &[u8; 32])],
                 );
                 if let Some(val) = self.storage_at_head(client, &storage_addr).await {
                     if let Some(data) = get_field(&val, "data") {
@@ -405,19 +390,33 @@ impl ChainClient {
     }
 
     pub async fn get_token_price_usd(&self) -> Result<f64, Box<dyn std::error::Error>> {
-        Ok(self.feed_value(|f| f.token_price_usd, FALLBACK_TOKEN_PRICE_USD).await)
+        Ok(self
+            .feed_value(|f| f.token_price_usd, FALLBACK_TOKEN_PRICE_USD)
+            .await)
     }
 
-    pub async fn get_gpu_hour_price(&self, _model: &str) -> Result<f64, Box<dyn std::error::Error>> {
-        Ok(self.feed_value(|f| f.avg_gpu_hour_price_usd, FALLBACK_GPU_HOUR_PRICE_USD).await)
+    pub async fn get_gpu_hour_price(
+        &self,
+        _model: &str,
+    ) -> Result<f64, Box<dyn std::error::Error>> {
+        Ok(self
+            .feed_value(|f| f.avg_gpu_hour_price_usd, FALLBACK_GPU_HOUR_PRICE_USD)
+            .await)
     }
 
-    pub async fn get_utilization_rate(&self, _model: &str) -> Result<f64, Box<dyn std::error::Error>> {
-        Ok(self.feed_value(|f| f.utilization, FALLBACK_UTILIZATION).await)
+    pub async fn get_utilization_rate(
+        &self,
+        _model: &str,
+    ) -> Result<f64, Box<dyn std::error::Error>> {
+        Ok(self
+            .feed_value(|f| f.utilization, FALLBACK_UTILIZATION)
+            .await)
     }
 
     pub async fn get_staking_apr(&self) -> Result<f64, Box<dyn std::error::Error>> {
-        Ok(self.feed_value(|f| f.staking_apr_percent, FALLBACK_STAKING_APR_PERCENT).await)
+        Ok(self
+            .feed_value(|f| f.staking_apr_percent, FALLBACK_STAKING_APR_PERCENT)
+            .await)
     }
 
     /// Fetch a single field from the on-chain feed, falling back to `fallback`
@@ -447,7 +446,7 @@ impl ChainClient {
         let storage_addr = subxt::dynamic::storage(
             "System",
             "Account",
-            vec![Value::from_bytes((addr32.as_ref() as &[u8; 32]).to_vec())],
+            vec![Value::from_bytes(addr32.as_ref() as &[u8; 32])],
         );
         match self.storage_at_head(client, &storage_addr).await {
             Some(v) => get_u32_field(&v, "nonce").unwrap_or(0) as u64,
@@ -458,13 +457,23 @@ impl ChainClient {
     /// Read whether the account has staked (has a `ProviderStake` entry) and
     /// whether it has an active attestation record, straight from storage.
     pub async fn get_provider_state(&self, address: &str) -> (bool, bool) {
-        let Some(client) = &self.client else { return (false, false) };
+        let Some(client) = &self.client else {
+            return (false, false);
+        };
         let Ok(addr32) = address.parse::<subxt::utils::AccountId32>() else {
             return (false, false);
         };
         let key = (addr32.as_ref() as &[u8; 32]).to_vec();
-        let stake = subxt::dynamic::storage("GPUAttestation", "ProviderStake", vec![Value::from_bytes(key.clone())]);
-        let att = subxt::dynamic::storage("GPUAttestation", "Attestations", vec![Value::from_bytes(key)]);
+        let stake = subxt::dynamic::storage(
+            "GPUAttestation",
+            "ProviderStake",
+            vec![Value::from_bytes(key.clone())],
+        );
+        let att = subxt::dynamic::storage(
+            "GPUAttestation",
+            "Attestations",
+            vec![Value::from_bytes(key)],
+        );
         let has_stake = self.storage_at_head(client, &stake).await.is_some();
         let has_att = self.storage_at_head(client, &att).await.is_some();
         (has_stake, has_att)
@@ -476,7 +485,11 @@ impl ChainClient {
         let client = self.client.as_ref()?;
         let addr32 = address.parse::<subxt::utils::AccountId32>().ok()?;
         let key = (addr32.as_ref() as &[u8; 32]).to_vec();
-        let att = subxt::dynamic::storage("GPUAttestation", "Attestations", vec![Value::from_bytes(key)]);
+        let att = subxt::dynamic::storage(
+            "GPUAttestation",
+            "Attestations",
+            vec![Value::from_bytes(key)],
+        );
         let v = self.storage_at_head(client, &att).await?;
         let gpus = get_u8_field(&v, "gpu_count")?;
         let gflops = get_u64_field(&v, "compute_gflops")?;
@@ -489,9 +502,15 @@ impl ChainClient {
                     ValueDef::Composite(subxt::ext::scale_value::Composite::Named(pairs)) => {
                         pairs.first().map(|(name, _)| name.clone())
                     }
-                    _ => t.as_u128().map(|n| match n {
-                        1 => "Bronze", 2 => "Silver", 3 => "Gold", _ => "Unattested",
-                    }.to_string()),
+                    _ => t.as_u128().map(|n| {
+                        match n {
+                            1 => "Bronze",
+                            2 => "Silver",
+                            3 => "Gold",
+                            _ => "Unattested",
+                        }
+                        .to_string()
+                    }),
                 }
             })
             .unwrap_or_else(|| "?".to_string());
@@ -545,7 +564,9 @@ impl ChainClient {
             ],
         );
 
-        let nonce = self.get_account_nonce(&signer.account_id().to_string()).await;
+        let nonce = self
+            .get_account_nonce(&signer.account_id().to_string())
+            .await;
         signer::submit_signed(&client, &call, &signer, nonce).await?;
         log::info!("GPU attestation submitted on-chain and succeeded.");
         Ok(())
@@ -557,10 +578,7 @@ impl ChainClient {
     /// signed `GPUAttestation::deposit_stake` extrinsic.
     ///
     /// This is a no-op (with a warning) if no signer is configured.
-    pub async fn deposit_stake(
-        &self,
-        amount: u128,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn deposit_stake(&self, amount: u128) -> Result<(), Box<dyn std::error::Error>> {
         let Some(uri) = &self.signer_uri else {
             log::warn!("No signer configured; cannot deposit stake (set signer_uri).");
             return Ok(());
@@ -571,15 +589,14 @@ impl ChainClient {
 
         log::info!(
             "Depositing {} GPN stake as {} (GPUAttestation::deposit_stake)",
-            amount, signer.account_id()
+            amount,
+            signer.account_id()
         );
 
-        let nonce = self.get_account_nonce(&signer.account_id().to_string()).await;
-        let call = subxt::dynamic::tx(
-            "GPUAttestation",
-            "deposit_stake",
-            vec![Value::u128(amount)],
-        );
+        let nonce = self
+            .get_account_nonce(&signer.account_id().to_string())
+            .await;
+        let call = subxt::dynamic::tx("GPUAttestation", "deposit_stake", vec![Value::u128(amount)]);
 
         signer::submit_signed(&client, &call, &signer, nonce).await?;
         log::info!("Stake deposited on-chain.");
@@ -598,9 +615,14 @@ impl ChainClient {
         let signer = signer::Sr25519Signer::from_uri(uri)?;
         let client = signer::connect(&self.endpoint).await?;
 
-        log::info!("Withdrawing stake as {} (GPUAttestation::withdraw_stake)", signer.account_id());
+        log::info!(
+            "Withdrawing stake as {} (GPUAttestation::withdraw_stake)",
+            signer.account_id()
+        );
 
-        let nonce = self.get_account_nonce(&signer.account_id().to_string()).await;
+        let nonce = self
+            .get_account_nonce(&signer.account_id().to_string())
+            .await;
         let call_args: Vec<subxt::dynamic::Value> = Vec::new();
         let call = subxt::dynamic::tx("GPUAttestation", "withdraw_stake", call_args);
 
@@ -621,7 +643,10 @@ impl ChainClient {
     ) -> Value {
         Value::named_composite([
             ("min_vram_mb", Value::u128(min_vram_mb as u128)),
-            ("min_compute_capability", Value::u128(min_compute_capability as u128)),
+            (
+                "min_compute_capability",
+                Value::u128(min_compute_capability as u128),
+            ),
             ("min_gpu_count", Value::u128(min_gpu_count as u128)),
             ("min_cuda_cores", Value::u128(min_cuda_cores as u128)),
             ("min_gflops", Value::u128(min_gflops as u128)),
@@ -635,14 +660,25 @@ impl ChainClient {
         args: Vec<Value>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let Some(uri) = &self.signer_uri else {
-            log::warn!("No signer configured; cannot submit {}::{}. (set signer_uri)", pallet, call_name);
+            log::warn!(
+                "No signer configured; cannot submit {}::{}. (set signer_uri)",
+                pallet,
+                call_name
+            );
             return Ok(());
         };
         let signer = signer::Sr25519Signer::from_uri(uri)?;
         let client = signer::connect(&self.endpoint).await?;
         let call = subxt::dynamic::tx(pallet, call_name, args);
-        let nonce = self.get_account_nonce(&signer.account_id().to_string()).await;
-        log::info!("Submitting {}::{} as {}", pallet, call_name, signer.account_id());
+        let nonce = self
+            .get_account_nonce(&signer.account_id().to_string())
+            .await;
+        log::info!(
+            "Submitting {}::{} as {}",
+            pallet,
+            call_name,
+            signer.account_id()
+        );
         signer::submit_signed(&client, &call, &signer, nonce).await?;
         log::info!("{}::{} succeeded on-chain.", pallet, call_name);
         Ok(())
@@ -659,8 +695,15 @@ impl ChainClient {
         min_cuda_cores: u32,
         min_gflops: u64,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let req = Self::gpu_requirements_value(min_vram_mb, min_compute_capability, min_gpu_count, min_cuda_cores, min_gflops);
-        self.submit_signed_call("ComputeMarketplace", "register_provider", vec![req]).await
+        let req = Self::gpu_requirements_value(
+            min_vram_mb,
+            min_compute_capability,
+            min_gpu_count,
+            min_cuda_cores,
+            min_gflops,
+        );
+        self.submit_signed_call("ComputeMarketplace", "register_provider", vec![req])
+            .await
     }
 
     /// `ComputeMarketplace::create_job(...)` — a requestor posts a paid AI job
@@ -679,46 +722,90 @@ impl ChainClient {
         max_duration: u32,
         workload_hash: [u8; 32],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let req = Self::gpu_requirements_value(min_vram_mb, min_compute_capability, min_gpu_count, min_cuda_cores, min_gflops);
+        let req = Self::gpu_requirements_value(
+            min_vram_mb,
+            min_compute_capability,
+            min_gpu_count,
+            min_cuda_cores,
+            min_gflops,
+        );
         let args = vec![
             req,
-            Value::variant(job_type, subxt::ext::scale_value::Composite::unnamed(Vec::<Value>::new())),
-            Value::variant(tier, subxt::ext::scale_value::Composite::unnamed(Vec::<Value>::new())),
+            Value::variant(
+                job_type,
+                subxt::ext::scale_value::Composite::unnamed(Vec::<Value>::new()),
+            ),
+            Value::variant(
+                tier,
+                subxt::ext::scale_value::Composite::unnamed(Vec::<Value>::new()),
+            ),
             Value::u128(price),
             Value::u128(max_duration as u128),
             Value::from_bytes(workload_hash),
         ];
-        self.submit_signed_call("ComputeMarketplace", "create_job", args).await
+        self.submit_signed_call("ComputeMarketplace", "create_job", args)
+            .await
     }
 
     /// `ComputeMarketplace::accept_job(job_id)` — provider takes a Pending job.
     /// Gated by the cycle-26 cross-pallet `min_gflops` attestation check.
     pub async fn accept_job(&self, job_id: u64) -> Result<(), Box<dyn std::error::Error>> {
-        self.submit_signed_call("ComputeMarketplace", "accept_job", vec![Value::u128(job_id as u128)]).await
+        self.submit_signed_call(
+            "ComputeMarketplace",
+            "accept_job",
+            vec![Value::u128(job_id as u128)],
+        )
+        .await
     }
 
     /// `ComputeMarketplace::start_job(job_id)` — mark an Accepted job Running.
     pub async fn start_job(&self, job_id: u64) -> Result<(), Box<dyn std::error::Error>> {
-        self.submit_signed_call("ComputeMarketplace", "start_job", vec![Value::u128(job_id as u128)]).await
+        self.submit_signed_call(
+            "ComputeMarketplace",
+            "start_job",
+            vec![Value::u128(job_id as u128)],
+        )
+        .await
     }
 
     /// `ComputeMarketplace::submit_result(job_id, result_hash)` — provider
     /// reports the digest of the computed workload; state → AwaitingVerification.
-    pub async fn submit_result(&self, job_id: u64, result_hash: [u8; 32]) -> Result<(), Box<dyn std::error::Error>> {
-        self.submit_signed_call("ComputeMarketplace", "submit_result", vec![Value::u128(job_id as u128), Value::from_bytes(result_hash)]).await
+    pub async fn submit_result(
+        &self,
+        job_id: u64,
+        result_hash: [u8; 32],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.submit_signed_call(
+            "ComputeMarketplace",
+            "submit_result",
+            vec![Value::u128(job_id as u128), Value::from_bytes(result_hash)],
+        )
+        .await
     }
 
     /// `ComputeMarketplace::complete_job(job_id)` — finalize and pay the
     /// provider from escrow (marketplace fee withheld).
     pub async fn complete_job(&self, job_id: u64) -> Result<(), Box<dyn std::error::Error>> {
-        self.submit_signed_call("ComputeMarketplace", "complete_job", vec![Value::u128(job_id as u128)]).await
+        self.submit_signed_call(
+            "ComputeMarketplace",
+            "complete_job",
+            vec![Value::u128(job_id as u128)],
+        )
+        .await
     }
 
     /// Read the on-chain job record: (state, price, requestor, provider).
     /// Returns None if the job doesn't exist / chain unreachable.
-    pub async fn get_job_state(&self, job_id: u64) -> Option<(String, u128, Option<String>, Option<String>)> {
+    pub async fn get_job_state(
+        &self,
+        job_id: u64,
+    ) -> Option<(String, u128, Option<String>, Option<String>)> {
         let client = self.client.as_ref()?;
-        let addr = subxt::dynamic::storage("ComputeMarketplace", "Jobs", vec![Value::u128(job_id as u128)]);
+        let addr = subxt::dynamic::storage(
+            "ComputeMarketplace",
+            "Jobs",
+            vec![Value::u128(job_id as u128)],
+        );
         let v = self.storage_at_head(client, &addr).await?;
         let state = get_field(&v, "state")
             .and_then(|t| {
@@ -731,21 +818,41 @@ impl ChainClient {
             .unwrap_or_else(|| "?".to_string());
         let price = get_u128_field(&v, "price").unwrap_or(0);
 
-        let req_addr = subxt::dynamic::storage("ComputeMarketplace", "JobRequestor", vec![Value::u128(job_id as u128)]);
-        let prov_addr = subxt::dynamic::storage("ComputeMarketplace", "JobProvider", vec![Value::u128(job_id as u128)]);
-        let requestor = self.storage_at_head(client, &req_addr).await
+        let req_addr = subxt::dynamic::storage(
+            "ComputeMarketplace",
+            "JobRequestor",
+            vec![Value::u128(job_id as u128)],
+        );
+        let prov_addr = subxt::dynamic::storage(
+            "ComputeMarketplace",
+            "JobProvider",
+            vec![Value::u128(job_id as u128)],
+        );
+        let requestor = self
+            .storage_at_head(client, &req_addr)
+            .await
             .map(|x| account_id_to_string(&x));
-        let provider = self.storage_at_head(client, &prov_addr).await
+        let provider = self
+            .storage_at_head(client, &prov_addr)
+            .await
             .map(|x| account_id_to_string(&x));
         Some((state, price, requestor, provider))
     }
 
     /// Read whether the account is a registered provider.
     pub async fn is_provider_registered(&self, address: &str) -> bool {
-        let Some(client) = &self.client else { return false };
-        let Ok(addr32) = address.parse::<subxt::utils::AccountId32>() else { return false };
+        let Some(client) = &self.client else {
+            return false;
+        };
+        let Ok(addr32) = address.parse::<subxt::utils::AccountId32>() else {
+            return false;
+        };
         let key = (addr32.as_ref() as &[u8; 32]).to_vec();
-        let addr = subxt::dynamic::storage("ComputeMarketplace", "RegisteredProviders", vec![Value::from_bytes(key)]);
+        let addr = subxt::dynamic::storage(
+            "ComputeMarketplace",
+            "RegisteredProviders",
+            vec![Value::from_bytes(key)],
+        );
         self.storage_at_head(client, &addr).await.is_some()
     }
 
@@ -764,7 +871,11 @@ impl ChainClient {
     /// exist / chain unreachable.
     pub async fn get_job_min_gflops(&self, job_id: u64) -> Option<u64> {
         let client = self.client.as_ref()?;
-        let addr = subxt::dynamic::storage("ComputeMarketplace", "Jobs", vec![Value::u128(job_id as u128)]);
+        let addr = subxt::dynamic::storage(
+            "ComputeMarketplace",
+            "Jobs",
+            vec![Value::u128(job_id as u128)],
+        );
         let v = self.storage_at_head(client, &addr).await?;
         // Jobs.gpu_requirements.min_gflops — nested named composite.
         let req = get_field(&v, "gpu_requirements")?;
@@ -779,12 +890,20 @@ impl ChainClient {
     /// `attested_gflops` = the provider's on-chain attested compute throughput;
     /// a job with min_gflops=0 is always claimable (open market).
     pub async fn list_claimable_jobs(&self, attested_gflops: u64) -> Vec<(u64, u64)> {
-        let Some(client) = &self.client else { return vec![] };
+        let Some(client) = &self.client else {
+            return vec![];
+        };
         let next = self.get_next_job_id().await;
         let mut out = Vec::new();
         for id in 0..next {
-            let addr = subxt::dynamic::storage("ComputeMarketplace", "Jobs", vec![Value::u128(id as u128)]);
-            let Some(v) = self.storage_at_head(client, &addr).await else { continue };
+            let addr = subxt::dynamic::storage(
+                "ComputeMarketplace",
+                "Jobs",
+                vec![Value::u128(id as u128)],
+            );
+            let Some(v) = self.storage_at_head(client, &addr).await else {
+                continue;
+            };
             // Only Pending jobs are claimable (skip Accepted/Running/etc).
             let state = get_field(&v, "state")
                 .and_then(|t| {
@@ -840,18 +959,20 @@ impl ChainClient {
             "register_fullnode",
             vec![Value::from_bytes(endpoint_bytes)],
         );
-        let nonce = self.get_account_nonce(&signer.account_id().to_string()).await;
+        let nonce = self
+            .get_account_nonce(&signer.account_id().to_string())
+            .await;
         signer::submit_signed(&client, &call, &signer, nonce).await?;
-        log::info!("Registered as a full node on-chain (endpoint {}).", endpoint);
+        log::info!(
+            "Registered as a full node on-chain (endpoint {}).",
+            endpoint
+        );
         Ok(())
     }
 
     /// A bonded full node witnesses that it successfully reached `target`'s
     /// declared endpoint this window. Signed `Liveness::witness_reachable`.
-    pub async fn witness_reachable(
-        &self,
-        target: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn witness_reachable(&self, target: &str) -> Result<(), Box<dyn std::error::Error>> {
         let Some(uri) = &self.signer_uri else {
             log::warn!("No signer configured; cannot witness (set signer_uri).");
             return Ok(());
@@ -865,7 +986,9 @@ impl ChainClient {
             "witness_reachable",
             vec![Value::from_bytes(key)],
         );
-        let nonce = self.get_account_nonce(&signer.account_id().to_string()).await;
+        let nonce = self
+            .get_account_nonce(&signer.account_id().to_string())
+            .await;
         signer::submit_signed(&client, &call, &signer, nonce).await?;
         log::info!("Witnessed full node {} reachable this window.", target);
         Ok(())
@@ -874,10 +997,7 @@ impl ChainClient {
     /// Finalize the most recent completed liveness window for `target` (anyone
     /// may call). Signed `Liveness::submit_liveness`. This is how a node
     /// confirms it stayed online (or records a miss).
-    pub async fn submit_liveness(
-        &self,
-        target: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn submit_liveness(&self, target: &str) -> Result<(), Box<dyn std::error::Error>> {
         let Some(uri) = &self.signer_uri else {
             log::warn!("No signer configured; cannot finalize liveness (set signer_uri).");
             return Ok(());
@@ -886,12 +1006,10 @@ impl ChainClient {
         let client = signer::connect(&self.endpoint).await?;
         let target32: subxt::utils::AccountId32 = target.parse()?;
         let key = (target32.as_ref() as &[u8; 32]).to_vec();
-        let call = subxt::dynamic::tx(
-            "Liveness",
-            "submit_liveness",
-            vec![Value::from_bytes(key)],
-        );
-        let nonce = self.get_account_nonce(&signer.account_id().to_string()).await;
+        let call = subxt::dynamic::tx("Liveness", "submit_liveness", vec![Value::from_bytes(key)]);
+        let nonce = self
+            .get_account_nonce(&signer.account_id().to_string())
+            .await;
         signer::submit_signed(&client, &call, &signer, nonce).await?;
         log::info!("Finalized liveness window for {}.", target);
         Ok(())
@@ -907,7 +1025,9 @@ impl ChainClient {
         let signer = signer::Sr25519Signer::from_uri(uri)?;
         let client = signer::connect(&self.endpoint).await?;
         let call = subxt::dynamic::tx("Liveness", "unregister_fullnode", Vec::<Value>::new());
-        let nonce = self.get_account_nonce(&signer.account_id().to_string()).await;
+        let nonce = self
+            .get_account_nonce(&signer.account_id().to_string())
+            .await;
         signer::submit_signed(&client, &call, &signer, nonce).await?;
         log::info!("Unregistered full node; bond returned.");
         Ok(())
@@ -928,7 +1048,7 @@ impl ChainClient {
         let last_win = get_u64_field(&v, "last_confirmed_window").unwrap_or(0);
         // Compute uptime_bps from the bitmask via popcount.
         let bits = get_u32_field(&v, "uptime_bits").unwrap_or(0);
-        let uptime = popcount(bits) * 10_000u32 / 10u32.max(1);
+        let uptime = popcount(bits) * 10_000u32 / 10u32;
         Some((active, missed, last_win, uptime))
     }
 
@@ -950,7 +1070,7 @@ impl ChainClient {
         let storage_addr = subxt::dynamic::storage(
             "System",
             "Account",
-            vec![Value::from_bytes((addr32.as_ref() as &[u8; 32]).to_vec())],
+            vec![Value::from_bytes(addr32.as_ref() as &[u8; 32])],
         );
         let v = self.storage_at_head(client, &storage_addr).await?;
         get_field(&v, "data").and_then(|d| get_u128_field(d, "free"))
@@ -1039,11 +1159,17 @@ pub fn aggregate_median_feed(feeds: &[OnChainFeed]) -> Option<OnChainFeed> {
     Some(OnChainFeed {
         token_price_usd: median_f64(&feeds.iter().map(|f| f.token_price_usd).collect::<Vec<_>>())?,
         avg_gpu_hour_price_usd: median_f64(
-            &feeds.iter().map(|f| f.avg_gpu_hour_price_usd).collect::<Vec<_>>(),
+            &feeds
+                .iter()
+                .map(|f| f.avg_gpu_hour_price_usd)
+                .collect::<Vec<_>>(),
         )?,
         utilization: median_f64(&feeds.iter().map(|f| f.utilization).collect::<Vec<_>>())?,
         staking_apr_percent: median_f64(
-            &feeds.iter().map(|f| f.staking_apr_percent).collect::<Vec<_>>(),
+            &feeds
+                .iter()
+                .map(|f| f.staking_apr_percent)
+                .collect::<Vec<_>>(),
         )?,
         updated_at_block: feeds.iter().map(|f| f.updated_at_block).max().unwrap_or(0),
     })
@@ -1088,10 +1214,7 @@ pub fn bond_weighted_median_f64(weights: &[f64], values: &[f64]) -> Option<f64> 
 /// weight, so a large-bond operator dominates and a tiny-bond outlier cannot
 /// move any field. `updated_at_block` is the max (most recent write). Returns
 /// `None` if `feeds` is empty or no positive-weight finite values remain.
-pub fn aggregate_bonded_median_feed(
-    feeds: &[OnChainFeed],
-    bonds: &[u128],
-) -> Option<OnChainFeed> {
+pub fn aggregate_bonded_median_feed(feeds: &[OnChainFeed], bonds: &[u128]) -> Option<OnChainFeed> {
     if feeds.is_empty() || feeds.len() != bonds.len() {
         return None;
     }
@@ -1103,7 +1226,10 @@ pub fn aggregate_bonded_median_feed(
         )?,
         avg_gpu_hour_price_usd: bond_weighted_median_f64(
             &w,
-            &feeds.iter().map(|f| f.avg_gpu_hour_price_usd).collect::<Vec<_>>(),
+            &feeds
+                .iter()
+                .map(|f| f.avg_gpu_hour_price_usd)
+                .collect::<Vec<_>>(),
         )?,
         utilization: bond_weighted_median_f64(
             &w,
@@ -1111,7 +1237,10 @@ pub fn aggregate_bonded_median_feed(
         )?,
         staking_apr_percent: bond_weighted_median_f64(
             &w,
-            &feeds.iter().map(|f| f.staking_apr_percent).collect::<Vec<_>>(),
+            &feeds
+                .iter()
+                .map(|f| f.staking_apr_percent)
+                .collect::<Vec<_>>(),
         )?,
         updated_at_block: feeds.iter().map(|f| f.updated_at_block).max().unwrap_or(0),
     })
@@ -1187,7 +1316,9 @@ fn composite_limbs(value: &subxt::dynamic::Value) -> [u64; 4] {
 
 /// Look up a named u64 field inside a scale composite value.
 fn get_u64_field(value: &subxt::dynamic::Value, name: &str) -> Option<u64> {
-    get_field(value, name).and_then(|v| v.as_u128()).map(|v| v as u64)
+    get_field(value, name)
+        .and_then(|v| v.as_u128())
+        .map(|v| v as u64)
 }
 
 /// Population count of a u32 (number of set bits) — used to compute rolling
@@ -1256,7 +1387,10 @@ fn get_u128_field(value: &subxt::dynamic::Value, name: &str) -> Option<u128> {
 }
 
 /// Look up a named field inside a scale composite value (returns the sub-value).
-fn get_field<'a>(value: &'a subxt::dynamic::Value, name: &str) -> Option<&'a subxt::dynamic::Value> {
+fn get_field<'a>(
+    value: &'a subxt::dynamic::Value,
+    name: &str,
+) -> Option<&'a subxt::dynamic::Value> {
     use subxt::ext::scale_value::ValueDef;
     match &value.value {
         ValueDef::Composite(c) => match c {
@@ -1430,15 +1564,37 @@ mod tests {
     #[test]
     fn aggregate_bonded_median_feed_weights_by_bond() {
         // Two large-bond operators + one tiny-bond outlier.
-        let a = OnChainFeed { token_price_usd: 0.05, avg_gpu_hour_price_usd: 2.0, utilization: 0.60, staking_apr_percent: 12.0, updated_at_block: 10 };
-        let b = OnChainFeed { token_price_usd: 0.07, avg_gpu_hour_price_usd: 3.0, utilization: 0.70, staking_apr_percent: 15.0, updated_at_block: 20 };
-        let c = OnChainFeed { token_price_usd: 0.06, avg_gpu_hour_price_usd: 9_999.0, utilization: 0.80, staking_apr_percent: 18.0, updated_at_block: 30 };
+        let a = OnChainFeed {
+            token_price_usd: 0.05,
+            avg_gpu_hour_price_usd: 2.0,
+            utilization: 0.60,
+            staking_apr_percent: 12.0,
+            updated_at_block: 10,
+        };
+        let b = OnChainFeed {
+            token_price_usd: 0.07,
+            avg_gpu_hour_price_usd: 3.0,
+            utilization: 0.70,
+            staking_apr_percent: 15.0,
+            updated_at_block: 20,
+        };
+        let c = OnChainFeed {
+            token_price_usd: 0.06,
+            avg_gpu_hour_price_usd: 9_999.0,
+            utilization: 0.80,
+            staking_apr_percent: 18.0,
+            updated_at_block: 30,
+        };
         // Bonds: a=1000, b=1000, c=1 (tiny-bond outlier on gpu price).
         let bonds = vec![1000u128, 1000, 1];
         let m = aggregate_bonded_median_feed(&[a, b, c], &bonds).expect("bonded median feed");
         // The tiny-bond $9,999/hr outlier must NOT move gpu price (weighted
         // median lands on 3.0, same as the plain median here).
-        assert!((m.avg_gpu_hour_price_usd - 3.0).abs() < 1e-9, "got {}", m.avg_gpu_hour_price_usd);
+        assert!(
+            (m.avg_gpu_hour_price_usd - 3.0).abs() < 1e-9,
+            "got {}",
+            m.avg_gpu_hour_price_usd
+        );
         assert!((m.token_price_usd - 0.06).abs() < 1e-9);
         assert!((m.utilization - 0.70).abs() < 1e-9);
         assert!((m.staking_apr_percent - 15.0).abs() < 1e-9);
@@ -1447,7 +1603,13 @@ mod tests {
 
     #[test]
     fn aggregate_bonded_median_feed_len_mismatch_or_empty_is_none() {
-        let a = OnChainFeed { token_price_usd: 0.05, avg_gpu_hour_price_usd: 2.0, utilization: 0.60, staking_apr_percent: 12.0, updated_at_block: 10 };
+        let a = OnChainFeed {
+            token_price_usd: 0.05,
+            avg_gpu_hour_price_usd: 2.0,
+            utilization: 0.60,
+            staking_apr_percent: 12.0,
+            updated_at_block: 10,
+        };
         assert!(aggregate_bonded_median_feed(&[], &[]).is_none());
         assert!(aggregate_bonded_median_feed(&[a], &[]).is_none()); // len mismatch
     }
@@ -1458,22 +1620,33 @@ mod tests {
         // Composite::Unnamed of 32 u8s OR a Primitive::U256 (as observed live
         // in cycle 28, where the old Composite-only code rendered `provider=0x00`).
         // Verify we now render the correct hex address for both shapes.
-        use subxt::ext::scale_value::Value;
         use subxt::ext::scale_value::Primitive;
-        let bytes: [u8; 32] = [0x5a, 0x6b, 0x7c, 0x8d, 0x9e, 0xaf, 0xb0, 0xc1,
-            0xd2, 0xe3, 0xf4, 0x01, 0x23, 0x45, 0x67, 0x89,
-            0xab, 0xcd, 0xef, 0x10, 0x32, 0x54, 0x76, 0x98,
-            0xba, 0xdc, 0xfe, 0x11, 0x22, 0x33, 0x44, 0x55];
+        use subxt::ext::scale_value::Value;
+        let bytes: [u8; 32] = [
+            0x5a, 0x6b, 0x7c, 0x8d, 0x9e, 0xaf, 0xb0, 0xc1, 0xd2, 0xe3, 0xf4, 0x01, 0x23, 0x45,
+            0x67, 0x89, 0xab, 0xcd, 0xef, 0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe, 0x11,
+            0x22, 0x33, 0x44, 0x55,
+        ];
         let expected = format!("0x{}", hex::encode(bytes));
 
         // The real shape subxt produces for an AccountId32: a doubly-nested
         // Composite::Unnamed — outer holds one inner composite of 32 byte-prims.
-        let inner = Value::unnamed_composite(bytes.iter().map(|b| Value::from(*b as u128)).collect::<Vec<_>>());
+        let inner = Value::unnamed_composite(
+            bytes
+                .iter()
+                .map(|b| Value::from(*b as u128))
+                .collect::<Vec<_>>(),
+        );
         let outer = Value::unnamed_composite(vec![inner]);
         assert_eq!(account_id_to_string(&outer), expected);
 
         // Composite::Unnamed of byte-prims directly (alternative shape)
-        let flat = Value::unnamed_composite(bytes.iter().map(|b| Value::from(*b as u128)).collect::<Vec<_>>());
+        let flat = Value::unnamed_composite(
+            bytes
+                .iter()
+                .map(|b| Value::from(*b as u128))
+                .collect::<Vec<_>>(),
+        );
         assert_eq!(account_id_to_string(&flat), expected);
 
         // Primitive::U256 shape (defensive)
@@ -1507,7 +1680,7 @@ mod tests {
         // Fresh: head within TTL of updated_at.
         assert!(!is_feed_stale(100, 100, Some(1440)));
         assert!(!is_feed_stale(100, 100 + 1440, Some(1440))); // exactly at TTL = fresh
-        // Stale: head has advanced more than TTL past updated_at.
+                                                              // Stale: head has advanced more than TTL past updated_at.
         assert!(is_feed_stale(100, 100 + 1441, Some(1440)));
         assert!(is_feed_stale(100, 5000, Some(1440)));
     }
@@ -1618,7 +1791,11 @@ mod tests {
         assert!(client.client.is_some(), "expected a live subxt client");
 
         let difficulty = client.get_difficulty().await.unwrap();
-        assert!(difficulty > 0.0, "difficulty must be positive, got {}", difficulty);
+        assert!(
+            difficulty > 0.0,
+            "difficulty must be positive, got {}",
+            difficulty
+        );
         println!("[live] difficulty = {}", difficulty);
 
         let token = client.get_token_price_usd().await.unwrap();
@@ -1642,11 +1819,23 @@ mod tests {
         let client = ChainClient::new("ws://127.0.0.1:9944").await.unwrap();
         let head = client.head_block_number().await.expect("head_block_number");
         let feed = client.get_feed().await.expect("seeded feed");
-        println!("[live] head_block = {}, feed.updated_at_block = {}", head, feed.updated_at_block);
+        println!(
+            "[live] head_block = {}, feed.updated_at_block = {}",
+            head, feed.updated_at_block
+        );
         // Small TTL to observe the fresh->stale transition live (head advances
         // sub-second on dev).
-        println!("[live] stale(TTL=5)   = {}", is_feed_stale(feed.updated_at_block, head, Some(5)));
-        println!("[live] stale(TTL=1440)= {}", is_feed_stale(feed.updated_at_block, head, Some(1440)));
-        assert!(head >= feed.updated_at_block, "head must not precede updated_at");
+        println!(
+            "[live] stale(TTL=5)   = {}",
+            is_feed_stale(feed.updated_at_block, head, Some(5))
+        );
+        println!(
+            "[live] stale(TTL=1440)= {}",
+            is_feed_stale(feed.updated_at_block, head, Some(1440))
+        );
+        assert!(
+            head >= feed.updated_at_block,
+            "head must not precede updated_at"
+        );
     }
 }

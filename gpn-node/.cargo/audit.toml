@@ -1,0 +1,14 @@
+# cargo-audit configuration — GPN node workspace.
+#
+# Run:  cd gpn-node && cargo audit
+# Requires: cargo install cargo-audit --locked
+#
+# Add time-boxed suppressions here with a justification and an expiry note so
+# we never silently ignore a real advisory. Example:
+#
+#   [[advisories.ignore]]
+#   id = "RUSTSEC-2024-0000"
+#   reason = "Only affects the `wasm32` test helper; not compiled into node/runtime."
+#   expires = "2026-12-31"
+[advisories]
+ignore = []

@@ -12,21 +12,25 @@
 //! same accepted seal. Useful as a reference and for testing the external
 //! mining RPC without a GPU.
 
-use sp_core::U256;
 use ethereum_types::H64;
+use sp_core::U256;
 const DEV_EPOCH: usize = 0;
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let pre_hash_hex = args.next().expect("usage: gpn_mine_seal <pre_hash_hex> <target_hex>");
-    let target_hex = args.next().expect("usage: gpn_mine_seal <pre_hash_hex> <target_hex>");
+    let pre_hash_hex = args
+        .next()
+        .expect("usage: gpn_mine_seal <pre_hash_hex> <target_hex>");
+    let target_hex = args
+        .next()
+        .expect("usage: gpn_mine_seal <pre_hash_hex> <target_hex>");
 
-    let pre_hash = hex::decode(pre_hash_hex.trim_start_matches("0x"))
-        .expect("invalid pre_hash hex");
+    let pre_hash =
+        hex::decode(pre_hash_hex.trim_start_matches("0x")).expect("invalid pre_hash hex");
     assert_eq!(pre_hash.len(), 32, "pre_hash must be 32 bytes");
 
-    let target = U256::from_str_radix(target_hex.trim_start_matches("0x"), 16)
-        .expect("invalid target hex");
+    let target =
+        U256::from_str_radix(target_hex.trim_start_matches("0x"), 16).expect("invalid target hex");
 
     let seed = ethash::get_seedhash(DEV_EPOCH);
     let cache_size = ethash::get_cache_size(DEV_EPOCH);
@@ -37,12 +41,8 @@ fn main() {
     let header_hash = ethereum_types::H256::from_slice(&pre_hash);
     let mut nonce: u64 = 0;
     loop {
-        let (mix, result) = ethash::hashimoto_light(
-            header_hash,
-            H64::from_low_u64_be(nonce),
-            full_size,
-            &cache,
-        );
+        let (mix, result) =
+            ethash::hashimoto_light(header_hash, H64::from_low_u64_be(nonce), full_size, &cache);
         if U256::from_little_endian(result.as_bytes()) < target {
             let mut seal = Vec::with_capacity(40);
             seal.extend_from_slice(&nonce.to_le_bytes());

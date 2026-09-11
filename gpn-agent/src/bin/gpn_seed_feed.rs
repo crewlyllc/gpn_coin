@@ -50,7 +50,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .cloned()
         .unwrap_or_else(|| "ws://127.0.0.1:9944".to_string());
     let token_micro = parse_u64(args.get(2).map(|s| s.as_str()).unwrap_or("50000"), 50_000);
-    let gpu_micro = parse_u64(args.get(3).map(|s| s.as_str()).unwrap_or("2500000"), 2_500_000);
+    let gpu_micro = parse_u64(
+        args.get(3).map(|s| s.as_str()).unwrap_or("2500000"),
+        2_500_000,
+    );
     let util_bps = parse_u32(args.get(4).map(|s| s.as_str()).unwrap_or("6500"), 6_500);
     let apr_bps = parse_u32(args.get(5).map(|s| s.as_str()).unwrap_or("1200"), 1_200);
     let signer_uri = args

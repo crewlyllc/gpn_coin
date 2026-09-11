@@ -35,14 +35,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ops = client.get_operator_feeds().await;
 
     if ops.is_empty() {
-        println!(
-            "[operator-feeds] NONE — no ProfitabilityOracle::OperatorFeeds on chain "
-        );
+        println!("[operator-feeds] NONE — no ProfitabilityOracle::OperatorFeeds on chain ");
         println!("                 (no operator has posted a feed yet, or chain unreachable).");
         std::process::exit(1);
     }
 
-    println!("[operator-feeds] {} operator(s) have posted a feed:", ops.len());
+    println!(
+        "[operator-feeds] {} operator(s) have posted a feed:",
+        ops.len()
+    );
     for (i, (op, f)) in ops.iter().enumerate() {
         println!(
             "  #{:<2} {}  token=${:.6}  gpu=${:.4}/hr  util={:.2}%  apr={:.2}%  @block {}",
@@ -56,8 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let feeds: Vec<gpn_agent::chain::OnChainFeed> =
-        ops.iter().map(|(_, f)| f.clone()).collect();
+    let feeds: Vec<gpn_agent::chain::OnChainFeed> = ops.iter().map(|(_, f)| f.clone()).collect();
     match aggregate_median_feed(&feeds) {
         Some(m) => {
             println!(
@@ -82,8 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // feed with its `StakedOperators` bond; only bonded operators who have
     // posted count.
     let bonds = client.get_staked_bonds().await;
-    let bond_of: std::collections::HashMap<String, u128> =
-        bonds.into_iter().collect();
+    let bond_of: std::collections::HashMap<String, u128> = bonds.into_iter().collect();
     let mut bfeeds: Vec<gpn_agent::chain::OnChainFeed> = Vec::new();
     let mut bweights: Vec<u128> = Vec::new();
     for (op, f) in ops.iter() {

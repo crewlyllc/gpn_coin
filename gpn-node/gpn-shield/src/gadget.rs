@@ -47,7 +47,10 @@ impl Default for CircuitBuilder {
 impl CircuitBuilder {
     /// Index 0 is reserved for the constant `1` (QAP convention).
     pub fn new() -> Self {
-        CircuitBuilder { constraints: Vec::new(), num_variables: 1 }
+        CircuitBuilder {
+            constraints: Vec::new(),
+            num_variables: 1,
+        }
     }
 
     /// Allocate a fresh private witness variable, returning its index.
@@ -58,14 +61,23 @@ impl CircuitBuilder {
     }
 
     /// Add a constraint `(Σ aᵢ zᵢ)·(Σ bᵢ zᵢ) = Σ cᵢ zᵢ`.
-    pub fn add(&mut self, a: Vec<(usize, Scalar)>, b: Vec<(usize, Scalar)>, c: Vec<(usize, Scalar)>) {
+    pub fn add(
+        &mut self,
+        a: Vec<(usize, Scalar)>,
+        b: Vec<(usize, Scalar)>,
+        c: Vec<(usize, Scalar)>,
+    ) {
         self.constraints.push(Constraint { a, b, c });
     }
 
     /// Enforce `x * (1 - x) = 0`, i.e. `x ∈ {0,1}`.
     pub fn bool_gate(&mut self, x: usize) {
         // x·x = x
-        self.add(vec![(x, Scalar::ONE)], vec![(x, Scalar::ONE)], vec![(x, Scalar::ONE)]);
+        self.add(
+            vec![(x, Scalar::ONE)],
+            vec![(x, Scalar::ONE)],
+            vec![(x, Scalar::ONE)],
+        );
     }
 
     /// Enforce `x = y` via `(1)·(x - y) = 0`.
@@ -89,7 +101,11 @@ impl CircuitBuilder {
 
     /// Enforce `out = x AND y` for boolean `x,y`.
     pub fn and_gate(&mut self, x: usize, y: usize, out: usize) {
-        self.add(vec![(x, Scalar::ONE)], vec![(y, Scalar::ONE)], vec![(out, Scalar::ONE)]);
+        self.add(
+            vec![(x, Scalar::ONE)],
+            vec![(y, Scalar::ONE)],
+            vec![(out, Scalar::ONE)],
+        );
     }
 
     /// Enforce that `value` equals the field element whose little-endian bit
@@ -228,23 +244,32 @@ impl WordCircuit {
         for (i, &bv) in w.iter().enumerate() {
             rhs.push((bv, Scalar::from(1u64 << i)));
         }
-        self.builder.add(vec![(value, Scalar::ONE)], vec![(0, Scalar::ONE)], rhs);
+        self.builder
+            .add(vec![(value, Scalar::ONE)], vec![(0, Scalar::ONE)], rhs);
         w
     }
 
     /// 2-input XOR of two words, bit by bit (via `xor_gate`). Returns a new Word.
     pub fn word_xor(&mut self, x: &Word, y: &Word) -> Word {
-        x.iter().zip(y.iter()).map(|(&xi, &yi)| {
-            let xv = self.values[xi];
-            let yv = self.values[yi];
-            // out = x XOR y; xor_gate enforces out = x + y - 2xy.
-            let out_val = if xv == Scalar::ONE && yv != Scalar::ONE
-                || xv != Scalar::ONE && yv == Scalar::ONE { Scalar::ONE } else { Scalar::ZERO };
-            let out = self.alloc(out_val);
-            self.builder.bool_gate(out);
-            self.builder.xor_gate(xi, yi, out);
-            out
-        }).collect()
+        x.iter()
+            .zip(y.iter())
+            .map(|(&xi, &yi)| {
+                let xv = self.values[xi];
+                let yv = self.values[yi];
+                // out = x XOR y; xor_gate enforces out = x + y - 2xy.
+                let out_val = if xv == Scalar::ONE && yv != Scalar::ONE
+                    || xv != Scalar::ONE && yv == Scalar::ONE
+                {
+                    Scalar::ONE
+                } else {
+                    Scalar::ZERO
+                };
+                let out = self.alloc(out_val);
+                self.builder.bool_gate(out);
+                self.builder.xor_gate(xi, yi, out);
+                out
+            })
+            .collect()
     }
 
     /// Add two 32-bit words mod 2^32. Returns the result word and carry bit.
@@ -258,14 +283,16 @@ impl WordCircuit {
         for (i, &bv) in x.iter().enumerate() {
             xrhs.push((bv, Scalar::from(1u64 << i)));
         }
-        self.builder.add(vec![(xv, Scalar::ONE)], vec![(0, Scalar::ONE)], xrhs);
+        self.builder
+            .add(vec![(xv, Scalar::ONE)], vec![(0, Scalar::ONE)], xrhs);
 
         let yv = self.alloc(yv_val);
         let mut yrhs = vec![(0, Scalar::ZERO)];
         for (i, &bv) in y.iter().enumerate() {
             yrhs.push((bv, Scalar::from(1u64 << i)));
         }
-        self.builder.add(vec![(yv, Scalar::ONE)], vec![(0, Scalar::ONE)], yrhs);
+        self.builder
+            .add(vec![(yv, Scalar::ONE)], vec![(0, Scalar::ONE)], yrhs);
 
         let full_u32 = self.low_u32(xv_val) as u64 + self.low_u32(yv_val) as u64;
         let (sum_val, carry_val) = if full_u32 >= (1u64 << WORD_BITS) {
@@ -313,7 +340,8 @@ impl WordCircuit {
         for (i, &bv) in bits.iter().enumerate() {
             rhs.push((bv, Scalar::from(1u64 << i)));
         }
-        self.builder.add(vec![(value_var, Scalar::ONE)], vec![(0, Scalar::ONE)], rhs);
+        self.builder
+            .add(vec![(value_var, Scalar::ONE)], vec![(0, Scalar::ONE)], rhs);
         bits
     }
 
@@ -360,9 +388,7 @@ impl WordCircuit {
 /// constraints needed, just reindexing (bit i of out = bit (i+n) mod 32 of in).
 pub fn word_rotr(w: &Word, n: usize) -> Word {
     let n = n % WORD_BITS;
-    (0..WORD_BITS)
-        .map(|i| w[(i + n) % WORD_BITS])
-        .collect()
+    (0..WORD_BITS).map(|i| w[(i + n) % WORD_BITS]).collect()
 }
 
 /// Plain-Rust reference blake2s G round (u32, mod-2^32 arithmetic) for tests.
@@ -421,9 +447,18 @@ pub fn into_r1cs_with_domain(
 /// so it stays fast even for large word-layer/compression circuits.
 pub fn constraints_hold(r1cs: &R1CS, z: &[Scalar]) -> bool {
     r1cs.constraints.iter().all(|cn| {
-        let a = cn.a.iter().map(|(i, c)| z[*i] * c).fold(Scalar::ZERO, |a, b| a + b);
-        let b = cn.b.iter().map(|(i, c)| z[*i] * c).fold(Scalar::ZERO, |a, b| a + b);
-        let c = cn.c.iter().map(|(i, c)| z[*i] * c).fold(Scalar::ZERO, |a, b| a + b);
+        let a =
+            cn.a.iter()
+                .map(|(i, c)| z[*i] * c)
+                .fold(Scalar::ZERO, |a, b| a + b);
+        let b =
+            cn.b.iter()
+                .map(|(i, c)| z[*i] * c)
+                .fold(Scalar::ZERO, |a, b| a + b);
+        let c =
+            cn.c.iter()
+                .map(|(i, c)| z[*i] * c)
+                .fold(Scalar::ZERO, |a, b| a + b);
         a * b == c
     })
 }
@@ -505,12 +540,7 @@ mod tests {
     #[test]
     fn g_round_matches_reference() {
         // IV block of blake2s (first 4 words of the IV constant).
-        let st_ref = [
-            0x6a09_e667u32,
-            0xbb67_ae85,
-            0x3c6e_f372,
-            0xa54f_f53a,
-        ];
+        let st_ref = [0x6a09_e667u32, 0xbb67_ae85, 0x3c6e_f372, 0xa54f_f53a];
         let x = 0x0000_0001u32;
         let y = 0x0000_0002u32;
         let mut expected = st_ref;
@@ -559,8 +589,6 @@ mod tests {
         }
         assert!(!constraints_hold(&rcs, &zbad));
     }
-
-
 
     #[test]
     fn bool_gate_enforces_binary() {

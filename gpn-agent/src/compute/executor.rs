@@ -134,7 +134,9 @@ fn compute_loop(
 
     log::info!(
         "compute loop started: {}x{} GEMM on {}, serving AI inference jobs",
-        n, n, mm.device_name()
+        n,
+        n,
+        mm.device_name()
     );
 
     while !stop.load(Ordering::SeqCst) {
@@ -155,12 +157,20 @@ fn compute_loop(
         if report_start.elapsed().as_secs() >= 2 {
             let g = total_flops / session_start.elapsed().as_secs_f64();
             *gflops.lock().unwrap() = g;
-            log::info!("  [compute] {:.2} GFLOPS ({} matmuls, {}s)", g, cfg.batch, elapsed.as_millis());
+            log::info!(
+                "  [compute] {:.2} GFLOPS ({} matmuls, {}s)",
+                g,
+                cfg.batch,
+                elapsed.as_millis()
+            );
             report_start = Instant::now();
         }
     }
 
-    log::info!("compute loop exited after serving {} GFLOP", total_flops / 1e9);
+    log::info!(
+        "compute loop exited after serving {} GFLOP",
+        total_flops / 1e9
+    );
 }
 
 /// Sleep for `ms` ms, but return early (true) if `stop` becomes set.
@@ -170,7 +180,9 @@ fn wait_interruptible(stop: &AtomicBool, ms: u64) -> bool {
         if stop.load(Ordering::SeqCst) {
             return true;
         }
-        let rem = deadline.saturating_duration_since(Instant::now()).as_millis() as u64;
+        let rem = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as u64;
         std::thread::sleep(Duration::from_millis(rem.min(10).max(1)));
     }
     false

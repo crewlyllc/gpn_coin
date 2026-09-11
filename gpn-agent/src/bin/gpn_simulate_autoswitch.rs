@@ -37,7 +37,11 @@ fn main() {
 
     let mut current = start_mode;
     for (i, (mode, step, decided)) in trace.iter().enumerate() {
-        let arrow = if *mode != current { "  ◀── SWITCH" } else { "" };
+        let arrow = if *mode != current {
+            "  ◀── SWITCH"
+        } else {
+            ""
+        };
         let decided_note = match decided {
             Some(m) => format!("(would switch to {m:?})"),
             None => String::new(),

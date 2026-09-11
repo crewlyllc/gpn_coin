@@ -77,9 +77,9 @@ impl R1CS {
     /// The evaluation domain points `r_0..r_{n-1}` (n = [`Self::domain_size`]).
     fn domain(&self) -> Vec<Scalar> {
         match self.domain {
-            Domain::Consecutive => {
-                (0..self.num_constraints()).map(|j| Scalar::from(j as u64)).collect()
-            }
+            Domain::Consecutive => (0..self.num_constraints())
+                .map(|j| Scalar::from(j as u64))
+                .collect(),
             Domain::RootsOfUnity => {
                 let n = self.domain_size();
                 let w = ntt::root_of_unity(n);
@@ -122,8 +122,8 @@ impl R1CS {
         let n = self.num_variables;
         let xs = self.domain();
         let dlen = xs.len(); // domain size (== m for Consecutive; next-pow2 for RootsOfUnity)
-        // Dense per-variable coefficient columns over the domain. Rows beyond the
-        // constraint count (padding, for RootsOfUnity) stay zero.
+                             // Dense per-variable coefficient columns over the domain. Rows beyond the
+                             // constraint count (padding, for RootsOfUnity) stay zero.
         let mut col_a = vec![vec![Scalar::ZERO; dlen]; n];
         let mut col_b = vec![vec![Scalar::ZERO; dlen]; n];
         let mut col_c = vec![vec![Scalar::ZERO; dlen]; n];
@@ -262,9 +262,15 @@ impl Qap {
                 let mut c_tau = vec![Scalar::ZERO; nv];
                 if t < m {
                     let con = &self.constraints[t];
-                    for &(k, v) in &con.a { a_tau[k] += v; }
-                    for &(k, v) in &con.b { b_tau[k] += v; }
-                    for &(k, v) in &con.c { c_tau[k] += v; }
+                    for &(k, v) in &con.a {
+                        a_tau[k] += v;
+                    }
+                    for &(k, v) in &con.b {
+                        b_tau[k] += v;
+                    }
+                    for &(k, v) in &con.c {
+                        c_tau[k] += v;
+                    }
                 }
                 return (a_tau, b_tau, c_tau);
             }
@@ -275,7 +281,9 @@ impl Qap {
         let n_inv = Scalar::from(n as u64).invert().expect("n invertible");
         let mut l = vec![Scalar::ZERO; n];
         for j in 0..n {
-            let denom = (tau - omegas[j]).invert().expect("τ off-domain ⇒ τ−ω^j ≠ 0");
+            let denom = (tau - omegas[j])
+                .invert()
+                .expect("τ off-domain ⇒ τ−ω^j ≠ 0");
             l[j] = omegas[j] * tau_n_minus_1 * n_inv * denom;
         }
 
@@ -285,9 +293,15 @@ impl Qap {
         let mut c_tau = vec![Scalar::ZERO; nv];
         for (lj, con) in l.iter().zip(self.constraints.iter()) {
             let lj = *lj;
-            for &(k, v) in &con.a { a_tau[k] += v * lj; }
-            for &(k, v) in &con.b { b_tau[k] += v * lj; }
-            for &(k, v) in &con.c { c_tau[k] += v * lj; }
+            for &(k, v) in &con.a {
+                a_tau[k] += v * lj;
+            }
+            for &(k, v) in &con.b {
+                b_tau[k] += v * lj;
+            }
+            for &(k, v) in &con.c {
+                c_tau[k] += v * lj;
+            }
         }
         (a_tau, b_tau, c_tau)
     }
@@ -298,7 +312,11 @@ impl Qap {
         let m = self.constraints.len(); // number of constraints
         let n = self.num_variables;
         if m == 0 {
-            return (vec![Scalar::ZERO; n], vec![Scalar::ZERO; n], vec![Scalar::ZERO; n]);
+            return (
+                vec![Scalar::ZERO; n],
+                vec![Scalar::ZERO; n],
+                vec![Scalar::ZERO; n],
+            );
         }
         // Fast path — τ is a domain node r_t (integer 0..m-1). Then the
         // barycentric basis is a Kronecker delta (ℓ_t=1, others 0), so each
@@ -349,7 +367,11 @@ impl Qap {
         let mut l = vec![Scalar::ZERO; m];
         let mut any_at_node = false;
         for j in 0..m {
-            let sign = if (m - 1 - j).is_multiple_of(2) { Scalar::ONE } else { -Scalar::ONE };
+            let sign = if (m - 1 - j).is_multiple_of(2) {
+                Scalar::ONE
+            } else {
+                -Scalar::ONE
+            };
             let w_j = sign * inv_fact[j] * inv_fact[m - 1 - j];
             let r_j = Scalar::from(j as u64);
             if tau == &r_j {
@@ -362,7 +384,11 @@ impl Qap {
         if any_at_node {
             // tau equals a domain node r_j → ℓ_j(τ) = 1, all others 0.
             for j in 0..m {
-                l[j] = if Scalar::from(j as u64) == *tau { Scalar::ONE } else { Scalar::ZERO };
+                l[j] = if Scalar::from(j as u64) == *tau {
+                    Scalar::ONE
+                } else {
+                    Scalar::ZERO
+                };
             }
         } else {
             let sum: Scalar = l.iter().fold(Scalar::ZERO, |a, b| a + b);
@@ -455,7 +481,11 @@ pub fn witness_polys(qap: &Qap, z: &[Scalar]) -> WitnessPoly {
 /// Requires `qap.domain == Domain::RootsOfUnity` and `z.len() == num_variables`.
 pub fn witness_polys_fft(qap: &Qap, z: &[Scalar]) -> WitnessPoly {
     debug_assert_eq!(z.len(), qap.num_variables);
-    debug_assert_eq!(qap.domain, Domain::RootsOfUnity, "witness_polys_fft requires RootsOfUnity domain");
+    debug_assert_eq!(
+        qap.domain,
+        Domain::RootsOfUnity,
+        "witness_polys_fft requires RootsOfUnity domain"
+    );
     let n = qap.domain_size;
     let m = qap.constraints.len();
     debug_assert!(m <= n, "constraints must fit within the padded domain");
@@ -549,8 +579,8 @@ pub fn value_balance_r1cs() -> R1CS {
                 c: vec![(4, one)], // spent
             },
             Constraint {
-                a: vec![(3, one)], // v_out
-                b: vec![(0, one)], // 1
+                a: vec![(3, one)],              // v_out
+                b: vec![(0, one)],              // 1
                 c: vec![(4, one), (1, -(one))], // spent - fee
             },
             Constraint {
@@ -590,7 +620,12 @@ mod tests {
                 c: vec![(k1, one), (k2, one), (k0, one)],
             });
         }
-        R1CS { num_variables: n, num_public: 1, constraints, domain: Domain::Consecutive }
+        R1CS {
+            num_variables: n,
+            num_public: 1,
+            constraints,
+            domain: Domain::Consecutive,
+        }
     }
 
     #[test]
@@ -653,10 +688,14 @@ mod tests {
     // circuit is provided by `eval_columns_at_on_domain_matches_sparse_at_note_spend_scale`
     // below (no dense polys needed).
     fn eval_columns_at_matches_dense_moderate_circuit() {
-        let r1cs = synthetic_r1cs(/*vars=*/16, /*constraints=*/60);
+        let r1cs = synthetic_r1cs(/*vars=*/ 16, /*constraints=*/ 60);
         let qap = r1cs.qap(); // dense polys feasible at this size
         let n = qap.num_variables;
-        for tau in [Scalar::from(1234567u64), Scalar::from(77u64), Scalar::from(0u64)] {
+        for tau in [
+            Scalar::from(1234567u64),
+            Scalar::from(77u64),
+            Scalar::from(0u64),
+        ] {
             let (a_fast, b_fast, c_fast) = qap.eval_columns_at(&tau);
             for k in 0..n {
                 assert_eq!(a_fast[k], qap.a[k].eval(&tau), "A_{k} at tau={tau:?}");
@@ -717,11 +756,15 @@ mod tests {
     // synthetic circuit, `eval_columns_at_roots(τ)` must match the dense
     // per-column interpolant evaluated at τ (feasible at this size).
     fn eval_columns_at_roots_matches_dense_offdomain() {
-        let mut r1cs = synthetic_r1cs(/*vars=*/24, /*constraints=*/40);
+        let mut r1cs = synthetic_r1cs(/*vars=*/ 24, /*constraints=*/ 40);
         r1cs.domain = Domain::RootsOfUnity;
         let qap = r1cs.qap(); // dense column polys over roots-of-unity nodes
         let n = qap.domain_size;
-        for tau in [Scalar::from(3u64), Scalar::from(12345u64), Scalar::from(999983u64)] {
+        for tau in [
+            Scalar::from(3u64),
+            Scalar::from(12345u64),
+            Scalar::from(999983u64),
+        ] {
             let (a_fast, b_fast, c_fast) = qap.eval_columns_at(&tau);
             for k in 0..qap.num_variables {
                 assert_eq!(a_fast[k], qap.a[k].eval(&tau), "A_{k} at {tau:?}");
@@ -742,14 +785,21 @@ mod tests {
         let qap = r1cs.qap();
         // fee=2 (pub), v_in=10, v_out=8, spent=10, w=80 — satisfying witness.
         let z = vec![
-            Scalar::ONE, Scalar::from(2), Scalar::from(10),
-            Scalar::from(8), Scalar::from(10), Scalar::from(80),
+            Scalar::ONE,
+            Scalar::from(2),
+            Scalar::from(10),
+            Scalar::from(8),
+            Scalar::from(10),
+            Scalar::from(80),
         ];
         let dense = witness_polys(&qap, &z);
         let fft = witness_polys_fft(&qap, &z);
         let eq_poly = |p: &Poly, q: &Poly| {
             let d = p.deg().max(q.deg());
-            (0..=d).all(|i| p.0.get(i).copied().unwrap_or(Scalar::ZERO) == q.0.get(i).copied().unwrap_or(Scalar::ZERO))
+            (0..=d).all(|i| {
+                p.0.get(i).copied().unwrap_or(Scalar::ZERO)
+                    == q.0.get(i).copied().unwrap_or(Scalar::ZERO)
+            })
         };
         assert!(eq_poly(&dense.a, &fft.a), "A mismatch");
         assert!(eq_poly(&dense.b, &fft.b), "B mismatch");

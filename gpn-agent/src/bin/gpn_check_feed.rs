@@ -56,8 +56,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "[feed] avg_gpu_hour_price  = ${:.4}/hr",
         feed.avg_gpu_hour_price_usd
     );
-    println!("[feed] utilization_rate   = {:.2}%", feed.utilization * 100.0);
-    println!("[feed] staking_apr        = {:.2}%", feed.staking_apr_percent);
+    println!(
+        "[feed] utilization_rate   = {:.2}%",
+        feed.utilization * 100.0
+    );
+    println!(
+        "[feed] staking_apr        = {:.2}%",
+        feed.staking_apr_percent
+    );
     println!(
         "[calc] compute_revenue   = ${:.4}/hr  (gpu x util x 0.85)",
         raw
@@ -70,9 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("[verdict] feed is plausible — auto-switch may act on it.");
         std::process::exit(0);
     } else {
-        println!(
-            "[verdict] feed IMPLAUSIBLE — agent will force conservative Mining (compute=0)."
-        );
+        println!("[verdict] feed IMPLAUSIBLE — agent will force conservative Mining (compute=0).");
         std::process::exit(1);
     }
 }

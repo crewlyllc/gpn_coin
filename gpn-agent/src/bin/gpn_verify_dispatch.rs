@@ -24,7 +24,10 @@ use subxt::tx::Signer as _;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
-    let endpoint = args.get(1).cloned().unwrap_or_else(|| "ws://127.0.0.1:9944".into());
+    let endpoint = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| "ws://127.0.0.1:9944".into());
     let uri = args.get(2).cloned().unwrap_or_else(|| "//Alice".into());
 
     let client = signer::connect(&endpoint).await?;

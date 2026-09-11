@@ -1,0 +1,6 @@
+# GPN workspace rustfmt configuration.
+#
+# Kept close to rustfmt defaults so `cargo fmt --all --check` is stable across
+# stable-toolchain point releases. Only stable options are used here (unstable
+# options are ignored unless running on nightly).
+edition = "2021"

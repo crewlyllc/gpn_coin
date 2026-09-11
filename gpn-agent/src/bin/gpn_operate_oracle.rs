@@ -82,15 +82,13 @@ fn load_values(path: &str) -> Result<OracleValues, Box<dyn std::error::Error>> {
         println!("📝 wrote default values template to {}", path);
     }
     let raw = std::fs::read_to_string(path)?;
-    let vals: OracleValues = toml::from_str(&raw)
-        .map_err(|e| format!("failed to parse {}: {}", path, e))?;
+    let vals: OracleValues =
+        toml::from_str(&raw).map_err(|e| format!("failed to parse {}: {}", path, e))?;
     Ok(vals)
 }
 
 /// Build the `ProfitabilityOracle.update_feed` dynamic call.
-fn update_feed_call(
-    v: &OracleValues,
-) -> impl subxt::tx::Payload + Clone {
+fn update_feed_call(v: &OracleValues) -> impl subxt::tx::Payload + Clone {
     subxt::dynamic::tx(
         "ProfitabilityOracle",
         "update_feed",
@@ -116,10 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get(2)
         .cloned()
         .unwrap_or_else(|| "oracle_values.toml".to_string());
-    let interval_secs: u64 = args
-        .get(3)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(60);
+    let interval_secs: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(60);
     let signer_uri = args
         .get(4)
         .cloned()
@@ -156,11 +151,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
             None => {
-                println!("  🔐 {} not bonded — submitting bond_operator (OperatorBond = 1,000 GPN)...", signer_uri);
-                let bond_call = subxt::dynamic::tx("ProfitabilityOracle", "bond_operator", Vec::<Value>::new());
+                println!(
+                    "  🔐 {} not bonded — submitting bond_operator (OperatorBond = 1,000 GPN)...",
+                    signer_uri
+                );
+                let bond_call =
+                    subxt::dynamic::tx("ProfitabilityOracle", "bond_operator", Vec::<Value>::new());
                 let nonce = signer::current_nonce(&client, &endpoint, &signer.account_id()).await;
                 match signer::submit_signed(&client, &bond_call, &signer, nonce).await {
-                    Ok(()) => println!("  ✅ bond_operator dispatched successfully; {} is now a Phase-C operator", signer_uri),
+                    Ok(()) => println!(
+                        "  ✅ bond_operator dispatched successfully; {} is now a Phase-C operator",
+                        signer_uri
+                    ),
                     Err(e) => {
                         // `AlreadyStakedOperator` means a race (some other run
                         // bonded first) — not fatal. Anything else is.
@@ -202,7 +204,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let call = update_feed_call(&vals);
 
         match signer::submit_signed(&client, &call, &signer, nonce).await {
-            Ok(()) => println!("  ✅ update_feed dispatched successfully (iteration #{})", tick),
+            Ok(()) => println!(
+                "  ✅ update_feed dispatched successfully (iteration #{})",
+                tick
+            ),
             Err(e) => {
                 // `UpdateTooSoon` is the *expected* back-off — the pallet guards
                 // against feeds fresher than OracleUpdateInterval. Treat it as
@@ -210,7 +215,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // is fatal (misconfiguration). Anything else: log + keep trying.
                 let msg = e.to_string();
                 if msg.contains("UpdateTooSoon") {
-                    println!("  ⏳ update_feed skipped: pallet interval not yet elapsed (UpdateTooSoon)");
+                    println!(
+                        "  ⏳ update_feed skipped: pallet interval not yet elapsed (UpdateTooSoon)"
+                    );
                 } else if msg.contains("NotAuthorized") {
                     eprintln!("  ❌ FATAL: {} is not an oracle operator. Add it via root `add_operator` or use an operator URI.", signer_uri);
                     return Err(e);

@@ -152,14 +152,11 @@ impl GpnMinerApiServer for GpnMinerRpc {
     }
 
     async fn effective_feed(&self) -> RpcResult<Option<EffectiveFeed>> {
-        let at = self
-            .client
-            .info()
-            .best_hash;
+        let at = self.client.info().best_hash;
         let api = self.client.runtime_api();
-        let feed = api
-            .effective_feed(at)
-            .map_err(|e| ErrorObject::owned(-32000, format!("runtime api error: {e}"), None::<()>))?;
+        let feed = api.effective_feed(at).map_err(|e| {
+            ErrorObject::owned(-32000, format!("runtime api error: {e}"), None::<()>)
+        })?;
         Ok(feed.map(|f| EffectiveFeed {
             token_price_usd: f.token_price_usd,
             avg_gpu_hour_price: f.avg_gpu_hour_price,
@@ -193,11 +190,12 @@ impl GpnMinerApiServer for GpnMinerRpc {
         // `MiningHandle::submit` holds a non-`Send` mutex guard across an
         // await (block import), so it cannot be polled on the async runtime
         // directly. Run it to completion on a blocking thread instead.
-        let ok = tokio::task::spawn_blocking(move || {
-            futures::executor::block_on(worker.submit(seal))
-        })
-        .await
-        .map_err(|e| ErrorObject::owned(-32000, format!("submit task failed: {e}"), None::<()>))?;
+        let ok =
+            tokio::task::spawn_blocking(move || futures::executor::block_on(worker.submit(seal)))
+                .await
+                .map_err(|e| {
+                    ErrorObject::owned(-32000, format!("submit task failed: {e}"), None::<()>)
+                })?;
 
         Ok(ok)
     }

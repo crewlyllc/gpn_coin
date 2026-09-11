@@ -37,7 +37,14 @@ impl MarketSnapshot {
 
     /// Convert into a `ProfitAnalysis` (fills the diagnostic fields the agent
     /// would normally fetch from chain).
-    pub fn to_analysis(&self, difficulty: f64, token_price: f64, gpu_hour_price: f64, util: f64, mhs: f64) -> ProfitAnalysis {
+    pub fn to_analysis(
+        &self,
+        difficulty: f64,
+        token_price: f64,
+        gpu_hour_price: f64,
+        util: f64,
+        mhs: f64,
+    ) -> ProfitAnalysis {
         ProfitAnalysis {
             mining_revenue_per_hour: self.mining_usd_hr,
             compute_revenue_per_hour: self.compute_usd_hr,
@@ -111,10 +118,17 @@ mod tests {
         assert_eq!(modes[0], Mode::Mining, "starts mining");
 
         // At some point we are in Compute (the spike flips us).
-        assert!(modes.contains(&Mode::Compute), "compute spike must flip mode: {modes:?}");
+        assert!(
+            modes.contains(&Mode::Compute),
+            "compute spike must flip mode: {modes:?}"
+        );
 
         // And we return to Mining by the end.
-        assert_eq!(*modes.last().unwrap(), Mode::Mining, "must flip back to mining: {modes:?}");
+        assert_eq!(
+            *modes.last().unwrap(),
+            Mode::Mining,
+            "must flip back to mining: {modes:?}"
+        );
 
         // Verify the exact transitions recorded match expectation.
         let switches: Vec<Mode> = trace.iter().filter_map(|(_, _, d)| *d).collect();

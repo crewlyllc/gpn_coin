@@ -1,6 +1,5 @@
 /// GPU monitoring module
 /// Interfaces with nvidia-smi or rocm-smi to get GPU telemetry
-
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 
@@ -81,18 +80,23 @@ impl GPUMonitor {
     fn get_cuda_version() -> Option<String> {
         if let Ok(output) = Command::new("nvidia-smi").arg("--version").output() {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            stdout.lines().find(|l| l.contains("CUDA Version"))
-                .map(|l| l.split(':').last().unwrap_or("").trim().to_string())
+            stdout
+                .lines()
+                .find(|l| l.contains("CUDA Version"))
+                .map(|l| l.split(':').next_back().unwrap_or("").trim().to_string())
         } else {
             None
         }
     }
 
     /// Compute a GPU challenge for attestation (placeholder)
-    pub async fn compute_challenge(&self, challenge: &[u8; 32]) -> Result<[u8; 32], Box<dyn std::error::Error>> {
+    pub async fn compute_challenge(
+        &self,
+        challenge: &[u8; 32],
+    ) -> Result<[u8; 32], Box<dyn std::error::Error>> {
         // In production: run actual GPU computation (matrix multiply, etc.)
         // For development: use SHA-256 as placeholder
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(challenge);
         let result = hasher.finalize();
@@ -105,8 +109,8 @@ impl GPUMonitor {
 /// as the **attestable compute metric** (`AttestationRecord::compute_gflops`),
 /// tying the AI-compute leg to the marketplace's `min_gflops` requirement.
 pub fn measure_gflops(device_index: usize) -> Result<u64, String> {
-    let mut mm = matmul::GpuMatmul::new(device_index, 1024)
-        .map_err(|e| format!("open GPU matmul: {e}"))?;
+    let mut mm =
+        matmul::GpuMatmul::new(device_index, 1024).map_err(|e| format!("open GPU matmul: {e}"))?;
     // 4 measured iters (1024³ GEMM ≈ 2.1 GFLOP each); warms up the kernel too.
     let (_elapsed, flops) = mm.run_many(4).map_err(|e| format!("GEMM benchmark: {e}"))?;
     // `run_many` returns raw FLOP/s (total_flops / elapsed, no /1e9). Convert to
@@ -119,14 +123,18 @@ pub fn measure_gflops(device_index: usize) -> Result<u64, String> {
 
 pub fn hash_gpu_info(info: &GPUInfo) -> [u8; 32] {
     let serialized = serde_json::to_vec(info).unwrap_or_default();
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(&serialized);
     hasher.finalize().into()
 }
 
 fn parse_mem(s: &str) -> u64 {
-    s.replace("MiB", "").replace("MiB/s", "").trim().parse().unwrap_or(0)
+    s.replace("MiB", "")
+        .replace("MiB/s", "")
+        .trim()
+        .parse()
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

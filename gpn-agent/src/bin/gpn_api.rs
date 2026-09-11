@@ -123,9 +123,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--listen" => { listen = args.get(i + 1).cloned().unwrap_or(listen); i += 1; }
-            "--endpoint" => { endpoint = args.get(i + 1).cloned().unwrap_or(endpoint); i += 1; }
-            "--signer-uri" => { signer_uri = args.get(i + 1).cloned().unwrap_or(signer_uri); i += 1; }
+            "--listen" => {
+                listen = args.get(i + 1).cloned().unwrap_or(listen);
+                i += 1;
+            }
+            "--endpoint" => {
+                endpoint = args.get(i + 1).cloned().unwrap_or(endpoint);
+                i += 1;
+            }
+            "--signer-uri" => {
+                signer_uri = args.get(i + 1).cloned().unwrap_or(signer_uri);
+                i += 1;
+            }
             _ => {}
         }
         i += 1;
@@ -141,8 +150,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client_signed = Arc::new(client_signed);
 
     let server = Server::http(&listen).map_err(|e| format!("cannot bind {}: {}", listen, e))?;
-    println!("GPN API listening on http://{} (chain endpoint {})", listen, endpoint);
-    println!("  signer: {} — write endpoints sign with this key (hot-wallet/testnet model)", signer_uri);
+    println!(
+        "GPN API listening on http://{} (chain endpoint {})",
+        listen, endpoint
+    );
+    println!(
+        "  signer: {} — write endpoints sign with this key (hot-wallet/testnet model)",
+        signer_uri
+    );
     println!("  endpoints: /health /block /feed /account/{{addr}} /jobs /job/{{id}} /jobs/claimable /provider/{{addr}} | POST /jobs /jobs/{{id}}/accept|start|complete /providers/register|stake|attest|withdraw");
 
     for request in server.incoming_requests() {
@@ -156,10 +171,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn handle(mut req: tiny_http::Request, client: &ChainClient, client_signed: &ChainClient, rt_handle: tokio::runtime::Handle) {
+fn handle(
+    mut req: tiny_http::Request,
+    client: &ChainClient,
+    client_signed: &ChainClient,
+    rt_handle: tokio::runtime::Handle,
+) {
     let (method, path, query) = parse_request(&req);
     let started = Instant::now();
-    let resp = route(&method, &path, &query, &mut req, client, client_signed, &rt_handle);
+    let resp = route(
+        &method,
+        &path,
+        &query,
+        &mut req,
+        client,
+        client_signed,
+        &rt_handle,
+    );
     let _ = req.respond(resp);
     log::info!("{} {} ({:?})", method, path, started.elapsed());
 }
@@ -222,10 +250,9 @@ fn route(
             let reg = rt.block_on(async { client.is_provider_registered(addr).await });
             let (staked, attested) = rt.block_on(client.get_provider_state(addr));
             let att = rt.block_on(client.get_attestation_record(addr));
-            let challenge = match rt.block_on(client.get_attestation_challenge()) {
-                Ok(c) => c,
-                Err(_) => [0u8; 32],
-            };
+            let challenge = rt
+                .block_on(client.get_attestation_challenge())
+                .unwrap_or_default();
             let (gpu_count, gflops, tier) = att.unwrap_or((0, 0, "Unattested".to_string()));
             json_ok(&serde_json::json!({
                 "address": addr,
@@ -278,7 +305,10 @@ fn route(
                     "result_hash": j.result_hash,
                     "error": j.error,
                 })),
-                None => json_err(404, "no off-chain LLM payload for this job (not an LLM job?)"),
+                None => json_err(
+                    404,
+                    "no off-chain LLM payload for this job (not an LLM job?)",
+                ),
             }
         }
         // ---- generated artifact (image/video file) ----
@@ -290,13 +320,22 @@ fn route(
             };
             let path = match &job.artifact_path {
                 Some(p) => p.clone(),
-                None => return json_err(404, &format!("artifact not ready yet (status={})", job.status)),
+                None => {
+                    return json_err(
+                        404,
+                        &format!("artifact not ready yet (status={})", job.status),
+                    )
+                }
             };
-            let media = job.artifact_media_type.unwrap_or_else(|| "application/octet-stream".to_string());
+            let media = job
+                .artifact_media_type
+                .unwrap_or_else(|| "application/octet-stream".to_string());
             match std::fs::read(&path) {
                 Ok(bytes) => Response::from_data(bytes)
                     .with_status_code(200)
-                    .with_header(Header::from_bytes(&b"Content-Type"[..], media.as_bytes()).unwrap()),
+                    .with_header(
+                        Header::from_bytes(&b"Content-Type"[..], media.as_bytes()).unwrap(),
+                    ),
                 Err(e) => json_err(500, &format!("cannot read artifact {}: {}", path, e)),
             }
         }
@@ -305,7 +344,9 @@ fn route(
             let next = rt.block_on(client.get_next_job_id());
             let mut jobs = Vec::new();
             for id in 0..next {
-                if let Some((state, price, requestor, provider)) = rt.block_on(client.get_job_state(id)) {
+                if let Some((state, price, requestor, provider)) =
+                    rt.block_on(client.get_job_state(id))
+                {
                     jobs.push(serde_json::json!({"id": id, "state": state, "price_base": price, "requestor": requestor, "provider": provider}));
                 }
             }
@@ -313,7 +354,10 @@ fn route(
         }
         ("GET", ["jobs", "claimable"]) => {
             let rt = rt_handle;
-            let gflops: u64 = query.get("gflops").and_then(|s| s.parse().ok()).unwrap_or(0);
+            let gflops: u64 = query
+                .get("gflops")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
             let ids = rt.block_on(client.list_claimable_jobs(gflops));
             json_ok(&serde_json::json!({"min_gflops": gflops, "claimable_jobs": ids}))
         }
@@ -325,16 +369,28 @@ fn route(
                 Err(e) => return json_err(400, &format!("bad JSON: {}", e)),
             };
             let g = |k: &str, d: u64| v.get(k).and_then(|x| x.as_u64()).unwrap_or(d) as u64;
-            let workload = v.get("workload").and_then(|x| x.as_str()).unwrap_or("gpn-api job");
+            let workload = v
+                .get("workload")
+                .and_then(|x| x.as_str())
+                .unwrap_or("gpn-api job");
             let price_gpn: f64 = v.get("price_gpn").and_then(|x| x.as_f64()).unwrap_or(1.0);
-            let price_base: u128 = (price_gpn * GPN_UNITS as f64).round() as u128;
-            let job_type = v.get("job_type").and_then(|x| x.as_str()).unwrap_or("LLMInference");
+            let price_base: u128 = (price_gpn * GPN_UNITS).round() as u128;
+            let job_type = v
+                .get("job_type")
+                .and_then(|x| x.as_str())
+                .unwrap_or("LLMInference");
 
             // Bridge: for any generative job (LLM / image / video) with a prompt,
             // capture the model/prompt/params in the off-chain store; the chain
             // only carries the workload hash.
-            let prompt = v.get("prompt").and_then(|x| x.as_str()).map(|s| s.to_string());
-            let model = v.get("model").and_then(|x| x.as_str()).map(|s| s.to_string());
+            let prompt = v
+                .get("prompt")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string());
+            let model = v
+                .get("model")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string());
             let is_llm = job_type.eq_ignore_ascii_case("LLMInference");
             let is_gen = (job_type.eq_ignore_ascii_case("ImageGeneration")
                 || job_type.eq_ignore_ascii_case("VideoGeneration"))
@@ -350,9 +406,15 @@ fn route(
             let lora_r: u32 = v.get("lora_r").and_then(|x| x.as_u64()).unwrap_or(16) as u32;
             let ft_epochs: u32 = v.get("epochs").and_then(|x| x.as_u64()).unwrap_or(2) as u32;
             let is_bridged = (is_llm || is_gen) && prompt.is_some() || is_ft;
-            let temperature: f32 = v.get("temperature").and_then(|x| x.as_f64()).unwrap_or(0.7) as f32;
-            let max_tokens: u32 = v.get("max_tokens").and_then(|x| x.as_u64()).unwrap_or(256) as u32;
-            let gen_kind = if job_type.eq_ignore_ascii_case("ImageGeneration") { "image" } else { "video" };
+            let temperature: f32 =
+                v.get("temperature").and_then(|x| x.as_f64()).unwrap_or(0.7) as f32;
+            let max_tokens: u32 =
+                v.get("max_tokens").and_then(|x| x.as_u64()).unwrap_or(256) as u32;
+            let gen_kind = if job_type.eq_ignore_ascii_case("ImageGeneration") {
+                "image"
+            } else {
+                "video"
+            };
             let width: u32 = v.get("width").and_then(|x| x.as_u64()).unwrap_or(512) as u32;
             let height: u32 = v.get("height").and_then(|x| x.as_u64()).unwrap_or(512) as u32;
             let steps: u32 = v.get("steps").and_then(|x| x.as_u64()).unwrap_or(30) as u32;
@@ -360,12 +422,24 @@ fn route(
             let frames: u32 = v.get("frames").and_then(|x| x.as_u64()).unwrap_or(16) as u32;
             let fps: u32 = v.get("fps").and_then(|x| x.as_u64()).unwrap_or(8) as u32;
             let negative = v.get("negative_prompt").and_then(|x| x.as_str());
-            let default_model = if is_gen { "sd-turbo" } else if is_ft { "HuggingFaceTB/SmolLM2-135M-Instruct" } else { "qwen2.5:1.5b" };
+            let default_model = if is_gen {
+                "sd-turbo"
+            } else if is_ft {
+                "HuggingFaceTB/SmolLM2-135M-Instruct"
+            } else {
+                "qwen2.5:1.5b"
+            };
             let model = model.unwrap_or_else(|| default_model.to_string());
 
             let hash_src: String = if is_bridged {
-                if is_ft { dataset.clone().unwrap() } else { prompt.clone().unwrap() }
-            } else { workload.to_string() };
+                if is_ft {
+                    dataset.clone().unwrap()
+                } else {
+                    prompt.clone().unwrap()
+                }
+            } else {
+                workload.to_string()
+            };
             let workload_hash = hash_workload(&hash_src);
 
             let rt = rt_handle;
@@ -396,7 +470,8 @@ fn route(
                                 gpn_agent::llm::LlmJob::new_llm(&model, p, temperature, max_tokens)
                             } else if is_gen {
                                 gpn_agent::llm::LlmJob::new_gen(
-                                    gen_kind, &model, p, negative, width, height, steps, seed, frames, fps,
+                                    gen_kind, &model, p, negative, width, height, steps, seed,
+                                    frames, fps,
                                 )
                             } else {
                                 gpn_agent::llm::LlmJob::new_llm(&model, p, temperature, max_tokens)
@@ -406,7 +481,9 @@ fn route(
                     if let Some(job) = job {
                         let _ = gpn_agent::llm::put_job(job_id, job);
                     }
-                    json_ok(&serde_json::json!({"ok": true, "job_id": job_id, "price_gpn": price_gpn, "bridged": is_bridged}))
+                    json_ok(
+                        &serde_json::json!({"ok": true, "job_id": job_id, "price_gpn": price_gpn, "bridged": is_bridged}),
+                    )
                 }
                 Err(e) => json_err(500, &format!("{}", e)),
             }
@@ -452,8 +529,11 @@ fn route(
                 Ok(v) => v,
                 Err(e) => return json_err(400, &format!("bad JSON: {}", e)),
             };
-            let amount_gpn: f64 = v.get("amount_gpn").and_then(|x| x.as_f64()).unwrap_or(1000.0);
-            let amount_base: u128 = (amount_gpn * GPN_UNITS as f64).round() as u128;
+            let amount_gpn: f64 = v
+                .get("amount_gpn")
+                .and_then(|x| x.as_f64())
+                .unwrap_or(1000.0);
+            let amount_base: u128 = (amount_gpn * GPN_UNITS).round() as u128;
             let rt = rt_handle;
             let res = rt.block_on(client_signed.deposit_stake(amount_base));
             match res {
@@ -468,24 +548,35 @@ fn route(
                 Err(e) => return json_err(400, &format!("bad JSON: {}", e)),
             };
             let gpu_count: u8 = v.get("gpu_count").and_then(|x| x.as_u64()).unwrap_or(1) as u8;
-            let compute_gflops: u64 = v.get("compute_gflops").and_then(|x| x.as_u64()).unwrap_or(0);
-            let gpu_info = v.get("gpu_info").and_then(|x| x.as_str()).unwrap_or("gpn-gpu");
+            let compute_gflops: u64 = v
+                .get("compute_gflops")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0);
+            let gpu_info = v
+                .get("gpu_info")
+                .and_then(|x| x.as_str())
+                .unwrap_or("gpn-gpu");
             if compute_gflops == 0 {
-                return json_err(400, "compute_gflops is required (run gpn_gpu_compute to measure it)");
+                return json_err(
+                    400,
+                    "compute_gflops is required (run gpn_gpu_compute to measure it)",
+                );
             }
             let rt = rt_handle;
             // gpu_info_hash = sha256(gpu_info); challenge_response = sha256(challenge || gpu_info_hash).
             let gpu_info_hash = sha256(gpu_info.as_bytes());
-            let challenge = match rt.block_on(client.get_attestation_challenge()) {
-                Ok(c) => c,
-                Err(_) => [0u8; 32],
-            };
+            let challenge = rt
+                .block_on(client.get_attestation_challenge())
+                .unwrap_or_default();
             let mut seed = Vec::with_capacity(64);
             seed.extend_from_slice(&challenge);
             seed.extend_from_slice(&gpu_info_hash);
             let challenge_response = sha256(&seed);
             let res = rt.block_on(client_signed.submit_attestation(
-                challenge_response, gpu_info_hash, gpu_count, compute_gflops,
+                challenge_response,
+                gpu_info_hash,
+                gpu_count,
+                compute_gflops,
             ));
             match res {
                 Ok(_) => json_ok(&serde_json::json!({

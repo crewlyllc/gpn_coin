@@ -13,7 +13,9 @@ use scale_info::TypeInfo;
 pub use pallet::*;
 
 /// GPU capability requirements
-#[derive(Clone, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, PartialEq, Eq, Debug, TypeInfo)]
+#[derive(
+    Clone, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, PartialEq, Eq, Debug, TypeInfo,
+)]
 pub struct GPURequirements {
     pub min_vram_mb: u32,
     pub min_compute_capability: u16,
@@ -27,23 +29,68 @@ pub struct GPURequirements {
 
 impl Default for GPURequirements {
     fn default() -> Self {
-        Self { min_vram_mb: 8_000, min_compute_capability: 75, min_gpu_count: 1, min_cuda_cores: 0, min_gflops: 0 }
+        Self {
+            min_vram_mb: 8_000,
+            min_compute_capability: 75,
+            min_gpu_count: 1,
+            min_cuda_cores: 0,
+            min_gflops: 0,
+        }
     }
 }
 
-#[derive(Clone, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, PartialEq, Eq, Debug, TypeInfo)]
-pub enum JobType { LLMInference, FineTuning, ImageGeneration, MLInference, Custom, VideoGeneration }
-impl Default for JobType { fn default() -> Self { Self::LLMInference } }
+#[derive(
+    Clone, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, PartialEq, Eq, Debug, TypeInfo,
+)]
+pub enum JobType {
+    LLMInference,
+    FineTuning,
+    ImageGeneration,
+    MLInference,
+    Custom,
+    VideoGeneration,
+}
+impl Default for JobType {
+    fn default() -> Self {
+        Self::LLMInference
+    }
+}
 
-#[derive(Clone, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, PartialEq, Eq, Debug, TypeInfo)]
-pub enum JobTier { Premium, Spot, Reserved }
-impl Default for JobTier { fn default() -> Self { Self::Spot } }
+#[derive(
+    Clone, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, PartialEq, Eq, Debug, TypeInfo,
+)]
+pub enum JobTier {
+    Premium,
+    Spot,
+    Reserved,
+}
+impl Default for JobTier {
+    fn default() -> Self {
+        Self::Spot
+    }
+}
 
-#[derive(Clone, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, PartialEq, Eq, Debug, TypeInfo)]
-pub enum JobState { Pending, Accepted, Running, AwaitingVerification, Completed, Failed, Cancelled }
-impl Default for JobState { fn default() -> Self { Self::Pending } }
+#[derive(
+    Clone, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, PartialEq, Eq, Debug, TypeInfo,
+)]
+pub enum JobState {
+    Pending,
+    Accepted,
+    Running,
+    AwaitingVerification,
+    Completed,
+    Failed,
+    Cancelled,
+}
+impl Default for JobState {
+    fn default() -> Self {
+        Self::Pending
+    }
+}
 
-#[derive(Clone, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, PartialEq, Eq, Debug, TypeInfo)]
+#[derive(
+    Clone, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, PartialEq, Eq, Debug, TypeInfo,
+)]
 pub struct ComputeJob {
     pub id: u64,
     pub gpu_requirements: GPURequirements,
@@ -75,11 +122,16 @@ pub mod pallet {
     pub trait Config: frame_system::Config {
         type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
         type Currency: Currency<Self::AccountId>;
-        #[pallet::constant] type MarketplaceFeeBps: Get<u32>;
-        #[pallet::constant] type MaxJobsPerProvider: Get<u32>;
-        #[pallet::constant] type EscrowLockDuration: Get<BlockNumberFor<Self>>;
-        #[pallet::constant] type MaxActiveJobs: Get<u32>;
-        #[pallet::constant] type MaxJobDuration: Get<BlockNumberFor<Self>>;
+        #[pallet::constant]
+        type MarketplaceFeeBps: Get<u32>;
+        #[pallet::constant]
+        type MaxJobsPerProvider: Get<u32>;
+        #[pallet::constant]
+        type EscrowLockDuration: Get<BlockNumberFor<Self>>;
+        #[pallet::constant]
+        type MaxActiveJobs: Get<u32>;
+        #[pallet::constant]
+        type MaxJobDuration: Get<BlockNumberFor<Self>>;
         /// Read-only access to providers' attested GPU compute credentials.
         /// Used to enforce that a provider accepting a job actually meets the
         /// job's `min_gflops` requirement (proof-of-compute gate at match time).
@@ -95,20 +147,37 @@ pub mod pallet {
     pub struct Pallet<T>(_);
 
     // Storage
-    #[pallet::storage] pub type NextJobId<T: Config> = StorageValue<_, u64, ValueQuery>;
-    #[pallet::storage] pub type Jobs<T: Config> = StorageMap<_, Blake2_128Concat, u64, ComputeJob, OptionQuery>;
-    #[pallet::storage] pub type JobRequestor<T: Config> = StorageMap<_, Blake2_128Concat, u64, T::AccountId, OptionQuery>;
-    #[pallet::storage] pub type JobProvider<T: Config> = StorageMap<_, Blake2_128Concat, u64, T::AccountId, OptionQuery>;
-    #[pallet::storage] pub type ProviderJobs<T: Config> = StorageMap<_, Blake2_128Concat, T::AccountId, Vec<u64>, ValueQuery>;
-    #[pallet::storage] pub type RequestorJobs<T: Config> = StorageMap<_, Blake2_128Concat, T::AccountId, Vec<u64>, ValueQuery>;
-    #[pallet::storage] pub type JobEscrow<T: Config> = StorageMap<_, Blake2_128Concat, u64, BalanceOf<T>, OptionQuery>;
-    #[pallet::storage] pub type RegisteredProviders<T: Config> = StorageMap<_, Blake2_128Concat, T::AccountId, GPURequirements, OptionQuery>;
-    #[pallet::storage] pub type ActiveJobCount<T: Config> = StorageValue<_, u32, ValueQuery>;
+    #[pallet::storage]
+    pub type NextJobId<T: Config> = StorageValue<_, u64, ValueQuery>;
+    #[pallet::storage]
+    pub type Jobs<T: Config> = StorageMap<_, Blake2_128Concat, u64, ComputeJob, OptionQuery>;
+    #[pallet::storage]
+    pub type JobRequestor<T: Config> =
+        StorageMap<_, Blake2_128Concat, u64, T::AccountId, OptionQuery>;
+    #[pallet::storage]
+    pub type JobProvider<T: Config> =
+        StorageMap<_, Blake2_128Concat, u64, T::AccountId, OptionQuery>;
+    #[pallet::storage]
+    pub type ProviderJobs<T: Config> =
+        StorageMap<_, Blake2_128Concat, T::AccountId, Vec<u64>, ValueQuery>;
+    #[pallet::storage]
+    pub type RequestorJobs<T: Config> =
+        StorageMap<_, Blake2_128Concat, T::AccountId, Vec<u64>, ValueQuery>;
+    #[pallet::storage]
+    pub type JobEscrow<T: Config> = StorageMap<_, Blake2_128Concat, u64, BalanceOf<T>, OptionQuery>;
+    #[pallet::storage]
+    pub type RegisteredProviders<T: Config> =
+        StorageMap<_, Blake2_128Concat, T::AccountId, GPURequirements, OptionQuery>;
+    #[pallet::storage]
+    pub type ActiveJobCount<T: Config> = StorageValue<_, u32, ValueQuery>;
 
     // Genesis
     #[pallet::genesis_config]
     #[derive(frame_support::DefaultNoBound)]
-    pub struct GenesisConfig<T: Config> { #[serde(skip)] pub _config: sp_std::marker::PhantomData<T>, }
+    pub struct GenesisConfig<T: Config> {
+        #[serde(skip)]
+        pub _config: sp_std::marker::PhantomData<T>,
+    }
     #[pallet::genesis_build]
     impl<T: Config> BuildGenesisConfig for GenesisConfig<T> {
         fn build(&self) {
@@ -121,23 +190,55 @@ pub mod pallet {
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
-        JobCreated { job_id: u64, requestor: T::AccountId, tier: JobTier },
-        JobAccepted { job_id: u64, provider: T::AccountId },
-        JobStarted { job_id: u64 },
-        JobCompleted { job_id: u64, provider: T::AccountId },
-        JobFailed { job_id: u64, reason: u8 },
-        JobCancelled { job_id: u64 },
-        ProviderRegistered { who: T::AccountId },
-        ProviderUnregistered { who: T::AccountId },
+        JobCreated {
+            job_id: u64,
+            requestor: T::AccountId,
+            tier: JobTier,
+        },
+        JobAccepted {
+            job_id: u64,
+            provider: T::AccountId,
+        },
+        JobStarted {
+            job_id: u64,
+        },
+        JobCompleted {
+            job_id: u64,
+            provider: T::AccountId,
+        },
+        JobFailed {
+            job_id: u64,
+            reason: u8,
+        },
+        JobCancelled {
+            job_id: u64,
+        },
+        ProviderRegistered {
+            who: T::AccountId,
+        },
+        ProviderUnregistered {
+            who: T::AccountId,
+        },
     }
 
     // Errors
     #[pallet::error]
     pub enum Error<T> {
-        TooManyActiveJobs, MaxProviderCapacity, JobNotFound, JobNotPending,
-        JobNotAccepted, JobNotRunning, AlreadyAccepted, NotJobProvider,
-        NotJobRequestor, InsufficientPayment, InvalidWorkload, JobExpired,
-        EscrowMismatch, ProviderNotRegistered, ProviderAlreadyRegistered,
+        TooManyActiveJobs,
+        MaxProviderCapacity,
+        JobNotFound,
+        JobNotPending,
+        JobNotAccepted,
+        JobNotRunning,
+        AlreadyAccepted,
+        NotJobProvider,
+        NotJobRequestor,
+        InsufficientPayment,
+        InvalidWorkload,
+        JobExpired,
+        EscrowMismatch,
+        ProviderNotRegistered,
+        ProviderAlreadyRegistered,
         /// The provider's attested compute throughput (GFLOPS) is below the
         /// job's `min_gflops` requirement — it cannot honestly serve this job.
         ProviderComputeInsufficient,
@@ -146,7 +247,9 @@ pub mod pallet {
     // Hooks
     #[pallet::hooks]
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
-        fn on_initialize(_now: BlockNumberFor<T>) -> Weight { Weight::zero() }
+        fn on_initialize(_now: BlockNumberFor<T>) -> Weight {
+            Weight::zero()
+        }
     }
 
     // Dispatchable calls
@@ -154,9 +257,15 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         #[pallet::call_index(0)]
         #[pallet::weight(10_000)]
-        pub fn register_provider(origin: OriginFor<T>, requirements: GPURequirements) -> DispatchResult {
+        pub fn register_provider(
+            origin: OriginFor<T>,
+            requirements: GPURequirements,
+        ) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            ensure!(!<RegisteredProviders<T>>::contains_key(&who), Error::<T>::ProviderAlreadyRegistered);
+            ensure!(
+                !<RegisteredProviders<T>>::contains_key(&who),
+                Error::<T>::ProviderAlreadyRegistered
+            );
             <RegisteredProviders<T>>::insert(&who, requirements);
             Self::deposit_event(Event::<T>::ProviderRegistered { who });
             Ok(())
@@ -166,7 +275,10 @@ pub mod pallet {
         #[pallet::weight(10_000)]
         pub fn unregister_provider(origin: OriginFor<T>) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            ensure!(<RegisteredProviders<T>>::contains_key(&who), Error::<T>::ProviderNotRegistered);
+            ensure!(
+                <RegisteredProviders<T>>::contains_key(&who),
+                Error::<T>::ProviderNotRegistered
+            );
             <RegisteredProviders<T>>::remove(&who);
             Self::deposit_event(Event::<T>::ProviderUnregistered { who });
             Ok(())
@@ -186,21 +298,34 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
             let requestor = who.clone();
 
-            ensure!(<ActiveJobCount<T>>::get() < T::MaxActiveJobs::get(), Error::<T>::TooManyActiveJobs);
-            ensure!(!workload_hash.iter().all(|&b| b == 0), Error::<T>::InvalidWorkload);
-            ensure!(max_duration <= T::MaxJobDuration::get(), Error::<T>::JobExpired);
+            ensure!(
+                <ActiveJobCount<T>>::get() < T::MaxActiveJobs::get(),
+                Error::<T>::TooManyActiveJobs
+            );
+            ensure!(
+                !workload_hash.iter().all(|&b| b == 0),
+                Error::<T>::InvalidWorkload
+            );
+            ensure!(
+                max_duration <= T::MaxJobDuration::get(),
+                Error::<T>::JobExpired
+            );
             ensure!(price > Zero::zero(), Error::<T>::InsufficientPayment);
 
             let job_id = <NextJobId<T>>::get();
             <NextJobId<T>>::mutate(|id| *id += 1);
 
-            let now: u32 = frame_system::Pallet::<T>::block_number().try_into().unwrap_or(0);
+            let now: u32 = frame_system::Pallet::<T>::block_number()
+                .try_into()
+                .unwrap_or(0);
             let max_dur: u32 = max_duration.try_into().unwrap_or(100_000);
 
             let job_tier = tier.clone();
             let job = ComputeJob {
                 id: job_id,
-                gpu_requirements, job_type, tier: job_tier,
+                gpu_requirements,
+                job_type,
+                tier: job_tier,
                 state: JobState::Pending,
                 price: price.try_into().unwrap_or(0),
                 max_duration: max_dur,
@@ -210,7 +335,12 @@ pub mod pallet {
                 result_hash: None,
             };
 
-            T::Currency::transfer(&requestor, &Self::account_id(), price, ExistenceRequirement::KeepAlive)?;
+            T::Currency::transfer(
+                &requestor,
+                &Self::account_id(),
+                price,
+                ExistenceRequirement::KeepAlive,
+            )?;
 
             <Jobs<T>>::insert(job_id, job);
             <JobRequestor<T>>::insert(job_id, who.clone());
@@ -221,7 +351,11 @@ pub mod pallet {
             <RequestorJobs<T>>::insert(&requestor, jobs);
             <ActiveJobCount<T>>::mutate(|c| *c += 1);
 
-            Self::deposit_event(Event::<T>::JobCreated { job_id, requestor: who, tier });
+            Self::deposit_event(Event::<T>::JobCreated {
+                job_id,
+                requestor: who,
+                tier,
+            });
             Ok(())
         }
 
@@ -230,11 +364,20 @@ pub mod pallet {
         pub fn accept_job(origin: OriginFor<T>, job_id: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
             let provider = who.clone();
-            ensure!(<RegisteredProviders<T>>::contains_key(&provider), Error::<T>::ProviderNotRegistered);
+            ensure!(
+                <RegisteredProviders<T>>::contains_key(&provider),
+                Error::<T>::ProviderNotRegistered
+            );
             let mut job = <Jobs<T>>::get(job_id).ok_or(Error::<T>::JobNotFound)?;
             ensure!(job.state == JobState::Pending, Error::<T>::JobNotPending);
-            ensure!(!<JobProvider<T>>::contains_key(job_id), Error::<T>::AlreadyAccepted);
-            ensure!((<ProviderJobs<T>>::get(&provider).len() as u32) < T::MaxJobsPerProvider::get(), Error::<T>::MaxProviderCapacity);
+            ensure!(
+                !<JobProvider<T>>::contains_key(job_id),
+                Error::<T>::AlreadyAccepted
+            );
+            ensure!(
+                (<ProviderJobs<T>>::get(&provider).len() as u32) < T::MaxJobsPerProvider::get(),
+                Error::<T>::MaxProviderCapacity
+            );
 
             // Proof-of-compute gate: if the job demands a minimum GFLOPS rate,
             // the provider must have *attested* to at least that throughput
@@ -244,7 +387,10 @@ pub mod pallet {
             let required_gflops = job.gpu_requirements.min_gflops;
             if required_gflops > 0 {
                 let attested = T::GPUAttestation::attested_gflops(&provider);
-                ensure!(attested >= required_gflops, Error::<T>::ProviderComputeInsufficient);
+                ensure!(
+                    attested >= required_gflops,
+                    Error::<T>::ProviderComputeInsufficient
+                );
             }
 
             job.state = JobState::Accepted;
@@ -264,11 +410,16 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
             let mut job = <Jobs<T>>::get(job_id).ok_or(Error::<T>::JobNotFound)?;
             ensure!(job.state == JobState::Accepted, Error::<T>::JobNotAccepted);
-            let assigned_provider = <JobProvider<T>>::get(job_id).ok_or(Error::<T>::NotJobProvider)?;
+            let assigned_provider =
+                <JobProvider<T>>::get(job_id).ok_or(Error::<T>::NotJobProvider)?;
             ensure!(assigned_provider == who, Error::<T>::NotJobProvider);
 
             job.state = JobState::Running;
-            job.started_at = Some(frame_system::Pallet::<T>::block_number().try_into().unwrap_or(0));
+            job.started_at = Some(
+                frame_system::Pallet::<T>::block_number()
+                    .try_into()
+                    .unwrap_or(0),
+            );
             <Jobs<T>>::insert(job_id, job);
             Self::deposit_event(Event::<T>::JobStarted { job_id });
             Ok(())
@@ -276,17 +427,25 @@ pub mod pallet {
 
         #[pallet::call_index(5)]
         #[pallet::weight(20_000)]
-        pub fn submit_result(origin: OriginFor<T>, job_id: u64, result_hash: [u8; 32]) -> DispatchResult {
+        pub fn submit_result(
+            origin: OriginFor<T>,
+            job_id: u64,
+            result_hash: [u8; 32],
+        ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             let mut job = <Jobs<T>>::get(job_id).ok_or(Error::<T>::JobNotFound)?;
             ensure!(job.state == JobState::Running, Error::<T>::JobNotRunning);
-            let assigned_provider = <JobProvider<T>>::get(job_id).ok_or(Error::<T>::NotJobProvider)?;
+            let assigned_provider =
+                <JobProvider<T>>::get(job_id).ok_or(Error::<T>::NotJobProvider)?;
             ensure!(assigned_provider == who, Error::<T>::NotJobProvider);
 
             job.state = JobState::AwaitingVerification;
             job.result_hash = Some(result_hash);
             <Jobs<T>>::insert(job_id, job);
-            Self::deposit_event(Event::<T>::JobCompleted { job_id, provider: who });
+            Self::deposit_event(Event::<T>::JobCompleted {
+                job_id,
+                provider: who,
+            });
             Ok(())
         }
 
@@ -295,7 +454,10 @@ pub mod pallet {
         pub fn complete_job(origin: OriginFor<T>, job_id: u64) -> DispatchResult {
             let _who = ensure_signed(origin)?;
             let mut job = <Jobs<T>>::get(job_id).ok_or(Error::<T>::JobNotFound)?;
-            ensure!(job.state == JobState::AwaitingVerification || job.state == JobState::Running, Error::<T>::JobNotRunning);
+            ensure!(
+                job.state == JobState::AwaitingVerification || job.state == JobState::Running,
+                Error::<T>::JobNotRunning
+            );
 
             let provider = <JobProvider<T>>::get(job_id).ok_or(Error::<T>::NotJobProvider)?;
             let escrow = <JobEscrow<T>>::take(job_id).ok_or(Error::<T>::EscrowMismatch)?;
@@ -335,7 +497,12 @@ pub mod pallet {
                 )?;
             }
             // Pay the provider last, sweeping the marketplace account to exactly 0.
-            T::Currency::transfer(&Self::account_id(), &provider, provider_payment, ExistenceRequirement::AllowDeath)?;
+            T::Currency::transfer(
+                &Self::account_id(),
+                &provider,
+                provider_payment,
+                ExistenceRequirement::AllowDeath,
+            )?;
             Self::deposit_event(Event::<T>::JobCompleted { job_id, provider });
 
             Ok(())
@@ -350,13 +517,22 @@ pub mod pallet {
             ensure!(who == requestor, Error::<T>::NotJobRequestor);
             ensure!(job.state == JobState::Pending, Error::<T>::JobNotPending);
 
-            <Jobs<T>>::mutate(job_id, |j| { if let Some(ref mut j) = j { j.state = JobState::Cancelled; } });
+            <Jobs<T>>::mutate(job_id, |j| {
+                if let Some(ref mut j) = j {
+                    j.state = JobState::Cancelled;
+                }
+            });
             <ActiveJobCount<T>>::mutate(|c| *c = c.saturating_sub(1));
 
             if let Some(escrow) = <JobEscrow<T>>::take(job_id) {
                 // Use AllowDeath: the escrow account may be fully emptied by a refund.
                 // KeepAlive would block the transfer if the escrow drops below ED.
-                T::Currency::transfer(&Self::account_id(), &who, escrow, ExistenceRequirement::AllowDeath)?;
+                T::Currency::transfer(
+                    &Self::account_id(),
+                    &who,
+                    escrow,
+                    ExistenceRequirement::AllowDeath,
+                )?;
             }
 
             // Remove from provider job list if accepted
@@ -376,8 +552,12 @@ pub mod pallet {
         pub fn account_id() -> T::AccountId {
             frame_support::PalletId(*b"gpn/cmkt").into_account_truncating()
         }
-        pub fn provider_active_jobs(who: &T::AccountId) -> Vec<u64> { <ProviderJobs<T>>::get(who) }
-        pub fn requestor_active_jobs(who: &T::AccountId) -> Vec<u64> { <RequestorJobs<T>>::get(who) }
+        pub fn provider_active_jobs(who: &T::AccountId) -> Vec<u64> {
+            <ProviderJobs<T>>::get(who)
+        }
+        pub fn requestor_active_jobs(who: &T::AccountId) -> Vec<u64> {
+            <RequestorJobs<T>>::get(who)
+        }
     }
 }
 
@@ -386,7 +566,7 @@ mod tests {
     use super::*;
     use frame_support::{
         construct_runtime, derive_impl, parameter_types,
-        traits::{BuildGenesisConfig, ConstU16, ConstU32, ConstU64, ConstU128, Everything},
+        traits::{BuildGenesisConfig, ConstU128, ConstU16, ConstU32, ConstU64, Everything},
     };
     use sp_core::H256;
     use sp_runtime::{
@@ -472,7 +652,9 @@ mod tests {
     }
     pub struct MockAttestation;
     impl GPUAttestationProvider<u64> for MockAttestation {
-        fn attested_gflops(_: &u64) -> u64 { MOCK_GFLOPS.with(|c| c.get()) }
+        fn attested_gflops(_: &u64) -> u64 {
+            MOCK_GFLOPS.with(|c| c.get())
+        }
         fn attested_tier(_: &u64) -> pallet_gpu_attestation::AttestationTier {
             pallet_gpu_attestation::AttestationTier::Silver
         }
@@ -495,11 +677,13 @@ mod tests {
     /// assert the fee is forwarded off the marketplace pallet account.
     pub struct MockFeeSink;
     impl pallet_gpn_token::FeeSinkProvider<u64> for MockFeeSink {
-        fn fee_sink() -> u64 { 99 }
+        fn fee_sink() -> u64 {
+            99
+        }
     }
 
     const ALICE: u64 = 1; // requestor
-    const BOB: u64 = 2;   // provider
+    const BOB: u64 = 2; // provider
     const CAROL: u64 = 3; // third party
 
     fn new_test_ext() -> sp_io::TestExternalities {
@@ -523,13 +707,21 @@ mod tests {
         ext
     }
 
-    type MarketPallet = crate::pallet::Pallet::<Test>;
+    type MarketPallet = crate::pallet::Pallet<Test>;
 
     fn default_reqs() -> GPURequirements {
-        GPURequirements { min_vram_mb: 16_000, min_compute_capability: 80, min_gpu_count: 1, min_cuda_cores: 6_000, min_gflops: 1_000 }
+        GPURequirements {
+            min_vram_mb: 16_000,
+            min_compute_capability: 80,
+            min_gpu_count: 1,
+            min_cuda_cores: 6_000,
+            min_gflops: 1_000,
+        }
     }
 
-    fn workload() -> [u8; 32] { [9u8; 32] }
+    fn workload() -> [u8; 32] {
+        [9u8; 32]
+    }
 
     fn register_provider(who: u64) {
         MarketPallet::register_provider(RuntimeOrigin::signed(who), default_reqs()).unwrap();
@@ -537,9 +729,15 @@ mod tests {
 
     fn create_job(who: u64) -> u64 {
         MarketPallet::create_job(
-            RuntimeOrigin::signed(who), default_reqs(), JobType::LLMInference,
-            JobTier::Spot, 1_000, 100, workload(),
-        ).unwrap();
+            RuntimeOrigin::signed(who),
+            default_reqs(),
+            JobType::LLMInference,
+            JobTier::Spot,
+            1_000,
+            100,
+            workload(),
+        )
+        .unwrap();
         NextJobId::<Test>::get() - 1
     }
 
@@ -556,7 +754,10 @@ mod tests {
         new_test_ext().execute_with(|| {
             register_provider(BOB);
             assert!(RegisteredProviders::<Test>::contains_key(BOB));
-            assert_eq!(RegisteredProviders::<Test>::get(BOB).unwrap().min_vram_mb, 16_000);
+            assert_eq!(
+                RegisteredProviders::<Test>::get(BOB).unwrap().min_vram_mb,
+                16_000
+            );
             // Duplicate registration fails
             let dup = MarketPallet::register_provider(RuntimeOrigin::signed(BOB), default_reqs());
             assert_eq!(dup, Err(Error::<Test>::ProviderAlreadyRegistered.into()));
@@ -581,7 +782,10 @@ mod tests {
             let before = pallet_balances::Pallet::<Test>::free_balance(ALICE);
             let job_id = create_job(ALICE);
             assert_eq!(job_id, 1);
-            assert_eq!(pallet_balances::Pallet::<Test>::free_balance(ALICE), before - 1_000);
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(ALICE),
+                before - 1_000
+            );
             assert_eq!(JobEscrow::<Test>::get(job_id), Some(1_000));
             assert_eq!(Jobs::<Test>::get(job_id).unwrap().state, JobState::Pending);
             assert_eq!(ActiveJobCount::<Test>::get(), 1);
@@ -592,8 +796,13 @@ mod tests {
     fn test_create_job_rejects_zero_price() {
         new_test_ext().execute_with(|| {
             let result = MarketPallet::create_job(
-                RuntimeOrigin::signed(ALICE), default_reqs(), JobType::LLMInference,
-                JobTier::Spot, 0, 100, workload(),
+                RuntimeOrigin::signed(ALICE),
+                default_reqs(),
+                JobType::LLMInference,
+                JobTier::Spot,
+                0,
+                100,
+                workload(),
             );
             assert_eq!(result, Err(Error::<Test>::InsufficientPayment.into()));
         });
@@ -603,8 +812,13 @@ mod tests {
     fn test_create_job_rejects_zero_workload() {
         new_test_ext().execute_with(|| {
             let result = MarketPallet::create_job(
-                RuntimeOrigin::signed(ALICE), default_reqs(), JobType::LLMInference,
-                JobTier::Spot, 1_000, 100, [0u8; 32],
+                RuntimeOrigin::signed(ALICE),
+                default_reqs(),
+                JobType::LLMInference,
+                JobTier::Spot,
+                1_000,
+                100,
+                [0u8; 32],
             );
             assert_eq!(result, Err(Error::<Test>::InvalidWorkload.into()));
         });
@@ -614,8 +828,13 @@ mod tests {
     fn test_create_job_rejects_excessive_duration() {
         new_test_ext().execute_with(|| {
             let result = MarketPallet::create_job(
-                RuntimeOrigin::signed(ALICE), default_reqs(), JobType::LLMInference,
-                JobTier::Spot, 1_000, 100_001, workload(),
+                RuntimeOrigin::signed(ALICE),
+                default_reqs(),
+                JobType::LLMInference,
+                JobTier::Spot,
+                1_000,
+                100_001,
+                workload(),
             );
             assert_eq!(result, Err(Error::<Test>::JobExpired.into()));
         });
@@ -639,16 +858,28 @@ mod tests {
 
             // Submit result
             MarketPallet::submit_result(RuntimeOrigin::signed(BOB), job_id, [5u8; 32]).unwrap();
-            assert_eq!(Jobs::<Test>::get(job_id).unwrap().state, JobState::AwaitingVerification);
-            assert_eq!(Jobs::<Test>::get(job_id).unwrap().result_hash, Some([5u8; 32]));
+            assert_eq!(
+                Jobs::<Test>::get(job_id).unwrap().state,
+                JobState::AwaitingVerification
+            );
+            assert_eq!(
+                Jobs::<Test>::get(job_id).unwrap().result_hash,
+                Some([5u8; 32])
+            );
 
             // Complete & pay
             let provider_before = pallet_balances::Pallet::<Test>::free_balance(BOB);
             MarketPallet::complete_job(RuntimeOrigin::signed(CAROL), job_id).unwrap();
-            assert_eq!(Jobs::<Test>::get(job_id).unwrap().state, JobState::Completed);
+            assert_eq!(
+                Jobs::<Test>::get(job_id).unwrap().state,
+                JobState::Completed
+            );
             assert_eq!(ActiveJobCount::<Test>::get(), 0);
             // 1% fee taken: 1000 - 10 = 990 to provider
-            assert_eq!(pallet_balances::Pallet::<Test>::free_balance(BOB), provider_before + 990);
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(BOB),
+                provider_before + 990
+            );
         });
     }
 
@@ -669,9 +900,15 @@ mod tests {
             MarketPallet::complete_job(RuntimeOrigin::signed(CAROL), job_id).unwrap();
 
             // 1% fee (10) must be forwarded to the fee sink, NOT left in gpn/cmkt.
-            assert_eq!(pallet_balances::Pallet::<Test>::free_balance(99), sink_before + 10);
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(99),
+                sink_before + 10
+            );
             // The marketplace pallet account keeps nothing after escrow + fee.
-            assert_eq!(pallet_balances::Pallet::<Test>::free_balance(MarketPallet::account_id()), 0);
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(MarketPallet::account_id()),
+                0
+            );
         });
     }
 
@@ -686,9 +923,15 @@ mod tests {
         new_test_ext().execute_with(|| {
             register_provider(BOB);
             MarketPallet::create_job(
-                RuntimeOrigin::signed(ALICE), default_reqs(), JobType::LLMInference,
-                JobTier::Spot, 50, 100, workload(),
-            ).unwrap();
+                RuntimeOrigin::signed(ALICE),
+                default_reqs(),
+                JobType::LLMInference,
+                JobTier::Spot,
+                50,
+                100,
+                workload(),
+            )
+            .unwrap();
             let job_id = NextJobId::<Test>::get() - 1;
             MarketPallet::accept_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
             MarketPallet::start_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
@@ -699,8 +942,14 @@ mod tests {
 
             // Provider paid the full escrow (fee rounds to 0); marketplace
             // account fully drained (AllowDeath), not blocked by ED.
-            assert_eq!(pallet_balances::Pallet::<Test>::free_balance(BOB), provider_before + 50);
-            assert_eq!(pallet_balances::Pallet::<Test>::free_balance(MarketPallet::account_id()), 0);
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(BOB),
+                provider_before + 50
+            );
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(MarketPallet::account_id()),
+                0
+            );
         });
     }
 
@@ -756,8 +1005,14 @@ mod tests {
             let job_id = create_job(ALICE);
             let before = pallet_balances::Pallet::<Test>::free_balance(ALICE);
             MarketPallet::cancel_job(RuntimeOrigin::signed(ALICE), job_id).unwrap();
-            assert_eq!(Jobs::<Test>::get(job_id).unwrap().state, JobState::Cancelled);
-            assert_eq!(pallet_balances::Pallet::<Test>::free_balance(ALICE), before + 1_000);
+            assert_eq!(
+                Jobs::<Test>::get(job_id).unwrap().state,
+                JobState::Cancelled
+            );
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(ALICE),
+                before + 1_000
+            );
             assert!(JobEscrow::<Test>::get(job_id).is_none());
             assert_eq!(ActiveJobCount::<Test>::get(), 0);
         });
@@ -777,7 +1032,9 @@ mod tests {
         new_test_ext().execute_with(|| {
             register_provider(BOB);
             // Create 5 jobs (max = 5)
-            for _ in 0..5 { create_job(ALICE); }
+            for _ in 0..5 {
+                create_job(ALICE);
+            }
             let job6 = create_job(ALICE);
             for i in 1..6u64 {
                 MarketPallet::accept_job(RuntimeOrigin::signed(BOB), i).unwrap();
@@ -792,10 +1049,13 @@ mod tests {
         new_test_ext().execute_with(|| {
             register_provider(BOB);
             let job_id = create_job(ALICE); // requires min_gflops = 1000
-            // Attested throughput only 500 GFLOPS < 1000 required.
+                                            // Attested throughput only 500 GFLOPS < 1000 required.
             MOCK_GFLOPS.with(|c| c.set(500));
             let result = MarketPallet::accept_job(RuntimeOrigin::signed(BOB), job_id);
-            assert_eq!(result, Err(Error::<Test>::ProviderComputeInsufficient.into()));
+            assert_eq!(
+                result,
+                Err(Error::<Test>::ProviderComputeInsufficient.into())
+            );
             assert!(!JobProvider::<Test>::contains_key(job_id));
             assert_eq!(Jobs::<Test>::get(job_id).unwrap().state, JobState::Pending);
         });
@@ -806,10 +1066,13 @@ mod tests {
         new_test_ext().execute_with(|| {
             register_provider(BOB);
             let job_id = create_job(ALICE); // requires min_gflops = 1000
-            // 0 GFLOPS = never attested; cannot serve a paid job with a compute gate.
+                                            // 0 GFLOPS = never attested; cannot serve a paid job with a compute gate.
             MOCK_GFLOPS.with(|c| c.set(0));
             let result = MarketPallet::accept_job(RuntimeOrigin::signed(BOB), job_id);
-            assert_eq!(result, Err(Error::<Test>::ProviderComputeInsufficient.into()));
+            assert_eq!(
+                result,
+                Err(Error::<Test>::ProviderComputeInsufficient.into())
+            );
         });
     }
 
@@ -834,9 +1097,15 @@ mod tests {
             let mut reqs = default_reqs();
             reqs.min_gflops = 0;
             MarketPallet::create_job(
-                RuntimeOrigin::signed(ALICE), reqs, JobType::LLMInference,
-                JobTier::Spot, 1_000, 100, workload(),
-            ).unwrap();
+                RuntimeOrigin::signed(ALICE),
+                reqs,
+                JobType::LLMInference,
+                JobTier::Spot,
+                1_000,
+                100,
+                workload(),
+            )
+            .unwrap();
             let job_id = NextJobId::<Test>::get() - 1;
             MOCK_GFLOPS.with(|c| c.set(0));
             MarketPallet::accept_job(RuntimeOrigin::signed(BOB), job_id).unwrap();

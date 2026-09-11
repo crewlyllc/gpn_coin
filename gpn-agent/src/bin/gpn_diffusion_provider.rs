@@ -29,11 +29,19 @@ fn diffuse_script() -> PathBuf {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
-    let endpoint = args.get(1).cloned().or_else(|| std::env::var("ENDPOINT").ok())
+    let endpoint = args
+        .get(1)
+        .cloned()
+        .or_else(|| std::env::var("ENDPOINT").ok())
         .unwrap_or_else(|| "ws://127.0.0.1:9944".to_string());
-    let signer_uri = args.get(2).cloned().or_else(|| std::env::var("SIGNER_URI").ok())
+    let signer_uri = args
+        .get(2)
+        .cloned()
+        .or_else(|| std::env::var("SIGNER_URI").ok())
         .unwrap_or_else(|| "//Alice".to_string());
-    let poll_ms: u64 = args.get(3).and_then(|s| s.parse().ok())
+    let poll_ms: u64 = args
+        .get(3)
+        .and_then(|s| s.parse().ok())
         .or_else(|| std::env::var("POLL_MS").ok().and_then(|s| s.parse().ok()))
         .unwrap_or(4000);
 
@@ -48,7 +56,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!(
         "GPN diffusion provider running — endpoint={} signer={} poll={}ms script={}",
-        endpoint, me, poll_ms, diffuse_script().display()
+        endpoint,
+        me,
+        poll_ms,
+        diffuse_script().display()
     );
 
     loop {
@@ -84,13 +95,19 @@ async fn run_job(
     id: u64,
     job: gpn_agent::llm::LlmJob,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("[job {id}] {} generation — model={} prompt=\"{:.40}\"", job.kind, job.model, job.prompt);
+    println!(
+        "[job {id}] {} generation — model={} prompt=\"{:.40}\"",
+        job.kind, job.model, job.prompt
+    );
     let _ = LlmStore::new().set_status(id, "running");
 
     // Artifact output path.
     let ext = if job.kind == "image" { "png" } else { "mp4" };
     let out_dir = std::env::var("GPN_ARTIFACTS").unwrap_or_else(|_| {
-        gpn_agent::utils::temp_dir().join("gpn_artifacts").to_string_lossy().to_string()
+        gpn_agent::utils::temp_dir()
+            .join("gpn_artifacts")
+            .to_string_lossy()
+            .to_string()
     });
     std::fs::create_dir_all(&out_dir)?;
     let out_path = format!("{}/job_{}.{}", out_dir, id, ext);
@@ -131,7 +148,10 @@ async fn run_job(
 
     if out.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
         let artifact = out["artifact"].as_str().unwrap_or(&out_path).to_string();
-        let media = out["media_type"].as_str().unwrap_or("application/octet-stream").to_string();
+        let media = out["media_type"]
+            .as_str()
+            .unwrap_or("application/octet-stream")
+            .to_string();
         let hash = out["sha256"].as_str().unwrap_or("").to_string();
         let _ = LlmStore::new().complete_artifact(id, &artifact, &media, &hash);
         let mut hb = [0u8; 32];
@@ -140,7 +160,10 @@ async fn run_job(
         client.complete_job(id).await?;
         println!("[job {id}] done — artifact {artifact} ({media}), hash {hash:.16}…");
     } else {
-        let err = out["error"].as_str().unwrap_or("unknown generation error").to_string();
+        let err = out["error"]
+            .as_str()
+            .unwrap_or("unknown generation error")
+            .to_string();
         let _ = LlmStore::new().set_error(id, &err);
         eprintln!("[job {id}] generation failed: {err}");
     }

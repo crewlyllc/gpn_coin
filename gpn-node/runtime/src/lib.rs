@@ -30,26 +30,24 @@ use frame_support::{
     construct_runtime, derive_impl,
     dispatch::DispatchClass,
     parameter_types,
-    traits::{ConstU16, ConstU32, ConstU64, ConstU8, ConstU128, EitherOfDiverse, Everything},
-    weights::{
-        constants::WEIGHT_REF_TIME_PER_SECOND, IdentityFee, Weight,
-    },
+    traits::{ConstU128, ConstU16, ConstU32, ConstU64, ConstU8, EitherOfDiverse, Everything},
+    weights::{constants::WEIGHT_REF_TIME_PER_SECOND, IdentityFee, Weight},
     PalletId,
 };
 use frame_system::limits::{BlockLength, BlockWeights};
 #[cfg(feature = "std")]
+use serde::{Deserialize, Serialize};
+use sp_core::OpaqueMetadata;
+use sp_inherents::{CheckInherentsResult, InherentData};
+#[cfg(feature = "std")]
 pub use sp_runtime::BuildStorage;
 use sp_runtime::{
     create_runtime_str, generic,
-    traits::{BlakeTwo256, IdentifyAccount, Verify, Block as BlockT},
+    traits::{BlakeTwo256, Block as BlockT, IdentifyAccount, Verify},
     transaction_validity::{TransactionSource, TransactionValidity},
     ApplyExtrinsicResult, MultiSignature, Perbill,
 };
-use sp_core::OpaqueMetadata;
-use sp_inherents::{CheckInherentsResult, InherentData};
 use sp_std::prelude::*;
-#[cfg(feature = "std")]
-use serde::{Deserialize, Serialize};
 
 /// Block number type
 pub type BlockNumber = u32;
@@ -90,7 +88,8 @@ pub type SignedExtra = (
 );
 
 /// Unchecked extrinsic type
-pub type UncheckedExtrinsic = generic::UncheckedExtrinsic<Address, RuntimeCall, Signature, SignedExtra>;
+pub type UncheckedExtrinsic =
+    generic::UncheckedExtrinsic<Address, RuntimeCall, Signature, SignedExtra>;
 
 /// Signature type
 pub type Signature = MultiSignature;

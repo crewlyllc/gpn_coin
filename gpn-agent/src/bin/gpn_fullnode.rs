@@ -88,14 +88,24 @@ fn parse_args() -> Args {
     }
 
     Args {
-        endpoint: positional.first().cloned().unwrap_or_else(|| "ws://127.0.0.1:9944".to_string()),
-        signer_uri: positional.get(1).cloned().unwrap_or_else(|| "//Alice".to_string()),
+        endpoint: positional
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "ws://127.0.0.1:9944".to_string()),
+        signer_uri: positional
+            .get(1)
+            .cloned()
+            .unwrap_or_else(|| "//Alice".to_string()),
         endpoint_uri: get("endpoint-uri"),
         bond_gpn: get("bond-gpn").and_then(|s| s.parse().ok()).unwrap_or(500),
         witness_peers,
-        witness_interval: get("witness-interval").and_then(|s| s.parse().ok()).unwrap_or(300),
+        witness_interval: get("witness-interval")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(300),
         finalize_window: has("finalize-window"),
-        loop_interval: get("loop-interval").and_then(|s| s.parse().ok()).unwrap_or(60),
+        loop_interval: get("loop-interval")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(60),
         once: has("once"),
     }
 }
@@ -114,7 +124,10 @@ async fn ensure_registered(
     let who = signer_address(&args.signer_uri)?;
     // If already registered, skip.
     if let Some((active, _, _, _)) = chain.get_fullnode_status(&who).await {
-        println!("  🔒 already registered as a full node (active={}); skipping register_fullnode", active);
+        println!(
+            "  🔒 already registered as a full node (active={}); skipping register_fullnode",
+            active
+        );
         return Ok(());
     }
     let endpoint = match &args.endpoint_uri {
@@ -128,7 +141,7 @@ async fn ensure_registered(
         }
     };
     // Ensure enough free balance for the bond (best-effort; the pallet enforces min).
-    let _ = chain.register_fullnode(&endpoint).await?;
+    chain.register_fullnode(&endpoint).await?;
     println!("  ✅ registered full node with endpoint {}", endpoint);
     Ok(())
 }
@@ -164,7 +177,10 @@ async fn run_cycle(chain: &ChainClient, args: &Args) {
         Some((active, missed, last_win, uptime)) => {
             println!(
                 "  📊 full-node status: active={} missed_windows={} last_win={} rolling_uptime={}%",
-                active, missed, last_win, uptime as f64 / 100.0
+                active,
+                missed,
+                last_win,
+                uptime as f64 / 100.0
             );
         }
         None => println!("  📊 not yet registered (status unavailable)"),
@@ -182,7 +198,9 @@ async fn main_loop(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         println!("   public endpoint: {}", e);
     }
 
-    let chain = ChainClient::new(&args.endpoint).await?.with_signer(&args.signer_uri);
+    let chain = ChainClient::new(&args.endpoint)
+        .await?
+        .with_signer(&args.signer_uri);
     ensure_registered(&chain, &args).await?;
 
     if args.once {

@@ -21,7 +21,8 @@
 //! ```
 
 use gpn_agent::{
-    chain, compute::ComputeConfig, config, gpu, mining::MiningConfig, modes, profitability, AgentState, Mode,
+    chain, compute::ComputeConfig, config, gpu, mining::MiningConfig, modes, profitability,
+    AgentState, Mode,
 };
 use sha2::Digest;
 use std::sync::Arc;
@@ -46,7 +47,9 @@ impl GPUMiningNodeAgent {
             .await?
             .with_signer(&config.signer_uri);
         let gpu_monitor = gpu::GPUMonitor::new()?;
-        let account = chain_client.get_account_info(&config.account_address).await?;
+        let account = chain_client
+            .get_account_info(&config.account_address)
+            .await?;
 
         let state = Arc::new(RwLock::new(AgentState {
             current_mode: Mode::Mining,
@@ -105,17 +108,22 @@ impl GPUMiningNodeAgent {
             let mut state = self.state.write().await;
             state.current_mode = boot_mode;
         }
-        log::info!("Booted into {:?} mode (mining={}, computing={})", boot_mode, self.mode_manager.is_mining(), self.mode_manager.is_computing());
+        log::info!(
+            "Booted into {:?} mode (mining={}, computing={})",
+            boot_mode,
+            self.mode_manager.is_mining(),
+            self.mode_manager.is_computing()
+        );
 
         // Periodic operations
-        let mut attestation_interval = tokio::time::interval(
-            std::time::Duration::from_secs(self.config.attestation_interval_secs)
-        );
-        let mut profitability_interval = tokio::time::interval(
-            std::time::Duration::from_secs(self.config.profitability_check_interval_secs)
-        );
+        let mut attestation_interval = tokio::time::interval(std::time::Duration::from_secs(
+            self.config.attestation_interval_secs,
+        ));
+        let mut profitability_interval = tokio::time::interval(std::time::Duration::from_secs(
+            self.config.profitability_check_interval_secs,
+        ));
         let mut health_check_interval = tokio::time::interval(
-            std::time::Duration::from_secs(60) // Every minute
+            std::time::Duration::from_secs(60), // Every minute
         );
 
         loop {
@@ -221,14 +229,13 @@ impl GPUMiningNodeAgent {
         let recommended = analysis.recommended_mode();
 
         if recommended != current_mode {
-            log::info!(
-                "🔄 Switching mode: {:?} → {:?}",
-                current_mode,
-                recommended
-            );
+            log::info!("🔄 Switching mode: {:?} → {:?}", current_mode, recommended);
 
             // Check hysteresis threshold
-            if self.profitability_calc.should_switch(&analysis, current_mode) {
+            if self
+                .profitability_calc
+                .should_switch(&analysis, current_mode)
+            {
                 self.mode_manager.switch_to(recommended).await?;
 
                 let mut state = self.state.write().await;
@@ -276,10 +283,17 @@ impl GPUMiningNodeAgent {
         // 3. Find pending jobs we can actually satisfy.
         let claimable = self.chain_client.list_claimable_jobs(attested_gflops).await;
         if claimable.is_empty() {
-            log::debug!("no claimable marketplace jobs (attested {} GFLOPS)", attested_gflops);
+            log::debug!(
+                "no claimable marketplace jobs (attested {} GFLOPS)",
+                attested_gflops
+            );
             return Ok(0);
         }
-        log::info!("{} claimable job(s) found (attested {} GFLOPS)", claimable.len(), attested_gflops);
+        log::info!(
+            "{} claimable job(s) found (attested {} GFLOPS)",
+            claimable.len(),
+            attested_gflops
+        );
 
         let mut served = 0usize;
         for (job_id, min_gflops) in claimable {
@@ -302,7 +316,11 @@ impl GPUMiningNodeAgent {
                 hasher.update(&bytes);
             }
             let result_hash: [u8; 32] = hasher.finalize().into();
-            log::info!("  GPU GEMM done in {}ms -> result_hash 0x{}...", elapsed.as_millis(), hex::encode(&result_hash[..4]));
+            log::info!(
+                "  GPU GEMM done in {}ms -> result_hash 0x{}...",
+                elapsed.as_millis(),
+                hex::encode(&result_hash[..4])
+            );
 
             // submit + complete (payout to provider from escrow)
             self.chain_client.submit_result(job_id, result_hash).await?;

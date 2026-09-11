@@ -28,8 +28,8 @@
 use gpn_agent::chain::signer;
 use gpn_agent::chain::ChainClient;
 use sp_core::{crypto::Pair as _, sr25519};
-use subxt::ext::scale_value::Composite;
 use subxt::dynamic::Value;
+use subxt::ext::scale_value::Composite;
 use subxt::tx::Signer as _;
 
 /// Resolve an account's 32-byte id from a Substrate dev URI (`//Dave`).
@@ -43,7 +43,10 @@ fn account_bytes(uri: &str) -> [u8; 32] {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
-    let endpoint = args.get(1).cloned().unwrap_or_else(|| "ws://127.0.0.1:9944".into());
+    let endpoint = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| "ws://127.0.0.1:9944".into());
     let bond_uri = args.get(2).cloned().unwrap_or_else(|| "//Dave".into());
     let challenger_uri = args.get(3).cloned().unwrap_or_else(|| "//Charlie".into());
 
@@ -54,7 +57,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ok = true;
     let mut check = |cond: bool, label: &str| {
         println!("  {} {}", if cond { "✅" } else { "❌" }, label);
-        if !cond { ok = false; }
+        if !cond {
+            ok = false;
+        }
     };
 
     println!("== 1. {bond_uri} bond_operator (permissionless, non-committee) ==");
@@ -67,7 +72,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Composite::unnamed(vec![]),
     );
     match signer::submit_signed(&client, &bond_call, &b, b_nonce).await {
-        Ok(_) => check(true, format!("{bond_uri} bond_operator dispatched OK").as_str()),
+        Ok(_) => check(
+            true,
+            format!("{bond_uri} bond_operator dispatched OK").as_str(),
+        ),
         Err(e) => check(false, &format!("bond_operator failed: {e}")),
     }
     let bond_val = chain.get_staked_bond(&bonder).await;
@@ -89,7 +97,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let b_nonce2 = signer::current_nonce(&client, &endpoint, &b_acct).await;
     match signer::submit_signed(&client, &feed_call, &b, b_nonce2).await {
-        Ok(_) => check(true, format!("{bond_uri} update_feed accepted (bonded operator path)").as_str()),
+        Ok(_) => check(
+            true,
+            format!("{bond_uri} update_feed accepted (bonded operator path)").as_str(),
+        ),
         Err(e) => check(false, &format!("bonded update_feed failed: {e}")),
     }
 
@@ -103,7 +114,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match signer::submit_signed(&client, &more_call, &b, b_nonce3).await {
         Ok(_) => {
             let bv = chain.get_staked_bond(&bonder).await;
-            check(bv == Some(1_100_000_000_000_000), "bond increased to 1,100 GPN (on-chain)");
+            check(
+                bv == Some(1_100_000_000_000_000),
+                "bond increased to 1,100 GPN (on-chain)",
+            );
         }
         Err(e) => check(false, &format!("bond_more failed: {e}")),
     }
@@ -115,10 +129,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let chal_call = subxt::dynamic::tx(
         "ProfitabilityOracle",
         "challenge_operator",
-        vec![Value::from_bytes(bonder.to_vec())],
+        vec![Value::from_bytes(bonder)],
     );
     match signer::submit_signed(&client, &chal_call, &c, c_nonce).await {
-        Ok(_) => check(true, format!("challenge_operator({bond_uri}) dispatched OK").as_str()),
+        Ok(_) => check(
+            true,
+            format!("challenge_operator({bond_uri}) dispatched OK").as_str(),
+        ),
         Err(e) => check(false, &format!("challenge_operator failed: {e}")),
     }
 
@@ -127,12 +144,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dismiss_call = subxt::dynamic::tx(
         "ProfitabilityOracle",
         "resolve_challenge",
-        vec![Value::from_bytes(bonder.to_vec()), Value::u128(2)], // 2 = Dismiss
+        vec![Value::from_bytes(bonder), Value::u128(2)], // 2 = Dismiss
     );
     match signer::submit_signed(&client, &dismiss_call, &c, c_nonce2).await {
         Ok(_) => {
             let bv = chain.get_staked_bond(&bonder).await;
-            check(bv == Some(1_100_000_000_000_000), "challenge closed, operator bond intact (frivolous -> challenger burned)");
+            check(
+                bv == Some(1_100_000_000_000_000),
+                "challenge closed, operator bond intact (frivolous -> challenger burned)",
+            );
         }
         Err(e) => check(false, &format!("resolve_challenge(Dismiss) failed: {e}")),
     }
@@ -147,7 +167,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match signer::submit_signed(&client, &unbond_call, &b, b_nonce4).await {
         Ok(_) => {
             let still = chain.get_staked_bond(&bonder).await;
-            check(still.is_none(), format!("{bond_uri} unbonded (removed from StakedOperators)").as_str());
+            check(
+                still.is_none(),
+                format!("{bond_uri} unbonded (removed from StakedOperators)").as_str(),
+            );
         }
         Err(e) => check(false, &format!("unbond_operator failed: {e}")),
     }

@@ -27,11 +27,19 @@ fn ft_script() -> PathBuf {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
-    let endpoint = args.get(1).cloned().or_else(|| std::env::var("ENDPOINT").ok())
+    let endpoint = args
+        .get(1)
+        .cloned()
+        .or_else(|| std::env::var("ENDPOINT").ok())
         .unwrap_or_else(|| "ws://127.0.0.1:9944".to_string());
-    let signer_uri = args.get(2).cloned().or_else(|| std::env::var("SIGNER_URI").ok())
+    let signer_uri = args
+        .get(2)
+        .cloned()
+        .or_else(|| std::env::var("SIGNER_URI").ok())
         .unwrap_or_else(|| "//Alice".to_string());
-    let poll_ms: u64 = args.get(3).and_then(|s| s.parse().ok())
+    let poll_ms: u64 = args
+        .get(3)
+        .and_then(|s| s.parse().ok())
         .or_else(|| std::env::var("POLL_MS").ok().and_then(|s| s.parse().ok()))
         .unwrap_or(4000);
 
@@ -46,7 +54,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!(
         "GPN finetune provider running — endpoint={} signer={} poll={}ms script={}",
-        endpoint, me, poll_ms, ft_script().display()
+        endpoint,
+        me,
+        poll_ms,
+        ft_script().display()
     );
 
     loop {
@@ -73,12 +84,19 @@ async fn process_once(client: &ChainClient, me: &str) -> Result<(), Box<dyn std:
     Ok(())
 }
 
-async fn run_job(client: &ChainClient, id: u64, job: gpn_agent::llm::LlmJob) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_job(
+    client: &ChainClient,
+    id: u64,
+    job: gpn_agent::llm::LlmJob,
+) -> Result<(), Box<dyn std::error::Error>> {
     let dataset = job.dataset.unwrap_or_default();
     let n_examples = dataset.matches("\"prompt\"").count();
     println!(
         "[job {id}] fine-tune — model={} examples={} lora_r={} epochs={}",
-        job.model, n_examples, job.lora_r.unwrap_or(16), job.epochs.unwrap_or(2)
+        job.model,
+        n_examples,
+        job.lora_r.unwrap_or(16),
+        job.epochs.unwrap_or(2)
     );
     let _ = LlmStore::new().set_status(id, "running");
 
@@ -114,7 +132,11 @@ async fn run_job(client: &ChainClient, id: u64, job: gpn_agent::llm::LlmJob) -> 
         }
         // transformers Trainer prints progress dicts to stdout; the final JSON
         // (our print) is the last non-empty line. Parse that.
-        let last_json = stdout.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
+        let last_json = stdout
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("");
         serde_json::from_str(last_json.trim())
             .map_err(|e| format!("bad helper output: {e} ({stdout})"))
     })
@@ -123,7 +145,10 @@ async fn run_job(client: &ChainClient, id: u64, job: gpn_agent::llm::LlmJob) -> 
 
     if out.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
         let artifact = out["artifact"].as_str().unwrap_or("").to_string();
-        let media = out["media_type"].as_str().unwrap_or("application/zip").to_string();
+        let media = out["media_type"]
+            .as_str()
+            .unwrap_or("application/zip")
+            .to_string();
         let hash = out["sha256"].as_str().unwrap_or("").to_string();
         let loss = out["loss"].as_f64().unwrap_or(0.0);
         let _ = LlmStore::new().complete_artifact(id, &artifact, &media, &hash);
@@ -136,7 +161,10 @@ async fn run_job(client: &ChainClient, id: u64, job: gpn_agent::llm::LlmJob) -> 
         // -> GGUF -> ollama create, detached so the poll loop isn't blocked.
         spawn_servemodel(id, &job.model, &out_dir);
     } else {
-        let err = out["error"].as_str().unwrap_or("unknown finetune error").to_string();
+        let err = out["error"]
+            .as_str()
+            .unwrap_or("unknown finetune error")
+            .to_string();
         let _ = LlmStore::new().set_error(id, &err);
         eprintln!("[job {id}] finetune failed: {err}");
     }
@@ -148,8 +176,8 @@ async fn run_job(client: &ChainClient, id: u64, job: gpn_agent::llm::LlmJob) -> 
 /// ollama model named `tuned-<job_id>`. Uses the same training template so the
 /// served model answers in the format it was fine-tuned on.
 fn spawn_servemodel(job_id: u64, base_model: &str, adapter_dir: &str) {
-    let script = std::env::var("GPN_SERVEMODEL_SCRIPT")
-        .unwrap_or_else(|_| "gpn_servemodel.py".to_string());
+    let script =
+        std::env::var("GPN_SERVEMODEL_SCRIPT").unwrap_or_else(|_| "gpn_servemodel.py".to_string());
     let req = json!({
         "base_model": base_model,
         "adapter_dir": adapter_dir,
@@ -170,14 +198,18 @@ fn spawn_servemodel(job_id: u64, base_model: &str, adapter_dir: &str) {
     let name = format!("tuned-{job_id}");
     std::thread::spawn(move || {
         let out = std::process::Command::new("python3")
-            .arg(&script2).arg(&req_file2)
-            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped())
+            .arg(&script2)
+            .arg(&req_file2)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .spawn();
         match out {
             Ok(mut child) => {
                 // Detach: wait briefly; if still running, leave it (it will finish on its own).
                 let _ = child.wait();
-                println!("[job {job_id}] servemodel registration finished — model {name} (if ok:true)");
+                println!(
+                    "[job {job_id}] servemodel registration finished — model {name} (if ok:true)"
+                );
             }
             Err(e) => eprintln!("[job {job_id}] servemodel spawn failed: {e}"),
         }

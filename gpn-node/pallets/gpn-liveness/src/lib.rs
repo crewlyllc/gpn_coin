@@ -45,7 +45,9 @@ pub trait LivenessProvider<AccountId> {
 
 /// A registered full node's on-chain record. (The declared endpoint lives in
 /// the [`Endpoints`] storage map; this record tracks liveness only.)
-#[derive(Clone, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, PartialEq, Eq, Debug, TypeInfo)]
+#[derive(
+    Clone, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, PartialEq, Eq, Debug, TypeInfo,
+)]
 pub struct FullNodeRecord {
     /// Window id of the last window in which this node was confirmed online.
     pub last_confirmed_window: u64,
@@ -131,8 +133,16 @@ pub mod pallet {
 
     /// Set of witnesses that already witnessed a (window, target) — dedup.
     #[pallet::storage]
-    pub type Witnesses<T: Config> =
-        StorageNMap<_, (NMapKey<Twox64Concat, u64>, NMapKey<Blake2_128Concat, T::AccountId>, NMapKey<Blake2_128Concat, T::AccountId>), (), OptionQuery>;
+    pub type Witnesses<T: Config> = StorageNMap<
+        _,
+        (
+            NMapKey<Twox64Concat, u64>,
+            NMapKey<Blake2_128Concat, T::AccountId>,
+            NMapKey<Blake2_128Concat, T::AccountId>,
+        ),
+        (),
+        OptionQuery,
+    >;
 
     /// Running total of registered full nodes (for stats / reward routing).
     #[pallet::storage]
@@ -159,12 +169,30 @@ pub mod pallet {
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
-        FullNodeRegistered { who: T::AccountId },
-        FullNodeUnregistered { who: T::AccountId },
-        WitnessSubmitted { target: T::AccountId, witness: T::AccountId, window: u64 },
-        WindowConfirmed { who: T::AccountId, window: u64 },
-        WindowMissed { who: T::AccountId, window: u64, missed_count: u32 },
-        BondSlashed { who: T::AccountId, penalty: BalanceOf<T> },
+        FullNodeRegistered {
+            who: T::AccountId,
+        },
+        FullNodeUnregistered {
+            who: T::AccountId,
+        },
+        WitnessSubmitted {
+            target: T::AccountId,
+            witness: T::AccountId,
+            window: u64,
+        },
+        WindowConfirmed {
+            who: T::AccountId,
+            window: u64,
+        },
+        WindowMissed {
+            who: T::AccountId,
+            window: u64,
+            missed_count: u32,
+        },
+        BondSlashed {
+            who: T::AccountId,
+            penalty: BalanceOf<T>,
+        },
     }
 
     // ── Errors ─────────────────────────────────────────────────────────────
@@ -189,32 +217,42 @@ pub mod pallet {
         /// Bond + register as a full node with a public endpoint.
         #[pallet::call_index(0)]
         #[pallet::weight(10_000)]
-        pub fn register_fullnode(
-            origin: OriginFor<T>,
-            endpoint: Vec<u8>,
-        ) -> DispatchResult {
+        pub fn register_fullnode(origin: OriginFor<T>, endpoint: Vec<u8>) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            ensure!(!<Endpoints<T>>::contains_key(&who), Error::<T>::AlreadyRegistered);
+            ensure!(
+                !<Endpoints<T>>::contains_key(&who),
+                Error::<T>::AlreadyRegistered
+            );
             let max_len = T::MaxEndpointLen::get() as usize;
             ensure!(endpoint.len() <= max_len, Error::<T>::EndpointTooLong);
             ensure!(!endpoint.is_empty(), Error::<T>::EndpointTooLong);
 
             let bond = T::LivenessBond::get();
-            T::Currency::transfer(&who, &Self::account_id(), bond, ExistenceRequirement::KeepAlive)?;
+            T::Currency::transfer(
+                &who,
+                &Self::account_id(),
+                bond,
+                ExistenceRequirement::KeepAlive,
+            )?;
 
             let now = Self::window_id();
-            let bounded: BoundedVec<u8, T::MaxEndpointLen> = endpoint.try_into().map_err(|_| Error::<T>::EndpointTooLong)?;
+            let bounded: BoundedVec<u8, T::MaxEndpointLen> = endpoint
+                .try_into()
+                .map_err(|_| Error::<T>::EndpointTooLong)?;
             <Endpoints<T>>::insert(&who, bounded);
             <Bonds<T>>::insert(&who, bond);
             // A node registered in window R is first finalizable in window R+1
             // (its registration window is partial). last_confirmed_window starts
             // at R so window R is skipped and R+1 onward are finalizable.
-            <FullNodes<T>>::insert(&who, FullNodeRecord {
-                last_confirmed_window: now,
-                uptime_bits: 0,
-                missed_count: 0,
-                active: true,
-            });
+            <FullNodes<T>>::insert(
+                &who,
+                FullNodeRecord {
+                    last_confirmed_window: now,
+                    uptime_bits: 0,
+                    missed_count: 0,
+                    active: true,
+                },
+            );
             <FullNodeCount<T>>::mutate(|c| *c = c.saturating_add(1));
             Self::deposit_event(Event::<T>::FullNodeRegistered { who });
             Ok(())
@@ -229,7 +267,12 @@ pub mod pallet {
             <Endpoints<T>>::remove(&who);
             <FullNodes<T>>::remove(&who);
             <FullNodeCount<T>>::mutate(|c| *c = c.saturating_sub(1));
-            T::Currency::transfer(&Self::account_id(), &who, bond, ExistenceRequirement::AllowDeath)?;
+            T::Currency::transfer(
+                &Self::account_id(),
+                &who,
+                bond,
+                ExistenceRequirement::AllowDeath,
+            )?;
             Self::deposit_event(Event::<T>::FullNodeUnregistered { who });
             Ok(())
         }
@@ -238,22 +281,32 @@ pub mod pallet {
         /// declared endpoint this window. Dedup per (window, target, witness).
         #[pallet::call_index(2)]
         #[pallet::weight(20_000)]
-        pub fn witness_reachable(
-            origin: OriginFor<T>,
-            target: T::AccountId,
-        ) -> DispatchResult {
+        pub fn witness_reachable(origin: OriginFor<T>, target: T::AccountId) -> DispatchResult {
             let witness = ensure_signed(origin)?;
             ensure!(witness != target, Error::<T>::CannotWitnessSelf);
             // Witness must itself be a bonded, active full node.
-            ensure!(<Bonds<T>>::contains_key(&witness), Error::<T>::WitnessMustBeFullNode);
-            ensure!(<Endpoints<T>>::contains_key(&target), Error::<T>::NotRegistered);
+            ensure!(
+                <Bonds<T>>::contains_key(&witness),
+                Error::<T>::WitnessMustBeFullNode
+            );
+            ensure!(
+                <Endpoints<T>>::contains_key(&target),
+                Error::<T>::NotRegistered
+            );
 
             let window = Self::window_id();
             let key = (window, target.clone(), witness.clone());
-            ensure!(!<Witnesses<T>>::contains_key(key.clone()), Error::<T>::NoExistingRecord); // already witnessed
+            ensure!(
+                !<Witnesses<T>>::contains_key(key.clone()),
+                Error::<T>::NoExistingRecord
+            ); // already witnessed
             <Witnesses<T>>::insert(key, ());
             <WitnessCounts<T>>::mutate(window, &target, |c| *c = c.saturating_add(1));
-            Self::deposit_event(Event::<T>::WitnessSubmitted { target, witness, window });
+            Self::deposit_event(Event::<T>::WitnessSubmitted {
+                target,
+                witness,
+                window,
+            });
             Ok(())
         }
 
@@ -263,16 +316,15 @@ pub mod pallet {
         /// miss is recorded and sustained absence slashes the bond.
         #[pallet::call_index(3)]
         #[pallet::weight(50_000)]
-        pub fn submit_liveness(
-            origin: OriginFor<T>,
-            target: T::AccountId,
-        ) -> DispatchResult {
+        pub fn submit_liveness(origin: OriginFor<T>, target: T::AccountId) -> DispatchResult {
             let _caller = ensure_signed(origin)?;
             let mut record = <FullNodes<T>>::get(&target).ok_or(Error::<T>::NoExistingRecord)?;
 
             let window = Self::window_id();
             // Finalize the window that just ended (window - 1).
-            if window == 0 { return Ok(()); }
+            if window == 0 {
+                return Ok(());
+            }
             let finalizing = window - 1;
 
             // If already finalized at/after this window, no-op (idempotent).
@@ -290,12 +342,19 @@ pub mod pallet {
                 let elapsed = finalizing.saturating_sub(record.last_confirmed_window);
                 let lookback = T::UptimeLookback::get() as u64;
                 let shift = elapsed.min(lookback);
-                let bits = if shift >= lookback as u64 { 0 } else { record.uptime_bits << shift as u32 };
+                let bits = if shift >= lookback as u64 {
+                    0
+                } else {
+                    record.uptime_bits << shift as u32
+                };
                 record.uptime_bits = (bits | 1u32) & Self::bitmask(lookback as u32);
                 record.last_confirmed_window = finalizing;
                 record.missed_count = 0;
                 record.active = true;
-                Self::deposit_event(Event::<T>::WindowConfirmed { who: target.clone(), window: finalizing });
+                Self::deposit_event(Event::<T>::WindowConfirmed {
+                    who: target.clone(),
+                    window: finalizing,
+                });
             } else {
                 // Missed: decay uptime (clear bit0 region) and count the miss.
                 record.missed_count = record.missed_count.saturating_add(1);
@@ -305,7 +364,9 @@ pub mod pallet {
                 record.last_confirmed_window = finalizing;
                 let missed = record.missed_count;
                 Self::deposit_event(Event::<T>::WindowMissed {
-                    who: target.clone(), window: finalizing, missed_count: missed,
+                    who: target.clone(),
+                    window: finalizing,
+                    missed_count: missed,
                 });
 
                 if missed >= T::MaxMissedLiveness::get() {
@@ -321,7 +382,10 @@ pub mod pallet {
                         } else {
                             <Bonds<T>>::insert(&target, remaining);
                         }
-                        Self::deposit_event(Event::<T>::BondSlashed { who: target.clone(), penalty });
+                        Self::deposit_event(Event::<T>::BondSlashed {
+                            who: target.clone(),
+                            penalty,
+                        });
                     }
                 }
             }
@@ -340,18 +404,30 @@ pub mod pallet {
 
         fn window_id() -> u64 {
             let now: u64 = frame_system::Pallet::<T>::block_number()
-                .try_into().unwrap_or(0);
+                .try_into()
+                .unwrap_or(0);
             let window = T::LivenessWindow::get();
-            if window == 0 { 0 } else { now / window }
+            if window == 0 {
+                0
+            } else {
+                now / window
+            }
         }
 
         fn bitmask(n: u32) -> u32 {
-            if n >= 32 { u32::MAX } else { (1u32 << n).saturating_sub(1) }
+            if n >= 32 {
+                u32::MAX
+            } else {
+                (1u32 << n).saturating_sub(1)
+            }
         }
 
         fn popcount(mut x: u32) -> u32 {
             let mut c = 0u32;
-            while x != 0 { c += x & 1; x >>= 1; }
+            while x != 0 {
+                c += x & 1;
+                x >>= 1;
+            }
             c
         }
 
@@ -361,7 +437,9 @@ pub mod pallet {
 
         pub fn uptime_bps(who: &T::AccountId) -> u32 {
             let lookback = T::UptimeLookback::get();
-            if lookback == 0 { return 0; }
+            if lookback == 0 {
+                return 0;
+            }
             match <FullNodes<T>>::get(who) {
                 Some(r) => Self::popcount(r.uptime_bits) * 10_000u32 / lookback,
                 None => 0,
@@ -385,7 +463,7 @@ mod tests {
     use super::*;
     use frame_support::{
         construct_runtime, derive_impl, parameter_types,
-        traits::{BuildGenesisConfig, ConstU16, ConstU32, ConstU64, ConstU128, Everything, Hooks},
+        traits::{BuildGenesisConfig, ConstU128, ConstU16, ConstU32, ConstU64, Everything, Hooks},
     };
     use sp_core::H256;
     use sp_runtime::{
@@ -488,17 +566,23 @@ mod tests {
         .unwrap();
         let mut ext = sp_io::TestExternalities::new(t);
         ext.execute_with(|| {
-            let cfg = crate::pallet::GenesisConfig::<Test> { _config: Default::default() };
+            let cfg = crate::pallet::GenesisConfig::<Test> {
+                _config: Default::default(),
+            };
             BuildGenesisConfig::build(&cfg);
             System::set_block_number(1);
         });
         ext
     }
 
-    type LivenessPallet = crate::pallet::Pallet::<Test>;
+    type LivenessPallet = crate::pallet::Pallet<Test>;
 
     fn register(who: u64) {
-        LivenessPallet::register_fullnode(RuntimeOrigin::signed(who), format!("/ip4/1.2.3.4/tcp/30333/p2p/{}", who).into_bytes()).unwrap();
+        LivenessPallet::register_fullnode(
+            RuntimeOrigin::signed(who),
+            format!("/ip4/1.2.3.4/tcp/30333/p2p/{}", who).into_bytes(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -506,7 +590,10 @@ mod tests {
         new_test_ext().execute_with(|| {
             let before = pallet_balances::Pallet::<Test>::free_balance(ALICE);
             register(ALICE);
-            assert_eq!(pallet_balances::Pallet::<Test>::free_balance(ALICE), before - TestBond::get());
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(ALICE),
+                before - TestBond::get()
+            );
             assert_eq!(Bonds::<Test>::get(ALICE), Some(TestBond::get()));
             assert_eq!(FullNodeCount::<Test>::get(), 1);
             assert!(Endpoints::<Test>::get(ALICE).is_some());
@@ -517,7 +604,8 @@ mod tests {
     fn test_register_rejects_duplicate() {
         new_test_ext().execute_with(|| {
             register(ALICE);
-            let r = LivenessPallet::register_fullnode(RuntimeOrigin::signed(ALICE), b"/ip4/x".to_vec());
+            let r =
+                LivenessPallet::register_fullnode(RuntimeOrigin::signed(ALICE), b"/ip4/x".to_vec());
             assert_eq!(r, Err(Error::<Test>::AlreadyRegistered.into()));
         });
     }
@@ -558,8 +646,8 @@ mod tests {
     fn test_missed_window_then_slash_after_limit() {
         new_test_ext().execute_with(|| {
             register(ALICE); // window 0 (registration, partial — not finalizable)
-            // Windows 1,2,3 are finalizable; nobody witnesses ALICE in any of them.
-            // Finalize window 1 (miss 1): submit while in window 2.
+                             // Windows 1,2,3 are finalizable; nobody witnesses ALICE in any of them.
+                             // Finalize window 1 (miss 1): submit while in window 2.
             System::set_block_number(21);
             LivenessPallet::submit_liveness(RuntimeOrigin::signed(ALICE), ALICE).unwrap();
             // Finalize window 2 (miss 2): submit while in window 3.

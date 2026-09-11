@@ -1,0 +1,72 @@
+# cargo-deny configuration — GPN Network
+#
+# Run from a workspace root:  cargo deny check
+# Requires: cargo install cargo-deny --locked
+#
+# This is intentionally *informational* in CI (see .github/workflows/ci.yml):
+# the licence allow-list for the Polkadot/Substrate dependency subtree is broad
+# and is tuned over time. Treat a red `cargo deny check` as a prompt to look,
+# not as a release blocker until the list is frozen for mainnet.
+
+[graph]
+targets = [
+    # Keep in sync with the CI build matrix.
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "x86_64-pc-windows-msvc" },
+    { triple = "aarch64-apple-darwin" },
+    { triple = "wasm32-unknown-unknown" },
+]
+all-features = false
+no-default-features = false
+
+[advisories]
+# Vulnerability advisories come from the RustSec database. `db-url` defaults to
+# the upstream repo; point it at a mirror here if the runners are air-gapped.
+version = 2
+yanked = "warn"
+unmaintained = "warn"
+ignore = [
+    # Add `"RUSTSEC-XXXX-YYYY" = "reason"` entries here after review, e.g. when
+    # an advisory only affects code paths we do not compile (test-only, wasm).
+]
+
+[licenses]
+version = 2
+# Allow common permissive licences used across the Substrate/parity stack.
+# Anything not listed here is flagged for manual review rather than denied
+# outright, so this list can start permissive and tighten over time.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "OpenSSL",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.8
+# First-party crates in this repository (none published / all Apache-2.0).
+exceptions = [
+    { allow = ["Apache-2.0"], name = "gpn-node" },
+    { allow = ["Apache-2.0"], name = "gpn-agent" },
+]
+
+[bans]
+multiple-versions = "allow"   # Substrate pulls many duplicate transitive versions.
+wildcards = "allow"          # Path/workspace members legitimately use wildcard deps.
+highlight = "all"
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# The runtime is pinned to a specific polkadot-sdk commit (see gpn-node/Cargo.toml).
+allow-git = ["https://github.com/paritytech/polkadot-sdk.git"]

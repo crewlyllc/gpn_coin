@@ -1,0 +1,9 @@
+# cargo-audit configuration — GPN agent workspace.
+#
+# Run:  cd gpn-agent && cargo audit
+# Requires: cargo install cargo-audit --locked
+#
+# See gpn-node/.cargo/audit.toml for the suppression format. Keep entries
+# time-boxed and justified.
+[advisories]
+ignore = []

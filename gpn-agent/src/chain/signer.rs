@@ -14,7 +14,7 @@
 use sp_core::{crypto::Pair as _, sr25519};
 use subxt::{
     config::{
-        substrate::{BlakeTwo256, H256, MultiSignature, SubstrateHeader},
+        substrate::{BlakeTwo256, MultiSignature, SubstrateHeader, H256},
         Config, DefaultExtrinsicParams,
     },
     dynamic::Value,
@@ -69,7 +69,9 @@ impl Signer<GpnConfig> for Sr25519Signer {
 }
 
 /// Connect to the GPN chain with the runtime-correct config.
-pub async fn connect(endpoint: &str) -> Result<OnlineClient<GpnConfig>, Box<dyn std::error::Error>> {
+pub async fn connect(
+    endpoint: &str,
+) -> Result<OnlineClient<GpnConfig>, Box<dyn std::error::Error>> {
     Ok(OnlineClient::<GpnConfig>::from_url(endpoint).await?)
 }
 
@@ -85,11 +87,13 @@ pub async fn current_nonce(
     let addr = subxt::dynamic::storage(
         "System",
         "Account",
-        vec![Value::from_bytes((account.as_ref() as &[u8; 32]).to_vec())],
+        vec![Value::from_bytes(account.as_ref() as &[u8; 32])],
     );
     // Resolve the best head block hash (JSON-RPC) so we don't read the stuck
     // finalized #0 on PoW dev chains.
-    let http_url = endpoint.replace("ws://", "http://").replace("wss://", "https://");
+    let http_url = endpoint
+        .replace("ws://", "http://")
+        .replace("wss://", "https://");
     let body = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "chain_getBlockHash", "params": [] });
     // Resolve the best head block hash asynchronously — a blocking reqwest
     // client inside the tokio runtime (the old `ureq_blocking_post`) triggered
@@ -97,11 +101,18 @@ pub async fn current_nonce(
     // panic at shutdown.
     let head_hash: Option<H256> = {
         async {
-            let resp = reqwest::Client::new().post(&http_url).json(&body).send().await.ok()?;
+            let resp = reqwest::Client::new()
+                .post(&http_url)
+                .json(&body)
+                .send()
+                .await
+                .ok()?;
             let v: serde_json::Value = resp.json().await.ok()?;
             let hex = v.get("result")?.as_str()?.trim_start_matches("0x");
             let bytes = hex::decode(hex).ok()?;
-            if bytes.len() != 32 { None } else {
+            if bytes.len() != 32 {
+                None
+            } else {
                 let mut arr = [0u8; 32];
                 arr.copy_from_slice(&bytes);
                 Some(arr.into())
@@ -113,7 +124,14 @@ pub async fn current_nonce(
     let fetch = async {
         let thunk = match head_hash {
             Some(h) => client.storage().at(h).fetch(&addr).await.ok()?,
-            None => client.storage().at_latest().await.ok()?.fetch(&addr).await.ok()?,
+            None => client
+                .storage()
+                .at_latest()
+                .await
+                .ok()?
+                .fetch(&addr)
+                .await
+                .ok()?,
         }?;
         let v = thunk.to_value().ok()?.remove_context();
         // System::Account nonce is a Named composite with a `nonce` field.
@@ -179,9 +197,15 @@ where
     let included = loop {
         match progress.next().await {
             Some(Ok(TxStatus::InBestBlock(ib))) => break ib,
-            Some(Ok(TxStatus::Error { message })) => return Err(format!("tx error: {}", message).into()),
-            Some(Ok(TxStatus::Invalid { message })) => return Err(format!("tx invalid: {}", message).into()),
-            Some(Ok(TxStatus::Dropped { message })) => return Err(format!("tx dropped: {}", message).into()),
+            Some(Ok(TxStatus::Error { message })) => {
+                return Err(format!("tx error: {}", message).into())
+            }
+            Some(Ok(TxStatus::Invalid { message })) => {
+                return Err(format!("tx invalid: {}", message).into())
+            }
+            Some(Ok(TxStatus::Dropped { message })) => {
+                return Err(format!("tx dropped: {}", message).into())
+            }
             Some(Ok(_)) => continue,
             Some(Err(e)) => return Err(e.into()),
             None => return Err("tx subscription dropped".into()),
@@ -223,7 +247,10 @@ where
 
     match dispatch_failure {
         None => {
-            log::info!("tx dispatched successfully ({} event(s) in block)", events.len());
+            log::info!(
+                "tx dispatched successfully ({} event(s) in block)",
+                events.len()
+            );
             Ok(())
         }
         Some(msg) => {
@@ -270,7 +297,7 @@ fn describe_module_error(client: &OnlineClient<GpnConfig>, field_bytes: &[u8]) -
         let pallet_idx = field_bytes[1];
         let error_idx = field_bytes[2];
         let meta = client.metadata();
-        let name = (&*meta).pallet_by_index(pallet_idx).and_then(|p| {
+        let name = &meta.pallet_by_index(pallet_idx).and_then(|p| {
             p.error_variant_by_index(error_idx)
                 .map(|v| format!("{}::{}", p.name(), v.name))
         });
@@ -280,7 +307,11 @@ fn describe_module_error(client: &OnlineClient<GpnConfig>, field_bytes: &[u8]) -
         }
     } else {
         // Non-module dispatch error (BadOrigin=2, Token=7, etc.): show raw bytes.
-        let hex_str = field_bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join("");
+        let hex_str = field_bytes
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<Vec<_>>()
+            .join("");
         format!(
             "DispatchError(variant={} bytes=0x{})",
             field_bytes.first().copied().unwrap_or(0),
@@ -291,7 +322,6 @@ fn describe_module_error(client: &OnlineClient<GpnConfig>, field_bytes: &[u8]) -
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     /// Pure helper mirroring `describe_module_error`'s byte parsing, so the
     /// dispatch-error decode logic is unit-testable without a live node.

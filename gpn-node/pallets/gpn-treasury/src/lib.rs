@@ -25,9 +25,17 @@ use scale_info::TypeInfo;
 pub use pallet::*;
 
 /// A single unlock tranche: `amount` becomes spendable at `unlock_block`.
-#[derive(Clone, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, PartialEq, Eq, Debug, TypeInfo)]
+#[derive(
+    Clone, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, PartialEq, Eq, Debug, TypeInfo,
+)]
 #[cfg_attr(feature = "std", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "std", serde(bound(serialize = "BlockNumber: serde::Serialize, Balance: serde::Serialize", deserialize = "BlockNumber: serde::Deserialize<'de>, Balance: serde::Deserialize<'de>")))]
+#[cfg_attr(
+    feature = "std",
+    serde(bound(
+        serialize = "BlockNumber: serde::Serialize, Balance: serde::Serialize",
+        deserialize = "BlockNumber: serde::Deserialize<'de>, Balance: serde::Deserialize<'de>"
+    ))
+)]
 pub struct Tranche<BlockNumber, Balance> {
     pub unlock_block: BlockNumber,
     pub amount: Balance,
@@ -65,7 +73,8 @@ pub mod pallet {
 
     /// The fixed governance roster (25 addresses at genesis).
     #[pallet::storage]
-    pub type Roster<T: Config> = StorageValue<_, BoundedVec<T::AccountId, T::MaxRoster>, ValueQuery>;
+    pub type Roster<T: Config> =
+        StorageValue<_, BoundedVec<T::AccountId, T::MaxRoster>, ValueQuery>;
 
     /// Number of roster approvals required to release funds (13 for GPN).
     #[pallet::storage]
@@ -73,7 +82,8 @@ pub mod pallet {
 
     /// The vesting schedule (tranches in ascending unlock order).
     #[pallet::storage]
-    pub type Schedule<T: Config> = StorageValue<_, BoundedVec<TrancheOf<T>, T::MaxTranches>, ValueQuery>;
+    pub type Schedule<T: Config> =
+        StorageValue<_, BoundedVec<TrancheOf<T>, T::MaxTranches>, ValueQuery>;
 
     /// Total GPN already released from the treasury (spent).
     #[pallet::storage]
@@ -87,10 +97,12 @@ pub mod pallet {
     /// executed (transferring `amount` to `dest` from the unlocked balance).
     /// Stored as parallel maps keyed by proposal id (avoids a generic struct).
     #[pallet::storage]
-    pub type ProposalDest<T: Config> = StorageMap<_, Blake2_128Concat, u64, T::AccountId, OptionQuery>;
+    pub type ProposalDest<T: Config> =
+        StorageMap<_, Blake2_128Concat, u64, T::AccountId, OptionQuery>;
 
     #[pallet::storage]
-    pub type ProposalAmount<T: Config> = StorageMap<_, Blake2_128Concat, u64, BalanceOf<T>, OptionQuery>;
+    pub type ProposalAmount<T: Config> =
+        StorageMap<_, Blake2_128Concat, u64, BalanceOf<T>, OptionQuery>;
 
     #[pallet::storage]
     pub type ProposalApprovals<T: Config> =
@@ -117,13 +129,19 @@ pub mod pallet {
     #[pallet::genesis_build]
     impl<T: Config> BuildGenesisConfig for GenesisConfig<T> {
         fn build(&self) {
-            let roster: BoundedVec<T::AccountId, T::MaxRoster> =
-                self.roster.clone().try_into().expect("roster within MaxRoster");
+            let roster: BoundedVec<T::AccountId, T::MaxRoster> = self
+                .roster
+                .clone()
+                .try_into()
+                .expect("roster within MaxRoster");
             Roster::<T>::put(roster);
             let schedule: BoundedVec<TrancheOf<T>, T::MaxTranches> = self
                 .schedule
                 .iter()
-                .map(|(b, a)| Tranche { unlock_block: *b, amount: *a })
+                .map(|(b, a)| Tranche {
+                    unlock_block: *b,
+                    amount: *a,
+                })
                 .collect::<Vec<_>>()
                 .try_into()
                 .expect("schedule within MaxTranches");
@@ -140,11 +158,27 @@ pub mod pallet {
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
-        SpendProposed { id: u64, dest: T::AccountId, amount: BalanceOf<T> },
-        SpendApproved { id: u64, approver: T::AccountId, approvals: u32 },
-        SpendExecuted { id: u64, dest: T::AccountId, amount: BalanceOf<T> },
-        RosterUpdated { size: u32 },
-        ThresholdUpdated { threshold: u32 },
+        SpendProposed {
+            id: u64,
+            dest: T::AccountId,
+            amount: BalanceOf<T>,
+        },
+        SpendApproved {
+            id: u64,
+            approver: T::AccountId,
+            approvals: u32,
+        },
+        SpendExecuted {
+            id: u64,
+            dest: T::AccountId,
+            amount: BalanceOf<T>,
+        },
+        RosterUpdated {
+            size: u32,
+        },
+        ThresholdUpdated {
+            threshold: u32,
+        },
     }
 
     // ── Errors ─────────────────────────────────────────────────────────────
@@ -204,10 +238,16 @@ pub mod pallet {
 
             let mut approvals = ProposalApprovals::<T>::get(id);
             ensure!(!approvals.contains(&who), Error::<T>::AlreadyApproved);
-            approvals.try_push(who.clone()).map_err(|_| Error::<T>::NotInRoster)?;
+            approvals
+                .try_push(who.clone())
+                .map_err(|_| Error::<T>::NotInRoster)?;
             let n = approvals.len() as u32;
             ProposalApprovals::<T>::insert(id, approvals);
-            Self::deposit_event(Event::<T>::SpendApproved { id, approver: who, approvals: n });
+            Self::deposit_event(Event::<T>::SpendApproved {
+                id,
+                approver: who,
+                approvals: n,
+            });
             Ok(())
         }
 
@@ -223,7 +263,10 @@ pub mod pallet {
             ensure!(!ProposalExecuted::<T>::get(id), Error::<T>::AlreadyExecuted);
             let amount = ProposalAmount::<T>::get(id).ok_or(Error::<T>::NoProposal)?;
             let approvals = ProposalApprovals::<T>::get(id);
-            ensure!(approvals.len() as u32 >= Threshold::<T>::get(), Error::<T>::NotEnoughApprovals);
+            ensure!(
+                approvals.len() as u32 >= Threshold::<T>::get(),
+                Error::<T>::NotEnoughApprovals
+            );
 
             // Amount must fit within the unlocked-but-not-yet-released balance.
             let unlocked = Self::unlocked_amount();
@@ -231,7 +274,12 @@ pub mod pallet {
             let available = unlocked.saturating_sub(released);
             ensure!(amount <= available, Error::<T>::InsufficientUnlocked);
 
-            T::Currency::transfer(&Self::account_id(), &dest, amount, ExistenceRequirement::AllowDeath)?;
+            T::Currency::transfer(
+                &Self::account_id(),
+                &dest,
+                amount,
+                ExistenceRequirement::AllowDeath,
+            )?;
             TotalReleased::<T>::mutate(|r| *r = r.saturating_add(amount));
             ProposalExecuted::<T>::insert(id, true);
             Self::deposit_event(Event::<T>::SpendExecuted { id, dest, amount });
@@ -318,7 +366,7 @@ mod tests {
     use super::*;
     use frame_support::{
         construct_runtime, derive_impl, parameter_types,
-        traits::{BuildGenesisConfig, ConstU16, ConstU32, ConstU64, ConstU128, Everything},
+        traits::{BuildGenesisConfig, ConstU128, ConstU16, ConstU32, ConstU64, Everything},
     };
     use sp_core::H256;
     use sp_runtime::{
@@ -479,7 +527,7 @@ mod tests {
     fn test_spend_requires_13_of_25() {
         new_test_ext().execute_with(|| {
             System::set_block_number(90); // 8 tranches = 80 unlocked
-            // member 1 proposes
+                                          // member 1 proposes
             T::propose_spend(RuntimeOrigin::signed(1), 99, 50).unwrap();
             // 12 approvals < 13 -> cannot execute
             for m in 2..=12 {
@@ -488,7 +536,10 @@ mod tests {
             // proposer counts as 1 -> approvals = 1 + 11 = 12
             let approvals = ProposalApprovals::<Test>::get(0);
             assert_eq!(approvals.len(), 12);
-            assert_eq!(T::execute_spend(RuntimeOrigin::signed(1), 0), Err(Error::<Test>::NotEnoughApprovals.into()));
+            assert_eq!(
+                T::execute_spend(RuntimeOrigin::signed(1), 0),
+                Err(Error::<Test>::NotEnoughApprovals.into())
+            );
             // 13th approval
             T::approve_spend(RuntimeOrigin::signed(13), 0).unwrap();
             T::execute_spend(RuntimeOrigin::signed(1), 0).unwrap();
@@ -505,7 +556,10 @@ mod tests {
             for m in 2..=13 {
                 T::approve_spend(RuntimeOrigin::signed(m), 0).unwrap();
             }
-            assert_eq!(T::execute_spend(RuntimeOrigin::signed(1), 0), Err(Error::<Test>::InsufficientUnlocked.into()));
+            assert_eq!(
+                T::execute_spend(RuntimeOrigin::signed(1), 0),
+                Err(Error::<Test>::InsufficientUnlocked.into())
+            );
         });
     }
 
@@ -513,9 +567,15 @@ mod tests {
     fn test_non_member_cannot_propose_or_approve() {
         new_test_ext().execute_with(|| {
             System::set_block_number(90);
-            assert_eq!(T::propose_spend(RuntimeOrigin::signed(999), 99, 1), Err(Error::<Test>::NotInRoster.into()));
+            assert_eq!(
+                T::propose_spend(RuntimeOrigin::signed(999), 99, 1),
+                Err(Error::<Test>::NotInRoster.into())
+            );
             T::propose_spend(RuntimeOrigin::signed(1), 99, 1).unwrap();
-            assert_eq!(T::approve_spend(RuntimeOrigin::signed(999), 0), Err(Error::<Test>::NotInRoster.into()));
+            assert_eq!(
+                T::approve_spend(RuntimeOrigin::signed(999), 0),
+                Err(Error::<Test>::NotInRoster.into())
+            );
         });
     }
 
@@ -524,8 +584,10 @@ mod tests {
         new_test_ext().execute_with(|| {
             System::set_block_number(90);
             T::propose_spend(RuntimeOrigin::signed(1), 99, 1).unwrap();
-            assert_eq!(T::approve_spend(RuntimeOrigin::signed(1), 0), Err(Error::<Test>::AlreadyApproved.into()));
+            assert_eq!(
+                T::approve_spend(RuntimeOrigin::signed(1), 0),
+                Err(Error::<Test>::AlreadyApproved.into())
+            );
         });
     }
 }
-
