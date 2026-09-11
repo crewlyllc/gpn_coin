@@ -16,6 +16,8 @@ use bls12_381::{pairing, G1Affine, G1Projective, G2Affine, G2Projective, Gt, Sca
 use ff::Field;
 use rayon::prelude::*;
 
+use crate::ec_ops;
+
 use crate::qap::{witness_polys, Qap};
 
 /// A deterministic xorshift64 PRNG seeded from a string, used only to derive
@@ -123,36 +125,30 @@ pub fn setup(qap: &Qap, seed: &str) -> ProvingKey {
     let delta_g1: G1Affine = (g1 * delta).into();
     let delta_g2: G2Affine = (g2 * delta).into();
 
-    // These maps are ~n independent fixed-base scalar multiplications; run them
-    // across all CPU cores. (Point mults are independent ⇒ byte-identical output.)
-    let a_g1: Vec<G1Affine> = a_tau.par_iter().map(|s| (g1 * s).into()).collect();
-    let b_g1: Vec<G1Affine> = b_tau.par_iter().map(|s| (g1 * s).into()).collect();
-    let b_g2: Vec<G2Affine> = b_tau.par_iter().map(|s| (g2 * s).into()).collect();
+    // These are all *fixed-base* multiplications (base = g1/g2). Use a shared
+    // windowed precomputation table — ~8× faster than per-element `g*s`, and
+    // byte-identical output. Each helper parallelizes across cores.
+    let a_g1: Vec<G1Affine> = ec_ops::fixed_base_g1_gen(&a_tau);
+    let b_g1: Vec<G1Affine> = ec_ops::fixed_base_g1_gen(&b_tau);
+    let b_g2: Vec<G2Affine> = ec_ops::fixed_base_g2_gen(&b_tau);
 
-    // Public: /γ ; Private: /δ. gamma_abc_g1 covers public vars (incl. const).
-    // Fold the /γ and /δ scalars into the exponent (one point mult per element
-    // instead of two); g1·(comb·γ⁻¹) == (g1·comb)·γ⁻¹, so output is unchanged.
+    // Public: /γ ; Private: /δ. `comb_k = β·a_k + α·b_k + c_k`, then a single
+    // fixed-base multiply with the /γ or /δ scalar folded in.
     let gamma_inv = gamma.invert().expect("gamma non-zero");
     let delta_inv = delta.invert().expect("delta non-zero");
-    let gamma_abc_g1: Vec<G1Affine> = (0..num_public)
+    let combs: Vec<Scalar> = (0..n)
         .into_par_iter()
-        .map(|k| {
-            let comb = beta * a_tau[k] + alpha * b_tau[k] + c_tau[k];
-            (g1 * (comb * gamma_inv)).into()
-        })
+        .map(|k| beta * a_tau[k] + alpha * b_tau[k] + c_tau[k])
         .collect();
-    let abc_delta_g1: Vec<G1Affine> = (num_public..n)
-        .into_par_iter()
-        .map(|k| {
-            let comb = beta * a_tau[k] + alpha * b_tau[k] + c_tau[k];
-            (g1 * (comb * delta_inv)).into()
-        })
-        .collect();
+    let gamma_abc_g1: Vec<G1Affine> =
+        ec_ops::fixed_base_g1_gen_scaled(&combs[..num_public], &gamma_inv);
+    let abc_delta_g1: Vec<G1Affine> =
+        ec_ops::fixed_base_g1_gen_scaled(&combs[num_public..], &delta_inv);
 
     // Powers (τ^i / δ)₁ for i in 0..=deg(H·T). deg(H·T) ≤ 2·domain_size − 2.
     // `domain_size` = constraints for the consecutive domain; next-pow2 ≥ m for
     // RootsOfUnity (padding rows included). Use 2·domain_size as a safe bound.
-    // Scalar powers are cheap and sequential; the point lifts run in parallel.
+    // Scalar powers are cheap and sequential; the point lifts use the base table.
     let max_deg = 2 * qap.domain_size.max(1);
     let mut tau_pows = Vec::with_capacity(max_deg + 1);
     let mut tau_pow = Scalar::ONE;
@@ -160,10 +156,7 @@ pub fn setup(qap: &Qap, seed: &str) -> ProvingKey {
         tau_pows.push(tau_pow);
         tau_pow *= tau;
     }
-    let ht_delta_g1: Vec<G1Affine> = tau_pows
-        .par_iter()
-        .map(|s| (g1 * (*s * delta_inv)).into())
-        .collect();
+    let ht_delta_g1: Vec<G1Affine> = ec_ops::fixed_base_g1_gen_scaled(&tau_pows, &delta_inv);
 
     ProvingKey {
         alpha_g1,
@@ -204,56 +197,30 @@ pub fn prove(pk: &ProvingKey, qap: &Qap, z: &[Scalar]) -> (Proof, Vec<Scalar>) {
     let s = rng.scalar();
 
     // A = α + Σ z_k A_k(τ) + rδ   (G1)
-    // The Σ z_k [A_k(τ)]₁ term is a multi-scalar sum — compute it across cores
-    // (point addition is commutative/associative ⇒ byte-identical result).
-    let a_sum: G1Projective = z
-        .par_iter()
-        .enumerate()
-        .filter(|(_, zk)| **zk != Scalar::ZERO)
-        .map(|(k, zk)| G1Projective::from(pk.a_g1[k]) * zk)
-        .reduce(G1Projective::identity, |a, b| a + b);
+    // The Σ z_k [A_k(τ)]₁ term is a multi-scalar product — use Pippenger MSM
+    // (≈10× fewer group ops); bit-identical to the naive sum.
+    let a_sum: G1Projective = ec_ops::msm_g1(&pk.a_g1, z);
     let mut a_acc = G1Projective::from(pk.alpha_g1) + a_sum;
     a_acc += G1Projective::from(pk.delta_g1) * r;
     let a: G1Affine = a_acc.into();
 
     // B = β + Σ z_k B_k(τ) + sδ   (G2)
-    let b_sum: G2Projective = z
-        .par_iter()
-        .enumerate()
-        .filter(|(_, zk)| **zk != Scalar::ZERO)
-        .map(|(k, zk)| G2Projective::from(pk.b_g2[k]) * zk)
-        .reduce(G2Projective::identity, |a, b| a + b);
+    let b_sum: G2Projective = ec_ops::msm_g2(&pk.b_g2, z);
     let mut b_acc = G2Projective::from(pk.beta_g2) + b_sum;
     b_acc += G2Projective::from(pk.delta_g2) * s;
     let b: G2Affine = b_acc.into();
 
     // C = [Σ_{k≥num_public} z_k (βA_k+αB_k+C_k)/δ] + H(τ)T(τ)/δ + rA + sB − rsδ  (G1)
-    let c_priv: G1Projective = z
-        .par_iter()
-        .enumerate()
-        .skip(pk.num_public)
-        .filter(|(_, zk)| **zk != Scalar::ZERO)
-        .map(|(k, zk)| G1Projective::from(pk.abc_delta_g1[k - pk.num_public]) * zk)
-        .reduce(G1Projective::identity, |a, b| a + b);
+    let c_priv: G1Projective = ec_ops::msm_g1(&pk.abc_delta_g1, &z[pk.num_public..]);
     let mut c_acc = c_priv;
     // H(τ)T(τ)/δ : HT = H·T as a scalar polynomial, then Σ coeff_i · (τ^i/δ)₁
     // Use the precomputed HT (= A·B − C) so no O(m²) product is needed.
     let ht = &wp.ht;
-    let ht_sum: G1Projective = ht
-        .0
-        .par_iter()
-        .enumerate()
-        .filter(|(_, coeff)| **coeff != Scalar::ZERO)
-        .map(|(i, coeff)| G1Projective::from(pk.ht_delta_g1[i]) * coeff)
-        .reduce(G1Projective::identity, |a, b| a + b);
+    let ht_len = ht.0.len();
+    let ht_sum: G1Projective = ec_ops::msm_g1(&pk.ht_delta_g1[..ht_len], &ht.0);
     c_acc += ht_sum;
     // rA + sB − rsδ
-    let b1_sum: G1Projective = z
-        .par_iter()
-        .enumerate()
-        .filter(|(_, zk)| **zk != Scalar::ZERO)
-        .map(|(k, zk)| G1Projective::from(pk.b_g1[k]) * zk)
-        .reduce(G1Projective::identity, |a, b| a + b);
+    let b1_sum: G1Projective = ec_ops::msm_g1(&pk.b_g1, z);
     let b_g1: G1Affine = (G1Projective::from(pk.beta_g1) + b1_sum
         + G1Projective::from(pk.delta_g1) * s)
         .into();

@@ -32,6 +32,7 @@
 //! [`groth16`] module.
 
 pub mod blake2s;
+pub mod ec_ops;
 pub mod gadget;
 pub mod note_spend;
 pub mod groth16;
