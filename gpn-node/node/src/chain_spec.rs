@@ -277,6 +277,9 @@ pub fn development_chain_spec() -> Result<ChainSpec, String> {
             account_id_from_seed("Alice"), // dev sudo key
             0,
             treasury_roster(), // dev placeholder roster
+            // Block-reward auto-wiring (item 4): dev node credits Alice so a
+            // mined block pays out without any manual extrinsic.
+            Some(account_id_from_seed("Alice")),
         ))
         .build())
 }
@@ -311,6 +314,8 @@ pub fn local_chain_spec() -> Result<ChainSpec, String> {
             account_id_from_seed("Alice"), // local testnet sudo key
             0,
             treasury_roster(), // dev placeholder roster
+            // Block-reward auto-wiring (item 4): local testnet credits Alice.
+            Some(account_id_from_seed("Alice")),
         ))
         .build())
 }
@@ -365,6 +370,9 @@ pub fn testnet_chain_spec() -> Result<ChainSpec, String> {
             // if you want to rehearse the vested treasury on the testnet.
             0,
             treasury_roster(), // dev placeholder roster
+            // Block-reward auto-wiring (item 4): testnet ops key (Alice)
+            // receives block rewards so the emission path is exercised.
+            Some(account_id_from_seed("Alice")),
         ))
         .build())
 }
@@ -397,6 +405,11 @@ pub fn mainnet_chain_spec() -> Result<ChainSpec, String> {
             // tranche vesting schedule. Counts against the 1B supply cap.
             gpn(TREASURY_ALLOC_GPN),
             mainnet_treasury_roster(), // production 25-address roster
+            // Block-reward auto-wiring (item 4): mainnet leaves this `None` at
+            // genesis (no hardcoded dev key = no backdoor). The mining account
+            // is set post-launch via root/governance `set_block_beneficiary`;
+            // see docs/mainnet-launch-runbook.md.
+            None,
         ))
         .build())
 }
@@ -410,6 +423,7 @@ fn genesis_config_json(
     sudo_key: AccountId,
     treasury_alloc: u128,
     treasury_roster: Vec<AccountId>,
+    block_reward_beneficiary: Option<AccountId>,
 ) -> serde_json::Value {
     let initial_difficulty = {
         // Target 2^245 (limb3 = 2^53) -> ~10s/block with the light-cache CPU
@@ -491,6 +505,7 @@ fn genesis_config_json(
         gpu_po_w: GPUPoWConfig {
             initial_difficulty,
             initial_block_reward: 50_000_000_000_000u128, // 50 GPN
+            block_reward_beneficiary: block_reward_beneficiary.clone(),
             _config: Default::default(),
         },
         gpu_attestation: GPUAttestationConfig {
@@ -558,6 +573,7 @@ mod reserve_tests {
             account_id_from_seed("Alice"),
             0,
             treasury_roster(),
+            None,
         );
         let bals = json["balances"]["balances"]
             .as_array()
@@ -585,6 +601,7 @@ mod reserve_tests {
             AccountId::new([0u8; 32]),
             0,
             treasury_roster(),
+            None,
         );
         let bals = json["balances"]["balances"]
             .as_array()

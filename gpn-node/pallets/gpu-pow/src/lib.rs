@@ -107,6 +107,12 @@ pub mod pallet {
     pub type PendingRewardBeneficiary<T: Config> = StorageValue<_, T::AccountId, OptionQuery>;
 
     #[pallet::storage]
+    /// Miner account that automatically receives each block's reward when the
+    /// block carries no manual `submit_solution` claim (workplan item 4:
+    /// block-reward auto-wiring). Seeded at genesis and mutable by root.
+    pub type BlockRewardBeneficiary<T: Config> = StorageValue<_, T::AccountId, OptionQuery>;
+
+    #[pallet::storage]
     pub type LastHalvingBlock<T: Config> = StorageValue<_, BlockNumberFor<T>, ValueQuery>;
 
     #[pallet::storage]
@@ -117,6 +123,9 @@ pub mod pallet {
     pub struct GenesisConfig<T: Config> {
         pub initial_difficulty: U256,
         pub initial_block_reward: BalanceOf<T>,
+        /// Account credited automatically with each block reward (item 4).
+        /// `None` disables auto-emission until root sets one.
+        pub block_reward_beneficiary: Option<T::AccountId>,
         #[serde(skip)]
         pub _config: sp_std::marker::PhantomData<T>,
     }
@@ -132,6 +141,10 @@ pub mod pallet {
             let zero_block: BlockNumberFor<T> = Zero::zero();
             <LastHalvingBlock<T>>::put(zero_block);
             <PendingRewardBeneficiary<T>>::kill();
+            match &self.block_reward_beneficiary {
+                Some(beneficiary) => <BlockRewardBeneficiary<T>>::put(beneficiary),
+                None => <BlockRewardBeneficiary<T>>::kill(),
+            }
             <LastBlockTimestamp<T>>::put(0u64);
             <LastAdjustmentBlock<T>>::put(zero_block);
         }
@@ -144,6 +157,16 @@ pub mod pallet {
             miner: T::AccountId,
             difficulty: U256,
             reward: BalanceOf<T>,
+        },
+        /// A block reward was minted to `miner` (auto-wired accrual or a
+        /// manual `submit_solution` claim, item 4).
+        BlockRewardPaid {
+            miner: T::AccountId,
+            reward: BalanceOf<T>,
+        },
+        /// The auto-reward beneficiary was set/changed (item 4).
+        BlockRewardBeneficiarySet {
+            beneficiary: T::AccountId,
         },
         DifficultyAdjusted {
             old_difficulty: U256,
@@ -217,7 +240,7 @@ pub mod pallet {
             {
                 Self::perform_halving();
             }
-            Self::distribute_pending_rewards();
+            Self::distribute_block_rewards();
             Weight::zero()
         }
     }
@@ -258,19 +281,78 @@ pub mod pallet {
             });
             Ok(())
         }
+
+        /// Set the account that automatically receives each block reward when
+        /// the block carries no manual `submit_solution` claim (item 4).
+        ///
+        /// Root only: prevents a stranger from redirecting the chain's block
+        /// emission to themselves. Root may rotate the beneficiary at any time.
+        #[pallet::call_index(1)]
+        #[pallet::weight(10_000)]
+        pub fn set_block_beneficiary(
+            origin: OriginFor<T>,
+            beneficiary: T::AccountId,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            <BlockRewardBeneficiary<T>>::put(&beneficiary);
+            Self::deposit_event(Event::<T>::BlockRewardBeneficiarySet { beneficiary });
+            Ok(())
+        }
     }
 
     impl<T: Config> Pallet<T> {
-        pub(crate) fn distribute_pending_rewards() {
+        /// Pay this block's emission once (item 4).
+        ///
+        /// Precedence: a manual claim recorded by `submit_solution` in the
+        /// *previous* block is honoured first; otherwise the configured
+        /// [`BlockRewardBeneficiary`] is auto-credited. Exactly one reward is
+        /// minted per block, so the manual and automatic paths can never
+        /// double-pay.
+        fn distribute_block_rewards() {
+            if !Self::distribute_pending_rewards() {
+                Self::accrue_block_reward();
+            }
+        }
+
+        /// Auto-wired block-reward accrual: mint the current block reward to
+        /// the configured beneficiary. No-op when no beneficiary is set, the
+        /// reward is zero, or the canonical supply cap is reached.
+        pub(crate) fn accrue_block_reward() {
+            let beneficiary = match <BlockRewardBeneficiary<T>>::get() {
+                Some(b) => b,
+                None => return,
+            };
+            let reward = <CurrentBlockReward<T>>::get();
+            if reward.is_zero() {
+                return;
+            }
+            // Mint through the canonical supply manager (enforces the 1B cap).
+            if T::Supply::mint_within_cap(&beneficiary, reward) {
+                Self::deposit_event(Event::<T>::BlockRewardPaid {
+                    miner: beneficiary,
+                    reward,
+                });
+            }
+        }
+
+        /// Distribute a pending reward recorded by `submit_solution`.
+        /// Returns `true` when a manual claim was present (regardless of
+        /// whether it minted), so the caller can skip auto-accrual.
+        pub(crate) fn distribute_pending_rewards() -> bool {
+            let miner = match <PendingRewardBeneficiary<T>>::take() {
+                Some(m) => m,
+                None => return false,
+            };
             let reward = <PendingBlockRewards<T>>::take();
-            if let Some(miner) = <PendingRewardBeneficiary<T>>::take() {
-                if !reward.is_zero() {
-                    // Mint through the canonical supply manager; it enforces the
-                    // global cap and updates the single `TotalMinted` counter.
-                    // Returns false (no-op) when the cap would be exceeded.
-                    let _ = T::Supply::mint_within_cap(&miner, reward);
+            if !reward.is_zero() {
+                // Mint through the canonical supply manager; it enforces the
+                // global cap and updates the single `TotalMinted` counter.
+                // Returns false (no-op) when the cap would be exceeded.
+                if T::Supply::mint_within_cap(&miner, reward) {
+                    Self::deposit_event(Event::<T>::BlockRewardPaid { miner, reward });
                 }
             }
+            true
         }
 
         pub fn adjust_difficulty(parent_difficulty: U256, actual_time: u64) -> U256 {
@@ -408,7 +490,8 @@ mod tests {
 
     use crate::pallet as local_gpu_pow;
     use crate::pallet::{
-        CurrentBlockReward, CurrentEpoch, Difficulty, PendingBlockRewards, PendingRewardBeneficiary,
+        BlockRewardBeneficiary, CurrentBlockReward, CurrentEpoch, Difficulty, PendingBlockRewards,
+        PendingRewardBeneficiary,
     };
     use pallet_gpn_token::SupplyManager;
     use sp_runtime::SaturatedConversion;
@@ -534,6 +617,7 @@ mod tests {
             let gp_config = crate::pallet::GenesisConfig::<Test> {
                 initial_difficulty: TestMinDifficulty::get(),
                 initial_block_reward: TestInitialReward::get(),
+                block_reward_beneficiary: None,
                 _config: Default::default(),
             };
             BuildGenesisConfig::build(&gp_config);
@@ -783,6 +867,143 @@ mod tests {
                 initial_balance
             );
             // Canonical issued supply unchanged
+            assert_eq!(MockSupply::total_issued(), 1_000_000_000_000_000_000_000);
+        });
+    }
+
+    // ── Item 4: block-reward auto-wiring ────────────────────────────────────
+
+    /// Build an `EthashSolution` whose `solution_hash` matches the pallet's
+    /// recomputation, so `submit_solution` accepts it.
+    fn valid_solution(nonce: u64) -> EthashSolution {
+        let sol = EthashSolution {
+            nonce,
+            mix_hash: [0u8; 32],
+            solution_hash: [0u8; 32],
+            algorithm_version: TestAlgoVersion::get(),
+        };
+        let work_data = (sol.nonce, sol.mix_hash, sol.algorithm_version);
+        let correct_hash = sp_io::hashing::blake2_256(&work_data.encode());
+        EthashSolution {
+            solution_hash: correct_hash,
+            ..sol
+        }
+    }
+
+    #[test]
+    fn test_genesis_can_seed_block_reward_beneficiary() {
+        MOCK_MINTED.with(|c| c.set(0));
+        MOCK_CAP.with(|c| c.set(u128::MAX));
+        let t = frame_system::GenesisConfig::<Test>::default()
+            .build_storage()
+            .unwrap();
+        let mut ext = sp_io::TestExternalities::new(t);
+        ext.execute_with(|| {
+            let gp_config = crate::pallet::GenesisConfig::<Test> {
+                initial_difficulty: TestMinDifficulty::get(),
+                initial_block_reward: TestInitialReward::get(),
+                block_reward_beneficiary: Some(7u64),
+                _config: Default::default(),
+            };
+            BuildGenesisConfig::build(&gp_config);
+            assert_eq!(BlockRewardBeneficiary::<Test>::get(), Some(7u64));
+        });
+    }
+
+    #[test]
+    fn test_set_block_beneficiary_requires_root() {
+        new_test_ext().execute_with(|| {
+            assert!(GpuPowPallet::set_block_beneficiary(RuntimeOrigin::signed(1), 9).is_err());
+            assert_eq!(BlockRewardBeneficiary::<Test>::get(), None);
+            assert!(GpuPowPallet::set_block_beneficiary(RuntimeOrigin::root(), 9).is_ok());
+            assert_eq!(BlockRewardBeneficiary::<Test>::get(), Some(9));
+        });
+    }
+
+    /// A configured beneficiary is credited automatically on each block, with
+    /// no manual `submit_solution` needed (the auto-wiring deliverable).
+    #[test]
+    fn test_block_reward_auto_wired_per_block() {
+        new_test_ext().execute_with(|| {
+            let miner = 7u64;
+            GpuPowPallet::set_block_beneficiary(RuntimeOrigin::root(), miner).unwrap();
+            let before = pallet_balances::Pallet::<Test>::free_balance(miner);
+
+            pallet_timestamp::Pallet::<Test>::set_timestamp(1_000_000_000);
+            for b in 1..=5u64 {
+                System::set_block_number(b);
+                GpuPowPallet::on_initialize(b);
+            }
+
+            let reward = TestInitialReward::get();
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(miner),
+                before + reward * 5,
+                "each produced block must credit the miner"
+            );
+            assert_eq!(MockSupply::total_issued(), reward * 5);
+        });
+    }
+
+    /// With no beneficiary configured, blocks mint nothing (safe default).
+    #[test]
+    fn test_auto_reward_no_beneficiary_is_noop() {
+        new_test_ext().execute_with(|| {
+            System::set_block_number(1);
+            GpuPowPallet::on_initialize(1);
+            GpuPowPallet::on_initialize(2);
+            assert_eq!(MockSupply::total_issued(), 0);
+            assert_eq!(BlockRewardBeneficiary::<Test>::get(), None);
+        });
+    }
+
+    /// A manual claim takes precedence: the block is paid exactly once, not
+    /// twice (app + auto).
+    #[test]
+    fn test_manual_claim_takes_precedence_over_auto() {
+        new_test_ext().execute_with(|| {
+            let auto_miner = 7u64;
+            let manual_miner = 42u64;
+            GpuPowPallet::set_block_beneficiary(RuntimeOrigin::root(), auto_miner).unwrap();
+
+            // Manual claim recorded during block 1...
+            GpuPowPallet::submit_solution(
+                RuntimeOrigin::signed(manual_miner),
+                valid_solution(1),
+                TestMaxDifficulty::get(),
+            )
+            .unwrap();
+
+            // ...paid at the next block, and the auto path is skipped.
+            System::set_block_number(2);
+            GpuPowPallet::on_initialize(2);
+
+            let reward = TestInitialReward::get();
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(manual_miner),
+                reward,
+                "manual claimant paid exactly once"
+            );
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(auto_miner),
+                0,
+                "auto beneficiary must not also be paid"
+            );
+            assert_eq!(MockSupply::total_issued(), reward);
+        });
+    }
+
+    /// Auto-accrual still respects the canonical supply cap.
+    #[test]
+    fn test_auto_reward_respects_supply_cap() {
+        new_test_ext().execute_with(|| {
+            MOCK_CAP.with(|c| c.set(1_000_000_000_000_000_000_000));
+            MOCK_MINTED.with(|c| c.set(1_000_000_000_000_000_000_000));
+            let miner = 7u64;
+            GpuPowPallet::set_block_beneficiary(RuntimeOrigin::root(), miner).unwrap();
+            System::set_block_number(1);
+            GpuPowPallet::on_initialize(1);
+            assert_eq!(pallet_balances::Pallet::<Test>::free_balance(miner), 0);
             assert_eq!(MockSupply::total_issued(), 1_000_000_000_000_000_000_000);
         });
     }
