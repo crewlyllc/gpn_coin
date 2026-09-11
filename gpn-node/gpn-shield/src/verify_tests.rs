@@ -359,6 +359,36 @@ fn value_balance_vk_unchanged_after_fft_refactor() {
 // ===========================================================================
 
 #[test]
+#[ignore = "profiling note-spend setup/prove phases; run with --release --nocapture"]
+fn time_setup_and_prove_phases() {
+    use std::time::Instant;
+    let note = crate::note_spend::tests::test_note(0);
+    let (r1cs, z) = crate::note_spend::note_spend_r1cs(&note);
+    let qap = r1cs.qap_sparse();
+    let n = qap.domain_size;
+    eprintln!("domain_size={n}, vars={}, constraints={}", qap.num_variables, qap.constraints.len());
+
+    // Time eval_columns_at (used once by setup) in isolation, off-domain.
+    let tau = Scalar::from(123456789u64);
+    let t0 = Instant::now();
+    let _ = qap.eval_columns_at(&tau);
+    eprintln!("eval_columns_at(off-domain): {:?}", t0.elapsed());
+
+    let t1 = Instant::now();
+    let pk = groth16::setup(&qap, "testnet-crs-v0");
+    eprintln!("setup total: {:?}", t1.elapsed());
+
+    let t2 = Instant::now();
+    let (_proof, _pi) = groth16::prove(&pk, &qap, &z);
+    eprintln!("prove total: {:?}", t2.elapsed());
+
+    // Time the witness (NTT) phase alone.
+    let t3 = Instant::now();
+    let _ = crate::qap::witness_polys_fft(&qap, &z);
+    eprintln!("witness_polys_fft (NTT): {:?}", t3.elapsed());
+}
+
+#[test]
 #[ignore = "full note-spend circuit; run with --release"]
 fn note_spend_roundtrip_depth_variants() {
     // NB: every depth has ~the same cost — the blake2s commitment/nullifier hash
