@@ -141,8 +141,10 @@ pub fn setup(qap: &Qap, seed: &str) -> ProvingKey {
         }
     }
 
-    // Powers (τ^i / δ)₁ for i in 0..=deg(H·T). deg(H·T) ≤ (m-2) + m = 2m-2.
-    let m = qap.constraints.len(); // = num_constraints (avoids needing dense qap.t)
+    // Powers (τ^i / δ)₁ for i in 0..=deg(H·T). deg(H·T) ≤ 2·domain_size − 2.
+    // `domain_size` = constraints for the consecutive domain; next-pow2 ≥ m for
+    // RootsOfUnity (padding rows included). Use 2·domain_size as a safe bound.
+    let m = qap.domain_size.max(1);
     let max_deg = 2 * m; // safe upper bound
     let mut tau_pow = Scalar::ONE;
     let mut ht_delta_g1 = Vec::with_capacity(max_deg + 1);
@@ -177,7 +179,12 @@ pub fn setup(qap: &Qap, seed: &str) -> ProvingKey {
 /// Prove a satisfying assignment `z` (full witness, `z[0] = 1`).
 /// Returns the proof plus the public inputs (variables `1..num_public`).
 pub fn prove(pk: &ProvingKey, qap: &Qap, z: &[Scalar]) -> (Proof, Vec<Scalar>) {
-    let wp = witness_polys(qap, z);
+    // Pick the witness-H path: FFT-native for large RootsOfUnity circuits,
+    // dense for the default consecutive-integer domain (small circuits).
+    let wp = match qap.domain {
+        crate::qap::Domain::RootsOfUnity => crate::qap::witness_polys_fft(qap, z),
+        crate::qap::Domain::Consecutive => witness_polys(qap, z),
+    };
     // Public inputs = z[1..num_public] (exclude the constant z[0]=1).
     let public_inputs: Vec<Scalar> = z[1..pk.num_public].to_vec();
 
@@ -216,7 +223,8 @@ pub fn prove(pk: &ProvingKey, qap: &Qap, z: &[Scalar]) -> (Proof, Vec<Scalar>) {
         c_acc += G1Projective::from(pk.abc_delta_g1[k - pk.num_public]) * zk;
     }
     // H(τ)T(τ)/δ : HT = H·T as a scalar polynomial, then Σ coeff_i · (τ^i/δ)₁
-    let ht = wp.h.mul(&qap.t);
+    // Use the precomputed HT (= A·B − C) so no O(m²) product is needed.
+    let ht = &wp.ht;
     for (i, coeff) in ht.0.iter().enumerate() {
         if *coeff == Scalar::ZERO {
             continue;
@@ -343,6 +351,27 @@ mod tests {
     }
 
     #[test]
+    // Full Groth16 roundtrip on the REAL note-spend circuit (~87k vars × ~121k
+    // constraints) using the FFT-native RootsOfUnity domain. This is the whole
+    // point of the NTT work: setup + prove + verify must all complete at scale
+    // (no OOM, no O(n²) blowup). Slow in debug; run in release:
+    //   cargo test --release -p gpn-shield -- --ignored note_spend_full_roundtrip
+    #[ignore = "full note-spend circuit; run with --release"]
+    fn note_spend_full_roundtrip() {
+        let note = crate::note_spend::tests::test_note(4);
+        let (r1cs, z) = crate::note_spend::note_spend_r1cs(&note);
+        assert!(crate::gadget::constraints_hold(&r1cs, &z), "witness must satisfy");
+        let qap = r1cs.qap_sparse();
+        let pk = setup(&qap, "testnet-crs-v0");
+        let (proof, pub_in) = prove(&pk, &qap, &z);
+        assert_eq!(verify(&pk.vk, &pub_in, &proof), Ok(()), "proof must verify");
+        // Tampering the public input must fail.
+        let mut bad = pub_in.clone();
+        bad[0] += Scalar::ONE;
+        assert!(verify(&pk.vk, &bad, &proof).is_err(), "tampered input must be rejected");
+    }
+
+    #[test]
     fn key_not_transferable_across_circuits() {
         let r1cs = value_balance_r1cs();
         let qap = r1cs.qap();
@@ -397,6 +426,7 @@ mod tests {
         let r1cs = crate::qap::R1CS {
             num_variables: 6,
             num_public: 2,
+            domain: crate::qap::Domain::Consecutive,
             constraints: vec![
                 Constraint { a: vec![(2, one)], b: vec![(0, one)], c: vec![(4, one)] },
                 Constraint { a: vec![(3, one)], b: vec![(0, one)], c: vec![(4, one), (1, -(one))] },

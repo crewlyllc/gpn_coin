@@ -26,7 +26,7 @@ use bls12_381::Scalar;
 use ff::Field;
 
 use crate::blake2s::{alloc_bytes32, digest_to_bytes, note_commitment_gate, nullifier_gate};
-use crate::gadget::{into_r1cs, merkle_combine, merkle_membership_gate, Word, WordCircuit};
+use crate::gadget::{into_r1cs_with_domain, merkle_combine, merkle_membership_gate, Word, WordCircuit};
 use crate::qap::R1CS;
 
 /// A concrete note spend: the note being spent plus the Merkle path proving its
@@ -130,7 +130,11 @@ pub fn note_spend_r1cs(note: &NoteSpend) -> (R1CS, Vec<Scalar>) {
     let root = merkle_root_from_path(cm_lo, &note.path);
     c.values[root_idx] = root;
 
-    let r1cs = into_r1cs(&c.builder, NUM_PUBLIC);
+    // Note-spend is the large circuit (~87k vars × ~121k constraints), so use
+    // the FFT-native domain: the Groth16 prover then runs in O(n log n) via the
+    // NTT instead of O(n²). Nothing on-chain bakes this circuit's key, so the
+    // domain choice is free to optimize.
+    let r1cs = into_r1cs_with_domain(&c.builder, NUM_PUBLIC, crate::qap::Domain::RootsOfUnity);
     (r1cs, c.values)
 }
 

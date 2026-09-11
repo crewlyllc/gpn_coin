@@ -396,6 +396,23 @@ pub fn into_r1cs(b: &CircuitBuilder, num_public: usize) -> R1CS {
         num_variables: b.num_variables,
         num_public,
         constraints: b.constraints.clone(),
+        domain: crate::qap::Domain::Consecutive,
+    }
+}
+
+/// Like [`into_r1cs`] but selects the QAP evaluation domain. Large circuits
+/// (e.g. note-spend) should use [`crate::qap::Domain::RootsOfUnity`] so the
+/// Groth16 prover runs in O(n log n) via the NTT rather than O(n²).
+pub fn into_r1cs_with_domain(
+    b: &CircuitBuilder,
+    num_public: usize,
+    domain: crate::qap::Domain,
+) -> R1CS {
+    R1CS {
+        num_variables: b.num_variables,
+        num_public,
+        constraints: b.constraints.clone(),
+        domain,
     }
 }
 
