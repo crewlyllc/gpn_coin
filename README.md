@@ -66,6 +66,10 @@ projectmanager07/
 │   ├── protocols/05-oracle-governance.md  # Oracle operator governance spec (§9 #5)
 │   ├── node-agent/01-agent-architecture.md
 │   └── tokenomics/01-gpn-tokenomics.md
+├── docs/            # Ops runbooks
+│   ├── mainnet-launch-runbook.md
+│   └── incident-response.md
+├── SECURITY.md      # Vulnerability disclosure policy
 └── HEARTBEAT.md
 ```
 
@@ -513,3 +517,14 @@ client gets from `gpn_effective_feed`, surfaced alongside the latest posted feed
 
 CLI: `gpn_explorer [--endpoint ws://127.0.0.1:9944] [--listen 127.0.0.1:8082] [--account …]…`
 (details: `shared/artifacts/project7/cycle45-explorer-live-log.md`; runbook `§7`)
+
+## Documentation & ops
+
+- **Mainnet launch runbook** — `docs/mainnet-launch-runbook.md` (genesis build + verification,
+  bootnodes, post-launch governance: block beneficiary + oracle operators, treasury ops,
+  monitoring, abort criteria).
+- **Incident response plan** — `docs/incident-response.md` (severity levels, roles,
+  detection, playbooks: chain halt/fork, supply anomaly, treasury/key compromise, oracle feed,
+  marketplace escrow, infra).
+- **Security policy** — `SECURITY.md` (private disclosure, scope, critical invariants, safe
+  harbor, coordinated disclosure given GPN's governed-only emergency path).

@@ -1,7 +1,7 @@
 # GPN Tokenomics Specification — v1 (Aligned to Implemented Code)
 
-**Status:** ✅ Matches the live `pallet-gpn-token` implementation (Cycle 32 audit)
-**Date:** 2026-08-01
+**Status:** ✅ Matches the live `pallet-gpn-token` + `pallet-gpn-treasury` implementation
+**Date:** 2026-08-01 · **reconciled 2026-09-11** (disclosed vested treasury, D-T1…D-T6)
 **Author:** PM07
 
 > This spec is the **source-of-truth** document for GPN tokenomics as *implemented*.
@@ -23,12 +23,16 @@
 | Terminal inflation | **1%** |
 | Initial block reward | **50 GPN/block** |
 | Hard supply cap | **1B GPN** (`MaxSupply`) |
-| Launch model | **Fair launch via mining** — no premine, no ICO, no dev allocation |
+| Launch model | **Fair launch via mining + disclosed vested treasury (20%)** — no private premine, no ICO, no liquid dev allocation |
+| Treasury allocation | **200,000,000 GPN** (20% of the cap), vested, keyless `gpn/trsy` account, 13-of-25 governance |
+| Max *mineable* | **800,000,000 GPN** (1B cap − 200M treasury) |
 
 The prototype runs on `gpn-node --dev` with a dev funding faucet (accounts seeded with
 100,000 GPN for testing — well below the cap and above the 1,000 GPN attestation stake).
-Mainnet (`--chain=mainnet`) seeds **zero** accounts: all GPN is issued via
-`mint_block_reward` through GPU PoW.
+
+Mainnet (`--chain=mainnet`) seeds **no user accounts** (fair launch) but **does** carry a single
+disclosed genesis allocation: the **200,000,000 GPN vested treasury** (see §9). The remaining
+**800M GPN** is issued via `mint_block_reward` through GPU PoW.
 
 ---
 
@@ -37,9 +41,10 @@ Mainnet (`--chain=mainnet`) seeds **zero** accounts: all GPN is issued via
 ### 2.1 Emission source
 - **All** GPN is minted by the `gpn-token` pallet via `mint_block_reward` (root-only,
   called by the `gpu-pow` consensus pallet when a block is sealed).
-- `TotalMinted` storage tracks cumulative issuance (enforces `SupplyCapExceeded` guard
-  in `gpu-pow`'s `distribute_pending_rewards` against `MaxSupply` = **1B GPN**).
-- No genesis supply (fair launch) — mainnet seeds zero accounts.
+- `TotalMinted` (canonical, in `gpn-token`) tracks cumulative issuance and enforces the
+  **1B GPN** `MaxSupply` cap via the `SupplyManager` trait used by `gpu-pow`.
+- Mainnet seeds `initial_minted = treasury_allocation (200M)` so the disclosure counts against
+  the cap; all *other* issuance is mined. Effective max mineable = **800M GPN**.
 
 ### 2.2 Inflation schedule (implemented)
 - `InitialInflation = 10%`, `TerminalInflation = 1%`.
@@ -121,10 +126,10 @@ real on-chain feed driving Mining→Compute and serving a paid job.
 
 | Parameter | Preliminary (synthesis) | Implemented (this spec) | Note |
 |-----------|-------------------------|--------------------------|------|
-| Total supply | 1,000,000,000 | **0 genesis; fair-launch mint** | No premine |
-| Mining alloc | 65% of initial | 100% of issuance via PoW | Cleaner |
+| Total supply | 1,000,000,000 | **1B hard cap** | ✅ Match |
+| Mining alloc | 65% of initial | 80% of cap (800M), mined | Treasury carve-out disclosed |
 | Staking rewards | 20% | Fee pool (40% of 5% fee) + attestation | Fee-driven |
-| Treasury/dev | 10% vested | 30% of 5% fee | Fee-driven |
+| Treasury | 10% vested | **20% vested (200M), keyless + 13-of-25** | Adopted (D-T1…D-T6, §9) |
 | Community | 5% | — | Dropped for fair launch |
 | Premine/ICO | 0% | 0% | ✅ Match |
 | Emission | halve /2yr | **−0.5%/yr inflation step** | Different mechanism |
@@ -157,22 +162,79 @@ marketplace fees rather than pre-minted allocations.
    the runtime gpu-pow config = `1_000_000_000_000_000_000_000` raw = 1B GPN).
    `distribute_pending_rewards` refuses to mint past the cap, so emission is
    disinflationary AND absolutely bounded — supply can never exceed 1B GPN.
-5. ✅ **Dev faucet scoped + mainnet fair launch (Cycle 35):** the `--dev`/`local`
+5. ✅ **Dev faucet scoped + mainnet launch (Cycle 35, treasury added later):** the `--dev`/`local`
    chain specs now seed a modest **100,000 GPN** test faucet (was erroneously 1
-   trillion GPN, equal to the entire cap). A new **`mainnet` chain spec**
-   (`--chain=mainnet`) has **zero endowed accounts and no oracle operators** —
-   all GPN is issued via GPU PoW block rewards (fair launch). Also fixed a
-   latent bug: the block reward constant was 50 **million** GPN, not 50 GPN
+   trillion GPN, equal to the entire cap). The **`mainnet` chain spec**
+   (`--chain=mainnet`) seeds **no user accounts and no oracle operators** — all mined GPN is
+   issued via GPU PoW block rewards — plus the **disclosed 200M vested treasury** (§9). Also
+   fixed a latent bug: the block reward constant was 50 **million** GPN, not 50 GPN
    (would have exhausted the 1B cap in ~20 blocks); now correctly **50 GPN**
    (matching the spec).
 
 ---
 
-## 8. Related Docs
+## 9. Vested treasury allocation (mainnet) — implemented
+
+The project owner's locked decisions **D-T1…D-T6 (2026-09-10)** moved mainnet from a strict
+zero-genesis fair launch to a **disclosed, vested treasury**. This section is the authoritative
+description; the code wins.
+
+| # | Decision | Value |
+|---|---|---|
+| D-T1 | Allocation | **20% of the 1B cap = 200,000,000 GPN** |
+| D-T2 | Address | **Keyless `gpn/trsy` pallet account** (`PalletId(*b"gpn/trsy")`); no private key exists |
+| D-T3 | Vesting | **Reading A**: Phase 1 = 100M over 48 mo (8 × 12.5M / 6 mo); Phase 2 = 100M over 120 mo (20 × 5M / 6 mo) |
+| D-T4 | Counts against 1B cap | **Yes** → `initial_minted = 200M`, max mineable **800M GPN** |
+| D-T5 | Governance | **Fixed 25-address roster at genesis; 13-of-25 approvals** to authorize a spend |
+| D-T6 | Default | **Vesting is the default on mainnet** (not opt-in) |
+
+### 9.1 Vesting schedule (exact)
+
+Total **200,000,000 GPN**; **0 GPN unlocked at launch**. Unlock blocks are `i × 1,036,800`
+blocks (≈ 6 months at 15 s/block).
+
+| Phase | Amount | Cadence | Tranches | Per tranche | First unlock |
+|---|---|---|---|---|---|
+| 1 | 100,000,000 | every 6 mo | 8 | 12,500,000 | month 6 (block 1,036,800) |
+| 2 | 100,000,000 | every 6 mo | 20 | 5,000,000 | month 54 |
+| **Total** | **200,000,000** | | **28** | | full unlock ≈ month 168 |
+
+### 9.2 Implementation
+
+- **Genesis:** `mainnet_chain_spec()` passes `gpn(TREASURY_ALLOC_GPN)` = 200M to
+  `genesis_config_json`, funding the `gpn/trsy` pallet account; `gpn_token.initial_minted` is
+  seeded with the same amount so it counts against `MaxSupply`. `dev`/`local`/`testnet` pass `0`
+  (clean fair-launch fork for testing).
+- **Pallet:** `pallet-gpn-treasury` stores `Roster` (25), `Threshold` (13), `Schedule`
+  (28 tranches), `TotalReleased`, and spend proposals (`ProposalDest/Amount/Approvals/Executed`).
+  The treasury can only ever spend its **unlocked** balance.
+- **Roster source:** `GPN_TREASURY_ROSTER` env (comma-separated ss58) at spec-build time, else
+  placeholder keys. **Mainnet must be launched with the real 25-address roster.**
+- **Ops CLI:** `gpn_treasury status|schedule|roster|proposals|propose|approve|execute`.
+- **Enforced errors:** `NotInRoster`, `NotEnoughApprovals`, `InsufficientUnlocked`,
+  `AlreadyExecuted`, `RosterEmpty`.
+
+### 9.3 Disclosure
+
+The amount, the address, the vesting schedule, and the governance rule are **public and
+on-chain verifiable** — the point of a disclosed treasury is that anyone can independently check
+it. See `README.md` (Vested treasury section), `design-treasury-vesting.md`, and
+`docs/mainnet-launch-runbook.md` §7.
+
+> **Honest note:** a vested treasury is still a genesis allocation, and it *does* depart from the
+> earlier "no premine" line. That departure is disclosed here and in the README rather than
+> hidden, per D-T1…D-T6.
+
+---
+
+## 10. Related Docs
 
 - Implementation: `gpn-node/pallets/gpn-token/src/lib.rs`
+- Treasury: `gpn-node/pallets/gpn-treasury/src/lib.rs` · `design-treasury-vesting.md`
 - Consensus: `gpn-node/pallets/gpu-pow/src/lib.rs`
 - Attestation: `gpn-node/pallets/gpu-attestation/src/lib.rs`
 - Marketplace: `gpn-node/pallets/compute-marketplace/src/lib.rs`
 - Oracle: `gpn-node/pallets/profitability-oracle/src/lib.rs`
 - Design synthesis: `shared/artifacts/project7/04-design-decisions-synthesis.md`
+- Launch runbook: `docs/mainnet-launch-runbook.md` · Incident response: `docs/incident-response.md`
+- Security policy: `SECURITY.md`
