@@ -5,6 +5,8 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+#[cfg(feature = "runtime-benchmarks")]
+pub mod benchmarking;
 pub mod weights;
 
 use codec::{Decode, DecodeWithMemTracking, Encode};
@@ -499,7 +501,6 @@ mod tests {
         PendingRewardBeneficiary,
     };
     use pallet_gpn_token::SupplyManager;
-    use sp_runtime::SaturatedConversion;
 
     thread_local! {
         static MOCK_MINTED: std::cell::Cell<u128> = const { std::cell::Cell::new(0) };
@@ -612,7 +613,7 @@ mod tests {
         type WeightInfo = ();
     }
 
-    fn new_test_ext() -> sp_io::TestExternalities {
+    pub fn new_test_ext() -> sp_io::TestExternalities {
         MOCK_MINTED.with(|c| c.set(0));
         MOCK_CAP.with(|c| c.set(u128::MAX));
         let t = frame_system::GenesisConfig::<Test>::default()
@@ -674,7 +675,6 @@ mod tests {
         });
     }
 
-    #[test]
     #[test]
     fn test_difficulty_adjustment_slower_easier() {
         new_test_ext().execute_with(|| {
