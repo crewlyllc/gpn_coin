@@ -35,6 +35,7 @@ use frame_support::{
     PalletId,
 };
 use frame_system::limits::{BlockLength, BlockWeights};
+use scale_info::TypeInfo;
 #[cfg(feature = "std")]
 use serde::{Deserialize, Serialize};
 use sp_core::OpaqueMetadata;
@@ -124,6 +125,50 @@ pub const VERSION: sp_version::RuntimeVersion = sp_version::RuntimeVersion {
     system_version: 1,
 };
 
+/// Typed snapshot of the on-chain GPN treasury, returned by [`GpnTreasuryApi`].
+/// A wallet/dapp can read this instead of re-deriving the vesting schedule or
+/// doing dynamic storage reads.
+#[derive(Clone, Debug, PartialEq, Eq, Decode, Encode, TypeInfo)]
+pub struct TreasuryStatus {
+    /// The keyless treasury account (`gpn/trsy` PalletId account).
+    pub account: AccountId,
+    /// Free balance currently held by the treasury account.
+    pub balance: Balance,
+    /// Total GPN ever scheduled into vesting tranches (the disclosed allocation).
+    pub total_allocation: Balance,
+    /// Amount already unlocked by the vesting schedule as of the current block.
+    pub unlocked: Balance,
+    /// Unlocked minus already-released (spending headroom).
+    pub spendable: Balance,
+    /// Total GPN already released (spent) from the treasury.
+    pub released: Balance,
+    /// Approvals required to release funds (13 for GPN).
+    pub threshold: u32,
+    /// Number of members on the governance roster (25 for GPN).
+    pub roster_size: u32,
+    /// Monotonic spend-proposal id (next id to be assigned).
+    pub next_proposal_id: u64,
+}
+
+/// Typed snapshot of a full node's liveness, returned by [`GpnLivenessApi`].
+#[derive(Clone, Debug, PartialEq, Eq, Decode, Encode, TypeInfo)]
+pub struct LivenessStatus {
+    /// The queried account.
+    pub account: AccountId,
+    /// Whether the account is currently registered as a full node.
+    pub registered: bool,
+    /// Whether the node is active (false once slashed/unregistered).
+    pub active: bool,
+    /// Rolling uptime over the lookback window, in basis points (1e4 = 100%).
+    pub uptime_bps: u32,
+    /// Window id of the last window the node was confirmed online.
+    pub last_confirmed_window: u64,
+    /// Consecutive liveness windows missed (drives slashing).
+    pub missed_count: u32,
+    /// Bond currently held for the node (0 if none).
+    pub bond: Balance,
+}
+
 sp_api::decl_runtime_apis! {
     /// The GPU mining API — exposed to the consensus engine
     pub trait GPUMiningApi {
@@ -140,6 +185,22 @@ sp_api::decl_runtime_apis! {
         /// The on-chain bond-weighted median feed across all bonded operators
         /// who have posted a feed. `None` if no bonded operator has posted.
         fn effective_feed() -> Option<pallet_profitability_oracle::ProfitabilityFeed>;
+    }
+
+    /// The GPN treasury API — exposes a typed snapshot of the vested
+    /// allocation, balances and 13-of-25 governance configuration.
+    pub trait GpnTreasuryApi {
+        /// Current treasury status (schedule, balances, governance config).
+        fn treasury_status() -> TreasuryStatus;
+    }
+
+    /// The GPN liveness API — exposes typed full-node liveness status so
+    /// clients don't need dynamic storage reads.
+    pub trait GpnLivenessApi {
+        /// Liveness status for a single account.
+        fn liveness_status(account: AccountId) -> LivenessStatus;
+        /// Running total of registered full nodes.
+        fn full_node_count() -> u32;
     }
 }
 
@@ -548,6 +609,44 @@ sp_api::impl_runtime_apis! {
     impl self::ProfitabilityOracleApi<Block> for Runtime {
         fn effective_feed() -> Option<pallet_profitability_oracle::ProfitabilityFeed> {
             ProfitabilityOracle::effective_feed()
+        }
+    }
+
+    impl self::GpnTreasuryApi<Block> for Runtime {
+        fn treasury_status() -> TreasuryStatus {
+            TreasuryStatus {
+                account: GPNTreasury::account_id(),
+                balance: GPNTreasury::balance(),
+                total_allocation: GPNTreasury::total_allocation(),
+                unlocked: GPNTreasury::unlocked_amount(),
+                spendable: GPNTreasury::spendable(),
+                released: GPNTreasury::released(),
+                threshold: GPNTreasury::threshold(),
+                roster_size: GPNTreasury::roster_size(),
+                next_proposal_id: GPNTreasury::next_proposal_id(),
+            }
+        }
+    }
+
+    impl self::GpnLivenessApi<Block> for Runtime {
+        fn liveness_status(account: AccountId) -> LivenessStatus {
+            let rec = Liveness::record(&account);
+            LivenessStatus {
+                registered: rec.is_some(),
+                active: Liveness::is_active(&account),
+                uptime_bps: Liveness::uptime_bps(&account),
+                last_confirmed_window: rec
+                    .as_ref()
+                    .map(|r| r.last_confirmed_window)
+                    .unwrap_or(0),
+                missed_count: rec.as_ref().map(|r| r.missed_count).unwrap_or(0),
+                bond: Liveness::bond(&account),
+                account,
+            }
+        }
+
+        fn full_node_count() -> u32 {
+            Liveness::full_node_count()
         }
     }
 

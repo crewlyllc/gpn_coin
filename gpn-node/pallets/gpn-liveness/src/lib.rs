@@ -445,6 +445,33 @@ pub mod pallet {
                 None => 0,
             }
         }
+
+        /// Whether `who` is currently registered as a full node.
+        pub fn is_registered(who: &T::AccountId) -> bool {
+            <FullNodes<T>>::get(who).is_some()
+        }
+
+        /// The raw liveness record for `who`, if registered.
+        pub fn record(who: &T::AccountId) -> Option<FullNodeRecord> {
+            <FullNodes<T>>::get(who)
+        }
+
+        /// Consecutive liveness windows missed by `who` (0 if unregistered).
+        pub fn missed_count(who: &T::AccountId) -> u32 {
+            <FullNodes<T>>::get(who)
+                .map(|r| r.missed_count)
+                .unwrap_or(0)
+        }
+
+        /// The bond currently held for `who` (0 if none / unregistered).
+        pub fn bond(who: &T::AccountId) -> BalanceOf<T> {
+            <Bonds<T>>::get(who).unwrap_or_else(Zero::zero)
+        }
+
+        /// Running total of registered full nodes.
+        pub fn full_node_count() -> u32 {
+            FullNodeCount::<T>::get()
+        }
     }
 }
 
@@ -661,6 +688,30 @@ mod tests {
             // After 3rd miss the bond was slashed 10% (remaining > 0 so not removed).
             let bond = Bonds::<Test>::get(ALICE).unwrap();
             assert_eq!(bond, TestBond::get() - TestBond::get() / 10);
+        });
+    }
+
+    #[test]
+    fn test_typed_getters_for_rpc() {
+        new_test_ext().execute_with(|| {
+            // Unknown account: all getters return neutral values (the RPC never
+            // errors on an unknown account; it reports registered = false).
+            assert!(!LivenessPallet::is_registered(&ALICE));
+            assert!(!LivenessPallet::is_active(&ALICE));
+            assert!(LivenessPallet::record(&ALICE).is_none());
+            assert_eq!(LivenessPallet::missed_count(&ALICE), 0);
+            assert_eq!(LivenessPallet::bond(&ALICE), 0);
+            assert_eq!(LivenessPallet::uptime_bps(&ALICE), 0);
+            assert_eq!(LivenessPallet::full_node_count(), 0);
+
+            register(ALICE);
+            assert!(LivenessPallet::is_registered(&ALICE));
+            assert!(LivenessPallet::is_active(&ALICE));
+            assert_eq!(LivenessPallet::bond(&ALICE), TestBond::get());
+            assert_eq!(LivenessPallet::full_node_count(), 1);
+            let rec = LivenessPallet::record(&ALICE).unwrap();
+            assert!(rec.active);
+            assert_eq!(rec.missed_count, 0);
         });
     }
 }

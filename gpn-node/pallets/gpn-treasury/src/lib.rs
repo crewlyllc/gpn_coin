@@ -347,6 +347,11 @@ pub mod pallet {
             Self::unlocked_amount().saturating_sub(TotalReleased::<T>::get())
         }
 
+        /// Roster size (number of governance members).
+        pub fn roster_size() -> u32 {
+            Roster::<T>::get().len() as u32
+        }
+
         pub fn roster() -> Vec<T::AccountId> {
             Roster::<T>::get().into_iter().collect()
         }
@@ -357,6 +362,29 @@ pub mod pallet {
 
         pub fn schedule() -> Vec<TrancheOf<T>> {
             Schedule::<T>::get().into_iter().collect()
+        }
+
+        /// Total GPN ever scheduled into the vesting tranches (the disclosed
+        /// 200M allocation). Independent of how much has unlocked so far.
+        pub fn total_allocation() -> BalanceOf<T> {
+            Schedule::<T>::get()
+                .into_iter()
+                .fold(Zero::zero(), |acc, t| acc.saturating_add(t.amount))
+        }
+
+        /// Total GPN already released (spent) from the treasury.
+        pub fn released() -> BalanceOf<T> {
+            TotalReleased::<T>::get()
+        }
+
+        /// Free balance currently held by the treasury account.
+        pub fn balance() -> BalanceOf<T> {
+            T::Currency::free_balance(&Self::account_id())
+        }
+
+        /// Current monotonic spend-proposal id (next id to be assigned).
+        pub fn next_proposal_id() -> u64 {
+            NextProposalId::<T>::get()
         }
     }
 }
@@ -588,6 +616,31 @@ mod tests {
                 T::approve_spend(RuntimeOrigin::signed(1), 0),
                 Err(Error::<Test>::AlreadyApproved.into())
             );
+        });
+    }
+
+    #[test]
+    fn test_typed_getters_for_rpc() {
+        new_test_ext().execute_with(|| {
+            System::set_block_number(1);
+            // Schedule totals / balances read by the `gpn_treasuryStatus` RPC.
+            assert_eq!(T::total_allocation(), ALLOC); // 80 + 120
+            assert_eq!(T::balance(), ALLOC);
+            assert_eq!(T::released(), 0);
+            assert_eq!(T::roster_size(), 25);
+            assert_eq!(T::next_proposal_id(), 0);
+            assert_eq!(T::threshold(), 13);
+
+            // After a spend the released/balance getters track it.
+            System::set_block_number(285);
+            T::propose_spend(RuntimeOrigin::signed(1), 99, 7).unwrap();
+            for m in 2..=13 {
+                T::approve_spend(RuntimeOrigin::signed(m), 0).unwrap();
+            }
+            T::execute_spend(RuntimeOrigin::signed(1), 0).unwrap();
+            assert_eq!(T::released(), 7);
+            assert_eq!(T::balance(), ALLOC - 7);
+            assert_eq!(T::spendable(), T::unlocked_amount() - 7);
         });
     }
 }

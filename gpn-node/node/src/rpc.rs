@@ -25,7 +25,7 @@ use sp_blockchain::HeaderBackend;
 use std::sync::{Arc, Mutex};
 
 use crate::service::{FullClient, MiningWorker};
-use gpn_runtime::ProfitabilityOracleApi;
+use gpn_runtime::{GpnLivenessApi, GpnTreasuryApi, ProfitabilityOracleApi};
 
 /// The on-chain **bond-weighted median** profitability feed (Phase C
 /// aggregation) as returned by the `gpn_effectiveFeed` RPC. Mirrors
@@ -207,9 +207,183 @@ pub fn create_full_rpc(
     client: Arc<FullClient>,
 ) -> jsonrpsee::RpcModule<()> {
     let mut module = jsonrpsee::RpcModule::new(());
-    let rpc = GpnMinerRpc::new(worker, client);
+    let rpc = GpnMinerRpc::new(worker, client.clone());
     module
         .merge(rpc.into_rpc())
         .expect("gpn miner rpc methods are unique");
+    let pallet_rpc = GpnPalletRpc::new(client);
     module
+        .merge(pallet_rpc.into_rpc())
+        .expect("gpn pallet rpc methods are unique");
+    module
+}
+
+// ###########################################################################
+// Typed pallet RPC (treasury + liveness)
+// ###########################################################################
+
+/// Wire form of [`gpn_runtime::TreasuryStatus`]. Balances are string-encoded
+/// decimal integers (1 GPN = 1e12 base units; the 1B cap = 1e21 exceeds u64,
+/// so we never emit balances as JSON numbers) plus a human-readable `*_gpn`
+/// float convenience field.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct TreasuryStatus {
+    /// SS58-encoded treasury account (`gpn/trsy` PalletId account).
+    pub account: String,
+    /// Free balance held by the treasury account (decimal string base units).
+    pub balance: String,
+    /// Total scheduled allocation (decimal string base units).
+    pub total_allocation: String,
+    /// Amount unlocked by the vesting schedule (decimal string base units).
+    pub unlocked: String,
+    /// Unlocked minus released — spending headroom (decimal string).
+    pub spendable: String,
+    /// Total already released/spent (decimal string).
+    pub released: String,
+    /// Approval threshold (13 for GPN).
+    pub threshold: u32,
+    /// Governance roster size (25 for GPN).
+    pub roster_size: u32,
+    /// Next spend-proposal id.
+    pub next_proposal_id: u64,
+    /// Human-readable convenience fields, in whole GPN.
+    pub balance_gpn: f64,
+    pub total_allocation_gpn: f64,
+    pub unlocked_gpn: f64,
+    pub spendable_gpn: f64,
+    pub released_gpn: f64,
+}
+
+/// Wire form of [`gpn_runtime::LivenessStatus`].
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct LivenessStatus {
+    /// SS58-encoded queried account.
+    pub account: String,
+    /// Whether the account is registered as a full node.
+    pub registered: bool,
+    /// Whether the node is active (false once slashed/unregistered).
+    pub active: bool,
+    /// Rolling uptime over the lookback window, in basis points.
+    pub uptime_bps: u32,
+    /// Rolling uptime as a fraction (1.0 = 100%).
+    pub uptime: f64,
+    /// Window id of the last confirmed-online window.
+    pub last_confirmed_window: u64,
+    /// Consecutive missed liveness windows.
+    pub missed_count: u32,
+    /// Bond currently held (decimal string base units).
+    pub bond: String,
+    /// Human-readable bond in whole GPN.
+    pub bond_gpn: f64,
+}
+
+/// Typed RPC surface for the GPN pallets (treasury + liveness). Clients can
+/// call these instead of issuing fragile dynamic storage reads.
+#[rpc(client, server)]
+pub trait GpnPalletApi {
+    /// The treasury's typed status: account, balances, schedule totals and the
+    /// 13-of-25 governance configuration.
+    #[method(name = "gpn_treasuryStatus")]
+    async fn treasury_status(&self) -> RpcResult<TreasuryStatus>;
+
+    /// Liveness status for one account (SS58 address or `0x`-prefixed 32-byte
+    /// hex). Always returns a value; `registered = false` for unknown accounts.
+    #[method(name = "gpn_livenessStatus")]
+    async fn liveness_status(&self, account: String) -> RpcResult<LivenessStatus>;
+
+    /// Running total of registered full nodes.
+    #[method(name = "gpn_fullNodeCount")]
+    async fn full_node_count(&self) -> RpcResult<u32>;
+}
+
+/// Base-unit divisor: 1 GPN = 1e12 base units.
+const BASE_UNITS_PER_GPN: f64 = 1e12;
+
+fn gpn_f64(base_units: u128) -> f64 {
+    base_units as f64 / BASE_UNITS_PER_GPN
+}
+
+/// Implementation backed by the client's runtime-API view.
+pub struct GpnPalletRpc {
+    client: Arc<FullClient>,
+}
+
+impl GpnPalletRpc {
+    pub fn new(client: Arc<FullClient>) -> Self {
+        Self { client }
+    }
+
+    /// Parse an SS58 address, or a `0x`-prefixed 32-byte hex account id.
+    fn parse_account(s: &str) -> RpcResult<gpn_runtime::AccountId> {
+        use sp_core::crypto::Ss58Codec;
+        if let Some(hex_part) = s.strip_prefix("0x") {
+            let bytes = hex::decode(hex_part).map_err(|e| {
+                ErrorObject::owned(-32602, format!("invalid hex account: {e}"), None::<()>)
+            })?;
+            let arr: [u8; 32] = bytes.try_into().map_err(|_| {
+                ErrorObject::owned(-32602, "account hex must be 32 bytes", None::<()>)
+            })?;
+            Ok(gpn_runtime::AccountId::from(arr))
+        } else {
+            gpn_runtime::AccountId::from_ss58check(s).map_err(|e| {
+                ErrorObject::owned(-32602, format!("invalid SS58 account: {e:?}"), None::<()>)
+            })
+        }
+    }
+}
+
+#[jsonrpsee::core::async_trait]
+impl GpnPalletApiServer for GpnPalletRpc {
+    async fn treasury_status(&self) -> RpcResult<TreasuryStatus> {
+        let at = self.client.info().best_hash;
+        let api = self.client.runtime_api();
+        let s = api.treasury_status(at).map_err(|e| {
+            ErrorObject::owned(-32000, format!("runtime api error: {e}"), None::<()>)
+        })?;
+        Ok(TreasuryStatus {
+            account: s.account.to_string(),
+            balance: s.balance.to_string(),
+            total_allocation: s.total_allocation.to_string(),
+            unlocked: s.unlocked.to_string(),
+            spendable: s.spendable.to_string(),
+            released: s.released.to_string(),
+            threshold: s.threshold,
+            roster_size: s.roster_size,
+            next_proposal_id: s.next_proposal_id,
+            balance_gpn: gpn_f64(s.balance),
+            total_allocation_gpn: gpn_f64(s.total_allocation),
+            unlocked_gpn: gpn_f64(s.unlocked),
+            spendable_gpn: gpn_f64(s.spendable),
+            released_gpn: gpn_f64(s.released),
+        })
+    }
+
+    async fn liveness_status(&self, account: String) -> RpcResult<LivenessStatus> {
+        let who = Self::parse_account(&account)?;
+        let at = self.client.info().best_hash;
+        let api = self.client.runtime_api();
+        let s = api.liveness_status(at, who).map_err(|e| {
+            ErrorObject::owned(-32000, format!("runtime api error: {e}"), None::<()>)
+        })?;
+        Ok(LivenessStatus {
+            account: s.account.to_string(),
+            registered: s.registered,
+            active: s.active,
+            uptime_bps: s.uptime_bps,
+            uptime: s.uptime_bps as f64 / 1e4,
+            last_confirmed_window: s.last_confirmed_window,
+            missed_count: s.missed_count,
+            bond: s.bond.to_string(),
+            bond_gpn: gpn_f64(s.bond),
+        })
+    }
+
+    async fn full_node_count(&self) -> RpcResult<u32> {
+        let at = self.client.info().best_hash;
+        let api = self.client.runtime_api();
+        api.full_node_count(at)
+            .map_err(|e| ErrorObject::owned(-32000, format!("runtime api error: {e}"), None::<()>))
+    }
 }
