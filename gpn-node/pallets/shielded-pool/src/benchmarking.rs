@@ -11,8 +11,8 @@
 use super::*;
 use crate::pallet::Pallet as ShieldedPool;
 use frame_benchmarking::v2::*;
-use frame_support::traits::{Currency, Get};
 use frame_support::sp_runtime::traits::Bounded;
+use frame_support::traits::Currency;
 use frame_system::RawOrigin;
 
 // Real value-balance circuit proof for `fee = 2` (from `gpn_shield qap-prove`,

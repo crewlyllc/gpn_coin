@@ -150,8 +150,12 @@ mod benchmarks {
     fn complete_job() {
         let (provider, _requestor, job_id) = setup_accepted_job::<T>();
         Market::<T>::start_job(RawOrigin::Signed(provider.clone()).into(), job_id).unwrap();
-        Market::<T>::submit_result(RawOrigin::Signed(provider.clone()).into(), job_id, [5u8; 32])
-            .unwrap();
+        Market::<T>::submit_result(
+            RawOrigin::Signed(provider.clone()).into(),
+            job_id,
+            [5u8; 32],
+        )
+        .unwrap();
         let completer: T::AccountId = account("completer", 0, SEED);
 
         #[extrinsic_call]

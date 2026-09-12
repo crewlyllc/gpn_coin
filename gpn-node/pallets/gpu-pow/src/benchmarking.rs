@@ -7,6 +7,9 @@
 #![cfg(feature = "runtime-benchmarks")]
 
 use super::*;
+// The alias is consumed by `impl_benchmark_test_suite!`, which only emits
+// `#[test]` fns; suppress the unused-import warning in non-test builds.
+#[allow(unused_imports)]
 use crate::pallet::Pallet as GpuPow;
 use frame_benchmarking::v2::*;
 use frame_support::traits::Get;

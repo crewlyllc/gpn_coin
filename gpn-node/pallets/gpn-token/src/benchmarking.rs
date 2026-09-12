@@ -56,30 +56,24 @@ mod benchmarks {
     }
 
     #[benchmark]
-    fn distribute_staking_rewards(
-        s: Linear<1, 100>,
-    ) {
+    fn distribute_staking_rewards(s: Linear<1, 100>) {
         let caller: T::AccountId = whitelisted_caller();
         fund_pallet::<T>();
         let pool: BalanceOf<T> = 1_000_000u32.into();
         StakingRewardPool::<T>::put(pool);
-        let stakers: Vec<T::AccountId> =
-            (0..s).map(|i| account("staker", i, SEED)).collect();
+        let stakers: Vec<T::AccountId> = (0..s).map(|i| account("staker", i, SEED)).collect();
 
         #[extrinsic_call]
         distribute_staking_rewards(RawOrigin::Signed(caller.clone()), stakers);
     }
 
     #[benchmark]
-    fn distribute_oracle_rewards(
-        o: Linear<1, 100>,
-    ) {
+    fn distribute_oracle_rewards(o: Linear<1, 100>) {
         let caller: T::AccountId = whitelisted_caller();
         fund_pallet::<T>();
         let pool: BalanceOf<T> = 1_000_000u32.into();
         OracleRewardPool::<T>::put(pool);
-        let operators: Vec<T::AccountId> =
-            (0..o).map(|i| account("operator", i, SEED)).collect();
+        let operators: Vec<T::AccountId> = (0..o).map(|i| account("operator", i, SEED)).collect();
 
         #[extrinsic_call]
         distribute_oracle_rewards(RawOrigin::Signed(caller.clone()), operators);

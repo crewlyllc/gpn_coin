@@ -10,6 +10,7 @@ use frame_support::sp_runtime::SaturatedConversion;
 use frame_support::traits::{Currency, Get};
 use frame_system::pallet_prelude::BlockNumberFor;
 use frame_system::RawOrigin;
+use sp_std::vec::Vec;
 
 const SEED: u32 = 0;
 

@@ -35,7 +35,13 @@ mod benchmarks {
         OracleOperators::<T>::insert(&caller, ());
 
         #[extrinsic_call]
-        update_feed(RawOrigin::Signed(caller.clone()), 1_000u64, 500u64, 8_000u32, 1_200u32);
+        update_feed(
+            RawOrigin::Signed(caller.clone()),
+            1_000u64,
+            500u64,
+            8_000u32,
+            1_200u32,
+        );
 
         assert!(OperatorFeeds::<T>::contains_key(&caller));
     }
@@ -152,8 +158,11 @@ mod benchmarks {
         let stale = T::StaleOperatorBlocks::get();
         frame_system::Pallet::<T>::set_block_number(stale + stale);
         // Post a challenge bond so a real challenge exists to resolve.
-        Oracle::<T>::challenge_operator(RawOrigin::Signed(challenger.clone()).into(), target.clone())
-            .unwrap();
+        Oracle::<T>::challenge_operator(
+            RawOrigin::Signed(challenger.clone()).into(),
+            target.clone(),
+        )
+        .unwrap();
 
         #[extrinsic_call]
         resolve_challenge(RawOrigin::Signed(challenger.clone()), target.clone(), 0u8);
