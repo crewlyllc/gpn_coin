@@ -18,3 +18,5 @@ subtle = "2.6"
 rayon = "1"
 
 [dev-dependencies]
+# Property-based differential/fuzz tests (item 6 of the prod-readiness plan).
+proptest = "1"

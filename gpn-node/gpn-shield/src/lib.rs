@@ -41,6 +41,8 @@ pub mod poly;
 pub mod qap;
 
 #[cfg(test)]
+mod fuzz_tests;
+#[cfg(test)]
 mod verify_tests;
 
 use bls12_381::{pairing, G1Affine, G1Projective, G2Affine, Gt, Scalar};
