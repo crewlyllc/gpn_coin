@@ -18,11 +18,14 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+pub mod weights;
+
 use codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use core::fmt::Debug;
 use scale_info::TypeInfo;
 
 pub use pallet::*;
+pub use weights::WeightInfo;
 
 /// A single unlock tranche: `amount` becomes spendable at `unlock_block`.
 #[derive(
@@ -64,6 +67,8 @@ pub mod pallet {
         /// Maximum number of vesting tranches (sanity bound on the schedule).
         #[pallet::constant]
         type MaxTranches: Get<u32>;
+        /// Weight information for extrinsics in this pallet (workplan item 9).
+        type WeightInfo: WeightInfo;
     }
 
     #[pallet::pallet]
@@ -201,7 +206,7 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         /// Propose a spend of `amount` to `dest`. Caller must be a roster member.
         #[pallet::call_index(0)]
-        #[pallet::weight(20_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::propose_spend())]
         pub fn propose_spend(
             origin: OriginFor<T>,
             dest: T::AccountId,
@@ -228,7 +233,7 @@ pub mod pallet {
         /// Approve a pending spend. Caller must be a roster member; each member
         /// may approve once.
         #[pallet::call_index(1)]
-        #[pallet::weight(15_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::approve_spend())]
         pub fn approve_spend(origin: OriginFor<T>, id: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
             ensure!(Self::is_member(&who), Error::<T>::NotInRoster);
@@ -254,7 +259,7 @@ pub mod pallet {
         /// Execute a spend once it has at least `Threshold` approvals and the
         /// amount is within the currently-unlocked treasury balance.
         #[pallet::call_index(2)]
-        #[pallet::weight(30_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::execute_spend())]
         pub fn execute_spend(origin: OriginFor<T>, id: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
             ensure!(Self::is_member(&who), Error::<T>::NotInRoster);
@@ -289,7 +294,7 @@ pub mod pallet {
         /// Root: replace the governance roster (fixed 25 by default). Emergency/
         /// ops only; use sparingly and publicly.
         #[pallet::call_index(3)]
-        #[pallet::weight(15_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::set_roster())]
         pub fn set_roster(origin: OriginFor<T>, roster: Vec<T::AccountId>) -> DispatchResult {
             ensure_root(origin)?;
             let bounded: BoundedVec<T::AccountId, T::MaxRoster> =
@@ -303,7 +308,7 @@ pub mod pallet {
 
         /// Root: update the approval threshold.
         #[pallet::call_index(4)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::set_threshold())]
         pub fn set_threshold(origin: OriginFor<T>, threshold: u32) -> DispatchResult {
             ensure_root(origin)?;
             Threshold::<T>::put(threshold);
@@ -465,6 +470,7 @@ mod tests {
     }
 
     impl crate::pallet::Config for Test {
+        type WeightInfo = ();
         type RuntimeEvent = RuntimeEvent;
         type Currency = Balances;
         type MaxRoster = TestMaxRoster;

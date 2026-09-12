@@ -26,11 +26,14 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+pub mod weights;
+
 use codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use core::fmt::Debug;
 use scale_info::TypeInfo;
 
 pub use pallet::*;
+pub use weights::WeightInfo;
 
 /// Read-only interface for other pallets (e.g. `gpu-attestation`) to query a
 /// node's full-node standing when awarding tiers.
@@ -99,6 +102,8 @@ pub mod pallet {
         /// Max endpoint length bytes.
         #[pallet::constant]
         type MaxEndpointLen: Get<u32>;
+        /// Weight information for extrinsics in this pallet (workplan item 9).
+        type WeightInfo: WeightInfo;
     }
 
     #[pallet::pallet]
@@ -216,7 +221,7 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         /// Bond + register as a full node with a public endpoint.
         #[pallet::call_index(0)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::register_fullnode())]
         pub fn register_fullnode(origin: OriginFor<T>, endpoint: Vec<u8>) -> DispatchResult {
             let who = ensure_signed(origin)?;
             ensure!(
@@ -260,7 +265,7 @@ pub mod pallet {
 
         /// Withdraw the bond and stop being a full node.
         #[pallet::call_index(1)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::unregister_fullnode())]
         pub fn unregister_fullnode(origin: OriginFor<T>) -> DispatchResult {
             let who = ensure_signed(origin)?;
             let bond = <Bonds<T>>::take(&who).ok_or(Error::<T>::NotRegistered)?;
@@ -280,7 +285,7 @@ pub mod pallet {
         /// A bonded full node witnesses that it successfully reached `target`'s
         /// declared endpoint this window. Dedup per (window, target, witness).
         #[pallet::call_index(2)]
-        #[pallet::weight(20_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::witness_reachable())]
         pub fn witness_reachable(origin: OriginFor<T>, target: T::AccountId) -> DispatchResult {
             let witness = ensure_signed(origin)?;
             ensure!(witness != target, Error::<T>::CannotWitnessSelf);
@@ -315,7 +320,7 @@ pub mod pallet {
         /// enough distinct witnesses that window it's confirmed online; else the
         /// miss is recorded and sustained absence slashes the bond.
         #[pallet::call_index(3)]
-        #[pallet::weight(50_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::submit_liveness())]
         pub fn submit_liveness(origin: OriginFor<T>, target: T::AccountId) -> DispatchResult {
             let _caller = ensure_signed(origin)?;
             let mut record = <FullNodes<T>>::get(&target).ok_or(Error::<T>::NoExistingRecord)?;
@@ -566,6 +571,7 @@ mod tests {
     }
 
     impl crate::pallet::Config for Test {
+        type WeightInfo = ();
         type RuntimeEvent = RuntimeEvent;
         type Currency = Balances;
         type LivenessBond = TestBond;

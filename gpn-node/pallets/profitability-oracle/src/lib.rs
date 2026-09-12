@@ -4,11 +4,14 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+pub mod weights;
+
 use codec::{Decode, Encode};
 use core::fmt::Debug;
 use scale_info::TypeInfo;
 
 pub use pallet::*;
+pub use weights::WeightInfo;
 
 #[frame_support::pallet]
 pub mod pallet {
@@ -84,6 +87,8 @@ pub mod pallet {
         type SlashBps: Get<u32>;
         /// The currency used to hold operator/challenge bonds (Phase C).
         type Currency: Currency<Self::AccountId>;
+        /// Weight information for extrinsics in this pallet (workplan item 9).
+        type WeightInfo: WeightInfo;
     }
 
     #[pallet::pallet]
@@ -305,7 +310,7 @@ pub mod pallet {
         /// Submit a profitability feed update.
         /// Only authorized oracle operators may call this.
         #[pallet::call_index(0)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::update_feed())]
         pub fn update_feed(
             origin: OriginFor<T>,
             token_price_usd: u64,
@@ -360,7 +365,7 @@ pub mod pallet {
         /// immediately; otherwise a pending proposal is stored for other
         /// committee members to `approve_operator`.
         #[pallet::call_index(1)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::propose_operator())]
         pub fn propose_operator(origin: OriginFor<T>, operator: T::AccountId) -> DispatchResult {
             let who = ensure_signed(origin)?;
             ensure!(
@@ -409,7 +414,7 @@ pub mod pallet {
         /// `AdmissionThreshold`, the operator is admitted and the proposal is
         /// cleared.
         #[pallet::call_index(2)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::approve_operator())]
         pub fn approve_operator(origin: OriginFor<T>, operator: T::AccountId) -> DispatchResult {
             let who = ensure_signed(origin)?;
             ensure!(
@@ -450,7 +455,7 @@ pub mod pallet {
         /// only shrinks the trusted set, so it is intentionally easier than
         /// addition (which requires the committee threshold).
         #[pallet::call_index(3)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::remove_operator())]
         pub fn remove_operator(origin: OriginFor<T>, operator: T::AccountId) -> DispatchResult {
             let is_committee = match ensure_signed(origin.clone()) {
                 Ok(who) => <Committee<T>>::contains_key(&who),
@@ -474,7 +479,7 @@ pub mod pallet {
         /// account and the caller becomes a bonded operator who may post feeds
         /// and whose weight in `effective_feed()` equals the bond size.
         #[pallet::call_index(4)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::bond_operator())]
         pub fn bond_operator(origin: OriginFor<T>) -> DispatchResult {
             let who = ensure_signed(origin)?;
             ensure!(
@@ -503,7 +508,7 @@ pub mod pallet {
         /// Increase an existing bonded operator's bond (Phase C), raising their
         /// weight in the bond-weighted median.
         #[pallet::call_index(5)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::bond_more())]
         pub fn bond_more(origin: OriginFor<T>, additional: BalanceOf<T>) -> DispatchResult {
             let who = ensure_signed(origin)?;
             ensure!(
@@ -526,7 +531,7 @@ pub mod pallet {
         /// while a challenge is open against the caller (prevents slashing
         /// evasion, decision D4 refinement).
         #[pallet::call_index(6)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::unbond_operator())]
         pub fn unbond_operator(origin: OriginFor<T>) -> DispatchResult {
             let who = ensure_signed(origin)?;
             ensure!(
@@ -555,7 +560,7 @@ pub mod pallet {
         /// challenger posts `ChallengeBond`. The target may not unbond until
         /// the challenge is resolved.
         #[pallet::call_index(7)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::challenge_operator())]
         pub fn challenge_operator(origin: OriginFor<T>, target: T::AccountId) -> DispatchResult {
             let who = ensure_signed(origin)?;
             ensure!(
@@ -600,7 +605,7 @@ pub mod pallet {
         /// In all cases the challenge is closed. On success the challenger's
         /// bond is returned.
         #[pallet::call_index(8)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::resolve_challenge())]
         pub fn resolve_challenge(
             origin: OriginFor<T>,
             target: T::AccountId,
@@ -891,6 +896,7 @@ mod tests {
     }
 
     impl crate::pallet::Config for Test {
+        type WeightInfo = ();
         type MaxOracleOperators = TestMaxOperators;
         type OracleUpdateInterval = TestOracleInterval;
         type CommitteeSize = TestCommitteeSize;
@@ -1276,6 +1282,7 @@ mod tests {
         }
 
         impl crate::pallet::Config for TestT1 {
+            type WeightInfo = ();
             type MaxOracleOperators = T1MaxOperators;
             type OracleUpdateInterval = T1Interval;
             type CommitteeSize = T1CommitteeSize;

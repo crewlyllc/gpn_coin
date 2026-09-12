@@ -4,11 +4,14 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+pub mod weights;
+
 use codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use core::fmt::Debug;
 use scale_info::TypeInfo;
 
 pub use pallet::*;
+pub use weights::WeightInfo;
 
 /// Fee distribution percentages (in basis points, must sum to 500)
 #[derive(
@@ -104,6 +107,8 @@ pub mod pallet {
         /// `TotalMinted` (below); every mint path checks it against this cap.
         #[pallet::constant]
         type MaxSupply: Get<BalanceOf<Self>>;
+        /// Weight information for extrinsics in this pallet (workplan item 9).
+        type WeightInfo: WeightInfo;
     }
 
     #[pallet::pallet]
@@ -222,7 +227,7 @@ pub mod pallet {
     #[pallet::call]
     impl<T: Config> Pallet<T> {
         #[pallet::call_index(0)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::mint_block_reward())]
         pub fn mint_block_reward(
             origin: OriginFor<T>,
             amount: BalanceOf<T>,
@@ -242,7 +247,7 @@ pub mod pallet {
         }
 
         #[pallet::call_index(1)]
-        #[pallet::weight(20_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::distribute_fees())]
         pub fn distribute_fees(origin: OriginFor<T>, total_fee: BalanceOf<T>) -> DispatchResult {
             ensure_root(origin)?;
             let config = <FeeDistributionConfig<T>>::get();
@@ -289,7 +294,7 @@ pub mod pallet {
         }
 
         #[pallet::call_index(2)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::set_fee_distribution())]
         pub fn set_fee_distribution(
             origin: OriginFor<T>,
             new_config: FeeDistribution,
@@ -302,7 +307,7 @@ pub mod pallet {
         }
 
         #[pallet::call_index(3)]
-        #[pallet::weight(100_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::distribute_staking_rewards())]
         pub fn distribute_staking_rewards(
             origin: OriginFor<T>,
             stakers: Vec<T::AccountId>,
@@ -355,7 +360,7 @@ pub mod pallet {
         }
 
         #[pallet::call_index(4)]
-        #[pallet::weight(100_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::distribute_oracle_rewards())]
         pub fn distribute_oracle_rewards(
             origin: OriginFor<T>,
             operators: Vec<T::AccountId>,
@@ -541,6 +546,7 @@ mod tests {
     }
 
     impl crate::pallet::Config for Test {
+        type WeightInfo = ();
         type RuntimeEvent = RuntimeEvent;
         type Currency = Balances;
         type GPUAttestation = MockAttestation;

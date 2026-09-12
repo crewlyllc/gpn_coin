@@ -6,12 +6,15 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+pub mod weights;
+
 use codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use core::fmt::Debug;
 use pallet_gpn_liveness::LivenessProvider;
 use scale_info::TypeInfo;
 
 pub use pallet::*;
+pub use weights::WeightInfo;
 
 /// GPU attestation tier
 #[derive(
@@ -124,6 +127,8 @@ pub mod pallet {
         /// Min rolling uptime (bps) a full node needs to hold the Gold tier.
         #[pallet::constant]
         type GoldUptimeBps: Get<u32>;
+        /// Weight information for extrinsics in this pallet (workplan item 9).
+        type WeightInfo: WeightInfo;
     }
 
     #[pallet::pallet]
@@ -237,7 +242,7 @@ pub mod pallet {
     #[pallet::call]
     impl<T: Config> Pallet<T> {
         #[pallet::call_index(0)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::deposit_stake())]
         pub fn deposit_stake(origin: OriginFor<T>, amount: BalanceOf<T>) -> DispatchResult {
             let who = ensure_signed(origin)?;
             let min_stake = T::MinAttestationStake::get();
@@ -261,7 +266,7 @@ pub mod pallet {
         }
 
         #[pallet::call_index(1)]
-        #[pallet::weight(50_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::submit_attestation())]
         pub fn submit_attestation(
             origin: OriginFor<T>,
             challenge_response: [u8; 32],
@@ -329,7 +334,7 @@ pub mod pallet {
         }
 
         #[pallet::call_index(2)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::withdraw_stake())]
         pub fn withdraw_stake(origin: OriginFor<T>) -> DispatchResult {
             let who = ensure_signed(origin)?;
             let stake = <ProviderStake<T>>::take(&who).ok_or(Error::<T>::NoStakeToWithdraw)?;
@@ -350,7 +355,7 @@ pub mod pallet {
         }
 
         #[pallet::call_index(3)]
-        #[pallet::weight(100_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::check_expired())]
         pub fn check_expired(origin: OriginFor<T>, target: T::AccountId) -> DispatchResult {
             let _who = ensure_signed(origin)?;
             let mut record =
@@ -567,6 +572,7 @@ mod tests {
     }
 
     impl crate::pallet::Config for Test {
+        type WeightInfo = ();
         type RuntimeEvent = RuntimeEvent;
         type Currency = Balances;
         type Liveness = MockLiveness;

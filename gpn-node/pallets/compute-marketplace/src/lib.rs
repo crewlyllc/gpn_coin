@@ -5,12 +5,15 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+pub mod weights;
+
 use codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use core::fmt::Debug;
 use pallet_gpu_attestation::GPUAttestationProvider;
 use scale_info::TypeInfo;
 
 pub use pallet::*;
+pub use weights::WeightInfo;
 
 /// GPU capability requirements
 #[derive(
@@ -140,6 +143,8 @@ pub mod pallet {
         /// token pallet (`gpn/tokn`) so collected fees feed `distribute_fees`
         /// (staking/oracle pools + treasury + burn) — self-funding fee economy.
         type FeeSink: pallet_gpn_token::FeeSinkProvider<Self::AccountId>;
+        /// Weight information for extrinsics in this pallet (workplan item 9).
+        type WeightInfo: WeightInfo;
     }
 
     #[pallet::pallet]
@@ -256,7 +261,7 @@ pub mod pallet {
     #[pallet::call]
     impl<T: Config> Pallet<T> {
         #[pallet::call_index(0)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::register_provider())]
         pub fn register_provider(
             origin: OriginFor<T>,
             requirements: GPURequirements,
@@ -272,7 +277,7 @@ pub mod pallet {
         }
 
         #[pallet::call_index(1)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::unregister_provider())]
         pub fn unregister_provider(origin: OriginFor<T>) -> DispatchResult {
             let who = ensure_signed(origin)?;
             ensure!(
@@ -285,7 +290,7 @@ pub mod pallet {
         }
 
         #[pallet::call_index(2)]
-        #[pallet::weight(50_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::create_job())]
         pub fn create_job(
             origin: OriginFor<T>,
             gpu_requirements: GPURequirements,
@@ -360,7 +365,7 @@ pub mod pallet {
         }
 
         #[pallet::call_index(3)]
-        #[pallet::weight(30_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::accept_job())]
         pub fn accept_job(origin: OriginFor<T>, job_id: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
             let provider = who.clone();
@@ -405,7 +410,7 @@ pub mod pallet {
         }
 
         #[pallet::call_index(4)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::start_job())]
         pub fn start_job(origin: OriginFor<T>, job_id: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
             let mut job = <Jobs<T>>::get(job_id).ok_or(Error::<T>::JobNotFound)?;
@@ -426,7 +431,7 @@ pub mod pallet {
         }
 
         #[pallet::call_index(5)]
-        #[pallet::weight(20_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::submit_result())]
         pub fn submit_result(
             origin: OriginFor<T>,
             job_id: u64,
@@ -450,7 +455,7 @@ pub mod pallet {
         }
 
         #[pallet::call_index(6)]
-        #[pallet::weight(20_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::complete_job())]
         pub fn complete_job(origin: OriginFor<T>, job_id: u64) -> DispatchResult {
             let _who = ensure_signed(origin)?;
             let mut job = <Jobs<T>>::get(job_id).ok_or(Error::<T>::JobNotFound)?;
@@ -509,7 +514,7 @@ pub mod pallet {
         }
 
         #[pallet::call_index(7)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::cancel_job())]
         pub fn cancel_job(origin: OriginFor<T>, job_id: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
             let job = <Jobs<T>>::get(job_id).ok_or(Error::<T>::JobNotFound)?;
@@ -661,6 +666,7 @@ mod tests {
     }
 
     impl crate::pallet::Config for Test {
+        type WeightInfo = ();
         type RuntimeEvent = RuntimeEvent;
         type Currency = Balances;
         type MarketplaceFeeBps = TestFeeBps;

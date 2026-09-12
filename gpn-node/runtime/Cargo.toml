@@ -92,6 +92,14 @@ runtime-benchmarks = [
     "frame-system/runtime-benchmarks",
     "pallet-balances/runtime-benchmarks",
     "pallet-timestamp/runtime-benchmarks",
+    "pallet-gpu-pow/runtime-benchmarks",
+    "pallet-gpu-attestation/runtime-benchmarks",
+    "pallet-gpn-liveness/runtime-benchmarks",
+    "pallet-gpn-treasury/runtime-benchmarks",
+    "pallet-compute-marketplace/runtime-benchmarks",
+    "pallet-profitability-oracle/runtime-benchmarks",
+    "pallet-gpn-token/runtime-benchmarks",
+    "pallet-shielded-pool/runtime-benchmarks",
 ]
 try-runtime = ["frame-try-runtime/try-runtime"]
 

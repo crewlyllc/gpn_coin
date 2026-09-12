@@ -5,6 +5,8 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+pub mod weights;
+
 use codec::{Decode, DecodeWithMemTracking, Encode};
 use core::fmt::Debug;
 use scale_info::TypeInfo;
@@ -15,6 +17,7 @@ use sp_runtime::SaturatedConversion;
 use serde::{Deserialize, Serialize};
 
 pub use pallet::*;
+pub use weights::WeightInfo;
 
 /// A 256-bit unsigned integer for difficulty.
 pub type U256 = [u64; 4];
@@ -75,6 +78,8 @@ pub mod pallet {
         /// Block rewards are minted through it so the 1B cap is enforced
         /// against one counter (workplan item 1).
         type Supply: SupplyManager<Self::AccountId, BalanceOf<Self>>;
+        /// Weight information for extrinsics in this pallet (workplan item 9).
+        type WeightInfo: WeightInfo;
     }
 
     #[pallet::pallet]
@@ -251,7 +256,7 @@ pub mod pallet {
         ///
         /// The reward is paid to `origin` in the next block's `on_initialize`.
         #[pallet::call_index(0)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::submit_solution())]
         pub fn submit_solution(
             origin: OriginFor<T>,
             solution: EthashSolution,
@@ -288,7 +293,7 @@ pub mod pallet {
         /// Root only: prevents a stranger from redirecting the chain's block
         /// emission to themselves. Root may rotate the beneficiary at any time.
         #[pallet::call_index(1)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::set_block_beneficiary())]
         pub fn set_block_beneficiary(
             origin: OriginFor<T>,
             beneficiary: T::AccountId,
@@ -604,6 +609,7 @@ mod tests {
         type PowMaxWeight = TestPowMaxWeight;
         type AlgorithmVersion = TestAlgoVersion;
         type Supply = MockSupply;
+        type WeightInfo = ();
     }
 
     fn new_test_ext() -> sp_io::TestExternalities {

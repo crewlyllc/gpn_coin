@@ -5776,6 +5776,7 @@ dependencies = [
 name = "pallet-compute-marketplace"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "log",
@@ -5795,6 +5796,7 @@ dependencies = [
 name = "pallet-gpn-liveness"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "log",
@@ -5812,6 +5814,7 @@ dependencies = [
 name = "pallet-gpn-token"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "log",
@@ -5830,6 +5833,7 @@ dependencies = [
 name = "pallet-gpn-treasury"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "log",
@@ -5847,6 +5851,7 @@ dependencies = [
 name = "pallet-gpu-attestation"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "log",
@@ -5865,6 +5870,7 @@ dependencies = [
 name = "pallet-gpu-pow"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "log",
@@ -5895,6 +5901,7 @@ dependencies = [
 name = "pallet-profitability-oracle"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "log",
@@ -5914,6 +5921,7 @@ version = "0.1.0"
 dependencies = [
  "bls12_381",
  "ff",
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "log",

@@ -316,6 +316,8 @@ impl pallet_gpu_pow::Config for Runtime {
     // Canonical supply accounting lives in pallet-gpn-token; the single
     // `MaxSupply` const is now enforced there (workplan item 1).
     type Supply = GPNToken;
+    // Benchmark-derived weights (workplan item 9).
+    type WeightInfo = pallet_gpu_pow::weights::SubstrateWeight<Runtime>;
 }
 
 parameter_types! {
@@ -339,6 +341,8 @@ impl pallet_gpu_attestation::Config for Runtime {
     type BaseStakingAPR = BaseStakingAPR;
     type SilverUptimeBps = SilverUptimeBps;
     type GoldUptimeBps = GoldUptimeBps;
+    // Benchmark-derived weights (workplan item 9).
+    type WeightInfo = pallet_gpu_attestation::weights::SubstrateWeight<Runtime>;
 }
 
 parameter_types! {
@@ -361,6 +365,8 @@ impl pallet_gpn_liveness::Config for Runtime {
     type SlashBps = LivenessSlashBps;
     type UptimeLookback = UptimeLookback;
     type MaxEndpointLen = MaxEndpointLen;
+    // Benchmark-derived weights (workplan item 9).
+    type WeightInfo = pallet_gpn_liveness::weights::SubstrateWeight<Runtime>;
 }
 
 parameter_types! {
@@ -373,6 +379,8 @@ impl pallet_gpn_treasury::Config for Runtime {
     type Currency = Balances;
     type MaxRoster = TreasuryMaxRoster;
     type MaxTranches = TreasuryMaxTranches;
+    // Benchmark-derived weights (workplan item 9).
+    type WeightInfo = pallet_gpn_treasury::weights::SubstrateWeight<Runtime>;
 }
 
 parameter_types! {
@@ -396,6 +404,8 @@ impl pallet_compute_marketplace::Config for Runtime {
     // Route marketplace fees into the GPN token pallet account so the fee
     // economy is self-funding (distribute_fees draws from gpn/tokn).
     type FeeSink = GPNToken;
+    // Benchmark-derived weights (workplan item 9).
+    type WeightInfo = pallet_compute_marketplace::weights::SubstrateWeight<Runtime>;
 }
 
 parameter_types! {
@@ -433,6 +443,8 @@ impl pallet_profitability_oracle::Config for Runtime {
     type StaleOperatorBlocks = OracleStaleOperatorBlocks;
     type SlashBps = OracleSlashBps;
     type Currency = Balances;
+    // Benchmark-derived weights (workplan item 9).
+    type WeightInfo = pallet_profitability_oracle::weights::SubstrateWeight<Runtime>;
 }
 
 parameter_types! {
@@ -451,6 +463,8 @@ impl pallet_gpn_token::Config for Runtime {
     type BlocksPerYear = BlocksPerYear;
     type TreasuryAccount = TreasuryAccount;
     type MaxSupply = MaxSupply;
+    // Benchmark-derived weights (workplan item 9).
+    type WeightInfo = pallet_gpn_token::weights::SubstrateWeight<Runtime>;
 }
 
 parameter_types! {
@@ -466,6 +480,8 @@ impl pallet_shielded_pool::Config for Runtime {
     type Currency = Balances;
     type ShieldedFee = ShieldedFee;
     type MaxCommitments = MaxShieldedCommitments;
+    // Benchmark-derived weights (workplan item 9).
+    type WeightInfo = pallet_shielded_pool::weights::SubstrateWeight<Runtime>;
 }
 
 // ###########################################################################

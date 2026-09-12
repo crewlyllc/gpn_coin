@@ -28,7 +28,10 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+pub mod weights;
+
 pub use pallet::*;
+pub use weights::WeightInfo;
 
 pub mod groth16;
 
@@ -141,6 +144,8 @@ pub mod pallet {
         /// Hard cap on live commitments (bounds storage + anonymity-set growth).
         #[pallet::constant]
         type MaxCommitments: Get<u32>;
+        /// Weight information for extrinsics in this pallet (workplan item 9).
+        type WeightInfo: WeightInfo;
     }
 
     #[pallet::pallet]
@@ -220,7 +225,7 @@ pub mod pallet {
         /// secret. In the prototype it uses the deterministic [`groth16::test_key`];
         /// a real deployment swaps in a Powers-of-Tau ceremony key.
         #[pallet::call_index(1)]
-        #[pallet::weight(200_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::verify_proof())]
         pub fn verify_proof(
             origin: OriginFor<T>,
             proof_a: [u8; 48],
@@ -255,7 +260,7 @@ pub mod pallet {
         /// shielded note (publishes `cm`), and increments `PoolValue`. The
         /// sender pays a configurable `ShieldedFee` on top.
         #[pallet::call_index(0)]
-        #[pallet::weight(50_000)]
+        #[pallet::weight(<T as Config>::WeightInfo::deposit())]
         pub fn deposit(
             origin: OriginFor<T>,
             amount: BalanceOf<T>,
@@ -411,6 +416,7 @@ mod tests {
     }
 
     impl crate::pallet::Config for Test {
+        type WeightInfo = ();
         type RuntimeEvent = RuntimeEvent;
         type Currency = Balances;
         type ShieldedFee = TestShieldedFee;
