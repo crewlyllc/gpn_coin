@@ -5,7 +5,7 @@
 use super::*;
 use crate::pallet::Pallet as Treasury;
 use frame_benchmarking::v2::*;
-use frame_support::sp_runtime::traits::{Bounded, Zero};
+use frame_support::sp_runtime::traits::{Bounded, Saturating, Zero};
 use frame_support::traits::Currency;
 use frame_support::BoundedVec;
 use frame_system::RawOrigin;
@@ -75,21 +75,20 @@ mod benchmarks {
             &Treasury::<T>::account_id(),
             BalanceOf::<T>::max_value() / 2u32.into(),
         );
+        // The spend is a real balance transfer, so it must clear the existential
+        // deposit to bring the (fresh) destination account into existence.
+        let amount: BalanceOf<T> = T::Currency::minimum_balance().saturating_mul(2u32.into());
         let mut schedule: BoundedVec<TrancheOf<T>, T::MaxTranches> = BoundedVec::default();
         schedule
             .try_push(Tranche {
                 unlock_block: Zero::zero(),
-                amount: 1_000_000u32.into(),
+                amount: amount.saturating_mul(10u32.into()),
             })
             .unwrap();
         Schedule::<T>::put(schedule);
         let dest = member::<T>(1);
-        Treasury::<T>::propose_spend(
-            RawOrigin::Signed(member_acct.clone()).into(),
-            dest,
-            100u32.into(),
-        )
-        .unwrap();
+        Treasury::<T>::propose_spend(RawOrigin::Signed(member_acct.clone()).into(), dest, amount)
+            .unwrap();
         let id = NextProposalId::<T>::get().saturating_sub(1);
 
         #[extrinsic_call]

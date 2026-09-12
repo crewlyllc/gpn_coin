@@ -93,6 +93,12 @@ pub trait GPUAttestationProvider<AccountId> {
     fn attested_gflops(who: &AccountId) -> u64;
     /// The provider's current attestation tier (`Unattested` if none).
     fn attested_tier(who: &AccountId) -> AttestationTier;
+    /// Benchmark-only: install/overwrite an attestation record so downstream
+    /// benchmarks (e.g. `pallet-gpn-token` staking-reward loops) can exercise
+    /// the attested path without going through the full challenge flow. Has a
+    /// no-op default so mocks/other implementers need not care.
+    #[cfg(feature = "runtime-benchmarks")]
+    fn benchmark_set_attestation(_who: &AccountId, _tier: AttestationTier) {}
 }
 
 #[frame_support::pallet]
@@ -470,6 +476,22 @@ impl<T: Config> GPUAttestationProvider<T::AccountId> for Pallet<T> {
         <Attestations<T>>::get(who)
             .map(|r| r.tier)
             .unwrap_or(AttestationTier::Unattested)
+    }
+
+    #[cfg(feature = "runtime-benchmarks")]
+    fn benchmark_set_attestation(who: &T::AccountId, tier: AttestationTier) {
+        let record = AttestationRecord {
+            submitted_at: frame_system::Pallet::<T>::block_number()
+                .try_into()
+                .unwrap_or(0u32),
+            gpu_info_hash: [0u8; 32],
+            challenge_response: [0u8; 32],
+            gpu_count: tier.min_gpus() as u8,
+            compute_gflops: 0,
+            tier,
+            missed_count: 0,
+        };
+        <Attestations<T>>::insert(who, record);
     }
 }
 

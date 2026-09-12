@@ -309,7 +309,7 @@ pub mod pallet {
         }
 
         #[pallet::call_index(3)]
-        #[pallet::weight(<T as Config>::WeightInfo::distribute_staking_rewards())]
+        #[pallet::weight(<T as Config>::WeightInfo::distribute_staking_rewards(stakers.len() as u32))]
         pub fn distribute_staking_rewards(
             origin: OriginFor<T>,
             stakers: Vec<T::AccountId>,
@@ -362,7 +362,7 @@ pub mod pallet {
         }
 
         #[pallet::call_index(4)]
-        #[pallet::weight(<T as Config>::WeightInfo::distribute_oracle_rewards())]
+        #[pallet::weight(<T as Config>::WeightInfo::distribute_oracle_rewards(operators.len() as u32))]
         pub fn distribute_oracle_rewards(
             origin: OriginFor<T>,
             operators: Vec<T::AccountId>,
