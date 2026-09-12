@@ -36,7 +36,7 @@ mod benchmarks {
     fn propose_spend() {
         let who = member::<T>(0);
         let dest = member::<T>(1);
-        install_roster::<T>(&[who.clone()], 1);
+        install_roster::<T>(core::slice::from_ref(&who), 1);
         let amount: BalanceOf<T> = 100u32.into();
         let id = NextProposalId::<T>::get();
 
@@ -69,7 +69,7 @@ mod benchmarks {
     #[benchmark]
     fn execute_spend() {
         let member_acct = member::<T>(0);
-        install_roster::<T>(&[member_acct.clone()], 1);
+        install_roster::<T>(core::slice::from_ref(&member_acct), 1);
         // Fund the treasury and give it an unlocked tranche.
         T::Currency::make_free_balance_be(
             &Treasury::<T>::account_id(),

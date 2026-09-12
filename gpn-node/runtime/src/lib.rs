@@ -7,6 +7,11 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![recursion_limit = "256"]
 
+// `alloc` is only referenced by the benchmark runtime API (its return type is
+// `Result<Vec<BenchmarkBatch>, alloc::string::String>`).
+#[cfg(feature = "runtime-benchmarks")]
+extern crate alloc;
+
 // Feature-2 spike: confirm a BLS12-381 pairing curve compiles in no_std Wasm.
 // This is the foundation for the shielded-pool zk-SNARK verifier.
 #[allow(dead_code)]
@@ -517,6 +522,27 @@ pub type Executive = frame_executive::Executive<
 >;
 
 // ###########################################################################
+// Runtime benchmarking (frame-omni-bencher entry point)
+// ###########################################################################
+//
+// Lists the pallets whose `#[benchmarks]` modules the runtime exposes to the
+// `Benchmark` runtime API. `frame-omni-bencher` drives these to produce the
+// measured weights that replace the `SubstrateWeight<T>` baselines (item 9.4).
+#[cfg(feature = "runtime-benchmarks")]
+mod benches {
+    frame_benchmarking::define_benchmarks!(
+        [pallet_gpu_pow, GPUPoW]
+        [pallet_gpu_attestation, GPUAttestation]
+        [pallet_gpn_liveness, Liveness]
+        [pallet_compute_marketplace, ComputeMarketplace]
+        [pallet_profitability_oracle, ProfitabilityOracle]
+        [pallet_gpn_token, GPNToken]
+        [pallet_gpn_treasury, GPNTreasury]
+        [pallet_shielded_pool, ShieldedPool]
+    );
+}
+
+// ###########################################################################
 // Runtime API
 // ###########################################################################
 
@@ -695,6 +721,45 @@ sp_api::impl_runtime_apis! {
 
         fn preset_names() -> sp_std::vec::Vec<sp_genesis_builder::PresetId> {
             sp_std::vec::Vec::new()
+        }
+    }
+
+    #[cfg(feature = "runtime-benchmarks")]
+    impl frame_benchmarking::Benchmark<Block> for Runtime {
+        fn benchmark_metadata(
+            extra: bool,
+        ) -> (
+            Vec<frame_benchmarking::BenchmarkList>,
+            Vec<frame_support::traits::StorageInfo>,
+        ) {
+            use frame_benchmarking::BenchmarkList;
+            use frame_support::traits::StorageInfoTrait;
+
+            let mut list = Vec::<BenchmarkList>::new();
+            list_benchmarks!(list, extra);
+
+            let storage_info = AllPalletsWithSystem::storage_info();
+            (list, storage_info)
+        }
+
+        #[allow(non_local_definitions)]
+        fn dispatch_benchmark(
+            config: frame_benchmarking::BenchmarkConfig,
+        ) -> Result<Vec<frame_benchmarking::BenchmarkBatch>, alloc::string::String> {
+            use frame_benchmarking::BenchmarkBatch;
+            use frame_support::traits::WhitelistedStorageKeys;
+            use frame_benchmarking::__private::TrackedStorageKey;
+
+            let whitelist: Vec<TrackedStorageKey> = AllPalletsWithSystem::whitelisted_storage_keys();
+
+            let mut batches = Vec::<BenchmarkBatch>::new();
+            let params = (&config, &whitelist);
+            add_benchmarks!(params, batches);
+
+            if batches.is_empty() {
+                return Err("Benchmark not found for this pallet.".into());
+            }
+            Ok(batches)
         }
     }
 }
