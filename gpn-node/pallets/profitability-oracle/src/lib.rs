@@ -4,6 +4,8 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+#[cfg(feature = "runtime-benchmarks")]
+pub mod benchmarking;
 pub mod weights;
 
 use codec::{Decode, Encode};
@@ -914,7 +916,7 @@ mod tests {
     const CHARLIE: u64 = 3;
     const DAVE: u64 = 4;
 
-    fn new_test_ext() -> sp_io::TestExternalities {
+    pub fn new_test_ext() -> sp_io::TestExternalities {
         let t = RuntimeGenesisConfig {
             system: Default::default(),
             balances: pallet_balances::GenesisConfig::<Test> {
