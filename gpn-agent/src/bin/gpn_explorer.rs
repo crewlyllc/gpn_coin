@@ -29,6 +29,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpn_agent::chain::{AccountInfo, ChainClient};
+use gpn_agent::cli;
 use tiny_http::{Header, Response, Server};
 
 /// GPN 1 GPN = 1e12 base units (12 decimals).
@@ -392,7 +393,7 @@ button{background:#238636;border:none;color:#fff;padding:6px 14px;border-radius:
     s
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let mut endpoint = "ws://127.0.0.1:9944".to_string();
     let mut listen = "127.0.0.1:8082".to_string();
@@ -402,27 +403,28 @@ fn main() {
         match args[i].as_str() {
             "--endpoint" => {
                 i += 1;
-                if i < args.len() {
-                    endpoint = args[i].clone();
-                }
+                endpoint = args.get(i).cloned().ok_or_else(|| {
+                    cli::ArgError::from("missing value for --endpoint".to_string())
+                })?;
             }
             "--listen" => {
                 i += 1;
-                if i < args.len() {
-                    listen = args[i].clone();
-                }
+                listen = args
+                    .get(i)
+                    .cloned()
+                    .ok_or_else(|| cli::ArgError::from("missing value for --listen".to_string()))?;
             }
             "--account" => {
                 i += 1;
-                if i < args.len() {
-                    accounts.push(args[i].clone());
-                }
+                accounts.push(args.get(i).cloned().ok_or_else(|| {
+                    cli::ArgError::from("missing value for --account".to_string())
+                })?);
             }
             "--help" | "-h" => {
                 println!("gpn_explorer [--endpoint ws://127.0.0.1:9944] [--listen 127.0.0.1:8082] [--account //Alice] ...");
-                return;
+                return Ok(());
             }
-            _ => {}
+            other => return Err(cli::ArgError::from(format!("unknown argument: {other}")).into()),
         }
         i += 1;
     }
@@ -432,16 +434,16 @@ fn main() {
     }
     env_logger::init();
 
-    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let runtime = tokio::runtime::Runtime::new().map_err(|e| format!("tokio runtime: {e}"))?;
     let client = runtime
         .block_on(ChainClient::new(&endpoint))
-        .expect("chain client");
+        .map_err(|e| format!("cannot connect to {endpoint}: {e}"))?;
     let explorer = Arc::new(Explorer {
         client,
         endpoint: endpoint.clone(),
         accounts,
     });
-    let server = Server::http(&listen).expect("bind listener");
+    let server = Server::http(&listen).map_err(|e| format!("cannot bind {listen}: {e}"))?;
     println!("gpn_explorer listening on http://{listen} (node {endpoint})");
 
     for request in server.incoming_requests() {
@@ -454,4 +456,5 @@ fn main() {
         let resp = route(&ex, runtime.handle(), &path, &query);
         let _ = request.respond(resp);
     }
+    Ok(())
 }

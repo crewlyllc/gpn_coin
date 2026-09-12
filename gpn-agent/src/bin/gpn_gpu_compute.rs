@@ -11,29 +11,32 @@
 //!
 //! Defaults: matrix_size=2048, iterations=8, device_index=0
 
+use gpn_agent::cli;
 use gpn_agent::gpu::matmul::GpuMatmul;
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
     let args: Vec<String> = std::env::args().collect();
-    let n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(2048);
-    let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(8);
-    let device: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let n: usize = cli::opt_num("matrix_size", args.get(1).map(|s| s.as_str()), 2048)?;
+    let iters: usize = cli::opt_num("iterations", args.get(2).map(|s| s.as_str()), 8)?;
+    let device: usize = cli::opt_num("device_index", args.get(3).map(|s| s.as_str()), 0)?;
 
     println!("== GPN GPU AI-compute benchmark (dense GEMM) ==");
     for line in gpn_agent::gpu::ethash_miner::EthashGpuMiner::device_summary() {
         println!("  device: {line}");
     }
 
-    let mut mm = GpuMatmul::new(device, n).expect("open GPU matmul");
+    let mut mm = GpuMatmul::new(device, n).map_err(|e| format!("open GPU matmul: {e}"))?;
     println!("using GPU: {}  N={n}  iterations={iters}", mm.device_name());
 
     // Warm-up so the first timed iteration reflects steady-state scheduling.
-    mm.run_once().expect("warm-up");
+    mm.run_once().map_err(|e| format!("warm-up: {e}"))?;
     println!("GPU matmul ready — running {iters} iterations...");
 
-    let (elapsed, flops) = mm.run_many(iters).expect("run matmuls");
+    let (elapsed, flops) = mm
+        .run_many(iters)
+        .map_err(|e| format!("run matmuls: {e}"))?;
     let gflops = flops / 1e9;
     let per_iter_ms = elapsed.as_secs_f64() * 1000.0 / iters as f64;
     println!();
@@ -47,4 +50,5 @@ fn main() {
     );
     println!();
     println!("✅ Real GPU AI compute verified — this workload is what Compute mode serves.");
+    Ok(())
 }

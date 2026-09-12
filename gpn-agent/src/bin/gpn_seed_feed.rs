@@ -29,16 +29,9 @@
 //!   cargo run -p gpn-agent --bin gpn_seed_feed --release
 
 use gpn_agent::chain::signer;
+use gpn_agent::cli;
 use subxt::dynamic::Value;
 use subxt::tx::Signer as _;
-
-fn parse_u64(s: &str, default: u64) -> u64 {
-    s.parse().unwrap_or(default)
-}
-
-fn parse_u32(s: &str, default: u32) -> u32 {
-    s.parse().unwrap_or(default)
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -49,13 +42,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get(1)
         .cloned()
         .unwrap_or_else(|| "ws://127.0.0.1:9944".to_string());
-    let token_micro = parse_u64(args.get(2).map(|s| s.as_str()).unwrap_or("50000"), 50_000);
-    let gpu_micro = parse_u64(
-        args.get(3).map(|s| s.as_str()).unwrap_or("2500000"),
-        2_500_000,
-    );
-    let util_bps = parse_u32(args.get(4).map(|s| s.as_str()).unwrap_or("6500"), 6_500);
-    let apr_bps = parse_u32(args.get(5).map(|s| s.as_str()).unwrap_or("1200"), 1_200);
+    let token_micro = cli::opt_num("token_micro", args.get(2).map(|s| s.as_str()), 50_000)?;
+    let gpu_micro = cli::opt_num("gpu_micro", args.get(3).map(|s| s.as_str()), 2_500_000)?;
+    let util_bps = cli::opt_num("util_bps", args.get(4).map(|s| s.as_str()), 6_500)?;
+    let apr_bps = cli::opt_num("apr_bps", args.get(5).map(|s| s.as_str()), 1_200)?;
     let signer_uri = args
         .get(6)
         .cloned()

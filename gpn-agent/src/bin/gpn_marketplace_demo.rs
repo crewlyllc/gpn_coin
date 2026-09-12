@@ -19,12 +19,9 @@
 //! attest demo / `gpn_check_state` after a prior live attest).
 
 use gpn_agent::chain::ChainClient;
+use gpn_agent::cli;
 use gpn_agent::gpu::matmul::GpuMatmul;
 use sha2::{Digest, Sha256};
-
-fn parse_u64(s: &str, default: u64) -> u64 {
-    s.parse().unwrap_or(default)
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -39,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get(2)
         .cloned()
         .unwrap_or_else(|| "//Alice".to_string());
-    let min_gflops = parse_u64(args.get(3).map(|s| s.as_str()).unwrap_or("150"), 150);
+    let min_gflops = cli::opt_num("min_gflops", args.get(3).map(|s| s.as_str()), 150)?;
 
     println!("=== GPN compute-marketplace end-to-end demo ===");
     println!(

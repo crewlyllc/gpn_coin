@@ -22,11 +22,8 @@
 //!   gpn_check_feed            -> "compute_revenue_reasonable = true"  (exit 0)
 
 use gpn_agent::chain::ChainClient;
+use gpn_agent::cli;
 use gpn_agent::profitability::{calc_compute_revenue, compute_revenue_reasonable};
-
-fn parse_f64(s: &str, default: f64) -> f64 {
-    s.parse().unwrap_or(default)
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -35,7 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get(1)
         .cloned()
         .unwrap_or_else(|| "ws://127.0.0.1:9944".to_string());
-    let max_usd_per_hour = parse_f64(args.get(2).map(|s| s.as_str()).unwrap_or("50.0"), 50.0);
+    let max_usd_per_hour = cli::opt_num("max_usd_per_hour", args.get(2).map(|s| s.as_str()), 50.0)?;
 
     let client = ChainClient::new(&endpoint).await?;
 

@@ -2,6 +2,7 @@
 //! (auto mode) can claim & serve it. This is the requestor-side of the
 //! loop-closing test: the agent should pick up this job on-chain.
 use gpn_agent::chain::ChainClient;
+use gpn_agent::cli;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -14,7 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get(2)
         .cloned()
         .unwrap_or_else(|| "//Alice".to_string());
-    let min_gflops: u64 = args.get(3).map(|s| s.parse().unwrap_or(150)).unwrap_or(150);
+    let min_gflops: u64 = cli::opt_num("min_gflops", args.get(3).map(|s| s.as_str()), 150)?;
 
     let client = ChainClient::new(&endpoint).await?.with_signer(&signer_uri);
     let workload_hash = [0xabu8; 32];

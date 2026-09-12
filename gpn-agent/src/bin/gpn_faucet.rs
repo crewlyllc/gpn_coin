@@ -379,18 +379,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     while let Some(a) = args.next() {
         let mut val = || {
             args.next()
-                .unwrap_or_else(|| panic!("missing value for {}", a))
+                .ok_or_else(|| gpn_agent::cli::ArgError::from(format!("missing value for {a}")))
         };
         match a.as_str() {
-            "--endpoint" => endpoint = val(),
-            "--listen" => listen = val(),
-            "--signer-uri" => signer_uri = val(),
-            "--drip-gpn" => drip_gpn = val().parse()?,
-            "--cooldown-secs" => cooldown_secs = val().parse()?,
-            "--daily-cap-gpn" => daily_cap_gpn = val().parse()?,
-            "--total-cap-gpn" => total_cap_gpn = val().parse()?,
-            "--reserve-gpn" => reserve_gpn = val().parse()?,
-            other => return Err(format!("unknown arg: {}", other).into()),
+            "--endpoint" => endpoint = val()?,
+            "--listen" => listen = val()?,
+            "--signer-uri" => signer_uri = val()?,
+            "--drip-gpn" => drip_gpn = gpn_agent::cli::parse_num("--drip-gpn", &val()?)?,
+            "--cooldown-secs" => {
+                cooldown_secs = gpn_agent::cli::parse_num("--cooldown-secs", &val()?)?
+            }
+            "--daily-cap-gpn" => {
+                daily_cap_gpn = gpn_agent::cli::parse_num("--daily-cap-gpn", &val()?)?
+            }
+            "--total-cap-gpn" => {
+                total_cap_gpn = gpn_agent::cli::parse_num("--total-cap-gpn", &val()?)?
+            }
+            "--reserve-gpn" => reserve_gpn = gpn_agent::cli::parse_num("--reserve-gpn", &val()?)?,
+            other => {
+                return Err(gpn_agent::cli::ArgError::from(format!("unknown arg: {other}")).into())
+            }
         }
     }
 

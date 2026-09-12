@@ -14,17 +14,23 @@
 //!   gpn_simulate_autoswitch [hysteresis_percent] [start_mode]
 //!   (start_mode: mining | compute | stake_only; default mining)
 
-use gpn_agent::{Mode, ScriptedFeed};
+use gpn_agent::{cli, Mode, ScriptedFeed};
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
     let args: Vec<String> = std::env::args().collect();
-    let hysteresis: f64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5.0);
+    let hysteresis: f64 = cli::opt_num("hysteresis_percent", args.get(1).map(|s| s.as_str()), 5.0)?;
     let start_mode = match args.get(2).map(|s| s.as_str()) {
+        None | Some("mining") | Some("mine") => Mode::Mining,
         Some("compute") => Mode::Compute,
         Some("stake_only") => Mode::StakeOnly,
-        _ => Mode::Mining,
+        Some(other) => {
+            return Err(cli::ArgError::from(format!(
+                "unknown start_mode '{other}' (expected mining | compute | stake_only)"
+            ))
+            .into())
+        }
     };
 
     println!("== GPN auto-switch simulator ==");
@@ -61,4 +67,5 @@ fn main() {
 
     println!();
     println!("Final mode: {current:?}");
+    Ok(())
 }

@@ -43,6 +43,7 @@
 //! A `oracle_values.toml` is written on first run (with defaults) if missing.
 
 use gpn_agent::chain::{signer, ChainClient};
+use gpn_agent::cli;
 use serde::{Deserialize, Serialize};
 use sp_core::{crypto::Pair as _, sr25519};
 use std::path::Path;
@@ -114,7 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get(2)
         .cloned()
         .unwrap_or_else(|| "oracle_values.toml".to_string());
-    let interval_secs: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(60);
+    let interval_secs: u64 = cli::opt_num("interval_secs", args.get(3).map(|s| s.as_str()), 60)?;
     let signer_uri = args
         .get(4)
         .cloned()

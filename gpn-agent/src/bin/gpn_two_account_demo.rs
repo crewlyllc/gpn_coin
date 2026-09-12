@@ -24,17 +24,11 @@
 //! `gpn_marketplace_demo`/cycle-27 attest flow).
 
 use gpn_agent::chain::ChainClient;
+use gpn_agent::cli;
 use sha2::{Digest, Sha256};
 
 const FEE_BPS: u64 = 500; // MarketplaceFeeBps = 5% (runtime)
 const GPN_UNITS: f64 = 1e12; // 1 GPN = 1e12 base units
-
-fn parse_u64(s: &str, default: u64) -> u64 {
-    s.parse().unwrap_or(default)
-}
-fn parse_f64(s: &str, default: f64) -> f64 {
-    s.parse().unwrap_or(default)
-}
 
 fn print_bal(label: &str, info: &gpn_agent::chain::AccountInfo) {
     println!(
@@ -57,8 +51,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get(3)
         .cloned()
         .unwrap_or_else(|| "//Alice".to_string());
-    let price_gpn = parse_f64(args.get(4).map(|s| s.as_str()).unwrap_or("50"), 50.0);
-    let min_gflops = parse_u64(args.get(5).map(|s| s.as_str()).unwrap_or("0"), 0);
+    let price_gpn = cli::opt_num("price_gpn", args.get(4).map(|s| s.as_str()), 50.0)?;
+    let min_gflops = cli::opt_num("min_gflops", args.get(5).map(|s| s.as_str()), 0)?;
 
     let price: u128 = (price_gpn * GPN_UNITS) as u128;
     println!("=== GPN two-account marketplace demo (requestor ≠ provider) ===");

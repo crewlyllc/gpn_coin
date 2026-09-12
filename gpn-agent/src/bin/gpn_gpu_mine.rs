@@ -9,44 +9,37 @@
 //!
 //! Defaults: header = 0x11.., target = 2^245 (GPN dev genesis difficulty).
 
+use gpn_agent::cli;
 use gpn_agent::gpu::ethash_miner::EthashGpuMiner;
 
-fn parse_hex(s: &str, expect: usize) -> [u8; 32] {
-    let clean: String = s.chars().filter(|c| !c.is_whitespace()).collect();
-    let clean = clean.trim_start_matches("0x");
-    let mut out = [0u8; 32];
-    let bytes = hex::decode(clean).expect("invalid hex");
-    assert_eq!(bytes.len(), expect, "expected {expect} bytes");
-    out.copy_from_slice(&bytes);
-    out
-}
-
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
     let args: Vec<String> = std::env::args().collect();
     let header = if args.len() > 1 {
-        parse_hex(&args[1], 32)
+        cli::parse_hex_fixed::<32>(&args[1])
+            .map_err(|e| cli::ArgError::from(format!("header_hex: {e}")))?
     } else {
         [0x11u8; 32]
     };
     let target = if args.len() > 2 {
-        parse_hex(&args[2], 32)
+        cli::parse_hex_fixed::<32>(&args[2])
+            .map_err(|e| cli::ArgError::from(format!("target_hex: {e}")))?
     } else {
         // 2^245, little-endian: byte 30 = 0x20
         let mut t = [0u8; 32];
         t[30] = 0x20;
         t
     };
-    let batch: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1 << 20);
-    let nonce_start: u64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let batch: usize = cli::opt_num("batch", args.get(3).map(|s| s.as_str()), 1 << 20)?;
+    let nonce_start: u64 = cli::opt_num("nonce_start", args.get(4).map(|s| s.as_str()), 0)?;
 
     println!("== GPN GPU Ethash miner ==");
     for line in EthashGpuMiner::device_summary() {
         println!("  device: {line}");
     }
 
-    let miner = EthashGpuMiner::new(0).expect("open GPU miner");
+    let miner = EthashGpuMiner::new(0).map_err(|e| format!("open GPU miner: {e}"))?;
     println!("using GPU: {}", miner.device_name());
 
     let epoch = 0usize;
@@ -57,7 +50,9 @@ fn main() {
     ethash::make_cache(&mut cache, seed);
     println!("light cache: {} KiB", cache_size / 1024);
 
-    let dag = miner.build_dag(&cache, full_size).expect("build DAG");
+    let dag = miner
+        .build_dag(&cache, full_size)
+        .map_err(|e| format!("build DAG: {e}"))?;
     println!(
         "target: 0x{}",
         target
@@ -70,7 +65,7 @@ fn main() {
     let start = std::time::Instant::now();
     let seal = miner
         .mine(&dag, &header, &target, nonce_start, batch)
-        .expect("mine");
+        .map_err(|e| format!("mine: {e}"))?;
     let elapsed = start.elapsed();
 
     // Self-verify exactly like gpn-node's `verify_seal`:
@@ -93,4 +88,5 @@ fn main() {
     }
     println!("  ✅ VERIFIED: this seal passes gpn-node's verify_seal");
     println!("  elapsed (search): {:?}", elapsed);
+    Ok(())
 }

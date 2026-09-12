@@ -15,11 +15,8 @@
 //!
 //! Defaults: rpc_url = http://127.0.0.1:9944, device_index = 0, batch = 1<<20, poll_ms = 2000
 
+use gpn_agent::cli;
 use gpn_agent::mining::{ExternalMiner, MiningConfig};
-
-fn parse_u64(s: &str, default: u64) -> u64 {
-    s.parse().unwrap_or(default)
-}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
@@ -29,12 +26,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get(1)
         .cloned()
         .unwrap_or_else(|| "http://127.0.0.1:9944".to_string());
-    let device_index: usize = parse_u64(args.get(2).map(|s| s.as_str()).unwrap_or("0"), 0) as usize;
-    let batch: usize = parse_u64(
-        args.get(3).map(|s| s.as_str()).unwrap_or("1048576"),
-        1 << 20,
-    ) as usize;
-    let poll_ms: u64 = parse_u64(args.get(4).map(|s| s.as_str()).unwrap_or("2000"), 2000);
+    let device_index: usize = cli::opt_num("device_index", args.get(2).map(|s| s.as_str()), 0)?;
+    let batch: usize = cli::opt_num("batch", args.get(3).map(|s| s.as_str()), 1 << 20)?;
+    let poll_ms: u64 = cli::opt_num("poll_ms", args.get(4).map(|s| s.as_str()), 2000)?;
 
     println!("== GPN external GPU miner ==");
     println!("  rpc:          {rpc_url}");
