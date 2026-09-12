@@ -26,6 +26,8 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+#[cfg(feature = "runtime-benchmarks")]
+pub mod benchmarking;
 pub mod weights;
 
 use codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
@@ -587,7 +589,7 @@ mod tests {
     const BOB: u64 = 2;
     const CHARLIE: u64 = 3;
 
-    fn new_test_ext() -> sp_io::TestExternalities {
+    pub fn new_test_ext() -> sp_io::TestExternalities {
         let mut t = frame_system::GenesisConfig::<Test>::default()
             .build_storage()
             .unwrap();
