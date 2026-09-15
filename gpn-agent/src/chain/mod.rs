@@ -30,7 +30,7 @@ use subxt::{config::SubstrateConfig, dynamic::Value, tx::Signer as _, OnlineClie
 
 /// Fallback defaults when the chain is unreachable / feed empty. Matches the
 /// previous hardcoded placeholders so behaviour is unchanged offline.
-const FALLBACK_TOKEN_PRICE_USD: f64 = 0.05;
+const FALLBACK_TOKEN_PRICE_USD: f64 = 0.15;
 const FALLBACK_GPU_HOUR_PRICE_USD: f64 = 2.5;
 const FALLBACK_UTILIZATION: f64 = 0.65;
 const FALLBACK_STAKING_APR_PERCENT: f64 = 12.0;

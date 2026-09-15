@@ -27,7 +27,7 @@
 //! `add_operator` or committee admission — the Phase-C path.
 //!
 //! Values file format (units match the oracle pallet / `gpn_seed_feed`):
-//!   token_price_usd      = 75000      # micro-USD  → $0.075
+//!   token_price_usd      = 150000     # micro-USD  → $0.15
 //!   avg_gpu_hour_price   = 3000000    # micro-USD  → $3.00/hr
 //!   utilization_rate_bps = 7200       # 72%
 //!   staking_apr_bps      = 1500       # 15%
@@ -54,7 +54,7 @@ use subxt::tx::Signer as _;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 struct OracleValues {
-    /// Token price in micro-USD (1e-6 USD). 75_000 = $0.075.
+    /// Token price in micro-USD (1e-6 USD). 150_000 = $0.15.
     token_price_usd: u64,
     /// Average GPU-hour price in micro-USD per hour. 3_000_000 = $3.00/hr.
     avg_gpu_hour_price: u64,
@@ -67,7 +67,7 @@ struct OracleValues {
 impl Default for OracleValues {
     fn default() -> Self {
         Self {
-            token_price_usd: 75_000,
+            token_price_usd: 150_000,
             avg_gpu_hour_price: 3_000_000,
             utilization_rate_bps: 7_200,
             staking_apr_bps: 1_500,

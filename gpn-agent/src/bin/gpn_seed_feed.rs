@@ -19,7 +19,7 @@
 //!
 //! Defaults (match the ChainClient fallbacks so a seeded feed == prior behavior):
 //!   endpoint       = ws://127.0.0.1:9944
-//!   token_micro    = 50_000          ($0.05)
+//!   token_micro    = 150_000         ($0.15)
 //!   gpu_hour_micro = 2_500_000       ($2.50/hr)
 //!   util_bps       = 6_500           (65%)
 //!   apr_bps        = 1_200           (12%)
@@ -42,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get(1)
         .cloned()
         .unwrap_or_else(|| "ws://127.0.0.1:9944".to_string());
-    let token_micro = cli::opt_num("token_micro", args.get(2).map(|s| s.as_str()), 50_000)?;
+    let token_micro = cli::opt_num("token_micro", args.get(2).map(|s| s.as_str()), 150_000)?;
     let gpu_micro = cli::opt_num("gpu_micro", args.get(3).map(|s| s.as_str()), 2_500_000)?;
     let util_bps = cli::opt_num("util_bps", args.get(4).map(|s| s.as_str()), 6_500)?;
     let apr_bps = cli::opt_num("apr_bps", args.get(5).map(|s| s.as_str()), 1_200)?;
