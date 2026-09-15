@@ -392,8 +392,8 @@ profitable, the agent switches Mining→Compute and **claims & serves marketplac
 on-chain** (accept→start→real GPU GEMM→submit→complete+payout).
 
 ```bash
-# seed a compute-favorable feed (token=$0.075, GPU=$12/hr, util=95%, APR=15%)
-gpn-agent/target/release/gpn_seed_feed ws://127.0.0.1:9944 75000 12000000 9500 1500 //Alice
+# seed a compute-favorable feed (token=$0.15, GPU=$12/hr, util=95%, APR=15%)
+gpn-agent/target/release/gpn_seed_feed ws://127.0.0.1:9944 150000 12000000 9500 1500 //Alice
 
 # create a Pending job for the agent to claim
 gpn-agent/target/release/gpn_create_job ws://127.0.0.1:9944 //Bob 0

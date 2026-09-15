@@ -89,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "ProfitabilityOracle",
         "update_feed",
         vec![
-            Value::u128(75_000),    // token_price_usd micro-USD
+            Value::u128(150_000),    // token_price_usd micro-USD ($0.15)
             Value::u128(3_000_000), // avg_gpu_hour_price micro-USD/hr
             Value::u128(7_200),     // utilization_rate_bps
             Value::u128(1_500),     // staking_apr_bps
