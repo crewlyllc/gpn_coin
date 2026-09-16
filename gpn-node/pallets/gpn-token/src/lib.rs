@@ -1,6 +1,6 @@
 //! # GPN Token Pallet — Inflation, Fee Distribution, Treasury Management
 //!
-//! Manages the GPN token supply, inflation schedule, and fee distribution.
+//! Manages the GPN token supply, fee distribution, and treasury management.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -83,7 +83,6 @@ pub mod pallet {
     use frame_support::traits::{Currency, ExistenceRequirement};
     use frame_system::pallet_prelude::*;
     use pallet_gpu_attestation::GPUAttestationProvider;
-    use sp_runtime::Perbill;
     use sp_std::vec::Vec;
 
     pub type BalanceOf<T> =
@@ -97,12 +96,6 @@ pub mod pallet {
         /// Used to weight staking rewards by each staker's GPU tier multiplier
         /// (proof-of-staked-GPU: attestation boosts staking yield).
         type GPUAttestation: GPUAttestationProvider<Self::AccountId>;
-        #[pallet::constant]
-        type InitialInflation: Get<Perbill>;
-        #[pallet::constant]
-        type TerminalInflation: Get<Perbill>;
-        #[pallet::constant]
-        type BlocksPerYear: Get<BlockNumberFor<Self>>;
         #[pallet::constant]
         type TreasuryAccount: Get<Self::AccountId>;
         /// Hard cap on total issued supply. The canonical counter lives in
@@ -119,16 +112,10 @@ pub mod pallet {
     // Storage
 
     #[pallet::storage]
-    pub type CurrentInflation<T: Config> = StorageValue<_, Perbill, ValueQuery>;
-
-    #[pallet::storage]
     pub type TotalMinted<T: Config> = StorageValue<_, BalanceOf<T>, ValueQuery>;
 
     #[pallet::storage]
     pub type FeeDistributionConfig<T: Config> = StorageValue<_, FeeDistribution, ValueQuery>;
-
-    #[pallet::storage]
-    pub type LastInflationUpdate<T: Config> = StorageValue<_, BlockNumberFor<T>, ValueQuery>;
 
     #[pallet::storage]
     pub type StakingRewardPool<T: Config> = StorageValue<_, BalanceOf<T>, ValueQuery>;
@@ -141,7 +128,6 @@ pub mod pallet {
     #[pallet::genesis_config]
     #[derive(frame_support::DefaultNoBound)]
     pub struct GenesisConfig<T: Config> {
-        pub initial_inflation: Perbill,
         /// Supply already issued before the chain started (e.g. a genesis
         /// treasury allocation). Seeds the canonical `TotalMinted` counter so
         /// it counts against `MaxSupply` from block 0. Default 0.
@@ -154,14 +140,11 @@ pub mod pallet {
     #[pallet::genesis_build]
     impl<T: Config> BuildGenesisConfig for GenesisConfig<T> {
         fn build(&self) {
-            <CurrentInflation<T>>::put(self.initial_inflation);
             <FeeDistributionConfig<T>>::put(FeeDistribution::default());
             let zero_bal: BalanceOf<T> = Zero::zero();
             <TotalMinted<T>>::put(self.initial_minted);
             <StakingRewardPool<T>>::put(zero_bal);
             <OracleRewardPool<T>>::put(zero_bal);
-            let zero_block: BlockNumberFor<T> = Zero::zero();
-            <LastInflationUpdate<T>>::put(zero_block);
         }
     }
 
@@ -179,10 +162,6 @@ pub mod pallet {
             treasury: BalanceOf<T>,
             burn: BalanceOf<T>,
             oracle: BalanceOf<T>,
-        },
-        InflationUpdated {
-            old_rate: Perbill,
-            new_rate: Perbill,
         },
         FeeDistributionUpdated {
             config: FeeDistribution,
@@ -205,23 +184,8 @@ pub mod pallet {
     #[pallet::error]
     pub enum Error<T> {
         InvalidFeeDistribution,
-        InvalidInflationRate,
         SupplyCapExceeded,
         NoUpdateNeeded,
-    }
-
-    // Hooks
-
-    #[pallet::hooks]
-    impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
-        fn on_initialize(now: BlockNumberFor<T>) -> Weight {
-            let last_update = <LastInflationUpdate<T>>::get();
-            let blocks_per_year = T::BlocksPerYear::get();
-            if !blocks_per_year.is_zero() && now >= last_update + blocks_per_year {
-                Self::update_inflation();
-            }
-            Weight::zero()
-        }
     }
 
     // Dispatchable calls
@@ -400,26 +364,6 @@ pub mod pallet {
     // Helpers
 
     impl<T: Config> Pallet<T> {
-        fn update_inflation() {
-            let current = <CurrentInflation<T>>::get();
-            let terminal = T::TerminalInflation::get();
-            if current <= terminal {
-                return;
-            }
-            let decrease = Perbill::from_parts(5_000_000); // 0.5%
-            let new_rate = if current <= decrease {
-                terminal
-            } else {
-                current.saturating_sub(decrease).max(terminal)
-            };
-            <CurrentInflation<T>>::put(new_rate);
-            <LastInflationUpdate<T>>::put(frame_system::Pallet::<T>::block_number());
-            Self::deposit_event(Event::<T>::InflationUpdated {
-                old_rate: current,
-                new_rate,
-            });
-        }
-
         pub fn account_id() -> T::AccountId {
             frame_support::PalletId(*b"gpn/tokn").into_account_truncating()
         }
@@ -462,10 +406,7 @@ impl<T: Config> FeeSinkProvider<T::AccountId> for Pallet<T> {
 mod tests {
     use super::*;
     use crate::pallet as local_token;
-    use crate::pallet::{
-        CurrentInflation, FeeDistributionConfig, LastInflationUpdate, OracleRewardPool,
-        StakingRewardPool, TotalMinted,
-    };
+    use crate::pallet::{FeeDistributionConfig, OracleRewardPool, StakingRewardPool, TotalMinted};
     use frame_support::{
         construct_runtime, derive_impl, parameter_types,
         traits::{ConstU128, ConstU16, ConstU32, ConstU64, Everything},
@@ -521,9 +462,6 @@ mod tests {
     }
 
     parameter_types! {
-        pub const InitialInflation: sp_runtime::Perbill = sp_runtime::Perbill::from_percent(10);
-        pub const TerminalInflation: sp_runtime::Perbill = sp_runtime::Perbill::from_percent(1);
-        pub const BlocksPerYear: u64 = 1000;
         pub const TreasuryAccount: AccountId = 99;
         pub const TestMaxSupply: Balance = 1_000_000_000_000_000_000_000;
     }
@@ -552,9 +490,6 @@ mod tests {
         type RuntimeEvent = RuntimeEvent;
         type Currency = Balances;
         type GPUAttestation = MockAttestation;
-        type InitialInflation = InitialInflation;
-        type TerminalInflation = TerminalInflation;
-        type BlocksPerYear = BlocksPerYear;
         type TreasuryAccount = TreasuryAccount;
         type MaxSupply = TestMaxSupply;
     }
@@ -567,7 +502,6 @@ mod tests {
                 dev_accounts: None,
             },
             token: GenesisConfig::<Test> {
-                initial_inflation: Perbill::from_percent(10),
                 initial_minted: 0,
                 _config: Default::default(),
             },
@@ -578,7 +512,6 @@ mod tests {
     #[test]
     fn test_genesis_defaults() {
         new_test_ext().execute_with(|| {
-            assert_eq!(CurrentInflation::<Test>::get(), Perbill::from_percent(10));
             assert_eq!(
                 FeeDistributionConfig::<Test>::get(),
                 FeeDistribution::default()
@@ -784,29 +717,6 @@ mod tests {
     }
 
     #[test]
-    fn test_inflation_decays_to_terminal() {
-        new_test_ext().execute_with(|| {
-            assert_eq!(CurrentInflation::<Test>::get(), Perbill::from_percent(10));
-            // Advance blocks to trigger inflation update.
-            System::set_block_number(1001);
-            <Token as frame_support::traits::Hooks<u64>>::on_initialize(1001);
-            let new_inflation = CurrentInflation::<Test>::get();
-            assert!(new_inflation < Perbill::from_percent(10));
-            assert!(new_inflation >= Perbill::from_percent(1));
-            assert_eq!(LastInflationUpdate::<Test>::get(), 1001);
-        });
-    }
-
-    #[test]
-    fn test_inflation_does_not_update_before_year() {
-        new_test_ext().execute_with(|| {
-            System::set_block_number(500);
-            <Token as frame_support::traits::Hooks<u64>>::on_initialize(500);
-            assert_eq!(CurrentInflation::<Test>::get(), Perbill::from_percent(10));
-        });
-    }
-
-    #[test]
     fn test_total_supply() {
         new_test_ext().execute_with(|| {
             let before = Token::total_supply();
@@ -844,7 +754,6 @@ mod tests {
                 dev_accounts: None,
             },
             token: GenesisConfig::<Test> {
-                initial_inflation: Perbill::from_percent(10),
                 initial_minted: alloc,
                 _config: Default::default(),
             },

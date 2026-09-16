@@ -1,14 +1,12 @@
 //! Chain specification for the GPN network.
 
 use gpn_runtime::{
-    AccountId, BalancesConfig, CouncilConfig, GPNTokenConfig, GPNTreasuryConfig,
-    GpnGovernanceConfig, GPUAttestationConfig, GPUPoWConfig, ProfitabilityOracleConfig,
-    RuntimeGenesisConfig,
+    AccountId, BalancesConfig, GPNTokenConfig, GPNTreasuryConfig, GpnGovernanceConfig,
+    GPUAttestationConfig, GPUPoWConfig, ProfitabilityOracleConfig, RuntimeGenesisConfig,
 };
 use sc_chain_spec::Properties;
 use sc_service::{ChainType, GenericChainSpec};
 use sp_core::{sr25519, Pair, Public};
-use sp_runtime::Perbill;
 use std::str::FromStr;
 
 /// The `gpn/tokn` pallet account (`PalletId` -> `into_account_truncating` =
@@ -567,7 +565,6 @@ fn genesis_config_json(
             _config: Default::default(),
         },
         gpn_token: GPNTokenConfig {
-            initial_inflation: Perbill::from_percent(10),
             // Canonical supply counter is seeded with the genesis treasury
             // allocation so it counts against the 1B MaxSupply cap (item 1).
             initial_minted: treasury_alloc,
@@ -584,10 +581,6 @@ fn genesis_config_json(
             _config: Default::default(),
         },
         transaction_payment: Default::default(),
-        council: CouncilConfig {
-            members: council_members.clone(),
-            phantom: Default::default(),
-        },
         gpn_governance: GpnGovernanceConfig {
             initial_members: council_members,
             _config: Default::default(),

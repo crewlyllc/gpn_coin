@@ -233,4 +233,108 @@ pub mod pallet {
             Weight::zero()
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate as pallet_gpn_governance;
+        use frame_support::{assert_noop, assert_ok, construct_runtime, derive_impl, parameter_types,
+            traits::{ConstU16, ConstU64}};
+        use sp_runtime::{
+            traits::{BlakeTwo256, IdentityLookup},
+            BuildStorage,
+        };
+
+        type Block = frame_system::mocking::MockBlock<Test>;
+
+        construct_runtime!(
+            pub enum Test {
+                System: frame_system,
+                GpnGovernance: pallet_gpn_governance,
+            }
+        );
+
+        #[derive_impl(frame_system::config_preludes::TestDefaultConfig)]
+        impl frame_system::Config for Test {
+            type Block = Block;
+            type AccountId = u64;
+            type BlockHashCount = ConstU64<250>;
+            type Lookup = IdentityLookup<u64>;
+            type SS58Prefix = ConstU16<42>;
+        }
+
+        parameter_types! {
+            pub const ApprovalsRequired: u32 = 2;
+            pub const TimelockPeriod: u64 = 3;
+            pub const MaxMembers: u32 = 8;
+        }
+
+        impl pallet_gpn_governance::Config for Test {
+            type RuntimeEvent = RuntimeEvent;
+            type ApprovalsRequired = ApprovalsRequired;
+            type TimelockPeriod = TimelockPeriod;
+            type MaxMembers = MaxMembers;
+            type WeightInfo = ();
+        }
+
+        fn new_test_ext() -> sp_io::TestExternalities {
+            let mut t = frame_system::GenesisConfig::<Test>::default().build_storage().unwrap();
+            pallet_gpn_governance::GenesisConfig::<Test> {
+                initial_members: vec![1, 2, 3],
+                _config: Default::default(),
+            }
+            .assimilate_storage(&mut t)
+            .unwrap();
+            t.into()
+        }
+
+        #[test]
+        fn non_member_cannot_propose() {
+            new_test_ext().execute_with(|| {
+                let call = RuntimeCall::System(frame_system::Call::remark { remark: vec![] });
+                assert_noop!(
+                    GpnGovernance::propose(RuntimeOrigin::signed(99), Box::new(call)),
+                    Error::<Test>::NotMember
+                );
+            });
+        }
+
+        #[test]
+        fn requires_two_approvals_and_timelock_before_root_execution() {
+            new_test_ext().execute_with(|| {
+                // A root-gated call: `kill_storage` (root-only) with no keys trivially
+                // succeeds iff dispatched as Root, so Ok proves the Root origin.
+                let call = RuntimeCall::System(frame_system::Call::kill_storage { keys: vec![] });
+                let hash = BlakeTwo256::hash_of(&call);
+
+                // Member 1 proposes (self-approves) -> 1 approval.
+                assert_ok!(GpnGovernance::propose(
+                    RuntimeOrigin::signed(1),
+                    Box::new(call)
+                ));
+
+                // 1 approval is not enough.
+                assert_noop!(
+                    GpnGovernance::execute(RuntimeOrigin::signed(9), hash),
+                    Error::<Test>::NotEnoughApprovals
+                );
+
+                // Member 2 approves -> 2 approvals (threshold met).
+                assert_ok!(GpnGovernance::approve(RuntimeOrigin::signed(2), hash));
+
+                // Timelock (3 blocks) not yet elapsed at block 1.
+                assert_noop!(
+                    GpnGovernance::execute(RuntimeOrigin::signed(9), hash),
+                    Error::<Test>::TimelockNotElapsed
+                );
+
+                // Advance past the timelock.
+                System::set_block_number(4);
+
+                // Now it executes as Root and the proposal is removed.
+                assert_ok!(GpnGovernance::execute(RuntimeOrigin::signed(9), hash));
+                assert!(!Proposals::<Test>::contains_key(hash));
+            });
+        }
+    }
 }
