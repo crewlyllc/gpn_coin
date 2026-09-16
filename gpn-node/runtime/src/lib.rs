@@ -279,6 +279,42 @@ impl pallet_sudo::Config for Runtime {
 }
 
 // ###########################################################################
+// Governance: Council (technical committee) — Option D (Jeremy, 2026-09-16).
+// committee-3 (2-of-3) can dispatch Root calls (set_code, set_*, …), giving
+// mainnet a non-single-key upgrade path. Sudo stays inert on mainnet; this is
+// the real governance. The `Members` origin maps to Root via
+// `EnsureProportionAtLeast` (see `construct_runtime!` origin wiring below).
+// ###########################################################################
+
+pub type CouncilCollective = pallet_collective::Instance1;
+
+/// Blocks per day at the 15s target (24*60*60/15 = 5,760).
+pub const DAYS: BlockNumber = 5_760;
+
+parameter_types! {
+    pub const CouncilMotionDuration: BlockNumber = 3 * DAYS;
+    pub const CouncilMaxProposals: u32 = 32;
+    pub const CouncilMaxMembers: u32 = 8;
+    pub const CouncilMaxProposalWeight: Weight = Weight::from_parts(1024, 0);
+}
+
+impl pallet_collective::Config<CouncilCollective> for Runtime {
+    type RuntimeOrigin = RuntimeOrigin;
+    type Proposal = RuntimeCall;
+    type RuntimeEvent = RuntimeEvent;
+    type MotionDuration = CouncilMotionDuration;
+    type MaxProposals = CouncilMaxProposals;
+    type MaxMembers = CouncilMaxMembers;
+    type DefaultVote = pallet_collective::PrimeDefaultVote;
+    type WeightInfo = ();
+    type SetMembersOrigin = frame_system::EnsureRoot<AccountId>;
+    type MaxProposalWeight = CouncilMaxProposalWeight;
+    type DisapproveOrigin = frame_system::EnsureRoot<AccountId>;
+    type KillOrigin = frame_system::EnsureRoot<AccountId>;
+    type Consideration = ();
+}
+
+// ###########################################################################
 // Transaction payment (fees)
 // ###########################################################################
 
@@ -501,6 +537,7 @@ construct_runtime!(
         Balances: pallet_balances,
         TransactionPayment: pallet_transaction_payment,
         Sudo: pallet_sudo,
+        Council: pallet_collective::<Instance1>,
         GPUPoW: pallet_gpu_pow,
         GPUAttestation: pallet_gpu_attestation,
         Liveness: pallet_gpn_liveness,

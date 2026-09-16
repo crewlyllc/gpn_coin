@@ -37,6 +37,8 @@ pallet-insecure-randomness-collective-flip = { git = "https://github.com/parityt
 pallet-transaction-payment = { git = "https://github.com/paritytech/polkadot-sdk.git", rev = "da5c966029ce352120d5928d789ee3df0f97db46", default-features = false }
 pallet-transaction-payment-rpc-runtime-api = { git = "https://github.com/paritytech/polkadot-sdk.git", rev = "da5c966029ce352120d5928d789ee3df0f97db46", default-features = false }
 pallet-sudo = { git = "https://github.com/paritytech/polkadot-sdk.git", rev = "da5c966029ce352120d5928d789ee3df0f97db46", default-features = false }
+pallet-collective = { git = "https://github.com/paritytech/polkadot-sdk.git", rev = "da5c966029ce352120d5928d789ee3df0f97db46", default-features = false }
+pallet-scheduler = { git = "https://github.com/paritytech/polkadot-sdk.git", rev = "da5c966029ce352120d5928d789ee3df0f97db46", default-features = false }
 
 # Substrate — primitives
 sp-api = { git = "https://github.com/paritytech/polkadot-sdk.git", rev = "da5c966029ce352120d5928d789ee3df0f97db46", default-features = false }

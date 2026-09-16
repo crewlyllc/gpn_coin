@@ -26,6 +26,8 @@ pallet-timestamp = { workspace = true, default-features = false }
 pallet-insecure-randomness-collective-flip = { workspace = true, default-features = false }
 pallet-transaction-payment = { workspace = true, default-features = false }
 pallet-sudo = { workspace = true, default-features = false }
+pallet-collective = { workspace = true, default-features = false }
+pallet-scheduler = { workspace = true, default-features = false }
 sp-api = { workspace = true, default-features = false }
 sp-block-builder = { workspace = true, default-features = false }
 sp-offchain = { workspace = true, default-features = false }
@@ -61,6 +63,8 @@ std = [
     "pallet-insecure-randomness-collective-flip/std",
     "pallet-transaction-payment/std",
     "pallet-sudo/std",
+    "pallet-collective/std",
+    "pallet-scheduler/std",
     "sp-api/std",
     "sp-block-builder/std",
     "sp-offchain/std",
@@ -92,6 +96,8 @@ runtime-benchmarks = [
     "frame-system/runtime-benchmarks",
     "pallet-balances/runtime-benchmarks",
     "pallet-timestamp/runtime-benchmarks",
+    "pallet-collective/runtime-benchmarks",
+    "pallet-scheduler/runtime-benchmarks",
     "pallet-gpu-pow/runtime-benchmarks",
     "pallet-gpu-attestation/runtime-benchmarks",
     "pallet-gpn-liveness/runtime-benchmarks",

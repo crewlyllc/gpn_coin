@@ -1,8 +1,8 @@
 //! Chain specification for the GPN network.
 
 use gpn_runtime::{
-    AccountId, BalancesConfig, GPNTokenConfig, GPNTreasuryConfig, GPUAttestationConfig,
-    GPUPoWConfig, ProfitabilityOracleConfig, RuntimeGenesisConfig,
+    AccountId, BalancesConfig, CouncilConfig, GPNTokenConfig, GPNTreasuryConfig,
+    GPUAttestationConfig, GPUPoWConfig, ProfitabilityOracleConfig, RuntimeGenesisConfig,
 };
 use sc_chain_spec::Properties;
 use sc_service::{ChainType, GenericChainSpec};
@@ -310,6 +310,7 @@ pub fn development_chain_spec() -> Result<ChainSpec, String> {
         .with_genesis_config(genesis_config_json(
             vec![account_id_from_seed("Alice")], // oracle operators
             vec![account_id_from_seed("Alice"), account_id_from_seed("Bob")], // admission committee
+            vec![account_id_from_seed("Alice"), account_id_from_seed("Bob")], // governance council
             vec![
                 account_id_from_seed("Alice"),
                 account_id_from_seed("Bob"),
@@ -347,6 +348,7 @@ pub fn local_chain_spec() -> Result<ChainSpec, String> {
                 account_id_from_seed("Bob"),
                 account_id_from_seed("Charlie"),
             ], // admission committee
+            vec![account_id_from_seed("Alice"), account_id_from_seed("Bob"), account_id_from_seed("Charlie")], // governance council
             vec![
                 account_id_from_seed("Alice"),
                 account_id_from_seed("Bob"),
@@ -396,6 +398,8 @@ pub fn testnet_chain_spec() -> Result<ChainSpec, String> {
             // Admission committee (Phase B): bootstrap the named committee so
             // operator admission works on day one (threshold approvals).
             testnet_committee(),
+            // Governance Council (Option D): committee-3 = 2-of-3 multisig.
+            testnet_committee(),
             // No endowed accounts — fair-launch economics preserved; operators
             // get their stake via the off-chain drip faucet (runbook §5).
             vec![],
@@ -436,6 +440,7 @@ pub fn mainnet_chain_spec() -> Result<ChainSpec, String> {
         .with_genesis_config(genesis_config_json(
             vec![],                    // no oracle operators at genesis
             vec![],                    // no admission committee at genesis (inert by default)
+            testnet_committee(),       // governance council (committee-3 = 2-of-3 multisig)
             vec![],                    // no endowed accounts - fair launch
             vec![],                    // no reserves - mainnet stays fair-launch
             AccountId::new([0u8; 32]), // mainnet sudo key = inert placeholder (not endowed),
@@ -459,6 +464,7 @@ pub fn mainnet_chain_spec() -> Result<ChainSpec, String> {
 fn genesis_config_json(
     initial_operators: Vec<AccountId>,
     initial_committee: Vec<AccountId>,
+    council_members: Vec<AccountId>,
     endowed_accounts: Vec<AccountId>,
     reserves: Vec<GenesisReserve>,
     sudo_key: AccountId,
@@ -578,6 +584,10 @@ fn genesis_config_json(
             _config: Default::default(),
         },
         transaction_payment: Default::default(),
+        council: CouncilConfig {
+            members: council_members,
+            phantom: Default::default(),
+        },
         sudo: pallet_sudo::GenesisConfig {
             key: Some(sudo_key),
         },
@@ -610,6 +620,7 @@ mod reserve_tests {
             vec![],
             vec![],
             vec![],
+            vec![],
             reserves,
             account_id_from_seed("Alice"),
             0,
@@ -635,6 +646,7 @@ mod reserve_tests {
         // Mainnet path: no endowed accounts and no reserves -> zero balances
         // (fair launch), fee-sink NOT added.
         let json = genesis_config_json(
+            vec![],
             vec![],
             vec![],
             vec![],
