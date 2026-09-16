@@ -33,6 +33,23 @@ pub fn account_id_from_seed(seed: &str) -> AccountId {
         .into()
 }
 
+/// The 5 bootstrap oracle operators for the public testnet (Jeremy's
+/// `oracle-roster`, 2026-09-16). Public SS58 addresses only — the secret
+/// phrases/seeds stay cold in the roster file and are NOT embedded here.
+/// `AccountId::from_str` parses SS58 (same pattern as `GPN_GENESIS_RESERVE`).
+fn testnet_oracle_operators() -> Vec<AccountId> {
+    [
+        "5DUaYAf5wSDSZrQVvMygLRCMmkF9BBqrrrSsVdw3QHboM5Y6",
+        "5Dk6Yv3B5PhjhafS7YauXWbNTcmHVbeyFuNzczKB78RtwNtV",
+        "5F1eQwdyGW3Csaz9FNSQncK62EyqfF76RM8j2hg8V3MwKwD9",
+        "5DV1GPahj1kTbjQY2rVwSzYVKdL7d4AWzjL1sEqHiqenSDUa",
+        "5Cvguz6wfB7EiLDghdTAZzE7TT3vGUCYegS7seyMDPJGASbm",
+    ]
+    .iter()
+    .map(|s| AccountId::from_str(s).expect("static SS58 is valid; qed"))
+    .collect()
+}
+
 /// Convert a whole-GPN amount to the chain's 12-decimal base units.
 fn gpn(amount: u128) -> u128 {
     amount.saturating_mul(1_000_000_000_000)
@@ -344,10 +361,10 @@ pub fn testnet_chain_spec() -> Result<ChainSpec, String> {
         .with_protocol_id("gpn")
         .with_properties(properties())
         .with_genesis_config(genesis_config_json(
-            // Bootstrap oracle operators (2-4) so the profitability feed is
-            // populated on day one. Dev seed keys are fine for a disposable
-            // testnet; real operators rotate them before any longer-lived run.
-            vec![account_id_from_seed("Alice"), account_id_from_seed("Bob")],
+            // Bootstrap oracle operators (Jeremy's oracle-roster, 2026-09-16):
+            // all 5 authorized at genesis; run `gpn_operate_oracle` per operator
+            // as machines come online. Secrets stay cold in the roster file.
+            testnet_oracle_operators(),
             // Admission committee (Phase B): bootstrap the named committee so
             // operator admission works on day one (threshold approvals).
             vec![

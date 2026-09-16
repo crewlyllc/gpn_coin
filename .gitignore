@@ -54,3 +54,6 @@ Thumbs.db
 treasury-roster-seeds.txt
 treasury-roster.env
 treasury-roster-addrs.txt
+
+# Oracle operator roster (contains secret phrases/seeds)
+oracle-roster
