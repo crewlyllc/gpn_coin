@@ -84,15 +84,14 @@ fn gpn(amount: u128) -> u128 {
     amount.saturating_mul(1_000_000_000_000)
 }
 
-// ── Treasury allocation parameters (LOCKED — Jeremy, 2026-09-10) ──────────
-/// 20% of the 1B GPN cap = 200,000,000 GPN, funded to the treasury at genesis.
-const TREASURY_ALLOC_GPN: u128 = 200_000_000;
-/// Phase 1: 100M GPN over 48 months, every 6 months → 8 tranches × 12.5M.
-const TREASURY_PHASE1_TRANCHES: u64 = 8;
-const TREASURY_PHASE1_PER_TRANCHE_GPN: u128 = 12_500_000;
-/// Phase 2: 100M GPN over 120 months, every 6 months → 20 tranches × 5M.
-const TREASURY_PHASE2_TRANCHES: u64 = 20;
-const TREASURY_PHASE2_PER_TRANCHE_GPN: u128 = 5_000_000;
+// ── Treasury allocation parameters (UPDATED — Jeremy, 2026-09-16) ──────────
+/// 10% of the 1B GPN cap = 100,000,000 GPN, funded to the treasury at genesis.
+const TREASURY_ALLOC_GPN: u128 = 100_000_000;
+/// Unlocked at genesis (block 0) — immediately spendable via 13-of-25 governance.
+const TREASURY_GENESIS_UNLOCK_GPN: u128 = 70_000_000;
+/// Vested over 10 years (120 months), every 6 months → 20 tranches × 1.5M.
+const TREASURY_VESTED_TRANCHES: u64 = 20;
+const TREASURY_VESTED_PER_TRANCHE_GPN: u128 = 1_500_000;
 /// Governance: 25-address roster, 13 approvals to spend.
 const TREASURY_ROSTER_SIZE: u32 = 25;
 const TREASURY_THRESHOLD: u32 = 13;
@@ -100,19 +99,19 @@ const TREASURY_THRESHOLD: u32 = 13;
 const SIX_MONTHS_BLOCKS: u64 = 1_036_800;
 
 /// Build the default treasury tranche schedule (discrete 6-month unlocks).
+/// 70M unlocks at genesis (block 0); the remaining 30M vests over 10 years.
 /// The treasury account is a PalletId account (`gpn/trsy`); amounts are set in
 /// base units. `start_block` is the first unlock offset (relative to genesis).
 fn treasury_schedule() -> Vec<(u32, u128)> {
     let mut s = Vec::new();
-    for i in 1..=TREASURY_PHASE1_TRANCHES {
+    // 70M unlocked at genesis (block 0).
+    s.push((0, gpn(TREASURY_GENESIS_UNLOCK_GPN)));
+    // 30M vested over 10 years (20 × 1.5M every 6 months).
+    for i in 1..=TREASURY_VESTED_TRANCHES {
         s.push((
             (i * SIX_MONTHS_BLOCKS) as u32,
-            gpn(TREASURY_PHASE1_PER_TRANCHE_GPN),
+            gpn(TREASURY_VESTED_PER_TRANCHE_GPN),
         ));
-    }
-    for i in 1..=TREASURY_PHASE2_TRANCHES {
-        let blk = (TREASURY_PHASE1_TRANCHES + i) * SIX_MONTHS_BLOCKS;
-        s.push((blk as u32, gpn(TREASURY_PHASE2_PER_TRANCHE_GPN)));
     }
     s
 }

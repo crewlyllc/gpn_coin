@@ -17,9 +17,9 @@ for GPU compute), not just speculative demand.
 | Parameter | Value |
 |---|---|
 | Hard cap | **1,000,000,000 GPN** (1B) |
-| Mining allocation | **800,000,000 GPN** (80%) via GPU PoW |
-| Treasury allocation | **200,000,000 GPN** (20%), vested (see below) |
-| ICO / liquid premine | **None** — no sale, no hidden allocation |
+| Mining allocation | **900,000,000 GPN** (90%) via GPU PoW |
+| Treasury allocation | **100,000,000 GPN** (10%) — see below |
+| ICO / token sale | **None** — no sale, no hidden allocation |
 
 ## Emission
 
@@ -27,9 +27,9 @@ for GPU compute), not just speculative demand.
 - Reward **halves every ~4,204,800 blocks (~2 years)**.
 - All newly issued GPN comes from mining block rewards; there is no other mint.
 
-## Treasury (20% — a growth fund, not a payout)
+## Treasury (10% — a growth fund, not a payout)
 
-200,000,000 GPN (20% of the cap) is allocated at genesis to a **keyless treasury
+100,000,000 GPN (10% of the cap) is allocated at genesis to a **keyless treasury
 account** (`gpn/trsy`) — it has no private key and can only spend via on-chain
 governance (**13-of-25** signers).
 
@@ -43,9 +43,9 @@ governance (**13-of-25** signers).
 Supporting uses: ongoing development, security audits, bug bounties, and a multi-year
 operating runway.
 
-**Vesting:** the 200M unlocks in **28 six-month tranches over ~14 years** — **0 unlocked
-at launch**. Phase 1: 100M over 48 months (8 × 12.5M). Phase 2: 100M over 120 months
-(20 × 5M). Amount, address, and schedule are all verifiable on-chain.
+**Unlock schedule:** **70M unlocks at genesis** (immediately spendable via 13-of-25
+governance) and the remaining **30M vests over 10 years** (20 × 1.5M six-month
+tranches). Amount, address, and schedule are all verifiable on-chain.
 
 ## Fees
 
@@ -69,8 +69,9 @@ A **5%** marketplace fee on AI-compute job payouts, split:
 
 ## No admin backdoor
 
-Mainnet has **no live `sudo` key** and **no endowed accounts** — supply is issued only
-through mining, and changes happen only through the timelocked governance above.
+Mainnet has **no live `sudo` key** and **no endowed accounts beyond the disclosed
+treasury** — supply is issued only through mining, and changes happen only through the
+timelocked governance above.
 
 ---
 
