@@ -2,7 +2,8 @@
 
 use gpn_runtime::{
     AccountId, BalancesConfig, CouncilConfig, GPNTokenConfig, GPNTreasuryConfig,
-    GPUAttestationConfig, GPUPoWConfig, ProfitabilityOracleConfig, RuntimeGenesisConfig,
+    GpnGovernanceConfig, GPUAttestationConfig, GPUPoWConfig, ProfitabilityOracleConfig,
+    RuntimeGenesisConfig,
 };
 use sc_chain_spec::Properties;
 use sc_service::{ChainType, GenericChainSpec};
@@ -585,8 +586,12 @@ fn genesis_config_json(
         },
         transaction_payment: Default::default(),
         council: CouncilConfig {
-            members: council_members,
+            members: council_members.clone(),
             phantom: Default::default(),
+        },
+        gpn_governance: GpnGovernanceConfig {
+            initial_members: council_members,
+            _config: Default::default(),
         },
         sudo: pallet_sudo::GenesisConfig {
             key: Some(sudo_key),

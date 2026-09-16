@@ -315,6 +315,24 @@ impl pallet_collective::Config<CouncilCollective> for Runtime {
 }
 
 // ###########################################################################
+// Governance: GpnGovernance (Option D) — committee-3 2-of-3 + timelock → Root.
+// ###########################################################################
+
+parameter_types! {
+    pub const GovernanceApprovalsRequired: u32 = 2;
+    pub const GovernanceTimelockPeriod: BlockNumber = 3 * DAYS; // 3 days at 15s
+    pub const GovernanceMaxMembers: u32 = 8;
+}
+
+impl pallet_gpn_governance::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type ApprovalsRequired = GovernanceApprovalsRequired;
+    type TimelockPeriod = GovernanceTimelockPeriod;
+    type MaxMembers = GovernanceMaxMembers;
+    type WeightInfo = ();
+}
+
+// ###########################################################################
 // Transaction payment (fees)
 // ###########################################################################
 
@@ -538,6 +556,7 @@ construct_runtime!(
         TransactionPayment: pallet_transaction_payment,
         Sudo: pallet_sudo,
         Council: pallet_collective::<Instance1>,
+        GpnGovernance: pallet_gpn_governance,
         GPUPoW: pallet_gpu_pow,
         GPUAttestation: pallet_gpu_attestation,
         Liveness: pallet_gpn_liveness,
@@ -576,6 +595,7 @@ mod benches {
         [pallet_gpn_token, GPNToken]
         [pallet_gpn_treasury, GPNTreasury]
         [pallet_shielded_pool, ShieldedPool]
+        [pallet_gpn_governance, GpnGovernance]
     );
 }
 

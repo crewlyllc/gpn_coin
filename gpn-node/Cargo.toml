@@ -8,6 +8,7 @@ members = [
     "pallets/profitability-oracle",
     "pallets/gpn-token",
     "pallets/shielded-pool",
+    "pallets/gpn-governance",
     "gpn-shield",
     "runtime",
     "node",

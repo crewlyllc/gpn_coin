@@ -14,6 +14,7 @@ pallet-compute-marketplace = { path = "../pallets/compute-marketplace", default-
 pallet-profitability-oracle = { path = "../pallets/profitability-oracle", default-features = false }
 pallet-gpn-token = { path = "../pallets/gpn-token", default-features = false }
 pallet-shielded-pool = { path = "../pallets/shielded-pool", default-features = false }
+pallet-gpn-governance = { path = "../pallets/gpn-governance", default-features = false }
 
 # Substrate dependencies
 frame-support = { workspace = true, default-features = false }
@@ -87,6 +88,7 @@ std = [
     "pallet-profitability-oracle/std",
     "pallet-gpn-token/std",
     "pallet-shielded-pool/std",
+    "pallet-gpn-governance/std",
     "serde",
     "substrate-wasm-builder",
 ]
@@ -106,6 +108,7 @@ runtime-benchmarks = [
     "pallet-profitability-oracle/runtime-benchmarks",
     "pallet-gpn-token/runtime-benchmarks",
     "pallet-shielded-pool/runtime-benchmarks",
+    "pallet-gpn-governance/runtime-benchmarks",
 ]
 try-runtime = ["frame-try-runtime/try-runtime"]
 
