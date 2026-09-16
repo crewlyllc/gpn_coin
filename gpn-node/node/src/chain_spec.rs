@@ -50,6 +50,26 @@ fn testnet_oracle_operators() -> Vec<AccountId> {
     .collect()
 }
 
+/// The 3 admission-committee members for the public testnet (Jeremy controls
+/// all three; `AdmissionThreshold = 2` → propose self-approves + 1 more approval
+/// is needed to admit an operator). Public SS58 addresses only.
+fn testnet_committee() -> Vec<AccountId> {
+    [
+        "5HTWBtWro5ARwrghSmbkcbhVKk8o7xxYirdR7J8T3PJRteWN",
+        "5Cd5NiY2qkGzVuQufh844DwKj2k4ExxwyzyrDU4pGUvEX3Dx",
+        "5HeUVTK6zd9ii8nXoXBbRU5Q2zdE1Moc9zd1E9GW5JqYej5h",
+    ]
+    .iter()
+    .map(|s| AccountId::from_str(s).expect("static SS58 is valid; qed"))
+    .collect()
+}
+
+/// The testnet ops `sudo` key (D5): a fresh OFFLINE key held by Jeremy. Only the
+/// public address is embedded; the secret phrase stays cold (never on a server).
+fn testnet_sudo_key() -> AccountId {
+    AccountId::from_str("5HHSuwZgsYpa5Mfdfdgzr7LJcY4sU21t2iyu8sq1yV2PjuMn").expect("valid; qed")
+}
+
 /// Convert a whole-GPN amount to the chain's 12-decimal base units.
 fn gpn(amount: u128) -> u128 {
     amount.saturating_mul(1_000_000_000_000)
@@ -367,11 +387,7 @@ pub fn testnet_chain_spec() -> Result<ChainSpec, String> {
             testnet_oracle_operators(),
             // Admission committee (Phase B): bootstrap the named committee so
             // operator admission works on day one (threshold approvals).
-            vec![
-                account_id_from_seed("Alice"),
-                account_id_from_seed("Bob"),
-                account_id_from_seed("Charlie"),
-            ],
+            testnet_committee(),
             // No endowed accounts — fair-launch economics preserved; operators
             // get their stake via the off-chain drip faucet (runbook §5).
             vec![],
@@ -381,7 +397,7 @@ pub fn testnet_chain_spec() -> Result<ChainSpec, String> {
             resolve_reserves(),
             // Ops sudo key (faucet + emergency ops on testnet only). NOT the
             // mainnet placeholder — testnet sudo is functional by design.
-            account_id_from_seed("Alice"),
+            testnet_sudo_key(),
             // No treasury allocation on testnet (keeps it a clean fair-launch
             // fork of mainnet's economics for testing). Enable via a custom spec
             // if you want to rehearse the vested treasury on the testnet.

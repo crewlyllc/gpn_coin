@@ -57,3 +57,7 @@ treasury-roster-addrs.txt
 
 # Oracle operator roster (contains secret phrases/seeds)
 oracle-roster
+
+# GPN governance key material
+ governance-keys.txt
+governance-addrs.txt
