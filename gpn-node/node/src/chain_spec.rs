@@ -70,6 +70,14 @@ fn testnet_sudo_key() -> AccountId {
     AccountId::from_str("5HHSuwZgsYpa5Mfdfdgzr7LJcY4sU21t2iyu8sq1yV2PjuMn").expect("valid; qed")
 }
 
+/// The testnet faucet key (D5 hot key): a warm account that receives block
+/// rewards so it self-funds the drip (runbook §5). Its secret lives on the
+/// faucet server and is passed via `gpn_faucet --signer-uri`; only the public
+/// address is embedded here.
+fn testnet_faucet_key() -> AccountId {
+    AccountId::from_str("5GjVjMhy2MfsEMFrT1BWB5NMXEXpsdqW2Dv2J8fHFnCRCwrs").expect("valid; qed")
+}
+
 /// Convert a whole-GPN amount to the chain's 12-decimal base units.
 fn gpn(amount: u128) -> u128 {
     amount.saturating_mul(1_000_000_000_000)
@@ -403,9 +411,9 @@ pub fn testnet_chain_spec() -> Result<ChainSpec, String> {
             // if you want to rehearse the vested treasury on the testnet.
             0,
             treasury_roster(), // dev placeholder roster
-            // Block-reward auto-wiring (item 4): testnet ops key (Alice)
-            // receives block rewards so the emission path is exercised.
-            Some(account_id_from_seed("Alice")),
+            // Block-reward auto-wiring (item 4): the faucet key receives block
+            // rewards so it self-funds the drip (runbook §5) — no manual mining.
+            Some(testnet_faucet_key()),
         ))
         .build())
 }
