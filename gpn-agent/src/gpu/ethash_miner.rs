@@ -61,19 +61,25 @@ impl EthashGpuMiner {
         let Ok(platforms) = get_platforms() else {
             return out;
         };
+        let mut gpus: Vec<(String, Device)> = Vec::new();
         for p in &platforms {
             let pname = p.name().unwrap_or_default();
             let devices = get_device_ids(p.id(), CL_DEVICE_TYPE_ALL).unwrap_or_default();
-            for (i, did) in devices.iter().enumerate() {
-                let d = Device::new(*did);
-                out.push(format!(
-                    "[{}] {} :: {} (GPU={})",
-                    i,
-                    pname,
-                    d.name().unwrap_or_default(),
-                    (d.dev_type().unwrap_or(0) & CL_DEVICE_TYPE_GPU) != 0
-                ));
+            for did in devices {
+                let d = Device::new(did);
+                if (d.dev_type().unwrap_or(0) & CL_DEVICE_TYPE_GPU) != 0 {
+                    gpus.push((pname, d));
+                }
             }
+        }
+        // Prefer discrete (NVIDIA/AMD) over integrated (Intel) so index 0 is the
+        // most powerful card.
+        gpus.sort_by_key(|(_, d)| {
+            let name = d.name().unwrap_or_default().to_lowercase();
+            if name.contains("intel") { 1 } else { 0 }
+        });
+        for (i, (pname, d)) in gpus.iter().enumerate() {
+            out.push(format!("[{}] {} :: {}", i, pname, d.name().unwrap_or_default()));
         }
         out
     }
@@ -94,6 +100,12 @@ impl EthashGpuMiner {
         if gpus.is_empty() {
             return Err("no OpenCL GPU device found".into());
         }
+        // Prefer discrete GPUs (NVIDIA/AMD) over integrated (Intel) so device 0 is
+        // the most powerful card, not a CPU-integrated iGPU.
+        gpus.sort_by_key(|d| {
+            let name = d.name().unwrap_or_default().to_lowercase();
+            if name.contains("intel") { 1 } else { 0 }
+        });
         let device = gpus.get(device_index).cloned().ok_or_else(|| {
             format!(
                 "GPU index {device_index} out of range ({} GPU(s))",
