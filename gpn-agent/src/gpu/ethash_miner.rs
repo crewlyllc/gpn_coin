@@ -68,7 +68,7 @@ impl EthashGpuMiner {
             for did in devices {
                 let d = Device::new(did);
                 if (d.dev_type().unwrap_or(0) & CL_DEVICE_TYPE_GPU) != 0 {
-                    gpus.push((pname, d));
+                    gpus.push((pname.clone(), d));
                 }
             }
         }
