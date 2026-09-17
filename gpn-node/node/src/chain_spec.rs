@@ -2,7 +2,8 @@
 
 use gpn_runtime::{
     AccountId, BalancesConfig, GPNTokenConfig, GPNTreasuryConfig, GpnGovernanceConfig,
-    GPUAttestationConfig, GPUPoWConfig, ProfitabilityOracleConfig, RuntimeGenesisConfig,
+    GPUAttestationConfig, GPUPoWConfig, GpnBridgeConfig, ProfitabilityOracleConfig,
+    RuntimeGenesisConfig,
 };
 use sc_chain_spec::Properties;
 use sc_service::{ChainType, GenericChainSpec};
@@ -583,6 +584,13 @@ fn genesis_config_json(
         transaction_payment: Default::default(),
         gpn_governance: GpnGovernanceConfig {
             initial_members: council_members,
+            _config: Default::default(),
+        },
+        gpn_bridge: GpnBridgeConfig {
+            // No trusted relayers at genesis: the bridge is inactive until the
+            // committee (via Root) adds the launch relayer set. This mirrors
+            // the governance-gated posture from design-crosschain-bridge.md.
+            relayers: Vec::new(),
             _config: Default::default(),
         },
         sudo: pallet_sudo::GenesisConfig {

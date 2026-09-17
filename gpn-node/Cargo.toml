@@ -9,6 +9,7 @@ members = [
     "pallets/gpn-token",
     "pallets/shielded-pool",
     "pallets/gpn-governance",
+    "pallets/gpn-bridge",
     "gpn-shield",
     "runtime",
     "node",

@@ -49,7 +49,7 @@ use sp_inherents::{CheckInherentsResult, InherentData};
 pub use sp_runtime::BuildStorage;
 use sp_runtime::{
     create_runtime_str, generic,
-    traits::{BlakeTwo256, Block as BlockT, IdentifyAccount, Verify},
+    traits::{AccountIdConversion, BlakeTwo256, Block as BlockT, IdentifyAccount, Verify},
     transaction_validity::{TransactionSource, TransactionValidity},
     ApplyExtrinsicResult, MultiSignature, Perbill,
 };
@@ -301,6 +301,31 @@ impl pallet_gpn_governance::Config for Runtime {
 }
 
 // ###########################################################################
+// Bridge: GpnBridge (Hyperlane Warp Route — GPN side, workplan item 10)
+// Lock/unlock native GPN against wGPN on Ethereum (mock ISM = relayer allowlist).
+// ###########################################################################
+
+parameter_types! {
+    pub const BridgeRateLimitWindow: BlockNumber = 5_760; // ~1 day at 15s blocks
+    pub const BridgeMaxWindowVolume: Balance = 10_000_000_000_000_000_000; // 10M GPN/window
+    pub const BridgeMaxSingleTransfer: Balance = 1_000_000_000_000_000_000; // 1M GPN
+    pub const BridgeMaxDestAddressLength: u32 = 32;
+    pub BridgeTreasuryAccount: AccountId =
+        PalletId(*b"gpn/brdg").into_account_truncating();
+}
+
+impl pallet_gpn_bridge::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type Currency = Balances;
+    type BridgeTreasuryAccount = BridgeTreasuryAccount;
+    type RateLimitWindow = BridgeRateLimitWindow;
+    type MaxWindowVolume = BridgeMaxWindowVolume;
+    type MaxSingleTransfer = BridgeMaxSingleTransfer;
+    type MaxDestAddressLength = BridgeMaxDestAddressLength;
+    type WeightInfo = ();
+}
+
+// ###########################################################################
 // Transaction payment (fees)
 // ###########################################################################
 
@@ -518,6 +543,7 @@ construct_runtime!(
         TransactionPayment: pallet_transaction_payment,
         Sudo: pallet_sudo,
         GpnGovernance: pallet_gpn_governance,
+        GpnBridge: pallet_gpn_bridge,
         GPUPoW: pallet_gpu_pow,
         GPUAttestation: pallet_gpu_attestation,
         Liveness: pallet_gpn_liveness,
@@ -557,6 +583,7 @@ mod benches {
         [pallet_gpn_treasury, GPNTreasury]
         [pallet_shielded_pool, ShieldedPool]
         [pallet_gpn_governance, GpnGovernance]
+        [pallet_gpn_bridge, GpnBridge]
     );
 }
 
