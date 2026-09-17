@@ -61,3 +61,6 @@ oracle-roster
 # GPN governance key material
 governance-keys.txt
 governance-addrs.txt
+
+# GitHub credentials (never commit)
+githubinfo
