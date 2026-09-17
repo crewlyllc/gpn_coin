@@ -280,10 +280,10 @@ impl EthashGpuMiner {
         }
         .map_err(|e| format!("target buf: {e}"))?;
         let mut counter = unsafe {
-            Buffer::<u64>::create(&self.context, CL_MEM_READ_WRITE, 1, std::ptr::null_mut())
+            Buffer::<u32>::create(&self.context, CL_MEM_READ_WRITE, 1, std::ptr::null_mut())
         }
         .map_err(|e| format!("counter: {e}"))?;
-        let zero = 0u64;
+        let zero = 0u32;
         unsafe {
             self.queue
                 .enqueue_write_buffer(&mut counter, 1, 0, &[zero], &[])
@@ -339,7 +339,7 @@ impl EthashGpuMiner {
                 .map_err(|e| format!("ndrange: {e}"))?;
         }
         self.queue.finish().map_err(|e| format!("finish: {e}"))?;
-        let mut cnt = [0u64];
+        let mut cnt = [0u32];
         unsafe {
             self.queue
                 .enqueue_read_buffer(&counter, 1, 0, &mut cnt, &[])
@@ -476,10 +476,10 @@ impl EthashGpuMiner {
         }
         .map_err(|e| format!("target buf: {e}"))?;
         let mut counter = unsafe {
-            Buffer::<u64>::create(&self.context, CL_MEM_READ_WRITE, 1, std::ptr::null_mut())
+            Buffer::<u32>::create(&self.context, CL_MEM_READ_WRITE, 1, std::ptr::null_mut())
         }
         .map_err(|e| format!("counter: {e}"))?;
-        let zero = 0u64;
+        let zero = 0u32;
         unsafe {
             self.queue
                 .enqueue_write_buffer(&mut counter, 1, 0, &[zero], &[])
@@ -541,7 +541,7 @@ impl EthashGpuMiner {
             .finish()
             .map_err(|e| format!("hashimoto finish: {e}"))?;
 
-        let mut cnt = [0u64];
+        let mut cnt = [0u32];
         unsafe {
             self.queue
                 .enqueue_read_buffer(&counter, 1, 0, &mut cnt, &[])

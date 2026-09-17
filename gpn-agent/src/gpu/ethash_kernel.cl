@@ -10,8 +10,6 @@
 // `sha3::Keccak256/Keccak512` used by the ethash crate.
 
 // ---------- Keccak-f[1600] ----------
-typedef unsigned long ulong;
-
 #define ROTL64(x, n) rotate((x), (ulong)(n))
 
 __constant ulong keccak_rndc[24] = {
@@ -52,6 +50,15 @@ static uint load32_le(const uchar *p) {
 static void store32_le(uchar *p, uint v) {
     p[0] = (uchar)(v & 0xff); p[1] = (uchar)((v >> 8) & 0xff);
     p[2] = (uchar)((v >> 16) & 0xff); p[3] = (uchar)((v >> 24) & 0xff);
+}
+
+// __global variants — NVIDIA OpenCL rejects private↔global address-space mismatch.
+static void store32_le_g(__global uchar *p, uint v) {
+    p[0] = (uchar)(v & 0xff); p[1] = (uchar)((v >> 8) & 0xff);
+    p[2] = (uchar)((v >> 16) & 0xff); p[3] = (uchar)((v >> 24) & 0xff);
+}
+static void store64_le_g(__global uchar *p, ulong v) {
+    for (int i = 0; i < 8; i++) { p[i] = (uchar)(v & 0xff); v >>= 8; }
 }
 
 static void keccak_f1600(ulong *s) {
@@ -163,7 +170,7 @@ __kernel void gpn_debug_trace(__global const uchar *header, ulong nonce,
     for (uint i = 0; i < 64; i++) {
         uint p = (uint)(fnv((uint)i ^ load32_le(seed), load32_le(mix + (i % w) * 4))
                         % (n / mixhashes)) * mixhashes;
-        store32_le(out + 64 + i * 4, p);
+        store32_le_g(out + 64 + i * 4, p);
         ulong off = (ulong)p * 64;
         for (uint j = 0; j < 128; j++) newdata[j] = dag[off + j];
         fnv128(mix, newdata);
@@ -227,7 +234,7 @@ __kernel void gpn_dag_item(__global const uchar *cache, uint cache_len,
 __kernel void gpn_hashimoto(__global const uchar *header, ulong nonce_start,
                             __global const uchar *dag, ulong full_size,
                             __global const uchar *target,
-                            __global ulong *counter,
+                            __global uint *counter,
                             __global uchar *results, uint results_cap) {
     ulong nonce = nonce_start + get_global_id(0);
 
@@ -278,10 +285,10 @@ __kernel void gpn_hashimoto(__global const uchar *header, ulong nonce_start,
         if (result[b] != target[b]) { lt = (result[b] < target[b]) ? 1 : 0; break; }
     }
     if (lt) {
-        uint idx = (uint)atomic_add(counter, 1);
+        uint idx = atomic_inc(counter);
         if (idx < results_cap) {
             __global uchar *r = results + (ulong)idx * 72;
-            store64_le(r, nonce);
+            store64_le_g(r, nonce);
             for (uint j = 0; j < 32; j++) r[8 + j] = cmix[j];
             for (uint j = 0; j < 32; j++) r[40 + j] = result[j];
         }
