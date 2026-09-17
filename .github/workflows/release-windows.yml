@@ -1,0 +1,44 @@
+name: Windows binaries
+
+# Builds the GPN agent (miner / CLI) on Windows and uploads the .exe files as a
+# downloadable artifact. Trigger manually, or on a version tag (v*).
+#
+# The gpn-node (full Substrate node) is heavier and not included here — the
+# agent's miner/CLI are the lightweight cross-platform pieces (see README §
+# "Running on Windows / Linux / macOS").
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  windows:
+    name: Build gpn-agent (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps (protoc, LLVM, CMake)
+        run: |
+          choco install -y protoc llvm cmake --no-progress
+          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$env:GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+
+      - name: Build gpn-agent (release)
+        working-directory: gpn-agent
+        run: cargo build --release --bins
+
+      - name: Upload Windows binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpn-windows
+          path: |
+            gpn-agent/target/release/*.exe
+          if-no-files-found: error
