@@ -31,10 +31,9 @@ jobs:
         run: cargo build --release --bins
       - name: pre-checkout polkadot-sdk via git CLI
         working-directory: gpn-node
-        shell: pwsh
+        shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $false
           $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
           $rev = 'da5c966029ce352120d5928d789ee3df0f97db46'
           $short = $rev.Substring(0, 7)
