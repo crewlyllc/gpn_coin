@@ -6,35 +6,24 @@ on:
     tags:
       - "v*"
 
-env:
-  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-
 jobs:
   windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: git longpaths
-        run: git config --global core.longpaths true
       - name: deps
         run: choco install -y protoc llvm cmake --no-progress
       - name: rust
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
-          rustup target add wasm32-unknown-unknown
-          rustup component add rust-src
+          rustc --version
       - name: build agent
         working-directory: gpn-agent
         run: cargo build --release --bins
-      - name: build node
-        working-directory: gpn-node
-        run: cargo build --release -p gpn-node
       - name: upload
         uses: actions/upload-artifact@v4
         with:
           name: gpn-windows
-          path: |
-            gpn-agent/target/release/*.exe
-            gpn-node/target/release/gpn-node.exe
+          path: gpn-agent/target/release/*.exe
           if-no-files-found: error
