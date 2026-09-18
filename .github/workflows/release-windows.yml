@@ -29,6 +29,29 @@ jobs:
       - name: build agent
         working-directory: gpn-agent
         run: cargo build --release --bins
+      - name: pre-checkout polkadot-sdk via git CLI
+        working-directory: gpn-node
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+          $rev = 'da5c966029ce352120d5928d789ee3df0f97db46'
+          $short = $rev.Substring(0, 7)
+          cargo fetch
+          $dbRoot = Join-Path $cargoHome 'git\db'
+          $db = Get-ChildItem $dbRoot -Directory | Where-Object { $_.Name -like 'polkadot-sdk-*' } | Select-Object -First 1
+          if (-not $db) { throw "polkadot-sdk bare db not found under $dbRoot" }
+          $hash = $db.Name -replace '^polkadot-sdk-', ''
+          $dest = Join-Path $cargoHome "git\checkouts\polkadot-sdk-$hash\$short"
+          if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+          New-Item -ItemType Directory -Force -Path (Split-Path $dest) | Out-Null
+          git clone --no-checkout -- "$($db.FullName)" "$dest"
+          git -C "$dest" -c core.protectNTFS=false -c core.longpaths=true -c core.autocrlf=false -c core.eol=lf checkout --force $rev
+          git -C "$dest" diff --quiet HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'polkadot-sdk worktree does not match HEAD' }
+          '{"v":1}' | Out-File -FilePath (Join-Path $dest '.cargo-ok') -Encoding ascii -NoNewline
+          Write-Host "OK: polkadot-sdk pre-checked out at $dest"
       - name: build node
         working-directory: gpn-node
         run: cargo build --release -p gpn-node
