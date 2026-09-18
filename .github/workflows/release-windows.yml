@@ -14,8 +14,10 @@ jobs:
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
-      - name: git longpaths
-        run: git config --global core.longpaths true
+      - name: git config
+        run: |
+          git config --global core.longpaths true
+          git config --global core.protectNTFS false
       - name: deps
         run: choco install -y protoc llvm cmake --no-progress
       - name: rust
