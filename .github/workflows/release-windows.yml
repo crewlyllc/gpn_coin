@@ -20,6 +20,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Configure git (large polkadot-sdk repo: long paths + fetch buffer)
+        run: |
+          git config --global core.longpaths true
+          git config --global http.postBuffer 524288000
+          git config --global http.version HTTP/1.1
+
       - name: Install system deps (protoc, LLVM, CMake)
         run: |
           choco install -y protoc llvm cmake --no-progress
