@@ -8,6 +8,7 @@ on:
 
 env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  LIBCLANG_PATH: "C:\\Program Files\\LLVM\\bin"
 
 jobs:
   windows:
@@ -23,7 +24,7 @@ jobs:
       - name: refresh path
         shell: powershell
         run: |
-          @('C:\Strawberry\perl\bin','C:\Strawberry\c\bin','C:\Program Files\OpenSSL-Win64\bin') | ForEach-Object {
+          @('C:\Strawberry\perl\bin','C:\Strawberry\c\bin','C:\Program Files\OpenSSL-Win64\bin','C:\Program Files\LLVM\bin') | ForEach-Object {
             Add-Content -Path $env:GITHUB_PATH -Value $_
           }
       - name: rust
