@@ -18,8 +18,6 @@ jobs:
     name: Build (Windows)
     runs-on: windows-latest
     env:
-      # Use the git CLI instead of libgit2 — libgit2 on Windows can't handle the
-      # huge polkadot-sdk repo (the "failed to load source for frame-benchmarking" error).
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
     steps:
       - uses: actions/checkout@v4
