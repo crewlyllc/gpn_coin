@@ -20,6 +20,12 @@ jobs:
           git config --global core.protectNTFS false
       - name: deps
         run: choco install -y protoc llvm cmake strawberryperl openssl --no-progress
+      - name: refresh path
+        shell: powershell
+        run: |
+          @('C:\Strawberry\perl\bin','C:\Strawberry\c\bin','C:\Program Files\OpenSSL-Win64\bin') | ForEach-Object {
+            Add-Content -Path $env:GITHUB_PATH -Value $_
+          }
       - name: rust
         run: |
           rustup toolchain install stable --profile minimal
