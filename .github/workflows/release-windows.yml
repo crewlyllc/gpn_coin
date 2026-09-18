@@ -19,7 +19,7 @@ jobs:
           git config --global core.longpaths true
           git config --global core.protectNTFS false
       - name: deps
-        run: choco install -y protoc llvm cmake perl openssl --no-progress
+        run: choco install -y protoc llvm cmake strawberryperl openssl --no-progress
       - name: rust
         run: |
           rustup toolchain install stable --profile minimal
