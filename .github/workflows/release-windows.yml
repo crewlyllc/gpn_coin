@@ -1,55 +1,36 @@
 name: Windows binaries
 
-# Builds the GPN agent (miner / CLI) and the full gpn-node on Windows, and
-# uploads the .exe files as a downloadable artifact. Trigger manually, or on a
-# version tag (v*).
-#
-# The node is a full Substrate binary (heavier build: needs the wasm32 target +
-# rust-src + LLVM), so its build is included but may be slower than the agent.
-
 on:
   workflow_dispatch:
   push:
     tags:
       - "v*"
 
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
 jobs:
   windows:
-    name: Build (Windows)
     runs-on: windows-latest
-    env:
-      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
     steps:
       - uses: actions/checkout@v4
-
-      - name: Configure git (long paths + fetch buffer)
-        run: |
-          git config --global core.longpaths true
-          git config --global http.postBuffer 524288000
-          git config --global http.version HTTP/1.1
-
-      - name: Install system deps (protoc, LLVM, CMake)
-        run: |
-          choco install -y protoc llvm cmake --no-progress
-          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$env:GITHUB_ENV"
-
-      - name: Install Rust toolchain
+      - name: git longpaths
+        run: git config --global core.longpaths true
+      - name: deps
+        run: choco install -y protoc llvm cmake --no-progress
+      - name: rust
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
           rustup target add wasm32-unknown-unknown
           rustup component add rust-src
-          rustc --version
-
-      - name: Build gpn-agent (release)
+      - name: build agent
         working-directory: gpn-agent
         run: cargo build --release --bins
-
-      - name: Build gpn-node (release)
+      - name: build node
         working-directory: gpn-node
         run: cargo build --release -p gpn-node
-
-      - name: Upload Windows binaries
+      - name: upload
         uses: actions/upload-artifact@v4
         with:
           name: gpn-windows
