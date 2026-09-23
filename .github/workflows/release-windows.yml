@@ -29,10 +29,10 @@ jobs:
           }
       - name: rust
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-          rustup target add wasm32-unknown-unknown
-          rustup component add rust-src
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
+          rustup target add wasm32-unknown-unknown --toolchain 1.98.1
+          rustup component add rust-src --toolchain 1.98.1
       - name: build agent
         working-directory: gpn-agent
         run: cargo build --release --bins

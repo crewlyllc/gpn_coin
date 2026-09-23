@@ -1,0 +1,56 @@
+name: Unix binaries (Linux + macOS)
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+env:
+  RUST_TOOLCHAIN: 1.98.1
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang cmake pkg-config \
+            libssl-dev libclang-dev protobuf-compiler
+
+      - name: deps (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install protobuf cmake llvm openssl || brew upgrade protobuf cmake llvm openssl
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+
+      - name: rust toolchain
+        run: |
+          rustup toolchain install ${{ env.RUST_TOOLCHAIN }} --profile minimal
+          rustup default ${{ env.RUST_TOOLCHAIN }}
+          rustup target add wasm32-unknown-unknown --toolchain ${{ env.RUST_TOOLCHAIN }}
+          rustup component add rust-src --toolchain ${{ env.RUST_TOOLCHAIN }}
+
+      - name: build node
+        run: cargo build --release --manifest-path gpn-node/Cargo.toml -p gpn-node
+
+      - name: build agent
+        run: cargo build --release --manifest-path gpn-agent/Cargo.toml --bins
+
+      - name: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpn-${{ runner.os }}
+          path: |
+            gpn-agent/target/release/gpn_*
+            gpn-node/target/release/gpn-node
+          if-no-files-found: error
