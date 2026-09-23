@@ -64,3 +64,14 @@ Also: subxt's `OnlineClient` needs a `ws://` endpoint (not `http://`) and a Toki
 - Re-triggered `release-windows.yml` on `main` (HTTP 204). Runner `DESKTOP-USBUADL` still **offline**, so the new run + the earlier queued run (35932818112) remain queued.
 - **Status:** Linux per-miner wallets DONE and pushed. Windows binary build still blocked on the offline self-hosted 5070 Ti runner (no code issue — the change is pure cross-platform Rust and compiles clean on Linux with the same rustc 1.98.1).
 
+
+## 2026-09-23 23:46 UTC — final re-verify + re-trigger (runner still offline)
+
+- Re-audited the fix end-to-end against `pallet_gpu_pow` semantics:
+  - `compute_solution_hash` = `blake2_256(SCALE(nonce, mix_hash, algorithm_version))` → the agent's `solution_hash()` builds the identical 44 raw bytes (`nonce_le(8) ++ mix(32) ++ version_le(4)`), so `SolutionHashMismatch` cannot fire.
+  - `meets_difficulty` reads the hash as four LE u64 limbs and compares `u256_lt` (target semantics). The agent's `meets_target` (`U256::from_little_endian(&h) < difficulty`) matches byte-for-byte.
+  - `EthashSolution` encoded as `unnamed_composite([u128→u64 nonce, from_bytes mix, from_bytes solution_hash, u128→u32 version])`; scale-value's `EncodeAsType` narrows `Value::u128` to the target field width, so no over-encoding. `difficulty` (`U256 = [u64;4]`) encoded as four u64 limbs. Verified against scale-value 0.16.3 `encode.rs`.
+- `cargo build --release --bin gpn_external_miner` passes clean (only a pre-existing `submit_work` dead-code warning).
+- Confirmed GitHub `main` == local HEAD `bb0bac0` (the fix commits 2f8b34d → bb0bac0 are all pushed; local `origin/main` tracking ref was stale, not the remote).
+- Re-triggered `release-windows.yml` on `main` (HTTP 204). Runner `DESKTOP-USBUADL` (5070 Ti self-hosted box) is **offline**, so the run + the earlier queued runs (35932818112, 35934260761) remain queued.
+- **Net:** per-miner wallets fix is DONE, committed, pushed, and verified live on Linux (//Bob climbs ~50 GPN/block). The Windows binary build cannot run until the physical 5070 Ti runner comes back online — a hardware/infra blocker, not a code issue.
