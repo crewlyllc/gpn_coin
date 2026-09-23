@@ -57,3 +57,10 @@ Also: subxt's `OnlineClient` needs a `ws://` endpoint (not `http://`) and a Toki
 
 **Net:** per-miner-wallets fix is committed (2f8b34d), pushed to `main`, and verified live on Linux (//Bob climbs ~50 GPN/block). The Windows binary build is blocked on an offline self-hosted runner, not on the code change.
 
+## 2026-09-23 23:34 UTC — re-verify + re-trigger (runner still offline)
+
+- Re-audited the fix in `gpn-agent/src/mining/mod.rs` against `pallet_gpu_pow::submit_solution` semantics. Confirmed correct: `solution_hash = blake2_256(SCALE(nonce, mix_hash, algorithm_version))` (44 raw bytes), difficulty encoded as an unnamed composite of four u64 limbs against the pallet's `U256 = [u64;4]` array type, and the mining loop does a CPU blake2 hashcash search (mix fixed to zero). scale-encode narrows `Value::u128` to the target field width, so no u128/u64/u32 over-encoding.
+- Node live on 127.0.0.1:9944 (block ~0x42f) at re-check; no external miner running (previous test miner was killed).
+- Re-triggered `release-windows.yml` on `main` (HTTP 204). Runner `DESKTOP-USBUADL` still **offline**, so the new run + the earlier queued run (35932818112) remain queued.
+- **Status:** Linux per-miner wallets DONE and pushed. Windows binary build still blocked on the offline self-hosted 5070 Ti runner (no code issue — the change is pure cross-platform Rust and compiles clean on Linux with the same rustc 1.98.1).
+
