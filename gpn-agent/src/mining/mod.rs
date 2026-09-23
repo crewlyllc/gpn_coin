@@ -1,17 +1,16 @@
-//! External GPU mining engine — a *stoppable* wrapper around the OpenCL
-//! Ethash miner that talks to the node's external-mining RPC
-//! (`gpn_getTemplate` / `gpn_submitWork`).
+//! External GPU mining engine — a *stoppable* wrapper that talks to the
+//! node's external-mining RPC (`gpn_getTemplate`) and claims the block reward
+//! via a signed `GPUPoW::submit_solution`.
 //!
 //! This is the production mining substrate for the agent's **auto-switch**
-//! feature: the agent can start mining (spawn the loop), and later stop it
-//! (cancel the loop and release the GPU DAG from VRAM) to free the GPU for a
-//! compute job. Mining is just a startable/stoppable task here, not the whole
-//! process.
+//! feature: the agent can start mining (spawn the loop), and later stop it to
+//! free the machine for a compute job. Mining is just a startable/stoppable
+//! task here, not the whole process.
 //!
-//! The loop runs on a dedicated OS thread (not a tokio task) because the
-//! `EthashGpuMiner` / `DagBuffer` hold raw OpenCL handles that are moved into
-//! the thread at spawn time. All network I/O inside the thread uses
-//! `reqwest::blocking`, so the thread is self-contained and safe to cancel.
+//! The loop runs on a dedicated OS thread (not a tokio task) so it can run the
+//! CPU blake2 PoW search without blocking the async runtime. All network I/O
+//! inside the thread uses `reqwest::blocking`, so the thread is self-contained
+//! and safe to cancel.
 
 use crate::gpu::ethash_miner::EthashGpuMiner;
 use serde_json::{json, Value};
@@ -21,8 +20,11 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use subxt::dynamic::Value as SubxtValue;
-use subxt::ext::scale_value::Primitive;
 use subxt::tx::Signer as _;
+
+/// The runtime's current `pallet_gpu_pow::AlgorithmVersion` (see
+/// `gpn-node/runtime/src/lib.rs`). A submitted solution must carry this value.
+const ALGORITHM_VERSION: u32 = 1;
 
 /// Configuration for the external mining engine.
 #[derive(Clone, Debug)]
@@ -63,38 +65,27 @@ pub struct ExternalMiner {
 }
 
 impl ExternalMiner {
-    /// Build the epoch-0 DAG once and start the mining loop on a background
-    /// thread. Returns immediately; mining proceeds in the background.
+    /// Start the mining loop on a background thread. Returns immediately;
+    /// mining proceeds in the background.
+    ///
+    /// The reward-claim PoW (`GPUPoW::submit_solution`) is a blake2 hashcash
+    /// (`blake2(nonce, mix, version) < target`), computed on the CPU, so no
+    /// OpenCL DAG is built here. We still detect the GPU up front so the
+    /// `gpn_external_miner` binary keeps its GPU diagnostics and fails fast on
+    /// a GPU-less box.
     pub fn start(cfg: MiningConfig) -> Result<Self, String> {
         let stop = Arc::new(AtomicBool::new(false));
 
-        // Enumerate the GPU up front so a missing device fails fast here,
-        // before we spawn a thread.
         let miner =
             EthashGpuMiner::new(cfg.device_index).map_err(|e| format!("open GPU miner: {e}"))?;
         let device_name = miner.device_name();
-
-        // Build the epoch-0 DAG once; it persists across all blocks in this epoch.
-        let epoch = 0usize;
-        let cache_size = ethash::get_cache_size(epoch);
-        let full_size = ethash::get_full_size(epoch);
-        let seed = ethash::get_seedhash(epoch);
-        let mut cache = vec![0u8; cache_size];
-        ethash::make_cache(&mut cache, seed);
-        log::info!(
-            "mining engine: light cache {} KiB, full DAG {} MiB on {device_name}",
-            cache_size / 1024,
-            full_size / (1024 * 1024)
-        );
-        let dag = miner
-            .build_dag(&cache, full_size)
-            .map_err(|e| format!("build DAG: {e}"))?;
+        drop(miner);
 
         let stop_clone = stop.clone();
         let thread = std::thread::Builder::new()
             .name("gpn-miner".into())
             .spawn(move || {
-                mining_loop(miner, dag, cfg, stop_clone);
+                mining_loop(cfg, stop_clone);
             })
             .map_err(|e| format!("spawn miner thread: {e}"))?;
 
@@ -138,15 +129,11 @@ impl ExternalMiner {
 }
 
 /// The mining loop body. Runs on the dedicated thread.
-fn mining_loop(
-    miner: EthashGpuMiner,
-    dag: crate::gpu::ethash_miner::DagBuffer,
-    cfg: MiningConfig,
-    stop: Arc<AtomicBool>,
-) {
+fn mining_loop(cfg: MiningConfig, stop: Arc<AtomicBool>) {
     let mut rpc = BlockingMinerRpc::new(&cfg.rpc_url);
 
     let mut last_block: Option<u32> = None;
+    let mut nonce: u64 = 0;
     let mut total_hashes: u64 = 0;
     let mut session_start = Instant::now();
     let mut mine_start = Instant::now();
@@ -188,32 +175,27 @@ fn mining_loop(
             hashrate_window = 0;
         }
 
-        let target = difficulty_to_le_target(&tmpl.difficulty);
+        let difficulty_u256 = U256::from_str_radix(tmpl.difficulty.trim_start_matches("0x"), 16)
+            .expect("difficulty hex is a valid U256");
 
-        // 2. Mine on the GPU until a seal below target is found.
-        let mut nonce_start: u64 = 0;
+        // 2. Search for a nonce whose `blake2(nonce, mix, version)` is below
+        // the difficulty target. `pallet_gpu_pow::submit_solution` verifies
+        // that blake2 hash (NOT an ethash result), so this is a CPU blake2
+        // hashcash search rather than the GPU ethash used for block authoring.
         let seal = loop {
             if stop.load(Ordering::SeqCst) {
                 log::info!("mining loop cancelled mid-search — stopping");
                 return;
             }
-            let found =
-                match miner.mine_batch(&dag, &tmpl.pre_hash, &target, nonce_start, cfg.batch) {
-                    Ok(f) => f,
-                    Err(e) => {
-                        log::error!("gpu mine error: {e}");
-                        if wait_interruptible(&stop, cfg.poll_ms) {
-                            return;
-                        }
-                        continue;
-                    }
-                };
+            match search_solution(&difficulty_u256, nonce, cfg.batch, &stop) {
+                Some(s) => {
+                    nonce = s.nonce.wrapping_add(1);
+                    break s;
+                }
+                None => nonce = nonce.wrapping_add(cfg.batch as u64),
+            }
             total_hashes += cfg.batch as u64;
             hashrate_window += cfg.batch as u64;
-            match found {
-                Some(s) => break s,
-                None => nonce_start = nonce_start.wrapping_add(cfg.batch as u64),
-            }
 
             // Report hashrate every ~2s.
             let elapsed = mine_start.elapsed();
@@ -225,11 +207,9 @@ fn mining_loop(
             }
         };
 
-        let seal_bytes = seal.to_seal_bytes();
         log::info!(
-            "⛏️  mined nonce={:#x} mix=0x{}... result=0x{}...",
+            "⛏️  mined nonce={:#x} solution_hash=0x{}...",
             seal.nonce,
-            hex::encode(&seal.mix[..4]),
             hex::encode(&seal.result[..4])
         );
 
@@ -266,6 +246,31 @@ fn mining_loop(
         }
     }
     log::info!("mining loop exited");
+}
+
+/// Search `batch` nonces starting at `start_nonce` (with a fixed zero
+/// `mix_hash`) for the first whose `blake2(nonce, mix, version)` is below
+/// `difficulty`. Returns the seal (with `result` = the blake2 solution hash)
+/// or `None` if no nonce in this window qualifies.
+fn search_solution(
+    difficulty: &U256,
+    start_nonce: u64,
+    batch: usize,
+    stop: &AtomicBool,
+) -> Option<crate::gpu::ethash_miner::MinedSeal> {
+    let mix = [0u8; 32];
+    let mut nonce = start_nonce;
+    for _ in 0..batch {
+        if stop.load(Ordering::SeqCst) {
+            return None;
+        }
+        if meets_target(nonce, &mix, ALGORITHM_VERSION, difficulty) {
+            let result = solution_hash(nonce, &mix, ALGORITHM_VERSION);
+            return Some(crate::gpu::ethash_miner::MinedSeal { nonce, mix, result });
+        }
+        nonce = nonce.wrapping_add(1);
+    }
+    None
 }
 
 /// Sleep for `ms` ms, but return early (true) if `stop` becomes set.
@@ -381,14 +386,27 @@ impl BlockingMinerRpc {
     }
 }
 
-/// Convert a big-endian hex difficulty string (U256 display) into a 32-byte
-/// little-endian target array for the GPU kernel.
-fn difficulty_to_le_target(difficulty: &str) -> [u8; 32] {
-    let value = U256::from_str_radix(difficulty.trim_start_matches("0x"), 16)
-        .expect("difficulty hex is a valid U256");
-    let mut target = [0u8; 32];
-    value.to_little_endian(&mut target);
-    target
+/// Compute the `solution_hash` the pallet expects for a seal.
+///
+/// `pallet_gpu_pow::compute_solution_hash` hashes the SCALE encoding of
+/// `(nonce, mix_hash, algorithm_version)` with blake2-256 — **not** the ethash
+/// final "result" hash. The SCALE encoding of that 3-tuple is the 44 raw bytes
+/// `nonce_le(8) ++ mix_hash(32) ++ version_le(4)` (no length prefixes).
+fn solution_hash(nonce: u64, mix: &[u8; 32], algorithm_version: u32) -> [u8; 32] {
+    let mut work = [0u8; 44];
+    work[0..8].copy_from_slice(&nonce.to_le_bytes());
+    work[8..40].copy_from_slice(mix);
+    work[40..44].copy_from_slice(&algorithm_version.to_le_bytes());
+    sp_core::hashing::blake2_256(&work)
+}
+
+/// Whether a seal's `solution_hash` meets the difficulty *target*.
+///
+/// `pallet_gpu_pow::meets_difficulty` treats `difficulty` as a target and
+/// requires `blake2(nonce, mix, version) < difficulty` (higher = easier).
+fn meets_target(nonce: u64, mix: &[u8; 32], algorithm_version: u32, difficulty: &U256) -> bool {
+    let h = solution_hash(nonce, mix, algorithm_version);
+    U256::from_little_endian(&h) < *difficulty
 }
 
 /// Submit a mined seal directly to `GPUPoW::submit_solution`, signed with the
@@ -402,11 +420,28 @@ fn submit_solution_direct(
 ) -> Result<bool, String> {
     let difficulty_u256 = U256::from_str_radix(difficulty.trim_start_matches("0x"), 16)
         .map_err(|e| format!("parse difficulty: {e}"))?;
-    let mut diff_bytes = [0u8; 32];
-    difficulty_u256.to_little_endian(&mut diff_bytes);
+    // The pallet's `U256` is `[u64; 4]` (little-endian limbs), so encode the
+    // difficulty as an unnamed composite of four u64s — NOT `Primitive::U256`
+    // (a 32-byte array, which fails to encode against `[u64; 4]`).
+    let limbs = difficulty_u256.0;
 
-    futures::executor::block_on(async {
-        let client = crate::chain::signer::connect(endpoint)
+    let solution_hash = solution_hash(seal.nonce, &seal.mix, ALGORITHM_VERSION);
+
+    // subxt's `OnlineClient` needs a ws(s) endpoint even though the template
+    // fetch (`get_template`) uses plain HTTP JSON-RPC. Rewrite the scheme here.
+    let ws_endpoint = endpoint
+        .replace("http://", "ws://")
+        .replace("https://", "wss://");
+
+    // subxt's `OnlineClient` (jsonrpsee ws) requires a Tokio reactor, and this
+    // runs on the dedicated mining thread (not the async runtime), so drive the
+    // whole async submission block with a fresh current-thread Tokio runtime.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("tokio runtime: {e}"))?;
+    rt.block_on(async {
+        let client = crate::chain::signer::connect(&ws_endpoint)
             .await
             .map_err(|e| format!("connect: {e}"))?;
         let signer = crate::chain::signer::Sr25519Signer::from_uri(signer_uri)
@@ -415,10 +450,15 @@ fn submit_solution_direct(
         let solution = SubxtValue::unnamed_composite(vec![
             SubxtValue::u128(seal.nonce as u128),
             SubxtValue::from_bytes(&seal.mix),
-            SubxtValue::from_bytes(&seal.result),
-            SubxtValue::u128(1), // algorithm_version
+            SubxtValue::from_bytes(&solution_hash),
+            SubxtValue::u128(ALGORITHM_VERSION as u128),
         ]);
-        let difficulty_val = SubxtValue::primitive(Primitive::U256(diff_bytes));
+        let difficulty_val = SubxtValue::unnamed_composite(vec![
+            SubxtValue::u128(limbs[0] as u128),
+            SubxtValue::u128(limbs[1] as u128),
+            SubxtValue::u128(limbs[2] as u128),
+            SubxtValue::u128(limbs[3] as u128),
+        ]);
         let call =
             subxt::dynamic::tx("GPUPoW", "submit_solution", vec![solution, difficulty_val]);
 
