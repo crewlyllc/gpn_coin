@@ -29,11 +29,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device_index: usize = cli::opt_num("device_index", args.get(2).map(|s| s.as_str()), 0)?;
     let batch: usize = cli::opt_num("batch", args.get(3).map(|s| s.as_str()), 1 << 20)?;
     let poll_ms: u64 = cli::opt_num("poll_ms", args.get(4).map(|s| s.as_str()), 2000)?;
+    let signer_uri = args
+        .get(5)
+        .cloned()
+        .unwrap_or_else(|| "//Alice".to_string());
 
     println!("== GPN external GPU miner ==");
     println!("  rpc:          {rpc_url}");
     println!("  device index: {device_index}");
     println!("  batch:        {batch}");
+    println!("  signer:       {signer_uri}");
 
     for line in gpn_agent::gpu::ethash_miner::EthashGpuMiner::device_summary() {
         println!("  device: {line}");
@@ -44,6 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         device_index,
         batch,
         poll_ms,
+        signer_uri,
     };
     let miner = ExternalMiner::start(cfg).map_err(|e| format!("start miner: {e}"))?;
     println!("using GPU: {}", miner.device_name());

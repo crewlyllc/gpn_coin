@@ -66,6 +66,7 @@ impl GPUMiningNodeAgent {
                 device_index: config.mining_device_index,
                 batch: 1 << 20,
                 poll_ms: 2000,
+                signer_uri: config.signer_uri.clone(),
             },
             ComputeConfig {
                 device_index: config.compute_device_index,

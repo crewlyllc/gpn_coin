@@ -20,6 +20,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+use subxt::dynamic::Value as SubxtValue;
+use subxt::ext::scale_value::Primitive;
+use subxt::tx::Signer as _;
 
 /// Configuration for the external mining engine.
 #[derive(Clone, Debug)]
@@ -32,6 +35,9 @@ pub struct MiningConfig {
     pub batch: usize,
     /// How long to wait when the node has no template yet
     pub poll_ms: u64,
+    /// Miner wallet secret URI (seed hex or dev URI). The block reward is paid
+    /// to this account via a direct `submit_solution` (per-miner rewards).
+    pub signer_uri: String,
 }
 
 impl MiningConfig {
@@ -41,6 +47,7 @@ impl MiningConfig {
             device_index: 0,
             batch: 1 << 20,
             poll_ms: 2000,
+            signer_uri: "//Alice".to_string(),
         }
     }
 }
@@ -182,7 +189,6 @@ fn mining_loop(
         }
 
         let target = difficulty_to_le_target(&tmpl.difficulty);
-        let pre_hash_hex = format!("0x{}", hex::encode(tmpl.pre_hash));
 
         // 2. Mine on the GPU until a seal below target is found.
         let mut nonce_start: u64 = 0;
@@ -227,17 +233,17 @@ fn mining_loop(
             hex::encode(&seal.result[..4])
         );
 
-        // 3. Submit the seal.
-        match rpc.submit_work(&pre_hash_hex, &seal_bytes) {
+        // 3. Submit the solution directly (signed) so the reward goes to the miner's wallet.
+        match submit_solution_direct(&cfg.rpc_url, &cfg.signer_uri, &seal, &tmpl.difficulty) {
             Ok(true) => log::info!(
-                "✅ SUBMITTED block #{} — accepted by node",
+                "✅ SUBMITTED block #{} — reward paid to miner wallet",
                 tmpl.block_number
             ),
             Ok(false) => log::info!(
-                "↩️  stale template (block #{}) — refetching",
+                "↩️  stale (block #{}) — refetching",
                 tmpl.block_number
             ),
-            Err(e) => log::error!("[error] submitWork: {e}"),
+            Err(e) => log::error!("[error] submit_solution: {e}"),
         }
 
         // Session hashrate summary.
@@ -383,4 +389,44 @@ fn difficulty_to_le_target(difficulty: &str) -> [u8; 32] {
     let mut target = [0u8; 32];
     value.to_little_endian(&mut target);
     target
+}
+
+/// Submit a mined seal directly to `GPUPoW::submit_solution`, signed with the
+/// miner's own key, so the block reward is paid to the miner's wallet (rather
+/// than the node's configured `BlockRewardBeneficiary`).
+fn submit_solution_direct(
+    endpoint: &str,
+    signer_uri: &str,
+    seal: &crate::gpu::ethash_miner::MinedSeal,
+    difficulty: &str,
+) -> Result<bool, String> {
+    let difficulty_u256 = U256::from_str_radix(difficulty.trim_start_matches("0x"), 16)
+        .map_err(|e| format!("parse difficulty: {e}"))?;
+    let mut diff_bytes = [0u8; 32];
+    difficulty_u256.to_little_endian(&mut diff_bytes);
+
+    futures::executor::block_on(async {
+        let client = crate::chain::signer::connect(endpoint)
+            .await
+            .map_err(|e| format!("connect: {e}"))?;
+        let signer = crate::chain::signer::Sr25519Signer::from_uri(signer_uri)
+            .map_err(|e| format!("signer: {e}"))?;
+
+        let solution = SubxtValue::unnamed_composite(vec![
+            SubxtValue::u128(seal.nonce as u128),
+            SubxtValue::from_bytes(&seal.mix),
+            SubxtValue::from_bytes(&seal.result),
+            SubxtValue::u128(1), // algorithm_version
+        ]);
+        let difficulty_val = SubxtValue::primitive(Primitive::U256(diff_bytes));
+        let call =
+            subxt::dynamic::tx("GPUPoW", "submit_solution", vec![solution, difficulty_val]);
+
+        let nonce =
+            crate::chain::signer::current_nonce(&client, endpoint, &signer.account_id()).await;
+        crate::chain::signer::submit_signed(&client, &call, &signer, nonce)
+            .await
+            .map_err(|e| format!("submit_solution: {e}"))?;
+        Ok(true)
+    })
 }
