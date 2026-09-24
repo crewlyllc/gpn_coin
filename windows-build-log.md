@@ -175,3 +175,55 @@ documents the model commands. Everything sandboxed under `~/.gpn`.
 - `gpn_pull_model gguf ggml-org/models tinyllamas/stories260K.gguf` → downloaded
   1.18 MB GGUF from HF, generated Modelfile, `ollama create stories260K` → "success".
 - `bash -n install.sh` clean; `cargo build --release --bins` clean.
+
+## 2026-09-24 20:30 UTC — 1 GPU = 1 reward: regenerate WASM + reset + rebuild Windows
+
+Starting the "1 GPU = 1 reward via attestation" runtime-change rollout (commit 0c03450).
+The committed deterministic WASM is now stale (submit_solution requires attestation), so:
+regenerate WASM → recommit → reset chain → re-seed → verify gate → rebuild Windows.
+
+STEP 1 — regenerate + recommit WASM (started).
+
+STEP 1 DONE — new WASM generated (md5 e9a6978fae1259f1c615be4ea59f033a, 476523 bytes vs stale 475998), committed e5c5467 + Cargo.lock c056d34, pushed to main (0c03450..c056d34).
+
+STEP 2 — reset chain + re-seed (started).
+
+STEP 2 DONE — chain reset + re-seed:
+- Stopped gpn-faucet/gpn-explorer/gpn-node; removed ~/.gpn/node; restarted all three.
+- New genesis: state 0xbf5b…b737 / header-hash 0x08c4…948a (hash changed vs old, confirming the
+  regenerated WASM altered the genesis hash).
+- Faucet (block beneficiary 5GjVjMhy2MfsEMFrT1BWB5NMXEXpsdqW2Dv2J8fHFnCRCwrs) accumulated
+  block rewards (~300 GPN / 3 min); waited until balance_gpn >= 2000 (reached 2150 at 13:35).
+- Dripped 1000 GPN to operator-1 (5DUaYAf5wSDSZrQVvMygLRCMmkF9BBqrrrSsVdw3QHboM5Y6).
+- gpn_seed_feed (operator-1) → update_feed finalized ✅ (token 0.15, gpu-hr 3.0, util 72%, APR 15%).
+  (The tool's "CurrentFeed still empty" warning was transient — gpn_check_feed now reads the
+  seeded feed correctly and marks it plausible.)
+
+STEP 3 DONE — attestation gate verified live:
+- Built two throwaway verification helpers (gpn_verify_gate + gpn_transfer, since removed).
+- Unattested fresh wallet 5CFuTqnmdoWiuTtFiHqcu25LAkzAYFgWmKT8N3LSfwfReGws (//GateTestMiner):
+  dripped 1000 GPN, submitted a VALID solution → REJECTED with
+  `ModuleError(GPUPoW::NotAttested)` [pallet=8 error=3]. ✅ gate blocks unattested miners.
+- Attested provider 5ENqSp5Q65bxfgryZExQDRnV1rEW1qb2UBztvswLamkoUrqj (seed 0xf0fb…): after
+  chain reset its attestation was wiped, so re-attested (drip 1200 via faucet-seed transfer,
+  gpn_attest → deposit_stake 1000 + submit_attestation, Bronze/188 GFLOPS). Submitted the same
+  VALID solution → OK (accepted, reward recorded). ✅ gate still lets attested miners through.
+- Note: faucet drip endpoint has a global 3600s cooldown, so the provider was funded via a
+  direct Balances::transfer from the faucet seed instead.
+
+STEP 4 — Windows rebuild dispatched:
+- POST release-windows.yml/dispatches {ref:main} → HTTP 204 ✅ (run 36056511503, head c056d34).
+- Run status: in_progress (the self-hosted Windows runner is back online).
+
+STEP 4 DONE — Windows rebuilt ✅
+- release-windows.yml run 36056511503 (head c056d34) → completed **success** at ~14:04 UTC.
+- Artifact uploaded: `gpn-windows` (142,900,850 bytes).
+
+=== ROLLOUT COMPLETE ===
+1 GPU = 1 reward via attestation: submit_solution now gated on attested_gflops > 0.
+WASM regenerated (md5 e9a6978…), committed + pushed, chain reset on new genesis,
+gate verified live (unattested → NotAttested; attested → accepted), Windows rebuilt.
+
+Out-of-scope note: ci.yml (fmt/clippy + unit tests on 3 OSes) was already failing BEFORE this
+change (run 36054256761 on 0c03450 failed at 20:20 UTC) and remains failing — unrelated to the
+WASM regeneration; not touched per task scope.
