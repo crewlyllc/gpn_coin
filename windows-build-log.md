@@ -87,3 +87,40 @@ Also: subxt's `OnlineClient` needs a `ws://` endpoint (not `http://`) and a Toki
 - Node live on 127.0.0.1:9944 (`gpn-node` pid 394595) + faucet on 8081; no external miner running.
 - Re-triggered `release-windows.yml` on `main` (HTTP 204). Runner `DESKTOP-USBUADL` still **offline** (status via runners API).
 - **Net:** code deliverable is complete, pushed, and Linux-verified. The Windows binary build remains blocked on the offline self-hosted 5070 Ti runner — a hardware blocker, not a code issue. The queued `Windows binaries` runs will execute automatically once the runner comes back online. Disabling this cron (re-running produces no further progress until the runner returns).
+
+## 2026-09-24 19:20 UTC — AI-compute Task 1: nonce fix + connection robustness ✅
+
+**Problem:** `gpn_marketplace_demo` could not even run — `ChainClient::new` /
+`signer::connect` both failed with `Rpc error: UnknownBlock: State already
+discarded for <genesis>` and silently fell back to placeholder data (nonce 0,
+balance 0, "not staked"). Two distinct issues were blocking the AI-compute side:
+
+1. **Pruned finalized block breaks subxt connect + tx submit.** The testnet is a
+   PoW chain with no GRANDPA finality gadget, so the finalized head stays stuck
+   at genesis (#0). The node prunes old state, so subxt's `OnlineClient::from_url`
+   (which fetches metadata at the *finalized* block) fails once #0 is pruned.
+   Same for `sign_and_submit_then_watch` → `refine_params`, which reads the
+   account nonce at the finalized block. Root cause confirmed by reading
+   `subxt-0.37.0/src/client/online_client.rs` (`from_backend` fetches metadata at
+   `latest_finalized_block_ref()`) and `src/tx/tx_client.rs` (`refine_params`
+   reads `get_account_nonce` at the finalized block hash).
+
+2. **Nonce collision** (the originally-reported "Priority is too low (2424 vs
+   2424)"): two back-to-back txs from the same account read the same head-block
+   nonce.
+
+**Fix (`gpn-agent/src/chain/signer.rs` + `mod.rs`):**
+- Added `signer::connect_robust<T: Config>`: falls back to fetching genesis
+  hash / runtime version / metadata at the **best (head)** block (whose state is
+  never pruned) and building the client with `OnlineClient::from_rpc_client_with`.
+- `ChainClient::new` now uses `connect_robust::<SubstrateConfig>`.
+- `submit_signed` now signs **offline** (`create_signed_offline`) + `submit_and_watch`,
+  avoiding the finalized-block `refine_params` read, and wraps the submission in a
+  nonce-retry loop (bump nonce + retry on "Priority is too low" / "Transaction is
+  outdated" / "nonce is too low" / "already in pool" / "duplicate").
+
+**Verified live:** `gpn_marketplace_demo ws://127.0.0.1:9944 <provider_seed> 150`
+now runs the FULL flow: provider read as staked+attested (Bronze 188 GFLOPS) →
+create_job (id=2) → accept → start → real GPU GEMM (RTX 4060, 14ms) →
+submit_result → complete_job (escrow 50 GPN released, balance 447.5 → 495.0 GPN).
+✅ END-TO-END MARKETPLACE FLOW COMPLETE.

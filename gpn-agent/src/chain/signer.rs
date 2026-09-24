@@ -13,6 +13,7 @@
 
 use sp_core::{crypto::Pair as _, sr25519};
 use subxt::{
+    backend::{legacy::LegacyRpcMethods, rpc::RpcClient},
     config::{
         substrate::{BlakeTwo256, MultiSignature, SubstrateHeader, H256},
         Config, DefaultExtrinsicParams,
@@ -72,7 +73,65 @@ impl Signer<GpnConfig> for Sr25519Signer {
 pub async fn connect(
     endpoint: &str,
 ) -> Result<OnlineClient<GpnConfig>, Box<dyn std::error::Error>> {
-    Ok(OnlineClient::<GpnConfig>::from_url(endpoint).await?)
+    connect_robust::<GpnConfig>(endpoint).await
+}
+
+/// Robustly construct an [`OnlineClient`] that tolerates a **pruned finalized
+/// block** on PoW chains without a finality gadget (GRANDPA).
+///
+/// The default [`OnlineClient::from_url`] fetches the chain metadata at the
+/// *latest finalized* block. On a PoW dev/testnet chain the finalized head
+/// stays stuck at genesis (#0) forever, and once the node prunes state past
+/// that block the metadata fetch fails with `UnknownBlock: State already
+/// discarded for <genesis>`, which makes `from_url` return `Err` and every
+/// downstream read silently fall back to placeholder defaults (nonce 0,
+/// balance 0, "not staked").
+///
+/// We first try the fast path, then fall back to fetching the genesis hash /
+/// runtime version / metadata at the **best (head)** block — whose state is
+/// always available — and construct the client with
+/// [`OnlineClient::from_rpc_client_with`]. Storage reads in this crate already
+/// target the head block explicitly (see [`current_nonce`]), so the client
+/// never needs the finalized block afterwards.
+pub async fn connect_robust<T: Config>(
+    endpoint: &str,
+) -> Result<OnlineClient<T>, Box<dyn std::error::Error>> {
+    // Fast path: normal connection (works while the finalized block's state is
+    // still within the node's pruning window).
+    if let Ok(client) = OnlineClient::<T>::from_url(endpoint).await {
+        return Ok(client);
+    }
+
+    // Slow path: fetch everything at the best block so we never touch the
+    // pruned finalized (genesis) state.
+    let rpc = RpcClient::from_insecure_url(endpoint).await?;
+    let methods = LegacyRpcMethods::<T>::new(rpc.clone());
+
+    let genesis_hash = methods.genesis_hash().await?;
+    let best_hash = methods
+        .chain_get_block_hash(None)
+        .await?
+        .ok_or("no best block hash returned by chain_getBlockHash")?;
+    // `state_get_runtime_version` returns the legacy RPC `RuntimeVersion`; the
+    // client constructor wants the `subxt_core` one (spec_version +
+    // transaction_version only).
+    let legacy_rt = methods.state_get_runtime_version(Some(best_hash)).await?;
+    let runtime_version = subxt::client::RuntimeVersion {
+        spec_version: legacy_rt.spec_version,
+        transaction_version: legacy_rt.transaction_version,
+    };
+    let metadata = methods.state_get_metadata(Some(best_hash)).await?;
+
+    log::warn!(
+        "finalized block state pruned; connected via best-block metadata (head {:?})",
+        best_hash
+    );
+    Ok(OnlineClient::<T>::from_rpc_client_with(
+        genesis_hash,
+        runtime_version,
+        metadata,
+        rpc,
+    )?)
 }
 
 /// Read the account's current on-chain nonce from the **head** block (so a
@@ -172,7 +231,57 @@ pub async fn current_nonce(
 /// *finalized* block, which on a PoW dev chain with no finality gadget stays at
 /// #0 — so a second+ tx from the same account would be rejected as
 /// `Transaction is outdated` (stale nonce 0 vs. real nonce 1+).
+/// Submit a signed call with nonce-retry/backoff for tx-pool collisions.
+///
+/// When two extrinsics from the same account are submitted back-to-back, the
+/// second can read a stale nonce (the first is still in the node's tx pool, so
+/// the on-chain `System::Account` nonce hasn't advanced yet) and collide —
+/// surfacing as "Priority is too low" / "Transaction is outdated". We retry the
+/// submission with an incremented nonce until the tx is accepted or a
+/// non-nonce error is returned.
 pub async fn submit_signed<Call>(
+    client: &OnlineClient<GpnConfig>,
+    call: &Call,
+    signer: &Sr25519Signer,
+    nonce: u64,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    Call: Payload,
+{
+    const MAX_NONCE_RETRIES: u32 = 8;
+    let mut nonce = nonce;
+    for attempt in 0..MAX_NONCE_RETRIES {
+        match submit_signed_once(client, call, signer, nonce).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                if attempt + 1 < MAX_NONCE_RETRIES && is_nonce_collision(&e.to_string()) {
+                    nonce += 1;
+                    log::warn!(
+                        "tx nonce collision; retrying with nonce {} (attempt {}/{})",
+                        nonce,
+                        attempt + 1,
+                        MAX_NONCE_RETRIES
+                    );
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+    Err("nonce collision: exceeded maximum retries".into())
+}
+
+/// True when an error string indicates a transaction-pool nonce collision.
+fn is_nonce_collision(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    m.contains("priority is too low")
+        || m.contains("transaction is outdated")
+        || m.contains("nonce is too low")
+        || m.contains("already in pool")
+        || m.contains("duplicate")
+}
+
+async fn submit_signed_once<Call>(
     client: &OnlineClient<GpnConfig>,
     call: &Call,
     signer: &Sr25519Signer,
@@ -184,9 +293,16 @@ where
     let params = subxt::config::DefaultExtrinsicParamsBuilder::<GpnConfig>::new()
         .nonce(nonce)
         .build();
+    // Sign OFFLINE then submit_and_watch: the online `sign_and_submit_then_watch`
+    // path routes through `refine_params`, which reads the account nonce + block
+    // header at the *finalized* block. On a PoW chain without a finality gadget
+    // the finalized head stays at genesis and its state is pruned, so that read
+    // fails with "State already discarded". We resolve the nonce ourselves (see
+    // `current_nonce`), so sign offline and submit the raw bytes directly.
     let progress = client
         .tx()
-        .sign_and_submit_then_watch(call, signer, params)
+        .create_signed_offline(call, signer, params)?
+        .submit_and_watch()
         .await?;
 
     // Wait for the tx to be included in a **best** block. We deliberately do

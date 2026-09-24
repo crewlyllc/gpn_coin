@@ -69,7 +69,10 @@ impl ChainClient {
     /// agent must keep working even when the chain is down.
     pub async fn new(endpoint: &str) -> Result<Self, Box<dyn std::error::Error>> {
         log::info!("Connecting to GPN chain at {}", endpoint);
-        let client = match OnlineClient::<SubstrateConfig>::from_url(endpoint).await {
+        // Use the robust connection path that tolerates a pruned finalized
+        // block on PoW chains without a finality gadget (see
+        // `signer::connect_robust`).
+        let client = match signer::connect_robust::<SubstrateConfig>(endpoint).await {
             Ok(c) => {
                 log::info!("Connected to GPN chain (subxt) at {}", endpoint);
                 Some(c)
