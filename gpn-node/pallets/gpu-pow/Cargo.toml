@@ -9,6 +9,7 @@ frame-system = { workspace = true }
 frame-benchmarking = { workspace = true, optional = true }
 pallet-timestamp = { workspace = true }
 pallet-gpn-token = { path = "../gpn-token", default-features = false }
+pallet-gpu-attestation = { path = "../gpu-attestation", default-features = false }
 sp-io = { workspace = true }
 sp-runtime = { workspace = true }
 sp-std = { workspace = true }
@@ -36,6 +37,7 @@ std = [
     "frame-benchmarking?/std",
     "pallet-timestamp/std",
     "pallet-gpn-token/std",
+    "pallet-gpu-attestation/std",
     "sp-io/std",
     "sp-runtime/std",
     "sp-std/std",

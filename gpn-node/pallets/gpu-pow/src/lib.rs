@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 pub use pallet::*;
 pub use weights::WeightInfo;
+use pallet_gpu_attestation::GPUAttestationProvider;
 
 /// A 256-bit unsigned integer for difficulty.
 pub type U256 = [u64; 4];
@@ -80,6 +81,10 @@ pub mod pallet {
         /// Block rewards are minted through it so the 1B cap is enforced
         /// against one counter (workplan item 1).
         type Supply: SupplyManager<Self::AccountId, BalanceOf<Self>>;
+        /// Cross-pallet read of attested GPU throughput — `submit_solution`
+        /// requires the caller to be attested so one GPU can only claim one
+        /// reward (anti-double-mining).
+        type GPUAttestation: GPUAttestationProvider<Self::AccountId>;
         /// Weight information for extrinsics in this pallet (workplan item 9).
         type WeightInfo: WeightInfo;
     }
@@ -195,6 +200,8 @@ pub mod pallet {
         InvalidSolution,
         SolutionHashMismatch,
         UnsupportedAlgorithmVersion,
+        /// The caller is not an attested GPU provider.
+        NotAttested,
         DifficultyTooLow,
         DifficultyTooHigh,
         SolutionTooEarly,
@@ -265,6 +272,10 @@ pub mod pallet {
             difficulty: U256,
         ) -> DispatchResult {
             let miner = ensure_signed(origin)?;
+            ensure!(
+                T::GPUAttestation::attested_gflops(&miner) > 0,
+                Error::<T>::NotAttested
+            );
             let computed_hash = Self::compute_solution_hash(&solution);
             ensure!(
                 computed_hash == solution.solution_hash,

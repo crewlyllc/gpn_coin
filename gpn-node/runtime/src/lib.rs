@@ -368,6 +368,8 @@ impl pallet_gpu_pow::Config for Runtime {
     // Canonical supply accounting lives in pallet-gpn-token; the single
     // `MaxSupply` const is now enforced there (workplan item 1).
     type Supply = GPNToken;
+    // Cross-pallet read of attested GPU throughput (submit_solution gate).
+    type GPUAttestation = GPUAttestation;
     // Benchmark-derived weights (workplan item 9).
     type WeightInfo = pallet_gpu_pow::weights::SubstrateWeight<Runtime>;
 }
