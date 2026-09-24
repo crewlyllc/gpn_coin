@@ -124,3 +124,54 @@ now runs the FULL flow: provider read as staked+attested (Bronze 188 GFLOPS) →
 create_job (id=2) → accept → start → real GPU GEMM (RTX 4060, 14ms) →
 submit_result → complete_job (escrow 50 GPN released, balance 447.5 → 495.0 GPN).
 ✅ END-TO-END MARKETPLACE FLOW COMPLETE.
+
+## 2026-09-24 19:26 UTC — AI-compute Task 2: LLM inference end-to-end ✅
+
+**Verified live (no code change needed — the `gpn_llm_provider` / `gpn_api` /
+off-chain `LlmStore` plumbing already existed; Task 1's connection fix unblocked it):**
+
+1. `gpn_llm_provider ws://127.0.0.1:9944 <provider_seed> 3000` (poll=3s) — polls
+   the chain for `LLMInference` jobs `Running` + assigned to its signer
+   (`0x664c6e…`), runs inference against the local ollama (`:11434`,
+   `llama3.2:1b`), writes the response + sha256 result hash off-chain, then
+   settles on-chain (`submit_result` → `complete_job`).
+2. `gpn_api --listen 127.0.0.1:8090 --signer-uri <provider_seed>` —
+   `POST /jobs` (LLMInference + prompt + model) created job #3 and stored the
+   off-chain payload (`GPN_LLM_STORE=/home/jeremyg/.gpn/llm_store.json`).
+3. `POST /jobs/3/accept` + `POST /jobs/3/start` → job moved Pending → Accepted →
+   Running (provider = provider_seed).
+4. Provider auto-picked it up, ran `llama3.2:1b` inference, and recorded:
+
+   - **response**: "A Graphics Processing Unit (GPU) is a specialized electronic
+     circuit designed to quickly manipulate and alter memory to accelerate the
+     creation of images in a computer or other digital device." (192 chars)
+   - **result_hash**: `0052336c4ad9aa3aae4efa886fd78f788d8d375a6026aaaee42b98b249d60ffb`
+   - on-chain state → **Completed** (escrow released).
+
+**Result:** LLM inference end-to-end works — requestor posts a job, the provider
+runs a real model off-chain, and only the result hash is recorded on-chain.
+`llama3.2:1b` + `ollama serve` on the RTX 4060 confirmed reachable via
+`/v1/chat/completions`.
+
+## 2026-09-24 19:33 UTC — AI-compute Task 3: installer (ollama + model helper) ✅
+
+**(a) install.sh — ollama user-local.** Added `install_ollama()`: detects
+OS/arch, downloads the ollama release tarball from GitHub (`releases/latest/
+download/ollama-{os}-{arch}.tgz`), extracts to `~/.gpn/ollama` (binary lands at
+`~/.gpn/ollama/bin/ollama`), and prepares `~/.gpn/models`. Idempotent (no-op if
+ollama present) and non-fatal (warns + continues on unsupported platform / failed
+download). `gpn.env` now exports `OLLAMA_BIN` + `OLLAMA_MODELS`; the "Done" banner
+documents the model commands. Everything sandboxed under `~/.gpn`.
+
+**(b) gpn_pull_model — model-download helper (new bin).** Two modes:
+- `pull <model>` → `ollama pull <model>` (resolves `~/.gpn/ollama/bin/ollama`,
+  sets `OLLAMA_MODELS`).
+- `gguf <hf-repo> <file> [name]` → downloads the GGUF from HuggingFace
+  (`https://huggingface.co/<repo>/resolve/main/<file>`, memory-bounded stream),
+  writes a `FROM "<path>"` Modelfile, and registers it via `ollama create <name>`.
+
+**Verified live:**
+- `gpn_pull_model pull llama3.2:1b` → real ollama pull (manifest + 1.3 GB verified).
+- `gpn_pull_model gguf ggml-org/models tinyllamas/stories260K.gguf` → downloaded
+  1.18 MB GGUF from HF, generated Modelfile, `ollama create stories260K` → "success".
+- `bash -n install.sh` clean; `cargo build --release --bins` clean.
