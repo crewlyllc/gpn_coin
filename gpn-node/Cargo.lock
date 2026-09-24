@@ -5912,6 +5912,7 @@ dependencies = [
  "log",
  "pallet-balances",
  "pallet-gpn-token",
+ "pallet-gpu-attestation",
  "pallet-timestamp",
  "parity-scale-codec 3.7.5",
  "scale-info",
