@@ -75,3 +75,15 @@ Also: subxt's `OnlineClient` needs a `ws://` endpoint (not `http://`) and a Toki
 - Confirmed GitHub `main` == local HEAD `bb0bac0` (the fix commits 2f8b34d → bb0bac0 are all pushed; local `origin/main` tracking ref was stale, not the remote).
 - Re-triggered `release-windows.yml` on `main` (HTTP 204). Runner `DESKTOP-USBUADL` (5070 Ti self-hosted box) is **offline**, so the run + the earlier queued runs (35932818112, 35934260761) remain queued.
 - **Net:** per-miner wallets fix is DONE, committed, pushed, and verified live on Linux (//Bob climbs ~50 GPN/block). The Windows binary build cannot run until the physical 5070 Ti runner comes back online — a hardware/infra blocker, not a code issue.
+
+## 2026-09-24 00:09 UTC — cron re-fire: re-audit + re-trigger (runner still offline)
+
+- Re-audited `gpn-agent/src/mining/mod.rs` `submit_solution_direct` + `search_solution` against `pallet_gpu_pow::submit_solution` / `compute_solution_hash` / `meets_difficulty`. Confirmed the encoding + semantics are correct:
+  - `solution_hash = blake2_256(SCALE(nonce, mix_hash, algorithm_version))` (44 raw bytes) — matches the pallet exactly.
+  - `meets_target` uses `U256::from_little_endian(&h) < difficulty`, byte-identical to the pallet's LE-limb comparison.
+  - Difficulty encoded as an unnamed composite of four u64 limbs against the pallet's `U256 = [u64;4]` array type; scale-value narrows `Value::u128` to the target field width (verified against scale-value 0.16.3 `encode.rs` `assert_can_encode_to_type(Value::u128(123), 123u8/u32/u64)`).
+- `cargo build --release --bins` (gpn-agent) passes clean (pre-existing dead-code warnings only).
+- Confirmed remote `main` HEAD == local HEAD `2491460` via GitHub API (fix commits 2f8b34d → 2491460 all pushed).
+- Node live on 127.0.0.1:9944 (`gpn-node` pid 394595) + faucet on 8081; no external miner running.
+- Re-triggered `release-windows.yml` on `main` (HTTP 204). Runner `DESKTOP-USBUADL` still **offline** (status via runners API).
+- **Net:** code deliverable is complete, pushed, and Linux-verified. The Windows binary build remains blocked on the offline self-hosted 5070 Ti runner — a hardware blocker, not a code issue. The queued `Windows binaries` runs will execute automatically once the runner comes back online. Disabling this cron (re-running produces no further progress until the runner returns).
