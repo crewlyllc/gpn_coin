@@ -34,6 +34,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .cloned()
         .unwrap_or_else(|| "//Alice".to_string());
 
+    // Refuse to mine against a LOCAL node: running on the same machine as the
+    // node would let a single GPU double-mine (both the node's internal miner
+    // and this external miner on the same card). The external miner must target
+    // a REMOTE node.
+    let lower = rpc_url.to_lowercase();
+    if lower.contains("localhost") || lower.contains("127.0.0.1") || lower.contains("[::1]") {
+        eprintln!(
+            "refusing to run: the node endpoint `{rpc_url}` is LOCAL — the external miner must \
+             target a REMOTE node (running it on the same machine would let one GPU mine twice \
+             the GPN). Use the node's public IP/DNS instead."
+        );
+        std::process::exit(1);
+    }
+
     println!("== GPN external GPU miner ==");
     println!("  rpc:          {rpc_url}");
     println!("  device index: {device_index}");
