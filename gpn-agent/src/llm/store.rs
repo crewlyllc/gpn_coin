@@ -16,10 +16,17 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 /// Default store location (override with env `GPN_LLM_STORE`).
+///
+/// Defaults to a PERSISTENT, shared path (`~/.gpn/llm_store.json`) so the API and
+/// the providers agree even without the env var. (A temp path differs per process
+/// and, worse, loses the store on reboot.)
 pub fn default_store_path() -> PathBuf {
     std::env::var("GPN_LLM_STORE")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| crate::utils::temp_path("gpn_llm_store.json"))
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+            PathBuf::from(format!("{home}/.gpn/llm_store.json"))
+        })
 }
 
 /// A single generation job's off-chain payload. Used for LLM inference AND

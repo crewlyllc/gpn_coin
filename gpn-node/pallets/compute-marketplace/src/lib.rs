@@ -481,7 +481,13 @@ pub mod pallet {
             //     dust job pays no fee rather than leaving a sub-ED account.
             //  2. Otherwise drain the fee to the sink FIRST (cmkt -> provider_payment,
             //     which is >= ED), THEN pay the provider (cmkt -> 0).
-            if provider_payment < T::Currency::minimum_balance() {
+            if provider_payment < T::Currency::minimum_balance()
+                || fee < T::Currency::minimum_balance()
+            {
+                // Also skip the fee when it is itself below ED: a fresh/empty fee
+                // sink cannot receive a sub-ED balance (pallet_balances rejects it
+                // with TokenError::BelowMinimum). Sub-ED fees are dust — route the
+                // whole escrow to the provider.
                 provider_payment = escrow;
                 fee = Zero::zero();
             }
