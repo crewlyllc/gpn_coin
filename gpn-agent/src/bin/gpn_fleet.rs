@@ -101,7 +101,12 @@ fn main() {
     println!("  poll:      {poll}s");
 
     let mut child: Option<Child> = None;
-    let mut current: Option<String> = None;
+    // Remember the last network actually applied (survives restarts) so we only
+    // PURGE on a real network change — never on the first start.
+    let mut current: Option<String> = std::fs::read_to_string(&state_file)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v.get("network").and_then(|x| x.as_str()).map(|s| s.to_string()));
 
     loop {
         let target = match fetch_directive(&directive_src) {
@@ -123,8 +128,11 @@ fn main() {
                 let _ = c.kill();
                 let _ = c.wait();
             }
-            // purge data (different genesis between networks)
-            if !node_data.is_empty() && std::path::Path::new(&node_data).exists() {
+            // Purge ONLY on an actual network change (different genesis), never on
+            // the first start — otherwise we'd wipe a valid chain on every boot.
+            let is_change = current.is_some() && current.as_deref() != Some(target.as_str());
+            if is_change && !node_data.is_empty() && std::path::Path::new(&node_data).exists() {
+                println!("[fleet] network changed — purging {node_data}");
                 if let Err(e) = std::fs::remove_dir_all(&node_data) {
                     println!("[fleet] WARN could not purge data dir: {e}");
                 }
