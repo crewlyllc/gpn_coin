@@ -121,7 +121,8 @@ fn main() {
             }
         };
 
-        if !target.is_empty() && Some(&target) != current.as_ref() {
+        // Decide whether to (re)start the node this cycle.
+        let start_needed = if !target.is_empty() && Some(&target) != current.as_ref() {
             println!("[fleet] ► target network = {target}");
             // stop the current node
             if let Some(mut c) = child.take() {
@@ -137,17 +138,24 @@ fn main() {
                     println!("[fleet] WARN could not purge data dir: {e}");
                 }
             }
-            let (chain, bootnodes) = net_of(&networks, &target);
-            match start_node(&node_bin, &node_data, &chain, &bootnodes, &node_args) {
-                Ok(c) => child = Some(c),
-                Err(e) => println!("[fleet] ERROR {e}"),
-            }
             current = Some(target.clone());
-            // persist last-applied network
             let _ = std::fs::write(
                 &state_file,
                 serde_json::json!({"network": target}).to_string(),
             );
+            true
+        } else {
+            // No directive change — (re)start only if the node isn't running.
+            child.is_none()
+        };
+
+        if start_needed {
+            let net = current.clone().unwrap_or_default();
+            let (chain, bootnodes) = net_of(&networks, &net);
+            match start_node(&node_bin, &node_data, &chain, &bootnodes, &node_args) {
+                Ok(c) => child = Some(c),
+                Err(e) => println!("[fleet] ERROR {e}"),
+            }
         }
 
         // supervise: restart if the node exited
