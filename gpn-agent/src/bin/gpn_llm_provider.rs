@@ -40,13 +40,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(5000);
 
     let client = ChainClient::new(&endpoint).await?.with_signer(&signer_uri);
-    let me = {
+    let (me, addr) = {
         use subxt::tx::Signer as _;
         let s = Sr25519Signer::from_uri(&signer_uri)?;
-        // get_job_state returns the account as 0x-hex; match that form.
+        // get_job_state returns the provider as 0x-hex; the attestation lookup
+        // parses an ss58/hex address string.
         let aid = s.account_id();
         let b: &[u8] = aid.as_ref();
-        format!("0x{}", hex::encode(b))
+        (format!("0x{}", hex::encode(b)), aid.to_string())
     };
 
     println!(
@@ -58,14 +59,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     loop {
-        if let Err(e) = process_once(&client, &me).await {
+        if let Err(e) = process_once(&client, &me, &addr).await {
             eprintln!("[provider] cycle error: {e}");
         }
         tokio::time::sleep(Duration::from_millis(poll_ms)).await;
     }
 }
 
-async fn process_once(client: &ChainClient, me: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn process_once(
+    client: &ChainClient,
+    me: &str,
+    addr: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // 0. Auto-claim: take any Pending LLM job we can satisfy (accept -> start),
+    //    so a posted job just runs with no manual accept/start.
+    let attested_gflops = client
+        .get_attestation_record(addr)
+        .await
+        .map(|(_, f, _)| f)
+        .unwrap_or(0);
+    for (job_id, min_gflops) in client.list_claimable_jobs(attested_gflops).await {
+        // Only claim jobs that have an off-chain LLM payload.
+        if !get_job(job_id).map(|j| j.kind == "llm").unwrap_or(false) {
+            continue;
+        }
+        println!("[provider] claiming LLM job #{job_id} (min_gflops={min_gflops})");
+        if let Err(e) = client.accept_job(job_id).await {
+            eprintln!("[provider] accept #{job_id} failed: {e}");
+            continue;
+        }
+        if let Err(e) = client.start_job(job_id).await {
+            eprintln!("[provider] start #{job_id} failed: {e}");
+        }
+    }
+
+    // 1. Run any Running LLM job assigned to this signer.
     let next = client.get_next_job_id().await;
     for id in 0..next {
         // Only jobs that have an off-chain LLM payload are LLM jobs.

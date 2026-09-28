@@ -46,12 +46,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(4000);
 
     let client = ChainClient::new(&endpoint).await?.with_signer(&signer_uri);
-    let me = {
+    let (me, addr) = {
         use subxt::tx::Signer as _;
         let s = gpn_agent::chain::signer::Sr25519Signer::from_uri(&signer_uri)?;
         let aid = s.account_id();
         let b: &[u8] = aid.as_ref();
-        format!("0x{}", hex::encode(b))
+        (format!("0x{}", hex::encode(b)), aid.to_string())
     };
 
     println!(
@@ -63,7 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     loop {
-        if let Err(e) = process_once(&client, &me).await {
+        if let Err(e) = process_once(&client, &me, &addr).await {
             eprintln!("[provider] cycle error: {e}");
         }
         tokio::time::sleep(Duration::from_millis(poll_ms)).await;
@@ -74,7 +74,32 @@ fn is_gen(job: &gpn_agent::llm::LlmJob) -> bool {
     job.kind == "image" || job.kind == "video"
 }
 
-async fn process_once(client: &ChainClient, me: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn process_once(
+    client: &ChainClient,
+    me: &str,
+    addr: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // 0. Auto-claim: take any Pending image/video job we can satisfy.
+    let attested_gflops = client
+        .get_attestation_record(addr)
+        .await
+        .map(|(_, f, _)| f)
+        .unwrap_or(0);
+    for (job_id, min_gflops) in client.list_claimable_jobs(attested_gflops).await {
+        if !get_job(job_id).map(|j| is_gen(&j)).unwrap_or(false) {
+            continue;
+        }
+        println!("[provider] claiming generation job #{job_id} (min_gflops={min_gflops})");
+        if let Err(e) = client.accept_job(job_id).await {
+            eprintln!("[provider] accept #{job_id} failed: {e}");
+            continue;
+        }
+        if let Err(e) = client.start_job(job_id).await {
+            eprintln!("[provider] start #{job_id} failed: {e}");
+        }
+    }
+
+    // 1. Run any Running generation job assigned to this signer.
     let next = client.get_next_job_id().await;
     for id in 0..next {
         let job = match get_job(id) {
