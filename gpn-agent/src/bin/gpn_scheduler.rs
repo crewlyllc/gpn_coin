@@ -40,10 +40,15 @@ fn opt(args: &[String], flag: &str) -> Option<String> {
 }
 
 fn jpost(url: &str) -> Option<Value> {
-    // GET the provider's /status (tiny_http status server).
+    // Allow `--providers http://host:port` (append /status) or a full URL.
+    let url = if url.contains("/status") {
+        url.to_string()
+    } else {
+        format!("{}/status", url.trim_end_matches('/'))
+    };
     let t0 = Instant::now();
     let body = reqwest::blocking::Client::new()
-        .get(url)
+        .get(&url)
         .timeout(Duration::from_millis(2000))
         .send()
         .ok()?

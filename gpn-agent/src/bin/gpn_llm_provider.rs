@@ -122,6 +122,13 @@ async fn process_once(
         if !get_job(job_id).map(|j| j.kind == "llm").unwrap_or(false) {
             continue;
         }
+        // Only claim a Pending job — skip ones already accepted/started (avoids
+        // the harmless-but-noisy `JobNotPending` error on re-claims).
+        if let Some((state, _, _, _)) = client.get_job_state(job_id).await {
+            if state != "Pending" {
+                continue;
+            }
+        }
         println!("[provider] claiming LLM job #{job_id}");
         if let Err(e) = client.accept_job(job_id).await {
             eprintln!("[provider] accept #{job_id} failed: {e}");
