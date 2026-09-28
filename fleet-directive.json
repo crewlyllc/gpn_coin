@@ -1,0 +1,5 @@
+{
+  "target_network": "testnet",
+  "updated_at": 1790620281,
+  "note": "fleet directive — set with gpn_fleet_set. All gpn_fleet-supervised nodes follow target_network."
+}
