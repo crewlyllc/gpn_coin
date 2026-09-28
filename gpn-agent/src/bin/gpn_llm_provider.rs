@@ -66,24 +66,63 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+fn assignment_store_path() -> String {
+    std::env::var("GPN_ASSIGN_STORE").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        format!("{home}/.gpn/assignments.json")
+    })
+}
+
+/// Job ids the access-point scheduler assigned to this provider (matched by
+/// either the hex or ss58 form of our account). Empty = no scheduler in play.
+fn read_assigned(me: &str, addr: &str) -> Vec<u64> {
+    let path = assignment_store_path();
+    let Ok(s) = std::fs::read_to_string(&path) else {
+        return vec![];
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) else {
+        return vec![];
+    };
+    let Some(m) = v.as_object() else {
+        return vec![];
+    };
+    m.iter()
+        .filter(|(_, pv)| {
+            let p = pv.as_str().unwrap_or("");
+            p == me || p == addr
+        })
+        .filter_map(|(k, _)| k.parse::<u64>().ok())
+        .collect()
+}
+
 async fn process_once(
     client: &ChainClient,
     me: &str,
     addr: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // 0. Auto-claim: take any Pending LLM job we can satisfy (accept -> start),
-    //    so a posted job just runs with no manual accept/start.
-    let attested_gflops = client
-        .get_attestation_record(addr)
-        .await
-        .map(|(_, f, _)| f)
-        .unwrap_or(0);
-    for (job_id, min_gflops) in client.list_claimable_jobs(attested_gflops).await {
-        // Only claim jobs that have an off-chain LLM payload.
+    // 0. Auto-claim: if an access-point scheduler has assigned us specific jobs,
+    //    claim ONLY those; otherwise (standalone) claim any claimable LLM job.
+    let assigned = read_assigned(me, addr);
+    let targets: Vec<u64> = if assigned.is_empty() {
+        let attested_gflops = client
+            .get_attestation_record(addr)
+            .await
+            .map(|(_, f, _)| f)
+            .unwrap_or(0);
+        client
+            .list_claimable_jobs(attested_gflops)
+            .await
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    } else {
+        assigned
+    };
+    for job_id in targets {
         if !get_job(job_id).map(|j| j.kind == "llm").unwrap_or(false) {
             continue;
         }
-        println!("[provider] claiming LLM job #{job_id} (min_gflops={min_gflops})");
+        println!("[provider] claiming LLM job #{job_id}");
         if let Err(e) = client.accept_job(job_id).await {
             eprintln!("[provider] accept #{job_id} failed: {e}");
             continue;
