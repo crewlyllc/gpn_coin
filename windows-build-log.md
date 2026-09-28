@@ -227,3 +227,78 @@ gate verified live (unattested → NotAttested; attested → accepted), Windows 
 Out-of-scope note: ci.yml (fmt/clippy + unit tests on 3 OSes) was already failing BEFORE this
 change (run 36054256761 on 0c03450 failed at 20:20 UTC) and remains failing — unrelated to the
 WASM regeneration; not touched per task scope.
+
+================================================================================
+2026-09-28 12:40 UTC — FORKLESS set_code UPGRADE (complete_job sub-ED fee fix)
+================================================================================
+STEP 1 DONE — WASM regen finished: /tmp/wasm-regen.log ends "Finished `release` profile";
+  fresh gpn_runtime.compact.compressed.wasm present in wbuild (476504 bytes, md5 eec31f41…,
+  differs from stale e9a6978f… in /tmp/stale-wasm.bak).
+STEP 2 DONE — copied fresh WASM to gpn-node/runtime/, committed 0c5693d
+  "runtime: regenerate canonical WASM (complete_job sub-ED fee fix)", pushed 5faff97..0c5693d.
+STEP 3 — sudo 5HHSuwZgsYpa5Mfdfdgzr7LJcY4sU21t2iyu8sq1yV2PjuMn balance was 0; faucet drip
+  1000 GPN ok (faucet bal before 13200). gpn_upgrade_runtime → "✅ runtime upgraded in place
+  (forkless) — chain continued, state preserved" (nonce 0 consumed, now nonce=1).
+STEP 4 DONE — NO RESET: head baseline #0x148 (328) before, #0x14c (332) after, still climbing.
+  State survived: provider 5ENqSp5Q… staked=true attested=true (Bronze/188 GFLOPS),
+  balance 999.9992 GPN; oracle feed present (price $0.15, apr 15%, plausible=true).
+
+--------------------------------------------------------------------------------
+2026-09-28 ~19:50 UTC — DIAGNOSIS: first set_code attempts were silently rejected
+--------------------------------------------------------------------------------
+Symptom: gpn_upgrade_runtime printed "✅ runtime upgraded" but the on-chain :code
+  was UNCHANGED (still the stale 476523-byte blob, blake2 aaa2b9b9…), and
+  complete_job kept failing with DispatchError variant=7 (Token) 0x02
+  = TokenError::BelowMinimum (the exact sub-ED fee bug → fix not live).
+Root cause found:
+  * Sudo.sudo does NOT fail the outer extrinsic when the inner call fails; it emits
+    Sudo::Sudid{ Err(...) } while the outer tx is ExtrinsicSuccess. The upgrade tool
+    only scans for System::ExtrinsicFailed, so it missed the inner failure (false success).
+  * Decoded block events (new gpn_dump_events bin):
+      Sudo::Sudid fields=0x01030001000000
+      = Err( Module{ pallet=0 (System), error=[1,0,0,0] } ) = System::SpecVersionNeedsToIncrease.
+  * Confirmed in polkadot-sdk frame/system/src/lib.rs can_set_code():
+      `if new_version.spec_version <= current_version.spec_version { SpecVersionNeedsToIncrease }`
+    i.e. the new runtime's spec_version must be STRICTLY GREATER than the live one.
+    Our rebuilt runtime kept spec_version=1 == live spec_version=1 → rejected (also
+    spec_name must match: gpn==gpn OK).
+FIX: bump runtime VERSION.spec_version 1 -> 2 (one line, gpn-node/runtime/src/lib.rs),
+  rebuild the runtime WASM (fix INCLUDED: marketplace sub-ED fee skip), redeploy via set_code.
+NOTE: this touches one line of runtime source beyond the WASM blob — unavoidable, since
+  a spec_version bump is a prerequisite for any forkless set_code on this frame-system.
+
+--------------------------------------------------------------------------------
+2026-09-28 ~19:53–20:00 UTC — FORKLESS set_code REDONE with spec_version bump
+--------------------------------------------------------------------------------
+STEP 3 (retry) DONE — rebuilt runtime with spec_version 1->2, redeployed via sudo
+  Sudo.sudo(System.set_code) [nonce 2], WASM 476529 bytes (md5 7d21d7da…).
+  Decoded block events (gpn_dump_events):
+    [5] System::CodeUpdated   hash=0x81e134d860a2bf5e73346b3ce6e803917988072a3f716532cd176301882f7748
+    [6] Sudo::Sudid           = Ok (0x00)          <- inner call now SUCCEEDED
+  On-chain :code len 476529 == local WASM (blake2 81e134d8…). state_getRuntimeVersion
+  → specVersion=2. Committed 0c93210 + pushed.
+STEP 4 DONE — still NO RESET: head kept climbing (#328 baseline → #370 → #381 → …).
+  State survived across the upgrade: provider 5ENqSp5Q… staked=true attested=true
+  (Bronze/188 GFLOPS); oracle feed present ($0.15, 15% APR, plausible=true);
+  requestor/provider balances intact.
+STEP 5 DONE — PAYOUT VERIFIED (this is the point of the whole exercise):
+  - fresh requestor 5CGPnkqoVBv9iw5GVFCN9yz8r7ytK9MtPP9UCBX5H2NSttTM, dripped 100 GPN,
+    gpn_api on :8090 (requestor signer). Posted LLMInference jobs price 10 GPN.
+  - gpn_llm_provider (5ENqSp5Q…, restarted after upgrade so it reconnected with the
+    new runtime metadata) auto-claimed + ran + settle.
+  - Job #3 (and the previously-stuck #1/#2) → state **Completed**.
+  - PROVIDER WALLET CREDITED: 999.9984 → 1009.9983 → 1029.9983 GPN (+10.00 per job;
+    the sub-ED fee is correctly skipped and the whole escrow goes to the provider).
+  - Note: a provider poll/block-timing race caused a duplicate accept_job
+    (JobNotPending) that skipped start_job on the first pass; started via the
+    provider-signed :8091 API to finish the run. Cosmetic to the payout proof.
+STEP 6 DONE — Windows rebuilt: POST release-windows.yml/dispatches ref=main → HTTP 204,
+  run 36476140664 (head 0c93210d) in_progress.
+
+Scope note: besides the committed canonical WASM blob, the ONLY source change was one
+  line — gpn-node/runtime/src/lib.rs spec_version 1->2 — which is a hard prerequisite for
+  ANY forkless set_code on this frame-system (frames don't need a reset/re-seed either way).
+  Added a throwaway diagnostic bin gpn-agent/src/bin/gpn_dump_events.rs (untracked, not
+  committed) used to decode Sudo::Sudid / System::CodeUpdated.
+
+=== FORKLESS UPGRADE OK — complete_job fix live, payout verified, no reset ===
