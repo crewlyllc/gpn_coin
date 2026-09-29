@@ -29,6 +29,7 @@ struct Provider {
     address: String,
     gflops: u64,
     models: Vec<String>,
+    can_pull: bool,
     active: u64,
     capacity: u64,
     latency_ms: u64,
@@ -78,6 +79,7 @@ fn refresh(registry: &Arc<Mutex<Vec<Provider>>>, urls: &Arc<Vec<String>>) {
                         .and_then(|x| x.as_array())
                         .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
                         .unwrap_or_default(),
+                    can_pull: v.get("can_pull").and_then(|x| x.as_bool()).unwrap_or(false),
                     active: v.get("active").and_then(|x| x.as_u64()).unwrap_or(0),
                     capacity: v.get("capacity").and_then(|x| x.as_u64()).unwrap_or(1).max(1),
                     latency_ms: v.get("__latency_ms").and_then(|x| x.as_u64()).unwrap_or(9999),
@@ -88,6 +90,7 @@ fn refresh(registry: &Arc<Mutex<Vec<Provider>>>, urls: &Arc<Vec<String>>) {
                     address: String::new(),
                     gflops: 0,
                     models: vec![],
+                    can_pull: false,
                     active: 0,
                     capacity: 0,
                     latency_ms: 9999,
@@ -101,34 +104,53 @@ fn refresh(registry: &Arc<Mutex<Vec<Provider>>>, urls: &Arc<Vec<String>>) {
     });
 }
 
-fn pick(registry: &[Provider], min_gflops: u64, model: &str) -> Option<Provider> {
-    // 1. Compatibility: gflops >= min, model present, and it has free capacity.
-    let mut candidates: Vec<&Provider> = registry
-        .iter()
-        .filter(|p| p.last_seen.is_some())
-        .filter(|p| p.gflops >= min_gflops)
-        .filter(|p| model.is_empty() || p.models.iter().any(|m| m == model))
-        .filter(|p| p.active < p.capacity)
-        .collect();
-    if candidates.is_empty() {
-        // relax the capacity filter
-        candidates = registry
-            .iter()
-            .filter(|p| p.last_seen.is_some() && p.gflops >= min_gflops)
-            .collect();
+fn has_model(p: &Provider, model: &str) -> bool {
+    if model.is_empty() || model == "auto" {
+        !p.models.is_empty()
+    } else {
+        p.models.iter().any(|m| m == model || m.split(':').next() == Some(model))
     }
-    // 2. Score: prefer least-loaded, then lowest latency.
-    candidates.sort_by_key(|p| (p.active * 1000 + p.latency_ms / 10));
-    candidates.first().map(|p| (*p).clone())
 }
 
-fn write_assignment(store: &str, job_id: u64, provider: &str) -> std::io::Result<()> {
+/// Model-aware selection. Returns `(provider, needs_pull)`.
+///
+/// 1. A provider that already HAS the model (or, if none was requested, any provider
+///    with at least one model) — fastest + least-loaded wins.
+/// 2. Otherwise a provider that CAN pull it (`can_pull`), which will download the model
+///    on demand (Ollama / HuggingFace) before running.
+fn pick(registry: &[Provider], min_gflops: u64, model: &str) -> Option<(Provider, bool)> {
+    let live: Vec<&Provider> = registry
+        .iter()
+        .filter(|p| p.last_seen.is_some() && p.gflops >= min_gflops)
+        .collect();
+    let score = |p: &&Provider| p.active * 1000 + p.latency_ms / 10;
+
+    // 1. Ready: has the model + free capacity (fall back to has-model ignoring capacity).
+    let mut ready: Vec<&Provider> = live.iter().copied().filter(|p| has_model(p, model) && p.active < p.capacity).collect();
+    if ready.is_empty() {
+        ready = live.iter().copied().filter(|p| has_model(p, model)).collect();
+    }
+    ready.sort_by_key(score);
+    if let Some(p) = ready.first() {
+        return Some(((*p).clone(), false));
+    }
+
+    // 2. Nobody has it -> a pull-eligible provider (prefer free capacity).
+    let mut pullers: Vec<&Provider> = live.iter().copied().filter(|p| p.can_pull && p.active < p.capacity).collect();
+    if pullers.is_empty() {
+        pullers = live.iter().copied().filter(|p| p.can_pull).collect();
+    }
+    pullers.sort_by_key(score);
+    pullers.first().map(|p| ((*p).clone(), true))
+}
+
+fn write_assignment(store: &str, job_id: u64, provider: &str, model: &str, pull: bool) -> std::io::Result<()> {
     let mut m: serde_json::Map<String, Value> = std::fs::read_to_string(store)
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
         .and_then(|v| v.as_object().cloned())
         .unwrap_or_default();
-    m.insert(job_id.to_string(), json!(provider));
+    m.insert(job_id.to_string(), json!({"provider": provider, "model": model, "pull": pull}));
     std::fs::write(store, serde_json::to_string_pretty(&Value::Object(m))?)
 }
 
@@ -231,11 +253,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let job_type = v.get("job_type").and_then(|x| x.as_str()).unwrap_or("LLMInference");
                 let prompt = v.get("prompt").and_then(|x| x.as_str()).map(|s| s.to_string());
 
-                // choose the best provider
+                // choose the best provider (model-aware)
                 let reg = registry.lock().unwrap().clone();
-                let chosen = pick(&reg, min_gflops, "");
-                let provider = match chosen {
-                    Some(p) => p,
+                let (provider, needs_pull) = match pick(&reg, min_gflops, &model) {
+                    Some(x) => x,
                     None => {
                         let r = Response::from_string(json!({"ok":false,"error":"no compatible provider available"}).to_string())
                             .with_header(hdr.clone()).with_status_code(503);
@@ -272,9 +293,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let job = gpn_agent::llm::LlmJob::new_llm(&model, p, 0.7, 256);
                             let _ = gpn_agent::llm::LlmStore::new().put(id, job);
                         }
-                        // dispatch: record which provider (by address) should claim it
-                        let _ = write_assignment(&assign_store, id, &provider.address);
+                        // dispatch: record which provider (by address) should claim it,
+                        // plus the model + whether it must pull the model first.
+                        let _ = write_assignment(&assign_store, id, &provider.address, &model, needs_pull);
                         json!({"ok":true,"job_id":id,"routed_to":provider.address,
+                               "model":model,"pull":needs_pull,
                                "status_url":provider.status_url,
                                "latency_ms":provider.latency_ms,"load":format!("{}/{}",provider.active,provider.capacity)})
                     }
@@ -301,15 +324,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Client-side signing: the caller already created + escrowed the job
             // with THEIR OWN wallet; they just ask us to ROUTE it to a provider.
             (Method::Post, ["route", id]) => {
-                let idn: u64 = id.parse().unwrap_or(0);
+                // optional ?model=<m> in the query string
+                let (idp, query) = id.split_once('?').unwrap_or((id, ""));
+                let idn: u64 = idp.parse().unwrap_or(0);
+                let qmodel = query
+                    .split('&')
+                    .find_map(|kv| kv.strip_prefix("model="))
+                    .map(|m| m.replace("%3A", ":").replace("%3a", ":"))
+                    .unwrap_or_else(|| "auto".to_string());
                 if rt.block_on(client.get_job_state(idn)).is_none() {
                     json!({"ok":false,"error":"job not found"})
                 } else {
                     let reg = registry.lock().unwrap().clone();
-                    match pick(&reg, 0, "") {
-                        Some(p) => {
-                            let _ = write_assignment(&assign_store, idn, &p.address);
+                    match pick(&reg, 0, &qmodel) {
+                        Some((p, pull)) => {
+                            let _ = write_assignment(&assign_store, idn, &p.address, &qmodel, pull);
                             json!({"ok":true,"job_id":idn,"routed_to":p.address,
+                                   "model":qmodel,"pull":pull,
                                    "latency_ms":p.latency_ms,"load":format!("{}/{}",p.active,p.capacity)})
                         }
                         None => json!({"ok":false,"error":"no compatible provider available"}),

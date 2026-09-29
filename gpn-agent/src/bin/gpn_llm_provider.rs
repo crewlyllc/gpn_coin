@@ -74,8 +74,10 @@ fn assignment_store_path() -> String {
 }
 
 /// Job ids the access-point scheduler assigned to this provider (matched by
-/// either the hex or ss58 form of our account). Empty = no scheduler in play.
-fn read_assigned(me: &str, addr: &str) -> Vec<u64> {
+/// either the hex or ss58 form of our account), plus the requested model +
+/// whether we must pull it on demand. Empty = no scheduler in play.
+/// Handles both the legacy string form and the `{provider,model,pull}` object.
+fn read_assigned(me: &str, addr: &str) -> Vec<(u64, String, bool)> {
     let path = assignment_store_path();
     let Ok(s) = std::fs::read_to_string(&path) else {
         return vec![];
@@ -87,12 +89,66 @@ fn read_assigned(me: &str, addr: &str) -> Vec<u64> {
         return vec![];
     };
     m.iter()
-        .filter(|(_, pv)| {
-            let p = pv.as_str().unwrap_or("");
-            p == me || p == addr
+        .filter_map(|(k, pv)| {
+            let id = k.parse::<u64>().ok()?;
+            let (p, model, pull) = if let Some(s) = pv.as_str() {
+                (s.to_string(), String::new(), false)
+            } else {
+                (
+                    pv.get("provider").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    pv.get("model").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    pv.get("pull").and_then(|x| x.as_bool()).unwrap_or(false),
+                )
+            };
+            if p == me || p == addr {
+                Some((id, model, pull))
+            } else {
+                None
+            }
         })
-        .filter_map(|(k, _)| k.parse::<u64>().ok())
         .collect()
+}
+
+/// Ensure `model` is present locally; if not, pull it from Ollama / HuggingFace.
+/// Returns a human-readable note about what happened.
+fn ensure_model(model: &str) -> Result<String, String> {
+    if model.is_empty() || model == "auto" {
+        return Ok("no specific model requested".into());
+    }
+    let base = gpn_agent::llm::infer::default_ollama_url();
+    let cli = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(3600))
+        .build()
+        .map_err(|e| e.to_string())?;
+    // 1. already present?
+    if let Ok(r) = cli.get(format!("{base}/api/tags")).send() {
+        if let Ok(v) = r.json::<serde_json::Value>() {
+            let have = v["models"]
+                .as_array()
+                .map(|a| a.iter().any(|m| {
+                    let n = m["name"].as_str().unwrap_or("");
+                    n == model || n.split(':').next() == Some(model)
+                }))
+                .unwrap_or(false);
+            if have {
+                return Ok(format!("model {model} already present"));
+            }
+        }
+    }
+    // 2. pull it on demand (Ollama registry). For a raw HF GGUF the operator
+    //    should use `gpn_pull_model gguf <repo> <file>`, but Ollama-library
+    //    models (and many HF repos) resolve via `ollama pull` directly.
+    println!("[provider] model {model} missing — pulling on demand…");
+    let r = cli
+        .post(format!("{base}/api/pull"))
+        .json(&serde_json::json!({"name": model, "stream": false}))
+        .send()
+        .map_err(|e| format!("pull {model} failed: {e}"))?;
+    if r.status().is_success() {
+        Ok(format!("pulled model {model} on demand"))
+    } else {
+        Err(format!("pull {model} http {}: {}", r.status(), r.text().unwrap_or_default()))
+    }
 }
 
 async fn process_once(
@@ -116,7 +172,15 @@ async fn process_once(
             .map(|(id, _)| id)
             .collect()
     } else {
-        assigned
+        // Model-aware: pull any requested-but-missing model BEFORE claiming.
+        for (id, model, pull) in &assigned {
+            if *pull || !model.is_empty() {
+                if let Err(e) = ensure_model(model) {
+                    eprintln!("[provider] job #{id}: {e}");
+                }
+            }
+        }
+        assigned.iter().map(|(id, _, _)| *id).collect()
     };
     for job_id in targets {
         if !get_job(job_id).map(|j| j.kind == "llm").unwrap_or(false) {
