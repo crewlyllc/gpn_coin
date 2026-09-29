@@ -153,6 +153,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
             format!("{home}/.gpn/assignments.json")
         });
+    // Testnet "free AI": the access point's own hot wallet pays the escrow, so a
+    // caller can run a job with no wallet at all. On MAINNET this MUST be off —
+    // callers sign with their own wallet and the access point only routes.
+    let allow_hot_wallet = args.iter().any(|a| a == "--allow-hot-wallet")
+        || std::env::var("GPN_ALLOW_HOT_WALLET").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
     let urls: Vec<String> = providers_csv
         .split(',')
         .map(|s| s.trim().to_string())
@@ -171,7 +176,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  chain: {endpoint}");
     println!("  providers: {} ({})", urls.len(), urls.join(", "));
     println!("  assign store: {assign_store}");
-    println!("  endpoints: /health /providers /jobs /job/{{id}} | POST /jobs");
+    println!("  endpoints: /health /providers /jobs /job/{{id}} /mode | POST /jobs /route/{{id}}");
+    println!(
+        "  mode: {} ({})",
+        if allow_hot_wallet { "TESTNET / free-AI" } else { "MAINNET / client-signed" },
+        if allow_hot_wallet { "access-point hot wallet pays" } else { "callers must sign with their OWN wallet" }
+    );
 
     let hdr = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
     for mut req in server.incoming_requests() {
@@ -195,7 +205,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "healthy": p.last_seen.is_some()
                 })).collect::<Vec<_>>() })
             }
+            (Method::Get, ["mode"]) => json!({
+                "hot_wallet_enabled": allow_hot_wallet,
+                "mode": if allow_hot_wallet { "testnet_free_ai" } else { "mainnet_client_signed" },
+                "note": if allow_hot_wallet {
+                    "testnet: the access point pays for jobs (free AI); callers may also sign with their own wallet via POST /route/{id}"
+                } else {
+                    "mainnet: POST /jobs is disabled — sign the job with YOUR wallet and POST /route/{id}"
+                }
+            }),
             (Method::Post, ["jobs"]) => {
+                if !allow_hot_wallet {
+                    let r = Response::from_string(json!({
+                        "ok": false,
+                        "error": "hot-wallet jobs are disabled on this access point (mainnet). Sign the job with your own wallet and POST /route/{id} instead (see gpn_job)."
+                    }).to_string()).with_header(hdr.clone()).with_status_code(403);
+                    let _ = req.respond(r);
+                    continue;
+                }
                 let v: Value = serde_json::from_str(&body).unwrap_or(json!({}));
                 let g = |k: &str, d: u64| v.get(k).and_then(|x| x.as_u64()).unwrap_or(d);
                 let model = v.get("model").and_then(|x| x.as_str()).unwrap_or("llama3.2:1b").to_string();
