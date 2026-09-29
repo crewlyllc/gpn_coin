@@ -58,6 +58,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         gpn_agent::llm::infer::default_ollama_url()
     );
 
+    // Guaranteed baseline: every node ships a starter model set so the network
+    // always has at least one usable LLM, even before any demand-driven pulls.
+    let baseline = std::env::var("GPN_BASELINE_MODELS")
+        .unwrap_or_else(|_| "llama3.2:1b,qwen2.5:0.5b".to_string());
+    for m in baseline.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        match ensure_model(m) {
+            Ok(note) => println!("[provider] baseline: {note}"),
+            Err(e) => eprintln!("[provider] baseline {m}: {e}"),
+        }
+    }
+
     loop {
         if let Err(e) = process_once(&client, &me, &addr).await {
             eprintln!("[provider] cycle error: {e}");

@@ -115,10 +115,19 @@ fn has_model(p: &Provider, model: &str) -> bool {
 /// Model-aware selection. Returns `(provider, needs_pull)`.
 ///
 /// 1. A provider that already HAS the model (or, if none was requested, any provider
-///    with at least one model) — fastest + least-loaded wins.
+///    with at least one model) — fastest + least-loaded.
 /// 2. Otherwise a provider that CAN pull it (`can_pull`), which will download the model
-///    on demand (Ollama / HuggingFace) before running.
-fn pick(registry: &[Provider], min_gflops: u64, model: &str) -> Option<(Provider, bool)> {
+///    on demand before running.
+///
+/// Tie-break (Jeremy's rule): a *puller* can beat a *ready* provider if
+/// `est(puller) + pull_penalty < est(ready)` — i.e. downloading the model on a
+/// fast/idle machine still finishes sooner than waiting on a slow/busy ready one.
+fn est_ms(p: &Provider) -> u64 {
+    // latency (network RTT) + a per-active-job queue estimate (~5s each).
+    p.latency_ms + p.active * 5000
+}
+
+fn pick(registry: &[Provider], min_gflops: u64, model: &str, pull_penalty_ms: u64) -> Option<(Provider, bool)> {
     let live: Vec<&Provider> = registry
         .iter()
         .filter(|p| p.last_seen.is_some() && p.gflops >= min_gflops)
@@ -131,17 +140,27 @@ fn pick(registry: &[Provider], min_gflops: u64, model: &str) -> Option<(Provider
         ready = live.iter().copied().filter(|p| has_model(p, model)).collect();
     }
     ready.sort_by_key(score);
-    if let Some(p) = ready.first() {
-        return Some(((*p).clone(), false));
-    }
 
-    // 2. Nobody has it -> a pull-eligible provider (prefer free capacity).
+    // 2. Pull-eligible (prefer free capacity).
     let mut pullers: Vec<&Provider> = live.iter().copied().filter(|p| p.can_pull && p.active < p.capacity).collect();
     if pullers.is_empty() {
         pullers = live.iter().copied().filter(|p| p.can_pull).collect();
     }
     pullers.sort_by_key(score);
-    pullers.first().map(|p| ((*p).clone(), true))
+
+    match (ready.first(), pullers.first()) {
+        // Both exist: a puller wins only if it beats the ready provider end-to-end.
+        (Some(r), Some(p)) => {
+            if est_ms(p) + pull_penalty_ms < est_ms(r) {
+                Some(((*p).clone(), true))
+            } else {
+                Some(((*r).clone(), false))
+            }
+        }
+        (Some(r), None) => Some(((*r).clone(), false)),
+        (None, Some(p)) => Some(((*p).clone(), true)),
+        (None, None) => None,
+    }
 }
 
 fn write_assignment(store: &str, job_id: u64, provider: &str, model: &str, pull: bool) -> std::io::Result<()> {
@@ -180,6 +199,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // callers sign with their own wallet and the access point only routes.
     let allow_hot_wallet = args.iter().any(|a| a == "--allow-hot-wallet")
         || std::env::var("GPN_ALLOW_HOT_WALLET").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+    // Estimated cost (ms) of downloading a model on demand, used only for the
+    // "download + be faster than a ready-but-slow provider" tie-break.
+    let pull_penalty_ms: u64 = opt(&args, "--pull-penalty-ms")
+        .or_else(|| std::env::var("GPN_PULL_PENALTY_MS").ok())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(120_000);
     let urls: Vec<String> = providers_csv
         .split(',')
         .map(|s| s.trim().to_string())
@@ -255,7 +280,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // choose the best provider (model-aware)
                 let reg = registry.lock().unwrap().clone();
-                let (provider, needs_pull) = match pick(&reg, min_gflops, &model) {
+                let (provider, needs_pull) = match pick(&reg, min_gflops, &model, pull_penalty_ms) {
                     Some(x) => x,
                     None => {
                         let r = Response::from_string(json!({"ok":false,"error":"no compatible provider available"}).to_string())
@@ -336,7 +361,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     json!({"ok":false,"error":"job not found"})
                 } else {
                     let reg = registry.lock().unwrap().clone();
-                    match pick(&reg, 0, &qmodel) {
+                    match pick(&reg, 0, &qmodel, pull_penalty_ms) {
                         Some((p, pull)) => {
                             let _ = write_assignment(&assign_store, idn, &p.address, &qmodel, pull);
                             json!({"ok":true,"job_id":idn,"routed_to":p.address,

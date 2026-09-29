@@ -74,18 +74,108 @@ fn is_gen(job: &gpn_agent::llm::LlmJob) -> bool {
     job.kind == "image" || job.kind == "video"
 }
 
+fn assignment_store_path() -> String {
+    std::env::var("GPN_ASSIGN_STORE").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        format!("{home}/.gpn/assignments.json")
+    })
+}
+
+/// Job ids the scheduler assigned to us (hex or ss58), + the requested model +
+/// whether we must pull it on demand. Handles string + `{provider,model,pull}`.
+fn read_assigned(me: &str, addr: &str) -> Vec<(u64, String, bool)> {
+    let Ok(s) = std::fs::read_to_string(assignment_store_path()) else {
+        return vec![];
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) else {
+        return vec![];
+    };
+    let Some(m) = v.as_object() else { return vec![] };
+    m.iter()
+        .filter_map(|(k, pv)| {
+            let id = k.parse::<u64>().ok()?;
+            let (p, model, pull) = if let Some(s) = pv.as_str() {
+                (s.to_string(), String::new(), false)
+            } else {
+                (
+                    pv.get("provider").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    pv.get("model").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    pv.get("pull").and_then(|x| x.as_bool()).unwrap_or(false),
+                )
+            };
+            if p == me || p == addr { Some((id, model, pull)) } else { None }
+        })
+        .collect()
+}
+
+/// Ensure a diffusion model is present; download from HuggingFace if missing.
+/// `model` is an HF repo id (e.g. `stabilityai/stable-diffusion-2-1`) or a local
+/// path. Empty/`auto` = use whatever the helper defaults to.
+fn ensure_model(model: &str) -> Result<String, String> {
+    if model.is_empty() || model == "auto" {
+        return Ok("no specific model requested".into());
+    }
+    if model.starts_with('/') || model.starts_with('.') {
+        return Ok("local model path".into());
+    }
+    // HF cache marker: ~/.cache/huggingface/hub/models--<org>--<name>
+    let repo_dir = format!("models--{}", model.replace('/', "--"));
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let hub = std::env::var("HF_HOME")
+        .map(|h| format!("{h}/hub"))
+        .unwrap_or_else(|_| format!("{home}/.cache/huggingface/hub"));
+    if std::path::Path::new(&format!("{hub}/{repo_dir}")).exists() {
+        return Ok(format!("model {model} already cached"));
+    }
+    println!("[provider] diffusion model {model} missing — pulling from HuggingFace…");
+    let out = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(format!(
+            "from huggingface_hub import snapshot_download; snapshot_download('{model}')"
+        ))
+        .output()
+        .map_err(|e| format!("spawn python3: {e}"))?;
+    if out.status.success() {
+        Ok(format!("pulled diffusion model {model} from HuggingFace"))
+    } else {
+        Err(format!(
+            "HF pull {model} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
+}
+
 async fn process_once(
     client: &ChainClient,
     me: &str,
     addr: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // 0. Auto-claim: take any Pending image/video job we can satisfy.
+    // 0. Auto-claim: if the scheduler assigned us specific jobs, claim ONLY those
+    //    (pulling any missing model first); otherwise claim any Pending gen job.
+    let assigned = read_assigned(me, addr);
+    let assigned_ids: Vec<u64> = if assigned.is_empty() {
+        vec![]
+    } else {
+        for (id, model, pull) in &assigned {
+            if *pull || !model.is_empty() {
+                match ensure_model(model) {
+                    Ok(n) => println!("[provider] job #{id}: {n}"),
+                    Err(e) => eprintln!("[provider] job #{id}: {e}"),
+                }
+            }
+        }
+        assigned.iter().map(|(id, _, _)| *id).collect()
+    };
+
     let attested_gflops = client
         .get_attestation_record(addr)
         .await
         .map(|(_, f, _)| f)
         .unwrap_or(0);
     for (job_id, min_gflops) in client.list_claimable_jobs(attested_gflops).await {
+        if !assigned_ids.is_empty() && !assigned_ids.contains(&job_id) {
+            continue;
+        }
         if !get_job(job_id).map(|j| is_gen(&j)).unwrap_or(false) {
             continue;
         }

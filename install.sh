@@ -66,6 +66,21 @@ install_ollama() {
   tar -xzf "$tgz" -C "$PREFIX/ollama"
   rm -f "$tgz"
   log "ollama installed: $PREFIX/ollama/bin/ollama (models → $PREFIX/models)"
+
+  # Guaranteed baseline: pull a starter model set so every node offers a usable
+  # LLM from day one (the network always has at least one model available).
+  local baseline="${GPN_BASELINE_MODELS:-llama3.2:1b,qwen2.5:0.5b}"
+  log "pulling baseline models: $baseline"
+  OLLAMA_MODELS="$PREFIX/models" "$PREFIX/ollama/bin/ollama" serve >/dev/null 2>&1 &
+  local opid=$!
+  sleep 3
+  local m
+  for m in $(echo "$baseline" | tr ',' ' '); do
+    OLLAMA_MODELS="$PREFIX/models" "$PREFIX/ollama/bin/ollama" pull "$m" >/dev/null 2>&1 \
+      || warn "baseline pull failed (will retry on provider start): $m"
+  done
+  kill "$opid" 2>/dev/null || true
+  log "baseline models ready"
 }
 
 # 1 ── Prerequisites ──────────────────────────────────────────────────────────
