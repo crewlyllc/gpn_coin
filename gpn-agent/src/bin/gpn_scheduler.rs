@@ -271,6 +271,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     None => json!({"error":"not found"}),
                 }
             }
+            // Client-side signing: the caller already created + escrowed the job
+            // with THEIR OWN wallet; they just ask us to ROUTE it to a provider.
+            (Method::Post, ["route", id]) => {
+                let idn: u64 = id.parse().unwrap_or(0);
+                if rt.block_on(client.get_job_state(idn)).is_none() {
+                    json!({"ok":false,"error":"job not found"})
+                } else {
+                    let reg = registry.lock().unwrap().clone();
+                    match pick(&reg, 0, "") {
+                        Some(p) => {
+                            let _ = write_assignment(&assign_store, idn, &p.address);
+                            json!({"ok":true,"job_id":idn,"routed_to":p.address,
+                                   "latency_ms":p.latency_ms,"load":format!("{}/{}",p.active,p.capacity)})
+                        }
+                        None => json!({"ok":false,"error":"no compatible provider available"}),
+                    }
+                }
+            }
             _ => json!({"error":"not found"}),
         };
 
