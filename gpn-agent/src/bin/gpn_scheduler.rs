@@ -272,7 +272,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 let v: Value = serde_json::from_str(&body).unwrap_or(json!({}));
                 let g = |k: &str, d: u64| v.get(k).and_then(|x| x.as_u64()).unwrap_or(d);
-                let model = v.get("model").and_then(|x| x.as_str()).unwrap_or("llama3.2:1b").to_string();
+                let model = v.get("model").and_then(|x| x.as_str()).unwrap_or("auto").to_string();
+                let wait = v.get("wait").and_then(|x| x.as_bool()).unwrap_or(false);
+                let wait_secs: u64 = v.get("wait_secs").and_then(|x| x.as_u64()).unwrap_or(180);
                 let min_gflops = g("min_gflops", 150);
                 let price_gpn = v.get("price_gpn").and_then(|x| x.as_f64()).unwrap_or(10.0);
                 let job_type = v.get("job_type").and_then(|x| x.as_str()).unwrap_or("LLMInference");
@@ -291,14 +293,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
 
                 // create the on-chain job (escrow) as the access-point signer
-                // workload hash must be non-zero (marketplace rejects all-zeros)
+                // workload hash: the marketplace rejects all-zeros, but we do NOT
+                // want the prompt recoverable on-chain. Use an opaque random-ish id
+                // (privacy: the question is never derivable from chain state).
                 let workload_hash = {
                     use sha2::{Digest, Sha256};
+                    use std::sync::atomic::{AtomicU64, Ordering};
+                    use std::time::{SystemTime, UNIX_EPOCH};
+                    static CTR: AtomicU64 = AtomicU64::new(0);
+                    let n = CTR.fetch_add(1, Ordering::Relaxed);
+                    let t = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0);
                     let mut h = Sha256::new();
-                    h.update(prompt.as_deref().unwrap_or("").as_bytes());
-                    h.update(model.as_bytes());
+                    h.update(t.to_le_bytes());
+                    h.update(n.to_le_bytes());
+                    h.update(std::process::id().to_le_bytes());
                     let mut o = [0u8; 32];
                     o.copy_from_slice(&h.finalize());
+                    o[0] |= 1;
                     o
                 };
                 let next_before = rt.block_on(client.get_next_job_id());
@@ -326,10 +340,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // dispatch: record which provider (by address) should claim it,
                         // plus the model + whether it must pull the model first.
                         let _ = write_assignment(&assign_store, id, &provider.address, &model, needs_pull);
-                        json!({"ok":true,"job_id":id,"routed_to":provider.address,
+                        // optional inline wait: poll the off-chain store and return the
+                        // answer in THIS response (no separate /result call).
+                        let mut answer: Option<serde_json::Value> = None;
+                        if wait {
+                            let deadline = std::time::Instant::now() + Duration::from_secs(wait_secs.min(600));
+                            while std::time::Instant::now() < deadline {
+                                if let Some(j) = gpn_agent::llm::get_job(id) {
+                                    if j.status == "done" || j.status == "error" {
+                                        answer = Some(json!({
+                                            "status": j.status, "response": j.response,
+                                            "result_hash": j.result_hash, "error": j.error,
+                                        }));
+                                        break;
+                                    }
+                                }
+                                std::thread::sleep(Duration::from_secs(2));
+                            }
+                        }
+                        let mut out = json!({"ok":true,"job_id":id,"routed_to":provider.address,
                                "model":model,"pull":needs_pull,
                                "status_url":provider.status_url,
-                               "latency_ms":provider.latency_ms,"load":format!("{}/{}",provider.active,provider.capacity)})
+                               "latency_ms":provider.latency_ms,"load":format!("{}/{}",provider.active,provider.capacity)});
+                        if let Some(a) = answer {
+                            out["answer"] = a;
+                        } else if wait {
+                            out["answer"] = json!({"status":"timeout","note":"not finished; poll /result/{id}"});
+                        }
+                        out
                     }
                     (Err(e), false) => json!({"ok":false,"error":format!("{e}")}),
                 }
@@ -395,7 +433,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ => json!({"error":"not found"}),
         };
 
-        let code = if resp.get("error").is_some() { 404 } else { 200 };
+        let code = if resp.get("error").map(|v| !v.is_null()).unwrap_or(false) { 404 } else { 200 };
         let _ = req.respond(Response::from_string(resp.to_string()).with_header(hdr.clone()).with_status_code(code));
     }
     Ok(())

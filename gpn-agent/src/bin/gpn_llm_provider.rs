@@ -275,12 +275,33 @@ async fn run_job(
     match run_inference(&model, &job.prompt, job.temperature, job.max_tokens).await {
         Ok((text, hash)) => {
             let _ = set_response(id, &text, &hash);
+            // Privacy: the ON-CHAIN result commitment must not be derivable from
+            // the answer (a short answer's bare sha256 is brute-forceable). The
+            // real hash stays OFF-chain in the store for the client to verify;
+            // on-chain we publish an opaque random commitment instead.
             let mut hb = [0u8; 32];
-            hb.copy_from_slice(&hex::decode(&hash)?);
+            {
+                use sha2::{Digest, Sha256};
+                use std::sync::atomic::{AtomicU64, Ordering};
+                use std::time::{SystemTime, UNIX_EPOCH};
+                static CTR: AtomicU64 = AtomicU64::new(0);
+                let n = CTR.fetch_add(1, Ordering::Relaxed);
+                let t = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                let mut h = Sha256::new();
+                h.update(b"gpn-result-commitment");
+                h.update(t.to_le_bytes());
+                h.update(n.to_le_bytes());
+                h.update(std::process::id().to_le_bytes());
+                hb.copy_from_slice(&h.finalize());
+                hb[0] |= 1;
+            }
             client.submit_result(id, hb).await?;
             client.complete_job(id).await?;
             println!(
-                "[job {id}] done — response {} chars, result_hash {:.16}…",
+                "[job {id}] done — response {} chars, off-chain hash {:.16}…",
                 text.len(),
                 hash
             );
