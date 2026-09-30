@@ -122,6 +122,30 @@ fn has_model(p: &Provider, model: &str) -> bool {
 /// Tie-break (Jeremy's rule): a *puller* can beat a *ready* provider if
 /// `est(puller) + pull_penalty < est(ready)` — i.e. downloading the model on a
 /// fast/idle machine still finishes sooner than waiting on a slow/busy ready one.
+/// Flatten an OpenAI `messages[]` array into a single prompt for the GPN job.
+fn messages_to_prompt(v: &Value) -> String {
+    let mut s = String::new();
+    if let Some(sys) = v.get("system").and_then(|x| x.as_str()) {
+        s.push_str(&format!("system: {sys}\n"));
+    }
+    if let Some(msgs) = v.get("messages").and_then(|x| x.as_array()) {
+        for m in msgs {
+            let role = m.get("role").and_then(|x| x.as_str()).unwrap_or("user");
+            let content = m.get("content").and_then(|x| x.as_str()).unwrap_or("");
+            s.push_str(&format!("{role}: {content}\n"));
+        }
+    }
+    s.push_str("assistant:");
+    s
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 fn est_ms(p: &Provider) -> u64 {
     // latency (network RTT) + a per-active-job queue estimate (~5s each).
     p.latency_ms + p.active * 5000
@@ -261,6 +285,103 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "mainnet: POST /jobs is disabled — sign the job with YOUR wallet and POST /route/{id}"
                 }
             }),
+            // ── OpenAI-compatible facade ─────────────────────────────────────
+            (Method::Get, ["v1", "models"]) => {
+                let reg = registry.lock().unwrap();
+                let mut ids: Vec<String> = reg.iter().flat_map(|p| p.models.clone()).collect();
+                ids.sort();
+                ids.dedup();
+                if ids.is_empty() {
+                    ids.push("llama3.2:1b".into());
+                }
+                json!({"object":"list", "data": ids.iter().map(|m| json!({
+                    "id": m, "object": "model", "owned_by": "gpn"
+                })).collect::<Vec<_>>()})
+            }
+            (Method::Post, ["v1", "chat", "completions"]) => {
+                let v: Value = serde_json::from_str(&body).unwrap_or(json!({}));
+                let model = v.get("model").and_then(|x| x.as_str()).unwrap_or("auto").to_string();
+                let stream = v.get("stream").and_then(|x| x.as_bool()).unwrap_or(false);
+                let prompt = messages_to_prompt(&v);
+                if !allow_hot_wallet {
+                    let r = Response::from_string(json!({
+                        "error": {"message": "hot-wallet inference is disabled on this access point (mainnet)", "type": "gpn_error"}
+                    }).to_string()).with_header(hdr.clone()).with_status_code(403);
+                    let _ = req.respond(r);
+                    continue;
+                }
+                // route to a provider
+                let reg = registry.lock().unwrap().clone();
+                let chosen = pick(&reg, 0, &model, pull_penalty_ms);
+                let (provider, needs_pull) = match chosen {
+                    Some(x) => x,
+                    None => {
+                        let r = Response::from_string(json!({
+                            "error": {"message": "no compatible provider online", "type": "gpn_error"}
+                        }).to_string()).with_header(hdr.clone()).with_status_code(503);
+                        let _ = req.respond(r);
+                        continue;
+                    }
+                };
+                // create + route (hot wallet pays)
+                let next_before = rt.block_on(client.get_next_job_id());
+                let _ = rt.block_on(client.create_job(
+                    8192u32, 75u16, 1u8, 0u32, 150u64, "LLMInference", "Spot",
+                    (10.0 * 1e12) as u128, 1000, {
+                        use sha2::{Digest, Sha256};
+                        let mut h = Sha256::new();
+                        h.update(now_secs().to_le_bytes());
+                        h.update(prompt.as_bytes());
+                        let mut o = [0u8; 32];
+                        o.copy_from_slice(&h.finalize());
+                        o[0] |= 1;
+                        o
+                    },
+                ));
+                let after = rt.block_on(client.get_next_job_id());
+                let id = after.saturating_sub(1);
+                let mut text = String::new();
+                if after > next_before {
+                    let _ = gpn_agent::llm::LlmStore::new().put(id, gpn_agent::llm::LlmJob::new_llm(&model, &prompt, 0.7, 512));
+                    let _ = write_assignment(&assign_store, id, &provider.address, &model, needs_pull);
+                    // block until the provider finishes (OpenAI calls are synchronous)
+                    for _ in 0..300 {
+                        if let Some(j) = gpn_agent::llm::get_job(id) {
+                            if j.status == "done" {
+                                text = j.response.clone().unwrap_or_default();
+                                break;
+                            }
+                            if j.status == "error" {
+                                text = format!("[gpn error] {}", j.error.clone().unwrap_or_default());
+                                break;
+                            }
+                        }
+                        std::thread::sleep(Duration::from_secs(2));
+                    }
+                } else {
+                    text = "[gpn error] could not create job".to_string();
+                }
+                if stream {
+                    let idc = format!("chatcmpl-gpn-{id}");
+                    let created = now_secs();
+                    let chunk1 = json!({"id":idc,"object":"chat.completion.chunk","created":created,"model":model,
+                        "choices":[{"index":0,"delta":{"role":"assistant","content":text},"finish_reason":serde_json::Value::Null}]});
+                    let chunk2 = json!({"id":idc,"object":"chat.completion.chunk","created":created,"model":model,
+                        "choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
+                    let sse = format!("data: {chunk1}\n\ndata: {chunk2}\n\ndata: [DONE]\n\n");
+                    let ct = Header::from_bytes(&b"Content-Type"[..], &b"text/event-stream"[..]).unwrap();
+                    let cc = Header::from_bytes(&b"Cache-Control"[..], &b"no-cache"[..]).unwrap();
+                    let r = Response::from_string(sse).with_header(ct).with_header(cc);
+                    let _ = req.respond(r);
+                    continue;
+                }
+                json!({
+                    "id": format!("chatcmpl-gpn-{id}"), "object": "chat.completion", "created": now_secs(),
+                    "model": model,
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+                })
+            }
             (Method::Post, ["jobs"]) => {
                 if !allow_hot_wallet {
                     let r = Response::from_string(json!({
