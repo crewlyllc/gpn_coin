@@ -258,6 +258,38 @@ async fn process_once(
     Ok(())
 }
 
+/// A fresh random salt (hex). Uses time + a process counter + pid as entropy
+/// (no external RNG crate); collisions are irrelevant for privacy here.
+fn random_salt() -> String {
+    use sha2::{Digest, Sha256};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static CTR: AtomicU64 = AtomicU64::new(0);
+    let n = CTR.fetch_add(1, Ordering::Relaxed);
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut h = Sha256::new();
+    h.update(b"gpn-salt");
+    h.update(t.to_le_bytes());
+    h.update(n.to_le_bytes());
+    h.update(std::process::id().to_le_bytes());
+    let d = h.finalize();
+    hex::encode(&d[..16])
+}
+
+/// sha256(salt || payload) — the on-chain commitment.
+fn salted_commit(salt: &str, payload: &str) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(salt.as_bytes());
+    h.update(payload.as_bytes());
+    let mut o = [0u8; 32];
+    o.copy_from_slice(&h.finalize());
+    o
+}
+
 async fn run_job(
     client: &ChainClient,
     id: u64,
@@ -274,37 +306,22 @@ async fn run_job(
     let _ = LlmStore::new().set_status(id, "running");
     match run_inference(&model, &job.prompt, job.temperature, job.max_tokens).await {
         Ok((text, hash)) => {
-            let _ = set_response(id, &text, &hash);
-            // Privacy: the ON-CHAIN result commitment must not be derivable from
-            // the answer (a short answer's bare sha256 is brute-forceable). The
-            // real hash stays OFF-chain in the store for the client to verify;
-            // on-chain we publish an opaque random commitment instead.
-            let mut hb = [0u8; 32];
-            {
-                use sha2::{Digest, Sha256};
-                use std::sync::atomic::{AtomicU64, Ordering};
-                use std::time::{SystemTime, UNIX_EPOCH};
-                static CTR: AtomicU64 = AtomicU64::new(0);
-                let n = CTR.fetch_add(1, Ordering::Relaxed);
-                let t = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0);
-                let mut h = Sha256::new();
-                h.update(b"gpn-result-commitment");
-                h.update(t.to_le_bytes());
-                h.update(n.to_le_bytes());
-                h.update(std::process::id().to_le_bytes());
-                hb.copy_from_slice(&h.finalize());
-                hb[0] |= 1;
-            }
-            client.submit_result(id, hb).await?;
+            // Salted commitment: on-chain value = sha256(salt ‖ answer). The salt is
+            // random + kept OFF-chain, so the on-chain value is opaque to observers
+            // but anyone holding the salt can verify the answer. (A bare
+            // sha256(answer) would leak short answers by brute force.)
+            let salt = random_salt();
+            let commit = salted_commit(&salt, &text);
+            let commit_hex = format!("0x{}", hex::encode(commit));
+            let _ = set_response(id, &text, &commit_hex, Some(&salt));
+            client.submit_result(id, commit).await?;
             client.complete_job(id).await?;
             println!(
-                "[job {id}] done — response {} chars, off-chain hash {:.16}…",
+                "[job {id}] done — response {} chars, salted commitment {:.16}… (salt off-chain)",
                 text.len(),
-                hash
+                commit_hex
             );
+            let _ = hash; // the bare hash stays off-chain too (informational)
         }
         Err(e) => {
             let _ = LlmStore::new().set_error(id, &e.to_string());

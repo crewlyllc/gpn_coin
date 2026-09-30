@@ -350,7 +350,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if j.status == "done" || j.status == "error" {
                                         answer = Some(json!({
                                             "status": j.status, "response": j.response,
-                                            "result_hash": j.result_hash, "error": j.error,
+                                            "result_hash": j.result_hash, "salt": j.salt,
+                                            "verify": "sha256(salt ++ response) == result_hash",
+                                            "error": j.error,
                                         }));
                                         break;
                                     }
@@ -399,7 +401,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Some(j) => json!({
                         "job_id": idn, "kind": j.kind, "model": j.model, "prompt": j.prompt,
                         "status": j.status, "response": j.response,
-                        "result_hash": j.result_hash, "error": j.error,
+                        "result_hash": j.result_hash, "salt": j.salt,
+                        "verify": "sha256(salt ++ response) == result_hash",
+                        "error": j.error,
                     }),
                     None => json!({"job_id": idn, "error": "no off-chain record yet"}),
                 }

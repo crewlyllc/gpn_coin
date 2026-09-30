@@ -58,6 +58,10 @@ pub struct LlmJob {
     /// sha256 of the response (LLM) or of the artifact file (image/video) —
     /// this is what gets submitted on-chain.
     pub result_hash: Option<String>,
+    /// Random per-job salt. The on-chain commitment is `sha256(salt || payload)`,
+    /// so the chain value is opaque to observers while anyone holding this salt
+    /// can verify the payload. Kept off-chain (with the answer).
+    pub salt: Option<String>,
     /// Where the generated artifact file was written (image/video).
     pub artifact_path: Option<String>,
     /// e.g. "image/png", "video/mp4"
@@ -90,6 +94,7 @@ impl LlmJob {
             artifact_path: None,
             artifact_media_type: None,
             error: None,
+            salt: None,
         }
     }
 
@@ -129,6 +134,7 @@ impl LlmJob {
             artifact_path: None,
             artifact_media_type: None,
             error: None,
+            salt: None,
         }
     }
     /// New fine-tuning job (kind = "finetune"). dataset is a JSON array string
@@ -156,6 +162,7 @@ impl LlmJob {
             artifact_path: None,
             artifact_media_type: None,
             error: None,
+            salt: None,
         }
     }
 }
@@ -227,12 +234,15 @@ impl LlmStore {
     }
 
     /// Set the completed response + result hash.
-    pub fn complete(&self, job_id: u64, response: &str, result_hash: &str) -> std::io::Result<()> {
+    pub fn complete(&self, job_id: u64, response: &str, result_hash: &str, salt: Option<&str>) -> std::io::Result<()> {
         let _g = self.lock.lock().unwrap();
         let mut map = self.load();
         if let Some(j) = map.get_mut(&job_id) {
             j.response = Some(response.to_string());
             j.result_hash = Some(result_hash.to_string());
+            if let Some(s) = salt {
+                j.salt = Some(s.to_string());
+            }
             j.status = "done".to_string();
             self.save(&map)?;
         }
@@ -280,8 +290,8 @@ pub fn get_job(job_id: u64) -> Option<LlmJob> {
     LlmStore::new().get(job_id)
 }
 /// Convenience: mark a job's response complete.
-pub fn set_response(job_id: u64, response: &str, result_hash: &str) -> std::io::Result<()> {
-    LlmStore::new().complete(job_id, response, result_hash)
+pub fn set_response(job_id: u64, response: &str, result_hash: &str, salt: Option<&str>) -> std::io::Result<()> {
+    LlmStore::new().complete(job_id, response, result_hash, salt)
 }
 
 impl Default for LlmStore {
