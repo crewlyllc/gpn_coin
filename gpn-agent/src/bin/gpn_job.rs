@@ -54,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  prompt:    \"{}\"  model={model}  price={price_gpn} GPN", prompt);
 
     client
-        .create_job(8192, 75, 1, 0, min_gflops, &job_type, "Spot", (price_gpn * 1e12) as u128, 1000, workload_hash)
+        .create_job(8192, 75, 1, 0, min_gflops, &job_type, "Spot", (price_gpn * 1e12) as u128, 0, 0, 1000, workload_hash)
         .await?;
     let id = client.get_next_job_id().await.saturating_sub(1);
     println!("  ✅ job #{id} created + escrowed from YOUR wallet");

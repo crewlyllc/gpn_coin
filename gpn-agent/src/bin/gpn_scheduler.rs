@@ -327,7 +327,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let next_before = rt.block_on(client.get_next_job_id());
                 let _ = rt.block_on(client.create_job(
                     8192u32, 75u16, 1u8, 0u32, 150u64, "LLMInference", "Spot",
-                    (10.0 * 1e12) as u128, 1000, {
+                    (1_000_000_000u128 * 512) as u128, 1_000_000_000u128, 512u32, 1000, {
                         use sha2::{Digest, Sha256};
                         let mut h = Sha256::new();
                         h.update(now_secs().to_le_bytes());
@@ -396,6 +396,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let model = v.get("model").and_then(|x| x.as_str()).unwrap_or("auto").to_string();
                 let wait = v.get("wait").and_then(|x| x.as_bool()).unwrap_or(false);
                 let wait_secs: u64 = v.get("wait_secs").and_then(|x| x.as_u64()).unwrap_or(180);
+                // per-token billing (optional): rate × max_tokens = escrow ceiling.
+                let ppt: u128 = v.get("price_per_token").and_then(|x| x.as_u64()).unwrap_or(0) as u128;
+                let mtok: u32 = v.get("max_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
                 let min_gflops = g("min_gflops", 150);
                 let price_gpn = v.get("price_gpn").and_then(|x| x.as_f64()).unwrap_or(10.0);
                 let job_type = v.get("job_type").and_then(|x| x.as_str()).unwrap_or("LLMInference");
@@ -437,13 +440,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     o
                 };
                 let next_before = rt.block_on(client.get_next_job_id());
+                // escrow: per-token jobs lock rate × max_tokens; otherwise the flat price.
+                let escrow: u128 = if ppt > 0 && mtok > 0 {
+                    ppt.saturating_mul(mtok as u128)
+                } else {
+                    (price_gpn * 1e12) as u128
+                };
                 let res = rt.block_on(client.create_job(
                     g("min_vram_mb", 8192) as u32,
                     g("min_compute_capability", 75) as u16,
                     g("min_gpu_count", 1) as u8,
                     g("min_cuda_cores", 0) as u32,
                     min_gflops, job_type, "Spot",
-                    (price_gpn * 1e12) as u128, 1000, workload_hash,
+                    escrow, ppt, mtok, 1000, workload_hash,
                 ));
                 // The signer can mis-attribute a *concurrent* extrinsic's failure
                 // (a busy chain packs several txs per block). So don't trust the

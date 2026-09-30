@@ -34,6 +34,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "LLMInference",
             "Spot",
             price,
+            0,
+            0,
             100,
             workload_hash,
         )

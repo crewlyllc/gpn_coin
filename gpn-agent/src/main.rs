@@ -324,7 +324,7 @@ impl GPUMiningNodeAgent {
             );
 
             // submit + complete (payout to provider from escrow)
-            self.chain_client.submit_result(job_id, result_hash).await?;
+            self.chain_client.submit_result(job_id, result_hash, 0).await?;
             log::info!("  result submitted for job #{}", job_id);
             self.chain_client.complete_job(job_id).await?;
             log::info!("✅ job #{} completed & paid out", job_id);

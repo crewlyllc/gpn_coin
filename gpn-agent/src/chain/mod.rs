@@ -722,6 +722,8 @@ impl ChainClient {
         job_type: &str,
         tier: &str,
         price: u128,
+        price_per_token: u128,
+        max_tokens: u32,
         max_duration: u32,
         workload_hash: [u8; 32],
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -743,6 +745,8 @@ impl ChainClient {
                 subxt::ext::scale_value::Composite::unnamed(Vec::<Value>::new()),
             ),
             Value::u128(price),
+            Value::u128(price_per_token),
+            Value::u128(max_tokens as u128),
             Value::u128(max_duration as u128),
             Value::from_bytes(workload_hash),
         ];
@@ -777,11 +781,16 @@ impl ChainClient {
         &self,
         job_id: u64,
         result_hash: [u8; 32],
+        actual_tokens: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.submit_signed_call(
             "ComputeMarketplace",
             "submit_result",
-            vec![Value::u128(job_id as u128), Value::from_bytes(result_hash)],
+            vec![
+                Value::u128(job_id as u128),
+                Value::from_bytes(result_hash),
+                Value::u128(actual_tokens as u128),
+            ],
         )
         .await
     }

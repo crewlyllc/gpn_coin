@@ -172,6 +172,13 @@ pub mod pallet {
         StorageMap<_, Blake2_128Concat, T::AccountId, Vec<u64>, ValueQuery>;
     #[pallet::storage]
     pub type JobEscrow<T: Config> = StorageMap<_, Blake2_128Concat, u64, BalanceOf<T>, OptionQuery>;
+
+    /// Per-token billing for a job: `(price_per_token, max_tokens, actual_tokens)`.
+    /// Kept in its own map (added post-genesis) so `ComputeJob`'s storage layout is
+    /// unchanged and no migration is required.
+    #[pallet::storage]
+    pub type JobBilling<T: Config> =
+        StorageMap<_, Blake2_128Concat, u64, (u128, u32, u32), ValueQuery>;
     #[pallet::storage]
     pub type RegisteredProviders<T: Config> =
         StorageMap<_, Blake2_128Concat, T::AccountId, GPURequirements, OptionQuery>;
@@ -358,6 +365,8 @@ pub mod pallet {
             job_type: JobType,
             tier: JobTier,
             price: BalanceOf<T>,
+            price_per_token: u128,
+            max_tokens: u32,
             max_duration: BlockNumberFor<T>,
             workload_hash: [u8; 32],
         ) -> DispatchResult {
@@ -409,6 +418,9 @@ pub mod pallet {
             )?;
 
             <Jobs<T>>::insert(job_id, job);
+            // Per-token billing in a SEPARATE map so `ComputeJob`'s on-chain layout
+            // is unchanged (no storage migration needed). (rate, cap, used)
+            <JobBilling<T>>::insert(job_id, (price_per_token, max_tokens, 0u32));
             <JobRequestor<T>>::insert(job_id, who.clone());
             <JobEscrow<T>>::insert(job_id, price);
 
@@ -497,6 +509,7 @@ pub mod pallet {
             origin: OriginFor<T>,
             job_id: u64,
             result_hash: [u8; 32],
+            actual_tokens: u32,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             let mut job = <Jobs<T>>::get(job_id).ok_or(Error::<T>::JobNotFound)?;
@@ -508,6 +521,9 @@ pub mod pallet {
             job.state = JobState::AwaitingVerification;
             job.result_hash = Some(result_hash);
             <Jobs<T>>::insert(job_id, job);
+            let mut billing = <JobBilling<T>>::get(job_id);
+            billing.2 = actual_tokens;
+            <JobBilling<T>>::insert(job_id, billing);
             Self::deposit_event(Event::<T>::JobCompleted {
                 job_id,
                 provider: who,
@@ -526,29 +542,43 @@ pub mod pallet {
             );
 
             let provider = <JobProvider<T>>::get(job_id).ok_or(Error::<T>::NotJobProvider)?;
+            let requestor = <JobRequestor<T>>::get(job_id).ok_or(Error::<T>::NotJobProvider)?;
             let escrow = <JobEscrow<T>>::take(job_id).ok_or(Error::<T>::EscrowMismatch)?;
+            // ── Per-token billing ──────────────────────────────────────────
+            // When the job carries a rate + cap, the real charge is
+            // `price_per_token × actual_tokens` (bounded by the escrow); the unused
+            // remainder is refunded to the requestor. No rate => legacy flat price.
+            let charge: BalanceOf<T> = {
+                let (price_per_token, max_tokens, actual_tokens) = <JobBilling<T>>::get(job_id);
+                if price_per_token > 0 && max_tokens > 0 {
+                    let toks: u128 = (actual_tokens.min(max_tokens)) as u128;
+                    let cap: u128 = escrow.try_into().unwrap_or(u128::MAX);
+                    price_per_token
+                        .saturating_mul(toks)
+                        .min(cap)
+                        .try_into()
+                        .unwrap_or(escrow)
+                } else {
+                    escrow
+                }
+            };
+            let ed = T::Currency::minimum_balance();
+            let mut refund: BalanceOf<T> = escrow.saturating_sub(charge);
             let fee_bps = T::MarketplaceFeeBps::get();
-            let mut fee: BalanceOf<T> = escrow * fee_bps.into() / 10_000u32.into();
-            let mut provider_payment = escrow.saturating_sub(fee);
+            let mut fee: BalanceOf<T> = charge * fee_bps.into() / 10_000u32.into();
+            let mut provider_payment = charge.saturating_sub(fee);
 
             // The marketplace pallet account is a pass-through escrow holder and
-            // must never be left with a *dangling* balance: pallet_balances only
-            // allows a transfer (with AllowDeath) when the sender ends at exactly
-            // 0 or >= ED, never a nonzero amount below ED. Two consequences:
-            //  1. If the provider payout itself would fall below ED (tiny escrow),
-            //     route the whole escrow to the provider and skip the fee — a
-            //     dust job pays no fee rather than leaving a sub-ED account.
-            //  2. Otherwise drain the fee to the sink FIRST (cmkt -> provider_payment,
-            //     which is >= ED), THEN pay the provider (cmkt -> 0).
-            if provider_payment < T::Currency::minimum_balance()
-                || fee < T::Currency::minimum_balance()
-            {
-                // Also skip the fee when it is itself below ED: a fresh/empty fee
-                // sink cannot receive a sub-ED balance (pallet_balances rejects it
-                // with TokenError::BelowMinimum). Sub-ED fees are dust — route the
-                // whole escrow to the provider.
-                provider_payment = escrow;
+            // must never be left with a *dangling* balance below ED. If the payout
+            // or fee is dust, fold it into the payout (no fee on dust jobs).
+            if provider_payment < ed || fee < ed {
+                provider_payment = charge;
                 fee = Zero::zero();
+            }
+            // Fold a sub-ED refund into the payout too, so the pallet ends at 0.
+            if refund > Zero::zero() && refund < ed {
+                provider_payment = provider_payment.saturating_add(refund);
+                refund = Zero::zero();
             }
 
             job.state = JobState::Completed;
@@ -581,6 +611,16 @@ pub mod pallet {
                     &Self::account_id(),
                     &T::FeeSink::fee_sink(),
                     fee,
+                    ExistenceRequirement::AllowDeath,
+                )?;
+            }
+            // Refund any unused escrow to the requestor (fee already out, so the
+            // pallet keeps exactly `provider_payment`).
+            if !refund.is_zero() {
+                T::Currency::transfer(
+                    &Self::account_id(),
+                    &requestor,
+                    refund,
                     ExistenceRequirement::AllowDeath,
                 )?;
             }

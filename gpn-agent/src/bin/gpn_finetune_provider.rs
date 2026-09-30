@@ -154,7 +154,7 @@ async fn run_job(
         let _ = LlmStore::new().complete_artifact(id, &artifact, &media, &hash);
         let mut hb = [0u8; 32];
         hb.copy_from_slice(&hex::decode(&hash)?);
-        client.submit_result(id, hb).await?;
+        client.submit_result(id, hb, 0).await?;
         client.complete_job(id).await?;
         println!("[job {id}] done — adapter {artifact} loss={loss:.3} hash {hash:.16}…");
         // Auto-register the tuned model for serving (tuned-<jobid>): merge LoRA

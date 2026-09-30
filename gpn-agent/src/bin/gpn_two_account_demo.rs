@@ -113,6 +113,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "LLMInference",
         "Spot",
         price,
+        0,
+        0,
         100,
         workload_hash,
     )
@@ -154,7 +156,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         short(&provider_uri),
         hex::encode(&result_hash[..4])
     );
-    prov.submit_result(job_id, result_hash).await?;
+    prov.submit_result(job_id, result_hash, 0).await?;
 
     println!(
         "[6] {} completes job #{} (payout from escrow)",

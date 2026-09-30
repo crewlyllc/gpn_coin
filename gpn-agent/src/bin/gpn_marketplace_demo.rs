@@ -103,6 +103,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "LLMInference",
             "Spot",
             price,
+            0,
+            0,
             100,
             workload_hash,
         )
@@ -163,7 +165,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         job_id,
         hex::encode(&result_hash[..4])
     );
-    client.submit_result(job_id, result_hash).await?;
+    client.submit_result(job_id, result_hash, 0).await?;
     if let Some((state, _, _, _)) = client.get_job_state(job_id).await {
         println!("    ✅ result submitted, job state = {}", state);
     }

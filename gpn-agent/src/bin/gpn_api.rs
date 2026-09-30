@@ -452,6 +452,8 @@ fn route(
                 job_type,
                 v.get("tier").and_then(|x| x.as_str()).unwrap_or("Spot"),
                 price_base,
+                0,
+                0,
                 g("max_duration", 1000) as u32,
                 workload_hash,
             ));

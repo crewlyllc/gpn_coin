@@ -314,7 +314,9 @@ async fn run_job(
             let commit = salted_commit(&salt, &text);
             let commit_hex = format!("0x{}", hex::encode(commit));
             let _ = set_response(id, &text, &commit_hex, Some(&salt));
-            client.submit_result(id, commit).await?;
+            // Rough output-token meter for per-token billing (chars/4 heuristic).
+            let est_tokens: u32 = ((text.chars().count() as u32) / 4).max(1);
+            client.submit_result(id, commit, est_tokens).await?;
             client.complete_job(id).await?;
             println!(
                 "[job {id}] done — response {} chars, salted commitment {:.16}… (salt off-chain)",
