@@ -348,6 +348,32 @@ where
     let events_bytes = read_events_storage(client, included.block_hash()).await?;
     let events = subxt::events::Events::<GpnConfig>::decode_from(events_bytes, client.metadata());
 
+    // Which extrinsic is OURS? A busy chain packs several extrinsics per block,
+    // and a *concurrent* failure (e.g. a provider's `accept_job` hitting its
+    // capacity) would otherwise be mis-attributed to us. Resolve our index by
+    // matching our extrinsic hash against the block's extrinsics; if that can't
+    // be read, fall back to the old "any failure" behaviour.
+    let our_index: Option<u32> = {
+        let mut our_call = Vec::new();
+        let md = client.metadata();
+        let _ = call.encode_call_data_to(&md, &mut our_call);
+        if our_call.is_empty() {
+            None
+        } else {
+            async {
+                let block = client.blocks().at(included.block_hash()).await.ok()?;
+                let exts = block.extrinsics().await.ok()?;
+                for e in exts.iter().flatten() {
+                    if e.call_bytes() == our_call.as_slice() {
+                        return Some(e.index());
+                    }
+                }
+                None
+            }
+            .await
+        }
+    };
+
     let mut dispatch_failure: Option<String> = None;
     for ev in events.iter() {
         let ev = match ev {
@@ -356,6 +382,12 @@ where
         };
         let (pallet, variant) = (ev.pallet_name(), ev.variant_name());
         if pallet == "System" && variant == "ExtrinsicFailed" {
+            // Only count a failure that belongs to our own extrinsic.
+            if let Some(ix) = our_index {
+                if !matches!(ev.phase(), subxt::events::Phase::ApplyExtrinsic(i) if i == ix) {
+                    continue;
+                }
+            }
             dispatch_failure = Some(describe_module_error(client, ev.field_bytes()));
             break;
         }

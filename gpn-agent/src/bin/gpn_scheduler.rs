@@ -301,6 +301,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     o.copy_from_slice(&h.finalize());
                     o
                 };
+                let next_before = rt.block_on(client.get_next_job_id());
                 let res = rt.block_on(client.create_job(
                     g("min_vram_mb", 8192) as u32,
                     g("min_compute_capability", 75) as u16,
@@ -309,10 +310,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     min_gflops, job_type, "Spot",
                     (price_gpn * 1e12) as u128, 1000, workload_hash,
                 ));
-                match res {
-                    Ok(_) => {
-                        let next = rt.block_on(client.get_next_job_id());
-                        let id = next.saturating_sub(1);
+                // The signer can mis-attribute a *concurrent* extrinsic's failure
+                // (a busy chain packs several txs per block). So don't trust the
+                // Err blindly: re-read the job counter — if it advanced, OUR job
+                // was in fact created, and we must still route it.
+                let after = rt.block_on(client.get_next_job_id());
+                match (res, after > next_before) {
+                    (Ok(_), _) | (Err(_), true) => {
+                        let id = after.saturating_sub(1);
                         // store the off-chain payload (prompt/model) if present
                         if let Some(p) = prompt.as_ref() {
                             let job = gpn_agent::llm::LlmJob::new_llm(&model, p, 0.7, 256);
@@ -326,7 +331,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                "status_url":provider.status_url,
                                "latency_ms":provider.latency_ms,"load":format!("{}/{}",provider.active,provider.capacity)})
                     }
-                    Err(e) => json!({"ok":false,"error":format!("{e}")}),
+                    (Err(e), false) => json!({"ok":false,"error":format!("{e}")}),
                 }
             }
             (Method::Get, ["jobs"]) => {

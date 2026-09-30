@@ -257,6 +257,65 @@ pub mod pallet {
         fn on_initialize(_now: BlockNumberFor<T>) -> Weight {
             Weight::zero()
         }
+
+        /// One-time capacity cleanup. Before the `complete_job` fix, finished jobs
+        /// were never removed from `ProviderJobs`/`RequestorJobs`, so every
+        /// completed job permanently consumed a `MaxJobsPerProvider` slot and
+        /// eventually wedged busy providers. Prune any terminal
+        /// (Completed/Failed/Cancelled) job still sitting in a capacity list.
+        /// Idempotent — a re-run finds nothing to prune.
+        fn on_runtime_upgrade() -> Weight {
+            let mut reads: u64 = 0;
+            let mut writes: u64 = 0;
+
+            let provider_rows: Vec<(T::AccountId, Vec<u64>)> = <ProviderJobs<T>>::iter().collect();
+            for (who, jobs) in provider_rows {
+                reads += 1;
+                let mut kept = Vec::with_capacity(jobs.len());
+                for id in jobs {
+                    reads += 1;
+                    let terminal = matches!(
+                        <Jobs<T>>::get(id).map(|j| j.state),
+                        Some(JobState::Completed)
+                            | Some(JobState::Failed)
+                            | Some(JobState::Cancelled)
+                    );
+                    if !terminal {
+                        kept.push(id);
+                    }
+                }
+                if kept.len() != <ProviderJobs<T>>::get(&who).len() {
+                    writes += 1;
+                    <ProviderJobs<T>>::insert(&who, kept);
+                }
+            }
+
+            let requestor_rows: Vec<(T::AccountId, Vec<u64>)> =
+                <RequestorJobs<T>>::iter().collect();
+            for (who, jobs) in requestor_rows {
+                reads += 1;
+                let mut kept = Vec::with_capacity(jobs.len());
+                for id in jobs {
+                    reads += 1;
+                    let terminal = matches!(
+                        <Jobs<T>>::get(id).map(|j| j.state),
+                        Some(JobState::Completed)
+                            | Some(JobState::Failed)
+                            | Some(JobState::Cancelled)
+                    );
+                    if !terminal {
+                        kept.push(id);
+                    }
+                }
+                if kept.len() != <RequestorJobs<T>>::get(&who).len() {
+                    writes += 1;
+                    <RequestorJobs<T>>::insert(&who, kept);
+                }
+            }
+
+            log::info!("gpn-marketplace: capacity migration pruned terminal jobs from provider/requestor lists");
+            T::DbWeight::get().reads_writes(reads, writes)
+        }
     }
 
     // Dispatchable calls
@@ -495,6 +554,22 @@ pub mod pallet {
             job.state = JobState::Completed;
             <Jobs<T>>::insert(job_id, job);
             <ActiveJobCount<T>>::mutate(|c| *c = c.saturating_sub(1));
+
+            // Free the provider's capacity slot. Previously `complete_job` only set
+            // the state, so every finished job kept consuming one of the provider's
+            // `MaxJobsPerProvider` slots forever — a slow capacity leak that wedged
+            // busy providers. `cancel_job` already did this; mirror it here.
+            if let Some(provider) = <JobProvider<T>>::take(job_id) {
+                let mut pj = <ProviderJobs<T>>::get(&provider);
+                pj.retain(|&id| id != job_id);
+                <ProviderJobs<T>>::insert(&provider, pj);
+            }
+            // Likewise free the requestor's slot (same leak on the requester side).
+            if let Some(requestor) = <JobRequestor<T>>::get(job_id) {
+                let mut rj = <RequestorJobs<T>>::get(&requestor);
+                rj.retain(|&id| id != job_id);
+                <RequestorJobs<T>>::insert(&requestor, rj);
+            }
 
             // Route the marketplace fee into the token pallet account first so the
             // fee economy is self-funding: `distribute_fees` draws from the `gpn/tokn`

@@ -1,0 +1,57 @@
+# GPN — "Coins → Wallet → Run AI" Test Log (2026-09-24)
+
+Goal: fund a wallet, then use that wallet to pay for an AI job on the network.
+
+## Step 1 — Generate a requestor wallet
+```
+gpn-node key generate
+  Secret seed: 0xe871c97ce671bd29efe234d077980d3ee12333ce3c3eb3af71f52d210045018a
+  SS58 Address: 5DaPejP1koNDcuJwRcFeySHmqCAPxzkRBbGU99bUWhfwBs7m
+```
+
+## Step 2 — Fund it (faucet)
+```
+curl "http://127.0.0.1:8081/drip?address=5DaPejP1koNDcuJwRcFeySHmqCAPxzkRBbGU99bUWhfwBs7m&amount=100"
+  → {"amount_gpn":100.0, "ok":true}
+Balance BEFORE: 100.0000 GPN
+```
+
+## Step 3 — Provider (already running)
+- ollama serve: running (llama3.2:1b loaded)
+- gpn_llm_provider: running (polls for Running LLM jobs)
+- provider 5ENqSp5Q… : staked=true attested=true (Bronze, 188 GFLOPS), balance 249.9997 GPN
+
+## Step 4 — Start gpn_api (requestor wallet)
+```
+gpn_api --listen 127.0.0.1:8090 --signer-uri <requestor_seed>
+  → listening on :8090
+```
+
+## Step 5 — Post the AI job
+```
+curl -X POST http://127.0.0.1:8090/jobs -d '{"job_type":"LLMInference","prompt":"What is the capital of France?","model":"llama3.2:1b","price_gpn":10,"min_gflops":150}'
+  → {"bridged":true,"job_id":1,"ok":true,"price_gpn":10.0}
+Job #1 created (Pending).
+```
+
+## Step 6 — (BLOCKED) Provider must accept the job
+Job #1 sat in `Pending` state. The `gpn_llm_provider` only picks up `Running` jobs, so the
+provider must first ACCEPT it. Two prerequisites were missing on the freshly-reset chain:
+
+### 6a. Provider registration — `ProviderNotRegistered`
+```
+POST /providers/register (min_gflops=150)  → HANGS (no response)
+```
+The provider is attested but NOT registered in the marketplace (attestation ≠ registration).
+The `register_provider` call hangs (subxt submit blocks / no response, no logged error).
+
+## RESULT
+✅ Wallet funded (100 GPN) and a paid LLM job was created (job #1, 10 GPN, Pending).
+❌ The provider couldn't be registered → couldn't accept → inference never ran → no payout.
+
+## Root cause to fix
+`POST /providers/register` (ComputeMarketplace::register_provider) hangs in the gpn_api /
+ChainClient `submit_signed_call`. The attestation + registration + accept chain has a gap:
+after a chain reset, the provider's marketplace REGISTRATION is wiped (separate from
+attestation) and the re-register call hangs. Needs investigation + fix before the full
+"wallet → pay → run AI → get result" loop can complete end-to-end.

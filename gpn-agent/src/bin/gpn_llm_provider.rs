@@ -77,6 +77,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+/// Resolve a requested model to a concrete one. `auto`/empty means "pick any
+/// model this machine has" — choose the first from the local Ollama, falling
+/// back to the guaranteed baseline model.
+fn resolve_model(requested: &str) -> String {
+    if !requested.is_empty() && requested != "auto" {
+        return requested.to_string();
+    }
+    let base = gpn_agent::llm::infer::default_ollama_url();
+    if let Ok(r) = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(2500))
+        .build()
+        .and_then(|c| c.get(format!("{base}/api/tags")).send())
+    {
+        if let Ok(v) = r.json::<serde_json::Value>() {
+            if let Some(name) = v["models"]
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(|m| m["name"].as_str())
+            {
+                return name.to_string();
+            }
+        }
+    }
+    "llama3.2:1b".to_string()
+}
+
 fn assignment_store_path() -> String {
     std::env::var("GPN_ASSIGN_STORE").unwrap_or_else(|_| {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
@@ -238,14 +264,15 @@ async fn run_job(
     job: &gpn_agent::llm::LlmJob,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let job = job.clone();
+    let model = resolve_model(&job.model);
     let preview: String = job.prompt.chars().take(60).collect();
     println!(
         "[job {id}] running inference — model={} prompt=\"{}\"",
-        job.model, preview
+        model, preview
     );
 
     let _ = LlmStore::new().set_status(id, "running");
-    match run_inference(&job.model, &job.prompt, job.temperature, job.max_tokens).await {
+    match run_inference(&model, &job.prompt, job.temperature, job.max_tokens).await {
         Ok((text, hash)) => {
             let _ = set_response(id, &text, &hash);
             let mut hb = [0u8; 32];

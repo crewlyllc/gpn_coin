@@ -302,3 +302,48 @@ Scope note: besides the committed canonical WASM blob, the ONLY source change wa
   committed) used to decode Sudo::Sudid / System::CodeUpdated.
 
 === FORKLESS UPGRADE OK — complete_job fix live, payout verified, no reset ===
+
+================================================================================
+2026-09-29 18:51–18:53 UTC — FREEZE GENESIS: rebuild + Windows sync (cron 75fbc745)
+================================================================================
+CONTEXT: commit 0f36ff9 restored gpn-node/runtime/gpn_runtime.compact.compressed.wasm
+  to the chain-launch blob (sha256 b6b5435c6785a96cb25b0fac798fc2783d786cc562999e5b77919247dc290cd6),
+  yielding genesis 0x08c4f181b2c29ca12fb1d56e05820525892f25119348cd058968445ba0e7948a.
+  The complete_job fix stays ON-CHAIN via the earlier set_code (spec_version 2); it is NOT
+  baked into the genesis blob.
+
+STEP 1 DONE — Linux node rebuilt. `cargo build --release -p gpn-node` finished OK
+  (gpn-node/target/release/gpn-node, fresh). build.rs embeds the committed frozen blob
+  via include_bytes!(gpn-node/runtime/gpn_runtime.compact.compressed.wasm).
+
+STEP 2 DONE — fleet restarted, NO RESET:
+  pre-restart head #5110 → post-restart head #5111 (climbing), genesis still
+  0x08c4f181b2c29ca12fb1d56e05820525892f25119348cd058968445ba0e7948a.
+
+STEP 4 (Linux side) DONE — fresh gpn-node started against throwaway base-path /tmp/gpngenesis:
+    "🔨 Initializing Genesis block/state (state: 0xbf5b…b737, header-hash: 0x08c4…948a)"
+  header-hash MATCHES the live chain genesis 0x08c4…948a. Linux binary is syncable.
+
+STEP 3 — Windows rebuild on frozen commit: release-windows.yml run 36613637944
+  (head 0f36ff9f4) IN PROGRESS on self-hosted runner DESKTOP-USBUADL (started 18:39:45 UTC).
+  No EPERM/checkout failure so far. Awaiting completion.
+
+STEP 3 DONE — Windows rebuild SUCCESS: release-windows.yml run 36613637944 (head 0f36ff9f4)
+  → completed success at ~19:04 UTC. Artifact `gpn-windows` (id 11055861288, 150,622,256 bytes).
+  No EPERM/checkout failure (Windows gpn-node.exe was not holding the lock).
+
+STEP 4 DONE — Windows binary VERIFIED against frozen genesis:
+  Downloaded + extracted gpn-node/target/release/gpn-node.exe (67,345,408 bytes).
+  Byte-search: the exe contains the frozen runtime WASM VERBATIM at offset 47,887,262 —
+    sha256(b6b5435c6785a96cb25b0fac798fc2783d786cc562999e5b77919247dc290cd6) == committed
+    gpn-node/runtime/gpn_runtime.compact.compressed.wasm (476,523 bytes). => the exe was built
+    with the frozen genesis blob and yields genesis 0x08c4f181…948a.
+  (No wine on host to exec the .exe directly; the Linux gpn-node built from this same commit
+   WAS run against a throwaway base-path and printed header-hash 0x08c4…948a — the permitted
+   equivalent verification.)
+
+STEP 2 (recheck) — fleet still healthy, NO RESET: head climbing #5110 → #5111 → … → #5162;
+  genesis still 0x08c4f181b2c29ca12fb1d56e05820525892f25119348cd058968445ba0e7948a.
+  WASM blob untouched (sha256 b6b5435c…0cd6, git clean).
+
+=== GENESIS FROZEN — Windows binary matches chain genesis 0x08c4f181…948a, syncable ===
