@@ -351,6 +351,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     None => json!({"error":"not found"}),
                 }
             }
+            // The answer/artifact lives OFF-chain in the provider's local store.
+            // On this testnet the access point shares the provider's box, so it can
+            // serve the result. (Production: the provider returns the result to the
+            // client directly, or encrypted to the client's key.)
+            (Method::Get, ["result", id]) => {
+                let idn: u64 = id.parse().unwrap_or(0);
+                match gpn_agent::llm::get_job(idn) {
+                    Some(j) => json!({
+                        "job_id": idn, "kind": j.kind, "model": j.model, "prompt": j.prompt,
+                        "status": j.status, "response": j.response,
+                        "result_hash": j.result_hash, "error": j.error,
+                    }),
+                    None => json!({"job_id": idn, "error": "no off-chain record yet"}),
+                }
+            }
             // Client-side signing: the caller already created + escrowed the job
             // with THEIR OWN wallet; they just ask us to ROUTE it to a provider.
             (Method::Post, ["route", id]) => {
