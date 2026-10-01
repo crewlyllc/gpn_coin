@@ -59,6 +59,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|| std::env::var("GPN_OWNER_COST_USD_HR").ok())
         .and_then(|s| s.parse().ok())
         .unwrap_or(0.03);
+    // Memory bandwidth (GB/s) — the other half of the roofline. A hardware spec.
+    let mem_bw_gbps: f64 = opt(&args, "--mem-bw-gbps")
+        .or_else(|| std::env::var("GPN_MEM_BW_GBPS").ok())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(250.0);
     let models: Vec<String> = models_csv.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
 
     let server = Server::http(&listen).map_err(|e| format!("cannot bind {listen}: {e}"))?;
@@ -72,7 +77,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 json!({
                     "address": address, "gflops": gflops, "models": models_now,
                     "can_pull": can_pull, "active": active, "capacity": capacity.max(1),
-                    "tok_per_s": tok_per_s, "owner_cost_usd_hr": owner_cost_usd_hr
+                    "tok_per_s": tok_per_s, "owner_cost_usd_hr": owner_cost_usd_hr,
+                    "mem_bw_gbps": mem_bw_gbps
                 })
             }
             (Method::Get, "/health") => json!({"status":"ok"}),

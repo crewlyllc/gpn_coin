@@ -32,6 +32,7 @@ struct Provider {
     can_pull: bool,
     tok_per_s: f64,
     owner_cost_usd_hr: f64,
+    mem_bw_gbps: f64,
     active: u64,
     capacity: u64,
     latency_ms: u64,
@@ -87,6 +88,7 @@ fn refresh(registry: &Arc<Mutex<Vec<Provider>>>, urls: &Arc<Vec<String>>) {
                         .get("owner_cost_usd_hr")
                         .and_then(|x| x.as_f64())
                         .unwrap_or(0.03),
+                    mem_bw_gbps: v.get("mem_bw_gbps").and_then(|x| x.as_f64()).unwrap_or(250.0),
                     active: v.get("active").and_then(|x| x.as_u64()).unwrap_or(0),
                     capacity: v.get("capacity").and_then(|x| x.as_u64()).unwrap_or(1).max(1),
                     latency_ms: v.get("__latency_ms").and_then(|x| x.as_u64()).unwrap_or(9999),
@@ -100,6 +102,7 @@ fn refresh(registry: &Arc<Mutex<Vec<Provider>>>, urls: &Arc<Vec<String>>) {
                     can_pull: false,
                     tok_per_s: 40.0,
                     owner_cost_usd_hr: 0.03,
+                    mem_bw_gbps: 250.0,
                     active: 0,
                     capacity: 0,
                     latency_ms: 9999,
@@ -146,6 +149,43 @@ fn messages_to_prompt(v: &Value) -> String {
     }
     s.push_str("assistant:");
     s
+}
+
+/// Parse a rough parameter count (in billions) from a model name, e.g.
+/// "llama3.2:1b" -> 1.0, "qwen2.5:0.5b" -> 0.5, "llama3:70b" -> 70.0.
+fn params_b_for(model: &str) -> f64 {
+    let m = model.to_ascii_lowercase();
+    if let Some(idx) = m.find('b') {
+        let pre = &m[..idx];
+        let num: String = pre
+            .chars()
+            .rev()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+        if let Ok(v) = num.parse::<f64>() {
+            if v > 0.0 {
+                return v;
+            }
+        }
+    }
+    1.0
+}
+
+/// Roofline estimate of output tokens/sec for `params_b` on a GPU with
+/// `gflops` GFLOP/s and `mem_bw_gbps` GB/s of memory bandwidth:
+///   compute-bound:  gflops·1e9·eff_c / (2 FLOPs per param per token)
+///   memory-bound:   bw·1e9·eff_m    / (2 bytes per fp16 weight per token)
+/// Decode is usually memory-bound; prefill/train is compute-bound. We take the min.
+fn roofline_tok_per_s(gflops: f64, mem_bw_gbps: f64, params_b: f64) -> f64 {
+    const EFF_COMPUTE: f64 = 0.40;
+    const EFF_MEM: f64 = 0.70;
+    let p = params_b.max(0.05) * 1e9;
+    let compute = gflops.max(1.0) * 1e9 * EFF_COMPUTE / (2.0 * p);
+    let memory = mem_bw_gbps.max(1.0) * 1e9 * EFF_MEM / (p * 2.0);
+    compute.min(memory).max(1.0)
 }
 
 fn now_secs() -> u64 {
@@ -460,13 +500,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .block_on(client.get_feed())
                     .map(|f| (f.token_price_usd, f.avg_gpu_hour_price_usd, f.utilization))
                     .unwrap_or((0.15, 3.0, 0.65));
+                let params_b = params_b_for(&model);
                 let (tok_per_s, owner_hr) = {
                     let reg = registry.lock().unwrap().clone();
                     let live: Vec<&Provider> = reg.iter().filter(|p| p.last_seen.is_some()).collect();
                     if live.is_empty() {
-                        (40.0_f64, 0.03_f64)
+                        (roofline_tok_per_s(165.0, 250.0, params_b), 0.03_f64)
                     } else {
-                        let t = live.iter().map(|p| p.tok_per_s).sum::<f64>() / live.len() as f64;
+                        let t = live
+                            .iter()
+                            .map(|p| roofline_tok_per_s(p.gflops as f64, p.mem_bw_gbps, params_b))
+                            .sum::<f64>()
+                            / live.len() as f64;
                         let o = live.iter().map(|p| p.owner_cost_usd_hr).fold(f64::MAX, f64::min);
                         (t.max(1.0), o.max(0.001))
                     }
