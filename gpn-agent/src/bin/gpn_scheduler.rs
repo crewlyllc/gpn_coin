@@ -587,9 +587,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match (res, after > next_before) {
                     (Ok(_), _) | (Err(_), true) => {
                         let id = after.saturating_sub(1);
-                        // store the off-chain payload (prompt/model) if present
+                        // store the off-chain payload (prompt/model/params) if present.
+                        // Generation jobs (image/video) MUST be stored with a gen
+                        // kind, otherwise the LLM provider claims them and 404s on
+                        // a diffusion model; the diffusion provider only claims
+                        // jobs where `kind` is image/video.
                         if let Some(p) = prompt.as_ref() {
-                            let job = gpn_agent::llm::LlmJob::new_llm(&model, p, 0.7, 256);
+                            let jt = job_type.to_ascii_lowercase();
+                            let job = if jt.contains("image") || jt.contains("video") {
+                                let kind = if jt.contains("video") { "video" } else { "image" };
+                                let neg = v.get("negative_prompt").and_then(|x| x.as_str());
+                                gpn_agent::llm::LlmJob::new_gen(
+                                    kind,
+                                    &model,
+                                    p,
+                                    neg,
+                                    g("width", 512) as u32,
+                                    g("height", 512) as u32,
+                                    g("steps", 8) as u32,
+                                    v.get("seed").and_then(|x| x.as_i64()),
+                                    g("frames", 16) as u32,
+                                    g("fps", 8) as u32,
+                                )
+                            } else {
+                                gpn_agent::llm::LlmJob::new_llm(&model, p, 0.7, 256)
+                            };
                             let _ = gpn_agent::llm::LlmStore::new().put(id, job);
                         }
                         // dispatch: record which provider (by address) should claim it,
@@ -606,6 +628,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         answer = Some(json!({
                                             "status": j.status, "response": j.response,
                                             "result_hash": j.result_hash, "salt": j.salt,
+                                            "artifact_path": j.artifact_path,
+                                            "artifact_media_type": j.artifact_media_type,
                                             "verify": "sha256(salt ++ response) == result_hash",
                                             "error": j.error,
                                         }));
@@ -657,6 +681,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "job_id": idn, "kind": j.kind, "model": j.model, "prompt": j.prompt,
                         "status": j.status, "response": j.response,
                         "result_hash": j.result_hash, "salt": j.salt,
+                        "artifact_path": j.artifact_path,
+                        "artifact_media_type": j.artifact_media_type,
                         "verify": "sha256(salt ++ response) == result_hash",
                         "error": j.error,
                     }),
