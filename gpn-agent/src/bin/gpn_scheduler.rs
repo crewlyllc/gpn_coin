@@ -146,6 +146,34 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// Target USD cost per output token for a model (the *stable* anchor). Uses a
+/// ~1B reference at $2e-6/token, scaled by roughly the parameter count parsed
+/// from the model name (0.5b/1b/8b/70b…). This is what keeps a job's *dollar*
+/// cost stable while the GPN amount floats with the token price.
+fn usd_per_token_for(model: &str) -> f64 {
+    let base = 2.0e-6;
+    let m = model.to_ascii_lowercase();
+    let mut params_b = 1.0f64;
+    if let Some(idx) = m.find('b') {
+        // find the numeric run immediately before the 'b'
+        let pre = &m[..idx];
+        let num: String = pre
+            .chars()
+            .rev()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+        if let Ok(v) = num.parse::<f64>() {
+            if v > 0.0 {
+                params_b = v;
+            }
+        }
+    }
+    base * params_b.max(0.5)
+}
+
 fn est_ms(p: &Provider) -> u64 {
     // latency (network RTT) + a per-active-job queue estimate (~5s each).
     p.latency_ms + p.active * 5000
@@ -397,8 +425,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let wait = v.get("wait").and_then(|x| x.as_bool()).unwrap_or(false);
                 let wait_secs: u64 = v.get("wait_secs").and_then(|x| x.as_u64()).unwrap_or(180);
                 // per-token billing (optional): rate × max_tokens = escrow ceiling.
-                let ppt: u128 = v.get("price_per_token").and_then(|x| x.as_u64()).unwrap_or(0) as u128;
+                let ppt_in: u128 = v.get("price_per_token").and_then(|x| x.as_u64()).unwrap_or(0) as u128;
                 let mtok: u32 = v.get("max_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+                // Oracle-driven USD→GPN: if the caller didn't pin a rate, derive it
+                // from the on-chain token price so the *dollar* cost stays stable.
+                let token_price_usd = rt
+                    .block_on(client.get_feed())
+                    .map(|f| f.token_price_usd)
+                    .filter(|p| *p > 0.0)
+                    .unwrap_or(0.15);
+                let oracle_ppt: u128 =
+                    ((usd_per_token_for(&model) / token_price_usd) * 1e12).max(1.0) as u128;
+                let ppt: u128 = if ppt_in > 0 { ppt_in } else { oracle_ppt };
+                let mtok_eff: u32 = if mtok > 0 { mtok } else { 256 };
                 let min_gflops = g("min_gflops", 150);
                 let price_gpn = v.get("price_gpn").and_then(|x| x.as_f64()).unwrap_or(10.0);
                 let job_type = v.get("job_type").and_then(|x| x.as_str()).unwrap_or("LLMInference");
@@ -441,8 +480,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 let next_before = rt.block_on(client.get_next_job_id());
                 // escrow: per-token jobs lock rate × max_tokens; otherwise the flat price.
-                let escrow: u128 = if ppt > 0 && mtok > 0 {
-                    ppt.saturating_mul(mtok as u128)
+                let escrow: u128 = if ppt > 0 && mtok_eff > 0 {
+                    ppt.saturating_mul(mtok_eff as u128)
                 } else {
                     (price_gpn * 1e12) as u128
                 };
@@ -452,7 +491,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     g("min_gpu_count", 1) as u8,
                     g("min_cuda_cores", 0) as u32,
                     min_gflops, job_type, "Spot",
-                    escrow, ppt, mtok, 1000, workload_hash,
+                    escrow, ppt, mtok_eff, 1000, workload_hash,
                 ));
                 // The signer can mis-attribute a *concurrent* extrinsic's failure
                 // (a busy chain packs several txs per block). So don't trust the
