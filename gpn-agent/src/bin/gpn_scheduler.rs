@@ -30,6 +30,8 @@ struct Provider {
     gflops: u64,
     models: Vec<String>,
     can_pull: bool,
+    tok_per_s: f64,
+    owner_cost_usd_hr: f64,
     active: u64,
     capacity: u64,
     latency_ms: u64,
@@ -80,6 +82,11 @@ fn refresh(registry: &Arc<Mutex<Vec<Provider>>>, urls: &Arc<Vec<String>>) {
                         .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
                         .unwrap_or_default(),
                     can_pull: v.get("can_pull").and_then(|x| x.as_bool()).unwrap_or(false),
+                    tok_per_s: v.get("tok_per_s").and_then(|x| x.as_f64()).unwrap_or(40.0),
+                    owner_cost_usd_hr: v
+                        .get("owner_cost_usd_hr")
+                        .and_then(|x| x.as_f64())
+                        .unwrap_or(0.03),
                     active: v.get("active").and_then(|x| x.as_u64()).unwrap_or(0),
                     capacity: v.get("capacity").and_then(|x| x.as_u64()).unwrap_or(1).max(1),
                     latency_ms: v.get("__latency_ms").and_then(|x| x.as_u64()).unwrap_or(9999),
@@ -91,6 +98,8 @@ fn refresh(registry: &Arc<Mutex<Vec<Provider>>>, urls: &Arc<Vec<String>>) {
                     gflops: 0,
                     models: vec![],
                     can_pull: false,
+                    tok_per_s: 40.0,
+                    owner_cost_usd_hr: 0.03,
                     active: 0,
                     capacity: 0,
                     latency_ms: 9999,
@@ -257,6 +266,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|| std::env::var("GPN_PULL_PENALTY_MS").ok())
         .and_then(|s| s.parse().ok())
         .unwrap_or(120_000);
+    // Rate card: price the AI in USD (cost of compute + margin), then convert to GPN.
+    //   rental-fraction-bps: target = clamp(frac × market_rental, owner_cost, market).
+    //                        5000 = 50% of the market rental (Jeremy's rule).
+    //   margin-bps:          profit on top of the (target) compute cost.
+    let rental_frac: f64 = opt(&args, "--rental-fraction-bps")
+        .or_else(|| std::env::var("GPN_RENTAL_FRACTION_BPS").ok())
+        .and_then(|s| s.parse::<f64>().ok())
+        .map(|b| b / 10_000.0)
+        .unwrap_or(0.5);
+    let margin: f64 = opt(&args, "--margin-bps")
+        .or_else(|| std::env::var("GPN_MARGIN_BPS").ok())
+        .and_then(|s| s.parse::<f64>().ok())
+        .map(|b| b / 10_000.0)
+        .unwrap_or(0.30);
     let urls: Vec<String> = providers_csv
         .split(',')
         .map(|s| s.trim().to_string())
@@ -427,15 +450,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // per-token billing (optional): rate × max_tokens = escrow ceiling.
                 let ppt_in: u128 = v.get("price_per_token").and_then(|x| x.as_u64()).unwrap_or(0) as u128;
                 let mtok: u32 = v.get("max_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
-                // Oracle-driven USD→GPN: if the caller didn't pin a rate, derive it
-                // from the on-chain token price so the *dollar* cost stays stable.
-                let token_price_usd = rt
+                // Oracle + fleet cost economics → GPN per token.
+                //   market  = oracle avg_gpu_hour_price (per-class market rental)
+                //   target  = clamp(rental_frac × market, owner_cost, market)
+                //   tok/s   = fleet-average measured throughput
+                //   $/token = target_hr / (tok/s × 3600 × util) × (1 + margin)
+                //   gpn/tok = $/token ÷ token_price_usd
+                let (token_price_usd, market_hr, util) = rt
                     .block_on(client.get_feed())
-                    .map(|f| f.token_price_usd)
-                    .filter(|p| *p > 0.0)
-                    .unwrap_or(0.15);
+                    .map(|f| (f.token_price_usd, f.avg_gpu_hour_price_usd, f.utilization))
+                    .unwrap_or((0.15, 3.0, 0.65));
+                let (tok_per_s, owner_hr) = {
+                    let reg = registry.lock().unwrap().clone();
+                    let live: Vec<&Provider> = reg.iter().filter(|p| p.last_seen.is_some()).collect();
+                    if live.is_empty() {
+                        (40.0_f64, 0.03_f64)
+                    } else {
+                        let t = live.iter().map(|p| p.tok_per_s).sum::<f64>() / live.len() as f64;
+                        let o = live.iter().map(|p| p.owner_cost_usd_hr).fold(f64::MAX, f64::min);
+                        (t.max(1.0), o.max(0.001))
+                    }
+                };
+                let market_hr = market_hr.max(0.001);
+                let util = util.clamp(0.05, 1.0);
+                let target_hr = (rental_frac * market_hr).clamp(owner_hr, market_hr);
+                let usd_per_token = (target_hr / (tok_per_s * 3600.0 * util)) * (1.0 + margin);
                 let oracle_ppt: u128 =
-                    ((usd_per_token_for(&model) / token_price_usd) * 1e12).max(1.0) as u128;
+                    ((usd_per_token / token_price_usd.max(1e-9)) * 1e12).max(1.0) as u128;
                 let ppt: u128 = if ppt_in > 0 { ppt_in } else { oracle_ppt };
                 let mtok_eff: u32 = if mtok > 0 { mtok } else { 256 };
                 let min_gflops = g("min_gflops", 150);

@@ -48,6 +48,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let capacity: u64 = opt(&args, "--capacity").or_else(|| std::env::var("CAPACITY").ok()).and_then(|s| s.parse().ok()).unwrap_or(1);
     let active: u64 = opt(&args, "--active").or_else(|| std::env::var("ACTIVE").ok()).and_then(|s| s.parse().ok()).unwrap_or(0);
     let ollama = opt(&args, "--ollama").or_else(|| std::env::var("GPN_OLLAMA").ok()).unwrap_or_else(|| "http://127.0.0.1:11434".into());
+    // Real compute economics for the rate card:
+    //   --tok-per-s          the provider's MEASURED throughput (tokens/sec)
+    //   --owner-cost-usd-hr  the provider's own cost/hr ($/kWh + amortized GPU)
+    let tok_per_s: f64 = opt(&args, "--tok-per-s")
+        .or_else(|| std::env::var("GPN_TOK_PER_S").ok())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(40.0);
+    let owner_cost_usd_hr: f64 = opt(&args, "--owner-cost-usd-hr")
+        .or_else(|| std::env::var("GPN_OWNER_COST_USD_HR").ok())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.03);
     let models: Vec<String> = models_csv.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
 
     let server = Server::http(&listen).map_err(|e| format!("cannot bind {listen}: {e}"))?;
@@ -60,7 +71,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let (models_now, can_pull) = ollama_models(&ollama, &models);
                 json!({
                     "address": address, "gflops": gflops, "models": models_now,
-                    "can_pull": can_pull, "active": active, "capacity": capacity.max(1)
+                    "can_pull": can_pull, "active": active, "capacity": capacity.max(1),
+                    "tok_per_s": tok_per_s, "owner_cost_usd_hr": owner_cost_usd_hr
                 })
             }
             (Method::Get, "/health") => json!({"status":"ok"}),
