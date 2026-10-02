@@ -188,6 +188,12 @@ fn ensure_model(model: &str) -> Result<String, String> {
     }
 }
 
+/// True if the off-chain store says job `id` is an LLM (text) job. Unknown
+/// jobs are treated as non-LLM so we never pull/handle a foreign kind.
+fn is_llm_id(id: u64) -> bool {
+    get_job(id).map(|j| j.kind == "llm").unwrap_or(false)
+}
+
 async fn process_once(
     client: &ChainClient,
     me: &str,
@@ -210,14 +216,27 @@ async fn process_once(
             .collect()
     } else {
         // Model-aware: pull any requested-but-missing model BEFORE claiming.
+        // Only LLM jobs: ignore image/video jobs the scheduler may have (mis)assigned,
+        // otherwise we spam `ollama pull` for foreign models (e.g. sd-turbo) forever.
+        // Also skip finished jobs and `auto`/empty requests (nothing concrete to pull).
         for (id, model, pull) in &assigned {
-            if *pull || !model.is_empty() {
-                if let Err(e) = ensure_model(model) {
-                    eprintln!("[provider] job #{id}: {e}");
-                }
+            let Some(job) = get_job(*id) else { continue };
+            if job.kind != "llm" || job.status == "done" {
+                continue;
+            }
+            if model.is_empty() || model == "auto" {
+                continue;
+            }
+            let _ = pull;
+            if let Err(e) = ensure_model(model) {
+                eprintln!("[provider] job #{id}: {e}");
             }
         }
-        assigned.iter().map(|(id, _, _)| *id).collect()
+        assigned
+            .iter()
+            .filter(|(id, _, _)| is_llm_id(*id))
+            .map(|(id, _, _)| *id)
+            .collect()
     };
     for job_id in targets {
         if !get_job(job_id).map(|j| j.kind == "llm").unwrap_or(false) {
@@ -304,7 +323,19 @@ async fn run_job(
     );
 
     let _ = LlmStore::new().set_status(id, "running");
-    match run_inference(&model, &job.prompt, job.temperature, job.max_tokens).await {
+    // Yield the GPU to this job: drop the flag the node's miner checks, so block
+    // mining parks (duty cycle) instead of contending with the inference.
+    let yield_path = format!(
+        "{}/.gpn/gpu-yield",
+        std::env::var("HOME").unwrap_or_else(|_| ".".into())
+    );
+    let _ = std::fs::create_dir_all(
+        std::path::Path::new(&yield_path).parent().unwrap_or(std::path::Path::new(".")),
+    );
+    let _ = std::fs::write(&yield_path, b"1");
+    let result = run_inference(&model, &job.prompt, job.temperature, job.max_tokens).await;
+    let _ = std::fs::remove_file(&yield_path);
+    match result {
         Ok((text, hash)) => {
             // Salted commitment: on-chain value = sha256(salt ‖ answer). The salt is
             // random + kept OFF-chain, so the on-chain value is opaque to observers

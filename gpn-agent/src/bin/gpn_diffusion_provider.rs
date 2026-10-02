@@ -74,6 +74,14 @@ fn is_gen(job: &gpn_agent::llm::LlmJob) -> bool {
     job.kind == "image" || job.kind == "video"
 }
 
+/// Path to the GPU duty-cycle yield flag the local miner watches.
+fn gpu_yield_path() -> String {
+    format!(
+        "{}/.gpn/gpu-yield",
+        std::env::var("HOME").unwrap_or_else(|_| ".".into())
+    )
+}
+
 fn assignment_store_path() -> String {
     std::env::var("GPN_ASSIGN_STORE").unwrap_or_else(|_| {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
@@ -157,14 +165,26 @@ async fn process_once(
         vec![]
     } else {
         for (id, model, pull) in &assigned {
-            if *pull || !model.is_empty() {
-                match ensure_model(model) {
-                    Ok(n) => println!("[provider] job #{id}: {n}"),
-                    Err(e) => eprintln!("[provider] job #{id}: {e}"),
-                }
+            let Some(job) = get_job(*id) else { continue };
+            if !is_gen(&job) || job.status == "done" {
+                continue;
+            }
+            if model.is_empty() || model == "auto" {
+                continue;
+            }
+            let _ = pull;
+            match ensure_model(model) {
+                // Only report a pull that actually happened (avoid per-cycle noise).
+                Ok(n) if n.starts_with("pulled") => println!("[provider] job #{id}: {n}"),
+                Ok(_) => {}
+                Err(e) => eprintln!("[provider] job #{id}: {e}"),
             }
         }
-        assigned.iter().map(|(id, _, _)| *id).collect()
+        assigned
+            .iter()
+            .filter(|(id, _, _)| get_job(*id).map(|j| is_gen(&j)).unwrap_or(false))
+            .map(|(id, _, _)| *id)
+            .collect()
     };
 
     let attested_gflops = client
@@ -244,9 +264,16 @@ async fn run_job(
     std::fs::write(&req_file, serde_json::to_string(&req_json)?)?;
 
     // Run the diffusers helper (blocking; do it off the async runtime).
+    // Yield the GPU: drop the same flag the node miner checks so block mining
+    // parks (duty cycle) instead of contending with the diffusion run.
+    let yield_path = gpu_yield_path();
+    let _ = std::fs::create_dir_all(
+        std::path::Path::new(&yield_path).parent().unwrap_or(std::path::Path::new(".")),
+    );
+    let _ = std::fs::write(&yield_path, b"1");
     let script = diffuse_script();
     let req_file2 = req_file.clone();
-    let out = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+    let out_res = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
         let out = std::process::Command::new("python3")
             .arg(&script)
             .arg(&req_file2)
@@ -259,7 +286,9 @@ async fn run_job(
         serde_json::from_str(&stdout).map_err(|e| format!("bad helper output: {e} ({stdout})"))
     })
     .await
-    .map_err(|e| e.to_string())??;
+    .map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(&yield_path);
+    let out = out_res?;
 
     if out.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
         let artifact = out["artifact"].as_str().unwrap_or(&out_path).to_string();
