@@ -244,6 +244,31 @@ fn is_llm_id(id: u64) -> bool {
     get_job(id).map(|j| j.kind == "llm").unwrap_or(false)
 }
 
+/// Kind-gate for the reconcile pass. Both providers share ONE signer account,
+/// so a job whose on-chain `provider == me` may actually belong to the other
+/// provider's kind. Reconcile only OUR kind here; a job whose off-chain kind is
+/// a different one is left to its owner. Unknown kinds (no store entry) are
+/// still reconciled so orphan zombies get reclaimed.
+fn job_kind_is_ours(id: u64) -> bool {
+    get_job(id).map(|j| j.kind == "llm").unwrap_or(true)
+}
+
+/// A state error meaning "the job already advanced / isn't in the state we
+/// expected" — benign during reconcile (the owning provider or a prior cycle
+/// got there first), so it must not be logged as an ERROR. This is the source
+/// of the spurious `JobNotRunning [pallet=11 e=5]` log spam.
+fn is_benign_state_err(s: &str) -> bool {
+    s.contains("JobNotRunning") || s.contains("JobNotPending") || s.contains("JobNotAccepted")
+}
+
+/// How many of the most recent job ids the reconcile pass scans per cycle.
+/// Previously this was `0..next` (every job ever created): one chain RPC per
+/// historical job on EVERY poll — hundreds of RPCs every few seconds, which
+/// contended with claim/start/submit for the signer+node. Only recently created
+/// jobs can be mid-flight (`AwaitingVerification`/`Accepted`), so a bounded
+/// trailing window suffices and keeps the poll loop tight.
+const RECONCILE_WINDOW: u64 = 128;
+
 async fn process_once(
     client: &ChainClient,
     me: &str,
@@ -259,15 +284,23 @@ async fn process_once(
     // reclaimed. Kind-agnostic so it also clears zombies with no off-chain
     // payload entry.
     let next = client.get_next_job_id().await;
-    for id in 0..next {
+    for id in next.saturating_sub(RECONCILE_WINDOW)..next {
         if let Some((state, _price, _req, provider)) = client.get_job_state(id).await {
             if provider.as_deref() != Some(me) {
                 continue;
             }
             if state == "AwaitingVerification" {
+                // Kind-gate: skip jobs owned by the other provider (shared
+                // signer account means `provider == me` is true for both kinds).
+                if !job_kind_is_ours(id) {
+                    continue;
+                }
                 match client.complete_job(id).await {
                     Ok(()) => {
                         println!("[provider] reconciled #{id} AwaitingVerification → Completed")
+                    }
+                    Err(e) if is_benign_state_err(&e.to_string()) => {
+                        // Already finalized elsewhere — quiet, not an error.
                     }
                     Err(e) => eprintln!("[provider] reconcile #{id} (complete) failed: {e}"),
                 }

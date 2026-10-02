@@ -74,6 +74,18 @@ fn is_gen(job: &gpn_agent::llm::LlmJob) -> bool {
     job.kind == "image" || job.kind == "video"
 }
 
+/// A state error meaning "the job already advanced / isn't in the state we
+/// expected" — benign during reconcile (the owning provider or a prior cycle
+/// got there first), so it must not be logged as an ERROR. This is the source
+/// of the spurious `JobNotRunning [pallet=11 e=5]` log spam.
+fn is_benign_state_err(s: &str) -> bool {
+    s.contains("JobNotRunning") || s.contains("JobNotPending") || s.contains("JobNotAccepted")
+}
+
+/// How many of the most recent job ids the reconcile pass scans per cycle
+/// (was `0..next` = every historical job, one RPC each, on EVERY poll).
+const RECONCILE_WINDOW: u64 = 128;
+
 /// Path to the GPU duty-cycle yield flag the local miner watches.
 fn gpu_yield_path() -> String {
     format!(
@@ -177,15 +189,24 @@ async fn process_once(
     // reclaimed. Kind-agnostic so it also clears zombies with no off-chain
     // payload entry.
     let next = client.get_next_job_id().await;
-    for id in 0..next {
+    for id in next.saturating_sub(RECONCILE_WINDOW)..next {
         if let Some((state, _price, _req, provider)) = client.get_job_state(id).await {
             if provider.as_deref() != Some(me) {
                 continue;
             }
             if state == "AwaitingVerification" {
+                // Kind-gate: skip jobs owned by the other provider (shared
+                // signer account means `provider == me` is true for both kinds).
+                // Unknown kinds are still reconciled so orphan zombies get freed.
+                if !get_job(id).map(|j| is_gen(&j)).unwrap_or(true) {
+                    continue;
+                }
                 match client.complete_job(id).await {
                     Ok(()) => {
                         println!("[provider] reconciled #{id} AwaitingVerification → Completed")
+                    }
+                    Err(e) if is_benign_state_err(&e.to_string()) => {
+                        // Already finalized elsewhere — quiet, not an error.
                     }
                     Err(e) => eprintln!("[provider] reconcile #{id} (complete) failed: {e}"),
                 }
