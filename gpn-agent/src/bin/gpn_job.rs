@@ -29,6 +29,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let price_gpn: f64 = opt(&args, "--price").and_then(|s| s.parse().ok()).unwrap_or(10.0);
     let min_gflops: u64 = opt(&args, "--min-gflops").and_then(|s| s.parse().ok()).unwrap_or(150);
     let job_type = opt(&args, "--job-type").unwrap_or_else(|| "LLMInference".into());
+    // Generative (image/video) params — only used when --job-type is an Image/Video generation.
+    let gen_kind = if job_type.eq_ignore_ascii_case("ImageGeneration") {
+        Some("image")
+    } else if job_type.eq_ignore_ascii_case("VideoGeneration") {
+        Some("video")
+    } else {
+        None
+    };
+    let negative = opt(&args, "--negative-prompt");
+    let width: u32 = opt(&args, "--width").and_then(|s| s.parse().ok()).unwrap_or(512);
+    let height: u32 = opt(&args, "--height").and_then(|s| s.parse().ok()).unwrap_or(512);
+    let steps: u32 = opt(&args, "--steps").and_then(|s| s.parse().ok()).unwrap_or(8);
+    let seed: Option<i64> = opt(&args, "--seed").and_then(|s| s.parse().ok());
+    let frames: u32 = opt(&args, "--frames").and_then(|s| s.parse().ok()).unwrap_or(16);
+    let fps: u32 = opt(&args, "--fps").and_then(|s| s.parse().ok()).unwrap_or(8);
+    // Diffusion model default differs from the LLM fallback.
+    let model = if gen_kind.is_some() {
+        opt(&args, "--model").unwrap_or_else(|| "sd-turbo".into())
+    } else {
+        model
+    };
     let endpoint = opt(&args, "--endpoint")
         .or_else(|| std::env::var("GPN_ENDPOINT").ok())
         .unwrap_or_else(|| "ws://127.0.0.1:9944".into());
@@ -60,7 +81,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  ✅ job #{id} created + escrowed from YOUR wallet");
 
     // Store the off-chain prompt/model so the provider can read it.
-    let job = gpn_agent::llm::LlmJob::new_llm(&model, &prompt, 0.7, 256);
+    let job = match gen_kind {
+        Some(kind) => gpn_agent::llm::LlmJob::new_gen(
+            kind,
+            &model,
+            &prompt,
+            negative.as_deref(),
+            width,
+            height,
+            steps,
+            seed,
+            frames,
+            fps,
+        ),
+        None => gpn_agent::llm::LlmJob::new_llm(&model, &prompt, 0.7, 256),
+    };
     let _ = gpn_agent::llm::LlmStore::new().put(id, job);
 
     // Ask the access point to route it to the best provider.
