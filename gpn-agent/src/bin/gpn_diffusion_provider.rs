@@ -126,6 +126,15 @@ fn ensure_model(model: &str) -> Result<String, String> {
     if model.starts_with('/') || model.starts_with('.') {
         return Ok("local model path".into());
     }
+    // Map short aliases (as advertised by gpn_diffuse.py) to real HF repo ids,
+    // otherwise ensure_model would try to pull a non-existent repo (e.g. "sd-turbo")
+    // and 401/404 every poll cycle.
+    let model = match model {
+        "sd-turbo" => "stabilityai/sd-turbo",
+        "sd15" | "sd1.5" => "runwayml/stable-diffusion-v1-5",
+        "ltx-video" => "Lightricks/LTX-Video",
+        other => other,
+    };
     // HF cache marker: ~/.cache/huggingface/hub/models--<org>--<name>
     let repo_dir = format!("models--{}", model.replace('/', "--"));
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
@@ -201,8 +210,14 @@ async fn process_once(
         }
         println!("[provider] claiming generation job #{job_id} (min_gflops={min_gflops})");
         if let Err(e) = client.accept_job(job_id).await {
-            eprintln!("[provider] accept #{job_id} failed: {e}");
-            continue;
+            // JobNotPending means we (or a prior cycle) already accepted it; don't give
+            // up — fall through and still drive it to Running, otherwise it wedges in
+            // Accepted forever (accept→continue skipped start_job).
+            let already = e.to_string().contains("JobNotPending");
+            if !already {
+                eprintln!("[provider] accept #{job_id} failed: {e}");
+                continue;
+            }
         }
         if let Err(e) = client.start_job(job_id).await {
             eprintln!("[provider] start #{job_id} failed: {e}");
