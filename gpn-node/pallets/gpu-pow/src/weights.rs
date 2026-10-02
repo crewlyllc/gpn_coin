@@ -46,6 +46,7 @@ use core::marker::PhantomData;
 pub trait WeightInfo {
 	fn submit_solution() -> Weight;
 	fn set_block_beneficiary() -> Weight;
+	fn set_block_reward() -> Weight;
 }
 
 /// Weights for `pallet_gpu_pow` using the GPN node and recommended hardware.
@@ -76,6 +77,13 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 		Weight::from_parts(5_780_000, 0)
 			.saturating_add(T::DbWeight::get().writes(1_u64))
 	}
+	/// Storage: `GPUPoW::CurrentBlockReward` (r:1 w:1)
+	fn set_block_reward() -> Weight {
+		// Reads + rewrites the single CurrentBlockReward storage value.
+		Weight::from_parts(7_000_000, 511)
+			.saturating_add(T::DbWeight::get().reads(1_u64))
+			.saturating_add(T::DbWeight::get().writes(1_u64))
+	}
 }
 
 // For backwards compatibility and tests.
@@ -103,6 +111,13 @@ impl WeightInfo for () {
 		//  Estimated: `0`
 		// Minimum execution time: 5_340_000 picoseconds.
 		Weight::from_parts(5_780_000, 0)
+			.saturating_add(RocksDbWeight::get().writes(1_u64))
+	}
+	/// Storage: `GPUPoW::CurrentBlockReward` (r:1 w:1)
+	fn set_block_reward() -> Weight {
+		// Reads + rewrites the single CurrentBlockReward storage value.
+		Weight::from_parts(7_000_000, 511)
+			.saturating_add(RocksDbWeight::get().reads(1_u64))
 			.saturating_add(RocksDbWeight::get().writes(1_u64))
 	}
 }

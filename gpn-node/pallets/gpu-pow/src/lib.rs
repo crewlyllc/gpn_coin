@@ -180,6 +180,11 @@ pub mod pallet {
         BlockRewardBeneficiarySet {
             beneficiary: T::AccountId,
         },
+        /// The block reward was changed via `set_block_reward` (item 5).
+        BlockRewardSet {
+            old_reward: BalanceOf<T>,
+            new_reward: BalanceOf<T>,
+        },
         DifficultyAdjusted {
             old_difficulty: U256,
             new_difficulty: U256,
@@ -314,6 +319,23 @@ pub mod pallet {
             ensure_root(origin)?;
             <BlockRewardBeneficiary<T>>::put(&beneficiary);
             Self::deposit_event(Event::<T>::BlockRewardBeneficiarySet { beneficiary });
+            Ok(())
+        }
+
+        /// Root only: adjust the block reward (the mining emission rate).
+        ///
+        /// This is the *runtime* knob for "change the mining rate in future
+        /// without touching the genesis". It sets `CurrentBlockReward`, which
+        /// every block's emission reads. Reachable by the 2-of-3 committee via
+        /// `gpn-governance` propose/execute (Root dispatch), or by sudo.
+        /// emission_rate = new_reward / TargetBlockTime.
+        #[pallet::call_index(2)]
+        #[pallet::weight(<T as Config>::WeightInfo::set_block_reward())]
+        pub fn set_block_reward(origin: OriginFor<T>, new_reward: BalanceOf<T>) -> DispatchResult {
+            ensure_root(origin)?;
+            let old_reward: BalanceOf<T> = <CurrentBlockReward<T>>::get();
+            <CurrentBlockReward<T>>::put(new_reward);
+            Self::deposit_event(Event::<T>::BlockRewardSet { old_reward, new_reward });
             Ok(())
         }
     }
@@ -610,8 +632,20 @@ mod tests {
         pub const TestAlgoVersion: u32 = 1;
     }
 
+    // Mock hardware attestation so the capability gate can be exercised in tests.
+    pub struct MockAttestation;
+    impl GPUAttestationProvider<u64> for MockAttestation {
+        fn attested_gflops(_: &u64) -> u64 {
+            1_000
+        }
+        fn attested_tier(_: &u64) -> pallet_gpu_attestation::AttestationTier {
+            pallet_gpu_attestation::AttestationTier::Silver
+        }
+    }
+
     impl crate::pallet::Config for Test {
         type Currency = Balances;
+        type GPUAttestation = MockAttestation;
         type MinDifficulty = TestMinDifficulty;
         type MaxDifficulty = TestMaxDifficulty;
         type InitialBlockReward = TestInitialReward;
@@ -934,6 +968,19 @@ mod tests {
             assert_eq!(BlockRewardBeneficiary::<Test>::get(), None);
             assert!(GpuPowPallet::set_block_beneficiary(RuntimeOrigin::root(), 9).is_ok());
             assert_eq!(BlockRewardBeneficiary::<Test>::get(), Some(9));
+        });
+    }
+
+    /// `set_block_reward` is Root-only and mutates the emission knob
+    /// (`CurrentBlockReward`) without touching the genesis.
+    #[test]
+    fn test_set_block_reward_requires_root() {
+        new_test_ext().execute_with(|| {
+            let before = CurrentBlockReward::<Test>::get();
+            assert!(GpuPowPallet::set_block_reward(RuntimeOrigin::signed(1), 12_000_000_000_000).is_err());
+            assert_eq!(CurrentBlockReward::<Test>::get(), before);
+            assert!(GpuPowPallet::set_block_reward(RuntimeOrigin::root(), 12_000_000_000_000).is_ok());
+            assert_eq!(CurrentBlockReward::<Test>::get(), 12_000_000_000_000);
         });
     }
 
