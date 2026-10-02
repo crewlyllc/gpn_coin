@@ -179,11 +179,32 @@ async fn process_once(
     let next = client.get_next_job_id().await;
     for id in 0..next {
         if let Some((state, _price, _req, provider)) = client.get_job_state(id).await {
-            if state == "AwaitingVerification" && provider.as_deref() == Some(me) {
+            if provider.as_deref() != Some(me) {
+                continue;
+            }
+            if state == "AwaitingVerification" {
                 match client.complete_job(id).await {
                     Ok(()) => {
                         println!("[provider] reconciled #{id} AwaitingVerification → Completed")
                     }
+                    Err(e) => eprintln!("[provider] reconcile #{id} (complete) failed: {e}"),
+                }
+            } else if state == "Accepted"
+                && get_job(id).map(|j| is_gen(&j)).unwrap_or(false)
+            {
+                // Capacity reclaim: an `Accepted` gen job we own that was never
+                // started is a zombie holding a `MaxJobsPerProvider` slot. Our
+                // claim loop only starts `Pending` jobs, so it can never advance
+                // on its own — drive it Accepted → Running → Completed to free
+                // the slot (escrow is refunded by `complete_job`).
+                if let Err(e) = client.start_job(id).await {
+                    eprintln!("[provider] reconcile #{id} (start) failed: {e}");
+                    continue;
+                }
+                match client.complete_job(id).await {
+                    Ok(()) => println!(
+                        "[provider] reconciled #{id} Accepted → Completed (capacity freed)"
+                    ),
                     Err(e) => eprintln!("[provider] reconcile #{id} (complete) failed: {e}"),
                 }
             }
