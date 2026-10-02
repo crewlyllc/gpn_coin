@@ -110,6 +110,56 @@ fn assignment_store_path() -> String {
     })
 }
 
+/// Persistent per-job inference-failure counter. We give up after a small
+/// number of attempts so a mis-routed job (e.g. an image model like `sd-turbo`
+/// that can never run as a chat completion) can't spin the provider forever.
+fn failed_store_path() -> String {
+    std::env::var("GPN_LLM_FAILED_STORE").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        format!("{home}/.gpn/llm-failed.json")
+    })
+}
+
+/// Max inference attempts before the provider abandons a job.
+const MAX_INFER_ATTEMPTS: u64 = 2;
+
+fn fail_count(id: u64) -> u64 {
+    std::fs::read_to_string(failed_store_path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get(id.to_string()).and_then(|x| x.as_u64()))
+        .unwrap_or(0)
+}
+
+fn record_failure(id: u64) -> u64 {
+    let path = failed_store_path();
+    let mut v: serde_json::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let n = v.get(id.to_string()).and_then(|x| x.as_u64()).unwrap_or(0) + 1;
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert(id.to_string(), serde_json::json!(n));
+    }
+    let _ = std::fs::write(&path, v.to_string());
+    n
+}
+
+/// Should we (still) attempt inference for this job? False once we've hit the
+/// attempt cap, or when the requested model is a known non-text kind.
+fn should_attempt(id: u64, model: &str) -> bool {
+    if fail_count(id) >= MAX_INFER_ATTEMPTS {
+        return false;
+    }
+    // Fast-path reject: image/video/audio diffusion models can't serve chat.
+    let m = model.to_ascii_lowercase();
+    !(m.contains("sd-")
+        || m.contains("diffusion")
+        || m.contains("sdxl")
+        || m.contains("flux")
+        || m.contains("stable-diffusion"))
+}
+
 /// Job ids the access-point scheduler assigned to this provider (matched by
 /// either the hex or ss58 form of our account), plus the requested model +
 /// whether we must pull it on demand. Empty = no scheduler in play.
@@ -270,6 +320,11 @@ async fn process_once(
         if let Some((state, _price, _req, provider)) = client.get_job_state(id).await {
             let is_mine = provider.as_deref() == Some(me);
             if state == "Running" && is_mine {
+                if !should_attempt(id, &job.model) {
+                    // Already failed too many times, or a foreign (non-text)
+                    // model that can never run here — stop hammering it.
+                    continue;
+                }
                 run_job(client, id, &job).await?;
             }
         }
@@ -358,7 +413,10 @@ async fn run_job(
         }
         Err(e) => {
             let _ = LlmStore::new().set_error(id, &e.to_string());
-            eprintln!("[job {id}] inference failed: {e}");
+            let n = record_failure(id);
+            eprintln!(
+                "[job {id}] inference failed (attempt {n}/{MAX_INFER_ATTEMPTS}), giving up after cap: {e}"
+            );
         }
     }
     Ok(())
