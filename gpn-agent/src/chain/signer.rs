@@ -278,6 +278,8 @@ fn is_nonce_collision(msg: &str) -> bool {
         || m.contains("transaction is outdated")
         || m.contains("nonce is too low")
         || m.contains("already in pool")
+        || m.contains("usurped")
+        || m.contains("same nonce")
         || m.contains("duplicate")
 }
 
