@@ -327,7 +327,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
 
     // Build the chain client (synchronous runtime for tiny_http handler).
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = Arc::new(tokio::runtime::Runtime::new()?);
     let client = Arc::new(rt.block_on(ChainClient::new(&endpoint))?.with_signer(&signer_uri));
 
     let registry = Arc::new(Mutex::new(Vec::<Provider>::new()));
@@ -346,7 +346,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let hdr = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
+    // Handle each request on its OWN thread. Previously the loop handled requests
+    // sequentially, so a single blocking handler (e.g. POST /jobs doing a chain
+    // RPC, or the OpenAI facade waiting for a job to finish) would wedge EVERY
+    // other endpoint — including GET /health. Threading keeps the AP responsive.
     for mut req in server.incoming_requests() {
+        let rt = rt.clone();
+        let client = client.clone();
+        let registry = registry.clone();
+        let assign_store = assign_store.clone();
+        let hdr = hdr.clone();
+        std::thread::spawn(move || {
         let url = req.url().to_string();
         let method = req.method().clone();
         let mut body = String::new();
@@ -399,7 +409,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "error": {"message": "hot-wallet inference is disabled on this access point (mainnet)", "type": "gpn_error"}
                     }).to_string()).with_header(hdr.clone()).with_status_code(403);
                     let _ = req.respond(r);
-                    continue;
+                    return;
                 }
                 // route to a provider
                 let reg = registry.lock().unwrap().clone();
@@ -411,7 +421,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "error": {"message": "no compatible provider online", "type": "gpn_error"}
                         }).to_string()).with_header(hdr.clone()).with_status_code(503);
                         let _ = req.respond(r);
-                        continue;
+                        return;
                     }
                 };
                 // create + route (hot wallet pays)
@@ -464,7 +474,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let cc = Header::from_bytes(&b"Cache-Control"[..], &b"no-cache"[..]).unwrap();
                     let r = Response::from_string(sse).with_header(ct).with_header(cc);
                     let _ = req.respond(r);
-                    continue;
+                    return;
                 }
                 json!({
                     "id": format!("chatcmpl-gpn-{id}"), "object": "chat.completion", "created": now_secs(),
@@ -480,7 +490,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "error": "hot-wallet jobs are disabled on this access point (mainnet). Sign the job with your own wallet and POST /route/{id} instead (see gpn_job)."
                     }).to_string()).with_header(hdr.clone()).with_status_code(403);
                     let _ = req.respond(r);
-                    continue;
+                    return;
                 }
                 let v: Value = serde_json::from_str(&body).unwrap_or(json!({}));
                 let g = |k: &str, d: u64| v.get(k).and_then(|x| x.as_u64()).unwrap_or(d);
@@ -537,7 +547,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let r = Response::from_string(json!({"ok":false,"error":"no compatible provider available"}).to_string())
                             .with_header(hdr.clone()).with_status_code(503);
                         let _ = req.respond(r);
-                        continue;
+                        return;
                     }
                 };
 
@@ -720,6 +730,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let code = if resp.get("error").map(|v| !v.is_null()).unwrap_or(false) { 404 } else { 200 };
         let _ = req.respond(Response::from_string(resp.to_string()).with_header(hdr.clone()).with_status_code(code));
+        });
     }
     Ok(())
 }
