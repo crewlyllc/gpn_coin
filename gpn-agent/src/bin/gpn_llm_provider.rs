@@ -69,8 +69,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Fast-claim mode: pipeline accept→start (and submit_result→complete) as a
+    // nonce-ordered burst with NO block-inclusion wait, so the claim lane stops
+    // being bound by block time. Disable with GPN_FAST_CLAIM=0 to fall back to
+    // the stop-and-wait path.
+    let fast_claim = std::env::var("GPN_FAST_CLAIM")
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(false);
+    println!(
+        "[provider] fast claim path: {}",
+        if fast_claim {
+            "ON (pipelined, no block wait)"
+        } else {
+            "off (stop-and-wait)"
+        }
+    );
+
     loop {
-        if let Err(e) = process_once(&client, &me, &addr).await {
+        if let Err(e) = process_once(&client, &me, &addr, fast_claim).await {
             eprintln!("[provider] cycle error: {e}");
         }
         tokio::time::sleep(Duration::from_millis(poll_ms)).await;
@@ -273,6 +289,7 @@ async fn process_once(
     client: &ChainClient,
     me: &str,
     addr: &str,
+    fast_claim: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // -1. Reconcile: finalize any of our jobs left in `AwaitingVerification`.
     // `complete_job` is the provider's own finalization call (state
@@ -365,9 +382,21 @@ async fn process_once(
             .map(|(id, _, _)| *id)
             .collect()
     };
+    // Jobs we claim this pass but (in fast mode) never wait on-chain for; we
+    // run them directly below rather than re-reading chain state that may not
+    // have advanced yet.
+    let mut just_claimed: Vec<u64> = Vec::new();
     for job_id in targets {
         if !get_job(job_id).map(|j| j.kind == "llm").unwrap_or(false) {
             continue;
+        }
+        // Skip jobs we've already handled. In fast mode the on-chain `Pending`
+        // check below can read stale/None right after our pipelined txs land, so
+        // trust the local store: a job with a response is finished, full stop.
+        if let Some(j) = get_job(job_id) {
+            if j.status == "done" || j.status == "error" {
+                continue;
+            }
         }
         // Only claim a Pending job — skip ones already accepted/started (avoids
         // the harmless-but-noisy `JobNotPending` error on re-claims).
@@ -377,6 +406,19 @@ async fn process_once(
             }
         }
         println!("[provider] claiming LLM job #{job_id}");
+        if fast_claim {
+            // accept_job + start_job as one nonce-ordered burst, no block wait.
+            match client.claim_job_pipelined(job_id).await {
+                Ok(()) => {
+                    just_claimed.push(job_id);
+                    continue;
+                }
+                Err(e) => {
+                    eprintln!("[provider] pipelined claim #{job_id} failed: {e}");
+                    continue;
+                }
+            }
+        }
         if let Err(e) = client.accept_job(job_id).await {
             eprintln!("[provider] accept #{job_id} failed: {e}");
             continue;
@@ -386,14 +428,40 @@ async fn process_once(
         }
     }
 
+    // 0b. Fast path: run the jobs we just pipelined WITHOUT waiting for their
+    //     `Running` state to land. submit_result/complete_job continue the same
+    //     nonce stream, so they dispatch after `start` with no block wait.
+    if fast_claim {
+        for id in just_claimed.iter().copied() {
+            if let Some(job) = get_job(id) {
+                if job.kind == "llm" && should_attempt(id, &job.model) {
+                    if let Err(e) = run_job(client, id, &job, true).await {
+                        eprintln!("[provider] run #{id} (pipelined) failed: {e}");
+                    }
+                }
+            }
+        }
+    }
+
     // 1. Run any Running LLM job assigned to this signer.
     let next = client.get_next_job_id().await;
     for id in 0..next {
+        // Skip jobs we already ran directly in the fast path this pass.
+        if fast_claim && just_claimed.contains(&id) {
+            continue;
+        }
         // Only jobs that have an off-chain LLM payload are LLM jobs.
         let job = match get_job(id) {
             Some(j) if j.kind == "llm" => j,
             _ => continue,
         };
+        // Skip jobs we've already produced a response for. In fast mode the
+        // on-chain state can still read `Running` for a beat after our
+        // submit_result/complete land in the pool — without this, a later pass
+        // would re-run an already-finished job.
+        if job.status == "done" {
+            continue;
+        }
         if let Some((state, _price, _req, provider)) = client.get_job_state(id).await {
             let is_mine = provider.as_deref() == Some(me);
             if state == "Running" && is_mine {
@@ -402,7 +470,7 @@ async fn process_once(
                     // model that can never run here — stop hammering it.
                     continue;
                 }
-                run_job(client, id, &job).await?;
+                run_job(client, id, &job, false).await?;
             }
         }
     }
@@ -445,6 +513,7 @@ async fn run_job(
     client: &ChainClient,
     id: u64,
     job: &gpn_agent::llm::LlmJob,
+    fast: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let job = job.clone();
     let model = resolve_model(&job.model);
@@ -479,8 +548,14 @@ async fn run_job(
             let _ = set_response(id, &text, &commit_hex, Some(&salt));
             // Rough output-token meter for per-token billing (chars/4 heuristic).
             let est_tokens: u32 = ((text.chars().count() as u32) / 4).max(1);
-            client.submit_result(id, commit, est_tokens).await?;
-            client.complete_job(id).await?;
+            if fast {
+                // Continue the pipelined nonce stream — no block-inclusion wait.
+                client.submit_result_fast(id, commit, est_tokens).await?;
+                client.complete_job_fast(id).await?;
+            } else {
+                client.submit_result(id, commit, est_tokens).await?;
+                client.complete_job(id).await?;
+            }
             println!(
                 "[job {id}] done — response {} chars, salted commitment {:.16}… (salt off-chain)",
                 text.len(),

@@ -61,6 +61,10 @@ pub struct ChainClient {
     /// Signer URI (e.g. `//Alice`) used for submitting signed extrinsics.
     /// `None` = read-only (no signed writes possible).
     signer_uri: Option<String>,
+    /// Lazily-initialized, process-shared inclusion-free submitter used to
+    /// pipeline marketplace lifecycle txs (accept→start→submit_result→complete)
+    /// without waiting on block time. See [`signer::NonceStream`].
+    fast: std::sync::Arc<tokio::sync::Mutex<Option<signer::NonceStream>>>,
 }
 
 impl ChainClient {
@@ -91,6 +95,7 @@ impl ChainClient {
             endpoint: endpoint.to_string(),
             client,
             signer_uri: None,
+            fast: Default::default(),
         })
     }
 
@@ -754,6 +759,59 @@ impl ChainClient {
             .await
     }
 
+    /// Inclusion-free `create_job` for the access-point fast path. Returns as
+    /// soon as the tx is accepted into the pool; the caller predicts the new job
+    /// id from `get_next_job_id()` (the pallet assigns `id = NextJobId` then
+    /// increments, so the new id equals the counter read just before submit).
+    ///
+    /// Note: unlike the claim path, `create_job` is signed by the *access-point*
+    /// account while `accept_job` is signed by the *provider* account, so the tx
+    /// pool cannot order them relative to each other. The provider therefore
+    /// tolerates a not-yet-on-chain job (its accept may land first and fail
+    /// dispatch; the next poll re-drives it) — see `gpn_llm_provider`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_job_fast(
+        &self,
+        min_vram_mb: u32,
+        min_compute_capability: u16,
+        min_gpu_count: u8,
+        min_cuda_cores: u32,
+        min_gflops: u64,
+        job_type: &str,
+        tier: &str,
+        price: u128,
+        price_per_token: u128,
+        max_tokens: u32,
+        max_duration: u32,
+        workload_hash: [u8; 32],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let req = Self::gpu_requirements_value(
+            min_vram_mb,
+            min_compute_capability,
+            min_gpu_count,
+            min_cuda_cores,
+            min_gflops,
+        );
+        let args = vec![
+            req,
+            Value::variant(
+                job_type,
+                subxt::ext::scale_value::Composite::unnamed(Vec::<Value>::new()),
+            ),
+            Value::variant(
+                tier,
+                subxt::ext::scale_value::Composite::unnamed(Vec::<Value>::new()),
+            ),
+            Value::u128(price),
+            Value::u128(price_per_token),
+            Value::u128(max_tokens as u128),
+            Value::u128(max_duration as u128),
+            Value::from_bytes(workload_hash),
+        ];
+        self.submit_fast("ComputeMarketplace", "create_job", args)
+            .await
+    }
+
     /// `ComputeMarketplace::accept_job(job_id)` — provider takes a Pending job.
     /// Gated by the cycle-26 cross-pallet `min_gflops` attestation check.
     pub async fn accept_job(&self, job_id: u64) -> Result<(), Box<dyn std::error::Error>> {
@@ -799,6 +857,100 @@ impl ChainClient {
     /// provider from escrow (marketplace fee withheld).
     pub async fn complete_job(&self, job_id: u64) -> Result<(), Box<dyn std::error::Error>> {
         self.submit_signed_call(
+            "ComputeMarketplace",
+            "complete_job",
+            vec![Value::u128(job_id as u128)],
+        )
+        .await
+    }
+
+    /// Get-or-create the process-shared, inclusion-free nonce stream, then
+    /// submit `pallet::call(args)` with the next nonce. Never waits for a
+    /// block. On a failed submit the stream is torn down so the next call
+    /// reconnects and re-seeds its nonce from the chain.
+    pub async fn submit_fast(
+        &self,
+        pallet: &str,
+        call_name: &str,
+        args: Vec<Value>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut guard = self.fast.lock().await;
+        if guard.is_none() {
+            let Some(uri) = &self.signer_uri else {
+                return Err(format!(
+                    "No signer configured; cannot submit {}::{}.",
+                    pallet, call_name
+                )
+                .into());
+            };
+            *guard = Some(signer::NonceStream::new(&self.endpoint, uri).await?);
+        }
+        let stream = guard.as_mut().expect("fast stream initialized above");
+        match stream.submit(pallet, call_name, args).await {
+            Ok(nonce) => {
+                log::info!(
+                    "{}::{} accepted into pool at nonce {} (no inclusion wait)",
+                    pallet,
+                    call_name,
+                    nonce
+                );
+                Ok(())
+            }
+            Err(e) => {
+                // Drop the stream: its local nonce may now be ahead of / behind
+                // the chain. The next submit_fast reconnects and re-seeds.
+                *guard = None;
+                Err(e)
+            }
+        }
+    }
+
+    /// Pipeline the two-tx claim (`accept_job` → `start_job`) as a single
+    /// nonce-ordered burst with **no block wait**. One connection, one nonce
+    /// read, two back-to-back pool accepts. This replaces the old
+    /// accept-then-wait-for-a-block-then-start sequence (~2 blocks ≈ 8–14s)
+    /// with ~two pool acks (~ms).
+    pub async fn claim_job_pipelined(
+        &self,
+        job_id: u64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.submit_fast(
+            "ComputeMarketplace",
+            "accept_job",
+            vec![Value::u128(job_id as u128)],
+        )
+        .await?;
+        self.submit_fast(
+            "ComputeMarketplace",
+            "start_job",
+            vec![Value::u128(job_id as u128)],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Inclusion-free `submit_result` for the pipelined serve path.
+    pub async fn submit_result_fast(
+        &self,
+        job_id: u64,
+        result_hash: [u8; 32],
+        actual_tokens: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.submit_fast(
+            "ComputeMarketplace",
+            "submit_result",
+            vec![
+                Value::u128(job_id as u128),
+                Value::from_bytes(result_hash),
+                Value::u128(actual_tokens as u128),
+            ],
+        )
+        .await
+    }
+
+    /// Inclusion-free `complete_job` for the pipelined serve path.
+    pub async fn complete_job_fast(&self, job_id: u64) -> Result<(), Box<dyn std::error::Error>> {
+        self.submit_fast(
             "ComputeMarketplace",
             "complete_job",
             vec![Value::u128(job_id as u128)],

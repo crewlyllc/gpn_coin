@@ -22,6 +22,27 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tiny_http::{Header, Method, Response, Server};
 
+/// Process-local job-id allocator for the access point's fast path.
+///
+/// With no-wait `create_job`, the on-chain `NextJobId` counter doesn't advance
+/// until the tx lands, so two overlapping requests can read the same counter
+/// and both predict the same id. Since the access point is the sole creator of
+/// jobs, we hand out ids from a local counter seeded from (and never behind)
+/// the chain counter. Fixes store/assignment collisions + provider claim storms.
+static NEXT_JOB_ID: Mutex<Option<u64>> = Mutex::new(None);
+
+/// Allocate the next predicted job id. `chain_next` is the current on-chain
+/// `NextJobId`; the returned id is `max(local_counter, chain_next)`.
+fn alloc_predicted_job_id(chain_next: u64) -> u64 {
+    let mut g = NEXT_JOB_ID.lock().unwrap();
+    let cur = match *g {
+        Some(c) if c >= chain_next => c,
+        _ => chain_next,
+    };
+    *g = Some(cur + 1);
+    cur
+}
+
 /// A known provider endpoint + its last-seen health.
 #[derive(Clone)]
 struct Provider {
@@ -424,25 +445,72 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         return;
                     }
                 };
-                // create + route (hot wallet pays)
+                // create + route (hot wallet pays). Id comes from a process-local
+                // allocator so concurrent requests never predict the same job id.
                 let next_before = rt.block_on(client.get_next_job_id());
-                let _ = rt.block_on(client.create_job(
-                    8192u32, 75u16, 1u8, 0u32, 150u64, "LLMInference", "Spot",
-                    (1_000_000_000u128 * 512) as u128, 1_000_000_000u128, 512u32, 1000, {
-                        use sha2::{Digest, Sha256};
-                        let mut h = Sha256::new();
-                        h.update(now_secs().to_le_bytes());
-                        h.update(prompt.as_bytes());
-                        let mut o = [0u8; 32];
-                        o.copy_from_slice(&h.finalize());
-                        o[0] |= 1;
-                        o
-                    },
-                ));
-                let after = rt.block_on(client.get_next_job_id());
-                let id = after.saturating_sub(1);
+                let workload_hash = {
+                    use sha2::{Digest, Sha256};
+                    let mut h = Sha256::new();
+                    h.update(now_secs().to_le_bytes());
+                    h.update(prompt.as_bytes());
+                    let mut o = [0u8; 32];
+                    o.copy_from_slice(&h.finalize());
+                    o[0] |= 1;
+                    o
+                };
+                // Fast AP path (GPN_FAST_AP, default OFF): submit create_job
+                // WITHOUT waiting for block inclusion and predict the id from the
+                // pre-submit counter. Removes the AP's create_job ≈1-block stall
+                // from the e2e path. The chain catches up in the background; the
+                // provider self-heals any create/accept ordering race on its next
+                // poll.
+                //
+                // NOTE: the process-local id allocator is only consulted on this
+                // fast path, so it stays fully inert on the stop-and-wait path.
+                let fast_ap = std::env::var("GPN_FAST_AP")
+                    .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+                    .unwrap_or(false);
+                let (created, id) = if fast_ap {
+                    let predicted = alloc_predicted_job_id(next_before);
+                    match rt.block_on(client.create_job_fast(
+                        8192u32, 75u16, 1u8, 0u32, 150u64, "LLMInference", "Spot",
+                        (1_000_000_000u128 * 512) as u128, 1_000_000_000u128, 512u32, 1000,
+                        workload_hash,
+                    )) {
+                        Ok(()) => (true, predicted),
+                        Err(_) => {
+                            // The create may have landed despite a slow/!acked pool
+                            // submit. Confirm briefly (bounded — never a full block).
+                            let mut real: Option<u64> = None;
+                            let deadline = Instant::now() + Duration::from_millis(2000);
+                            while Instant::now() < deadline {
+                                let after = rt.block_on(client.get_next_job_id());
+                                if after > next_before {
+                                    real = Some(after - 1);
+                                    break;
+                                }
+                                std::thread::sleep(Duration::from_millis(200));
+                            }
+                            match real {
+                                // Only trust the chain id if it matches our
+                                // prediction — under concurrency `after-1` could
+                                // belong to a sibling request.
+                                Some(id) if id == predicted => (true, id),
+                                _ => (false, predicted),
+                            }
+                        }
+                    }
+                } else {
+                    let _ = rt.block_on(client.create_job(
+                        8192u32, 75u16, 1u8, 0u32, 150u64, "LLMInference", "Spot",
+                        (1_000_000_000u128 * 512) as u128, 1_000_000_000u128, 512u32, 1000,
+                        workload_hash,
+                    ));
+                    let after = rt.block_on(client.get_next_job_id());
+                    (after > next_before, after.saturating_sub(1))
+                };
                 let mut text = String::new();
-                if after > next_before {
+                if created {
                     let _ = gpn_agent::llm::LlmStore::new().put(id, gpn_agent::llm::LlmJob::new_llm(&model, &prompt, 0.7, 512));
                     let _ = write_assignment(&assign_store, id, &provider.address, &model, needs_pull);
                     // block until the provider finishes (OpenAI calls are synchronous)

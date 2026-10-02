@@ -433,6 +433,136 @@ where
     }
 }
 
+/// Submit a signed call and return as soon as the node has **accepted it into
+/// the transaction pool** — WITHOUT waiting for block inclusion and WITHOUT
+/// decoding the dispatch outcome.
+///
+/// This is the "untie from block time" primitive: a caller that needs a
+/// *sequence* of state transitions (accept → start → submit_result → complete)
+/// can assign them consecutive nonces and submit them back-to-back. Substrate's
+/// tx pool orders per-account txs by nonce, so the chain dispatches them in
+/// order even though we never block on a block. Cost per tx drops from
+/// ~block-time (≈4s) to a pool-ack (≈ms).
+///
+/// Trade-off (deliberate): a tx that is included but fails dispatch is NOT
+/// surfaced here. Correctness is repaired by the provider's reconcile loop,
+/// which re-drives stragglers (see `gpn_llm_provider::process_once`). Use this
+/// only for a signer account whose nonce stream is owned by this process.
+pub async fn submit_signed_no_wait<Call>(
+    client: &OnlineClient<GpnConfig>,
+    call: &Call,
+    signer: &Sr25519Signer,
+    nonce: u64,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    Call: Payload,
+{
+    let params = subxt::config::DefaultExtrinsicParamsBuilder::<GpnConfig>::new()
+        .nonce(nonce)
+        .build();
+    // Sign offline (the online path routes through `refine_params`, which reads
+    // the *finalized* block — stuck at genesis on a PoW chain). See
+    // `submit_signed_once` for the full rationale.
+    let mut progress = client
+        .tx()
+        .create_signed_offline(call, signer, params)?
+        .submit_and_watch()
+        .await?;
+
+    // Await only until the node acknowledges the tx (Broadcast / Validated; we
+    // may occasionally catch InBestBlock before we even look). Do NOT loop to
+    // inclusion. A short timeout bounds the claim lane so a stalled pool can
+    // never wedge the provider.
+    use subxt::tx::TxStatus;
+    const ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    let ack = tokio::time::timeout(ACK_TIMEOUT, async {
+        loop {
+            match progress.next().await {
+                Some(Ok(TxStatus::Broadcasted { .. })) => break Ok(()),
+                Some(Ok(TxStatus::Validated)) => break Ok(()),
+                Some(Ok(TxStatus::InBestBlock(_))) => break Ok(()),
+                Some(Ok(TxStatus::Error { message })) => break Err(format!("tx error: {message}")),
+                Some(Ok(TxStatus::Invalid { message })) => break Err(format!("tx invalid: {message}")),
+                Some(Ok(TxStatus::Dropped { message })) => break Err(format!("tx dropped: {message}")),
+                Some(Ok(_)) => continue,
+                Some(Err(e)) => break Err(e.to_string()),
+                None => break Err("tx subscription dropped".to_string()),
+            }
+        }
+    })
+    .await;
+    match ack {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(msg)) => Err(msg.into()),
+        Err(_) => Err(format!(
+            "tx ack timed out after {ACK_TIMEOUT:?} (tx not accepted into pool)"
+        )
+        .into()),
+    }
+}
+
+/// A single-connection, nonce-serialized submitter used to **pipeline** a
+/// provider's lifecycle txs without ever waiting for block inclusion.
+///
+/// One `OnlineClient` (no per-tx reconnect — unlike `submit_signed_call`, which
+/// opens a fresh WS connection every call) plus an in-memory `next_nonce`
+/// handed out in submission order. Because txs are immortal and nonce-ordered,
+/// the chain dispatches `accept_job(n)` before `start_job(n+1)` even though the
+/// caller never waits.
+///
+/// Ownership assumption: this process is the sole nonce source for the signer
+/// account. If anything else signs for the same account, call [`NonceStream::resync`]
+/// (or drop/recreate the stream) so the local counter doesn't lag the chain.
+pub struct NonceStream {
+    client: OnlineClient<GpnConfig>,
+    signer: Sr25519Signer,
+    next_nonce: u64,
+}
+
+impl NonceStream {
+    /// Connect once and seed the nonce counter from the chain's head block.
+    pub async fn new(
+        endpoint: &str,
+        signer_uri: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let client = connect(endpoint).await?;
+        let signer = Sr25519Signer::from_uri(signer_uri)?;
+        let acct = signer.account_id();
+        let next_nonce = current_nonce(&client, endpoint, &acct).await;
+        Ok(Self {
+            client,
+            signer,
+            next_nonce,
+        })
+    }
+
+    /// Submit `pallet::call(args)` with the next nonce and return as soon as the
+    /// pool accepts it. Returns the nonce used (handy for logging/attribution).
+    pub async fn submit(
+        &mut self,
+        pallet: &str,
+        call_name: &str,
+        args: Vec<Value>,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        let call = subxt::dynamic::tx(pallet, call_name, args);
+        let nonce = self.next_nonce;
+        submit_signed_no_wait(&self.client, &call, &self.signer, nonce).await?;
+        self.next_nonce += 1;
+        Ok(nonce)
+    }
+
+    /// Re-read the on-chain nonce and pull the local counter forward (never
+    /// backward — a pending tx we already submitted must keep its slot).
+    pub async fn resync(&mut self, endpoint: &str) -> u64 {
+        let acct = self.signer.account_id();
+        let on = current_nonce(&self.client, endpoint, &acct).await;
+        if on > self.next_nonce {
+            self.next_nonce = on;
+        }
+        self.next_nonce
+    }
+}
+
 /// Read the `System::Events` SCALE bytes for a block via the **dynamic storage**
 /// path (`client.storage().at(hash).fetch`), which is proven to work on the GPN
 /// runtime (same as `current_nonce`). Returns an empty vec if the chain is
