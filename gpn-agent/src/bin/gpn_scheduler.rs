@@ -604,8 +604,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // jobs where `kind` is image/video.
                         if let Some(p) = prompt.as_ref() {
                             let jt = job_type.to_ascii_lowercase();
-                            let job = if jt.contains("image") || jt.contains("video") {
-                                let kind = if jt.contains("video") { "video" } else { "image" };
+                            // Guard: a diffusion/video model submitted with
+                            // job_type omitted (defaults to LLMInference) must
+                            // be routed to the diffusion provider, not the LLM
+                            // provider (which 404/500s pulling it from ollama).
+                            let model_l = model.to_ascii_lowercase();
+                            let model_diff = model_l.contains("sd-")
+                                || model_l.contains("stable-diffusion")
+                                || model_l.contains("sdxl")
+                                || model_l.contains("flux")
+                                || model_l.contains("ltx");
+                            let is_gen_kind =
+                                jt.contains("image") || jt.contains("video") || model_diff;
+                            let job = if is_gen_kind {
+                                let kind = if jt.contains("video") || model_l.contains("ltx") {
+                                    "video"
+                                } else {
+                                    "image"
+                                };
                                 let neg = v.get("negative_prompt").and_then(|x| x.as_str());
                                 gpn_agent::llm::LlmJob::new_gen(
                                     kind,
