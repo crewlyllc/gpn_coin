@@ -17,7 +17,61 @@
 use gpn_agent::chain::signer::Sr25519Signer;
 use gpn_agent::chain::ChainClient;
 use gpn_agent::llm::{get_job, run_inference, set_response, LlmStore};
+use std::collections::HashMap;
+use std::io::Read as _;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
+
+/// Per-job count of consecutive polls where the job was *absent* from chain
+/// state. Bounds the fast path's optimistic claiming: a job that never appears
+/// (mis-routed / dropped create) can't cause an infinite claim storm.
+fn missing_counter() -> &'static Mutex<HashMap<u64, u32>> {
+    static M: OnceLock<Mutex<HashMap<u64, u32>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Off-chain, chain-free inference endpoint ("passthrough" mode).
+/// `POST /infer {model,prompt,temperature,max_tokens}` → `{ok,text,model}`. NO
+/// chain, escrow, commitment, or billing — free/private tier. Loopback bind.
+fn spawn_infer_server(listen: &str) {
+    let listen = listen.to_string();
+    std::thread::spawn(move || {
+        let server = match tiny_http::Server::http(&listen) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[infer] bind {listen} failed: {e}");
+                return;
+            }
+        };
+        println!("[infer] passthrough inference endpoint on http://{listen} (POST /infer)");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("infer runtime");
+        for mut req in server.incoming_requests() {
+            let path = req.url().split('?').next().unwrap_or("").to_string();
+            let is_infer = req.method() == &tiny_http::Method::Post && path == "/infer";
+            if !is_infer {
+                let _ = req.respond(tiny_http::Response::from_string("not found").with_status_code(404));
+                continue;
+            }
+            let mut body = String::new();
+            let _ = req.as_reader().read_to_string(&mut body);
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let model = v.get("model").and_then(|x| x.as_str()).unwrap_or("auto");
+            let prompt = v.get("prompt").and_then(|x| x.as_str()).unwrap_or("");
+            let temp = v.get("temperature").and_then(|x| x.as_f64()).unwrap_or(0.7) as f32;
+            let max_tokens = v.get("max_tokens").and_then(|x| x.as_u64()).unwrap_or(256) as u32;
+            let model_r = resolve_model(model);
+            let resp = match rt.block_on(run_inference(&model_r, prompt, temp, max_tokens)) {
+                Ok((text, _hash)) => serde_json::json!({"ok": true, "text": text, "model": model_r}),
+                Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}),
+            };
+            let hdr = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
+            let _ = req.respond(tiny_http::Response::from_string(resp.to_string()).with_header(hdr));
+        }
+    });
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -75,7 +129,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the stop-and-wait path.
     let fast_claim = std::env::var("GPN_FAST_CLAIM")
         .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-        .unwrap_or(false);
+        .unwrap_or(true);
     println!(
         "[provider] fast claim path: {}",
         if fast_claim {
@@ -84,6 +138,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "off (stop-and-wait)"
         }
     );
+
+    // Chain-free passthrough inference endpoint (opt-out with GPN_PASSTHROUGH=0).
+    if std::env::var("GPN_PASSTHROUGH")
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(true)
+    {
+        let listen = std::env::var("GPN_INFER_LISTEN")
+            .unwrap_or_else(|_| "127.0.0.1:8094".to_string());
+        spawn_infer_server(&listen);
+    }
 
     loop {
         if let Err(e) = process_once(&client, &me, &addr, fast_claim).await {
@@ -398,11 +462,24 @@ async fn process_once(
                 continue;
             }
         }
-        // Only claim a Pending job — skip ones already accepted/started (avoids
-        // the harmless-but-noisy `JobNotPending` error on re-claims).
-        if let Some((state, _, _, _)) = client.get_job_state(job_id).await {
-            if state != "Pending" {
-                continue;
+        // Only claim a Pending job — skip ones already accepted/started. In fast
+        // mode a job may be absent from chain state while the AP's no-wait create
+        // is still in flight: tolerate that, but bound it so a job that never
+        // appears can't storm the chain with doomed accepts.
+        match client.get_job_state(job_id).await {
+            Some((state, _, _, _)) => {
+                missing_counter().lock().unwrap().remove(&job_id);
+                if state != "Pending" {
+                    continue;
+                }
+            }
+            None => {
+                let mut m = missing_counter().lock().unwrap();
+                let n = m.entry(job_id).or_insert(0);
+                *n += 1;
+                if *n > 20 {
+                    continue;
+                }
             }
         }
         println!("[provider] claiming LLM job #{job_id}");

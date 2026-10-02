@@ -445,6 +445,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         return;
                     }
                 };
+                // Passthrough mode (`"mode":"passthrough"`): run inference
+                // directly on the provider with NO on-chain job, escrow, commitment,
+                // or billing. Answer returned; nothing recorded. Default = settle.
+                let mode = v.get("mode").and_then(|x| x.as_str()).unwrap_or("settle").to_ascii_lowercase();
+                let passthrough = mode == "passthrough";
                 // create + route (hot wallet pays). Id comes from a process-local
                 // allocator so concurrent requests never predict the same job id.
                 let next_before = rt.block_on(client.get_next_job_id());
@@ -469,8 +474,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // fast path, so it stays fully inert on the stop-and-wait path.
                 let fast_ap = std::env::var("GPN_FAST_AP")
                     .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-                    .unwrap_or(false);
-                let (created, id) = if fast_ap {
+                    .unwrap_or(true);
+                let (created, id) = if passthrough {
+                    (false, 0u64)
+                } else if fast_ap {
                     let predicted = alloc_predicted_job_id(next_before);
                     match rt.block_on(client.create_job_fast(
                         8192u32, 75u16, 1u8, 0u32, 150u64, "LLMInference", "Spot",
@@ -510,11 +517,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     (after > next_before, after.saturating_sub(1))
                 };
                 let mut text = String::new();
-                if created {
+                if passthrough {
+                    // Direct provider call, no chain. Derive the off-chain infer
+                    // endpoint from the provider's status_url (:8093 → :8094).
+                    let infer_url = format!(
+                        "{}/infer",
+                        provider.status_url.replacen(":8093", ":8094", 1)
+                    );
+                    let body = json!({"model": model, "prompt": prompt, "temperature": 0.7, "max_tokens": 512});
+                    text = match reqwest::blocking::Client::new()
+                        .post(&infer_url)
+                        .json(&body)
+                        .send()
+                        .and_then(|r| r.json::<serde_json::Value>())
+                    {
+                        Ok(j) if j.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) => {
+                            j.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string()
+                        }
+                        Ok(j) => format!(
+                            "[gpn error] {}",
+                            j.get("error").and_then(|x| x.as_str()).unwrap_or("inference failed")
+                        ),
+                        Err(e) => format!("[gpn error] {e}"),
+                    };
+                } else if created {
                     let _ = gpn_agent::llm::LlmStore::new().put(id, gpn_agent::llm::LlmJob::new_llm(&model, &prompt, 0.7, 512));
                     let _ = write_assignment(&assign_store, id, &provider.address, &model, needs_pull);
                     // block until the provider finishes (OpenAI calls are synchronous)
-                    for _ in 0..300 {
+                    for _ in 0..1200 {
                         if let Some(j) = gpn_agent::llm::get_job(id) {
                             if j.status == "done" {
                                 text = j.response.clone().unwrap_or_default();
@@ -525,7 +555,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 break;
                             }
                         }
-                        std::thread::sleep(Duration::from_secs(2));
+                        std::thread::sleep(Duration::from_millis(300));
                     }
                 } else {
                     text = "[gpn error] could not create job".to_string();
@@ -730,7 +760,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         break;
                                     }
                                 }
-                                std::thread::sleep(Duration::from_secs(2));
+                                std::thread::sleep(Duration::from_millis(300));
                             }
                         }
                         let mut out = json!({"ok":true,"job_id":id,"routed_to":provider.address,
