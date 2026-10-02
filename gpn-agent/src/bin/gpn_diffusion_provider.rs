@@ -262,9 +262,17 @@ async fn run_job(
     std::fs::create_dir_all(&out_dir)?;
     let out_path = format!("{}/job_{}.{}", out_dir, id, ext);
 
+    // Resolve empty/"auto" to a concrete default so the diffusers helper never
+    // receives the literal "auto" (invalid HF repo id) and wedges the job.
+    let model = match job.model.as_str() {
+        "" | "auto" => {
+            if job.kind == "video" { "ltx-video" } else { "sd-turbo" }
+        }
+        m => m,
+    };
     let req_json = json!({
         "kind": job.kind,
-        "model": job.model,
+        "model": model,
         "prompt": job.prompt,
         "negative_prompt": job.negative_prompt,
         "width": job.width.unwrap_or(512),

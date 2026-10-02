@@ -28,6 +28,10 @@ def sha256_file(p):
     return h.hexdigest()
 
 def model_id(m):
+    # Empty/"auto" = caller asked for the default model; resolve it so diffusers
+    # never receives the literal string "auto" (which is not a valid HF repo id).
+    if not m or m == "auto":
+        m = "sd-turbo"
     return {
         "sd-turbo": "stabilityai/sd-turbo",
         "sd15": "runwayml/stable-diffusion-v1-5",
