@@ -249,6 +249,29 @@ async fn process_once(
     me: &str,
     addr: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // -1. Reconcile: finalize any of our jobs left in `AwaitingVerification`.
+    // `complete_job` is the provider's own finalization call (state
+    // Running|AwaitingVerification → Completed). On a slow chain a
+    // `submit_result`/`complete_job` tx can time out *after* the result was
+    // recorded, stranding the job mid-state and permanently consuming one of
+    // the provider's `MaxJobsPerProvider` slots (→ `MaxProviderCapacity` on
+    // every later accept). Re-drive such jobs to Completed so capacity is
+    // reclaimed. Kind-agnostic so it also clears zombies with no off-chain
+    // payload entry.
+    let next = client.get_next_job_id().await;
+    for id in 0..next {
+        if let Some((state, _price, _req, provider)) = client.get_job_state(id).await {
+            if state == "AwaitingVerification" && provider.as_deref() == Some(me) {
+                match client.complete_job(id).await {
+                    Ok(()) => {
+                        println!("[provider] reconciled #{id} AwaitingVerification → Completed")
+                    }
+                    Err(e) => eprintln!("[provider] reconcile #{id} (complete) failed: {e}"),
+                }
+            }
+        }
+    }
+
     // 0. Auto-claim: if an access-point scheduler has assigned us specific jobs,
     //    claim ONLY those; otherwise (standalone) claim any claimable LLM job.
     let assigned = read_assigned(me, addr);

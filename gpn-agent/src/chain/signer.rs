@@ -312,21 +312,43 @@ where
     // `finalized` stays at #0 forever).
     use subxt::tx::TxStatus;
     let mut progress = progress;
-    let included = loop {
-        match progress.next().await {
-            Some(Ok(TxStatus::InBestBlock(ib))) => break ib,
-            Some(Ok(TxStatus::Error { message })) => {
-                return Err(format!("tx error: {}", message).into())
+    // **Tx-inclusion timeout (Cycle 39 fix).** The old loop awaited
+    // `progress.next()` with no bound: if a tx reached the pool but was never
+    // included in a best block (evicted, subscription stall, node busy), the
+    // loop hung forever and wedged the caller's accept/start lane — producing
+    // the observed multi-minute claim→start gaps and follow-on
+    // `JobNotRunning`/`MaxProviderCapacity` races. Bound it so the cycle can
+    // recover instead of blocking the provider indefinitely.
+    const TX_INCLUSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+    let included = match tokio::time::timeout(TX_INCLUSION_TIMEOUT, async {
+        loop {
+            match progress.next().await {
+                Some(Ok(TxStatus::InBestBlock(ib))) => break Ok(ib),
+                Some(Ok(TxStatus::Error { message })) => {
+                    break Err(format!("tx error: {}", message))
+                }
+                Some(Ok(TxStatus::Invalid { message })) => {
+                    break Err(format!("tx invalid: {}", message))
+                }
+                Some(Ok(TxStatus::Dropped { message })) => {
+                    break Err(format!("tx dropped: {}", message))
+                }
+                Some(Ok(_)) => continue,
+                Some(Err(e)) => break Err(e.to_string()),
+                None => break Err("tx subscription dropped".to_string()),
             }
-            Some(Ok(TxStatus::Invalid { message })) => {
-                return Err(format!("tx invalid: {}", message).into())
-            }
-            Some(Ok(TxStatus::Dropped { message })) => {
-                return Err(format!("tx dropped: {}", message).into())
-            }
-            Some(Ok(_)) => continue,
-            Some(Err(e)) => return Err(e.into()),
-            None => return Err("tx subscription dropped".into()),
+        }
+    })
+    .await
+    {
+        Ok(Ok(ib)) => ib,
+        Ok(Err(msg)) => return Err(msg.into()),
+        Err(_) => {
+            return Err(format!(
+                "tx inclusion timed out after {:?} (tx not in a best block)",
+                TX_INCLUSION_TIMEOUT
+            )
+            .into());
         }
     };
     log::info!("tx included in best block {:?}", included.block_hash());
