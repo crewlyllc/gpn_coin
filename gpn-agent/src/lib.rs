@@ -11,6 +11,7 @@ pub mod gpu;
 pub mod llm;
 pub mod mining;
 pub mod modes;
+pub mod network_registry;
 pub mod profitability;
 pub mod utils;
 

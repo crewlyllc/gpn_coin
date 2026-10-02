@@ -328,6 +328,48 @@ pub fn new_full<
             metrics,
         })?;
 
+    // ---- Network identity banner + peer guard ----------------------------
+    // (design-network-identity-fork-tolerance.md). Print chain-id + genesis +
+    // spec_version, classify the running chain against the canonical registry,
+    // and warn loudly — never forbid — when isolated (0 peers) or outdated.
+    // Explicitly NO 0-peer mining ban: identity is defined by genesis + chain-id.
+    {
+        let info = client.chain_info();
+        let spec_version = gpn_runtime::VERSION.spec_version;
+        let running_version = env!("CARGO_PKG_VERSION");
+        let genesis_hex = format!("{:?}", info.genesis_hash);
+        let st = crate::network_registry::classify(&genesis_hex, spec_version, running_version);
+        log::info!("==============================================================");
+        log::info!("GPN network identity");
+        log::info!("  network  : {}", st.name);
+        log::info!("  chain-id : {}", st.chain_id);
+        log::info!("  genesis  : {}", genesis_hex);
+        log::info!("  spec     : {} (node v{})", spec_version, running_version);
+        log::info!("  identity : {}", st.summary);
+        log::info!("==============================================================");
+    }
+    {
+        let net = network.clone();
+        task_manager.spawn_handle().spawn(
+            "gpn-peer-watch",
+            None,
+            async move {
+                let mut tick = tokio::time::interval(Duration::from_secs(30));
+                tick.tick().await; // consume the immediate first tick
+                loop {
+                    tick.tick().await;
+                    if net.sync_num_connected() == 0 {
+                        log::warn!(
+                            "⚠️ No peers — this node is NOT connected to the GPN network. \
+                             Network identity is defined by genesis + chain-id, not by peer \
+                             count; mining continues (no 0-peer ban)."
+                        );
+                    }
+                }
+            },
+        );
+    }
+
     if config.offchain_worker.enabled {
         let offchain_workers =
             sc_offchain::OffchainWorkers::new(sc_offchain::OffchainWorkerOptions {
@@ -411,8 +453,8 @@ pub fn new_full<
             sync_service,
             Some(POW_ENGINE_ID.to_vec()),
             create_inherent_data_providers(),
-            Duration::from_secs(10),
-            Duration::from_secs(5),
+            Duration::from_secs(2),
+            Duration::from_secs(1),
         );
 
         task_manager
@@ -510,7 +552,9 @@ fn spawn_gpu_miner(worker: MiningWorker) {
                 // AI-compute yield (duty cycle): while a local inference job runs
                 // the provider drops a flag; we park the GPU most of the time so
                 // the two don't contend, but still mine once per cycle so blocks
-                // keep advancing. No process stops — the node just lends its GPU.
+                // keep advancing (settlement latency is the e2e bottleneck, so we
+                // must never stall block production). No process stops — the node
+                // just lends its GPU.
                 if gpu_yield_requested() {
                     std::thread::sleep(Duration::from_millis(GPU_YIELD_SLEEP_MS));
                 }

@@ -425,7 +425,7 @@ pub fn testnet_chain_spec() -> Result<ChainSpec, String> {
 ///
 /// All GPN is issued via GPU PoW block rewards (`gpu-pow` mints through
 /// `gpn-token::mint_block_reward`). Genesis supply = 0, as the tokenomics spec
-/// requires. Initial difficulty targets ~15s blocks like the other specs.
+/// requires. Initial difficulty starts near the 4s target like the other specs.
 pub fn mainnet_chain_spec() -> Result<ChainSpec, String> {
     let wasm_binary =
         gpn_runtime::WASM_BINARY.ok_or_else(|| "Mainnet wasm binary not available".to_string())?;
@@ -472,12 +472,13 @@ fn genesis_config_json(
     block_reward_beneficiary: Option<AccountId>,
 ) -> serde_json::Value {
     let initial_difficulty = {
-        // Target 2^245 (limb3 = 2^53) -> ~10s/block with the light-cache CPU
-        // miner. Eases the pallet toward TargetBlockTime (15s) from here.
-        // Fast enough to observe self-tuning quickly, hard enough that mining
-        // is not instant (instant mining -> timestamp-rejection chaos).
+        // Target 2^232 (limb3 = 2^40): a fast-testnet starting point that the
+        // pallet's windowed retarget eases toward `TargetBlockTime` (4s).
+        // We start *near* the 4s equilibrium (rather than the old 2^53 dev
+        // value) so a fresh chain does not spam ~1s blocks for the first ~120
+        // blocks before converging (which risks timestamp/reorg churn).
         let mut diff = [0u64; 4];
-        diff[3] = 0x0020_0000_0000_0000; // 2^53 limb -> 2^245 target
+        diff[3] = 0x0000_0100_0000_0000; // 2^40 limb -> 2^232 target
         diff
     };
 

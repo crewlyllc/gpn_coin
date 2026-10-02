@@ -1,0 +1,8 @@
+{
+  "network": "GPN Public Testnet",
+  "chain_id": "gpn_testnet",
+  "genesis_hash": "0xb8e4636a65d0c812abb437c38dd7e937bd7c3355c54c54d63060f26a33519a5c",
+  "spec_version": 6,
+  "bootnodes": [],
+  "latest_version": "0.1.0"
+}

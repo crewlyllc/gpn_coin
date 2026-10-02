@@ -7,6 +7,7 @@ mod chain_spec;
 mod cli;
 mod command;
 mod gpu_miner;
+mod network_registry;
 mod rpc;
 mod service;
 

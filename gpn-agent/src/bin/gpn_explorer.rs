@@ -398,9 +398,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut endpoint = "ws://127.0.0.1:9944".to_string();
     let mut listen = "127.0.0.1:8082".to_string();
     let mut accounts = Vec::new();
+    let mut allow_noncanonical = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "--allow-noncanonical" => allow_noncanonical = true,
             "--endpoint" => {
                 i += 1;
                 endpoint = args.get(i).cloned().ok_or_else(|| {
@@ -421,7 +423,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })?);
             }
             "--help" | "-h" => {
-                println!("gpn_explorer [--endpoint ws://127.0.0.1:9944] [--listen 127.0.0.1:8082] [--account //Alice] ...");
+                println!("gpn_explorer [--endpoint ws://127.0.0.1:9944] [--listen 127.0.0.1:8082] [--account //Alice] [--allow-noncanonical] ...");
                 return Ok(());
             }
             other => return Err(cli::ArgError::from(format!("unknown argument: {other}")).into()),
@@ -438,6 +440,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = runtime
         .block_on(ChainClient::new(&endpoint))
         .map_err(|e| format!("cannot connect to {endpoint}: {e}"))?;
+    // Canonical-genesis guard (network-identity doc, build item 5): an explorer
+    // must not serve a chain that isn't the canonical GPN network.
+    {
+        let canon = gpn_agent::network_registry::load_registry();
+        if let Some(gen) = runtime
+            .block_on(rpc_call(&endpoint, "chain_getBlockHash", serde_json::json!([0])))
+            .and_then(|v| v.as_str().map(String::from))
+        {
+            let mismatch = !canon.genesis_is_placeholder()
+                && !canon.genesis_hash.eq_ignore_ascii_case(&gen);
+            if mismatch && !allow_noncanonical {
+                return Err(format!(
+                    "⚠️ DIFFERENT NETWORK: genesis {gen} != canonical {} ({}). Refusing to serve a non-canonical chain; pass --allow-noncanonical to override.",
+                    canon.genesis_hash, canon.chain_id
+                )
+                .into());
+            }
+            if mismatch {
+                log::warn!("⚠️ serving NON-CANONICAL chain genesis {gen} (--allow-noncanonical)");
+            } else {
+                println!("gpn_explorer: canonical chain OK (genesis {gen}, {})", canon.chain_id);
+            }
+        }
+    }
     let explorer = Arc::new(Explorer {
         client,
         endpoint: endpoint.clone(),
