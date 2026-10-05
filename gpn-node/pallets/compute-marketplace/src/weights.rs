@@ -52,6 +52,7 @@ pub trait WeightInfo {
 	fn submit_result() -> Weight;
 	fn complete_job() -> Weight;
 	fn cancel_job() -> Weight;
+	fn fail_job() -> Weight;
 }
 
 /// Weights for `pallet_compute_marketplace` using the GPN node and recommended hardware.
@@ -185,6 +186,18 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 			.saturating_add(T::DbWeight::get().reads(6_u64))
 			.saturating_add(T::DbWeight::get().writes(4_u64))
 	}
+
+	/// Storage: `ComputeMarketplace::Jobs` (r:1 w:1)
+	/// Storage: `ComputeMarketplace::JobRequestor` (r:1 w:0)
+	/// Storage: `ComputeMarketplace::JobProvider` (r:1 w:1)
+	/// Storage: `ComputeMarketplace::ActiveJobCount` (r:1 w:1)
+	/// Storage: `ComputeMarketplace::JobEscrow` (r:1 w:1)
+	/// Storage: `System::Account` (r:1 w:1)
+	fn fail_job() -> Weight {
+		Weight::from_parts(72_000_000, 3914)
+			.saturating_add(T::DbWeight::get().reads(6_u64))
+			.saturating_add(T::DbWeight::get().writes(4_u64))
+	}
 }
 
 // For backwards compatibility and tests.
@@ -314,6 +327,12 @@ impl WeightInfo for () {
 		//  Estimated: `3914`
 		// Minimum execution time: 64_190_000 picoseconds.
 		Weight::from_parts(65_933_000, 3914)
+			.saturating_add(RocksDbWeight::get().reads(6_u64))
+			.saturating_add(RocksDbWeight::get().writes(4_u64))
+	}
+
+	fn fail_job() -> Weight {
+		Weight::from_parts(72_000_000, 3914)
 			.saturating_add(RocksDbWeight::get().reads(6_u64))
 			.saturating_add(RocksDbWeight::get().writes(4_u64))
 	}

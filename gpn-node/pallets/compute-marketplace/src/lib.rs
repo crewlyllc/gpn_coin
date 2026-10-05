@@ -673,6 +673,63 @@ pub mod pallet {
             Self::deposit_event(Event::<T>::JobCancelled { job_id });
             Ok(())
         }
+
+        /// `fail_job(job_id, reason)` — mark a job **Failed** before completion and
+        /// **refund the escrow immediately**. Callable by the assigned provider (to
+        /// report an execution failure) or the requestor (to fail a stuck job).
+        /// Unlike `cancel_job` this is allowed from any non-terminal state
+        /// (Pending/Accepted/Running/AwaitingVerification) and frees the global
+        /// `ActiveJobCount` slot plus the provider/requestor capacity slots. Emits
+        /// `JobFailed { job_id, reason }` so off-chain callers can surface a
+        /// "job failed" message to the client.
+        #[pallet::call_index(8)]
+        #[pallet::weight(<T as Config>::WeightInfo::fail_job())]
+        pub fn fail_job(origin: OriginFor<T>, job_id: u64, reason: u8) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            let mut job = <Jobs<T>>::get(job_id).ok_or(Error::<T>::JobNotFound)?;
+            ensure!(
+                !matches!(
+                    job.state,
+                    JobState::Completed | JobState::Cancelled | JobState::Failed
+                ),
+                Error::<T>::JobNotRunning
+            );
+            let requestor = <JobRequestor<T>>::get(job_id).ok_or(Error::<T>::NotJobProvider)?;
+            let provider = <JobProvider<T>>::get(job_id);
+            // Only the owning provider (if any) or the requestor may fail the job.
+            ensure!(
+                who == requestor || provider.as_ref() == Some(&who),
+                Error::<T>::NotJobProvider
+            );
+
+            job.state = JobState::Failed;
+            <Jobs<T>>::insert(job_id, job);
+            <ActiveJobCount<T>>::mutate(|c| *c = c.saturating_sub(1));
+
+            // Refund the full escrow to the requestor (no work delivered).
+            if let Some(escrow) = <JobEscrow<T>>::take(job_id) {
+                T::Currency::transfer(
+                    &Self::account_id(),
+                    &requestor,
+                    escrow,
+                    ExistenceRequirement::AllowDeath,
+                )?;
+            }
+            // Free capacity slots (mirror cancel_job).
+            if let Some(provider) = <JobProvider<T>>::take(job_id) {
+                let mut pj = <ProviderJobs<T>>::get(&provider);
+                pj.retain(|&id| id != job_id);
+                <ProviderJobs<T>>::insert(&provider, pj);
+            }
+            if let Some(requestor) = <JobRequestor<T>>::get(job_id) {
+                let mut rj = <RequestorJobs<T>>::get(&requestor);
+                rj.retain(|&id| id != job_id);
+                <RequestorJobs<T>>::insert(&requestor, rj);
+            }
+
+            Self::deposit_event(Event::<T>::JobFailed { job_id, reason });
+            Ok(())
+        }
     }
 
     // Public helpers
@@ -863,6 +920,8 @@ mod tests {
             JobType::LLMInference,
             JobTier::Spot,
             1_000,
+            0,
+            0,
             100,
             workload(),
         )
@@ -930,6 +989,8 @@ mod tests {
                 JobType::LLMInference,
                 JobTier::Spot,
                 0,
+                0,
+                0,
                 100,
                 workload(),
             );
@@ -946,6 +1007,8 @@ mod tests {
                 JobType::LLMInference,
                 JobTier::Spot,
                 1_000,
+                0,
+                0,
                 100,
                 [0u8; 32],
             );
@@ -962,6 +1025,8 @@ mod tests {
                 JobType::LLMInference,
                 JobTier::Spot,
                 1_000,
+                0,
+                0,
                 100_001,
                 workload(),
             );
@@ -986,7 +1051,7 @@ mod tests {
             assert_eq!(Jobs::<Test>::get(job_id).unwrap().state, JobState::Running);
 
             // Submit result
-            MarketPallet::submit_result(RuntimeOrigin::signed(BOB), job_id, [5u8; 32]).unwrap();
+            MarketPallet::submit_result(RuntimeOrigin::signed(BOB), job_id, [5u8; 32], 0).unwrap();
             assert_eq!(
                 Jobs::<Test>::get(job_id).unwrap().state,
                 JobState::AwaitingVerification
@@ -1019,7 +1084,7 @@ mod tests {
             let job_id = create_job(ALICE);
             MarketPallet::accept_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
             MarketPallet::start_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
-            MarketPallet::submit_result(RuntimeOrigin::signed(BOB), job_id, [7u8; 32]).unwrap();
+            MarketPallet::submit_result(RuntimeOrigin::signed(BOB), job_id, [7u8; 32], 0).unwrap();
 
             // Fee sink (MockFeeSink -> 99) starts at 0; marketplace pallet
             // account holds the 1000 escrow.
@@ -1057,6 +1122,8 @@ mod tests {
                 JobType::LLMInference,
                 JobTier::Spot,
                 50,
+                0,
+                0,
                 100,
                 workload(),
             )
@@ -1064,7 +1131,7 @@ mod tests {
             let job_id = NextJobId::<Test>::get() - 1;
             MarketPallet::accept_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
             MarketPallet::start_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
-            MarketPallet::submit_result(RuntimeOrigin::signed(BOB), job_id, [7u8; 32]).unwrap();
+            MarketPallet::submit_result(RuntimeOrigin::signed(BOB), job_id, [7u8; 32], 0).unwrap();
 
             let provider_before = pallet_balances::Pallet::<Test>::free_balance(BOB);
             MarketPallet::complete_job(RuntimeOrigin::signed(CAROL), job_id).unwrap();
@@ -1123,7 +1190,7 @@ mod tests {
             register_provider(BOB);
             let job_id = create_job(ALICE);
             // Not running yet — submit fails
-            let result = MarketPallet::submit_result(RuntimeOrigin::signed(BOB), job_id, [5u8; 32]);
+            let result = MarketPallet::submit_result(RuntimeOrigin::signed(BOB), job_id, [5u8; 32], 0);
             assert_eq!(result, Err(Error::<Test>::JobNotRunning.into()));
         });
     }
@@ -1143,6 +1210,37 @@ mod tests {
                 before + 1_000
             );
             assert!(JobEscrow::<Test>::get(job_id).is_none());
+            assert_eq!(ActiveJobCount::<Test>::get(), 0);
+        });
+    }
+
+    #[test]
+    fn test_fail_job_refunds_escrow_and_frees_slot() {
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            let job_id = create_job(ALICE);
+            MarketPallet::accept_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
+            MarketPallet::start_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
+            assert_eq!(ActiveJobCount::<Test>::get(), 1);
+            let before = pallet_balances::Pallet::<Test>::free_balance(ALICE);
+
+            // The assigned provider reports failure → state Failed, full escrow
+            // refunded to the requestor, ActiveJobCount freed.
+            MarketPallet::fail_job(RuntimeOrigin::signed(BOB), job_id, 7).unwrap();
+            assert_eq!(Jobs::<Test>::get(job_id).unwrap().state, JobState::Failed);
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(ALICE),
+                before + 1_000
+            );
+            assert!(JobEscrow::<Test>::get(job_id).is_none());
+            assert_eq!(ActiveJobCount::<Test>::get(), 0);
+
+            // A stranger cannot fail a job they don't own/request.
+            let j2 = create_job(ALICE);
+            assert!(MarketPallet::fail_job(RuntimeOrigin::signed(CAROL), j2, 1).is_err());
+            // The requestor can (fail a stuck job).
+            MarketPallet::fail_job(RuntimeOrigin::signed(ALICE), j2, 2).unwrap();
+            assert_eq!(Jobs::<Test>::get(j2).unwrap().state, JobState::Failed);
             assert_eq!(ActiveJobCount::<Test>::get(), 0);
         });
     }
@@ -1231,6 +1329,8 @@ mod tests {
                 JobType::LLMInference,
                 JobTier::Spot,
                 1_000,
+                0,
+                0,
                 100,
                 workload(),
             )

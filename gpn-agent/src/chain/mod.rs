@@ -1001,6 +1001,28 @@ impl ChainClient {
         Some(s.account_id().to_string())
     }
 
+    /// `ComputeMarketplace::fail_job(job_id, reason)` — mark a non-terminal job
+    /// Failed and refund the escrow immediately. Callable by the assigned provider
+    /// or the requestor. Frees the global `ActiveJobCount` slot.
+    pub async fn fail_job(&self, job_id: u64, reason: u8) -> Result<(), Box<dyn std::error::Error>> {
+        self.submit_signed_call(
+            "ComputeMarketplace",
+            "fail_job",
+            vec![Value::u128(job_id as u128), Value::u128(reason as u128)],
+        )
+        .await
+    }
+
+    /// Inclusion-free `fail_job` for the shared nonce stream.
+    pub async fn fail_job_fast(&self, job_id: u64, reason: u8) -> Result<(), Box<dyn std::error::Error>> {
+        self.submit_fast(
+            "ComputeMarketplace",
+            "fail_job",
+            vec![Value::u128(job_id as u128), Value::u128(reason as u128)],
+        )
+        .await
+    }
+
     /// Read the on-chain job record: (state, price, requestor, provider).
     /// Returns None if the job doesn't exist / chain unreachable.
     pub async fn get_job_state(

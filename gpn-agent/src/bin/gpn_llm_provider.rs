@@ -674,6 +674,20 @@ async fn run_job(
         Err(e) => {
             let _ = LlmStore::new().set_error(id, &e.to_string());
             let n = record_failure(id);
+            if n >= MAX_INFER_ATTEMPTS {
+                // Terminal failure: mark the job Failed on-chain so escrow is
+                // refunded to the requestor immediately (and the ActiveJobCount
+                // slot + provider capacity slot are freed). reason=1 = inference error.
+                let r = if fast {
+                    client.fail_job_fast(id, 1).await
+                } else {
+                    client.fail_job(id, 1).await
+                };
+                match r {
+                    Ok(()) => println!("[job {id}] failed on-chain — escrow refunded to requestor"),
+                    Err(er) => eprintln!("[job {id}] fail_job failed: {er}"),
+                }
+            }
             eprintln!(
                 "[job {id}] inference failed (attempt {n}/{MAX_INFER_ATTEMPTS}), giving up after cap: {e}"
             );
