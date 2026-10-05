@@ -145,6 +145,33 @@ fn has_model(p: &Provider, model: &str) -> bool {
     }
 }
 
+/// Resolve/validate a requested model against the live provider registry.
+///
+/// Returns the concrete model to enqueue, or an error to **reject** the request.
+/// Unknown models are rejected rather than routed to a can-pull provider: a job
+/// for a model no provider can actually serve never completes and permanently
+/// consumes a global `MaxActiveJobs` slot → eventually `TooManyActiveJobs`
+/// blocks ALL job creation (2026-10-05 incident).
+fn resolve_requested_model(reg: &[Provider], requested: &str) -> Result<String, String> {
+    let m = requested.trim();
+    if m.is_empty() || m == "auto" {
+        for p in reg {
+            if let Some(x) = p.models.first() {
+                return Ok(x.clone());
+            }
+        }
+        return Err("no models available from any provider".into());
+    }
+    if reg.iter().any(|p| has_model(p, m)) {
+        Ok(m.to_string())
+    } else {
+        let mut have: Vec<String> = reg.iter().flat_map(|p| p.models.clone()).collect();
+        have.sort();
+        have.dedup();
+        Err(format!("unknown model '{m}'; available: {have:?}"))
+    }
+}
+
 /// Model-aware selection. Returns `(provider, needs_pull)`.
 ///
 /// 1. A provider that already HAS the model (or, if none was requested, any provider
@@ -432,8 +459,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let _ = req.respond(r);
                     return;
                 }
-                // route to a provider
+                // route to a provider — resolve/validate the model FIRST so we
+                // never create a job for a model no provider can serve (those
+                // orphaned Pending jobs saturate the global MaxActiveJobs cap).
                 let reg = registry.lock().unwrap().clone();
+                let model = match resolve_requested_model(&reg, &model) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        let r = Response::from_string(json!({
+                            "error": {"message": e, "type": "gpn_error"}
+                        }).to_string()).with_header(hdr.clone()).with_status_code(400);
+                        let _ = req.respond(r);
+                        return;
+                    }
+                };
                 let chosen = pick(&reg, 0, &model, pull_penalty_ms);
                 let (provider, needs_pull) = match chosen {
                     Some(x) => x,
@@ -637,8 +676,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let job_type = v.get("job_type").and_then(|x| x.as_str()).unwrap_or("LLMInference");
                 let prompt = v.get("prompt").and_then(|x| x.as_str()).map(|s| s.to_string());
 
-                // choose the best provider (model-aware)
+                // choose the best provider (model-aware); reject unservable models
+                // so no orphaned Pending job can be created.
                 let reg = registry.lock().unwrap().clone();
+                let model = match resolve_requested_model(&reg, &model) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        let r = Response::from_string(json!({"ok":false,"error":e}).to_string())
+                            .with_header(hdr.clone()).with_status_code(400);
+                        let _ = req.respond(r);
+                        return;
+                    }
+                };
                 let (provider, needs_pull) = match pick(&reg, min_gflops, &model, pull_penalty_ms) {
                     Some(x) => x,
                     None => {
@@ -828,14 +877,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     json!({"ok":false,"error":"job not found"})
                 } else {
                     let reg = registry.lock().unwrap().clone();
-                    match pick(&reg, 0, &qmodel, pull_penalty_ms) {
-                        Some((p, pull)) => {
-                            let _ = write_assignment(&assign_store, idn, &p.address, &qmodel, pull);
-                            json!({"ok":true,"job_id":idn,"routed_to":p.address,
-                                   "model":qmodel,"pull":pull,
-                                   "latency_ms":p.latency_ms,"load":format!("{}/{}",p.active,p.capacity)})
-                        }
-                        None => json!({"ok":false,"error":"no compatible provider available"}),
+                    match resolve_requested_model(&reg, &qmodel) {
+                        Err(e) => json!({"ok":false,"error":e}),
+                        Ok(qmodel) => match pick(&reg, 0, &qmodel, pull_penalty_ms) {
+                            Some((p, pull)) => {
+                                let _ = write_assignment(&assign_store, idn, &p.address, &qmodel, pull);
+                                json!({"ok":true,"job_id":idn,"routed_to":p.address,
+                                       "model":qmodel,"pull":pull,
+                                       "latency_ms":p.latency_ms,"load":format!("{}/{}",p.active,p.capacity)})
+                            }
+                            None => json!({"ok":false,"error":"no compatible provider available"}),
+                        },
                     }
                 }
             }

@@ -161,26 +161,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// model this machine has" — choose the first from the local Ollama, falling
 /// back to the guaranteed baseline model.
 fn resolve_model(requested: &str) -> String {
-    if !requested.is_empty() && requested != "auto" {
-        return requested.to_string();
-    }
     let base = gpn_agent::llm::infer::default_ollama_url();
-    if let Ok(r) = reqwest::blocking::Client::builder()
+    let installed: Vec<String> = reqwest::blocking::Client::builder()
         .timeout(Duration::from_millis(2500))
         .build()
         .and_then(|c| c.get(format!("{base}/api/tags")).send())
-    {
-        if let Ok(v) = r.json::<serde_json::Value>() {
-            if let Some(name) = v["models"]
-                .as_array()
-                .and_then(|a| a.first())
-                .and_then(|m| m["name"].as_str())
-            {
-                return name.to_string();
-            }
+        .ok()
+        .and_then(|r| r.json::<serde_json::Value>().ok())
+        .and_then(|v| {
+            v["models"].as_array().map(|a| {
+                a.iter()
+                    .filter_map(|m| m["name"].as_str().map(String::from))
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
+    let has = |name: &str| {
+        installed.iter().any(|n| n == name || n.split(':').next() == Some(name))
+    };
+    if !requested.is_empty() && requested != "auto" && has(requested) {
+        // Prefer the exact installed tag when a bare name was requested.
+        if let Some(exact) = installed.iter().find(|n| n.as_str() == requested) {
+            return exact.clone();
         }
+        if let Some(tag) = installed.iter().find(|n| n.split(':').next() == Some(requested)) {
+            return tag.clone();
+        }
+        return requested.to_string();
     }
-    "llama3.2:1b".to_string()
+    // Requested model unavailable (or `auto`/empty) → fall back to an INSTALLED
+    // model so the job COMPLETES instead of orphaning forever (which saturates
+    // the on-chain MaxActiveJobs cap — 2026-10-05 incident). Prefer llama3.2:1b.
+    if installed.iter().any(|n| n == "llama3.2:1b") {
+        return "llama3.2:1b".to_string();
+    }
+    installed
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| "llama3.2:1b".to_string())
 }
 
 fn assignment_store_path() -> String {

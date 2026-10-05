@@ -958,6 +958,28 @@ impl ChainClient {
         .await
     }
 
+    /// `ComputeMarketplace::cancel_job(job_id)` — the **requestor** cancels a
+    /// still-`Pending` job. Refunds escrow and decrements the global
+    /// `ActiveJobCount`, freeing a `MaxActiveJobs` slot. Used to drain orphaned
+    /// Pending jobs that would otherwise saturate job creation.
+    pub async fn cancel_job(&self, job_id: u64) -> Result<(), Box<dyn std::error::Error>> {
+        self.submit_signed_call(
+            "ComputeMarketplace",
+            "cancel_job",
+            vec![Value::u128(job_id as u128)],
+        )
+        .await
+    }
+
+    /// Read an account's ss58/hex address string for the configured signer
+    /// (empty if no signer configured).
+    pub fn signer_address(&self) -> Option<String> {
+        let uri = self.signer_uri.as_ref()?;
+        let s = signer::Sr25519Signer::from_uri(uri).ok()?;
+        use subxt::tx::Signer as _;
+        Some(s.account_id().to_string())
+    }
+
     /// Read the on-chain job record: (state, price, requestor, provider).
     /// Returns None if the job doesn't exist / chain unreachable.
     pub async fn get_job_state(
