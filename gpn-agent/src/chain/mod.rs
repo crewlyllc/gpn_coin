@@ -940,6 +940,16 @@ impl ChainClient {
         .await
     }
 
+    /// Inclusion-free `accept_job` for the pipelined/self-heal path.
+    pub async fn accept_job_fast(&self, job_id: u64) -> Result<(), Box<dyn std::error::Error>> {
+        self.submit_fast(
+            "ComputeMarketplace",
+            "accept_job",
+            vec![Value::u128(job_id as u128)],
+        )
+        .await
+    }
+
     /// Inclusion-free `start_job` for the pipelined/self-heal path.
     pub async fn start_job_fast(&self, job_id: u64) -> Result<(), Box<dyn std::error::Error>> {
         self.submit_fast(

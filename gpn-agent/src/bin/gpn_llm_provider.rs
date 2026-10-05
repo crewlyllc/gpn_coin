@@ -30,6 +30,13 @@ fn missing_counter() -> &'static Mutex<HashMap<u64, u32>> {
     M.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Parse a "0x"-prefixed 32-byte hex string into `[u8; 32]`.
+fn hex32(s: &str) -> Option<[u8; 32]> {
+    let h = s.trim_start_matches("0x");
+    let b = hex::decode(h).ok()?;
+    b.try_into().ok()
+}
+
 /// Rate-limit the reconcile pass. Reconcile scans the last `RECONCILE_WINDOW`
 /// (128) jobs on-chain — expensive. With the poll at 300ms it would run ~3×/s
 /// and peg the CPU; gate it to ~once per 10s.
@@ -405,8 +412,31 @@ async fn process_once(
     if should_reconcile() {
     let next = client.get_next_job_id().await;
     for id in next.saturating_sub(RECONCILE_WINDOW)..next {
-        if let Some((state, _price, _req, provider)) = client.get_job_state(id).await {
-            if provider.as_deref() != Some(me) {
+        if let Some((state, _price, _req, _provider_now)) = client.get_job_state(id).await {
+            if state == "Pending" {
+                // Heal a fast-path leak: we served this job off-chain (store status
+                // `done` + a result hash) but the on-chain accept never landed (the
+                // AP's create hadn't been included when we claimed). Drive it
+                // Pending → Accepted → Running → submit_result → Completed so it
+                // doesn't strand as an orphan. Only for jobs we actually have a
+                // completed off-chain result for.
+                if let Some(j) = get_job(id) {
+                    if j.kind == "llm" && j.status == "done" {
+                        if let Some(bytes) = j.result_hash.as_deref().and_then(hex32) {
+                            let toks = (j.response.as_deref().unwrap_or("").chars().count() as u32 / 4).max(1);
+                            let a = if fast_claim { client.accept_job_fast(id).await } else { client.accept_job(id).await };
+                            let s = if fast_claim { client.start_job_fast(id).await } else { client.start_job(id).await };
+                            let r = if fast_claim { client.submit_result_fast(id, bytes, toks).await } else { client.submit_result(id, bytes, toks).await };
+                            let c = if fast_claim { client.complete_job_fast(id).await } else { client.complete_job(id).await };
+                            if a.is_ok() && s.is_ok() && r.is_ok() && c.is_ok() {
+                                println!("[provider] healed leaked Pending #{id} → Completed");
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+            if _provider_now.as_deref() != Some(me) {
                 continue;
             }
             if state == "AwaitingVerification" {
@@ -527,10 +557,16 @@ async fn process_once(
                 }
             }
             None => {
+                // Not on-chain yet — the AP's no-wait `create_job` is still in
+                // flight. Claim optimistically so we serve the client fast; if the
+                // accept races ahead of the create it fails, and the reconcile pass
+                // heals it (Pending + done-store → Completed). Bound the counter so
+                // a never-created id isn't re-checked forever.
                 let mut m = missing_counter().lock().unwrap();
                 let n = m.entry(job_id).or_insert(0);
                 *n += 1;
-                if *n > 20 {
+                if *n > 40 {
+                    m.remove(&job_id);
                     continue;
                 }
             }
