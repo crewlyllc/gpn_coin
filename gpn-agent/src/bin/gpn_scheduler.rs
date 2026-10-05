@@ -18,9 +18,62 @@
 use gpn_agent::chain::ChainClient;
 use serde_json::{json, Value};
 use std::io::Read;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tiny_http::{Header, Method, Response, Server};
+
+/// Job ids this AP created recently, with creation time. Used by the stale-job
+/// janitor to reclaim its own orphaned `Pending` jobs, which otherwise hold a
+/// global `MaxActiveJobs` slot forever (there is no on-chain expiry — see
+/// artifacts/project7/job-lifecycle-gap-analysis-2026-10-05.md).
+fn recent_jobs() -> &'static Mutex<Vec<(u64, Instant)>> {
+    static R: OnceLock<Mutex<Vec<(u64, Instant)>>> = OnceLock::new();
+    R.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn record_created(id: u64) {
+    recent_jobs().lock().unwrap().push((id, Instant::now()));
+}
+
+/// Every 30s, cancel our own `Pending` jobs that are still Pending 120s after
+/// creation (the requestor's job never got served — e.g. no provider accepted,
+/// or a fast-path create that wasn't routed). Cancels only Pending (on-chain
+/// guard); advanced/terminal jobs are dropped from tracking. Uses the shared
+/// nonce stream (`cancel_job_fast`) so it can't desync request-path txs.
+fn spawn_janitor(client: Arc<ChainClient>, rt: Arc<tokio::runtime::Runtime>) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(30));
+        let now = Instant::now();
+        let mut due: Vec<u64> = Vec::new();
+        {
+            let mut g = recent_jobs().lock().unwrap();
+            let mut keep: Vec<(u64, Instant)> = Vec::with_capacity(g.len());
+            for (id, t) in g.drain(..) {
+                if now.duration_since(t) > Duration::from_secs(120) {
+                    due.push(id);
+                } else {
+                    keep.push((id, t));
+                }
+            }
+            *g = keep;
+        }
+        for id in due {
+            match rt.block_on(client.get_job_state(id)) {
+                Some((state, _, _, _)) if state == "Pending" => {
+                    match rt.block_on(client.cancel_job_fast(id)) {
+                        Ok(()) => println!("[janitor] cancelled stale Pending #{id}"),
+                        Err(e) => {
+                            eprintln!("[janitor] cancel #{id} failed: {e}");
+                            // Retry next tick.
+                            record_created(id);
+                        }
+                    }
+                }
+                _ => { /* advanced/terminal/gone — stop tracking */ }
+            }
+        }
+    });
+}
 
 /// Process-local job-id allocator for the access point's fast path.
 ///
@@ -377,6 +430,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build the chain client (synchronous runtime for tiny_http handler).
     let rt = Arc::new(tokio::runtime::Runtime::new()?);
     let client = Arc::new(rt.block_on(ChainClient::new(&endpoint))?.with_signer(&signer_uri));
+    spawn_janitor(client.clone(), rt.clone());
 
     let registry = Arc::new(Mutex::new(Vec::<Provider>::new()));
     refresh(&registry, &Arc::new(urls.clone()));
@@ -580,6 +634,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Err(e) => format!("[gpn error] {e}"),
                     };
                 } else if created {
+                    record_created(id);
                     let _ = gpn_agent::llm::LlmStore::new().put(id, gpn_agent::llm::LlmJob::new_llm(&model, &prompt, 0.7, 512));
                     let _ = write_assignment(&assign_store, id, &provider.address, &model, needs_pull);
                     // block until the provider finishes (OpenAI calls are synchronous)
@@ -789,6 +844,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         // dispatch: record which provider (by address) should claim it,
                         // plus the model + whether it must pull the model first.
+                        record_created(id);
                         let _ = write_assignment(&assign_store, id, &provider.address, &model, needs_pull);
                         // optional inline wait: poll the off-chain store and return the
                         // answer in THIS response (no separate /result call).

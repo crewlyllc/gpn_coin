@@ -929,6 +929,17 @@ impl ChainClient {
         Ok(())
     }
 
+    /// Inclusion-free `cancel_job` for the janitor/self-heal path (shared nonce
+    /// stream). The requestor-only + Pending-only guards are enforced on-chain.
+    pub async fn cancel_job_fast(&self, job_id: u64) -> Result<(), Box<dyn std::error::Error>> {
+        self.submit_fast(
+            "ComputeMarketplace",
+            "cancel_job",
+            vec![Value::u128(job_id as u128)],
+        )
+        .await
+    }
+
     /// Inclusion-free `start_job` for the pipelined/self-heal path.
     pub async fn start_job_fast(&self, job_id: u64) -> Result<(), Box<dyn std::error::Error>> {
         self.submit_fast(
