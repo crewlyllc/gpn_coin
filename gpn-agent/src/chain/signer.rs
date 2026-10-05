@@ -87,51 +87,42 @@ pub async fn connect(
 /// downstream read silently fall back to placeholder defaults (nonce 0,
 /// balance 0, "not staked").
 ///
-/// We first try the fast path, then fall back to fetching the genesis hash /
-/// runtime version / metadata at the **best (head)** block — whose state is
-/// always available — and construct the client with
-/// [`OnlineClient::from_rpc_client_with`]. Storage reads in this crate already
-/// target the head block explicitly (see [`current_nonce`]), so the client
-/// never needs the finalized block afterwards.
+/// Connect using the **best (head) block** metadata, falling back to the normal
+/// `from_url` connection only if the head-block path fails.
+///
+/// Rationale: on this PoW chain the finalized head stays at genesis (#0), so
+/// `from_url` fetches **genesis-era** metadata. Reads are fine, but dynamic
+/// calls resolve their call index against that metadata — so after a runtime
+/// upgrade a call to a *new* extrinsic (e.g. `ComputeMarketplace::fail_job`)
+/// would encode the wrong index and be rejected ("variant doesn't exist").
+/// Best-block metadata always matches the running runtime.
 pub async fn connect_robust<T: Config>(
     endpoint: &str,
 ) -> Result<OnlineClient<T>, Box<dyn std::error::Error>> {
-    // Fast path: normal connection (works while the finalized block's state is
-    // still within the node's pruning window).
-    if let Ok(client) = OnlineClient::<T>::from_url(endpoint).await {
+    // Preferred: metadata at the best (head) block — always available and
+    // matches the current runtime (survives forkless upgrades).
+    if let Some(client) = connect_best_block::<T>(endpoint).await {
         return Ok(client);
     }
+    // Fallback: normal connection (finalized-block metadata).
+    Ok(OnlineClient::<T>::from_url(endpoint).await?)
+}
 
-    // Slow path: fetch everything at the best block so we never touch the
-    // pruned finalized (genesis) state.
-    let rpc = RpcClient::from_insecure_url(endpoint).await?;
+/// Build an [`OnlineClient`] from best-block metadata. `None` on any RPC error.
+async fn connect_best_block<T: Config>(endpoint: &str) -> Option<OnlineClient<T>> {
+    let rpc = RpcClient::from_insecure_url(endpoint).await.ok()?;
     let methods = LegacyRpcMethods::<T>::new(rpc.clone());
-
-    let genesis_hash = methods.genesis_hash().await?;
-    let best_hash = methods
-        .chain_get_block_hash(None)
-        .await?
-        .ok_or("no best block hash returned by chain_getBlockHash")?;
+    let genesis_hash = methods.genesis_hash().await.ok()?;
+    let best_hash = methods.chain_get_block_hash(None).await.ok()??;
     // `state_get_runtime_version` returns the legacy RPC `RuntimeVersion`; the
-    // client constructor wants the `subxt_core` one (spec_version +
-    // transaction_version only).
-    let legacy_rt = methods.state_get_runtime_version(Some(best_hash)).await?;
+    // client constructor wants the `subxt_core` one.
+    let legacy_rt = methods.state_get_runtime_version(Some(best_hash)).await.ok()?;
     let runtime_version = subxt::client::RuntimeVersion {
         spec_version: legacy_rt.spec_version,
         transaction_version: legacy_rt.transaction_version,
     };
-    let metadata = methods.state_get_metadata(Some(best_hash)).await?;
-
-    log::warn!(
-        "finalized block state pruned; connected via best-block metadata (head {:?})",
-        best_hash
-    );
-    Ok(OnlineClient::<T>::from_rpc_client_with(
-        genesis_hash,
-        runtime_version,
-        metadata,
-        rpc,
-    )?)
+    let metadata = methods.state_get_metadata(Some(best_hash)).await.ok()?;
+    OnlineClient::<T>::from_rpc_client_with(genesis_hash, runtime_version, metadata, rpc).ok()
 }
 
 /// Read the account's current on-chain nonce from the **head** block (so a
