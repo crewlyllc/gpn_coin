@@ -748,16 +748,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let job_type = v.get("job_type").and_then(|x| x.as_str()).unwrap_or("LLMInference");
                 let prompt = v.get("prompt").and_then(|x| x.as_str()).map(|s| s.to_string());
 
-                // choose the best provider (model-aware); reject unservable models
-                // so no orphaned Pending job can be created.
+                // choose the best provider (model-aware). Generation jobs
+                // (image/video) are served by the diffusion provider, which
+                // self-claims from chain — the LLM model registry doesn't list
+                // gen models, so DON'T validate them here. Reject unknown models
+                // only for LLM/text jobs (prevents orphaned Pending jobs).
+                let jt_lc = job_type.to_ascii_lowercase();
+                let model_lc = model.to_ascii_lowercase();
+                let is_gen = jt_lc.contains("image")
+                    || jt_lc.contains("video")
+                    || model_lc.contains("sd-")
+                    || model_lc.contains("stable-diffusion")
+                    || model_lc.contains("sdxl")
+                    || model_lc.contains("flux")
+                    || model_lc.contains("ltx");
                 let reg = registry.lock().unwrap().clone();
-                let model = match resolve_requested_model(&reg, &model) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        let r = Response::from_string(json!({"ok":false,"error":e}).to_string())
-                            .with_header(hdr.clone()).with_status_code(400);
-                        let _ = req.respond(r);
-                        return;
+                let model = if is_gen {
+                    model
+                } else {
+                    match resolve_requested_model(&reg, &model) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            let r = Response::from_string(json!({"ok":false,"error":e}).to_string())
+                                .with_header(hdr.clone()).with_status_code(400);
+                            let _ = req.respond(r);
+                            return;
+                        }
                     }
                 };
                 let (provider, needs_pull) = match pick(&reg, min_gflops, &model, pull_penalty_ms) {
