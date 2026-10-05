@@ -242,6 +242,24 @@ fn resolve_requested_model(reg: &[Provider], requested: &str) -> Result<String, 
     }
 }
 
+/// Job-relative GPN price for an image/video generation job, grounded in the
+/// market GPU-hour price from the profitability oracle (mirrors the text
+/// per-token pricing). Scales linearly with output pixels × denoise steps, so a
+/// bigger image or more steps costs more. Reference: 512×512 @ 8 steps ≈ REF_SECS
+/// of GPU time (including one-time model load).
+fn image_price_gpn(w: f64, h: f64, steps: f64, token_price_usd: f64, market_hr: f64, util: f64) -> f64 {
+    const REF_SECS: f64 = 90.0;
+    const MARGIN: f64 = 0.20;
+    const REF_UNITS: f64 = 512.0 * 512.0 * 8.0;
+    let units = w.max(1.0) * h.max(1.0) * steps.max(1.0);
+    let est_secs = (units / REF_UNITS) * REF_SECS;
+    let util = util.clamp(0.05, 1.0);
+    let usd = (market_hr.max(0.001) / 3600.0) * est_secs * (1.0 + MARGIN) / util;
+    let base_units = (usd / token_price_usd.max(1e-9)) * 1e12;
+    // Return whole GPN, at least 1 base unit.
+    base_units.round().max(1.0) / 1e12
+}
+
 /// Model-aware selection. Returns `(provider, needs_pull)`.
 ///
 /// 1. A provider that already HAS the model (or, if none was requested, any provider
@@ -413,6 +431,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
             format!("{home}/.gpn/assignments.json")
         });
+    // Optional bearer token. When set, state-changing (POST) + artifact requests
+    // from NON-loopback clients must present it (local crons/monitors keep working).
+    let ap_token = std::env::var("GPN_AP_TOKEN").unwrap_or_default();
     // Testnet "free AI": the access point's own hot wallet pays the escrow, so a
     // caller can run a job with no wallet at all. On MAINNET this MUST be off —
     // callers sign with their own wallet and the access point only routes.
@@ -475,12 +496,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let registry = registry.clone();
         let assign_store = assign_store.clone();
         let hdr = hdr.clone();
+        let ap_token = ap_token.clone();
         std::thread::spawn(move || {
         let url = req.url().to_string();
         let method = req.method().clone();
         let mut body = String::new();
         let _ = req.as_reader().read_to_string(&mut body);
         let path: Vec<&str> = url.trim_start_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+
+        // Auth gate (non-loopback only).
+        if !ap_token.is_empty() {
+            let is_loopback = req.remote_addr().map(|a| a.ip().is_loopback()).unwrap_or(false);
+            let protected = method == Method::Post
+                || path.first().map(|s| *s == "artifact").unwrap_or(false);
+            if protected && !is_loopback {
+                let want = format!("Bearer {ap_token}");
+                let ok = req.headers().iter().any(|h| {
+                    (h.field.equiv("Authorization") && h.value.as_str().trim() == want)
+                        || (h.field.equiv("X-Api-Key") && h.value.as_str().trim() == ap_token)
+                });
+                if !ok {
+                    let _ = req.respond(
+                        Response::from_string(json!({"error":"unauthorized"}).to_string())
+                            .with_header(hdr.clone())
+                            .with_status_code(401),
+                    );
+                    return;
+                }
+            }
+        }
 
         let resp = match (&method, path.as_slice()) {
             (Method::Get, ["health"]) => {
@@ -810,11 +854,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     o
                 };
                 let next_before = rt.block_on(client.get_next_job_id());
-                // escrow: per-token jobs lock rate × max_tokens; otherwise the flat price.
-                let escrow: u128 = if ppt > 0 && mtok_eff > 0 {
-                    ppt.saturating_mul(mtok_eff as u128)
+                // Job-relative pricing for generation jobs (pixels × steps), grounded
+                // in the oracle market GPU price; text jobs price per-token (ppt).
+                let price_gpn = if is_gen {
+                    match v.get("price_gpn").and_then(|x| x.as_f64()) {
+                        Some(p) if p > 0.0 => p, // explicit override
+                        _ => image_price_gpn(
+                            g("width", 512) as f64,
+                            g("height", 512) as f64,
+                            g("steps", 8) as f64,
+                            token_price_usd,
+                            market_hr,
+                            util,
+                        ),
+                    }
                 } else {
-                    (price_gpn * 1e12) as u128
+                    price_gpn
+                };
+                // escrow/pricing: generation jobs use a flat, job-sized price
+                // (price_gpn from pixels×steps); text jobs use per-token billing.
+                let (escrow, job_ppt, job_mtok): (u128, u128, u32) = if is_gen {
+                    ((price_gpn * 1e12) as u128, 0u128, 0u32)
+                } else if ppt > 0 && mtok_eff > 0 {
+                    (ppt.saturating_mul(mtok_eff as u128), ppt, mtok_eff)
+                } else {
+                    ((price_gpn * 1e12) as u128, 0u128, 0u32)
                 };
                 let res = rt.block_on(client.create_job(
                     g("min_vram_mb", 8192) as u32,
@@ -822,7 +886,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     g("min_gpu_count", 1) as u8,
                     g("min_cuda_cores", 0) as u32,
                     min_gflops, job_type, "Spot",
-                    escrow, ppt, mtok_eff, 1000, workload_hash,
+                    escrow, job_ppt, job_mtok, 1000, workload_hash,
                 ));
                 // The signer can mis-attribute a *concurrent* extrinsic's failure
                 // (a busy chain packs several txs per block). So don't trust the
