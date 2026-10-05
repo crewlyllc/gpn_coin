@@ -13,7 +13,27 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
+
+/// Process-global cache of the parsed store, keyed by path, invalidated when the
+/// file's mtime changes. Without this, every `get()` re-reads + JSON-parses the
+/// entire `llm_store.json` — the provider's 300ms poll loop called it hundreds of
+/// times/second and pegged the CPU. Multi-process safe: writers update the cache
+/// on save, and a changed mtime forces a reload (so the AP sees the provider's
+/// writes and vice-versa).
+fn store_cache() -> &'static Mutex<HashMap<PathBuf, (u128, HashMap<u64, LlmJob>)>> {
+    static C: OnceLock<Mutex<HashMap<PathBuf, (u128, HashMap<u64, LlmJob>)>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn file_mtime_ns(path: &PathBuf) -> u128 {
+    std::fs::metadata(path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
 
 /// Default store location (override with env `GPN_LLM_STORE`).
 ///
@@ -198,16 +218,32 @@ impl LlmStore {
     }
 
     fn load(&self) -> HashMap<u64, LlmJob> {
-        match std::fs::read_to_string(&self.path) {
+        let mtime = file_mtime_ns(&self.path);
+        let mut cache = store_cache().lock().unwrap();
+        if let Some((m, map)) = cache.get(&self.path) {
+            // Cache hit: file unchanged since we last parsed it.
+            if *m == mtime && !(mtime == 0 && map.is_empty()) {
+                return map.clone();
+            }
+        }
+        let map: HashMap<u64, LlmJob> = match std::fs::read_to_string(&self.path) {
             Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
             Err(_) => HashMap::new(),
-        }
+        };
+        cache.insert(self.path.clone(), (mtime, map.clone()));
+        map
     }
 
     fn save(&self, map: &HashMap<u64, LlmJob>) -> std::io::Result<()> {
         let tmp = self.path.with_extension("tmp");
         std::fs::write(&tmp, serde_json::to_string_pretty(map).unwrap_or_default())?;
         std::fs::rename(&tmp, &self.path)?;
+        // Keep the cache warm + consistent after our own write.
+        let mtime = file_mtime_ns(&self.path);
+        store_cache()
+            .lock()
+            .unwrap()
+            .insert(self.path.clone(), (mtime, map.clone()));
         Ok(())
     }
 

@@ -30,6 +30,26 @@ fn missing_counter() -> &'static Mutex<HashMap<u64, u32>> {
     M.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Rate-limit the reconcile pass. Reconcile scans the last `RECONCILE_WINDOW`
+/// (128) jobs on-chain — expensive. With the poll at 300ms it would run ~3×/s
+/// and peg the CPU; gate it to ~once per 10s.
+fn should_reconcile() -> bool {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let last = LAST.load(Ordering::Relaxed);
+    if now.saturating_sub(last) >= 10_000 {
+        LAST.store(now, Ordering::Relaxed);
+        true
+    } else {
+        false
+    }
+}
+
 /// Off-chain, chain-free inference endpoint ("passthrough" mode).
 /// `POST /infer {model,prompt,temperature,max_tokens}` → `{ok,text,model}`. NO
 /// chain, escrow, commitment, or billing — free/private tier. Loopback bind.
@@ -382,6 +402,7 @@ async fn process_once(
     // every later accept). Re-drive such jobs to Completed so capacity is
     // reclaimed. Kind-agnostic so it also clears zombies with no off-chain
     // payload entry.
+    if should_reconcile() {
     let next = client.get_next_job_id().await;
     for id in next.saturating_sub(RECONCILE_WINDOW)..next {
         if let Some((state, _price, _req, provider)) = client.get_job_state(id).await {
@@ -437,6 +458,7 @@ async fn process_once(
             }
         }
     }
+    } // end reconcile gate
 
     // 0. Auto-claim: if an access-point scheduler has assigned us specific jobs,
     //    claim ONLY those; otherwise (standalone) claim any claimable LLM job.
@@ -551,9 +573,12 @@ async fn process_once(
         }
     }
 
-    // 1. Run any Running LLM job assigned to this signer.
+    // 1. Run any Running LLM job assigned to this signer. Scan only the RECENT
+    //    window (not every job ever) — a full 0..next scan on each 300ms pass
+    //    pegged the CPU/RPC once the ledger grew. We only ever run
+    //    recently-claimed jobs, so the recent window is sufficient.
     let next = client.get_next_job_id().await;
-    for id in 0..next {
+    for id in next.saturating_sub(RECONCILE_WINDOW)..next {
         // Skip jobs we already ran directly in the fast path this pass.
         if fast_claim && just_claimed.contains(&id) {
             continue;
