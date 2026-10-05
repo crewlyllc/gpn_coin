@@ -951,6 +951,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     None => json!({"job_id": idn, "error": "no off-chain record yet"}),
                 }
             }
+            // Download the generated artifact (image/video) for a job id.
+            // Serves the provider's on-disk file over HTTP so remote clients can
+            // fetch it (the AP has no other way to hand back the bytes).
+            (Method::Get, ["artifact", id]) => {
+                let idp = id.split('?').next().unwrap_or(id);
+                let idn: u64 = idp.parse().unwrap_or(0);
+                let rec = gpn_agent::llm::get_job(idn);
+                let path = rec.as_ref().and_then(|j| j.artifact_path.clone());
+                match path {
+                    Some(p) if std::path::Path::new(&p).exists() => match std::fs::read(&p) {
+                        Ok(bytes) => {
+                            let mt = rec
+                                .and_then(|j| j.artifact_media_type)
+                                .unwrap_or_else(|| "application/octet-stream".into());
+                            let name = std::path::Path::new(&p)
+                                .file_name()
+                                .map(|s| s.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| format!("job_{idn}"));
+                            let ct = Header::from_bytes(&b"Content-Type"[..], mt.as_bytes())
+                                .unwrap_or_else(|_| hdr.clone());
+                            let cd = Header::from_bytes(
+                                &b"Content-Disposition"[..],
+                                format!("inline; filename=\"{name}\"").as_bytes(),
+                            )
+                            .unwrap_or_else(|_| hdr.clone());
+                            let _ = req.respond(Response::from_data(bytes).with_header(ct).with_header(cd));
+                        }
+                        Err(e) => {
+                            let _ = req.respond(
+                                Response::from_string(json!({"error": e.to_string()}).to_string())
+                                    .with_header(hdr.clone())
+                                    .with_status_code(500),
+                            );
+                        }
+                    },
+                    _ => {
+                        let _ = req.respond(
+                            Response::from_string(
+                                json!({"error":"no artifact for that job (not generated yet?)"}).to_string(),
+                            )
+                            .with_header(hdr.clone())
+                            .with_status_code(404),
+                        );
+                    }
+                }
+                return;
+            }
             // Client-side signing: the caller already created + escrowed the job
             // with THEIR OWN wallet; they just ask us to ROUTE it to a provider.
             (Method::Post, ["route", id]) => {
