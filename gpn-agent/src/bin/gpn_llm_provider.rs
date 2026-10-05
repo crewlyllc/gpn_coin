@@ -394,7 +394,11 @@ async fn process_once(
                 if !job_kind_is_ours(id) {
                     continue;
                 }
-                match client.complete_job(id).await {
+                match if fast_claim {
+                    client.complete_job_fast(id).await
+                } else {
+                    client.complete_job(id).await
+                } {
                     Ok(()) => {
                         println!("[provider] reconciled #{id} AwaitingVerification → Completed")
                     }
@@ -411,11 +415,20 @@ async fn process_once(
                 // *starts* `Pending` jobs, an `Accepted` job can never advance on
                 // its own — drive it Accepted → Running → Completed to free the
                 // slot (escrow is refunded by `complete_job`).
-                if let Err(e) = client.start_job(id).await {
+                let start_res = if fast_claim {
+                    client.start_job_fast(id).await
+                } else {
+                    client.start_job(id).await
+                };
+                if let Err(e) = start_res {
                     eprintln!("[provider] reconcile #{id} (start) failed: {e}");
                     continue;
                 }
-                match client.complete_job(id).await {
+                match if fast_claim {
+                    client.complete_job_fast(id).await
+                } else {
+                    client.complete_job(id).await
+                } {
                     Ok(()) => println!(
                         "[provider] reconciled #{id} Accepted → Completed (capacity freed)"
                     ),
@@ -565,7 +578,7 @@ async fn process_once(
                     // model that can never run here — stop hammering it.
                     continue;
                 }
-                run_job(client, id, &job, false).await?;
+                run_job(client, id, &job, fast_claim).await?;
             }
         }
     }
