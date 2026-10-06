@@ -123,7 +123,7 @@ pub const VERSION: sp_version::RuntimeVersion = sp_version::RuntimeVersion {
     spec_name: create_runtime_str!("gpn"),
     impl_name: create_runtime_str!("gpn"),
     authoring_version: 1,
-    spec_version: 6,
+    spec_version: 11,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 1,
@@ -352,6 +352,7 @@ parameter_types! {
     pub const DifficultyAdjustmentWindow: BlockNumber = 10; // dev-friendly; retune every 10 blocks
     pub const PowMaxWeight: u64 = 200_000;
     pub const AlgorithmVersion: u32 = 1;
+    pub const MiningAttestationThreshold: u32 = 3; // blocks authored before direct payout (stake-free PoW gate)
     pub const MaxSupply: Balance = 1_000_000_000_000_000_000_000; // 1B GPN (12 decimals)
 }
 
@@ -396,6 +397,8 @@ impl pallet_gpu_pow::Config for Runtime {
     // Read the block producer from the PoW seal → pay the miner who produced
     // the block (Bitcoin-style coinbase), gated by attestation.
     type FindAuthor = GpnPowAuthor;
+    // Stake-free, PoW-verified mining gate (blocks authored before direct payout).
+    type MiningAttestationThreshold = MiningAttestationThreshold;
 }
 
 parameter_types! {

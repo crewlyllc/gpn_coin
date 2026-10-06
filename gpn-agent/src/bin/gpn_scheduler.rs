@@ -1062,6 +1062,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 return;
             }
+            // Serve the canonical chain-spec so a fresh node (e.g. Windows) can
+            // join THIS chain: `--chain <downloaded>.json` pins the exact genesis.
+            (Method::Get, ["genesis-spec"]) => {
+                let p = std::env::var("GPN_SPEC_PATH").unwrap_or_else(|_| {
+                    "/home/jeremyg/shared_workspace/artifacts/project7/gpn-testnet-spec.json".to_string()
+                });
+                match std::fs::read(&p) {
+                    Ok(bytes) => {
+                        let ct = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                            .unwrap_or_else(|_| hdr.clone());
+                        let cd = Header::from_bytes(
+                            &b"Content-Disposition"[..],
+                            &b"attachment; filename=\"gpn-testnet-spec.json\""[..],
+                        )
+                        .unwrap_or_else(|_| hdr.clone());
+                        let _ = req.respond(Response::from_data(bytes).with_header(ct).with_header(cd));
+                    }
+                    Err(e) => {
+                        let _ = req.respond(
+                            Response::from_string(json!({"error": e.to_string()}).to_string())
+                                .with_header(hdr.clone())
+                                .with_status_code(500),
+                        );
+                    }
+                }
+                return;
+            }
             // Client-side signing: the caller already created + escrowed the job
             // with THEIR OWN wallet; they just ask us to ROUTE it to a provider.
             (Method::Post, ["route", id]) => {

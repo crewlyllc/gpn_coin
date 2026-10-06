@@ -81,9 +81,11 @@ pub mod pallet {
         /// Block rewards are minted through it so the 1B cap is enforced
         /// against one counter (workplan item 1).
         type Supply: SupplyManager<Self::AccountId, BalanceOf<Self>>;
-        /// Cross-pallet read of attested GPU throughput — `submit_solution`
-        /// requires the caller to be attested so one GPU can only claim one
-        /// reward (anti-double-mining).
+        /// Cross-pallet read of attested GPU throughput — the block-reward path
+        /// requires the producer to be attested, so **only GPU miners can earn**
+        /// (the "GPU-only" eligibility gate). This is NOT an equalizer: payouts
+        /// stay hashrate-proportional / Bitcoin-style — the fastest GPU wins the
+        /// most blocks. The gate only decides who is allowed to keep a reward.
         type GPUAttestation: GPUAttestationProvider<Self::AccountId>;
         /// Weight information for extrinsics in this pallet (workplan item 9).
         type WeightInfo: WeightInfo;
@@ -92,6 +94,13 @@ pub mod pallet {
         /// coinbase) instead of a separate claim. `None` = unknown/legacy seal →
         /// fall back to `BlockRewardBeneficiary`.
         type FindAuthor: frame_support::traits::FindAuthor<Self::AccountId>;
+        /// Minimum number of blocks an account must have authored (proven, seal-verified
+        /// PoW work) before its block rewards are paid to it directly. This is the
+        /// **stake-free, PoW-verified "GPU-only" gate**: producing a seal-verified block
+        /// IS proof of real GPU work, so no stake or self-reported attestation is needed.
+        /// See design-verifiable-gpu-proof-2026-10-06.md.
+        #[pallet::constant]
+        type MiningAttestationThreshold: Get<u32>;
     }
 
     #[pallet::pallet]
@@ -134,6 +143,13 @@ pub mod pallet {
 
     #[pallet::storage]
     pub type CurrentBlockReward<T: Config> = StorageValue<_, BalanceOf<T>, ValueQuery>;
+
+    #[pallet::storage]
+    /// Per-account count of blocks authored. The author is stamped by the node in the
+    /// pre-runtime digest and the block's Ethash seal is verified on import, so this
+    /// count is *proven* GPU work — the basis of the stake-free mining gate.
+    pub type BlocksAuthored<T: Config> =
+        StorageMap<_, Blake2_128Concat, T::AccountId, u32, ValueQuery>;
 
     #[pallet::genesis_config]
     #[derive(frame_support::DefaultNoBound)]
@@ -350,10 +366,10 @@ pub mod pallet {
         ///
         /// Bitcoin-style: the miner that produced the block earns its reward. The
         /// author is read from the PoW seal digest via `FindAuthor`; the payout is
-        /// gated on GPU attestation so **1 GPU = 1 reward** (an unattested author
-        /// can't be paid). Falls back to the configured `BlockRewardBeneficiary`
-        /// when there's no known/attested author (bootstrap / legacy 40-byte seals),
-        /// so the chain keeps emitting during transition.
+        /// gated on GPU attestation so **only attested GPU miners are paid** (the
+        /// "GPU-only" rule; an unattested author can't be paid and the reward
+        /// falls back to `BlockRewardBeneficiary`). This gate is *eligibility*, not
+        /// equalization — payout weight remains hashrate-proportional.
         pub(crate) fn distribute_block_rewards() {
             let reward = <CurrentBlockReward<T>>::get();
             if reward.is_zero() {
@@ -366,8 +382,25 @@ pub mod pallet {
                     .filter_map(|d| d.as_pre_runtime()),
             );
             let payee = match author {
-                Some(a) if T::GPUAttestation::attested_gflops(&a) > 0 => Some(a),
-                _ => <BlockRewardBeneficiary<T>>::get(),
+                Some(a) => {
+                    // Stake-free, PoW-verified "GPU-only" gate: count proven block
+                    // production. A seal-verified block authored IS proof of real GPU
+                    // work, so an account becomes pay-eligible after authoring
+                    // `MiningAttestationThreshold` blocks (or is grandfathered in via an
+                    // existing attestation). No stake is required.
+                    let authored = <BlocksAuthored<T>>::mutate(&a, |c| {
+                        *c = c.saturating_add(1);
+                        *c
+                    });
+                    if authored >= T::MiningAttestationThreshold::get()
+                        || T::GPUAttestation::attested_gflops(&a) > 0
+                    {
+                        Some(a)
+                    } else {
+                        <BlockRewardBeneficiary<T>>::get()
+                    }
+                }
+                None => <BlockRewardBeneficiary<T>>::get(),
             };
             if let Some(p) = payee {
                 // Mint through the canonical supply manager (enforces the 1B cap).
@@ -612,6 +645,7 @@ mod tests {
         pub const TestDifficultyWindow: u64 = 10;
         pub const TestPowMaxWeight: u64 = 200_000;
         pub const TestAlgoVersion: u32 = 1;
+        pub const TestMiningAttestationThreshold: u32 = 3;
     }
 
     // Mock hardware attestation so the capability gate can be exercised in tests.
@@ -653,6 +687,7 @@ mod tests {
         type Supply = MockSupply;
         type WeightInfo = ();
         type FindAuthor = MockAuthor;
+        type MiningAttestationThreshold = TestMiningAttestationThreshold;
     }
 
     pub fn new_test_ext() -> sp_io::TestExternalities {

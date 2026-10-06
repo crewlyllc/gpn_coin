@@ -283,10 +283,11 @@ pub mod pallet {
             compute_gflops: u64,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            ensure!(
-                <ProviderStake<T>>::contains_key(&who),
-                Error::<T>::InsufficientStake
-            );
+            // Staking is now OPTIONAL (carrot, not gate): a provider no longer needs a
+            // stake to attest. Real GPU verification is enforced by the mining path
+            // (seal-verified PoW) and, in phase 2, by a node-verified challenge. Staking
+            // remains available and raises the reward multiplier via the tier system.
+            // See design-verifiable-gpu-proof-2026-10-06.md.
 
             let mut tier = if gpu_count >= 16 {
                 AttestationTier::Gold
