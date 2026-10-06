@@ -1,5 +1,11 @@
 # GPN change-log
 
+## 2026-10-06 09:34 PT — monitor run: GREEN (probe clean, no new orphan, no restart)
+**Root-cause-first:** no problem found this run → no fix attempted. Provider log clean (no errors/panics; only normal claim/done + fast-path "healed leaked Pending" reconciles for #617–#620). Services active.
+**Probe:** POST /v1/chat/completions via AP :8092 → HTTP 200, chatcmpl-gpn-622, real 512-char answer (crypto hash fn), **WALL 1.26s warm** (<5s target MET). Claims: 1 for #622, no storm.
+**Jobs:** AP /jobs total 621 {Completed 394, Cancelled 222, Failed 1, Pending 4}. Pending = pre-existing {305,306,345,568} (Oct-5 AP restart lost janitor set + #568 fast-AP desync orphan) → **NO new Pending orphan** this run.
+**Result:** GREEN / NOT DONE. No fix, no restart. Open items unchanged (expire_job WASM set_code + Root; desync allocator re-seed; explorer reqwest-timeout fix; Windows rejoin).
+
 ## 2026-10-06 08:29–08:31 PT — monitor run: GREEN (no new orphan, no restart)
 **Evidence:** 9 gpn --user units active (provider PID 1098961, AP PID 1110762); ports 9944/30333/8081/8082/8092/8093/8094/11434 LISTEN; fleet active / gpn-node inactive (superseded); head 0xfbe5(64485) advancing; canonical WASM gpn_runtime.compact.compressed.wasm md5 d9d2b536 UNTOUCHED; tree clean @1938489; GPN_FAST_AP=1 (accesspoint.env) + GPN_FAST_CLAIM=1 (provider.env) intact.
 **e2e:** POST /v1/chat/completions via AP :8092 → HTTP 200, chatcmpl-gpn-607, real answer, **WALL 1.56s** (<5s target MET). `journalctl -u gpn-provider` 0 errors/panics (last 15m); provider served #590–#607 cleanly.
