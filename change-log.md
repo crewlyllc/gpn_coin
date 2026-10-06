@@ -267,3 +267,17 @@ expire_job janitor follow-up.
 - Jobs: AP /jobs total 607 {Completed 380, Cancelled 222, Failed 1, Pending 4} → no new Pending orphan this run.
 - On-chain Pending = 4 pre-existing: {305,306,345 (Oct-5 AP restart lost janitor in-memory set) + #568 (06:21 fast-AP desync orphan)}; no throughput impact.
 - Fix applied: none needed. No restart (no hang/deadlock; restart would drop the janitor in-memory set → more orphans). Open with Jeremy: id-desync allocator re-seed + item (8) expire_job spec-8 WASM. STATUS GREEN / NOT DONE.
+
+## 2026-10-06 08:45 PT — monitor run: GREEN (probe clean, no new orphan, no restart)
+- Evidence: gpn-provider active (PID 1098961 up since 10-05 13:56 ~18.8h, NRestarts=0); `journalctl --user -u gpn-provider -n 15` 0 errors/panics (only idempotent heals #606–#608); GPN_FAST_CLAIM=1 + GPN_FAST_AP=1 intact (~/.gpn/provider.env, accesspoint.env).
+- Probe: job #610 (AP :8092 /v1/chat/completions, llama3.2:1b, ~500-char Rayleigh prompt) HTTP 200 (chatcmpl-gpn-610) real coherent 412-char answer, WALL 1.56s (<5s MET, ~64 tok/s est). Provider claimed #610 == AP id → no fresh leak. ~1 claim/request (#607–#610), no storm, tx pool drained.
+- Jobs: AP /jobs total 609 {Completed 382, Cancelled 222, Pending 4, Failed 1} → no new Pending orphan this run.
+- On-chain Pending = 4 pre-existing: {305,306,345 (Oct-5 AP restart lost janitor in-memory set) + #568 (06:21 fast-AP desync orphan)}; no throughput impact.
+- Fix applied: none needed. No restart (no hang/deadlock; restart would drop the janitor in-memory set → more orphans). Open with Jeremy: id-desync allocator re-seed + item (8) expire_job spec-8 WASM. STATUS GREEN / NOT DONE.
+
+## 2026-10-06 08:49 PT — monitor run: GREEN (probe clean, no new orphan, no restart)
+- Evidence: gpn-provider active (PID 1098961 up since 10-05 13:56 ~18.9h, NRestarts=0); `journalctl --user -u gpn-provider` 25m sweep 0 errors/panics (9 idempotent heals #606–#610 only); chain RPC head 0xfcdd (64733) advancing; tree clean; GPN_FAST_CLAIM=1 + GPN_FAST_AP=1 intact (~/.gpn/provider.env, accesspoint.env); AP /health {providers:1,status:ok}, heartbeat :8093 ok.
+- Probe: job #611 (AP :8092 /v1/chat/completions, llama3.2:1b, Rayleigh prompt) HTTP 200 (chatcmpl-gpn-611) real coherent answer, WALL 3.71s (<5s MET). Provider claimed #611 == AP id → no fresh leak. ~1 claim/request, no storm.
+- Jobs: AP /jobs total 609 {Completed 382, Cancelled 222, Pending 4, Failed 1} → no new Pending orphan this run.
+- On-chain Pending = 4 pre-existing: {305,306,345 (Oct-5 AP restart lost janitor in-memory set) + #568 (06:21 fast-AP desync orphan)}; no throughput impact.
+- Fix applied: none needed. No restart (no hang/deadlock; restart would drop the janitor in-memory set → more orphans). Open with Jeremy: id-desync allocator re-seed + item (8) expire_job spec-8 WASM. STATUS GREEN / NOT DONE.
