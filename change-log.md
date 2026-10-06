@@ -377,3 +377,10 @@ expire_job janitor follow-up.
 - Probe: job #627 (AP :8092 /v1/chat/completions, llama3.2:1b, ~500-char hash-integrity prompt) HTTP 200 (chatcmpl-gpn-627) real coherent 601-char answer, WALL 1.26s (<5s MET, warm). Provider claimed #627 == AP id → no fresh leak. 1 claim/request, no storm.
 - Jobs: AP /jobs total 626 {Completed 399, Cancelled 222, Failed 1, Pending 4} → no new persistent orphan (#626 healed). Pending baseline = 4 pre-existing {305,306,345 (Oct-5 AP restart lost janitor set) + #568 (06:21 fast-AP desync orphan)}; no throughput impact. (/jobs still O(n) ~9s at n=626.)
 - Fix applied: none. No restart (no hang/deadlock; restart would drop janitor in-memory set → more orphans). Open with Jeremy: id-desync allocator re-seed + item (8) expire_job spec-8 WASM. STATUS GREEN / NOT DONE.
+
+## 2026-10-06 10:04 PT — monitor run: GREEN (probe clean, no new persistent orphan, no restart)
+- Evidence: 9 gpn units active; gpn-provider PID 1098961 up since 10-05 13:56 (~20.1h, NRestarts=0); `journalctl --user -u gpn-provider` 15m sweep 0 errors/panics (jobs #625–#628 clean + idempotent heals #621–#627→Completed); GPN_FAST_CLAIM=1 + GPN_FAST_AP=1 intact; AP :8092 /health {providers:1,status:ok}.
+- Probe: job #628 (AP :8092 /v1/chat/completions, llama3.2:1b, ~500-char Rayleigh prompt) HTTP 200 (chatcmpl-gpn-628) real coherent 441-char answer, WALL 1.57s (<5s MET, warm). Provider claimed #628 == AP id → no fresh leak. 1 claim/request, no storm.
+- Tx pool: `author_pendingExtrinsics` = 8 transient → drains (no backup). `txpool_status` still not exposed.
+- Jobs: AP /jobs total 627 {Completed 399, Cancelled 222, Failed 1, Pending 5}. #627 (09:59 probe) mid heal-cycle → transient, not a new persistent orphan. Pending baseline = 4 pre-existing {305,306,345 (Oct-5 AP restart lost janitor set) + #568 (06:21 fast-AP desync orphan)}; no throughput impact. (/jobs still O(n) ~9s at n=627.)
+- Fix applied: none. No restart (no hang/deadlock). Open with Jeremy: id-desync allocator re-seed + item (8) expire_job spec-8 WASM. STATUS GREEN / NOT DONE.
