@@ -355,6 +355,28 @@ parameter_types! {
     pub const MaxSupply: Balance = 1_000_000_000_000_000_000_000; // 1B GPN (12 decimals)
 }
 
+/// Reads the block PRODUCER's account from the PoW seal digest
+/// (`nonce(8) | mix(32) | author(32)`). `None` for legacy 40-byte seals, in which
+/// case `pallet-gpu-pow` falls back to the configured beneficiary. The PoW itself
+/// authenticates that work was done; the account is just the payout address
+/// (like a coinbase).
+pub struct GpnPowAuthor;
+impl frame_support::traits::FindAuthor<AccountId> for GpnPowAuthor {
+    fn find_author<'a, I>(digests: I) -> Option<AccountId>
+    where
+        I: 'a + IntoIterator<Item = (sp_runtime::ConsensusEngineId, &'a [u8])>,
+    {
+        for (id, data) in digests.into_iter() {
+            if id == sp_consensus_pow::POW_ENGINE_ID && data.len() >= 72 {
+                let mut b = [0u8; 32];
+                b.copy_from_slice(&data[40..72]);
+                return Some(AccountId::new(b));
+            }
+        }
+        None
+    }
+}
+
 impl pallet_gpu_pow::Config for Runtime {
     type Currency = Balances;
     type MinDifficulty = MinDifficulty;
@@ -372,6 +394,9 @@ impl pallet_gpu_pow::Config for Runtime {
     type GPUAttestation = GPUAttestation;
     // Benchmark-derived weights (workplan item 9).
     type WeightInfo = pallet_gpu_pow::weights::SubstrateWeight<Runtime>;
+    // Read the block producer from the PoW seal → pay the miner who produced
+    // the block (Bitcoin-style coinbase), gated by attestation.
+    type FindAuthor = GpnPowAuthor;
 }
 
 parameter_types! {

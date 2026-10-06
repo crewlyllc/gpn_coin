@@ -82,7 +82,13 @@ const DEV_EPOCH: usize = 0;
 /// The Ethash seal layout: 8-byte little-endian nonce ++ 32-byte mix hash.
 const SEAL_NONCE_LEN: usize = 8;
 const SEAL_MIX_LEN: usize = 32;
-const SEAL_LEN: usize = SEAL_NONCE_LEN + SEAL_MIX_LEN;
+/// The miner's AccountId (32 bytes) appended so the runtime can pay the block
+/// PRODUCER (Bitcoin-style coinbase). Legacy/external seals without it still
+/// verify (author then unknown → beneficiary fallback).
+const SEAL_AUTHOR_LEN: usize = 32;
+/// Legacy seal (nonce + mix) — the minimum `verify_seal` accepts.
+const SEAL_MIN_LEN: usize = SEAL_NONCE_LEN + SEAL_MIX_LEN;
+const SEAL_LEN: usize = SEAL_NONCE_LEN + SEAL_MIX_LEN + SEAL_AUTHOR_LEN;
 
 /// Lazily-built Ethash light cache for the dev epoch. Verification on every
 /// block import and mining both share this cache.
@@ -122,12 +128,14 @@ pub struct GPNPowAlgorithm {
 /// pre-hash, and require the computed mix hash to match AND the final hash to
 /// be below the target.
 fn verify_seal(pre_hash: &<Block as BlockT>::Hash, seal: &Seal, target: U256) -> bool {
-    if seal.len() != SEAL_LEN {
+    // Accept a legacy seal (nonce+mix = 40 bytes) or one that also carries the
+    // miner's account (72 bytes). Reject anything else.
+    if seal.len() != SEAL_MIN_LEN && seal.len() != SEAL_LEN {
         return false;
     }
     let nonce = u64::from_le_bytes(seal[..SEAL_NONCE_LEN].try_into().unwrap());
     let mut mix = [0u8; SEAL_MIX_LEN];
-    mix.copy_from_slice(&seal[SEAL_NONCE_LEN..SEAL_LEN]);
+    mix.copy_from_slice(&seal[SEAL_NONCE_LEN..SEAL_MIN_LEN]);
 
     let header_hash = ethereum_types::H256::from_slice(pre_hash.as_ref());
     let (computed_mix, result) = ethash::hashimoto_light(
@@ -466,7 +474,9 @@ pub fn new_full<
         *miner_worker_slot.lock().unwrap() = Some(worker.clone());
 
         if force_authoring {
-            spawn_miner(worker);
+            // The node's own wallet is its block-reward payout address (Bitcoin-style).
+            let author = mining_account(keystore_container.keystore().as_ref());
+            spawn_miner(worker, author);
         }
     }
 
@@ -504,14 +514,48 @@ fn gpu_yield_requested() -> bool {
 /// Tries the **GPU OpenCL miner first** (full dataset on the GPU). If no
 /// OpenCL GPU is available, falls back to the light-cache CPU miner so the
 /// node still produces blocks on machines without a GPU.
-fn spawn_miner(worker: MiningWorker) {
+fn spawn_miner(worker: MiningWorker, author: Option<[u8; 32]>) {
     match EthashGpuMiner::new(0) {
-        Ok(_) => spawn_gpu_miner(worker),
+        Ok(_) => spawn_gpu_miner(worker, author),
         Err(e) => {
             log::warn!("GPU miner unavailable ({e}); falling back to CPU light-cache miner");
-            spawn_cpu_miner(worker);
+            spawn_cpu_miner(worker, author);
         }
     }
+}
+
+/// Append the miner's account to a legacy (40-byte) seal so the runtime can
+/// credit the block producer. No-op if the seal already carries it or no author
+/// is known.
+fn seal_with_author(mut seal: Vec<u8>, author: Option<[u8; 32]>) -> Vec<u8> {
+    if let Some(a) = author {
+        if seal.len() == SEAL_MIN_LEN {
+            seal.extend_from_slice(&a);
+        }
+    }
+    seal
+}
+
+/// The node's own mining payout account: `GPN_MINER_ACCOUNT` (0x-hex) if set,
+/// else the first sr25519 key in its keystore. `None` → the runtime falls back to
+/// the configured `BlockRewardBeneficiary`.
+fn mining_account(keystore: &dyn sp_keystore::Keystore) -> Option<[u8; 32]> {
+    if let Ok(h) = std::env::var("GPN_MINER_ACCOUNT") {
+        if let Ok(b) = hex::decode(h.trim_start_matches("0x")) {
+            if let Ok(a) = <[u8; 32]>::try_from(b.as_slice()) {
+                return Some(a);
+            }
+        }
+    }
+    for id in [*b"aura", *b"gran", *b"babe", *b"gpu!", *b"acco", *b"imol"] {
+        if let Some(p) =
+            sp_keystore::Keystore::sr25519_public_keys(keystore, sp_core::crypto::KeyTypeId(id))
+                .first()
+        {
+            return Some(p.0);
+        }
+    }
+    None
 }
 
 /// GPU miner: build the full Ethash dataset on the GPU once, then loop over
@@ -519,7 +563,7 @@ fn spawn_miner(worker: MiningWorker) {
 /// The node's `verify_seal` recomputes with `hashimoto_light`, so the GPU's
 /// full-DAG solution is accepted as long as mix + result match (they do — the
 /// miner self-validates against the `ethash` crate reference).
-fn spawn_gpu_miner(worker: MiningWorker) {
+fn spawn_gpu_miner(worker: MiningWorker, author: Option<[u8; 32]>) {
     std::thread::Builder::new()
         .name("gpn-gpu-miner".into())
         .spawn(move || {
@@ -575,7 +619,7 @@ fn spawn_gpu_miner(worker: MiningWorker) {
 
                     match miner.mine_batch(&dag, &header, &target_le, nonce, GPU_BATCH) {
                         Ok(Some(seal)) => {
-                            let seal_bytes = seal.to_seal_bytes();
+                            let seal_bytes = seal_with_author(seal.to_seal_bytes(), author);
                             let _ = futures::executor::block_on(worker.submit(seal_bytes));
                             nonce = nonce.wrapping_add(GPU_BATCH as u64);
                         }
@@ -597,7 +641,7 @@ fn spawn_gpu_miner(worker: MiningWorker) {
 }
 
 /// Light-cache CPU miner fallback (no GPU available).
-fn spawn_cpu_miner(worker: MiningWorker) {
+fn spawn_cpu_miner(worker: MiningWorker, author: Option<[u8; 32]>) {
     std::thread::Builder::new()
         .name("gpn-cpu-miner".into())
         .spawn(move || {
@@ -621,6 +665,9 @@ fn spawn_cpu_miner(worker: MiningWorker) {
                             let mut seal = Vec::with_capacity(SEAL_LEN);
                             seal.extend_from_slice(&nonce.to_le_bytes());
                             seal.extend_from_slice(mix.as_bytes());
+                            if let Some(a) = author {
+                                seal.extend_from_slice(&a);
+                            }
                             let _ = futures::executor::block_on(worker.submit(seal));
                             nonce = nonce.wrapping_add(1);
                             break;
@@ -673,7 +720,7 @@ mod seal_tests {
             b
         });
         let seal = make_seal(&pre_hash, target);
-        assert_eq!(seal.len(), SEAL_LEN, "seal must be exactly 40 bytes");
+        assert_eq!(seal.len(), SEAL_MIN_LEN, "legacy seal is nonce+mix");
         assert!(
             verify_seal(&pre_hash.into(), &seal, target),
             "valid seal rejected"
@@ -712,7 +759,7 @@ mod seal_tests {
         let good = make_seal(&pre_hash, target);
 
         // Too short (39 bytes).
-        let short: Vec<u8> = good[..SEAL_LEN - 1].to_vec();
+        let short: Vec<u8> = good[..SEAL_MIN_LEN - 1].to_vec();
         assert!(
             !verify_seal(&pre_hash.into(), &short, target),
             "short seal accepted"

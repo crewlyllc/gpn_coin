@@ -87,6 +87,11 @@ pub mod pallet {
         type GPUAttestation: GPUAttestationProvider<Self::AccountId>;
         /// Weight information for extrinsics in this pallet (workplan item 9).
         type WeightInfo: WeightInfo;
+        /// Reads the block PRODUCER's account from the PoW seal digest, so the
+        /// block reward is paid to the miner who produced the block (Bitcoin-style
+        /// coinbase) instead of a separate claim. `None` = unknown/legacy seal →
+        /// fall back to `BlockRewardBeneficiary`.
+        type FindAuthor: frame_support::traits::FindAuthor<Self::AccountId>;
     }
 
     #[pallet::pallet]
@@ -341,58 +346,35 @@ pub mod pallet {
     }
 
     impl<T: Config> Pallet<T> {
-        /// Pay this block's emission once (item 4).
+        /// Pay this block's emission once, to the block's PRODUCER.
         ///
-        /// Precedence: a manual claim recorded by `submit_solution` in the
-        /// *previous* block is honoured first; otherwise the configured
-        /// [`BlockRewardBeneficiary`] is auto-credited. Exactly one reward is
-        /// minted per block, so the manual and automatic paths can never
-        /// double-pay.
-        fn distribute_block_rewards() {
-            if !Self::distribute_pending_rewards() {
-                Self::accrue_block_reward();
-            }
-        }
-
-        /// Auto-wired block-reward accrual: mint the current block reward to
-        /// the configured beneficiary. No-op when no beneficiary is set, the
-        /// reward is zero, or the canonical supply cap is reached.
-        pub(crate) fn accrue_block_reward() {
-            let beneficiary = match <BlockRewardBeneficiary<T>>::get() {
-                Some(b) => b,
-                None => return,
-            };
+        /// Bitcoin-style: the miner that produced the block earns its reward. The
+        /// author is read from the PoW seal digest via `FindAuthor`; the payout is
+        /// gated on GPU attestation so **1 GPU = 1 reward** (an unattested author
+        /// can't be paid). Falls back to the configured `BlockRewardBeneficiary`
+        /// when there's no known/attested author (bootstrap / legacy 40-byte seals),
+        /// so the chain keeps emitting during transition.
+        pub(crate) fn distribute_block_rewards() {
             let reward = <CurrentBlockReward<T>>::get();
             if reward.is_zero() {
                 return;
             }
-            // Mint through the canonical supply manager (enforces the 1B cap).
-            if T::Supply::mint_within_cap(&beneficiary, reward) {
-                Self::deposit_event(Event::<T>::BlockRewardPaid {
-                    miner: beneficiary,
-                    reward,
-                });
-            }
-        }
-
-        /// Distribute a pending reward recorded by `submit_solution`.
-        /// Returns `true` when a manual claim was present (regardless of
-        /// whether it minted), so the caller can skip auto-accrual.
-        pub(crate) fn distribute_pending_rewards() -> bool {
-            let miner = match <PendingRewardBeneficiary<T>>::take() {
-                Some(m) => m,
-                None => return false,
+            let author = <T::FindAuthor as frame_support::traits::FindAuthor<T::AccountId>>::find_author(
+                frame_system::Pallet::<T>::digest()
+                    .logs
+                    .iter()
+                    .filter_map(|d| d.as_seal()),
+            );
+            let payee = match author {
+                Some(a) if T::GPUAttestation::attested_gflops(&a) > 0 => Some(a),
+                _ => <BlockRewardBeneficiary<T>>::get(),
             };
-            let reward = <PendingBlockRewards<T>>::take();
-            if !reward.is_zero() {
-                // Mint through the canonical supply manager; it enforces the
-                // global cap and updates the single `TotalMinted` counter.
-                // Returns false (no-op) when the cap would be exceeded.
-                if T::Supply::mint_within_cap(&miner, reward) {
-                    Self::deposit_event(Event::<T>::BlockRewardPaid { miner, reward });
+            if let Some(p) = payee {
+                // Mint through the canonical supply manager (enforces the 1B cap).
+                if T::Supply::mint_within_cap(&p, reward) {
+                    Self::deposit_event(Event::<T>::BlockRewardPaid { miner: p, reward });
                 }
             }
-            true
         }
 
         pub fn adjust_difficulty(parent_difficulty: U256, actual_time: u64) -> U256 {
@@ -643,6 +625,20 @@ mod tests {
         }
     }
 
+    // Mock block-author source: returns whatever MOCK_AUTHOR is set to.
+    thread_local! {
+        pub static MOCK_AUTHOR: std::cell::Cell<Option<u64>> = std::cell::Cell::new(None);
+    }
+    pub struct MockAuthor;
+    impl frame_support::traits::FindAuthor<u64> for MockAuthor {
+        fn find_author<'a, I>(_digests: I) -> Option<u64>
+        where
+            I: 'a + IntoIterator<Item = (sp_runtime::ConsensusEngineId, &'a [u8])>,
+        {
+            MOCK_AUTHOR.with(|c| c.get())
+        }
+    }
+
     impl crate::pallet::Config for Test {
         type Currency = Balances;
         type GPUAttestation = MockAttestation;
@@ -656,6 +652,7 @@ mod tests {
         type AlgorithmVersion = TestAlgoVersion;
         type Supply = MockSupply;
         type WeightInfo = ();
+        type FindAuthor = MockAuthor;
     }
 
     pub fn new_test_ext() -> sp_io::TestExternalities {
@@ -807,32 +804,30 @@ mod tests {
 
     #[test]
     fn test_reward_distribution() {
+        // Bitcoin-style: the block PRODUCER (FindAuthor) is paid, gated on attestation.
         new_test_ext().execute_with(|| {
             let miner = 42u64;
             let initial_balance = pallet_balances::Pallet::<Test>::free_balance(miner);
-            let sol = EthashSolution {
-                nonce: 1,
-                mix_hash: [0u8; 32],
-                solution_hash: [0u8; 32],
-                algorithm_version: 1,
-            };
-            let work_data = (sol.nonce, sol.mix_hash, sol.algorithm_version);
-            let correct_hash = sp_io::hashing::blake2_256(&work_data.encode());
-            let valid_solution = EthashSolution {
-                solution_hash: correct_hash,
-                ..sol
-            };
-            GpuPowPallet::submit_solution(
-                RuntimeOrigin::signed(miner),
-                valid_solution,
-                TestMaxDifficulty::get(),
-            )
-            .unwrap();
-            GpuPowPallet::distribute_pending_rewards();
+            MOCK_AUTHOR.with(|c| c.set(Some(miner)));
+            GpuPowPallet::distribute_block_rewards();
             let new_balance = pallet_balances::Pallet::<Test>::free_balance(miner);
             assert_eq!(new_balance, initial_balance + TestInitialReward::get());
-            assert_eq!(PendingBlockRewards::<Test>::get(), 0);
-            assert!(PendingRewardBeneficiary::<Test>::get().is_none());
+        });
+    }
+
+    #[test]
+    fn test_unattested_author_falls_back_to_beneficiary() {
+        new_test_ext().execute_with(|| {
+            // No author known → fall back to the configured beneficiary.
+            let ben = 7u64;
+            BlockRewardBeneficiary::<Test>::put(ben);
+            MOCK_AUTHOR.with(|c| c.set(None));
+            let before = pallet_balances::Pallet::<Test>::free_balance(ben);
+            GpuPowPallet::distribute_block_rewards();
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(ben),
+                before + TestInitialReward::get()
+            );
         });
     }
 
@@ -866,19 +861,8 @@ mod tests {
                 solution_hash: [0u8; 32],
                 algorithm_version: 1,
             };
-            let work_data = (sol.nonce, sol.mix_hash, sol.algorithm_version);
-            let correct_hash = sp_io::hashing::blake2_256(&work_data.encode());
-            let valid = EthashSolution {
-                solution_hash: correct_hash,
-                ..sol
-            };
-            GpuPowPallet::submit_solution(
-                RuntimeOrigin::signed(miner),
-                valid,
-                TestMaxDifficulty::get(),
-            )
-            .unwrap();
-            GpuPowPallet::distribute_pending_rewards();
+            MOCK_AUTHOR.with(|c| c.set(Some(miner)));
+            GpuPowPallet::distribute_block_rewards();
             assert_eq!(MockSupply::total_issued(), TestInitialReward::get());
         });
     }
@@ -911,7 +895,8 @@ mod tests {
             )
             .unwrap();
             // Distribute should silently skip due to supply cap
-            GpuPowPallet::distribute_pending_rewards();
+            MOCK_AUTHOR.with(|c| c.set(Some(miner)));
+            GpuPowPallet::distribute_block_rewards();
             // Balance unchanged
             assert_eq!(
                 pallet_balances::Pallet::<Test>::free_balance(miner),
@@ -1021,37 +1006,28 @@ mod tests {
         });
     }
 
-    /// A manual claim takes precedence: the block is paid exactly once, not
-    /// twice (app + auto).
+    /// Bitcoin-style: the block PRODUCER (author) is paid; the configured
+    /// beneficiary is NOT (no double-pay).
     #[test]
-    fn test_manual_claim_takes_precedence_over_auto() {
+    fn test_author_paid_over_beneficiary() {
         new_test_ext().execute_with(|| {
-            let auto_miner = 7u64;
-            let manual_miner = 42u64;
-            GpuPowPallet::set_block_beneficiary(RuntimeOrigin::root(), auto_miner).unwrap();
-
-            // Manual claim recorded during block 1...
-            GpuPowPallet::submit_solution(
-                RuntimeOrigin::signed(manual_miner),
-                valid_solution(1),
-                TestMaxDifficulty::get(),
-            )
-            .unwrap();
-
-            // ...paid at the next block, and the auto path is skipped.
+            let beneficiary = 7u64;
+            let author = 42u64;
+            GpuPowPallet::set_block_beneficiary(RuntimeOrigin::root(), beneficiary).unwrap();
+            MOCK_AUTHOR.with(|c| c.set(Some(author)));
             System::set_block_number(2);
             GpuPowPallet::on_initialize(2);
 
             let reward = TestInitialReward::get();
             assert_eq!(
-                pallet_balances::Pallet::<Test>::free_balance(manual_miner),
+                pallet_balances::Pallet::<Test>::free_balance(author),
                 reward,
-                "manual claimant paid exactly once"
+                "block author paid exactly once"
             );
             assert_eq!(
-                pallet_balances::Pallet::<Test>::free_balance(auto_miner),
+                pallet_balances::Pallet::<Test>::free_balance(beneficiary),
                 0,
-                "auto beneficiary must not also be paid"
+                "beneficiary must not also be paid"
             );
             assert_eq!(MockSupply::total_issued(), reward);
         });
