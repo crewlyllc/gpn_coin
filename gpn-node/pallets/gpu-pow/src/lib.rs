@@ -363,7 +363,7 @@ pub mod pallet {
                 frame_system::Pallet::<T>::digest()
                     .logs
                     .iter()
-                    .filter_map(|d| d.as_seal()),
+                    .filter_map(|d| d.as_pre_runtime()),
             );
             let payee = match author {
                 Some(a) if T::GPUAttestation::attested_gflops(&a) > 0 => Some(a),

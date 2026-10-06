@@ -459,7 +459,10 @@ pub fn new_full<
             proposer_factory,
             sync_service.clone(),
             sync_service,
-            Some(POW_ENGINE_ID.to_vec()),
+            // The node's payout account goes in the block's PRE-runtime digest, so
+            // it's known deterministically at execution time → the block producer
+            // is paid (Bitcoin-style coinbase), gated by attestation.
+            mining_account(keystore_container.keystore().as_ref()).map(|a| a.to_vec()),
             create_inherent_data_providers(),
             Duration::from_secs(2),
             Duration::from_secs(1),

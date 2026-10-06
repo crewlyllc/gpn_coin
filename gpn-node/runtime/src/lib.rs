@@ -123,7 +123,7 @@ pub const VERSION: sp_version::RuntimeVersion = sp_version::RuntimeVersion {
     spec_name: create_runtime_str!("gpn"),
     impl_name: create_runtime_str!("gpn"),
     authoring_version: 1,
-    spec_version: 6,
+    spec_version: 10,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 1,
@@ -355,11 +355,10 @@ parameter_types! {
     pub const MaxSupply: Balance = 1_000_000_000_000_000_000_000; // 1B GPN (12 decimals)
 }
 
-/// Reads the block PRODUCER's account from the PoW seal digest
-/// (`nonce(8) | mix(32) | author(32)`). `None` for legacy 40-byte seals, in which
-/// case `pallet-gpu-pow` falls back to the configured beneficiary. The PoW itself
-/// authenticates that work was done; the account is just the payout address
-/// (like a coinbase).
+/// Reads the block PRODUCER's account from the PoW **pre-runtime** digest
+/// (`DigestItem::PreRuntime(POW_ENGINE_ID, author32)`), which the mining worker
+/// stamps into every block. Pre-runtime (unlike the seal) is present when the
+/// block executes, so the reward is deterministic. `None` → beneficiary fallback.
 pub struct GpnPowAuthor;
 impl frame_support::traits::FindAuthor<AccountId> for GpnPowAuthor {
     fn find_author<'a, I>(digests: I) -> Option<AccountId>
@@ -367,9 +366,9 @@ impl frame_support::traits::FindAuthor<AccountId> for GpnPowAuthor {
         I: 'a + IntoIterator<Item = (sp_runtime::ConsensusEngineId, &'a [u8])>,
     {
         for (id, data) in digests.into_iter() {
-            if id == sp_consensus_pow::POW_ENGINE_ID && data.len() >= 72 {
+            if id == sp_consensus_pow::POW_ENGINE_ID && data.len() >= 32 {
                 let mut b = [0u8; 32];
-                b.copy_from_slice(&data[40..72]);
+                b.copy_from_slice(&data[..32]);
                 return Some(AccountId::new(b));
             }
         }
