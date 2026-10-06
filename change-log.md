@@ -1,5 +1,13 @@
 # GPN change-log
 
+## 2026-10-06 08:29–08:31 PT — monitor run: GREEN (no new orphan, no restart)
+**Evidence:** 9 gpn --user units active (provider PID 1098961, AP PID 1110762); ports 9944/30333/8081/8082/8092/8093/8094/11434 LISTEN; fleet active / gpn-node inactive (superseded); head 0xfbe5(64485) advancing; canonical WASM gpn_runtime.compact.compressed.wasm md5 d9d2b536 UNTOUCHED; tree clean @1938489; GPN_FAST_AP=1 (accesspoint.env) + GPN_FAST_CLAIM=1 (provider.env) intact.
+**e2e:** POST /v1/chat/completions via AP :8092 → HTTP 200, chatcmpl-gpn-607, real answer, **WALL 1.56s** (<5s target MET). `journalctl -u gpn-provider` 0 errors/panics (last 15m); provider served #590–#607 cleanly.
+**On-chain (substrate-interface query_map ComputeMarketplace::Jobs):** {Completed 379, Cancelled 222, Failed 1, **Pending 4**} = {305,306,345,568} → **NO new orphan**. NextJobId=607.
+**Observation (known, no impact):** AP-side `llm_store.json` holds 25 `queued` entries (incl. speculative predicted ids 608–625 ahead of chain NextJobId=607, plus 568 and old 282/342/376–380) — the already-documented client-side stale-job janitor gap = item (8); off-chain only, no on-chain escrow leak, no throughput impact. `gpn-explorer` :8082 still hangs on all routes (known reqwest no-timeout + serial loop).
+**Fix applied this run:** none (pipeline GREEN; no genuine hang/deadlock; no code change). Open: (8) expire_job spec-8 WASM build/set_code + Root (needs MAIN/Jeremy); desync allocator re-seed proposal (06:30) still unapproved — MAIN not reachable from this cron session; (6) Windows rejoin needs Jeremy.
+**Result:** GREEN / NOT DONE. No restart.
+
 ## 2026-10-06 06:39–06:42 PT — monitor run: GREEN (no new orphan, no restart). Model-validation + explorer hang re-confirmed as expected/known.
 
 **Evidence:**
