@@ -330,3 +330,10 @@ expire_job janitor follow-up.
 - Jobs: AP /jobs total 619 {Completed 391, Cancelled 222, Failed 1, Pending 4} → no new Pending orphan this run. (/jobs still O(n) ~9s at n=619.)
 - Pending = 4 pre-existing {305,306,345 (Oct-5 AP restart lost janitor set) + #568 (06:21 fast-AP desync orphan)}; no throughput impact.
 - Fix applied: none. No restart (no hang/deadlock). Open with Jeremy: id-desync allocator re-seed + item (8) expire_job spec-8 WASM. STATUS GREEN / NOT DONE.
+
+## 2026-10-06 09:29 PT — monitor run: GREEN (probe clean, no new orphan, no restart)
+- Evidence: 9 gpn units active; gpn-provider PID 1098961 up since 10-05 13:56 (~19.6h, NRestarts=0); `journalctl --user -u gpn-provider` 15m sweep 0 errors/panics (jobs #620–#621 clean + idempotent heals #617–#619→Completed); chain RPC :9944 head 0xfeb3 (65203) advancing; GPN_FAST_CLAIM=1 + GPN_FAST_AP=1 intact; AP :8092 /health {providers:1,status:ok}; canonical runtime WASM untouched.
+- Probe: job #621 (AP :8092 /v1/chat/completions, llama3.2:1b, Rayleigh prompt) HTTP 200 (chatcmpl-gpn-621) real coherent 1091-char answer, WALL 3.97s (<5s MET). Provider claimed #621 == AP id → no fresh leak. ~1 claim/request, no storm.
+- Jobs: AP /jobs total 619 {Completed 392, Cancelled 222, Failed 1, Pending 4} → no new Pending orphan this run. (/jobs still O(n) ~9s.)
+- Pending = 4 pre-existing {305,306,345 (Oct-5 AP restart lost janitor set) + #568 (06:21 fast-AP desync orphan)}; no throughput impact.
+- Fix applied: none. No restart (no hang/deadlock). Open with Jeremy: id-desync allocator re-seed + item (8) expire_job spec-8 WASM. STATUS GREEN / NOT DONE.
