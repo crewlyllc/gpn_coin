@@ -426,3 +426,9 @@ expire_job janitor follow-up.
 - Probe: job #636 (AP :8092 /v1/chat/completions, llama3.2:1b, ~500-char Merkle-tree prompt) HTTP 200 (chatcmpl-gpn-636) real coherent 360-char answer, WALL 1.26s (<5s MET, warm). Provider claimed #636 == AP id → no fresh leak. 1 claim/request, no storm.
 - Jobs: AP /jobs total 634 {Completed 407, Cancelled 222, Failed 1, Pending 4}; Pending ids == exactly {305,306,345,568} (4 pre-existing baseline) → no new persistent orphan, no throughput impact. (/jobs still O(n).)
 - Fix applied: none. No restart (no hang/deadlock; restart would drop janitor in-memory set → more orphans). Open with Jeremy: id-desync allocator re-seed + item (8) expire_job spec-8 WASM. STATUS GREEN / NOT DONE.
+
+## 2026-10-06 10:44 PT — monitor run: GREEN (probe clean, no new persistent orphan, no restart)
+- Evidence: gpn-provider + gpn-accesspoint active (PID 1098961 up since 10-05 13:56, NRestarts=0); `journalctl --user -u gpn-provider` sweep: jobs #635/#636 clean + idempotent heals #633/#634→Completed; one benign tx-pool race `Priority is too low: (2669 vs 2666)` on reconcile #635 start → self-resolved, `#635 Accepted → Completed (capacity freed)`; 0 panics/fatal; GPN_FAST_CLAIM=1 + GPN_FAST_AP=1 intact; AP :8092 /health ok.
+- Probe: job #637 (AP :8092 /v1/chat/completions, llama3.2:1b, ~500-char Rayleigh/blue-sky prompt) HTTP 200 (chatcmpl-gpn-637) coherent 457-char answer, WALL 4.57s (<5s MET). Provider claimed #637 == AP id → no fresh leak. 1 claim/request, no storm.
+- Jobs: AP /jobs total 636 {Completed 409, Cancelled 222, Failed 1, Pending 4}; Pending ids == exactly {305,306,345,568} (4 pre-existing baseline) → no new persistent orphan, no throughput impact. (/jobs still O(n).)
+- Fix applied: none. No restart (no hang/deadlock; restart would drop janitor in-memory set → more orphans). Open with Jeremy: id-desync allocator re-seed + item (8) expire_job spec-8 WASM. STATUS GREEN / NOT DONE.
