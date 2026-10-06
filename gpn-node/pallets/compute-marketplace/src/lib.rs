@@ -227,6 +227,11 @@ pub mod pallet {
         JobCancelled {
             job_id: u64,
         },
+        /// A non-terminal job passed its `created_at + max_duration` deadline and
+        /// was reclaimed permissionlessly; escrow refunded to the requestor.
+        JobExpired {
+            job_id: u64,
+        },
         ProviderRegistered {
             who: T::AccountId,
         },
@@ -256,6 +261,8 @@ pub mod pallet {
         /// The provider's attested compute throughput (GFLOPS) is below the
         /// job's `min_gflops` requirement — it cannot honestly serve this job.
         ProviderComputeInsufficient,
+        /// `expire_job` was called before `created_at + max_duration` elapsed.
+        JobNotExpired,
     }
 
     // Hooks
@@ -728,6 +735,62 @@ pub mod pallet {
             }
 
             Self::deposit_event(Event::<T>::JobFailed { job_id, reason });
+            Ok(())
+        }
+
+        /// `expire_job(job_id)` — **permissionless** reclaim of a job that has
+        /// outlived its deadline. Unlike `cancel_job` (requestor-only) and
+        /// `fail_job` (provider-or-requestor), **any signed account** may call
+        /// this. It wires up the previously-dead `created_at` + `max_duration`
+        /// fields: allowed only once `now > created_at + max_duration`, and for
+        /// any non-terminal state (Pending/Accepted/Running/AwaitingVerification),
+        /// so a requestor that goes away or a provider that dies can no longer
+        /// hold a global `ActiveJobCount` slot forever. Escrow is refunded to the
+        /// requestor and `ActiveJobCount` is decremented; emits `JobExpired`.
+        #[pallet::call_index(9)]
+        #[pallet::weight(<T as Config>::WeightInfo::expire_job())]
+        pub fn expire_job(origin: OriginFor<T>, job_id: u64) -> DispatchResult {
+            let _who = ensure_signed(origin)?;
+            let mut job = <Jobs<T>>::get(job_id).ok_or(Error::<T>::JobNotFound)?;
+            ensure!(
+                !matches!(
+                    job.state,
+                    JobState::Completed | JobState::Cancelled | JobState::Failed
+                ),
+                Error::<T>::JobNotRunning
+            );
+            let requestor = <JobRequestor<T>>::get(job_id).ok_or(Error::<T>::JobNotFound)?;
+
+            let now: u32 = frame_system::Pallet::<T>::block_number()
+                .try_into()
+                .unwrap_or(0);
+            let deadline = job.created_at.saturating_add(job.max_duration);
+            ensure!(now > deadline, Error::<T>::JobNotExpired);
+
+            job.state = JobState::Failed;
+            <Jobs<T>>::insert(job_id, job);
+            <ActiveJobCount<T>>::mutate(|c| *c = c.saturating_sub(1));
+
+            // Refund the full escrow to the requestor (no work delivered).
+            if let Some(escrow) = <JobEscrow<T>>::take(job_id) {
+                T::Currency::transfer(
+                    &Self::account_id(),
+                    &requestor,
+                    escrow,
+                    ExistenceRequirement::AllowDeath,
+                )?;
+            }
+            // Free capacity slots (mirror fail_job/cancel_job).
+            if let Some(provider) = <JobProvider<T>>::take(job_id) {
+                let mut pj = <ProviderJobs<T>>::get(&provider);
+                pj.retain(|&id| id != job_id);
+                <ProviderJobs<T>>::insert(&provider, pj);
+            }
+            let mut rj = <RequestorJobs<T>>::get(&requestor);
+            rj.retain(|&id| id != job_id);
+            <RequestorJobs<T>>::insert(&requestor, rj);
+
+            Self::deposit_event(Event::<T>::JobExpired { job_id });
             Ok(())
         }
     }
@@ -1242,6 +1305,39 @@ mod tests {
             MarketPallet::fail_job(RuntimeOrigin::signed(ALICE), j2, 2).unwrap();
             assert_eq!(Jobs::<Test>::get(j2).unwrap().state, JobState::Failed);
             assert_eq!(ActiveJobCount::<Test>::get(), 0);
+        });
+    }
+
+    #[test]
+    fn test_expire_job_permissionless_refunds_and_frees_slot() {
+        new_test_ext().execute_with(|| {
+            // Helper create_job uses max_duration = 100, created at block 1,
+            // so the deadline is block 101.
+            let job_id = create_job(ALICE);
+            assert_eq!(ActiveJobCount::<Test>::get(), 1);
+            let before = pallet_balances::Pallet::<Test>::free_balance(ALICE);
+
+            // Before the deadline it is NOT expirable, even by a stranger.
+            System::set_block_number(50);
+            assert_eq!(
+                MarketPallet::expire_job(RuntimeOrigin::signed(CAROL), job_id),
+                Err(Error::<Test>::JobNotExpired.into())
+            );
+
+            // Past the deadline ANY signed account (a third party) may reclaim it,
+            // the escrow is refunded and the global slot is freed.
+            System::set_block_number(200);
+            MarketPallet::expire_job(RuntimeOrigin::signed(CAROL), job_id).unwrap();
+            assert_eq!(Jobs::<Test>::get(job_id).unwrap().state, JobState::Failed);
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(ALICE),
+                before + 1_000
+            );
+            assert!(JobEscrow::<Test>::get(job_id).is_none());
+            assert_eq!(ActiveJobCount::<Test>::get(), 0);
+
+            // A terminal job cannot be expired again.
+            assert!(MarketPallet::expire_job(RuntimeOrigin::signed(CAROL), job_id).is_err());
         });
     }
 
