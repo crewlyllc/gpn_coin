@@ -1,5 +1,11 @@
 # GPN change-log
 
+## 2026-10-06 09:39 PT — monitor run: GREEN (probe clean, no new orphan, no restart)
+**Root-cause-first:** no problem found → no fix attempted. 9 gpn --user units active; gpn-provider PID 1098961 up since 10-05 13:56 (~19.7h, NRestarts=0); `journalctl -u gpn-provider` 12m sweep 0 errors/panics (jobs #622–#623 claim→done + idempotent fast-path heals #621/#622→Completed only); chain RPC :9944 head 0xff36 (65334) advancing; GPN_FAST_CLAIM=1 + GPN_FAST_AP=1 intact (~/.gpn/provider.env, accesspoint.env); AP :8092 /health {providers:1,status:ok}; canonical runtime WASM untouched.
+**Probe:** job #623 (AP :8092 /v1/chat/completions, llama3.2:1b, Rayleigh prompt) HTTP 200 (chatcmpl-gpn-623) real coherent 247-char answer, **WALL 3.67s** (<5s MET). Provider claimed #623 == AP id → no fresh leak. 1 claim/request, no storm.
+**Jobs:** AP /jobs total 621 {Completed 394, Cancelled 222, Failed 1, Pending 4}. Pending = pre-existing {305,306,345,568} (Oct-5 AP restart lost janitor set + #568 fast-AP desync orphan); #622 transient mid-flight, healed → Completed 09:40:09 → **NO new Pending orphan** this run.
+**Result:** GREEN / NOT DONE. No fix, no restart (no hang/deadlock). Open unchanged: (8) expire_job spec-8 WASM set_code + Root; desync allocator re-seed (needs MAIN); explorer reqwest-timeout fix; (6) Windows rejoin (needs Jeremy).
+
 ## 2026-10-06 09:34 PT — monitor run: GREEN (probe clean, no new orphan, no restart)
 **Root-cause-first:** no problem found this run → no fix attempted. Provider log clean (no errors/panics; only normal claim/done + fast-path "healed leaked Pending" reconciles for #617–#620). Services active.
 **Probe:** POST /v1/chat/completions via AP :8092 → HTTP 200, chatcmpl-gpn-622, real 512-char answer (crypto hash fn), **WALL 1.26s warm** (<5s target MET). Claims: 1 for #622, no storm.
