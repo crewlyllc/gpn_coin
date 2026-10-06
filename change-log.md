@@ -253,3 +253,10 @@ expire_job janitor follow-up.
 - Jobs: AP /jobs total 602, non-completed = 4 Pending → no new Pending orphan this run.
 - On-chain Pending = 4 pre-existing: {305,306,345 (Oct-5 AP restart lost janitor in-memory set) + #568 (06:21 fast-AP desync orphan)}; no throughput impact, tx pool draining.
 - Fix applied: none needed. No restart (no hang/deadlock; restart would drop the janitor in-memory set → more orphans). Open with Jeremy: id-desync allocator re-seed + item (8) expire_job spec-8 WASM. STATUS GREEN / NOT DONE.
+
+## 2026-10-06 08:35 PT — monitor run: GREEN (probe clean, no new orphan, no restart); /jobs latency noted
+- Evidence: 9 gpn units active; provider PID 1098961 up since 10-05 13:56 (~18.7h, NRestarts=0); `journalctl --user -u gpn-provider` 25m sweep 0 errors/panics (only idempotent heals #600–#606); chain RPC head 0xfc25 (64549) advancing; tree clean @cb7b8d4; GPN_FAST_CLAIM=1 + GPN_FAST_AP=1 intact (~/.gpn/provider.env, accesspoint.env); AP /health {providers:1,status:ok}, /providers + /mode + /job/{id} responsive.
+- Probe: job #608 (AP :8092 /v1/chat/completions, llama3.2:1b, ~500-char Rayleigh prompt) HTTP 200 (chatcmpl-gpn-608) real coherent 382-char answer, WALL 1.56s (<5s MET). Provider claimed #608 → no fresh leak. ~1 claim/request (#602–#608), no storm.
+- NEW OBSERVATION (not a fault): GET /jobs now takes ~9.2s (607 jobs) because the handler linear-scans 0..next_id with one sequential chain RPC per id (gpn_scheduler.rs L982). It crossed my 6s curl cap, so it LOOKED hung; re-probe with 90s cap returns HTTP 200 + 607 jobs. Root cause = O(n) sequential chain-query design at n=607, NOT a deadlock. No fix applied (behavior change would need review; handler is documented single-threaded by design).
+- Jobs: AP Pending = 4 pre-existing {305,306,345,568}, provider=None; no new Pending orphan this run.
+- Fix applied: none needed. No restart (no hang/deadlock; restart would drop the janitor in-memory set → more orphans). Open with Jeremy: id-desync allocator re-seed + item (8) expire_job spec-8 WASM; optional follow-up: /jobs could use /jobs/claimable or a pending-only filter to avoid the O(n) scan. STATUS GREEN / NOT DONE.
