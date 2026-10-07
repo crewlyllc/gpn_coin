@@ -52,6 +52,35 @@ impl Sr25519Signer {
             .map_err(|e| format!("invalid signer URI '{}': {}", uri, e))?;
         Ok(Self { pair })
     }
+
+    /// Build a signer from an already-constructed sr25519 pair (used by the
+    /// off-chain channel manager when both parties co-sign in one process).
+    pub fn from_pair(pair: sr25519::Pair) -> Self {
+        Self { pair }
+    }
+
+    /// Borrow the underlying pair (for `Pair::verify` and public-key reads).
+    pub fn pair(&self) -> &sr25519::Pair {
+        &self.pair
+    }
+}
+
+impl Sr25519Signer {
+    /// Sign an arbitrary 32-byte payload with the raw sr25519 key, returning the
+    /// 64-byte signature. Used by the off-chain escrow channel manager, whose
+    /// signatures are verified directly on-chain by `ChannelAuth` (sr25519 over
+    /// the domain-separated settle payload) — **not** wrapped in an extrinsic,
+    /// so the subxt `Signer` trait's extrinsic-signing path does not apply.
+    pub fn sign_raw(&self, payload: &[u8; 32]) -> [u8; 64] {
+        use sp_core::crypto::Pair as _;
+        self.pair.sign(payload).0
+    }
+
+    /// The account's ss58-less 32-byte public key (for `Channel` party matching).
+    pub fn public_key(&self) -> [u8; 32] {
+        use sp_core::crypto::Pair as _;
+        self.pair.public().0
+    }
 }
 
 impl Signer<GpnConfig> for Sr25519Signer {

@@ -23,6 +23,7 @@
 ///   (`10_000 == 100%`, `1_200 == 12%`).
 /// (Units are a design decision of the oracle pallet; the agent converts to the
 /// dollar / fraction / percent forms the profitability calculator expects.)
+pub mod channel;
 pub mod signer;
 
 use serde::{Deserialize, Serialize};
@@ -727,6 +728,81 @@ impl ChainClient {
             "ComputeMarketplace",
             "set_provider_endpoint",
             vec![Value::from_bytes(endpoint.as_bytes())],
+        )
+        .await
+    }
+
+    /// `ComputeMarketplace::open_channel(provider, amount, ttl)` — lock `amount`
+    /// of escrow on-chain for an off-chain payment channel to `provider`. The
+    /// chain sees only this open (+ the later close); per-job payments stay
+    /// off-chain (item #2, `design-offchain-escrow-channels.md`).
+    pub async fn open_channel(
+        &self,
+        provider: [u8; 32],
+        amount: u128,
+        ttl: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.submit_signed_call(
+            "ComputeMarketplace",
+            "open_channel",
+            vec![
+                Value::from_bytes(&provider),
+                Value::u128(amount),
+                Value::u128(ttl as u128),
+            ],
+        )
+        .await
+    }
+
+    /// `ComputeMarketplace::close_channel(...)` — cooperative close authorised by
+    /// BOTH parties' off-chain settle signatures (see `chain::channel`).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn close_channel(
+        &self,
+        channel_id: u64,
+        balance_requestor: u128,
+        balance_provider: u128,
+        nonce: u64,
+        sig_requestor: [u8; 64],
+        sig_provider: [u8; 64],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.submit_signed_call(
+            "ComputeMarketplace",
+            "close_channel",
+            vec![
+                Value::u128(channel_id as u128),
+                Value::u128(balance_requestor),
+                Value::u128(balance_provider),
+                Value::u128(nonce as u128),
+                Value::from_bytes(&sig_requestor),
+                Value::from_bytes(&sig_provider),
+            ],
+        )
+        .await
+    }
+
+    /// `ComputeMarketplace::force_close_channel(...)` — after the channel TTL, a
+    /// party settles with the **counterparty's** latest signed state (its own
+    /// authorization is implicit). Nonce monotonicity blocks replaying a stale
+    /// self-favoring state.
+    pub async fn force_close_channel(
+        &self,
+        channel_id: u64,
+        balance_requestor: u128,
+        balance_provider: u128,
+        nonce: u64,
+        sig_counterparty: [u8; 64],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.submit_signed_call(
+            "ComputeMarketplace",
+            "force_close_channel",
+            vec![
+                Value::u128(channel_id as u128),
+                Value::u128(balance_requestor),
+                Value::u128(balance_provider),
+                Value::u128(nonce as u128),
+                Value::from_bytes(&sig_counterparty),
+            ],
         )
         .await
     }
