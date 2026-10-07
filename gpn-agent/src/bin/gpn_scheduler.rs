@@ -113,6 +113,15 @@ fn alloc_predicted_job_id(chain_next: u64) -> u64 {
     cur
 }
 
+/// Realign the process-local allocator to a known-good on-chain id (never move it
+/// backwards). Call after a create is CONFIRMED so the allocator can't stay drifted
+/// ahead of the chain (the +1 id-desync bug: a create that didn't land still
+/// advanced the local counter, so every later label was one too high).
+fn reseed_alloc(next_id: u64) {
+    let mut g = NEXT_JOB_ID.lock().unwrap();
+    *g = Some(g.unwrap_or(0).max(next_id));
+}
+
 /// A known provider endpoint + its last-seen health.
 #[derive(Clone)]
 struct Provider {
@@ -632,32 +641,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     (false, 0u64)
                 } else if fast_ap {
                     let predicted = alloc_predicted_job_id(next_before);
-                    match rt.block_on(client.create_job_fast(
+                    let submit = rt.block_on(client.create_job_fast(
                         8192u32, 75u16, 1u8, 0u32, 150u64, "LLMInference", "Spot",
                         (1_000_000_000u128 * 512) as u128, 1_000_000_000u128, 512u32, 1000,
                         workload_hash,
-                    )) {
-                        Ok(()) => (true, predicted),
-                        Err(_) => {
-                            // The create may have landed despite a slow/!acked pool
-                            // submit. Confirm briefly (bounded — never a full block).
-                            let mut real: Option<u64> = None;
-                            let deadline = Instant::now() + Duration::from_millis(2000);
-                            while Instant::now() < deadline {
-                                let after = rt.block_on(client.get_next_job_id());
-                                if after > next_before {
-                                    real = Some(after - 1);
-                                    break;
-                                }
-                                std::thread::sleep(Duration::from_millis(200));
-                            }
-                            match real {
-                                // Only trust the chain id if it matches our
-                                // prediction — under concurrency `after-1` could
-                                // belong to a sibling request.
-                                Some(id) if id == predicted => (true, id),
-                                _ => (false, predicted),
-                            }
+                    ));
+                    // CONFIRM the real on-chain id (the source of truth). The AP is the sole
+                    // creator, so the create lands within ~1 block and NextJobId advances; our
+                    // id is the confirmed counter value. Then re-seed the allocator so it can't
+                    // stay drifted ahead of the chain. Bounded so it never stalls indefinitely.
+                    let mut real: Option<u64> = None;
+                    let deadline = Instant::now() + Duration::from_millis(6000);
+                    while Instant::now() < deadline {
+                        let after = rt.block_on(client.get_next_job_id());
+                        if after > next_before {
+                            real = Some(after - 1);
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(150));
+                    }
+                    match (submit, real) {
+                        // Created + confirmed: label with the REAL on-chain id, re-seed allocator.
+                        (Ok(()), Some(id)) | (Err(_), Some(id)) => {
+                            reseed_alloc(id + 1);
+                            (true, id)
+                        }
+                        // Submitted but not yet visible (rare): best-effort prediction.
+                        (Ok(()), None) => (true, predicted),
+                        // Not submitted and not visible: realign to the chain, declare failure.
+                        (Err(_), None) => {
+                            reseed_alloc(next_before);
+                            (false, next_before)
                         }
                     }
                 } else {
