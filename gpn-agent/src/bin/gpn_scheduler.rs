@@ -170,12 +170,34 @@ fn jpost(url: &str) -> Option<Value> {
 }
 
 /// Poll every provider's /status into the shared registry.
-fn refresh(registry: &Arc<Mutex<Vec<Provider>>>, urls: &Arc<Vec<String>>) {
+///
+/// The candidate set is the **union** of (a) any static `--providers` URLs and
+/// (b) providers DISCOVERED ON-CHAIN (`ComputeMarketplace::ProviderEndpoints`,
+/// item 1). On-chain discovery means a new provider becomes routable without
+/// editing the access point's config — it just advertises its endpoint with
+/// `set_provider_endpoint` and this loop picks it up. Entries that resolve to
+/// the same provider address are de-duplicated (keep the lowest-latency URL), so
+/// a node that is listed both statically and on-chain isn't counted twice.
+fn refresh(
+    registry: &Arc<Mutex<Vec<Provider>>>,
+    urls: &Arc<Vec<String>>,
+    client: Arc<ChainClient>,
+    rt: Arc<tokio::runtime::Runtime>,
+) {
     let reg = registry.clone();
     let urls = urls.clone();
     std::thread::spawn(move || loop {
+        // 1. Merge the static list with the on-chain discovered endpoints.
+        let mut all: Vec<String> = urls.iter().cloned().collect();
+        for (_who, url) in rt.block_on(client.list_provider_endpoints()) {
+            if !all.iter().any(|u| u == &url) {
+                all.push(url);
+            }
+        }
+
+        // 2. Poll every endpoint's /status into a Provider.
         let mut out = Vec::new();
-        for u in urls.iter() {
+        for u in all.iter() {
             let v = jpost(u);
             let p = match v {
                 Some(v) => Provider {
@@ -216,6 +238,13 @@ fn refresh(registry: &Arc<Mutex<Vec<Provider>>>, urls: &Arc<Vec<String>>) {
             };
             out.push(p);
         }
+
+        // 3. De-duplicate by provider address (a node listed both statically and
+        //    on-chain must not be counted twice). Keep the lowest-latency entry.
+        out.sort_by_key(|p| p.latency_ms);
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        out.retain(|p| p.address.is_empty() || seen.insert(p.address.clone()));
+
         *reg.lock().unwrap() = out;
         std::thread::sleep(Duration::from_secs(5));
     });
@@ -484,7 +513,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     spawn_janitor(client.clone(), rt.clone());
 
     let registry = Arc::new(Mutex::new(Vec::<Provider>::new()));
-    refresh(&registry, &Arc::new(urls.clone()));
+    refresh(&registry, &Arc::new(urls.clone()), client.clone(), rt.clone());
+    println!("  on-chain discovery: ENABLED (ComputeMarketplace::ProviderEndpoints)");
 
     let server = Server::http(&listen).map_err(|e| format!("cannot bind {listen}: {e}"))?;
     println!("GPN access point (scheduler) listening on http://{listen}");

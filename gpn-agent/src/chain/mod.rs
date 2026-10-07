@@ -1126,6 +1126,44 @@ impl ChainClient {
         self.storage_at_head(client, &addr).await.is_some()
     }
 
+    /// Enumerate every provider's **on-chain advertised endpoint** from
+    /// `ComputeMarketplace::ProviderEndpoints`, as `(hex account, url)`.
+    ///
+    /// Together with `RegisteredProviders` (the pallet gates `set_provider_endpoint`
+    /// behind registration, so every endpoint's account IS a registered provider),
+    /// this is what lets an access point / scheduler DISCOVER providers from the
+    /// chain instead of a hand-configured `--providers` list (item 1: on-chain
+    /// provider discovery). The URL is the provider's reachable `/status`
+    /// heartbeat. Returns an empty vec if the chain is unreachable or no provider
+    /// has advertised an endpoint yet.
+    pub async fn list_provider_endpoints(&self) -> Vec<(String, String)> {
+        let Some(client) = self.client.as_ref() else {
+            return Vec::new();
+        };
+        let addr = subxt::dynamic::storage("ComputeMarketplace", "ProviderEndpoints", vec![]);
+        let mut out: Vec<(String, String)> = Vec::new();
+        if let Some(hash) = self.head_block_hash().await {
+            if let Ok(mut stream) = client.storage().at(hash).iter(addr).await {
+                while let Some(Ok(kv)) = stream.next().await {
+                    let who = kv
+                        .keys
+                        .first()
+                        .map(account_id_to_string)
+                        .unwrap_or_default();
+                    if let Ok(v) = kv.value.to_value() {
+                        let bytes = bytes_from_dynamic(&v.remove_context(), 256);
+                        let url = String::from_utf8_lossy(&bytes).trim().to_string();
+                        if !url.is_empty() {
+                            out.push((who, url));
+                        }
+                    }
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
     /// Read the next job id (so the demo can predict the id before accepting).
     pub async fn get_next_job_id(&self) -> u64 {
         let Some(client) = &self.client else { return 0 };
@@ -1584,6 +1622,31 @@ fn composite_limbs(value: &subxt::dynamic::Value) -> [u64; 4] {
     out
 }
 
+/// Collect up to `cap` bytes from a dynamically-decoded `Vec<u8>` (which subxt
+/// decodes as an unnamed composite of u128 byte primitives). Unlike
+/// `composite_to_bytes` this is variable-length (not fixed at 32), so it can
+/// read an on-chain `Vec<u8>` such as a provider endpoint URL.
+fn bytes_from_dynamic(value: &subxt::dynamic::Value, cap: usize) -> Vec<u8> {
+    use subxt::ext::scale_value::ValueDef;
+    let mut out = Vec::new();
+    if let ValueDef::Composite(c) = &value.value {
+        for v in c.values() {
+            if out.len() >= cap {
+                break;
+            }
+            // A `u8` may decode as a u128 primitive or as a nested composite.
+            match &v.value {
+                ValueDef::Primitive(subxt::ext::scale_value::Primitive::U128(n)) => {
+                    out.push((*n & 0xff) as u8)
+                }
+                ValueDef::Composite(_) => out.extend(bytes_from_dynamic(v, cap - out.len())),
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
 /// Look up a named u64 field inside a scale composite value.
 fn get_u64_field(value: &subxt::dynamic::Value, name: &str) -> Option<u64> {
     get_field(value, name)
@@ -1789,6 +1852,18 @@ mod tests {
         assert_eq!(out[0], 0x01);
         assert_eq!(out[1], 0x02);
         assert_eq!(&out[2..], &[0u8; 30]);
+    }
+
+    #[test]
+    fn bytes_from_dynamic_reads_variable_length_vec_u8() {
+        // An on-chain `Vec<u8>` (e.g. a provider endpoint URL) decodes as an
+        // unnamed composite of u128 byte primitives; it must round-trip fully,
+        // not be truncated to the fixed 32-byte account width.
+        let url = b"http://gpn-testnet.duckdns.org:8093/status";
+        let v = subxt::dynamic::Value::from_bytes(url);
+        let out = bytes_from_dynamic(&v, 256);
+        assert_eq!(&out[..], &url[..]);
+        assert_eq!(String::from_utf8_lossy(&out), "http://gpn-testnet.duckdns.org:8093/status");
     }
 
     #[test]
