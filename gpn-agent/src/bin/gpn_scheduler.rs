@@ -359,44 +359,43 @@ fn usd_per_token_for(model: &str) -> f64 {
     base * params_b.max(0.5)
 }
 
-fn est_ms(p: &Provider) -> u64 {
-    // latency (network RTT) + a per-active-job queue estimate (~5s each).
-    p.latency_ms + p.active * 5000
-}
-
 fn pick(registry: &[Provider], min_gflops: u64, model: &str, pull_penalty_ms: u64) -> Option<(Provider, bool)> {
     let live: Vec<&Provider> = registry
         .iter()
         .filter(|p| p.last_seen.is_some() && p.gflops >= min_gflops)
         .collect();
-    let score = |p: &&Provider| p.active * 1000 + p.latency_ms / 10;
 
-    // 1. Ready: has the model + free capacity (fall back to has-model ignoring capacity).
-    let mut ready: Vec<&Provider> = live.iter().copied().filter(|p| has_model(p, model) && p.active < p.capacity).collect();
-    if ready.is_empty() {
-        ready = live.iter().copied().filter(|p| has_model(p, model)).collect();
-    }
-    ready.sort_by_key(score);
+    // Availability: a node currently running an AI job is NOT available (one GPU does one
+    // job at a time). Prefer idle nodes, chosen by LOWEST LATENCY (least-ms), not by load.
+    let idle: Vec<&Provider> = live.iter().copied().filter(|p| p.active == 0).collect();
 
-    // 2. Pull-eligible (prefer free capacity).
-    let mut pullers: Vec<&Provider> = live.iter().copied().filter(|p| p.can_pull && p.active < p.capacity).collect();
-    if pullers.is_empty() {
-        pullers = live.iter().copied().filter(|p| p.can_pull).collect();
-    }
-    pullers.sort_by_key(score);
+    // 1. Idle nodes that already HAVE the model -> lowest latency wins.
+    let mut ready: Vec<&Provider> = idle.iter().copied().filter(|p| has_model(p, model)).collect();
+    ready.sort_by_key(|p| p.latency_ms);
 
-    match (ready.first(), pullers.first()) {
-        // Both exist: a puller wins only if it beats the ready provider end-to-end.
+    // 2. Idle nodes that CAN pull the model -> lowest latency.
+    let mut pullers: Vec<&Provider> = idle.iter().copied().filter(|p| p.can_pull).collect();
+    pullers.sort_by_key(|p| p.latency_ms);
+
+    match (ready.first().copied(), pullers.first().copied()) {
+        // Both exist: a puller wins only if it beats the ready idle node end-to-end
+        // (downloading on a fast/idle node still finishes sooner than waiting on a slow one).
         (Some(r), Some(p)) => {
-            if est_ms(p) + pull_penalty_ms < est_ms(r) {
-                Some(((*p).clone(), true))
+            if p.latency_ms + pull_penalty_ms < r.latency_ms {
+                Some((p.clone(), true))
             } else {
-                Some(((*r).clone(), false))
+                Some((r.clone(), false))
             }
         }
-        (Some(r), None) => Some(((*r).clone(), false)),
-        (None, Some(p)) => Some(((*p).clone(), true)),
-        (None, None) => None,
+        (Some(r), None) => Some((r.clone(), false)),
+        (None, Some(p)) => Some((p.clone(), true)),
+        (None, None) => {
+            // Every compatible node is busy: no idle node exists. Fall back to queuing on the
+            // least-loaded, then lowest-latency node (the job waits; it is not run concurrently).
+            let mut busy: Vec<&Provider> = live.iter().copied().filter(|p| has_model(p, model)).collect();
+            busy.sort_by_key(|p| p.active * 1000 + p.latency_ms / 10);
+            busy.first().map(|p| ((*p).clone(), false))
+        }
     }
 }
 
