@@ -182,6 +182,12 @@ pub mod pallet {
     #[pallet::storage]
     pub type RegisteredProviders<T: Config> =
         StorageMap<_, Blake2_128Concat, T::AccountId, GPURequirements, OptionQuery>;
+    /// Provider-advertised reachable endpoint (e.g. its `/status` heartbeat URL), set on-chain so
+    /// access points / the scheduler can DISCOVER providers from the chain instead of a static list.
+    /// Capped at 256 bytes by `set_provider_endpoint`.
+    #[pallet::storage]
+    pub type ProviderEndpoints<T: Config> =
+        StorageMap<_, Blake2_128Concat, T::AccountId, Vec<u8>, OptionQuery>;
     #[pallet::storage]
     pub type ActiveJobCount<T: Config> = StorageValue<_, u32, ValueQuery>;
 
@@ -238,6 +244,10 @@ pub mod pallet {
         ProviderUnregistered {
             who: T::AccountId,
         },
+        ProviderEndpointSet {
+            who: T::AccountId,
+            endpoint: Vec<u8>,
+        },
     }
 
     // Errors
@@ -258,6 +268,8 @@ pub mod pallet {
         EscrowMismatch,
         ProviderNotRegistered,
         ProviderAlreadyRegistered,
+        /// Provider-declared endpoint exceeds the 256-byte cap.
+        EndpointTooLong,
         /// The provider's attested compute throughput (GFLOPS) is below the
         /// job's `min_gflops` requirement — it cannot honestly serve this job.
         ProviderComputeInsufficient,
@@ -361,6 +373,26 @@ pub mod pallet {
             );
             <RegisteredProviders<T>>::remove(&who);
             Self::deposit_event(Event::<T>::ProviderUnregistered { who });
+            Ok(())
+        }
+
+        /// Advertise (or update) the provider's reachable endpoint on-chain.
+        ///
+        /// Caller must be a registered provider. The endpoint (e.g. the provider's
+        /// `/status` heartbeat URL) is read by access points / the scheduler so they can
+        /// DISCOVER providers from the chain rather than a hand-configured list. Capped at
+        /// 256 bytes.
+        #[pallet::call_index(10)]
+        #[pallet::weight(<T as Config>::WeightInfo::register_provider())]
+        pub fn set_provider_endpoint(origin: OriginFor<T>, endpoint: Vec<u8>) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            ensure!(
+                <RegisteredProviders<T>>::contains_key(&who),
+                Error::<T>::ProviderNotRegistered
+            );
+            ensure!(endpoint.len() <= 256, Error::<T>::EndpointTooLong);
+            <ProviderEndpoints<T>>::insert(&who, endpoint.clone());
+            Self::deposit_event(Event::<T>::ProviderEndpointSet { who, endpoint });
             Ok(())
         }
 
