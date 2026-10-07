@@ -714,6 +714,23 @@ impl ChainClient {
             .await
     }
 
+    /// `ComputeMarketplace::set_provider_endpoint(endpoint)` — advertise this
+    /// provider's reachable `/status` URL on-chain so access points / the
+    /// scheduler can DISCOVER providers from the chain instead of a static list
+    /// (item 1: on-chain provider discovery). The signer must already be a
+    /// registered provider; the endpoint is capped at 256 bytes on-chain.
+    pub async fn set_provider_endpoint(
+        &self,
+        endpoint: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.submit_signed_call(
+            "ComputeMarketplace",
+            "set_provider_endpoint",
+            vec![Value::from_bytes(endpoint.as_bytes())],
+        )
+        .await
+    }
+
     /// `ComputeMarketplace::create_job(...)` — a requestor posts a paid AI job
     /// (escrow transferred to the marketplace account on creation).
     #[allow(clippy::too_many_arguments)]

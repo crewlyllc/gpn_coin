@@ -150,6 +150,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // On-chain provider discovery (item 1): advertise this provider's reachable
+    // `/status` URL on-chain so access points / the scheduler can discover us from
+    // the chain instead of a hand-configured `--providers` list. Opt out by
+    // leaving GPN_PROVIDER_ENDPOINT unset/empty. Requires this account to already
+    // be a registered provider (the pallet rejects otherwise); a failure here is
+    // non-fatal — the provider still serves jobs.
+    match std::env::var("GPN_PROVIDER_ENDPOINT") {
+        Ok(ep) if !ep.trim().is_empty() => {
+            let ep = ep.trim().to_string();
+            match client.set_provider_endpoint(&ep).await {
+                Ok(()) => println!("[provider] advertised on-chain endpoint: {ep}"),
+                Err(e) => eprintln!("[provider] set_provider_endpoint({ep}) failed: {e}"),
+            }
+        }
+        _ => println!("[provider] GPN_PROVIDER_ENDPOINT unset/empty — on-chain discovery disabled"),
+    }
+
     // Fast-claim mode: pipeline accept→start (and submit_result→complete) as a
     // nonce-ordered burst with NO block-inclusion wait, so the claim lane stops
     // being bound by block time. Disable with GPN_FAST_CLAIM=0 to fall back to
