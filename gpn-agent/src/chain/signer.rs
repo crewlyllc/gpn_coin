@@ -129,6 +129,27 @@ async fn connect_best_block<T: Config>(endpoint: &str) -> Option<OnlineClient<T>
 /// second+ tx from the same account isn't rejected as `Transaction is
 /// outdated` — see `submit_signed`). Returns 0 if the chain is unreachable or
 /// the account doesn't exist yet.
+/// Current on-chain runtime `spec_version` via JSON-RPC. `None` if unreachable.
+///
+/// Used to detect a mid-run **runtime upgrade**: a long-lived client's metadata is
+/// then stale and its dynamically-encoded calls are rejected/dropped, which (on the
+/// pipelined path) silently diverges the nonce stream. On a change we re-seed the
+/// stream (fresh best-block metadata + nonce).
+pub async fn runtime_spec_version(endpoint: &str) -> Option<u32> {
+    let http_url = endpoint
+        .replace("ws://", "http://")
+        .replace("wss://", "https://");
+    let body = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"state_getRuntimeVersion","params":[]});
+    let resp = reqwest::Client::new()
+        .post(&http_url)
+        .json(&body)
+        .send()
+        .await
+        .ok()?;
+    let v: serde_json::Value = resp.json().await.ok()?;
+    v.get("result")?.get("specVersion")?.as_u64().map(|x| x as u32)
+}
+
 pub async fn current_nonce(
     client: &OnlineClient<GpnConfig>,
     endpoint: &str,
@@ -508,6 +529,9 @@ pub struct NonceStream {
     client: OnlineClient<GpnConfig>,
     signer: Sr25519Signer,
     next_nonce: u64,
+    /// On-chain runtime `spec_version` at the time this stream connected. If the
+    /// chain's spec changes (runtime upgrade), the caller re-seeds the stream.
+    spec_version: u32,
 }
 
 impl NonceStream {
@@ -520,11 +544,18 @@ impl NonceStream {
         let signer = Sr25519Signer::from_uri(signer_uri)?;
         let acct = signer.account_id();
         let next_nonce = current_nonce(&client, endpoint, &acct).await;
+        let spec_version = runtime_spec_version(endpoint).await.unwrap_or(0);
         Ok(Self {
             client,
             signer,
             next_nonce,
+            spec_version,
         })
+    }
+
+    /// The runtime `spec_version` this stream connected with.
+    pub fn spec_version(&self) -> u32 {
+        self.spec_version
     }
 
     /// Submit `pallet::call(args)` with the next nonce and return as soon as the

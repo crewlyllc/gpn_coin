@@ -875,6 +875,20 @@ impl ChainClient {
         args: Vec<Value>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut guard = self.fast.lock().await;
+        // Runtime-upgrade resilience: if the chain's spec_version changed since the
+        // stream connected, its metadata is stale → post-upgrade calls get dropped and
+        // the pipelined nonce stream silently diverges (the create-path stall). Drop the
+        // stream so we reconnect with fresh best-block metadata + a re-seeded nonce.
+        if let Some(cur) = signer::runtime_spec_version(&self.endpoint).await {
+            if guard.as_ref().map_or(false, |s| s.spec_version() != cur) {
+                log::warn!(
+                    "runtime spec changed ({} -> {}) — re-seeding the fast submitter",
+                    guard.as_ref().map(|s| s.spec_version()).unwrap_or(0),
+                    cur
+                );
+                *guard = None;
+            }
+        }
         if guard.is_none() {
             let Some(uri) = &self.signer_uri else {
                 return Err(format!(
