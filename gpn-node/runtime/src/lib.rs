@@ -487,6 +487,23 @@ impl pallet_compute_marketplace::Config for Runtime {
     type FeeSink = GPNToken;
     // Benchmark-derived weights (workplan item 9).
     type WeightInfo = pallet_compute_marketplace::weights::SubstrateWeight<Runtime>;
+    // Off-chain escrow channels (item #2): verify a party's sr25519 signature
+    // over a channel-settlement state so the chain stays the open/close/settle
+    // root of trust (per-job payments stay off-chain).
+    type ChannelAuth = Sr25519ChannelAuth;
+}
+
+/// Channel-settlement signature verifier: sr25519 over the domain-separated
+/// payload (see `pallet_compute_marketplace::channel_settle_payload`).
+pub struct Sr25519ChannelAuth;
+impl pallet_compute_marketplace::ChannelSignatureVerifier<AccountId> for Sr25519ChannelAuth {
+    fn verify(who: &AccountId, payload: &[u8; 32], signature: &[u8; 64]) -> bool {
+        let mut key = [0u8; 32];
+        key.copy_from_slice(who.as_ref());
+        let pubkey = sp_core::sr25519::Public::from_raw(key);
+        let sig = sp_core::sr25519::Signature::from_raw(*signature);
+        sp_io::crypto::sr25519_verify(&sig, payload, &pubkey)
+    }
 }
 
 parameter_types! {

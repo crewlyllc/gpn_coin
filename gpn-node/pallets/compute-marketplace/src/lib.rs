@@ -110,6 +110,57 @@ pub struct ComputeJob {
     pub result_hash: Option<[u8; 32]>,
 }
 
+/// Lifecycle of an off-chain escrow channel (`design-offchain-escrow-channels.md`).
+#[derive(
+    Clone, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, PartialEq, Eq, Debug, TypeInfo,
+)]
+pub enum ChannelState {
+    /// Funds locked on-chain; per-job payments happen off-chain via signed
+    /// balance updates. No per-job tx.
+    Open,
+    /// Settled on-chain; escrow released to the two parties.
+    Closed,
+}
+impl Default for ChannelState {
+    fn default() -> Self {
+        Self::Open
+    }
+}
+
+/// A payment channel between a requestor and a provider. The on-chain record
+/// only tracks the **latest settled** balances + nonce; the per-job money
+/// movement stays off-chain as two signatures. Open/close are the only on-chain
+/// txs, so an AI job no longer waits a block for escrow/settlement.
+#[derive(
+    Clone, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, PartialEq, Eq, Debug, TypeInfo,
+)]
+pub struct Channel<AccountId> {
+    pub id: u64,
+    pub requestor: AccountId,
+    pub provider: AccountId,
+    /// Latest settled balances (must sum to the channel deposit).
+    pub balance_requestor: u128,
+    pub balance_provider: u128,
+    /// Monotonic settlement counter — a later state MUST carry a strictly
+    /// greater `nonce`, so an old (stale) state can never be replayed.
+    pub nonce: u64,
+    pub opened_at: u32,
+    /// Block after which either party may force-close using the counterparty's
+    /// signature — the liveness escape hatch when the peer goes dark.
+    pub deadline: u32,
+    pub state: ChannelState,
+}
+
+/// Domain tag for the payload a channel party signs to authorize a settlement.
+pub const CHANNEL_SETTLE_DOMAIN: &[u8] = b"gpn/channel-settle-v1";
+
+/// Verifies that `signature` is a valid authorization by `who` over a channel
+/// settlement payload. Injected (like `GPUAttestation`/`FeeSink`) so the pallet
+/// stays account-type agnostic and unit-testable.
+pub trait ChannelSignatureVerifier<AccountId> {
+    fn verify(who: &AccountId, payload: &[u8; 32], signature: &[u8; 64]) -> bool;
+}
+
 #[frame_support::pallet]
 pub mod pallet {
     use super::*;
@@ -147,6 +198,10 @@ pub mod pallet {
         type FeeSink: pallet_gpn_token::FeeSinkProvider<Self::AccountId>;
         /// Weight information for extrinsics in this pallet (workplan item 9).
         type WeightInfo: WeightInfo;
+        /// Off-chain escrow channels (`design-offchain-escrow-channels.md`):
+        /// verifies a party's authorization signature over a channel-settlement
+        /// state so the chain stays the root of trust for open/close/settle.
+        type ChannelAuth: ChannelSignatureVerifier<Self::AccountId>;
     }
 
     #[pallet::pallet]
@@ -191,6 +246,20 @@ pub mod pallet {
     #[pallet::storage]
     pub type ActiveJobCount<T: Config> = StorageValue<_, u32, ValueQuery>;
 
+    // ── Off-chain escrow channels (design-offchain-escrow-channels.md) ────────
+    #[pallet::storage]
+    pub type NextChannelId<T: Config> = StorageValue<_, u64, ValueQuery>;
+    #[pallet::storage]
+    pub type Channels<T: Config> =
+        StorageMap<_, Blake2_128Concat, u64, Channel<T::AccountId>, OptionQuery>;
+    #[pallet::storage]
+    pub type ChannelEscrow<T: Config> =
+        StorageMap<_, Blake2_128Concat, u64, BalanceOf<T>, OptionQuery>;
+    /// (requestor, provider) → channel id, to enforce one live channel per pair.
+    #[pallet::storage]
+    pub type ChannelIndex<T: Config> =
+        StorageMap<_, Blake2_128Concat, (T::AccountId, T::AccountId), u64, OptionQuery>;
+
     // Genesis
     #[pallet::genesis_config]
     #[derive(frame_support::DefaultNoBound)]
@@ -202,6 +271,7 @@ pub mod pallet {
     impl<T: Config> BuildGenesisConfig for GenesisConfig<T> {
         fn build(&self) {
             <NextJobId<T>>::put(1u64);
+            <NextChannelId<T>>::put(1u64);
             <ActiveJobCount<T>>::put(0u32);
         }
     }
@@ -248,6 +318,21 @@ pub mod pallet {
             who: T::AccountId,
             endpoint: Vec<u8>,
         },
+        /// An off-chain escrow channel was opened; `amount` locked on-chain.
+        ChannelOpened {
+            channel_id: u64,
+            requestor: T::AccountId,
+            provider: T::AccountId,
+            amount: u128,
+        },
+        /// A channel was settled on-chain (cooperative or forced); `nonce` is the
+        /// settlement counter of the state that was accepted.
+        ChannelSettled {
+            channel_id: u64,
+            balance_requestor: u128,
+            balance_provider: u128,
+            nonce: u64,
+        },
     }
 
     // Errors
@@ -275,6 +360,19 @@ pub mod pallet {
         ProviderComputeInsufficient,
         /// `expire_job` was called before `created_at + max_duration` elapsed.
         JobNotExpired,
+        /// A channel already exists (open) for this (requestor, provider) pair.
+        ChannelAlreadyOpen,
+        ChannelNotFound,
+        /// The channel is not in the `Open` state.
+        ChannelNotOpen,
+        /// `balance_requestor + balance_provider` must equal the channel deposit.
+        ChannelBalanceMismatch,
+        /// A settlement must carry a strictly greater nonce than the last one.
+        ChannelNonceTooLow,
+        /// The counterparty's authorization signature did not verify.
+        InvalidChannelSignature,
+        /// `force_close` was attempted before the channel `deadline`.
+        ChannelNotExpired,
     }
 
     // Hooks
@@ -394,6 +492,172 @@ pub mod pallet {
             <ProviderEndpoints<T>>::insert(&who, endpoint.clone());
             Self::deposit_event(Event::<T>::ProviderEndpointSet { who, endpoint });
             Ok(())
+        }
+
+        /// Open a `(requestor, provider)` payment channel, locking `amount` in the
+        /// marketplace escrow account. The chain only sees this open + the later
+        /// close — per-job money movement stays off-chain as signed balance
+        /// updates, so an AI job no longer waits a block for escrow/settlement
+        /// (`design-offchain-escrow-channels.md`).
+        #[pallet::call_index(11)]
+        #[pallet::weight(<T as Config>::WeightInfo::create_job())]
+        pub fn open_channel(
+            origin: OriginFor<T>,
+            provider: T::AccountId,
+            amount: BalanceOf<T>,
+            ttl: BlockNumberFor<T>,
+        ) -> DispatchResult {
+            let requestor = ensure_signed(origin)?;
+            ensure!(
+                <RegisteredProviders<T>>::contains_key(&provider),
+                Error::<T>::ProviderNotRegistered
+            );
+            ensure!(requestor != provider, Error::<T>::InvalidWorkload);
+            ensure!(amount > Zero::zero(), Error::<T>::InsufficientPayment);
+            ensure!(ttl > Zero::zero(), Error::<T>::ChannelNotExpired);
+            ensure!(
+                !<ChannelIndex<T>>::contains_key((requestor.clone(), provider.clone())),
+                Error::<T>::ChannelAlreadyOpen
+            );
+
+            let channel_id = <NextChannelId<T>>::get();
+            <NextChannelId<T>>::mutate(|id| *id += 1);
+
+            let now_raw = frame_system::Pallet::<T>::block_number();
+            let now: u32 = now_raw.try_into().unwrap_or(0);
+            let deadline: u32 = now_raw
+                .saturating_add(ttl)
+                .try_into()
+                .unwrap_or(u32::MAX);
+            let deposit: u128 = amount.try_into().unwrap_or(u128::MAX);
+
+            T::Currency::transfer(
+                &requestor,
+                &Self::account_id(),
+                amount,
+                ExistenceRequirement::KeepAlive,
+            )?;
+
+            <Channels<T>>::insert(
+                channel_id,
+                Channel {
+                    id: channel_id,
+                    requestor: requestor.clone(),
+                    provider: provider.clone(),
+                    balance_requestor: deposit,
+                    balance_provider: 0,
+                    nonce: 0,
+                    opened_at: now,
+                    deadline,
+                    state: ChannelState::Open,
+                },
+            );
+            <ChannelEscrow<T>>::insert(channel_id, amount);
+            <ChannelIndex<T>>::insert((requestor.clone(), provider.clone()), channel_id);
+
+            Self::deposit_event(Event::<T>::ChannelOpened {
+                channel_id,
+                requestor,
+                provider,
+                amount: deposit,
+            });
+            Ok(())
+        }
+
+        /// Cooperative close: settle the channel to the latest off-chain state,
+        /// authorized by BOTH parties' signatures. Releases escrow instantly.
+        #[pallet::call_index(12)]
+        #[pallet::weight(<T as Config>::WeightInfo::complete_job())]
+        pub fn close_channel(
+            origin: OriginFor<T>,
+            channel_id: u64,
+            balance_requestor: u128,
+            balance_provider: u128,
+            nonce: u64,
+            sig_requestor: [u8; 64],
+            sig_provider: [u8; 64],
+        ) -> DispatchResult {
+            let _who = ensure_signed(origin)?;
+            let channel = <Channels<T>>::get(channel_id).ok_or(Error::<T>::ChannelNotFound)?;
+            ensure!(
+                channel.state == ChannelState::Open,
+                Error::<T>::ChannelNotOpen
+            );
+
+            let payload = Self::channel_settle_payload(
+                channel_id,
+                balance_requestor,
+                balance_provider,
+                nonce,
+            );
+            ensure!(
+                T::ChannelAuth::verify(&channel.requestor, &payload, &sig_requestor)
+                    && T::ChannelAuth::verify(&channel.provider, &payload, &sig_provider),
+                Error::<T>::InvalidChannelSignature
+            );
+
+            Self::settle_channel(
+                channel_id,
+                channel,
+                balance_requestor,
+                balance_provider,
+                nonce,
+            )
+        }
+
+        /// Force-close after `deadline` when the peer is unresponsive: the caller
+        /// supplies the **counterparty's** signature over the final state (the
+        /// caller's own authorization is implicit). Nonce monotonicity prevents
+        /// replaying a stale (self-favoring) state.
+        #[pallet::call_index(13)]
+        #[pallet::weight(<T as Config>::WeightInfo::complete_job())]
+        pub fn force_close_channel(
+            origin: OriginFor<T>,
+            channel_id: u64,
+            balance_requestor: u128,
+            balance_provider: u128,
+            nonce: u64,
+            sig_counterparty: [u8; 64],
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            let channel = <Channels<T>>::get(channel_id).ok_or(Error::<T>::ChannelNotFound)?;
+            ensure!(
+                channel.state == ChannelState::Open,
+                Error::<T>::ChannelNotOpen
+            );
+            ensure!(
+                who == channel.requestor || who == channel.provider,
+                Error::<T>::NotJobProvider
+            );
+
+            let now: u32 = frame_system::Pallet::<T>::block_number()
+                .try_into()
+                .unwrap_or(0);
+            ensure!(now >= channel.deadline, Error::<T>::ChannelNotExpired);
+
+            let counterparty = if who == channel.requestor {
+                channel.provider.clone()
+            } else {
+                channel.requestor.clone()
+            };
+            let payload = Self::channel_settle_payload(
+                channel_id,
+                balance_requestor,
+                balance_provider,
+                nonce,
+            );
+            ensure!(
+                T::ChannelAuth::verify(&counterparty, &payload, &sig_counterparty),
+                Error::<T>::InvalidChannelSignature
+            );
+
+            Self::settle_channel(
+                channel_id,
+                channel,
+                balance_requestor,
+                balance_provider,
+                nonce,
+            )
         }
 
         #[pallet::call_index(2)]
@@ -838,6 +1102,84 @@ pub mod pallet {
         pub fn requestor_active_jobs(who: &T::AccountId) -> Vec<u64> {
             <RequestorJobs<T>>::get(who)
         }
+
+        /// Borrow-free payload hashing shared by the open/close paths and (off-chain)
+        /// the agent's channel manager. The domain tag keeps these signatures from
+        /// being replayable in any other signing context.
+        pub fn channel_settle_payload(
+            channel_id: u64,
+            balance_requestor: u128,
+            balance_provider: u128,
+            nonce: u64,
+        ) -> [u8; 32] {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(CHANNEL_SETTLE_DOMAIN);
+            channel_id.encode_to(&mut buf);
+            balance_requestor.encode_to(&mut buf);
+            balance_provider.encode_to(&mut buf);
+            nonce.encode_to(&mut buf);
+            sp_io::hashing::blake2_256(&buf)
+        }
+
+        /// Shared settlement path for cooperative + forced close. Validates the
+        /// nonce floor and balance conservation, releases the escrow, and clears
+        /// the live-channel index.
+        fn settle_channel(
+            channel_id: u64,
+            mut channel: Channel<T::AccountId>,
+            balance_requestor: u128,
+            balance_provider: u128,
+            nonce: u64,
+        ) -> DispatchResult {
+            ensure!(
+                nonce > channel.nonce,
+                Error::<T>::ChannelNonceTooLow
+            );
+            let escrow =
+                <ChannelEscrow<T>>::get(channel_id).ok_or(Error::<T>::ChannelNotFound)?;
+            let deposit: u128 = escrow.try_into().unwrap_or(u128::MAX);
+            ensure!(
+                balance_requestor.saturating_add(balance_provider) == deposit,
+                Error::<T>::ChannelBalanceMismatch
+            );
+
+            channel.balance_requestor = balance_requestor;
+            channel.balance_provider = balance_provider;
+            channel.nonce = nonce;
+            channel.state = ChannelState::Closed;
+            let requestor = channel.requestor.clone();
+            let provider = channel.provider.clone();
+            <Channels<T>>::insert(channel_id, channel);
+            <ChannelEscrow<T>>::remove(channel_id);
+            <ChannelIndex<T>>::remove((requestor.clone(), provider.clone()));
+
+            if balance_requestor > 0 {
+                let amt: BalanceOf<T> = balance_requestor.try_into().unwrap_or(escrow);
+                T::Currency::transfer(
+                    &Self::account_id(),
+                    &requestor,
+                    amt,
+                    ExistenceRequirement::AllowDeath,
+                )?;
+            }
+            if balance_provider > 0 {
+                let amt: BalanceOf<T> = balance_provider.try_into().unwrap_or(escrow);
+                T::Currency::transfer(
+                    &Self::account_id(),
+                    &provider,
+                    amt,
+                    ExistenceRequirement::AllowDeath,
+                )?;
+            }
+
+            Self::deposit_event(Event::<T>::ChannelSettled {
+                channel_id,
+                balance_requestor,
+                balance_provider,
+                nonce,
+            });
+            Ok(())
+        }
     }
 }
 
@@ -849,6 +1191,7 @@ mod tests {
         traits::{BuildGenesisConfig, ConstU128, ConstU16, ConstU32, ConstU64, Everything},
     };
     use sp_core::H256;
+    use sp_core::Pair;
     use sp_runtime::{
         traits::{BlakeTwo256, IdentityLookup},
         BuildStorage,
@@ -856,7 +1199,8 @@ mod tests {
 
     use crate::pallet as local_market;
     use crate::pallet::{
-        ActiveJobCount, JobEscrow, JobProvider, Jobs, NextJobId, RegisteredProviders,
+        ActiveJobCount, ChannelEscrow, ChannelIndex, Channels, JobEscrow, JobProvider, Jobs,
+        NextChannelId, NextJobId, RegisteredProviders,
     };
 
     type Block = frame_system::mocking::MockBlock<Test>;
@@ -952,6 +1296,50 @@ mod tests {
         type GPUAttestation = MockAttestation;
         // Test fee sink: a dedicated account (99) that collects marketplace fees.
         type FeeSink = MockFeeSink;
+        type ChannelAuth = MockChannelAuth;
+    }
+
+    // Test-only channel signature verifier backed by REAL sr25519 keys. Each
+    // account id gets a deterministic key via `register_channel_key`, so tests
+    // exercise the actual signature path (not a rubber-stamp mock).
+    thread_local! {
+        static CHANNEL_KEYS: std::cell::RefCell<
+            std::collections::HashMap<u64, sp_core::sr25519::Pair>,
+        > = std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    pub struct MockChannelAuth;
+    impl crate::ChannelSignatureVerifier<u64> for MockChannelAuth {
+        fn verify(who: &u64, payload: &[u8; 32], signature: &[u8; 64]) -> bool {
+            CHANNEL_KEYS.with(|m| match m.borrow().get(who) {
+                Some(pair) => {
+                    let sig = sp_core::sr25519::Signature::from_raw(*signature);
+                    <sp_core::sr25519::Pair as sp_core::Pair>::verify(
+                        &sig,
+                        payload,
+                        &pair.public(),
+                    )
+                }
+                None => false,
+            })
+        }
+    }
+    /// Register (and return) the deterministic sr25519 key for `id`.
+    fn register_channel_key(id: u64) -> sp_core::sr25519::Pair {
+        let pair = sp_core::sr25519::Pair::from_seed_slice(&[id as u8; 32]).unwrap();
+        CHANNEL_KEYS.with(|m| m.borrow_mut().insert(id, pair.clone()));
+        pair
+    }
+    /// Sign a channel settlement as `id`.
+    fn sign_settle(
+        id: u64,
+        channel_id: u64,
+        br: u128,
+        bp: u128,
+        nonce: u64,
+    ) -> [u8; 64] {
+        let pair = register_channel_key(id);
+        let payload = MarketPallet::channel_settle_payload(channel_id, br, bp, nonce);
+        pair.sign(&payload).to_raw()
     }
 
     /// Test-only fee sink: routes marketplace fees to account 99 so tests can
@@ -1467,6 +1855,143 @@ mod tests {
             MOCK_GFLOPS.with(|c| c.set(0));
             MarketPallet::accept_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
             assert_eq!(JobProvider::<Test>::get(job_id), Some(BOB));
+        });
+    }
+
+    // ── Off-chain escrow channel tests (item #2, build-order step 1) ────────
+
+    fn open_default_channel() -> u64 {
+        register_provider(BOB);
+        MarketPallet::open_channel(RuntimeOrigin::signed(ALICE), BOB, 5_000, 100).unwrap();
+        NextChannelId::<Test>::get() - 1
+    }
+
+    #[test]
+    fn test_open_channel_locks_funds_and_indexes_pair() {
+        new_test_ext().execute_with(|| {
+            let ch = open_default_channel();
+            assert_eq!(ChannelEscrow::<Test>::get(ch), Some(5_000));
+            assert_eq!(ChannelIndex::<Test>::get((ALICE, BOB)), Some(ch));
+            let channel = Channels::<Test>::get(ch).unwrap();
+            assert_eq!(channel.balance_requestor, 5_000);
+            assert_eq!(channel.balance_provider, 0);
+            assert_eq!(channel.state, ChannelState::Open);
+            // Funds actually moved into the marketplace escrow account.
+            assert_eq!(Balances::free_balance(MarketPallet::account_id()), 5_000);
+        });
+    }
+
+    #[test]
+    fn test_open_channel_rejects_unregistered_provider() {
+        new_test_ext().execute_with(|| {
+            let res = MarketPallet::open_channel(RuntimeOrigin::signed(ALICE), CAROL, 5_000, 100);
+            assert_eq!(res, Err(Error::<Test>::ProviderNotRegistered.into()));
+        });
+    }
+
+    #[test]
+    fn test_cooperative_close_pays_both_parties() {
+        new_test_ext().execute_with(|| {
+            let ch = open_default_channel();
+            // Off-chain agreed final state: provider earned 1_200 out of 5_000.
+            let (br, bp, n) = (3_800u128, 1_200u128, 1u64);
+            let sr = sign_settle(ALICE, ch, br, bp, n);
+            let sp = sign_settle(BOB, ch, br, bp, n);
+            let alice_before = Balances::free_balance(ALICE);
+            let bob_before = Balances::free_balance(BOB);
+            // Anyone can relay a fully-signed cooperative close.
+            MarketPallet::close_channel(RuntimeOrigin::signed(CAROL), ch, br, bp, n, sr, sp)
+                .unwrap();
+            assert_eq!(Balances::free_balance(ALICE), alice_before + br);
+            assert_eq!(Balances::free_balance(BOB), bob_before + bp);
+            assert_eq!(Channels::<Test>::get(ch).unwrap().state, ChannelState::Closed);
+            assert_eq!(ChannelEscrow::<Test>::get(ch), None);
+            assert_eq!(ChannelIndex::<Test>::get((ALICE, BOB)), None);
+            assert_eq!(Balances::free_balance(MarketPallet::account_id()), 0);
+        });
+    }
+
+    #[test]
+    fn test_close_rejects_forged_signature() {
+        new_test_ext().execute_with(|| {
+            let ch = open_default_channel();
+            // Requestor tries to settle ALL funds back to itself; the "provider"
+            // signature is forged (signed by CAROL, not BOB).
+            let (br, bp, n) = (5_000u128, 0u128, 1u64);
+            let sr = sign_settle(ALICE, ch, br, bp, n);
+            let forged = sign_settle(CAROL, ch, br, bp, n);
+            let res = MarketPallet::close_channel(
+                RuntimeOrigin::signed(ALICE),
+                ch,
+                br,
+                bp,
+                n,
+                sr,
+                forged,
+            );
+            assert_eq!(res, Err(Error::<Test>::InvalidChannelSignature.into()));
+            assert_eq!(Channels::<Test>::get(ch).unwrap().state, ChannelState::Open);
+        });
+    }
+
+    #[test]
+    fn test_close_rejects_balance_mismatch() {
+        new_test_ext().execute_with(|| {
+            let ch = open_default_channel();
+            // Sum (4_800) != deposit (5_000): escrow couldn't be fully drained.
+            let (br, bp, n) = (3_800u128, 1_000u128, 1u64);
+            let sr = sign_settle(ALICE, ch, br, bp, n);
+            let sp = sign_settle(BOB, ch, br, bp, n);
+            let res = MarketPallet::close_channel(
+                RuntimeOrigin::signed(ALICE),
+                ch,
+                br,
+                bp,
+                n,
+                sr,
+                sp,
+            );
+            assert_eq!(res, Err(Error::<Test>::ChannelBalanceMismatch.into()));
+        });
+    }
+
+    #[test]
+    fn test_force_close_blocked_before_deadline() {
+        new_test_ext().execute_with(|| {
+            let ch = open_default_channel();
+            let (br, bp, n) = (3_800u128, 1_200u128, 1u64);
+            let sp = sign_settle(BOB, ch, br, bp, n);
+            let res = MarketPallet::force_close_channel(
+                RuntimeOrigin::signed(ALICE),
+                ch,
+                br,
+                bp,
+                n,
+                sp,
+            );
+            assert_eq!(res, Err(Error::<Test>::ChannelNotExpired.into()));
+        });
+    }
+
+    #[test]
+    fn test_force_close_after_deadline_settles_with_counterparty_sig() {
+        new_test_ext().execute_with(|| {
+            let ch = open_default_channel();
+            let (br, bp, n) = (3_800u128, 1_200u128, 1u64);
+            let sp = sign_settle(BOB, ch, br, bp, n);
+            System::set_block_number(101); // opened_at(1) + ttl(100)
+            let bob_before = Balances::free_balance(BOB);
+            MarketPallet::force_close_channel(
+                RuntimeOrigin::signed(ALICE),
+                ch,
+                br,
+                bp,
+                n,
+                sp,
+            )
+            .unwrap();
+            assert_eq!(Balances::free_balance(BOB), bob_before + bp);
+            assert_eq!(Channels::<Test>::get(ch).unwrap().state, ChannelState::Closed);
         });
     }
 }
