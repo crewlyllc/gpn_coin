@@ -101,6 +101,12 @@ fn spawn_janitor(client: Arc<ChainClient>, rt: Arc<tokio::runtime::Runtime>) {
 /// the chain counter. Fixes store/assignment collisions + provider claim storms.
 static NEXT_JOB_ID: Mutex<Option<u64>> = Mutex::new(None);
 
+/// Serializes on-chain job CREATION so exactly ONE create is in flight at a time.
+/// The AP is the sole creator and the chain assigns ids in submit order, so with
+/// serialization the process-local prediction is exactly the real on-chain id — and
+/// concurrent requests can't bind to one shared `NextJobId` (the misattribution bug).
+static CREATE_LOCK: Mutex<()> = Mutex::new(());
+
 /// Allocate the next predicted job id. `chain_next` is the current on-chain
 /// `NextJobId`; the returned id is `max(local_counter, chain_next)`.
 fn alloc_predicted_job_id(chain_next: u64) -> u64 {
@@ -113,13 +119,12 @@ fn alloc_predicted_job_id(chain_next: u64) -> u64 {
     cur
 }
 
-/// Realign the process-local allocator to a known-good on-chain id (never move it
-/// backwards). Call after a create is CONFIRMED so the allocator can't stay drifted
-/// ahead of the chain (the +1 id-desync bug: a create that didn't land still
-/// advanced the local counter, so every later label was one too high).
-fn reseed_alloc(next_id: u64) {
+/// Force the process-local allocator to an exact on-chain id. Used to HEAL a drift after
+/// a create that consumed a local id but did NOT land. Only safe with no create in flight
+/// (enforced by `CREATE_LOCK`).
+fn align_alloc(next_id: u64) {
     let mut g = NEXT_JOB_ID.lock().unwrap();
-    *g = Some(g.unwrap_or(0).max(next_id));
+    *g = Some(next_id);
 }
 
 /// A known provider endpoint + its last-seen health.
@@ -614,6 +619,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let passthrough = mode == "passthrough";
                 // create + route (hot wallet pays). Id comes from a process-local
                 // allocator so concurrent requests never predict the same job id.
+                // `_create_guard` serializes the create so exactly one is in flight.
+                let _create_guard = CREATE_LOCK.lock().unwrap();
                 let next_before = rt.block_on(client.get_next_job_id());
                 let workload_hash = {
                     use sha2::{Digest, Sha256};
@@ -640,38 +647,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let (created, id) = if passthrough {
                     (false, 0u64)
                 } else if fast_ap {
+                    // Serialized by `_create_guard`: exactly ONE create is in flight at a time, so
+                    // the process-local prediction IS the real on-chain id (the AP is the sole
+                    // creator; the chain assigns ids in submit order). Labeling with the prediction
+                    // avoids the concurrent-confirm misattribution (two in-flight creates binding to
+                    // one shared NextJobId → a stranded Pending job).
                     let predicted = alloc_predicted_job_id(next_before);
-                    let submit = rt.block_on(client.create_job_fast(
+                    match rt.block_on(client.create_job_fast(
                         8192u32, 75u16, 1u8, 0u32, 150u64, "LLMInference", "Spot",
                         (1_000_000_000u128 * 512) as u128, 1_000_000_000u128, 512u32, 1000,
                         workload_hash,
-                    ));
-                    // CONFIRM the real on-chain id (the source of truth). The AP is the sole
-                    // creator, so the create lands within ~1 block and NextJobId advances; our
-                    // id is the confirmed counter value. Then re-seed the allocator so it can't
-                    // stay drifted ahead of the chain. Bounded so it never stalls indefinitely.
-                    let mut real: Option<u64> = None;
-                    let deadline = Instant::now() + Duration::from_millis(6000);
-                    while Instant::now() < deadline {
-                        let after = rt.block_on(client.get_next_job_id());
-                        if after > next_before {
-                            real = Some(after - 1);
-                            break;
-                        }
-                        std::thread::sleep(Duration::from_millis(150));
-                    }
-                    match (submit, real) {
-                        // Created + confirmed: label with the REAL on-chain id, re-seed allocator.
-                        (Ok(()), Some(id)) | (Err(_), Some(id)) => {
-                            reseed_alloc(id + 1);
-                            (true, id)
-                        }
-                        // Submitted but not yet visible (rare): best-effort prediction.
-                        (Ok(()), None) => (true, predicted),
-                        // Not submitted and not visible: realign to the chain, declare failure.
-                        (Err(_), None) => {
-                            reseed_alloc(next_before);
-                            (false, next_before)
+                    )) {
+                        Ok(()) => (true, predicted),
+                        Err(_) => {
+                            // The create may have landed despite a slow/!acked pool submit.
+                            // Confirm briefly; only trust it if it matches our prediction.
+                            let mut real: Option<u64> = None;
+                            let deadline = Instant::now() + Duration::from_millis(2000);
+                            while Instant::now() < deadline {
+                                let after = rt.block_on(client.get_next_job_id());
+                                if after > next_before {
+                                    real = Some(after - 1);
+                                    break;
+                                }
+                                std::thread::sleep(Duration::from_millis(200));
+                            }
+                            match real {
+                                Some(id) if id == predicted => (true, id),
+                                // Did not land: realign the allocator and report failure.
+                                _ => {
+                                    align_alloc(next_before);
+                                    (false, predicted)
+                                }
+                            }
                         }
                     }
                 } else {
@@ -683,6 +691,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let after = rt.block_on(client.get_next_job_id());
                     (after > next_before, after.saturating_sub(1))
                 };
+                drop(_create_guard);
                 let mut text = String::new();
                 if passthrough {
                     // Direct provider call, no chain. Derive the off-chain infer
