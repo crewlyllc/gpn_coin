@@ -68,8 +68,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+/// How many trailing jobs to consider for self-claim each pass. A full
+/// `0..next` scan every poll pegs the RPC once the ledger grows (same lesson as
+/// the LLM provider), and fine-tune jobs are only ever newly created.
+const CLAIM_WINDOW: u64 = 64;
+
 async fn process_once(client: &ChainClient, me: &str) -> Result<(), Box<dyn std::error::Error>> {
     let next = client.get_next_job_id().await;
+
+    // 0. Self-claim Pending fine-tune jobs. There is no AP/scheduler routing
+    //    path for `FineTuning` yet, so this provider is the only consumer: it
+    //    accepts + starts any recent Pending finetune job that has an off-chain
+    //    payload here. `accept_job` is gated on-chain by the min_gflops
+    //    attestation check, so an under-provisioned provider is rejected there.
+    for id in next.saturating_sub(CLAIM_WINDOW)..next {
+        let is_ft = get_job(id).map(|j| j.kind == "finetune").unwrap_or(false);
+        if !is_ft {
+            continue;
+        }
+        if let Some((state, _price, _req, provider)) = client.get_job_state(id).await {
+            if state == "Pending" && provider.is_none() {
+                if let Err(e) = client.accept_job(id).await {
+                    eprintln!("[provider] accept #{id} failed: {e}");
+                    continue;
+                }
+                if let Err(e) = client.start_job(id).await {
+                    eprintln!("[provider] start #{id} failed: {e}");
+                }
+            }
+        }
+    }
+
     for id in 0..next {
         let job = match get_job(id) {
             Some(j) if j.kind == "finetune" => j,
