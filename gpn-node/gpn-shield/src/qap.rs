@@ -808,7 +808,14 @@ mod tests {
         assert!(eq_poly(&dense.h, &fft.h), "H mismatch");
     }
 
+    // The R1CS-satisfaction invariant is a *debug-only* guard
+    // (`witness_polys` panics via `debug_assert_eq!`, per its contract). In a
+    // `--release` build `debug_assert!` is compiled out, so this test can only
+    // observe the panic under `debug_assertions`. Gate it accordingly so the
+    // release test suite (CI: `cargo test --release --workspace`) is green —
+    // previously it failed there because the expected panic never happened.
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "does not satisfy the R1CS")]
     fn invalid_witness_panics() {
         let r1cs = value_balance_r1cs();
