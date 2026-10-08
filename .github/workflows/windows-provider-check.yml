@@ -1,7 +1,9 @@
 name: Windows provider readiness check
 
 # Read-only diagnostic: reports whether this self-hosted Windows box is ready to
-# run as a GPN AI provider (item 4). Makes NO changes and starts nothing.
+# run as a GPN AI provider (item 4). Makes NO changes and starts nothing
+# persistent (the heartbeat smoke test is started then stopped). Results are
+# printed and uploaded as the `provider-check` artifact for programmatic review.
 on:
   workflow_dispatch:
 
@@ -9,51 +11,55 @@ jobs:
   check:
     runs-on: self-hosted
     steps:
-      - name: Ollama backend
+      - name: Collect diagnostics
         shell: powershell
         run: |
-          Write-Host "== Ollama =="
+          $ErrorActionPreference = 'Continue'
+          $out = Join-Path $env:RUNNER_TEMP 'provider-check.txt'
+          function Say($m) { Write-Host $m; Add-Content -Path $out -Value $m }
+
+          Say "== Ollama =="
           try {
             $t = Invoke-RestMethod "http://127.0.0.1:11434/api/tags" -TimeoutSec 8
             $names = @($t.models | ForEach-Object { $_.name })
-            Write-Host "Ollama OK; models: $($names -join ', ')"
-            if ($names -contains 'llama3.2:1b') { Write-Host "llama3.2:1b: PRESENT" } else { Write-Host "llama3.2:1b: MISSING" }
-          } catch { Write-Host "Ollama NOT reachable at 127.0.0.1:11434 ($($_.Exception.Message))" }
+            Say "Ollama OK; models: $($names -join ', ')"
+            if ($names -contains 'llama3.2:1b') { Say "llama3.2:1b: PRESENT" } else { Say "llama3.2:1b: MISSING" }
+          } catch { Say "Ollama NOT reachable at 127.0.0.1:11434 ($($_.Exception.Message))" }
 
-      - name: GPN provider binaries / processes
-        shell: powershell
-        run: |
-          Write-Host "== running gpn processes =="
-          Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match 'gpn' } | ForEach-Object { Write-Host "  $($_.ProcessName) PID=$($_.Id)" }
-          Write-Host "== candidate bin dirs =="
-          foreach ($d in @("C:\gpn\bin","$env:USERPROFILE\bin","$env:USERPROFILE\Desktop\gpn\bin","C:\gpn")) {
-            if (Test-Path $d) {
-              $exes = @(Get-ChildItem $d -Filter *.exe -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
-              Write-Host "  $d -> $($exes -join ', ')"
-            } else { Write-Host "  $d -> (absent)" }
-          }
-          Write-Host "== GPN_PROVIDER_ENDPOINT =="
-          Write-Host "  value: '$($env:GPN_PROVIDER_ENDPOINT)'"
+          Say "== running gpn processes =="
+          Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match 'gpn' } | ForEach-Object { Say "  $($_.ProcessName) PID=$($_.Id)" }
 
-      - name: Heartbeat binary smoke test
-        shell: powershell
-        run: |
+          Say "== C:\gpn\bin =="
+          if (Test-Path 'C:\gpn\bin') {
+            Get-ChildItem 'C:\gpn\bin' -Filter *.exe | ForEach-Object { Say "  $($_.Name)" }
+          } else { Say "  (absent)" }
+
+          Say "== GPN_PROVIDER_ENDPOINT =="
+          Say "  value: '$($env:GPN_PROVIDER_ENDPOINT)'"
+
+          Say "== heartbeat binary smoke test =="
           $exe = 'C:\gpn\bin\gpn_provider_status.exe'
-          if (-not (Test-Path $exe)) { Write-Host 'gpn_provider_status.exe MISSING — skip'; exit 0 }
-          Write-Host '== starting gpn_provider_status on 127.0.0.1:18093 =='
-          $p = Start-Process -FilePath $exe -ArgumentList @('--listen','127.0.0.1:18093','--gflops','2500','--ollama','http://127.0.0.1:11434') -PassThru -WindowStyle Hidden
-          Start-Sleep -Seconds 3
-          try {
-            $s = Invoke-RestMethod 'http://127.0.0.1:18093/status' -TimeoutSec 8
-            Write-Host "status OK: $($s | ConvertTo-Json -Compress)"
-          } catch { Write-Host "status FAILED: $($_.Exception.Message)" }
-          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-          Write-Host 'stopped smoke-test process'
+          if (Test-Path $exe) {
+            try {
+              $p = Start-Process -FilePath $exe -ArgumentList @('--listen','127.0.0.1:18093','--gflops','2500','--ollama','http://127.0.0.1:11434') -PassThru -WindowStyle Hidden
+              Start-Sleep -Seconds 3
+              try { $s = Invoke-RestMethod 'http://127.0.0.1:18093/status' -TimeoutSec 8; Say "status OK: $($s | ConvertTo-Json -Compress)" }
+              catch { Say "status FAILED: $($_.Exception.Message)" }
+              Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+              Say "smoke-test process stopped"
+            } catch { Say "could not start: $($_.Exception.Message)" }
+          } else { Say "gpn_provider_status.exe MISSING" }
 
-      - name: Reachability / port
-        shell: powershell
-        run: |
-          Write-Host "== public IP =="
-          try { Write-Host "  $(Invoke-RestMethod 'https://api.ipify.org' -TimeoutSec 8)" } catch { Write-Host "  (lookup failed)" }
-          Write-Host "== local :8093 listener =="
-          (Get-NetTCPConnection -LocalPort 8093 -State Listen -ErrorAction SilentlyContinue | Measure-Object).Count | ForEach-Object { Write-Host "  listeners on 8093: $_" }
+          Say "== public IP =="
+          try { Say "  $(Invoke-RestMethod 'https://api.ipify.org' -TimeoutSec 8)" } catch { Say "  (lookup failed)" }
+
+          Say "== listeners on :8093 =="
+          $n = (Get-NetTCPConnection -LocalPort 8093 -State Listen -ErrorAction SilentlyContinue | Measure-Object).Count
+          Say "  $n"
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: provider-check
+          path: ${{ runner.temp }}\provider-check.txt
+          if-no-files-found: error
