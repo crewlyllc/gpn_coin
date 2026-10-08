@@ -68,6 +68,35 @@ pub struct ChainClient {
     fast: std::sync::Arc<tokio::sync::Mutex<Option<signer::NonceStream>>>,
 }
 
+/// Resolve the readiness-gate timeout/poll from the environment and wait for the
+/// node RPC to report a live best block. Bounded and non-fatal — on timeout it
+/// returns the last [`signer::NodeReadiness`] so the caller can log and proceed
+/// (the agent is designed to keep working even when the chain is down).
+async fn gate_rpc_readiness(endpoint: &str) -> signer::NodeReadiness {
+    let enabled = std::env::var("GPN_RPC_READY_GATE")
+        .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off")))
+        .unwrap_or(true);
+    if !enabled {
+        return signer::NodeReadiness {
+            reachable: true,
+            head_block: 1,
+            peers: 0,
+            is_syncing: false,
+            should_have_peers: false,
+        };
+    }
+    let timeout_ms: u64 = std::env::var("GPN_RPC_READY_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(15_000);
+    signer::wait_until_ready(
+        endpoint,
+        std::time::Duration::from_millis(timeout_ms),
+        std::time::Duration::from_millis(500),
+    )
+    .await
+}
+
 impl ChainClient {
     /// Connect to the GPN chain. On failure we log a warning and keep
     /// `client = None` so all reads fall back to placeholder defaults — the
@@ -92,6 +121,31 @@ impl ChainClient {
                 None
             }
         };
+        // RPC-readiness gate (queue item 9c): a long-lived client must not start
+        // submitting lifecycle txs against a node that is still booting or not
+        // yet producing blocks. `connect_robust` can succeed against a node that
+        // is up but still at genesis / mid-sync, in which case reads return
+        // genesis-era state and dynamically-encoded calls get dropped or diverge
+        // the nonce stream. Wait (bounded, non-fatal) for a live best block
+        // before proceeding. Opt out with GPN_RPC_READY_GATE=0; tune with
+        // GPN_RPC_READY_TIMEOUT_MS (default 15000).
+        let ready = gate_rpc_readiness(endpoint).await;
+        if ready.is_ready() {
+            log::info!(
+                "RPC readiness gate: node ready (head #{}, peers {}, syncing {})",
+                ready.head_block,
+                ready.peers,
+                ready.is_syncing
+            );
+        } else {
+            log::warn!(
+                "RPC readiness gate: node not ready (reachable={}, head #{}, peers {}, syncing {}); proceeding anyway",
+                ready.reachable,
+                ready.head_block,
+                ready.peers,
+                ready.is_syncing
+            );
+        }
         Ok(Self {
             endpoint: endpoint.to_string(),
             client,

@@ -179,6 +179,118 @@ pub async fn runtime_spec_version(endpoint: &str) -> Option<u32> {
     v.get("result")?.get("specVersion")?.as_u64().map(|x| x as u32)
 }
 
+/// Snapshot of node RPC readiness, used by the **RPC-readiness gate** (queue
+/// item 9c). See [`wait_until_ready`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeReadiness {
+    /// The RPC answered at all.
+    pub reachable: bool,
+    /// Best (head) block number; `0` means the node is still at genesis.
+    pub head_block: u64,
+    /// Connected peers as reported by `system_health`.
+    pub peers: u64,
+    /// `system_health.isSyncing`.
+    pub is_syncing: bool,
+    /// `system_health.shouldHavePeers` — `false` on a single-node dev/testnet.
+    pub should_have_peers: bool,
+}
+
+impl NodeReadiness {
+    /// A node is **ready** once the RPC answers *and* it reports a live best
+    /// block (head > 0) that is not syncing.
+    ///
+    /// We deliberately do NOT require `peers > 0`: a lone authority on a
+    /// single-node testnet has no connected peers yet is fully healthy and
+    /// producing blocks (requiring a peer would wedge that topology). But when
+    /// the node itself says it *should* have peers and has none, it is still
+    /// bootstrapping → not ready.
+    pub fn is_ready(&self) -> bool {
+        self.reachable
+            && self.head_block > 0
+            && !self.is_syncing
+            && !(self.should_have_peers && self.peers == 0)
+    }
+}
+
+/// Pure parser for the readiness snapshot: folds a `system_health` response, a
+/// `chain_getHeader` response, and a `reachable` flag into a [`NodeReadiness`].
+/// No I/O, so it is unit-testable without a live node.
+pub fn parse_readiness(
+    reachable: bool,
+    health: Option<&serde_json::Value>,
+    header: Option<&serde_json::Value>,
+) -> NodeReadiness {
+    fn field<'a>(v: Option<&'a serde_json::Value>, k: &str) -> Option<&'a serde_json::Value> {
+        v.and_then(|x| x.get("result")).and_then(|r| r.get(k))
+    }
+    let peers = field(health, "peers").and_then(|x| x.as_u64()).unwrap_or(0);
+    let is_syncing = field(health, "isSyncing").and_then(|x| x.as_bool()).unwrap_or(false);
+    let should_have_peers = field(health, "shouldHavePeers").and_then(|x| x.as_bool()).unwrap_or(false);
+    // Header.number is a 0x-prefixed hex string.
+    let head_block = field(header, "number")
+        .and_then(|x| x.as_str())
+        .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        .unwrap_or(0);
+    NodeReadiness {
+        reachable,
+        head_block,
+        peers,
+        is_syncing,
+        should_have_peers,
+    }
+}
+
+/// Probe the node RPC for readiness (two cheap JSON-RPC calls). Never fails:
+/// an unreachable node simply yields `reachable = false`.
+pub async fn check_node_ready(endpoint: &str) -> NodeReadiness {
+    let http_url = endpoint
+        .replace("ws://", "http://")
+        .replace("wss://", "https://");
+    let client = reqwest::Client::new();
+    let post = |method: &str| {
+        let url = http_url.clone();
+        let body = serde_json::json!({"jsonrpc":"2.0","id":1,"method":method,"params":[]});
+        let client = client.clone();
+        async move {
+            client
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .ok()?
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+        }
+    };
+    let health = post("system_health").await;
+    let header = post("chain_getHeader").await;
+    let reachable = health.is_some() || header.is_some();
+    parse_readiness(reachable, health.as_ref(), header.as_ref())
+}
+
+/// RPC-readiness gate: poll [`check_node_ready`] until the node is ready or
+/// `timeout` elapses, then return the last snapshot. Callers gate their
+/// startup / first writes on this so a long-lived client never fires
+/// lifecycle txs at a node that is still booting or not yet producing blocks
+/// (a not-ready node returns genesis-era state, which silently drops or
+/// diverges the nonce stream — the documented post-restart / post-upgrade
+/// stall). Non-fatal: on timeout the caller decides whether to proceed.
+pub async fn wait_until_ready(
+    endpoint: &str,
+    timeout: std::time::Duration,
+    poll: std::time::Duration,
+) -> NodeReadiness {
+    let start = std::time::Instant::now();
+    loop {
+        let r = check_node_ready(endpoint).await;
+        if r.is_ready() || start.elapsed() >= timeout {
+            return r;
+        }
+        tokio::time::sleep(poll).await;
+    }
+}
+
 pub async fn current_nonce(
     client: &OnlineClient<GpnConfig>,
     endpoint: &str,
@@ -719,5 +831,77 @@ mod tests {
         // (`gpn_verify_dispatch`) exercises the metadata-name resolution.
         let bytes = [3u8, 8, 13, 0, 0, 0]; // Module(pallet=8, error=13)
         assert_eq!(parse_module_indices(&bytes), Some((8, 13)));
+    }
+
+    // ── RPC-readiness gate (item 9c) ──────────────────────────────────────
+
+    use super::{parse_readiness, NodeReadiness};
+    use serde_json::json;
+
+    fn health(peers: u64, syncing: bool, should: bool) -> serde_json::Value {
+        json!({"jsonrpc":"2.0","id":1,"result":{
+            "peers": peers, "isSyncing": syncing, "shouldHavePeers": should
+        }})
+    }
+
+    fn header(number: u64) -> serde_json::Value {
+        json!({"jsonrpc":"2.0","id":1,"result":{
+            "number": format!("0x{:x}", number)
+        }})
+    }
+
+    #[test]
+    fn readiness_true_when_reachable_and_head_advancing() {
+        let r = parse_readiness(true, Some(&health(1, false, true)), Some(&header(93025)));
+        assert_eq!(r.head_block, 93025);
+        assert!(r.is_ready());
+    }
+
+    #[test]
+    fn readiness_false_at_genesis() {
+        // Reachable but still at genesis (head 0) → not ready.
+        let r = parse_readiness(true, Some(&health(0, false, false)), Some(&header(0)));
+        assert_eq!(r.head_block, 0);
+        assert!(!r.is_ready());
+    }
+
+    #[test]
+    fn readiness_false_when_unreachable() {
+        let r = parse_readiness(false, None, None);
+        assert!(!r.is_ready());
+    }
+
+    #[test]
+    fn lone_authority_with_no_peers_is_ready() {
+        // Single-node dev/testnet: shouldHavePeers=false, peers=0 is healthy.
+        let r = parse_readiness(true, Some(&health(0, false, false)), Some(&header(7)));
+        assert!(r.is_ready());
+    }
+
+    #[test]
+    fn bootstrapping_node_that_should_have_peers_is_not_ready() {
+        let r = parse_readiness(true, Some(&health(0, false, true)), Some(&header(7)));
+        assert!(!r.is_ready());
+    }
+
+    #[test]
+    fn syncing_node_is_not_ready() {
+        let r = parse_readiness(true, Some(&health(3, true, true)), Some(&header(7)));
+        assert!(!r.is_ready());
+    }
+
+    #[test]
+    fn malformed_health_defaults_to_not_ready() {
+        // Health present but empty result → peers/syncing default false, but a
+        // missing head number parses to 0 → not ready.
+        let r = parse_readiness(true, Some(&json!({"result":{}})), Some(&json!({"result":{}})));
+        assert_eq!(r, NodeReadiness {
+            reachable: true,
+            head_block: 0,
+            peers: 0,
+            is_syncing: false,
+            should_have_peers: false,
+        });
+        assert!(!r.is_ready());
     }
 }
