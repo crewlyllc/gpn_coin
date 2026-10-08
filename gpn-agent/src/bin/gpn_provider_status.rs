@@ -1,7 +1,12 @@
 //! gpn_provider_status — a tiny HTTP heartbeat for a provider, polled by the
 //! access-point scheduler to learn capabilities + load + latency.
 //!
-//! `GET /status` → `{ address, gflops, models[], can_pull, active, capacity }`
+//! `GET /status` → `{ address, gflops, models[], can_pull, active, capacity, vram_mb, ram_mb }`
+//!
+//! `vram_mb`/`ram_mb` advertise this box's hardware so the scheduler can gate a
+//! job that declares a VRAM/RAM floor (item 14 — e.g. video needs a big-VRAM box).
+//! They are auto-detected (nvidia-smi / /proc/meminfo) and can be overridden with
+//! `--vram-mb`/`--ram-mb` (env `VRAM_MB`/`RAM_MB`); 0 = unknown (not advertised).
 //!
 //! `models[]` is read LIVE from the local Ollama (`GET /api/tags`), so the network
 //! always sees what this machine actually has. `can_pull` = Ollama is reachable,
@@ -57,6 +62,38 @@ fn write_assignment(job_id: u64, rec: serde_json::Value) -> std::io::Result<()> 
     std::fs::write(&path, serde_json::Value::Object(m).to_string())
 }
 
+/// Total VRAM (MiB) of the first NVIDIA GPU via `nvidia-smi`; 0 if unknown.
+fn detect_vram_mb() -> u64 {
+    let out = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
+        .output()
+        .ok();
+    if let Some(o) = out {
+        if o.status.success() {
+            let s = String::from_utf8_lossy(&o.stdout);
+            if let Some(line) = s.lines().next() {
+                if let Ok(mb) = line.trim().parse::<u64>() {
+                    return mb;
+                }
+            }
+        }
+    }
+    0
+}
+
+/// Total system RAM (MiB) from `/proc/meminfo`; 0 if unknown (e.g. Windows).
+fn detect_ram_mb() -> u64 {
+    if let Ok(s) = std::fs::read_to_string("/proc/meminfo") {
+        for line in s.lines() {
+            if let Some(rest) = line.strip_prefix("MemTotal:") {
+                let kb: u64 = rest.trim().trim_end_matches("kB").trim().parse().unwrap_or(0);
+                return kb / 1024;
+            }
+        }
+    }
+    0
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let listen = opt(&args, "--listen").or_else(|| std::env::var("LISTEN").ok()).unwrap_or_else(|| "0.0.0.0:8093".into());
@@ -82,6 +119,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|| std::env::var("GPN_MEM_BW_GBPS").ok())
         .and_then(|s| s.parse().ok())
         .unwrap_or(250.0);
+    // Hardware capability (item 14): advertise VRAM/RAM so a job's `min_vram_mb`/
+    // `min_ram_mb` floor can be enforced *off-chain* by the scheduler. Auto-detected;
+    // 0 = unknown (explicitly NOT filtered against, so pre-item-14 boxes keep working).
+    let vram_mb: u64 = opt(&args, "--vram-mb")
+        .or_else(|| std::env::var("VRAM_MB").ok())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(detect_vram_mb);
+    let ram_mb: u64 = opt(&args, "--ram-mb")
+        .or_else(|| std::env::var("RAM_MB").ok())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(detect_ram_mb);
     let models: Vec<String> = models_csv.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
 
     let server = Server::http(&listen).map_err(|e| format!("cannot bind {listen}: {e}"))?;
@@ -96,7 +144,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "address": address, "gflops": gflops, "models": models_now,
                     "can_pull": can_pull, "active": active, "capacity": capacity.max(1),
                     "tok_per_s": tok_per_s, "owner_cost_usd_hr": owner_cost_usd_hr,
-                    "mem_bw_gbps": mem_bw_gbps
+                    "mem_bw_gbps": mem_bw_gbps, "vram_mb": vram_mb, "ram_mb": ram_mb
                 })
             }
             (Method::Get, "/health") => json!({"status":"ok"}),

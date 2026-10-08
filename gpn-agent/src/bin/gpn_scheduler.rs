@@ -195,6 +195,8 @@ struct Provider {
     tok_per_s: f64,
     owner_cost_usd_hr: f64,
     mem_bw_gbps: f64,
+    vram_mb: u64,
+    ram_mb: u64,
     active: u64,
     capacity: u64,
     latency_ms: u64,
@@ -284,6 +286,8 @@ fn refresh(
                         .and_then(|x| x.as_f64())
                         .unwrap_or(0.03),
                     mem_bw_gbps: v.get("mem_bw_gbps").and_then(|x| x.as_f64()).unwrap_or(250.0),
+                    vram_mb: v.get("vram_mb").and_then(|x| x.as_u64()).unwrap_or(0),
+                    ram_mb: v.get("ram_mb").and_then(|x| x.as_u64()).unwrap_or(0),
                     active: v.get("active").and_then(|x| x.as_u64()).unwrap_or(0),
                     capacity: v.get("capacity").and_then(|x| x.as_u64()).unwrap_or(1).max(1),
                     latency_ms: v.get("__latency_ms").and_then(|x| x.as_u64()).unwrap_or(9999),
@@ -298,6 +302,8 @@ fn refresh(
                     tok_per_s: 40.0,
                     owner_cost_usd_hr: 0.03,
                     mem_bw_gbps: 250.0,
+                    vram_mb: 0,
+                    ram_mb: 0,
                     active: 0,
                     capacity: 0,
                     latency_ms: 9999,
@@ -494,10 +500,21 @@ fn usd_per_token_for(model: &str) -> f64 {
     base * params_b.max(0.5)
 }
 
-fn pick(registry: &[Provider], min_gflops: u64, model: &str, pull_penalty_ms: u64, rtt: &RttOverrides) -> Option<(Provider, bool)> {
+fn pick(registry: &[Provider], min_gflops: u64, min_vram_mb: u64, min_ram_mb: u64, model: &str, pull_penalty_ms: u64, rtt: &RttOverrides) -> Option<(Provider, bool)> {
+    // Hardware-capability gate (item 14): a job declaring a VRAM/RAM floor (e.g.
+    // video needs a big-VRAM box) routes only to a provider that advertises AT
+    // LEAST that much. This is a HARD requirement, so it FAILS CLOSED: a provider
+    // that advertises less, or nothing (0 = unknown, e.g. an old heartbeat), is
+    // EXCLUDED when a floor is set — the safe choice, since the alternative is
+    // routing an OOM-prone job to a box that cannot run it. When no floor is set
+    // (min_* = 0, the default) the gate is inert and routing is unchanged.
+    let hw_ok = |p: &Provider| {
+        (min_vram_mb == 0 || p.vram_mb >= min_vram_mb)
+            && (min_ram_mb == 0 || p.ram_mb >= min_ram_mb)
+    };
     let live: Vec<&Provider> = registry
         .iter()
-        .filter(|p| p.last_seen.is_some() && p.gflops >= min_gflops)
+        .filter(|p| p.last_seen.is_some() && p.gflops >= min_gflops && hw_ok(p))
         .collect();
 
     // Effective latency for the *user's* path: a client-measured (user→provider)
@@ -717,6 +734,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 json!({ "providers": reg.iter().map(|p| json!({
                     "status_url": p.status_url, "address": p.address, "gflops": p.gflops, "models": p.models,
                     "active": p.active, "capacity": p.capacity, "latency_ms": p.latency_ms,
+                    "vram_mb": p.vram_mb, "ram_mb": p.ram_mb,
                     "healthy": p.last_seen.is_some()
                 })).collect::<Vec<_>>() })
             }
@@ -768,7 +786,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         return;
                     }
                 };
-                let chosen = pick(&reg, 0, &model, pull_penalty_ms, &rtt_overrides(&v));
+                let chosen = pick(&reg, 0, 0, 0, &model, pull_penalty_ms, &rtt_overrides(&v));
                 let (provider, needs_pull) = match chosen {
                     Some(x) => x,
                     None => {
@@ -978,6 +996,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let ppt: u128 = if ppt_in > 0 { ppt_in } else { oracle_ppt };
                 let mtok_eff: u32 = if mtok > 0 { mtok } else { 256 };
                 let min_gflops = g("min_gflops", 150);
+                // Hardware floor for this job (item 14): default 0 = no VRAM/RAM
+                // requirement; a video/gen job sends e.g. min_vram_mb=16000 so the
+                // scheduler skips small-VRAM boxes (the 8GB 4060 OOMs on video).
+                let min_vram_mb = g("min_vram_mb", 0);
+                let min_ram_mb = g("min_ram_mb", 0);
                 let price_gpn = v.get("price_gpn").and_then(|x| x.as_f64()).unwrap_or(10.0);
                 let job_type = v.get("job_type").and_then(|x| x.as_str()).unwrap_or("LLMInference");
                 let prompt = v.get("prompt").and_then(|x| x.as_str()).map(|s| s.to_string());
@@ -1012,7 +1035,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 };
-                let (provider, needs_pull) = match pick(&reg, min_gflops, &model, pull_penalty_ms, &rtt_overrides(&v)) {
+                let (provider, needs_pull) = match pick(&reg, min_gflops, min_vram_mb, min_ram_mb, &model, pull_penalty_ms, &rtt_overrides(&v)) {
                     Some(x) => x,
                     None => {
                         let r = Response::from_string(json!({"ok":false,"error":"no compatible provider available"}).to_string())
@@ -1073,7 +1096,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ((price_gpn * 1e12) as u128, 0u128, 0u32)
                 };
                 let res = rt.block_on(client.create_job(
-                    g("min_vram_mb", 8192) as u32,
+                    min_vram_mb as u32,
                     g("min_compute_capability", 75) as u16,
                     g("min_gpu_count", 1) as u8,
                     g("min_cuda_cores", 0) as u32,
@@ -1313,7 +1336,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let reg = registry.lock().unwrap().clone();
                     match resolve_requested_model(&reg, &qmodel) {
                         Err(e) => json!({"ok":false,"error":e}),
-                        Ok(qmodel) => match pick(&reg, 0, &qmodel, pull_penalty_ms, &rtt_overrides(&route_body)) {
+                        Ok(qmodel) => match pick(&reg, 0, 0, 0, &qmodel, pull_penalty_ms, &rtt_overrides(&route_body)) {
                             Some((p, pull)) => {
                                 let _ = write_assignment(&assign_store, idn, &p.address, &qmodel, pull);
                                 json!({"ok":true,"job_id":idn,"routed_to":p.address,
@@ -1349,6 +1372,8 @@ mod tests {
             tok_per_s: 40.0,
             owner_cost_usd_hr: 0.03,
             mem_bw_gbps: 250.0,
+            vram_mb: 0,
+            ram_mb: 0,
             active: 0,
             capacity: 4,
             latency_ms,
@@ -1392,7 +1417,7 @@ mod tests {
             prov("A", "http://a:8093", 5, "llama3.2:1b"),
             prov("B", "http://b:8093", 50, "llama3.2:1b"),
         ];
-        let (p, _) = pick(&reg, 0, "llama3.2:1b", 120_000, &RttOverrides::new()).unwrap();
+        let (p, _) = pick(&reg, 0, 0, 0, "llama3.2:1b", 120_000, &RttOverrides::new()).unwrap();
         assert_eq!(p.address, "A");
     }
 
@@ -1406,7 +1431,7 @@ mod tests {
         let mut rtt = RttOverrides::new();
         rtt.insert("a".into(), 120); // user is far from A
         rtt.insert("b".into(), 8); // user is near B
-        let (p, _) = pick(&reg, 0, "llama3.2:1b", 120_000, &rtt).unwrap();
+        let (p, _) = pick(&reg, 0, 0, 0, "llama3.2:1b", 120_000, &rtt).unwrap();
         assert_eq!(p.address, "B", "client-measured RTT must override AP-measured latency");
     }
 
@@ -1417,7 +1442,7 @@ mod tests {
             prov("B", "http://b:8093", 50, "llama3.2:1b"),
         ];
         let rtt = routing::parse_rtt_overrides(&json!({"http://b:8093/status": 2}));
-        let (p, _) = pick(&reg, 0, "llama3.2:1b", 120_000, &rtt).unwrap();
+        let (p, _) = pick(&reg, 0, 0, 0, "llama3.2:1b", 120_000, &rtt).unwrap();
         assert_eq!(p.address, "B");
     }
 
@@ -1453,7 +1478,56 @@ mod tests {
         ];
         let mut rtt = RttOverrides::new();
         rtt.insert("b".into(), 0); // "not measured"
-        let (p, _) = pick(&reg, 0, "llama3.2:1b", 120_000, &rtt).unwrap();
+        let (p, _) = pick(&reg, 0, 0, 0, "llama3.2:1b", 120_000, &rtt).unwrap();
         assert_eq!(p.address, "A");
+    }
+
+    #[test]
+    fn pick_gates_on_advertised_vram() {
+        // item 14: a video-class job (min_vram 16 GB) must skip the 8 GB node.
+        let mk = |addr: &str, url: &str, lat: u64, vram: u64| {
+            let mut p = prov(addr, url, lat, "ltx-video");
+            p.vram_mb = vram;
+            p
+        };
+        let reg = vec![mk("small", "http://s", 5, 8188), mk("big", "http://b", 50, 24576)];
+        // With a 16 GB floor, only the big node qualifies even though `small` is faster.
+        let (p, _) = pick(&reg, 0, 16000, 0, "ltx-video", 0, &RttOverrides::new()).unwrap();
+        assert_eq!(p.address, "big", "16GB job must skip the 8GB node");
+        // No floor -> the faster small node wins (gate inactive).
+        let (p2, _) = pick(&reg, 0, 0, 0, "ltx-video", 0, &RttOverrides::new()).unwrap();
+        assert_eq!(p2.address, "small");
+    }
+
+    #[test]
+    fn pick_excludes_providers_that_cannot_meet_the_floor() {
+        // A VRAM/RAM floor is a HARD requirement, so the gate fails closed: an
+        // 8GB node AND an unadvertised (0 = unknown) node are both excluded from a
+        // 16GB job -> no candidate.
+        let mut small = prov("small", "http://s", 5, "ltx-video");
+        small.vram_mb = 8188;
+        let unknown = prov("unknown", "http://u", 1, "ltx-video"); // vram/ram = 0
+        let reg = vec![small, unknown];
+        assert!(
+            pick(&reg, 0, 16000, 0, "ltx-video", 0, &RttOverrides::new()).is_none(),
+            "16GB job must find no candidate among an 8GB and an unadvertised node"
+        );
+
+        // A RAM floor is enforced the same way.
+        let mut low = prov("low", "http://l", 5, "llama3.2:1b");
+        low.ram_mb = 8000;
+        let mut hi = prov("hi", "http://h", 50, "llama3.2:1b");
+        hi.ram_mb = 64000;
+        let reg2 = vec![low, hi];
+        let (p, _) = pick(&reg2, 0, 0, 32000, "llama3.2:1b", 0, &RttOverrides::new()).unwrap();
+        assert_eq!(p.address, "hi", "32GB RAM floor must skip the 8GB-RAM node");
+
+        // No floor -> the gate is inert (the faster unadvertised node still wins).
+        let reg3 = vec![
+            prov("s2", "http://s2", 50, "ltx-video"),
+            prov("u2", "http://u2", 5, "ltx-video"),
+        ];
+        let (p2, _) = pick(&reg3, 0, 0, 0, "ltx-video", 0, &RttOverrides::new()).unwrap();
+        assert_eq!(p2.address, "u2");
     }
 }
