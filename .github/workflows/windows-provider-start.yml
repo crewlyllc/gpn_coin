@@ -72,17 +72,30 @@ jobs:
           $ErrorActionPreference = 'Continue'
           $tr = 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\gpn\run-provider.ps1'
           # stop any duplicate supervisor/provider started outside the task
-          Get-CimInstance Win32_Process -Filter "Name LIKE 'gpn_%'" |
-            Where-Object { $_.ExecutablePath -like 'C:\gpn\bin*' } |
-            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+          $procs = @(Get-CimInstance Win32_Process -Filter "Name LIKE 'gpn_%'")
+          foreach ($p in $procs) {
+            if ($p.ExecutablePath -like 'C:\gpn\bin*') {
+              Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+            }
+          }
           Start-Sleep -Seconds 2
           schtasks /Create /TN GPNProvider /TR $tr /SC ONLOGON /RL HIGHEST /F
-          if ($LASTEXITCODE -ne 0) { Write-Host "schtasks failed ($LASTEXITCODE) — falling back to detached Start-Process"; Start-Process -FilePath 'powershell' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','C:\gpn\run-provider.ps1' -WindowStyle Hidden }
-          else { schtasks /Run /TN GPNProvider }
+          $rc = $LASTEXITCODE
+          if ($rc -ne 0) {
+            Write-Host "schtasks failed (rc=$rc); falling back to detached Start-Process"
+            Start-Process -FilePath 'powershell' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','C:\gpn\run-provider.ps1' -WindowStyle Hidden
+          } else {
+            schtasks /Run /TN GPNProvider
+          }
           Start-Sleep -Seconds 12
           Write-Host '== gpn processes =='
           Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match 'gpn' } | ForEach-Object { Write-Host "  $($_.ProcessName) PID=$($_.Id)" }
           Write-Host '== listeners on :8093 =='
-          $n = (Get-NetTCPConnection -LocalPort 8093 -State Listen -ErrorAction SilentlyContinue | Measure-Object).Count
+          $n = @(Get-NetTCPConnection -LocalPort 8093 -State Listen -ErrorAction SilentlyContinue).Count
           Write-Host "  count=$n"
-          try { Write-Host ("local status: " + (Invoke-RestMethod 'http://127.0.0.1:8093/status' -TimeoutSec 8 | ConvertTo-Json -Compress)) } catch { Write-Host "local status FAILED: $($_.Exception.Message)" }
+          try {
+            $s = Invoke-RestMethod 'http://127.0.0.1:8093/status' -TimeoutSec 8
+            Write-Host ("local status: " + ($s | ConvertTo-Json -Compress))
+          } catch {
+            Write-Host "local status FAILED: $($_.Exception.Message)"
+          }
