@@ -552,6 +552,25 @@ fn rtt_overrides(v: &Value) -> RttOverrides {
     v.get("rtt").map(routing::parse_rtt_overrides).unwrap_or_default()
 }
 
+/// PUSH an assignment to the chosen provider over HTTP, so a REMOTE provider (which
+/// can't read this AP's host-local assignments file) still learns the job is its. The
+/// provider's heartbeat (`POST /assign`) writes it into the provider's OWN local file.
+/// Best-effort — silently no-ops if the provider is unreachable.
+fn dispatch_assignment(status_url: &str, job_id: u64, provider: &str, model: &str, pull: bool) {
+    let base = status_url
+        .trim_end_matches('/')
+        .trim_end_matches("/status")
+        .trim_end_matches('/');
+    let url = format!("{base}/assign");
+    let body = json!({"job_id": job_id, "provider": provider, "model": model, "pull": pull});
+    if let Ok(c) = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    {
+        let _ = c.post(&url).json(&body).send();
+    }
+}
+
 fn write_assignment(store: &str, job_id: u64, provider: &str, model: &str, pull: bool) -> std::io::Result<()> {
     let mut m: serde_json::Map<String, Value> = std::fs::read_to_string(store)
         .ok()
@@ -868,6 +887,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     record_created(id, 512);
                     let _ = gpn_agent::llm::LlmStore::new().put(id, gpn_agent::llm::LlmJob::new_llm(&model, &prompt, 0.7, 512));
                     let _ = write_assignment(&assign_store, id, &provider.address, &model, needs_pull);
+                    dispatch_assignment(&provider.status_url, id, &provider.address, &model, needs_pull);
                     // block until the provider finishes (OpenAI calls are synchronous)
                     for _ in 0..1200 {
                         if let Some(j) = gpn_agent::llm::get_job(id) {
@@ -1128,6 +1148,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // plus the model + whether it must pull the model first.
                         record_created(id, mtok_eff as u64);
                         let _ = write_assignment(&assign_store, id, &provider.address, &model, needs_pull);
+                        dispatch_assignment(&provider.status_url, id, &provider.address, &model, needs_pull);
                         // optional inline wait: poll the off-chain store and return the
                         // answer in THIS response (no separate /result call).
                         let mut answer: Option<serde_json::Value> = None;

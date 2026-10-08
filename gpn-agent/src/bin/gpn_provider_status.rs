@@ -14,6 +14,7 @@
 //! Env: LISTEN, ADDRESS, GFLOPS, MODELS, CAPACITY, ACTIVE, GPN_OLLAMA
 
 use serde_json::json;
+use std::io::Read;
 use std::time::Duration;
 use tiny_http::{Header, Method, Response, Server};
 
@@ -37,6 +38,23 @@ fn ollama_models(base: &str, fallback: &[String]) -> (Vec<String>, bool) {
         }
         Err(_) => (fallback.to_vec(), false),
     }
+}
+
+/// Merge one assignment into the provider's local `~/.gpn/assignments.json` —
+/// the file the provider loop's `read_assigned` reads.
+fn write_assignment(job_id: u64, rec: serde_json::Value) -> std::io::Result<()> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let path = std::env::var("GPN_ASSIGN_STORE")
+        .unwrap_or_else(|_| format!("{home}/.gpn/assignments.json"));
+    let mut m: serde_json::Map<String, serde_json::Value> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    m.insert(job_id.to_string(), rec);
+    if let Some(dir) = std::path::Path::new(&path).parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    std::fs::write(&path, serde_json::Value::Object(m).to_string())
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -70,7 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("GPN provider heartbeat on http://{listen} — address={address} gflops={gflops} models={:?} active={active}/{capacity}", models);
 
     let hdr = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
-    for req in server.incoming_requests() {
+    for mut req in server.incoming_requests() {
         let body = match (req.method(), req.url()) {
             (Method::Get, "/status") => {
                 let (models_now, can_pull) = ollama_models(&ollama, &models);
@@ -82,6 +100,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
             }
             (Method::Get, "/health") => json!({"status":"ok"}),
+            // POST /assign — the access point PUSHES a job assignment for this provider.
+            // We write it into the provider's OWN ~/.gpn/assignments.json (what the
+            // provider loop reads), so a REMOTE provider gets its assignment without
+            // needing to see the AP's host-local file.
+            (Method::Post, "/assign") => {
+                let mut body = String::new();
+                let _ = req.as_reader().read_to_string(&mut body);
+                match serde_json::from_str::<serde_json::Value>(&body) {
+                    Ok(v) => {
+                        let jid = v.get("job_id").and_then(|x| x.as_u64()).unwrap_or(0);
+                        let rec = json!({
+                            "provider": v.get("provider").and_then(|x| x.as_str()).unwrap_or(address.as_str()),
+                            "model": v.get("model").and_then(|x| x.as_str()).unwrap_or(""),
+                            "pull": v.get("pull").and_then(|x| x.as_bool()).unwrap_or(false),
+                        });
+                        match write_assignment(jid, rec) {
+                            Ok(_) => json!({"ok": true, "job_id": jid}),
+                            Err(e) => json!({"error": format!("{e}")}),
+                        }
+                    }
+                    Err(e) => json!({"error": format!("bad body: {e}")}),
+                }
+            }
             _ => json!({"error":"not found"}),
         };
         let _ = req.respond(Response::from_string(body.to_string()).with_header(hdr.clone()));
