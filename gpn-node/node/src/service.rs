@@ -408,10 +408,12 @@ pub fn new_full<
     let rpc_extensions_builder = {
         let client = client.clone();
         let miner_worker_slot = miner_worker_slot.clone();
+        let pool = transaction_pool.clone();
         Box::new(move |_| {
             Ok(crate::rpc::create_full_rpc(
                 miner_worker_slot.clone(),
                 client.clone(),
+                pool.clone(),
             ))
         })
     };

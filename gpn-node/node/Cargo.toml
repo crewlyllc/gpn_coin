@@ -7,6 +7,7 @@ edition = "2021"
 # Local
 gpn-runtime = { path = "../runtime" }
 pallet-gpu-pow = { path = "../pallets/gpu-pow" }
+pallet-gpu-attestation = { path = "../pallets/gpu-attestation" }
 
 # Substrate / Polkadot SDK
 frame-system = { workspace = true }
@@ -14,6 +15,7 @@ frame-benchmarking = { workspace = true, optional = true }
 pallet-transaction-payment = { workspace = true, default-features = false }
 pallet-sudo = { workspace = true, default-features = false }
 pallet-transaction-payment-rpc-runtime-api = { workspace = true, features = ["std"] }
+frame-system-rpc-runtime-api = { workspace = true, features = ["std"] }
 sc-basic-authorship = { workspace = true }
 sc-chain-spec = { workspace = true }
 sc-cli = { workspace = true }
