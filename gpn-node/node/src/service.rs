@@ -10,6 +10,8 @@ use sc_client_api::StorageProvider;
 use sc_consensus::{BlockImport, LongestChain};
 use sc_consensus_pow::{start_mining_worker, PowAlgorithm, PowBlockImport, PowImportQueue};
 use sc_network_sync::SyncingService;
+use sc_network::config::MultiaddrWithPeerId;
+use sc_network::{NetworkPeers, NetworkStatusProvider};
 use sc_service::{error::Error as ServiceError, Configuration, TaskManager};
 use sc_telemetry::{Telemetry, TelemetryWorker};
 use sc_transaction_pool_api::OffchainTransactionPoolFactory;
@@ -297,6 +299,98 @@ pub fn new_partial(config: &Configuration) -> Result<Service, ServiceError> {
     })
 }
 
+/// Merge every peer-discovery source into `config.network.boot_nodes` before the
+/// network is built. Sources, in priority order:
+/// 1. the already-configured static bootnodes (`--bootnodes` / chain-spec /
+///    compiled-in registry) — kept as the hard fallback;
+/// 2. the persisted peer store (`<base-path>/gpn-peers.json`) — Bitcoin-style
+///    addrman, so known-good peers are re-dialed on restart;
+/// 3. `--bootnodes-dns` DNS seeds;
+/// 4. `--bootnodes-url` published seed lists.
+///
+/// Every extra source is best-effort: failures are logged and ignored, so a
+/// dead DNS seed or unreachable seed URL can never abort startup.
+pub async fn prepare_network_config(
+    mut config: Configuration,
+    sources: &crate::discovery::SeedSources,
+) -> Configuration {
+    let base = config.base_path.path().to_path_buf();
+
+    // Existing bootnodes + the compiled-in registry fallback.
+    let mut existing: Vec<String> = config
+        .network
+        .boot_nodes
+        .iter()
+        .map(|b| b.to_string())
+        .collect();
+    existing.extend(crate::network_registry::load_registry().bootnodes);
+
+    // Resolve each extra source independently (each returns Result, never panics).
+    let mut results: Vec<Result<Vec<String>, String>> = Vec::new();
+    for name in &sources.dns {
+        results.push(crate::discovery::resolve_dns_seed(name).await);
+    }
+    for url in &sources.urls {
+        results.push(crate::discovery::fetch_seed_url(url).await);
+    }
+    // The persisted peer store acts as one more (always-available) source.
+    results.push(Ok(crate::discovery::read_persisted_peers(&base)));
+
+    let merged = crate::discovery::merge_sources_lossy(&existing, results);
+    let bootnodes: Vec<MultiaddrWithPeerId> =
+        merged.iter().filter_map(|s| s.parse().ok()).collect();
+
+    log::info!(
+        "peer-discovery: {} bootnode(s) after merging static + persisted + {} DNS + {} URL source(s)",
+        bootnodes.len(),
+        sources.dns.len(),
+        sources.urls.len()
+    );
+    if bootnodes.is_empty() {
+        log::warn!(
+            "peer-discovery: no dialable bootnodes — this node may be unable to join the \
+             network. Configure --bootnodes, --bootnodes-dns or --bootnodes-url."
+        );
+    }
+
+    config.network.boot_nodes = bootnodes;
+    config
+}
+
+/// Read the GPN on-chain peer registry: every endpoint declared by a registered
+/// full node (`gpn-liveness::Endpoints`) and every registered compute provider
+/// (`ComputeMarketplace::ProviderEndpoints`), converted to a multiaddress.
+///
+/// Best-effort: any read error yields fewer (or zero) endpoints, never a panic.
+fn read_chain_endpoints(client: &FullClient) -> Vec<String> {
+    use sc_client_api::StorageProvider;
+
+    let info = client.chain_info();
+    let mut out = Vec::new();
+    let maps: [(&[u8], &[u8]); 2] = [
+        (b"Liveness", b"Endpoints"),
+        (b"ComputeMarketplace", b"ProviderEndpoints"),
+    ];
+    for (pallet, item) in maps {
+        let prefix = StorageKey(crate::discovery::storage_prefix(pallet, item));
+        match client.storage_pairs(info.best_hash, Some(&prefix), None) {
+            Ok(pairs) => {
+                for (_key, value) in pairs {
+                    if let Some(bytes) = crate::discovery::decode_bytes_value(&value.0) {
+                        if let Ok(text) = String::from_utf8(bytes) {
+                            if let Some(ma) = crate::discovery::endpoint_to_multiaddr(&text) {
+                                out.push(ma);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => log::debug!("chain-discovery: read of {pallet:?}::{item:?} failed: {e}"),
+        }
+    }
+    out
+}
+
 /// Builds a new service for a full client.
 pub fn new_full<
     N: sc_network::NetworkBackend<Block, <Block as sp_runtime::traits::Block>::Hash>,
@@ -313,6 +407,9 @@ pub fn new_full<
         transaction_pool,
         other: (algorithm, mut telemetry, miner_worker_slot),
     } = new_partial(&config)?;
+
+    // Captured before `config` is moved: used by the persistent peer store.
+    let base_path = config.base_path.path().to_path_buf();
 
     let net_config = sc_network::config::FullNetworkConfiguration::<
         Block,
@@ -387,6 +484,75 @@ pub fn new_full<
                 }
             },
         );
+    }
+
+    // ---- Persistent peer store (Bitcoin-style addrman) -------------------
+    // Snapshot the addresses of peers we are *connected to* into
+    // `<base-path>/gpn-peers.json`. On the next start these are merged into the
+    // bootnode set (see `prepare_network_config`), so known-good peers are
+    // re-dialed even if the static bootnodes are down.
+    {
+        let net = network.clone();
+        let base = base_path.clone();
+        task_manager.spawn_handle().spawn("gpn-peer-store", None, async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                let Ok(state) = net.network_state().await else {
+                    continue;
+                };
+                let mut addrs = Vec::new();
+                for (peer, info) in &state.connected_peers {
+                    for addr in &info.known_addresses {
+                        // `known_addresses` omit the peer id; add it back so the
+                        // stored entry is a dialable bootnode.
+                        addrs.push(format!("{addr}/p2p/{peer}"));
+                    }
+                }
+                if !addrs.is_empty() {
+                    if let Err(e) = crate::discovery::write_persisted_peers(&base, &addrs) {
+                        log::debug!("peer-store: persist failed: {e}");
+                    }
+                }
+            }
+        });
+    }
+
+    // ---- On-chain discovery (GPN-native top-up) --------------------------
+    // Read the full-node registry + provider endpoints from chain and dial
+    // them. Bootstrap chicken-and-egg: wait until we have at least one peer
+    // (bounded) before the first scan; never blocks startup.
+    {
+        let net = network.clone();
+        let client = client.clone();
+        task_manager.spawn_handle().spawn("gpn-chain-discovery", None, async move {
+            {
+                let mut gate = tokio::time::interval(Duration::from_secs(30));
+                for _ in 0..10 {
+                    if net.sync_num_connected() > 0 {
+                        break;
+                    }
+                    gate.tick().await;
+                }
+            }
+            let mut tick = tokio::time::interval(Duration::from_secs(600));
+            loop {
+                tick.tick().await;
+                let endpoints = read_chain_endpoints(&client);
+                let mut added = 0usize;
+                for ma in endpoints {
+                    if let Ok(mw) = ma.parse::<MultiaddrWithPeerId>() {
+                        net.add_known_address(mw.peer_id, mw.multiaddr);
+                        added += 1;
+                    }
+                }
+                if added > 0 {
+                    log::info!("chain-discovery: dialing {added} on-chain peer(s)");
+                } else {
+                    log::debug!("chain-discovery: no dialable on-chain endpoints");
+                }
+            }
+        });
     }
 
     if config.offchain_worker.enabled {

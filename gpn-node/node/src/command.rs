@@ -129,7 +129,15 @@ pub fn run() -> sc_cli::Result<()> {
         }
         None => {
             let runner = cli.create_runner(&cli.run)?;
+            // Extra peer-discovery seed sources (Bitcoin-style DNS seeds + HTTP
+            // seed lists) declared on the CLI. Merged with the static
+            // bootnodes + persisted peer store in `prepare_network_config`.
+            let seed_sources = crate::discovery::SeedSources {
+                dns: cli.bootnodes_dns.clone(),
+                urls: cli.bootnodes_url.clone(),
+            };
             runner.run_node_until_exit(|config| async move {
+                let config = service::prepare_network_config(config, &seed_sources).await;
                 match config.network.network_backend {
                     sc_network::config::NetworkBackendType::Libp2p => service::new_full::<
                         sc_network::NetworkWorker<

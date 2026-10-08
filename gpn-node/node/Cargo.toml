@@ -57,6 +57,14 @@ jsonrpsee = { version = "0.24", features = ["server", "macros"] }
 serde_json = "1"
 hex = "0.4"
 
+# Peer discovery: Bitcoin-style DNS seeds (TXT multiaddrs) + HTTP seed lists.
+# hickory-resolver is already in the dependency graph via litep2p, so this adds
+# no new crates. attohttpc is built WITHOUT TLS (default-features = false): seed
+# lists should be served over plain http://; https sources are logged and
+# skipped rather than pulling a TLS stack into the node.
+hickory-resolver = "0.25"
+attohttpc = { version = "0.24", default-features = false }
+
 # Real Ethash PoW (memory-hard, GPU-mineable). Light-cache mode lets a CPU
 # mine/verify the same algorithm a GPU miner targets with the full DAG.
 ethash = "0.4"

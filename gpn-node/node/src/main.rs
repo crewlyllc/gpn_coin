@@ -8,6 +8,7 @@ mod challenge;
 mod cli;
 mod clock;
 mod command;
+mod discovery;
 mod gpu_miner;
 mod network_registry;
 mod rpc;

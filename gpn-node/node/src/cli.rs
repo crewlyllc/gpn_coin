@@ -18,6 +18,16 @@ pub struct Cli {
     /// GPU device index for mining (0-indexed)
     #[arg(long, default_value = "0")]
     pub gpu_device: u8,
+
+    /// Bitcoin-style DNS seed: resolve this name and merge the peer multiaddrs
+    /// it publishes as DNS TXT records into the bootnode set. Repeatable.
+    #[arg(long = "bootnodes-dns", value_name = "NAME")]
+    pub bootnodes_dns: Vec<String>,
+
+    /// Published seed-list JSON to fetch and merge into the bootnode set
+    /// (accepts `{"multiaddrs": [...]}` or a plain array). Repeatable.
+    #[arg(long = "bootnodes-url", value_name = "URL")]
+    pub bootnodes_url: Vec<String>,
 }
 
 #[derive(Debug, clap::Subcommand)]

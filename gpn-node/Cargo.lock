@@ -3128,6 +3128,7 @@ dependencies = [
 name = "gpn-node"
 version = "0.1.0"
 dependencies = [
+ "attohttpc",
  "clap",
  "ethash",
  "ethereum-types",
@@ -3137,6 +3138,7 @@ dependencies = [
  "futures",
  "gpn-runtime",
  "hex",
+ "hickory-resolver 0.25.2",
  "jsonrpsee",
  "log",
  "opencl3",
@@ -3234,7 +3236,10 @@ dependencies = [
  "ff",
  "proptest",
  "rayon",
+ "serde_json",
+ "sha2 0.10.9",
  "subtle 2.6.1",
+ "zeroize",
 ]
 
 [[package]]
