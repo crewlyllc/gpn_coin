@@ -1,0 +1,44 @@
+name: Windows provider readiness check
+
+# Read-only diagnostic: reports whether this self-hosted Windows box is ready to
+# run as a GPN AI provider (item 4). Makes NO changes and starts nothing.
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: self-hosted
+    steps:
+      - name: Ollama backend
+        shell: powershell
+        run: |
+          Write-Host "== Ollama =="
+          try {
+            $t = Invoke-RestMethod "http://127.0.0.1:11434/api/tags" -TimeoutSec 8
+            $names = @($t.models | ForEach-Object { $_.name })
+            Write-Host "Ollama OK; models: $($names -join ', ')"
+            if ($names -contains 'llama3.2:1b') { Write-Host "llama3.2:1b: PRESENT" } else { Write-Host "llama3.2:1b: MISSING" }
+          } catch { Write-Host "Ollama NOT reachable at 127.0.0.1:11434 ($($_.Exception.Message))" }
+
+      - name: GPN provider binaries / processes
+        shell: powershell
+        run: |
+          Write-Host "== running gpn processes =="
+          Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match 'gpn' } | ForEach-Object { Write-Host "  $($_.ProcessName) PID=$($_.Id)" }
+          Write-Host "== candidate bin dirs =="
+          foreach ($d in @("C:\gpn\bin","$env:USERPROFILE\bin","$env:USERPROFILE\Desktop\gpn\bin","C:\gpn")) {
+            if (Test-Path $d) {
+              $exes = @(Get-ChildItem $d -Filter *.exe -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+              Write-Host "  $d -> $($exes -join ', ')"
+            } else { Write-Host "  $d -> (absent)" }
+          }
+          Write-Host "== GPN_PROVIDER_ENDPOINT =="
+          Write-Host "  value: '$($env:GPN_PROVIDER_ENDPOINT)'"
+
+      - name: Reachability / port
+        shell: powershell
+        run: |
+          Write-Host "== public IP =="
+          try { Write-Host "  $(Invoke-RestMethod 'https://api.ipify.org' -TimeoutSec 8)" } catch { Write-Host "  (lookup failed)" }
+          Write-Host "== local :8093 listener =="
+          (Get-NetTCPConnection -LocalPort 8093 -State Listen -ErrorAction SilentlyContinue | Measure-Object).Count | ForEach-Object { Write-Host "  listeners on 8093: $_" }
