@@ -1,0 +1,57 @@
+name: Windows provider deploy
+
+# Deploys the gpn-windows release bundle and the in-network LLM model onto the
+# self-hosted Windows box so it can run as a provider (item 4). Idempotent:
+# unpacks the provider exes into C:\gpn\bin and pulls the model if missing.
+# Starts nothing and writes no wallets.
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "release-windows run id to fetch the gpn-windows artifact from"
+        required: true
+      pull_model:
+        description: "ollama pull llama3.2:1b if missing"
+        type: boolean
+        default: true
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    steps:
+      - name: download bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: gpn-windows
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: ${{ runner.temp }}\gpn-windows
+
+      - name: unpack into C:\gpn\bin
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dst = 'C:\gpn\bin'
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          $src = Join-Path $env:RUNNER_TEMP 'gpn-windows'
+          Get-ChildItem -Path $src -Recurse -Filter *.exe | ForEach-Object {
+            Copy-Item $_.FullName -Destination $dst -Force
+          }
+          Write-Host "C:\gpn\bin now contains:"
+          Get-ChildItem $dst -Filter *.exe | ForEach-Object { Write-Host "  $($_.Name)" }
+          foreach ($need in @('gpn_llm_provider.exe','gpn_provider_status.exe','gpn_register.exe')) {
+            if (-not (Test-Path (Join-Path $dst $need))) { throw "missing required $need" }
+          }
+
+      - name: pull in-network model
+        if: ${{ inputs.pull_model }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $t = Invoke-RestMethod 'http://127.0.0.1:11434/api/tags' -TimeoutSec 8
+          $names = @($t.models | ForEach-Object { $_.name })
+          if ($names -contains 'llama3.2:1b') { Write-Host 'llama3.2:1b already present'; exit 0 }
+          Write-Host 'pulling llama3.2:1b ...'
+          & ollama pull llama3.2:1b
+          if ($LASTEXITCODE -ne 0) { throw "ollama pull failed ($LASTEXITCODE)" }
+          Write-Host 'pulled'
