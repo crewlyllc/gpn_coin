@@ -1,0 +1,84 @@
+name: Windows video generation test
+
+# Runs ONE video-generation job directly through the helper
+# (gpn_diffuse.py -> LTX-Video) on the self-hosted Windows box's GPU, times it,
+# and uploads the resulting .mp4 as an artifact. Requires windows-video-install
+# to have run first (venv at C:\gpn\venv). Forces 4-bit T5 (GPN_DIFFUSE_T5_4BIT=1)
+# so the ~22 GB fp16 text encoder stays NF4 on CPU and the 16 GB card is not OOM'd.
+on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        default: "a golden retriever puppy running on a sunny beach, cinematic"
+      frames:
+        default: "25"
+      steps:
+        default: "25"
+      seed:
+        default: "42"
+
+jobs:
+  video:
+    runs-on: self-hosted
+    timeout-minutes: 180
+    steps:
+      - name: checkout repo (for gpn_diffuse.py)
+        uses: actions/checkout@v4
+
+      - name: sync helper into C:\gpn
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path 'C:\gpn' | Out-Null
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'gpn-agent\gpn_diffuse.py') 'C:\gpn\gpn_diffuse.py' -Force
+          Write-Host "gpn_diffuse.py synced"
+
+      - name: run video job
+        shell: powershell
+        env:
+          GPN_DIFFUSE_T5_4BIT: "1"
+          HF_HUB_ENABLE_HF_TRANSFER: "1"
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $py = 'C:\gpn\venv\Scripts\python.exe'
+          if (-not (Test-Path $py)) { throw "venv python missing at $py — run windows-video-install first" }
+          $out = 'C:\gpn\out-video.mp4'
+          if (Test-Path $out) { Remove-Item $out -Force }
+
+          $req = [ordered]@{
+            kind            = 'video'
+            model           = 'ltx-video'
+            prompt          = '${{ inputs.prompt }}'
+            negative_prompt = 'blurry, low quality, distorted'
+            width           = 512
+            height          = 512
+            steps           = [int]'${{ inputs.steps }}'
+            seed            = [int]'${{ inputs.seed }}'
+            frames          = [int]'${{ inputs.frames }}'
+            fps             = 8
+            output          = $out
+          }
+          $reqPath = 'C:\gpn\req-video.json'
+          ($req | ConvertTo-Json) | Set-Content -Path $reqPath -Encoding UTF8
+          Write-Host "request: $(Get-Content $reqPath -Raw)"
+
+          Write-Host "== running gpn_diffuse.py (video) =="
+          $t0 = Get-Date
+          & $py 'C:\gpn\gpn_diffuse.py' $reqPath
+          $rc = $LASTEXITCODE
+          $secs = [math]::Round(((Get-Date) - $t0).TotalSeconds, 1)
+          Write-Host "exit=$rc elapsed=${secs}s"
+
+          if (Test-Path $out) {
+            $fi = Get-Item $out
+            $sha = (Get-FileHash $out -Algorithm SHA256).Hash.ToLower()
+            Write-Host "ARTIFACT: $($fi.FullName) size=$($fi.Length) bytes sha256=$sha elapsed=${secs}s"
+          } else {
+            Write-Host "NO ARTIFACT produced (exit=$rc)"
+          }
+
+      - name: upload video artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpn-video-out
+          path: C:\gpn\out-video.mp4
+          if-no-files-found: warn
