@@ -35,6 +35,21 @@ jobs:
           Write-Host "== GPN_PROVIDER_ENDPOINT =="
           Write-Host "  value: '$($env:GPN_PROVIDER_ENDPOINT)'"
 
+      - name: Heartbeat binary smoke test
+        shell: powershell
+        run: |
+          $exe = 'C:\gpn\bin\gpn_provider_status.exe'
+          if (-not (Test-Path $exe)) { Write-Host 'gpn_provider_status.exe MISSING — skip'; exit 0 }
+          Write-Host '== starting gpn_provider_status on 127.0.0.1:18093 =='
+          $p = Start-Process -FilePath $exe -ArgumentList @('--listen','127.0.0.1:18093','--gflops','2500','--ollama','http://127.0.0.1:11434') -PassThru -WindowStyle Hidden
+          Start-Sleep -Seconds 3
+          try {
+            $s = Invoke-RestMethod 'http://127.0.0.1:18093/status' -TimeoutSec 8
+            Write-Host "status OK: $($s | ConvertTo-Json -Compress)"
+          } catch { Write-Host "status FAILED: $($_.Exception.Message)" }
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          Write-Host 'stopped smoke-test process'
+
       - name: Reachability / port
         shell: powershell
         run: |
