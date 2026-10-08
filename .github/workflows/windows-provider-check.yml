@@ -65,11 +65,19 @@ jobs:
 
           Say "== assignment stores (item 4/14 remote dispatch) =="
           $cand = @()
+          $cand += 'C:\Windows\System32\.gpn\assignments.json'
           $cand += 'C:\gpn\.gpn\assignments.json'
           if ($env:HOME)        { $cand += (Join-Path $env:HOME '.gpn\assignments.json') }
           if ($env:USERPROFILE) { $cand += (Join-Path $env:USERPROFILE '.gpn\assignments.json') }
           $cand += 'C:\gpn\assignments.json'
           $cand += (Join-Path (Get-Location) '.gpn\assignments.json')
+          Say "  supervisor CWD probe: $(Get-Location)"
+          Say "  -- all assignments.json under likely roots --"
+          foreach ($root in @('C:\gpn','C:\Windows\System32','C:\Users','C:\actions-runner')) {
+            if (Test-Path $root) {
+              Get-ChildItem -Path $root -Recurse -Depth 4 -Filter 'assignments.json' -ErrorAction SilentlyContinue | ForEach-Object { Say "    $($_.FullName) ($($_.Length) bytes)" }
+            }
+          }
           foreach ($c in ($cand | Select-Object -Unique)) {
             if (Test-Path $c) {
               $len = (Get-Item $c).Length
@@ -83,6 +91,10 @@ jobs:
           if (Test-Path 'C:\gpn\provider.log') {
             $fi = Get-Item 'C:\gpn\provider.log'
             Say "  size=$($fi.Length) mtime=$($fi.LastWriteTime)"
+            $raw = [IO.File]::ReadAllBytes('C:\gpn\provider.log')
+            Say "  RAW_BASE64_BEGIN"
+            Say ([Convert]::ToBase64String($raw))
+            Say "  RAW_BASE64_END"
             Get-Content 'C:\gpn\provider.log' -Tail 80 -ErrorAction SilentlyContinue | ForEach-Object { Say "  $_" }
           } else { Say "  (no C:\gpn\provider.log)" }
 
