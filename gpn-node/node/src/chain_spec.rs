@@ -672,3 +672,121 @@ mod reserve_tests {
         );
     }
 }
+
+/// Mainnet-prep (item 12) param-parity regression locks. The chain-spec header
+/// claims testnet is a *config-only* fork of mainnet so testnet-verified
+/// behavior transfers directly; these tests make that claim enforceable.
+#[cfg(test)]
+mod param_parity_tests {
+    use super::*;
+
+    /// Build the genesis JSON the way either public spec would (dev/local/testnet
+    /// pass `treasury_alloc == 0`; mainnet passes the disclosed treasury allocation).
+    fn build(treasury_alloc: u128, roster: Vec<AccountId>) -> serde_json::Value {
+        genesis_config_json(
+            vec![],
+            vec![],
+            vec![],
+            vec![], // no endowed accounts (both public specs are fair-launch)
+            vec![], // no reserves
+            AccountId::new([0u8; 32]), // mainnet-style inert sudo placeholder
+            treasury_alloc,
+            roster,
+            None,
+        )
+    }
+
+    /// Numbers may exceed `u64` (e.g. `gpn(100M) = 1e20`); compare via the
+    /// serialized decimal text so we don't depend on `u128`<->`Value` casting.
+    fn raw(v: &serde_json::Value) -> String {
+        v.to_string().trim_matches('"').to_string()
+    }
+
+    #[test]
+    fn mainnet_and_testnet_share_emission_and_difficulty() {
+        let testnet = build(0, treasury_roster());
+        let mainnet = build(gpn(TREASURY_ALLOC_GPN), mainnet_treasury_roster());
+
+        // Param parity: identical starting difficulty + block reward, so a
+        // testnet-verified retarget/emission behaves the same on mainnet.
+        // NB: the runtime GenesisConfig serializes with camelCase keys.
+        assert_eq!(
+            testnet["gpuPoW"]["initialDifficulty"], mainnet["gpuPoW"]["initialDifficulty"],
+            "testnet and mainnet must start at the same difficulty"
+        );
+        assert_eq!(
+            testnet["gpuPoW"]["initialBlockReward"], mainnet["gpuPoW"]["initialBlockReward"],
+            "testnet and mainnet must share the same block reward"
+        );
+        assert_eq!(
+            raw(&mainnet["gpuPoW"]["initialBlockReward"]),
+            "50000000000000",
+            "initial block reward must be 50 GPN (12 decimals)"
+        );
+        // 2^232 starting target (limb 3 = 2^40).
+        assert_eq!(
+            mainnet["gpuPoW"]["initialDifficulty"],
+            serde_json::json!([0u64, 0, 0, 1_099_511_627_776u64])
+        );
+        // Neither public spec hard-codes a dev block-reward beneficiary.
+        assert!(testnet["gpuPoW"]["blockRewardBeneficiary"].is_null());
+        assert!(mainnet["gpuPoW"]["blockRewardBeneficiary"].is_null());
+    }
+
+    #[test]
+    fn mainnet_genesis_is_fair_launch_with_inert_sudo_and_disclosed_treasury() {
+        let m = build(gpn(TREASURY_ALLOC_GPN), mainnet_treasury_roster());
+
+        // The only genesis balance is the keyless `gpn/trsy` pallet account.
+        let bals = m["balances"]["balances"]
+            .as_array()
+            .expect("balances array");
+        assert_eq!(
+            bals.len(),
+            1,
+            "mainnet endows exactly one account: {bals:?}"
+        );
+        assert_eq!(
+            raw(&bals[0][1]),
+            "100000000000000000000",
+            "treasury allocation must be 100M GPN"
+        );
+        // Supply counter seeds at the treasury allocation so it counts against the 1B cap.
+        assert_eq!(
+            raw(&m["gpnToken"]["initialMinted"]),
+            "100000000000000000000"
+        );
+
+        // Inert all-zeros sudo: no private key exists for this account.
+        assert_eq!(
+            m["sudo"]["key"].as_str().unwrap(),
+            "5C4hrfjw9DjXZTzV3MwzrrAr9P1MJhSrvWGWqi1eSuyUpnhM"
+        );
+
+        // Treasury governance wiring.
+        assert_eq!(m["gpnTreasury"]["threshold"].as_u64().unwrap(), 13);
+        assert_eq!(
+            m["gpnTreasury"]["roster"].as_array().unwrap().len(),
+            TREASURY_ROSTER_SIZE as usize
+        );
+
+        // Unlock schedule: 70M spendable at block 0 + 20 x 1.5M six-month tranches.
+        let sched = m["gpnTreasury"]["schedule"].as_array().expect("schedule");
+        assert_eq!(
+            sched.len(),
+            1 + TREASURY_VESTED_TRANCHES as usize,
+            "expected 70M-at-genesis entry + {TREASURY_VESTED_TRANCHES} vesting tranches"
+        );
+        assert_eq!(
+            sched[0][0].as_u64().unwrap(),
+            0,
+            "first unlock is at block 0"
+        );
+        assert_eq!(raw(&sched[0][1]), "70000000000000000000", "70M at genesis");
+        let total: u128 = sched
+            .iter()
+            .map(|t| raw(&t[1]).parse::<u128>().expect("tranche is a decimal"))
+            .sum();
+        assert_eq!(total, gpn(TREASURY_ALLOC_GPN), "schedule must sum to 100M");
+    }
+}

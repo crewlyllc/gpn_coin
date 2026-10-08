@@ -27,11 +27,16 @@ Companion docs:
 |---|---|---|
 | Chain id / name | `gpn_mainnet` / "GPN Mainnet" | `chain_spec::mainnet_chain_spec()` |
 | Chain type | `Live` | same |
-| Genesis supply | **0 mined**, **200,000,000 GPN** disclosed vested treasury | `TREASURY_ALLOC_GPN` |
+| Genesis supply | **0 mined**, **100,000,000 GPN** disclosed vested treasury | `TREASURY_ALLOC_GPN` |
 | Hard cap | **1,000,000,000 GPN** (`MaxSupply`) | `pallet-gpn-token` (canonical) |
-| Max *mineable* | **800,000,000 GPN** (cap − treasury allocation) | `initial_minted = treasury_alloc` |
-| Block reward | **50 GPN/block**, disinflationary (10% → 1%) | `gpu_po_w.initial_block_reward` |
-| Block time | ~15 s (self-tuning from 2^245 difficulty) | `initial_difficulty` |
+| Max *mineable* | **900,000,000 GPN** (cap − treasury allocation) | `initial_minted = treasury_alloc` |
+| Block reward | **50 GPN/block**, halving-only (**no** inflation curve) | `gpu_po_w.initial_block_reward` |
+| Block time | **~4 s target** (shared runtime `TargetBlockTime=4`; self-tuning from 2^232 difficulty) | `initial_difficulty` |
+
+> **Cadence note (open decision §10):** the runtime is shared by testnet and mainnet, so
+> `TargetBlockTime=4 s` applies to **both** today — mainnet has **no separate 15 s cadence** yet.
+> The `HalvingInterval` (4,204,800 blocks) is ~2 yr at 15 s but only **~194 days at 4 s**; resolve
+> via §10 before launch.
 | Consensus | Ethash PoW (`gpu-pow`) + PoSG attestation | pallet runtime |
 | Oracle operators at genesis | **none** (added by governance) | `initial_operators = vec![]` |
 | Endowed accounts | **none** (fair launch) | `endowed_accounts = vec![]` |
@@ -88,28 +93,30 @@ cargo run --release -- build-spec --chain mainnet --disable-default-bootnode > /
 ```bash
 python3 - <<'PY'
 import json
+# NB: the runtime GenesisConfig serializes with **camelCase** keys
+# (`gpuPoW`, `gpnToken`, `gpnTreasury`, `profitabilityOracle`, …).
 g = json.load(open('/tmp/gpn-mainnet.json'))['genesis']['runtimeGenesis']['config']
 b = g['balances']['balances']
-print('endowed accounts (must be empty or treasury-only):', b)
-print('gpu_po_w.block_reward_beneficiary (must be null):', g['gpu_po_w']['block_reward_beneficiary'])
-print('gpu_po_w.initial_block_reward (must be 50e12):', g['gpu_po_w']['initial_block_reward'])
-print('gpn_token.initial_minted (must be 200e6 * 1e12):', g['gpn_token']['initial_minted'])
-print('treasury threshold (must be 13):', g['gpn_treasury']['threshold'])
-print('treasury roster size (must be 25):', len(g['gpn_treasury']['roster']))
-print('treasury tranches (must be 28):', len(g['gpn_treasury']['schedule']))
-print('oracle operators (must be empty):', g['profitability_oracle']['initial_operators'])
+print('endowed accounts (must be treasury-only):', b)
+print('gpuPoW.blockRewardBeneficiary (must be null):', g['gpuPoW']['blockRewardBeneficiary'])
+print('gpuPoW.initialBlockReward (must be 50e12):', g['gpuPoW']['initialBlockReward'])
+print('gpnToken.initialMinted (must be 100e6 * 1e12):', g['gpnToken']['initialMinted'])
+print('treasury threshold (must be 13):', g['gpnTreasury']['threshold'])
+print('treasury roster size (must be 25):', len(g['gpnTreasury']['roster']))
+print('treasury tranches (must be 21):', len(g['gpnTreasury']['schedule']))
+print('oracle operators (must be empty):', g['profitabilityOracle']['initialOperators'])
 print('sudo key (must be the all-zeros placeholder):', g['sudo']['key'])
 PY
 ```
 
 Expected:
-- `balances` = the single `gpn/trsy` pallet account with `200000000000000000000000000` raw
-  (`200,000,000 GPN × 10¹²`). No other account.
+- `balances` = the single `gpn/trsy` pallet account with `100000000000000000000` raw
+  (`100,000,000 GPN × 10¹²`). No other account.
 - `block_reward_beneficiary` = `null` (set post-launch via governance, §6).
 - `gpn_token.initial_minted` = the treasury allocation (counts against the 1B cap).
 - `sudo.key` = `5C4hrfjw9DjXZTzV3MwzrrAr9P1MJhSrvWGWqi1eSuyUpnhM` (all-zeros).
-- 28 tranches: 8 × 12.5M (months 6…48) then 20 × 5M (months 54…168), **nothing unlocked at
-  block 0**.
+- 21 schedule entries: **70M unlocked at block 0**, then 20 × 1.5M six-month tranches (30M over
+  10 yr). 70M is spendable at launch.
 
 Hash and publish the canonical spec:
 ```bash
@@ -173,9 +180,9 @@ gpn-agent/target/release/gpn_check_state --endpoint ws://127.0.0.1:9944 | head
 
 Checklist:
 - [ ] All nodes report the **same genesis hash**.
-- [ ] `TotalMinted` seeds at `200e6 GPN` and increases by `50 GPN` per block.
-- [ ] `Balances` shows the treasury `gpn/trsy` account holding 200M, **0 spendable**
-      (nothing unlocked at launch).
+- [ ] `TotalMinted` seeds at `100e6 GPN` and increases by `50 GPN` per block.
+- [ ] `Balances` shows the treasury `gpn/trsy` account holding 100M, **70M spendable**
+      (70M unlocked at genesis; the remaining 30M vests over 10 yr).
 - [ ] No endowed user accounts exist.
 - [ ] Sudo is unreachable (the all-zeros key is not funded and has no known private key).
 
@@ -201,8 +208,9 @@ governed `Sudo.sudo → <call>` or via the governance committee per
    profitability_oracle.add_operator(account)   # root; then operator posts update_feed
    ```
    Client-side: an operator runs `gpn_operate_oracle ws://<node>:9944 <values.toml> <interval> //<key>`.
-3. **Fund/operate the treasury** only through the 13-of-25 flow (§7). Nothing is unlocked at
-   launch, so the first tranche is spendable only after `SIX_MONTHS_BLOCKS` = **1,036,800 blocks**.
+3. **Fund/operate the treasury** only through the 13-of-25 flow (§7). **70M is unlocked at
+   genesis** (spendable immediately), and 1.5M unlocks every `SIX_MONTHS_BLOCKS` = **1,036,800
+   blocks** thereafter until the 30M vest completes (10 yr).
 4. **Publish operator onboarding** (`operator-onboarding.md`) and the RPC endpoint list.
 
 ---
@@ -272,3 +280,8 @@ is non-negotiable.
 4. Marketplace go-live: first paying customers + SLA / reputation policy
    (`marketplace-sla-reputation-proposal.md`).
 5. The 25 treasury roster members and the 13-of-25 signer operational runbook.
+6. **Block-time / halving parity.** The shared runtime currently sets `TargetBlockTime = 4 s`
+   (labelled "fast testnet cadence") for **both** testnet and mainnet, while `HalvingInterval`
+   (4,204,800 blocks) is documented as "~2 years" (true only at 15 s). Decide the launch cadence;
+   if mainnet should differ from testnet, the runtime constant must change (forkless `set_code`,
+   reviewed) before the mainnet genesis is cut.

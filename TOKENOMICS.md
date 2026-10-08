@@ -23,8 +23,12 @@ for GPU compute), not just speculative demand.
 
 ## Emission
 
-- Block reward: **50 GPN/block**, ~15s target → **~288,000 GPN/day** (~105M in year 1).
-- Reward **halves every ~4,204,800 blocks (~2 years)**.
+- Block reward: **50 GPN/block**. Runtime target block time is **4 s** (shared testnet/mainnet
+  cadence) → **~1,080,000 GPN/day** at target. (Older docs said "~15 s → ~288,000/day"; the
+  15 s cadence is **not** implemented — see the cadence note below.)
+- Reward **halves every 4,204,800 blocks** — that is ~2 years at 15 s but **~194 days at the
+  current 4 s cadence**; the block-time/halving parity is an **open mainnet decision**
+  (`docs/mainnet-launch-runbook.md` §10).
 - All newly issued GPN comes from mining block rewards; there is no other mint.
 
 ## Treasury (10% — a growth fund, not a payout)
