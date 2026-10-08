@@ -1,9 +1,10 @@
 name: Windows provider readiness check
 
 # Read-only diagnostic: reports whether this self-hosted Windows box is ready to
-# run as a GPN AI provider (item 4). Makes NO changes and starts nothing
-# persistent (the heartbeat smoke test is started then stopped). Results are
-# printed and uploaded as the `provider-check` artifact for programmatic review.
+# run as a GPN AI provider (item 4 / item 14). Makes NO changes and starts
+# nothing persistent (the heartbeat smoke test is started then stopped). Results
+# are printed and uploaded as the `provider-check` artifact for programmatic
+# review.
 on:
   workflow_dispatch:
 
@@ -27,15 +28,18 @@ jobs:
           } catch { Say "Ollama NOT reachable at 127.0.0.1:11434 ($($_.Exception.Message))" }
 
           Say "== running gpn processes =="
-          Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match 'gpn' } | ForEach-Object { Say "  $($_.ProcessName) PID=$($_.Id)" }
+          Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match 'gpn' } | ForEach-Object { Say "  $($_.ProcessName) PID=$($_.Id) started=$($_.StartTime)" }
 
           Say "== C:\gpn\bin =="
           if (Test-Path 'C:\gpn\bin') {
-            Get-ChildItem 'C:\gpn\bin' -Filter *.exe | ForEach-Object { Say "  $($_.Name)" }
+            Get-ChildItem 'C:\gpn\bin' -Filter *.exe | ForEach-Object { Say "  $($_.Name)  $($_.LastWriteTime)" }
           } else { Say "  (absent)" }
 
-          Say "== GPN_PROVIDER_ENDPOINT =="
-          Say "  value: '$($env:GPN_PROVIDER_ENDPOINT)'"
+          Say "== env HOME/USERPROFILE =="
+          Say "  HOME='$($env:HOME)'"
+          Say "  USERPROFILE='$($env:USERPROFILE)'"
+          Say "  GPN_PROVIDER_ENDPOINT='$($env:GPN_PROVIDER_ENDPOINT)'"
+          Say "  GPN_ASSIGN_STORE='$($env:GPN_ASSIGN_STORE)'"
 
           Say "== heartbeat binary smoke test =="
           $exe = 'C:\gpn\bin\gpn_provider_status.exe'
@@ -53,13 +57,33 @@ jobs:
           Say "== public IP =="
           try { Say "  $(Invoke-RestMethod 'https://api.ipify.org' -TimeoutSec 8)" } catch { Say "  (lookup failed)" }
 
-          Say "== listeners on :8093 =="
-          $n = (Get-NetTCPConnection -LocalPort 8093 -State Listen -ErrorAction SilentlyContinue | Measure-Object).Count
-          Say "  $n"
+          Say "== listeners on :8093 and :8094 =="
+          foreach ($port in 8093,8094) {
+            $n = (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Measure-Object).Count
+            Say "  :$port -> $n"
+          }
 
-          Say "== provider.log (tail 40) =="
+          Say "== assignment stores (item 4/14 remote dispatch) =="
+          $cand = @()
+          $cand += 'C:\gpn\.gpn\assignments.json'
+          if ($env:HOME)        { $cand += (Join-Path $env:HOME '.gpn\assignments.json') }
+          if ($env:USERPROFILE) { $cand += (Join-Path $env:USERPROFILE '.gpn\assignments.json') }
+          $cand += 'C:\gpn\assignments.json'
+          $cand += (Join-Path (Get-Location) '.gpn\assignments.json')
+          foreach ($c in ($cand | Select-Object -Unique)) {
+            if (Test-Path $c) {
+              $len = (Get-Item $c).Length
+              $txt = Get-Content $c -Raw -ErrorAction SilentlyContinue
+              $tail = if ($txt.Length -gt 600) { $txt.Substring($txt.Length-600) } else { $txt }
+              Say "  FOUND $c ($len bytes): ...$tail"
+            } else { Say "  absent $c" }
+          }
+
+          Say "== provider.log (tail 80) =="
           if (Test-Path 'C:\gpn\provider.log') {
-            Get-Content 'C:\gpn\provider.log' -Tail 40 -ErrorAction SilentlyContinue | ForEach-Object { Say "  $_" }
+            $fi = Get-Item 'C:\gpn\provider.log'
+            Say "  size=$($fi.Length) mtime=$($fi.LastWriteTime)"
+            Get-Content 'C:\gpn\provider.log' -Tail 80 -ErrorAction SilentlyContinue | ForEach-Object { Say "  $_" }
           } else { Say "  (no C:\gpn\provider.log)" }
 
           Say "== scheduled task GPNProvider =="
