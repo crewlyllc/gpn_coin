@@ -1,12 +1,18 @@
 //! gpn_provider_status — a tiny HTTP heartbeat for a provider, polled by the
 //! access-point scheduler to learn capabilities + load + latency.
 //!
-//! `GET /status` → `{ address, gflops, models[], can_pull, active, capacity, vram_mb, ram_mb }`
+//! `GET /status` → `{ address, gflops, models[], can_pull, active, capacity, vram_mb, ram_mb, gpu_class, tflops }`
 //!
 //! `vram_mb`/`ram_mb` advertise this box's hardware so the scheduler can gate a
 //! job that declares a VRAM/RAM floor (item 14 — e.g. video needs a big-VRAM box).
 //! They are auto-detected (nvidia-smi / /proc/meminfo) and can be overridden with
 //! `--vram-mb`/`--ram-mb` (env `VRAM_MB`/`RAM_MB`); 0 = unknown (not advertised).
+//!
+//! `gpu_class` (`discrete`|`integrated`|`unknown`) + `tflops` advertise whether
+//! this box has a real (discrete) GPU (item 19 — a CPU/APU integrated GPU must
+//! not earn unless it clears an FP32-TFLOPS floor). Auto-detected (nvidia-smi /
+//! lspci on Linux, Win32_VideoController on Windows); override with
+//! `--gpu-class`/`--tflops` (env `GPU_CLASS`/`TFLOPS`); tflops 0 = unknown.
 //!
 //! `models[]` is read LIVE from the local Ollama (`GET /api/tags`), so the network
 //! always sees what this machine actually has. `can_pull` = Ollama is reachable,
@@ -19,6 +25,7 @@
 //! Env: LISTEN, ADDRESS, GFLOPS, MODELS, CAPACITY, ACTIVE, GPN_OLLAMA
 
 use serde_json::json;
+use gpn_agent::gpu::detect_gpu_capability;
 use std::io::Read;
 use std::time::Duration;
 use tiny_http::{Header, Method, Response, Server};
@@ -130,6 +137,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|| std::env::var("RAM_MB").ok())
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(detect_ram_mb);
+    // Minimum GPU capability (item 19): advertise the GPU *class* + an FP32
+    // TFLOPS estimate so the scheduler can gate a job's `min_tflops` floor and
+    // reject CPU/APU integrated graphics. Auto-detected; overridable.
+    let (gpu_class, tflops_detected) = detect_gpu_capability();
+    let gpu_class: String = opt(&args, "--gpu-class")
+        .or_else(|| std::env::var("GPU_CLASS").ok())
+        .unwrap_or(gpu_class);
+    let tflops: f64 = opt(&args, "--tflops")
+        .or_else(|| std::env::var("TFLOPS").ok())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(tflops_detected);
     let models: Vec<String> = models_csv.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
 
     let server = Server::http(&listen).map_err(|e| format!("cannot bind {listen}: {e}"))?;
@@ -144,7 +162,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "address": address, "gflops": gflops, "models": models_now,
                     "can_pull": can_pull, "active": active, "capacity": capacity.max(1),
                     "tok_per_s": tok_per_s, "owner_cost_usd_hr": owner_cost_usd_hr,
-                    "mem_bw_gbps": mem_bw_gbps, "vram_mb": vram_mb, "ram_mb": ram_mb
+                    "mem_bw_gbps": mem_bw_gbps, "vram_mb": vram_mb, "ram_mb": ram_mb,
+                    "gpu_class": gpu_class, "tflops": tflops
                 })
             }
             (Method::Get, "/health") => json!({"status":"ok"}),

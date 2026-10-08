@@ -123,7 +123,7 @@ pub const VERSION: sp_version::RuntimeVersion = sp_version::RuntimeVersion {
     spec_name: create_runtime_str!("gpn"),
     impl_name: create_runtime_str!("gpn"),
     authoring_version: 1,
-    spec_version: 16,
+    spec_version: 17,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 1,
@@ -406,6 +406,11 @@ parameter_types! {
     pub const AttestationInterval: BlockNumber = 3600; // ~15 hours at 15s blocks
     pub const MaxAttestationAge: BlockNumber = 14400; // ~60 hours
     pub const MaxMissedAttestations: u32 = 3;
+    /// Minimum GPU capability (item 19): a device must *measure* at least this
+    /// many FP32 GFLOPS to be eligible to attest (⇒ to earn). 3,000 GFLOPS =
+    /// **3 TFLOPS** — a CPU/APU **integrated** GPU (≈1–2 TFLOPS) never clears it,
+    /// while a discrete card does. Tunable via a reviewed runtime upgrade.
+    pub const MinEligibilityGflops: u64 = 3_000;
     pub const BaseStakingAPR: u32 = 1000; // 10.00% (in basis points)
     pub const SilverUptimeBps: u32 = 9_000; // 90% rolling uptime
     pub const GoldUptimeBps: u32 = 9_500; // 95% rolling uptime
@@ -429,6 +434,7 @@ impl pallet_gpu_attestation::Config for Runtime {
     type AttestationInterval = AttestationInterval;
     type MaxAttestationAge = MaxAttestationAge;
     type MaxMissedAttestations = MaxMissedAttestations;
+    type MinEligibilityGflops = MinEligibilityGflops;
     type BaseStakingAPR = BaseStakingAPR;
     type SilverUptimeBps = SilverUptimeBps;
     type GoldUptimeBps = GoldUptimeBps;

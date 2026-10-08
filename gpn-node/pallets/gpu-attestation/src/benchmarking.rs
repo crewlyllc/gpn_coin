@@ -42,13 +42,17 @@ mod benchmarks {
         )
         .unwrap();
 
+        // Clear the per-tier (Bronze = 100) AND the eligibility floor (item 19)
+        // so the benchmark exercises the success path under any runtime config.
+        let gflops = T::MinEligibilityGflops::get().max(100u64);
+
         #[extrinsic_call]
         submit_attestation(
             RawOrigin::Signed(caller.clone()),
             [1u8; 32],
             [2u8; 32],
             1u8,
-            100u64,
+            gflops,
         );
 
         assert!(Attestations::<T>::contains_key(&caller));
@@ -85,7 +89,7 @@ mod benchmarks {
             [1u8; 32],
             [2u8; 32],
             1u8,
-            100u64,
+            T::MinEligibilityGflops::get().max(100u64),
         )
         .unwrap();
         // Set the record one miss away from the slash limit so the (heavier)

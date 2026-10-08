@@ -137,6 +137,15 @@ pub mod pallet {
         type MaxAttestationAge: Get<BlockNumberFor<Self>>;
         #[pallet::constant]
         type MaxMissedAttestations: Get<u32>;
+        /// Minimum measured FP32 GFLOPS a device must demonstrate to be eligible
+        /// to attest **at all** (⇒ to earn). The capability floor (item 19): a
+        /// CPU/APU **integrated** GPU (≈1–2 TFLOPS) cannot clear a ~3 TFLOPS
+        /// (3000 GFLOPS) floor, so it cannot attest or earn. Unlike the per-tier
+        /// `min_gflops`, this is a hard eligibility gate that also protects the
+        /// `Unattested`→earn path. Enforced against the *measured* `compute_gflops`
+        /// (self-reported at attestation ⇒ pair with the capacity challenge #6).
+        #[pallet::constant]
+        type MinEligibilityGflops: Get<u64>;
         #[pallet::constant]
         type BaseStakingAPR: Get<u32>;
         /// Min rolling uptime (bps) a full node needs to hold the Silver tier.
@@ -270,6 +279,9 @@ pub mod pallet {
         StakeTransferFailed,
         /// Reported compute throughput is below the minimum for the claimed GPU tier.
         InsufficientCompute,
+        /// Reported compute throughput is below the minimum GPU *eligibility*
+        /// floor (item 19) — the device cannot attest (⇒ cannot earn).
+        BelowEligibilityFloor,
         /// Caller is not the configured trusted challenge verifier.
         NotChallengeVerifier,
         /// No challenge is currently active to confirm against.
@@ -334,6 +346,15 @@ pub mod pallet {
             // (seal-verified PoW) and, in phase 2, by a node-verified challenge. Staking
             // remains available and raises the reward multiplier via the tier system.
             // See design-verifiable-gpu-proof-2026-10-06.md.
+
+            // Minimum GPU capability floor (item 19): a CPU/APU integrated GPU
+            // cannot attest — hence cannot earn — unless its *measured* FP32
+            // throughput clears the floor. This is checked FIRST, before any tier
+            // is assigned, so it also covers the stake-free earn path.
+            ensure!(
+                compute_gflops >= T::MinEligibilityGflops::get(),
+                Error::<T>::BelowEligibilityFloor
+            );
 
             let mut tier = if gpu_count >= 16 {
                 AttestationTier::Gold
@@ -693,6 +714,9 @@ mod tests {
         pub const TestAttestInterval: u64 = 10;
         pub const TestMaxAge: u64 = 50;
         pub const TestMaxMissed: u32 = 3;
+        /// Low floor in tests so the many tier/count cases below stay valid; the
+        /// dedicated floor test uses a value under it.
+        pub const TestMinEligibilityGflops: u64 = 50;
         pub const TestBaseAPR: u32 = 1_000;
         pub const TestSilverUptime: u32 = 9_000;
         pub const TestGoldUptime: u32 = 9_500;
@@ -726,6 +750,7 @@ mod tests {
         type AttestationInterval = TestAttestInterval;
         type MaxAttestationAge = TestMaxAge;
         type MaxMissedAttestations = TestMaxMissed;
+        type MinEligibilityGflops = TestMinEligibilityGflops;
         type BaseStakingAPR = TestBaseAPR;
         type SilverUptimeBps = TestSilverUptime;
         type GoldUptimeBps = TestGoldUptime;
@@ -986,6 +1011,40 @@ mod tests {
             assert_eq!(
                 Attestations::<Test>::get(BOB).unwrap().tier,
                 AttestationTier::Silver
+            );
+        });
+    }
+
+    #[test]
+    fn test_below_eligibility_floor_cannot_attest() {
+        // item 19: a device measuring below the eligibility floor (a CPU/APU
+        // integrated GPU, ≈1–2 TFLOPS) is rejected outright — it cannot attest,
+        // hence cannot earn — even when its GPU count would otherwise qualify.
+        new_test_ext().execute_with(|| {
+            AttestPallet::deposit_stake(RuntimeOrigin::signed(ALICE), 500).unwrap();
+            let result = AttestPallet::submit_attestation(
+                RuntimeOrigin::signed(ALICE),
+                [1u8; 32],
+                [2u8; 32],
+                1,
+                40, // < TestMinEligibilityGflops (50)
+            );
+            assert_eq!(result, Err(Error::<Test>::BelowEligibilityFloor.into()));
+            assert!(Attestations::<Test>::get(ALICE).is_none());
+        });
+        // At/above the floor an otherwise-valid submission attests normally.
+        new_test_ext().execute_with(|| {
+            let result = AttestPallet::submit_attestation(
+                RuntimeOrigin::signed(BOB),
+                [1u8; 32],
+                [2u8; 32],
+                1,
+                100, // >= floor (50) and >= Bronze (100)
+            );
+            assert!(result.is_ok());
+            assert_eq!(
+                Attestations::<Test>::get(BOB).unwrap().tier,
+                AttestationTier::Bronze
             );
         });
     }

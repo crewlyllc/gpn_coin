@@ -197,6 +197,11 @@ struct Provider {
     mem_bw_gbps: f64,
     vram_mb: u64,
     ram_mb: u64,
+    /// GPU class advertised by the heartbeat (item 19): "discrete" |
+    /// "integrated" | "unknown". A *supporting* flag for the TFLOPS floor.
+    gpu_class: String,
+    /// Estimated FP32 TFLOP/s advertised by the heartbeat; 0.0 = unknown.
+    tflops: f64,
     active: u64,
     capacity: u64,
     latency_ms: u64,
@@ -288,6 +293,12 @@ fn refresh(
                     mem_bw_gbps: v.get("mem_bw_gbps").and_then(|x| x.as_f64()).unwrap_or(250.0),
                     vram_mb: v.get("vram_mb").and_then(|x| x.as_u64()).unwrap_or(0),
                     ram_mb: v.get("ram_mb").and_then(|x| x.as_u64()).unwrap_or(0),
+                    gpu_class: v
+                        .get("gpu_class")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    tflops: v.get("tflops").and_then(|x| x.as_f64()).unwrap_or(0.0),
                     active: v.get("active").and_then(|x| x.as_u64()).unwrap_or(0),
                     capacity: v.get("capacity").and_then(|x| x.as_u64()).unwrap_or(1).max(1),
                     latency_ms: v.get("__latency_ms").and_then(|x| x.as_u64()).unwrap_or(9999),
@@ -304,6 +315,8 @@ fn refresh(
                     mem_bw_gbps: 250.0,
                     vram_mb: 0,
                     ram_mb: 0,
+                    gpu_class: "unknown".to_string(),
+                    tflops: 0.0,
                     active: 0,
                     capacity: 0,
                     latency_ms: 9999,
@@ -500,7 +513,7 @@ fn usd_per_token_for(model: &str) -> f64 {
     base * params_b.max(0.5)
 }
 
-fn pick(registry: &[Provider], min_gflops: u64, min_vram_mb: u64, min_ram_mb: u64, model: &str, pull_penalty_ms: u64, rtt: &RttOverrides) -> Option<(Provider, bool)> {
+fn pick(registry: &[Provider], min_gflops: u64, min_vram_mb: u64, min_ram_mb: u64, min_tflops: f64, model: &str, pull_penalty_ms: u64, rtt: &RttOverrides) -> Option<(Provider, bool)> {
     // Hardware-capability gate (item 14): a job declaring a VRAM/RAM floor (e.g.
     // video needs a big-VRAM box) routes only to a provider that advertises AT
     // LEAST that much. This is a HARD requirement, so it FAILS CLOSED: a provider
@@ -512,9 +525,28 @@ fn pick(registry: &[Provider], min_gflops: u64, min_vram_mb: u64, min_ram_mb: u6
         (min_vram_mb == 0 || p.vram_mb >= min_vram_mb)
             && (min_ram_mb == 0 || p.ram_mb >= min_ram_mb)
     };
+    // Minimum-GPU-capability gate (item 19): a real (discrete) GPU OR an
+    // advertised FP32 TFLOPS figure that clears `min_tflops`. A CPU/APU
+    // **integrated** GPU must not earn unless it clears the objective floor.
+    // The TFLOPS floor is authoritative; "discrete" is only a *supporting*
+    // flag for a box that hasn't reported a number yet. Fail-closed only when a
+    // floor is set (min_tflops <= 0 ⇒ inert, routing unchanged):
+    //   • known tflops      → must be ≥ the floor (discrete or not);
+    //   • unknown tflops(0) → only a self-declared *discrete* card is trusted.
+    let gpu_ok = |p: &Provider| {
+        if min_tflops <= 0.0 {
+            return true;
+        }
+        if p.tflops > 0.0 {
+            return p.tflops >= min_tflops;
+        }
+        p.gpu_class == "discrete"
+    };
     let live: Vec<&Provider> = registry
         .iter()
-        .filter(|p| p.last_seen.is_some() && p.gflops >= min_gflops && hw_ok(p))
+        .filter(|p| {
+            p.last_seen.is_some() && p.gflops >= min_gflops && hw_ok(p) && gpu_ok(p)
+        })
         .collect();
 
     // Effective latency for the *user's* path: a client-measured (user→provider)
@@ -735,6 +767,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "status_url": p.status_url, "address": p.address, "gflops": p.gflops, "models": p.models,
                     "active": p.active, "capacity": p.capacity, "latency_ms": p.latency_ms,
                     "vram_mb": p.vram_mb, "ram_mb": p.ram_mb,
+                    "gpu_class": p.gpu_class, "tflops": p.tflops,
                     "healthy": p.last_seen.is_some()
                 })).collect::<Vec<_>>() })
             }
@@ -786,7 +819,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         return;
                     }
                 };
-                let chosen = pick(&reg, 0, 0, 0, &model, pull_penalty_ms, &rtt_overrides(&v));
+                let chosen = pick(&reg, 0, 0, 0, 0.0, &model, pull_penalty_ms, &rtt_overrides(&v));
                 let (provider, needs_pull) = match chosen {
                     Some(x) => x,
                     None => {
@@ -1001,6 +1034,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // scheduler skips small-VRAM boxes (the 8GB 4060 OOMs on video).
                 let min_vram_mb = g("min_vram_mb", 0);
                 let min_ram_mb = g("min_ram_mb", 0);
+                // Minimum GPU capability (item 19): a job may declare an FP32
+                // TFLOPS floor (`min_tflops`, or env `GPN_MIN_TFLOPS`) so it only
+                // routes to a real/discrete GPU that clears it. 0.0 = no floor
+                // (gate inert). Integrated GPUs advertise a low estimate and are
+                // excluded; a self-declared discrete card with no number yet is
+                // trusted (the attestation floor still gates earning on-chain).
+                let min_tflops: f64 = v
+                    .get("min_tflops")
+                    .and_then(|x| x.as_f64())
+                    .or_else(|| {
+                        std::env::var("GPN_MIN_TFLOPS")
+                            .ok()
+                            .and_then(|s| s.parse().ok())
+                    })
+                    .unwrap_or(0.0);
                 let price_gpn = v.get("price_gpn").and_then(|x| x.as_f64()).unwrap_or(10.0);
                 let job_type = v.get("job_type").and_then(|x| x.as_str()).unwrap_or("LLMInference");
                 let prompt = v.get("prompt").and_then(|x| x.as_str()).map(|s| s.to_string());
@@ -1035,7 +1083,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 };
-                let (provider, needs_pull) = match pick(&reg, min_gflops, min_vram_mb, min_ram_mb, &model, pull_penalty_ms, &rtt_overrides(&v)) {
+                let (provider, needs_pull) = match pick(&reg, min_gflops, min_vram_mb, min_ram_mb, min_tflops, &model, pull_penalty_ms, &rtt_overrides(&v)) {
                     Some(x) => x,
                     None => {
                         let r = Response::from_string(json!({"ok":false,"error":"no compatible provider available"}).to_string())
@@ -1336,7 +1384,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let reg = registry.lock().unwrap().clone();
                     match resolve_requested_model(&reg, &qmodel) {
                         Err(e) => json!({"ok":false,"error":e}),
-                        Ok(qmodel) => match pick(&reg, 0, 0, 0, &qmodel, pull_penalty_ms, &rtt_overrides(&route_body)) {
+                        Ok(qmodel) => match pick(&reg, 0, 0, 0, 0.0, &qmodel, pull_penalty_ms, &rtt_overrides(&route_body)) {
                             Some((p, pull)) => {
                                 let _ = write_assignment(&assign_store, idn, &p.address, &qmodel, pull);
                                 json!({"ok":true,"job_id":idn,"routed_to":p.address,
@@ -1374,6 +1422,8 @@ mod tests {
             mem_bw_gbps: 250.0,
             vram_mb: 0,
             ram_mb: 0,
+            gpu_class: "unknown".to_string(),
+            tflops: 0.0,
             active: 0,
             capacity: 4,
             latency_ms,
@@ -1417,7 +1467,7 @@ mod tests {
             prov("A", "http://a:8093", 5, "llama3.2:1b"),
             prov("B", "http://b:8093", 50, "llama3.2:1b"),
         ];
-        let (p, _) = pick(&reg, 0, 0, 0, "llama3.2:1b", 120_000, &RttOverrides::new()).unwrap();
+        let (p, _) = pick(&reg, 0, 0, 0, 0.0, "llama3.2:1b", 120_000, &RttOverrides::new()).unwrap();
         assert_eq!(p.address, "A");
     }
 
@@ -1431,7 +1481,7 @@ mod tests {
         let mut rtt = RttOverrides::new();
         rtt.insert("a".into(), 120); // user is far from A
         rtt.insert("b".into(), 8); // user is near B
-        let (p, _) = pick(&reg, 0, 0, 0, "llama3.2:1b", 120_000, &rtt).unwrap();
+        let (p, _) = pick(&reg, 0, 0, 0, 0.0, "llama3.2:1b", 120_000, &rtt).unwrap();
         assert_eq!(p.address, "B", "client-measured RTT must override AP-measured latency");
     }
 
@@ -1442,7 +1492,7 @@ mod tests {
             prov("B", "http://b:8093", 50, "llama3.2:1b"),
         ];
         let rtt = routing::parse_rtt_overrides(&json!({"http://b:8093/status": 2}));
-        let (p, _) = pick(&reg, 0, 0, 0, "llama3.2:1b", 120_000, &rtt).unwrap();
+        let (p, _) = pick(&reg, 0, 0, 0, 0.0, "llama3.2:1b", 120_000, &rtt).unwrap();
         assert_eq!(p.address, "B");
     }
 
@@ -1478,7 +1528,7 @@ mod tests {
         ];
         let mut rtt = RttOverrides::new();
         rtt.insert("b".into(), 0); // "not measured"
-        let (p, _) = pick(&reg, 0, 0, 0, "llama3.2:1b", 120_000, &rtt).unwrap();
+        let (p, _) = pick(&reg, 0, 0, 0, 0.0, "llama3.2:1b", 120_000, &rtt).unwrap();
         assert_eq!(p.address, "A");
     }
 
@@ -1492,10 +1542,10 @@ mod tests {
         };
         let reg = vec![mk("small", "http://s", 5, 8188), mk("big", "http://b", 50, 24576)];
         // With a 16 GB floor, only the big node qualifies even though `small` is faster.
-        let (p, _) = pick(&reg, 0, 16000, 0, "ltx-video", 0, &RttOverrides::new()).unwrap();
+        let (p, _) = pick(&reg, 0, 16000, 0, 0.0, "ltx-video", 0, &RttOverrides::new()).unwrap();
         assert_eq!(p.address, "big", "16GB job must skip the 8GB node");
         // No floor -> the faster small node wins (gate inactive).
-        let (p2, _) = pick(&reg, 0, 0, 0, "ltx-video", 0, &RttOverrides::new()).unwrap();
+        let (p2, _) = pick(&reg, 0, 0, 0, 0.0, "ltx-video", 0, &RttOverrides::new()).unwrap();
         assert_eq!(p2.address, "small");
     }
 
@@ -1509,7 +1559,7 @@ mod tests {
         let unknown = prov("unknown", "http://u", 1, "ltx-video"); // vram/ram = 0
         let reg = vec![small, unknown];
         assert!(
-            pick(&reg, 0, 16000, 0, "ltx-video", 0, &RttOverrides::new()).is_none(),
+            pick(&reg, 0, 16000, 0, 0.0, "ltx-video", 0, &RttOverrides::new()).is_none(),
             "16GB job must find no candidate among an 8GB and an unadvertised node"
         );
 
@@ -1519,7 +1569,7 @@ mod tests {
         let mut hi = prov("hi", "http://h", 50, "llama3.2:1b");
         hi.ram_mb = 64000;
         let reg2 = vec![low, hi];
-        let (p, _) = pick(&reg2, 0, 0, 32000, "llama3.2:1b", 0, &RttOverrides::new()).unwrap();
+        let (p, _) = pick(&reg2, 0, 0, 32000, 0.0, "llama3.2:1b", 0, &RttOverrides::new()).unwrap();
         assert_eq!(p.address, "hi", "32GB RAM floor must skip the 8GB-RAM node");
 
         // No floor -> the gate is inert (the faster unadvertised node still wins).
@@ -1527,7 +1577,38 @@ mod tests {
             prov("s2", "http://s2", 50, "ltx-video"),
             prov("u2", "http://u2", 5, "ltx-video"),
         ];
-        let (p2, _) = pick(&reg3, 0, 0, 0, "ltx-video", 0, &RttOverrides::new()).unwrap();
+        let (p2, _) = pick(&reg3, 0, 0, 0, 0.0, "ltx-video", 0, &RttOverrides::new()).unwrap();
         assert_eq!(p2.address, "u2");
+    }
+
+    #[test]
+    fn pick_gates_on_advertised_tflops() {
+        // item 19: a job declaring a 3 TFLOPS floor must skip an APU/integrated
+        // GPU even though it is the faster/nearest node.
+        let mk = |addr: &str, url: &str, lat: u64, class: &str, tflops: f64| {
+            let mut p = prov(addr, url, lat, "llama3.2:1b");
+            p.gpu_class = class.to_string();
+            p.tflops = tflops;
+            p
+        };
+        let reg = vec![
+            mk("apu", "http://a", 5, "integrated", 1.8), // 780M-class iGPU
+            mk("dgpu", "http://d", 50, "discrete", 15.1), // RTX 4060
+        ];
+        // With a 3 TFLOPS floor the integrated node is excluded despite being faster.
+        let (p, _) = pick(&reg, 0, 0, 0, 3.0, "llama3.2:1b", 0, &RttOverrides::new()).unwrap();
+        assert_eq!(p.address, "dgpu", "3 TFLOPS job must skip the integrated GPU");
+        // No floor -> the faster integrated node wins (gate inert).
+        let (p2, _) = pick(&reg, 0, 0, 0, 0.0, "llama3.2:1b", 0, &RttOverrides::new()).unwrap();
+        assert_eq!(p2.address, "apu");
+
+        // A known-but-too-low tflops is excluded even if it claims "discrete"...
+        let weak = mk("weak", "http://w", 1, "discrete", 2.0);
+        assert!(pick(&vec![weak.clone()], 0, 0, 0, 3.0, "llama3.2:1b", 0, &RttOverrides::new()).is_none());
+        // ...and an *unknown* tflops (0) is trusted ONLY when self-declared discrete.
+        let unknown_disc = mk("ud", "http://ud", 1, "discrete", 0.0);
+        assert!(pick(&vec![unknown_disc], 0, 0, 0, 3.0, "llama3.2:1b", 0, &RttOverrides::new()).is_some());
+        let unknown_integ = mk("ui", "http://ui", 1, "integrated", 0.0);
+        assert!(pick(&vec![unknown_integ], 0, 0, 0, 3.0, "llama3.2:1b", 0, &RttOverrides::new()).is_none());
     }
 }
