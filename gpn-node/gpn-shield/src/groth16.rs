@@ -326,6 +326,139 @@ pub fn verify(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Trusted-setup ceremony support
+// ---------------------------------------------------------------------------
+//
+// [`ProvingKey`] stores only the *combined* `[βA_k+αB_k+C_k]/δ` (and `/γ`) term,
+// which is enough to prove but **not** enough for a multi-party phase-2
+// contribution: a contributor must fold a fresh `α'`, `β'`, `γ'`, `δ'` into the
+// CRS *without* ever learning the aggregate `α,β,γ,δ`. That is only possible if
+// the `βA_k`, `αB_k` and `C_k` pieces are kept separate, so each can be scaled
+// independently (the standard Groth16 MPC structure).
+//
+// `setup_ceremony` is the genesis step: it derives the secrets from `seed` and
+// emits the split CRS. `gpn-shield`'s ceremony module folds contributions into
+// it. τ is fixed here (see `design-ceremony.md` for the powers-of-tau extension).
+
+/// Split CRS components emitted by [`setup_ceremony`] — the phase-2 genesis.
+#[derive(Clone, Debug)]
+pub struct CeremonyKeys {
+    pub alpha_g1: G1Affine,
+    pub beta_g1: G1Affine,
+    pub beta_g2: G2Affine,
+    pub gamma_g2: G2Affine,
+    pub delta_g1: G1Affine,
+    pub delta_g2: G2Affine,
+    /// `[A_k(τ)]₁`, `[B_k(τ)]₁`, `[B_k(τ)]₂` for every variable (τ fixed).
+    pub a_g1: Vec<G1Affine>,
+    pub b_g1: Vec<G1Affine>,
+    pub b_g2: Vec<G2Affine>,
+    /// `[(τ^i)/δ]₁` for i in `0..=deg(H·T)`.
+    pub ht_delta_g1: Vec<G1Affine>,
+    /// Private (`k >= num_public`) split combined terms (each `/δ`):
+    /// `[βA_k/δ]₁`, `[αB_k/δ]₁`, `[C_k/δ]₁`.
+    pub abc_beta_delta: Vec<G1Affine>,
+    pub abc_alpha_delta: Vec<G1Affine>,
+    pub abc_c_delta: Vec<G1Affine>,
+    /// Public (`0..num_public`) split combined terms (each `/γ`):
+    /// `[βA_i/γ]₁`, `[αB_i/γ]₁`, `[C_i/γ]₁`.
+    pub gabc_beta_gamma: Vec<G1Affine>,
+    pub gabc_alpha_gamma: Vec<G1Affine>,
+    pub gabc_c_gamma: Vec<G1Affine>,
+    pub num_public: usize,
+    pub num_variables: usize,
+    pub domain_size: usize,
+}
+
+/// Build the split (phase-2 genesis) CRS for `qap` from a `seed`.
+///
+/// Uses the **constant-time** keygen path ([`KeygenMode::ConstantTime`]) because
+/// the derived scalars are the CRS toxic waste; the group elements are
+/// byte-identical to the fast path.
+///
+/// Panics if any of the derived secrets is zero (astronomically unlikely).
+pub fn setup_ceremony(qap: &Qap, seed: &str) -> CeremonyKeys {
+    let mut rng = Drng::from_seed(seed);
+    let alpha = rng.scalar();
+    let beta = rng.scalar();
+    let gamma = rng.scalar();
+    let delta = rng.scalar();
+    let tau = rng.scalar();
+
+    let n = qap.num_variables;
+    let num_public = qap.num_public;
+    let (a_tau, b_tau, c_tau) = qap.eval_columns_at(&tau);
+
+    let fb_g1 = ec_ops::fixed_base_g1_gen_ct;
+    let fb_g2 = ec_ops::fixed_base_g2_gen_ct;
+    let fb_g1_scaled = ec_ops::fixed_base_g1_gen_scaled_ct;
+
+    let alpha_g1 = fb_g1(&[alpha])[0];
+    let beta_g1 = fb_g1(&[beta])[0];
+    let beta_g2 = fb_g2(&[beta])[0];
+    let delta_g1 = fb_g1(&[delta])[0];
+    let delta_g2 = fb_g2(&[delta])[0];
+    let gamma_g2 = fb_g2(&[gamma])[0];
+
+    let a_g1: Vec<G1Affine> = fb_g1(&a_tau);
+    let b_g1: Vec<G1Affine> = fb_g1(&b_tau);
+    let b_g2: Vec<G2Affine> = fb_g2(&b_tau);
+
+    let gamma_inv = gamma.invert().expect("gamma non-zero");
+    let delta_inv = delta.invert().expect("delta non-zero");
+
+    // Split `β·a_k`, `α·b_k`, `c_k` per variable, then fold the `/δ` (private)
+    // or `/γ` (public) factor into a single fixed-base multiply.
+    let priv_r: Vec<usize> = (num_public..n).collect();
+    let beta_a_priv: Vec<Scalar> = priv_r.iter().map(|&k| beta * a_tau[k]).collect();
+    let alpha_b_priv: Vec<Scalar> = priv_r.iter().map(|&k| alpha * b_tau[k]).collect();
+    let c_priv: Vec<Scalar> = priv_r.iter().map(|&k| c_tau[k]).collect();
+    let abc_beta_delta = fb_g1_scaled(&beta_a_priv, &delta_inv);
+    let abc_alpha_delta = fb_g1_scaled(&alpha_b_priv, &delta_inv);
+    let abc_c_delta = fb_g1_scaled(&c_priv, &delta_inv);
+
+    let pub_r: Vec<usize> = (0..num_public).collect();
+    let beta_a_pub: Vec<Scalar> = pub_r.iter().map(|&k| beta * a_tau[k]).collect();
+    let alpha_b_pub: Vec<Scalar> = pub_r.iter().map(|&k| alpha * b_tau[k]).collect();
+    let c_pub: Vec<Scalar> = pub_r.iter().map(|&k| c_tau[k]).collect();
+    let gabc_beta_gamma = fb_g1_scaled(&beta_a_pub, &gamma_inv);
+    let gabc_alpha_gamma = fb_g1_scaled(&alpha_b_pub, &gamma_inv);
+    let gabc_c_gamma = fb_g1_scaled(&c_pub, &gamma_inv);
+
+    // `[(τ^i)/δ]₁` up to `2·domain_size` (deg(H·T) ≤ 2·domain_size − 2).
+    let max_deg = 2 * qap.domain_size.max(1);
+    let mut tau_pows = Vec::with_capacity(max_deg + 1);
+    let mut tau_pow = Scalar::ONE;
+    for _ in 0..=max_deg {
+        tau_pows.push(tau_pow);
+        tau_pow *= tau;
+    }
+    let ht_delta_g1 = fb_g1_scaled(&tau_pows, &delta_inv);
+
+    CeremonyKeys {
+        alpha_g1,
+        beta_g1,
+        beta_g2,
+        gamma_g2,
+        delta_g1,
+        delta_g2,
+        a_g1,
+        b_g1,
+        b_g2,
+        ht_delta_g1,
+        abc_beta_delta,
+        abc_alpha_delta,
+        abc_c_delta,
+        gabc_beta_gamma,
+        gabc_alpha_gamma,
+        gabc_c_gamma,
+        num_public,
+        num_variables: n,
+        domain_size: qap.domain_size,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

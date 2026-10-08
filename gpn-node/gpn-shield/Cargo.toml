@@ -16,6 +16,12 @@ ff = "0.13"
 subtle = "2.6"
 # Parallelise the prover's elliptic-curve scalar-mult loops across CPU cores.
 rayon = "1"
+# Trusted-setup ceremony tooling (ceremony module + `gpn_ceremony` bin):
+# sha256 CRS digests / hash-chain, JSON contribution transcripts, and
+# toxic-waste wiping of the fresh contribution scalars.
+sha2 = "0.10"
+serde_json = "1"
+zeroize = "1.8"
 
 [dev-dependencies]
 # Property-based differential/fuzz tests (item 6 of the prod-readiness plan).
