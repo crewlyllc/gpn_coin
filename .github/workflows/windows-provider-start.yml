@@ -43,6 +43,12 @@ jobs:
           $log    = 'C:\gpn\provider.log'
           function Log($m) { "$(Get-Date -Format o) $m" | Out-File -FilePath $log -Append -Encoding utf8 }
           Log "supervisor starting (rpc=$rpc signer=$signer pub=$pub)"
+          # guarantee a single provider: a stray gpn_llm_provider (e.g. from an
+          # older manual launch) holds the infer port :8094 and makes us fail to
+          # bind. Kill any strays before we start.
+          $strays = @(Get-CimInstance Win32_Process -Filter "Name='gpn_llm_provider.exe'")
+          foreach ($p in $strays) { Log "killing stray gpn_llm_provider pid=$($p.ProcessId)"; Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }
+          if ($strays.Count -gt 0) { Start-Sleep -Seconds 3 }
           # heartbeat (public /status on :8093) — only if not already up
           $hb = @(Get-CimInstance Win32_Process -Filter "Name='gpn_provider_status.exe'")
           if ($hb.Count -eq 0) {
@@ -71,14 +77,14 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           $tr = 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\gpn\run-provider.ps1'
-          # stop any duplicate supervisor/provider started outside the task
+          # stop ALL gpn_* processes (any launch path) so exactly one provider
+          # is started below — a stray holds :8094 and wedges the real one
           $procs = @(Get-CimInstance Win32_Process -Filter "Name LIKE 'gpn_%'")
           foreach ($p in $procs) {
-            if ($p.ExecutablePath -like 'C:\gpn\bin*') {
-              Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
-            }
+            Write-Host "stopping stray $($p.Name) pid=$($p.ProcessId)"
+            Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
           }
-          Start-Sleep -Seconds 2
+          Start-Sleep -Seconds 3
           schtasks /Create /TN GPNProvider /TR $tr /SC ONLOGON /RL HIGHEST /F
           $rc = $LASTEXITCODE
           if ($rc -ne 0) {
