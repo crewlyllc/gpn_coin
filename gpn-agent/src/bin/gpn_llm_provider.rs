@@ -382,10 +382,6 @@ fn ensure_model(model: &str) -> Result<String, String> {
 
 /// True if the off-chain store says job `id` is an LLM (text) job. Unknown
 /// jobs are treated as non-LLM so we never pull/handle a foreign kind.
-fn is_llm_id(id: u64) -> bool {
-    get_job(id).map(|j| j.kind == "llm").unwrap_or(false)
-}
-
 /// Kind-gate for the reconcile pass. Both providers share ONE signer account,
 /// so a job whose on-chain `provider == me` may actually belong to the other
 /// provider's kind. Reconcile only OUR kind here; a job whose off-chain kind is
@@ -475,7 +471,7 @@ async fn process_once(
                     }
                     Err(e) => eprintln!("[provider] reconcile #{id} (complete) failed: {e}"),
                 }
-            } else if state == "Accepted" && is_llm_id(id) {
+            } else if state == "Accepted" && job_kind_is_ours(id) {
                 // Capacity reclaim: an `Accepted` LLM job we own that was never
                 // started is a zombie (its start tx never landed) permanently
                 // holding one of our `MaxJobsPerProvider` slots → every later
@@ -542,7 +538,12 @@ async fn process_once(
         }
         assigned
             .iter()
-            .filter(|(id, _, _)| is_llm_id(*id))
+            // A REMOTE provider never created this job, so it has NO local
+            // store entry — `is_llm_id` would be false and the assignment would
+            // be silently dropped (the item-4/#14 "Windows box never claims"
+            // bug). Use the kind-gate that treats an unknown id as ours: the
+            // scheduler only assigns LLM jobs to this LLM provider.
+            .filter(|(id, _, _)| job_kind_is_ours(*id))
             .map(|(id, _, _)| *id)
             .collect()
     };
@@ -551,7 +552,10 @@ async fn process_once(
     // have advanced yet.
     let mut just_claimed: Vec<u64> = Vec::new();
     for job_id in targets {
-        if !get_job(job_id).map(|j| j.kind == "llm").unwrap_or(false) {
+        // Skip only a job KNOWN to belong to another kind (e.g. a mis-assigned
+        // image/diffusion job); an id absent from our local store is a
+        // remote-assigned LLM job and MUST be claimed.
+        if get_job(job_id).map(|j| j.kind != "llm").unwrap_or(false) {
             continue;
         }
         // Skip jobs we've already handled. In fast mode the on-chain `Pending`
