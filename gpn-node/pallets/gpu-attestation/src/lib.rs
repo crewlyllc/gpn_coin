@@ -188,6 +188,15 @@ pub mod pallet {
     pub type ProviderStake<T: Config> =
         StorageMap<_, Blake2_128Concat, T::AccountId, BalanceOf<T>, OptionQuery>;
 
+    /// Block at which `check_expired` last counted a *miss* for an account.
+    /// Bounds miss-counting (and thus slashing) to at most once per
+    /// `MaxAttestationAge` window so a permissionless caller cannot hammer
+    /// `check_expired` in a single block to repeatedly slash an overdue
+    /// provider's stake. Cleared on (re)attestation and unbonding.
+    #[pallet::storage]
+    pub type LastMissBlock<T: Config> =
+        StorageMap<_, Blake2_128Concat, T::AccountId, BlockNumberFor<T>, OptionQuery>;
+
     // Genesis
 
     #[pallet::genesis_config]
@@ -373,6 +382,8 @@ pub mod pallet {
 
             let is_new = !<Attestations<T>>::contains_key(&who);
             <Attestations<T>>::insert(&who, record);
+            // A fresh attestation resets the miss clock for this provider.
+            <LastMissBlock<T>>::remove(&who);
             if is_new {
                 <AttestedProviderCount<T>>::mutate(|c| *c += 1);
             }
@@ -392,6 +403,7 @@ pub mod pallet {
             let stake = <ProviderStake<T>>::take(&who).ok_or(Error::<T>::NoStakeToWithdraw)?;
 
             <Attestations<T>>::remove(&who);
+            <LastMissBlock<T>>::remove(&who);
             <AttestedProviderCount<T>>::mutate(|c| *c = c.saturating_sub(1));
             <TotalStaked<T>>::mutate(|t| *t -= stake);
 
@@ -441,8 +453,17 @@ pub mod pallet {
                 .unwrap_or(0);
             let max_age: u32 = T::MaxAttestationAge::get().try_into().unwrap_or(u32::MAX);
 
-            if now.saturating_sub(record.submitted_at) > max_age {
-                record.missed_count += 1;
+            // Count at most ONE miss per `MaxAttestationAge` window. The
+            // reference is the last counted miss (or the attestation time if
+            // none yet), so repeated calls in the same window are a no-op.
+            // Without this, a permissionless caller could call `check_expired`
+            // N times in one block and slash 10% each time, draining the stake.
+            let last_miss_block: u32 = <LastMissBlock<T>>::get(&target)
+                .map(|b| b.try_into().unwrap_or(u32::MAX))
+                .unwrap_or(record.submitted_at);
+            if now.saturating_sub(last_miss_block) > max_age {
+                record.missed_count = record.missed_count.saturating_add(1);
+                <LastMissBlock<T>>::insert(&target, frame_system::Pallet::<T>::block_number());
                 if record.missed_count >= T::MaxMissedAttestations::get() {
                     if let Some(stake) = <ProviderStake<T>>::get(&target) {
                         let penalty: BalanceOf<T> = stake / 10u32.into();
@@ -1069,18 +1090,52 @@ mod tests {
             stake_and_attest(ALICE, 1_000, 2);
             let initial_stake = ProviderStake::<Test>::get(ALICE).unwrap();
 
-            // Advance beyond max age (50 blocks) repeatedly.
-            // Each check_expired past max age increments missed_count.
+            // Advance beyond max age (50 blocks) repeatedly. Misses are only
+            // counted once per `MaxAttestationAge` window (red-team fix), so
+            // space the calls by a full window to accumulate the miss limit.
             for i in 0..TestMaxMissed::get() {
-                System::set_block_number(100 + i as u64);
+                System::set_block_number(100 + i as u64 * (TestMaxAge::get() + 1));
                 AttestPallet::check_expired(RuntimeOrigin::signed(BOB), ALICE).unwrap();
             }
 
-            // After reaching missed limit, 10% slashed.
+            // After reaching missed limit, 10% slashed (exactly once).
             let stake_after = ProviderStake::<Test>::get(ALICE).unwrap();
             let penalty = initial_stake / 10;
             assert_eq!(stake_after, initial_stake - penalty);
             assert_eq!(TotalStaked::<Test>::get(), initial_stake - penalty);
+        });
+    }
+
+    /// REGRESSION (red-team 2026-10-08): `check_expired` is permissionless and
+    /// used to count one miss + apply one slash per *call*. Because the slash is
+    /// a percentage of the *current* remaining stake, any signed account could
+    /// call it repeatedly in a single block and drain an overdue provider's
+    /// entire stake (1000 -> 900 -> 810 -> ...). A miss must only be counted once
+    /// per `MaxAttestationAge` window, so repeated calls in the same window are a
+    /// no-op.
+    #[test]
+    fn test_repeated_check_expired_does_not_drain_stake() {
+        new_test_ext().execute_with(|| {
+            stake_and_attest(ALICE, 1_000, 2);
+            let initial = ProviderStake::<Test>::get(ALICE).unwrap();
+            assert_eq!(initial, 1_000);
+
+            // ALICE is now overdue (submitted_at = 1, max_age = 50). Hammer
+            // `check_expired` in the SAME block, permissionlessly, as BOB.
+            System::set_block_number(100);
+            for _ in 0..10 {
+                AttestPallet::check_expired(RuntimeOrigin::signed(BOB), ALICE).unwrap();
+            }
+            assert_eq!(
+                ProviderStake::<Test>::get(ALICE).unwrap(),
+                initial,
+                "repeated same-window checks must not slash (drain) the stake"
+            );
+            // And the single overdue window counts at most one miss.
+            assert!(
+                Attestations::<Test>::get(ALICE).unwrap().missed_count <= 1,
+                "at most one miss per attestation window"
+            );
         });
     }
 
