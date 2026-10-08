@@ -27,10 +27,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tiny_http::{Header, Method, Response, Server};
 
-/// Job ids this AP created recently, with creation time. Used by the stale-job
-/// janitor to reclaim its own orphaned `Pending` jobs, which otherwise hold a
-/// global `MaxActiveJobs` slot forever (there is no on-chain expiry — see
-/// artifacts/project7/job-lifecycle-gap-analysis-2026-10-05.md).
+/// Job ids this AP created recently, with creation time. Used by the janitor to
+/// reclaim orphaned jobs that would otherwise hold a global `MaxActiveJobs` slot
+/// forever. Reclaimed via the marketplace's permissionless `expire_job` (past
+/// `created_at + max_duration`) and, as a fast path, requestor-side `cancel_job`
+/// — see artifacts/project7/job-lifecycle-gap-analysis-2026-10-05.md.
 fn recent_jobs() -> &'static Mutex<Vec<(u64, Instant, u64)>> {
     static R: OnceLock<Mutex<Vec<(u64, Instant, u64)>>> = OnceLock::new();
     R.get_or_init(|| Mutex::new(Vec::new()))
@@ -55,45 +56,96 @@ fn stale_secs(max_tokens: u64) -> u64 {
     (JANITOR_BASE_SECS + gen).clamp(JANITOR_MIN_SECS, JANITOR_MAX_SECS)
 }
 
-/// Every 30s, cancel our own `Pending` jobs that have sat Pending longer than
-/// [`stale_secs`] (token-scaled). Cancels only Pending (on-chain guard);
-/// advanced/terminal jobs are dropped from tracking. Uses the shared nonce
-/// stream (`cancel_job_fast`) so it can't desync request-path txs.
+/// Terminal job states — a job here no longer holds an `ActiveJobCount` slot,
+/// so the janitor stops tracking it.
+fn is_terminal_state(state: &str) -> bool {
+    matches!(state, "Completed" | "Cancelled" | "Failed")
+}
+
+/// Has a job outlived its on-chain deadline (`now > created_at + max_duration`)?
+/// Mirrors `pallet-compute-marketplace::expire_job`'s guard exactly (strict `>`).
+fn past_deadline(created_at: u32, max_duration: u32, head: u64) -> bool {
+    head > created_at as u64 + max_duration as u64
+}
+
+/// How many recent job ids to re-adopt at AP startup so orphaned non-terminal
+/// jobs created by a *previous* AP process (lost from the in-memory janitor
+/// list) are still reclaimed once past their on-chain deadline.
+const JANITOR_SEED_LOOKBACK: u64 = 256;
+
+/// Every 30s, reclaim this AP's orphaned jobs:
+///   1. **Primary — pallet `expire_job` (permissionless):** any non-terminal job
+///      past its on-chain `created_at + max_duration` deadline is reclaimed via the
+///      marketplace's own timeout. Being permissionless and state-agnostic, this
+///      also clears provider-abandoned `Accepted`/`Running` orphans, which a
+///      requestor-side `cancel_job` can never touch.
+///   2. **Fast path — `cancel_job` (requestor-only, Pending-only):** our own
+///      still-`Pending` jobs past the token-scaled [`stale_secs`] window get a
+///      quick requestor cancel, well before the on-chain deadline.
+/// Both use the shared nonce stream (`*_fast`) so they can't desync request-path
+/// txs. Tracking is seeded from recent chain job ids so restarts don't leak slots.
 fn spawn_janitor(client: Arc<ChainClient>, rt: Arc<tokio::runtime::Runtime>) {
+    // Re-adopt non-terminal jobs from the last AP epoch so the on-chain expiry can
+    // still reclaim them after a restart (the in-memory list is empty then).
+    let next = rt.block_on(client.get_next_job_id());
+    let start = next.saturating_sub(JANITOR_SEED_LOOKBACK);
+    let mut seeded = 0u32;
+    for id in start..next {
+        if let Some((state, _, _, _)) = rt.block_on(client.get_job_state(id)) {
+            if !is_terminal_state(&state) {
+                record_created(id, 0);
+                seeded += 1;
+            }
+        }
+    }
+    if seeded > 0 {
+        println!("[janitor] re-adopted {seeded} non-terminal job(s) from #{start}..#{} after restart", next.saturating_sub(1));
+    }
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(30));
         let now = Instant::now();
-        let mut due: Vec<(u64, u64)> = Vec::new();
-        {
-            let mut g = recent_jobs().lock().unwrap();
-            let mut keep: Vec<(u64, Instant, u64)> = Vec::with_capacity(g.len());
-            for (id, t, mt) in g.drain(..) {
-                if now.duration_since(t).as_secs() > stale_secs(mt) {
-                    due.push((id, mt));
-                } else {
-                    keep.push((id, t, mt));
-                }
+        let head = rt.block_on(client.head_block_number()).unwrap_or(0);
+        let snapshot: Vec<(u64, Instant, u64)> = recent_jobs().lock().unwrap().clone();
+        let mut keep: Vec<(u64, Instant, u64)> = Vec::with_capacity(snapshot.len());
+        for (id, t, mt) in snapshot {
+            let Some((state, _, _, _)) = rt.block_on(client.get_job_state(id)) else {
+                continue; // gone / unreadable — stop tracking
+            };
+            if is_terminal_state(&state) {
+                continue; // slot already freed
             }
-            *g = keep;
-        }
-        for (id, mt) in due {
-            match rt.block_on(client.get_job_state(id)) {
-                Some((state, _, _, _)) if state == "Pending" => {
-                    match rt.block_on(client.cancel_job_fast(id)) {
-                        Ok(()) => println!(
-                            "[janitor] cancelled stale Pending #{id} (max_tokens {mt}, waited >{}s)",
-                            stale_secs(mt)
-                        ),
-                        Err(e) => {
-                            eprintln!("[janitor] cancel #{id} failed: {e}");
-                            // Retry next tick.
-                            record_created(id, mt);
+            // Primary: permissionless on-chain expiry for ANY non-terminal job
+            // past its deadline (also reclaims Accepted/Running orphans).
+            if let Some((created_at, max_duration)) = rt.block_on(client.get_job_timing(id)) {
+                if past_deadline(created_at, max_duration, head) {
+                    let deadline = created_at as u64 + max_duration as u64;
+                    match rt.block_on(client.expire_job_fast(id)) {
+                        Ok(()) => {
+                            println!(
+                                "[janitor] expired #{id} via pallet expire_job (state {state}, block {head} > deadline {deadline})"
+                            );
+                            continue;
                         }
+                        Err(e) => eprintln!("[janitor] expire #{id} failed: {e}"),
                     }
                 }
-                _ => { /* advanced/terminal/gone — stop tracking */ }
             }
+            // Fast path: requestor cancel of our own stale Pending jobs.
+            if state == "Pending" && now.duration_since(t).as_secs() > stale_secs(mt) {
+                match rt.block_on(client.cancel_job_fast(id)) {
+                    Ok(()) => {
+                        println!(
+                            "[janitor] cancelled stale Pending #{id} (max_tokens {mt}, waited >{}s)",
+                            stale_secs(mt)
+                        );
+                        continue;
+                    }
+                    Err(e) => eprintln!("[janitor] cancel #{id} failed: {e}"),
+                }
+            }
+            keep.push((id, t, mt));
         }
+        *recent_jobs().lock().unwrap() = keep;
     });
 }
 
@@ -1282,6 +1334,30 @@ mod tests {
         let rtt = routing::parse_rtt_overrides(&json!({"http://b:8093/status": 2}));
         let (p, _) = pick(&reg, 0, "llama3.2:1b", 120_000, &rtt).unwrap();
         assert_eq!(p.address, "B");
+    }
+
+    #[test]
+    fn terminal_states_are_recognized() {
+        // The janitor only stops tracking jobs whose slot is truly freed.
+        assert!(is_terminal_state("Completed"));
+        assert!(is_terminal_state("Cancelled"));
+        assert!(is_terminal_state("Failed"));
+        // Non-terminal states still hold an ActiveJobCount slot -> keep tracking.
+        assert!(!is_terminal_state("Pending"));
+        assert!(!is_terminal_state("Accepted"));
+        assert!(!is_terminal_state("Running"));
+        assert!(!is_terminal_state("AwaitingVerification"));
+    }
+
+    #[test]
+    fn past_deadline_matches_pallet_guard() {
+        // expire_job allows reclaim strictly *after* created_at + max_duration.
+        assert!(!past_deadline(100, 1000, 1100)); // exactly at deadline: not yet
+        assert!(past_deadline(100, 1000, 1101)); // one block past: reclaimable
+        assert!(!past_deadline(0, 0, 0));
+        assert!(past_deadline(0, 0, 1));
+        // No overflow even at the field bounds (u64 math).
+        assert!(!past_deadline(u32::MAX, u32::MAX, 0));
     }
 
     #[test]

@@ -1140,6 +1140,50 @@ impl ChainClient {
         .await
     }
 
+    /// `ComputeMarketplace::expire_job(job_id)` — **permissionless** on-chain
+    /// reclaim of a non-terminal job that outlived its deadline
+    /// (`now > created_at + max_duration`). Unlike `cancel_job` (requestor-only,
+    /// Pending-only) this is callable by **any** signed account and covers **any**
+    /// non-terminal state (Pending/Accepted/Running/AwaitingVerification), so it
+    /// also reclaims provider-abandoned Accepted/Running orphans a requestor-side
+    /// cancel can never touch. Sets `Failed`, refunds escrow to the requestor, and
+    /// frees a global `ActiveJobCount` slot.
+    pub async fn expire_job(&self, job_id: u64) -> Result<(), Box<dyn std::error::Error>> {
+        self.submit_signed_call(
+            "ComputeMarketplace",
+            "expire_job",
+            vec![Value::u128(job_id as u128)],
+        )
+        .await
+    }
+
+    /// Inclusion-free `expire_job` for the shared nonce stream.
+    pub async fn expire_job_fast(&self, job_id: u64) -> Result<(), Box<dyn std::error::Error>> {
+        self.submit_fast(
+            "ComputeMarketplace",
+            "expire_job",
+            vec![Value::u128(job_id as u128)],
+        )
+        .await
+    }
+
+    /// Read a job's on-chain expiry timing: `(created_at, max_duration)` in blocks.
+    /// The reclaim deadline is `created_at + max_duration`. `None` if the job
+    /// doesn't exist / the chain is unreachable.
+    pub async fn get_job_timing(&self, job_id: u64) -> Option<(u32, u32)> {
+        let client = self.client.as_ref()?;
+        let addr = subxt::dynamic::storage(
+            "ComputeMarketplace",
+            "Jobs",
+            vec![Value::u128(job_id as u128)],
+        );
+        let v = self.storage_at_head(client, &addr).await?;
+        Some((
+            get_u32_field(&v, "created_at")?,
+            get_u32_field(&v, "max_duration")?,
+        ))
+    }
+
     /// Read the on-chain job record: (state, price, requestor, provider).
     /// Returns None if the job doesn't exist / chain unreachable.
     pub async fn get_job_state(
