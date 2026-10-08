@@ -613,7 +613,20 @@ pub mod pallet {
             target: T::AccountId,
             verdict: u8,
         ) -> DispatchResult {
-            ensure_signed(origin)?;
+            // RED-TEAM 2026-10-08: resolution used to be permissionless
+            // (`ensure_signed`), but the resolver *judges* the challenge and,
+            // for `Dismiss`, burns the challenger's bond with no on-chain
+            // predicate to check — so any account could grief an honest
+            // challenger (or let a challenged operator self-dismiss to escape
+            // slashing). Only a committee member, or root (break-glass), may
+            // resolve — mirroring `remove_operator`.
+            let is_committee = match ensure_signed(origin.clone()) {
+                Ok(who) => <Committee<T>>::contains_key(&who),
+                Err(_) => false,
+            };
+            if !is_committee {
+                ensure_root(origin)?;
+            }
             let verdict = ChallengeVerdict::from_u8(verdict).ok_or(Error::<T>::InvalidPrice)?;
             let verdict_disc = verdict.clone().discriminant();
             let challenge = <OpenChallenges<T>>::get(&target).ok_or(Error::<T>::NoOpenChallenge)?;
@@ -1495,6 +1508,40 @@ mod tests {
             // A second open challenge against the same target fails.
             let r2 = OraclePallet::challenge_operator(RuntimeOrigin::signed(ALICE), DAVE);
             assert_eq!(r2, Err(Error::<Test>::AlreadyChallenged.into()));
+        });
+    }
+
+    #[test]
+    fn test_resolve_challenge_requires_committee_or_root() {
+        // RED-TEAM 2026-10-08: `resolve_challenge` was `ensure_signed` with no
+        // authority check, so ANY account could resolve an open challenge —
+        // including voting `Dismiss` (2), which burns the *challenger's* bond
+        // and closes the challenge (letting a challenged operator escape
+        // slashing and grief an honest challenger).
+        new_test_ext().execute_with(|| {
+            OraclePallet::bond_operator(RuntimeOrigin::signed(DAVE)).unwrap();
+            // CHARLIE (committee) opens a challenge against DAVE.
+            OraclePallet::challenge_operator(RuntimeOrigin::signed(CHARLIE), DAVE).unwrap();
+            let charlie_before = pallet_balances::Pallet::<Test>::free_balance(CHARLIE);
+
+            // Account 42 is NOT on the committee -> must be rejected, and the
+            // challenge (and CHARLIE's bond) must be untouched.
+            assert!(
+                OraclePallet::resolve_challenge(RuntimeOrigin::signed(42), DAVE, 2).is_err(),
+                "non-committee account must not resolve a challenge"
+            );
+            assert!(OpenChallenges::<Test>::contains_key(DAVE));
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(CHARLIE),
+                charlie_before,
+                "griefer must not be able to burn the challenger's bond"
+            );
+
+            // A committee member may still resolve.
+            assert!(
+                OraclePallet::resolve_challenge(RuntimeOrigin::signed(ALICE), DAVE, 2).is_ok()
+            );
+            assert!(OpenChallenges::<Test>::get(DAVE).is_none());
         });
     }
 
