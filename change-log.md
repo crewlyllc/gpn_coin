@@ -1,5 +1,14 @@
 # GPN change-log
 
+## 2026-10-07 17:52 PT / 00:52 UTC — PM07 driver (cron d496e0b0) — item **#3 Client-side RTT / user→nearest-node** → **DONE**
+**What changed (smallest correct change; no chain/genesis touched):**
+1. **New `gpn-agent/src/routing.rs`** — `RttOverrides` + `effective_latency_ms` (client-measured user→provider RTT wins over AP-measured, `0`/absent = fall back), `parse_rtt_overrides` (lenient; malformed/non-positive ignored, never fatal), `lookup_override` (matches by provider **address** or **status URL**, case-insensitive, `/status`+trailing-slash normalized). 5 unit tests green.
+2. **`gpn_scheduler.rs`** — `pick()` now takes `&RttOverrides` and scores every branch (ready/puller/busy) by the effective **user-relevant** latency. Job requests (`POST /jobs`, `POST /route/{id}`, `POST /v1/chat/completions`) read an optional `{"rtt": {"<addr|url>": <ms>}}` hint. New unauthenticated **`GET /ping`** (client RTT probe / multi-AP selection); `/providers` now returns `address` so clients can key hints by address. 4 new bin tests (default pick = AP-nearest; client hint flips it; address- and URL-keyed; zero = unmeasured).
+3. **New `gpn-agent/gpn_rtt.py`** — stdlib client helper: `measure_rtt`, `pick_nearest_ap`, `provider_rtts`, `ask` (attaches the hints; `GPN_APS`/`GPN_AP_TOKEN` env).
+**Why:** the scheduler only ever minimised **AP→provider** RTT, so a user far from the access point paid that leg on every call regardless of the provider chosen (§6.1 gap). Now the *client* measures the path it actually uses and the AP prefers the provider nearest the **user**; behaviour is unchanged when no hints are sent (safe/back-compatible).
+**Verified:** `cargo test --lib routing` 5/5, `cargo test --bin gpn_scheduler` 4/4. Built release, redeployed `~/.local/bin/gpn_scheduler`, `systemctl --user restart gpn-accesspoint`. **Live:** `/ping` → `{"ok":true,"ap":"0.0.0.0:8092"}`; `/providers` returns address `5ENqSp5Q…`; three e2e jobs (2 with RTT hints, 1 baseline) all `status:done`, `routed_to=5ENqSp5Q…`, `verify=sha256` OK. Multi-provider flip is unit-covered (only one healthy provider on the testnet today). No runtime upgrade ⇒ no `set_code`; no rule-5a client restart needed beyond reloading the AP binary.
+**Next:** item #4 (Windows as an AI provider).
+
 ## 2026-10-07 14:52 PT / 21:52 UTC — PM07 GPN debug (cron 1a4f19ab) — NEW ANOMALY: provider **#1102 heal-loop / false-success log storm** — ROOT CAUSE = **chronic tip fork** vs a remote AUTHORITY peer (23.241.109.255); reorgs revert #1102 completion ⇒ state flaps Pending↔Completed. No restart, no code change (network-level; escalate).
 **Root-cause-first (evidence before action):**
 1. `journalctl gpn-provider` since 14:40 = **only** `[provider] healed leaked Pending #1102 → Completed` every ~10–20s (19+ and counting, still going) — no other activity; txpool empty.

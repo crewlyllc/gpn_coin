@@ -4,6 +4,10 @@
 //! A caller hits one URL (`POST /jobs`); the scheduler:
 //!   1. filters providers by COMPATIBILITY (attested GFLOPS >= job min_gflops),
 //!   2. scores the survivors by LATENCY + LOAD (from each provider's /status heartbeat),
+//!      preferring the provider whose **user→provider** RTT is lowest when the
+//!      caller supplies client-measured RTT hints (`{"rtt": {"<addr|url>": <ms>}}`)
+//!      — see `routing.rs` / item 3 (client-side RTT). Falls back to the
+//!      access-point-measured latency when no hints are given.
 //!   3. picks the best, creates the on-chain job (escrow), and DISPATCHES it to that
 //!      provider (via a shared assignment store the provider polls).
 //!
@@ -16,6 +20,7 @@
 //! Env: LISTEN, SIGNER_URI, ENDPOINT, PROVIDERS, GPN_ASSIGN_STORE
 
 use gpn_agent::chain::ChainClient;
+use gpn_agent::routing::{self, RttOverrides};
 use serde_json::{json, Value};
 use std::io::Read;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -402,11 +407,18 @@ fn usd_per_token_for(model: &str) -> f64 {
     base * params_b.max(0.5)
 }
 
-fn pick(registry: &[Provider], min_gflops: u64, model: &str, pull_penalty_ms: u64) -> Option<(Provider, bool)> {
+fn pick(registry: &[Provider], min_gflops: u64, model: &str, pull_penalty_ms: u64, rtt: &RttOverrides) -> Option<(Provider, bool)> {
     let live: Vec<&Provider> = registry
         .iter()
         .filter(|p| p.last_seen.is_some() && p.gflops >= min_gflops)
         .collect();
+
+    // Effective latency for the *user's* path: a client-measured (user→provider)
+    // RTT wins over the access-point-measured value when the caller supplied one
+    // (item 3 — client-side RTT). Falls back to `latency_ms` otherwise.
+    let eff = |p: &Provider| {
+        routing::effective_latency_ms(p.latency_ms, routing::lookup_override(rtt, &p.address, &p.status_url))
+    };
 
     // Availability: a node currently running an AI job is NOT available (one GPU does one
     // job at a time). Prefer idle nodes, chosen by LOWEST LATENCY (least-ms), not by load.
@@ -414,17 +426,17 @@ fn pick(registry: &[Provider], min_gflops: u64, model: &str, pull_penalty_ms: u6
 
     // 1. Idle nodes that already HAVE the model -> lowest latency wins.
     let mut ready: Vec<&Provider> = idle.iter().copied().filter(|p| has_model(p, model)).collect();
-    ready.sort_by_key(|p| p.latency_ms);
+    ready.sort_by_key(|p| eff(p));
 
     // 2. Idle nodes that CAN pull the model -> lowest latency.
     let mut pullers: Vec<&Provider> = idle.iter().copied().filter(|p| p.can_pull).collect();
-    pullers.sort_by_key(|p| p.latency_ms);
+    pullers.sort_by_key(|p| eff(p));
 
     match (ready.first().copied(), pullers.first().copied()) {
         // Both exist: a puller wins only if it beats the ready idle node end-to-end
         // (downloading on a fast/idle node still finishes sooner than waiting on a slow one).
         (Some(r), Some(p)) => {
-            if p.latency_ms + pull_penalty_ms < r.latency_ms {
+            if eff(p) + pull_penalty_ms < eff(r) {
                 Some((p.clone(), true))
             } else {
                 Some((r.clone(), false))
@@ -436,10 +448,21 @@ fn pick(registry: &[Provider], min_gflops: u64, model: &str, pull_penalty_ms: u6
             // Every compatible node is busy: no idle node exists. Fall back to queuing on the
             // least-loaded, then lowest-latency node (the job waits; it is not run concurrently).
             let mut busy: Vec<&Provider> = live.iter().copied().filter(|p| has_model(p, model)).collect();
-            busy.sort_by_key(|p| p.active * 1000 + p.latency_ms / 10);
+            busy.sort_by_key(|p| p.active * 1000 + eff(p) / 10);
             busy.first().map(|p| ((*p).clone(), false))
         }
     }
+}
+
+/// Client-side RTT hints from a request body: `{"rtt": {"<addr-or-url>": <ms>}}`.
+///
+/// The client measures its OWN round-trip to the provider endpoints (from
+/// `GET /providers`) and/or the access point (via `GET /ping`) and passes them
+/// here so routing reflects the **user→provider** path, not just AP→provider.
+/// Absent/malformed hints are ignored → routing falls back to the AP-measured
+/// latency (identical to the old behaviour).
+fn rtt_overrides(v: &Value) -> RttOverrides {
+    v.get("rtt").map(routing::parse_rtt_overrides).unwrap_or_default()
 }
 
 fn write_assignment(store: &str, job_id: u64, provider: &str, model: &str, pull: bool) -> std::io::Result<()> {
@@ -521,7 +544,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  chain: {endpoint}");
     println!("  providers: {} ({})", urls.len(), urls.join(", "));
     println!("  assign store: {assign_store}");
-    println!("  endpoints: /health /providers /jobs /job/{{id}} /mode | POST /jobs /route/{{id}}");
+    println!("  endpoints: /health /ping /providers /jobs /job/{{id}} /mode | POST /jobs /route/{{id}}");
     println!(
         "  mode: {} ({})",
         if allow_hot_wallet { "TESTNET / free-AI" } else { "MAINNET / client-signed" },
@@ -540,6 +563,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let assign_store = assign_store.clone();
         let hdr = hdr.clone();
         let ap_token = ap_token.clone();
+        let listen = listen.clone();
         std::thread::spawn(move || {
         let url = req.url().to_string();
         let method = req.method().clone();
@@ -575,10 +599,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = head;
                 json!({"status":"ok","providers": registry.lock().unwrap().len()})
             }
+            // Cheap, unauthenticated RTT probe. A client times this GET to measure
+            // its OWN round-trip to this access point — used to pick the nearest AP
+            // when several are available (item 3, client-side RTT). No chain RPC, no
+            // state: safe to hammer.
+            (Method::Get, ["ping"]) => {
+                json!({"ok":true, "ap": listen, "t": now_secs()})
+            }
             (Method::Get, ["providers"]) => {
                 let reg = registry.lock().unwrap();
                 json!({ "providers": reg.iter().map(|p| json!({
-                    "status_url": p.status_url, "gflops": p.gflops, "models": p.models,
+                    "status_url": p.status_url, "address": p.address, "gflops": p.gflops, "models": p.models,
                     "active": p.active, "capacity": p.capacity, "latency_ms": p.latency_ms,
                     "healthy": p.last_seen.is_some()
                 })).collect::<Vec<_>>() })
@@ -631,7 +662,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         return;
                     }
                 };
-                let chosen = pick(&reg, 0, &model, pull_penalty_ms);
+                let chosen = pick(&reg, 0, &model, pull_penalty_ms, &rtt_overrides(&v));
                 let (provider, needs_pull) = match chosen {
                     Some(x) => x,
                     None => {
@@ -872,7 +903,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 };
-                let (provider, needs_pull) = match pick(&reg, min_gflops, &model, pull_penalty_ms) {
+                let (provider, needs_pull) = match pick(&reg, min_gflops, &model, pull_penalty_ms, &rtt_overrides(&v)) {
                     Some(x) => x,
                     None => {
                         let r = Response::from_string(json!({"ok":false,"error":"no compatible provider available"}).to_string())
@@ -1147,6 +1178,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // optional ?model=<m> in the query string
                 let (idp, query) = id.split_once('?').unwrap_or((id, ""));
                 let idn: u64 = idp.parse().unwrap_or(0);
+                let route_body: Value = serde_json::from_str(&body).unwrap_or(json!({}));
                 let qmodel = query
                     .split('&')
                     .find_map(|kv| kv.strip_prefix("model="))
@@ -1158,7 +1190,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let reg = registry.lock().unwrap().clone();
                     match resolve_requested_model(&reg, &qmodel) {
                         Err(e) => json!({"ok":false,"error":e}),
-                        Ok(qmodel) => match pick(&reg, 0, &qmodel, pull_penalty_ms) {
+                        Ok(qmodel) => match pick(&reg, 0, &qmodel, pull_penalty_ms, &rtt_overrides(&route_body)) {
                             Some((p, pull)) => {
                                 let _ = write_assignment(&assign_store, idn, &p.address, &qmodel, pull);
                                 json!({"ok":true,"job_id":idn,"routed_to":p.address,
@@ -1178,4 +1210,74 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn prov(addr: &str, url: &str, latency_ms: u64, model: &str) -> Provider {
+        Provider {
+            status_url: url.to_string(),
+            address: addr.to_string(),
+            gflops: 30000,
+            models: vec![model.to_string()],
+            can_pull: false,
+            tok_per_s: 40.0,
+            owner_cost_usd_hr: 0.03,
+            mem_bw_gbps: 250.0,
+            active: 0,
+            capacity: 4,
+            latency_ms,
+            last_seen: Some(Instant::now()),
+        }
+    }
+
+    #[test]
+    fn ap_view_picks_nearest_to_the_access_point_by_default() {
+        // A is 5ms from the AP, B is 50ms. No client hints -> A wins.
+        let reg = vec![
+            prov("A", "http://a:8093", 5, "llama3.2:1b"),
+            prov("B", "http://b:8093", 50, "llama3.2:1b"),
+        ];
+        let (p, _) = pick(&reg, 0, "llama3.2:1b", 120_000, &RttOverrides::new()).unwrap();
+        assert_eq!(p.address, "A");
+    }
+
+    #[test]
+    fn client_rtt_hint_flips_routing_to_the_user_nearest_provider() {
+        // Same registry, but the client (user) is much closer to B.
+        let reg = vec![
+            prov("A", "http://a:8093", 5, "llama3.2:1b"),
+            prov("B", "http://b:8093", 50, "llama3.2:1b"),
+        ];
+        let mut rtt = RttOverrides::new();
+        rtt.insert("a".into(), 120); // user is far from A
+        rtt.insert("b".into(), 8); // user is near B
+        let (p, _) = pick(&reg, 0, "llama3.2:1b", 120_000, &rtt).unwrap();
+        assert_eq!(p.address, "B", "client-measured RTT must override AP-measured latency");
+    }
+
+    #[test]
+    fn rtt_hint_can_be_keyed_by_status_url() {
+        let reg = vec![
+            prov("A", "http://a:8093", 5, "llama3.2:1b"),
+            prov("B", "http://b:8093", 50, "llama3.2:1b"),
+        ];
+        let rtt = routing::parse_rtt_overrides(&json!({"http://b:8093/status": 2}));
+        let (p, _) = pick(&reg, 0, "llama3.2:1b", 120_000, &rtt).unwrap();
+        assert_eq!(p.address, "B");
+    }
+
+    #[test]
+    fn zero_override_does_not_disturb_ap_ordering() {
+        let reg = vec![
+            prov("A", "http://a:8093", 5, "llama3.2:1b"),
+            prov("B", "http://b:8093", 50, "llama3.2:1b"),
+        ];
+        let mut rtt = RttOverrides::new();
+        rtt.insert("b".into(), 0); // "not measured"
+        let (p, _) = pick(&reg, 0, "llama3.2:1b", 120_000, &rtt).unwrap();
+        assert_eq!(p.address, "A");
+    }
 }

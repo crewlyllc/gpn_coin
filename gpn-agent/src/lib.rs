@@ -13,6 +13,7 @@ pub mod mining;
 pub mod modes;
 pub mod network_registry;
 pub mod profitability;
+pub mod routing;
 pub mod utils;
 
 // Re-export the scripted feed for the headless simulator binary.
