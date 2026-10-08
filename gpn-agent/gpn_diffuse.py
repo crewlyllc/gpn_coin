@@ -88,7 +88,7 @@ def _load_text_encoder_4bit(repo, dtype):
     )
 
 
-def _pin_text_encoder_device(pipe, exec_device):
+def _pin_text_encoder_device(pipe, exec_device, out_dtype=None):
     """Keep the text-encoder inputs on the text-encoder's *own* device.
 
     When the 4-bit T5 lives on CPU but the transformer/VAE run on cuda, the
@@ -100,14 +100,16 @@ def _pin_text_encoder_device(pipe, exec_device):
 
     Wrap `_get_t5_prompt_embeds` so the encoder is always invoked on its own
     device, then hand the resulting embeddings/attention_mask back on the
-    execution device (where the pipeline expects them). Small + reversible:
-    restores the original method on the instance afterwards is not needed since
-    the process runs one job and exits.
+    execution device (where the pipeline expects them).
+
+    We also force the embedding dtype (out_dtype): a bitsandbytes 4-bit
+    module reports `.dtype == float32` (its unquantized norms are fp32), so
+    the stock code would cast the embeddings to fp32 and the fp16 transformer
+    then fails with "mat1 and mat2 must have the same dtype, got Float and
+    Half". Casting to the transformer dtype (fp16) fixes that.
     """
     import types
     te_device = next(pipe.text_encoder.parameters()).device
-    if te_device.type == "cpu" and torch_device_type(exec_device) == "cpu":
-        return  # already aligned (CPU-only host)
     orig = pipe._get_t5_prompt_embeds
 
     def _wrapped(self, prompt=None, num_videos_per_prompt=1,
@@ -117,15 +119,11 @@ def _pin_text_encoder_device(pipe, exec_device):
             num_videos_per_prompt=num_videos_per_prompt,
             max_sequence_length=max_sequence_length,
             device=te_device,
-            dtype=dtype,
+            dtype=dtype or out_dtype,
         )
-        return embeds.to(exec_device), mask.to(exec_device)
+        return embeds.to(device=exec_device, dtype=out_dtype or embeds.dtype), mask.to(exec_device)
 
     pipe._get_t5_prompt_embeds = types.MethodType(_wrapped, pipe)
-
-
-def torch_device_type(device):
-    return device.type if hasattr(device, "type") else str(device).split(":")[0]
 
 
 def gen_video(req):
@@ -182,7 +180,7 @@ def gen_video(req):
             comp.to("cuda", dtype=dtype if comp.dtype.is_floating_point else None)
         # Prompt inputs must reach the CPU text encoder on CPU (not cuda)
         # while transformer/VAE inputs stay on cuda. See _pin_text_encoder_device.
-        _pin_text_encoder_device(pipe, torch.device("cuda"))
+        _pin_text_encoder_device(pipe, torch.device("cuda"), out_dtype=dtype)
     else:
         pipe.to("cuda", dtype=dtype)
 
