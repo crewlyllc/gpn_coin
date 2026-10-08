@@ -1,5 +1,15 @@
 # GPN change-log
 
+## 2026-10-08 02:55 PT / 09:55 UTC — PM07 driver (cron d496e0b0) — item **#10 Diffusion silent-wedge instrumentation** → **DONE** (live-verified)
+**What changed (one file; no chain/genesis/runtime touched):** `gpn-agent/src/bin/gpn_diffusion_provider.rs` — `run_job` used to `await` the diffusers helper via an unchecked `Command::output()`, so a hung render blocked the entire provider loop **indefinitely and silently** (the "silent wedge"; only a restart cleared it).  New `run_with_watchdog(cmd, timeout, label)`:
+1. runs the helper under a **hard budget** (`GPN_DIFFUSE_TIMEOUT_SECS`; default **600 s** image / **1800 s** video);
+2. emits a **30 s progress heartbeat** (`[watchdog] … still running — elapsed=Ns`) so a slow render is no longer dead air;
+3. at the budget **kills the hung child** and logs `⚠ SILENT-WEDGE DETECTED` + marks the job errored off-chain (never silent);
+4. a process-local `wedged` set **skips re-rendering a proven-wedge job** (avoids a tight GPU-burning retry loop); the chain-side expiry sweep reclaims it.
+**Tests:** 5/5 bin tests green (success output; hung helper killed+flagged+prompt; nonzero-exit ≠ wedge; timeout defaults; wedged-marker roundtrip).
+**Live-verified:** (1) real ImageGeneration `#1370` → heartbeat at 30 s → `done`, `/tmp/gpn_artifacts/job_1370.png`, on-chain **Completed**; (2) forced wedge (fake `sleep 300` script + `GPN_DIFFUSE_TIMEOUT_SECS=35` via a temporary systemd drop-in) → heartbeat at 30 s → `⚠ SILENT-WEDGE DETECTED — exceeded 35s — killed` → provider stayed `active` and kept polling; override removed + real script restored → `#1371` then rendered for real → on-chain **Completed** (no stranded job). Canonical genesis WASM `76f37b23…` intact; only `gpn_diffusion_provider` rebuilt/redeployed (`~/.local/bin`), `gpn-diffusion` restarted.
+**Next:** item #11 (pallet distributions — staking + oracle rewards, real burn).
+
 ## 2026-10-07 19:42 PT / 02:42 UTC — PM07 driver (cron d496e0b0) — item **#5a Enable + live-verify the fine-tune provider** → **DONE**
 **What changed (no chain/genesis/runtime touched):**
 1. **`gpn-agent/src/bin/gpn_finetune_provider.rs`** — added a **self-claim** step: there is no AP/scheduler routing path for `FineTuning` jobs, so the provider previously could never be triggered (it only *ran* jobs already `Running`+assigned). Now each pass it accepts + starts any recent (`CLAIM_WINDOW=64`) `Pending` finetune job that has an off-chain payload; `accept_job` stays gated on-chain by the min_gflops attestation check. Rebuilt release, installed `~/.local/bin/gpn_finetune_provider`.

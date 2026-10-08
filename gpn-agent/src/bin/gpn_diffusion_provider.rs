@@ -14,8 +14,27 @@
 use gpn_agent::chain::ChainClient;
 use gpn_agent::llm::{get_job, LlmStore};
 use serde_json::json;
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
+
+/// Job ids this process has already declared a **wedge** (helper hung past its
+/// budget). Re-running one would just wedge again in a tight loop, burning the
+/// GPU with no progress; the chain-side expiry sweep reclaims them instead.
+/// In-memory only — a provider restart clears it (a restart is the known cure).
+fn wedged_set() -> &'static Mutex<HashSet<u64>> {
+    static WEDGED: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
+    WEDGED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn mark_wedged(id: u64) {
+    wedged_set().lock().unwrap().insert(id);
+}
+
+fn is_wedged(id: u64) -> bool {
+    wedged_set().lock().unwrap().contains(&id)
+}
 
 fn diffuse_script() -> PathBuf {
     if let Ok(p) = std::env::var("GPN_DIFFUSE_SCRIPT") {
@@ -85,6 +104,91 @@ fn is_benign_state_err(s: &str) -> bool {
 /// How many of the most recent job ids the reconcile pass scans per cycle
 /// (was `0..next` = every historical job, one RPC each, on EVERY poll).
 const RECONCILE_WINDOW: u64 = 128;
+
+/// Hard time budget for one generation. Beyond this the helper is considered
+/// **wedged** (GPU contention, a stalled HF download, a CUDA hang) and is
+/// killed, so a single bad job can never silence the provider forever — the
+/// exact "silent wedge" this instrumentation detects. Override with
+/// `GPN_DIFFUSE_TIMEOUT_SECS`; default 600 s for images, 1800 s for video.
+fn diffuse_timeout(kind: &str) -> Duration {
+    if let Ok(s) = std::env::var("GPN_DIFFUSE_TIMEOUT_SECS") {
+        if let Ok(n) = s.parse::<u64>() {
+            if n > 0 {
+                return Duration::from_secs(n);
+            }
+        }
+    }
+    if kind == "video" {
+        Duration::from_secs(1800)
+    } else {
+        Duration::from_secs(600)
+    }
+}
+
+/// Progress-heartbeat interval while the generation helper runs. Emitting this
+/// keeps the provider log from going *silent* during a long render, so a wedge
+/// is visible as "still running at Ns" rather than dead air.
+const HELPER_HEARTBEAT: Duration = Duration::from_secs(30);
+
+/// Run a command under a hard watchdog, capturing stdout/stderr to temp files.
+///
+/// Returns `(stdout, stderr)` on success. On non-zero exit returns the helper's
+/// stderr in `Err`. On timeout the child is **killed** and `Err("WEDGE: …")` is
+/// returned so the caller logs the wedge and keeps serving instead of stalling.
+fn run_with_watchdog(
+    mut cmd: std::process::Command,
+    timeout: Duration,
+    label: &str,
+) -> Result<(String, String), String> {
+    let tag = format!("{}_{}", label.replace(' ', "_"), std::process::id());
+    let out_path = gpn_agent::utils::temp_path(&format!("gpn_wd_{tag}.out"));
+    let err_path = gpn_agent::utils::temp_path(&format!("gpn_wd_{tag}.err"));
+    let out_f = std::fs::File::create(&out_path).map_err(|e| format!("tmp stdout: {e}"))?;
+    let err_f = std::fs::File::create(&err_path).map_err(|e| format!("tmp stderr: {e}"))?;
+    cmd.stdout(out_f).stderr(err_f);
+    let mut child = cmd.spawn().map_err(|e| format!("spawn: {e}"))?;
+    let pid = child.id();
+    let start = std::time::Instant::now();
+    let mut last_hb = start;
+    let result = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let so = std::fs::read_to_string(&out_path).unwrap_or_default();
+                let se = std::fs::read_to_string(&err_path).unwrap_or_default();
+                break if status.success() {
+                    Ok((so, se))
+                } else {
+                    Err(format!("helper exited {:?}: {}", status.code(), se.trim()))
+                };
+            }
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break Err(format!(
+                        "WEDGE: {label} helper (pid {pid}) exceeded {}s — killed (GPU/download hang?)",
+                        timeout.as_secs()
+                    ));
+                }
+                if last_hb.elapsed() >= HELPER_HEARTBEAT {
+                    eprintln!(
+                        "[watchdog] {label} helper pid {pid} still running — elapsed={}s",
+                        start.elapsed().as_secs()
+                    );
+                    last_hb = std::time::Instant::now();
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                break Err(format!("wait failed: {e}"));
+            }
+        }
+    };
+    let _ = std::fs::remove_file(&out_path);
+    let _ = std::fs::remove_file(&err_path);
+    result
+}
 
 /// Path to the GPU duty-cycle yield flag the local miner watches.
 fn gpu_yield_path() -> String {
@@ -298,6 +402,11 @@ async fn process_once(
         };
         if let Some((state, _price, _req, provider)) = client.get_job_state(id).await {
             if state == "Running" && provider.as_deref() == Some(me) {
+                // Skip a job we already proved wedges this host — re-rendering it
+                // only to kill it again would stall the GPU with no progress.
+                if is_wedged(id) {
+                    continue;
+                }
                 run_job(client, id, job).await?;
             }
         }
@@ -360,23 +469,34 @@ async fn run_job(
     );
     let _ = std::fs::write(&yield_path, b"1");
     let script = diffuse_script();
+    let timeout = diffuse_timeout(&job.kind);
     let req_file2 = req_file.clone();
     let out_res = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
-        let out = std::process::Command::new("python3")
-            .arg(&script)
-            .arg(&req_file2)
-            .output()
-            .map_err(|e| format!("spawn python3: {e}"))?;
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        if !out.status.success() {
-            return Err(format!("diffusers failed: {}", stdout.trim()));
-        }
+        let mut cmd = std::process::Command::new("python3");
+        cmd.arg(&script).arg(&req_file2);
+        let (stdout, _stderr) = run_with_watchdog(cmd, timeout, &format!("job {id}"))?;
         serde_json::from_str(&stdout).map_err(|e| format!("bad helper output: {e} ({stdout})"))
     })
     .await
     .map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(&yield_path);
-    let out = out_res?;
+    // A wedged/timed-out helper is reported explicitly (never silent) and the
+    // job is marked errored off-chain; on-chain it stays Running and is
+    // reclaimed by the expiry sweep. The provider itself keeps serving.
+    let out = match out_res {
+        Ok(v) => v,
+        Err(e) => {
+            if e.contains("WEDGE") {
+                eprintln!("[job {id}] ⚠ SILENT-WEDGE DETECTED — {e}");
+                mark_wedged(id);
+            } else {
+                eprintln!("[job {id}] generation error: {e}");
+            }
+            let _ = LlmStore::new().set_error(id, &e);
+            let _ = std::fs::remove_file(&req_file);
+            return Ok(());
+        }
+    };
 
     if out.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
         let artifact = out["artifact"].as_str().unwrap_or(&out_path).to_string();
@@ -401,4 +521,61 @@ async fn run_job(
     }
     let _ = std::fs::remove_file(&req_file);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sh(script: &str) -> std::process::Command {
+        let mut c = std::process::Command::new("sh");
+        c.arg("-c").arg(script);
+        c
+    }
+
+    #[test]
+    fn watchdog_returns_output_on_success() {
+        let (out, _err) = run_with_watchdog(sh("echo hello"), Duration::from_secs(10), "t_ok")
+            .expect("should succeed");
+        assert!(out.contains("hello"), "stdout was: {out}");
+    }
+
+    #[test]
+    fn watchdog_kills_a_hung_helper_and_flags_wedge() {
+        // A helper that never finishes must be killed at the budget, not hang forever.
+        let start = std::time::Instant::now();
+        let err = run_with_watchdog(sh("sleep 30"), Duration::from_secs(1), "t_wedge")
+            .expect_err("expected a wedge error");
+        assert!(err.contains("WEDGE"), "got: {err}");
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "watchdog did not return promptly (took {:?})",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn watchdog_reports_nonzero_exit_without_calling_it_a_wedge() {
+        let err = run_with_watchdog(
+            sh("echo boom >&2; exit 3"),
+            Duration::from_secs(10),
+            "t_fail",
+        )
+        .expect_err("expected a failure");
+        assert!(err.contains("boom"), "got: {err}");
+        assert!(!err.contains("WEDGE"), "false wedge: {err}");
+    }
+
+    #[test]
+    fn diffuse_timeout_video_is_at_least_image() {
+        assert!(diffuse_timeout("video") >= diffuse_timeout("image"));
+        assert!(diffuse_timeout("image") > Duration::from_secs(0));
+    }
+
+    #[test]
+    fn wedged_marker_roundtrip() {
+        assert!(!is_wedged(424242));
+        mark_wedged(424242);
+        assert!(is_wedged(424242));
+    }
 }
