@@ -486,6 +486,11 @@ parameter_types! {
     // (self-inflicted DoS, incident 2026-10-05).
     pub const MaxActiveJobsPerRequestor: u32 = 25;
     pub const MaxJobDuration: BlockNumber = 100_000;
+    // On-chain expiry sweep: how many job ids `on_initialize` may examine per
+    // block (bounded O(1) hook). At 4s blocks this walks the whole id space in
+    // ~ (NextJobId / 25) blocks, guaranteeing orphaned jobs auto-expire without
+    // relying on an external caller.
+    pub const MaxExpirySweepPerBlock: u32 = 25;
 }
 
 impl pallet_compute_marketplace::Config for Runtime {
@@ -497,6 +502,7 @@ impl pallet_compute_marketplace::Config for Runtime {
     type MaxActiveJobs = MaxActiveJobs;
     type MaxActiveJobsPerRequestor = MaxActiveJobsPerRequestor;
     type MaxJobDuration = MaxJobDuration;
+    type MaxExpirySweepPerBlock = MaxExpirySweepPerBlock;
     // Cross-pallet read of attested GPU throughput (proof-of-compute gate).
     type GPUAttestation = GPUAttestation;
     // Route marketplace fees into the GPN token pallet account so the fee

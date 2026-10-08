@@ -194,6 +194,12 @@ pub mod pallet {
         type MaxActiveJobsPerRequestor: Get<u32>;
         #[pallet::constant]
         type MaxJobDuration: Get<BlockNumberFor<Self>>;
+        /// Upper bound on how many job ids the `on_initialize` expiry sweep may
+        /// examine per block. Keeps the hook weight bounded (O(1) per block)
+        /// while still guaranteeing every job id is visited over time (the
+        /// cursor wraps around `NextJobId`). 0 disables the sweep.
+        #[pallet::constant]
+        type MaxExpirySweepPerBlock: Get<u32>;
         /// Read-only access to providers' attested GPU compute credentials.
         /// Used to enforce that a provider accepting a job actually meets the
         /// job's `min_gflops` requirement (proof-of-compute gate at match time).
@@ -251,6 +257,13 @@ pub mod pallet {
         StorageMap<_, Blake2_128Concat, T::AccountId, Vec<u8>, OptionQuery>;
     #[pallet::storage]
     pub type ActiveJobCount<T: Config> = StorageValue<_, u32, ValueQuery>;
+
+    /// Cursor for the on-chain expiry sweep: the next job id `on_initialize`
+    /// should examine. Advances by `MaxExpirySweepPerBlock` each block and wraps
+    /// at `NextJobId`, so the sweep is bounded per block yet eventually visits
+    /// every job id (removing reliance on someone calling `expire_job`).
+    #[pallet::storage]
+    pub type JobSweepCursor<T: Config> = StorageValue<_, u64, ValueQuery>;
 
     // ── Off-chain escrow channels (design-offchain-escrow-channels.md) ────────
     #[pallet::storage]
@@ -387,8 +400,18 @@ pub mod pallet {
     // Hooks
     #[pallet::hooks]
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
-        fn on_initialize(_now: BlockNumberFor<T>) -> Weight {
-            Weight::zero()
+        /// On-chain expiry sweep. Every block, examine up to
+        /// `MaxExpirySweepPerBlock` job ids from a wrapping cursor and
+        /// auto-expire any non-terminal job past its `created_at + max_duration`
+        /// deadline (same state transition as the permissionless `expire_job`:
+        /// mark `Failed`, refund escrow, free slots, emit `JobExpired`).
+        ///
+        /// This removes the marketplace's reliance on an external caller (the
+        /// AP janitor) to reclaim orphaned jobs: a requestor that goes away or a
+        /// provider that dies can no longer hold a global `ActiveJobCount` slot
+        /// (or a per-requestor slot) forever. The work is bounded O(1) per block.
+        fn on_initialize(now: BlockNumberFor<T>) -> Weight {
+            Self::expiry_sweep(now)
         }
 
         /// One-time capacity cleanup. Before the `complete_job` fix, finished jobs
@@ -1072,7 +1095,7 @@ pub mod pallet {
         #[pallet::weight(<T as Config>::WeightInfo::expire_job())]
         pub fn expire_job(origin: OriginFor<T>, job_id: u64) -> DispatchResult {
             let _who = ensure_signed(origin)?;
-            let mut job = <Jobs<T>>::get(job_id).ok_or(Error::<T>::JobNotFound)?;
+            let job = <Jobs<T>>::get(job_id).ok_or(Error::<T>::JobNotFound)?;
             ensure!(
                 !matches!(
                     job.state,
@@ -1088,30 +1111,7 @@ pub mod pallet {
             let deadline = job.created_at.saturating_add(job.max_duration);
             ensure!(now > deadline, Error::<T>::JobNotExpired);
 
-            job.state = JobState::Failed;
-            <Jobs<T>>::insert(job_id, job);
-            <ActiveJobCount<T>>::mutate(|c| *c = c.saturating_sub(1));
-
-            // Refund the full escrow to the requestor (no work delivered).
-            if let Some(escrow) = <JobEscrow<T>>::take(job_id) {
-                T::Currency::transfer(
-                    &Self::account_id(),
-                    &requestor,
-                    escrow,
-                    ExistenceRequirement::AllowDeath,
-                )?;
-            }
-            // Free capacity slots (mirror fail_job/cancel_job).
-            if let Some(provider) = <JobProvider<T>>::take(job_id) {
-                let mut pj = <ProviderJobs<T>>::get(&provider);
-                pj.retain(|&id| id != job_id);
-                <ProviderJobs<T>>::insert(&provider, pj);
-            }
-            let mut rj = <RequestorJobs<T>>::get(&requestor);
-            rj.retain(|&id| id != job_id);
-            <RequestorJobs<T>>::insert(&requestor, rj);
-
-            Self::deposit_event(Event::<T>::JobExpired { job_id });
+            Self::apply_expiry(job_id, &requestor);
             Ok(())
         }
     }
@@ -1120,6 +1120,104 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         pub fn account_id() -> T::AccountId {
             frame_support::PalletId(*b"gpn/cmkt").into_account_truncating()
+        }
+
+        /// The one shared expiry state transition, used by both the permissionless
+        /// `expire_job` extrinsic and the `on_initialize` sweep: mark the job
+        /// `Failed`, decrement the global count, refund the full escrow to the
+        /// requestor, free the provider/requestor capacity slots, emit
+        /// `JobExpired`. The caller must have already verified the job exists,
+        /// is non-terminal, and is past its deadline.
+        pub(crate) fn apply_expiry(job_id: u64, requestor: &T::AccountId) {
+            let Some(mut job) = <Jobs<T>>::get(job_id) else {
+                return;
+            };
+            job.state = JobState::Failed;
+            <Jobs<T>>::insert(job_id, job);
+            <ActiveJobCount<T>>::mutate(|c| *c = c.saturating_sub(1));
+
+            // Refund the full escrow to the requestor (no work delivered).
+            if let Some(escrow) = <JobEscrow<T>>::take(job_id) {
+                // Best-effort: a pathological transfer failure (e.g. the
+                // marketplace account under its ED) must not abort the sweep.
+                let _ = T::Currency::transfer(
+                    &Self::account_id(),
+                    requestor,
+                    escrow,
+                    ExistenceRequirement::AllowDeath,
+                );
+            }
+            // Free capacity slots (mirror fail_job/cancel_job).
+            if let Some(provider) = <JobProvider<T>>::take(job_id) {
+                let mut pj = <ProviderJobs<T>>::get(&provider);
+                pj.retain(|&id| id != job_id);
+                <ProviderJobs<T>>::insert(&provider, pj);
+            }
+            let mut rj = <RequestorJobs<T>>::get(requestor);
+            rj.retain(|&id| id != job_id);
+            <RequestorJobs<T>>::insert(requestor, rj);
+
+            Self::deposit_event(Event::<T>::JobExpired { job_id });
+        }
+
+        /// Examine a single job id and expire it if it is non-terminal and past
+        /// its deadline. Returns the weight consumed (bounded).
+        fn sweep_one(job_id: u64, now: u32) -> Weight {
+            let base = T::DbWeight::get().reads(1);
+            let Some(job) = <Jobs<T>>::get(job_id) else {
+                return base;
+            };
+            if matches!(
+                job.state,
+                JobState::Completed | JobState::Cancelled | JobState::Failed
+            ) {
+                return base;
+            }
+            let deadline = job.created_at.saturating_add(job.max_duration);
+            if now <= deadline {
+                return base;
+            }
+            let Some(requestor) = <JobRequestor<T>>::get(job_id) else {
+                return base.saturating_add(T::DbWeight::get().reads(1));
+            };
+            Self::apply_expiry(job_id, &requestor);
+            // Mirror `WeightInfo::expire_job` (marked-full cost; a hand estimate
+            // since a hook cannot be benchmarked by the extrinsic harness).
+            base.saturating_add(T::DbWeight::get().reads_writes(5, 4))
+        }
+
+        /// Bounded, wrapping expiry sweep run from `on_initialize`. Visits up to
+        /// `MaxExpirySweepPerBlock` job ids starting at `JobSweepCursor` and
+        /// expires any that are past their deadline. The cursor advances each
+        /// block and wraps at `NextJobId`, so every id is eventually examined
+        /// regardless of when jobs were created or cancelled. `MaxExpirySweepPerBlock
+        /// = 0` disables the sweep entirely.
+        fn expiry_sweep(now: BlockNumberFor<T>) -> Weight {
+            let limit = T::MaxExpirySweepPerBlock::get();
+            let next_id = <NextJobId<T>>::get();
+            let mut weight = T::DbWeight::get().reads(2);
+            if limit == 0 || next_id == 0 {
+                return weight;
+            }
+
+            let now: u32 = now.try_into().unwrap_or(0);
+            let mut id = <JobSweepCursor<T>>::get();
+            if id >= next_id {
+                id = 0;
+            }
+
+            let mut checked: u32 = 0;
+            while checked < limit && id < next_id {
+                weight = weight.saturating_add(Self::sweep_one(id, now));
+                id = id.saturating_add(1);
+                checked = checked.saturating_add(1);
+            }
+            // Wrap back to the start once we've walked past the newest job id.
+            if id >= next_id {
+                id = 0;
+            }
+            <JobSweepCursor<T>>::put(id);
+            weight.saturating_add(T::DbWeight::get().writes(1))
         }
         pub fn provider_active_jobs(who: &T::AccountId) -> Vec<u64> {
             <ProviderJobs<T>>::get(who)
@@ -1213,7 +1311,7 @@ mod tests {
     use super::*;
     use frame_support::{
         construct_runtime, derive_impl, parameter_types,
-        traits::{BuildGenesisConfig, ConstU128, ConstU16, ConstU32, ConstU64, Everything},
+        traits::{BuildGenesisConfig, ConstU128, ConstU16, ConstU32, ConstU64, Everything, Hooks},
     };
     use sp_core::H256;
     use sp_core::Pair;
@@ -1224,8 +1322,8 @@ mod tests {
 
     use crate::pallet as local_market;
     use crate::pallet::{
-        ActiveJobCount, ChannelEscrow, ChannelIndex, Channels, JobEscrow, JobProvider, Jobs,
-        NextChannelId, NextJobId, RegisteredProviders,
+        ActiveJobCount, ChannelEscrow, ChannelIndex, Channels, JobEscrow, JobProvider, JobSweepCursor,
+        Jobs, NextChannelId, NextJobId, RegisteredProviders,
     };
 
     type Block = frame_system::mocking::MockBlock<Test>;
@@ -1289,6 +1387,7 @@ mod tests {
         pub const TestMaxActiveJobs: u32 = 100;
         pub const TestMaxActiveJobsPerRequestor: u32 = 10;
         pub const TestMaxJobDuration: u64 = 10_000;
+        pub const TestMaxExpirySweepPerBlock: u32 = 25;
     }
 
     // Test-only mock of the gpu-attestation provider: returns a configurable
@@ -1320,6 +1419,7 @@ mod tests {
         type MaxActiveJobs = TestMaxActiveJobs;
         type MaxActiveJobsPerRequestor = TestMaxActiveJobsPerRequestor;
         type MaxJobDuration = TestMaxJobDuration;
+        type MaxExpirySweepPerBlock = TestMaxExpirySweepPerBlock;
         type GPUAttestation = MockAttestation;
         // Test fee sink: a dedicated account (99) that collects marketplace fees.
         type FeeSink = MockFeeSink;
@@ -1785,6 +1885,92 @@ mod tests {
 
             // A terminal job cannot be expired again.
             assert!(MarketPallet::expire_job(RuntimeOrigin::signed(CAROL), job_id).is_err());
+        });
+    }
+
+    #[test]
+    fn test_expiry_sweep_expires_past_deadline() {
+        new_test_ext().execute_with(|| {
+            // Helper create_job uses max_duration = 100, created at block 1 →
+            // deadline block 101.
+            let job_id = create_job(ALICE);
+            assert_eq!(ActiveJobCount::<Test>::get(), 1);
+            let before = pallet_balances::Pallet::<Test>::free_balance(ALICE);
+
+            // A block before the deadline leaves the job untouched.
+            System::set_block_number(50);
+            MarketPallet::on_initialize(50);
+            assert_eq!(Jobs::<Test>::get(job_id).unwrap().state, JobState::Pending);
+            assert_eq!(ActiveJobCount::<Test>::get(), 1);
+
+            // Past the deadline the hook auto-expires it — no external caller
+            // needed: state Failed, escrow refunded, slot freed.
+            System::set_block_number(200);
+            MarketPallet::on_initialize(200);
+            assert_eq!(Jobs::<Test>::get(job_id).unwrap().state, JobState::Failed);
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(ALICE),
+                before + 1_000
+            );
+            assert!(JobEscrow::<Test>::get(job_id).is_none());
+            assert_eq!(ActiveJobCount::<Test>::get(), 0);
+            // Terminal → a second sweep is a no-op (idempotent).
+            MarketPallet::on_initialize(201);
+            assert_eq!(ActiveJobCount::<Test>::get(), 0);
+        });
+    }
+
+    #[test]
+    fn test_expiry_sweep_is_bounded_and_covers_all_ids() {
+        new_test_ext().execute_with(|| {
+            // 30 jobs across 3 requestors (each capped at 10), ids 1..=30, all
+            // with deadline block 101. Sweep limit is 25 per block.
+            for who in [ALICE, BOB, CAROL] {
+                for _ in 0..10 {
+                    create_job(who);
+                }
+            }
+            assert_eq!(ActiveJobCount::<Test>::get(), 30);
+            assert_eq!(NextJobId::<Test>::get(), 31);
+
+            System::set_block_number(200);
+
+            // First sweep visits at most `limit` ids → does not expire all 30.
+            MarketPallet::on_initialize(200);
+            let after_first = ActiveJobCount::<Test>::get();
+            assert!(after_first > 0, "a single block must not sweep everything");
+            assert!(
+                after_first >= 30 - 25,
+                "sweep examined at most the per-block limit"
+            );
+
+            // Subsequent sweeps (cursor wrapped) finish the job set.
+            MarketPallet::on_initialize(201);
+            assert_eq!(ActiveJobCount::<Test>::get(), 0);
+            for id in 1..=30u64 {
+                assert_eq!(Jobs::<Test>::get(id).unwrap().state, JobState::Failed);
+            }
+        });
+    }
+
+    #[test]
+    fn test_expiry_sweep_skips_terminal_jobs() {
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            // Complete one job (terminal) and leave one Pending past deadline.
+            let done = create_job(ALICE);
+            MarketPallet::accept_job(RuntimeOrigin::signed(BOB), done).unwrap();
+            MarketPallet::start_job(RuntimeOrigin::signed(BOB), done).unwrap();
+            MarketPallet::submit_result(RuntimeOrigin::signed(BOB), done, [7u8; 32], 0).unwrap();
+            MarketPallet::complete_job(RuntimeOrigin::signed(BOB), done).unwrap();
+            let stuck = create_job(ALICE);
+
+            System::set_block_number(500);
+            MarketPallet::on_initialize(500);
+            // The completed job is untouched; the stuck one expires.
+            assert_eq!(Jobs::<Test>::get(done).unwrap().state, JobState::Completed);
+            assert_eq!(Jobs::<Test>::get(stuck).unwrap().state, JobState::Failed);
+            assert_eq!(ActiveJobCount::<Test>::get(), 0);
         });
     }
 
