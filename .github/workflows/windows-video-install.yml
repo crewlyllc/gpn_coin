@@ -28,28 +28,30 @@ jobs:
           $venv = 'C:\gpn\venv'
           $py   = Join-Path $venv 'Scripts\python.exe'
 
+          # Resolve uv (from the box's Python 3.14) and use it for the venv + all
+          # installs. uv venvs have no pip, so `python -m pip` cannot be used.
+          & python -m pip install --upgrade --quiet uv
+          $uv = Join-Path (Split-Path (Get-Command python).Source) 'Scripts\uv.exe'
+          if (-not (Test-Path $uv)) { $uv = 'uv' }
+          Write-Host "uv: $uv"
+
           if (-not (Test-Path $py)) {
             Write-Host "== creating Python 3.12 venv via uv =="
-            & python -m pip install --upgrade --quiet uv
-            $uv = Join-Path (Split-Path (Get-Command python).Source) 'Scripts\uv.exe'
-            if (-not (Test-Path $uv)) { $uv = 'uv' }
-            Write-Host "uv: $uv"
             & $uv venv --python 3.12 $venv
             if ($LASTEXITCODE -ne 0) { throw "uv venv failed ($LASTEXITCODE)" }
           } else { Write-Host "venv already present at $venv" }
 
           & $py --version
-          & $py -m pip install --upgrade --quiet pip
 
           Write-Host "== installing torch (${{ inputs.torch_index }}) =="
           & $py -c "import torch" 2>$null
           if ($LASTEXITCODE -ne 0) {
-            & $py -m pip install torch --index-url '${{ inputs.torch_index }}'
+            & $uv pip install --python $py torch --index-url '${{ inputs.torch_index }}'
             if ($LASTEXITCODE -ne 0) { throw "torch install failed ($LASTEXITCODE)" }
           } else { Write-Host "torch already importable" }
 
           Write-Host "== installing diffusers stack =="
-          & $py -m pip install --quiet diffusers transformers accelerate safetensors bitsandbytes imageio imageio-ffmpeg
+          & $uv pip install --python $py diffusers transformers accelerate safetensors bitsandbytes imageio imageio-ffmpeg
           if ($LASTEXITCODE -ne 0) { throw "diffusers stack install failed ($LASTEXITCODE)" }
 
       - name: fetch gpn_diffuse.py into C:\gpn
