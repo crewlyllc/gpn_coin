@@ -58,8 +58,9 @@ jobs:
             output          = $out
           }
           $reqPath = 'C:\gpn\req-video.json'
-          ($req | ConvertTo-Json) | Set-Content -Path $reqPath -Encoding UTF8
-          Write-Host "request: $(Get-Content $reqPath -Raw)"
+          $json = $req | ConvertTo-Json
+          [System.IO.File]::WriteAllText($reqPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+          Write-Host "request: $json"
 
           Write-Host "== running gpn_diffuse.py (video) =="
           $t0 = Get-Date
