@@ -57,6 +57,14 @@ jobs:
           $n = (Get-NetTCPConnection -LocalPort 8093 -State Listen -ErrorAction SilentlyContinue | Measure-Object).Count
           Say "  $n"
 
+          Say "== provider.log (tail 40) =="
+          if (Test-Path 'C:\gpn\provider.log') {
+            Get-Content 'C:\gpn\provider.log' -Tail 40 -ErrorAction SilentlyContinue | ForEach-Object { Say "  $_" }
+          } else { Say "  (no C:\gpn\provider.log)" }
+
+          Say "== scheduled task GPNProvider =="
+          schtasks /Query /TN GPNProvider /V /FO LIST 2>&1 | ForEach-Object { Say "  $_" }
+
       - name: Upload results
         uses: actions/upload-artifact@v4
         with:
