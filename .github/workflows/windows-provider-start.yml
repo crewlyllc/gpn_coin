@@ -1,0 +1,88 @@
+name: Windows provider start
+
+# Stands this self-hosted Windows box up AS a persistent GPN AI provider (item 4
+# / item 14): a Scheduled Task runs a supervisor that (a) serves the public
+# :8093 /status heartbeat and (b) keeps the gpn_llm_provider claim/infer loop
+# alive (auto-restart). Idempotent: registers/updates the task and (re)starts it.
+#
+# This is what deploys rely on so a running provider's locked .exe can be
+# replaced (stop -> copy -> task restart) instead of failing the copy.
+on:
+  workflow_dispatch:
+    inputs:
+      signer:
+        description: "provider signer (dev URI or seed)"
+        default: "//Bob"
+      rpc:
+        description: "node RPC websocket"
+        default: "ws://gpn-testnet.duckdns.org:9944"
+      public_status_url:
+        description: "public /status URL advertised on-chain"
+        default: "http://23.241.109.255:8093/status"
+      gflops:
+        description: "advertised GFLOPS"
+        default: "2500"
+
+jobs:
+  start:
+    runs-on: self-hosted
+    steps:
+      - name: write supervisor script
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $script = @'
+          param()
+          $ErrorActionPreference = 'Continue'
+          $bin    = 'C:\gpn\bin'
+          $rpc    = '__RPC__'
+          $signer = '__SIGNER__'
+          $pub    = '__PUB__'
+          $ollama = 'http://127.0.0.1:11434'
+          $gflops = __GFLOPS__
+          $log    = 'C:\gpn\provider.log'
+          function Log($m) { "$(Get-Date -Format o) $m" | Out-File -FilePath $log -Append -Encoding utf8 }
+          Log "supervisor starting (rpc=$rpc signer=$signer pub=$pub)"
+          # heartbeat (public /status on :8093) — only if not already up
+          $hb = @(Get-CimInstance Win32_Process -Filter "Name='gpn_provider_status.exe'")
+          if ($hb.Count -eq 0) {
+            Log 'starting heartbeat on 0.0.0.0:8093'
+            Start-Process -FilePath "$bin\gpn_provider_status.exe" `
+              -ArgumentList @('--listen','0.0.0.0:8093','--gflops',"$gflops",'--ollama',$ollama) `
+              -WindowStyle Hidden
+          } else { Log 'heartbeat already running' }
+          $env:GPN_PROVIDER_ENDPOINT = $pub
+          while ($true) {
+            Log 'starting gpn_llm_provider'
+            & "$bin\gpn_llm_provider.exe" $rpc $signer *>> $log
+            Log "gpn_llm_provider exited ($LASTEXITCODE); restart in 10s"
+            Start-Sleep -Seconds 10
+          }
+          '@
+          $script = $script.Replace('__RPC__',    '${{ inputs.rpc }}')
+          $script = $script.Replace('__SIGNER__', '${{ inputs.signer }}')
+          $script = $script.Replace('__PUB__',    '${{ inputs.public_status_url }}')
+          $script = $script.Replace('__GFLOPS__', '${{ inputs.gflops }}')
+          Set-Content -Path 'C:\gpn\run-provider.ps1' -Value $script -Encoding utf8
+          Write-Host "wrote C:\gpn\run-provider.ps1"
+
+      - name: register + start scheduled task
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $tr = 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\gpn\run-provider.ps1'
+          # stop any duplicate supervisor/provider started outside the task
+          Get-CimInstance Win32_Process -Filter "Name LIKE 'gpn_%'" |
+            Where-Object { $_.ExecutablePath -like 'C:\gpn\bin*' } |
+            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+          Start-Sleep -Seconds 2
+          schtasks /Create /TN GPNProvider /TR $tr /SC ONLOGON /RL HIGHEST /F
+          if ($LASTEXITCODE -ne 0) { Write-Host "schtasks failed ($LASTEXITCODE) — falling back to detached Start-Process"; Start-Process -FilePath 'powershell' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','C:\gpn\run-provider.ps1' -WindowStyle Hidden }
+          else { schtasks /Run /TN GPNProvider }
+          Start-Sleep -Seconds 12
+          Write-Host '== gpn processes =='
+          Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match 'gpn' } | ForEach-Object { Write-Host "  $($_.ProcessName) PID=$($_.Id)" }
+          Write-Host '== listeners on :8093 =='
+          $n = (Get-NetTCPConnection -LocalPort 8093 -State Listen -ErrorAction SilentlyContinue | Measure-Object).Count
+          Write-Host "  count=$n"
+          try { Write-Host ("local status: " + (Invoke-RestMethod 'http://127.0.0.1:8093/status' -TimeoutSec 8 | ConvertTo-Json -Compress)) } catch { Write-Host "local status FAILED: $($_.Exception.Message)" }
