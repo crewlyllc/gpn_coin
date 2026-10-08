@@ -1,0 +1,73 @@
+name: Windows video-stack readiness check
+
+# Read-only diagnostic (workflow_dispatch): reports whether this self-hosted
+# Windows box can run the GPN VIDEO path (gpn_diffusion_provider.exe ->
+# gpn_diffuse.py -> torch/CUDA + diffusers + Lightricks/LTX-Video).
+# Makes NO changes and installs NOTHING. Prints RAM, free disk, GPU/VRAM,
+# Python version and whether torch/diffusers are importable.
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: self-hosted
+    steps:
+      - name: Collect video-stack diagnostics
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+
+          Write-Host "== RAM =="
+          try {
+            $cs = Get-CimInstance Win32_ComputerSystem
+            $ramGB = [math]::Round($cs.TotalPhysicalMemory / 1GB, 1)
+            Write-Host "TotalPhysicalMemory: $ramGB GB"
+            $os = Get-CimInstance Win32_OperatingSystem
+            $freeGB = [math]::Round($os.FreePhysicalMemory / 1MB, 1)
+            Write-Host "FreePhysicalMemory:  $freeGB GB"
+          } catch { Write-Host "RAM query FAILED: $($_.Exception.Message)" }
+
+          Write-Host "== DISK (C:) =="
+          try {
+            $d = Get-PSDrive C
+            Write-Host ("C: used {0} GB, free {1} GB" -f [math]::Round($d.Used/1GB,1), [math]::Round($d.Free/1GB,1))
+          } catch { Write-Host "disk query FAILED: $($_.Exception.Message)" }
+
+          Write-Host "== GPU / VRAM =="
+          try {
+            & nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv
+          } catch { Write-Host "nvidia-smi FAILED: $($_.Exception.Message)" }
+
+          Write-Host "== PYTHON =="
+          try {
+            $p = Get-Command python -ErrorAction Stop
+            Write-Host "python path: $($p.Source)"
+            & python --version 2>&1
+          } catch { Write-Host "python NOT found on PATH" }
+          try { & python -c "import sys; print('executable:', sys.executable)" 2>&1 } catch {}
+
+          Write-Host "== PIP PACKAGES (torch / diffusers) =="
+          foreach ($pkg in @('torch','diffusers','transformers','accelerate','bitsandbytes')) {
+            try {
+              $v = (& python -m pip show $pkg 2>&1 | Select-String '^Version:')
+              if ($v) { Write-Host "$pkg : $($v -replace 'Version:\s*','')" }
+              else { Write-Host "$pkg : MISSING" }
+            } catch { Write-Host "$pkg : query FAILED ($($_.Exception.Message))" }
+          }
+
+          Write-Host "== TORCH CUDA AVAILABILITY =="
+          try { & python -c "import torch; print('torch', torch.__version__, 'cuda_available', torch.cuda.is_available(), 'cuda_ver', torch.version.cuda)" 2>&1 }
+          catch { Write-Host "torch import FAILED" }
+
+          Write-Host "== C:\gpn =="
+          if (Test-Path 'C:\gpn') {
+            Get-ChildItem 'C:\gpn' -Filter *.py | ForEach-Object { Write-Host "  py: $($_.Name)" }
+            if (Test-Path 'C:\gpn\bin') { Get-ChildItem 'C:\gpn\bin' -Filter *.exe | ForEach-Object { Write-Host "  exe: $($_.Name)" } }
+          } else { Write-Host "C:\gpn absent" }
+
+          Write-Host "== HF CACHE =="
+          $hf = Join-Path $env:USERPROFILE '.cache\huggingface'
+          if (Test-Path $hf) {
+            Write-Host "HF cache present at $hf"
+            Get-ChildItem $hf -Recurse -Directory -ErrorAction SilentlyContinue | Select-Object -First 20 | ForEach-Object { Write-Host "  $($_.FullName)" }
+          } else { Write-Host "no HF cache at $hf" }
