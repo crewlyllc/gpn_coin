@@ -17,5 +17,5 @@
 pub mod infer;
 pub mod store;
 
-pub use infer::run_inference;
+pub use infer::{normalize_ml_task, run_inference, run_ml_inference};
 pub use store::{get_job, put_job, set_response, LlmJob, LlmStore};

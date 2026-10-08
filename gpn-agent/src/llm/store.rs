@@ -53,7 +53,7 @@ pub fn default_store_path() -> PathBuf {
 /// image/video generation — the job-type is carried in `kind`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmJob {
-    /// "llm" | "image" | "video" | "finetune"
+    /// "llm" | "image" | "video" | "finetune" | "ml"
     pub kind: String,
     pub model: String,
     pub prompt: String,
@@ -64,6 +64,10 @@ pub struct LlmJob {
     /// Fine-tune hyperparams
     pub lora_r: Option<u32>,
     pub epochs: Option<u32>,
+    /// Generic ML-inference task (kind = "ml"): "generate" (default) or
+    /// "embeddings". `#[serde(default)]` keeps older store entries readable.
+    #[serde(default)]
+    pub task: Option<String>,
     /// Generation params (image/video):
     pub negative_prompt: Option<String>,
     pub width: Option<u32>,
@@ -101,6 +105,7 @@ impl LlmJob {
             dataset: None,
             lora_r: None,
             epochs: None,
+            task: None,
             negative_prompt: None,
             width: None,
             height: None,
@@ -141,6 +146,7 @@ impl LlmJob {
             dataset: None,
             lora_r: None,
             epochs: None,
+            task: None,
             negative_prompt: negative_prompt.map(|s| s.to_string()),
             width: Some(width),
             height: Some(height),
@@ -169,11 +175,44 @@ impl LlmJob {
             dataset: Some(dataset.to_string()),
             lora_r: Some(lora_r),
             epochs: Some(epochs),
+            task: None,
             negative_prompt: None,
             width: None,
             height: None,
             steps: None,
             seed: Some(rand_like_seed()),
+            frames: None,
+            fps: None,
+            status: "queued".into(),
+            response: None,
+            result_hash: None,
+            artifact_path: None,
+            artifact_media_type: None,
+            error: None,
+            salt: None,
+        }
+    }
+
+    /// New generic ML-inference job (kind = "ml"). `input` is the model input
+    /// (a prompt / text to embed); `task` selects the executor ("generate" for
+    /// raw completion, "embeddings" for a vector). Temperature/max_tokens are
+    /// honoured by the `generate` task.
+    pub fn new_ml(model: &str, input: &str, task: &str, temperature: f32, max_tokens: u32) -> Self {
+        Self {
+            kind: "ml".into(),
+            model: model.to_string(),
+            prompt: input.to_string(),
+            temperature,
+            max_tokens,
+            dataset: None,
+            lora_r: None,
+            epochs: None,
+            task: Some(task.to_string()),
+            negative_prompt: None,
+            width: None,
+            height: None,
+            steps: None,
+            seed: None,
             frames: None,
             fps: None,
             status: "queued".into(),
@@ -333,5 +372,34 @@ pub fn set_response(job_id: u64, response: &str, result_hash: &str, salt: Option
 impl Default for LlmStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_ml_sets_kind_task_and_roundtrips() {
+        let j = LlmJob::new_ml("qwen2.5:1.5b", "hello world", "embeddings", 0.7, 64);
+        assert_eq!(j.kind, "ml");
+        assert_eq!(j.task.as_deref(), Some("embeddings"));
+        assert_eq!(j.model, "qwen2.5:1.5b");
+        assert_eq!(j.prompt, "hello world");
+        let s = serde_json::to_string(&j).unwrap();
+        let back: LlmJob = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.kind, "ml");
+        assert_eq!(back.task.as_deref(), Some("embeddings"));
+        assert_eq!(back.prompt, "hello world");
+    }
+
+    #[test]
+    fn legacy_entry_without_task_field_still_loads() {
+        // Entries written before the `task` field existed must still parse
+        // (it is `#[serde(default)]`), so upgrades don't drop in-flight jobs.
+        let legacy = r#"{"kind":"llm","model":"m","prompt":"p","temperature":0.7,"max_tokens":1,"dataset":null,"lora_r":null,"epochs":null,"negative_prompt":null,"width":null,"height":null,"steps":null,"seed":null,"frames":null,"fps":null,"status":"queued","response":null,"result_hash":null,"salt":null,"artifact_path":null,"artifact_media_type":null,"error":null}"#;
+        let j: LlmJob = serde_json::from_str(legacy).unwrap();
+        assert_eq!(j.kind, "llm");
+        assert!(j.task.is_none());
     }
 }

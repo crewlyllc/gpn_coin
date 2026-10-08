@@ -403,9 +403,18 @@ fn route(
                 _ => None,
             };
             let is_ft = job_type.eq_ignore_ascii_case("FineTuning") && dataset.is_some();
+            // Generic ML inference (task = "generate" | "embeddings"). Accepts the
+            // model input via `input` (or falls back to `prompt`).
+            let ml_input = v
+                .get("input")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| prompt.clone());
+            let ml_task = v.get("task").and_then(|x| x.as_str()).unwrap_or("generate");
+            let is_ml = job_type.eq_ignore_ascii_case("MLInference") && ml_input.is_some();
             let lora_r: u32 = v.get("lora_r").and_then(|x| x.as_u64()).unwrap_or(16) as u32;
             let ft_epochs: u32 = v.get("epochs").and_then(|x| x.as_u64()).unwrap_or(2) as u32;
-            let is_bridged = (is_llm || is_gen) && prompt.is_some() || is_ft;
+            let is_bridged = (is_llm || is_gen) && prompt.is_some() || is_ft || is_ml;
             let temperature: f32 =
                 v.get("temperature").and_then(|x| x.as_f64()).unwrap_or(0.7) as f32;
             let max_tokens: u32 =
@@ -434,6 +443,8 @@ fn route(
             let hash_src: String = if is_bridged {
                 if is_ft {
                     dataset.clone().unwrap()
+                } else if is_ml {
+                    ml_input.clone().unwrap()
                 } else {
                     prompt.clone().unwrap()
                 }
@@ -465,6 +476,16 @@ fn route(
                     let job = if is_ft {
                         dataset.as_ref().map(|d| {
                             gpn_agent::llm::LlmJob::new_finetune(&model, d, lora_r, ft_epochs)
+                        })
+                    } else if is_ml {
+                        ml_input.as_ref().map(|i| {
+                            gpn_agent::llm::LlmJob::new_ml(
+                                &model,
+                                i,
+                                gpn_agent::llm::normalize_ml_task(Some(ml_task)),
+                                temperature,
+                                max_tokens,
+                            )
                         })
                     } else {
                         prompt.as_ref().map(|p| {

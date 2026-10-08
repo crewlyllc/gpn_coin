@@ -874,6 +874,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let price_gpn = v.get("price_gpn").and_then(|x| x.as_f64()).unwrap_or(10.0);
                 let job_type = v.get("job_type").and_then(|x| x.as_str()).unwrap_or("LLMInference");
                 let prompt = v.get("prompt").and_then(|x| x.as_str()).map(|s| s.to_string());
+                // ML inference may carry its input in `input` rather than `prompt`.
+                let ml_input = v.get("input").and_then(|x| x.as_str()).map(|s| s.to_string());
 
                 // choose the best provider (model-aware). Generation jobs
                 // (image/video) are served by the diffusion provider, which
@@ -984,7 +986,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // kind, otherwise the LLM provider claims them and 404s on
                         // a diffusion model; the diffusion provider only claims
                         // jobs where `kind` is image/video.
-                        if let Some(p) = prompt.as_ref() {
+                        if let Some(p) = prompt.as_ref().or(ml_input.as_ref()) {
                             let jt = job_type.to_ascii_lowercase();
                             // Guard: a diffusion/video model submitted with
                             // job_type omitted (defaults to LLMInference) must
@@ -998,6 +1000,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 || model_l.contains("ltx");
                             let is_gen_kind =
                                 jt.contains("image") || jt.contains("video") || model_diff;
+                            let is_ml_kind = jt == "mlinference";
                             let job = if is_gen_kind {
                                 let kind = if jt.contains("video") || model_l.contains("ltx") {
                                     "video"
@@ -1016,6 +1019,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     v.get("seed").and_then(|x| x.as_i64()),
                                     g("frames", 16) as u32,
                                     g("fps", 8) as u32,
+                                )
+                            } else if is_ml_kind {
+                                let task = v
+                                    .get("task")
+                                    .and_then(|x| x.as_str())
+                                    .unwrap_or("generate");
+                                gpn_agent::llm::LlmJob::new_ml(
+                                    &model,
+                                    p,
+                                    gpn_agent::llm::normalize_ml_task(Some(task)),
+                                    0.7,
+                                    256,
                                 )
                             } else {
                                 gpn_agent::llm::LlmJob::new_llm(&model, p, 0.7, 256)
