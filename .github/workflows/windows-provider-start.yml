@@ -49,16 +49,21 @@ jobs:
           $strays = @(Get-CimInstance Win32_Process -Filter "Name='gpn_llm_provider.exe'")
           foreach ($p in $strays) { Log "killing stray gpn_llm_provider pid=$($p.ProcessId)"; Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }
           if ($strays.Count -gt 0) { Start-Sleep -Seconds 3 }
-          # heartbeat (public /status on :8093) — only if not already up
-          $hb = @(Get-CimInstance Win32_Process -Filter "Name='gpn_provider_status.exe'")
-          if ($hb.Count -eq 0) {
-            Log 'starting heartbeat on 0.0.0.0:8093'
-            Start-Process -FilePath "$bin\gpn_provider_status.exe" `
-              -ArgumentList @('--listen','0.0.0.0:8093','--gflops',"$gflops",'--ollama',$ollama) `
-              -WindowStyle Hidden
-          } else { Log 'heartbeat already running' }
           $env:GPN_PROVIDER_ENDPOINT = $pub
+          function EnsureHeartbeat {
+            $listening = @(Get-NetTCPConnection -LocalPort 8093 -State Listen -ErrorAction SilentlyContinue).Count
+            $hb = @(Get-CimInstance Win32_Process -Filter "Name='gpn_provider_status.exe'")
+            if ($listening -eq 0 -or $hb.Count -eq 0) {
+              Log 'starting heartbeat on 0.0.0.0:8093'
+              Start-Process -FilePath "$bin\gpn_provider_status.exe" `
+                -ArgumentList @('--listen','0.0.0.0:8093','--gflops',"$gflops",'--ollama',$ollama) `
+                -WindowStyle Hidden
+              Start-Sleep -Seconds 2
+            }
+          }
+          EnsureHeartbeat
           while ($true) {
+            EnsureHeartbeat
             Log 'starting gpn_llm_provider'
             & "$bin\gpn_llm_provider.exe" $rpc $signer *>> $log
             Log "gpn_llm_provider exited ($LASTEXITCODE); restart in 10s"
@@ -77,8 +82,13 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           $tr = 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\gpn\run-provider.ps1'
-          # stop ALL gpn_* processes (any launch path) so exactly one provider
-          # is started below — a stray holds :8094 and wedges the real one
+          # stop the previous task's supervisor (a plain powershell running
+          # run-provider.ps1) then ALL gpn_* processes so exactly one provider is
+          # started below — a stray holds :8094 and wedges the real one
+          schtasks /End /TN GPNProvider 2>$null | Out-Null
+          Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
+            Where-Object { $_.CommandLine -like '*run-provider.ps1*' } |
+            ForEach-Object { Write-Host "stopping old supervisor pid=$($_.ProcessId)"; Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
           $procs = @(Get-CimInstance Win32_Process -Filter "Name LIKE 'gpn_%'")
           foreach ($p in $procs) {
             Write-Host "stopping stray $($p.Name) pid=$($p.ProcessId)"
