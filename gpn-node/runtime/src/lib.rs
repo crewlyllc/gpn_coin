@@ -481,6 +481,10 @@ parameter_types! {
     pub const MaxJobsPerProvider: u32 = 10;
     pub const EscrowLockDuration: BlockNumber = 100;
     pub const MaxActiveJobs: u32 = 100;
+    // Per-requestor concurrency cap: a single account may hold at most this many
+    // non-terminal jobs, so no one can drain the global `MaxActiveJobs` pool
+    // (self-inflicted DoS, incident 2026-10-05).
+    pub const MaxActiveJobsPerRequestor: u32 = 25;
     pub const MaxJobDuration: BlockNumber = 100_000;
 }
 
@@ -491,6 +495,7 @@ impl pallet_compute_marketplace::Config for Runtime {
     type MaxJobsPerProvider = MaxJobsPerProvider;
     type EscrowLockDuration = EscrowLockDuration;
     type MaxActiveJobs = MaxActiveJobs;
+    type MaxActiveJobsPerRequestor = MaxActiveJobsPerRequestor;
     type MaxJobDuration = MaxJobDuration;
     // Cross-pallet read of attested GPU throughput (proof-of-compute gate).
     type GPUAttestation = GPUAttestation;

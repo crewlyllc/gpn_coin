@@ -186,6 +186,12 @@ pub mod pallet {
         type EscrowLockDuration: Get<BlockNumberFor<Self>>;
         #[pallet::constant]
         type MaxActiveJobs: Get<u32>;
+        /// Per-requestor cap on concurrent non-terminal jobs. Bounds a single
+        /// account from draining the global `MaxActiveJobs` pool (self-inflicted
+        /// DoS, incident 2026-10-05) — one requestor can no longer monopolize
+        /// every slot. `MaxActiveJobs` stays the network-wide ceiling.
+        #[pallet::constant]
+        type MaxActiveJobsPerRequestor: Get<u32>;
         #[pallet::constant]
         type MaxJobDuration: Get<BlockNumberFor<Self>>;
         /// Read-only access to providers' attested GPU compute credentials.
@@ -339,6 +345,9 @@ pub mod pallet {
     #[pallet::error]
     pub enum Error<T> {
         TooManyActiveJobs,
+        /// The requestor already holds `MaxActiveJobsPerRequestor` non-terminal
+        /// jobs. Cancelling/completing/failing/expiring one frees a slot.
+        TooManyRequestorJobs,
         MaxProviderCapacity,
         JobNotFound,
         JobNotPending,
@@ -680,6 +689,14 @@ pub mod pallet {
                 <ActiveJobCount<T>>::get() < T::MaxActiveJobs::get(),
                 Error::<T>::TooManyActiveJobs
             );
+            // Per-requestor cap: `RequestorJobs` holds exactly this account's
+            // non-terminal jobs (freed on complete/fail/expire/cancel), so its
+            // length is the faithful per-requestor active count.
+            ensure!(
+                (<RequestorJobs<T>>::get(&requestor).len() as u32)
+                    < T::MaxActiveJobsPerRequestor::get(),
+                Error::<T>::TooManyRequestorJobs
+            );
             ensure!(
                 !workload_hash.iter().all(|&b| b == 0),
                 Error::<T>::InvalidWorkload
@@ -973,6 +990,14 @@ pub mod pallet {
                 <ProviderJobs<T>>::insert(&provider, pj);
             }
 
+            // Free the requestor's capacity slot too — previously `cancel_job`
+            // decremented only `ActiveJobCount`, leaving the cancelled id in
+            // `RequestorJobs` forever (a leak that also inflates the
+            // per-requestor cap count). Mirror complete/fail/expire.
+            let mut rj = <RequestorJobs<T>>::get(&requestor);
+            rj.retain(|&id| id != job_id);
+            <RequestorJobs<T>>::insert(&requestor, rj);
+
             Self::deposit_event(Event::<T>::JobCancelled { job_id });
             Ok(())
         }
@@ -1262,6 +1287,7 @@ mod tests {
         pub const TestMaxJobsPerProvider: u32 = 5;
         pub const TestEscrowLock: u64 = 100;
         pub const TestMaxActiveJobs: u32 = 100;
+        pub const TestMaxActiveJobsPerRequestor: u32 = 10;
         pub const TestMaxJobDuration: u64 = 10_000;
     }
 
@@ -1292,6 +1318,7 @@ mod tests {
         type MaxJobsPerProvider = TestMaxJobsPerProvider;
         type EscrowLockDuration = TestEscrowLock;
         type MaxActiveJobs = TestMaxActiveJobs;
+        type MaxActiveJobsPerRequestor = TestMaxActiveJobsPerRequestor;
         type MaxJobDuration = TestMaxJobDuration;
         type GPUAttestation = MockAttestation;
         // Test fee sink: a dedicated account (99) that collects marketplace fees.
@@ -1767,6 +1794,67 @@ mod tests {
             let job_id = create_job(ALICE);
             let result = MarketPallet::cancel_job(RuntimeOrigin::signed(CAROL), job_id);
             assert_eq!(result, Err(Error::<Test>::NotJobRequestor.into()));
+        });
+    }
+
+    #[test]
+    fn test_max_active_jobs_per_requestor() {
+        new_test_ext().execute_with(|| {
+            // Test cap = 10 concurrent non-terminal jobs per requestor.
+            for _ in 0..10 {
+                create_job(ALICE);
+            }
+            let over = MarketPallet::create_job(
+                RuntimeOrigin::signed(ALICE),
+                default_reqs(),
+                JobType::LLMInference,
+                JobTier::Spot,
+                1_000,
+                0,
+                0,
+                100,
+                workload(),
+            );
+            assert_eq!(over, Err(Error::<Test>::TooManyRequestorJobs.into()));
+            // A DIFFERENT requestor is unaffected — the cap is per-account, not global.
+            create_job(CAROL);
+            assert_eq!(ActiveJobCount::<Test>::get(), 11);
+        });
+    }
+
+    #[test]
+    fn test_cancel_frees_requestor_slot() {
+        new_test_ext().execute_with(|| {
+            // Fill ALICE's cap (10), cancel one, and confirm a create is allowed again.
+            let j1 = create_job(ALICE);
+            for _ in 0..9 {
+                create_job(ALICE);
+            }
+            assert_eq!(RequestorJobs::<Test>::get(ALICE).len(), 10);
+            MarketPallet::cancel_job(RuntimeOrigin::signed(ALICE), j1).unwrap();
+            // Cancelled id must leave `RequestorJobs` (leak fix), not linger.
+            assert_eq!(RequestorJobs::<Test>::get(ALICE).len(), 9);
+            create_job(ALICE);
+            assert_eq!(RequestorJobs::<Test>::get(ALICE).len(), 10);
+        });
+    }
+
+    #[test]
+    fn test_complete_frees_requestor_slot() {
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            let j1 = create_job(ALICE);
+            for _ in 0..9 {
+                create_job(ALICE);
+            }
+            // Complete one job end-to-end, which must free ALICE's slot.
+            MarketPallet::accept_job(RuntimeOrigin::signed(BOB), j1).unwrap();
+            MarketPallet::start_job(RuntimeOrigin::signed(BOB), j1).unwrap();
+            MarketPallet::submit_result(RuntimeOrigin::signed(BOB), j1, [7u8; 32], 0).unwrap();
+            MarketPallet::complete_job(RuntimeOrigin::signed(BOB), j1).unwrap();
+            assert_eq!(RequestorJobs::<Test>::get(ALICE).len(), 9);
+            create_job(ALICE);
+            assert_eq!(RequestorJobs::<Test>::get(ALICE).len(), 10);
         });
     }
 
