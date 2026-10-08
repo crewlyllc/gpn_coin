@@ -37,6 +37,20 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $dst = 'C:\gpn\bin'
           New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          # A running provider holds its .exe open, so Copy-Item fails with
+          # "being used by another process". Stop any GPN processes launched from
+          # C:\gpn\bin first, remembering their command lines so we can relaunch
+          # them on the freshly-deployed binaries afterwards.
+          $running = @(Get-CimInstance Win32_Process -Filter "Name LIKE 'gpn_%'" |
+            Where-Object { $_.ExecutablePath -and $_.ExecutablePath -like "$dst*" })
+          $relaunch = @()
+          foreach ($p in $running) {
+            $cmd = $p.CommandLine
+            if ($cmd) { $relaunch += $cmd }
+            Write-Host "stopping $($p.Name) (pid $($p.ProcessId)) to release its .exe"
+            Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+          }
+          if ($running.Count -gt 0) { Start-Sleep -Seconds 2 }
           $src = Join-Path $env:RUNNER_TEMP 'gpn-windows'
           Get-ChildItem -Path $src -Recurse -Filter *.exe | ForEach-Object {
             Copy-Item $_.FullName -Destination $dst -Force
@@ -45,6 +59,11 @@ jobs:
           Get-ChildItem $dst -Filter *.exe | ForEach-Object { Write-Host "  $($_.Name)" }
           foreach ($need in @('gpn_llm_provider.exe','gpn_provider_status.exe','gpn_register.exe')) {
             if (-not (Test-Path (Join-Path $dst $need))) { throw "missing required $need" }
+          }
+          # Relaunch anything we stopped, on the new binaries, with its original args.
+          foreach ($cmd in $relaunch) {
+            Write-Host "relaunching: $cmd"
+            Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', $cmd -WindowStyle Hidden
           }
 
       - name: pull in-network model
