@@ -12,6 +12,7 @@ pub mod weights;
 
 use codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use core::fmt::Debug;
+use frame_support::sp_runtime::traits::SaturatedConversion;
 use pallet_gpn_liveness::LivenessProvider;
 use scale_info::TypeInfo;
 
@@ -93,6 +94,15 @@ pub trait GPUAttestationProvider<AccountId> {
     fn attested_gflops(who: &AccountId) -> u64;
     /// The provider's current attestation tier (`Unattested` if none).
     fn attested_tier(who: &AccountId) -> AttestationTier;
+    /// Weight for staking-reward distribution: the account's staked balance
+    /// scaled by its GPU-tier multiplier (`stake × tier`, basis-points-scaled).
+    /// Zero when the account holds **no stake** or is **unattested**, so the
+    /// staking pool is paid only to real stakers in proportion to how much they
+    /// staked — i.e. "staking increases your reward" (design-tokenomics-spec §5).
+    /// Defaults to 0 for implementers that don't track stakes (e.g. test mocks).
+    fn reward_weight(_who: &AccountId) -> u128 {
+        0
+    }
     /// Benchmark-only: install/overwrite an attestation record so downstream
     /// benchmarks (e.g. `pallet-gpn-token` staking-reward loops) can exercise
     /// the attested path without going through the full challenge flow. Has a
@@ -479,6 +489,10 @@ impl<T: Config> GPUAttestationProvider<T::AccountId> for Pallet<T> {
             .unwrap_or(AttestationTier::Unattested)
     }
 
+    fn reward_weight(who: &T::AccountId) -> u128 {
+        Self::effective_stake(who).saturated_into()
+    }
+
     #[cfg(feature = "runtime-benchmarks")]
     fn benchmark_set_attestation(who: &T::AccountId, tier: AttestationTier) {
         let record = AttestationRecord {
@@ -702,7 +716,10 @@ mod tests {
     }
 
     #[test]
-    fn test_submit_attestation_requires_stake() {
+    fn test_submit_attestation_stakeless_ok() {
+        // Stake-free attestation (spec 11 / design-verifiable-gpu-proof): a
+        // provider no longer needs a stake to attest — staking is an optional
+        // boost, not a gate. A bare 1-GPU box with enough GFLOPS attests Bronze.
         new_test_ext().execute_with(|| {
             let result = AttestPallet::submit_attestation(
                 RuntimeOrigin::signed(ALICE),
@@ -711,7 +728,13 @@ mod tests {
                 1,
                 10_000,
             );
-            assert_eq!(result, Err(Error::<Test>::InsufficientStake.into()));
+            assert!(result.is_ok());
+            assert_eq!(
+                Attestations::<Test>::get(ALICE).unwrap().tier,
+                AttestationTier::Bronze
+            );
+            // No stake was ever deposited.
+            assert_eq!(ProviderStake::<Test>::get(ALICE), None);
         });
     }
 

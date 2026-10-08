@@ -79,7 +79,9 @@ pub trait SupplyManager<AccountId, Balance> {
 pub mod pallet {
     use super::*;
     use frame_support::pallet_prelude::*;
-    use frame_support::sp_runtime::traits::{AccountIdConversion, Saturating, Zero};
+    use frame_support::sp_runtime::traits::{
+        AccountIdConversion, SaturatedConversion, Saturating, Zero,
+    };
     use frame_support::traits::{Currency, ExistenceRequirement};
     use frame_system::pallet_prelude::*;
     use pallet_gpu_attestation::GPUAttestationProvider;
@@ -283,43 +285,47 @@ pub mod pallet {
             if total_rewards.is_zero() || stakers.is_empty() {
                 return Ok(());
             }
-            // Weight each staker by their attested GPU tier multiplier, so
-            // proof-of-staked-GPU boosts yield (Unattested = 0 multiplier =
-            // excluded from the payout).
-            let mut weights: Vec<(T::AccountId, BalanceOf<T>)> = Vec::with_capacity(stakers.len());
-            let mut total_weight: BalanceOf<T> = Zero::zero();
+            // Weight each staker by `stake × GPU-tier multiplier` so the payout
+            // is proportional to how much they actually staked, boosted by their
+            // attested tier (proof-of-staked-GPU). This is the mechanism behind
+            // "staking increases your reward": an unstaked account has zero
+            // weight and is excluded (as does an unattested one, since the tier
+            // multiplier is 0), and the pool is returned for a later payout.
+            let total_rewards_u128: u128 = total_rewards.saturated_into();
+            let mut weights: Vec<(T::AccountId, u128)> = Vec::with_capacity(stakers.len());
+            let mut total_weight: u128 = 0;
             for s in stakers {
-                let mult: u32 = T::GPUAttestation::attested_tier(&s).staking_multiplier_bps();
-                if mult > 0 {
-                    let w: BalanceOf<T> = mult.into();
+                let w = T::GPUAttestation::reward_weight(&s);
+                if w > 0 {
                     weights.push((s, w));
                     total_weight += w;
                 }
             }
-            if total_weight.is_zero() {
-                // No attested stakers -> nothing to pay out; return pool for later.
+            if total_weight == 0 {
+                // No staked+attested stakers -> nothing to pay; return pool for later.
                 <StakingRewardPool<T>>::put(total_rewards);
                 return Ok(());
             }
             let mut paid: u32 = 0;
-            let mut remaining = total_rewards;
+            let mut remaining: u128 = total_rewards_u128;
             for (staker, w) in &weights {
-                let share = total_rewards * *w / total_weight;
-                if share.is_zero() {
+                let share_u128: u128 = total_rewards_u128 * *w / total_weight;
+                if share_u128 == 0 {
                     continue;
                 }
+                let share: BalanceOf<T> = share_u128.saturated_into();
                 T::Currency::transfer(
                     &Self::account_id(),
                     staker,
                     share,
                     ExistenceRequirement::KeepAlive,
                 )?;
-                remaining = remaining.saturating_sub(share);
+                remaining = remaining.saturating_sub(share_u128);
                 paid += 1;
             }
             // Dust (rounding) stays in the pallet account as retained fees.
             Self::deposit_event(Event::<T>::StakingRewardsPaid {
-                total: total_rewards.saturating_sub(remaining),
+                total: total_rewards_u128.saturating_sub(remaining).saturated_into(),
                 participants: paid,
             });
             Ok(())
@@ -469,6 +475,8 @@ mod tests {
     thread_local! {
         static MOCK_TIER: std::cell::Cell<u32> =
             const { std::cell::Cell::new(1_500) }; // Silver multiplier bps
+        static MOCK_STAKE: std::cell::Cell<u128> =
+            const { std::cell::Cell::new(10_000) }; // staked balance (raw)
     }
     pub struct MockAttestation;
     impl GPUAttestationProvider<u64> for MockAttestation {
@@ -482,6 +490,11 @@ mod tests {
                 0 => AttestationTier::Unattested,
                 _ => AttestationTier::Silver,
             }
+        }
+        fn reward_weight(_: &u64) -> u128 {
+            // Mirror the pallet: stake × tier multiplier (bps-scaled).
+            let mult = MOCK_TIER.with(|c| c.get()) as u128;
+            MOCK_STAKE.with(|c| c.get()) * mult / 10_000
         }
     }
 
@@ -627,7 +640,9 @@ mod tests {
             let pallet_account = Token::account_id();
             Balances::force_set_balance(RuntimeOrigin::root(), pallet_account.clone(), 100_000)
                 .unwrap();
-            // Mock tier = Silver (1500 bps) for both stakers.
+            // Mock tier = Silver (1500 bps) for both stakers, equal stake.
+            MOCK_TIER.with(|c| c.set(1_500));
+            MOCK_STAKE.with(|c| c.set(10_000));
             assert!(
                 Token::distribute_staking_rewards(RuntimeOrigin::signed(1), vec![1, 2]).is_ok()
             );
@@ -639,7 +654,8 @@ mod tests {
     fn test_distribute_staking_rewards_weights_by_tier() {
         new_test_ext().execute_with(|| {
             // 7000 total reward: Alice (id 1) Bronze (1000) vs Bob (id 2) Gold
-            // (2500) -> weights 1000:2500 => 2:5 split of 7000 = 2000:5000.
+            // (2500), equal stake (10_000) -> weights stake×tier = 1000:2500
+            // => 2:5 split of 7000 = 2000:5000.
             <StakingRewardPool<Test>>::put(7_000u128);
             let pallet_account = Token::account_id();
             Balances::force_set_balance(RuntimeOrigin::root(), pallet_account.clone(), 100_000)
@@ -647,6 +663,7 @@ mod tests {
             // The mock's attested_tier is keyed by a single per-thread value,
             // so to give Alice and Bob *different* tiers we distribute them one
             // at a time with the mock tier set per call, seeding the pool twice.
+            MOCK_STAKE.with(|c| c.set(10_000));
             MOCK_TIER.with(|c| c.set(1_000)); // Bronze
             <StakingRewardPool<Test>>::put(2_000u128);
             Token::distribute_staking_rewards(RuntimeOrigin::signed(1), vec![1]).unwrap();
@@ -662,6 +679,48 @@ mod tests {
                 pallet_balances::Pallet::<Test>::free_balance(2) - 1_000_000,
                 5_000u128
             );
+        });
+    }
+
+    #[test]
+    fn test_distribute_staking_rewards_scales_with_stake() {
+        new_test_ext().execute_with(|| {
+            // Same Bronze tier (1000 bps) for both, but Bob staked 3× Alice's
+            // amount, so his weight/payout is 3× — "staking increases your reward".
+            let pallet_account = Token::account_id();
+            Balances::force_set_balance(RuntimeOrigin::root(), pallet_account.clone(), 100_000)
+                .unwrap();
+            MOCK_TIER.with(|c| c.set(1_000)); // Bronze for both
+            MOCK_STAKE.with(|c| c.set(1_000));
+            <StakingRewardPool<Test>>::put(1_000u128);
+            Token::distribute_staking_rewards(RuntimeOrigin::signed(1), vec![1]).unwrap();
+            MOCK_STAKE.with(|c| c.set(3_000));
+            <StakingRewardPool<Test>>::put(3_000u128);
+            Token::distribute_staking_rewards(RuntimeOrigin::signed(1), vec![2]).unwrap();
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(1) - 1_000_000,
+                1_000u128
+            );
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(2) - 1_000_000,
+                3_000u128
+            );
+        });
+    }
+
+    #[test]
+    fn test_distribute_staking_rewards_unstaked_excluded() {
+        new_test_ext().execute_with(|| {
+            // Attested (Silver) but zero stake -> weight 0 -> nothing paid,
+            // pool is returned. This is the fix: the staking pool only pays
+            // accounts that actually staked.
+            <StakingRewardPool<Test>>::put(5_000u128);
+            MOCK_TIER.with(|c| c.set(1_500));
+            MOCK_STAKE.with(|c| c.set(0));
+            assert!(
+                Token::distribute_staking_rewards(RuntimeOrigin::signed(1), vec![1, 2]).is_ok()
+            );
+            assert_eq!(StakingRewardPool::<Test>::get(), 5_000);
         });
     }
 
