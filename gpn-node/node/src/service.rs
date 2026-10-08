@@ -356,6 +356,17 @@ pub fn new_full<
         log::info!("  identity : {}", st.summary);
         log::info!("==============================================================");
     }
+    // ---- Clock / NTP skew check (roadmap item 8) -------------------------
+    // A skewed wall clock can wedge a node (block timestamps + timing-based
+    // difficulty reject otherwise-valid blocks; the Windows box was ~57 s off).
+    // Best-effort, non-fatal, and non-blocking: runs once on a background task.
+    task_manager.spawn_handle().spawn(
+        "gpn-clock-check",
+        None,
+        async move {
+            let _ = tokio::task::spawn_blocking(crate::clock::run_startup_check).await;
+        },
+    );
     {
         let net = network.clone();
         task_manager.spawn_handle().spawn(
