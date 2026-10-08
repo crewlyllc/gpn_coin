@@ -246,7 +246,14 @@ fn refresh(
     std::thread::spawn(move || loop {
         // 1. Merge the static list with the on-chain discovered endpoints.
         let mut all: Vec<String> = urls.iter().cloned().collect();
-        for (_who, url) in rt.block_on(client.list_provider_endpoints()) {
+        // A provider discovered on-chain identifies itself by its storage KEY
+        // (the AccountId), so keep url -> account so we can attribute an
+        // endpoint whose /status heartbeat omits its own `address`.
+        let mut chain_addr: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for (who, url) in rt.block_on(client.list_provider_endpoints()) {
+            if let Some(addr) = hex_to_ss58(&who) {
+                chain_addr.entry(url.clone()).or_insert(addr);
+            }
             if !all.iter().any(|u| u == &url) {
                 all.push(url);
             }
@@ -259,7 +266,11 @@ fn refresh(
             let p = match v {
                 Some(v) => Provider {
                     status_url: u.clone(),
-                    address: v.get("address").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    address: attribute_address(
+                        v.get("address").and_then(|x| x.as_str()).unwrap_or(""),
+                        u,
+                        &chain_addr,
+                    ),
                     gflops: v.get("gflops").and_then(|x| x.as_u64()).unwrap_or(0),
                     models: v
                         .get("models")
@@ -305,6 +316,30 @@ fn refresh(
         *reg.lock().unwrap() = out;
         std::thread::sleep(Duration::from_secs(5));
     });
+}
+
+/// Resolve a registry entry's `address`: prefer the provider's own heartbeat
+/// `address`; when it is empty (an on-chain-discovered endpoint whose `/status`
+/// was started without `--address`), fall back to the provider's on-chain key so
+/// the entry stays attributable (assignments / `routed_to` / client RTT hints
+/// key on `address`).
+fn attribute_address(hb_addr: &str, url: &str, chain_addr: &std::collections::HashMap<String, String>) -> String {
+    if hb_addr.is_empty() {
+        chain_addr.get(url).cloned().unwrap_or_default()
+    } else {
+        hb_addr.to_string()
+    }
+}
+
+/// Convert a `0x`-hex AccountId32 (the form chain storage reads return, see
+/// `ChainClient::list_provider_endpoints`) into the canonical ss58 string used
+/// everywhere else in the agent, so an on-chain-discovered provider can be keyed
+/// by address (client RTT hints, assignment store, `routed_to`).
+fn hex_to_ss58(hex_addr: &str) -> Option<String> {
+    use sp_core::crypto::Ss58Codec;
+    let raw = hex_addr.strip_prefix("0x").unwrap_or(hex_addr);
+    let bytes: [u8; 32] = hex::decode(raw).ok()?.try_into().ok()?;
+    Some(sp_core::sr25519::Public::from_raw(bytes).to_ss58check())
 }
 
 fn has_model(p: &Provider, model: &str) -> bool {
@@ -1298,6 +1333,35 @@ mod tests {
             latency_ms,
             last_seen: Some(Instant::now()),
         }
+    }
+
+    #[test]
+    fn hex_to_ss58_converts_a_chain_key_to_the_canonical_address() {
+        // Bob's AccountId32 as it comes back from a `ProviderEndpoints` storage
+        // read (hex) must render as the ss58 address used by the rest of the
+        // agent, so a discovered provider is attributable.
+        let hex = "0x8eaf04151687736326c9fea17e25fc5287613693c912909cb226aa4794f26a48";
+        assert_eq!(
+            hex_to_ss58(hex).as_deref(),
+            Some("5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty")
+        );
+        assert_eq!(hex_to_ss58("not-hex"), None);
+        assert_eq!(hex_to_ss58("0xdeadbeef"), None);
+    }
+
+    #[test]
+    fn attribute_address_falls_back_to_the_chain_key_only_when_heartbeat_omits_it() {
+        let mut chain = std::collections::HashMap::new();
+        chain.insert("http://win:8093/status".to_string(), "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty".to_string());
+        // Heartbeat omits address -> use the on-chain key.
+        assert_eq!(
+            attribute_address("", "http://win:8093/status", &chain),
+            "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
+        );
+        // Heartbeat reports its own address -> trust it.
+        assert_eq!(attribute_address("5GrwvaE", "http://win:8093/status", &chain), "5GrwvaE");
+        // Unknown endpoint + no heartbeat address -> empty (unchanged behaviour).
+        assert_eq!(attribute_address("", "http://other:8093/status", &chain), "");
     }
 
     #[test]
