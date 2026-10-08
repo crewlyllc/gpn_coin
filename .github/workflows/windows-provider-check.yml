@@ -92,6 +92,7 @@ jobs:
             $fi = Get-Item 'C:\gpn\provider.log'
             Say "  size=$($fi.Length) mtime=$($fi.LastWriteTime)"
             $raw = [IO.File]::ReadAllBytes('C:\gpn\provider.log')
+            [IO.File]::WriteAllText("$env:RUNNER_TEMP\provider.hex", ([BitConverter]::ToString($raw) -replace '-',''))
             Say "  RAW_BASE64_BEGIN"
             Say ([Convert]::ToBase64String($raw))
             Say "  RAW_BASE64_END"
@@ -105,5 +106,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: provider-check
-          path: ${{ runner.temp }}\provider-check.txt
+          path: ${{ runner.temp }}\*
           if-no-files-found: error
