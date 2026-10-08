@@ -51,7 +51,7 @@ jobs:
           } else { Write-Host "torch already importable" }
 
           Write-Host "== installing diffusers stack =="
-          & $uv pip install --python $py diffusers transformers accelerate safetensors bitsandbytes imageio imageio-ffmpeg
+          & $uv pip install --python $py diffusers transformers accelerate safetensors bitsandbytes imageio imageio-ffmpeg sentencepiece tiktoken protobuf
           if ($LASTEXITCODE -ne 0) { throw "diffusers stack install failed ($LASTEXITCODE)" }
 
       - name: fetch gpn_diffuse.py into C:\gpn
