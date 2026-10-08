@@ -252,20 +252,23 @@ pub mod pallet {
             } else if !window.is_zero() && now >= last_adj + window {
                 let blocks: u64 = (now - last_adj).saturated_into::<u64>();
                 let elapsed_ms = current_ts.saturating_sub(last_ts);
-                // `last_ts`/`current_ts` are in MILLISECONDS (pallet_timestamp
-                // Moment); `TargetBlockTime` is in SECONDS. Convert to seconds
-                // before comparing. Guard against a missing window start
-                // (last_ts == 0, e.g. block 1 seeded before a timestamp was set).
-                let elapsed_s = elapsed_ms / 1000;
-                if last_ts != 0 && blocks > 0 && elapsed_s > 0 {
-                    let avg_block_time = elapsed_s / blocks;
+                // Millisecond-precise retarget. `last_ts`/`current_ts` are the
+                // pallet_timestamp `Moment` (MILLISECONDS). Averaging in *whole
+                // seconds* truncates to 0 once blocks are faster than 1s each,
+                // which made `adjust_difficulty` a no-op and FROZE the difficulty
+                // (a fast GPU could then run away). Average in ms and compare
+                // against the target converted ms→target. Guard against a missing
+                // window start (last_ts == 0, e.g. block 1 seeded before any
+                // timestamp was set).
+                if last_ts != 0 && blocks > 0 && elapsed_ms > 0 {
+                    let avg_block_time_ms = elapsed_ms / blocks;
                     let stored = <Difficulty<T>>::get();
-                    let new = Self::adjust_difficulty(stored, avg_block_time);
+                    let new = Self::adjust_difficulty(stored, avg_block_time_ms);
                     log::info!(
                         target: "runtime::gpu-pow",
-                        "ADJUST now={} last_adj={} last_ts={} cur_ts={} elapsed_s={} blocks={} avg_s={} target={} stored_limb3={} new_limb3={}",
-                        now.saturated_into::<u64>(), last_adj.saturated_into::<u64>(), last_ts, current_ts, elapsed_s, blocks, avg_block_time,
-                        T::TargetBlockTime::get(), stored[3], new[3],
+                        "ADJUST now={} last_adj={} last_ts={} cur_ts={} elapsed_ms={} blocks={} avg_ms={} target_ms={} stored_limb3={} new_limb3={}",
+                        now.saturated_into::<u64>(), last_adj.saturated_into::<u64>(), last_ts, current_ts, elapsed_ms, blocks, avg_block_time_ms,
+                        T::TargetBlockTime::get().saturating_mul(1000), stored[3], new[3],
                     );
                 }
                 <LastAdjustmentBlock<T>>::put(now);
@@ -410,9 +413,14 @@ pub mod pallet {
             }
         }
 
-        pub fn adjust_difficulty(parent_difficulty: U256, actual_time: u64) -> U256 {
-            let target_time = T::TargetBlockTime::get();
-            if actual_time == 0 {
+        /// `actual_time_ms` is the average block time over the adjustment window,
+        /// in MILLISECONDS. `TargetBlockTime` is configured in whole SECONDS, so
+        /// it is converted to ms here — this keeps sub-second precision and means
+        /// a sub-1s average still hardens the target instead of truncating to 0
+        /// and freezing (the runaway bug). See design item 7.
+        pub fn adjust_difficulty(parent_difficulty: U256, actual_time_ms: u64) -> U256 {
+            let target_time_ms = T::TargetBlockTime::get().saturating_mul(1000);
+            if actual_time_ms == 0 || target_time_ms == 0 {
                 return parent_difficulty;
             }
             // `Difficulty` is a *target* (hash < target = valid, higher = EASIER).
@@ -422,8 +430,11 @@ pub mod pallet {
             //   - on time (actual == target)       -> ratio == 1 -> unchanged
             // The (actual+target) averaging smooths noise vs a raw actual/target
             // ratio. Scaled by 1000 to avoid truncation.
-            let ratio_numer = actual_time * 1000;
-            let ratio_denom = (target_time + actual_time) * 1000 / 2;
+            let ratio_numer = actual_time_ms.saturating_mul(1000);
+            let ratio_denom = target_time_ms
+                .saturating_add(actual_time_ms)
+                .saturating_mul(1000)
+                / 2;
             let ratio_denom = ratio_denom.max(1);
             let new_diff =
                 Self::apply_difficulty_ratio(parent_difficulty, ratio_numer, ratio_denom);
@@ -755,9 +766,9 @@ mod tests {
     #[test]
     fn test_difficulty_adjustment_slower_easier() {
         new_test_ext().execute_with(|| {
-            // Blocks too slow (actual 30s > target 15s) -> target must rise (easier).
+            // Blocks too slow (actual 30s = 30000ms > target 15s) -> target rises (easier).
             let parent = [0, 0, 0, 0x1000_0000_0000_0000];
-            let adjusted = GpuPowPallet::adjust_difficulty(parent, 30);
+            let adjusted = GpuPowPallet::adjust_difficulty(parent, 30_000);
             assert!(GpuPowPallet::u256_gt(&adjusted, &parent));
         });
     }
@@ -765,9 +776,9 @@ mod tests {
     #[test]
     fn test_difficulty_adjustment_faster_harder() {
         new_test_ext().execute_with(|| {
-            // Blocks too fast (actual 5s < target 15s) -> target must fall (harder).
+            // Blocks too fast (actual 5s = 5000ms < target 15s) -> target falls (harder).
             let parent = [0, 0, 0, 0x1000_0000_0000_0000];
-            let adjusted = GpuPowPallet::adjust_difficulty(parent, 5);
+            let adjusted = GpuPowPallet::adjust_difficulty(parent, 5_000);
             assert!(GpuPowPallet::u256_lt(&adjusted, &parent));
         });
     }
@@ -777,8 +788,21 @@ mod tests {
         new_test_ext().execute_with(|| {
             // On-time (actual 15s == target 15s) -> unchanged.
             let parent = [0, 0, 0, 0x1000_0000_0000_0000];
-            let adjusted = GpuPowPallet::adjust_difficulty(parent, 15);
+            let adjusted = GpuPowPallet::adjust_difficulty(parent, 15_000);
             assert_eq!(adjusted, parent);
+        });
+    }
+
+    /// Regression (item 7, runaway bug): a sub-second average must still
+    /// HARDEN the target. In the old whole-second averaging this case
+    /// truncated to 0 and left the target frozen.
+    #[test]
+    fn test_difficulty_adjustment_sub_second_hardens() {
+        new_test_ext().execute_with(|| {
+            let parent = [0, 0, 0, 0x1000_0000_0000_0000];
+            let adjusted = GpuPowPallet::adjust_difficulty(parent, 500); // 0.5s/block
+            assert!(GpuPowPallet::u256_lt(&adjusted, &parent), "sub-1s must harden");
+            assert_ne!(adjusted, parent, "must not be a no-op (frozen)");
         });
     }
 
@@ -805,6 +829,30 @@ mod tests {
             }
             let after = Difficulty::<Test>::get();
             assert!(GpuPowPallet::u256_lt(&after, &before));
+        });
+    }
+
+    /// Regression (item 7): previously a sub-1s window average truncated to 0
+    /// seconds and the retarget was a no-op (difficulty frozen → runaway risk).
+    /// With ms averaging the same window hardens the target.
+    #[test]
+    fn test_on_initialize_sub_second_window_hardens() {
+        new_test_ext().execute_with(|| {
+            Difficulty::<Test>::put([0, 0, 0, 0x1000_0000_0000]); // 2^236, easy
+            let before = Difficulty::<Test>::get();
+
+            pallet_timestamp::Pallet::<Test>::set_timestamp(1_000_000_000); // ms
+            System::set_block_number(1);
+            GpuPowPallet::on_initialize(1); // seed window start
+
+            // 500ms per block for blocks 2..=11 (avg 0.5s << target 15s).
+            for b in 2..=11 {
+                pallet_timestamp::Pallet::<Test>::set_timestamp(1_000_000_000 + (b as u64) * 500);
+                System::set_block_number(b);
+                GpuPowPallet::on_initialize(b);
+            }
+            let after = Difficulty::<Test>::get();
+            assert!(GpuPowPallet::u256_lt(&after, &before), "sub-1s must harden, not freeze");
         });
     }
 
