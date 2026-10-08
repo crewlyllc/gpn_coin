@@ -280,7 +280,12 @@ pub mod pallet {
             origin: OriginFor<T>,
             stakers: Vec<T::AccountId>,
         ) -> DispatchResult {
-            let _who = ensure_signed(origin)?;
+            // Root-only: the caller supplies the recipient list, so a
+            // permissionless caller could direct the whole pool to a
+            // self-chosen (staked+attested) subset and steal the rest.
+            // Governance (sudo) is the payout authority, matching the sibling
+            // `distribute_fees`/`set_fee_distribution` calls.
+            ensure_root(origin)?;
             let total_rewards = <StakingRewardPool<T>>::take();
             if total_rewards.is_zero() || stakers.is_empty() {
                 return Ok(());
@@ -337,7 +342,10 @@ pub mod pallet {
             origin: OriginFor<T>,
             operators: Vec<T::AccountId>,
         ) -> DispatchResult {
-            let _who = ensure_signed(origin)?;
+            // Root-only: otherwise any signed account could call this with a
+            // one-address list and drain the entire oracle pool to itself.
+            // Governance (sudo) is the payout authority.
+            ensure_root(origin)?;
             let total_rewards = <OracleRewardPool<T>>::take();
             if total_rewards.is_zero() || operators.is_empty() {
                 return Ok(());
@@ -644,7 +652,7 @@ mod tests {
             MOCK_TIER.with(|c| c.set(1_500));
             MOCK_STAKE.with(|c| c.set(10_000));
             assert!(
-                Token::distribute_staking_rewards(RuntimeOrigin::signed(1), vec![1, 2]).is_ok()
+                Token::distribute_staking_rewards(RuntimeOrigin::root(), vec![1, 2]).is_ok()
             );
             assert_eq!(StakingRewardPool::<Test>::get(), 0);
         });
@@ -666,10 +674,10 @@ mod tests {
             MOCK_STAKE.with(|c| c.set(10_000));
             MOCK_TIER.with(|c| c.set(1_000)); // Bronze
             <StakingRewardPool<Test>>::put(2_000u128);
-            Token::distribute_staking_rewards(RuntimeOrigin::signed(1), vec![1]).unwrap();
+            Token::distribute_staking_rewards(RuntimeOrigin::root(), vec![1]).unwrap();
             MOCK_TIER.with(|c| c.set(2_500)); // Gold
             <StakingRewardPool<Test>>::put(5_000u128);
-            Token::distribute_staking_rewards(RuntimeOrigin::signed(1), vec![2]).unwrap();
+            Token::distribute_staking_rewards(RuntimeOrigin::root(), vec![2]).unwrap();
             // Alice started with 1_000_000; Bob with 1_000_000.
             assert_eq!(
                 pallet_balances::Pallet::<Test>::free_balance(1) - 1_000_000,
@@ -693,10 +701,10 @@ mod tests {
             MOCK_TIER.with(|c| c.set(1_000)); // Bronze for both
             MOCK_STAKE.with(|c| c.set(1_000));
             <StakingRewardPool<Test>>::put(1_000u128);
-            Token::distribute_staking_rewards(RuntimeOrigin::signed(1), vec![1]).unwrap();
+            Token::distribute_staking_rewards(RuntimeOrigin::root(), vec![1]).unwrap();
             MOCK_STAKE.with(|c| c.set(3_000));
             <StakingRewardPool<Test>>::put(3_000u128);
-            Token::distribute_staking_rewards(RuntimeOrigin::signed(1), vec![2]).unwrap();
+            Token::distribute_staking_rewards(RuntimeOrigin::root(), vec![2]).unwrap();
             assert_eq!(
                 pallet_balances::Pallet::<Test>::free_balance(1) - 1_000_000,
                 1_000u128
@@ -718,7 +726,7 @@ mod tests {
             MOCK_TIER.with(|c| c.set(1_500));
             MOCK_STAKE.with(|c| c.set(0));
             assert!(
-                Token::distribute_staking_rewards(RuntimeOrigin::signed(1), vec![1, 2]).is_ok()
+                Token::distribute_staking_rewards(RuntimeOrigin::root(), vec![1, 2]).is_ok()
             );
             assert_eq!(StakingRewardPool::<Test>::get(), 5_000);
         });
@@ -731,7 +739,7 @@ mod tests {
             MOCK_TIER.with(|c| c.set(0)); // Unattested
                                           // No attested stakers -> pool is restored, nothing paid.
             assert!(
-                Token::distribute_staking_rewards(RuntimeOrigin::signed(1), vec![1, 2]).is_ok()
+                Token::distribute_staking_rewards(RuntimeOrigin::root(), vec![1, 2]).is_ok()
             );
             assert_eq!(StakingRewardPool::<Test>::get(), 5_000);
         });
@@ -740,7 +748,7 @@ mod tests {
     #[test]
     fn test_distribute_staking_rewards_empty_ok() {
         new_test_ext().execute_with(|| {
-            assert!(Token::distribute_staking_rewards(RuntimeOrigin::signed(1), vec![]).is_ok());
+            assert!(Token::distribute_staking_rewards(RuntimeOrigin::root(), vec![]).is_ok());
             assert_eq!(StakingRewardPool::<Test>::get(), 0);
         });
     }
@@ -752,11 +760,35 @@ mod tests {
             let pallet_account = Token::account_id();
             Balances::force_set_balance(RuntimeOrigin::root(), pallet_account.clone(), 100_000)
                 .unwrap();
-            assert!(Token::distribute_oracle_rewards(RuntimeOrigin::signed(1), vec![1, 2]).is_ok());
+            assert!(Token::distribute_oracle_rewards(RuntimeOrigin::root(), vec![1, 2]).is_ok());
             assert_eq!(OracleRewardPool::<Test>::get(), 0);
             // 3000 / 2 = 1500 each on top of their 1_000_000 seed.
             assert_eq!(pallet_balances::Pallet::<Test>::free_balance(1), 1_001_500);
             assert_eq!(pallet_balances::Pallet::<Test>::free_balance(2), 1_001_500);
+        });
+    }
+
+    #[test]
+    fn test_distribute_staking_rewards_requires_root() {
+        // A permissionless caller must NOT be able to pick the recipient list
+        // (that would let one staker drain the whole pool to itself).
+        new_test_ext().execute_with(|| {
+            <StakingRewardPool<Test>>::put(9_000u128);
+            MOCK_TIER.with(|c| c.set(1_500));
+            MOCK_STAKE.with(|c| c.set(10_000));
+            assert!(Token::distribute_staking_rewards(RuntimeOrigin::signed(1), vec![1]).is_err());
+            // Pool untouched by the rejected call.
+            assert_eq!(StakingRewardPool::<Test>::get(), 9_000);
+        });
+    }
+
+    #[test]
+    fn test_distribute_oracle_rewards_requires_root() {
+        // Otherwise any signed account could drain the oracle pool to itself.
+        new_test_ext().execute_with(|| {
+            <OracleRewardPool<Test>>::put(3_000u128);
+            assert!(Token::distribute_oracle_rewards(RuntimeOrigin::signed(1), vec![1]).is_err());
+            assert_eq!(OracleRewardPool::<Test>::get(), 3_000);
         });
     }
 
