@@ -48,6 +48,7 @@ pub trait WeightInfo {
 	fn submit_attestation() -> Weight;
 	fn withdraw_stake() -> Weight;
 	fn check_expired() -> Weight;
+	fn confirm_challenge() -> Weight;
 }
 
 /// Weights for `pallet_gpu_attestation` using the GPN node and recommended hardware.
@@ -119,6 +120,15 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 			.saturating_add(T::DbWeight::get().reads(3_u64))
 			.saturating_add(T::DbWeight::get().writes(3_u64))
 	}
+	/// Storage: `GPUAttestation::AttestationChallenge` (r:1 w:0)
+	/// Storage: `GPUAttestation::ChallengeVerified` (r:0 w:1)
+	/// Conservative hand-estimate (not benchmarked): one storage read + one write,
+	/// cheaper than `submit_attestation`.
+	fn confirm_challenge() -> Weight {
+		Weight::from_parts(12_000_000, 2602)
+			.saturating_add(T::DbWeight::get().reads(1_u64))
+			.saturating_add(T::DbWeight::get().writes(1_u64))
+	}
 }
 
 // For backwards compatibility and tests.
@@ -188,5 +198,14 @@ impl WeightInfo for () {
 		Weight::from_parts(20_488_000, 3595)
 			.saturating_add(RocksDbWeight::get().reads(3_u64))
 			.saturating_add(RocksDbWeight::get().writes(3_u64))
+	}
+	/// Storage: `GPUAttestation::AttestationChallenge` (r:1 w:0)
+	/// Storage: `GPUAttestation::ChallengeVerified` (r:0 w:1)
+	/// Conservative hand-estimate (not benchmarked): one storage read + one write,
+	/// cheaper than `submit_attestation`.
+	fn confirm_challenge() -> Weight {
+		Weight::from_parts(12_000_000, 2602)
+			.saturating_add(RocksDbWeight::get().reads(1_u64))
+			.saturating_add(RocksDbWeight::get().writes(1_u64))
 	}
 }

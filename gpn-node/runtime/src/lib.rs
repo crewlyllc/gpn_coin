@@ -409,6 +409,16 @@ parameter_types! {
     pub const BaseStakingAPR: u32 = 1000; // 10.00% (in basis points)
     pub const SilverUptimeBps: u32 = 9_000; // 90% rolling uptime
     pub const GoldUptimeBps: u32 = 9_500; // 95% rolling uptime
+    /// Trusted account allowed to commit node-verified capacity-challenge
+    /// results (`GPUAttestation::confirm_challenge`). On testnet this is the
+    /// testnet ops key (`5HHSuwZ…`, the same account as `Sudo::Key`); the node
+    /// service task signs with it after verifying a provider's Ethash solution.
+    /// Production should move this to a verifier committee.
+    pub const ChallengeVerifierAccount: AccountId =
+        AccountId::new([
+            230, 229, 13, 143, 173, 154, 12, 224, 119, 189, 6, 143, 87, 7, 111, 2, 69, 248, 181,
+            79, 167, 63, 112, 184, 213, 2, 219, 34, 215, 151, 82, 102,
+        ]);
 }
 
 impl pallet_gpu_attestation::Config for Runtime {
@@ -422,6 +432,8 @@ impl pallet_gpu_attestation::Config for Runtime {
     type BaseStakingAPR = BaseStakingAPR;
     type SilverUptimeBps = SilverUptimeBps;
     type GoldUptimeBps = GoldUptimeBps;
+    // Trusted verifier that commits node-verified capacity challenges (Phase 2).
+    type ChallengeVerifier = ChallengeVerifierAccount;
     // Benchmark-derived weights (workplan item 9).
     type WeightInfo = pallet_gpu_attestation::weights::SubstrateWeight<Runtime>;
 }

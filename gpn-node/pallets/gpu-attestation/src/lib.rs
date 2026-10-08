@@ -147,6 +147,14 @@ pub mod pallet {
         type GoldUptimeBps: Get<u32>;
         /// Weight information for extrinsics in this pallet (workplan item 9).
         type WeightInfo: WeightInfo;
+        /// Trusted account allowed to commit a **node-verified** capacity
+        /// challenge result on-chain (`confirm_challenge`). The runtime cannot
+        /// run Ethash itself, so a node verifies a provider's solution natively
+        /// (it holds the epoch light cache) and this account commits the
+        /// boolean outcome — mirroring how block seals are node-verified at
+        /// import. Testnet-acceptable; production would use a verifier
+        /// committee. See `design-verifiable-gpu-proof-2026-10-06.md`.
+        type ChallengeVerifier: Get<Self::AccountId>;
     }
 
     #[pallet::pallet]
@@ -156,6 +164,15 @@ pub mod pallet {
 
     #[pallet::storage]
     pub type AttestationChallenge<T: Config> = StorageValue<_, [u8; 32], ValueQuery>;
+
+    /// The challenge each account has had its solution **node-verified** for.
+    /// Stored separately from `Attestations` (no record-layout change, so live
+    /// attestation records are untouched by the upgrade) and compared against
+    /// the live `AttestationChallenge` — a solution only counts while the
+    /// challenge it was mined over is still current.
+    #[pallet::storage]
+    pub type ChallengeVerified<T: Config> =
+        StorageMap<_, Blake2_128Concat, T::AccountId, [u8; 32], OptionQuery>;
 
     #[pallet::storage]
     pub type Attestations<T: Config> =
@@ -221,6 +238,12 @@ pub mod pallet {
         ChallengeRotated {
             new_challenge: [u8; 32],
         },
+        /// A provider's capacity-challenge solution was verified by the trusted
+        /// verifier and committed on-chain.
+        ChallengeConfirmed {
+            who: T::AccountId,
+            challenge: [u8; 32],
+        },
     }
 
     // Errors
@@ -238,6 +261,10 @@ pub mod pallet {
         StakeTransferFailed,
         /// Reported compute throughput is below the minimum for the claimed GPU tier.
         InsufficientCompute,
+        /// Caller is not the configured trusted challenge verifier.
+        NotChallengeVerifier,
+        /// No challenge is currently active to confirm against.
+        NoActiveChallenge,
     }
 
     // Hooks
@@ -324,6 +351,12 @@ pub mod pallet {
             // GPU box that is hidden / NAT'd / off-and-on is capped at Bronze.
             tier = Self::apply_fullnode_gate(&who, tier);
 
+            // Only *new* submissions must prove a node-verified capacity
+            // challenge for the higher tiers (design: "only newly-gated tiers
+            // require a verified challenge"); legacy records already on-chain are
+            // left untouched so the live marketplace is not zeroed on upgrade.
+            tier = Self::apply_challenge_gate(&who, tier);
+
             let now: u32 = frame_system::Pallet::<T>::block_number()
                 .try_into()
                 .unwrap_or(0);
@@ -373,6 +406,29 @@ pub mod pallet {
             Ok(())
         }
 
+        /// Commit the result of a **node-verified** capacity-challenge solution.
+        ///
+        /// Verification itself is node-native (Ethash over the live
+        /// `AttestationChallenge`), so the runtime stores only the assertion: the
+        /// trusted `ChallengeVerifier` calls this **after** the node has verified
+        /// `who`'s seal, recording that `who` solved the *current* challenge.
+        /// This does not itself change any tier — `submit_attestation` (and the
+        /// expiry sweep) consults it via `challenge_verified`.
+        #[pallet::call_index(4)]
+        #[pallet::weight(<T as Config>::WeightInfo::confirm_challenge())]
+        pub fn confirm_challenge(origin: OriginFor<T>, who: T::AccountId) -> DispatchResult {
+            let signer = ensure_signed(origin)?;
+            ensure!(
+                signer == T::ChallengeVerifier::get(),
+                Error::<T>::NotChallengeVerifier
+            );
+            let challenge = <AttestationChallenge<T>>::get();
+            ensure!(challenge != [0u8; 32], Error::<T>::NoActiveChallenge);
+            <ChallengeVerified<T>>::insert(&who, challenge);
+            Self::deposit_event(Event::<T>::ChallengeConfirmed { who, challenge });
+            Ok(())
+        }
+
         #[pallet::call_index(3)]
         #[pallet::weight(<T as Config>::WeightInfo::check_expired())]
         pub fn check_expired(origin: OriginFor<T>, target: T::AccountId) -> DispatchResult {
@@ -403,7 +459,10 @@ pub mod pallet {
 
             // A Silver/Gold holder that lost full-node standing (went idle /
             // unreachable) is demoted to Bronze so it cannot keep earning 1.5x /
-            // 2.5x while hidden. Runs on every expiry sweep.
+            // 2.5x while hidden. Runs on every expiry sweep. The capacity-challenge
+            // gate is deliberately NOT applied here: it only gates *new*
+            // submissions, so a legacy record already on-chain is never demoted by
+            // the upgrade (design rollout note).
             let gate = Self::apply_fullnode_gate(&target, record.tier.clone());
             if gate != record.tier {
                 let old = record.tier.clone();
@@ -439,6 +498,31 @@ pub mod pallet {
                         _ => T::SilverUptimeBps::get(),
                     };
                     if uptime < need {
+                        return AttestationTier::Bronze;
+                    }
+                    tier
+                }
+                other => other,
+            }
+        }
+
+        /// Whether `who` currently holds a **node-verified** solution to the
+        /// live challenge. False for never-verified accounts and once the
+        /// challenge rotates (the stored challenge no longer matches).
+        pub fn challenge_verified(who: &T::AccountId) -> bool {
+            match <ChallengeVerified<T>>::get(who) {
+                Some(c) => c == <AttestationChallenge<T>>::get(),
+                None => false,
+            }
+        }
+
+        /// Cap a claimed Silver/Gold tier at Bronze unless the account holds a
+        /// node-verified challenge solution for the *current* challenge. Bronze
+        /// stays open (entry tier), consistent with the full-node gate.
+        fn apply_challenge_gate(who: &T::AccountId, tier: AttestationTier) -> AttestationTier {
+            match tier {
+                AttestationTier::Silver | AttestationTier::Gold => {
+                    if !Self::challenge_verified(who) {
                         return AttestationTier::Bronze;
                     }
                     tier
@@ -525,7 +609,8 @@ mod tests {
 
     use crate::pallet as local_attest;
     use crate::pallet::{
-        AttestationChallenge, Attestations, AttestedProviderCount, ProviderStake, TotalStaked,
+        AttestationChallenge, Attestations, AttestedProviderCount, ChallengeVerified,
+        ProviderStake, TotalStaked,
     };
 
     type Block = frame_system::mocking::MockBlock<Test>;
@@ -590,6 +675,7 @@ mod tests {
         pub const TestBaseAPR: u32 = 1_000;
         pub const TestSilverUptime: u32 = 9_000;
         pub const TestGoldUptime: u32 = 9_500;
+        pub const TestChallengeVerifier: u64 = 99;
     }
 
     // Mock liveness provider: configurable active/uptime via thread-local state
@@ -622,10 +708,13 @@ mod tests {
         type BaseStakingAPR = TestBaseAPR;
         type SilverUptimeBps = TestSilverUptime;
         type GoldUptimeBps = TestGoldUptime;
+        type ChallengeVerifier = TestChallengeVerifier;
     }
 
     const ALICE: u64 = 1;
     const BOB: u64 = 2;
+    /// Trusted node verifier (mock).
+    const VERIFIER: u64 = 99;
     const INITIAL_CHALLENGE: [u8; 32] = [7u8; 32];
 
     pub fn new_test_ext() -> sp_io::TestExternalities {
@@ -661,6 +750,9 @@ mod tests {
     }
 
     fn stake_and_attest_gflops(who: u64, amount: Balance, gpus: u8, gflops: u64) {
+        // Higher tiers now also require a node-verified capacity challenge, so
+        // the shared happy-path helper confirms it first (Bronze is unaffected).
+        AttestPallet::confirm_challenge(RuntimeOrigin::signed(VERIFIER), who).unwrap();
         AttestPallet::deposit_stake(RuntimeOrigin::signed(who), amount).unwrap();
         AttestPallet::submit_attestation(
             RuntimeOrigin::signed(who),
@@ -860,7 +952,8 @@ mod tests {
             );
             assert_eq!(result, Err(Error::<Test>::InsufficientCompute.into()));
 
-            // 4 GPUs with 1500 GFLOPS → Silver.
+            // 4 GPUs with 1500 GFLOPS → Silver (needs a verified challenge too).
+            AttestPallet::confirm_challenge(RuntimeOrigin::signed(VERIFIER), BOB).unwrap();
             AttestPallet::submit_attestation(
                 RuntimeOrigin::signed(BOB),
                 [1u8; 32],
@@ -1012,6 +1105,124 @@ mod tests {
         new_test_ext().execute_with(|| {
             let result = AttestPallet::check_expired(RuntimeOrigin::signed(BOB), ALICE);
             assert_eq!(result, Err(Error::<Test>::NoExistingAttestation.into()));
+        });
+    }
+
+    // ── Part 2: node-verified capacity challenge ──────────────────────────
+
+    #[test]
+    fn test_confirm_challenge_records_current_challenge() {
+        new_test_ext().execute_with(|| {
+            assert!(!AttestPallet::challenge_verified(&ALICE));
+            AttestPallet::confirm_challenge(RuntimeOrigin::signed(VERIFIER), ALICE).unwrap();
+            assert_eq!(
+                ChallengeVerified::<Test>::get(ALICE),
+                Some(INITIAL_CHALLENGE)
+            );
+            assert!(AttestPallet::challenge_verified(&ALICE));
+        });
+    }
+
+    #[test]
+    fn test_confirm_challenge_verifier_only() {
+        new_test_ext().execute_with(|| {
+            // A random signed account cannot confirm challenges.
+            let result = AttestPallet::confirm_challenge(RuntimeOrigin::signed(ALICE), BOB);
+            assert_eq!(result, Err(Error::<Test>::NotChallengeVerifier.into()));
+            assert!(ChallengeVerified::<Test>::get(BOB).is_none());
+        });
+    }
+
+    #[test]
+    fn test_confirm_challenge_requires_active_challenge() {
+        new_test_ext().execute_with(|| {
+            AttestationChallenge::<Test>::put([0u8; 32]);
+            let result = AttestPallet::confirm_challenge(RuntimeOrigin::signed(VERIFIER), ALICE);
+            assert_eq!(result, Err(Error::<Test>::NoActiveChallenge.into()));
+        });
+    }
+
+    #[test]
+    fn test_unverified_high_tier_capped_to_bronze() {
+        new_test_ext().execute_with(|| {
+            // 16-GPU, high-GFLOPS box, but no node-verified challenge → Bronze.
+            AttestPallet::deposit_stake(RuntimeOrigin::signed(ALICE), 500).unwrap();
+            AttestPallet::submit_attestation(
+                RuntimeOrigin::signed(ALICE),
+                [1u8; 32],
+                [2u8; 32],
+                16,
+                10_000,
+            )
+            .unwrap();
+            assert_eq!(
+                Attestations::<Test>::get(ALICE).unwrap().tier,
+                AttestationTier::Bronze
+            );
+        });
+    }
+
+    #[test]
+    fn test_verified_high_tier_allowed() {
+        new_test_ext().execute_with(|| {
+            AttestPallet::confirm_challenge(RuntimeOrigin::signed(VERIFIER), ALICE).unwrap();
+            AttestPallet::deposit_stake(RuntimeOrigin::signed(ALICE), 500).unwrap();
+            AttestPallet::submit_attestation(
+                RuntimeOrigin::signed(ALICE),
+                [1u8; 32],
+                [2u8; 32],
+                4,
+                10_000,
+            )
+            .unwrap();
+            assert_eq!(
+                Attestations::<Test>::get(ALICE).unwrap().tier,
+                AttestationTier::Silver
+            );
+        });
+    }
+
+    #[test]
+    fn test_challenge_rotation_invalidates_verification() {
+        new_test_ext().execute_with(|| {
+            AttestPallet::confirm_challenge(RuntimeOrigin::signed(VERIFIER), ALICE).unwrap();
+            assert!(AttestPallet::challenge_verified(&ALICE));
+            // Rotate the challenge: the stored solution no longer matches.
+            System::set_block_number(10);
+            AttestPallet::on_initialize(10);
+            assert!(!AttestPallet::challenge_verified(&ALICE));
+        });
+    }
+
+    #[test]
+    fn test_legacy_record_not_demoted_on_expiry_sweep() {
+        new_test_ext().execute_with(|| {
+            // Simulate a pre-upgrade Silver record: tier stored, no
+            // ChallengeVerified entry. The expiry sweep must leave the tier
+            // alone (challenge gate is submission-only).
+            AttestPallet::deposit_stake(RuntimeOrigin::signed(ALICE), 1_000).unwrap();
+            AttestPallet::confirm_challenge(RuntimeOrigin::signed(VERIFIER), ALICE).unwrap();
+            AttestPallet::submit_attestation(
+                RuntimeOrigin::signed(ALICE),
+                [1u8; 32],
+                [2u8; 32],
+                4,
+                10_000,
+            )
+            .unwrap();
+            assert_eq!(
+                Attestations::<Test>::get(ALICE).unwrap().tier,
+                AttestationTier::Silver
+            );
+            // Drop the verification, then run a sweep past max age.
+            ChallengeVerified::<Test>::remove(ALICE);
+            System::set_block_number(100);
+            AttestPallet::check_expired(RuntimeOrigin::signed(BOB), ALICE).unwrap();
+            assert_eq!(
+                Attestations::<Test>::get(ALICE).unwrap().tier,
+                AttestationTier::Silver,
+                "legacy/unverified record must not be demoted by the sweep"
+            );
         });
     }
 }
