@@ -92,7 +92,7 @@ const SEAL_LEN: usize = SEAL_NONCE_LEN + SEAL_MIX_LEN + SEAL_AUTHOR_LEN;
 
 /// Lazily-built Ethash light cache for the dev epoch. Verification on every
 /// block import and mining both share this cache.
-fn ethash_cache() -> &'static [u8] {
+pub(crate) fn ethash_cache() -> &'static [u8] {
     static CACHE: OnceLock<Vec<u8>> = OnceLock::new();
     CACHE.get_or_init(|| {
         let seed = ethash::get_seedhash(DEV_EPOCH);
@@ -105,7 +105,7 @@ fn ethash_cache() -> &'static [u8] {
 
 /// Full dataset size for the dev epoch (used only to size hashimoto lookups;
 /// light mode computes dataset items from the cache on the fly).
-fn ethash_full_size() -> usize {
+pub(crate) fn ethash_full_size() -> usize {
     ethash::get_full_size(DEV_EPOCH)
 }
 

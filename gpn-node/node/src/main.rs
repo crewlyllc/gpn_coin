@@ -4,6 +4,7 @@
 //! Supports GPU mining, GPU-attested staking, and a compute marketplace.
 
 mod chain_spec;
+mod challenge;
 mod cli;
 mod command;
 mod gpu_miner;
