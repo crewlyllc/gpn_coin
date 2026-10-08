@@ -40,7 +40,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           $py = 'C:\gpn\venv\Scripts\python.exe'
-          if (-not (Test-Path $py)) { throw "venv python missing at $py — run windows-video-install first" }
+          if (-not (Test-Path $py)) { throw "venv python missing at $py - run windows-video-install first" }
           $out = 'C:\gpn\out-video.mp4'
           if (Test-Path $out) { Remove-Item $out -Force }
 
