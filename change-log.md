@@ -1,5 +1,14 @@
 # GPN change-log
 
+## 2026-10-08 18:55 PT / 01:55 UTC — PM07 driver (cron d496e0b0) — item **#4 Windows as an AI provider** → **BLOCKED** (box staged; remaining steps need Jeremy)
+**What changed (no chain/genesis/runtime touched):**
+1. **New `.github/workflows/windows-provider-deploy.yml`** — on the self-hosted Windows runner (`DESKTOP-USBUADL`), fetches the `gpn-windows` release artifact (from `release-windows` run `37711523590`) and unpacks every provider `.exe` into `C:\gpn\bin`; runs `ollama pull llama3.2:1b` if missing. Run `37714644531` **success**.
+2. **New `.github/workflows/windows-provider-check.yml`** — read-only readiness report (Ollama/models, `C:\gpn\bin` contents, running `gpn*` procs, `GPN_PROVIDER_ENDPOINT`, public IP, :8093 listeners) + a heartbeat smoke test (starts `gpn_provider_status.exe` on `127.0.0.1:18093`, hits `GET /status`, stops it); results uploaded as the `provider-check` artifact.
+**Why:** the box is reachable only through its CI runner (no agent SSH), so the item-4 "unpack + pull model + verify the binary runs" steps were driven through dispatchable workflows instead of manual Windows work.
+**Verified (run `37714890815`):** Ollama OK with `llama3.2:1b PRESENT` (+ qwen2.5:7b, deepseek-r1:7b/14b); all provider `.exe`s present in `C:\gpn\bin`; **heartbeat binary live-tested OK** — `GET /status` → `{"active":0,"can_pull":true,"gflops":2500,"models":["llama3.2:1b",…]}`; box public IP `23.241.109.255`; **no listener on :8093**; `GPN_PROVIDER_ENDPOINT` unset.
+**BLOCKED — needs Jeremy (agent has no router/host access):** (a) choose+fund the provider wallet and run `run-windows-provider.ps1 -Signer … -PublicStatusUrl http://23.241.109.255:8093/status` (design: reuse node identity `//Bob`); (b) forward TCP **8093**. Deliberately **did NOT** register the provider on-chain yet — an unreachable provider would have jobs routed to it and lose them (janitor-cancels). No runtime upgrade ⇒ no `set_code`, no rule-5a restart.
+**Next:** item #5a (enable + live-verify the fine-tune provider).
+
 ## 2026-10-07 17:52 PT / 00:52 UTC — PM07 driver (cron d496e0b0) — item **#3 Client-side RTT / user→nearest-node** → **DONE**
 **What changed (smallest correct change; no chain/genesis touched):**
 1. **New `gpn-agent/src/routing.rs`** — `RttOverrides` + `effective_latency_ms` (client-measured user→provider RTT wins over AP-measured, `0`/absent = fall back), `parse_rtt_overrides` (lenient; malformed/non-positive ignored, never fatal), `lookup_override` (matches by provider **address** or **status URL**, case-insensitive, `/status`+trailing-slash normalized). 5 unit tests green.
