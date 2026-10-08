@@ -219,6 +219,73 @@ pub fn value_balance_key() -> VerifyingKey {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Real note-spend circuit verification key (Step 5, sub-step b)
+// ---------------------------------------------------------------------------
+//
+// This is the **real** CRS for the note-spend circuit in
+// `gpn-shield/src/note_spend.rs::note_spend_r1cs` (fixed Merkle depth 32),
+// deterministically derived from seed `"testnet-crs-note-spend-v0"` by
+// `gpn-shield note-spend-setup`. The circuit's Merkle side-bits are witnesses,
+// so this single key verifies spends of notes at ANY tree position. Public
+// inputs (6): `value_balance, cm_lo, cm_hi, nf_lo, nf_hi, merkle_root`.
+//
+// `gamma_abc_g1` has 7 entries: index 0 = constant (a0 = 1), 1..6 = the six
+// public inputs above. Production replaces this deterministic (testnet-only)
+// CRS with a Powers-of-Tau ceremony key.
+pub fn note_spend_key() -> VerifyingKey {
+    let alpha = G1Affine::from_compressed(&hex48(
+        "a75c3b2178861e0ecfddb31f338f2cee49e1c31438f97b2c1361f3e217716eaf\
+         c1d0d1f18c57027fc1f7a905cb86a3a5",
+    ))
+    .expect("valid alpha_g1");
+    let beta = G2Affine::from_compressed(&hex96(
+        "b5929e3cf01b4ff3be86e9695a1c63686437f3763e808a888846c4532356647d\
+         09df8a746ddfc989e2337c23cb77416c01615a0773aa589b351db3653a3fe5a1\
+         623f0c258931fa3442940ab712aae89aa75a24006734909dd2e331141f88cf86",
+    ))
+    .expect("valid beta_g2");
+    let gamma = G2Affine::from_compressed(&hex96(
+        "b44a74f1b88bc767e29805239f699dd5a9d6f9193d8eca3d4b40ee77d6b43bec\
+         20928358c0633b777b99c4507f855f0c00ab67e5d7942c236ca9359567d6f17e\
+         3f1ae380ee131a3e005760b2cf153020477a53df3f68706d64443ffd522b62d2",
+    ))
+    .expect("valid gamma_g2");
+    let delta = G2Affine::from_compressed(&hex96(
+        "99f6da878203cb7ab62989aac2c7ae21a47c7340b0f7a2fd054436e8ca3bb3b5\
+         2c2882a90731fbeaa371c4d0d90d2b020b0f59134475bfc4d98f7e1f4cca6678\
+         9e520ba88519189582265bbf2f8c796bac2609d2d8240685dcef163a1d20f827",
+    ))
+    .expect("valid delta_g2");
+    let entries = [
+        "b52a6be4841d3176fb6b004e1d9dd4aa8777cec3c1dfe5cf315e1a4d6a1a1949\
+         5dbf282a6cdf21b77984518c5833d574",
+        "a2c7930ce2b4954dc8f2570612b9c320dcdca5ea1ccde57fa50ec9d5e32e47d2\
+         572946f765d02e3c42bcf57bdb123312",
+        "838affe93b939142f470c0ea7a057288dd0dfcfd2962625503b8cbf064c01e2c\
+         b1ffa424d8d28442d131ded11fe48953",
+        "80a49bab5f6b5523db2dc34f4133edf86108722179c96928c4cf9aaffbf37758\
+         84bf145cbedf13fe5571e3350b6cc718",
+        "87d48e3b5c58005d07d11569243479584543b67aae13d071de8d27faa436a61f\
+         0e3b210b03d5f7cf68aed7cd2add54ef",
+        "984cd42720766a8322ea92d1042c1f0ce8a50a22bc8e4254fa8e83be31482f18\
+         d68c81bdea06f4736019a1e1c79a2e49",
+        "a902d4b76efbb6d4e295191ef4177b28ea756724ed8c156ed4b31d35bdf912e0\
+         c6bf1d2010c2e1c2cf2816c5afa9d32b",
+    ];
+    let gamma_abc_g1 = entries
+        .iter()
+        .map(|s| G1Affine::from_compressed(&hex48(s)).expect("valid gamma_abc"))
+        .collect();
+    VerifyingKey {
+        alpha_g1: alpha,
+        beta_g2: beta,
+        gamma_g2: gamma,
+        delta_g2: delta,
+        gamma_abc_g1,
+    }
+}
+
 /// Decode a 96-hex-char (48-byte) G1 compressed point string.
 fn hex48(s: &str) -> [u8; 48] {
     let mut out = [0u8; 48];

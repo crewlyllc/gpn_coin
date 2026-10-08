@@ -503,3 +503,44 @@ fn note_spend_roundtrip_depth_variants() {
         }
     }
 }
+
+#[test]
+#[ignore = "full note-spend circuit; run with --release"]
+fn note_spend_vk_is_path_independent() {
+    // The Merkle side-bits are WITNESSES (not constants), so the circuit shape —
+    // and hence the Groth16 verification key — must be identical for any Merkle
+    // path. That is what lets ONE on-chain key verify spends of notes at any
+    // tree position (and against any historical root).
+    use crate::note_spend::{note_spend_r1cs, tests::test_note};
+
+    let n1 = test_note(4);
+    let mut n2 = test_note(4);
+    // Different trapdoor + different siblings + flipped directions.
+    n2.rcm = [3u8; 32];
+    for (i, (sib, right)) in n2.path.iter_mut().enumerate() {
+        *sib = Scalar::from(7000 + i as u64);
+        *right = !*right;
+    }
+
+    let (r1, _) = note_spend_r1cs(&n1);
+    let (r2, z2) = note_spend_r1cs(&n2);
+    assert_eq!(r1.num_variables, r2.num_variables);
+    assert_eq!(r1.constraints.len(), r2.constraints.len());
+    assert!(
+        crate::gadget::constraints_hold(&r2, &z2),
+        "flipped-path witness must satisfy"
+    );
+
+    let q1 = r1.qap_sparse();
+    let q2 = r2.qap_sparse();
+    let k1 = groth16::setup(&q1, "testnet-crs-note-spend-v0");
+    let k2 = groth16::setup(&q2, "testnet-crs-note-spend-v0");
+    assert_eq!(
+        k1.vk, k2.vk,
+        "note-spend VK must not depend on the Merkle path directions"
+    );
+
+    // End-to-end: a proof for the flipped path must verify under the SAME key.
+    let (proof2, pub2) = groth16::prove(&k2, &q2, &z2);
+    assert_eq!(groth16::verify(&k1.vk, &pub2, &proof2), Ok(()));
+}

@@ -16,6 +16,10 @@ log = { workspace = true }
 serde = { workspace = true, optional = true }
 bls12_381 = { version = "0.8", default-features = false, features = ["alloc", "pairings"] }
 ff = { version = "0.13", default-features = false }
+# BLAKE2s-256 — the note scheme's hash (RFC 7693). The shielded-pool circuit
+# (`gpn-shield`) commits/nullifies with BLAKE2s; the pallet must use the SAME
+# hash so its on-chain commitments/merkle leaves match the proofs.
+blake2 = { version = "0.10", default-features = false }
 
 [dev-dependencies]
 pallet-balances = { workspace = true, features = ["std"] }
@@ -37,5 +41,6 @@ std = [
     "sp-runtime/std",
     "sp-std/std",
     "sp-io/std",
+    "blake2/std",
     "serde",
 ]

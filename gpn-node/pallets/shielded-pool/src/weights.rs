@@ -46,6 +46,7 @@ use core::marker::PhantomData;
 pub trait WeightInfo {
 	fn verify_proof() -> Weight;
 	fn deposit() -> Weight;
+	fn spend() -> Weight;
 }
 
 /// Weights for `pallet_shielded_pool` using the GPN node and recommended hardware.
@@ -77,6 +78,17 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 			.saturating_add(T::DbWeight::get().reads(4_u64))
 			.saturating_add(T::DbWeight::get().writes(5_u64))
 	}
+	/// Note-spend: Groth16 verify (~94 ms, same pairing cost as `verify_proof`)
+	/// plus pool/root-ring/nullifier/tree storage I/O. Hand-estimated (see
+	/// `scripts/benchmark-weights.sh` to regenerate with the runtime wasm).
+	/// Storage: NoteCommitments (r:1 w:1), Nullifiers (r:1 w:1), RootHistory
+	/// (r:1 w:1), FilledSubtrees (r:1 w:1), NextPosition (r:1 w:1), PoolValue
+	/// (r:1 w:1), CurrentRoot (w:1), System::Account (r:1 w:1).
+	fn spend() -> Weight {
+		Weight::from_parts(96_000_000_000, 32001500)
+			.saturating_add(T::DbWeight::get().reads(6_u64))
+			.saturating_add(T::DbWeight::get().writes(8_u64))
+	}
 }
 
 // For backwards compatibility and tests.
@@ -106,5 +118,11 @@ impl WeightInfo for () {
 		Weight::from_parts(50_805_000, 32001489)
 			.saturating_add(RocksDbWeight::get().reads(4_u64))
 			.saturating_add(RocksDbWeight::get().writes(5_u64))
+	}
+	/// Note-spend: Groth16 verify (~94 ms) + storage I/O. Hand-estimated.
+	fn spend() -> Weight {
+		Weight::from_parts(96_000_000_000, 32001500)
+			.saturating_add(RocksDbWeight::get().reads(6_u64))
+			.saturating_add(RocksDbWeight::get().writes(8_u64))
 	}
 }

@@ -11,7 +11,8 @@
 use bls12_381::{G1Affine, G2Affine, Scalar};
 use ff::Field;
 
-use gpn_shield::{groth16, keygen, prove, qap, ser, verify, VerifyError};
+use gpn_shield::note_spend::MERKLE_DEPTH;
+use gpn_shield::{groth16, keygen, note_spend, prove, qap, ser, verify, VerifyError};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -142,6 +143,75 @@ fn main() {
                 }
             }
         }
+        "note-spend-setup" => {
+            // Emit the on-chain note-spend verification key. Uses the EXISTING
+            // note-spend circuit (canonical note shape, fixed depth) so the
+            // on-chain verifier can bind value_balance + commitment + nullifier
+            // + merkle root. Seed is deterministic (testnet-only).
+            let note = note_spend::canonical_note();
+            let (r1cs, _z) = note_spend::note_spend_r1cs(&note);
+            let qap = r1cs.qap_sparse();
+            let seed = args
+                .get(2)
+                .map(|s| s.as_str())
+                .unwrap_or("testnet-crs-note-spend-v0");
+            let pk = groth16::setup(&qap, seed);
+            println!(
+                "circuit = note-spend (depth {MERKLE_DEPTH}, {} vars, {} constraints, {} public)",
+                r1cs.num_variables,
+                r1cs.num_constraints(),
+                r1cs.num_public
+            );
+            println!("seed = {seed}");
+            println!("alpha_g1 = 0x{}", hex(&pk.vk.alpha_g1.to_compressed()));
+            println!("beta_g2  = 0x{}", hex(&pk.vk.beta_g2.to_compressed()));
+            println!("gamma_g2 = 0x{}", hex(&pk.vk.gamma_g2.to_compressed()));
+            println!("delta_g2 = 0x{}", hex(&pk.vk.delta_g2.to_compressed()));
+            for (i, g) in pk.vk.gamma_abc_g1.iter().enumerate() {
+                println!("gamma_abc[{i}] = 0x{}", hex(&g.to_compressed()));
+            }
+            println!("public_inputs = [value_balance, cm_lo, cm_hi, nf_lo, nf_hi, merkle_root] (6 public variables)");
+        }
+        "note-spend-prove" => {
+            // Prove a canonical fixture. Optional args override value/value_out/
+            // rcm/addr/position; defaults reproduce the canonical note so the
+            // proof bytes can be embedded in the pallet's unit tests.
+            let value: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(500);
+            let value_out: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let mut note = note_spend::canonical_note();
+            note.value = value;
+            note.value_out = value_out;
+            if let Some(hex_rcm) = args.get(4) {
+                if let Some(b) = parse_hex32(hex_rcm) {
+                    note.rcm = b;
+                }
+            }
+            let (r1cs, z) = note_spend::note_spend_r1cs(&note);
+            let qap = r1cs.qap_sparse();
+            let seed = "testnet-crs-note-spend-v0";
+            let pk = groth16::setup(&qap, seed);
+            let (proof, pub_in) = groth16::prove(&pk, &qap, &z);
+            let publics = note_spend::public_inputs(&note);
+            let cm = note_spend::commitment_bytes(&note);
+            let nf = note_spend::nullifier_bytes(&note);
+            println!("proof_a (48) = 0x{}", hex(&proof.a.to_compressed()));
+            println!("proof_b (96) = 0x{}", hex(&proof.b.to_compressed()));
+            println!("proof_c (48) = 0x{}", hex(&proof.c.to_compressed()));
+            for (i, s) in publics.iter().enumerate() {
+                println!("public[{i}] = 0x{}", hex(&s.to_bytes()));
+            }
+            println!("value_balance = {}", note.value - note.value_out);
+            println!("cm = 0x{}", hex(&cm));
+            println!("nf = 0x{}", hex(&nf));
+            println!("merkle_root = 0x{}", hex(&publics[5].to_bytes()));
+            println!("rcm = 0x{}", hex(&note.rcm));
+            println!("addr = 0x{}", hex(&note.addr));
+            println!("position = {}", note.position);
+            println!(
+                "verify locally = {}",
+                groth16::verify(&pk.vk, &pub_in, &proof).is_ok()
+            );
+        }
         "qap-setup-ct" => {
             // Constant-time keygen path: same key as `qap-setup`, but every
             // secret-scalar fixed-base mult uses the branchless CT lookup.
@@ -167,7 +237,7 @@ fn main() {
         }
         other => {
             eprintln!("unknown command: {other}");
-            eprintln!("usage: gpn_shield [keygen|prove|verify|qap-setup|qap-setup-ct|qap-prove|qap-verify]");
+            eprintln!("usage: gpn_shield [keygen|prove|verify|qap-setup|qap-setup-ct|qap-prove|qap-verify|note-spend-setup|note-spend-prove]");
             std::process::exit(2);
         }
     }
@@ -175,6 +245,12 @@ fn main() {
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn parse_hex32(s: &str) -> Option<[u8; 32]> {
+    let v = parse_hex(s)?;
+    let arr: [u8; 32] = v.try_into().ok()?;
+    Some(arr)
 }
 
 fn parse_hex(s: &str) -> Option<Vec<u8>> {

@@ -175,6 +175,56 @@ pub fn merkle_membership_gate(
     nodes
 }
 
+/// **Path-independent** Merkle membership gate.
+///
+/// Identical in meaning to [`merkle_membership_gate`], but each level's *side*
+/// is a **witness boolean** (allocated + boolean-constrained here) rather than a
+/// compile-time constant folded into the constraint coefficients. That makes the
+/// R1CS shape — and therefore the Groth16 verification key — independent of the
+/// specific path directions, so one on-chain key verifies spends of notes at
+/// **any** tree position. `path[i] = (sibling_var, side_var)` where `side_var = 1`
+/// means the sibling is the **right** child (the running node is the left child).
+///
+/// `parent = sibling + node·K + (1−K)·t` with `t = side·(node − sibling)`, which
+/// reduces to `node + sibling·K` when `side = 1` and `sibling + node·K` when
+/// `side = 0`.
+///
+/// Returns the intermediate parent-node variable indices (root-ward); their
+/// witness values are tracked in `c.values` (no backfill needed).
+pub fn merkle_membership_gate_witnessed(
+    c: &mut WordCircuit,
+    leaf: usize,
+    root: usize,
+    path: &[(usize, usize)], // (sibling_var, side_var); side=1 => sibling is right
+) -> Vec<usize> {
+    let k = Scalar::from(MERKLE_K);
+    let one_minus_k = Scalar::ONE - k;
+    let mut nodes = Vec::with_capacity(path.len() + 1);
+    nodes.push(leaf);
+    let mut node = leaf;
+    for &(sibling, side) in path {
+        // t = side · (node − sibling)
+        let d = c.alloc(c.values[node] - c.values[sibling]);
+        let t = c.alloc(c.values[side] * c.values[d]);
+        c.builder.add(
+            vec![(side, Scalar::ONE)],
+            vec![(d, Scalar::ONE)],
+            vec![(t, Scalar::ONE)],
+        );
+        // parent = sibling + node·K + (1−K)·t
+        let parent = c.alloc(c.values[sibling] + c.values[node] * k + one_minus_k * c.values[t]);
+        c.builder.add(
+            vec![(0, Scalar::ONE)],
+            vec![(parent, Scalar::ONE)],
+            vec![(sibling, Scalar::ONE), (node, k), (t, one_minus_k)],
+        );
+        node = parent;
+        nodes.push(parent);
+    }
+    c.builder.assert_equal(node, root);
+    nodes
+}
+
 // ---------------------------------------------------------------------------
 // blake2s word-level gadget layer (gate #2/#3 foundation)
 // ---------------------------------------------------------------------------

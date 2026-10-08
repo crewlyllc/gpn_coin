@@ -21,10 +21,22 @@
 //! (see the [`groth16`] module) plus a [`verify_proof`] dispatchable that lets a
 //! shielded spend carry a zk-proof and have the chain check it.
 //!
-//! **Deferred to later cycles:** the client-side GPU prover (`gpn_shield`,
-//! Step 5), wallet support (Step 6), and full shielded→shielded /
-//! shielded→transparent spends (which need the circuit + prover wired to the
-//! verifier). The note scheme here is the foundation those build on.
+//! **Step 5 (this cycle): the real spend path.** An on-chain **note-spend key**
+//! ([`groth16::note_spend_key`]) for the existing `gpn-shield` note-spend circuit
+//! (fixed Merkle depth [`MERKLE_DEPTH`]) plus a [`spend`] dispatchable that:
+//! verifies the proof, rejects a re-used nullifier (double-spend) and an unknown
+//! Merkle root (must be in the bounded [`RootHistory`] ring), **burns the
+//! nullifier** (nullifiers are no longer marked spent at deposit), supports
+//! **shielded→shielded** (appends an output commitment) and **shielded→transparent**
+//! (releases value to a recipient, reducing `PoolValue`) spends, and enforces
+//! value conservation. The note scheme commits/nulls with **BLAKE2s-256** (RFC
+//! 7693), byte-identical to the circuit.
+//!
+//! **Deferred to later cycles:** a client-side GPU prover (done in `gpn-shield`),
+//! wallet support, and a production Powers-of-Tau ceremony to replace the
+//! deterministic (testnet-only) CRS. The current note scheme and CRS are
+//! testnet prototypes — with a public CRS seed, proofs are forgeable by anyone;
+//! the on-chain nullifier/root/value checks are the real guards until a ceremony.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -40,6 +52,19 @@ pub mod groth16;
 /// Maximum size of the live-commitment pool (bounds the merkle-tree position
 /// and on-chain storage growth).
 pub const MAX_POOL_COMMITMENTS: u32 = 1_000_000;
+
+/// Fixed depth of the on-chain commitment-set Merkle tree. **Must match**
+/// `gpn_shield::note_spend::MERKLE_DEPTH`: the note-spend circuit's shape (and
+/// so its on-chain verification key) depends on the path length.
+pub const MERKLE_DEPTH: u32 = 32;
+
+/// Domain constant of the R1CS-friendly Merkle combiner `parent = l + r·K`.
+/// **Must match** `gpn_shield::gadget::MERKLE_K`.
+pub const MERKLE_K: u64 = 0x5bd1_e995;
+
+/// Number of historical Merkle roots retained so a note stays spendable after
+/// later deposits change the tree root.
+pub const ROOT_HISTORY_SIZE: u32 = 100;
 
 /// A note commitment is a 32-byte hash. We use the raw type so the pallet stays
 /// agnostic to the exact hash backend and cheap to store.
@@ -65,13 +90,24 @@ pub type Nullifier = [u8; 32];
 // and `nf` — the PRFs here are the same ones the circuit will enforce.
 pub mod note {
     use super::*;
-    use sp_io::hashing::blake2_256;
+    use blake2::{Blake2s256, Digest};
     use sp_std::vec::Vec;
 
     /// Domain-separation tag for the commitment hash (Sapling-style prefix).
     const CM_DOMAIN: &[u8; 8] = b"gpn/cm00";
     /// Domain-separation tag for the nullifier PRF.
     const NF_DOMAIN: &[u8; 8] = b"gpn/nf00";
+
+    /// BLAKE2s-256 (RFC 7693). Byte-identical to `gpn_shield::blake2s::blake2s_256_ref`
+    /// — the exact hash the note-spend circuit enforces in-field via its gates.
+    pub fn blake2s_256(data: &[u8]) -> [u8; 32] {
+        let mut h = Blake2s256::new();
+        h.update(data);
+        let out = h.finalize();
+        let mut r = [0u8; 32];
+        r.copy_from_slice(&out);
+        r
+    }
 
     /// Compute the note commitment `cm = H(gpn/cm00 || v || rcm || addr)`.
     ///
@@ -84,7 +120,7 @@ pub mod note {
         preimage.extend_from_slice(&v.to_be_bytes());
         preimage.extend_from_slice(rcm);
         preimage.extend_from_slice(addr);
-        blake2_256(&preimage)
+        blake2s_256(&preimage)
     }
 
     /// Compute the nullifier `nf = H(gpn/nf00 || rcm || position)`.
@@ -96,7 +132,7 @@ pub mod note {
         preimage.extend_from_slice(NF_DOMAIN);
         preimage.extend_from_slice(rcm);
         preimage.extend_from_slice(&position.to_be_bytes());
-        blake2_256(&preimage)
+        blake2s_256(&preimage)
     }
 
     /// Deterministic trapdoor generator for on-chain minting of shielded notes
@@ -108,15 +144,15 @@ pub mod note {
     /// recompute it and steal the note. This is INTENDED ONLY for the deposit
     /// path where the note is minted fresh on-chain by the depositor and the
     /// "trapdoor" is actually the depositor's own knowledge of the commitment
-    /// preimage. The shielded→shielded spend path (later cycle) will require
-    /// client-side random `rcm` and a real zk-proof.
+    /// preimage. The shielded→shielded spend path will require client-side
+    /// random `rcm` and a real zk-proof (see the pallet docs).
     pub fn derive_rcm(v: u128, addr: &[u8; 32], nonce: u64) -> [u8; 32] {
         let mut preimage = Vec::with_capacity(8 + 16 + 32 + 8);
         preimage.extend_from_slice(b"gpn/rcm0");
         preimage.extend_from_slice(&v.to_be_bytes());
         preimage.extend_from_slice(addr);
         preimage.extend_from_slice(&nonce.to_be_bytes());
-        blake2_256(&preimage)
+        blake2s_256(&preimage)
     }
 }
 
@@ -127,10 +163,14 @@ pub mod note {
 #[frame_support::pallet]
 pub mod pallet {
     use super::*;
+    use bls12_381::Scalar;
+    use ff::Field;
     use frame_support::pallet_prelude::*;
     use frame_support::sp_runtime::traits::{AccountIdConversion, Saturating, Zero};
     use frame_support::traits::{Currency, ExistenceRequirement};
     use frame_system::pallet_prelude::*;
+    use sp_runtime::traits::UniqueSaturatedInto;
+    use sp_runtime::DispatchError;
 
     pub type BalanceOf<T> =
         <<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
@@ -175,6 +215,23 @@ pub mod pallet {
     #[pallet::storage]
     pub type NextPosition<T: Config> = StorageValue<_, u64, ValueQuery>;
 
+    /// Left-child subtree roots for the append-only commitment-set tree, one per
+    /// level (`MERKLE_DEPTH` entries). Used to compute the new root on append.
+    #[pallet::storage]
+    pub type FilledSubtrees<T: Config> =
+        StorageValue<_, BoundedVec<[u8; 32], ConstU32<MERKLE_DEPTH>>, ValueQuery>;
+
+    /// Bounded ring of recent commitment-set Merkle roots (newest last). A spend
+    /// proof may reference ANY root still in this ring, so a note stays
+    /// spendable after later deposits move the current root.
+    #[pallet::storage]
+    pub type RootHistory<T: Config> =
+        StorageValue<_, BoundedVec<[u8; 32], ConstU32<ROOT_HISTORY_SIZE>>, ValueQuery>;
+
+    /// The current commitment-set Merkle root (canonical 32-byte field encoding).
+    #[pallet::storage]
+    pub type CurrentRoot<T: Config> = StorageValue<_, [u8; 32], ValueQuery>;
+
     // ---- Events -----------------------------------------------------------
 
     #[pallet::event]
@@ -192,6 +249,16 @@ pub mod pallet {
         NoteAdded { cm: Commitment, position: u64 },
         /// A Groth16 zk-proof was verified on-chain (Step 4).
         ProofVerified { who: T::AccountId },
+        /// A note was spent (shielded→shielded or shielded→transparent). The
+        /// nullifier is now burned; `value_out` is the transparent amount (0
+        /// for a pure shielded→shielded transfer).
+        Spent {
+            nullifier: Nullifier,
+            value_out: u64,
+            merkle_root: [u8; 32],
+        },
+        /// A new commitment-set Merkle root was recorded.
+        RootRecorded { root: [u8; 32] },
     }
 
     // ---- Errors -----------------------------------------------------------
@@ -210,6 +277,24 @@ pub mod pallet {
         TransferFailed,
         /// A supplied zero-knowledge proof failed verification.
         InvalidProof,
+        /// The note's nullifier was already spent (double-spend).
+        NullifierAlreadySpent,
+        /// The referenced Merkle root is not one of the recently accepted roots.
+        UnknownMerkleRoot,
+        /// The commitment being spent is not in the pool.
+        UnknownCommitment,
+        /// The released amount exceeds the pooled value (value conservation).
+        InsufficientPoolValue,
+        /// A shielded→shielded spend must have a zero transparent value balance.
+        NonZeroValueBalance,
+        /// A shielded→shielded spend requires an output commitment.
+        MissingOutputCommitment,
+        /// A shielded→transparent spend requires a recipient.
+        MissingRecipient,
+        /// Shielded→transparent release amount must be non-zero.
+        ZeroValueOut,
+        /// The supplied amount does not fit the balance type / proof scalar.
+        ValueTooLarge,
     }
 
     // ---- Calls ------------------------------------------------------------
@@ -297,14 +382,15 @@ pub mod pallet {
             )
             .map_err(|_| Error::<T>::TransferFailed)?;
 
-            // Burn the fee by removing it from pool value (fee never enters the
-            // redeemable shielded supply — it's a network cost, self-funding).
+            // Nth the fee: it is charged on top and never enters the redeemable
+            // shielded supply (a network cost, self-funding).
+            // Append the commitment to the pool + Merkle tree and record the new
+            // root. NOTE: a note's nullifier is burned at SPEND, not here.
             let position = <NextPosition<T>>::get();
             let mut new_pool = pool;
             new_pool.try_push(cm).map_err(|_| Error::<T>::PoolFull)?;
             <NoteCommitments<T>>::put(new_pool);
-            <Nullifiers<T>>::insert(note::nullifier(&rcm, position), ());
-            <NextPosition<T>>::put(position + 1);
+            let root = Self::append_to_tree(&cm)?;
             <PoolValue<T>>::mutate(|p| *p = p.saturating_add(amount));
 
             Self::deposit_event(Event::<T>::Deposited {
@@ -314,6 +400,137 @@ pub mod pallet {
                 position,
             });
             Self::deposit_event(Event::<T>::NoteAdded { cm, position });
+            Self::deposit_event(Event::<T>::RootRecorded { root });
+            Ok(())
+        }
+
+        /// **Shielded spend** — spend a note with a Groth16 proof.
+        ///
+        /// Verifies the note-spend proof (binding value balance, the spent
+        /// commitment, the nullifier, and the Merkle root) against the on-chain
+        /// note-spend key, then:
+        ///   * rejects a re-used nullifier (double-spend) and an unknown root
+        ///     (must be in the bounded [`RootHistory`] ring),
+        ///   * burns the nullifier (it is *not* burned at deposit),
+        ///   * for **shielded→shielded** (`output_commitment = Some`): requires a
+        ///     zero transparent value balance, appends the output note, and
+        ///     advances `NextPosition`,
+        ///   * for **shielded→transparent** (`output_commitment = None`): releases
+        ///     `value_balance` to `recipient` and reduces `PoolValue`.
+        ///
+        /// Value conservation: the circuit proves `v = v_out + value_balance`
+        /// against the spent commitment; the transparent release is further
+        /// capped by the live `PoolValue`.
+        #[pallet::call_index(2)]
+        #[pallet::weight(<T as Config>::WeightInfo::spend())]
+        pub fn spend(
+            origin: OriginFor<T>,
+            proof_a: [u8; 48],
+            proof_b: [u8; 96],
+            proof_c: [u8; 48],
+            commitment: Commitment,
+            nullifier: Nullifier,
+            merkle_root: [u8; 32],
+            value_balance: u64,
+            recipient: Option<T::AccountId>,
+            output_commitment: Option<Commitment>,
+        ) -> DispatchResult
+        where
+            BalanceOf<T>: TryFrom<u64>,
+        {
+            let _who = ensure_signed(origin)?;
+
+            // The referenced root must be one this pallet produced.
+            ensure!(
+                Self::is_known_root(&merkle_root),
+                Error::<T>::UnknownMerkleRoot
+            );
+            // The nullifier must be unspent.
+            ensure!(
+                !<Nullifiers<T>>::contains_key(nullifier),
+                Error::<T>::NullifierAlreadySpent
+            );
+            // The spent commitment must be a live pool commitment.
+            ensure!(
+                <NoteCommitments<T>>::get().contains(&commitment),
+                Error::<T>::UnknownCommitment
+            );
+
+            // Reconstruct the circuit's public inputs (order:
+            // value_balance, cm_lo, cm_hi, nf_lo, nf_hi, merkle_root) and verify.
+            let cm_lo = Self::half_le(&commitment[0..16]);
+            let cm_hi = Self::half_le(&commitment[16..32]);
+            let nf_lo = Self::half_le(&nullifier[0..16]);
+            let nf_hi = Self::half_le(&nullifier[16..32]);
+            let root_s = Scalar::from_bytes(&merkle_root)
+                .into_option()
+                .ok_or(Error::<T>::UnknownMerkleRoot)?;
+            let scalars = sp_std::vec![
+                Scalar::from(value_balance),
+                cm_lo,
+                cm_hi,
+                nf_lo,
+                nf_hi,
+                root_s,
+            ];
+            let vk = groth16::note_spend_key();
+            let proof = groth16::proof_from_bytes(&proof_a, &proof_b, &proof_c)
+                .ok_or(Error::<T>::InvalidProof)?;
+            groth16::verify(&vk, &scalars, &proof).map_err(|_| Error::<T>::InvalidProof)?;
+
+            // Effect: burn the nullifier.
+            <Nullifiers<T>>::insert(nullifier, ());
+
+            match output_commitment {
+                Some(out) => {
+                    // Shielded → shielded.
+                    ensure!(value_balance == 0, Error::<T>::NonZeroValueBalance);
+                    let pool = <NoteCommitments<T>>::get();
+                    ensure!(
+                        (pool.len() as u32) < T::MaxCommitments::get(),
+                        Error::<T>::PoolFull
+                    );
+                    ensure!(!pool.contains(&out), Error::<T>::DuplicateCommitment);
+                    let position = <NextPosition<T>>::get();
+                    let mut new_pool = pool;
+                    new_pool.try_push(out).map_err(|_| Error::<T>::PoolFull)?;
+                    <NoteCommitments<T>>::put(new_pool);
+                    let root = Self::append_to_tree(&out)?;
+                    Self::deposit_event(Event::<T>::NoteAdded { cm: out, position });
+                    Self::deposit_event(Event::<T>::RootRecorded { root });
+                    Self::deposit_event(Event::<T>::Spent {
+                        nullifier,
+                        value_out: 0,
+                        merkle_root,
+                    });
+                }
+                None => {
+                    // Shielded → transparent.
+                    let to = recipient.ok_or(Error::<T>::MissingRecipient)?;
+                    ensure!(value_balance > 0, Error::<T>::ZeroValueOut);
+                    let amount: BalanceOf<T> = value_balance
+                        .try_into()
+                        .map_err(|_| Error::<T>::ValueTooLarge)?;
+                    let pooled: u128 = <PoolValue<T>>::get().unique_saturated_into();
+                    ensure!(
+                        pooled >= value_balance as u128,
+                        Error::<T>::InsufficientPoolValue
+                    );
+                    T::Currency::transfer(
+                        &Self::account_id(),
+                        &to,
+                        amount,
+                        ExistenceRequirement::AllowDeath,
+                    )
+                    .map_err(|_| Error::<T>::TransferFailed)?;
+                    <PoolValue<T>>::mutate(|p| *p = p.saturating_sub(amount));
+                    Self::deposit_event(Event::<T>::Spent {
+                        nullifier,
+                        value_out: value_balance,
+                        merkle_root,
+                    });
+                }
+            }
             Ok(())
         }
     }
@@ -339,6 +556,76 @@ pub mod pallet {
         pub fn pool_value() -> BalanceOf<T> {
             <PoolValue<T>>::get()
         }
+
+        /// Whether `root` is a currently accepted commitment-set Merkle root.
+        pub fn is_known_root(root: &[u8; 32]) -> bool {
+            <RootHistory<T>>::get().contains(root)
+        }
+
+        /// Read a 16-byte little-endian half into a BLS scalar as a 32-byte LE
+        /// field element (byte 0 = LSB). Mirrors the circuit's `digest_halves`,
+        /// which binds the commitment/nullifier digests to these halves.
+        fn half_le(bytes: &[u8]) -> Scalar {
+            let mut b = [0u8; 32];
+            let n = bytes.len().min(16);
+            b[..n].copy_from_slice(&bytes[..n]);
+            Scalar::from_bytes(&b).into_option().unwrap_or(Scalar::ZERO)
+        }
+
+        /// Merkle combiner `parent = l + r·K` (matches the circuit's gadget).
+        fn merkle_combine(l: &Scalar, r: &Scalar) -> Scalar {
+            *l + *r * Scalar::from(MERKLE_K)
+        }
+
+        /// The commitment-set tree leaf for `cm` = its low 128 bits, as the
+        /// circuit's Merkle gate uses (`cm_lo`).
+        fn leaf_of(cm: &Commitment) -> Scalar {
+            Self::half_le(&cm[0..16])
+        }
+
+        /// Append `cm` to the fixed-depth commitment-set tree at `NextPosition`,
+        /// recompute the root, advance `NextPosition`, and record the root in the
+        /// bounded [`RootHistory`] ring. Returns the new root's canonical bytes.
+        ///
+        /// The tree law is `parent = left + right·K` (left = child on the side
+        /// given by the position bit; bit 0 = left child). Empty subtrees are 0.
+        pub fn append_to_tree(cm: &Commitment) -> Result<[u8; 32], DispatchError> {
+            let leaf = Self::leaf_of(cm);
+            let mut idx = <NextPosition<T>>::get();
+            let mut cur = leaf;
+            let mut filled = <FilledSubtrees<T>>::get();
+            while (filled.len() as u32) < MERKLE_DEPTH {
+                filled
+                    .try_push([0u8; 32])
+                    .map_err(|_| Error::<T>::PoolFull)?;
+            }
+            for level in 0..MERKLE_DEPTH as usize {
+                if idx & 1 == 0 {
+                    // Running node is the LEFT child; its (empty) right sibling
+                    // is 0, so parent = cur + 0·K = cur. Remember cur as this
+                    // level's left subtree for a future right child.
+                    filled[level] = cur.to_bytes();
+                } else {
+                    // Running node is the RIGHT child: parent = left + cur·K.
+                    let left = Scalar::from_bytes(&filled[level])
+                        .into_option()
+                        .unwrap_or(Scalar::ZERO);
+                    cur = Self::merkle_combine(&left, &cur);
+                }
+                idx >>= 1;
+            }
+            <FilledSubtrees<T>>::put(filled);
+            <NextPosition<T>>::put(<NextPosition<T>>::get().saturating_add(1));
+            let root = cur.to_bytes();
+            <CurrentRoot<T>>::put(root);
+            let mut hist = <RootHistory<T>>::get();
+            if hist.len() as u32 >= ROOT_HISTORY_SIZE {
+                let _ = hist.remove(0);
+            }
+            let _ = hist.try_push(root);
+            <RootHistory<T>>::put(hist);
+            Ok(root)
+        }
     }
 }
 
@@ -352,11 +639,14 @@ mod tests {
     use sp_core::H256;
     use sp_runtime::{
         traits::{BlakeTwo256, IdentityLookup},
-        BuildStorage,
+        BuildStorage, DispatchResult,
     };
 
     use crate::pallet as local_shield;
-    use crate::pallet::{NextPosition, NoteCommitments, Nullifiers, PoolValue};
+    use crate::pallet::{
+        CurrentRoot, FilledSubtrees, NextPosition, NoteCommitments, Nullifiers, PoolValue,
+        RootHistory,
+    };
 
     type Block = frame_system::mocking::MockBlock<Test>;
     type Balance = u128;
@@ -427,13 +717,52 @@ mod tests {
 
     const ALICE: u64 = 1;
     const BOB: u64 = 2;
+    const CAROL: u64 = 3;
+
+    // ---- Note-spend circuit fixtures --------------------------------------
+    //
+    // Real proofs produced off-chain by the EXISTING gpn-shield note-spend
+    // circuit (`gpn_shield note-spend-prove`), seed `testnet-crs-note-spend-v0`,
+    // for a note at pool position 0 with value 500, addr = [0x22;32], and the
+    // deterministic trapdoor `derive_rcm(500, addr, 0)`. Public inputs are
+    // [value_balance, cm_lo, cm_hi, nf_lo, nf_hi, merkle_root]. Because the note
+    // is the single leaf of an empty depth-32 tree, its root equals its leaf
+    // (`cm_lo`).
+    const FIX_ADDR: [u8; 32] = [0x22u8; 32];
+    const FIX_RCM_HEX: &str = "e84ea2145e2ea516abb214b83fadd453e9d68afd5a20545a8b7daf5014a81126";
+    const FIX_CM_HEX: &str = "eb7bbf78dc4eaf9cf42196a7567b28fb6b6968ca68f7a940b80b5db734f26c45";
+    const FIX_NF_HEX: &str = "c838f269f82e24cfc38bf68c8f4c28f7b037aa58ddad69772771effd5bc28cae";
+    const FIX_ROOT_HEX: &str = "eb7bbf78dc4eaf9cf42196a7567b28fb00000000000000000000000000000000";
+    // Transparent spend fixture (value_balance = 500).
+    const FIX_T_A: &str = "a195f1e0705d23d6d377933b80c05adc98ee01c2ef0e17bfd790340e5f25902c21436747d293d9b3d0e09babc801b04c";
+    const FIX_T_B: &str = "aa41fc72088ca275c8fa3834a136edba054d4d12eaf04a6fa88ad11c55ac1d1445581a3c19693c60570e819a5a0cb26111b20f9dbc0af4c3e4a62ed36cf1516fe3f22f42c50b54c69dfd8d8d64f0f0dcaeb6c95adddbebe53697e374c9f0b2db";
+    const FIX_T_C: &str = "8be6a29619bf056b8afe7765ec41f32e8080ea96c637fbd614e2b5c0378a3a1c02bc98e3e4fe967cf4e3595e4d96e691";
+    // Shielded→shielded fixture (value_balance = 0), same note.
+    const FIX_S_A: &str = "a195f1e0705d23d6d377933b80c05adc98ee01c2ef0e17bfd790340e5f25902c21436747d293d9b3d0e09babc801b04c";
+    const FIX_S_B: &str = "b310fe0e5df9246bcf1b83dde8d48c965429e56315ba4ac1928fc1a7688deb8e731b1805c668700a618ad9a67c5d58c21366ee0ad99238221901571acf4cbd12fd50dbfa46f7364d4c7344d8e255ebf724f29ffb5c8a7a865535ad50f3879280";
+    const FIX_S_C: &str = "8871292674f794fe2ed8ef4fb22658fccd32a3a19f2209e9eb09372989349602fd63f0d314f33f55ba1c56460a140272";
+
+    fn hexv(s: &str) -> Vec<u8> {
+        (0..s.len() / 2)
+            .map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap())
+            .collect()
+    }
+    fn a48(s: &str) -> [u8; 48] {
+        hexv(s).try_into().unwrap()
+    }
+    fn a96(s: &str) -> [u8; 96] {
+        hexv(s).try_into().unwrap()
+    }
+    fn a32(s: &str) -> [u8; 32] {
+        hexv(s).try_into().unwrap()
+    }
 
     pub fn new_test_ext() -> sp_io::TestExternalities {
         let mut t = frame_system::GenesisConfig::<Test>::default()
             .build_storage()
             .unwrap();
         pallet_balances::GenesisConfig::<Test> {
-            balances: vec![(ALICE, 10_000), (BOB, 10_000)],
+            balances: vec![(ALICE, 10_000), (BOB, 10_000), (CAROL, 10_000)],
             dev_accounts: None,
         }
         .assimilate_storage(&mut t)
@@ -602,9 +931,17 @@ mod tests {
             let cm = NoteCommitments::<Test>::get()[0];
             let rcm = note::derive_rcm(500, &ADDR_A, 0);
             assert_eq!(cm, note::note_commitment(500, &rcm, &ADDR_A));
-            // Nullifier recorded for that position.
-            assert!(Nullifiers::<Test>::contains_key(note::nullifier(&rcm, 0)));
-            assert!(ShieldPallet::is_nullifier_spent(&note::nullifier(&rcm, 0)));
+            // Nullifiers are burned at SPEND, not at deposit — none recorded yet.
+            assert!(!Nullifiers::<Test>::contains_key(note::nullifier(&rcm, 0)));
+            assert!(!ShieldPallet::is_nullifier_spent(&note::nullifier(&rcm, 0)));
+            // A root was recorded and is current.
+            assert_eq!(ShieldPallet::pool_size(), 1);
+            assert!(!RootHistory::<Test>::get().is_empty());
+            assert_eq!(
+                CurrentRoot::<Test>::get(),
+                *RootHistory::<Test>::get().last().unwrap()
+            );
+            assert!(!FilledSubtrees::<Test>::get().is_empty());
         });
     }
 
@@ -665,4 +1002,275 @@ mod tests {
             assert_eq!(result, Err(Error::<Test>::PoolFull.into()));
         });
     }
+
+    // ---- Note-spend path --------------------------------------------------
+
+    /// Deposit the canonical fixture note (value 500, addr `FIX_ADDR`, nonce 0)
+    /// so its commitment/root match the off-chain proof fixtures.
+    fn deposit_fixture_note() {
+        ShieldPallet::deposit(RuntimeOrigin::signed(ALICE), 500, FIX_ADDR, 0).unwrap();
+    }
+
+    fn transparent_spend() -> DispatchResult {
+        ShieldPallet::spend(
+            RuntimeOrigin::signed(ALICE),
+            a48(FIX_T_A),
+            a96(FIX_T_B),
+            a48(FIX_T_C),
+            a32(FIX_CM_HEX),
+            a32(FIX_NF_HEX),
+            a32(FIX_ROOT_HEX),
+            500,
+            Some(BOB),
+            None,
+        )
+    }
+
+    fn shielded_spend(output: [u8; 32]) -> DispatchResult {
+        ShieldPallet::spend(
+            RuntimeOrigin::signed(ALICE),
+            a48(FIX_S_A),
+            a96(FIX_S_B),
+            a48(FIX_S_C),
+            a32(FIX_CM_HEX),
+            a32(FIX_NF_HEX),
+            a32(FIX_ROOT_HEX),
+            0,
+            None,
+            Some(output),
+        )
+    }
+
+    #[test]
+    fn test_note_scheme_matches_circuit_fixture() {
+        // Cross-crate consistency: the pallet's BLAKE2s note scheme must produce
+        // exactly the commitment/nullifier the gpn-shield circuit committed to.
+        let rcm = note::derive_rcm(500, &FIX_ADDR, 0);
+        assert_eq!(rcm, a32(FIX_RCM_HEX));
+        assert_eq!(note::note_commitment(500, &rcm, &FIX_ADDR), a32(FIX_CM_HEX));
+        assert_eq!(note::nullifier(&rcm, 0), a32(FIX_NF_HEX));
+    }
+
+    #[test]
+    fn test_deposit_records_circuit_fixture_root() {
+        new_test_ext().execute_with(|| {
+            deposit_fixture_note();
+            // The single-leaf tree root equals the leaf (cm_lo).
+            assert!(ShieldPallet::is_known_root(&a32(FIX_ROOT_HEX)));
+            assert_eq!(CurrentRoot::<Test>::get(), a32(FIX_ROOT_HEX));
+        });
+    }
+
+    #[test]
+    fn test_spend_transparent_releases_value() {
+        new_test_ext().execute_with(|| {
+            deposit_fixture_note();
+            let bob_before = pallet_balances::Pallet::<Test>::free_balance(BOB);
+            assert_eq!(PoolValue::<Test>::get(), 500);
+
+            transparent_spend().unwrap();
+
+            // Value released to the recipient; pool value drained.
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(BOB),
+                bob_before + 500
+            );
+            assert_eq!(PoolValue::<Test>::get(), 0);
+            // Nullifier burned exactly now (not at deposit).
+            assert!(ShieldPallet::is_nullifier_spent(&a32(FIX_NF_HEX)));
+        });
+    }
+
+    #[test]
+    fn test_spend_rejects_double_spend() {
+        new_test_ext().execute_with(|| {
+            deposit_fixture_note();
+            transparent_spend().unwrap();
+            // Second spend of the same nullifier is rejected.
+            assert_eq!(
+                transparent_spend(),
+                Err(Error::<Test>::NullifierAlreadySpent.into())
+            );
+        });
+    }
+
+    #[test]
+    fn test_spend_rejects_unknown_root() {
+        new_test_ext().execute_with(|| {
+            deposit_fixture_note();
+            let r = ShieldPallet::spend(
+                RuntimeOrigin::signed(ALICE),
+                a48(FIX_T_A),
+                a96(FIX_T_B),
+                a48(FIX_T_C),
+                a32(FIX_CM_HEX),
+                a32(FIX_NF_HEX),
+                [0xEEu8; 32], // not a root we produced
+                500,
+                Some(BOB),
+                None,
+            );
+            assert_eq!(r, Err(Error::<Test>::UnknownMerkleRoot.into()));
+        });
+    }
+
+    #[test]
+    fn test_spend_rejects_unknown_commitment() {
+        new_test_ext().execute_with(|| {
+            deposit_fixture_note();
+            let mut cm = a32(FIX_CM_HEX);
+            cm[0] ^= 0xFF; // not in the pool
+            let r = ShieldPallet::spend(
+                RuntimeOrigin::signed(ALICE),
+                a48(FIX_T_A),
+                a96(FIX_T_B),
+                a48(FIX_T_C),
+                cm,
+                a32(FIX_NF_HEX),
+                a32(FIX_ROOT_HEX),
+                500,
+                Some(BOB),
+                None,
+            );
+            assert_eq!(r, Err(Error::<Test>::UnknownCommitment.into()));
+        });
+    }
+
+    #[test]
+    fn test_spend_rejects_bad_proof() {
+        new_test_ext().execute_with(|| {
+            deposit_fixture_note();
+            let r = ShieldPallet::spend(
+                RuntimeOrigin::signed(ALICE),
+                a48(FIX_T_A),
+                a96(FIX_T_B),
+                a48(FIX_T_C),
+                a32(FIX_CM_HEX),
+                a32(FIX_NF_HEX),
+                a32(FIX_ROOT_HEX),
+                499, // wrong public value_balance vs the proof
+                Some(BOB),
+                None,
+            );
+            assert_eq!(r, Err(Error::<Test>::InvalidProof.into()));
+        });
+    }
+
+    #[test]
+    fn test_spend_shielded_to_shielded_appends_output() {
+        new_test_ext().execute_with(|| {
+            deposit_fixture_note();
+            let out = [0xABu8; 32];
+            let size_before = ShieldPallet::pool_size();
+            let pos_before = NextPosition::<Test>::get();
+
+            shielded_spend(out).unwrap();
+
+            // Output commitment appended; pool value unchanged (no release).
+            assert_eq!(ShieldPallet::pool_size(), size_before + 1);
+            assert_eq!(NextPosition::<Test>::get(), pos_before + 1);
+            assert!(NoteCommitments::<Test>::get().contains(&out));
+            assert_eq!(PoolValue::<Test>::get(), 500);
+            assert!(ShieldPallet::is_nullifier_spent(&a32(FIX_NF_HEX)));
+        });
+    }
+
+    #[test]
+    fn test_spend_shielded_rejects_missing_output() {
+        new_test_ext().execute_with(|| {
+            deposit_fixture_note();
+            // value_balance = 0 but no output and no recipient → MissingRecipient
+            // (falls into the transparent branch).
+            let r = ShieldPallet::spend(
+                RuntimeOrigin::signed(ALICE),
+                a48(FIX_S_A),
+                a96(FIX_S_B),
+                a48(FIX_S_C),
+                a32(FIX_CM_HEX),
+                a32(FIX_NF_HEX),
+                a32(FIX_ROOT_HEX),
+                0,
+                None,
+                None,
+            );
+            assert_eq!(r, Err(Error::<Test>::MissingRecipient.into()));
+        });
+    }
+
+    #[test]
+    fn test_spend_shielded_rejects_nonzero_value_balance() {
+        new_test_ext().execute_with(|| {
+            deposit_fixture_note();
+            // Transparent proof (value_balance = 500) but asking for a shielded
+            // output → NonZeroValueBalance.
+            let r = ShieldPallet::spend(
+                RuntimeOrigin::signed(ALICE),
+                a48(FIX_T_A),
+                a96(FIX_T_B),
+                a48(FIX_T_C),
+                a32(FIX_CM_HEX),
+                a32(FIX_NF_HEX),
+                a32(FIX_ROOT_HEX),
+                500,
+                None,
+                Some([0xCDu8; 32]),
+            );
+            assert_eq!(r, Err(Error::<Test>::NonZeroValueBalance.into()));
+        });
+    }
+
+    #[test]
+    fn test_spend_rejects_zero_value_out() {
+        new_test_ext().execute_with(|| {
+            deposit_fixture_note();
+            // Shielded proof (value_balance = 0) with a recipient but no output.
+            let r = ShieldPallet::spend(
+                RuntimeOrigin::signed(ALICE),
+                a48(FIX_S_A),
+                a96(FIX_S_B),
+                a48(FIX_S_C),
+                a32(FIX_CM_HEX),
+                a32(FIX_NF_HEX),
+                a32(FIX_ROOT_HEX),
+                0,
+                Some(BOB),
+                None,
+            );
+            assert_eq!(r, Err(Error::<Test>::ZeroValueOut.into()));
+        });
+    }
+
+    #[test]
+    fn test_spend_enforces_pool_value_cap() {
+        new_test_ext().execute_with(|| {
+            deposit_fixture_note();
+            // Force pool value below the release amount: the transparent release
+            // must be rejected (value conservation).
+            PoolValue::<Test>::put(100);
+            assert_eq!(
+                transparent_spend(),
+                Err(Error::<Test>::InsufficientPoolValue.into())
+            );
+        });
+    }
+
+    #[test]
+    fn test_root_history_is_bounded_and_note_stays_spendable() {
+        new_test_ext().execute_with(|| {
+            // Deposit the fixture note; its root is recorded.
+            deposit_fixture_note();
+            let fixture_root = a32(FIX_ROOT_HEX);
+            assert!(ShieldPallet::is_known_root(&fixture_root));
+            // More deposits must not evict the original root while under the cap,
+            // so the note remains spendable against its historical root.
+            for i in 0..5u64 {
+                ShieldPallet::deposit(RuntimeOrigin::signed(CAROL), 10, [0x33u8; 32], i).unwrap();
+            }
+            assert!(ShieldPallet::is_known_root(&fixture_root));
+            // And that historical-root spend still verifies.
+            transparent_spend().unwrap();
+        });
+    }
+
+    // ---- Note-spend path --------------------------------------------------
 }

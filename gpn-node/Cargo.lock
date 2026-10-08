@@ -5958,6 +5958,7 @@ dependencies = [
 name = "pallet-shielded-pool"
 version = "0.1.0"
 dependencies = [
+ "blake2 0.10.6",
  "bls12_381",
  "ff",
  "frame-benchmarking",

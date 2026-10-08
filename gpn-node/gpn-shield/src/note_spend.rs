@@ -27,7 +27,7 @@ use ff::Field;
 
 use crate::blake2s::{alloc_bytes32, digest_to_bytes, note_commitment_gate, nullifier_gate};
 use crate::gadget::{
-    into_r1cs_with_domain, merkle_combine, merkle_membership_gate, Word, WordCircuit,
+    into_r1cs_with_domain, merkle_combine, merkle_membership_gate_witnessed, Word, WordCircuit,
 };
 use crate::qap::R1CS;
 
@@ -52,6 +52,64 @@ pub struct NoteSpend {
 /// Number of public variables including the constant `1`.
 /// Public inputs (excluding const): value_balance, cm_lo, cm_hi, nf_lo, nf_hi, merkle_root.
 pub const NUM_PUBLIC: usize = 7;
+
+/// Fixed Merkle-tree depth for the on-chain commitment-set tree.
+///
+/// The note-spend circuit allocates one sibling + one parent variable per tree
+/// level, so its *shape* (and therefore its Groth16 verification key) depends on
+/// the path length. To have a single on-chain key, the tree depth is fixed here
+/// and **must match** `pallet-shielded-pool`'s `MERKLE_DEPTH`.
+pub const MERKLE_DEPTH: usize = 32;
+
+/// A canonical note used to derive the on-chain note-spend verification key and
+/// as a reproducible proof fixture. It sits at pool position 0 with an
+/// all-empty (zero-sibling) path of [`MERKLE_DEPTH`] levels, so its Merkle root
+/// equals its leaf (`cm_lo`) — i.e. a single-commitment tree.
+pub fn canonical_note() -> NoteSpend {
+    NoteSpend {
+        value: 500,
+        value_out: 0, // full transparent spend → value_balance = 500
+        rcm: derive_rcm(500, &[0x22u8; 32], 0),
+        addr: [0x22u8; 32],
+        position: 0,
+        // A leaf at pool position 0 is the LEFT child at every level of an
+        // otherwise-empty tree, so every sibling is the empty subtree (0) and
+        // is the *right* child → `is_right = true`. The root then equals the
+        // leaf (`cm_lo`).
+        path: vec![(Scalar::ZERO, true); MERKLE_DEPTH],
+    }
+}
+
+/// Deterministic note trapdoor, **byte-identical** to
+/// `pallet-shielded-pool::note::derive_rcm` (blake2s-256). Kept here so the
+/// client prover can reproduce the exact note a deposit minted on-chain.
+pub fn derive_rcm(value: u128, addr: &[u8; 32], nonce: u64) -> [u8; 32] {
+    let mut pre = Vec::with_capacity(8 + 16 + 32 + 8);
+    pre.extend_from_slice(b"gpn/rcm0");
+    pre.extend_from_slice(&value.to_be_bytes());
+    pre.extend_from_slice(addr);
+    pre.extend_from_slice(&nonce.to_be_bytes());
+    crate::blake2s::blake2s_256_ref(&pre)
+}
+
+/// The 32-byte commitment digest for a note (matches the circuit's gate #2).
+pub fn commitment_bytes(note: &NoteSpend) -> [u8; 32] {
+    let mut p = Vec::with_capacity(8 + 16 + 32 + 32);
+    p.extend_from_slice(crate::blake2s::CM_DOMAIN);
+    p.extend_from_slice(&(note.value as u128).to_be_bytes());
+    p.extend_from_slice(&note.rcm);
+    p.extend_from_slice(&note.addr);
+    crate::blake2s::blake2s_256_ref(&p)
+}
+
+/// The 32-byte nullifier digest for a note (matches the circuit's gate #3).
+pub fn nullifier_bytes(note: &NoteSpend) -> [u8; 32] {
+    let mut p = Vec::with_capacity(8 + 32 + 8);
+    p.extend_from_slice(crate::blake2s::NF_DOMAIN);
+    p.extend_from_slice(&note.rcm);
+    p.extend_from_slice(&note.position.to_be_bytes());
+    crate::blake2s::blake2s_256_ref(&p)
+}
 
 /// Build the note-spend R1CS plus the full witness assignment.
 ///
@@ -117,18 +175,21 @@ pub fn note_spend_r1cs(note: &NoteSpend) -> (R1CS, Vec<Scalar>) {
     c.values[nf_lo_idx] = nf_lo;
     c.values[nf_hi_idx] = nf_hi;
 
-    let path_vars: Vec<(usize, bool)> = note
+    let path_vars: Vec<(usize, usize)> = note
         .path
         .iter()
-        .map(|(sib, is_right)| (c.alloc(*sib), *is_right))
+        .map(|(sib, is_right)| {
+            let sib_var = c.alloc(*sib);
+            // Side is a WITNESS bit so the circuit shape is path-independent
+            // (one fixed on-chain VK for a note at any tree position).
+            let side_var = c.alloc(if *is_right { Scalar::ONE } else { Scalar::ZERO });
+            c.builder.bool_gate(side_var);
+            (sib_var, side_var)
+        })
         .collect();
-    // Returns every intermediate parent var (root-ward); witness values for
-    // these are NOT auto-filled (merkle_membership_gate allocs via
-    // `builder.alloc`), so backfill them from the off-chain combiner.
-    let merkle_nodes = merkle_membership_gate(&mut c.builder, cm_lo_idx, root_idx, &path_vars);
-    backfill_merkle_witness(&mut c, cm_lo_idx, &note.path, &merkle_nodes);
+    let _merkle_nodes = merkle_membership_gate_witnessed(&mut c, cm_lo_idx, root_idx, &path_vars);
 
-    // Root witness = top of the (already-backfilled) path chain.
+    // Root witness = top of the path chain (mirrors the gate's combiner).
     let root = merkle_root_from_path(cm_lo, &note.path);
     c.values[root_idx] = root;
 
@@ -207,7 +268,7 @@ fn digest_halves(d: &[u8; 32]) -> (Scalar, Scalar) {
 }
 
 /// Compute the Merkle root from a leaf and a root-ward path (off-chain mirror
-/// of the `merkle_membership_gate` combiner).
+/// of the `merkle_membership_gate_witnessed` combiner).
 pub fn merkle_root_from_path(leaf: Scalar, path: &[(Scalar, bool)]) -> Scalar {
     let mut node = leaf;
     for (sib, is_right) in path {
@@ -218,35 +279,6 @@ pub fn merkle_root_from_path(leaf: Scalar, path: &[(Scalar, bool)]) -> Scalar {
         };
     }
     node
-}
-
-/// Backfill the witness values of the Merkle parent vars that
-/// `merkle_membership_gate` allocated directly via `builder.alloc` (so they are
-/// missing from `WordCircuit.values`). `merkle_nodes[0]` is the leaf; node `i+1`
-/// is the parent at path level `i`.
-fn backfill_merkle_witness(
-    c: &mut WordCircuit,
-    leaf_idx: usize,
-    path: &[(Scalar, bool)],
-    merkle_nodes: &[usize],
-) {
-    let mut node_val = c.values[leaf_idx];
-    for (i, (sib, is_right)) in path.iter().enumerate() {
-        node_val = if *is_right {
-            merkle_combine(&node_val, sib)
-        } else {
-            merkle_combine(sib, &node_val)
-        };
-        // The parent vars are appended past the current end of `values`
-        // (merkle_membership_gate allocs them via builder.alloc), in the same
-        // level-0..n-1 order — so push rather than index-assign.
-        assert_eq!(
-            merkle_nodes[i + 1],
-            c.values.len(),
-            "merkle parents must append in order"
-        );
-        c.values.push(node_val);
-    }
 }
 
 #[cfg(test)]
