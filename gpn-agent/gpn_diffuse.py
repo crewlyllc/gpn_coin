@@ -88,6 +88,46 @@ def _load_text_encoder_4bit(repo, dtype):
     )
 
 
+def _pin_text_encoder_device(pipe, exec_device):
+    """Keep the text-encoder inputs on the text-encoder's *own* device.
+
+    When the 4-bit T5 lives on CPU but the transformer/VAE run on cuda, the
+    stock LTXPipeline moves the tokenized prompt inputs (input_ids /
+    attention_mask) to the *execution* device (cuda) before calling the
+    CPU-resident encoder, so the embedding `index_select` gets an index on
+    cuda:0 with weights on cpu ->
+        RuntimeError: Expected all tensors to be on the same device ...
+
+    Wrap `_get_t5_prompt_embeds` so the encoder is always invoked on its own
+    device, then hand the resulting embeddings/attention_mask back on the
+    execution device (where the pipeline expects them). Small + reversible:
+    restores the original method on the instance afterwards is not needed since
+    the process runs one job and exits.
+    """
+    import types
+    te_device = next(pipe.text_encoder.parameters()).device
+    if te_device.type == "cpu" and torch_device_type(exec_device) == "cpu":
+        return  # already aligned (CPU-only host)
+    orig = pipe._get_t5_prompt_embeds
+
+    def _wrapped(self, prompt=None, num_videos_per_prompt=1,
+                 max_sequence_length=128, device=None, dtype=None):
+        embeds, mask = orig(
+            prompt=prompt,
+            num_videos_per_prompt=num_videos_per_prompt,
+            max_sequence_length=max_sequence_length,
+            device=te_device,
+            dtype=dtype,
+        )
+        return embeds.to(exec_device), mask.to(exec_device)
+
+    pipe._get_t5_prompt_embeds = types.MethodType(_wrapped, pipe)
+
+
+def torch_device_type(device):
+    return device.type if hasattr(device, "type") else str(device).split(":")[0]
+
+
 def gen_video(req):
     # Video diffusion is memory-hungry (T5-XXL text encoder + 3D transformer).
     # Plain "load everything in fp16 onto the GPU" OOMs on an 8 GB card; use the
@@ -140,6 +180,9 @@ def gen_video(req):
             if name == "text_encoder" or not isinstance(comp, torch.nn.Module):
                 continue
             comp.to("cuda", dtype=dtype if comp.dtype.is_floating_point else None)
+        # Prompt inputs must reach the CPU text encoder on CPU (not cuda)
+        # while transformer/VAE inputs stay on cuda. See _pin_text_encoder_device.
+        _pin_text_encoder_device(pipe, torch.device("cuda"))
     else:
         pipe.to("cuda", dtype=dtype)
 
