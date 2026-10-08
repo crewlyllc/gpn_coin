@@ -1,0 +1,68 @@
+name: Windows video-stack install
+
+# Installs the GPN VIDEO diffusion stack on the self-hosted Windows box:
+# a Python 3.12 venv (torch has no 3.14 wheels yet; box ships 3.14) + torch
+# (CUDA 12.8 / cu128 — required for the RTX 5070 Ti Blackwell sm_120; the older
+# cu121 build has no sm_120 kernels) + diffusers/transformers/etc, and fetches
+# gpn_diffuse.py into C:\gpn. Idempotent: skips work already done.
+# Starts nothing persistent and writes no wallets.
+on:
+  workflow_dispatch:
+    inputs:
+      torch_index:
+        description: "torch wheel index URL (cu128 for Blackwell sm_120)"
+        default: "https://download.pytorch.org/whl/cu128"
+
+jobs:
+  install:
+    runs-on: self-hosted
+    timeout-minutes: 120
+    steps:
+      - name: checkout repo (for gpn_diffuse.py)
+        uses: actions/checkout@v4
+
+      - name: install python 3.12 venv + torch + diffusers
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $venv = 'C:\gpn\venv'
+          $py   = Join-Path $venv 'Scripts\python.exe'
+
+          if (-not (Test-Path $py)) {
+            Write-Host "== creating Python 3.12 venv via uv =="
+            & python -m pip install --upgrade --quiet uv
+            $uv = Join-Path (Split-Path (Get-Command python).Source) 'Scripts\uv.exe'
+            if (-not (Test-Path $uv)) { $uv = 'uv' }
+            Write-Host "uv: $uv"
+            & $uv venv --python 3.12 $venv
+            if ($LASTEXITCODE -ne 0) { throw "uv venv failed ($LASTEXITCODE)" }
+          } else { Write-Host "venv already present at $venv" }
+
+          & $py --version
+          & $py -m pip install --upgrade --quiet pip
+
+          Write-Host "== installing torch (${{ inputs.torch_index }}) =="
+          & $py -c "import torch" 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            & $py -m pip install torch --index-url '${{ inputs.torch_index }}'
+            if ($LASTEXITCODE -ne 0) { throw "torch install failed ($LASTEXITCODE)" }
+          } else { Write-Host "torch already importable" }
+
+          Write-Host "== installing diffusers stack =="
+          & $py -m pip install --quiet diffusers transformers accelerate safetensors bitsandbytes imageio imageio-ffmpeg
+          if ($LASTEXITCODE -ne 0) { throw "diffusers stack install failed ($LASTEXITCODE)" }
+
+      - name: fetch gpn_diffuse.py into C:\gpn
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path 'C:\gpn' | Out-Null
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'gpn-agent\gpn_diffuse.py') 'C:\gpn\gpn_diffuse.py' -Force
+          Write-Host "copied gpn_diffuse.py -> C:\gpn\gpn_diffuse.py"
+
+      - name: verify CUDA
+        shell: powershell
+        run: |
+          $py = 'C:\gpn\venv\Scripts\python.exe'
+          & $py -c "import torch; print('torch', torch.__version__); print('cuda_available', torch.cuda.is_available()); print('device', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'no-cuda'); print('cap', torch.cuda.get_device_capability(0) if torch.cuda.is_available() else '')"
+          & $py -c "import diffusers, transformers; print('diffusers', diffusers.__version__, 'transformers', transformers.__version__)"
