@@ -57,6 +57,12 @@ use crate::qap::R1CS;
 /// Version tag embedded in every CRS file and contribution record.
 pub const CRS_VERSION: u32 = 1;
 
+/// Sentinel `seeded_from` value written when a contribution used OS entropy
+/// (i.e. the contributor's secret randomness, which is *not* reproducible from
+/// public data). Such a step cannot be re-derived by a verifier and therefore
+/// needs a pairing-based contribution proof; see [`verify_chain`].
+pub const SEEDED_FROM_OS: &str = "os-entropy";
+
 // ===========================================================================
 // Circuit registry
 // ===========================================================================
@@ -678,6 +684,104 @@ pub fn verify(crs: &CeremonyCrs, records: &[ContributionRecord]) -> Result<(), S
     Ok(())
 }
 
+/// Recompute one contribution step from **public data** and require
+/// byte-equality.
+///
+/// Given the input CRS `prev`, the published `record`, and the output CRS
+/// `next`, this re-derives the contribution from the record's `seeded_from`
+/// value (a public, un-biasable beacon) and requires the result to equal the
+/// published output byte-for-byte. This is what makes a transcript
+/// *sound*: [`verify`] alone only checks that the record digests form a
+/// self-consistent chain ending at the final CRS, which a malicious
+/// coordinator can fabricate.
+///
+/// **Only defined for publicly-seeded contributions.** An OS-entropy
+/// contribution (`seeded_from == `[`SEEDED_FROM_OS`]) cannot be reproduced
+/// without the contributor's secret, so it returns an error here; verifying
+/// such a step requires a pairing-based proof of correct re-randomisation
+/// (out of scope for this tool — see the design doc).
+pub fn verify_contribution_step(
+    prev: &CeremonyCrs,
+    record: &ContributionRecord,
+    next: &CeremonyCrs,
+) -> Result<(), String> {
+    if record.kind != "contribute" {
+        return Err(format!(
+            "record kind '{}' is not a contribution",
+            record.kind
+        ));
+    }
+    if prev.circuit != next.circuit || prev.circuit != record.circuit {
+        return Err("circuit mismatch across the step".into());
+    }
+    if record.parent != prev.digest_hex() {
+        return Err("record parent does not match the input CRS digest".into());
+    }
+    if record.digest != next.digest_hex() {
+        return Err("record digest does not match the output CRS digest".into());
+    }
+    if record.seeded_from == SEEDED_FROM_OS || record.seeded_from.is_empty() {
+        return Err(
+            "unverifiable: OS-entropy contribution cannot be reproduced from public data \
+             (a pairing-based contribution proof is required)"
+                .into(),
+        );
+    }
+    let entropy = contribution_entropy(Some(&record.seeded_from))?;
+    let expected = prev.contribute(&FreshSecrets::from_entropy(&entropy));
+    if expected.to_bytes() != next.to_bytes() {
+        return Err(format!(
+            "contribution by '{}' did not apply the claimed public-seeded operation \
+             (recomputed digest {} != published {})",
+            record.contributor,
+            expected.digest_hex(),
+            next.digest_hex()
+        ));
+    }
+    Ok(())
+}
+
+/// Verify a **full transcript with recomputation**.
+///
+/// `crs_chain[i]` is the CRS as published after `records[i]`, so the two slices
+/// must have equal length and every non-genesis step must be reproducible from
+/// its public seed (see [`verify_contribution_step`]). This is strictly
+/// stronger than [`verify`]: in addition to running all of `verify`'s
+/// structural/chain checks, it re-derives each `contribute` step and rejects a
+/// fabricated digest chain that ends at a substituted CRS.
+///
+/// The first entry (the `init` genesis) is the trusted anchor and is **not**
+/// recomputed (its seed may be private), but it is required to be structurally
+/// valid and to match its named circuit.
+pub fn verify_chain(
+    crs_chain: &[CeremonyCrs],
+    records: &[ContributionRecord],
+) -> Result<(), String> {
+    if crs_chain.is_empty() {
+        return Err("no CRS chain supplied".into());
+    }
+    if crs_chain.len() != records.len() {
+        return Err(format!(
+            "CRS chain length {} != record count {}",
+            crs_chain.len(),
+            records.len()
+        ));
+    }
+    // Existing structural/chain checks against the final CRS + the full record list.
+    verify(crs_chain.last().unwrap(), records)?;
+    if records[0].digest != crs_chain[0].digest_hex() {
+        return Err("first record digest does not match the first CRS".into());
+    }
+    if records[0].kind == "init" {
+        crs_chain[0].check_structure()?;
+        crs_chain[0].check_matches_circuit()?;
+    }
+    for i in 1..records.len() {
+        verify_contribution_step(&crs_chain[i - 1], &records[i], &crs_chain[i])?;
+    }
+    Ok(())
+}
+
 // ===========================================================================
 // VK serialization (on-chain artifact)
 // ===========================================================================
@@ -1034,5 +1138,108 @@ mod tests {
         let out1 = crs.contribute(&FreshSecrets::from_entropy(&a));
         let out2 = crs.contribute(&FreshSecrets::from_entropy(&b));
         assert_eq!(out1.digest(), out2.digest());
+    }
+
+    /// Build an honest, fully publicly-seeded transcript with recomputable steps.
+    fn publicly_seeded_chain(circuit: &str) -> (Vec<CeremonyCrs>, Vec<ContributionRecord>) {
+        let crs0 = small_crs(circuit, "anchor-seed");
+        let r0 =
+            ContributionRecord::init(&crs0.circuit, crs0.digest_hex(), "genesis", SEEDED_FROM_OS);
+        let s1 = "drand-round-1001";
+        let crs1 = crs0.contribute(&FreshSecrets::from_entropy(
+            &contribution_entropy(Some(s1)).unwrap(),
+        ));
+        let r1 = ContributionRecord::contribute(
+            &crs1.circuit,
+            crs0.digest_hex(),
+            crs1.digest_hex(),
+            "alice",
+            s1,
+        );
+        let s2 = "drand-round-1002";
+        let crs2 = crs1.contribute(&FreshSecrets::from_entropy(
+            &contribution_entropy(Some(s2)).unwrap(),
+        ));
+        let r2 = ContributionRecord::contribute(
+            &crs2.circuit,
+            crs1.digest_hex(),
+            crs2.digest_hex(),
+            "bob",
+            s2,
+        );
+        (vec![crs0, crs1, crs2], vec![r0, r1, r2])
+    }
+
+    #[test]
+    fn verify_chain_accepts_honest_publicly_seeded_chain() {
+        let (chain, records) = publicly_seeded_chain("value-balance");
+        verify_chain(&chain, &records).expect("honest chain verifies");
+        // A length mismatch is rejected.
+        assert!(verify_chain(&chain, &records[..2]).is_err());
+    }
+
+    #[test]
+    fn verify_chain_rejects_substituted_final_crs_that_plain_verify_accepts() {
+        // The exact attack the tool exists to stop: a coordinator swaps in a
+        // CRS whose trapdoor it knows and fabricates a self-consistent record
+        // chain ending at that CRS's digest. Plain `verify` passes (it only
+        // checks a hash chain + final digest); `verify_chain` rejects it because
+        // the last step does not recompute to the substituted CRS.
+        let (chain, records) = publicly_seeded_chain("value-balance");
+        let mut evil = chain[2].clone();
+        evil.delta_g1 = (G1Projective::from(evil.delta_g1) * Scalar::from(2u64)).into();
+        assert_ne!(evil.digest_hex(), chain[2].digest_hex());
+        // Fabricate a record that links the honest crs1 to the evil CRS.
+        let mut r2_evil = records[2].clone();
+        r2_evil.digest = evil.digest_hex();
+        // From the *record* perspective this is a valid, contiguous chain.
+        assert!(verify(
+            &evil,
+            &[records[0].clone(), records[1].clone(), r2_evil.clone()]
+        )
+        .is_ok());
+        // The recomputing verifier catches the substitution.
+        let evil_chain = vec![chain[0].clone(), chain[1].clone(), evil];
+        assert!(verify_chain(
+            &evil_chain,
+            &[records[0].clone(), records[1].clone(), r2_evil]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn verify_chain_rejects_os_entropy_step() {
+        // A step that actually changed the CRS but claims OS entropy cannot be
+        // reproduced from public data -> rejected (needs a pairing proof).
+        let crs0 = small_crs("value-balance", "os-step-seed");
+        let r0 =
+            ContributionRecord::init(&crs0.circuit, crs0.digest_hex(), "genesis", SEEDED_FROM_OS);
+        let crs1 = crs0.contribute(&FreshSecrets::from_entropy(b"secret-randomness"));
+        let r1 = ContributionRecord::contribute(
+            &crs1.circuit,
+            crs0.digest_hex(),
+            crs1.digest_hex(),
+            "carol",
+            SEEDED_FROM_OS,
+        );
+        // The (weak) chain check is happy...
+        assert!(verify(&crs1, &[r0.clone(), r1.clone()]).is_ok());
+        // ...but the recomputing verifier refuses to vouch for it.
+        assert!(verify_chain(&[crs0, crs1], &[r0, r1]).is_err());
+    }
+
+    #[test]
+    fn verify_contribution_step_checks_parent_and_digest() {
+        let (chain, records) = publicly_seeded_chain("value-balance");
+        // Correct step passes.
+        verify_contribution_step(&chain[1], &records[2], &chain[2]).expect("step ok");
+        // Wrong parent.
+        let mut r = records[2].clone();
+        r.parent = "00".repeat(32);
+        assert!(verify_contribution_step(&chain[1], &r, &chain[2]).is_err());
+        // Wrong digest.
+        let mut r = records[2].clone();
+        r.digest = "11".repeat(32);
+        assert!(verify_contribution_step(&chain[1], &r, &chain[2]).is_err());
     }
 }

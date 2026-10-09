@@ -27,6 +27,7 @@ fn main() {
         "init" => cmd_init(&opts),
         "contribute" => cmd_contribute(&opts),
         "verify" => cmd_verify(&opts),
+        "verify-chain" => cmd_verify_chain(&opts),
         "export-vk" => cmd_export_vk(&opts),
         "" | "--help" | "-h" | "help" => usage(),
         other => {
@@ -44,8 +45,13 @@ fn usage() {
          \x20 gpn_ceremony init       --circuit <name> --out <crs.bin> [--record <init.json>] [--seeded-from <public>] [--contributor <name>]\n\
          \x20 gpn_ceremony contribute --in <crs.bin> --out <crs.bin> --record <contribution.json> [--seeded-from <public>] [--contributor <name>]\n\
          \x20 gpn_ceremony verify     --crs <crs.bin> --records <r1.json,r2.json,...>\n\
+         \x20 gpn_ceremony verify-chain --crs <crs0.bin,crs1.bin,...> --records <r0.json,r1.json,...>\n\
          \x20 gpn_ceremony export-vk  --crs <crs.bin> --out <vk.bin>\n\n\
-         CIRCUITS: value-balance, note-spend"
+         CIRCUITS: value-balance, note-spend\n\n\
+         verify       : hash-chain + final-digest checks (self-consistency only)\n\
+         verify-chain : ALSO recomputes every publicly-seeded step (use this for\n\
+         \x20              a real ceremony; OS-entropy steps are rejected because\n\
+         \x20              they cannot be reproduced from public data)"
     );
 }
 
@@ -125,16 +131,9 @@ fn cmd_contribute(opts: &HashMap<String, String>) {
     println!("contribute: toxic waste wiped from memory");
 }
 
-fn cmd_verify(opts: &HashMap<String, String>) {
-    let crs_path = req(opts, "crs");
-    let records_spec = req(opts, "records");
-    let crs = read_crs(&crs_path);
+fn read_records(spec: &str) -> Vec<ContributionRecord> {
     let mut records = Vec::new();
-    for path in records_spec
-        .split(',')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-    {
+    for path in spec.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
         let text = match std::fs::read_to_string(path) {
             Ok(t) => t,
             Err(e) => fail(&format!("read record {path}: {e}")),
@@ -144,12 +143,46 @@ fn cmd_verify(opts: &HashMap<String, String>) {
             Err(e) => fail(&format!("record {path}: {e}")),
         }
     }
+    records
+}
+
+fn cmd_verify(opts: &HashMap<String, String>) {
+    let crs_path = req(opts, "crs");
+    let records = read_records(&req(opts, "records"));
+    let crs = read_crs(&crs_path);
     match ceremony::verify(&crs, &records) {
         Ok(()) => {
             println!("PASS");
             println!("  circuit      = {}", crs.circuit);
             println!("  contributions= {}", records.len());
             println!("  final digest = {}", crs.digest_hex());
+            println!("  note: self-consistency only — use `verify-chain` to also recompute steps");
+        }
+        Err(e) => {
+            println!("FAIL");
+            println!("  {e}");
+            exit(1);
+        }
+    }
+}
+
+fn cmd_verify_chain(opts: &HashMap<String, String>) {
+    let crs_spec = req(opts, "crs");
+    let mut chain = Vec::new();
+    for path in crs_spec
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        chain.push(read_crs(path));
+    }
+    let records = read_records(&req(opts, "records"));
+    match ceremony::verify_chain(&chain, &records) {
+        Ok(()) => {
+            println!("PASS (recomputed)");
+            println!("  circuit      = {}", chain.last().unwrap().circuit);
+            println!("  steps        = {}", records.len());
+            println!("  final digest = {}", chain.last().unwrap().digest_hex());
         }
         Err(e) => {
             println!("FAIL");
