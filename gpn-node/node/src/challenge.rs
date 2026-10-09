@@ -33,6 +33,31 @@ pub const CHALLENGE_SEAL_LEN: usize = 8 + 32;
 const NONCE_LEN: usize = 8;
 const MIX_LEN: usize = 32;
 
+/// Domain-separation tag for the provider-bound capacity challenge. Mixing it
+/// in keeps the derived value disjoint from block pre-hashes and raw chain
+/// challenges, so a seal mined for one purpose can never be replayed as
+/// another (red-team finding 2026-10-09, attestation/challenge binding).
+pub const CHALLENGE_BIND_TAG: &[u8] = b"gpn/capacity-challenge/v1";
+
+/// Bind the **global** on-chain `base` challenge to a specific provider account.
+///
+/// The chain publishes a single global `AttestationChallenge` (a `StorageValue`),
+/// so on its own an Ethash seal over that challenge is valid for *any* account a
+/// caller names. That let one GPU solution node-verify unlimited accounts — a
+/// sybil bypass of the `apply_challenge_gate` Silver/Gold gate (red-team finding
+/// 2026-10-09). Deriving a per-provider challenge `blake2_256(tag ++ base ++ who)`
+/// means a solution is valid for exactly the provider it was mined for: the
+/// verifier checks `who`'s *bound* challenge, so a seal for Alice is rejected for
+/// Bob (its mix no longer reproduces). The runtime is unchanged — it still stores
+/// the global `base` and treats the verifier's assertion as the result.
+pub fn provider_challenge(base: &[u8; 32], who: &[u8]) -> [u8; 32] {
+    let mut buf = Vec::with_capacity(CHALLENGE_BIND_TAG.len() + base.len() + who.len());
+    buf.extend_from_slice(CHALLENGE_BIND_TAG);
+    buf.extend_from_slice(base);
+    buf.extend_from_slice(who);
+    sp_io::hashing::blake2_256(&buf)
+}
+
 /// Verify a provider's Ethash solution to a 32-byte capacity `challenge`.
 ///
 /// Returns `true` iff `seal` is well-formed **and** recomputing Ethash over the
@@ -158,5 +183,36 @@ mod tests {
         assert_eq!(parse_seal_hex(&format!("0x{hex_s}")).unwrap(), raw);
         assert!(parse_seal_hex("deadbeef").is_none());
         assert!(parse_seal_hex(&format!("zz{hex_s}")).is_none());
+    }
+
+    // ── Red-team finding 2026-10-09: provider-bound capacity challenge ──────
+
+    /// The derived challenge must depend on the provider, so two accounts can
+    /// never share one seal.
+    #[test]
+    fn provider_challenge_is_account_bound() {
+        let base = [0x42u8; 32];
+        let alice = provider_challenge(&base, b"alice-account");
+        let bob = provider_challenge(&base, b"bob-account");
+        assert_ne!(alice, bob, "different providers must derive different challenges");
+        assert_ne!(alice, base, "the bound challenge must differ from the raw one");
+        // Deterministic for the same inputs (verifier + miner agree).
+        assert_eq!(alice, provider_challenge(&base, b"alice-account"));
+    }
+
+    /// A seal mined over Alice's bound challenge must NOT verify for Bob
+    /// (this is the exact sybil path the fix closes: one solution, many who).
+    #[test]
+    fn bound_seal_does_not_verify_for_another_provider() {
+        let base = [0x42u8; 32];
+        let target = easy_target();
+        let alice = provider_challenge(&base, b"alice-account");
+        let bob = provider_challenge(&base, b"bob-account");
+        let seal = mine(&alice, target);
+        assert!(verify_challenge_solution(&alice, &seal, target), "alice's own seal must verify");
+        assert!(
+            !verify_challenge_solution(&bob, &seal, target),
+            "alice's seal must be rejected for bob"
+        );
     }
 }

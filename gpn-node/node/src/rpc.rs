@@ -35,7 +35,7 @@ use sp_runtime::traits::{BlakeTwo256, Hash};
 use sp_runtime::MultiSignature;
 use std::sync::{Arc, Mutex};
 
-use crate::challenge::verify_challenge_solution;
+use crate::challenge::{provider_challenge, verify_challenge_solution};
 use crate::service::{FullClient, MiningWorker};
 use gpn_runtime::{
     GpnLivenessApi, GpnTreasuryApi, ProfitabilityOracleApi, RuntimeCall, SignedExtra,
@@ -275,6 +275,10 @@ const CHALLENGE_ITEM: &[u8] = b"AttestationChallenge";
 pub struct ConfirmChallengeResult {
     /// The live on-chain challenge the seal was verified against (hex).
     pub challenge: String,
+    /// The **provider-bound** challenge actually mined/verified (hex) —
+    /// `blake2_256(tag ++ challenge ++ who)`. A miners fetches this via
+    /// `gpn_challengeFor` and mines over it (red-team finding 2026-10-09).
+    pub provider_challenge: String,
     /// Whether the seal is a valid Ethash solution to the challenge at `target`.
     pub verified: bool,
     /// Whether a `confirm_challenge` extrinsic was accepted into the pool.
@@ -299,6 +303,15 @@ pub trait GpnChallengeApi {
         provider: String,
         seal: String,
     ) -> RpcResult<ConfirmChallengeResult>;
+
+    /// Return the exact **provider-bound** 32-byte challenge a given account must
+    /// mine an Ethash solution over: `blake2_256(tag ++ live_challenge ++ who)`,
+    /// hex-encoded. This is the single source of truth for miners — the same
+    /// derivation `gpn_confirmChallenge` verifies against — so one provider's
+    /// solution can never be replayed for another account (red-team finding
+    /// 2026-10-09). `provider` is SS58 or 0x-hex 32-byte account.
+    #[method(name = "gpn_challengeFor")]
+    async fn challenge_for(&self, provider: String) -> RpcResult<String>;
 }
 
 /// The twox128-prefixed storage key for `pallet_gpu_attestation::AttestationChallenge`.
@@ -410,6 +423,19 @@ impl GpnChallengeRpc {
     ) -> Self {
         Self { client, pool }
     }
+
+    /// Read the live global `AttestationChallenge` from chain state.
+    fn read_live_challenge(&self, at: sp_core::H256) -> RpcResult<[u8; 32]> {
+        let data = self
+            .client
+            .storage(at, &challenge_storage_key())
+            .map_err(|e| ErrorObject::owned(-32000, format!("storage error: {e}"), None::<()>))?
+            .ok_or_else(|| {
+                ErrorObject::owned(-32000, "no AttestationChallenge on chain", None::<()>)
+            })?;
+        <[u8; 32]>::decode(&mut &data.0[..])
+            .map_err(|e| ErrorObject::owned(-32000, format!("challenge decode: {e}"), None::<()>))
+    }
 }
 
 #[jsonrpsee::core::async_trait]
@@ -425,30 +451,30 @@ impl GpnChallengeApiServer for GpnChallengeRpc {
         let at = self.client.info().best_hash;
 
         // 1. Read the live challenge from chain state.
-        let data = self
-            .client
-            .storage(at, &challenge_storage_key())
-            .map_err(|e| ErrorObject::owned(-32000, format!("storage error: {e}"), None::<()>))?
-            .ok_or_else(|| {
-                ErrorObject::owned(-32000, "no AttestationChallenge on chain", None::<()>)
-            })?;
-        let challenge = <[u8; 32]>::decode(&mut &data.0[..]).map_err(|e| {
-            ErrorObject::owned(-32000, format!("challenge decode: {e}"), None::<()>)
-        })?;
+        let challenge = self.read_live_challenge(at)?;
         let challenge_hex = format!("0x{}", hex::encode(challenge));
 
-        // 2. Parse + verify the seal natively (Ethash over the live challenge).
+        // 2. Parse + verify the seal natively, against the **provider-bound**
+        //    challenge (red-team finding 2026-10-09). The on-chain challenge is a
+        //    single global value, so verifying the raw value here would let one
+        //    Ethash solution node-verify unlimited accounts (each call naming a
+        //    different `who`) — a sybil bypass of the Silver/Gold challenge gate.
+        //    Binding the derivation to `who` means a solution is valid for exactly
+        //    the account it was mined for.
+        let bound = provider_challenge(&challenge, &who.encode());
+        let bound_hex = format!("0x{}", hex::encode(bound));
         let seal_bytes = GpnMinerRpc::decode_hex(&seal)?;
         let target = resolve_challenge_target();
-        let verified = verify_challenge_solution(&challenge, &seal_bytes, target);
+        let verified = verify_challenge_solution(&bound, &seal_bytes, target);
         if !verified {
             return Ok(ConfirmChallengeResult {
                 challenge: challenge_hex,
+                provider_challenge: bound_hex,
                 verified: false,
                 submitted: false,
                 tx_hash: None,
                 reason: Some(
-                    "seal is not a valid Ethash solution to the current challenge".to_string(),
+                    "seal is not a valid Ethash solution to this provider's bound challenge".to_string(),
                 ),
             });
         }
@@ -501,11 +527,20 @@ impl GpnChallengeApiServer for GpnChallengeRpc {
         );
         Ok(ConfirmChallengeResult {
             challenge: challenge_hex,
+            provider_challenge: bound_hex,
             verified: true,
             submitted: true,
             tx_hash: Some(format!("{:#x}", xt_hash)),
             reason: None,
         })
+    }
+
+    async fn challenge_for(&self, provider: String) -> RpcResult<String> {
+        let who = parse_account(&provider)?;
+        let at = self.client.info().best_hash;
+        let challenge = self.read_live_challenge(at)?;
+        let bound = provider_challenge(&challenge, &who.encode());
+        Ok(format!("0x{}", hex::encode(bound)))
     }
 }
 
