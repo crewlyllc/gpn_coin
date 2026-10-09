@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Access the AI — GPN compute, live access node</title>
+<meta name="description" content="Use the GPN AI marketplace: an OpenAI-compatible chat API plus an image/video/fine-tune job API, priced per token in GPN. Try it live against a public testnet access point." />
+<meta name="theme-color" content="#07090f" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237c6cff'/%3E%3Ctext x='16' y='22' font-size='16' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%2307090f'%3EG%3C/text%3E%3C/svg%3E" />
+<link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap nav">
+    <a class="brand" href="index.html" aria-label="GPN home"><span class="dot" aria-hidden="true">G</span><span>GPN<br><small>GPU-NATIVE NETWORK</small></span></a>
+    <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Toggle navigation">☰</button>
+    <nav class="nav-links" id="nav-links" aria-label="Primary">
+      <a href="index.html">Home</a>
+      <a href="download.html">Download</a>
+      <a href="deploy.html">Deploy</a>
+      <a href="ai.html" aria-current="page">AI</a>
+      <a href="access-points.html">Access Points</a>
+      <a href="buy.html">Buy GPN</a>
+      <a href="../GPN-WHITEPAPER.html">Whitepaper</a>
+    </nav>
+    <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
+  </div>
+</header>
+
+<main id="main">
+  <section class="page-head first">
+    <div class="wrap">
+      <span class="kicker">The AI</span>
+      <h1>Run AI on someone's GPU</h1>
+      <p>GPN's marketplace is one interface for LLM chat, image/video generation, and fine-tuning. You hit a
+        single <b>access point</b>; the network routes your job to the best idle GPU and settles it on-chain.
+        No provider addresses, no per-node wiring.</p>
+    </div>
+  </section>
+
+  <!-- ============ TRY IT ============ -->
+  <section id="try">
+    <div class="wrap">
+      <span class="kicker">Live access node</span>
+      <h2>Try it now</h2>
+      <p class="sub">This widget POSTs a chat request straight to a public testnet access point from your
+        browser. It defaults to the current network entry point — change it if you run your own.</p>
+
+      <div class="grid cols-2">
+        <form class="card" id="try-form" autocomplete="off">
+          <div class="field">
+            <label for="ap-url">Access-point URL</label>
+            <input type="url" id="ap-url" value="http://gpn-testnet.duckdns.org:8092"
+                   spellcheck="false" inputmode="url"
+                   aria-describedby="ap-url-hint" />
+            <p class="hint" id="ap-url-hint">Base URL of the access point. <code>/v1/chat/completions</code>
+              is appended if you give a bare host.</p>
+          </div>
+
+          <div class="field-row">
+            <div class="field">
+              <label for="ap-model">Model</label>
+              <input type="text" id="ap-model" value="llama3.2:1b" spellcheck="false"
+                     list="model-list" />
+              <datalist id="model-list">
+                <option value="auto"></option>
+                <option value="llama3.2:1b"></option>
+                <option value="qwen2.5:0.5b"></option>
+                <option value="qwen2.5:1.5b"></option>
+              </datalist>
+            </div>
+            <div class="field">
+              <label for="ap-token">Token <span class="hint">(optional)</span></label>
+              <input type="text" id="ap-token" value="" spellcheck="false"
+                     placeholder="Bearer token for non-loopback calls"
+                     aria-describedby="ap-token-hint" />
+            </div>
+          </div>
+          <p class="hint" id="ap-token-hint" style="margin-top:-8px">Sent as
+            <code>Authorization: Bearer …</code>. Never stored; leave blank for public/loopback access
+            points.</p>
+
+          <div class="field">
+            <label for="ap-prompt">Prompt</label>
+            <textarea id="ap-prompt" spellcheck="false"
+                      placeholder="Explain a GPU compute network in two sentences.">What is the capital of Portugal? Answer in one word only.</textarea>
+          </div>
+
+          <button class="btn" id="try-submit" type="submit">Ask the network</button>
+          <span class="hint" style="margin-left:10px">First calls may take 30–90&nbsp;s on testnet (model load + inference).</span>
+        </form>
+
+        <div>
+          <div class="result empty" id="try-result" role="status" aria-live="polite">
+            Responses appear here. Try a prompt and hit <b>Ask the network</b>.
+          </div>
+          <div class="callout warn" style="margin-top:16px">
+            <span class="ct">About CORS &amp; mixed content</span>
+            <p class="mb-0">This is a browser calling an API directly. If the access point doesn't send
+              permissive <code>Access-Control-Allow-Origin</code> headers, the browser blocks the response
+              even though the server ran the job — use the <code>curl</code> example below instead. Also, a
+              page served over <code>https://</code> cannot call a plain <code>http://</code> host (mixed
+              content), and this page opened from <code>file://</code> can't make same-origin calls at all —
+              serve it over <code>http://</code>.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ API ============ -->
+  <section id="api">
+    <div class="wrap">
+      <span class="kicker">API</span>
+      <h2>Two ways to call it</h2>
+      <p class="sub">A friendly OpenAI-compatible chat endpoint, and a general job API for everything else.
+        Both are served by the same access point.</p>
+
+      <div class="grid cols-2">
+        <div class="card">
+          <h3><span class="ico" aria-hidden="true">💬</span> Chat — OpenAI-compatible</h3>
+          <p class="muted">Drop-in for OpenAI-style clients. Send <code>messages</code> and get a completion
+            back.</p>
+          <pre><code>POST /v1/chat/completions
+{
+  "model": "auto",
+  "messages": [
+    {"role": "user", "content": "Hello!"}
+  ]
+}</code></pre>
+          <button class="btn small ghost no-print" data-copy="#curl-chat" type="button">Copy curl</button>
+        </div>
+        <div class="card">
+          <h3><span class="ico" aria-hidden="true">🧰</span> Jobs — image / video / fine-tune</h3>
+          <p class="muted">Submit a job with a type and parameters; poll for the result or artifact. The
+            access point routes it and the chain escrows payment.</p>
+          <pre><code>POST /jobs
+{
+  "job_type": "ImageGeneration",
+  "model": "sd-turbo",
+  "prompt": "a cozy cabin at dusk",
+  "width": 512, "height": 512, "steps": 8,
+  "price_gpn": 5, "min_gflops": 800
+}
+GET /job/{id}/result
+GET /job/{id}/artifact   # PNG / MP4 / adapter</code></pre>
+        </div>
+      </div>
+
+      <div class="field" style="margin-top:20px">
+        <label for="curl-chat">Copy-paste: chat with the live access point</label>
+        <pre id="curl-chat"><code>curl http://gpn-testnet.duckdns.org:8092/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "llama3.2:1b",
+    "messages": [{"role":"user","content":"What is the capital of Kenya? Answer in one word."}]
+  }'</code></pre>
+        <button class="btn small ghost no-print" data-copy="#curl-chat" type="button">Copy</button>
+      </div>
+
+      <details class="card" style="margin-top:6px">
+        <summary style="cursor:pointer;font-weight:700">Job types &amp; the escaping requestor model</summary>
+        <div style="margin-top:12px">
+          <p class="muted">Job types: <code>LLMInference</code> · <code>ImageGeneration</code> ·
+            <code>VideoGeneration</code> · <code>FineTuning</code> · <code>MLInference</code> ·
+            <code>Custom</code>.</p>
+          <p class="small muted mb-0">Escrow = rate × max_output_tokens (the cap); the charge is rate ×
+            <em>actual</em> tokens used, and the surplus auto-refunds. Priced in dollars, settled in GPN, so
+            a buyer's dollar cost is stable while the GPN amount floats.</p>
+        </div>
+      </details>
+    </div>
+  </section>
+
+  <!-- ============ MODELS ============ -->
+  <section id="models">
+    <div class="wrap">
+      <span class="kicker">Catalog</span>
+      <h2>Models</h2>
+      <p class="sub">The <code>model</code> field is passed straight to the runtime, so you can name any
+        model a provider has. Use <code>auto</code> to let the network pick any available model.</p>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th scope="col">Kind</th><th scope="col">Examples</th><th scope="col">Notes</th></tr></thead>
+          <tbody>
+            <tr><td>Chat (LLM)</td><td><code>llama3.2:1b</code>, <code>qwen2.5:0.5b</code>, <code>qwen2.5:1.5b</code></td>
+              <td>The first two are guaranteed on every node (baseline pulls); <code>auto</code> = whichever is available.</td></tr>
+            <tr><td>Image</td><td><code>sd-turbo</code>, <code>sd15</code>, plus any Hugging Face text-to-image id</td>
+              <td>Diffusers runtime.</td></tr>
+            <tr><td>Video</td><td><code>ltx-video</code></td>
+              <td>Needs a large host (T5-XXL encoder is heavy) — not for small cards.</td></tr>
+            <tr><td>Fine-tune</td><td>any Hugging Face causal-LM id</td>
+              <td>LoRA; a completed tune auto-serves as <code>tuned-&lt;jobid&gt;</code>.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="small muted" style="margin-top:12px">Bring your own: <code>ollama pull &lt;model&gt;</code> for
+        chat, or point <code>model</code> at a GGUF you've created. No weights, datasets, or prompts ever
+        touch the chain.</p>
+    </div>
+  </section>
+
+  <!-- ============ PRICING ============ -->
+  <section id="pricing">
+    <div class="wrap">
+      <span class="kicker">Pricing</span>
+      <h2>How GPN prices AI compute</h2>
+      <p class="sub">Rates are <b>cost-derived</b> and charged <b>per token</b> against your actual usage.</p>
+
+      <div class="grid cols-2">
+        <div class="card plain">
+          <h3>Cost-derived</h3>
+          <p class="muted mb-0">A roofline estimate of the provider's true throughput (compute- and
+            memory-bandwidth-bound) ÷ realized tokens/sec × a margin — targeting roughly half of comparable
+            market GPU-rental, and clamped at or above the provider's cost so a GPU always at least covers
+            its cost.</p>
+        </div>
+        <div class="card plain">
+          <h3>Per-token escrow</h3>
+          <p class="muted mb-0">You escrow <code>rate × max_tokens</code>; the provider meters
+            <em>actual</em> usage; you're charged <code>rate × actual</code> and the surplus auto-refunds.
+            You're never overcharged past your cap.</p>
+        </div>
+      </div>
+
+      <div class="callout" style="margin-top:20px">
+        <span class="ct">Testnet is free-AI</span>
+        <p class="mb-0">On the testnet, the access point can pay escrow from a hot wallet, so a client's
+          <code>price_gpn</code> is cosmetic — you spend nothing. On mainnet this mode is disabled and
+          callers sign with their own wallet.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ HOW IT ROUTES ============ -->
+  <section>
+    <div class="wrap">
+      <span class="kicker">Under the hood</span>
+      <h2>What happens when you hit “send”</h2>
+      <div class="steps">
+        <div class="step"><h4>Filter by capability</h4><p>The scheduler keeps only providers that meet the
+          job's <code>min_gflops</code>/VRAM/RAM requirement and have (or can pull) the model.</p></div>
+        <div class="step"><h4>Require an idle GPU</h4><p>A node already running a job isn't available —
+          one GPU does one job at a time.</p></div>
+        <div class="step"><h4>Pick lowest latency</h4><p>Among eligible idle nodes, the least-ms provider
+          wins (with a model-aware fallback for a node that can pull the model).</p></div>
+        <div class="step"><h4>Escrow &amp; settle</h4><p>The chain escrows the payment and enforces the
+          capability gate; the provider runs it off-chain and the result is settled. With payment channels,
+          there's no per-job block delay.</p></div>
+      </div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:16px">
+        <a class="btn" href="access-points.html">Browse access points</a>
+        <a class="btn ghost" href="deploy.html#provider">Become a provider →</a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="foot-grid">
+      <div><a class="brand" href="index.html" style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a><p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute. <em>A GPU should not have to choose.</em></p></div>
+      <div><h4>Product</h4><a href="download.html">Download</a><a href="deploy.html">Deploy</a><a href="ai.html">Access the AI</a><a href="access-points.html">Access Points</a></div>
+      <div><h4>Learn</h4><a href="../GPN-WHITEPAPER.html">Whitepaper</a><a href="../GPN-ONE-PAGER.md">One-pager</a><a href="../GPN-TECHNICAL-OVERVIEW.md">Technical overview</a><a href="buy.html">Token &amp; purchasing</a></div>
+      <div><h4>Project</h4><a href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">Source on GitHub</a><a href="../USE-GPN.md">Usage guide</a><a href="../linux-install-guide.md">Linux install guide</a><a href="../windows-client-test.md">Windows guide</a></div>
+    </div>
+    <div class="foot-bottom">
+      <p class="small muted">© <span data-year>2026</span> GPN · Public testnet. Not investment advice.</p>
+      <p class="small muted">Testnet only — tokens here have no monetary value.</p>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

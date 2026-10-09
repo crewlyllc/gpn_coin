@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Download GPN — installers &amp; release artifacts</title>
+<meta name="description" content="Install GPN with a single command, or download release artifacts for Unix and Windows. Prerequisites: a discrete GPU with OpenCL/CUDA; Rust for building from source." />
+<meta name="theme-color" content="#07090f" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237c6cff'/%3E%3Ctext x='16' y='22' font-size='16' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%2307090f'%3EG%3C/text%3E%3C/svg%3E" />
+<link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap nav">
+    <a class="brand" href="index.html" aria-label="GPN home"><span class="dot" aria-hidden="true">G</span><span>GPN<br><small>GPU-NATIVE NETWORK</small></span></a>
+    <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Toggle navigation">☰</button>
+    <nav class="nav-links" id="nav-links" aria-label="Primary">
+      <a href="index.html">Home</a>
+      <a href="download.html" aria-current="page">Download</a>
+      <a href="deploy.html">Deploy</a>
+      <a href="ai.html">AI</a>
+      <a href="access-points.html">Access Points</a>
+      <a href="buy.html">Buy GPN</a>
+      <a href="../GPN-WHITEPAPER.html">Whitepaper</a>
+    </nav>
+    <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
+  </div>
+</header>
+
+<main id="main">
+  <section class="page-head first">
+    <div class="wrap">
+      <span class="kicker">Download</span>
+      <h1>Get GPN in one command</h1>
+      <p>Install the node + miner/agent, generate a wallet, and be ready to earn. Everything below is on the
+        public <a href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">source repository</a>.</p>
+    </div>
+  </section>
+
+  <!-- ============ ONE-COMMAND ============ -->
+  <section>
+    <div class="wrap">
+      <h2>One-command installers</h2>
+      <p class="sub">Two scripts cover the two most common roles. Both can run from a local clone (recommended
+        until the repo URL is fixed for public fetch) or from a hosted URL.</p>
+
+      <div class="grid cols-2">
+        <div class="card">
+          <h3><span class="ico" aria-hidden="true">⛏</span> <code>install.sh</code></h3>
+          <p class="muted">Full node + miner/agent. Clones the source, builds <code>gpn-node</code> and
+            <code>gpn-agent</code>, symlinks the binaries into <code>~/.local/bin</code>, generates a wallet,
+            installs a user-local Ollama + baseline models, and writes <code>~/.gpn/gpn.env</code>.</p>
+          <div class="field">
+            <label for="cmd-install">From a clone</label>
+            <pre id="cmd-install"><code>./install.sh</code></pre>
+            <button class="btn small ghost no-print" data-copy="#cmd-install" type="button">Copy</button>
+          </div>
+          <p class="small muted mb-0">Or pipe from a hosted copy (once public):
+            <code>curl -fsSL &lt;REPO&gt;/install.sh | sh</code>. Override with
+            <code>GPN_PREFIX</code>, <code>GPN_BIN</code>, <code>GPN_NETWORK</code>, <code>GPN_REPO_URL</code>.</p>
+        </div>
+
+        <div class="card">
+          <h3><span class="ico" aria-hidden="true">🚪</span> <code>install-accesspoint.sh</code></h3>
+          <p class="muted">Run a public <b>access point</b> (<code>gpn_scheduler</code>) — the decentralized
+            front door. A caller hits one URL and it routes each job to the best provider (least-ms idle node).
+            Permissionless; no special trust, so running several is the point.</p>
+          <div class="field">
+            <label for="cmd-ap">From a clone</label>
+            <pre id="cmd-ap"><code>./install-accesspoint.sh</code></pre>
+            <button class="btn small ghost no-print" data-copy="#cmd-ap" type="button">Copy</button>
+          </div>
+          <p class="small muted mb-0">Add <code>GPN_INSTALL_SERVICE=1</code> to install a
+            <code>systemd --user</code> unit. Config lands in <code>~/.gpn/accesspoint.env</code> — see the
+            <a href="access-points.html">access-points page</a>.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ ARTIFACTS ============ -->
+  <section>
+    <div class="wrap">
+      <h2>Release artifacts</h2>
+      <p class="sub">Pre-built binaries are produced by CI. If you'd rather not build from source, grab the
+        matching artifact.</p>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th scope="col">Platform</th><th scope="col">Artifact</th><th scope="col">Contents</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><b>Unix</b> (Linux / macOS)</td>
+              <td><code>install.sh</code> / source build</td>
+              <td><code>gpn-node</code>, <code>gpn-agent</code> binaries (<code>gpn_api</code>,
+                providers, <code>gpn_gpu_compute</code>, <code>gpn_scheduler</code>, …)</td>
+            </tr>
+            <tr>
+              <td><b>Windows</b></td>
+              <td><code>gpn-windows</code> (CI artifact)</td>
+              <td><code>gpn-node.exe</code>, <code>gpn_llm_provider.exe</code>,
+                <code>gpn_provider_status.exe</code>, <code>gpn_register.exe</code></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="small muted" style="margin-top:12px">Windows: unpack the artifacts into a <code>bin\</code>
+        folder next to <code>run-windows-provider.ps1</code>, then follow the
+        <a href="deploy.html#windows">Windows provider path</a>. Artifact download links live on the
+        repository's <a href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">Actions / Releases</a>.</p>
+    </div>
+  </section>
+
+  <!-- ============ PREREQUISITES ============ -->
+  <section>
+    <div class="wrap">
+      <h2>Prerequisites</h2>
+      <div class="grid cols-2">
+        <div class="card plain">
+          <h3>To run a node / provider</h3>
+          <ul class="checks">
+            <li><b>A discrete GPU</b> — mining is GPU-only by construction.</li>
+            <li><b>OpenCL ICD</b> for GPU mining — NVIDIA:
+              <code>nvidia-opencl-icd</code>; AMD: <code>rocm-opencl-runtime</code> (then reboot).</li>
+            <li><b>Ollama</b> for serving LLMs (the installer sets up a user-local copy).</li>
+            <li>Enough <b>VRAM</b> for your target models — an 8 GB card runs small quantized LLMs,
+              SD-class image models, and LoRA fine-tunes; video/70B-class need a bigger card.</li>
+          </ul>
+        </div>
+        <div class="card plain">
+          <h3>To build from source</h3>
+          <ul class="checks">
+            <li><b>Rust</b> toolchain (<a href="https://rustup.rs" rel="noopener">rustup.rs</a>) with the
+              <code>wasm32-unknown-unknown</code> target.</li>
+            <li><b>Build deps:</b> <code>git build-essential clang llvm protobuf-compiler cmake pkg-config libssl-dev</code>.</li>
+            <li>For a CUDA path, your vendor drivers/toolkit as needed.</li>
+            <li>Windows users serving jobs need <b>no</b> Rust/Python — the prebuilt provider drives Ollama.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="callout" style="margin-top:20px">
+        <span class="ct">No OpenCL detected?</span>
+        <p class="mb-0">Mining will fall back to CPU (much slower). Install the vendor OpenCL runtime above
+          and reboot to mine on your GPU.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ REPO ============ -->
+  <section>
+    <div class="wrap">
+      <span class="kicker">Source</span>
+      <h2>Clone it</h2>
+      <div class="field">
+        <label for="cmd-clone">Repository</label>
+        <pre id="cmd-clone"><code>git clone https://github.com/jeremyzguo/gpn_coin.git
+cd gpn_coin</code></pre>
+        <button class="btn small ghost no-print" data-copy="#cmd-clone" type="button">Copy</button>
+      </div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:6px">
+        <a class="btn" href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">Open the repository</a>
+        <a class="btn ghost" href="deploy.html">Next: deploy a node →</a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="foot-grid">
+      <div>
+        <a class="brand" href="index.html" style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a>
+        <p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute. <em>A GPU should not have to choose.</em></p>
+      </div>
+      <div><h4>Product</h4><a href="download.html">Download</a><a href="deploy.html">Deploy</a><a href="ai.html">Access the AI</a><a href="access-points.html">Access Points</a></div>
+      <div><h4>Learn</h4><a href="../GPN-WHITEPAPER.html">Whitepaper</a><a href="../GPN-ONE-PAGER.md">One-pager</a><a href="../GPN-TECHNICAL-OVERVIEW.md">Technical overview</a><a href="buy.html">Token &amp; purchasing</a></div>
+      <div><h4>Project</h4><a href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">Source on GitHub</a><a href="../USE-GPN.md">Usage guide</a><a href="../linux-install-guide.md">Linux install guide</a><a href="../windows-client-test.md">Windows guide</a></div>
+    </div>
+    <div class="foot-bottom">
+      <p class="small muted">© <span data-year>2026</span> GPN · Public testnet. Not investment advice.</p>
+      <p class="small muted">Testnet only — tokens here have no monetary value.</p>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

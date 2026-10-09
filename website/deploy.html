@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Deploy GPN — run a miner/node, a provider, or an access point</title>
+<meta name="description" content="Step-by-step deployment for GPN: run a miner/node, onboard as an LLM/diffusion provider, or stand up an access point. Covers config, ports (30333, 9944, 8092, 8093), the Windows provider path, and the one-GPU auto-switch." />
+<meta name="theme-color" content="#07090f" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237c6cff'/%3E%3Ctext x='16' y='22' font-size='16' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%2307090f'%3EG%3C/text%3E%3C/svg%3E" />
+<link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap nav">
+    <a class="brand" href="index.html" aria-label="GPN home"><span class="dot" aria-hidden="true">G</span><span>GPN<br><small>GPU-NATIVE NETWORK</small></span></a>
+    <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Toggle navigation">☰</button>
+    <nav class="nav-links" id="nav-links" aria-label="Primary">
+      <a href="index.html">Home</a>
+      <a href="download.html">Download</a>
+      <a href="deploy.html" aria-current="page">Deploy</a>
+      <a href="ai.html">AI</a>
+      <a href="access-points.html">Access Points</a>
+      <a href="buy.html">Buy GPN</a>
+      <a href="../GPN-WHITEPAPER.html">Whitepaper</a>
+    </nav>
+    <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
+  </div>
+</header>
+
+<main id="main">
+  <section class="page-head first">
+    <div class="wrap">
+      <span class="kicker">Deploy</span>
+      <h1>Run it: miner, provider, or access point</h1>
+      <p>Three roles, one codebase. A node can mine; a provider serves AI jobs; an access point is the public
+        front door. Start with whichever fits your hardware and goals. New here? See
+        <a href="download.html">Download</a> first.</p>
+      <p class="small muted">On this page:
+        <a href="#node">Miner / node</a> ·
+        <a href="#provider">AI provider</a> ·
+        <a href="#access-point">Access point</a> ·
+        <a href="#windows">Windows provider</a> ·
+        <a href="#config">Config</a> ·
+        <a href="#ports">Ports</a>
+      </p>
+    </div>
+  </section>
+
+  <!-- ============ ONE GPU NOTE ============ -->
+  <section>
+    <div class="wrap">
+      <div class="callout danger">
+        <span class="ct">One GPU = mine <em>OR</em> serve — never both at once</span>
+        <p class="mb-0">A single GPU does one job at a time. In mining mode it hashes blocks; in compute mode
+          the miner is <b>stopped and VRAM freed</b> before the model loads. The <b>auto-switch</b> decides
+          which mode to run by comparing revenue in <b>USD/hr</b> and flips only when one beats the other by
+          more than ~5% (hysteresis, no thrashing). Running as a <b>provider means not mining</b> on that box
+          while it serves.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ MINER / NODE ============ -->
+  <section id="node">
+    <div class="wrap">
+      <span class="kicker">Role 1</span>
+      <h2>Run a miner / node</h2>
+      <p class="sub">The node holds chain state, syncs, mines on its GPU, and can serve AI compute. Full node,
+        self-mining.</p>
+
+      <div class="steps">
+        <div class="step"><h4>Install</h4><p>Run <code>./install.sh</code> (see <a href="download.html">Download</a>). It builds the binaries, generates a wallet, and writes <code>~/.gpn/gpn.env</code>.</p></div>
+        <div class="step"><h4>Start the node</h4>
+          <pre><code>gpn-node --chain testnet --force-authoring --base-path ~/.gpn/data</code></pre>
+          <p>Watch the log for <code>GPU Ethash miner online: &lt;device&gt;</code> to confirm real GPU mining
+            (not the CPU fallback).</p></div>
+        <div class="step"><h4>Or mine against a remote node (lighter)</h4>
+          <pre><code>gpn_external_miner &lt;rpc_url&gt; [device_index] [batch] [poll_ms]</code></pre>
+          <p>No local chain required — handy for a small box.</p></div>
+        <div class="step"><h4>Get paid</h4><p>Producing a block <b>is</b> the proof of GPU work: after a small
+          number of authored blocks your node is pay-eligible and the reward goes to the block producer's own
+          account (Bitcoin-style). Staking remains optional — it raises your tier, not a gate.</p></div>
+      </div>
+      <p class="small muted" style="margin-top:14px">Heads-up: a long-running <code>--dev --tmp</code> node
+        eventually discards old state; restart it or use a persistent <code>--base-path</code>.</p>
+    </div>
+  </section>
+
+  <!-- ============ PROVIDER ============ -->
+  <section id="provider">
+    <div class="wrap">
+      <span class="kicker">Role 2</span>
+      <h2>Become an AI provider (LLM / image / video / fine-tune)</h2>
+      <p class="sub">A provider registers, attests its GPU, and serves jobs routed to it. It earns GPN from
+        job escrow. The chain enforces the capability gate; providers are discovered by the scheduler.</p>
+
+      <div class="steps">
+        <div class="step"><h4>Run the node + REST API</h4>
+          <pre><code>gpn-node --dev --tmp --force-authoring --rpc-port 9944
+
+gpn_api --listen 127.0.0.1:8082 \
+  --endpoint ws://127.0.0.1:9944 \
+  --signer-uri //Alice</code></pre></div>
+        <div class="step"><h4>Onboard the GPU (one-time, per fresh chain)</h4>
+          <p>Register, then attest with your <b>real</b> measured GFLOPS (run <code>gpn_gpu_compute</code> to
+            measure — don't self-report a guess).</p>
+          <pre><code>curl -X POST http://127.0.0.1:8082/providers/register \
+  -H 'Content-Type: application/json' -d '{"min_gflops":800}'
+
+curl -X POST http://127.0.0.1:8082/providers/attest \
+  -H 'Content-Type: application/json' \
+  -d '{"gpu_count":1,"compute_gflops":831,"gpu_info":"RTX 4060 8GB"}'</code></pre></div>
+        <div class="step"><h4>Start the executors</h4>
+          <pre><code>gpn_llm_provider       ws://127.0.0.1:9944 //Alice 3000   # LLM chat
+
+GPN_DIFFUSE_SCRIPT=$PWD/gpn_diffuse.py \
+  gpn_diffusion_provider ws://127.0.0.1:9944 //Alice 3000  # image + video
+
+GPN_FINETUNE_SCRIPT=$PWD/gpn_finetune.py \
+  GPN_SERVEMODEL_SCRIPT=$PWD/gpn_servemodel.py \
+  gpn_finetune_provider ws://127.0.0.1:9944 //Alice 3000   # LoRA fine-tune</code></pre></div>
+        <div class="step"><h4>Advertise a reachable status URL</h4>
+          <p>The scheduler discovers providers from the chain via their endpoint. Expose a public
+            <code>/status</code> and register it (port <b>8093</b> by default). A job is routed to the
+            <b>lowest-latency idle</b> provider that meets its capability gate.</p></div>
+      </div>
+
+      <div class="callout" style="margin-top:20px">
+        <span class="ct">Testnet free-AI</span>
+        <p class="mb-0">On the public testnet the access point can run a hot wallet that pays escrow for you,
+          so a client's <code>price_gpn</code> is cosmetic. On mainnet this endpoint is disabled and callers
+          sign with their own wallet.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ ACCESS POINT ============ -->
+  <section id="access-point">
+    <div class="wrap">
+      <span class="kicker">Role 3</span>
+      <h2>Run an access point</h2>
+      <p class="sub">An access point (<code>gpn_scheduler</code>) is a public job API. Callers hit one URL; it
+        routes each job to the best provider. Permissionless and redundant — run several for the
+        decentralized front door.</p>
+
+      <div class="steps">
+        <div class="step"><h4>Install + run</h4>
+          <pre><code>./install-accesspoint.sh
+# or install + start a systemd --user service:
+GPN_INSTALL_SERVICE=1 ./install-accesspoint.sh
+
+gpn-accesspoint-run</code></pre></div>
+        <div class="step"><h4>Verify</h4>
+          <pre><code>curl http://127.0.0.1:8092/health     # {"providers":N,"status":"ok"}
+curl http://127.0.0.1:8092/providers  # live registry (gflops, latency_ms, models, active)</code></pre></div>
+        <div class="step"><h4>Expose it</h4><p>Point callers at <code>http://&lt;your-host&gt;:8092</code>.
+          Non-loopback POSTs require <code>Authorization: Bearer &lt;GPN_AP_TOKEN&gt;</code> (or
+          <code>X-Api-Key</code>) — set your own token in the env; never commit it.</p></div>
+      </div>
+      <p class="small muted" style="margin-top:14px">See the current public entry point and how to add yours
+        on the <a href="access-points.html">Access Points</a> page.</p>
+    </div>
+  </section>
+
+  <!-- ============ WINDOWS ============ -->
+  <section id="windows">
+    <div class="wrap">
+      <span class="kicker">Windows</span>
+      <h2>Windows provider path</h2>
+      <p class="sub">Your Windows box can be a client (no install needed) or a provider that serves jobs and
+        earns GPN. To serve, you need three things plus the <code>gpn-windows</code> binaries.</p>
+
+      <div class="grid cols-3">
+        <div class="card plain"><h3>1 · Backend</h3><p class="muted mb-0">Install <b>Ollama</b>
+          (<a href="https://ollama.com/download" rel="noopener">ollama.com/download</a>) and pull a model,
+          e.g. <code>ollama pull llama3.2:1b</code>. The provider drives Ollama — no Python or CUDA
+          needed on the box.</p></div>
+        <div class="card plain"><h3>2 · A wallet</h3><p class="muted mb-0">Drip a fresh account from the
+          testnet faucet — you need GPN for the one-time registration fee and to sign claims. The signer you
+          pass to the provider is the source of truth for its identity.</p></div>
+        <div class="card plain"><h3>3 · Reachable /status</h3><p class="muted mb-0">Forward port <b>8093</b>
+          on your router so the URL you advertise resolves from the internet. The scheduler discovers
+          providers from the chain.</p></div>
+      </div>
+
+      <div class="field" style="margin-top:20px">
+        <label for="cmd-win">Run it</label>
+        <pre id="cmd-win"><code>.\run-windows-provider.ps1 -Signer "&lt;your seed or //Alice&gt;" `
+    -PublicStatusUrl "http://&lt;your-public-ip&gt;:8093/status" -Gflops 2500</code></pre>
+        <button class="btn small ghost no-print" data-copy="#cmd-win" type="button">Copy</button>
+      </div>
+      <p class="small muted">The script checks Ollama, calls <code>gpn_register.exe</code>, starts the
+        <code>:8093</code> heartbeat, then runs the claim/infer/settle loop. Verify from another box with
+        <code>Invoke-RestMethod "…:8093/status"</code>.</p>
+
+      <details class="card" style="margin-top:8px">
+        <summary style="cursor:pointer;font-weight:700">Windows firewall + bootnode extras</summary>
+        <div style="margin-top:12px">
+          <pre><code>New-NetFirewallRule -DisplayName "GPN p2p" -Direction Inbound -Protocol TCP -LocalPort 30333 -Action Allow
+New-NetFirewallRule -DisplayName "GPN RPC" -Direction Inbound -Protocol TCP -LocalPort 9944  -Action Allow
+New-NetFirewallRule -DisplayName "GPN web" -Direction Inbound -Protocol TCP -LocalPort 8082  -Action Allow</code></pre>
+        </div>
+      </details>
+    </div>
+  </section>
+
+  <!-- ============ CONFIG ============ -->
+  <section id="config">
+    <div class="wrap">
+      <span class="kicker">Config</span>
+      <h2>Config &amp; environment</h2>
+      <p class="sub">Installers write env files under <code>~/.gpn/</code>. Keep secrets there (chmod 600) —
+        never in a repo or a webpage.</p>
+
+      <div class="grid cols-2">
+        <div class="card">
+          <h3>Miner / node — <code>~/.gpn/gpn.env</code></h3>
+          <pre><code>GPN_NETWORK=testnet
+GPN_ENDPOINT=wss://&lt;testnet-rpc&gt;:9944
+GPN_WALLET=&lt;your-ss58-address&gt;
+GPN_DATA=~/.gpn/data
+OLLAMA_BIN=~/.gpn/ollama/bin/ollama
+OLLAMA_MODELS=~/.gpn/models</code></pre>
+        </div>
+        <div class="card">
+          <h3>Access point — <code>~/.gpn/accesspoint.env</code></h3>
+          <pre><code>GPN_LISTEN=0.0.0.0:8092
+GPN_ENDPOINT=ws://127.0.0.1:9944
+GPN_PROVIDERS=http://127.0.0.1:8093
+# GPN_SIGNER_URI=          # testnet free-AI hot wallet (omit for mainnet client-signed)
+# GPN_AP_TOKEN=            # required for non-loopback POSTs
+# GPN_PUBLIC_URL=http://your-host:8092</code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ PORTS ============ -->
+  <section id="ports">
+    <div class="wrap">
+      <span class="kicker">Reference</span>
+      <h2>Ports &amp; endpoints</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th scope="col">Port</th><th scope="col">Service</th><th scope="col">Purpose</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>30333</code></td><td>p2p (libp2p)</td><td>Peer discovery &amp; block gossip (bootnode inbound).</td></tr>
+            <tr><td><code>9944</code></td><td>RPC (ws)</td><td>Chain RPC — jobs, escrow, attestation, result hashes.</td></tr>
+            <tr><td><code>8092</code></td><td>Access point</td><td>Public job API + scheduler (<code>gpn_scheduler</code>).</td></tr>
+            <tr><td><code>8093</code></td><td>Provider heartbeat</td><td><code>GET /status</code> — capabilities, load, latency.</td></tr>
+            <tr><td><code>8082</code></td><td>REST API / explorer</td><td>Local <code>gpn_api</code> / read-only explorer.</td></tr>
+            <tr><td><code>8081</code></td><td>Faucet</td><td>Dev/testnet GPN drip.</td></tr>
+            <tr><td><code>8080</code></td><td>dapp (web UI)</td><td>No-code chat / image / video / fine-tune.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="small muted" style="margin-top:12px">Open the firewall (and port-forward, for remote peers)
+        on whichever of these you expose. Outbound joins never need port-forwarding — only the receiving
+        host does. If your ISP uses CGNAT, inbound forwarding won't work at all.</p>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:10px">
+        <a class="btn" href="ai.html">Next: use the AI →</a>
+        <a class="btn ghost" href="../linux-install-guide.md">Full Linux install guide</a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="foot-grid">
+      <div><a class="brand" href="index.html" style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a><p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute. <em>A GPU should not have to choose.</em></p></div>
+      <div><h4>Product</h4><a href="download.html">Download</a><a href="deploy.html">Deploy</a><a href="ai.html">Access the AI</a><a href="access-points.html">Access Points</a></div>
+      <div><h4>Learn</h4><a href="../GPN-WHITEPAPER.html">Whitepaper</a><a href="../GPN-ONE-PAGER.md">One-pager</a><a href="../GPN-TECHNICAL-OVERVIEW.md">Technical overview</a><a href="buy.html">Token &amp; purchasing</a></div>
+      <div><h4>Project</h4><a href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">Source on GitHub</a><a href="../USE-GPN.md">Usage guide</a><a href="../linux-install-guide.md">Linux install guide</a><a href="../windows-client-test.md">Windows guide</a></div>
+    </div>
+    <div class="foot-bottom">
+      <p class="small muted">© <span data-year>2026</span> GPN · Public testnet. Not investment advice.</p>
+      <p class="small muted">Testnet only — tokens here have no monetary value.</p>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

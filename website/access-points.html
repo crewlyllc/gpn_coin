@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>GPN Access Points — public entry list</title>
+<meta name="description" content="Known GPN access points: public job APIs that route AI work to the best idle GPU. Includes the current testnet entry point and a one-command installer to run your own." />
+<meta name="theme-color" content="#07090f" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237c6cff'/%3E%3Ctext x='16' y='22' font-size='16' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%2307090f'%3EG%3C/text%3E%3C/svg%3E" />
+<link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap nav">
+    <a class="brand" href="index.html" aria-label="GPN home"><span class="dot" aria-hidden="true">G</span><span>GPN<br><small>GPU-NATIVE NETWORK</small></span></a>
+    <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Toggle navigation">☰</button>
+    <nav class="nav-links" id="nav-links" aria-label="Primary">
+      <a href="index.html">Home</a>
+      <a href="download.html">Download</a>
+      <a href="deploy.html">Deploy</a>
+      <a href="ai.html">AI</a>
+      <a href="access-points.html" aria-current="page">Access Points</a>
+      <a href="buy.html">Buy GPN</a>
+      <a href="../GPN-WHITEPAPER.html">Whitepaper</a>
+    </nav>
+    <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
+  </div>
+</header>
+
+<main id="main">
+  <section class="page-head first">
+    <div class="wrap">
+      <span class="kicker">Network entry</span>
+      <h1>Access points</h1>
+      <p>An <b>access point</b> is a public job API (<code>gpn_scheduler</code>). Hit one URL and the network
+        routes your job to the best idle GPU — no provider addresses needed. They're <b>permissionless and
+        redundant</b>: anyone can run one, so running several is the decentralized front door.</p>
+    </div>
+  </section>
+
+  <!-- ============ LIST ============ -->
+  <section>
+    <div class="wrap">
+      <div class="callout warn">
+        <span class="ct">Testnet</span>
+        <p class="mb-0">Everything below is on the public <b>testnet</b>. Tokens have no monetary value, and
+          the testnet can be reset or change without notice.</p>
+      </div>
+
+      <h2>Known access points</h2>
+      <p class="sub">The seeded entry is the current public entry point for the testnet.</p>
+
+      <div class="table-wrap">
+        <table>
+          <caption class="sr-only" style="position:absolute;left:-9999px">Known GPN access points</caption>
+          <thead>
+            <tr>
+              <th scope="col">Name</th>
+              <th scope="col">URL</th>
+              <th scope="col">Status</th>
+              <th scope="col">Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><b>GPN Testnet (public)</b></td>
+              <td><code>http://gpn-testnet.duckdns.org:8092</code></td>
+              <td><span class="chip up"><span class="d" aria-hidden="true"></span> Live</span></td>
+              <td>Current public entry point. LLM chat + job API. Testnet <em>free-AI</em>: the access point
+                can pay escrow, so clients spend nothing. Health: <code>/health</code>; status: <code>/mode</code>;
+                registry: <code>/providers</code>.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="small muted" style="margin-top:12px">No other public access points are published yet. As the
+        network grows, additional regional access points will be listed here.</p>
+
+      <div class="grid cols-2" style="margin-top:22px">
+        <div class="card plain">
+          <h3>Check an access point</h3>
+          <pre><code>curl http://gpn-testnet.duckdns.org:8092/health
+# {"providers":N,"status":"ok"}
+
+curl http://gpn-testnet.duckdns.org:8092/mode
+# testnet free-AI mode
+
+curl http://gpn-testnet.duckdns.org:8092/providers
+# live registry: gflops, latency_ms, models, active</code></pre>
+        </div>
+        <div class="card plain">
+          <h3>Use one from your machine</h3>
+          <p class="muted">See the <a href="ai.html">Access the AI</a> page for a working chat example and the
+            full job API. Windows clients need no install — just PowerShell.</p>
+          <p class="small muted mb-0">Non-loopback POSTs to an access point require
+            <code>Authorization: Bearer &lt;GPN_AP_TOKEN&gt;</code> (or <code>X-Api-Key</code>). Tokens are set
+            per access point and are never published here.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ ADD YOUR OWN ============ -->
+  <section id="add">
+    <div class="wrap">
+      <span class="kicker">Run your own</span>
+      <h2>Add an access point in one command</h2>
+      <p class="sub">Point an access point at the chain and the providers you want it to route to. Expose the
+        port, share the URL, and you're a new front door for the network — no special trust required.</p>
+
+      <div class="field">
+        <label for="cmd-ap">Install &amp; run</label>
+        <pre id="cmd-ap"><code>./install-accesspoint.sh
+# install + start a systemd --user service:
+GPN_INSTALL_SERVICE=1 ./install-accesspoint.sh
+
+gpn-accesspoint-run</code></pre>
+        <button class="btn small ghost no-print" data-copy="#cmd-ap" type="button">Copy</button>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th scope="col">Env var</th><th scope="col">Meaning</th><th scope="col">Default</th></tr></thead>
+          <tbody>
+            <tr><td><code>GPN_LISTEN</code></td><td>Listen address:port</td><td><code>0.0.0.0:8092</code></td></tr>
+            <tr><td><code>GPN_ENDPOINT</code></td><td>Chain RPC endpoint</td><td><code>ws://127.0.0.1:9944</code></td></tr>
+            <tr><td><code>GPN_PROVIDERS</code></td><td>Comma list of provider <code>/status</code> URLs to route to</td><td><code>http://127.0.0.1:8093</code></td></tr>
+            <tr><td><code>GPN_SIGNER_URI</code></td><td>Hot-wallet seed for testnet free-AI mode (creates + escrows jobs)</td><td>unset (mainnet = client-signed)</td></tr>
+            <tr><td><code>GPN_AP_TOKEN</code></td><td>Bearer token required for non-loopback POSTs</td><td>unset (set your own)</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="small muted" style="margin-top:12px">Config is written to <code>~/.gpn/accesspoint.env</code>
+        (chmod 600). Secrets stay there — never in a repo or on a webpage. Full details in the
+        <a href="../access-point-install-guide.md">access-point install guide</a>.</p>
+
+      <div class="callout" style="margin-top:20px">
+        <span class="ct">Want to be listed here?</span>
+        <p class="mb-0">Run an access point, expose its port, and announce it through the project's official
+          channels. Contributions to this page's list are curated; nothing is added automatically.</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="foot-grid">
+      <div><a class="brand" href="index.html" style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a><p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute. <em>A GPU should not have to choose.</em></p></div>
+      <div><h4>Product</h4><a href="download.html">Download</a><a href="deploy.html">Deploy</a><a href="ai.html">Access the AI</a><a href="access-points.html">Access Points</a></div>
+      <div><h4>Learn</h4><a href="../GPN-WHITEPAPER.html">Whitepaper</a><a href="../GPN-ONE-PAGER.md">One-pager</a><a href="../GPN-TECHNICAL-OVERVIEW.md">Technical overview</a><a href="buy.html">Token &amp; purchasing</a></div>
+      <div><h4>Project</h4><a href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">Source on GitHub</a><a href="../USE-GPN.md">Usage guide</a><a href="../linux-install-guide.md">Linux install guide</a><a href="../windows-client-test.md">Windows guide</a></div>
+    </div>
+    <div class="foot-bottom">
+      <p class="small muted">© <span data-year>2026</span> GPN · Public testnet. Not investment advice.</p>
+      <p class="small muted">Testnet only — tokens here have no monetary value.</p>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/app.js"></script>
+</body>
+</html>
