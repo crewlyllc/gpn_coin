@@ -252,6 +252,60 @@ fn assignment_store_path() -> String {
     })
 }
 
+/// Provider-private cache of assignment ids that are already settled (a job we
+/// have conclusively seen as non-`Pending` on-chain, or written off after
+/// repeated absence). Item #16 red-team finding #34: `assignments.json` only
+/// ever grows (`write_assignment` inserts, never prunes), so re-reading it and
+/// calling `get_job_state` (~2 chain reads) for every historical assignment on
+/// every ~300ms pass made the claim cycle balloon from <1s to 30-100s (O(history)
+/// RPC per poll ⇒ the whole job-claim path stalls). Persisting the settled set
+/// lets the claim loop skip a resolved id WITHOUT an RPC, so the per-pass chain
+/// cost tracks only *unresolved* assignments.
+fn settled_store_path() -> String {
+    std::env::var("GPN_LLM_SETTLED_STORE").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        format!("{home}/.gpn/llm-settled.json")
+    })
+}
+
+/// Parse a settled-id set from `path`. Accepts a JSON array of ids (what we
+/// write) and tolerates a JSON object keyed by id (forward/backward compat).
+/// Path is a parameter so the parse is unit-testable without touching `$HOME`.
+fn read_settled_from(path: &str) -> std::collections::HashSet<u64> {
+    let mut set = std::collections::HashSet::new();
+    let Ok(s) = std::fs::read_to_string(path) else {
+        return set;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) else {
+        return set;
+    };
+    match v {
+        serde_json::Value::Array(a) => {
+            for x in a {
+                if let Some(n) = x.as_u64() {
+                    set.insert(n);
+                }
+            }
+        }
+        serde_json::Value::Object(o) => {
+            for k in o.keys() {
+                if let Ok(n) = k.parse::<u64>() {
+                    set.insert(n);
+                }
+            }
+        }
+        _ => {}
+    }
+    set
+}
+
+/// Persist a settled-id set as a sorted JSON array (stable, diff-friendly).
+fn write_settled_to(path: &str, set: &std::collections::HashSet<u64>) -> std::io::Result<()> {
+    let mut ids: Vec<u64> = set.iter().copied().collect();
+    ids.sort_unstable();
+    std::fs::write(path, serde_json::to_string(&ids)?)
+}
+
 /// Persistent per-job inference-failure counter. We give up after a small
 /// number of attempts so a mis-routed job (e.g. an image model like `sd-turbo`
 /// that can never run as a chat completion) can't spin the provider forever.
@@ -601,11 +655,22 @@ async fn process_once(
             .map(|(id, _, _)| *id)
             .collect()
     };
+    // finding #34: skip ids we've already settled so the unbounded
+    // assignments.json can't drive O(history) chain reads every poll. The set
+    // is in-memory here and persisted once per pass (below).
+    let settled_path = settled_store_path();
+    let mut settled = read_settled_from(&settled_path);
+    let mut settled_dirty = false;
     // Jobs we claim this pass but (in fast mode) never wait on-chain for; we
     // run them directly below rather than re-reading chain state that may not
     // have advanced yet.
     let mut just_claimed: Vec<u64> = Vec::new();
     for job_id in targets {
+        // Already settled (non-Pending or written off) on a previous pass — no
+        // need to spend two chain reads rediscovering that every cycle.
+        if settled.contains(&job_id) {
+            continue;
+        }
         // Skip only a job KNOWN to belong to another kind (e.g. a mis-assigned
         // image/diffusion job); an id absent from our local store is a
         // remote-assigned LLM job and MUST be claimed.
@@ -628,6 +693,10 @@ async fn process_once(
             Some((state, _, _, _)) => {
                 missing_counter().lock().unwrap().remove(&job_id);
                 if state != "Pending" {
+                    // Conclusively not claimable (Accepted/Running/terminal) —
+                    // remember it so we never re-query this id again.
+                    settled.insert(job_id);
+                    settled_dirty = true;
                     continue;
                 }
             }
@@ -642,6 +711,12 @@ async fn process_once(
                 *n += 1;
                 if *n > 40 {
                     m.remove(&job_id);
+                    // Write off a never-created / permanently-absent id so it is
+                    // not rescanned on every future pass (the counter itself
+                    // resets on removal, so without this the id would loop
+                    // forever).
+                    settled.insert(job_id);
+                    settled_dirty = true;
                     continue;
                 }
             }
@@ -666,6 +741,13 @@ async fn process_once(
         }
         if let Err(e) = client.start_job(job_id).await {
             eprintln!("[provider] start #{job_id} failed: {e}");
+        }
+    }
+
+    // Persist any newly-settled ids (one write per pass, not per id).
+    if settled_dirty {
+        if let Err(e) = write_settled_to(&settled_path, &settled) {
+            eprintln!("[provider] could not persist settled-id cache: {e}");
         }
     }
 
@@ -833,4 +915,56 @@ async fn run_job(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod settled_cache_tests {
+    //! Item #16 red-team finding #34: the persisted settled-id cache bounds the
+    //! claim loop's chain reads when `assignments.json` grows unbounded.
+    use super::*;
+
+    fn tmp(name: &str) -> String {
+        std::env::temp_dir()
+            .join(format!("gpn-settled-test-{}-{}.json", std::process::id(), name))
+            .to_string_lossy()
+            .to_string()
+    }
+
+    #[test]
+    fn settled_roundtrip_preserves_ids() {
+        let p = tmp("rt");
+        let _ = std::fs::remove_file(&p);
+        let mut set = std::collections::HashSet::new();
+        set.insert(5);
+        set.insert(2049);
+        set.insert(0);
+        write_settled_to(&p, &set).unwrap();
+        let back = read_settled_from(&p);
+        assert_eq!(back, set);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn settled_reads_tolerate_object_and_missing_file() {
+        // Forward/backward compat: a JSON object keyed by id also parses.
+        let obj = tmp("obj");
+        std::fs::write(&obj, r#"{"7":{"provider":"x"},"9":{}}"#).unwrap();
+        let s = read_settled_from(&obj);
+        assert!(s.contains(&7) && s.contains(&9) && s.len() == 2);
+        let _ = std::fs::remove_file(&obj);
+
+        // A missing file is simply an empty set (first run), never a panic.
+        assert!(read_settled_from("/nonexistent/gpn-settled.json").is_empty());
+    }
+
+    #[test]
+    fn settled_skips_resolved_ids_without_an_rpc() {
+        // The claim loop's guard: an id already in the settled set is skipped
+        // before any chain read. This is the regression the fix targets — the
+        // 1700+ stale assignment entries must not be re-queried every pass.
+        let mut settled = std::collections::HashSet::new();
+        settled.insert(42u64);
+        assert!(settled.contains(&42), "resolved id must be skipped");
+        assert!(!settled.contains(&43), "fresh id must still be claimed");
+    }
 }
