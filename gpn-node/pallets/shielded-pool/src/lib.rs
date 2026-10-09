@@ -295,6 +295,10 @@ pub mod pallet {
         ZeroValueOut,
         /// The supplied amount does not fit the balance type / proof scalar.
         ValueTooLarge,
+        /// Shielded→shielded spends are temporarily disabled (see finding #9):
+        /// the note-spend circuit does not yet bind the *output* commitment as a
+        /// public input, so an output note could claim arbitrary value.
+        ShieldedSpendDisabled,
     }
 
     // ---- Calls ------------------------------------------------------------
@@ -412,9 +416,11 @@ pub mod pallet {
         ///   * rejects a re-used nullifier (double-spend) and an unknown root
         ///     (must be in the bounded [`RootHistory`] ring),
         ///   * burns the nullifier (it is *not* burned at deposit),
-        ///   * for **shielded→shielded** (`output_commitment = Some`): requires a
-        ///     zero transparent value balance, appends the output note, and
-        ///     advances `NextPosition`,
+        ///   * the **shielded→shielded** branch (`output_commitment = Some`) is
+        ///     **disabled** (fail-closed, red-team finding #9) until the
+        ///     note-spend circuit binds the output commitment as a public input —
+        ///     otherwise an unconstrained output note could inflate the pool and
+        ///     be drained via a transparent spend,
         ///   * for **shielded→transparent** (`output_commitment = None`): releases
         ///     `value_balance` to `recipient` and reduces `PoolValue`.
         ///
@@ -478,59 +484,48 @@ pub mod pallet {
                 .ok_or(Error::<T>::InvalidProof)?;
             groth16::verify(&vk, &scalars, &proof).map_err(|_| Error::<T>::InvalidProof)?;
 
+            // RED-TEAM 2026-10-09 (finding #9, value conservation / pool‑drain):
+            // the shielded→shielded branch is **fail-closed** until the note-spend
+            // circuit binds the *output* commitment as a public input. The circuit
+            // currently proves the value balance only against the *input* note
+            // (`v = v_out + value_balance`); `output_commitment` is an entirely
+            // unconstrained caller argument (the in-repo test even passes `0xAB…`).
+            // A spender could therefore append an output note committing to an
+            // arbitrary value and later drain the pool with a transparent spend.
+            // Reject BEFORE any effect so a rejected spend does not burn the
+            // nullifier (the input note stays spendable).
+            ensure!(
+                output_commitment.is_none(),
+                Error::<T>::ShieldedSpendDisabled
+            );
+
             // Effect: burn the nullifier.
             <Nullifiers<T>>::insert(nullifier, ());
 
-            match output_commitment {
-                Some(out) => {
-                    // Shielded → shielded.
-                    ensure!(value_balance == 0, Error::<T>::NonZeroValueBalance);
-                    let pool = <NoteCommitments<T>>::get();
-                    ensure!(
-                        (pool.len() as u32) < T::MaxCommitments::get(),
-                        Error::<T>::PoolFull
-                    );
-                    ensure!(!pool.contains(&out), Error::<T>::DuplicateCommitment);
-                    let position = <NextPosition<T>>::get();
-                    let mut new_pool = pool;
-                    new_pool.try_push(out).map_err(|_| Error::<T>::PoolFull)?;
-                    <NoteCommitments<T>>::put(new_pool);
-                    let root = Self::append_to_tree(&out)?;
-                    Self::deposit_event(Event::<T>::NoteAdded { cm: out, position });
-                    Self::deposit_event(Event::<T>::RootRecorded { root });
-                    Self::deposit_event(Event::<T>::Spent {
-                        nullifier,
-                        value_out: 0,
-                        merkle_root,
-                    });
-                }
-                None => {
-                    // Shielded → transparent.
-                    let to = recipient.ok_or(Error::<T>::MissingRecipient)?;
-                    ensure!(value_balance > 0, Error::<T>::ZeroValueOut);
-                    let amount: BalanceOf<T> = value_balance
-                        .try_into()
-                        .map_err(|_| Error::<T>::ValueTooLarge)?;
-                    let pooled: u128 = <PoolValue<T>>::get().unique_saturated_into();
-                    ensure!(
-                        pooled >= value_balance as u128,
-                        Error::<T>::InsufficientPoolValue
-                    );
-                    T::Currency::transfer(
-                        &Self::account_id(),
-                        &to,
-                        amount,
-                        ExistenceRequirement::AllowDeath,
-                    )
-                    .map_err(|_| Error::<T>::TransferFailed)?;
-                    <PoolValue<T>>::mutate(|p| *p = p.saturating_sub(amount));
-                    Self::deposit_event(Event::<T>::Spent {
-                        nullifier,
-                        value_out: value_balance,
-                        merkle_root,
-                    });
-                }
-            }
+            // Shielded → transparent.
+            let to = recipient.ok_or(Error::<T>::MissingRecipient)?;
+            ensure!(value_balance > 0, Error::<T>::ZeroValueOut);
+            let amount: BalanceOf<T> = value_balance
+                .try_into()
+                .map_err(|_| Error::<T>::ValueTooLarge)?;
+            let pooled: u128 = <PoolValue<T>>::get().unique_saturated_into();
+            ensure!(
+                pooled >= value_balance as u128,
+                Error::<T>::InsufficientPoolValue
+            );
+            T::Currency::transfer(
+                &Self::account_id(),
+                &to,
+                amount,
+                ExistenceRequirement::AllowDeath,
+            )
+            .map_err(|_| Error::<T>::TransferFailed)?;
+            <PoolValue<T>>::mutate(|p| *p = p.saturating_sub(amount));
+            Self::deposit_event(Event::<T>::Spent {
+                nullifier,
+                value_out: value_balance,
+                merkle_root,
+            });
             Ok(())
         }
     }
@@ -1157,21 +1152,31 @@ mod tests {
     }
 
     #[test]
-    fn test_spend_shielded_to_shielded_appends_output() {
+    fn test_shielded_spend_is_disabled_and_cannot_inflate_pool() {
         new_test_ext().execute_with(|| {
             deposit_fixture_note();
-            let out = [0xABu8; 32];
+            let out = [0xABu8; 32]; // arbitrary attacker-chosen commitment
             let size_before = ShieldPallet::pool_size();
             let pos_before = NextPosition::<Test>::get();
 
-            shielded_spend(out).unwrap();
+            // RED-TEAM finding #9: the shielded→shielded branch is fail-closed
+            // until the circuit binds the output commitment as a public input.
+            assert_eq!(
+                shielded_spend(out),
+                Err(Error::<Test>::ShieldedSpendDisabled.into())
+            );
 
-            // Output commitment appended; pool value unchanged (no release).
-            assert_eq!(ShieldPallet::pool_size(), size_before + 1);
-            assert_eq!(NextPosition::<Test>::get(), pos_before + 1);
-            assert!(NoteCommitments::<Test>::get().contains(&out));
+            // No effect: the pool/tree are untouched, the nullifier is NOT
+            // burned (the input note stays spendable), and no growth occurs.
+            assert_eq!(ShieldPallet::pool_size(), size_before);
+            assert_eq!(NextPosition::<Test>::get(), pos_before);
+            assert!(!NoteCommitments::<Test>::get().contains(&out));
             assert_eq!(PoolValue::<Test>::get(), 500);
-            assert!(ShieldPallet::is_nullifier_spent(&a32(FIX_NF_HEX)));
+            assert!(!ShieldPallet::is_nullifier_spent(&a32(FIX_NF_HEX)));
+
+            // The note is still spendable transparently (nullifier not consumed).
+            transparent_spend().unwrap();
+            assert_eq!(PoolValue::<Test>::get(), 0);
         });
     }
 
@@ -1198,11 +1203,11 @@ mod tests {
     }
 
     #[test]
-    fn test_spend_shielded_rejects_nonzero_value_balance() {
+    fn test_spend_shielded_rejects_output_commitment() {
         new_test_ext().execute_with(|| {
             deposit_fixture_note();
             // Transparent proof (value_balance = 500) but asking for a shielded
-            // output → NonZeroValueBalance.
+            // output → the shielded branch is disabled (finding #9).
             let r = ShieldPallet::spend(
                 RuntimeOrigin::signed(ALICE),
                 a48(FIX_T_A),
@@ -1215,7 +1220,7 @@ mod tests {
                 None,
                 Some([0xCDu8; 32]),
             );
-            assert_eq!(r, Err(Error::<Test>::NonZeroValueBalance.into()));
+            assert_eq!(r, Err(Error::<Test>::ShieldedSpendDisabled.into()));
         });
     }
 
