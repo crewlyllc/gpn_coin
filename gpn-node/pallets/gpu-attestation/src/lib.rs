@@ -410,7 +410,7 @@ pub mod pallet {
                 .try_into()
                 .unwrap_or(0);
 
-            let record = AttestationRecord {
+            let mut record = AttestationRecord {
                 submitted_at: now,
                 gpu_info_hash,
                 challenge_response,
@@ -421,10 +421,26 @@ pub mod pallet {
             };
 
             let is_new = !<Attestations<T>>::contains_key(&who);
+            // RED-TEAM 2026-10-09 (finding #23, gpu-attestation / liveness-incentive
+            // evasion): a RE-submission used to reset `missed_count` to 0 and clear
+            // `LastMissBlock`, so a provider that had gone idle could zero its miss
+            // history simply by re-submitting an attestation. Because the base
+            // (Bronze) attestation's `challenge_response` is NOT verified on-chain,
+            // that re-submission proves nothing about liveness — an offline operator
+            // could therefore dodge the `MaxMissedAttestations` slash (`check_expired`)
+            // indefinitely, defeating the periodic-liveness deterrent. Only a *fresh*
+            // attestation starts a clean miss history; a re-submission preserves the
+            // accumulated miss state, so an honest provider clears it the real way —
+            // via a confirmed liveness window in `gpn-liveness::submit_liveness`
+            // (which sets `missed_count = 0`).
+            let prior_missed = <Attestations<T>>::get(&who)
+                .map(|r| r.missed_count)
+                .unwrap_or(0);
+            record.missed_count = if is_new { 0 } else { prior_missed };
             <Attestations<T>>::insert(&who, record);
-            // A fresh attestation resets the miss clock for this provider.
-            <LastMissBlock<T>>::remove(&who);
+            // Only a *fresh* attestation resets the miss clock for this provider.
             if is_new {
+                <LastMissBlock<T>>::remove(&who);
                 <AttestedProviderCount<T>>::mutate(|c| *c += 1);
             }
 
@@ -1264,6 +1280,66 @@ mod tests {
             let penalty = initial_stake / 10;
             assert_eq!(stake_after, initial_stake - penalty);
             assert_eq!(TotalStaked::<Test>::get(), initial_stake - penalty);
+        });
+    }
+
+    /// REGRESSION (red-team 2026-10-09, finding #23, gpu-attestation /
+    /// liveness-incentive evasion): a re-submitted attestation must NOT reset the
+    /// accumulated miss history. Previously every `submit_attestation` set
+    /// `missed_count = 0` and cleared `LastMissBlock`, so a provider that had gone
+    /// idle could zero its miss count by simply re-attesting (the open Bronze tier
+    /// needs no verified challenge) and dodge the `MaxMissedAttestations` slash
+    /// forever. A re-submission must preserve the miss state; only a genuinely
+    /// fresh attestation starts clean.
+    #[test]
+    fn test_resubmit_preserves_miss_history_and_does_not_evade_slash() {
+        new_test_ext().execute_with(|| {
+            stake_and_attest(ALICE, 1_000, 2);
+
+            // Count one miss for ALICE.
+            System::set_block_number(100 + TestMaxAge::get() + 1);
+            AttestPallet::check_expired(RuntimeOrigin::signed(BOB), ALICE).unwrap();
+            assert_eq!(Attestations::<Test>::get(ALICE).unwrap().missed_count, 1);
+
+            // An idle provider tries to zero its miss history by re-attesting.
+            AttestPallet::submit_attestation(
+                RuntimeOrigin::signed(ALICE),
+                [1u8; 32],
+                [2u8; 32],
+                2,
+                10_000,
+            )
+            .unwrap();
+            assert_eq!(
+                Attestations::<Test>::get(ALICE).unwrap().missed_count,
+                1,
+                "re-submission must not reset the miss counter (slash evasion)"
+            );
+
+            // Two more misses reach the limit -> the 10% slash still fires, i.e.
+            // the evasion is closed.
+            let initial_stake = ProviderStake::<Test>::get(ALICE).unwrap();
+            for blk in [300u64, 400u64] {
+                System::set_block_number(blk);
+                AttestPallet::check_expired(RuntimeOrigin::signed(BOB), ALICE).unwrap();
+            }
+            assert_eq!(
+                ProviderStake::<Test>::get(ALICE).unwrap(),
+                initial_stake - initial_stake / 10,
+                "the missed-attestation slash must still be reachable after a re-attest"
+            );
+
+            // A genuinely fresh attestation, by contrast, starts at zero.
+            AttestPallet::confirm_challenge(RuntimeOrigin::signed(VERIFIER), BOB).unwrap();
+            AttestPallet::submit_attestation(
+                RuntimeOrigin::signed(BOB),
+                [3u8; 32],
+                [4u8; 32],
+                1,
+                10_000,
+            )
+            .unwrap();
+            assert_eq!(Attestations::<Test>::get(BOB).unwrap().missed_count, 0);
         });
     }
 
