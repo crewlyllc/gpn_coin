@@ -312,6 +312,19 @@ pub mod pallet {
             // disabled treasury spending (until another successful root call).
             // A rejected call must not mutate state; check first, then write.
             ensure!(size > 0, Error::<T>::RosterEmpty);
+            // Red-team finding #32 (treasury / governance-config integrity — the
+            // cross-field counterpart of findings #13/#28): `execute_spend`
+            // requires `approvals.len() >= Threshold`, and `ProposalApprovals` is
+            // bounded by the roster, so the reachable approval count can never
+            // exceed `roster_size`. `set_threshold` already enforces
+            // `0 < threshold <= roster_size`, but the SAME invariant can be broken
+            // from the other side: `set_roster` revalidated only `size > 0`, so a
+            // root roster change to fewer members than the current `Threshold`
+            // (e.g. shrink 25 -> 3 while Threshold stays 13) silently persists a
+            // state where NO spend can ever reach the threshold — treasury
+            // spending is bricked until another successful root call. Validate the
+            // invariant BEFORE writing, independently of which setter moves.
+            ensure!(Threshold::<T>::get() <= size, Error::<T>::InvalidThreshold);
             Roster::<T>::put(bounded);
             Self::deposit_event(Event::<T>::RosterUpdated { size });
             Ok(())
@@ -655,9 +668,41 @@ mod tests {
                 25,
                 "roster must be unchanged after a rejected set_roster"
             );
-            // A valid replacement still works.
+            // A valid replacement still works — but the cross-field invariant
+            // `Threshold <= roster_size` (finding #32) must be respected, so
+            // lower the threshold to the new roster size first.
+            T::set_threshold(RuntimeOrigin::root(), 3).unwrap();
             T::set_roster(RuntimeOrigin::root(), vec![1, 2, 3]).unwrap();
             assert_eq!(Roster::<Test>::get().len(), 3);
+        });
+    }
+
+    #[test]
+    fn test_set_roster_below_threshold_rejected_without_mutating() {
+        new_test_ext().execute_with(|| {
+            // Genesis: roster 25, threshold 13.
+            assert_eq!(Roster::<Test>::get().len(), 25);
+            assert_eq!(Threshold::<Test>::get(), 13);
+            // Shrinking the roster to 3 members while Threshold stays 13 is
+            // unsatisfiable (`execute_spend` demands >= 13 approvals but only 3
+            // members exist) -> all treasury spending would be bricked. Must be
+            // REJECTED and must NOT mutate the roster (red-team finding #32:
+            // cross-field invariant enforced on both setters).
+            assert_eq!(
+                T::set_roster(RuntimeOrigin::root(), vec![1, 2, 3]),
+                Err(Error::<Test>::InvalidThreshold.into())
+            );
+            assert_eq!(
+                Roster::<Test>::get().len(),
+                25,
+                "roster must be unchanged after a rejected set_roster"
+            );
+            // A roster of exactly the threshold size (13) is still allowed and
+            // leaves spending satisfiable.
+            let just_enough: Vec<u64> = (1..=13).collect();
+            T::set_roster(RuntimeOrigin::root(), just_enough).unwrap();
+            assert_eq!(Roster::<Test>::get().len(), 13);
+            assert_eq!(Threshold::<Test>::get(), 13);
         });
     }
 
