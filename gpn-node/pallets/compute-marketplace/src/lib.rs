@@ -995,42 +995,6 @@ pub mod pallet {
                 ensure!(who == provider, Error::<T>::NotJobProvider);
             }
             let escrow = <JobEscrow<T>>::take(job_id).ok_or(Error::<T>::EscrowMismatch)?;
-            // ── Per-token billing ──────────────────────────────────────────
-            // When the job carries a rate + cap, the real charge is
-            // `price_per_token × actual_tokens` (bounded by the escrow); the unused
-            // remainder is refunded to the requestor. No rate => legacy flat price.
-            let charge: BalanceOf<T> = {
-                let (price_per_token, max_tokens, actual_tokens) = <JobBilling<T>>::get(job_id);
-                if price_per_token > 0 && max_tokens > 0 {
-                    let toks: u128 = (actual_tokens.min(max_tokens)) as u128;
-                    let cap: u128 = escrow.try_into().unwrap_or(u128::MAX);
-                    price_per_token
-                        .saturating_mul(toks)
-                        .min(cap)
-                        .try_into()
-                        .unwrap_or(escrow)
-                } else {
-                    escrow
-                }
-            };
-            let ed = T::Currency::minimum_balance();
-            let mut refund: BalanceOf<T> = escrow.saturating_sub(charge);
-            let fee_bps = T::MarketplaceFeeBps::get();
-            let mut fee: BalanceOf<T> = charge * fee_bps.into() / 10_000u32.into();
-            let mut provider_payment = charge.saturating_sub(fee);
-
-            // The marketplace pallet account is a pass-through escrow holder and
-            // must never be left with a *dangling* balance below ED. If the payout
-            // or fee is dust, fold it into the payout (no fee on dust jobs).
-            if provider_payment < ed || fee < ed {
-                provider_payment = charge;
-                fee = Zero::zero();
-            }
-            // Fold a sub-ED refund into the payout too, so the pallet ends at 0.
-            if refund > Zero::zero() && refund < ed {
-                provider_payment = provider_payment.saturating_add(refund);
-                refund = Zero::zero();
-            }
 
             job.state = JobState::Completed;
             <Jobs<T>>::insert(job_id, job);
@@ -1052,36 +1016,10 @@ pub mod pallet {
                 <RequestorJobs<T>>::insert(&requestor, rj);
             }
 
-            // Route the marketplace fee into the token pallet account first so the
-            // fee economy is self-funding: `distribute_fees` draws from the `gpn/tokn`
-            // pallet account. AllowDeath: sweeping the fee may take the marketplace
-            // account below ED (it holds only per-job escrow and is recreated on the
-            // next deposit), but only down to the provider payout, which is >= ED.
-            if !fee.is_zero() {
-                T::Currency::transfer(
-                    &Self::account_id(),
-                    &T::FeeSink::fee_sink(),
-                    fee,
-                    ExistenceRequirement::AllowDeath,
-                )?;
-            }
-            // Refund any unused escrow to the requestor (fee already out, so the
-            // pallet keeps exactly `provider_payment`).
-            if !refund.is_zero() {
-                T::Currency::transfer(
-                    &Self::account_id(),
-                    &requestor,
-                    refund,
-                    ExistenceRequirement::AllowDeath,
-                )?;
-            }
-            // Pay the provider last, sweeping the marketplace account to exactly 0.
-            T::Currency::transfer(
-                &Self::account_id(),
-                &provider,
-                provider_payment,
-                ExistenceRequirement::AllowDeath,
-            )?;
+            // Settle the escrow: fee → fee sink, unused escrow → requestor,
+            // remainder → provider (per-token billing). Shared with the expiry
+            // path so a delivered job settles identically however it finalizes.
+            Self::settle_escrow(job_id, escrow, &provider, &requestor)?;
             Self::deposit_event(Event::<T>::JobCompleted { job_id, provider });
 
             Ok(())
@@ -1249,6 +1187,90 @@ pub mod pallet {
             frame_support::PalletId(*b"gpn/cmkt").into_account_truncating()
         }
 
+        /// Split a job's escrowed `price` into the marketplace `fee`, the
+        /// requestor `refund`, and the `provider`'s payout (per-token billing),
+        /// then move the funds out of the marketplace account.
+        ///
+        /// Shared by `complete_job` (provider delivered and settled) and the
+        /// expiry path (`apply_expiry`) when a job expired *after* the provider
+        /// had already delivered a result (red-team finding #29 — the requestor
+        /// must not get a full refund once work is delivered). `AllowDeath`:
+        /// sweeping the last escrow may take the marketplace account below ED (it
+        /// holds only per-job escrow and is recreated on the next deposit).
+        fn settle_escrow(
+            job_id: u64,
+            escrow: BalanceOf<T>,
+            provider: &T::AccountId,
+            requestor: &T::AccountId,
+        ) -> DispatchResult {
+            // ── Per-token billing ──────────────────────────────────────────
+            // When the job carries a rate + cap, the real charge is
+            // `price_per_token × actual_tokens` (bounded by the escrow); the unused
+            // remainder is refunded to the requestor. No rate => legacy flat price.
+            let charge: BalanceOf<T> = {
+                let (price_per_token, max_tokens, actual_tokens) = <JobBilling<T>>::get(job_id);
+                if price_per_token > 0 && max_tokens > 0 {
+                    let toks: u128 = (actual_tokens.min(max_tokens)) as u128;
+                    let cap: u128 = escrow.try_into().unwrap_or(u128::MAX);
+                    price_per_token
+                        .saturating_mul(toks)
+                        .min(cap)
+                        .try_into()
+                        .unwrap_or(escrow)
+                } else {
+                    escrow
+                }
+            };
+            let ed = T::Currency::minimum_balance();
+            let mut refund: BalanceOf<T> = escrow.saturating_sub(charge);
+            let fee_bps = T::MarketplaceFeeBps::get();
+            let mut fee: BalanceOf<T> = charge * fee_bps.into() / 10_000u32.into();
+            let mut provider_payment = charge.saturating_sub(fee);
+
+            // The marketplace pallet account is a pass-through escrow holder and
+            // must never be left with a *dangling* balance below ED. If the payout
+            // or fee is dust, fold it into the payout (no fee on dust jobs).
+            if provider_payment < ed || fee < ed {
+                provider_payment = charge;
+                fee = Zero::zero();
+            }
+            // Fold a sub-ED refund into the payout too, so the pallet ends at 0.
+            if refund > Zero::zero() && refund < ed {
+                provider_payment = provider_payment.saturating_add(refund);
+                refund = Zero::zero();
+            }
+
+            // Route the marketplace fee into the token pallet account first so the
+            // fee economy is self-funding: `distribute_fees` draws from the `gpn/tokn`
+            // pallet account.
+            if !fee.is_zero() {
+                T::Currency::transfer(
+                    &Self::account_id(),
+                    &T::FeeSink::fee_sink(),
+                    fee,
+                    ExistenceRequirement::AllowDeath,
+                )?;
+            }
+            // Refund any unused escrow to the requestor (fee already out, so the
+            // pallet keeps exactly `provider_payment`).
+            if !refund.is_zero() {
+                T::Currency::transfer(
+                    &Self::account_id(),
+                    requestor,
+                    refund,
+                    ExistenceRequirement::AllowDeath,
+                )?;
+            }
+            // Pay the provider last, sweeping the marketplace account to exactly 0.
+            T::Currency::transfer(
+                &Self::account_id(),
+                provider,
+                provider_payment,
+                ExistenceRequirement::AllowDeath,
+            )?;
+            Ok(())
+        }
+
         /// The one shared expiry state transition, used by both the permissionless
         /// `expire_job` extrinsic and the `on_initialize` sweep: mark the job
         /// `Failed`, decrement the global count, refund the full escrow to the
@@ -1259,20 +1281,43 @@ pub mod pallet {
             let Some(mut job) = <Jobs<T>>::get(job_id) else {
                 return;
             };
+            // Red-team finding #29 (compute-marketplace / theft-of-service — the
+            // expiry back-door around the #11/#12 requestor-side fixes): expiry
+            // refunds the escrow to the requestor *regardless of state*. If the
+            // provider had already DELIVERED a result (`AwaitingVerification`),
+            // the requestor could obtain compute for free simply by never calling
+            // `complete_job` and letting the deadline pass (anyone — or the
+            // `on_initialize` sweep — then expires the job and refunds the whole
+            // escrow, with the provider unpaid for delivered work). A job that
+            // expired with a delivered result must settle to its provider (the
+            // same per-token split as `complete_job`); only an *undelivered* job
+            // (Pending/Accepted/Running) refunds the requestor in full.
+            let delivered = job.state == JobState::AwaitingVerification;
+            let delivering_provider = if delivered {
+                <JobProvider<T>>::get(job_id)
+            } else {
+                None
+            };
             job.state = JobState::Failed;
             <Jobs<T>>::insert(job_id, job);
             <ActiveJobCount<T>>::mutate(|c| *c = c.saturating_sub(1));
 
-            // Refund the full escrow to the requestor (no work delivered).
+            // Refund/settle the full escrow.
             if let Some(escrow) = <JobEscrow<T>>::take(job_id) {
                 // Best-effort: a pathological transfer failure (e.g. the
                 // marketplace account under its ED) must not abort the sweep.
-                let _ = T::Currency::transfer(
-                    &Self::account_id(),
-                    requestor,
-                    escrow,
-                    ExistenceRequirement::AllowDeath,
-                );
+                if let Some(provider) = delivering_provider {
+                    // Delivered work (finding #29): pay the provider and refund
+                    // only the unused remainder to the requestor.
+                    let _ = Self::settle_escrow(job_id, escrow, &provider, requestor);
+                } else {
+                    let _ = T::Currency::transfer(
+                        &Self::account_id(),
+                        requestor,
+                        escrow,
+                        ExistenceRequirement::AllowDeath,
+                    );
+                }
             }
             // Free capacity slots (mirror fail_job/cancel_job).
             if let Some(provider) = <JobProvider<T>>::take(job_id) {
@@ -2247,6 +2292,57 @@ mod tests {
 
             // A terminal job cannot be expired again.
             assert!(MarketPallet::expire_job(RuntimeOrigin::signed(CAROL), job_id).is_err());
+        });
+    }
+
+    #[test]
+    fn test_expire_job_after_delivery_pays_provider_not_requestor() {
+        // Red-team finding #29: expiry must NOT refund the requestor once the
+        // provider has DELIVERED a result (AwaitingVerification) — otherwise the
+        // requestor gets free compute by never completing. The delivered job
+        // settles to the provider (per-token split), like `complete_job`.
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            let job_id = create_job(ALICE);
+            // Provider accepts, starts and delivers a result.
+            MarketPallet::accept_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
+            MarketPallet::start_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
+            MarketPallet::submit_result(RuntimeOrigin::signed(BOB), job_id, [7u8; 32], 0).unwrap();
+            assert_eq!(
+                Jobs::<Test>::get(job_id).unwrap().state,
+                JobState::AwaitingVerification
+            );
+
+            // ALICE already paid the 1_000 escrow at create time.
+            let alice_after_escrow = pallet_balances::Pallet::<Test>::free_balance(ALICE);
+            let bob_before = pallet_balances::Pallet::<Test>::free_balance(BOB);
+            let sink_before = pallet_balances::Pallet::<Test>::free_balance(99);
+
+            // The requestor never completes; past the deadline a THIRD PARTY
+            // (permissionless) expires the job.
+            System::set_block_number(200);
+            MarketPallet::expire_job(RuntimeOrigin::signed(CAROL), job_id).unwrap();
+
+            // The provider IS paid for delivered work (flat billing = 1_000 escrow,
+            // 1% fee => 990 payout + 10 fee), and the requestor is NOT refunded the
+            // whole escrow (charge consumed it, so the refund is 0).
+            let charge: u128 = 1_000;
+            let fee: u128 = charge * 100 / 10_000;
+            let payout = charge - fee;
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(BOB),
+                bob_before + payout
+            );
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(99),
+                sink_before + fee
+            );
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(ALICE),
+                alice_after_escrow
+            );
+            assert!(JobEscrow::<Test>::get(job_id).is_none());
+            assert_eq!(ActiveJobCount::<Test>::get(), 0);
         });
     }
 
