@@ -877,7 +877,7 @@ pub mod pallet {
         #[pallet::call_index(6)]
         #[pallet::weight(<T as Config>::WeightInfo::complete_job())]
         pub fn complete_job(origin: OriginFor<T>, job_id: u64) -> DispatchResult {
-            let _who = ensure_signed(origin)?;
+            let who = ensure_signed(origin)?;
             let mut job = <Jobs<T>>::get(job_id).ok_or(Error::<T>::JobNotFound)?;
             ensure!(
                 job.state == JobState::AwaitingVerification || job.state == JobState::Running,
@@ -886,6 +886,18 @@ pub mod pallet {
 
             let provider = <JobProvider<T>>::get(job_id).ok_or(Error::<T>::NotJobProvider)?;
             let requestor = <JobRequestor<T>>::get(job_id).ok_or(Error::<T>::NotJobProvider)?;
+            // Access control (red-team finding 2026-10-08): `complete_job` used to be
+            // callable by *any* signed account. Because it is allowed from the
+            // `Running` state (before a result is submitted), a third party — or the
+            // requestor itself — could finalize an in-flight job early: with per-token
+            // billing `actual_tokens` is still 0, so `charge == 0`, the whole escrow is
+            // refunded to the requestor and the provider is paid nothing for work it is
+            // still doing (theft-of-service / griefing). Only the job's own requestor or
+            // assigned provider may complete it (mirrors `fail_job`).
+            ensure!(
+                who == requestor || who == provider,
+                Error::<T>::NotJobProvider
+            );
             let escrow = <JobEscrow<T>>::take(job_id).ok_or(Error::<T>::EscrowMismatch)?;
             // ── Per-token billing ──────────────────────────────────────────
             // When the job carries a rate + cap, the real charge is
@@ -1310,7 +1322,7 @@ pub mod pallet {
 mod tests {
     use super::*;
     use frame_support::{
-        construct_runtime, derive_impl, parameter_types,
+        assert_noop, construct_runtime, derive_impl, parameter_types,
         traits::{BuildGenesisConfig, ConstU128, ConstU16, ConstU32, ConstU64, Everything, Hooks},
     };
     use sp_core::H256;
@@ -1671,9 +1683,9 @@ mod tests {
                 Some([5u8; 32])
             );
 
-            // Complete & pay
+            // Complete & pay (the assigned provider finalizes its own job).
             let provider_before = pallet_balances::Pallet::<Test>::free_balance(BOB);
-            MarketPallet::complete_job(RuntimeOrigin::signed(CAROL), job_id).unwrap();
+            MarketPallet::complete_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
             assert_eq!(
                 Jobs::<Test>::get(job_id).unwrap().state,
                 JobState::Completed
@@ -1684,6 +1696,42 @@ mod tests {
                 pallet_balances::Pallet::<Test>::free_balance(BOB),
                 provider_before + 990
             );
+        });
+    }
+
+    #[test]
+    fn test_complete_job_rejects_third_party() {
+        // Red-team finding 2026-10-08: `complete_job` was callable by ANY signed
+        // account. From the `Running` state (no result yet) that let a third party
+        // — or the requestor — finalize an in-flight job early: per-token billing
+        // `actual_tokens` is still 0, so the whole escrow is refunded to the
+        // requestor and the provider is paid nothing. Only the requestor or the
+        // assigned provider may complete.
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            let job_id = create_job(ALICE);
+            MarketPallet::accept_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
+            MarketPallet::start_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
+            assert_eq!(Jobs::<Test>::get(job_id).unwrap().state, JobState::Running);
+
+            // A third party cannot complete the still-running job…
+            let escrow_before =
+                pallet_balances::Pallet::<Test>::free_balance(MarketPallet::account_id());
+            assert_noop!(
+                MarketPallet::complete_job(RuntimeOrigin::signed(CAROL), job_id),
+                Error::<Test>::NotJobProvider
+            );
+            // …and the job stays Running with its escrow intact.
+            assert_eq!(Jobs::<Test>::get(job_id).unwrap().state, JobState::Running);
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(MarketPallet::account_id()),
+                escrow_before
+            );
+
+            // The assigned provider still completes normally.
+            MarketPallet::submit_result(RuntimeOrigin::signed(BOB), job_id, [5u8; 32], 1).unwrap();
+            MarketPallet::complete_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
+            assert_eq!(Jobs::<Test>::get(job_id).unwrap().state, JobState::Completed);
         });
     }
 
@@ -1701,7 +1749,7 @@ mod tests {
             let sink_before = pallet_balances::Pallet::<Test>::free_balance(99);
             assert_eq!(sink_before, 0);
 
-            MarketPallet::complete_job(RuntimeOrigin::signed(CAROL), job_id).unwrap();
+            MarketPallet::complete_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
 
             // 1% fee (10) must be forwarded to the fee sink, NOT left in gpn/cmkt.
             assert_eq!(
@@ -1744,7 +1792,7 @@ mod tests {
             MarketPallet::submit_result(RuntimeOrigin::signed(BOB), job_id, [7u8; 32], 0).unwrap();
 
             let provider_before = pallet_balances::Pallet::<Test>::free_balance(BOB);
-            MarketPallet::complete_job(RuntimeOrigin::signed(CAROL), job_id).unwrap();
+            MarketPallet::complete_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
 
             // Provider paid the full escrow (fee rounds to 0); marketplace
             // account fully drained (AllowDeath), not blocked by ED.
