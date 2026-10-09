@@ -302,8 +302,15 @@ pub mod pallet {
             let bounded: BoundedVec<T::AccountId, T::MaxRoster> =
                 roster.try_into().map_err(|_| Error::<T>::RosterEmpty)?;
             let size = bounded.len() as u32;
-            Roster::<T>::put(bounded);
+            // Validate BEFORE mutating. RED-TEAM 2026-10-09 (finding #13, treasury /
+            // governance-config integrity): the `size > 0` guard used to run
+            // *after* `Roster::<T>::put`, so `set_roster(vec![])` returned
+            // `Err(RosterEmpty)` yet the empty roster was already persisted — the
+            // failed dispatch still emptied the governance roster and permanently
+            // disabled treasury spending (until another successful root call).
+            // A rejected call must not mutate state; check first, then write.
             ensure!(size > 0, Error::<T>::RosterEmpty);
+            Roster::<T>::put(bounded);
             Self::deposit_event(Event::<T>::RosterUpdated { size });
             Ok(())
         }
@@ -612,6 +619,28 @@ mod tests {
                 T::approve_spend(RuntimeOrigin::signed(999), 0),
                 Err(Error::<Test>::NotInRoster.into())
             );
+        });
+    }
+
+    #[test]
+    fn test_set_roster_rejects_empty_without_mutating() {
+        new_test_ext().execute_with(|| {
+            // Genesis roster present.
+            assert_eq!(Roster::<Test>::get().len(), 25);
+            // Root attempts an empty roster: must be REJECTED and must NOT mutate
+            // the stored roster (red-team finding #13: guard-after-write).
+            assert_eq!(
+                T::set_roster(RuntimeOrigin::root(), vec![]),
+                Err(Error::<Test>::RosterEmpty.into())
+            );
+            assert_eq!(
+                Roster::<Test>::get().len(),
+                25,
+                "roster must be unchanged after a rejected set_roster"
+            );
+            // A valid replacement still works.
+            T::set_roster(RuntimeOrigin::root(), vec![1, 2, 3]).unwrap();
+            assert_eq!(Roster::<Test>::get().len(), 3);
         });
     }
 
