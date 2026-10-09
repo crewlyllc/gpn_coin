@@ -123,7 +123,7 @@ pub const VERSION: sp_version::RuntimeVersion = sp_version::RuntimeVersion {
     spec_name: create_runtime_str!("gpn"),
     impl_name: create_runtime_str!("gpn"),
     authoring_version: 1,
-    spec_version: 32,
+    spec_version: 33,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 1,
@@ -464,6 +464,8 @@ impl pallet_gpn_liveness::Config for Runtime {
     type SlashBps = LivenessSlashBps;
     type UptimeLookback = UptimeLookback;
     type MaxEndpointLen = MaxEndpointLen;
+    // Confirming a window clears the provider's missed-attestation history.
+    type Attestation = GPUAttestation;
     // Benchmark-derived weights (workplan item 9).
     type WeightInfo = pallet_gpn_liveness::weights::SubstrateWeight<Runtime>;
 }

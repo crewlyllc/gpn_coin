@@ -13,7 +13,7 @@ pub mod weights;
 use codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use core::fmt::Debug;
 use frame_support::sp_runtime::traits::SaturatedConversion;
-use pallet_gpn_liveness::LivenessProvider;
+use pallet_gpn_liveness::{AttestationLivenessSink, LivenessProvider};
 use scale_info::TypeInfo;
 
 pub use pallet::*;
@@ -198,10 +198,12 @@ pub mod pallet {
         StorageMap<_, Blake2_128Concat, T::AccountId, BalanceOf<T>, OptionQuery>;
 
     /// Block at which `check_expired` last counted a *miss* for an account.
-    /// Bounds miss-counting (and thus slashing) to at most once per
-    /// `MaxAttestationAge` window so a permissionless caller cannot hammer
-    /// `check_expired` in a single block to repeatedly slash an overdue
-    /// provider's stake. Cleared on (re)attestation and unbonding.
+    /// Also the anchor of the current miss window: seeded at a **fresh**
+    /// attestation and left untouched by re-submissions (so re-attesting cannot
+    /// reset the window — red-team finding #26), and reset by a confirmed
+    /// liveness window (`AttestationLivenessSink::reset_misses`). Cleared on
+    /// unbonding. `check_expired` falls back to `submitted_at` only for legacy
+    /// records that predate this bookmark.
     #[pallet::storage]
     pub type LastMissBlock<T: Config> =
         StorageMap<_, Blake2_128Concat, T::AccountId, BlockNumberFor<T>, OptionQuery>;
@@ -438,9 +440,16 @@ pub mod pallet {
                 .unwrap_or(0);
             record.missed_count = if is_new { 0 } else { prior_missed };
             <Attestations<T>>::insert(&who, record);
-            // Only a *fresh* attestation resets the miss clock for this provider.
+            // Only a *fresh* attestation starts a clean miss clock. Seed the
+            // miss-window anchor at the fresh attestation so `check_expired`'s
+            // reference is NOT the refreshable `submitted_at`: a later
+            // re-submission must not reset the window (red-team finding #26 —
+            // otherwise an idle but cheaply re-attesting staked provider never
+            // accumulates `MaxMissedAttestations` misses and dodges the slash
+            // forever). The only genuine reset is a confirmed liveness window,
+            // which calls `reset_misses` (see `AttestationLivenessSink`).
             if is_new {
-                <LastMissBlock<T>>::remove(&who);
+                <LastMissBlock<T>>::insert(&who, frame_system::Pallet::<T>::block_number());
                 <AttestedProviderCount<T>>::mutate(|c| *c += 1);
             }
 
@@ -696,6 +705,22 @@ impl<T: Config> GPUAttestationProvider<T::AccountId> for Pallet<T> {
     }
 }
 
+/// Liveness hook: when `gpn-liveness` confirms a node online for a window, clear
+/// its accumulated missed-attestation history and restart the miss window. This
+/// is the genuine reset path for the `MaxMissedAttestations` slash — a
+/// re-submitted attestation deliberately does NOT reset it (red-team finding
+/// #26: the miss clock was refreshed on every re-attestation, so an idle but
+/// cheaply re-attesting staked provider could evade the slash indefinitely).
+impl<T: Config> AttestationLivenessSink<T::AccountId> for Pallet<T> {
+    fn reset_misses(who: &T::AccountId) {
+        if let Some(mut record) = <Attestations<T>>::get(who) {
+            record.missed_count = 0;
+            <Attestations<T>>::insert(who, record);
+        }
+        <LastMissBlock<T>>::insert(who, frame_system::Pallet::<T>::block_number());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -712,7 +737,7 @@ mod tests {
     use crate::pallet as local_attest;
     use crate::pallet::{
         AttestationChallenge, Attestations, AttestedProviderCount, ChallengeVerified,
-        ProviderStake, TotalStaked,
+        LastMissBlock, ProviderStake, TotalStaked,
     };
 
     type Block = frame_system::mocking::MockBlock<Test>;
@@ -1340,6 +1365,80 @@ mod tests {
             )
             .unwrap();
             assert_eq!(Attestations::<Test>::get(BOB).unwrap().missed_count, 0);
+        });
+    }
+
+    /// REGRESSION (red-team 2026-10-09, finding #26, gpu-attestation /
+    /// liveness-incentive evasion — residual of #23): finding #23 pinned the
+    /// missed-attestation *counter* across re-submissions, but the miss *clock*
+    /// was still anchored to `submitted_at`, which every re-attestation
+    /// refreshed. So an idle-but-cheaply-re-attesting staked provider could keep
+    /// the clock fresh and NEVER accumulate `MaxMissedAttestations` misses —
+    /// dodging the slash forever. The clock is now anchored to `LastMissBlock`
+    /// (seeded at the fresh attestation and left alone by re-submissions), so a
+    /// re-attestation cannot reset the window; only a confirmed liveness window
+    /// can (`reset_misses`).
+    #[test]
+    fn test_reattest_does_not_reset_the_miss_clock() {
+        new_test_ext().execute_with(|| {
+            stake_and_attest(ALICE, 1_000, 2); // fresh attestation at block 1
+
+            // The idle provider re-attests (cheap; Bronze needs no verified
+            // challenge) part-way through the window, trying to keep the clock
+            // fresh so a miss is never counted.
+            System::set_block_number(40); // < TestMaxAge (50) since block 1
+            AttestPallet::submit_attestation(
+                RuntimeOrigin::signed(ALICE),
+                [1u8; 32],
+                [2u8; 32],
+                2,
+                10_000,
+            )
+            .unwrap();
+
+            // The ORIGINAL window closed at block 51 (1 + 50). The re-attest at
+            // 40 must not have moved the anchor, so a miss is still counted.
+            System::set_block_number(52);
+            AttestPallet::check_expired(RuntimeOrigin::signed(BOB), ALICE).unwrap();
+            assert_eq!(
+                Attestations::<Test>::get(ALICE).unwrap().missed_count,
+                1,
+                "a re-attestation must not reset the miss clock (slash evasion)"
+            );
+        });
+    }
+
+    /// REGRESSION (red-team 2026-10-09, finding #26): the *genuine* reset path is
+    /// a confirmed liveness window, which clears the accumulated miss history and
+    /// restarts the window (this is what `gpn-liveness::submit_liveness` calls
+    /// when it confirms a node online).
+    #[test]
+    fn test_liveness_confirmation_resets_miss_history() {
+        new_test_ext().execute_with(|| {
+            stake_and_attest(ALICE, 1_000, 2);
+
+            // Accumulate one miss against the original window.
+            System::set_block_number(52);
+            AttestPallet::check_expired(RuntimeOrigin::signed(BOB), ALICE).unwrap();
+            assert_eq!(Attestations::<Test>::get(ALICE).unwrap().missed_count, 1);
+
+            // A confirmed liveness window clears it and restarts the clock.
+            <AttestPallet as AttestationLivenessSink<u64>>::reset_misses(&ALICE);
+            assert_eq!(Attestations::<Test>::get(ALICE).unwrap().missed_count, 0);
+            assert_eq!(LastMissBlock::<Test>::get(ALICE), Some(52));
+
+            // No new miss until a full window elapses from the reset.
+            System::set_block_number(80);
+            AttestPallet::check_expired(RuntimeOrigin::signed(BOB), ALICE).unwrap();
+            assert_eq!(
+                Attestations::<Test>::get(ALICE).unwrap().missed_count,
+                0,
+                "a fresh window must not immediately re-count a miss"
+            );
+
+            System::set_block_number(103);
+            AttestPallet::check_expired(RuntimeOrigin::signed(BOB), ALICE).unwrap();
+            assert_eq!(Attestations::<Test>::get(ALICE).unwrap().missed_count, 1);
         });
     }
 

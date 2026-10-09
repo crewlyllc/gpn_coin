@@ -48,6 +48,27 @@ pub trait LivenessProvider<AccountId> {
     fn window_uptime_bps(who: &AccountId) -> u32;
 }
 
+/// Reverse hook: called by the liveness layer when a node is confirmed online
+/// for a window, so `pallet-gpu-attestation` can clear that account's
+/// accumulated *missed-attestation* history and restart its miss window.
+///
+/// This is the ONLY genuine reset path for the missed-attestation slash: a
+/// re-submitted attestation must never clear the miss clock (red-team finding
+/// #26 — the clock used to be refreshed by re-attestation, letting an idle but
+/// cheaply re-attesting staked provider dodge the `MaxMissedAttestations`
+/// slash indefinitely). Defining the trait here (rather than in
+/// `gpu-attestation`) avoids a crate dependency cycle: `gpu-attestation`
+/// already depends on `gpn-liveness` for [`LivenessProvider`].
+pub trait AttestationLivenessSink<AccountId> {
+    /// Clear `who`'s missed-attestation counter and reset its miss window to now.
+    fn reset_misses(who: &AccountId);
+}
+
+/// No-op sink for mocks / runtimes that don't wire attestation.
+impl<AccountId> AttestationLivenessSink<AccountId> for () {
+    fn reset_misses(_who: &AccountId) {}
+}
+
 /// A registered full node's on-chain record. (The declared endpoint lives in
 /// the [`Endpoints`] storage map; this record tracks liveness only.)
 #[derive(
@@ -104,6 +125,10 @@ pub mod pallet {
         /// Max endpoint length bytes.
         #[pallet::constant]
         type MaxEndpointLen: Get<u32>;
+        /// Sink used to clear a provider's missed-attestation history when a
+        /// liveness window is confirmed. Implemented by `pallet-gpu-attestation`;
+        /// `()` (no-op) for mocks.
+        type Attestation: AttestationLivenessSink<Self::AccountId>;
         /// Weight information for extrinsics in this pallet (workplan item 9).
         type WeightInfo: WeightInfo;
     }
@@ -358,6 +383,11 @@ pub mod pallet {
                 record.last_confirmed_window = finalizing;
                 record.missed_count = 0;
                 record.active = true;
+                // The node proved liveness for this window: clear any
+                // accumulated missed-attestation history on the attestation
+                // pallet too (the genuine reset path; re-attestation must not
+                // reset it — red-team finding #26).
+                T::Attestation::reset_misses(&target);
                 Self::deposit_event(Event::<T>::WindowConfirmed {
                     who: target.clone(),
                     window: finalizing,
@@ -596,6 +626,7 @@ mod tests {
         type SlashBps = TestSlashBps;
         type UptimeLookback = TestLookback;
         type MaxEndpointLen = TestMaxEndpointLen;
+        type Attestation = ();
     }
 
     const ALICE: u64 = 1;
