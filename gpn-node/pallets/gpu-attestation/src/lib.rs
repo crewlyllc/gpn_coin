@@ -500,8 +500,7 @@ pub mod pallet {
                         // `profitability-oracle::slash_operator` and
                         // `gpn-token::distribute_fees`.
                         if !penalty.is_zero() {
-                            let (imbalance, _) =
-                                T::Currency::slash(&Self::account_id(), penalty);
+                            let (imbalance, _) = T::Currency::slash(&Self::account_id(), penalty);
                             drop(imbalance); // negative imbalance = burned
                         }
                         Self::deposit_event(Event::<T>::Slashed {
@@ -603,12 +602,25 @@ pub mod pallet {
         }
 
         fn generate_challenge() -> [u8; 32] {
-            let mut seed = [0u8; 32];
-            let block_num = frame_system::Pallet::<T>::block_number();
-            let encoded = block_num.encode();
-            let hash = sp_io::hashing::blake2_256(&encoded);
-            seed.copy_from_slice(&hash);
-            seed
+            // Mix the block number with the **parent block hash** so the
+            // challenge is unpredictable ahead of time, per
+            // `design-verifiable-gpu-proof-2026-10-06.md` § "derived from a
+            // recent block hash → unpredictable".
+            //
+            // A block-numeric seed alone (`blake2_256(block_number)`) is fully
+            // predictable: the next rotation block is `now + interval`, so an
+            // attacker could pre-compute (or buy) solutions for several future
+            // challenges in advance — defeating the anti-spoof purpose of the
+            // challenge (and its binding to the verifier/account). The parent
+            // hash is unknown until the parent block is actually produced, so
+            // no one can know a rotation-block challenge before the block
+            // immediately preceding it exists.
+            let seed = (
+                frame_system::Pallet::<T>::block_number(),
+                frame_system::Pallet::<T>::parent_hash(),
+            )
+                .encode();
+            sp_io::hashing::blake2_256(&seed)
         }
     }
 }
@@ -1153,6 +1165,36 @@ mod tests {
             System::set_block_number(11);
             AttestPallet::on_initialize(11);
             assert_eq!(AttestationChallenge::<Test>::get(), rotated);
+        });
+    }
+
+    #[test]
+    fn test_challenge_is_bound_to_parent_hash_not_just_block_number() {
+        // Red-team finding #16: the rotation seed was `blake2_256(block_number)`
+        // ⇒ fully predictable (the next rotation block is known in advance), so
+        // future challenges could be pre-computed. The seed must be bound to the
+        // parent block hash, which is unknown until the parent is produced.
+        new_test_ext().execute_with(|| {
+            System::set_block_number(10);
+            System::set_parent_hash(H256::from([0xAAu8; 32]));
+            AttestPallet::on_initialize(10);
+            let a = AttestationChallenge::<Test>::get();
+
+            System::set_block_number(10);
+            System::set_parent_hash(H256::from([0xBBu8; 32]));
+            AttestPallet::on_initialize(10);
+            let b = AttestationChallenge::<Test>::get();
+
+            assert_ne!(
+                a, b,
+                "challenge must depend on the parent block hash, not only the block number"
+            );
+
+            // And it is not the old, fully-predictable block-number seed.
+            let old_predictable_seed =
+                sp_io::hashing::blake2_256(&frame_system::Pallet::<Test>::block_number().encode());
+            assert_ne!(a, old_predictable_seed);
+            assert_ne!(b, old_predictable_seed);
         });
     }
 
