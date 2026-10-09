@@ -306,8 +306,7 @@ fn should_attempt(id: u64, model: &str) -> bool {
 /// either the hex or ss58 form of our account), plus the requested model +
 /// whether we must pull it on demand. Empty = no scheduler in play.
 /// Handles both the legacy string form and the `{provider,model,pull}` object.
-fn read_assigned(me: &str, addr: &str) -> Vec<(u64, String, bool)> {
-    let path = assignment_store_path();
+fn read_assigned(me: &str, addr: &str) -> Vec<(u64, String, bool)> {    let path = assignment_store_path();
     let Ok(s) = std::fs::read_to_string(&path) else {
         return vec![];
     };
@@ -336,6 +335,43 @@ fn read_assigned(me: &str, addr: &str) -> Vec<(u64, String, bool)> {
             }
         })
         .collect()
+}
+
+/// The AP callback base URL recorded for this assignment (item #14), if any.
+/// A REMOTE provider uses it to return the finished result to the requesting AP.
+fn assignment_callback(id: u64) -> Option<String> {
+    let s = std::fs::read_to_string(assignment_store_path()).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&s).ok()?;
+    v.get(id.to_string())
+        .and_then(|r| r.get("callback"))
+        .and_then(|c| c.as_str())
+        .map(str::to_string)
+        .filter(|c| !c.is_empty())
+}
+
+/// POST the finished job's off-chain result back to the requesting AP so ITS
+/// LlmStore learns the outcome (a remote provider cannot write the AP's store
+/// directly). Best-effort: a missing callback or an unreachable AP is ignored —
+/// the on-chain `submit_result`/`complete_job` still settle the job.
+fn return_result(id: u64) {
+    let Some(cb) = assignment_callback(id) else { return };
+    let Some(j) = get_job(id) else { return };
+    let base = cb.trim_end_matches('/');
+    let url = format!("{base}/result/{id}");
+    let body = serde_json::json!({
+        "status": j.status, "response": j.response, "result_hash": j.result_hash,
+        "salt": j.salt, "artifact_path": j.artifact_path,
+        "artifact_media_type": j.artifact_media_type, "error": j.error,
+    });
+    if let Ok(c) = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        match c.post(&url).json(&body).send() {
+            Ok(_) => println!("[job {id}] result returned to AP ({base})"),
+            Err(e) => eprintln!("[job {id}] result return to AP failed: {e}"),
+        }
+    }
 }
 
 /// Ensure `model` is present locally; if not, pull it from Ollama / HuggingFace.
@@ -736,6 +772,8 @@ async fn run_job(
             let commit = salted_commit(&salt, &text);
             let commit_hex = format!("0x{}", hex::encode(commit));
             let _ = set_response(id, &text, &commit_hex, Some(&salt));
+            // Return the result to the requesting AP (remote providers; item #14).
+            return_result(id);
             // Rough output-token meter for per-token billing (chars/4 heuristic).
             let est_tokens: u32 = ((text.chars().count() as u32) / 4).max(1);
             if fast {
@@ -755,6 +793,7 @@ async fn run_job(
         }
         Err(e) => {
             let _ = LlmStore::new().set_error(id, &e.to_string());
+            return_result(id);
             let n = record_failure(id);
             if n >= MAX_INFER_ATTEMPTS {
                 // Terminal failure: mark the job Failed on-chain so escrow is

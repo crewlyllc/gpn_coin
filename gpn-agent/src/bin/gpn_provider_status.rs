@@ -26,7 +26,7 @@
 
 use serde_json::json;
 use gpn_agent::gpu::detect_gpu_capability;
-use std::io::Read;
+use gpn_agent::llm::{LlmJob, LlmStore};
 use std::time::Duration;
 use tiny_http::{Header, Method, Response, Server};
 
@@ -177,13 +177,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match serde_json::from_str::<serde_json::Value>(&body) {
                     Ok(v) => {
                         let jid = v.get("job_id").and_then(|x| x.as_u64()).unwrap_or(0);
+                        let callback = v.get("callback").and_then(|x| x.as_str()).unwrap_or("");
+                        // Item #14: the assignment now carries the FULL off-chain job
+                        // payload. Persist it into THIS provider's own LlmStore so a
+                        // REMOTE provider (which never created the job and has no local
+                        // entry) can actually RUN it. Without this the provider claims
+                        // but `run_job` finds no `get_job(id)` and skips → the job
+                        // wedges Running. The `callback` is stored so the provider can
+                        // POST the result back to the requesting AP.
+                        let mut stored_job = false;
+                        if let Some(jv) = v.get("job") {
+                            if let Ok(job) = serde_json::from_value::<LlmJob>(jv.clone()) {
+                                stored_job = LlmStore::new().put(jid, job).is_ok();
+                            }
+                        }
                         let rec = json!({
                             "provider": v.get("provider").and_then(|x| x.as_str()).unwrap_or(address.as_str()),
                             "model": v.get("model").and_then(|x| x.as_str()).unwrap_or(""),
                             "pull": v.get("pull").and_then(|x| x.as_bool()).unwrap_or(false),
+                            "callback": callback,
                         });
                         match write_assignment(jid, rec) {
-                            Ok(_) => json!({"ok": true, "job_id": jid}),
+                            Ok(_) => json!({"ok": true, "job_id": jid, "job_stored": stored_job}),
                             Err(e) => json!({"error": format!("{e}")}),
                         }
                     }

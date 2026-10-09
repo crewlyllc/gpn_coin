@@ -603,15 +603,34 @@ fn rtt_overrides(v: &Value) -> RttOverrides {
 
 /// PUSH an assignment to the chosen provider over HTTP, so a REMOTE provider (which
 /// can't read this AP's host-local assignments file) still learns the job is its. The
-/// provider's heartbeat (`POST /assign`) writes it into the provider's OWN local file.
-/// Best-effort — silently no-ops if the provider is unreachable.
-fn dispatch_assignment(status_url: &str, job_id: u64, provider: &str, model: &str, pull: bool) {
+/// provider's heartbeat (`POST /assign`) writes it into the provider's OWN local file AND
+/// (item #14) persists the full off-chain job payload into the provider's own LlmStore,
+/// so a remote provider can actually RUN the job (the prompt lives only in the AP's
+/// store otherwise). The push also carries a `callback` URL so the provider can return
+/// the result to this AP. Best-effort — silently no-ops if the provider is unreachable.
+fn dispatch_assignment(
+    status_url: &str,
+    job_id: u64,
+    provider: &str,
+    model: &str,
+    pull: bool,
+    job_payload: Option<&gpn_agent::llm::LlmJob>,
+    callback_url: &str,
+) {
     let base = status_url
         .trim_end_matches('/')
         .trim_end_matches("/status")
         .trim_end_matches('/');
     let url = format!("{base}/assign");
-    let body = json!({"job_id": job_id, "provider": provider, "model": model, "pull": pull});
+    let mut body = json!({
+        "job_id": job_id, "provider": provider, "model": model,
+        "pull": pull, "callback": callback_url
+    });
+    if let Some(j) = job_payload {
+        if let Ok(v) = serde_json::to_value(j) {
+            body["job"] = v;
+        }
+    }
     if let Ok(c) = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
         .build()
@@ -620,13 +639,23 @@ fn dispatch_assignment(status_url: &str, job_id: u64, provider: &str, model: &st
     }
 }
 
-fn write_assignment(store: &str, job_id: u64, provider: &str, model: &str, pull: bool) -> std::io::Result<()> {
+fn write_assignment(
+    store: &str,
+    job_id: u64,
+    provider: &str,
+    model: &str,
+    pull: bool,
+    callback_url: &str,
+) -> std::io::Result<()> {
     let mut m: serde_json::Map<String, Value> = std::fs::read_to_string(store)
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
         .and_then(|v| v.as_object().cloned())
         .unwrap_or_default();
-    m.insert(job_id.to_string(), json!({"provider": provider, "model": model, "pull": pull}));
+    m.insert(
+        job_id.to_string(),
+        json!({"provider": provider, "model": model, "pull": pull, "callback": callback_url}),
+    );
     std::fs::write(store, serde_json::to_string_pretty(&Value::Object(m))?)
 }
 
@@ -651,6 +680,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
             format!("{home}/.gpn/assignments.json")
         });
+    // Public base URL this AP is reachable at, used as the `callback` a remote
+    // provider POSTs the finished result to (`{callback}/result/{id}`). Item #14:
+    // a remote provider can be anywhere, so it needs an absolute URL back to us.
+    // Precedence: --callback-url > GPN_AP_CALLBACK_URL > GPN_PUBLIC_URL > http://<listen>.
+    let callback_url = opt(&args, "--callback-url")
+        .or_else(|| std::env::var("GPN_AP_CALLBACK_URL").ok())
+        .or_else(|| std::env::var("GPN_PUBLIC_URL").ok())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| format!("http://{listen}"));
     // Optional bearer token. When set, state-changing (POST) + artifact requests
     // from NON-loopback clients must present it (local crons/monitors keep working).
     let ap_token = std::env::var("GPN_AP_TOKEN").unwrap_or_default();
@@ -716,6 +754,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let client = client.clone();
         let registry = registry.clone();
         let assign_store = assign_store.clone();
+        let callback_url = callback_url.clone();
         let hdr = hdr.clone();
         let ap_token = ap_token.clone();
         let listen = listen.clone();
@@ -729,8 +768,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Auth gate (non-loopback only).
         if !ap_token.is_empty() {
             let is_loopback = req.remote_addr().map(|a| a.ip().is_loopback()).unwrap_or(false);
-            let protected = method == Method::Post
-                || path.first().map(|s| *s == "artifact").unwrap_or(false);
+            // `/result/{id}` is the provider→AP result-return channel (item #14);
+            // providers are remote and hold no user token, so it is exempt.
+            let is_result_callback = path.first().map(|s| *s == "result").unwrap_or(false);
+            let protected = !is_result_callback
+                && (method == Method::Post
+                    || path.first().map(|s| *s == "artifact").unwrap_or(false));
             if protected && !is_loopback {
                 let want = format!("Bearer {ap_token}");
                 let ok = req.headers().iter().any(|h| {
@@ -937,8 +980,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else if created {
                     record_created(id, 512);
                     let _ = gpn_agent::llm::LlmStore::new().put(id, gpn_agent::llm::LlmJob::new_llm(&model, &prompt, 0.7, 512));
-                    let _ = write_assignment(&assign_store, id, &provider.address, &model, needs_pull);
-                    dispatch_assignment(&provider.status_url, id, &provider.address, &model, needs_pull);
+                    let job_payload = gpn_agent::llm::get_job(id);
+                    let _ = write_assignment(&assign_store, id, &provider.address, &model, needs_pull, &callback_url);
+                    dispatch_assignment(&provider.status_url, id, &provider.address, &model, needs_pull, job_payload.as_ref(), &callback_url);
                     // block until the provider finishes (OpenAI calls are synchronous)
                     for _ in 0..1200 {
                         if let Some(j) = gpn_agent::llm::get_job(id) {
@@ -1218,8 +1262,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // dispatch: record which provider (by address) should claim it,
                         // plus the model + whether it must pull the model first.
                         record_created(id, mtok_eff as u64);
-                        let _ = write_assignment(&assign_store, id, &provider.address, &model, needs_pull);
-                        dispatch_assignment(&provider.status_url, id, &provider.address, &model, needs_pull);
+                        let job_payload = gpn_agent::llm::get_job(id);
+                        let _ = write_assignment(&assign_store, id, &provider.address, &model, needs_pull, &callback_url);
+                        dispatch_assignment(&provider.status_url, id, &provider.address, &model, needs_pull, job_payload.as_ref(), &callback_url);
                         // optional inline wait: poll the off-chain store and return the
                         // answer in THIS response (no separate /result call).
                         let mut answer: Option<serde_json::Value> = None;
@@ -1290,6 +1335,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "error": j.error,
                     }),
                     None => json!({"job_id": idn, "error": "no off-chain record yet"}),
+                }
+            }
+            // POST /result/{id} — the provider→AP result-return channel (item #14).
+            // A REMOTE provider runs the job against the payload we pushed in
+            // `/assign`, then POSTs the finished result here so THIS AP's own
+            // LlmStore learns the outcome and its inline waiter unblocks. Body:
+            // {status, response, result_hash, salt, artifact_path, artifact_media_type, error}.
+            (Method::Post, ["result", id]) => {
+                let idn: u64 = id.parse().unwrap_or(0);
+                let v: Value = serde_json::from_str(&body).unwrap_or(json!({}));
+                let status = v.get("status").and_then(|x| x.as_str()).unwrap_or("done");
+                let store = gpn_agent::llm::LlmStore::new();
+                let res = if status == "error" {
+                    store.set_error(idn, v.get("error").and_then(|x| x.as_str()).unwrap_or("remote inference error"))
+                } else if let Some(ap) = v.get("artifact_path").and_then(|x| x.as_str()) {
+                    store.complete_artifact(
+                        idn,
+                        ap,
+                        v.get("artifact_media_type").and_then(|x| x.as_str()).unwrap_or("application/octet-stream"),
+                        v.get("result_hash").and_then(|x| x.as_str()).unwrap_or(""),
+                    )
+                } else {
+                    store.complete(
+                        idn,
+                        v.get("response").and_then(|x| x.as_str()).unwrap_or(""),
+                        v.get("result_hash").and_then(|x| x.as_str()).unwrap_or(""),
+                        v.get("salt").and_then(|x| x.as_str()),
+                    )
+                };
+                match res {
+                    Ok(_) => {
+                        println!("[result] remote provider returned #{idn} ({status})");
+                        json!({"ok":true,"job_id":idn})
+                    }
+                    Err(e) => json!({"error": format!("store: {e}")}),
                 }
             }
             // Download the generated artifact (image/video) for a job id.
@@ -1386,7 +1466,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Err(e) => json!({"ok":false,"error":e}),
                         Ok(qmodel) => match pick(&reg, 0, 0, 0, 0.0, &qmodel, pull_penalty_ms, &rtt_overrides(&route_body)) {
                             Some((p, pull)) => {
-                                let _ = write_assignment(&assign_store, idn, &p.address, &qmodel, pull);
+                                // Client-signed path: the prompt lives only in the
+                                // caller's body. If they included the off-chain job
+                                // (item #14) persist + push it, so a REMOTE provider
+                                // can run it; otherwise a remote provider will claim
+                                // but find no local prompt.
+                                let job_payload = route_body
+                                    .get("job")
+                                    .and_then(|jv| serde_json::from_value::<gpn_agent::llm::LlmJob>(jv.clone()).ok());
+                                if let Some(j) = &job_payload {
+                                    let _ = gpn_agent::llm::LlmStore::new().put(idn, j.clone());
+                                }
+                                let _ = write_assignment(&assign_store, idn, &p.address, &qmodel, pull, &callback_url);
+                                dispatch_assignment(&p.status_url, idn, &p.address, &qmodel, pull, job_payload.as_ref(), &callback_url);
                                 json!({"ok":true,"job_id":idn,"routed_to":p.address,
                                        "model":qmodel,"pull":pull,
                                        "latency_ms":p.latency_ms,"load":format!("{}/{}",p.active,p.capacity)})
@@ -1610,5 +1702,34 @@ mod tests {
         assert!(pick(&vec![unknown_disc], 0, 0, 0, 3.0, "llama3.2:1b", 0, &RttOverrides::new()).is_some());
         let unknown_integ = mk("ui", "http://ui", 1, "integrated", 0.0);
         assert!(pick(&vec![unknown_integ], 0, 0, 0, 3.0, "llama3.2:1b", 0, &RttOverrides::new()).is_none());
+    }
+
+    #[test]
+    fn write_assignment_records_the_callback_for_result_return() {
+        // Item #14: the assignment record must carry the AP callback URL so a
+        // remote provider knows where to POST the finished result.
+        let p = std::env::temp_dir().join(format!("gpn-assign-test-{}.json", std::process::id()));
+        let ps = p.to_string_lossy().to_string();
+        write_assignment(&ps, 42, "5Bob", "qwen2.5:7b", true, "http://gpn-testnet.duckdns.org:8092").unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&ps).unwrap()).unwrap();
+        assert_eq!(v["42"]["provider"], "5Bob");
+        assert_eq!(v["42"]["model"], "qwen2.5:7b");
+        assert_eq!(v["42"]["pull"], true);
+        assert_eq!(v["42"]["callback"], "http://gpn-testnet.duckdns.org:8092");
+        let _ = std::fs::remove_file(&ps);
+    }
+
+    #[test]
+    fn assignment_job_payload_roundtrips_as_llmjob() {
+        // The AP serializes the full off-chain LlmJob into the `/assign` push and
+        // the provider heartbeat deserializes it back into its own store. Guard
+        // that wire shape (item #14 remote-provider run path).
+        let job = gpn_agent::llm::LlmJob::new_llm("qwen2.5:7b", "hello world", 0.7, 256);
+        let v = serde_json::to_value(&job).unwrap();
+        let back: gpn_agent::llm::LlmJob = serde_json::from_value(v).unwrap();
+        assert_eq!(back.kind, "llm");
+        assert_eq!(back.model, "qwen2.5:7b");
+        assert_eq!(back.prompt, "hello world");
+        assert_eq!(back.status, "queued");
     }
 }
