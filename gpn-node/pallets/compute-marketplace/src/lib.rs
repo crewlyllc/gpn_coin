@@ -200,6 +200,16 @@ pub mod pallet {
         /// cursor wraps around `NextJobId`). 0 disables the sweep.
         #[pallet::constant]
         type MaxExpirySweepPerBlock: Get<u32>;
+        /// Dispute window for unilateral payment-channel refunds. An untouched
+        /// channel may only be swept back by its requestor *after* the channel
+        /// deadline **plus** this many blocks, giving the provider (which holds
+        /// any co-signed off-chain state) a guaranteed, race-free window to
+        /// `force_close_channel` its latest settled state first. Without it a
+        /// requestor could refund at the deadline even after the provider had
+        /// delivered off-chain work (red-team finding #30). 0 restores the old
+        /// immediate-refund behaviour (not recommended).
+        #[pallet::constant]
+        type ChannelRefundDelay: Get<BlockNumberFor<Self>>;
         /// Read-only access to providers' attested GPU compute credentials.
         /// Used to enforce that a provider accepting a job actually meets the
         /// job's `min_gflops` requirement (proof-of-compute gate at match time).
@@ -406,6 +416,11 @@ pub mod pallet {
         /// co-signed off-chain state (`nonce > 0` / a non-zero provider balance),
         /// so it must go through the signed close/force-close path instead.
         ChannelHasUpdates,
+        /// `refund_expired_channel` was attempted inside the post-deadline
+        /// dispute window (red-team finding #30): the provider must be given
+        /// `ChannelRefundDelay` blocks after the deadline to force-close its
+        /// latest co-signed state first.
+        ChannelWithinDisputePeriod,
     }
 
     // Hooks
@@ -719,7 +734,8 @@ pub mod pallet {
             )
         }
 
-        /// Unilateral refund of an **untouched** channel after its deadline.
+        /// Unilateral refund of an **untouched** channel after its deadline and
+        /// the post-deadline dispute window.
         ///
         /// RED-TEAM 2026-10-0x (compute-marketplace / fund lock): an escrowed
         /// channel could be **permanently locked**. `close_channel` needs BOTH
@@ -729,11 +745,23 @@ pub mod pallet {
         /// state), so if the provider never co-signs anything (goes away, or
         /// griefs) the deposit is stuck in the marketplace account forever —
         /// there is no expiry/refund path — even though no off-chain value ever
-        /// moved. Since `nonce == 0` (and a zero provider balance) means the
-        /// provider holds no co-signed claim, refunding the full deposit to the
-        /// requestor can never take value owed to the provider. Channels that do
-        /// carry co-signed state (`nonce > 0`) fall through to the existing
-        /// signed `close_channel`/`force_close_channel` paths.
+        /// moved.
+        ///
+        /// RED-TEAM 2026-10-0x (finding #30, compute-marketplace / payment-channel
+        /// theft-of-service): the guard used `channel.nonce == 0 &&
+        /// channel.balance_provider == 0` to prove the channel was untouched,
+        /// but those are the **on-chain** fields, which only change when the
+        /// channel is *settled on-chain* — during a channel's life the per-job
+        /// money movement is entirely off-chain, so an actively-used channel
+        /// still reads `nonce == 0` on-chain. The guard was therefore vacuous: a
+        /// requestor could wait out the deadline and reclaim the whole deposit
+        /// even though the provider held a co-signed state with
+        /// `balance_provider > 0` (i.e. had delivered work) — a free-compute /
+        /// theft-of-service path. The safe construction is a **dispute window**:
+        /// refund is only allowed `ChannelRefundDelay` blocks *after* the
+        /// deadline, so the provider (holding the requestor-co-signed latest
+        /// state) always has a race-free opportunity to `force_close_channel`
+        /// its claim first. Only the funding requestor may reclaim.
         #[pallet::call_index(14)]
         #[pallet::weight(<T as Config>::WeightInfo::complete_job())]
         pub fn refund_expired_channel(
@@ -758,6 +786,14 @@ pub mod pallet {
                 .try_into()
                 .unwrap_or(0);
             ensure!(now >= channel.deadline, Error::<T>::ChannelNotExpired);
+            // Finding #30: give the provider a race-free window after the
+            // deadline to force-close its (requestor-co-signed) latest state
+            // before the requestor may unilaterally reclaim the escrow.
+            let delay: u32 = T::ChannelRefundDelay::get().try_into().unwrap_or(0);
+            ensure!(
+                now >= channel.deadline.saturating_add(delay),
+                Error::<T>::ChannelWithinDisputePeriod
+            );
 
             Self::refund_channel(channel_id, channel)
         }
@@ -1593,6 +1629,7 @@ mod tests {
         pub const TestMaxActiveJobsPerRequestor: u32 = 10;
         pub const TestMaxJobDuration: u64 = 10_000;
         pub const TestMaxExpirySweepPerBlock: u32 = 25;
+        pub const TestChannelRefundDelay: u64 = 50;
     }
 
     // Test-only mock of the gpu-attestation provider: returns a configurable
@@ -1625,6 +1662,7 @@ mod tests {
         type MaxActiveJobsPerRequestor = TestMaxActiveJobsPerRequestor;
         type MaxJobDuration = TestMaxJobDuration;
         type MaxExpirySweepPerBlock = TestMaxExpirySweepPerBlock;
+        type ChannelRefundDelay = TestChannelRefundDelay;
         type GPUAttestation = MockAttestation;
         // Test fee sink: a dedicated account (99) that collects marketplace fees.
         type FeeSink = MockFeeSink;
@@ -2742,7 +2780,7 @@ mod tests {
             assert_eq!(escrow, 5_000);
             let alice_before = Balances::free_balance(ALICE);
 
-            System::set_block_number(101); // opened_at(1) + ttl(100)
+            System::set_block_number(151); // deadline(101) + ChannelRefundDelay(50)
             MarketPallet::refund_expired_channel(RuntimeOrigin::signed(ALICE), ch).unwrap();
 
             // Full escrow returned, pallet account swept to 0, index cleared.
@@ -2763,6 +2801,56 @@ mod tests {
             assert_eq!(res, Err(Error::<Test>::ChannelNotExpired.into()));
             assert_eq!(Channels::<Test>::get(ch).unwrap().state, ChannelState::Open);
             assert_eq!(ChannelEscrow::<Test>::get(ch), Some(5_000));
+        });
+    }
+
+    #[test]
+    fn test_refund_expired_channel_blocked_during_dispute_window() {
+        new_test_ext().execute_with(|| {
+            // RED-TEAM finding #30: the on-chain `nonce`/`balance_provider`
+            // fields never reflect off-chain co-signed state, so the "untouched"
+            // guard alone cannot protect a provider that delivered work. The
+            // post-deadline dispute window forces the requestor to wait, giving
+            // the provider a race-free chance to force-close its latest state.
+            let ch = open_default_channel();
+            let escrow = ChannelEscrow::<Test>::get(ch).unwrap();
+            let alice_before = Balances::free_balance(ALICE);
+
+            // Exactly at the deadline the refund must still be refused.
+            System::set_block_number(101);
+            let res = MarketPallet::refund_expired_channel(RuntimeOrigin::signed(ALICE), ch);
+            assert_eq!(res, Err(Error::<Test>::ChannelWithinDisputePeriod.into()));
+
+            // One block short of the window also refused; escrow untouched.
+            System::set_block_number(150);
+            let res = MarketPallet::refund_expired_channel(RuntimeOrigin::signed(ALICE), ch);
+            assert_eq!(res, Err(Error::<Test>::ChannelWithinDisputePeriod.into()));
+            assert_eq!(ChannelEscrow::<Test>::get(ch), Some(escrow));
+            assert_eq!(Channels::<Test>::get(ch).unwrap().state, ChannelState::Open);
+            assert_eq!(Balances::free_balance(ALICE), alice_before);
+
+            // During the window the provider CAN still force-close its claim
+            // with the requestor-co-signed latest state (proving the window is
+            // meaningful), which is exactly what the requestor's refund cannot
+            // pre-empt any more.
+            let (br, bp, n) = (3_000u128, 2_000u128, 1u64);
+            let sr = sign_settle(ALICE, ch, br, bp, n);
+            let bob_before = Balances::free_balance(BOB);
+            MarketPallet::force_close_channel(
+                RuntimeOrigin::signed(BOB),
+                ch,
+                br,
+                bp,
+                n,
+                sr,
+            )
+            .unwrap();
+            assert_eq!(Balances::free_balance(BOB), bob_before + bp);
+            assert_eq!(Channels::<Test>::get(ch).unwrap().state, ChannelState::Closed);
+            // The requestor's later refund now fails (channel already closed).
+            System::set_block_number(151);
+            let res = MarketPallet::refund_expired_channel(RuntimeOrigin::signed(ALICE), ch);
+            assert_eq!(res, Err(Error::<Test>::ChannelNotOpen.into()));
         });
     }
 

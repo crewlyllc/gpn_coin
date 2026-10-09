@@ -123,7 +123,7 @@ pub const VERSION: sp_version::RuntimeVersion = sp_version::RuntimeVersion {
     spec_name: create_runtime_str!("gpn"),
     impl_name: create_runtime_str!("gpn"),
     authoring_version: 1,
-    spec_version: 36,
+    spec_version: 37,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 1,
@@ -499,6 +499,11 @@ parameter_types! {
     // ~ (NextJobId / 25) blocks, guaranteeing orphaned jobs auto-expire without
     // relying on an external caller.
     pub const MaxExpirySweepPerBlock: u32 = 25;
+    // Payment-channel refund dispute window (red-team finding #30): an untouched
+    // channel may only be swept back by its requestor this many blocks AFTER the
+    // deadline, so a provider holding a co-signed (off-chain) claim always has a
+    // race-free chance to `force_close_channel` first. 300 blocks ~ 75 min @15s.
+    pub const ChannelRefundDelay: BlockNumber = 300;
 }
 
 impl pallet_compute_marketplace::Config for Runtime {
@@ -511,6 +516,7 @@ impl pallet_compute_marketplace::Config for Runtime {
     type MaxActiveJobsPerRequestor = MaxActiveJobsPerRequestor;
     type MaxJobDuration = MaxJobDuration;
     type MaxExpirySweepPerBlock = MaxExpirySweepPerBlock;
+    type ChannelRefundDelay = ChannelRefundDelay;
     // Cross-pallet read of attested GPU throughput (proof-of-compute gate).
     type GPUAttestation = GPUAttestation;
     // Route marketplace fees into the GPN token pallet account so the fee
