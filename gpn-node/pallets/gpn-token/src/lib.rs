@@ -286,7 +286,24 @@ pub mod pallet {
             // Governance (sudo) is the payout authority, matching the sibling
             // `distribute_fees`/`set_fee_distribution` calls.
             ensure_root(origin)?;
-            let total_rewards = <StakingRewardPool<T>>::take();
+            // Read the pool, do NOT `take()` it yet. Red-team finding #33
+            // (gpn-token / fund lock + accounting integrity): the pool used to
+            // be `take()`n (zeroed) *before* the fallible multi-transfer payout
+            // loop below. FRAME does not roll back storage when a dispatch
+            // returns `Err`, so a payout that failed partway left the pool
+            // permanently zeroed while the not-yet-paid remainder sat stranded
+            // in the pallet account (never distributable again — the pool is the
+            // only path that pays it out). Worse, the payout transfers used
+            // `KeepAlive`, which forbids drawing the `gpn/tokn` account below
+            // ED: in the normal steady state the reward pool *equals* the
+            // pallet balance (accumulated fees have been fully allocated to the
+            // pools), so the last staker's payout would drop the account to (or
+            // below) ED and be rejected — the distribution could never complete
+            // and the remainder was lost from accounting. Fix: keep the pool
+            // value, transfer with `AllowDeath` (this is a pass-through payout
+            // account, exactly like `settle_escrow`/`unregister_fullnode`), and
+            // write back the undistributed remainder so nothing is ever stranded.
+            let total_rewards = <StakingRewardPool<T>>::get();
             if total_rewards.is_zero() || stakers.is_empty() {
                 return Ok(());
             }
@@ -307,30 +324,39 @@ pub mod pallet {
                 }
             }
             if total_weight == 0 {
-                // No staked+attested stakers -> nothing to pay; return pool for later.
-                <StakingRewardPool<T>>::put(total_rewards);
+                // No staked+attested stakers -> nothing to pay; pool untouched for later.
                 return Ok(());
             }
             let mut paid: u32 = 0;
-            let mut remaining: u128 = total_rewards_u128;
+            let mut paid_amount: u128 = 0;
             for (staker, w) in &weights {
                 let share_u128: u128 = total_rewards_u128 * *w / total_weight;
                 if share_u128 == 0 {
                     continue;
                 }
                 let share: BalanceOf<T> = share_u128.saturated_into();
+                // `AllowDeath`: the `gpn/tokn` account is a pass-through payout
+                // account and may legitimately be drained to zero by the last
+                // payout (finding #33).
                 T::Currency::transfer(
                     &Self::account_id(),
                     staker,
                     share,
-                    ExistenceRequirement::KeepAlive,
+                    ExistenceRequirement::AllowDeath,
                 )?;
-                remaining = remaining.saturating_sub(share_u128);
+                paid_amount = paid_amount.saturating_add(share_u128);
                 paid += 1;
             }
-            // Dust (rounding) stays in the pallet account as retained fees.
+            // Retain any undistributed remainder (rounding dust, or anything not
+            // paid) in the pool so it is never stranded in the account unaccounted
+            // (finding #33).
+            <StakingRewardPool<T>>::put(
+                total_rewards_u128
+                    .saturating_sub(paid_amount)
+                    .saturated_into::<BalanceOf<T>>(),
+            );
             Self::deposit_event(Event::<T>::StakingRewardsPaid {
-                total: total_rewards_u128.saturating_sub(remaining).saturated_into(),
+                total: paid_amount.saturated_into(),
                 participants: paid,
             });
             Ok(())
@@ -346,14 +372,21 @@ pub mod pallet {
             // one-address list and drain the entire oracle pool to itself.
             // Governance (sudo) is the payout authority.
             ensure_root(origin)?;
-            let total_rewards = <OracleRewardPool<T>>::take();
+            // Same fix as `distribute_staking_rewards` (red-team finding #33,
+            // gpn-token / fund lock + accounting integrity): read the pool
+            // instead of `take()`ing it before a fallible payout loop, use
+            // `AllowDeath` (the `gpn/tokn` account is a pass-through payout
+            // account and must be drainable to zero), and write back the
+            // undistributed remainder so a partial/failed payout can never strand
+            // funds that are unaccounted for.
+            let total_rewards = <OracleRewardPool<T>>::get();
             if total_rewards.is_zero() || operators.is_empty() {
                 return Ok(());
             }
             let n: u32 = operators.len() as u32;
             let share = total_rewards / n.into();
             let mut paid: u32 = 0;
-            let mut remaining = total_rewards;
+            let mut paid_amount: BalanceOf<T> = Zero::zero();
             for op in operators {
                 if share.is_zero() {
                     continue;
@@ -362,13 +395,14 @@ pub mod pallet {
                     &Self::account_id(),
                     &op,
                     share,
-                    ExistenceRequirement::KeepAlive,
+                    ExistenceRequirement::AllowDeath,
                 )?;
-                remaining = remaining.saturating_sub(share);
+                paid_amount = paid_amount.saturating_add(share);
                 paid += 1;
             }
+            <OracleRewardPool<T>>::put(total_rewards.saturating_sub(paid_amount));
             Self::deposit_event(Event::<T>::OracleRewardsPaid {
-                total: total_rewards.saturating_sub(remaining),
+                total: paid_amount,
                 operators: paid,
             });
             Ok(())
@@ -655,6 +689,50 @@ mod tests {
                 Token::distribute_staking_rewards(RuntimeOrigin::root(), vec![1, 2]).is_ok()
             );
             assert_eq!(StakingRewardPool::<Test>::get(), 0);
+        });
+    }
+
+    #[test]
+    fn test_distribute_staking_rewards_drains_pallet_account_to_zero() {
+        // Red-team finding #33 (gpn-token / fund lock + accounting integrity):
+        // the pool must be fully distributable even when it *equals* the pallet
+        // account balance — the steady state once accumulated fees have been
+        // fully allocated into the pools. The payout used to `KeepAlive`, so the
+        // final staker's transfer (which would take `gpn/tokn` below ED) was
+        // rejected; combined with the up-front `take()` the pool was zeroed and
+        // the remainder stranded/unaccounted. With the fix the account drains to
+        // exactly zero and every staker is paid.
+        new_test_ext().execute_with(|| {
+            let pallet_account = Token::account_id();
+            Balances::force_set_balance(RuntimeOrigin::root(), pallet_account.clone(), 2).unwrap();
+            <StakingRewardPool<Test>>::put(2u128);
+            // Silver tier (1500 bps), equal stake -> equal weights -> 1 each.
+            MOCK_TIER.with(|c| c.set(1_500));
+            MOCK_STAKE.with(|c| c.set(10_000));
+            assert!(
+                Token::distribute_staking_rewards(RuntimeOrigin::root(), vec![1, 2]).is_ok()
+            );
+            assert_eq!(StakingRewardPool::<Test>::get(), 0);
+            assert_eq!(Balances::free_balance(&pallet_account), 0);
+            assert_eq!(Balances::free_balance(&1), 1_000_001);
+            assert_eq!(Balances::free_balance(&2), 1_000_001);
+        });
+    }
+
+    #[test]
+    fn test_distribute_oracle_rewards_drains_pallet_account_to_zero() {
+        // Same finding #33 on the oracle-reward path.
+        new_test_ext().execute_with(|| {
+            let pallet_account = Token::account_id();
+            Balances::force_set_balance(RuntimeOrigin::root(), pallet_account.clone(), 2).unwrap();
+            <OracleRewardPool<Test>>::put(2u128);
+            assert!(
+                Token::distribute_oracle_rewards(RuntimeOrigin::root(), vec![1, 2]).is_ok()
+            );
+            assert_eq!(OracleRewardPool::<Test>::get(), 0);
+            assert_eq!(Balances::free_balance(&pallet_account), 0);
+            assert_eq!(Balances::free_balance(&1), 1_000_001);
+            assert_eq!(Balances::free_balance(&2), 1_000_001);
         });
     }
 
