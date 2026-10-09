@@ -1078,6 +1078,25 @@ pub mod pallet {
                 who == requestor || provider.as_ref() == Some(&who),
                 Error::<T>::NotJobProvider
             );
+            // Red-team finding #12 (2026-10-0x, compute-marketplace /
+            // theft-of-service — bypass of findings #1/#11 via the sibling
+            // `fail_job`): findings #1/#11 stopped third parties and the
+            // requestor from *completing* an in-flight job early, because that
+            // refunds the whole escrow while the provider is paid nothing. But
+            // `fail_job` is the identical early-refund primitive and was
+            // callable by the requestor from ANY non-terminal state — so a
+            // requestor could fail a job the provider is `Running` (work in
+            // progress) or `AwaitingVerification` (result already delivered)
+            // and reclaim the entire escrow with the provider unpaid, simply by
+            // choosing `fail_job` over `complete_job`. Once the provider has
+            // started or delivered work, only the assigned provider may fail
+            // (it owns the abandon/reconcile path; a genuinely stalled provider
+            // is still reclaimed permissionlessly by `expire_job` after the
+            // deadline). The requestor may still fail from Pending/Accepted,
+            // where no work has been done yet.
+            if matches!(job.state, JobState::Running | JobState::AwaitingVerification) {
+                ensure!(provider.as_ref() == Some(&who), Error::<T>::NotJobProvider);
+            }
 
             job.state = JobState::Failed;
             <Jobs<T>>::insert(job_id, job);
@@ -1782,6 +1801,65 @@ mod tests {
             MarketPallet::submit_result(RuntimeOrigin::signed(BOB), job_id, [9u8; 32], 1).unwrap();
             MarketPallet::complete_job(RuntimeOrigin::signed(ALICE), job_id).unwrap();
             assert_eq!(Jobs::<Test>::get(job_id).unwrap().state, JobState::Completed);
+        });
+    }
+
+    #[test]
+    fn test_fail_job_rejects_requestor_after_work_started() {
+        // Red-team finding #12 (2026-10-0x): the fixes for findings #1/#11 closed
+        // the requestor/third-party early-refund hole on `complete_job`, but
+        // `fail_job` is the same primitive and was callable by the requestor from
+        // ANY non-terminal state ⇒ the requestor could refund the full escrow out
+        // from under a provider that was `Running` (working) or
+        // `AwaitingVerification` (result delivered), paying it nothing. From those
+        // states only the assigned provider may fail.
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            let job_id = create_job(ALICE);
+            MarketPallet::accept_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
+            MarketPallet::start_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
+            assert_eq!(Jobs::<Test>::get(job_id).unwrap().state, JobState::Running);
+
+            let escrow_before =
+                pallet_balances::Pallet::<Test>::free_balance(MarketPallet::account_id());
+            // Requestor cannot fail a still-running job (no free refund).
+            assert_noop!(
+                MarketPallet::fail_job(RuntimeOrigin::signed(ALICE), job_id, 3),
+                Error::<Test>::NotJobProvider
+            );
+            assert_eq!(Jobs::<Test>::get(job_id).unwrap().state, JobState::Running);
+            assert!(JobEscrow::<Test>::get(job_id).is_some());
+            assert_eq!(ActiveJobCount::<Test>::get(), 1);
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(MarketPallet::account_id()),
+                escrow_before
+            );
+
+            // Nor once the provider has delivered a result (AwaitingVerification).
+            MarketPallet::submit_result(RuntimeOrigin::signed(BOB), job_id, [7u8; 32], 10).unwrap();
+            assert_eq!(
+                Jobs::<Test>::get(job_id).unwrap().state,
+                JobState::AwaitingVerification
+            );
+            assert_noop!(
+                MarketPallet::fail_job(RuntimeOrigin::signed(ALICE), job_id, 4),
+                Error::<Test>::NotJobProvider
+            );
+            assert_eq!(
+                Jobs::<Test>::get(job_id).unwrap().state,
+                JobState::AwaitingVerification
+            );
+
+            // The assigned provider may still fail (its abandon/reconcile path).
+            MarketPallet::fail_job(RuntimeOrigin::signed(BOB), job_id, 9).unwrap();
+            assert_eq!(Jobs::<Test>::get(job_id).unwrap().state, JobState::Failed);
+            assert_eq!(ActiveJobCount::<Test>::get(), 0);
+
+            // And the requestor may still fail a job the provider never started
+            // (Pending) — the legitimate "fail a stuck job" path.
+            let j2 = create_job(ALICE);
+            MarketPallet::fail_job(RuntimeOrigin::signed(ALICE), j2, 2).unwrap();
+            assert_eq!(Jobs::<Test>::get(j2).unwrap().state, JobState::Failed);
         });
     }
 
