@@ -50,6 +50,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: gpn-${{ runner.os }}
+          retention-days: 3
           path: |
             gpn-agent/target/release/gpn_*
             gpn-node/target/release/gpn-node

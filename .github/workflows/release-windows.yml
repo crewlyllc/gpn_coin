@@ -10,6 +10,10 @@ env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   LIBCLANG_PATH: "C:\\Program Files\\LLVM\\bin"
 
+permissions:
+  actions: write   # to prune old artifacts
+  contents: read
+
 jobs:
   windows:
     runs-on: self-hosted
@@ -61,10 +65,28 @@ jobs:
       - name: build node
         working-directory: gpn-node
         run: cargo build --release -p gpn-node
+      - name: prune old artifacts (keep newest 2)
+        if: ${{ always() }}
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $h = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent' = 'gpn-ci' }
+          try {
+            $all = (Invoke-RestMethod -Headers $h "https://api.github.com/repos/$env:GITHUB_REPOSITORY/actions/artifacts?per_page=100").artifacts
+            $old = $all | Where-Object { $_.name -eq 'gpn-windows' } | Sort-Object created_at -Descending | Select-Object -Skip 2
+            foreach ($a in $old) {
+              Invoke-RestMethod -Method Delete -Headers $h "https://api.github.com/repos/$env:GITHUB_REPOSITORY/actions/artifacts/$($a.id)" | Out-Null
+              Write-Host "pruned artifact $($a.id) ($($a.created_at))"
+            }
+            Write-Host "prune done ($($old.Count) removed)"
+          } catch { Write-Host "prune skipped: $($_.Exception.Message)" }
       - name: upload
         uses: actions/upload-artifact@v4
         with:
           name: gpn-windows
+          retention-days: 3
           path: |
             gpn-agent/target/release/*.exe
             gpn-node/target/release/gpn-node.exe
