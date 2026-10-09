@@ -441,6 +441,39 @@ fn messages_to_prompt(v: &Value) -> String {
     s
 }
 
+/// Resolve the effective inference prompt for a native `POST /jobs` body.
+/// Accepts `prompt` (native), `input` (ML inference), or an OpenAI-style
+/// `messages[]`/`system` body. Returns `None` when the body carries no usable
+/// prompt, so the caller can reject the job BEFORE creating it on-chain.
+///
+/// Without this gate a prompt-less body is still created on-chain (escrow
+/// locked + a global `ActiveJobCount` and per-requestor slot consumed) but
+/// never written to the off-chain store, so no provider can claim it — a
+/// guaranteed unservable orphan until the expiry sweep, while the caller gets
+/// a misleading `ok:true` (red-team finding #24).
+fn resolve_job_prompt(v: &Value) -> Option<String> {
+    if let Some(p) = v.get("prompt").and_then(|x| x.as_str()) {
+        if !p.trim().is_empty() {
+            return Some(p.to_string());
+        }
+    }
+    if let Some(i) = v.get("input").and_then(|x| x.as_str()) {
+        if !i.trim().is_empty() {
+            return Some(i.to_string());
+        }
+    }
+    let has_messages = v
+        .get("messages")
+        .and_then(|x| x.as_array())
+        .map(|a| !a.is_empty())
+        .unwrap_or(false);
+    let has_system = v.get("system").and_then(|x| x.as_str()).is_some();
+    if has_messages || has_system {
+        return Some(messages_to_prompt(v));
+    }
+    None
+}
+
 /// Parse a rough parameter count (in billions) from a model name, e.g.
 /// "llama3.2:1b" -> 1.0, "qwen2.5:0.5b" -> 0.5, "llama3:70b" -> 70.0.
 fn params_b_for(model: &str) -> f64 {
@@ -1182,9 +1215,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or(0.0);
                 let price_gpn = v.get("price_gpn").and_then(|x| x.as_f64()).unwrap_or(10.0);
                 let job_type = v.get("job_type").and_then(|x| x.as_str()).unwrap_or("LLMInference");
-                let prompt = v.get("prompt").and_then(|x| x.as_str()).map(|s| s.to_string());
-                // ML inference may carry its input in `input` rather than `prompt`.
-                let ml_input = v.get("input").and_then(|x| x.as_str()).map(|s| s.to_string());
+                // Effective prompt: `prompt` (native), `input` (ML), or an
+                // OpenAI-style `messages[]`/`system` body. Red-team finding #24
+                // (agent/AP input validation / orphan-job DoS): a native
+                // `POST /jobs` with no prompt was still created on-chain —
+                // escrow locked + a global `ActiveJobCount` and per-requestor
+                // slot consumed — but never written to the off-chain store, so
+                // no provider could claim it (a guaranteed unservable orphan
+                // until the expiry sweep) while the caller got `ok:true`.
+                // Reject it up front, BEFORE any on-chain create.
+                let prompt = resolve_job_prompt(&v);
+                if prompt.is_none() {
+                    let r = Response::from_string(
+                        json!({
+                            "ok": false,
+                            "error": "missing prompt: provide `prompt`, `input`, or an OpenAI-style `messages` array"
+                        })
+                        .to_string(),
+                    )
+                    .with_header(hdr.clone())
+                    .with_status_code(400);
+                    let _ = req.respond(r);
+                    return;
+                }
 
                 // choose the best provider (model-aware). Generation jobs
                 // (image/video) are served by the diffusion provider, which
@@ -1295,7 +1348,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // kind, otherwise the LLM provider claims them and 404s on
                         // a diffusion model; the diffusion provider only claims
                         // jobs where `kind` is image/video.
-                        if let Some(p) = prompt.as_ref().or(ml_input.as_ref()) {
+                        if let Some(p) = prompt.as_ref() {
                             let jt = job_type.to_ascii_lowercase();
                             // Guard: a diffusion/video model submitted with
                             // job_type omitted (defaults to LLMInference) must
@@ -1732,6 +1785,30 @@ mod tests {
         assert!(past_deadline(0, 0, 1));
         // No overflow even at the field bounds (u64 math).
         assert!(!past_deadline(u32::MAX, u32::MAX, 0));
+    }
+
+    #[test]
+    fn resolve_job_prompt_accepts_prompt_input_or_messages_and_rejects_empty() {
+        // Red-team finding #24: a prompt-less POST /jobs used to create an
+        // unservable orphan on-chain while returning ok:true. The prompt is now
+        // resolved up front and a body with no prompt is rejected.
+        assert_eq!(resolve_job_prompt(&json!({"prompt": "hi"})).as_deref(), Some("hi"));
+        assert_eq!(resolve_job_prompt(&json!({"input": "vec"})).as_deref(), Some("vec"));
+        // OpenAI-style body: previously silently ignored on this endpoint.
+        let m = resolve_job_prompt(&json!({"messages": [{"role": "user", "content": "yo"}]}))
+            .expect("messages body must yield a prompt");
+        assert!(m.contains("user: yo"));
+        // A system-only body also yields a prompt.
+        assert!(resolve_job_prompt(&json!({"system": "be nice"})).is_some());
+        // Blank / absent prompt is rejected before any on-chain create.
+        assert_eq!(resolve_job_prompt(&json!({"prompt": "   "})), None);
+        assert_eq!(resolve_job_prompt(&json!({"messages": []})), None);
+        assert_eq!(resolve_job_prompt(&json!({})), None);
+        // `prompt` wins over `input` when both are present.
+        assert_eq!(
+            resolve_job_prompt(&json!({"prompt": "P", "input": "I"})).as_deref(),
+            Some("P")
+        );
     }
 
     #[test]
