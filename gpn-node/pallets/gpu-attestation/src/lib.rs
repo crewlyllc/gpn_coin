@@ -274,6 +274,12 @@ pub mod pallet {
         InvalidChallengeResponse,
         StakeLocked,
         AlreadyAttested,
+        /// A stake already exists for the caller. Red-team finding #18:
+        /// `deposit_stake` used to guard only on `Attestations`, so a second
+        /// pre-attestation deposit silently *overwrote* `ProviderStake`
+        /// (the first deposit's funds stayed stranded in the pallet account,
+        /// unaccounted and never withdrawable) and desynced `TotalStaked`.
+        AlreadyStaked,
         NoStakeToWithdraw,
         InvalidGPUCount,
         StakeTransferFailed,
@@ -316,6 +322,19 @@ pub mod pallet {
             ensure!(
                 !<Attestations<T>>::contains_key(&who),
                 Error::<T>::AlreadyAttested
+            );
+            // Red-team finding #18 (fund lock / accounting integrity): reject a
+            // second stake deposit while one already exists. Previously the only
+            // guard was the `Attestations` check above, which a caller who had
+            // deposited but not yet attested would pass — the second call then
+            // transferred `amount` again but `ProviderStake::insert(..)`
+            // *overwrote* the first stake, so the surplus sat permanently in the
+            // pallet account (never returned by `withdraw_stake`, which refunds
+            // only the recorded `ProviderStake`) and `TotalStaked` diverged from
+            // the real pallet balance. Reject instead of silently locking funds.
+            ensure!(
+                !<ProviderStake<T>>::contains_key(&who),
+                Error::<T>::AlreadyStaked
             );
 
             T::Currency::transfer(
@@ -875,6 +894,34 @@ mod tests {
             // Can't deposit again once attested
             let result = AttestPallet::deposit_stake(RuntimeOrigin::signed(ALICE), 500);
             assert_eq!(result, Err(Error::<Test>::AlreadyAttested.into()));
+        });
+    }
+
+    #[test]
+    fn test_deposit_stake_rejects_second_deposit_without_locking_funds() {
+        // Red-team finding #18 (fund lock / accounting integrity): a second
+        // `deposit_stake` before attesting used to pass the `Attestations`-only
+        // guard, pull `amount` a second time from the caller, then *overwrite*
+        // `ProviderStake` — stranding the first deposit in the pallet account
+        // (unaccounted, never refunded) and desyncing `TotalStaked`.
+        new_test_ext().execute_with(|| {
+            let before = pallet_balances::Pallet::<Test>::free_balance(ALICE);
+            AttestPallet::deposit_stake(RuntimeOrigin::signed(ALICE), 500).unwrap();
+            // Second deposit (still un-attested) must be rejected outright.
+            let result = AttestPallet::deposit_stake(RuntimeOrigin::signed(ALICE), 700);
+            assert_eq!(result, Err(Error::<Test>::AlreadyStaked.into()));
+            // First stake preserved exactly; no extra funds pulled in.
+            assert_eq!(ProviderStake::<Test>::get(ALICE), Some(500));
+            assert_eq!(TotalStaked::<Test>::get(), 500);
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(ALICE),
+                before - 500
+            );
+            // Withdrawal returns the full recorded stake -> no locked surplus.
+            AttestPallet::withdraw_stake(RuntimeOrigin::signed(ALICE)).unwrap();
+            assert_eq!(pallet_balances::Pallet::<Test>::free_balance(ALICE), before);
+            assert_eq!(ProviderStake::<Test>::get(ALICE), None);
+            assert_eq!(TotalStaked::<Test>::get(), 0);
         });
     }
 
