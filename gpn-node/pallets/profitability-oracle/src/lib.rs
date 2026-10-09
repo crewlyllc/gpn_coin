@@ -754,7 +754,17 @@ pub mod pallet {
         }
 
         /// Relative deviation (in basis points) between two values.
-        fn deviation_bps(a: u64, b: u64) -> u64 {
+        ///
+        /// RED-TEAM 2026-10-09 (finding #21, oracle-feed integrity / arithmetic):
+        /// `(big - small) * 10_000` was computed in `u64`. `update_feed` bounds
+        /// `utilization_rate_bps` (finding #14) but NOT `token_price_usd` /
+        /// `avg_gpu_hour_price` / `staking_apr_bps`, so a bonded operator can post
+        /// `token_price_usd = u64::MAX`. Then `big - small` can be ~`u64::MAX`, and
+        /// `* 10_000` **overflows u64** — a `debug` panic, and in the `release`
+        /// runtime a silent wrap: `deviation_bps` returns an arbitrary (often small)
+        /// value, so `is_outlier` FAILS to flag a genuinely-outlier feed and the
+        /// operator evades the `SlashOutlier` slash. Compute in `u128` and saturate.
+        pub(crate) fn deviation_bps(a: u64, b: u64) -> u64 {
             if a == b {
                 return 0;
             }
@@ -762,7 +772,8 @@ pub mod pallet {
             if small == 0 {
                 return u64::MAX;
             }
-            (big - small) * 10_000 / small
+            let bps = (big as u128 - small as u128) * 10_000u128 / small as u128;
+            bps.min(u64::MAX as u128) as u64
         }
 
         /// The on-chain **bond-weighted median** feed across all bonded
@@ -1137,6 +1148,24 @@ mod tests {
                 OraclePallet::update_feed(RuntimeOrigin::signed(ALICE), 0, 150, 60_00, 1_200);
             assert_eq!(result, Err(Error::<Test>::InvalidPrice.into()));
         });
+    }
+
+    #[test]
+    fn test_deviation_bps_does_not_overflow_on_extreme_feeds() {
+        // RED-TEAM 2026-10-09 (finding #21): a bonded operator can post
+        // `token_price_usd = u64::MAX` (update_feed does not upper-bound it).
+        // `deviation_bps(u64::MAX, 1)` must not overflow/panic (debug) or wrap
+        // to a small value (release) — it must report a maximal deviation so the
+        // outlier-slash path still fires.
+        assert_eq!(OraclePallet::deviation_bps(u64::MAX, 1), u64::MAX);
+        // Same for the largest representable gap short of the cap.
+        assert_eq!(OraclePallet::deviation_bps(u64::MAX, 2), u64::MAX);
+        // Ordinary values keep the exact (non-saturated) basis-point result.
+        assert_eq!(OraclePallet::deviation_bps(110, 100), 1_000);
+        assert_eq!(OraclePallet::deviation_bps(150, 100), 5_000);
+        assert_eq!(OraclePallet::deviation_bps(100, 100), 0);
+        // A zero denominator is (still) treated as maximal deviation.
+        assert_eq!(OraclePallet::deviation_bps(5, 0), u64::MAX);
     }
 
     // ── Phase B committee admission (oracle-governance §6 gap #4) ──
