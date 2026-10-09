@@ -574,8 +574,11 @@ pub mod pallet {
                 Error::<T>::ChannelAlreadyOpen
             );
 
+            // RED-TEAM 2026-10-09 (finding #25, compute-marketplace / state
+            // consistency): as with `create_job`, only consume a channel id once
+            // the escrow transfer below has actually succeeded (a failed open must
+            // not leave a permanent id gap).
             let channel_id = <NextChannelId<T>>::get();
-            <NextChannelId<T>>::mutate(|id| *id += 1);
 
             let now_raw = frame_system::Pallet::<T>::block_number();
             let now: u32 = now_raw.try_into().unwrap_or(0);
@@ -592,6 +595,8 @@ pub mod pallet {
                 ExistenceRequirement::KeepAlive,
             )?;
 
+            // Escrow taken -> the channel id is now genuinely consumed (finding #25).
+            <NextChannelId<T>>::mutate(|id| *id += 1);
             <Channels<T>>::insert(
                 channel_id,
                 Channel {
@@ -795,8 +800,18 @@ pub mod pallet {
             );
             ensure!(price > Zero::zero(), Error::<T>::InsufficientPayment);
 
+            // RED-TEAM 2026-10-09 (finding #25, compute-marketplace / state
+            // consistency): the id counter used to be bumped here, *before* the
+            // fallible escrow `transfer` below. FRAME does not roll back storage
+            // when a dispatch returns `Err` (the call is not `#[transactional]`),
+            // so a create whose escrow transfer fails still permanently consumed
+            // a `NextJobId` -> an id gap. The access point seeds its off-chain
+            // job-id predictor from `NextJobId`, so a single failed create
+            // desyncs it from the chain by one and the *next* real job is labeled
+            // with a stale id (the documented on-chain/off-chain mislabel -> orphan
+            // class, items (a)/(d)). Read the id now, but only bump the counter
+            // once the escrow has actually been taken (below).
             let job_id = <NextJobId<T>>::get();
-            <NextJobId<T>>::mutate(|id| *id += 1);
 
             let now: u32 = frame_system::Pallet::<T>::block_number()
                 .try_into()
@@ -825,6 +840,8 @@ pub mod pallet {
                 ExistenceRequirement::KeepAlive,
             )?;
 
+            // Escrow taken -> the job id is now genuinely consumed (finding #25).
+            <NextJobId<T>>::mutate(|id| *id += 1);
             <Jobs<T>>::insert(job_id, job);
             // Per-token billing in a SEPARATE map so `ComputeJob`'s on-chain layout
             // is unchanged (no storage migration needed). (rate, cap, used)
@@ -1687,6 +1704,53 @@ mod tests {
         new_test_ext().execute_with(|| {
             assert_eq!(NextJobId::<Test>::get(), 1);
             assert_eq!(ActiveJobCount::<Test>::get(), 0);
+        });
+    }
+
+    // RED-TEAM 2026-10-09 (finding #25): a `create_job` whose escrow transfer fails
+    // must NOT consume a `NextJobId` (a permanent id gap desyncs the access
+    // point's off-chain job-id predictor -> mislabeled/orphan jobs).
+    #[test]
+    fn test_create_job_failed_escrow_does_not_consume_job_id() {
+        new_test_ext().execute_with(|| {
+            // An account with no balance cannot pay the escrow (KeepAlive).
+            let poor = 12_345u64;
+            let before = NextJobId::<Test>::get();
+            let res = MarketPallet::create_job(
+                RuntimeOrigin::signed(poor),
+                default_reqs(),
+                JobType::LLMInference,
+                JobTier::Spot,
+                1_000,
+                0,
+                0,
+                100,
+                workload(),
+            );
+            assert!(res.is_err(), "unfunded create must fail");
+            assert_eq!(
+                NextJobId::<Test>::get(),
+                before,
+                "a failed create must not consume a job id"
+            );
+            assert_eq!(ActiveJobCount::<Test>::get(), 0);
+        });
+    }
+
+    // RED-TEAM 2026-10-09 (finding #25): same guarantee for `open_channel`.
+    #[test]
+    fn test_open_channel_failed_escrow_does_not_consume_channel_id() {
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            let poor = 12_345u64; // no balance
+            let before = NextChannelId::<Test>::get();
+            let res = MarketPallet::open_channel(RuntimeOrigin::signed(poor), BOB, 1_000, 100);
+            assert!(res.is_err(), "unfunded open_channel must fail");
+            assert_eq!(
+                NextChannelId::<Test>::get(),
+                before,
+                "a failed open_channel must not consume a channel id"
+            );
         });
     }
 
