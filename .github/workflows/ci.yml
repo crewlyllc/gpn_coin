@@ -65,6 +65,19 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # Secret hygiene: reject tracked key material (private seeds / mnemonics).
+  # Red-team finding #5 (2026-10-08): a live private seed had been committed to
+  # a public file. Redaction is not enough if it can recur, so this is a hard gate.
+  # ---------------------------------------------------------------------------
+  secret-scan:
+    name: secret-scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan tracked files for committed secrets
+        run: python3 scripts/check_no_secrets.py
+
+  # ---------------------------------------------------------------------------
   # Formatting + lints. Fast, and the first gate.
   # ---------------------------------------------------------------------------
   lint:

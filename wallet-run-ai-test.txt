@@ -5,9 +5,15 @@ Goal: fund a wallet, then use that wallet to pay for an AI job on the network.
 ## Step 1 — Generate a requestor wallet
 ```
 gpn-node key generate
-  Secret seed: 0xe871c97ce671bd29efe234d077980d3ee12333ce3c3eb3af71f52d210045018a
+  Secret seed: <REDACTED — generate your own; NEVER commit a real seed.>
   SS58 Address: 5DaPejP1koNDcuJwRcFeySHmqCAPxzkRBbGU99bUWhfwBs7m
 ```
+> ⚠️ **Redaction note (2026-10-08, red-team finding #5):** this log originally committed a
+> **live private seed**. It has been redacted here, but the seed still exists in git history
+> (`d593658`) and was pushed to the public remote — treat that key as **compromised/burned**
+> (it held only testnet GPN, balance now 0). Never paste a real seed into a tracked file;
+> CI now rejects it (`scripts/check-no-secrets.sh`). If history must be purged,
+> `git filter-repo` + force-push is a reviewed, owner-run operation.
 
 ## Step 2 — Fund it (faucet)
 ```
