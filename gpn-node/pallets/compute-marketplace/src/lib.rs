@@ -502,6 +502,17 @@ pub mod pallet {
                 Error::<T>::ProviderNotRegistered
             );
             <RegisteredProviders<T>>::remove(&who);
+            // Red-team finding #19 (compute-marketplace / ghost provider): the
+            // scheduler discovers providers from the chain by reading
+            // `ComputeMarketplace::ProviderEndpoints` *only* (item #1), but
+            // `unregister_provider` removed only `RegisteredProviders` — so the
+            // advertised endpoint survived deregistration and the provider stayed
+            // on-chain-discoverable. Access points then kept routing jobs to a
+            // wallet that had left the network, where nobody claimed them (the
+            // job is only reaped by the janitor/expiry sweep) — a routed-to-a-
+            // black-hole / theft-of-service condition. Retract the endpoint with
+            // the registration so discovery reflects the provider set.
+            <ProviderEndpoints<T>>::remove(&who);
             Self::deposit_event(Event::<T>::ProviderUnregistered { who });
             Ok(())
         }
@@ -1368,7 +1379,7 @@ mod tests {
     use crate::pallet as local_market;
     use crate::pallet::{
         ActiveJobCount, ChannelEscrow, ChannelIndex, Channels, JobEscrow, JobProvider, JobSweepCursor,
-        Jobs, NextChannelId, NextJobId, RegisteredProviders,
+        Jobs, NextChannelId, NextJobId, ProviderEndpoints, RegisteredProviders,
     };
 
     type Block = frame_system::mocking::MockBlock<Test>;
@@ -1616,6 +1627,30 @@ mod tests {
             // Unregistering non-provider fails
             let miss = MarketPallet::unregister_provider(RuntimeOrigin::signed(ALICE));
             assert_eq!(miss, Err(Error::<Test>::ProviderNotRegistered.into()));
+        });
+    }
+
+    /// Red-team finding #19: deregistration must also retract the advertised
+    /// on-chain endpoint, otherwise the scheduler (which discovers providers
+    /// ONLY from `ProviderEndpoints`) keeps routing jobs to a ghost provider.
+    #[test]
+    fn test_unregister_provider_retracts_on_chain_endpoint() {
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            MarketPallet::set_provider_endpoint(
+                RuntimeOrigin::signed(BOB),
+                b"http://box:8093/status".to_vec(),
+            )
+            .unwrap();
+            assert!(ProviderEndpoints::<Test>::contains_key(BOB));
+
+            MarketPallet::unregister_provider(RuntimeOrigin::signed(BOB)).unwrap();
+
+            assert!(!RegisteredProviders::<Test>::contains_key(BOB));
+            assert!(
+                !ProviderEndpoints::<Test>::contains_key(BOB),
+                "deregistration must retract the on-chain endpoint"
+            );
         });
     }
 
