@@ -352,6 +352,13 @@ pub mod pallet {
             balance_provider: u128,
             nonce: u64,
         },
+        /// An untouched channel was refunded to its requestor after the deadline
+        /// (`refund_expired_channel`). `amount` is the full locked escrow.
+        ChannelRefunded {
+            channel_id: u64,
+            requestor: T::AccountId,
+            amount: u128,
+        },
     }
 
     // Errors
@@ -395,6 +402,10 @@ pub mod pallet {
         InvalidChannelSignature,
         /// `force_close` was attempted before the channel `deadline`.
         ChannelNotExpired,
+        /// `refund_expired_channel` was attempted on a channel that already has
+        /// co-signed off-chain state (`nonce > 0` / a non-zero provider balance),
+        /// so it must go through the signed close/force-close path instead.
+        ChannelHasUpdates,
     }
 
     // Hooks
@@ -701,6 +712,49 @@ pub mod pallet {
                 balance_provider,
                 nonce,
             )
+        }
+
+        /// Unilateral refund of an **untouched** channel after its deadline.
+        ///
+        /// RED-TEAM 2026-10-0x (compute-marketplace / fund lock): an escrowed
+        /// channel could be **permanently locked**. `close_channel` needs BOTH
+        /// parties' signatures and `force_close_channel` needs the
+        /// *counterparty's* signature. A requestor that opens a channel has, by
+        /// construction, NO counterparty signature (`nonce == 0` is the opening
+        /// state), so if the provider never co-signs anything (goes away, or
+        /// griefs) the deposit is stuck in the marketplace account forever —
+        /// there is no expiry/refund path — even though no off-chain value ever
+        /// moved. Since `nonce == 0` (and a zero provider balance) means the
+        /// provider holds no co-signed claim, refunding the full deposit to the
+        /// requestor can never take value owed to the provider. Channels that do
+        /// carry co-signed state (`nonce > 0`) fall through to the existing
+        /// signed `close_channel`/`force_close_channel` paths.
+        #[pallet::call_index(14)]
+        #[pallet::weight(<T as Config>::WeightInfo::complete_job())]
+        pub fn refund_expired_channel(
+            origin: OriginFor<T>,
+            channel_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            let channel = <Channels<T>>::get(channel_id).ok_or(Error::<T>::ChannelNotFound)?;
+            ensure!(
+                channel.state == ChannelState::Open,
+                Error::<T>::ChannelNotOpen
+            );
+            // Only the party that funded the channel may reclaim it.
+            ensure!(who == channel.requestor, Error::<T>::NotJobRequestor);
+            // An untouched channel only: no co-signed off-chain update exists, so
+            // the provider is owed nothing and cannot be robbed by this path.
+            ensure!(
+                channel.nonce == 0 && channel.balance_provider == 0,
+                Error::<T>::ChannelHasUpdates
+            );
+            let now: u32 = frame_system::Pallet::<T>::block_number()
+                .try_into()
+                .unwrap_or(0);
+            ensure!(now >= channel.deadline, Error::<T>::ChannelNotExpired);
+
+            Self::refund_channel(channel_id, channel)
         }
 
         #[pallet::call_index(2)]
@@ -1356,6 +1410,39 @@ pub mod pallet {
                 balance_requestor,
                 balance_provider,
                 nonce,
+            });
+            Ok(())
+        }
+
+        /// Close an `Open` channel and return its full escrow to the requestor.
+        /// Used only by `refund_expired_channel`, which has already verified the
+        /// channel is untouched (no co-signed state ⇒ nothing owed to the
+        /// provider). Mirrors the bookkeeping of `settle_channel`.
+        fn refund_channel(
+            channel_id: u64,
+            mut channel: Channel<T::AccountId>,
+        ) -> DispatchResult {
+            let escrow =
+                <ChannelEscrow<T>>::get(channel_id).ok_or(Error::<T>::ChannelNotFound)?;
+            let requestor = channel.requestor.clone();
+            let provider = channel.provider.clone();
+            channel.state = ChannelState::Closed;
+            <Channels<T>>::insert(channel_id, channel);
+            <ChannelEscrow<T>>::remove(channel_id);
+            <ChannelIndex<T>>::remove((requestor.clone(), provider.clone()));
+
+            T::Currency::transfer(
+                &Self::account_id(),
+                &requestor,
+                escrow,
+                ExistenceRequirement::AllowDeath,
+            )?;
+
+            let amount: u128 = escrow.try_into().unwrap_or(u128::MAX);
+            Self::deposit_event(Event::<T>::ChannelRefunded {
+                channel_id,
+                requestor,
+                amount,
             });
             Ok(())
         }
@@ -2477,6 +2564,60 @@ mod tests {
             .unwrap();
             assert_eq!(Balances::free_balance(BOB), bob_before + bp);
             assert_eq!(Channels::<Test>::get(ch).unwrap().state, ChannelState::Closed);
+        });
+    }
+
+    // ── Red-team finding #20: untouched-channel escrow lock ─────────────────
+
+    #[test]
+    fn test_refund_expired_channel_returns_full_escrow_to_requestor() {
+        new_test_ext().execute_with(|| {
+            let ch = open_default_channel();
+            // The provider never co-signs anything: the requestor holds NO
+            // counterparty signature, so neither `close_channel` nor
+            // `force_close_channel` can release the escrow. Before the fix this
+            // stranded the deposit forever; now the requestor can reclaim it
+            // after the deadline.
+            let escrow = ChannelEscrow::<Test>::get(ch).unwrap();
+            assert_eq!(escrow, 5_000);
+            let alice_before = Balances::free_balance(ALICE);
+
+            System::set_block_number(101); // opened_at(1) + ttl(100)
+            MarketPallet::refund_expired_channel(RuntimeOrigin::signed(ALICE), ch).unwrap();
+
+            // Full escrow returned, pallet account swept to 0, index cleared.
+            assert_eq!(Balances::free_balance(ALICE), alice_before + escrow);
+            assert_eq!(ChannelEscrow::<Test>::get(ch), None);
+            assert_eq!(ChannelIndex::<Test>::get((ALICE, BOB)), None);
+            assert_eq!(Channels::<Test>::get(ch).unwrap().state, ChannelState::Closed);
+            assert_eq!(Balances::free_balance(MarketPallet::account_id()), 0);
+        });
+    }
+
+    #[test]
+    fn test_refund_expired_channel_rejected_before_deadline() {
+        new_test_ext().execute_with(|| {
+            let ch = open_default_channel();
+            // Still inside the TTL: the provider may yet co-sign, so no refund.
+            let res = MarketPallet::refund_expired_channel(RuntimeOrigin::signed(ALICE), ch);
+            assert_eq!(res, Err(Error::<Test>::ChannelNotExpired.into()));
+            assert_eq!(Channels::<Test>::get(ch).unwrap().state, ChannelState::Open);
+            assert_eq!(ChannelEscrow::<Test>::get(ch), Some(5_000));
+        });
+    }
+
+    #[test]
+    fn test_refund_expired_channel_rejected_for_non_requestor() {
+        new_test_ext().execute_with(|| {
+            let ch = open_default_channel();
+            System::set_block_number(101);
+            // Neither the provider nor a third party may sweep the deposit back;
+            // only the funding requestor.
+            let res = MarketPallet::refund_expired_channel(RuntimeOrigin::signed(BOB), ch);
+            assert_eq!(res, Err(Error::<Test>::NotJobRequestor.into()));
+            let res = MarketPallet::refund_expired_channel(RuntimeOrigin::signed(CAROL), ch);
+            assert_eq!(res, Err(Error::<Test>::NotJobRequestor.into()));
+            assert_eq!(ChannelEscrow::<Test>::get(ch), Some(5_000));
         });
     }
 }
