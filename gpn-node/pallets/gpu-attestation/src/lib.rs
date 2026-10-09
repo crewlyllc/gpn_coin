@@ -491,6 +491,19 @@ pub mod pallet {
                         let remaining = stake.saturating_sub(penalty);
                         <ProviderStake<T>>::insert(&target, remaining);
                         <TotalStaked<T>>::mutate(|t| *t -= penalty);
+                        // RED-TEAM 2026-10-08 (finding #3, fund lock / D4 violation):
+                        // the slash used to adjust *accounting only* — the penalty
+                        // currency stayed in the pallet account forever (it is never
+                        // withdrawable: `withdraw_stake` returns only the reduced
+                        // `ProviderStake`). Per D4 the penalty must be BURNED (removed
+                        // from total issuance), matching
+                        // `profitability-oracle::slash_operator` and
+                        // `gpn-token::distribute_fees`.
+                        if !penalty.is_zero() {
+                            let (imbalance, _) =
+                                T::Currency::slash(&Self::account_id(), penalty);
+                            drop(imbalance); // negative imbalance = burned
+                        }
                         Self::deposit_event(Event::<T>::Slashed {
                             who: target.clone(),
                             penalty,
@@ -1162,6 +1175,37 @@ mod tests {
             let penalty = initial_stake / 10;
             assert_eq!(stake_after, initial_stake - penalty);
             assert_eq!(TotalStaked::<Test>::get(), initial_stake - penalty);
+        });
+    }
+
+    /// REGRESSION (red-team 2026-10-08, finding #3, fund lock / D4 violation):
+    /// a slash must actually BURN the penalty — remove it from total issuance —
+    /// not merely shrink the accounting while the currency stays stranded in the
+    /// pallet account (where `withdraw_stake` can never return it). The pallet
+    /// account's free balance must drop by exactly `penalty` and end equal to the
+    /// remaining (unslashed) stake.
+    #[test]
+    fn test_expired_slash_burns_currency() {
+        new_test_ext().execute_with(|| {
+            stake_and_attest(ALICE, 1_000, 2);
+            let acct = AttestPallet::account_id();
+            let before = pallet_balances::Pallet::<Test>::free_balance(acct.clone());
+            assert_eq!(before, 1_000);
+
+            for i in 0..TestMaxMissed::get() {
+                System::set_block_number(100 + i as u64 * (TestMaxAge::get() + 1));
+                AttestPallet::check_expired(RuntimeOrigin::signed(BOB), ALICE).unwrap();
+            }
+
+            let penalty = 1_000u128 / 10;
+            let after = pallet_balances::Pallet::<Test>::free_balance(acct);
+            assert_eq!(
+                after,
+                before - penalty,
+                "slash must burn the penalty out of the pallet account"
+            );
+            // The pallet now holds exactly the remaining (unslashed) stake.
+            assert_eq!(after, ProviderStake::<Test>::get(ALICE).unwrap());
         });
     }
 

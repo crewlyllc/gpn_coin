@@ -389,6 +389,19 @@ pub mod pallet {
                         } else {
                             <Bonds<T>>::insert(&target, remaining);
                         }
+                        // RED-TEAM 2026-10-08 (finding #3, fund lock / D4 violation):
+                        // the slash used to shrink `Bonds` accounting only — the
+                        // penalty currency stayed stuck in the pallet account forever
+                        // (it is never withdrawable: `unregister_fullnode` refunds only
+                        // the reduced `Bonds`, and a fully-slashed node removes the
+                        // record outright). Per D4 the penalty must be BURNED (removed
+                        // from total issuance), matching
+                        // `profitability-oracle::slash_operator`.
+                        if !penalty.is_zero() {
+                            let (imbalance, _) =
+                                T::Currency::slash(&Self::account_id(), penalty);
+                            drop(imbalance); // negative imbalance = burned
+                        }
                         Self::deposit_event(Event::<T>::BondSlashed {
                             who: target.clone(),
                             penalty,
@@ -696,6 +709,39 @@ mod tests {
             // After 3rd miss the bond was slashed 10% (remaining > 0 so not removed).
             let bond = Bonds::<Test>::get(ALICE).unwrap();
             assert_eq!(bond, TestBond::get() - TestBond::get() / 10);
+        });
+    }
+
+    /// REGRESSION (red-team 2026-10-08, finding #3, fund lock / D4 violation):
+    /// a liveness bond slash must BURN the penalty (remove it from issuance),
+    /// leaving the pallet account holding exactly the remaining refundable bond —
+    /// not stranding the penalty forever (`unregister_fullnode` only refunds the
+    /// reduced `Bonds`).
+    #[test]
+    fn test_bond_slash_burns_currency() {
+        new_test_ext().execute_with(|| {
+            register(ALICE);
+            let acct = LivenessPallet::account_id();
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(acct.clone()),
+                TestBond::get()
+            );
+            // Miss three windows in a row (nobody witnesses ALICE).
+            System::set_block_number(21);
+            LivenessPallet::submit_liveness(RuntimeOrigin::signed(ALICE), ALICE).unwrap();
+            System::set_block_number(31);
+            LivenessPallet::submit_liveness(RuntimeOrigin::signed(ALICE), ALICE).unwrap();
+            System::set_block_number(41);
+            LivenessPallet::submit_liveness(RuntimeOrigin::signed(ALICE), ALICE).unwrap();
+
+            let penalty = TestBond::get() / 10;
+            let after = pallet_balances::Pallet::<Test>::free_balance(acct);
+            assert_eq!(
+                after,
+                TestBond::get() - penalty,
+                "bond slash must burn the penalty out of the pallet account"
+            );
+            assert_eq!(after, Bonds::<Test>::get(ALICE).unwrap());
         });
     }
 
