@@ -200,6 +200,8 @@ pub mod pallet {
         InsufficientUnlocked,
         RosterEmpty,
         TransferFailed,
+        /// Approval threshold must be `> 0` and `<= roster_size` (finding #28).
+        InvalidThreshold,
     }
 
     // ── Calls ──────────────────────────────────────────────────────────────
@@ -320,6 +322,21 @@ pub mod pallet {
         #[pallet::weight(<T as Config>::WeightInfo::set_threshold())]
         pub fn set_threshold(origin: OriginFor<T>, threshold: u32) -> DispatchResult {
             ensure_root(origin)?;
+            // Red-team finding #28 (treasury / governance-config integrity):
+            // `set_threshold` wrote the caller-supplied value with NO validation.
+            // A root parameter change to `0` silently disables the approval gate
+            // — `execute_spend`'s `approvals.len() >= Threshold` check (`>= 0`) is
+            // then always true, so a SINGLE roster member can execute any proposed
+            // spend and drain the treasury. A value larger than the roster is
+            // equally broken (no spend could ever reach it, permanently bricking
+            // spending). Same "validate before trusting a config write" class as
+            // finding #13. Require `0 < threshold <= roster_size`; root can adjust
+            // the roster and threshold in tandem.
+            let roster_len = Roster::<T>::get().len() as u32;
+            ensure!(
+                threshold > 0 && threshold <= roster_len,
+                Error::<T>::InvalidThreshold
+            );
             Threshold::<T>::put(threshold);
             Self::deposit_event(Event::<T>::ThresholdUpdated { threshold });
             Ok(())
@@ -641,6 +658,32 @@ mod tests {
             // A valid replacement still works.
             T::set_roster(RuntimeOrigin::root(), vec![1, 2, 3]).unwrap();
             assert_eq!(Roster::<Test>::get().len(), 3);
+        });
+    }
+
+    #[test]
+    fn test_set_threshold_rejects_invalid_without_mutating() {
+        new_test_ext().execute_with(|| {
+            assert_eq!(Threshold::<Test>::get(), 13);
+            // Zero disables the approval gate: any single member could then
+            // execute (and drain) any proposed spend.
+            assert_eq!(
+                T::set_threshold(RuntimeOrigin::root(), 0),
+                Err(Error::<Test>::InvalidThreshold.into())
+            );
+            // Greater than the roster is unsatisfiable -> spending bricks forever.
+            assert_eq!(
+                T::set_threshold(RuntimeOrigin::root(), 26),
+                Err(Error::<Test>::InvalidThreshold.into())
+            );
+            assert_eq!(
+                Threshold::<Test>::get(),
+                13,
+                "threshold must be unchanged after a rejected set_threshold"
+            );
+            // A valid value within the roster still applies.
+            T::set_threshold(RuntimeOrigin::root(), 3).unwrap();
+            assert_eq!(Threshold::<Test>::get(), 3);
         });
     }
 
