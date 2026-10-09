@@ -41,6 +41,11 @@ jobs:
           $ollama = 'http://127.0.0.1:11434'
           $gflops = __GFLOPS__
           $log    = 'C:\gpn\provider.log'
+          # Shared AP<->provider secret binding POST /assign (item #16 finding #7).
+          # Set the GPN_ASSIGN_TOKEN repo secret to the SAME value as the AP
+          # host's GPN_ASSIGN_TOKEN so the box rejects forged assignment pushes
+          # to its public :8093. Unset secret => legacy (permissive) heartbeat.
+          $env:GPN_ASSIGN_TOKEN = '__ASSIGNTOK__'
           function Log($m) { "$(Get-Date -Format o) $m" | Out-File -FilePath $log -Append -Encoding utf8 }
           Log "supervisor starting (rpc=$rpc signer=$signer pub=$pub)"
           # guarantee a single provider: a stray gpn_llm_provider (e.g. from an
@@ -74,6 +79,7 @@ jobs:
           $script = $script.Replace('__SIGNER__', '${{ inputs.signer }}')
           $script = $script.Replace('__PUB__',    '${{ inputs.public_status_url }}')
           $script = $script.Replace('__GFLOPS__', '${{ inputs.gflops }}')
+          $script = $script.Replace('__ASSIGNTOK__', '${{ secrets.GPN_ASSIGN_TOKEN }}')
           Set-Content -Path 'C:\gpn\run-provider.ps1' -Value $script -Encoding utf8
           Write-Host "wrote C:\gpn\run-provider.ps1"
 

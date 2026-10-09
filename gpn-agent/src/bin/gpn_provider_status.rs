@@ -34,6 +34,40 @@ fn opt(args: &[String], flag: &str) -> Option<String> {
     args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1).cloned())
 }
 
+/// Constant-time string equality (don't leak the shared token via timing).
+fn ct_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Authorization for `POST /assign` (item #16, red-team finding #7).
+///
+/// The provider heartbeat (:8093) is *publicly* reachable — the Windows box
+/// forwards it to the internet — and `POST /assign` writes an attacker-supplied
+/// job + `callback` into the provider's OWN store. Left unauthenticated, any
+/// remote caller could (a) make the provider run an arbitrary prompt on its GPU
+/// with no on-chain job/escrow, and (b) overwrite a pending assignment's
+/// `callback`/`callback_token` so the provider returns a *user's* inference
+/// result to the attacker (result hijack / data exfiltration).
+///
+/// Bind the push to a shared AP↔provider secret (`GPN_ASSIGN_TOKEN`): when a
+/// token is configured, a NON-loopback caller must present it. Loopback stays
+/// exempt (the local AP / tests share the secret implicitly) and an *unset*
+/// token keeps legacy behaviour so a rollout never breaks an existing box.
+fn assign_authorized(is_loopback: bool, required: &str, provided: &str) -> bool {
+    if required.is_empty() || is_loopback {
+        return true;
+    }
+    ct_eq(required, provided)
+}
+
 /// Live model inventory from Ollama. Returns (models, can_pull).
 fn ollama_models(base: &str, fallback: &[String]) -> (Vec<String>, bool) {
     let cli = reqwest::blocking::Client::builder()
@@ -110,6 +144,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let capacity: u64 = opt(&args, "--capacity").or_else(|| std::env::var("CAPACITY").ok()).and_then(|s| s.parse().ok()).unwrap_or(1);
     let active: u64 = opt(&args, "--active").or_else(|| std::env::var("ACTIVE").ok()).and_then(|s| s.parse().ok()).unwrap_or(0);
     let ollama = opt(&args, "--ollama").or_else(|| std::env::var("GPN_OLLAMA").ok()).unwrap_or_else(|| "http://127.0.0.1:11434".into());
+    // Shared AP↔provider secret binding `POST /assign` (item #16 finding #7).
+    // Empty ⇒ legacy accept (logged) so a rollout is non-breaking.
+    let assign_token = opt(&args, "--assign-token").or_else(|| std::env::var("GPN_ASSIGN_TOKEN").ok()).unwrap_or_default();
     // Real compute economics for the rate card:
     //   --tok-per-s          the provider's MEASURED throughput (tokens/sec)
     //   --owner-cost-usd-hr  the provider's own cost/hr ($/kWh + amortized GPU)
@@ -154,7 +191,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("GPN provider heartbeat on http://{listen} — address={address} gflops={gflops} models={:?} active={active}/{capacity}", models);
 
     let hdr = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
+    if assign_token.is_empty() {
+        eprintln!("⚠ assign-token not configured — POST /assign is UNAUTHENTICATED (set GPN_ASSIGN_TOKEN; item #16 finding #7)");
+    }
     for mut req in server.incoming_requests() {
+        // Auth gate for the assignment push (item #16, red-team finding #7): a
+        // publicly-reachable `POST /assign` must carry the shared token.
+        {
+            let u = req.url().to_string();
+            let is_assign = req.method() == &Method::Post && u.split('?').next() == Some("/assign");
+            if is_assign {
+                let is_loopback = req.remote_addr().map(|a| a.ip().is_loopback()).unwrap_or(false);
+                let provided = req
+                    .headers()
+                    .iter()
+                    .find_map(|h| {
+                        if h.field.equiv("X-Gpn-Assign-Token") {
+                            Some(h.value.as_str().trim().to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
+                if !assign_authorized(is_loopback, &assign_token, &provided) {
+                    let _ = req.respond(
+                        Response::from_string(json!({"error":"invalid assign token"}).to_string())
+                            .with_header(hdr.clone())
+                            .with_status_code(401),
+                    );
+                    continue;
+                }
+            }
+        }
         let body = match (req.method(), req.url()) {
             (Method::Get, "/status") => {
                 let (models_now, can_pull) = ollama_models(&ollama, &models);
@@ -215,4 +283,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = req.respond(Response::from_string(body.to_string()).with_header(hdr.clone()));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assign_token_gate_rejects_remote_callers_with_the_wrong_or_missing_token() {
+        // Token configured: a non-loopback caller must present it exactly.
+        assert!(!assign_authorized(false, "s3cret", ""));
+        assert!(!assign_authorized(false, "s3cret", "wrong"));
+        assert!(assign_authorized(false, "s3cret", "s3cret"));
+        // Loopback stays exempt so the local AP / tests keep working.
+        assert!(assign_authorized(true, "s3cret", ""));
+    }
+
+    #[test]
+    fn assign_token_gate_is_inert_when_unconfigured() {
+        // Rollout safety: no token configured ⇒ legacy (accept) behaviour.
+        assert!(assign_authorized(false, "", ""));
+        assert!(assign_authorized(false, "", "anything"));
+    }
+
+    #[test]
+    fn ct_eq_matches_only_equal_same_length_strings() {
+        assert!(ct_eq("abc", "abc"));
+        assert!(!ct_eq("abc", "abd"));
+        assert!(!ct_eq("abc", "abcd"));
+        assert!(ct_eq("", ""));
+    }
 }

@@ -623,21 +623,46 @@ fn dispatch_assignment(
         .trim_end_matches("/status")
         .trim_end_matches('/');
     let url = format!("{base}/assign");
+    // Shared AP↔provider secret so a remote provider can reject a forged
+    // assignment push to its publicly-exposed heartbeat (item #16, finding #7).
+    // Sent as a header + body field; unset env ⇒ the provider stays legacy/permissive.
+    let assign_token = std::env::var("GPN_ASSIGN_TOKEN").unwrap_or_default();
+    let body = assignment_body(job_id, provider, model, pull, job_payload, callback_url, callback_token, &assign_token);
+    if let Ok(c) = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    {
+        let mut req = c.post(&url).json(&body);
+        if !assign_token.is_empty() {
+            req = req.header("X-Gpn-Assign-Token", &assign_token);
+        }
+        let _ = req.send();
+    }
+}
+
+/// Build the `POST /assign` JSON body. Split out so the assignment-push auth
+/// binding (item #16 finding #7) is unit-testable without an HTTP round trip.
+fn assignment_body(
+    job_id: u64,
+    provider: &str,
+    model: &str,
+    pull: bool,
+    job_payload: Option<&gpn_agent::llm::LlmJob>,
+    callback_url: &str,
+    callback_token: &str,
+    assign_token: &str,
+) -> Value {
     let mut body = json!({
         "job_id": job_id, "provider": provider, "model": model,
-        "pull": pull, "callback": callback_url, "callback_token": callback_token
+        "pull": pull, "callback": callback_url, "callback_token": callback_token,
+        "assign_token": assign_token
     });
     if let Some(j) = job_payload {
         if let Ok(v) = serde_json::to_value(j) {
             body["job"] = v;
         }
     }
-    if let Ok(c) = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-    {
-        let _ = c.post(&url).json(&body).send();
-    }
+    body
 }
 
 fn write_assignment(
@@ -1830,6 +1855,17 @@ mod tests {
         assert!(!ct_eq(&a, &b));
         assert!(!ct_eq(&a, ""));
         assert_eq!(assignment_token("/nonexistent/gpn-assign.json", 1), None);
+    }
+
+    #[test]
+    fn assignment_push_carries_the_shared_token_that_binds_it_to_the_provider() {
+        let body = assignment_body(7, "prov", "llama3.2:1b", false, None, "http://ap:8092", "ctok", "s3cret");
+        assert_eq!(body["assign_token"], "s3cret");
+        assert_eq!(body["callback_token"], "ctok");
+        assert_eq!(body["job_id"], 7);
+        // Empty token still serializes (provider treats it as "no secret configured").
+        let body2 = assignment_body(7, "prov", "m", false, None, "http://ap", "ctok", "");
+        assert_eq!(body2["assign_token"], "");
     }
 
     #[test]
