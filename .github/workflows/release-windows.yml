@@ -84,6 +84,7 @@ jobs:
           } catch { Write-Host "prune skipped: $($_.Exception.Message)" }
       - name: upload
         uses: actions/upload-artifact@v4
+        continue-on-error: true   # artifact storage quota is out of our control; don't fail the build on it
         with:
           name: gpn-windows
           retention-days: 3
@@ -91,3 +92,14 @@ jobs:
             gpn-agent/target/release/*.exe
             gpn-node/target/release/gpn-node.exe
           if-no-files-found: error
+
+      - name: deploy binaries directly to C:\gpn\bin
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dst = 'C:\gpn\bin'
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          Copy-Item 'gpn-agent\target\release\*.exe' $dst -Force
+          Copy-Item 'gpn-node\target\release\gpn-node.exe' $dst -Force
+          Write-Host "deployed to $dst :"
+          Get-ChildItem $dst -Filter *.exe | ForEach-Object { Write-Host "  $($_.Name)  $([math]::Round($_.Length/1MB,1))MB" }
