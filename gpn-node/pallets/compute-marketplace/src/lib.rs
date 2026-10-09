@@ -898,6 +898,20 @@ pub mod pallet {
                 who == requestor || who == provider,
                 Error::<T>::NotJobProvider
             );
+            // Red-team finding 2026-10-11 (#11): from `Running` (no result
+            // submitted yet) ONLY the assigned provider may complete. The fix for
+            // finding #1 removed third parties but *kept the requestor allowed*,
+            // leaving the requestor-side half of the same theft-of-service open:
+            // the requestor could finalize an in-flight job early — with per-token
+            // billing `actual_tokens` is still 0 ⇒ `charge == 0` ⇒ the entire
+            // escrow is refunded to the requestor and the provider is paid nothing
+            // for work it is still doing. From `AwaitingVerification` (a result
+            // exists) the requestor may still complete; the provider may complete
+            // from either state (it owns the zombie/abandon reconcile path that
+            // drives Running → Completed).
+            if job.state == JobState::Running {
+                ensure!(who == provider, Error::<T>::NotJobProvider);
+            }
             let escrow = <JobEscrow<T>>::take(job_id).ok_or(Error::<T>::EscrowMismatch)?;
             // ── Per-token billing ──────────────────────────────────────────
             // When the job carries a rate + cap, the real charge is
@@ -1731,6 +1745,42 @@ mod tests {
             // The assigned provider still completes normally.
             MarketPallet::submit_result(RuntimeOrigin::signed(BOB), job_id, [5u8; 32], 1).unwrap();
             MarketPallet::complete_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
+            assert_eq!(Jobs::<Test>::get(job_id).unwrap().state, JobState::Completed);
+        });
+    }
+
+    #[test]
+    fn test_complete_job_rejects_requestor_early_completion() {
+        // Red-team finding 2026-10-11 (#11): the fix for finding #1 only removed
+        // *third parties* from `complete_job`; the REQUESTOR could still finalize
+        // an in-flight `Running` job early. With per-token billing `actual_tokens`
+        // is 0 ⇒ `charge == 0` ⇒ the whole escrow is refunded to the requestor and
+        // the provider is paid nothing for work it is still doing. From `Running`
+        // only the assigned provider may complete.
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            let job_id = create_job(ALICE);
+            MarketPallet::accept_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
+            MarketPallet::start_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
+            assert_eq!(Jobs::<Test>::get(job_id).unwrap().state, JobState::Running);
+
+            let escrow_before =
+                pallet_balances::Pallet::<Test>::free_balance(MarketPallet::account_id());
+            // The requestor cannot short-circuit a still-running job…
+            assert_noop!(
+                MarketPallet::complete_job(RuntimeOrigin::signed(ALICE), job_id),
+                Error::<Test>::NotJobProvider
+            );
+            // …the job stays Running with its escrow intact (no zero-charge refund).
+            assert_eq!(Jobs::<Test>::get(job_id).unwrap().state, JobState::Running);
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(MarketPallet::account_id()),
+                escrow_before
+            );
+
+            // The requestor MAY complete once a result exists (AwaitingVerification).
+            MarketPallet::submit_result(RuntimeOrigin::signed(BOB), job_id, [9u8; 32], 1).unwrap();
+            MarketPallet::complete_job(RuntimeOrigin::signed(ALICE), job_id).unwrap();
             assert_eq!(Jobs::<Test>::get(job_id).unwrap().state, JobState::Completed);
         });
     }
