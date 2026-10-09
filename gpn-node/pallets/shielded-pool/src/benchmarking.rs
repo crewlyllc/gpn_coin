@@ -73,11 +73,14 @@ mod benchmarks {
         let caller: T::AccountId = whitelisted_caller();
         fund::<T>(&caller);
         let amount: BalanceOf<T> = 500u32.into();
-        let addr: [u8; 32] = [7u8; 32];
-        let nonce: u64 = 0;
+        let cm = crate::note::note_commitment(
+            500u128,
+            &crate::note::derive_rcm(500u128, &[7u8; 32], 0),
+            &[7u8; 32],
+        );
 
         #[extrinsic_call]
-        deposit(RawOrigin::Signed(caller), amount, addr, nonce);
+        deposit(RawOrigin::Signed(caller), amount, cm);
 
         assert_eq!(ShieldedPool::<T>::pool_size(), 1);
     }

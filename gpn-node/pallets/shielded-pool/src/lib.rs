@@ -135,17 +135,14 @@ pub mod note {
         blake2s_256(&preimage)
     }
 
-    /// Deterministic trapdoor generator for on-chain minting of shielded notes
-    /// (transparent→shielded deposits). For real shielded spends the prover
-    /// generates `rcm` off-chain with strong randomness; this is only a
-    /// convenience so a user can deposit without a client prover.
+    /// Deterministic trapdoor generator — **kept for test fixtures only**.
     ///
     /// ⚠️ Security note: deriving `rcm` from public inputs means anyone can
-    /// recompute it and steal the note. This is INTENDED ONLY for the deposit
-    /// path where the note is minted fresh on-chain by the depositor and the
-    /// "trapdoor" is actually the depositor's own knowledge of the commitment
-    /// preimage. The shielded→shielded spend path will require client-side
-    /// random `rcm` and a real zk-proof (see the pallet docs).
+    /// recompute it and steal the note (red-team finding #22). The pallet no
+    /// longer calls this on-chain: `deposit` takes a caller-supplied `cm` whose
+    /// trapdoor `rcm` is chosen off-chain with strong randomness, so only the
+    /// depositor can produce a spend proof. This helper remains so tests can
+    /// build reproducible notes/fixtures and cross-check the BLAKE2s scheme.
     pub fn derive_rcm(v: u128, addr: &[u8; 32], nonce: u64) -> [u8; 32] {
         let mut preimage = Vec::with_capacity(8 + 16 + 32 + 8);
         preimage.extend_from_slice(b"gpn/rcm0");
@@ -210,6 +207,21 @@ pub mod pallet {
     /// (later cycle) subtract.
     #[pallet::storage]
     pub type PoolValue<T: Config> = StorageValue<_, BalanceOf<T>, ValueQuery>;
+
+    /// The value recorded for each deposited commitment, keyed by `cm`. A note's
+    /// transparent release is **capped by this**, so a spend can never release
+    /// more than was actually paid in for that commitment (value conservation).
+    ///
+    /// This is the on-chain half of the red-team finding-#22 fix: `deposit` now
+    /// takes a **caller-supplied commitment** (a secret trapdoor `rcm` chosen
+    /// off-chain) instead of deriving `rcm` from public call args, so the
+    /// note-spend witness is no longer publicly reconstructible. Because the
+    /// chain can no longer check `cm` against `amount` at deposit, the
+    /// per-commitment deposited value recorded here (plus the circuit's
+    /// `value = v_out + value_balance` binding) is what enforces conservation.
+    #[pallet::storage]
+    pub type DepositedValue<T: Config> =
+        StorageMap<_, Blake2_128Concat, Commitment, BalanceOf<T>, OptionQuery>;
 
     /// Next merkle-tree position for a commitment being appended.
     #[pallet::storage]
@@ -285,6 +297,9 @@ pub mod pallet {
         UnknownCommitment,
         /// The released amount exceeds the pooled value (value conservation).
         InsufficientPoolValue,
+        /// The released amount exceeds the value recorded as deposited for this
+        /// commitment (red-team finding #22; value conservation).
+        ValueExceedsDeposit,
         /// A shielded→shielded spend must have a zero transparent value balance.
         NonZeroValueBalance,
         /// A shielded→shielded spend requires an output commitment.
@@ -347,16 +362,26 @@ pub mod pallet {
 
         /// Transparent → Shielded deposit.
         ///
-        /// Moves `amount` from the sender's `Balances` into the pool, mints a
-        /// shielded note (publishes `cm`), and increments `PoolValue`. The
-        /// sender pays a configurable `ShieldedFee` on top.
+        /// Moves `amount` from the sender's `Balances` into the pool, publishes
+        /// the caller-supplied note commitment `cm`, and increments `PoolValue`.
+        /// The sender pays a configurable `ShieldedFee` on top.
+        ///
+        /// **Red-team finding #22 fix:** `cm` is supplied by the caller (the
+        /// depositor computes it off-chain from a *secret* trapdoor `rcm`, e.g.
+        /// `cm = H("gpn/cm00" || v || rcm || addr)` with a random `rcm`). The
+        /// pallet no longer derives the trapdoor from public call arguments, so
+        /// the note-spend witness is not publicly reconstructible and a
+        /// deposited note can only be spent by whoever knows `rcm`. The value
+        /// paid in is recorded in [`DepositedValue`] and caps the transparent
+        /// release at spend time (the chain cannot inspect `cm`'s preimage, so
+        /// conservation is enforced by the deposit record + the circuit's
+        /// `value = v_out + value_balance` binding).
         #[pallet::call_index(0)]
         #[pallet::weight(<T as Config>::WeightInfo::deposit())]
         pub fn deposit(
             origin: OriginFor<T>,
             amount: BalanceOf<T>,
-            addr: [u8; 32],
-            nonce: u64,
+            cm: Commitment,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             ensure!(!amount.is_zero(), Error::<T>::ZeroAmount);
@@ -370,10 +395,6 @@ pub mod pallet {
                 (pool.len() as u32) < T::MaxCommitments::get(),
                 Error::<T>::PoolFull
             );
-            // Compute the commitment for this note.
-            let rcm = note::derive_rcm(amount.try_into().unwrap_or(u128::MAX), &addr, nonce);
-            let v: u128 = amount.try_into().unwrap_or(u128::MAX);
-            let cm = note::note_commitment(v, &rcm, &addr);
 
             ensure!(!pool.contains(&cm), Error::<T>::DuplicateCommitment);
 
@@ -396,6 +417,9 @@ pub mod pallet {
             <NoteCommitments<T>>::put(new_pool);
             let root = Self::append_to_tree(&cm)?;
             <PoolValue<T>>::mutate(|p| *p = p.saturating_add(amount));
+            // Record the value paid in for this commitment so the spend cap can
+            // enforce value conservation without trusting the (opaque) commitment.
+            <DepositedValue<T>>::insert(cm, amount);
 
             Self::deposit_event(Event::<T>::Deposited {
                 who,
@@ -460,6 +484,19 @@ pub mod pallet {
             ensure!(
                 <NoteCommitments<T>>::get().contains(&commitment),
                 Error::<T>::UnknownCommitment
+            );
+            // RED-TEAM 2026-10-09 (finding #22): cap the transparent release by
+            // the value actually deposited for this commitment. The circuit
+            // binds `value = v_out + value_balance` to the (now secret) trapdoor,
+            // but the chain cannot see the preimage of the caller-supplied `cm`;
+            // this recorded deposit amount is what guarantees a spender can never
+            // release more than they paid in (no pool drain).
+            let deposited =
+                <DepositedValue<T>>::get(commitment).ok_or(Error::<T>::UnknownCommitment)?;
+            let deposited_u128: u128 = deposited.unique_saturated_into();
+            ensure!(
+                (value_balance as u128) <= deposited_u128,
+                Error::<T>::ValueExceedsDeposit
             );
 
             // Reconstruct the circuit's public inputs (order:
@@ -772,6 +809,13 @@ mod tests {
     const ADDR_A: [u8; 32] = [1u8; 32];
     const ADDR_B: [u8; 32] = [2u8; 32];
 
+    /// Build the note commitment the way a client does off-chain (with a secret
+    /// trapdoor `rcm`). The pallet no longer derives `rcm` from public args
+    /// (red-team finding #22), so tests must supply `cm` explicitly.
+    fn cm_of(v: u128, addr: &[u8; 32], nonce: u64) -> [u8; 32] {
+        note::note_commitment(v, &note::derive_rcm(v, addr, nonce), addr)
+    }
+
     // ---- Note scheme tests ------------------------------------------------
 
     // Real value-balance circuit: proof for fee=2 (from `gpn_shield qap-prove`,
@@ -912,8 +956,9 @@ mod tests {
     fn test_deposit_moves_funds_and_mints_note() {
         new_test_ext().execute_with(|| {
             let before = pallet_balances::Pallet::<Test>::free_balance(ALICE);
+            let cm = cm_of(500, &ADDR_A, 0);
             // Fee = 10, amount = 500 → total 510 debited.
-            ShieldPallet::deposit(RuntimeOrigin::signed(ALICE), 500, ADDR_A, 0).unwrap();
+            ShieldPallet::deposit(RuntimeOrigin::signed(ALICE), 500, cm).unwrap();
 
             assert_eq!(
                 pallet_balances::Pallet::<Test>::free_balance(ALICE),
@@ -923,9 +968,12 @@ mod tests {
             assert_eq!(ShieldPallet::pool_size(), 1);
             assert_eq!(NextPosition::<Test>::get(), 1);
 
-            let cm = NoteCommitments::<Test>::get()[0];
+            let stored_cm = NoteCommitments::<Test>::get()[0];
             let rcm = note::derive_rcm(500, &ADDR_A, 0);
+            assert_eq!(stored_cm, cm);
             assert_eq!(cm, note::note_commitment(500, &rcm, &ADDR_A));
+            // The deposited value is recorded for the spend cap (finding #22).
+            assert_eq!(DepositedValue::<Test>::get(cm), Some(500));
             // Nullifiers are burned at SPEND, not at deposit — none recorded yet.
             assert!(!Nullifiers::<Test>::contains_key(note::nullifier(&rcm, 0)));
             assert!(!ShieldPallet::is_nullifier_spent(&note::nullifier(&rcm, 0)));
@@ -943,7 +991,8 @@ mod tests {
     #[test]
     fn test_deposit_rejects_zero_amount() {
         new_test_ext().execute_with(|| {
-            let result = ShieldPallet::deposit(RuntimeOrigin::signed(ALICE), 0, ADDR_A, 0);
+            let result =
+                ShieldPallet::deposit(RuntimeOrigin::signed(ALICE), 0, cm_of(0, &ADDR_A, 0));
             assert_eq!(result, Err(Error::<Test>::ZeroAmount.into()));
         });
     }
@@ -951,9 +1000,10 @@ mod tests {
     #[test]
     fn test_deposit_rejects_duplicate_commitment() {
         new_test_ext().execute_with(|| {
-            ShieldPallet::deposit(RuntimeOrigin::signed(ALICE), 500, ADDR_A, 0).unwrap();
-            // Same addr+nonce → same rcm → same cm → rejected.
-            let result = ShieldPallet::deposit(RuntimeOrigin::signed(BOB), 500, ADDR_A, 0);
+            let cm = cm_of(500, &ADDR_A, 0);
+            ShieldPallet::deposit(RuntimeOrigin::signed(ALICE), 500, cm).unwrap();
+            // Re-depositing the same commitment → rejected.
+            let result = ShieldPallet::deposit(RuntimeOrigin::signed(BOB), 500, cm);
             assert_eq!(result, Err(Error::<Test>::DuplicateCommitment.into()));
         });
     }
@@ -962,7 +1012,11 @@ mod tests {
     fn test_deposit_rejects_insufficient_balance() {
         new_test_ext().execute_with(|| {
             // BOB has 10,000 but we try to deposit 10,000 + 10 fee = 10,010 > balance.
-            let result = ShieldPallet::deposit(RuntimeOrigin::signed(BOB), 10_000, ADDR_B, 0);
+            let result = ShieldPallet::deposit(
+                RuntimeOrigin::signed(BOB),
+                10_000,
+                cm_of(10_000, &ADDR_B, 0),
+            );
             assert_eq!(result, Err(Error::<Test>::TransferFailed.into()));
         });
     }
@@ -970,9 +1024,11 @@ mod tests {
     #[test]
     fn test_multiple_deposits_append_positions() {
         new_test_ext().execute_with(|| {
-            ShieldPallet::deposit(RuntimeOrigin::signed(ALICE), 100, ADDR_A, 0).unwrap();
-            ShieldPallet::deposit(RuntimeOrigin::signed(ALICE), 200, ADDR_A, 1).unwrap();
-            ShieldPallet::deposit(RuntimeOrigin::signed(BOB), 300, ADDR_B, 0).unwrap();
+            ShieldPallet::deposit(RuntimeOrigin::signed(ALICE), 100, cm_of(100, &ADDR_A, 0))
+                .unwrap();
+            ShieldPallet::deposit(RuntimeOrigin::signed(ALICE), 200, cm_of(200, &ADDR_A, 1))
+                .unwrap();
+            ShieldPallet::deposit(RuntimeOrigin::signed(BOB), 300, cm_of(300, &ADDR_B, 0)).unwrap();
 
             assert_eq!(ShieldPallet::pool_size(), 3);
             assert_eq!(NextPosition::<Test>::get(), 3);
@@ -990,10 +1046,12 @@ mod tests {
         new_test_ext().execute_with(|| {
             // MaxCommits = 100; deposit 100 unique notes.
             for i in 0..100u64 {
-                ShieldPallet::deposit(RuntimeOrigin::signed(ALICE), 1, ADDR_A, i).unwrap();
+                ShieldPallet::deposit(RuntimeOrigin::signed(ALICE), 1, cm_of(1, &ADDR_A, i))
+                    .unwrap();
             }
             assert_eq!(ShieldPallet::pool_size(), 100);
-            let result = ShieldPallet::deposit(RuntimeOrigin::signed(ALICE), 1, ADDR_A, 100);
+            let result =
+                ShieldPallet::deposit(RuntimeOrigin::signed(ALICE), 1, cm_of(1, &ADDR_A, 100));
             assert_eq!(result, Err(Error::<Test>::PoolFull.into()));
         });
     }
@@ -1003,7 +1061,7 @@ mod tests {
     /// Deposit the canonical fixture note (value 500, addr `FIX_ADDR`, nonce 0)
     /// so its commitment/root match the off-chain proof fixtures.
     fn deposit_fixture_note() {
-        ShieldPallet::deposit(RuntimeOrigin::signed(ALICE), 500, FIX_ADDR, 0).unwrap();
+        ShieldPallet::deposit(RuntimeOrigin::signed(ALICE), 500, a32(FIX_CM_HEX)).unwrap();
     }
 
     fn transparent_spend() -> DispatchResult {
@@ -1246,6 +1304,24 @@ mod tests {
     }
 
     #[test]
+    fn test_spend_rejects_release_exceeding_deposit() {
+        new_test_ext().execute_with(|| {
+            deposit_fixture_note();
+            // The note's proof releases 500, but only 400 was recorded as
+            // deposited for this commitment → the spend must be rejected
+            // (value conservation, red-team finding #22).
+            DepositedValue::<Test>::insert(a32(FIX_CM_HEX), 400u128);
+            assert_eq!(
+                transparent_spend(),
+                Err(Error::<Test>::ValueExceedsDeposit.into())
+            );
+            // No effect: nullifier not burned, pool value intact.
+            assert!(!ShieldPallet::is_nullifier_spent(&a32(FIX_NF_HEX)));
+            assert_eq!(PoolValue::<Test>::get(), 500);
+        });
+    }
+
+    #[test]
     fn test_spend_enforces_pool_value_cap() {
         new_test_ext().execute_with(|| {
             deposit_fixture_note();
@@ -1269,7 +1345,12 @@ mod tests {
             // More deposits must not evict the original root while under the cap,
             // so the note remains spendable against its historical root.
             for i in 0..5u64 {
-                ShieldPallet::deposit(RuntimeOrigin::signed(CAROL), 10, [0x33u8; 32], i).unwrap();
+                ShieldPallet::deposit(
+                    RuntimeOrigin::signed(CAROL),
+                    10,
+                    cm_of(10, &[0x33u8; 32], i),
+                )
+                .unwrap();
             }
             assert!(ShieldPallet::is_known_root(&fixture_root));
             // And that historical-root spend still verifies.
