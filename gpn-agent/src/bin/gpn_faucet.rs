@@ -19,7 +19,9 @@
 //!   - `--reserve-gpn`    : faucet stops dripping if its balance would fall below this
 //!
 //! Endpoints:
-//!   GET /drip?address=<ss58|hex>&amount=<gpn>   → drip GPN (default `--drip-gpn`)
+//!   GET /drip?address=<ss58|hex>&amount=<gpn>   → drip GPN (fixed `--drip-gpn`; a
+//!                                                 caller may request a SMALLER
+//!                                                 drip, never a larger one)
 //!   GET /status                                  → faucet balance + config + rate-limit state
 //!   GET /                                        → tiny usage banner
 //!
@@ -117,6 +119,17 @@ fn transfer_call(dest_bytes: &[u8; 32], amount_raw: u128) -> impl subxt::tx::Pay
         "transfer_allow_death",
         vec![Value::from_bytes(dest_bytes), Value::u128(amount_raw)],
     )
+}
+
+/// Resolve the amount to drip. The faucet drips a **fixed** `drip_gpn`; a caller
+/// may *lower* the requested amount (e.g. to take a smaller drip) but must never
+/// exceed `drip_gpn` — otherwise one request could drain the whole daily cap.
+/// A missing, non-positive, or non-finite `amount` falls back to `drip_gpn`.
+fn resolve_drip_amount(drip_gpn: f64, requested: Option<f64>) -> f64 {
+    match requested {
+        Some(a) if a.is_finite() && a > 0.0 => a.min(drip_gpn),
+        _ => drip_gpn,
+    }
 }
 
 /// Check rate limits and, if allowed, record the drip atomically.
@@ -327,10 +340,13 @@ fn route(
             Ok(b) => b,
             Err(e) => return json_response(&format!(r#"{{"ok":false,"error":"{}"}}"#, e), 400),
         };
-        let amount_gpn = params
-            .get("amount")
-            .and_then(|a| a.parse::<f64>().ok())
-            .unwrap_or(faucet.drip_gpn);
+        // A caller may request a SMALLER drip, but never more than the fixed
+        // `--drip-gpn`: unbounded, one request could take the whole daily cap
+        // (red-team finding #6).
+        let amount_gpn = resolve_drip_amount(
+            faucet.drip_gpn,
+            params.get("amount").and_then(|a| a.parse::<f64>().ok()),
+        );
         let addr_key = AccountId32(dest_bytes).to_string();
 
         if let Err(e) = check_and_record(faucet, &addr_key, amount_gpn) {
@@ -475,6 +491,31 @@ mod tests {
         // requires live metadata). It targets the Balances pallet's `transfer`.
         let dest = [1u8; 32];
         let _call = transfer_call(&dest, 1_000_000_000_000_000);
+    }
+
+    #[test]
+    fn drip_amount_defaults_to_fixed_when_absent() {
+        assert_eq!(resolve_drip_amount(10_000.0, None), 10_000.0);
+    }
+
+    #[test]
+    fn drip_amount_cannot_exceed_fixed_drip() {
+        // A caller asking for the whole daily cap in one shot is bounded to drip_gpn.
+        assert_eq!(resolve_drip_amount(10_000.0, Some(100_000.0)), 10_000.0);
+    }
+
+    #[test]
+    fn drip_amount_allows_smaller_request() {
+        assert_eq!(resolve_drip_amount(10_000.0, Some(250.0)), 250.0);
+    }
+
+    #[test]
+    fn drip_amount_rejects_nonpositive_and_nonfinite() {
+        // Falls back to the fixed drip (never a negative/NaN/inf transfer).
+        assert_eq!(resolve_drip_amount(10_000.0, Some(-5.0)), 10_000.0);
+        assert_eq!(resolve_drip_amount(10_000.0, Some(0.0)), 10_000.0);
+        assert_eq!(resolve_drip_amount(10_000.0, Some(f64::NAN)), 10_000.0);
+        assert_eq!(resolve_drip_amount(10_000.0, Some(f64::INFINITY)), 10_000.0);
     }
 
     #[test]
