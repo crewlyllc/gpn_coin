@@ -298,6 +298,9 @@ pub mod pallet {
         NotOutlier,
         NoFeed,
         ZeroAmount,
+        /// Feed utilization is expressed in basis points (10000 = 100%); a value
+        /// above 100% is impossible and is rejected (red-team finding #14).
+        InvalidUtilization,
     }
 
     #[pallet::hooks]
@@ -340,6 +343,19 @@ pub mod pallet {
                 Error::<T>::UpdateTooSoon
             );
             ensure!(token_price_usd > 0, Error::<T>::InvalidPrice);
+            // Red-team finding #14 (oracle-feed integrity): `utilization_rate_bps`
+            // is a *rate in basis points* — 10000 bps == 100% — so any value above
+            // 10000 is definitionally impossible. Without this bound a feed writer
+            // could post an absurd utilization (e.g. u32::MAX ≈ 429,496.7%), which
+            // is stored verbatim in `CurrentFeed`/`OperatorFeeds` and flows — via
+            // the bond-weighted median and the `ProfitabilityOracleApi` — into the
+            // off-chain consumer's profitability/auto-switch math (bps/10000,
+            // unclamped), skewing every node's mine⇄compute decision. Mirror the
+            // existing `token_price_usd > 0` input check: validate, don't trust.
+            ensure!(
+                utilization_rate_bps <= 10_000,
+                Error::<T>::InvalidUtilization
+            );
 
             let feed = ProfitabilityFeed {
                 token_price_usd,
@@ -837,7 +853,7 @@ mod tests {
     use crate::pallet as local_oracle;
     use crate::pallet::{
         ChallengeVerdict, Committee, CurrentFeed, LastUpdateBlock, OpenChallenges, OperatorCount,
-        OperatorLastFeedBlock, OracleOperators, PendingAdmissions, StakedOperators,
+        OperatorFeeds, OperatorLastFeedBlock, OracleOperators, PendingAdmissions, StakedOperators,
     };
 
     type Block = frame_system::mocking::MockBlock<Test>;
@@ -1002,6 +1018,47 @@ mod tests {
             );
             assert_eq!(result, Err(Error::<Test>::NotAuthorized.into()));
             assert!(CurrentFeed::<Test>::get().is_none());
+        });
+    }
+
+    #[test]
+    fn test_update_feed_rejects_impossible_utilization() {
+        // RED-TEAM 2026-10-09 (finding #14, oracle-feed integrity):
+        // `utilization_rate_bps` is a rate in basis points (10000 == 100%), so a
+        // value above 10000 is impossible. Before the bound, an operator could
+        // post e.g. u32::MAX and the pallet stored it verbatim, feeding an absurd
+        // utilization into the off-chain profitability / auto-switch math.
+        new_test_ext().execute_with(|| {
+            // 10001 bps (100.01%) is already out of range.
+            let too_high =
+                OraclePallet::update_feed(RuntimeOrigin::signed(ALICE), 25_000, 150, 10_001, 1_200);
+            assert_eq!(too_high, Err(Error::<Test>::InvalidUtilization.into()));
+            // u32::MAX must also be rejected, and no state must change.
+            let absurd = OraclePallet::update_feed(
+                RuntimeOrigin::signed(ALICE),
+                25_000,
+                150,
+                u32::MAX,
+                1_200,
+            );
+            assert_eq!(absurd, Err(Error::<Test>::InvalidUtilization.into()));
+            assert!(CurrentFeed::<Test>::get().is_none());
+            assert!(OperatorFeeds::<Test>::get(ALICE).is_none());
+            assert_eq!(OperatorLastFeedBlock::<Test>::get(ALICE), None);
+
+            // Exactly 10000 bps (100%) is the boundary and IS allowed.
+            assert!(OraclePallet::update_feed(
+                RuntimeOrigin::signed(ALICE),
+                25_000,
+                150,
+                10_000,
+                1_200,
+            )
+            .is_ok());
+            assert_eq!(
+                CurrentFeed::<Test>::get().unwrap().utilization_rate_bps,
+                10_000
+            );
         });
     }
 
@@ -1538,9 +1595,7 @@ mod tests {
             );
 
             // A committee member may still resolve.
-            assert!(
-                OraclePallet::resolve_challenge(RuntimeOrigin::signed(ALICE), DAVE, 2).is_ok()
-            );
+            assert!(OraclePallet::resolve_challenge(RuntimeOrigin::signed(ALICE), DAVE, 2).is_ok());
             assert!(OpenChallenges::<Test>::get(DAVE).is_none());
         });
     }

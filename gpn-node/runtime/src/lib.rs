@@ -123,7 +123,7 @@ pub const VERSION: sp_version::RuntimeVersion = sp_version::RuntimeVersion {
     spec_name: create_runtime_str!("gpn"),
     impl_name: create_runtime_str!("gpn"),
     authoring_version: 1,
-    spec_version: 23,
+    spec_version: 24,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 1,
