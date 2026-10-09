@@ -191,11 +191,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 stored_job = LlmStore::new().put(jid, job).is_ok();
                             }
                         }
+                        // Item #16 finding #2: persist the per-job callback token so
+                        // the provider can echo it when returning the result, binding
+                        // the remote result channel to this assignment.
+                        let callback_token = v.get("callback_token").and_then(|x| x.as_str()).unwrap_or("");
                         let rec = json!({
                             "provider": v.get("provider").and_then(|x| x.as_str()).unwrap_or(address.as_str()),
                             "model": v.get("model").and_then(|x| x.as_str()).unwrap_or(""),
                             "pull": v.get("pull").and_then(|x| x.as_bool()).unwrap_or(false),
                             "callback": callback,
+                            "callback_token": callback_token,
                         });
                         match write_assignment(jid, rec) {
                             Ok(_) => json!({"ok": true, "job_id": jid, "job_stored": stored_job}),

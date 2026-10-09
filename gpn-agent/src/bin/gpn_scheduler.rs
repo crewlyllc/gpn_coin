@@ -616,6 +616,7 @@ fn dispatch_assignment(
     pull: bool,
     job_payload: Option<&gpn_agent::llm::LlmJob>,
     callback_url: &str,
+    callback_token: &str,
 ) {
     let base = status_url
         .trim_end_matches('/')
@@ -624,7 +625,7 @@ fn dispatch_assignment(
     let url = format!("{base}/assign");
     let mut body = json!({
         "job_id": job_id, "provider": provider, "model": model,
-        "pull": pull, "callback": callback_url
+        "pull": pull, "callback": callback_url, "callback_token": callback_token
     });
     if let Some(j) = job_payload {
         if let Ok(v) = serde_json::to_value(j) {
@@ -646,6 +647,7 @@ fn write_assignment(
     model: &str,
     pull: bool,
     callback_url: &str,
+    callback_token: &str,
 ) -> std::io::Result<()> {
     let mut m: serde_json::Map<String, Value> = std::fs::read_to_string(store)
         .ok()
@@ -654,9 +656,63 @@ fn write_assignment(
         .unwrap_or_default();
     m.insert(
         job_id.to_string(),
-        json!({"provider": provider, "model": model, "pull": pull, "callback": callback_url}),
+        json!({"provider": provider, "model": model, "pull": pull, "callback": callback_url, "callback_token": callback_token}),
     );
     std::fs::write(store, serde_json::to_string_pretty(&Value::Object(m))?)
+}
+
+/// Generate an unguessable per-job callback token (item #16, red-team finding #2).
+/// The `POST /result/{id}` result-return channel is exempt from the caller-token
+/// auth gate (remote providers hold no user token), so it must be bound to the
+/// assignment some other way: the AP issues this token at dispatch, the provider
+/// echoes it back, and the AP rejects a result whose token doesn't match. 32 bytes
+/// of OS entropy, hex-encoded; falls back to a hash of process/time state if
+/// `/dev/urandom` is unavailable (still unguessable to a remote caller).
+fn new_callback_token(job_id: u64) -> String {
+    use sha2::{Digest, Sha256};
+    let mut buf = [0u8; 32];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        if std::io::Read::read_exact(&mut f, &mut buf).is_ok() {
+            return hex::encode(buf);
+        }
+    }
+    let mut h = Sha256::new();
+    h.update(job_id.to_le_bytes());
+    h.update(std::process::id().to_le_bytes());
+    h.update(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+            .to_le_bytes(),
+    );
+    hex::encode(h.finalize())
+}
+
+/// The per-job callback token the AP issued for this assignment, if any. Read
+/// back from the AP's own assignment store so the `POST /result/{id}` handler can
+/// authenticate a remote provider's result even across an AP restart.
+fn assignment_token(store: &str, job_id: u64) -> Option<String> {
+    let s = std::fs::read_to_string(store).ok()?;
+    let v: Value = serde_json::from_str(&s).ok()?;
+    v.get(job_id.to_string())
+        .and_then(|r| r.get("callback_token"))
+        .and_then(|t| t.as_str())
+        .map(str::to_string)
+        .filter(|t| !t.is_empty())
+}
+
+/// Constant-time string equality (avoid leaking the token via timing).
+fn ct_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -769,10 +825,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if !ap_token.is_empty() {
             let is_loopback = req.remote_addr().map(|a| a.ip().is_loopback()).unwrap_or(false);
             // `/result/{id}` is the provider→AP result-return channel (item #14);
-            // providers are remote and hold no user token, so it is exempt.
-            let is_result_callback = path.first().map(|s| *s == "result").unwrap_or(false);
-            let protected = !is_result_callback
+            // a remote provider holds no user token, so the POST side is exempt
+            // from the caller-token gate — instead it is authenticated by the
+            // per-job callback token (item #16, finding #2) checked in its handler.
+            // The GET side (read the prompt/response) still requires the token.
+            let is_result_path = path.first().map(|s| *s == "result").unwrap_or(false);
+            let is_result_post = is_result_path && method == Method::Post;
+            let protected = !is_result_post
                 && (method == Method::Post
+                    || is_result_path
                     || path.first().map(|s| *s == "artifact").unwrap_or(false));
             if protected && !is_loopback {
                 let want = format!("Bearer {ap_token}");
@@ -981,8 +1042,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     record_created(id, 512);
                     let _ = gpn_agent::llm::LlmStore::new().put(id, gpn_agent::llm::LlmJob::new_llm(&model, &prompt, 0.7, 512));
                     let job_payload = gpn_agent::llm::get_job(id);
-                    let _ = write_assignment(&assign_store, id, &provider.address, &model, needs_pull, &callback_url);
-                    dispatch_assignment(&provider.status_url, id, &provider.address, &model, needs_pull, job_payload.as_ref(), &callback_url);
+                    let callback_token = new_callback_token(id);
+                    let _ = write_assignment(&assign_store, id, &provider.address, &model, needs_pull, &callback_url, &callback_token);
+                    dispatch_assignment(&provider.status_url, id, &provider.address, &model, needs_pull, job_payload.as_ref(), &callback_url, &callback_token);
                     // block until the provider finishes (OpenAI calls are synchronous)
                     for _ in 0..1200 {
                         if let Some(j) = gpn_agent::llm::get_job(id) {
@@ -1263,8 +1325,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // plus the model + whether it must pull the model first.
                         record_created(id, mtok_eff as u64);
                         let job_payload = gpn_agent::llm::get_job(id);
-                        let _ = write_assignment(&assign_store, id, &provider.address, &model, needs_pull, &callback_url);
-                        dispatch_assignment(&provider.status_url, id, &provider.address, &model, needs_pull, job_payload.as_ref(), &callback_url);
+                        let callback_token = new_callback_token(id);
+                        let _ = write_assignment(&assign_store, id, &provider.address, &model, needs_pull, &callback_url, &callback_token);
+                        dispatch_assignment(&provider.status_url, id, &provider.address, &model, needs_pull, job_payload.as_ref(), &callback_url, &callback_token);
                         // optional inline wait: poll the off-chain store and return the
                         // answer in THIS response (no separate /result call).
                         let mut answer: Option<serde_json::Value> = None;
@@ -1345,6 +1408,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             (Method::Post, ["result", id]) => {
                 let idn: u64 = id.parse().unwrap_or(0);
                 let v: Value = serde_json::from_str(&body).unwrap_or(json!({}));
+                // Bind the callback to the assignment (item #16, finding #2): the
+                // AP issued a per-job token at dispatch and the provider must echo
+                // it. Without a match, ANY remote caller could inject/overwrite a
+                // job's result (answer poisoning). Loopback stays exempt so local
+                // tests/monitors keep working. A job with no recorded token (legacy
+                // pre-fix assignment) is accepted for backward-compat.
+                let is_loopback = req.remote_addr().map(|a| a.ip().is_loopback()).unwrap_or(false);
+                if !is_loopback {
+                    if let Some(want) = assignment_token(&assign_store, idn) {
+                        let got = v
+                            .get("callback_token")
+                            .and_then(|x| x.as_str())
+                            .map(str::to_string)
+                            .or_else(|| {
+                                req.headers().iter().find_map(|h| {
+                                    if h.field.equiv("X-Gpn-Callback-Token") {
+                                        Some(h.value.as_str().trim().to_string())
+                                    } else {
+                                        None
+                                    }
+                                })
+                            })
+                            .unwrap_or_default();
+                        if !ct_eq(&want, &got) {
+                            let _ = req.respond(
+                                Response::from_string(json!({"error":"invalid callback token"}).to_string())
+                                    .with_header(hdr.clone())
+                                    .with_status_code(401),
+                            );
+                            return;
+                        }
+                    }
+                }
                 let status = v.get("status").and_then(|x| x.as_str()).unwrap_or("done");
                 let store = gpn_agent::llm::LlmStore::new();
                 let res = if status == "error" {
@@ -1477,8 +1573,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if let Some(j) = &job_payload {
                                     let _ = gpn_agent::llm::LlmStore::new().put(idn, j.clone());
                                 }
-                                let _ = write_assignment(&assign_store, idn, &p.address, &qmodel, pull, &callback_url);
-                                dispatch_assignment(&p.status_url, idn, &p.address, &qmodel, pull, job_payload.as_ref(), &callback_url);
+                                let callback_token = new_callback_token(idn);
+                                let _ = write_assignment(&assign_store, idn, &p.address, &qmodel, pull, &callback_url, &callback_token);
+                                dispatch_assignment(&p.status_url, idn, &p.address, &qmodel, pull, job_payload.as_ref(), &callback_url, &callback_token);
                                 json!({"ok":true,"job_id":idn,"routed_to":p.address,
                                        "model":qmodel,"pull":pull,
                                        "latency_ms":p.latency_ms,"load":format!("{}/{}",p.active,p.capacity)})
@@ -1710,13 +1807,29 @@ mod tests {
         // remote provider knows where to POST the finished result.
         let p = std::env::temp_dir().join(format!("gpn-assign-test-{}.json", std::process::id()));
         let ps = p.to_string_lossy().to_string();
-        write_assignment(&ps, 42, "5Bob", "qwen2.5:7b", true, "http://gpn-testnet.duckdns.org:8092").unwrap();
+        write_assignment(&ps, 42, "5Bob", "qwen2.5:7b", true, "http://gpn-testnet.duckdns.org:8092", "tok-abc").unwrap();
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&ps).unwrap()).unwrap();
         assert_eq!(v["42"]["provider"], "5Bob");
         assert_eq!(v["42"]["model"], "qwen2.5:7b");
         assert_eq!(v["42"]["pull"], true);
         assert_eq!(v["42"]["callback"], "http://gpn-testnet.duckdns.org:8092");
+        assert_eq!(v["42"]["callback_token"], "tok-abc");
+        // The per-job callback token is read back for the POST /result auth check.
+        assert_eq!(assignment_token(&ps, 42).as_deref(), Some("tok-abc"));
+        assert_eq!(assignment_token(&ps, 43), None);
         let _ = std::fs::remove_file(&ps);
+    }
+
+    #[test]
+    fn callback_token_is_unguessable_and_constant_time_compared() {
+        let a = new_callback_token(7);
+        let b = new_callback_token(7);
+        assert_eq!(a.len(), 64, "32 bytes hex-encoded");
+        assert_ne!(a, b, "two tokens for the same job must differ (OS entropy)");
+        assert!(ct_eq(&a, &a));
+        assert!(!ct_eq(&a, &b));
+        assert!(!ct_eq(&a, ""));
+        assert_eq!(assignment_token("/nonexistent/gpn-assign.json", 1), None);
     }
 
     #[test]

@@ -349,6 +349,19 @@ fn assignment_callback(id: u64) -> Option<String> {
         .filter(|c| !c.is_empty())
 }
 
+/// The per-job callback token the AP issued in `/assign` (item #16, finding #2).
+/// Echoed back on the result POST so the AP can verify the callback is bound to
+/// this assignment (without it any remote caller could inject a result).
+fn assignment_callback_token(id: u64) -> Option<String> {
+    let s = std::fs::read_to_string(assignment_store_path()).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&s).ok()?;
+    v.get(id.to_string())
+        .and_then(|r| r.get("callback_token"))
+        .and_then(|c| c.as_str())
+        .map(str::to_string)
+        .filter(|c| !c.is_empty())
+}
+
 /// POST the finished job's off-chain result back to the requesting AP so ITS
 /// LlmStore learns the outcome (a remote provider cannot write the AP's store
 /// directly). Best-effort: a missing callback or an unreachable AP is ignored —
@@ -358,11 +371,16 @@ fn return_result(id: u64) {
     let Some(j) = get_job(id) else { return };
     let base = cb.trim_end_matches('/');
     let url = format!("{base}/result/{id}");
-    let body = serde_json::json!({
+    // Echo the per-job callback token (item #16 finding #2) so the AP authenticates
+    // this result as the bound assignment (an unbound/forged POST is rejected 401).
+    let mut body = serde_json::json!({
         "status": j.status, "response": j.response, "result_hash": j.result_hash,
         "salt": j.salt, "artifact_path": j.artifact_path,
         "artifact_media_type": j.artifact_media_type, "error": j.error,
     });
+    if let Some(t) = assignment_callback_token(id) {
+        body["callback_token"] = serde_json::Value::String(t);
+    }
     if let Ok(c) = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
