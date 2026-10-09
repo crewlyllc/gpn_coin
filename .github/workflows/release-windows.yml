@@ -99,6 +99,12 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $dst = 'C:\gpn\bin'
           New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          # stop any running GPN processes so their .exe files aren't locked (Jeremy restarts the provider afterwards)
+          Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like 'gpn*' } | ForEach-Object {
+            Write-Host "stopping $($_.ProcessName) (pid $($_.Id))"
+            Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+          }
+          Start-Sleep -Seconds 2
           Copy-Item 'gpn-agent\target\release\*.exe' $dst -Force
           Copy-Item 'gpn-node\target\release\gpn-node.exe' $dst -Force
           Write-Host "deployed to $dst :"
