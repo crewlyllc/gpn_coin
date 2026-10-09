@@ -277,10 +277,18 @@ pub mod pallet {
 
             let halving_interval = T::HalvingInterval::get();
             let last_halving = <LastHalvingBlock<T>>::get();
-            if !halving_interval.is_zero()
-                && !last_halving.is_zero()
-                && now - last_halving >= halving_interval
-            {
+            // A zero `LastHalvingBlock` is the genesis baseline (block 0): the
+            // field is ONLY ever written by `perform_halving` itself
+            // (`genesis_build` seeds it to zero), so the old
+            // `!last_halving.is_zero()` guard made this branch UNREACHABLE and
+            // the block reward NEVER halved (red-team finding 2026-10-09,
+            // chain-consensus / monetary policy: emission stayed at 50 GPN/block
+            // indefinitely, over-minting until the supply cap — ~2.1x the
+            // documented `2 x reward x HalvingInterval` course). Treat zero as the
+            // genesis baseline so the first halving fires at `now == interval`
+            // and each subsequent one every interval. `last_halving` is always
+            // `<= now`, so the subtraction cannot underflow.
+            if !halving_interval.is_zero() && now - last_halving >= halving_interval {
                 Self::perform_halving();
             }
             Self::distribute_block_rewards();
@@ -1177,6 +1185,54 @@ mod tests {
                 "beneficiary must not also be paid"
             );
             assert_eq!(MockSupply::total_issued(), reward);
+        });
+    }
+
+    /// Red-team finding 2026-10-09 (chain-consensus / monetary policy): the
+    /// block-reward halving never fired. `on_initialize` only halved when
+    /// `LastHalvingBlock != 0`, but that field is written *only* by the halving
+    /// itself (`genesis_build` seeds it to zero) — so the branch was unreachable
+    /// and the reward stayed at the initial value forever, over-minting until the
+    /// supply cap (~2.1x the documented `2 x reward x HalvingInterval` course).
+    #[test]
+    fn test_block_reward_halving_fires_at_interval() {
+        new_test_ext().execute_with(|| {
+            let interval = TestHalvingInterval::get(); // 100
+            let r0 = CurrentBlockReward::<Test>::get();
+
+            pallet_timestamp::Pallet::<Test>::set_timestamp(1_000_000_000);
+            System::set_block_number(1);
+            GpuPowPallet::on_initialize(1);
+
+            // Not before the interval.
+            System::set_block_number(interval - 1);
+            GpuPowPallet::on_initialize(interval - 1);
+            assert_eq!(
+                CurrentBlockReward::<Test>::get(),
+                r0,
+                "no halving before the interval elapses"
+            );
+
+            // Exactly at the interval the reward halves once and the epoch ticks.
+            System::set_block_number(interval);
+            GpuPowPallet::on_initialize(interval);
+            assert_eq!(
+                CurrentBlockReward::<Test>::get(),
+                r0 / 2,
+                "reward must halve at the interval"
+            );
+            assert_eq!(CurrentEpoch::<Test>::get(), 1);
+
+            // And only once per interval.
+            System::set_block_number(interval + 1);
+            GpuPowPallet::on_initialize(interval + 1);
+            assert_eq!(CurrentBlockReward::<Test>::get(), r0 / 2);
+
+            // Second halving at 2x the interval.
+            System::set_block_number(2 * interval);
+            GpuPowPallet::on_initialize(2 * interval);
+            assert_eq!(CurrentBlockReward::<Test>::get(), r0 / 4);
+            assert_eq!(CurrentEpoch::<Test>::get(), 2);
         });
     }
 
