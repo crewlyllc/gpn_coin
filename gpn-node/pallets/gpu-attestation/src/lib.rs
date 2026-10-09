@@ -467,9 +467,22 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
             let stake = <ProviderStake<T>>::take(&who).ok_or(Error::<T>::NoStakeToWithdraw)?;
 
+            // Red-team finding #27 (gpu-attestation / state consistency —
+            // non-root): `AttestedProviderCount` is incremented only by a *fresh*
+            // `submit_attestation`, but `deposit_stake` does NOT increment it (a
+            // stake may be deposited *before* attesting, or never attested at
+            // all). `withdraw_stake` used to decrement it unconditionally, so any
+            // account could run `deposit_stake(min)` -> `withdraw_stake()` without
+            // ever attesting and decrement the counter below its true value —
+            // repeatable to pin `AttestedProviderCount` at 0 (a cheap,
+            // permissionless stats-integrity / invariant break). Only decrement
+            // when the account was actually counted (i.e. it held an attestation).
+            let was_attested = <Attestations<T>>::contains_key(&who);
             <Attestations<T>>::remove(&who);
             <LastMissBlock<T>>::remove(&who);
-            <AttestedProviderCount<T>>::mutate(|c| *c = c.saturating_sub(1));
+            if was_attested {
+                <AttestedProviderCount<T>>::mutate(|c| *c = c.saturating_sub(1));
+            }
             <TotalStaked<T>>::mutate(|t| *t -= stake);
 
             T::Currency::transfer(
@@ -1237,6 +1250,38 @@ mod tests {
         new_test_ext().execute_with(|| {
             let result = AttestPallet::withdraw_stake(RuntimeOrigin::signed(ALICE));
             assert_eq!(result, Err(Error::<Test>::NoStakeToWithdraw.into()));
+        });
+    }
+
+    /// Red-team finding #27 (gpu-attestation / state consistency — non-root):
+    /// `AttestedProviderCount` is bumped only by a fresh attestation, so an
+    /// account that deposits a stake but never attests must NOT decrement it on
+    /// withdraw. Before the fix the decrement was unconditional, so a
+    /// permissionless deposit->withdraw cycle drove the attested-provider count
+    /// below its true value (repeatable to 0).
+    #[test]
+    fn test_withdraw_without_attest_does_not_corrupt_attested_count() {
+        new_test_ext().execute_with(|| {
+            // A real attested provider (count == 1)...
+            stake_and_attest(ALICE, 500, 2);
+            assert_eq!(AttestedProviderCount::<Test>::get(), 1);
+
+            // ...and BOB deposits but never attests (not counted).
+            AttestPallet::deposit_stake(RuntimeOrigin::signed(BOB), 500).unwrap();
+            assert!(Attestations::<Test>::get(BOB).is_none());
+            assert_eq!(AttestedProviderCount::<Test>::get(), 1);
+
+            // BOB withdraws without ever attesting: the count must stay 1.
+            AttestPallet::withdraw_stake(RuntimeOrigin::signed(BOB)).unwrap();
+            assert_eq!(
+                AttestedProviderCount::<Test>::get(),
+                1,
+                "a non-attesting deposit/withdraw must not decrement the attested count"
+            );
+
+            // ALICE, who DID attest, still decrements it correctly on withdraw.
+            AttestPallet::withdraw_stake(RuntimeOrigin::signed(ALICE)).unwrap();
+            assert_eq!(AttestedProviderCount::<Test>::get(), 0);
         });
     }
 
