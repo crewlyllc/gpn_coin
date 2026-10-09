@@ -310,8 +310,22 @@ pub mod pallet {
                 computed_hash == solution.solution_hash,
                 Error::<T>::SolutionHashMismatch
             );
+            // Validate the proof-of-work claim against the *chain's* difficulty
+            // target, never the caller-supplied one (red-team finding 2026-10-09,
+            // chain-consensus/difficulty): `difficulty` is attacker-chosen, so
+            // trusting it let any attested account pass `meets_difficulty` with a
+            // trivial target (e.g. U256::MAX = easiest) and be credited as having
+            // mined — a PoW-bypass / (latent) reward-theft. Anchor the check to the
+            // live target and additionally reject a claimed target weaker (larger)
+            // than the chain's. `DifficultyTooHigh` already existed, unused, for
+            // exactly this guard; `Difficulty` is a *target* (higher = easier).
+            let chain_difficulty = <Difficulty<T>>::get();
             ensure!(
-                Self::meets_difficulty(&solution.solution_hash, &difficulty),
+                !Self::u256_gt(&difficulty, &chain_difficulty),
+                Error::<T>::DifficultyTooHigh
+            );
+            ensure!(
+                Self::meets_difficulty(&solution.solution_hash, &chain_difficulty),
                 Error::<T>::InvalidSolution
             );
             ensure!(
@@ -873,6 +887,9 @@ mod tests {
                 solution_hash: correct_hash,
                 ..sol
             };
+            // Easiest chain target so a valid (but unground) hash still meets it;
+            // `submit_solution` now anchors the check to the chain difficulty.
+            Difficulty::<Test>::put(TestMaxDifficulty::get());
             // Use MaxDifficulty (easiest) so any valid hash passes
             let result = GpuPowPallet::submit_solution(
                 RuntimeOrigin::signed(miner),
@@ -882,6 +899,50 @@ mod tests {
             assert!(result.is_ok());
             assert_eq!(PendingBlockRewards::<Test>::get(), TestInitialReward::get());
             assert_eq!(PendingRewardBeneficiary::<Test>::get(), Some(miner));
+        });
+    }
+
+    /// Red-team finding 2026-10-09 (chain-consensus/difficulty): a PoW claim must
+    /// be validated against the *chain's* difficulty, not the caller-supplied one.
+    /// Before the fix an attested account could pass `meets_difficulty` with a
+    /// trivial (easiest) target and be credited as having mined.
+    #[test]
+    fn test_submit_solution_rejects_weak_difficulty() {
+        new_test_ext().execute_with(|| {
+            let miner = 42u64;
+            let sol = EthashSolution {
+                nonce: 0,
+                mix_hash: [0u8; 32],
+                solution_hash: [0u8; 32],
+                algorithm_version: 1,
+            };
+            let work_data = (sol.nonce, sol.mix_hash, sol.algorithm_version);
+            let correct_hash = sp_io::hashing::blake2_256(&work_data.encode());
+            let valid_solution = EthashSolution {
+                solution_hash: correct_hash,
+                ..sol
+            };
+
+            // Chain difficulty is the hardest test target. Claiming the easiest
+            // target (weaker than the chain's) must be rejected outright...
+            let weak = GpuPowPallet::submit_solution(
+                RuntimeOrigin::signed(miner),
+                valid_solution.clone(),
+                TestMaxDifficulty::get(),
+            );
+            assert!(weak.is_err(), "a weaker-than-chain difficulty must be rejected");
+            assert_eq!(PendingBlockRewards::<Test>::get(), 0);
+
+            // ...and even sitting on the chain target, the unground hash must fail
+            // the real (chain-anchored) difficulty check.
+            let unground = GpuPowPallet::submit_solution(
+                RuntimeOrigin::signed(miner),
+                valid_solution,
+                TestMinDifficulty::get(),
+            );
+            assert!(unground.is_err(), "a hash above the chain target must be rejected");
+            assert_eq!(PendingBlockRewards::<Test>::get(), 0);
+            assert!(PendingRewardBeneficiary::<Test>::get().is_none());
         });
     }
 
@@ -971,6 +1032,9 @@ mod tests {
                 solution_hash: correct_hash,
                 ..sol
             };
+            // Anchor a valid submission to an easy chain target (see
+            // `submit_solution`'s chain-difficulty check).
+            Difficulty::<Test>::put(TestMaxDifficulty::get());
             GpuPowPallet::submit_solution(
                 RuntimeOrigin::signed(miner),
                 valid,
