@@ -271,6 +271,8 @@ pub mod pallet {
         },
         /// A new commitment-set Merkle root was recorded.
         RootRecorded { root: [u8; 32] },
+        /// The deposit fee was burned (removed from total issuance).
+        FeeBurned { amount: BalanceOf<T> },
     }
 
     // ---- Errors -----------------------------------------------------------
@@ -407,8 +409,26 @@ pub mod pallet {
             )
             .map_err(|_| Error::<T>::TransferFailed)?;
 
-            // Nth the fee: it is charged on top and never enters the redeemable
-            // shielded supply (a network cost, self-funding).
+            // The fee is charged on top and never enters the redeemable shielded
+            // supply (a network cost).
+            //
+            // RED-TEAM 2026-10-09 (finding #31, shielded-pool / fund lock +
+            // accounting integrity): the fee used to be *left in the pallet
+            // account* — neither burned nor routed anywhere — so it was
+            // permanently stranded (nobody can withdraw it: `spend` releases only
+            // up to the deposited `amount`, and there is no fee-sweep path) while
+            // still counting in `total_issuance`. That violates the documented D4
+            // "burn" policy and left the pallet account over-funded relative to
+            // `PoolValue` — the same fund-lock class as findings #3/#18 (slash
+            // that only shrank accounting while the currency stayed stranded).
+            // Burn it for real: `Currency::slash` removes it from issuance, so
+            // the pallet account ends at exactly the redeemable `PoolValue`.
+            if !fee.is_zero() {
+                let (imbalance, _) = T::Currency::slash(&Self::account_id(), fee);
+                drop(imbalance); // negative imbalance = burned (removed from supply)
+                Self::deposit_event(Event::<T>::FeeBurned { amount: fee });
+            }
+
             // Append the commitment to the pool + Merkle tree and record the new
             // root. NOTE: a note's nullifier is burned at SPEND, not here.
             let position = <NextPosition<T>>::get();
@@ -985,6 +1005,32 @@ mod tests {
                 *RootHistory::<Test>::get().last().unwrap()
             );
             assert!(!FilledSubtrees::<Test>::get().is_empty());
+        });
+    }
+
+    #[test]
+    fn test_deposit_fee_is_burned_not_stranded() {
+        new_test_ext().execute_with(|| {
+            // Red-team finding #31: the transparent→shielded deposit fee must be
+            // removed from total issuance (a real burn) rather than left
+            // stranded in the pallet account forever, and the pallet account must
+            // hold exactly the redeemable `PoolValue` afterwards.
+            let issuance_before = pallet_balances::Pallet::<Test>::total_issuance();
+            let cm = cm_of(500, &ADDR_A, 0);
+            // Fee = 10, amount = 500 → ALICE debited 510.
+            ShieldPallet::deposit(RuntimeOrigin::signed(ALICE), 500, cm).unwrap();
+
+            // Issuance dropped by exactly the fee. (Moving `amount` into the
+            // pallet account is supply-neutral; only the burn reduces issuance.)
+            let issuance_after = pallet_balances::Pallet::<Test>::total_issuance();
+            assert_eq!(issuance_after, issuance_before - 10);
+
+            // No stranded surplus: the pallet account holds exactly the pool value.
+            assert_eq!(PoolValue::<Test>::get(), 500);
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(ShieldPallet::account_id()),
+                PoolValue::<Test>::get()
+            );
         });
     }
 
