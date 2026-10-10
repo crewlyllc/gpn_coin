@@ -36,6 +36,36 @@ Or script it against the REST API (section 4).
 
 ---
 
+## 2.1 Buy / hold / transfer GPN — a node-free wallet
+
+You do **not** need to run a node to hold or move GPN. `gpn_wallet` is a lightweight sr25519
+wallet (standard Substrate derivation — interoperable with Polkadot.js / `subkey`). Keygen,
+address derivation and signing are **fully offline**; only balance/send touch an RPC endpoint
+(a public access point or any node).
+
+```bash
+# 1. Create a wallet (offline). Writes a 0600 JSON keystore, prints the mnemonic.
+gpn_wallet keygen --out mywallet.json
+
+# 2. Show the ss58 address (offline, from the keystore)
+gpn_wallet address mywallet.json
+
+# 3. Check the balance (needs RPC; any node / access point)
+gpn_wallet balance ws://127.0.0.1:9944 mywallet.json
+
+# 4. Send GPN (signed locally; amount below the existential deposit is rejected)
+gpn_wallet send ws://127.0.0.1:9944 mywallet.json <dest-ss58|0x-hex> 1.5
+
+# 5. Sign a message/payload to authorize an off-chain job payment (offline)
+gpn_wallet sign mywallet.json "pay:job=42;amount=1.5"
+```
+
+Notes: the **mnemonic is the private key** — back it up; never share it. A password-protected
+keystore/mnemonic uses `--password <pw>` (or `GPN_WALLET_PASSWORD`). Dev/VIP URIs like `//Alice`
+are accepted anywhere a wallet source is. See `docs/wallet.md`.
+
+---
+
 ## 3. Run a node + a provider (from scratch)
 
 ### 3.1 The blockchain node
