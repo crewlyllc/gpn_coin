@@ -2495,3 +2495,11 @@ STATUS: **GREEN** (latency restored to the documented class).
 **Checks:** `/api/jobs` (explorer, 78.7 s O(N)) = total 2916 {Completed 2595, Cancelled 293, Failed 27, '?' 1(id 0)} ⇒ **Pending 0, no orphan spike**; claims **6 / 30 min ≈ 1/request**, no storm. `:8092/jobs` client-timeout @10 s (known O(N) item).
 **ACTION TAKEN: NONE.** No service restart (all units active+computing), no code/env/flag/state change. Only this log file touched.
 **STATUS: GREEN / recurring transient block gap; OPEN for MAIN unchanged: bounded-enumeration + per-RPC-timeout for `gpn_explorer.rs::jobs_panel` & `gpn_scheduler.rs` GET `["jobs"]`; `max_tokens`→ollama `num_predict`.**
+
+## 2026-10-11 10:44 PT / 2026-10-11 17:44 UTC — PM07 GPN debug (cron 1a4f19ab) — pipeline GREEN; known-class false-Pending heal churn (#2928 ×4, 10:43:13–10:43:44) after brief block gap; SELF-RECOVERED; e2e 7.04s>5s (known GPU/max_tokens item) then 4.56s<5s; 0 Pending; no action.
+**Root-cause-first:** provider journalctl (15) + probe ×2 + explorer `/api/jobs` FIRST. Flags intact (`GPN_FAST_CLAIM=1`, `GPN_FAST_AP=1`); HEAD `ae6e4ff`, tree clean; gpn-provider `active`.
+**e2e (probes):** llama3.2:1b ~120w → HTTP200 coherent, walls **7.04 s** / **4.56 s**; job #2931 claimed 10:45:35→done 10:45:37 (~2 s inference) ⇒ wall is GPU/queue + OPEN `max_tokens` item, not a provider fault.
+**ANOMALY:** benign fast-path `healed leaked Pending #2928 → Completed` churn ×4 (10:43:13–10:43:44) — #2928 inference had already completed 10:42:10; on-chain mark couldn't land during the gap, then stopped. New jobs #2931/#2932 claimed+done cleanly. Known recurring class (…/09:12/09:54/10:16/10:34).
+**Checks:** `/api/jobs` (explorer, 64.3 s O(N)) = total 2932 {'?' 1(id0), Completed 2611, Cancelled 293, Failed 27} ⇒ **Pending 0, no orphan spike**; claims ~1/request, no storm.
+**ACTION TAKEN: NONE.** No restart (unit active+computing), no code/env/flag/state change. Only this log file touched.
+**STATUS: GREEN / recurring transient block gap; OPEN for MAIN unchanged: bounded-enumeration + per-RPC-timeout for `gpn_explorer.rs::jobs_panel` & `gpn_scheduler.rs` GET `["jobs"]`; `max_tokens`→ollama `num_predict`.**
