@@ -1,5 +1,13 @@
 # GPN change-log
 
+## 2026-10-11 12:08 PT / 19:08 UTC — PM07 GPN debug (cron 1a4f19ab) — pipeline GREEN; known-class false-Pending heal churn (#2948 ×2, #2949 ×3; 11:54–12:00) self-recovered; e2e 6.44 s >5 s (known GPU/max_tokens item); 0 Pending; no action.
+**Root-cause-first:** provider `journalctl -n 15` + `POST :8092/v1/chat/completions` + unit state + `GET :8092/jobs` FIRST. Fast-path `GPN_FAST_CLAIM=1`/`GPN_FAST_AP=1` (9dcedb7) intact; HEAD `44b2170`, tree clean; gpn-provider `active` (PID 2230591 up since Oct-09 ⇒ no restart).
+**e2e (probe):** llama3.2:1b ~500-ch ocean → HTTP200 coherent, wall **6.44 s** (over cap); job #2949 claimed 11:59:14→done 11:59:17 (~3 s inference) ⇒ wall is GPU/queue + OPEN `max_tokens` item, not a provider fault. Jobs #2949/#2950 claimed+done cleanly.
+**ANOMALY:** benign fast-path `healed leaked Pending #2948/#2949 → Completed` churn ×~14 (30 min census); each job's inference had already completed, on-chain mark couldn't land during the gap then stopped once inclusion landed. Known recurring class (05:44…/11:21/11:27).
+**Checks:** `/jobs` `:8092` (47.1 s O(N)) = total 2950 {Completed 2630, Cancelled 293, Failed 27} ⇒ **Pending 0, no orphan spike**; claims **6 / 30 min ≈ 1/request**, no storm.
+**ACTION TAKEN: NONE.** No restart (unit active+computing), no code/env/flag/state change. Only this log file touched.
+**STATUS: GREEN / recurring transient block gap; OPEN for MAIN unchanged: bounded-enumeration + per-RPC-timeout for `gpn_explorer.rs::jobs_panel` & `gpn_scheduler.rs` GET `["jobs"]`; `max_tokens`→ollama `num_predict`.**
+
 ## 2026-10-11 10:34 PT / 17:34 UTC — PM07 GPN debug (cron 1a4f19ab) — pipeline GREEN; known-class false-Pending heal churn (#2924 ×3, #2927 ×3) after brief block gap; e2e 6.03s (>5s cap); 0 Pending; NO restart, NO code/env/flag/state change.
 **Root-cause-first:** provider `journalctl` (last-15 + since-10:28 full run + 10:30–10:36 heal census) + `chain_getHeader` ×6 + `POST :8092/v1/chat/completions` + `GET :8092/jobs` + unit state FIRST. Fast-path `GPN_FAST_CLAIM=1`/`GPN_FAST_AP=1` (9dcedb7) intact; units provider/explorer `active` (provider PID 2230591 up since Oct-09 ⇒ no restart).
 **CAUSE→RESULT:** error census since 10:33 = **0**; only repeated lines are `healed leaked Pending #2924/#2927 → Completed` — no-op heal churn after each job already returned done (#2924 done 10:29:19 372ch, #2927 done 10:34:44 379ch). Head sampling 0x1cb7b→0x1cb7c advancing ⇒ transient reconcile artifact (best-head read shows `Pending`), not a deadlock. Same class as prior runs 04:42–10:16. **Benign/self-recovering; no fix applicable without touching the approved fast path; no restart.**
