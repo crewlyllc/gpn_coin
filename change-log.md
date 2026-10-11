@@ -2534,3 +2534,12 @@ STATUS: **GREEN** (latency restored to the documented class).
 **Checks:** head advancing 0x1ce02→0x1ce09; explorer `/api/jobs` (66.9 s O(N)) = total 2971 {'?' 1(id0), Completed 2650, Cancelled 293, Failed 27} ⇒ **Pending 0, no orphan spike**; claims 4/15 min ≈ 1/request, no storm.
 **ACTION TAKEN: NONE.** No restart (all units active+computing), no code/env/flag/state change. Only this log file touched.
 **STATUS: GREEN / recurring transient block gap; OPEN for MAIN unchanged: bounded-enumeration + per-RPC-timeout for `gpn_explorer.rs::jobs_panel` & `gpn_scheduler.rs` GET `["jobs"]`; `max_tokens`→ollama `num_predict`.**
+
+## 2026-10-11 14:39 PT / 2026-10-11 21:39 UTC — PM07 GPN debug (cron 1a4f19ab) — pipeline GREEN; known-class block-gap false-Pending heal churn (#2986 ×1, #2987 ×3; 14:30–14:35) self-recovered; e2e 6.69 s >5 s (known GPU/max_tokens item); 0 Pending; no action.
+**Root-cause-first:** provider journalctl (15) + `chain_getHeader` sampling ×2 + `POST :8092/v1/chat/completions` + explorer `/api/jobs` FIRST. Flags intact (`GPN_FAST_CLAIM=1` ~/.gpn/provider.env, `GPN_FAST_AP=1` ~/.gpn/accesspoint.env); HEAD `a1eebf2`, tree clean; gpn-provider/AP/explorer all `active`; `:8092/health`=`{"providers":3,"status":"ok"}`.
+**e2e (probe):** llama3.2:1b ~500-char escrow → HTTP200 coherent (1929 ch), wall **6.69 s** (over cap); job #2988 claimed 14:41:01→done 14:41:07 (~6 s inference) ⇒ wall is GPU/queue + OPEN `max_tokens` item, not a provider fault.
+**ERROR CENSUS (60 min):** provider grep error/fail/panic/refused/timeout EXCLUDING benign heals = **0**.
+**ANOMALY:** node head frozen ~15 s @0x1ceed (14:39–14:41), then advanced 0x1ceed→0x1ceee — node alive ⇒ block-production cadence gap, NOT a hang. While frozen, on-chain mark-Complete couldn't land → benign fast-path `healed leaked Pending` churn (35 / 60 min; #2986 ×1, #2987 ×3, #2976 ×4, #2980 ×3, #2982 ×1); stopped once inclusion landed. Known recurring class (…/11:28/12:08/12:41/13:39).
+**Checks:** explorer `/api/jobs` (O(N), client-timeout) = total 2986 {'?' 1(id0), Completed 2665, Cancelled 293, Failed 27} ⇒ **Pending 0, no orphan spike**; claims 18 / 60 min ≈ 1/request, no storm.
+**ACTION TAKEN: NONE.** No restart (all units active+computing), no code/env/flag/state change. Only this log file touched.
+**STATUS: GREEN / recurring transient block gap; OPEN for MAIN unchanged: bounded-enumeration + per-RPC-timeout for `gpn_explorer.rs::jobs_panel` & `gpn_scheduler.rs` GET `["jobs"]`; `max_tokens`→ollama `num_predict`.**
