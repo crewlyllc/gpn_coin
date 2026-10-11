@@ -2503,3 +2503,11 @@ STATUS: **GREEN** (latency restored to the documented class).
 **Checks:** `/api/jobs` (explorer, 64.3 s O(N)) = total 2932 {'?' 1(id0), Completed 2611, Cancelled 293, Failed 27} ⇒ **Pending 0, no orphan spike**; claims ~1/request, no storm.
 **ACTION TAKEN: NONE.** No restart (unit active+computing), no code/env/flag/state change. Only this log file touched.
 **STATUS: GREEN / recurring transient block gap; OPEN for MAIN unchanged: bounded-enumeration + per-RPC-timeout for `gpn_explorer.rs::jobs_panel` & `gpn_scheduler.rs` GET `["jobs"]`; `max_tokens`→ollama `num_predict`.**
+
+## 2026-10-11 11:28 PT / 2026-10-11 18:28 UTC — PM07 GPN debug (cron 1a4f19ab) — pipeline GREEN; known-class false-Pending heal churn (#2940 ×5, #2942 ×3, #2943 ×3; 11:21–11:27) self-recovered; e2e 6.12 s >5 s (known GPU/max_tokens item); 0 Pending; no action.
+**Root-cause-first:** provider journalctl (15) + `chain_getHeader` sampling ×3 + `POST :8092/v1/chat/completions` + explorer `/api/jobs` FIRST. Flags intact (`GPN_FAST_CLAIM=1`, `GPN_FAST_AP=1`); HEAD `4739b5f`, tree clean; gpn-provider `active`.
+**e2e (probe):** llama3.2:1b ~500-ch ocean → HTTP200 coherent (468 ch), wall **6.12 s** (over cap); job #2943 claimed 11:27:00→done 11:27:01 (~1 s inference) ⇒ wall is GPU/queue + OPEN `max_tokens` item, not a provider fault.
+**ANOMALY:** benign fast-path `healed leaked Pending #2940/#2942/#2943 → Completed` churn ×11 (11:21–11:27); each job's inference had already completed, on-chain mark couldn't land during the gap then stopped once inclusion landed. New job #2943 claimed+done cleanly. Known recurring class (…/10:34/10:44).
+**Checks:** head advancing 0x1cc2b→0x1cc2c; `/jobs` `:8092` client-timeout (known O(N) item); no orphan spike (all heals → Completed); claims ~1/request, no storm.
+**ACTION TAKEN: NONE.** No restart (unit active+computing), no code/env/flag/state change. Only this log file touched.
+**STATUS: GREEN / recurring transient block gap; OPEN for MAIN unchanged: bounded-enumeration + per-RPC-timeout for `gpn_explorer.rs::jobs_panel` & `gpn_scheduler.rs` GET `["jobs"]`; `max_tokens`→ollama `num_predict`.**
