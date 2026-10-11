@@ -2415,3 +2415,10 @@ STATUS: **GREEN** (latency restored to the documented class).
 **Checks:** `/jobs` = **0 Pending** {Completed 2544, Cancelled 293, Failed 27, '?' 1(id0)} ⇒ **no orphan spike**; claims **8 / 30 min ≈ 1/request**, no storm. `/jobs` client-30s still slow (known O(N) item).
 **ACTION TAKEN: NONE.** No service restart (node alive+advancing), no code/env/flag/state change. Only this log file touched.
 **STATUS: GREEN (pipeline) / self-recovered transient block gap; OPEN for MAIN unchanged: bounded-enumeration + per-RPC-timeout for `gpn_explorer.rs::jobs_panel` & `gpn_scheduler.rs` GET `["jobs"]`; `max_tokens`→ollama `num_predict`.**
+
+## 2026-10-11 06:57 PT / 2026-10-11 13:57 UTC — PM07 GPN debug (cron 1a4f19ab) — pipeline GREEN; recurring block-production gap (#116819→#116821, ~112s stall @06:55:05–06:56:57) → false-Pending heal churn (#2876 ×4, #2877 ×3) SELF-RECOVERED; no restart/no code change.
+**Root-cause-first:** provider journalctl (15 + 30-min census) + gpn-fleet import timeline + node chain_getHeader sampling + `POST :8092/v1/chat/completions` + `/jobs` FIRST. Flags intact (`GPN_FAST_CLAIM=1`, `GPN_FAST_AP=1`); HEAD `8e10a0e`, tree clean; units `active`; `:8092/health`=`{"providers":3,"status":"ok"}`.
+**e2e (probe):** llama3.2:1b ~500-ch water cycle → HTTP200, coherent 479-char answer, wall **3.11 s** (UNDER 5 s cap).
+**ANOMALY:** node head frozen @#116819/#116820 ~112s (06:55:05→06:56:57) while fleet proc at ~110% CPU (CPU ticks 22.9→29.7 in 6s) actively authoring ⇒ block-production gap, NOT a hang. On-chain mark-Complete couldn't land → benign fast-path `healed leaked Pending` churn (#2876 ×4, #2877 ×3); stopped once inclusion landed.
+**Checks:** `/jobs` = **0 Pending** {Completed 2556, Cancelled 293, Failed 27} (last id 2876) ⇒ no orphan spike; claims ~1/request, no storm. `/jobs` client 53.4s (known O(N) item). **ACTION: NONE** — no restart, no code/env/flag/state change.
+**STATUS: GREEN / self-recovered transient block gap; OPEN for MAIN unchanged: bounded-enumeration + per-RPC-timeout for `gpn_explorer.rs::jobs_panel` & `gpn_scheduler.rs` GET `["jobs"]`; `max_tokens`→ollama `num_predict`.**
