@@ -14,6 +14,7 @@ pub mod moderation;
 pub mod modes;
 pub mod network_registry;
 pub mod profitability;
+pub mod provider_policy;
 pub mod routing;
 pub mod utils;
 

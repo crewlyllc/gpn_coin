@@ -842,6 +842,30 @@ async fn run_job(
     fast: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let job = job.clone();
+    // Item #22 build-order step 3: the provider-side policy hook. Re-check the
+    // assigned job BEFORE spending any GPU cycles — refuse hard-harm categories
+    // (defense in depth over the AP's moderation) and any model this operator
+    // does not serve. On refusal we settle the job on-chain so the requestor's
+    // escrow refunds and the capacity slot frees, then bail without inferring.
+    let policy = gpn_agent::provider_policy::ProviderPolicy::from_env();
+    if let gpn_agent::provider_policy::Decision::Refuse(r) = policy.check(&job.prompt, &job.model)
+    {
+        let cat = r.category.unwrap_or("model_policy");
+        eprintln!("[job {id}] \u{26a0} policy refusal (category={cat}) \u{2014} not running: {}", r.reason);
+        // Content-free off-chain marker (no prompt stored) so the job is never
+        // re-attempted in this process.
+        let _ = LlmStore::new().set_error(id, &format!("gpn_policy_violation: {cat}"));
+        let rr = if fast {
+            client.fail_job_fast(id, 2).await
+        } else {
+            client.fail_job(id, 2).await
+        };
+        match rr {
+            Ok(()) => println!("[job {id}] refused by provider policy \u{2014} escrow refunded"),
+            Err(e) => eprintln!("[job {id}] fail_job (policy) failed: {e}"),
+        }
+        return Ok(());
+    }
     let model = resolve_model(&job.model);
     let preview: String = job.prompt.chars().take(60).collect();
     println!(
