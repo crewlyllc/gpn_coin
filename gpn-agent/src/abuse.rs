@@ -293,6 +293,80 @@ pub fn read_reports(path: &Path, limit: usize) -> Vec<Report> {
     out
 }
 
+/// Read **all** reports (no truncation), oldest first — for the transparency
+/// summary, which needs the full population and the time range.
+pub fn read_all_reports(path: &Path) -> Vec<Report> {
+    let Ok(s) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    s.lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<Report>(l).ok())
+        .collect()
+}
+
+/// A transparency summary of abuse-handling activity: report counts by kind and
+/// by category, the time range, and the number of *active* bans. Content-free
+/// (design §5) — it counts metadata, never prompts. Pure, so it is unit-tested
+/// and the same function backs the `gpn_abuse_report` operator CLI.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Summary {
+    /// Total reports on file.
+    pub total_reports: usize,
+    /// Reports by `kind` (account/provider/job/ip), sorted by count desc.
+    pub by_kind: Vec<(String, usize)>,
+    /// Reports by `category`, sorted by count desc (uncategorised grouped as `""`).
+    pub by_category: Vec<(String, usize)>,
+    /// Oldest report timestamp (unix secs), 0 when none.
+    pub first_ts: u64,
+    /// Newest report timestamp (unix secs), 0 when none.
+    pub last_ts: u64,
+    /// Active banned accounts.
+    pub banned_accounts: usize,
+    /// Active banned providers.
+    pub banned_providers: usize,
+    /// Active banned IPs.
+    pub banned_ips: usize,
+}
+
+/// Build a [`Summary`] from the reports and the current denylist. Ties in the
+/// counts are broken alphabetically so the output is deterministic.
+pub fn summarize(reports: &[Report], denylist: &Denylist) -> Summary {
+    use std::collections::BTreeMap;
+    let mut by_kind: BTreeMap<String, usize> = BTreeMap::new();
+    let mut by_category: BTreeMap<String, usize> = BTreeMap::new();
+    let mut first_ts = 0u64;
+    let mut last_ts = 0u64;
+    for r in reports {
+        *by_kind.entry(r.kind.clone()).or_insert(0) += 1;
+        *by_category
+            .entry(r.category.clone().unwrap_or_default())
+            .or_insert(0) += 1;
+        if first_ts == 0 || r.ts < first_ts {
+            first_ts = r.ts;
+        }
+        if r.ts > last_ts {
+            last_ts = r.ts;
+        }
+    }
+    let rank = |m: BTreeMap<String, usize>| {
+        let mut v: Vec<(String, usize)> = m.into_iter().collect();
+        // Highest count first; alphabetical tiebreak (already sorted by key).
+        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        v
+    };
+    Summary {
+        total_reports: reports.len(),
+        by_kind: rank(by_kind),
+        by_category: rank(by_category),
+        first_ts,
+        last_ts,
+        banned_accounts: denylist.accounts.len(),
+        banned_providers: denylist.providers.len(),
+        banned_ips: denylist.ips.len(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,6 +498,59 @@ mod tests {
             vec!["c", "b", "a"]
         );
         assert_eq!(read_reports(&path, 2).len(), 2);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn summarize_counts_kinds_categories_range_and_bans() {
+        let mk = |id: &str, ts: u64, kind: &str, cat: Option<&str>| Report {
+            report_id: id.into(),
+            ts,
+            kind: kind.into(),
+            target: format!("t-{id}"),
+            category: cat.map(|c| c.to_string()),
+            reason: None,
+            source: None,
+        };
+        let reports = vec![
+            mk("a", 100, "account", Some("csam")),
+            mk("b", 300, "account", Some("csam")),
+            mk("c", 200, "ip", Some("weapons_mass_casualty")),
+            mk("d", 400, "job", None),
+        ];
+        let mut d = Denylist::new();
+        d.add_account("alice");
+        d.add_provider("bob");
+        d.add_ip("10.0.0.1");
+        let s = summarize(&reports, &d);
+        assert_eq!(s.total_reports, 4);
+        assert_eq!(s.by_kind, vec![("account".into(), 2), ("ip".into(), 1), ("job".into(), 1)]);
+        assert_eq!(
+            s.by_category,
+            vec![("csam".into(), 2), ("".into(), 1), ("weapons_mass_casualty".into(), 1)]
+        );
+        assert_eq!((s.first_ts, s.last_ts), (100, 400));
+        assert_eq!((s.banned_accounts, s.banned_providers, s.banned_ips), (1, 1, 1));
+    }
+
+    #[test]
+    fn summarize_empty_is_zeroed() {
+        let s = summarize(&[], &Denylist::new());
+        assert_eq!(s, Summary::default());
+        assert_eq!(s.total_reports, 0);
+    }
+
+    #[test]
+    fn read_all_reports_preserves_order_and_skips_malformed() {
+        let path = tmp("all-reports");
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(
+            &path,
+            "{\"report_id\":\"a\",\"ts\":1,\"kind\":\"job\",\"target\":\"1\"}\nnot json\n\n{\"report_id\":\"b\",\"ts\":2,\"kind\":\"ip\",\"target\":\"2\"}\n",
+        )
+        .unwrap();
+        let all = read_all_reports(&path);
+        assert_eq!(all.iter().map(|r| r.report_id.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
         let _ = std::fs::remove_file(&path);
     }
 
