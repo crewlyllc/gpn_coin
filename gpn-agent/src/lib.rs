@@ -10,6 +10,7 @@ pub mod config;
 pub mod gpu;
 pub mod llm;
 pub mod mining;
+pub mod moderation;
 pub mod modes;
 pub mod network_registry;
 pub mod profitability;

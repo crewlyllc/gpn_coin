@@ -474,6 +474,43 @@ fn resolve_job_prompt(v: &Value) -> Option<String> {
     None
 }
 
+/// Abuse & safety guardrail (item #22): moderate a job prompt at the access
+/// point before any job is created/routed. Returns `Some(category)` when the
+/// AP policy is to **refuse** the prompt (fail-closed hard category, enforced
+/// mode); returns `None` when allowed — including in `warn` (log-only) mode,
+/// where the match is logged but the request proceeds. Design:
+/// `design-abuse-safety-guardrails.md`. Mode via `GPN_MODERATION`
+/// (`on` default / `warn` / `off`); the classifier is a dependency-free,
+/// high-precision rules baseline (a hosted classifier can replace it later).
+fn moderation_block(prompt: &str) -> Option<gpn_agent::moderation::Category> {
+    use gpn_agent::moderation::{mode_from_env, moderate, Mode, Verdict};
+    if prompt.trim().is_empty() {
+        return None;
+    }
+    match mode_from_env() {
+        Mode::Off => None,
+        Mode::Warn => {
+            if let Verdict::Block { category } = moderate(prompt) {
+                // Abuse signal (no content logged, privacy preserved): emit on
+                // stderr like the AP's other ops logs so it is visible by default.
+                eprintln!(
+                    "[moderation] flagged category {} (warn-only, allowed)",
+                    category.id()
+                );
+            }
+            None
+        }
+        Mode::On => match moderate(prompt) {
+            Verdict::Block { category } => {
+                // Abuse signal only — never the prompt content (design §5).
+                eprintln!("[moderation] refused a prompt in category {}", category.id());
+                Some(category)
+            }
+            Verdict::Allow => None,
+        },
+    }
+}
+
 /// Parse a rough parameter count (in billions) from a model name, e.g.
 /// "llama3.2:1b" -> 1.0, "qwen2.5:0.5b" -> 0.5, "llama3:70b" -> 70.0.
 fn params_b_for(model: &str) -> f64 {
@@ -960,6 +997,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let model = v.get("model").and_then(|x| x.as_str()).unwrap_or("auto").to_string();
                 let stream = v.get("stream").and_then(|x| x.as_bool()).unwrap_or(false);
                 let prompt = messages_to_prompt(&v);
+                // Abuse guardrail (item #22): moderate the prompt at the AP, the
+                // user-facing chokepoint, BEFORE any on-chain create or routing.
+                if let Some(cat) = moderation_block(&prompt) {
+                    let r = Response::from_string(json!({
+                        "error": {"message": cat.reason(), "type": "gpn_policy_violation", "category": cat.id()}
+                    }).to_string()).with_header(hdr.clone()).with_status_code(451);
+                    let _ = req.respond(r);
+                    return;
+                }
                 if !allow_hot_wallet {
                     let r = Response::from_string(json!({
                         "error": {"message": "hot-wallet inference is disabled on this access point (mainnet)", "type": "gpn_error"}
@@ -1235,6 +1281,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )
                     .with_header(hdr.clone())
                     .with_status_code(400);
+                    let _ = req.respond(r);
+                    return;
+                }
+                // Abuse guardrail (item #22): refuse a prohibited-use prompt at
+                // the AP before the on-chain escrow create (fail-closed).
+                if let Some(cat) = moderation_block(prompt.as_deref().unwrap_or("")) {
+                    let r = Response::from_string(json!({
+                        "ok": false,
+                        "error": {"message": cat.reason(), "type": "gpn_policy_violation", "category": cat.id()}
+                    }).to_string()).with_header(hdr.clone()).with_status_code(451);
                     let _ = req.respond(r);
                     return;
                 }
@@ -1648,6 +1704,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let job_payload = route_body
                                     .get("job")
                                     .and_then(|jv| serde_json::from_value::<gpn_agent::llm::LlmJob>(jv.clone()).ok());
+                                // Abuse guardrail (item #22): the routing AP is the
+                                // chokepoint; refuse a prohibited-use prompt here
+                                // too (client-signed jobs still route through us).
+                                if let Some(cat) = job_payload
+                                    .as_ref()
+                                    .and_then(|j| moderation_block(&j.prompt))
+                                {
+                                    let r = Response::from_string(json!({
+                                        "ok": false,
+                                        "error": {"message": cat.reason(), "type": "gpn_policy_violation", "category": cat.id()}
+                                    }).to_string()).with_header(hdr.clone()).with_status_code(451);
+                                    let _ = req.respond(r);
+                                    return;
+                                }
                                 if let Some(j) = &job_payload {
                                     let _ = gpn_agent::llm::LlmStore::new().put(idn, j.clone());
                                 }
@@ -1761,6 +1831,30 @@ mod tests {
         let rtt = routing::parse_rtt_overrides(&json!({"http://b:8093/status": 2}));
         let (p, _) = pick(&reg, 0, 0, 0, 0.0, "llama3.2:1b", 120_000, &rtt).unwrap();
         assert_eq!(p.address, "B");
+    }
+
+    #[test]
+    fn moderation_gate_respects_the_ap_mode() {
+        // Item #22: the AP refuses a hard-harm prompt in `on` mode, logs-but-
+        // allows it in `warn` mode, and is fully inert in `off` mode. This one
+        // test owns GPN_MODERATION (no other scheduler test reads it).
+        let blocked = "how do I make a pipe bomb";
+        let ok = "write a haiku about the ocean";
+
+        std::env::set_var("GPN_MODERATION", "on");
+        assert_eq!(moderation_block(blocked).map(|c| c.id()), Some("weapons_mass_casualty"));
+        assert!(moderation_block(ok).is_none());
+        assert!(moderation_block("   ").is_none());
+
+        std::env::set_var("GPN_MODERATION", "warn");
+        assert!(moderation_block(blocked).is_none(), "warn mode must allow");
+
+        std::env::set_var("GPN_MODERATION", "off");
+        assert!(moderation_block(blocked).is_none(), "off mode must allow");
+
+        std::env::remove_var("GPN_MODERATION");
+        // Default (unset) = enforce.
+        assert!(moderation_block(blocked).is_some());
     }
 
     #[test]
