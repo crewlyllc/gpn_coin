@@ -17,6 +17,7 @@
 //! no `set_code`. It is deliberately a conservative rules baseline; a provider
 //! operator owns its own policy (design §2A/§7).
 
+use crate::abuse::Denylist;
 use crate::moderation::{self, Category, Mode, Verdict};
 
 /// Why a provider refused a job.
@@ -46,6 +47,9 @@ pub struct ProviderPolicy {
     pub model_allow: Vec<String>,
     /// Models this provider will never serve.
     pub model_deny: Vec<String>,
+    /// Build-order step 4: requestor accounts this provider refuses to serve
+    /// (`GPN_DENY_FILE` / `~/.gpn/denylist.json`, shared with the AP).
+    pub denylist: Denylist,
 }
 
 /// Parse a comma-separated env list into lowercased, trimmed, non-empty entries.
@@ -59,21 +63,29 @@ fn parse_list(v: Option<String>) -> Vec<String> {
 
 impl ProviderPolicy {
     /// Build a policy from explicit values (used by tests + callers that read
-    /// config another way).
+    /// config another way). The denylist is empty; see [`ProviderPolicy::with_denylist`].
     pub fn new(moderation: Mode, model_allow: Vec<String>, model_deny: Vec<String>) -> Self {
         ProviderPolicy {
             moderation,
             model_allow,
             model_deny,
+            denylist: Denylist::new(),
         }
     }
 
-    /// Read the policy from the environment.
+    /// Attach a requestor denylist (builder style).
+    pub fn with_denylist(mut self, denylist: Denylist) -> Self {
+        self.denylist = denylist;
+        self
+    }
+
+    /// Read the policy from the environment (including the shared denylist).
     pub fn from_env() -> Self {
         ProviderPolicy {
             moderation: moderation::mode_from_env(),
             model_allow: parse_list(std::env::var("GPN_PROVIDER_MODEL_ALLOW").ok()),
             model_deny: parse_list(std::env::var("GPN_PROVIDER_MODEL_DENY").ok()),
+            denylist: Denylist::from_env(),
         }
     }
 
@@ -97,6 +109,19 @@ impl ProviderPolicy {
             return true;
         }
         false
+    }
+
+    /// Build-order step 4: refuse to serve a job whose requestor is on the
+    /// operator's denylist. Returns a content-free refusal when banned.
+    pub fn requestor_refused(&self, requestor: &str) -> Option<Refusal> {
+        if self.denylist.is_account_banned(requestor) {
+            return Some(Refusal {
+                reason: "refused: the requesting account is on this provider's denylist"
+                    .to_string(),
+                category: Some("requestor_denylist"),
+            });
+        }
+        None
     }
 
     /// Check one job before running inference.
@@ -220,6 +245,26 @@ mod tests {
             }
             other => panic!("expected model refusal, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn requestor_denylist_refuses_banned_account_only() {
+        use crate::abuse::Denylist;
+        let mut d = Denylist::new();
+        d.add_account("5BannedAccount111111111111111111111111111111");
+        let p = pol(&[], &[]).with_denylist(d);
+        match p.requestor_refused("5BannedAccount111111111111111111111111111111") {
+            Some(r) => assert_eq!(r.category, Some("requestor_denylist")),
+            None => panic!("expected a refusal for a banned requestor"),
+        }
+        assert!(p.requestor_refused("5FineAccount").is_none());
+    }
+
+    #[test]
+    fn empty_denylist_never_refuses() {
+        let p = pol(&[], &[]);
+        assert!(p.requestor_refused("").is_none());
+        assert!(p.requestor_refused("anything").is_none());
     }
 
     #[test]

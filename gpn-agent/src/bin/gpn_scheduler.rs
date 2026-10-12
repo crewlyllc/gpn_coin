@@ -843,6 +843,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Optional bearer token. When set, state-changing (POST) + artifact requests
     // from NON-loopback clients must present it (local crons/monitors keep working).
     let ap_token = std::env::var("GPN_AP_TOKEN").unwrap_or_default();
+    // Item #22 build-order step 4: the abuse **report path + operator denylist**.
+    // The denylist (accounts / providers / IPs) is enforced at this AP and read
+    // by providers from the SAME file (`GPN_DENY_FILE` / `~/.gpn/denylist.json`);
+    // reports are appended to a JSONL log (`GPN_REPORTS_FILE`).
+    let denylist_path = gpn_agent::abuse::Denylist::default_path();
+    let denylist = {
+        let mut d = gpn_agent::abuse::Denylist::load(&denylist_path);
+        d.merge_env();
+        Arc::new(Mutex::new(d))
+    };
+    let reports_path = gpn_agent::abuse::reports_path();
     // Testnet "free AI": the access point's own hot wallet pays the escrow, so a
     // caller can run a job with no wallet at all. On MAINNET this MUST be off —
     // callers sign with their own wallet and the access point only routes.
@@ -889,6 +900,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  providers: {} ({})", urls.len(), urls.join(", "));
     println!("  assign store: {assign_store}");
     println!("  endpoints: /health /ping /providers /jobs /job/{{id}} /mode | POST /jobs /route/{{id}}");
+    println!("  abuse: denylist={} ({} bans) reports={}",
+        denylist_path.display(), denylist.lock().unwrap().accounts.len(), reports_path.display());
     println!(
         "  mode: {} ({})",
         if allow_hot_wallet { "TESTNET / free-AI" } else { "MAINNET / client-signed" },
@@ -909,6 +922,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let hdr = hdr.clone();
         let ap_token = ap_token.clone();
         let listen = listen.clone();
+        let denylist = denylist.clone();
+        let denylist_path = denylist_path.clone();
+        let reports_path = reports_path.clone();
         std::thread::spawn(move || {
         let url = req.url().to_string();
         let method = req.method().clone();
@@ -926,10 +942,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // The GET side (read the prompt/response) still requires the token.
             let is_result_path = path.first().map(|s| *s == "result").unwrap_or(false);
             let is_result_post = is_result_path && method == Method::Post;
+            // `/report` is the abuse-report path — anyone (user/provider/third
+            // party) must be able to file one, so it is exempt from the caller
+            // token too (design §3). It is content-free.
+            let is_report_post =
+                path.first().map(|s| *s == "report").unwrap_or(false) && method == Method::Post;
             let protected = !is_result_post
+                && !is_report_post
                 && (method == Method::Post
                     || is_result_path
-                    || path.first().map(|s| *s == "artifact").unwrap_or(false));
+                    || path
+                        .first()
+                        .map(|s| *s == "artifact" || *s == "reports")
+                        .unwrap_or(false));
             if protected && !is_loopback {
                 let want = format!("Bearer {ap_token}");
                 let ok = req.headers().iter().any(|h| {
@@ -979,6 +1004,83 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "mainnet: POST /jobs is disabled — sign the job with YOUR wallet and POST /route/{id}"
                 }
             }),
+            // ── Abuse & safety: report path + ban lists (item #22, step 4) ────
+            // Anyone may file a report; it is recorded content-free (target +
+            // category only — NEVER the prompt/response text, design §5).
+            (Method::Post, ["report"]) => {
+                let v: Value = serde_json::from_str(&body).unwrap_or(json!({}));
+                let kind = v.get("kind").and_then(|x| x.as_str()).unwrap_or("account").to_string();
+                let target = v.get("target").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let category = v.get("category").and_then(|x| x.as_str()).map(|s| s.to_string());
+                let reason = v.get("reason").and_then(|x| x.as_str()).map(|s| s.to_string());
+                let source = req
+                    .remote_addr()
+                    .map(|a| a.ip().to_string())
+                    .unwrap_or_else(|| "unknown".into());
+                let rep = gpn_agent::abuse::Report {
+                    report_id: gpn_agent::abuse::new_report_id(),
+                    ts: gpn_agent::abuse::now_secs(),
+                    kind,
+                    target,
+                    category,
+                    reason,
+                    source: Some(source),
+                };
+                match rep.validate() {
+                    Err(e) => json!({"ok": false, "error": e}),
+                    Ok(()) => match gpn_agent::abuse::append_report(&reports_path, &rep) {
+                        Ok(()) => {
+                            eprintln!(
+                                "[abuse] report {} kind={} category={} (recorded)",
+                                rep.report_id,
+                                rep.kind,
+                                rep.category.as_deref().unwrap_or("-")
+                            );
+                            json!({"ok": true, "report_id": rep.report_id})
+                        }
+                        Err(e) => json!({"ok": false, "error": format!("could not record report: {e}")}),
+                    },
+                }
+            }
+            // Operator view of recent reports (token-gated on non-loopback via
+            // the `reports` entry in the auth gate). Content-free.
+            (Method::Get, ["reports"]) => {
+                let reports = gpn_agent::abuse::read_reports(&reports_path, 50);
+                json!({"count": reports.len(), "reports": reports})
+            }
+            // Operator ban/unban (item #22, step 4). POST => token-gated.
+            (Method::Post, ["admin", "ban"]) => {
+                let v: Value = serde_json::from_str(&body).unwrap_or(json!({}));
+                let action = v.get("action").and_then(|x| x.as_str()).unwrap_or("ban").to_string();
+                let kind = v.get("kind").and_then(|x| x.as_str()).unwrap_or("account").to_string();
+                let value = v.get("value").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+                let valid_kind = ["account", "provider", "ip"].contains(&kind.as_str());
+                if value.is_empty() || !valid_kind {
+                    json!({"ok": false, "error": "need {action: ban|unban, kind: account|provider|ip, value}"})
+                } else {
+                    let mut d = denylist.lock().unwrap();
+                    let changed = match action.as_str() {
+                        "unban" | "remove" => d.remove(&kind, &value),
+                        _ => match kind.as_str() {
+                            "account" => d.add_account(&value),
+                            "provider" => d.add_provider(&value),
+                            "ip" => d.add_ip(&value),
+                            _ => false,
+                        },
+                    };
+                    let total = d.accounts.len() + d.providers.len() + d.ips.len();
+                    match d.save(&denylist_path) {
+                        Ok(()) => {
+                            eprintln!(
+                                "[abuse] {action} {kind}={value} (changed={changed}, {total} total bans)"
+                            );
+                            json!({"ok": true, "action": action, "kind": kind, "value": value,
+                                   "changed": changed, "total_bans": total})
+                        }
+                        Err(e) => json!({"ok": false, "error": format!("could not persist denylist: {e}")}),
+                    }
+                }
+            }
             // ── OpenAI-compatible facade ─────────────────────────────────────
             (Method::Get, ["v1", "models"]) => {
                 let reg = registry.lock().unwrap();
@@ -1188,6 +1290,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
             }
             (Method::Post, ["jobs"]) => {
+                // Item #22 build-order step 4: refuse a banned client IP (per-AP
+                // denylist). Checked BEFORE any chain RPC or job creation.
+                if let Some(ip) = req.remote_addr().map(|a| a.ip().to_string()) {
+                    if denylist.lock().unwrap().is_ip_banned(&ip) {
+                        let _ = req.respond(
+                            Response::from_string(json!({
+                                "ok": false,
+                                "error": {"message": "service refused (operator denylist)", "type": "gpn_policy_violation"}
+                            }).to_string()).with_header(hdr.clone()).with_status_code(403),
+                        );
+                        return;
+                    }
+                }
                 if !allow_hot_wallet {
                     let r = Response::from_string(json!({
                         "ok": false,
@@ -1688,7 +1803,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .find_map(|kv| kv.strip_prefix("model="))
                     .map(|m| m.replace("%3A", ":").replace("%3a", ":"))
                     .unwrap_or_else(|| "auto".to_string());
-                if rt.block_on(client.get_job_state(idn)).is_none() {
+                let job_state = rt.block_on(client.get_job_state(idn));
+                // Item #22 build-order step 4: enforce the operator denylist over
+                // the client IP AND the job's on-chain requestor/provider.
+                if let Some(ip) = req.remote_addr().map(|a| a.ip().to_string()) {
+                    if denylist.lock().unwrap().is_ip_banned(&ip) {
+                        let _ = req.respond(
+                            Response::from_string(json!({
+                                "ok": false,
+                                "error": {"message": "service refused (operator denylist)", "type": "gpn_policy_violation"}
+                            }).to_string()).with_header(hdr.clone()).with_status_code(403),
+                        );
+                        return;
+                    }
+                }
+                if let Some((_st, _pr, req_acct, prov_acct)) = &job_state {
+                    let banned = {
+                        let d = denylist.lock().unwrap();
+                        req_acct.as_deref().map(|a| d.is_account_banned(a)).unwrap_or(false)
+                            || prov_acct.as_deref().map(|a| d.is_provider_banned(a)).unwrap_or(false)
+                    };
+                    if banned {
+                        let _ = req.respond(
+                            Response::from_string(json!({
+                                "ok": false,
+                                "error": {"message": "service refused (operator denylist)", "type": "gpn_policy_violation"}
+                            }).to_string()).with_header(hdr.clone()).with_status_code(403),
+                        );
+                        return;
+                    }
+                }
+                if job_state.is_none() {
                     json!({"ok":false,"error":"job not found"})
                 } else {
                     let reg = registry.lock().unwrap().clone();

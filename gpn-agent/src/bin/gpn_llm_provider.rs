@@ -866,6 +866,25 @@ async fn run_job(
         }
         return Ok(());
     }
+    // Item #22 build-order step 4: report/ban path. Refuse to run a job whose
+    // on-chain requestor is on this operator's denylist (shared with the AP).
+    if let Some((_state, _price, Some(requestor), _prov)) = client.get_job_state(id).await {
+        if let Some(r) = policy.requestor_refused(&requestor) {
+            let cat = r.category.unwrap_or("requestor_denylist");
+            eprintln!("[job {id}] \u{26a0} requestor denylist refusal \u{2014} not running: {}", r.reason);
+            let _ = LlmStore::new().set_error(id, &format!("gpn_policy_violation: {cat}"));
+            let rr = if fast {
+                client.fail_job_fast(id, 2).await
+            } else {
+                client.fail_job(id, 2).await
+            };
+            match rr {
+                Ok(()) => println!("[job {id}] requestor banned \u{2014} escrow refunded"),
+                Err(e) => eprintln!("[job {id}] fail_job (denylist) failed: {e}"),
+            }
+            return Ok(());
+        }
+    }
     let model = resolve_model(&job.model);
     let preview: String = job.prompt.chars().take(60).collect();
     println!(
