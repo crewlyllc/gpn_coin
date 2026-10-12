@@ -2709,3 +2709,20 @@ STATUS: **GREEN** (latency restored to the documented class).
 - **ROLLBACK:** `git revert <commit>` + `systemctl --user restart gpn-explorer`.
 **MAIN STATUS:** `sessions_list` = this cron session only ⇒ MAIN unreachable this run ⇒ recorded here + **ESCALATED to Jeremy** (not auto-applied).
 **STATUS: provider GREEN (0 Pending) / AP census UNUSABLE / explorer WEDGED and NOT restart-recoverable — durable fix now required.**
+
+## 2026-10-12 05:06 PT / 2026-10-12 12:06 UTC — PM07 GPN debug (cron 95b27deb) — provider GREEN; explorer STILL WEDGED (continuation of 04:28 escalation; no state change).
+**Provider:** journalctl 30-min census = only benign `healed leaked Pending` (#3164–#3169,#3172); AP errors = 0. `:8092/health` = `{"providers":3,"status":"ok"}`, 200. Flags intact (fast path untouched).
+**e2e probe:** llama3.2:1b ~100-word water cycle → HTTP200, coherent (chatcmpl-gpn-3172), wall **7.94 s** (over 5 s cap = known GPU/queue + OPEN `max_tokens`→`num_predict` item).
+**Orphan check:** bounded `/job/{id}` sweep 3162–3172 = **11/11 Completed ⇒ 0 Pending**.
+**Explorer:** pid 2818063, ~39 min up, `/proc` state `R`, utime+stime +199 ticks/2 s (≈1 core), ALL routes (`/`,`/health`,`/api/blocks`,`/api/jobs`,`/api/stats`) = HTTP 000 @10 s. Identical to 04:28 findings — single-threaded loop + unbounded `0..next` `jobs_panel` (~3161 RPCs × ~23 ms ≈ 73 s/req) ⇒ restart no longer recovers. **No restart attempted (proven ineffective); no code/env/flag change (needs MAIN APPROVE).**
+**MAIN STATUS:** `sessions_list` = this cron session only ⇒ MAIN still unreachable; durable explorer fix remains UNAPPROVED. **Surfaced to Jeremy (continuation, not new).**
+**STATUS: provider GREEN (0 Pending) / explorer WEDGED awaiting MAIN approval of the durable `gpn_explorer.rs` fix.**
+
+## 2026-10-12 05:18 PT / 2026-10-12 12:18 UTC — PM07 GPN debug (cron 95b27deb) — provider GREEN; explorer STILL degraded (no state change) but 04:28 "permanently wedged / restart no longer recovers" REFINED by fresh evidence.
+**Provider:** 60-min `journalctl` census = **0** real errors (30 benign `healed leaked Pending`); AP = **0** errors, `NRestarts=0` (up since 2026-10-09 11:20). `:8092/health` = `{"providers":3,"status":"ok"}` 200. Flags intact (fast path untouched). head `0x1db54` (#121684).
+**e2e probe:** llama3.2:1b ~100-word water cycle → HTTP200, coherent (chatcmpl-gpn-**3175**), wall **14.58 s** (>5 s cap = known GPU/queue + OPEN `max_tokens`→`num_predict` item, not a provider fault).
+**Explorer (refined cause):** pid 2818063 serving, `/proc` state `R`, utime+stime **+285 ticks/3 s (≈95% one core)** — BUSY, not deadlocked. Sequential probes: `/health` 000@3 s (queued behind backlog) THEN `/api/blocks` **200 @1.17 s** ⇒ the single-threaded `incoming_requests()` loop IS making progress; it is draining a *backlog* of expensive `jobs_panel` requests (unbounded `for id in 0..next_job_id { block_on(get_job_state(id)) }`, ~3161 RPCs × ~23 ms ≈ 73 s/req, new `reqwest::Client` per call, no per-RPC timeout). Correcting 04:28: it is chronic serial starvation, not a permanent hard hang — a restart DOES clear the backlog (explorer was serving fast at 05:17, 51 min post-04:26 restart) but re-wedges on the next `jobs_panel` poll.
+**No restart this run:** logs show a genuine *busy* loop (work in progress), NOT a hang/deadlock ⇒ restart not justified (and non-durable). No code/env/flag/state change.
+**REVIEW REQUEST (unchanged, needs MAIN APPROVE; explorer binary ONLY — permitted class: bugfix/perf, no runtime/genesis/tokenomics):** (1) shared `reqwest::Client` w/ 15 s timeout in `rpc_call`; (2) bound `jobs_panel` to last N (e.g. 200) instead of `0..next`; (3) serve requests non-blocking (spawn/worker pool). **ROLLBACK:** `git revert` + `systemctl --user restart gpn-explorer`.
+**MAIN STATUS:** `sessions_list` = this cron session only ⇒ MAIN unreachable; durable fix remains UNAPPROVED. **Escalated to Jeremy (continuation; refined diagnosis, no new action taken).**
+**STATUS: provider GREEN (0 Pending) / explorer degraded (chronic serial backlog) awaiting MAIN approval of the `gpn_explorer.rs` fix.**
