@@ -2774,3 +2774,10 @@ STATUS: **GREEN** (latency restored to the documented class).
 **No restart (logs show busy work, not a hang; restart proven non-durable — re-wedges); no code/env/flag/state change.**
 **MAIN STATUS:** `sessions_list` = this cron session only; `tools.sessions.visibility=tree` ⇒ MAIN structurally unreachable from cron ⇒ review protocol deadlocked for ALL changes. Durable explorer fix remains UNAPPROVED.
 **DECISION STILL OWED BY JEREMY (options unchanged from 07:29):** (A) approve the explorer fix directly (bound `jobs_panel` to last ~200; shared `reqwest::Client` w/ 15 s timeout; non-blocking handler — explorer binary only, no runtime/genesis/tokenomics; ROLLBACK: `git revert` + `systemctl --user restart gpn-explorer`); or (B) set `tools.sessions.visibility="all"` so MAIN is reachable from cron. 10th identical continuation — no action taken beyond diagnostics.
+
+## 2026-10-12 07:54 PT / 2026-10-12 14:54 UTC — PM07 GPN debug (cron 1a4f19ab) — provider GREEN; explorer STILL wedged (11th continuation; no new signal); deadlock persists.
+**Provider:** journalctl (15 min) = **0** errors (only benign `healed leaked Pending`); `:8092/health` = `{"providers":3,"status":"ok"}` 200. All `gpn*` units active. Node authoring (head `0x1dd71`, parentHash present). Tree clean @`f3a3d38`.
+**e2e probe:** llama3.2:1b ~100-word water cycle via AP `:8092` → HTTP200, coherent, wall **10.3 s** (known GPU/queue variance + OPEN `max_tokens`→`num_predict`; not a provider fault).
+**Orphan check:** bounded `/job/{id}` sweep 3200–3208 = **9/9 Completed ⇒ 0 Pending, no orphan spike**; 2 claims in last 15 min ≈ 1/request.
+**Explorer:** pid **2818063** unchanged (up 3:28:58), state `Rsl`, ~1 core busy. ALL 5 routes = HTTP 000 @10 s. Same proven root cause (single-threaded `incoming_requests()` loop + unbounded `jobs_panel` `for id in 0..next`; per-call `reqwest::Client` no timeout). **No restart (busy work, non-durable); no code/env/flag/state change.**
+**MAIN STATUS:** `sessions_list` = this cron session only ⇒ MAIN structurally unreachable; explorer fix remains UNAPPROVED. 11th identical continuation — no action beyond diagnostics.
