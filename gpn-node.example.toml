@@ -7,11 +7,9 @@
 # chmod 600 and out of the repo. Prefer env vars / a systemd EnvironmentFile
 # for secrets.
 
-# ── role ────────────────────────────────────────────────────────────────────
-# mine     = chain node/miner only
-# provider = heartbeat + provider loop(s) only
-# both     = everything (default)
-role = "both"
+# A GPN node is ALWAYS both a miner and an AI provider — there is no role
+# option. Every start brings up the chain node/miner, the provider heartbeat,
+# and the provider loop(s) together.
 
 # ── node / miner ────────────────────────────────────────────────────────────
 chain     = "testnet"                    # testnet | mainnet | dev | <path to chain-spec.json>

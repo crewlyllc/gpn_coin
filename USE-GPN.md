@@ -8,7 +8,7 @@ A practical, from-scratch guide to running a GPN node, providing GPU compute, an
 
 ## 1. What's running (this machine / a provider box)
 
-| Service | Endpoint | Role |
+| Service | Endpoint | What it does |
 |---|---|---|
 | `gpn-node` | `ws://127.0.0.1:9944` | Blockchain: jobs, escrow, attestation, result hashes |
 | `gpn_api` (REST) | `http://127.0.0.1:8082` | Create/accept/start jobs, store off-chain payloads, fetch results/artifacts |

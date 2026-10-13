@@ -1,17 +1,23 @@
 <#
-  GPN Windows — run this box as an AI PROVIDER (serves LLM inference jobs).
+  GPN Windows — run this box as a GPN node (miner + AI provider).
 
-  A GPN node is one entity: mine OR serve AI. This script runs the *provider*
-  side only (no mining) — the node's own miner stays off so the one GPU is
-  dedicated to inference while the provider serves.
+  A GPN node is ALWAYS both a miner and an AI provider — there is no role
+  option, and no provider-only or mine-only mode. This script brings the whole
+  node up together: the chain node/miner, the provider heartbeat, and the
+  provider claim/infer loop. The one GPU is auto-yielded to an AI job while it
+  runs (mining fully stops, then resumes — task #24).
 
-  Prereqs (see shared/artifacts/project7/windows-client-test.md §"Run your
-  Windows box as an AI provider"):
+  It does this by running the single-node supervisor `gpn_node.exe`, which
+  starts, logs ([node]/[heartbeat]/[provider]), monitors and cleanly stops all
+  of the above. Use Ctrl-C (or close the window) to stop everything.
+
+  Prereqs (see shared/artifacts/project7/windows-client-test.md):
     * Ollama installed + running with at least one model pulled
       (default in-network model: llama3.2:1b).
     * The Windows release bundle unpacked next to this script in .\bin\
-      (gpn-node.exe, gpn_llm_provider.exe, gpn_provider_status.exe, gpn_register.exe).
-    * A funded provider wallet. For testnet, drip it from the faucet first.
+      (gpn_node.exe plus gpn-node.exe, gpn_llm_provider.exe,
+      gpn_provider_status.exe, gpn_register.exe).
+    * A funded wallet. For testnet, drip it from the faucet first.
     * Your provider's PUBLIC /status URL port-forwarded (default 8093).
 
   Usage:
@@ -19,6 +25,7 @@
         -PublicStatusUrl "http://<your-public-ip>:8093/status" -Gflops 2500
 #>
 param(
+  [string]$Chain           = "testnet",                # testnet | mainnet | dev | path to chain-spec.json
   [string]$Rpc             = "ws://gpn-testnet.duckdns.org:9944",
   [string]$Signer          = "//Alice",
   [string]$Address         = "",                     # ss58 payout/identity address (optional; shown if given)
@@ -48,14 +55,24 @@ Write-Host "      models: $($models -join ', ')"
 Write-Host "[2/4] registering provider (min_gflops=150) ..."
 & (Need "gpn_register.exe") $Rpc $Signer
 
-# 3. Heartbeat: serve GET /status on :$ListenPort so the scheduler can route here.
-Write-Host "[3/4] starting /status heartbeat on 0.0.0.0:$ListenPort ..."
-$statusArgs = @("--listen", "0.0.0.0:$ListenPort", "--gflops", "$Gflops", "--capacity", "1", "--ollama", $Ollama)
-if ($Address) { $statusArgs += @("--address", $Address) }
-Start-Process -FilePath (Need "gpn_provider_status.exe") -ArgumentList $statusArgs -WindowStyle Minimized
+# 3. Configure the node (env overrides for the supervisor). A node is always
+#    miner + provider, so we set BOTH sides: chain/node settings and provider.
+Write-Host "[3/4] configuring node (miner + provider) ..."
+$env:GPN_CHAIN   = $Chain
+$env:GPN_ENDPOINT = $Rpc
+$env:GPN_SIGNER  = $Signer
+$env:GPN_OLLAMA  = $Ollama
+$env:GPN_GFLOPS  = "$Gflops"
+$env:GPN_LISTEN  = "0.0.0.0:$ListenPort"
+if ($Address) { $env:GPN_ACCOUNT = $Address } else { Remove-Item Env:\GPN_ACCOUNT -ErrorAction SilentlyContinue }
+if ($PublicStatusUrl) {
+  $env:GPN_PROVIDER_ENDPOINT = $PublicStatusUrl
+  Write-Host "      advertising on-chain endpoint: $PublicStatusUrl"
+} else {
+  Remove-Item Env:\GPN_PROVIDER_ENDPOINT -ErrorAction SilentlyContinue
+  Write-Host "      GPN_PROVIDER_ENDPOINT unset — on-chain discovery disabled"
+}
 
-# 4. The provider loop: claims assigned/claimable jobs, runs inference, settles.
-Write-Host "[4/4] starting gpn_llm_provider (RPC=$Rpc signer=$Signer) ..."
-if ($PublicStatusUrl) { $env:GPN_PROVIDER_ENDPOINT = $PublicStatusUrl; Write-Host "      advertising on-chain endpoint: $PublicStatusUrl" }
-else { Remove-Item Env:\GPN_PROVIDER_ENDPOINT -ErrorAction SilentlyContinue; Write-Host "      GPN_PROVIDER_ENDPOINT unset — on-chain discovery disabled" }
-& (Need "gpn_llm_provider.exe") $Rpc $Signer
+# 4. Run the supervisor: chain node/miner + heartbeat + provider loop, together.
+Write-Host "[4/4] starting gpn_node (miner + provider, chain=$Chain signer=$Signer) ..."
+& (Need "gpn_node.exe")

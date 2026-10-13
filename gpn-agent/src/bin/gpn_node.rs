@@ -6,24 +6,25 @@
 //! but presents the operator with **one** entry point: one command, one
 //! prefixed log stream, one aggregated status line, and one clean shutdown.
 //!
+//! **A GPN node is always both a miner and an AI provider.** There is no role
+//! option: every start brings up the chain node/miner *and* the AI serving
+//! stack together. The node mines and serves AI, auto-yielding the one GPU to
+//! a job while it runs (#24: full stop mining during a job, resume after).
+//!
 //! ```text
-//!   gpn_node                 # role from config/env (default: both)
-//!   gpn_node --role both     # miner + heartbeat + provider
-//!   gpn_node --role mine     # chain node only (author/mine)
-//!   gpn_node --role provider # heartbeat + provider loop(s) only
+//!   gpn_node                 # starts: node + heartbeat + provider (always)
 //! ```
 //!
-//! ## Roles
-//! - `mine`     → the chain node (`gpn-node … --force-authoring …`) — log `[node]`
-//! - `provider` → the heartbeat (`gpn_provider_status … :8093`) — log `[heartbeat]`
-//!              + the provider loop (`gpn_llm_provider …`) — log `[provider]`
-//!              (+ `gpn_diffusion_provider …` when `diffusion = true`) — `[diffuse]`
-//! - `both`     → everything above
+//! ## Children (all always started)
+//! - the chain node/miner (`gpn-node … --force-authoring …`) — log `[node]`
+//! - the heartbeat (`gpn_provider_status … :8093`) — log `[heartbeat]`
+//! - the provider loop (`gpn_llm_provider …`) — log `[provider]`
+//!   (+ `gpn_diffusion_provider …` when `diffusion = true`) — `[diffuse]`
 //!
 //! ## Config (small TOML file) + env overrides
 //! The file is `--config <path>`, else `$GPN_CONFIG`, else `$GPN_PREFIX/node.toml`
 //! (`$GPN_PREFIX` defaults to `~/.gpn`), else `./gpn-node.toml`. Every field has
-//! an env override (`GPN_ROLE`, `GPN_CHAIN`, `GPN_SIGNER`, `GPN_ENDPOINT`, …).
+//! an env override (`GPN_CHAIN`, `GPN_SIGNER`, `GPN_ENDPOINT`, …).
 //! Secrets (the assign token, the signer/seed) are read from env / the file and
 //! are **never** written anywhere by this supervisor.
 //!
@@ -50,35 +51,10 @@ use std::time::{Duration, Instant};
 // Config
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Role {
-    Mine,
-    Provider,
-    Both,
-}
-
-impl Role {
-    fn parse(s: &str) -> Result<Role, String> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "mine" | "miner" | "node" => Ok(Role::Mine),
-            "provider" | "serve" | "compute" => Ok(Role::Provider),
-            "both" | "all" => Ok(Role::Both),
-            other => Err(format!("unknown role '{other}' (expected mine|provider|both)")),
-        }
-    }
-    fn wants_mine(self) -> bool {
-        matches!(self, Role::Mine | Role::Both)
-    }
-    fn wants_provider(self) -> bool {
-        matches!(self, Role::Provider | Role::Both)
-    }
-}
-
 /// The optional TOML config file. All fields optional → env fills the rest.
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct FileConfig {
-    role: Option<String>,
     chain: Option<String>,
     signer: Option<String>,
     account: Option<String>,
@@ -108,7 +84,6 @@ struct FileConfig {
 
 #[derive(Clone)]
 struct Config {
-    role: Role,
     chain: String,
     signer: String,
     account: String,
@@ -204,12 +179,6 @@ impl Config {
             }
         };
 
-        // role: env > file > default both
-        let role = env_str("GPN_ROLE")
-            .or(file.role)
-            .unwrap_or_else(|| "both".to_string());
-        let role = Role::parse(&role)?;
-
         // bin dir: env GPN_BIN > file > dir of this exe > $HOME/.local/bin
         let bin_dir = env_str("GPN_BIN")
             .or(file.bin_dir)
@@ -229,7 +198,6 @@ impl Config {
             .unwrap_or(9944);
 
         Ok(Config {
-            role,
             chain: env_str("GPN_CHAIN").or(file.chain).unwrap_or_else(|| "testnet".into()),
             signer: env_str("GPN_SIGNER")
                 .or(file.signer)
@@ -519,20 +487,14 @@ fn status_line(cfg: &Config, shared: &Shared) -> String {
             }
         }
     }
-    let mut line = format!(
-        "[status] role={:?} node_count={}",
-        cfg.role,
-        parts.len()
-    );
+    let mut line = format!("[status] node_count={}", parts.len());
     for p in &parts {
         line.push(' ');
         line.push_str(p);
     }
-    if cfg.role.wants_mine() {
-        match best_block(cfg.rpc_port) {
-            Some(b) => line.push_str(&format!(" best=#{b}")),
-            None => line.push_str(" best=?"),
-        }
+    match best_block(cfg.rpc_port) {
+        Some(b) => line.push_str(&format!(" best=#{b}")),
+        None => line.push_str(" best=?"),
     }
     line
 }
@@ -544,7 +506,9 @@ fn status_line(cfg: &Config, shared: &Shared) -> String {
 fn build_children(cfg: &Config) -> Vec<ChildSpec> {
     let mut specs = Vec::new();
 
-    if cfg.role.wants_mine() {
+    // A GPN node is always both: mine + serve. Every node starts the chain
+    // node/miner, the provider heartbeat, and the provider loop(s).
+    {
         let mut argv = vec![cfg.resolve("gpn-node"), "--chain".into(), cfg.chain.clone()];
         argv.push("--force-authoring".into());
         argv.push("--rpc-port".into());
@@ -584,7 +548,7 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
         });
     }
 
-    if cfg.role.wants_provider() {
+    {
         // Heartbeat (:8093): advertises capability + load to the scheduler.
         let mut argv = vec![
             cfg.resolve("gpn_provider_status"),
@@ -661,10 +625,9 @@ async fn main() {
         }
     };
 
-    println!("gpn_node — single-node supervisor");
+    println!("gpn_node — single-node supervisor (a node is always miner + AI provider)");
     println!(
-        "  role={:?} chain={} endpoint={} rpc_port={} bin_dir={}",
-        cfg.role,
+        "  chain={} endpoint={} rpc_port={} bin_dir={}",
         cfg.chain,
         cfg.endpoint,
         cfg.rpc_port,
@@ -679,7 +642,7 @@ async fn main() {
 
     let specs = build_children(&cfg);
     if specs.is_empty() {
-        eprintln!("gpn_node: role selected no children — nothing to run");
+        eprintln!("gpn_node: no children to run");
         std::process::exit(2);
     }
     let labels: Vec<&'static str> = specs.iter().map(|s| s.label).collect();

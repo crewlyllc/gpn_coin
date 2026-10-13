@@ -1,11 +1,13 @@
 name: Windows provider start
 
-# Stands this self-hosted Windows box up AS a persistent GPN AI provider (item 4
-# / item 14): a Scheduled Task runs a supervisor that (a) serves the public
-# :8093 /status heartbeat and (b) keeps the gpn_llm_provider claim/infer loop
-# alive (auto-restart). Idempotent: registers/updates the task and (re)starts it.
+# Stands this self-hosted Windows box up AS a persistent GPN node (item 4 /
+# item 14): a Scheduled Task runs the single-node supervisor `gpn_node.exe`,
+# which brings up the whole node — the chain node/miner AND the AI provider
+# (heartbeat :8093 + the gpn_llm_provider claim/infer loop) — together. A GPN
+# node is always both; there is no provider-only mode. Idempotent: registers/
+# updates the task and (re)starts it.
 #
-# This is what deploys rely on so a running provider's locked .exe can be
+# This is what deploys rely on so a running node's locked .exe can be
 # replaced (stop -> copy -> task restart) instead of failing the copy.
 on:
   workflow_dispatch:
@@ -35,6 +37,7 @@ jobs:
           param()
           $ErrorActionPreference = 'Continue'
           $bin    = 'C:\gpn\bin'
+          $chain  = 'testnet'
           $rpc    = '__RPC__'
           $signer = '__SIGNER__'
           $pub    = '__PUB__'
@@ -46,32 +49,26 @@ jobs:
           # host's GPN_ASSIGN_TOKEN so the box rejects forged assignment pushes
           # to its public :8093. Unset secret => legacy (permissive) heartbeat.
           $env:GPN_ASSIGN_TOKEN = '__ASSIGNTOK__'
+          # A GPN node is always miner + provider — configure BOTH sides.
+          $env:GPN_CHAIN             = $chain
+          $env:GPN_ENDPOINT          = $rpc
+          $env:GPN_SIGNER            = $signer
+          $env:GPN_PROVIDER_ENDPOINT = $pub
+          $env:GPN_OLLAMA            = $ollama
+          $env:GPN_GFLOPS            = "$gflops"
+          $env:GPN_LISTEN            = '0.0.0.0:8093'
           function Log($m) { "$(Get-Date -Format o) $m" | Out-File -FilePath $log -Append -Encoding utf8 }
           Log "supervisor starting (rpc=$rpc signer=$signer pub=$pub)"
-          # guarantee a single provider: a stray gpn_llm_provider (e.g. from an
+          # guarantee a single node: a stray gpn_llm_provider (e.g. from an
           # older manual launch) holds the infer port :8094 and makes us fail to
           # bind. Kill any strays before we start.
           $strays = @(Get-CimInstance Win32_Process -Filter "Name='gpn_llm_provider.exe'")
           foreach ($p in $strays) { Log "killing stray gpn_llm_provider pid=$($p.ProcessId)"; Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }
           if ($strays.Count -gt 0) { Start-Sleep -Seconds 3 }
-          $env:GPN_PROVIDER_ENDPOINT = $pub
-          function EnsureHeartbeat {
-            $listening = @(Get-NetTCPConnection -LocalPort 8093 -State Listen -ErrorAction SilentlyContinue).Count
-            $hb = @(Get-CimInstance Win32_Process -Filter "Name='gpn_provider_status.exe'")
-            if ($listening -eq 0 -or $hb.Count -eq 0) {
-              Log 'starting heartbeat on 0.0.0.0:8093'
-              Start-Process -FilePath "$bin\gpn_provider_status.exe" `
-                -ArgumentList @('--listen','0.0.0.0:8093','--gflops',"$gflops",'--capacity','1','--ollama',$ollama) `
-                -WindowStyle Hidden
-              Start-Sleep -Seconds 2
-            }
-          }
-          EnsureHeartbeat
           while ($true) {
-            EnsureHeartbeat
-            Log 'starting gpn_llm_provider'
-            & "$bin\gpn_llm_provider.exe" $rpc $signer *>> $log
-            Log "gpn_llm_provider exited ($LASTEXITCODE); restart in 10s"
+            Log 'starting gpn_node (miner + provider)'
+            & "$bin\gpn_node.exe" *>> $log
+            Log "gpn_node exited ($LASTEXITCODE); restart in 10s"
             Start-Sleep -Seconds 10
           }
           '@

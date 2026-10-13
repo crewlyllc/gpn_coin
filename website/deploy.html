@@ -33,15 +33,16 @@
   <section class="page-head first">
     <div class="wrap">
       <span class="kicker">Deploy</span>
-      <h1>Run it: miner, provider, or access point</h1>
-      <p>Three roles, one codebase. A node can mine; a provider serves AI jobs; an access point is the public
-        front door. Start with whichever fits your hardware and goals. New here? See
+      <h1>Run it: a node, or an access point</h1>
+      <p>A GPN node is always <b>both a miner and an AI provider</b> — no role option. It mines and serves
+        AI jobs on the same box, auto-yielding its one GPU to a job while it runs. An access point is the
+        public front door. Start with whichever fits your hardware and goals. New here? See
         <a href="download.html">Download</a> first.</p>
       <p class="small muted">On this page:
-        <a href="#node">Miner / node</a> ·
-        <a href="#provider">AI provider</a> ·
+        <a href="#node">Node (mine + serve)</a> ·
+        <a href="#provider">How serving works</a> ·
         <a href="#access-point">Access point</a> ·
-        <a href="#windows">Windows provider</a> ·
+        <a href="#windows">Windows</a> ·
         <a href="#config">Config</a> ·
         <a href="#ports">Ports</a>
       </p>
@@ -52,12 +53,11 @@
   <section>
     <div class="wrap">
       <div class="callout danger">
-        <span class="ct">One GPU = mine <em>OR</em> serve — never both at once</span>
-        <p class="mb-0">A single GPU does one job at a time. In mining mode it hashes blocks; in compute mode
-          the miner is <b>stopped and VRAM freed</b> before the model loads. The <b>auto-switch</b> decides
-          which mode to run by comparing revenue in <b>USD/hr</b> and flips only when one beats the other by
-          more than ~5% (hysteresis, no thrashing). Running as a <b>provider means not mining</b> on that box
-          while it serves.</p>
+        <span class="ct">One GPU, one job at a time — a node does both</span>
+        <p class="mb-0">A single GPU does one job at a time, but a GPN node is always <b>miner + AI
+          provider</b>: it mines by default and, when it accepts an AI job, it <b>fully stops mining and frees
+          VRAM</b> for the model, then resumes the instant the job completes. No profitability switch, no
+          mode to pick — the node auto-yields the GPU per job.</p>
       </div>
     </div>
   </section>
@@ -65,17 +65,18 @@
   <!-- ============ MINER / NODE ============ -->
   <section id="node">
     <div class="wrap">
-      <span class="kicker">Role 1</span>
-      <h2>Run a miner / node</h2>
-      <p class="sub">The node holds chain state, syncs, mines on its GPU, and can serve AI compute. Full node,
-        self-mining.</p>
+      <span class="kicker">Node</span>
+      <h2>Run a node (mine + serve)</h2>
+      <p class="sub">The node holds chain state, syncs, mines on its GPU, <b>and</b> serves AI compute — one
+        entity, one command. It auto-yields the GPU to a job while it runs.</p>
 
       <div class="steps">
         <div class="step"><h4>Install</h4><p>Run <code>./install.sh</code> (see <a href="download.html">Download</a>). It builds the binaries, generates a wallet, and writes <code>~/.gpn/gpn.env</code>.</p></div>
         <div class="step"><h4>Start the node</h4>
-          <pre><code>gpn-node --chain testnet --force-authoring --base-path ~/.gpn/data</code></pre>
-          <p>Watch the log for <code>GPU Ethash miner online: &lt;device&gt;</code> to confirm real GPU mining
-            (not the CPU fallback).</p></div>
+          <pre><code>gpn_node</code></pre>
+          <p>One command brings up the chain node/miner, the provider heartbeat, and the AI provider loop
+            together. Watch the log for <code>GPU Ethash miner online: &lt;device&gt;</code> to confirm real
+            GPU mining (not the CPU fallback).</p></div>
         <div class="step"><h4>Or mine against a remote node (lighter)</h4>
           <pre><code>gpn_external_miner &lt;rpc_url&gt; [device_index] [batch] [poll_ms]</code></pre>
           <p>No local chain required — handy for a small box.</p></div>
@@ -91,10 +92,11 @@
   <!-- ============ PROVIDER ============ -->
   <section id="provider">
     <div class="wrap">
-      <span class="kicker">Role 2</span>
-      <h2>Become an AI provider (LLM / image / video / fine-tune)</h2>
-      <p class="sub">A provider registers, attests its GPU, and serves jobs routed to it. It earns GPN from
-        job escrow. The chain enforces the capability gate; providers are discovered by the scheduler.</p>
+      <span class="kicker">Serving</span>
+      <h2>How a node serves AI (LLM / image / video / fine-tune)</h2>
+      <p class="sub">Every node is an AI provider too: it registers, attests its GPU, and serves jobs routed to
+        it, earning GPN from job escrow. The chain enforces the capability gate; providers are discovered by
+        the scheduler. There is nothing to switch on — serving runs alongside mining.</p>
 
       <div class="steps">
         <div class="step"><h4>Run the node + REST API</h4>
@@ -139,7 +141,7 @@ GPN_FINETUNE_SCRIPT=$PWD/gpn_finetune.py \
   <!-- ============ ACCESS POINT ============ -->
   <section id="access-point">
     <div class="wrap">
-      <span class="kicker">Role 3</span>
+      <span class="kicker">Access point</span>
       <h2>Run an access point</h2>
       <p class="sub">An access point (<code>gpn_scheduler</code>) is a public job API. Callers hit one URL; it
         routes each job to the best provider. Permissionless and redundant — run several for the
@@ -168,9 +170,10 @@ curl http://127.0.0.1:8092/providers  # live registry (gflops, latency_ms, model
   <section id="windows">
     <div class="wrap">
       <span class="kicker">Windows</span>
-      <h2>Windows provider path</h2>
-      <p class="sub">Your Windows box can be a client (no install needed) or a provider that serves jobs and
-        earns GPN. To serve, you need three things plus the <code>gpn-windows</code> binaries.</p>
+      <h2>Windows node (mine + serve)</h2>
+      <p class="sub">Your Windows box can be a client (no install needed) or a full node that mines and
+        serves AI jobs, earning GPN. There is no provider-only mode — the node runs both. You need the three
+        things below plus the <code>gpn-windows</code> binaries.</p>
 
       <div class="grid cols-3">
         <div class="card plain"><h3>1 · Backend</h3><p class="muted mb-0">Install <b>Ollama</b>
@@ -191,8 +194,9 @@ curl http://127.0.0.1:8092/providers  # live registry (gflops, latency_ms, model
     -PublicStatusUrl "http://&lt;your-public-ip&gt;:8093/status" -Gflops 2500</code></pre>
         <button class="btn small ghost no-print" data-copy="#cmd-win" type="button">Copy</button>
       </div>
-      <p class="small muted">The script checks Ollama, calls <code>gpn_register.exe</code>, starts the
-        <code>:8093</code> heartbeat, then runs the claim/infer/settle loop. Verify from another box with
+      <p class="small muted">The script checks Ollama, calls <code>gpn_register.exe</code>, then runs
+        <code>gpn_node.exe</code>, which brings up the chain node/miner, the <code>:8093</code> heartbeat, and
+        the claim/infer/settle loop together. Verify from another box with
         <code>Invoke-RestMethod "…:8093/status"</code>.</p>
 
       <details class="card" style="margin-top:8px">

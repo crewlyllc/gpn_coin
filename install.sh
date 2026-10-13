@@ -147,9 +147,9 @@ EOF
 # 7 ── Done ──────────────────────────────────────────────────────────────────
 log "installed. wallet: $WALLET"
 echo
-echo "Start earning (ONE command — supervised node + miner + AI provider):"
-echo "  GPN_SIGNER=<your-key> GPN_AUTHOR=alice gpn_node --role both"
-echo "  (config + env reference: docs/run-a-node.md)"
+echo "Start earning (ONE command — supervised node: miner + AI provider together):"
+echo "  GPN_SIGNER=<your-key> GPN_AUTHOR=alice gpn_node"
+echo "  (a GPN node always mines AND serves AI — no role option; config + env reference: docs/run-a-node.md)"
 echo
 echo "Or run just the chain node/miner directly:"
 echo "  gpn-node --chain $NETWORK --force-authoring --base-path \"$PREFIX/data\""

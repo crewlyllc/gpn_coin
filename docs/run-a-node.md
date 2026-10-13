@@ -5,6 +5,12 @@ command** and gets **one node** — the chain node/miner, the provider heartbeat
 and the provider loop(s) — started, logged (one prefixed stream), monitored
 (one status line) and stopped cleanly, together.
 
+**A GPN node is always both a miner and an AI provider.** There is no role
+option and no mine-only / provider-only mode: every `gpn_node` start brings up
+the chain node/miner *and* the AI serving stack. The node mines and serves AI,
+**auto-yielding the one GPU** to a job while it runs (mining fully stops for the
+job's duration, then resumes — see #24).
+
 Internally the parts stay **separate processes** (fault isolation: a crash in
 the AI stack cannot take the chain node down), but the operator never has to
 manage them individually.
@@ -26,32 +32,26 @@ manage them individually.
 # 1) install (builds gpn-node + the gpn-agent bins, generates a wallet)
 curl -fsSL <REPO>/install.sh | sh      # or ./install.sh from a clone
 
-# 2) run ONE command — role defaults to "both" (mine + serve)
+# 2) run ONE command — starts the miner AND the AI provider together
 gpn_node
 ```
 
 That's it. `gpn_node` reads its config from a small file + env, then starts and
-supervises the children for the selected **role**.
+supervises all of the children — always: the miner and the AI serving stack.
 
-## Roles
+## What it starts (always)
 
-| `role`     | children started                                                            |
-|------------|-----------------------------------------------------------------------------|
-| `mine`     | the chain node / miner (`gpn-node … --force-authoring`) — log `[node]`      |
-| `provider` | `gpn_provider_status` (heartbeat, `:8093`) — `[heartbeat]` + `gpn_llm_provider` — `[provider]` (+ `gpn_diffusion_provider` — `[diffuse]` when `diffusion = true`) |
-| `both`     | everything above                                                             |
+| Child       | Process                                                                    | Log prefix  |
+|-------------|----------------------------------------------------------------------------|-------------|
+| miner/node  | the chain node / miner (`gpn-node … --force-authoring`)                     | `[node]`    |
+| heartbeat   | `gpn_provider_status` (advertises capability + load, `:8093`)               | `[heartbeat]` |
+| provider    | `gpn_llm_provider` (claims + runs + settles LLM jobs)                       | `[provider]` |
+| diffuse     | `gpn_diffusion_provider` (only when `diffusion = true`)                     | `[diffuse]` |
 
-Select it per-run with `--role`, the `GPN_ROLE` env var, or the config file:
-
-```bash
-gpn_node --role both       # mine + serve (default)
-gpn_node --role mine       # chain node only
-gpn_node --role provider   # heartbeat + provider loop(s) only
-```
-
-`gpn_node` honours the #24 semantics: **mine-by-default**, and the provider
-holds the (separate) job flag so the miner fully stops during a job. The
-supervisor here just runs both roles side by side.
+There is nothing to select — a node is miner + provider. `gpn_node` honours the
+#24 semantics: **mine-by-default**, and the provider holds the (separate) job
+flag so the miner fully stops during a job; the supervisor runs the miner and
+the AI stack side by side.
 
 ## Config: one small file + env overrides
 
@@ -67,7 +67,6 @@ The config file is, in order:
 Example (`~/.gpn/node.toml`, also see `gpn-node.example.toml`):
 
 ```toml
-role         = "both"                              # mine | provider | both
 chain        = "testnet"                           # testnet | mainnet | dev | <path to chain-spec.json>
 signer       = "//Alice"                           # sr25519 URI or seed (provider identity / authoring key)
 account      = "5ENqSp5Q…"                         # payout / advertised ss58 address
@@ -93,7 +92,6 @@ diffusion    = false                               # also run gpn_diffusion_prov
 
 | Env var | Meaning | Default |
 |---------|---------|---------|
-| `GPN_ROLE` | `mine` \| `provider` \| `both` | `both` |
 | `GPN_CHAIN` | chain spec (`testnet`/`mainnet`/`dev`/path) | `testnet` |
 | `GPN_SIGNER` | signer URI / seed | `//Alice` |
 | `GPN_ACCOUNT` | payout / advertised address | _(empty)_ |
@@ -136,7 +134,7 @@ diffusion    = false                               # also run gpn_diffusion_prov
 - **Prints one aggregated status line** every `status_secs` (default 15s):
 
   ```
-  [status] role=Both node_count=3 node=up(pid 123) heartbeat=up(pid 456) provider=up(pid 789) best=#107535
+  [status] node_count=3 node=up(pid 123) heartbeat=up(pid 456) provider=up(pid 789) best=#107535
   ```
 
   `best` is the node's best block, read cheaply from its own RPC
@@ -145,8 +143,8 @@ diffusion    = false                               # also run gpn_diffusion_prov
 ## Linux
 
 ```bash
-# foreground (Ctrl-C stops everything)
-GPN_ROLE=both GPN_SIGNER=//Alice \
+# foreground (Ctrl-C stops everything) — always miner + provider
+GPN_SIGNER=//Alice \
 GPN_PROVIDER_ENDPOINT=http://<public-ip>:8093/status \
 GPN_ASSIGN_TOKEN=$GPN_ASSIGN_TOKEN \
 gpn_node
@@ -185,8 +183,7 @@ journalctl --user -u gpn-node.service -f     # the one prefixed log stream
 `gpn_node.exe` is the same binary. From the release bundle (`.\bin\`):
 
 ```powershell
-# role=both, everything supervised under one console window
-$env:GPN_ROLE             = "both"
+# everything supervised under one console window (miner + provider)
 $env:GPN_SIGNER           = "//Alice"          # or your seed
 $env:GPN_CHAIN            = "testnet"
 $env:GPN_PROVIDER_ENDPOINT= "http://<public-ip>:8093/status"
@@ -195,8 +192,7 @@ $env:GPN_ASSIGN_TOKEN     = "<shared secret>"
 ```
 
 Use **Ctrl-C** in the window (or close it) to stop all children cleanly. To run
-it as a service, wrap `gpn_node.exe` with NSSM / a Windows Service, or keep the
-existing `run-windows-provider.ps1` for the provider-only case.
+it as a service, wrap `gpn_node.exe` with NSSM / a Windows Service.
 
 > Windows note: the connect step for a syncing node (`run-windows.bat`) still
 > applies — a second `--force-authoring --alice` node on the **same key** would
@@ -204,7 +200,7 @@ existing `run-windows-provider.ps1` for the provider-only case.
 
 ## Fault isolation / why separate processes
 
-The supervisor deliberately keeps one process per role: an ollama/diffusion
+The supervisor deliberately keeps one process per part: an ollama/diffusion
 crash, an OOM in the AI stack, or a wedged inference never takes the chain node
 down — the supervisor restarts just that child. Folding everything into one
 binary is tracked separately (task #26, deferred).
