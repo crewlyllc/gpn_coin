@@ -51,6 +51,13 @@ const JANITOR_TOK_PER_S: u64 = 20; // conservative provider throughput floor
 const JANITOR_SLACK: u64 = 2; // 2× headroom
 const JANITOR_MIN_SECS: u64 = 120; // never reclaim faster than this
 const JANITOR_MAX_SECS: u64 = 900; // but never wait longer than this
+
+/// How many of the most recent job ids `GET /jobs` enumerates. The handler does
+/// one chain RPC (`get_job_state`) per id, so the old `0..next_id` scan was O(N)
+/// and, once the chain passed ~3.6k jobs, wedged the endpoint (HTTP000 after
+/// 40s). Monitoring only ever needs the trailing window (orphans are recent);
+/// per-id lookups (`GET /job/{id}`) cover anything older.
+const JOBS_LIST_WINDOW: u64 = 256;
 fn stale_secs(max_tokens: u64) -> u64 {
     let gen = (max_tokens / JANITOR_TOK_PER_S.max(1)) * JANITOR_SLACK;
     (JANITOR_BASE_SECS + gen).clamp(JANITOR_MIN_SECS, JANITOR_MAX_SECS)
@@ -1615,13 +1622,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             (Method::Get, ["jobs"]) => {
                 let next = rt.block_on(client.get_next_job_id());
+                let start = next.saturating_sub(JOBS_LIST_WINDOW);
                 let mut jobs = vec![];
-                for id in 0..next {
+                for id in start..next {
                     if let Some((state, _p, _r, prov)) = rt.block_on(client.get_job_state(id)) {
                         jobs.push(json!({"id":id,"state":state,"provider":prov}));
                     }
                 }
-                json!({"jobs":jobs})
+                json!({"jobs":jobs, "from":start, "next":next})
             }
             (Method::Get, ["job", id]) => {
                 let idn: u64 = id.parse().unwrap_or(0);
