@@ -61,7 +61,7 @@ jobs:
             if ($listening -eq 0 -or $hb.Count -eq 0) {
               Log 'starting heartbeat on 0.0.0.0:8093'
               Start-Process -FilePath "$bin\gpn_provider_status.exe" `
-                -ArgumentList @('--listen','0.0.0.0:8093','--gflops',"$gflops",'--ollama',$ollama) `
+                -ArgumentList @('--listen','0.0.0.0:8093','--gflops',"$gflops",'--capacity','1','--ollama',$ollama) `
                 -WindowStyle Hidden
               Start-Sleep -Seconds 2
             }

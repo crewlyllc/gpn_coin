@@ -727,7 +727,9 @@ async fn process_once(
             match client.claim_job_pipelined(job_id).await {
                 Ok(()) => {
                     just_claimed.push(job_id);
-                    continue;
+                    // One GPU = one job: accept AT MOST ONE per pass; the next job
+                    // is only claimed once this one has been run to completion.
+                    break;
                 }
                 Err(e) => {
                     eprintln!("[provider] pipelined claim #{job_id} failed: {e}");
@@ -742,6 +744,9 @@ async fn process_once(
         if let Err(e) = client.start_job(job_id).await {
             eprintln!("[provider] start #{job_id} failed: {e}");
         }
+        // One GPU = one job: we have accepted this job — stop claiming others
+        // until it has been run to completion.
+        break;
     }
 
     // Persist any newly-settled ids (one write per pass, not per id).
@@ -893,18 +898,18 @@ async fn run_job(
     );
 
     let _ = LlmStore::new().set_status(id, "running");
-    // Yield the GPU to this job: drop the flag the node's miner checks, so block
-    // mining parks (duty cycle) instead of contending with the inference.
-    let yield_path = format!(
-        "{}/.gpn/gpu-yield",
-        std::env::var("HOME").unwrap_or_else(|_| ".".into())
-    );
-    let _ = std::fs::create_dir_all(
-        std::path::Path::new(&yield_path).parent().unwrap_or(std::path::Path::new(".")),
-    );
-    let _ = std::fs::write(&yield_path, b"1");
-    let result = run_inference(&model, &job.prompt, job.temperature, job.max_tokens).await;
-    let _ = std::fs::remove_file(&yield_path);
+    // Yield the GPU to this job for its GPU-contending inference (one GPU = one
+    // job): the co-located node miner FULLY STOPS while the flag is held and
+    // resumes the instant the guard drops. The guard is scoped to `run_inference`
+    // ONLY and released BEFORE the on-chain settlement below — settlement needs
+    // fresh blocks, and holding the flag across a block-waiting `submit_result`
+    // would starve block production on a single-authority chain and deadlock the
+    // provider (chain halt). No GPU is used during settlement, so releasing here
+    // loses nothing.
+    let result = {
+        let _yield = gpn_agent::gpu_yield::GpuYieldGuard::acquire();
+        run_inference(&model, &job.prompt, job.temperature, job.max_tokens).await
+    };
     match result {
         Ok((text, hash)) => {
             // Salted commitment: on-chain value = sha256(salt ‖ answer). The salt is

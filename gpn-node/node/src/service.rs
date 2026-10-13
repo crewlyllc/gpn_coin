@@ -673,9 +673,11 @@ pub(crate) type MiningWorker =
 /// re-check for a newer block build.
 const GPU_BATCH: usize = 1 << 20;
 
-/// How long to park the GPU per cycle while an AI job runs (duty cycle): the
-/// miner sleeps this long, then does one quick batch so blocks still seal.
-const GPU_YIELD_SLEEP_MS: u64 = 2500;
+/// How long the miner parks (and re-checks the yield flag) while an AI job runs.
+/// While the flag is held the miner does **no** nonce search at all (full stop);
+/// this is only the poll interval, so mining resumes within this bound once the
+/// job signals completion (kept short for a snappy resume).
+const GPU_YIELD_SLEEP_MS: u64 = 500;
 
 /// True when the local provider has asked the GPU to yield (an inference job is
 /// running). A file flag lets the separate provider process signal us with no IPC:
@@ -775,14 +777,15 @@ fn spawn_gpu_miner(worker: MiningWorker, author: Option<[u8; 32]>) {
             let mut last_pre_hash: Option<<Block as BlockT>::Hash> = None;
             let mut nonce: u64 = 0;
             loop {
-                // AI-compute yield (duty cycle): while a local inference job runs
-                // the provider drops a flag; we park the GPU most of the time so
-                // the two don't contend, but still mine once per cycle so blocks
-                // keep advancing (settlement latency is the e2e bottleneck, so we
-                // must never stall block production). No process stops — the node
-                // just lends its GPU.
+                // AI-compute full stop: while a local inference job runs the
+                // provider holds a flag; we do NOT search any nonces at all so the
+                // GPU is dedicated to the job, then resume the instant the flag
+                // clears. The miner thread stays alive (we only park here), so
+                // mining resumes immediately with no process/thread restart.
+                // One GPU = one job: mining and inference never contend.
                 if gpu_yield_requested() {
                     std::thread::sleep(Duration::from_millis(GPU_YIELD_SLEEP_MS));
+                    continue;
                 }
                 if let Some(metadata) = worker.metadata() {
                     let pre_hash = metadata.pre_hash;
@@ -831,6 +834,13 @@ fn spawn_cpu_miner(worker: MiningWorker, author: Option<[u8; 32]>) {
             let full_size = ethash_full_size();
             let mut nonce: u64 = 0;
             loop {
+                // AI-compute full stop (same contract as the GPU miner): while a
+                // provider holds the yield flag we search no nonces at all, then
+                // resume the instant it clears. Thread stays alive throughout.
+                if gpu_yield_requested() {
+                    std::thread::sleep(Duration::from_millis(GPU_YIELD_SLEEP_MS));
+                    continue;
+                }
                 if let Some(metadata) = worker.metadata() {
                     let pre_hash = metadata.pre_hash;
                     let target = metadata.difficulty;

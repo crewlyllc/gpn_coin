@@ -50,7 +50,7 @@ Write-Host "[2/4] registering provider (min_gflops=150) ..."
 
 # 3. Heartbeat: serve GET /status on :$ListenPort so the scheduler can route here.
 Write-Host "[3/4] starting /status heartbeat on 0.0.0.0:$ListenPort ..."
-$statusArgs = @("--listen", "0.0.0.0:$ListenPort", "--gflops", "$Gflops", "--ollama", $Ollama)
+$statusArgs = @("--listen", "0.0.0.0:$ListenPort", "--gflops", "$Gflops", "--capacity", "1", "--ollama", $Ollama)
 if ($Address) { $statusArgs += @("--address", $Address) }
 Start-Process -FilePath (Need "gpn_provider_status.exe") -ArgumentList $statusArgs -WindowStyle Minimized
 

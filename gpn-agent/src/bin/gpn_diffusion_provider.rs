@@ -190,14 +190,6 @@ fn run_with_watchdog(
     result
 }
 
-/// Path to the GPU duty-cycle yield flag the local miner watches.
-fn gpu_yield_path() -> String {
-    format!(
-        "{}/.gpn/gpu-yield",
-        std::env::var("HOME").unwrap_or_else(|_| ".".into())
-    )
-}
-
 fn assignment_store_path() -> String {
     std::env::var("GPN_ASSIGN_STORE").unwrap_or_else(|_| {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
@@ -391,6 +383,9 @@ async fn process_once(
         if let Err(e) = client.start_job(job_id).await {
             eprintln!("[provider] start #{job_id} failed: {e}");
         }
+        // One GPU = one job: we have accepted this job — stop claiming others
+        // until it has been run to completion.
+        break;
     }
 
     // 1. Run any Running generation job assigned to this signer.
@@ -490,25 +485,27 @@ async fn run_job(
     std::fs::write(&req_file, serde_json::to_string(&req_json)?)?;
 
     // Run the diffusers helper (blocking; do it off the async runtime).
-    // Yield the GPU: drop the same flag the node miner checks so block mining
-    // parks (duty cycle) instead of contending with the diffusion run.
-    let yield_path = gpu_yield_path();
-    let _ = std::fs::create_dir_all(
-        std::path::Path::new(&yield_path).parent().unwrap_or(std::path::Path::new(".")),
-    );
-    let _ = std::fs::write(&yield_path, b"1");
+    // Yield the GPU to this job for its GPU-contending render ONLY (one GPU = one
+    // job): the co-located node miner FULLY STOPS while the flag is held and
+    // resumes the instant the guard drops. The guard is scoped to the helper
+    // invocation and released BEFORE the on-chain settlement below — settlement
+    // needs fresh blocks, and holding the flag across a block-waiting
+    // `submit_result` would starve block production on a single-authority chain
+    // and deadlock the provider (chain halt). No GPU is used during settlement.
     let script = diffuse_script();
     let timeout = diffuse_timeout(&job.kind);
     let req_file2 = req_file.clone();
-    let out_res = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
-        let mut cmd = std::process::Command::new("python3");
-        cmd.arg(&script).arg(&req_file2);
-        let (stdout, _stderr) = run_with_watchdog(cmd, timeout, &format!("job {id}"))?;
-        serde_json::from_str(&stdout).map_err(|e| format!("bad helper output: {e} ({stdout})"))
-    })
-    .await
-    .map_err(|e| e.to_string())?;
-    let _ = std::fs::remove_file(&yield_path);
+    let out_res = {
+        let _yield = gpn_agent::gpu_yield::GpuYieldGuard::acquire();
+        tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+            let mut cmd = std::process::Command::new("python3");
+            cmd.arg(&script).arg(&req_file2);
+            let (stdout, _stderr) = run_with_watchdog(cmd, timeout, &format!("job {id}"))?;
+            serde_json::from_str(&stdout).map_err(|e| format!("bad helper output: {e} ({stdout})"))
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    };
     // A wedged/timed-out helper is reported explicitly (never silent) and the
     // job is marked errored off-chain; on-chain it stays Running and is
     // reclaimed by the expiry sweep. The provider itself keeps serving.
