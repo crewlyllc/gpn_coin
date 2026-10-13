@@ -12,6 +12,39 @@ pub fn default_ollama_url() -> String {
     std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".to_string())
 }
 
+/// Marker error returned by providers when ollama is simply not running.
+/// Call sites recognise it so they warn **once** (actionably) instead of
+/// spamming `pull … failed: error sending request` every poll.
+pub const OLLAMA_UNAVAILABLE: &str = "ollama-unavailable";
+
+/// The one-line, actionable guidance printed when ollama is missing.
+pub fn ollama_missing_hint() -> String {
+    format!(
+        "ollama not reachable at {} — install & start it (Linux: scripts/install-ollama.sh · \
+         Windows: scripts/install-ollama.ps1, or winget install Ollama.Ollama), then `ollama serve` \
+         and `ollama pull llama3.2:1b`. The node still mines, but cannot serve LLM jobs until then.",
+        default_ollama_url()
+    )
+}
+
+/// Quick liveness probe: does the local ollama server answer right now?
+/// Blocking + short timeout so providers can cheaply gate model pulls.
+pub fn ollama_reachable() -> bool {
+    let base = default_ollama_url();
+    let base = base.trim_end_matches('/');
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_millis(1500))
+        .build()
+    else {
+        return false;
+    };
+    client
+        .get(format!("{base}/api/tags"))
+        .send()
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
 #[derive(Deserialize)]
 struct ChatResponse {
     choices: Vec<Choice>,

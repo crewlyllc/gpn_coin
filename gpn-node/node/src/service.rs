@@ -397,6 +397,18 @@ pub fn new_full<
 >(
     config: Configuration,
 ) -> Result<TaskManager, ServiceError> {
+    // ── A GPN node ALWAYS mines: mining is structural, not an opt-in flag. ──
+    // Just like "a node is always a provider", every node is also a miner.
+    // We force the authority role + block authoring here, so a *plain*
+    // `gpn-node` launch (no `--force-authoring`, no `--validator`, no keyring)
+    // mines and serves blocks by default. Substrate otherwise derives the role
+    // from `--validator`/`--dev`/a keyring only, which left a fresh box at
+    // `Role: FULL` → no mining worker, no GPU-miner lines, no rewards.
+    // The flags remain *accepted* (harmless) for backward compatibility.
+    let mut config = config;
+    config.role = sc_service::Role::Authority;
+    config.force_authoring = true;
+
     let sc_service::PartialComponents {
         client,
         backend,

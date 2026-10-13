@@ -16,7 +16,7 @@
 //! ```
 //!
 //! ## Children (all always started)
-//! - the chain node/miner (`gpn-node … --force-authoring …`) — log `[node]`
+//! - the chain node/miner (`gpn-node …` — mines by default) — log `[node]`
 //! - the heartbeat (`gpn_provider_status … :8093`) — log `[heartbeat]`
 //! - the provider loop (`gpn_llm_provider …`) — log `[provider]`
 //!   (+ `gpn_diffusion_provider …` when `diffusion = true`) — `[diffuse]`
@@ -510,7 +510,9 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
     // node/miner, the provider heartbeat, and the provider loop(s).
     {
         let mut argv = vec![cfg.resolve("gpn-node"), "--chain".into(), cfg.chain.clone()];
-        argv.push("--force-authoring".into());
+        // Mining is structural: `gpn-node` is an authority + authoring miner by
+        // default (see service::new_full). We deliberately do NOT pass
+        // `--force-authoring` here — a plain node launch must mine on its own.
         argv.push("--rpc-port".into());
         argv.push(cfg.rpc_port.to_string());
         if let Some(a) = &cfg.author {
@@ -614,6 +616,24 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
     specs
 }
 
+/// Report whether an ollama server answers at `url` (short timeout). Used to
+/// warn clearly at startup when the box can mine but can't serve LLMs yet.
+fn ollama_reachable(url: &str) -> bool {
+    let base = url.trim_end_matches('/');
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(1500))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    client
+        .get(format!("{base}/api/tags"))
+        .send()
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
 #[tokio::main]
 async fn main() {
     env_logger::init();
@@ -639,6 +659,23 @@ async fn main() {
         println!("  account={}", cfg.account);
     }
     println!("  heartbeat listen={} ollama={} gflops={}", cfg.listen, cfg.ollama, cfg.gflops);
+
+    // ── Ollama is a first-class prerequisite: without it the node still mines,
+    //    but the provider cannot serve any LLM job. Warn clearly & actionably. ──
+    if !ollama_reachable(&cfg.ollama) {
+        eprintln!(
+            "\n  ⚠️  ollama NOT reachable at {} — the node will MINE, but it CANNOT serve LLM jobs until ollama is running.",
+            cfg.ollama
+        );
+        eprintln!("      Install & start ollama (one-time):");
+        eprintln!("        Windows :  winget install Ollama.Ollama   (or  scripts\\install-ollama.ps1 )");
+        eprintln!("        Linux   :  scripts/install-ollama.sh      (or  curl -fsSL https://ollama.com/install.sh | sh )");
+        eprintln!("      Then:  ollama serve        # keep it running (listens on 127.0.0.1:11434)");
+        eprintln!("             ollama pull llama3.2:1b");
+        eprintln!("      Docs: docs/run-a-node.md\n");
+    } else {
+        println!("  ollama: reachable at {}", cfg.ollama);
+    }
 
     let specs = build_children(&cfg);
     if specs.is_empty() {

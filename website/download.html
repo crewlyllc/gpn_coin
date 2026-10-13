@@ -110,7 +110,8 @@
       </div>
       <p class="small muted" style="margin-top:12px">Windows: unpack the artifacts into a <code>bin\</code>
         folder next to <code>run-windows-provider.ps1</code>, then follow the
-        <a href="deploy.html#windows">Windows provider path</a>. Artifact download links live on the
+        <a href="deploy.html#windows">Windows provider path</a> (it installs/starts Ollama for you). Artifact
+        download links live on the
         repository's <a href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">Actions / Releases</a>.</p>
     </div>
   </section>
@@ -126,7 +127,8 @@
             <li><b>A discrete GPU</b> — mining is GPU-only by construction.</li>
             <li><b>OpenCL ICD</b> for GPU mining — NVIDIA:
               <code>nvidia-opencl-icd</code>; AMD: <code>rocm-opencl-runtime</code> (then reboot).</li>
-            <li><b>Ollama</b> for serving LLMs (the installer sets up a user-local copy).</li>
+            <li><b>Ollama</b> for serving LLMs — <b>required</b> (the installer sets up a user-local copy).
+              A node <em>mines</em> without it, but <em>cannot serve AI jobs</em> until it's installed and running.</li>
             <li>Enough <b>VRAM</b> for your target models — an 8 GB card runs small quantized LLMs,
               SD-class image models, and LoRA fine-tunes; video/70B-class need a bigger card.</li>
           </ul>
@@ -147,6 +149,30 @@
         <span class="ct">No OpenCL detected?</span>
         <p class="mb-0">Mining will fall back to CPU (much slower). Install the vendor OpenCL runtime above
           and reboot to mine on your GPU.</p>
+      </div>
+
+      <div class="callout" style="margin-top:20px">
+        <span class="ct">Ollama is required to serve LLMs</span>
+        <p class="mb-0">The provider talks to <code>http://127.0.0.1:11434</code>. Without ollama the node still
+          <b>mines</b>, but every AI job fails (and <code>gpn_node</code> warns you at startup). Install + start it once:</p>
+        <div class="grid cols-2" style="margin-top:12px">
+          <div class="field">
+            <label>Linux / macOS</label>
+            <pre><code>./scripts/install-ollama.sh
+# or:
+curl -fsSL https://ollama.com/install.sh | sh
+ollama serve &amp;
+ollama pull llama3.2:1b</code></pre>
+          </div>
+          <div class="field">
+            <label>Windows</label>
+            <pre><code>powershell -ExecutionPolicy Bypass -File scripts\install-ollama.ps1
+# or:
+winget install Ollama.Ollama
+ollama serve
+ollama pull llama3.2:1b</code></pre>
+          </div>
+        </div>
       </div>
     </div>
   </section>

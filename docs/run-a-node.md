@@ -32,18 +32,52 @@ manage them individually.
 # 1) install (builds gpn-node + the gpn-agent bins, generates a wallet)
 curl -fsSL <REPO>/install.sh | sh      # or ./install.sh from a clone
 
-# 2) run ONE command — starts the miner AND the AI provider together
+# 2) make sure ollama is running (REQUIRED to serve LLM jobs — see below)
+./scripts/install-ollama.sh            # Linux/macOS; Windows: scripts\install-ollama.ps1
+
+# 3) run ONE command — starts the miner AND the AI provider together
 gpn_node
 ```
 
 That's it. `gpn_node` reads its config from a small file + env, then starts and
 supervises all of the children — always: the miner and the AI serving stack.
 
+## Ollama is a prerequisite (for serving LLMs)
+
+A GPN node **cannot serve LLM jobs without ollama** — the provider talks to
+`http://127.0.0.1:11434`. **Mining still works** without it, but every AI job
+fails (`pull … failed: error sending request for url (http://127.0.0.1:11434/api/pull)`),
+and `gpn_node` prints a clear warning at startup telling you exactly this.
+
+Install + start it once (idempotent helpers are in `scripts/`):
+
+```bash
+# Linux / macOS
+./scripts/install-ollama.sh                    # installs, starts, pulls llama3.2:1b
+# or manually
+curl -fsSL https://ollama.com/install.sh | sh
+ollama serve &                                 # keep running (listens on 127.0.0.1:11434)
+ollama pull llama3.2:1b
+```
+
+```powershell
+# Windows
+powershell -ExecutionPolicy Bypass -File scripts\install-ollama.ps1
+# or manually
+winget install Ollama.Ollama
+ollama serve
+ollama pull llama3.2:1b
+```
+
+The baseline model(s) can be overridden with `GPN_BASELINE_MODELS`
+(default `llama3.2:1b,qwen2.5:0.5b`). When ollama is down the provider logs a
+**single** actionable warning (never a per-poll `pull … failed` spam).
+
 ## What it starts (always)
 
 | Child       | Process                                                                    | Log prefix  |
 |-------------|----------------------------------------------------------------------------|-------------|
-| miner/node  | the chain node / miner (`gpn-node … --force-authoring`)                     | `[node]`    |
+| miner/node  | the chain node / miner (`gpn-node …` — mines by default)                     | `[node]`    |
 | heartbeat   | `gpn_provider_status` (advertises capability + load, `:8093`)               | `[heartbeat]` |
 | provider    | `gpn_llm_provider` (claims + runs + settles LLM jobs)                       | `[provider]` |
 | diffuse     | `gpn_diffusion_provider` (only when `diffusion = true`)                     | `[diffuse]` |
@@ -195,8 +229,10 @@ Use **Ctrl-C** in the window (or close it) to stop all children cleanly. To run
 it as a service, wrap `gpn_node.exe` with NSSM / a Windows Service.
 
 > Windows note: the connect step for a syncing node (`run-windows.bat`) still
-> applies — a second `--force-authoring --alice` node on the **same key** would
-> fork the chain. Only the single designated author should mine.
+> applies — a second node authoring on the **same key** would fork the chain.
+> Only the single designated author should mine. Every node mines by default
+> (`gpn-node` is an authority miner on its own key — no `--force-authoring`
+> needed); the flag is accepted but no longer required.
 
 ## Fault isolation / why separate processes
 

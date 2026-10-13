@@ -16,6 +16,10 @@ REM    GPN_CHAIN, GPN_SIGNER, GPN_ACCOUNT, GPN_PROVIDER_ENDPOINT, GPN_OLLAMA,
 REM    GPN_GFLOPS, GPN_ASSIGN_TOKEN, GPN_NODE_KEY, GPN_BOOTNODES
 REM  Rewards go to the node's own (or the configured payout) account.
 REM
+REM  Ollama is REQUIRED to serve LLM jobs (mining works without it). If it is
+REM  missing the node still mines, but cannot serve AI until you install + start
+REM  it (see the Ollama step below).
+REM
 REM  NOTE: a second author on the SAME authoring key forks the chain. Only one
 REM  designated author should mine per key. The external miner (if used) must run
 REM  on a SEPARATE machine — gpn_external_miner refuses a localhost node, so one
@@ -27,6 +31,18 @@ set "GPN_CHAIN=testnet"
 set "GPN_NODE_KEY=8f9e5ccd99ed3f4516563495d598a7dbcfff5c18b658d3e5cea5718307a4ba74"
 set "GPN_RPC_PORT=9944"
 set "GPN_BOOTNODES=/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo"
+REM
+REM --- Ollama: first-class prerequisite (needed to serve LLM jobs) -------------
+REM  A GPN node mines without it, but CANNOT serve LLM jobs until Ollama runs.
+where ollama >nul 2>nul
+if errorlevel 1 (
+  echo [gpn] Ollama NOT found - the node will MINE but cannot serve LLM jobs.
+  echo [gpn]   install:  winget install Ollama.Ollama   ^(or: powershell -ExecutionPolicy Bypass -File scripts\install-ollama.ps1^)
+  echo [gpn]   then:     ollama serve  ^^&^&  ollama pull llama3.2:1b
+) else (
+  echo [gpn] Ollama found - ensuring it is running...
+  powershell -NoProfile -Command "try { Invoke-RestMethod 'http://127.0.0.1:11434/api/tags' -TimeoutSec 2 | Out-Null } catch { Write-Host '[gpn] starting Ollama...'; Start-Process ollama -ArgumentList 'serve' -WindowStyle Hidden }"
+)
 REM  Provider side (AI serving) — set to match this box:
 REM set "GPN_SIGNER=//Alice"
 REM set "GPN_PROVIDER_ENDPOINT=http://<your-public-ip>:8093/status"

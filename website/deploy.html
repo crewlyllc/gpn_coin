@@ -100,7 +100,10 @@
 
       <div class="steps">
         <div class="step"><h4>Run the node + REST API</h4>
-          <pre><code>gpn-node --dev --tmp --force-authoring --rpc-port 9944
+          <pre><code>gpn-node --dev --tmp --rpc-port 9944      # mines by default
+
+# serving LLMs needs ollama running (http://127.0.0.1:11434):
+#   scripts/install-ollama.sh   (Linux)   |   scripts\install-ollama.ps1  (Windows)
 
 gpn_api --listen 127.0.0.1:8082 \
   --endpoint ws://127.0.0.1:9944 \
@@ -176,10 +179,12 @@ curl http://127.0.0.1:8092/providers  # live registry (gflops, latency_ms, model
         things below plus the <code>gpn-windows</code> binaries.</p>
 
       <div class="grid cols-3">
-        <div class="card plain"><h3>1 · Backend</h3><p class="muted mb-0">Install <b>Ollama</b>
-          (<a href="https://ollama.com/download" rel="noopener">ollama.com/download</a>) and pull a model,
-          e.g. <code>ollama pull llama3.2:1b</code>. The provider drives Ollama — no Python or CUDA
-          needed on the box.</p></div>
+        <div class="card plain"><h3>1 · Backend (Ollama)</h3><p class="muted mb-0">Install <b>Ollama</b> —
+          <code>winget install Ollama.Ollama</code> or
+          <a href="https://ollama.com/download" rel="noopener">ollama.com/download</a> — then start it
+          (<code>ollama serve</code>) and pull a model, e.g. <code>ollama pull llama3.2:1b</code>. Without
+          Ollama the box still <b>mines</b> but <b>cannot serve LLM jobs</b>. One-shot:
+          <code>powershell -ExecutionPolicy Bypass -File scripts\install-ollama.ps1</code>. No Python or CUDA needed.</p></div>
         <div class="card plain"><h3>2 · A wallet</h3><p class="muted mb-0">Drip a fresh account from the
           testnet faucet — you need GPN for the one-time registration fee and to sign claims. The signer you
           pass to the provider is the source of truth for its identity.</p></div>

@@ -128,7 +128,14 @@ pub fn run() -> sc_cli::Result<()> {
             runner.sync_run(|config| cmd.run::<Block>(&config))
         }
         None => {
-            let runner = cli.create_runner(&cli.run)?;
+            let mut runner = cli.create_runner(&cli.run)?;
+            // A GPN node ALWAYS mines: mining is structural, not an opt-in flag.
+            // Force the authority role + authoring on the runner's config *before*
+            // anything reads it, so the startup banner reports `Role: AUTHORITY`
+            // (not the misleading `FULL`) and the service mines by default —
+            // with no `--force-authoring` / `--validator` required.
+            runner.config_mut().role = sc_service::Role::Authority;
+            runner.config_mut().force_authoring = true;
             // Extra peer-discovery seed sources (Bitcoin-style DNS seeds + HTTP
             // seed lists) declared on the CLI. Merged with the static
             // bootnodes + persisted peer store in `prepare_network_config`.

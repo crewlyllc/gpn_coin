@@ -119,7 +119,11 @@ for b in gpn_node gpn_provider_status gpn_llm_provider gpn_diffusion_provider gp
   [ -f "$SRC/gpn-agent/target/release/$b" ] && ln -sf "$SRC/gpn-agent/target/release/$b" "$BIN_DIR/$b"
 done
 
-# 4b ── ollama (AI-compute models, user-local) ────────────────────────────────
+# 4b ── ollama (AI-compute models, REQUIRED to serve LLMs, user-local) ─────────
+# A node mines without ollama, but cannot serve LLM jobs until ollama runs (the
+# provider calls http://127.0.0.1:11434). This installs it user-local + pulls
+# the baseline model(s). Equivalent helpers: scripts/install-ollama.sh (Linux),
+# scripts/install-ollama.ps1 (Windows).
 install_ollama
 
 # 5 ── Wallet ────────────────────────────────────────────────────────────────
@@ -151,8 +155,14 @@ echo "Start earning (ONE command — supervised node: miner + AI provider togeth
 echo "  GPN_SIGNER=<your-key> GPN_AUTHOR=alice gpn_node"
 echo "  (a GPN node always mines AND serves AI — no role option; config + env reference: docs/run-a-node.md)"
 echo
-echo "Or run just the chain node/miner directly:"
-echo "  gpn-node --chain $NETWORK --force-authoring --base-path \"$PREFIX/data\""
+echo "Or run just the chain node/miner directly (mines by default):"
+echo "  gpn-node --chain $NETWORK --base-path \"$PREFIX/data\""
+echo ""
+echo "ollama (REQUIRED to serve LLM jobs; mining works without it):"
+echo "  installed user-local → $PREFIX/ollama/bin/ollama  (models in $PREFIX/models)"
+echo "  keep it running:  OLLAMA_MODELS=$PREFIX/models $PREFIX/ollama/bin/ollama serve &"
+echo "  re-run/repair:    ./scripts/install-ollama.sh"
+echo "  check:            curl -s http://127.0.0.1:11434/api/tags"
 echo
 echo "Lighter option — mine against a remote node (positional args):"
 echo "  gpn_external_miner <rpc_url> [device_index] [batch] [poll_ms]"

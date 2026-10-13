@@ -19,8 +19,24 @@ use gpn_agent::chain::ChainClient;
 use gpn_agent::llm::{get_job, run_inference, set_response, LlmStore};
 use std::collections::HashMap;
 use std::io::Read as _;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
+
+/// Warn **once** (not every poll) that ollama is missing, so a box without it
+/// logs a single clear, actionable message instead of spamming pull failures.
+static OLLAMA_WARNED: AtomicBool = AtomicBool::new(false);
+fn warn_ollama_missing_once() {
+    if !OLLAMA_WARNED.swap(true, Ordering::Relaxed) {
+        eprintln!("[provider] ⚠️  {}", gpn_agent::llm::infer::ollama_missing_hint());
+    }
+}
+
+/// True when the error string is the "ollama not running" sentinel (which was
+/// already warned about), so callers stay quiet for it.
+fn is_ollama_unavailable(e: &str) -> bool {
+    e == gpn_agent::llm::infer::OLLAMA_UNAVAILABLE
+}
 
 /// Per-job count of consecutive polls where the job was *absent* from chain
 /// state. Bounds the fast path's optimistic claiming: a job that never appears
@@ -146,6 +162,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for m in baseline.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         match ensure_model(m) {
             Ok(note) => println!("[provider] baseline: {note}"),
+            Err(e) if is_ollama_unavailable(&e) => {}
             Err(e) => eprintln!("[provider] baseline {m}: {e}"),
         }
     }
@@ -457,6 +474,12 @@ fn ensure_model(model: &str) -> Result<String, String> {
         .timeout(Duration::from_secs(3600))
         .build()
         .map_err(|e| e.to_string())?;
+    // Preflight: without ollama there is nothing to pull. Warn once, clearly,
+    // and bail with a sentinel the callers suppress (no per-poll spam).
+    if !gpn_agent::llm::infer::ollama_reachable() {
+        warn_ollama_missing_once();
+        return Err(gpn_agent::llm::infer::OLLAMA_UNAVAILABLE.to_string());
+    }
     // 1. already present?
     if let Ok(r) = cli.get(format!("{base}/api/tags")).send() {
         if let Ok(v) = r.json::<serde_json::Value>() {
@@ -641,7 +664,9 @@ async fn process_once(
             }
             let _ = pull;
             if let Err(e) = ensure_model(model) {
-                eprintln!("[provider] job #{id}: {e}");
+                if !is_ollama_unavailable(&e) {
+                    eprintln!("[provider] job #{id}: {e}");
+                }
             }
         }
         assigned
