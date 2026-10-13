@@ -35,7 +35,9 @@ impl GpuYieldGuard {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = std::fs::write(&path, b"1");
+        if let Err(e) = std::fs::write(&path, b"1") {
+            eprintln!("[gpu-yield] acquire write {} failed: {e}", path.display());
+        }
         Self { path }
     }
 }
