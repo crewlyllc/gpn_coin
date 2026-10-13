@@ -9,6 +9,10 @@ on:
 env:
   RUST_TOOLCHAIN: 1.98.1
 
+permissions:
+  actions: write
+  contents: write   # to publish downloadable GitHub Releases
+
 jobs:
   build:
     strategy:
@@ -48,6 +52,7 @@ jobs:
 
       - name: upload
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: gpn-${{ runner.os }}
           retention-days: 3
@@ -55,3 +60,24 @@ jobs:
             gpn-agent/target/release/gpn_*
             gpn-node/target/release/gpn-node
           if-no-files-found: error
+
+      - name: publish GitHub Release (rolling '<os>-latest')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eo pipefail
+          os=$(echo "$RUNNER_OS" | tr '[:upper:]' '[:lower:]')
+          tag="${os}-latest"
+          asset="gpn-${os}.tar.gz"
+          tar -czf "$RUNNER_TEMP/$asset" gpn-agent/target/release/gpn_* gpn-node/target/release/gpn-node
+          hdr=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json")
+          relid=$(curl -s "${hdr[@]}" "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$tag" | jq -r '.id // empty')
+          if [ -z "$relid" ]; then
+            curl -s "${hdr[@]}" -X POST "https://api.github.com/repos/$GITHUB_REPOSITORY/releases" -d "{\"tag_name\":\"$tag\",\"name\":\"GPN ${os} (latest)\",\"target_commitish\":\"main\"}" >/dev/null
+            relid=$(curl -s "${hdr[@]}" "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$tag" | jq -r '.id')
+          fi
+          asid=$(curl -s "${hdr[@]}" "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/$relid/assets" | jq -r ".[] | select(.name==\"$asset\") | .id")
+          [ -n "$asid" ] && curl -s "${hdr[@]}" -X DELETE "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$asid" >/dev/null || true
+          curl -s "${hdr[@]}" -H "Content-Type: application/gzip" --data-binary "@$RUNNER_TEMP/$asset" "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$relid/assets?name=$asset" >/dev/null
+          echo "published $tag / $asset"

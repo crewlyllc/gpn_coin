@@ -11,8 +11,8 @@ env:
   LIBCLANG_PATH: "C:\\Program Files\\LLVM\\bin"
 
 permissions:
-  actions: write   # to prune old artifacts
-  contents: read
+  actions: write    # to prune old artifacts
+  contents: write   # to publish downloadable GitHub Releases
 
 jobs:
   windows:
@@ -109,3 +109,26 @@ jobs:
           Copy-Item 'gpn-node\target\release\gpn-node.exe' $dst -Force
           Write-Host "deployed to $dst :"
           Get-ChildItem $dst -Filter *.exe | ForEach-Object { Write-Host "  $($_.Name)  $([math]::Round($_.Length/1MB,1))MB" }
+
+      - name: publish GitHub Release (rolling 'windows-latest')
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $h = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent' = 'gpn-ci'; 'Accept' = 'application/vnd.github+json' }
+          $repo = $env:GITHUB_REPOSITORY
+          $tag = 'windows-latest'
+          $zip = Join-Path $env:RUNNER_TEMP 'gpn-windows.zip'
+          $files = @((Get-ChildItem 'gpn-agent\target\release\*.exe').FullName) + @((Get-Item 'gpn-node\target\release\gpn-node.exe').FullName)
+          Compress-Archive -Path $files -DestinationPath $zip -Force
+          $rel = $null
+          try { $rel = Invoke-RestMethod -Headers $h "https://api.github.com/repos/$repo/releases/tags/$tag" } catch {}
+          if (-not $rel) {
+            $body = @{ tag_name=$tag; name='GPN Windows (latest)'; body="Rolling GPN Windows build. commit $env:GITHUB_SHA"; draft=$false; prerelease=$false; target_commitish='main' } | ConvertTo-Json
+            $rel = Invoke-RestMethod -Method Post -Headers $h -ContentType 'application/json' "https://api.github.com/repos/$repo/releases" -Body $body
+          }
+          foreach ($a in $rel.assets) { if ($a.name -eq 'gpn-windows.zip') { Invoke-RestMethod -Method Delete -Headers $h $a.url | Out-Null } }
+          $bytes = [System.IO.File]::ReadAllBytes($zip)
+          $up = Invoke-RestMethod -Method Post -Headers $h -ContentType 'application/zip' -Body $bytes "https://uploads.github.com/repos/$repo/releases/$($rel.id)/assets?name=gpn-windows.zip"
+          Write-Host "release: $($rel.html_url)  asset: $($up.browser_download_url)  ($([math]::Round($up.size/1MB,1))MB)"
