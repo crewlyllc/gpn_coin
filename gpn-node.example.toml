@@ -1,0 +1,41 @@
+# gpn-node.example.toml — example config for the GPN single-node supervisor
+# (task #25). Copy to ~/.gpn/node.toml (or ./gpn-node.toml) and edit.
+# Every field can also be set — and overridden — via a GPN_* env var.
+# See docs/run-a-node.md for the full reference.
+#
+# SECURITY: this file may contain a signer seed and the assign token. Keep it
+# chmod 600 and out of the repo. Prefer env vars / a systemd EnvironmentFile
+# for secrets.
+
+# ── role ────────────────────────────────────────────────────────────────────
+# mine     = chain node/miner only
+# provider = heartbeat + provider loop(s) only
+# both     = everything (default)
+role = "both"
+
+# ── node / miner ────────────────────────────────────────────────────────────
+chain     = "testnet"                    # testnet | mainnet | dev | <path to chain-spec.json>
+signer    = "//Alice"                    # sr25519 URI or seed (authoring key + provider identity)
+account   = ""                           # payout / advertised ss58 address (optional)
+base_path = "~/.gpn/node"
+rpc_port  = 9944
+node_key  = ""                           # 64-hex ed25519 network key (the node requires one)
+bootnodes = []                           # e.g. ["/ip4/23.241.109.255/tcp/30333/p2p/12D3KooW…"]
+author    = ""                           # short authoring key name → --<name> (e.g. "alice")
+node_args = ["--no-telemetry", "--no-prometheus"]
+
+# ── provider ────────────────────────────────────────────────────────────────
+endpoint          = "ws://127.0.0.1:9944"                    # chain RPC the provider loop uses
+provider_endpoint = ""                                       # public /status URL advertised on-chain
+assign_token      = ""                                       # shared AP<->provider secret (GPN_ASSIGN_TOKEN)
+ollama            = "http://127.0.0.1:11434"
+listen            = "0.0.0.0:8093"
+gflops            = 0
+capacity          = 1
+poll_ms           = 300
+diffusion         = false
+diffusion_poll_ms = 2000
+
+# ── supervisor ──────────────────────────────────────────────────────────────
+# bin_dir     = "~/.local/bin"   # dir holding the child binaries (default: dir of gpn_node)
+# status_secs = 15               # aggregated status-line interval

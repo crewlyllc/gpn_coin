@@ -115,7 +115,7 @@ cargo build --release --manifest-path "$SRC/gpn-agent/Cargo.toml" --bins
 log "installing binaries → $BIN_DIR"
 mkdir -p "$BIN_DIR"
 ln -sf "$SRC/gpn-node/target/release/gpn-node" "$BIN_DIR/gpn-node"
-for b in gpn_gpu_mine gpn_external_miner gpn_gpu_compute gpn_simulate_autoswitch gpn_pull_model gpn_snapshot; do
+for b in gpn_node gpn_provider_status gpn_llm_provider gpn_diffusion_provider gpn_gpu_mine gpn_external_miner gpn_gpu_compute gpn_simulate_autoswitch gpn_pull_model gpn_snapshot; do
   [ -f "$SRC/gpn-agent/target/release/$b" ] && ln -sf "$SRC/gpn-agent/target/release/$b" "$BIN_DIR/$b"
 done
 
@@ -147,7 +147,11 @@ EOF
 # 7 ── Done ──────────────────────────────────────────────────────────────────
 log "installed. wallet: $WALLET"
 echo
-echo "Start earning (full node — self-mines on GPU, serves AI compute):"
+echo "Start earning (ONE command — supervised node + miner + AI provider):"
+echo "  GPN_SIGNER=<your-key> GPN_AUTHOR=alice gpn_node --role both"
+echo "  (config + env reference: docs/run-a-node.md)"
+echo
+echo "Or run just the chain node/miner directly:"
 echo "  gpn-node --chain $NETWORK --force-authoring --base-path \"$PREFIX/data\""
 echo
 echo "Lighter option — mine against a remote node (positional args):"
