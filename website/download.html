@@ -174,6 +174,21 @@ ollama pull llama3.2:1b</code></pre>
           </div>
         </div>
       </div>
+
+      <div class="callout" style="margin-top:20px">
+        <span class="ct">AMD / Radeon (ROCm)</span>
+        <p class="mb-0">AMD is a first-class vendor: <b>mining</b> uses vendor-agnostic <b>OpenCL</b>
+          (<code>rocm-opencl-runtime</code>, then reboot), and detection is automatic via
+          <code>rocm-smi</code>/<code>lspci</code> on Linux or <code>Win32_VideoController</code> on Windows
+          — so <code>gpu_class</code>/<code>vram_mb</code>/<code>tflops</code> are correct on AMD.</p>
+        <p class="mb-0" style="margin-top:8px">For <b>serving LLMs</b>, on <b>Linux</b> ollama runs on
+          <b>ROCm</b> (RX 6000/7000 supported; if you hit <i>"unsupported gfx"</i> pin
+          <code>HSA_OVERRIDE_GFX_VERSION=11.0.0</code> for RX 7000 / <code>10.3.0</code> for RX 6000):</p>
+        <pre style="margin-top:8px"><code>./scripts/install-ollama-amd.sh</code></pre>
+        <p class="mb-0" style="margin-top:8px">On <b>Windows</b>, ollama's ROCm support is limited — an AMD box often falls back
+          to the <b>CPU</b> (slow) or needs a DirectML build. <b>Mining still works</b>; just expect higher LLM latency.
+          Prefer Linux for full AMD GPU serving.</p>
+      </div>
     </div>
   </section>
 

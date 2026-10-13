@@ -73,6 +73,65 @@ The baseline model(s) can be overridden with `GPN_BASELINE_MODELS`
 (default `llama3.2:1b,qwen2.5:0.5b`). When ollama is down the provider logs a
 **single** actionable warning (never a per-poll `pull … failed` spam).
 
+## AMD / Radeon support (ROCm)
+
+GPN is GPU-native and supports **AMD** as a first-class vendor alongside NVIDIA.
+Two independent things use the GPU, and they have different requirements:
+
+| Use | Needs | Notes |
+|-----|-------|-------|
+| **Mining** (Ethash) | an **OpenCL** ICD | vendor-agnostic — AMD, NVIDIA, Intel all mine. Install `rocm-opencl-runtime` on Linux (then reboot). |
+| **Serving LLMs** (ollama) | an ollama-supported backend | Linux: **ROCm**; Windows: limited → often **CPU** fallback. |
+
+**GPU detection is automatic and vendor-agnostic.** The heartbeat
+(`gpn_provider_status`) and the node probe the local GPU and advertise
+`gpu_class` (`discrete`/`integrated`/`unknown`), `vram_mb`, and an FP32 `tflops`
+estimate so the min-GPU gate (#19) and the scheduler route correctly:
+
+* Linux — `nvidia-smi`, then **`rocm-smi`** (`--showproductname`,
+  `--showmeminfo vram`), then `lspci` + `/sys/class/drm`.
+* Windows — `Win32_VideoController` (`Get-CimInstance` / `wmic`) for name +
+  `AdapterRAM`. ⚠️ Windows caps `AdapterRAM` at 4 GiB, so set `--vram-mb` (or
+  `VRAM_MB`) to the real figure for big cards.
+
+Override anything with `--gpu-class`/`--tflops`/`--vram-mb` (or the `GPU_CLASS`,
+`TFLOPS`, `VRAM_MB` env vars).
+
+### Serving LLMs on AMD (Linux — ROCm)
+
+```bash
+# 1) the OpenCL ICD (mining) + the ROCm runtime (ollama):
+sudo apt install rocm-opencl-runtime          # mining; then reboot
+# 2) bring ollama up on ROCm (installs, starts, pulls the baseline):
+./scripts/install-ollama-amd.sh
+```
+
+Ollama's bundled ROCm supports a **subset** of AMD cards (RDNA2/RDNA3 — RX
+6000/7000 series, plus some older GCN). If it errors with *"unsupported gfx"*,
+pin the compute target **before** `ollama serve`:
+
+```bash
+export HSA_OVERRIDE_GFX_VERSION=11.0.0   # RX 7000 (gfx1100/1101/1102)
+# export HSA_OVERRIDE_GFX_VERSION=10.3.0  # RX 6000 (gfx1030/1031/1032)
+ollama serve
+```
+
+Confirm GPU inference (not CPU): `ollama ps` (the `PROCESSOR` column should say
+`ROCm`/`GPU`) — or `grep -i 'inference compute' ~/.gpn/ollama.log`.
+
+### Windows + AMD (ROCm is limited)
+
+On Windows, ollama's ROCm support is limited/experimental. In practice an AMD
+Windows box either **(a)** runs ollama on the **CPU — correct but slow**, or
+**(b)** needs a DirectML/ROCm build if one exists for the card. **Mining is
+unaffected** (pure OpenCL). This is why an AMD **Windows** box may show high
+latency on LLM jobs even though it mines fine — set expectations (small models,
+quantized) and prefer **Linux** for full AMD GPU serving.
+
+> **CPU-fallback caveat:** when ollama cannot use the GPU it silently falls back
+to the CPU, giving ~10–50× lower token/s. The node still works and still mines;
+just budget latency accordingly.
+
 ## What it starts (always)
 
 | Child       | Process                                                                    | Log prefix  |

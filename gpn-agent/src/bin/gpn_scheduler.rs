@@ -2151,6 +2151,26 @@ mod tests {
     }
 
     #[test]
+    fn pick_gate_recognises_amd_discrete_and_igpu() {
+        // item #27: the same gate must work for AMD. Build a provider profile
+        // straight from an AMD model name via the shared detection helpers.
+        let mk_amd = |addr: &str, url: &str, lat: u64, name: &str| {
+            let mut p = prov(addr, url, lat, "llama3.2:1b");
+            p.gpu_class = gpn_agent::gpu::classify_gpu_name(name).to_string();
+            p.tflops = gpn_agent::gpu::estimate_tflops(name);
+            p
+        };
+        // An AMD RX 7900 XTX is a discrete dGPU → admitted by the class flag.
+        let dgpu = mk_amd("amd-d", "http://d", 50, "AMD Radeon RX 7900 XTX");
+        assert_eq!(dgpu.gpu_class, "discrete");
+        assert!(pick(&vec![dgpu], 0, 0, 0, 3.0, "llama3.2:1b", 0, &RttOverrides::new()).is_some());
+        // An AMD APU (Radeon Graphics) is integrated + sub-floor → excluded.
+        let igpu = mk_amd("amd-i", "http://i", 1, "AMD Radeon(TM) Graphics");
+        assert_eq!(igpu.gpu_class, "integrated");
+        assert!(pick(&vec![igpu], 0, 0, 0, 3.0, "llama3.2:1b", 0, &RttOverrides::new()).is_none());
+    }
+
+    #[test]
     fn write_assignment_records_the_callback_for_result_return() {
         // Item #14: the assignment record must carry the AP callback URL so a
         // remote provider knows where to POST the finished result.

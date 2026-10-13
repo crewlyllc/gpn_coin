@@ -193,6 +193,19 @@ curl http://127.0.0.1:8092/providers  # live registry (gflops, latency_ms, model
           providers from the chain.</p></div>
       </div>
 
+      <div class="callout" style="margin-top:16px">
+        <span class="ct">AMD / Radeon boxes</span>
+        <p class="mb-0"><b>Mining</b> is vendor-agnostic (OpenCL) — install <code>rocm-opencl-runtime</code>
+          on Linux (then reboot) or the AMD/OpenCL driver on Windows; a GPU node detects the card
+          automatically (<code>rocm-smi</code>/<code>lspci</code>, or <code>Win32_VideoController</code>) so
+          <code>gpu_class</code>/<code>vram_mb</code>/<code>tflops</code> are accurate.</p>
+        <p class="mb-0" style="margin-top:8px"><b>Serving LLMs</b> differs by OS: on <b>Linux</b> ollama runs on
+          <b>ROCm</b> (RX 6000/7000; pin <code>HSA_OVERRIDE_GFX_VERSION=11.0.0</code> / <code>10.3.0</code> if you
+          see <i>"unsupported gfx"</i>) — use <code>./scripts/install-ollama-amd.sh</code>. On <b>Windows</b>,
+          ollama's ROCm support is limited, so an AMD box often falls back to the <b>CPU</b> (slow) or a DirectML
+          build: it <b>mines</b> fine but LLM jobs are latency-heavy. Prefer Linux for full AMD GPU serving.</p>
+      </div>
+
       <div class="field" style="margin-top:20px">
         <label for="cmd-win">Run it</label>
         <pre id="cmd-win"><code>.\run-windows-provider.ps1 -Signer "&lt;your seed or //Alice&gt;" `

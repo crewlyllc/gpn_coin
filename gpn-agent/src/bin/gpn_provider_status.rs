@@ -25,7 +25,7 @@
 //! Env: LISTEN, ADDRESS, GFLOPS, MODELS, CAPACITY, ACTIVE, GPN_OLLAMA
 
 use serde_json::json;
-use gpn_agent::gpu::detect_gpu_capability;
+use gpn_agent::gpu::{detect_gpu_capability, detect_vram_mb};
 use gpn_agent::llm::{LlmJob, LlmStore};
 use std::time::Duration;
 use tiny_http::{Header, Method, Response, Server};
@@ -101,25 +101,6 @@ fn write_assignment(job_id: u64, rec: serde_json::Value) -> std::io::Result<()> 
         let _ = std::fs::create_dir_all(dir);
     }
     std::fs::write(&path, serde_json::Value::Object(m).to_string())
-}
-
-/// Total VRAM (MiB) of the first NVIDIA GPU via `nvidia-smi`; 0 if unknown.
-fn detect_vram_mb() -> u64 {
-    let out = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
-        .output()
-        .ok();
-    if let Some(o) = out {
-        if o.status.success() {
-            let s = String::from_utf8_lossy(&o.stdout);
-            if let Some(line) = s.lines().next() {
-                if let Ok(mb) = line.trim().parse::<u64>() {
-                    return mb;
-                }
-            }
-        }
-    }
-    0
 }
 
 /// Total system RAM (MiB) from `/proc/meminfo`; 0 if unknown (e.g. Windows).
