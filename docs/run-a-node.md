@@ -207,12 +207,40 @@ diffusion    = false                               # also run gpn_diffusion_prov
 | `GPN_DIFFUSION_POLL_MS` | diffusion poll interval | `2000` |
 | `GPN_BIN` | dir holding the child binaries | dir of `gpn_node` |
 | `GPN_STATUS_SECS` | status-line interval | `15` |
+| `GPN_STALL_SECS` | sync-stall watchdog: restart node after `best` frozen this long (min 60) | `300` |
+| `GPN_STALL_CHECK_SECS` | sync-stall watchdog poll interval (min 10) | `60` |
 | `GPN_CONFIG` | config-file path | _(see search order)_ |
 
 > **Secrets stay in the environment.** `gpn_node` reads the signer/seed and the
 > assign token from env / the config file and never writes them anywhere. Put
 > the token in `GPN_ASSIGN_TOKEN` (or the service `EnvironmentFile`), and keep
 > the config file `chmod 600`.
+
+### Sync-robustness defaults (why your node won't wedge)
+
+GPN has **no finality gadget** — the finalized head stays at `#0`. That breaks
+both of the things a node normally leans on to sync, so `gpn_node` bakes in the
+one reliable combination (**on by default, overridable via `GPN_NODE_ARGS` /
+`node_args`**):
+
+| Flag | Why |
+|------|-----|
+| `--sync full` | `fast`/`warp` build their proof from a **finalized** block; with no finality they burst then stall early. (`full` is also the node default, but we pin it explicitly so a stray `--sync fast` can't re-introduce the wedge.) |
+| `--state-pruning archive` | The node default is `256`, pruned **relative to finality** — i.e. it discards state almost immediately on GPN, so a peer that asks for it gets *"State already discarded"*, the peer bans us, and our best block freezes. `archive` never discards state. |
+| `--blocks-pruning archive` | Same finality-relative problem for block bodies (default `archive-canonical`). `archive` keeps every body so we can always serve a syncing peer. |
+
+Archive is cheap here (the whole testnet DB is well under a gigabyte); there is
+no reason to prune on a chain this small.
+
+> ⚠️ **Legacy DB caveat.** Substrate **locks the state-pruning mode into the DB
+> at first creation**, and requesting `archive` on a DB that was created with
+> the old `256` default **hard-fails**:
+> `Incompatible pruning modes [stored: Constrained { max_blocks: Some(256) };
+> requested: ArchiveAll]`.
+> So `gpn_node` applies the `archive` default **only to a fresh data dir**. If it
+> finds an existing DB it leaves pruning untouched and logs a warning — that DB
+> must be **re-created** (see the Troubleshooting entry below) before it can be
+> stall-proof.
 
 ## What the supervisor does
 
@@ -292,6 +320,82 @@ it as a service, wrap `gpn_node.exe` with NSSM / a Windows Service.
 > Only the single designated author should mine. Every node mines by default
 > (`gpn-node` is an authority miner on its own key — no `--force-authoring`
 > needed); the flag is accepted but no longer required.
+
+## Watchdog — auto-recover a silently wedged node
+
+GPN has no finality, so a node can stay **p2p-connected** while its best block
+silently freezes (see the Troubleshooting entry below). `gpn_node` watches for
+exactly this: it polls the node's own RPC (`chain_getHeader` → best number)
+every `GPN_STALL_CHECK_SECS` (default **60 s**). If `best` is **unchanged for
+more than `GPN_STALL_SECS` (default 300 s = 5 min)** *while at least one peer is
+connected*, it logs a loud `SYNC STALL` alert and **restarts the node child**
+(SIGTERM → the supervisor restarts it with its normal backoff → it re-syncs).
+
+It is deliberately conservative so it never fights healthy behaviour:
+
+* normal syncing advances `best` on every check → never triggers;
+* if the node's RPC isn't answering yet (startup / mid-restart) the clock is
+  **reset**, not counted;
+* with **zero** peers it logs but does **not** restart (a peerless node can't
+  sync anyway — that's a different problem);
+* after a restart it resets its timer, so it can't spiral into a tight kill loop.
+
+Tune it with `GPN_STALL_SECS` (min 60) and `GPN_STALL_CHECK_SECS` (min 10).
+
+## Troubleshooting — node connected but not syncing
+
+**Symptom.** The node shows peers at the p2p layer — `system_peers` lists them as
+`FULL`/`AUTHORITY` — but its **best block is frozen** while the network head
+keeps advancing. `system_syncState` shows `currentBlock` stuck. Logs may show
+`State already discarded` followed by `Same block request multiple times.
+Banned, disconnecting` — the sync peer bans the node, it has no other peer, and
+it never imports another block. This is the *silent wedge*.
+
+**Mechanism (why).** GPN has **no finality gadget** — the finalized head is
+`#0` forever. Two things then go wrong:
+
+1. **Finality-relative pruning.** The node's default pruning is
+   `--state-pruning 256` / `--blocks-pruning archive-canonical`, both measured
+   *from the finalized block*. With finality pinned at `#0`, the node discards
+   state and block bodies almost immediately. A peer that requests them gets
+   *"State already discarded"*, the request repeats, and the peer bans us.
+2. **Finality-dependent sync modes.** `--sync fast` / `warp` need a *finalized*
+   block to build their state proof. With no finality they burst for a moment
+   then stall early.
+
+Because the node loses its only peer to a ban, it can no longer sync and its
+best block freezes — while still looking "connected" in the peer list.
+
+**Fix.** Run with the reliable combination (which `gpn_node` now defaults to):
+
+```bash
+gpn-node --chain testnet --base-path ~/.gpn/node --sync full \
+  --state-pruning archive --blocks-pruning archive …
+```
+
+**If the node already has a (legacy `256`) DB**, the pruning mode is locked in
+and `archive` will hard-fail — re-create the data dir and let it re-sync, or
+import a fresh **archive** DB snapshot (fast — see
+[`docs/fast-sync.md`](fast-sync.md)):
+
+```bash
+# option A — re-sync from scratch (keep the node key / config):
+mv ~/.gpn/node/chains/gpn_testnet/db ~/.gpn/node/chains/gpn_testnet/db.old
+#   …then restart gpn_node: it creates a FRESH archive DB and full-syncs.
+
+# option B — fast onboarding from a snapshot (recommended for a slow box):
+scripts/gpn-snapshot.sh import --snapshot gpn-testnet-<tip>.tar.gz --base-path ~/.gpn/node --force
+```
+
+On Windows, stop the `gpn*` processes first; see the fast-sync doc and
+`docs/downloads.md` for the snapshot URL.
+
+> **Deeper root cause:** this failure mode only exists because GPN has **no
+> finality gadget**. Archive pruning + `--sync full` are the correct *workaround*
+> and make nodes robust today, but the *real* fix is to add finality at mainnet
+> — see the finality-gadget design cross-reference in
+> [`docs/mainnet-launch-runbook.md`](mainnet-launch-runbook.md). Until then,
+> assume no finality and never rely on `finalized #> 0`.
 
 ## Fault isolation / why separate processes
 

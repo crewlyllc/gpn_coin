@@ -134,6 +134,20 @@ fn split_list(s: &str) -> Vec<String> {
         .collect()
 }
 
+/// True if any `<base_path>/chains/*/db` already exists (a pre-existing DB).
+fn existing_db(base_path: &Option<String>) -> bool {
+    let Some(bp) = base_path else { return false };
+    let chains = PathBuf::from(bp).join("chains");
+    let Ok(rd) = std::fs::read_dir(&chains) else { return false };
+    rd.flatten().any(|e| e.path().join("db").is_dir())
+}
+
+/// Does the node-args list already contain this flag (exact or `flag=`)?
+fn has_flag(args: &[String], flag: &str) -> bool {
+    args.iter()
+        .any(|a| a == flag || a.starts_with(&format!("{flag}=")))
+}
+
 /// Expand a leading `~` to `$HOME`.
 fn expand_tilde(p: &str) -> String {
     if let Some(rest) = p.strip_prefix("~/") {
@@ -475,6 +489,100 @@ fn best_block(rpc_port: u16) -> Option<u64> {
     u64::from_str_radix(hex.trim_start_matches("0x"), 16).ok()
 }
 
+/// Cheaply read the node's connected-peer count from its own HTTP JSON-RPC.
+fn peer_count(rpc_port: u16) -> Option<u64> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(1200))
+        .build()
+        .ok()?;
+    let body = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"system_health","params":[]});
+    let resp: serde_json::Value = client
+        .post(format!("http://127.0.0.1:{rpc_port}"))
+        .json(&body)
+        .send()
+        .ok()?
+        .json()
+        .ok()?;
+    resp.get("result")?.get("peers")?.as_u64()
+}
+
+/// Sleep `ms` in small steps so shutdown stays prompt (returns early if set).
+fn sleep_steps(shutdown: &Arc<AtomicBool>, ms: u64) {
+    let mut left = ms;
+    while left > 0 && !shutdown.load(Ordering::SeqCst) {
+        let s = 200.min(left);
+        std::thread::sleep(Duration::from_millis(s));
+        left -= s;
+    }
+}
+
+/// Sync-stall watchdog ("never silently wedge again"). GPN has no finality, so a
+/// node can stay p2p-connected while its best block silently freezes (a
+/// state/block request loop → the sync peer bans it → it can't sync from its
+/// only peer). If the node's best is unchanged for `GPN_STALL_SECS` (default
+/// 300s) while ≥1 peer is connected, log a clear alert and restart the node
+/// child (via SIGTERM — the supervisor then restarts it with backoff, and it
+/// re-syncs). Normal syncing advances `best` every check, so it never triggers;
+/// a node whose RPC isn't answering yet resets the clock rather than counting.
+fn spawn_stall_watchdog(cfg: &Config, shared: Shared, shutdown: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
+    let port = cfg.rpc_port;
+    std::thread::spawn(move || {
+        let stall = Duration::from_secs(env_u64("GPN_STALL_SECS").unwrap_or(300).max(60));
+        let check = Duration::from_secs(env_u64("GPN_STALL_CHECK_SECS").unwrap_or(60).max(10));
+        let mut last_best: Option<u64> = None;
+        let mut last_change = Instant::now();
+        while !shutdown.load(Ordering::SeqCst) {
+            sleep_steps(&shutdown, check.as_millis() as u64);
+            if shutdown.load(Ordering::SeqCst) {
+                break;
+            }
+            match best_block(port) {
+                None => {
+                    // RPC not ready (starting / restarting) — don't count as stall.
+                    last_change = Instant::now();
+                }
+                Some(b) => {
+                    if last_best != Some(b) {
+                        last_best = Some(b);
+                        last_change = Instant::now();
+                    } else if last_change.elapsed() >= stall {
+                        let (node_up, pid) = {
+                            let m = shared.lock().unwrap();
+                            m.get("node")
+                                .map(|s| (s.up, s.pid))
+                                .unwrap_or((false, 0))
+                        };
+                        let peers = peer_count(port).unwrap_or(0);
+                        if node_up && peers >= 1 && pid != 0 {
+                            log_event(
+                                "watchdog",
+                                &format!(
+                                    "SYNC STALL: best frozen at #{b} for {}s with {peers} peer(s) connected \
+                                     — restarting node child (pid {pid}) to re-sync (GPN has no finality; see \
+                                     docs/run-a-node.md)",
+                                    last_change.elapsed().as_secs()
+                                ),
+                            );
+                            send_term(pid);
+                        } else {
+                            log_event(
+                                "watchdog",
+                                &format!(
+                                    "best frozen at #{b} for {}s but peers={peers} node_up={node_up} — not restarting",
+                                    last_change.elapsed().as_secs()
+                                ),
+                            );
+                        }
+                        // Reset so we don't immediately re-trigger while it restarts.
+                        last_change = Instant::now();
+                    }
+                }
+            }
+        }
+        log_event("watchdog", "stall watchdog exiting");
+    })
+}
+
 fn status_line(cfg: &Config, shared: &Shared) -> String {
     let m = shared.lock().unwrap();
     let mut parts: Vec<String> = Vec::new();
@@ -534,6 +642,53 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
             argv.push("--public-addr".into());
             argv.push(pa.clone());
         }
+
+        // ── Sync-robustness defaults (see docs/run-a-node.md, "node connected
+        //    but not syncing"). GPN has NO finality gadget (finalized head stays
+        //    #0). That breaks the two things a node relies on to sync:
+        //      * the *finality-relative* default pruning (state-pruning=256,
+        //        blocks-pruning=archive-canonical) discards state/bodies almost
+        //        immediately, so a peer that asks for them gets nothing →
+        //        "State already discarded" → the peer bans us → best freezes; and
+        //      * the fast/warp sync modes need a finalized block for their proof.
+        //    So we default to the one reliable combination and keep it
+        //    overridable (GPN_NODE_ARGS / node_args wins):
+        //      --sync full
+        //      --state-pruning archive --blocks-pruning archive
+        //    Archive is cheap here (~0.4 GB testnet DB) and is the only mode that
+        //    never discards served state on a chain with no finality.
+        //
+        //    CAVEAT: Substrate locks the state-pruning mode into the DB at first
+        //    creation; requesting `archive` on a legacy `256` DB HARD-FAILS
+        //    ("Incompatible pruning modes"). So apply the archive default only to
+        //    a FRESH db dir; if a db already exists, leave its mode alone and warn
+        //    (the operator should re-create it — wipe, or import an archive
+        //    snapshot; see docs/fast-sync.md).
+        let db_exists = existing_db(&cfg.base_path);
+        if !has_flag(&cfg.node_args, "--sync") {
+            argv.push("--sync".into());
+            argv.push("full".into());
+        }
+        if !has_flag(&cfg.node_args, "--state-pruning")
+            && !has_flag(&cfg.node_args, "--blocks-pruning")
+            && !has_flag(&cfg.node_args, "--pruning")
+        {
+            if db_exists {
+                log_event(
+                    "node",
+                    "existing DB — leaving its pruning mode untouched (requesting archive would hard-fail; 
+                     Substrate locks pruning at DB creation). A legacy 256-pruned DB cannot serve state on a 
+                     finality-less chain; re-create it (wipe, or import a fresh *archive* snapshot) for 
+                     stall-proof syncing — see docs/run-a-node.md",
+                );
+            } else {
+                argv.push("--state-pruning".into());
+                argv.push("archive".into());
+                argv.push("--blocks-pruning".into());
+                argv.push("archive".into());
+            }
+        }
+
         argv.extend(cfg.node_args.iter().cloned());
 
         let mut envs = Vec::new();
@@ -717,6 +872,9 @@ async fn main() {
         }
     });
 
+    // Sync-stall watchdog (auto-recover a silently wedged node).
+    let watchdog_handle = spawn_stall_watchdog(&cfg, shared.clone(), shutdown.clone());
+
     // Wait for Ctrl-C or SIGTERM.
     wait_for_signal().await;
     println!("\n[supervisor] shutdown requested — stopping children…");
@@ -726,6 +884,7 @@ async fn main() {
         let _ = h.join();
     }
     let _ = status_handle.join();
+    let _ = watchdog_handle.join();
     println!("[supervisor] all children stopped — exiting");
 }
 

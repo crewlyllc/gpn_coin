@@ -114,3 +114,48 @@ Pick the format from the `--out` extension:
   install zstd`).
 * **`.tar.gz`** — pure-Rust (no external tools), so it always works (including
   the Windows box), at ~124 MiB / ~4.5 s.
+
+## 6. Snapshot pruning mode matters — export from an **archive** DB
+
+Substrate **locks the state-pruning mode into the DB at creation**, and a
+snapshot carries that mode with it. The node's legacy default
+`--state-pruning 256` (+ `--blocks-pruning archive-canonical`) prunes *relative
+to finality* — which GPN has none of — so a DB created with it **cannot serve
+state** and will **wedge** (see the "node connected but not syncing" entry in
+[`run-a-node.md`](run-a-node.md)).
+
+So when you export a snapshot, take it from a node that was started with
+`--state-pruning archive --blocks-pruning archive`:
+
+* importing a **legacy `256`** snapshot and then launching with the (default)
+  `archive` flags **hard-fails**:
+  `Incompatible pruning modes [stored: Constrained { max_blocks: Some(256) };
+  requested: ArchiveAll]`;
+* importing an **`archive`** snapshot and launching with the defaults just works,
+  and the node is stall-proof.
+
+`gpn_snapshot info`/`export` record the pruning mode in the manifest, so you can
+check before importing. Recommended snapshot URLs are listed in
+[`downloads.md`](downloads.md).
+
+## 7. Recovering a wedged node (Windows provider, "box #2")
+
+A node whose best block is frozen at an old height while peers stay connected
+(the "silent wedge") is fixed by giving it a **fresh, archive** DB and starting
+it with the robust defaults. On a Windows box, one copy-paste PowerShell block
+(adjust `$URL` / paths to the current snapshot from `downloads.md`;
+`$env:USERPROFILE\.gpn\node` is the default base-path):
+
+```powershell
+$URL='https://gpn-testnet.duckdns.org:8083/gpn-testnet-snapshot.tar.gz'; $BP="$env:USERPROFILE\.gpn\node"; $T="$env:TEMP\gpn-snap.tar.gz"; Get-Process gpn* -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep 3; Invoke-WebRequest $URL -OutFile $T; if (Test-Path $BP) { Rename-Item $BP "$BP.bak-$(Get-Date -f yyyyMMddHHmmss)" }; New-Item -ItemType Directory -Force -Path $BP | Out-Null; & "$env:USERPROFILE\.local\bin\gpn_snapshot.exe" import --snapshot $T --base-path $BP --force; & "$env:USERPROFILE\.local\bin\gpn_node.exe"
+```
+
+That stops every `gpn*` process, downloads the snapshot, backs up the old DB
+dir, imports the fresh **archive** DB, and starts `gpn_node` — which now defaults
+to `--sync full --state-pruning archive --blocks-pruning archive` and catches up
+only the last few blocks.
+
+**If no snapshot is available**, the equivalent manual recovery is to *wipe* the
+DB dir and let it re-sync from scratch (`Rename-Item $BP "$BP.old"` and restart)
+— slower, but with the new defaults it will sync all the way to the tip and not
+stall.
