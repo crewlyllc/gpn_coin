@@ -415,14 +415,16 @@ parameter_types! {
     pub const SilverUptimeBps: u32 = 9_000; // 90% rolling uptime
     pub const GoldUptimeBps: u32 = 9_500; // 95% rolling uptime
     /// Trusted account allowed to commit node-verified capacity-challenge
-    /// results (`GPUAttestation::confirm_challenge`). On testnet this is the
-    /// testnet ops key (`5HHSuwZ…`, the same account as `Sudo::Key`); the node
-    /// service task signs with it after verifying a provider's Ethash solution.
+    /// results (`GPUAttestation::confirm_challenge`). Rotated 2026-10-14 to
+    /// `5FyFZ2q…` after the previous testnet ops key (`5HHSuwZ…`) leaked via a
+    /// public file-server; this is now the **fallback default** only — the live
+    /// value is the mutable `GPUAttestation::ChallengeVerifierAccount` storage,
+    /// settable by root (`set_challenge_verifier`) without a WASM upgrade.
     /// Production should move this to a verifier committee.
     pub const ChallengeVerifierAccount: AccountId =
         AccountId::new([
-            230, 229, 13, 143, 173, 154, 12, 224, 119, 189, 6, 143, 87, 7, 111, 2, 69, 248, 181,
-            79, 167, 63, 112, 184, 213, 2, 219, 34, 215, 151, 82, 102,
+            172, 200, 40, 205, 18, 114, 142, 199, 132, 31, 247, 13, 27, 204, 208, 119, 90, 37,
+            194, 60, 91, 245, 24, 112, 39, 119, 151, 124, 23, 8, 148, 64,
         ]);
 }
 

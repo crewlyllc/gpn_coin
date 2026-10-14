@@ -174,6 +174,14 @@ pub mod pallet {
     #[pallet::storage]
     pub type AttestationChallenge<T: Config> = StorageValue<_, [u8; 32], ValueQuery>;
 
+    /// The trusted challenge-verifier account, **mutable at runtime** so it can
+    /// be rotated by root without a WASM upgrade. Falls back to the compile-time
+    /// `T::ChallengeVerifier` when unset (so a forkless upgrade needs no genesis
+    /// change or storage migration). Set via `set_challenge_verifier`.
+    #[pallet::storage]
+    pub type ChallengeVerifierAccount<T: Config> =
+        StorageValue<_, T::AccountId, ValueQuery, T::ChallengeVerifier>;
+
     /// The challenge each account has had its solution **node-verified** for.
     /// Stored separately from `Attestations` (no record-layout change, so live
     /// attestation records are untouched by the upgrade) and compared against
@@ -263,6 +271,10 @@ pub mod pallet {
         ChallengeConfirmed {
             who: T::AccountId,
             challenge: [u8; 32],
+        },
+        /// The trusted challenge-verifier account was rotated (root-only).
+        ChallengeVerifierSet {
+            who: T::AccountId,
         },
     }
 
@@ -496,6 +508,23 @@ pub mod pallet {
             Ok(())
         }
 
+        /// Set the trusted challenge-verifier account (root-only).
+        ///
+        /// Lets the verifier key be rotated without a runtime upgrade — e.g. after
+        /// a key leak. Writes the live `ChallengeVerifierAccount` storage, which
+        /// `confirm_challenge` consults (falling back to the compiled-in default).
+        #[pallet::call_index(5)]
+        #[pallet::weight(T::DbWeight::get().reads_writes(1, 1))]
+        pub fn set_challenge_verifier(
+            origin: OriginFor<T>,
+            who: T::AccountId,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            ChallengeVerifierAccount::<T>::put(&who);
+            Self::deposit_event(Event::<T>::ChallengeVerifierSet { who });
+            Ok(())
+        }
+
         /// Commit the result of a **node-verified** capacity-challenge solution.
         ///
         /// Verification itself is node-native (Ethash over the live
@@ -509,7 +538,7 @@ pub mod pallet {
         pub fn confirm_challenge(origin: OriginFor<T>, who: T::AccountId) -> DispatchResult {
             let signer = ensure_signed(origin)?;
             ensure!(
-                signer == T::ChallengeVerifier::get(),
+                signer == ChallengeVerifierAccount::<T>::get(),
                 Error::<T>::NotChallengeVerifier
             );
             let challenge = <AttestationChallenge<T>>::get();
@@ -1597,6 +1626,29 @@ mod tests {
             let result = AttestPallet::confirm_challenge(RuntimeOrigin::signed(ALICE), BOB);
             assert_eq!(result, Err(Error::<Test>::NotChallengeVerifier.into()));
             assert!(ChallengeVerified::<Test>::get(BOB).is_none());
+        });
+    }
+
+    #[test]
+    fn test_set_challenge_verifier_rotates_and_is_root_only() {
+        new_test_ext().execute_with(|| {
+            // Non-root rotation is rejected; storage stays at the compiled-in default.
+            let bad = AttestPallet::set_challenge_verifier(RuntimeOrigin::signed(ALICE), BOB);
+            assert!(bad.is_err());
+            assert_eq!(ChallengeVerifierAccount::<Test>::get(), VERIFIER);
+
+            // Root rotates the verifier (key-leak response).
+            AttestPallet::set_challenge_verifier(RuntimeOrigin::root(), BOB).unwrap();
+            assert_eq!(ChallengeVerifierAccount::<Test>::get(), BOB);
+
+            // The old verifier can no longer confirm...
+            let old = AttestPallet::confirm_challenge(RuntimeOrigin::signed(VERIFIER), ALICE);
+            assert_eq!(old, Err(Error::<Test>::NotChallengeVerifier.into()));
+            assert!(ChallengeVerified::<Test>::get(ALICE).is_none());
+
+            // ...but the new one can.
+            AttestPallet::confirm_challenge(RuntimeOrigin::signed(BOB), ALICE).unwrap();
+            assert!(ChallengeVerified::<Test>::get(ALICE).is_some());
         });
     }
 
