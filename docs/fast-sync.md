@@ -134,28 +134,34 @@ So when you export a snapshot, take it from a node that was started with
 * importing an **`archive`** snapshot and launching with the defaults just works,
   and the node is stall-proof.
 
-`gpn_snapshot info`/`export` record the pruning mode in the manifest, so you can
-check before importing. Recommended snapshot URLs are listed in
+`gpn_snapshot export` records the **genesis hash**, **best block** and a
+`sha256` in the manifest, so an importer can check the snapshot is for the right
+chain and the file isn't corrupt. (The pruning mode isn't a manifest field; it's
+determined by how the exporting node was started — so make sure you export from
+an `archive` node.) Recommended snapshot URLs are listed in
 [`downloads.md`](downloads.md).
 
 ## 7. Recovering a wedged node (Windows provider, "box #2")
 
 A node whose best block is frozen at an old height while peers stay connected
 (the "silent wedge") is fixed by giving it a **fresh, archive** DB and starting
-it with the robust defaults. On a Windows box, one copy-paste PowerShell block
-(adjust `$URL` / paths to the current snapshot from `downloads.md`;
-`$env:USERPROFILE\.gpn\node` is the default base-path):
+it with the robust defaults. On a Windows box, one copy-paste PowerShell line
+(adjust `$URL` to the current snapshot from `downloads.md`; it downloads from
+the AP at `gpn-testnet.duckdns.org:8083`, stops every `gpn*` process, swaps out
+only the `chains` DB dir — keeping the node identity/keystore — imports the
+fresh **archive** DB, and starts `gpn_node`):
 
 ```powershell
-$URL='https://gpn-testnet.duckdns.org:8083/gpn-testnet-snapshot.tar.gz'; $BP="$env:USERPROFILE\.gpn\node"; $T="$env:TEMP\gpn-snap.tar.gz"; Get-Process gpn* -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep 3; Invoke-WebRequest $URL -OutFile $T; if (Test-Path $BP) { Rename-Item $BP "$BP.bak-$(Get-Date -f yyyyMMddHHmmss)" }; New-Item -ItemType Directory -Force -Path $BP | Out-Null; & "$env:USERPROFILE\.local\bin\gpn_snapshot.exe" import --snapshot $T --base-path $BP --force; & "$env:USERPROFILE\.local\bin\gpn_node.exe"
+$URL='http://gpn-testnet.duckdns.org:8083/gpn-testnet-snapshot.tar.gz'; $BP="$env:USERPROFILE\.gpn\node"; Get-Process gpn* -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep 3; Invoke-WebRequest $URL -OutFile "$env:TEMP\gpn-snap.tar.gz"; if (Test-Path "$BP\chains") { Rename-Item "$BP\chains" "$BP\chains.bak-$(Get-Date -f yyyyMMddHHmmss)" }; New-Item -ItemType Directory -Force -Path "$BP\chains" | Out-Null; & "$env:USERPROFILE\.local\bin\gpn_snapshot.exe" import --snapshot "$env:TEMP\gpn-snap.tar.gz" --base-path $BP --force; & "$env:USERPROFILE\.local\bin\gpn_node.exe"
 ```
 
-That stops every `gpn*` process, downloads the snapshot, backs up the old DB
-dir, imports the fresh **archive** DB, and starts `gpn_node` — which now defaults
-to `--sync full --state-pruning archive --blocks-pruning archive` and catches up
-only the last few blocks.
+Only the `chains\` subdir is swapped, so the node's network identity
+(`network/secret_ed25519`) and keystore are preserved (a new peer-id would
+otherwise reset its on-chain full-node identity/uptime). `gpn_node` then
+defaults to `--sync full --state-pruning archive --blocks-pruning archive` and
+catches up only the last few blocks.
 
 **If no snapshot is available**, the equivalent manual recovery is to *wipe* the
-DB dir and let it re-sync from scratch (`Rename-Item $BP "$BP.old"` and restart)
-— slower, but with the new defaults it will sync all the way to the tip and not
-stall.
+chain dir and let it re-sync from scratch
+(`Rename-Item "$BP\chains" "$BP\chains.old"` and restart) — slower, but with
+the new defaults it syncs all the way to the tip without stalling.
