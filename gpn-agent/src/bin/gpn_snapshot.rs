@@ -13,7 +13,7 @@
 //! ```text
 //!   gpn_snapshot info   [--rpc URL]                       # what a snapshot would record (node up)
 //!   gpn_snapshot export --base-path <node dir> --out <file> [--chain-dir <dir>] [--meta <json>] [--allow-live]
-//!   gpn_snapshot import --snapshot <file> --base-path <dir> [--force]
+//!   gpn_snapshot import --snapshot <file> --base-path <dir> [--force] [--pruning archive|none]
 //! ```
 //!
 //! ## Safety — STOP THE NODE FIRST
@@ -218,6 +218,9 @@ struct Args {
     allow_live: bool,
     freeze: bool,
     force: bool,
+    /// Explicit pruning mode for `import`: `archive` or `none`. Overrides the
+    /// manifest. When absent, import defaults to `archive` (see `import`).
+    pruning: Option<String>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -266,6 +269,7 @@ fn parse_args() -> Result<Args, String> {
         allow_live: has("allow-live"),
         freeze: has("freeze"),
         force: has("force"),
+        pruning: get("pruning"),
     })
 }
 
@@ -273,7 +277,7 @@ fn usage() -> String {
     "usage:
   gpn_snapshot info   [--rpc URL] [--out meta.json]
   gpn_snapshot export --base-path <node dir> --out <file.tar.gz|.tar.zst> [--chain-dir <dir>] [--meta <json>] [--rpc URL] [--freeze] [--allow-live]
-  gpn_snapshot import --snapshot <file> --base-path <dir> [--force]
+  gpn_snapshot import --snapshot <file> --base-path <dir> [--force] [--pruning archive|none]
 ".to_string()
 }
 
@@ -700,14 +704,63 @@ fn import(a: &Args) -> Result<(), String> {
     // Record the source DB's pruning mode as our marker, so `gpn_node` knows an
     // imported *archive* DB is safe to run with `--state-pruning archive`
     // (without it, gpn_node conservatively leaves pruning alone).
-    if manifest.as_ref().and_then(|m| m.pruning.as_deref()) == Some("archive") {
-        write_pruning_marker(base);
-        println!(
-            "   pruning:      archive (marked {} for gpn_node)",
-            PRUNING_MARKER
-        );
+    //
+    // Resolution order:
+    //   1. explicit `--pruning archive|none` always wins;
+    //   2. else the manifest's own pruning field (a modern export records it);
+    //   3. else DEFAULT TO ARCHIVE. A `gpn_snapshot` export produced by a
+    //      modern `gpn-node` is archive (archive is our default pruning), and
+    //      manifests baked before the marker feature existed have no pruning
+    //      field at all — so an older snapshot would otherwise leave gpn_node
+    //      blind and it would refuse to mark the imported DB. Defaulting to
+    //      archive makes a pre-marker snapshot "just work".
+    let explicit = a.pruning.as_deref();
+    let manifest_mode = manifest.as_ref().and_then(|m| m.pruning.as_deref());
+    let defaulted = explicit.is_none() && manifest_mode.is_none();
+    let mode = effective_import_pruning(explicit, manifest_mode);
+    match mode.as_str() {
+        "archive" => {
+            write_pruning_marker(base);
+            if defaulted {
+                println!(
+                    "   pruning:      archive (no marker in the manifest \u{2014} assuming a modern \
+                     gpn-node export; marked {} for gpn_node)",
+                    PRUNING_MARKER
+                );
+            } else {
+                println!(
+                    "   pruning:      archive (marked {} for gpn_node)",
+                    PRUNING_MARKER
+                );
+            }
+        }
+        "none" => {
+            println!(
+                "   pruning:      left as-is (no {} marker written \u{2014} gpn_node will not force archive)",
+                PRUNING_MARKER
+            );
+        }
+        other => {
+            return Err(format!("--pruning {other}: expected 'archive' or 'none'"));
+        }
     }
     Ok(())
+}
+
+/// Resolve the pruning mode an `import` should stamp, in priority order:
+/// explicit `--pruning` value, else the manifest's `pruning` field, else the
+/// **archive** default (a `gpn_snapshot` export from a modern `gpn-node` is
+/// archive; older manifests carry no field). The returned value is
+/// lower-cased/trimmed; validation happens in the caller.
+fn effective_import_pruning(explicit: Option<&str>, manifest: Option<&str>) -> String {
+    let norm = |s: &str| s.trim().to_ascii_lowercase();
+    if let Some(e) = explicit {
+        return norm(e);
+    }
+    if let Some(m) = manifest {
+        return norm(m);
+    }
+    "archive".to_string()
 }
 
 fn extract<R: Read>(
@@ -804,5 +857,48 @@ fn main() {
     if let Err(e) = r {
         eprintln!("error: {e}");
         std::process::exit(1);
+    }
+}
+
+// ------------------------------------------------------------------ tests
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn import_pruning_defaults_to_archive_for_old_manifest() {
+        // Pre-marker export: manifest has NO pruning field → assume archive.
+        assert_eq!(effective_import_pruning(None, None), "archive");
+    }
+
+    #[test]
+    fn import_pruning_honours_manifest_field() {
+        // A manifest that DOES specify a mode is honoured (here: archive).
+        assert_eq!(effective_import_pruning(None, Some("archive")), "archive");
+        // ...including an explicit "none".
+        assert_eq!(effective_import_pruning(None, Some("none")), "none");
+    }
+
+    #[test]
+    fn import_pruning_explicit_flag_wins() {
+        // `--pruning none` overrides a manifest that says archive.
+        assert_eq!(
+            effective_import_pruning(Some("none"), Some("archive")),
+            "none"
+        );
+        // `--pruning archive` overrides a manifest that says none.
+        assert_eq!(
+            effective_import_pruning(Some("archive"), Some("none")),
+            "archive"
+        );
+        // ...even when the manifest has no field.
+        assert_eq!(effective_import_pruning(Some("none"), None), "none");
+    }
+
+    #[test]
+    fn import_pruning_normalises_case_and_space() {
+        assert_eq!(effective_import_pruning(Some(" Archive "), None), "archive");
+        assert_eq!(effective_import_pruning(None, Some("NONE")), "none");
     }
 }

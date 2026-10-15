@@ -135,6 +135,115 @@ fn split_list(s: &str) -> Vec<String> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Console encoding safety (legacy Windows consoles)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// When true, every line the supervisor prints is sanitised to ASCII (`?`/
+/// tokens in place of emoji) so it survives a legacy Windows console and a
+/// PowerShell `Tee-Object` pipeline that round-trips the text through the OEM
+/// code page — otherwise UTF-8 emoji mojibake (`ΓÜá∩╕Å`, `≡ƒÆñ`), even with
+/// `chcp 65001`. Off on Unix (modern terminals render UTF-8 fine).
+static ASCII_MODE: AtomicBool = AtomicBool::new(false);
+
+/// Turn ASCII-safe console output on/off (set once at startup).
+fn set_ascii_mode(on: bool) {
+    ASCII_MODE.store(on, Ordering::Relaxed);
+}
+
+/// Whether the supervisor is sanitising console output to ASCII.
+fn ascii_mode() -> bool {
+    ASCII_MODE.load(Ordering::Relaxed)
+}
+
+/// Decide the ASCII-console default: `--no-emoji` or `GPN_ASCII_LOG=1` force it
+/// on; `GPN_ASCII_LOG=0` forces it off; otherwise it defaults **on** on Windows
+/// (legacy consoles mojibake UTF-8) and **off** elsewhere.
+fn ascii_mode_default(argv: &[String]) -> bool {
+    if argv.iter().any(|a| a == "--no-emoji") {
+        return true;
+    }
+    match env_str("GPN_ASCII_LOG") {
+        Some(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+        None => cfg!(windows),
+    }
+}
+
+/// Map (or drop) a non-ASCII char to a safe ASCII token. Known symbols get a
+/// readable token; variation selectors / zero-width joiners are dropped; any
+/// other non-ASCII (e.g. an emoji) becomes `?`. Always returns ASCII.
+fn ascii_token(ch: char) -> &'static str {
+    match ch {
+        '⚠' => "!",
+        'ℹ' => "i",
+        '✅' => "[ok]",
+        '❌' | '✖' => "[x]",
+        '🚀' => "[go]",
+        '📦' => "[pkg]",
+        '🏆' => "[win]",
+        '💤' => "[zzz]",
+        '🔧' => "[fix]",
+        '🛑' => "[stop]",
+        // common typography → ASCII look-alikes (keeps messages readable)
+        '—' | '–' | '·' => "-",
+        '…' => "...",
+        '’' | '‘' => "'",
+        '“' | '”' => "\"",
+        '│' => "|",
+        '→' => "->",
+        '×' => "x",
+        // invisible/formatting code points: drop them
+        '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}' => "",
+        c if ('\u{FE00}'..='\u{FE0F}').contains(&c) => "", // variation selectors
+        _ => "?",
+    }
+}
+
+/// Return `s` unchanged if it is already ASCII, else a copy with every
+/// non-ASCII char replaced by a safe ASCII token (see [`ascii_token`]).
+fn to_ascii_safe(s: &str) -> String {
+    if s.is_ascii() {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if ch.is_ascii() {
+            out.push(ch);
+        } else {
+            out.push_str(ascii_token(ch));
+        }
+    }
+    out
+}
+
+/// `asciiprintln!` that honours ASCII mode. Used for **all** supervisor output so a
+/// legacy Windows console never shows mojibake.
+macro_rules! asciiprintln {
+    ($($arg:tt)*) => {{
+        let line = format!($($arg)*);
+        if crate::ascii_mode() {
+            ::std::println!("{}", crate::to_ascii_safe(&line));
+        } else {
+            ::std::println!("{line}");
+        }
+    }};
+}
+
+/// `asciieprintln!` that honours ASCII mode.
+macro_rules! asciieprintln {
+    ($($arg:tt)*) => {{
+        let line = format!($($arg)*);
+        if crate::ascii_mode() {
+            ::std::eprintln!("{}", crate::to_ascii_safe(&line));
+        } else {
+            ::std::eprintln!("{line}");
+        }
+    }};
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Base path + DB-pruning detection
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -223,7 +332,7 @@ fn resolve_effective_base_with(explicit: Option<PathBuf>, legacy: Option<PathBuf
     if !db_exists_at(&pinned) {
         if let Some(legacy) = legacy {
             if legacy != pinned && db_exists_at(&legacy) {
-                eprintln!(
+                asciieprintln!(
                     "[gpn_node] using existing legacy node DB at {} (OS-default base path; \
                      set GPN_BASE_PATH to pin it — see docs/run-a-node.md)",
                     legacy.display()
@@ -459,7 +568,7 @@ fn pump<R: std::io::Read + Send + 'static>(r: R, prefix: &'static str) {
         let reader = BufReader::new(r);
         for line in reader.lines() {
             match line {
-                Ok(l) => println!("{prefix} {l}"),
+                Ok(l) => asciiprintln!("{prefix} {l}"),
                 Err(_) => break,
             }
         }
@@ -594,7 +703,7 @@ fn sleep_or_shutdown(shutdown: &Arc<AtomicBool>, ms: u64) {
 
 fn log_event(label: &str, msg: &str) {
     let ts = now_hms();
-    println!("[supervisor {ts}] {label}: {msg}");
+    asciiprintln!("[supervisor {ts}] {label}: {msg}");
 }
 
 fn now_hms() -> String {
@@ -943,16 +1052,17 @@ fn ollama_reachable(url: &str) -> bool {
 #[tokio::main]
 async fn main() {
     env_logger::init();
+    set_ascii_mode(ascii_mode_default(&std::env::args().collect::<Vec<_>>()));
     let cfg = match Config::load() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("gpn_node: {e}");
+            asciieprintln!("gpn_node: {e}");
             std::process::exit(2);
         }
     };
 
-    println!("gpn_node — single-node supervisor (a node is always miner + AI provider)");
-    println!(
+    asciiprintln!("gpn_node — single-node supervisor (a node is always miner + AI provider)");
+    asciiprintln!(
         "  chain={} endpoint={} rpc_port={} bin_dir={}",
         cfg.chain,
         cfg.endpoint,
@@ -960,43 +1070,45 @@ async fn main() {
         cfg.bin_dir.display()
     );
     if cfg.account.is_empty() {
-        println!("  account=<unset> (payout address not advertised)");
+        asciiprintln!("  account=<unset> (payout address not advertised)");
     } else {
-        println!("  account={}", cfg.account);
+        asciiprintln!("  account={}", cfg.account);
     }
-    println!(
+    asciiprintln!(
         "  heartbeat listen={} ollama={} gflops={}",
-        cfg.listen, cfg.ollama, cfg.gflops
+        cfg.listen,
+        cfg.ollama,
+        cfg.gflops
     );
 
     // ── Ollama is a first-class prerequisite: without it the node still mines,
     //    but the provider cannot serve any LLM job. Warn clearly & actionably. ──
     if !ollama_reachable(&cfg.ollama) {
-        eprintln!(
+        asciieprintln!(
             "\n  ⚠️  ollama NOT reachable at {} — the node will MINE, but it CANNOT serve LLM jobs until ollama is running.",
             cfg.ollama
         );
-        eprintln!("      Install & start ollama (one-time):");
-        eprintln!(
+        asciieprintln!("      Install & start ollama (one-time):");
+        asciieprintln!(
             "        Windows :  winget install Ollama.Ollama   (or  scripts\\install-ollama.ps1 )"
         );
-        eprintln!("        Linux   :  scripts/install-ollama.sh      (or  curl -fsSL https://ollama.com/install.sh | sh )");
-        eprintln!(
+        asciieprintln!("        Linux   :  scripts/install-ollama.sh      (or  curl -fsSL https://ollama.com/install.sh | sh )");
+        asciieprintln!(
             "      Then:  ollama serve        # keep it running (listens on 127.0.0.1:11434)"
         );
-        eprintln!("             ollama pull llama3.2:1b");
-        eprintln!("      Docs: docs/run-a-node.md\n");
+        asciieprintln!("             ollama pull llama3.2:1b");
+        asciieprintln!("      Docs: docs/run-a-node.md\n");
     } else {
-        println!("  ollama: reachable at {}", cfg.ollama);
+        asciiprintln!("  ollama: reachable at {}", cfg.ollama);
     }
 
     let specs = build_children(&cfg);
     if specs.is_empty() {
-        eprintln!("gpn_node: no children to run");
+        asciieprintln!("gpn_node: no children to run");
         std::process::exit(2);
     }
     let labels: Vec<&'static str> = specs.iter().map(|s| s.label).collect();
-    println!("  children: {}", labels.join(", "));
+    asciiprintln!("  children: {}", labels.join(", "));
 
     let shared: Shared = Arc::new(Mutex::new(BTreeMap::new()));
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -1028,7 +1140,7 @@ async fn main() {
             if status_shutdown.load(Ordering::SeqCst) {
                 break;
             }
-            println!("{}", status_line(&status_cfg, &status_shared));
+            asciiprintln!("{}", status_line(&status_cfg, &status_shared));
         }
     });
 
@@ -1037,7 +1149,7 @@ async fn main() {
 
     // Wait for Ctrl-C or SIGTERM.
     wait_for_signal().await;
-    println!("\n[supervisor] shutdown requested — stopping children…");
+    asciiprintln!("\n[supervisor] shutdown requested — stopping children…");
     shutdown.store(true, Ordering::SeqCst);
 
     for h in handles {
@@ -1045,7 +1157,7 @@ async fn main() {
     }
     let _ = status_handle.join();
     let _ = watchdog_handle.join();
-    println!("[supervisor] all children stopped — exiting");
+    asciiprintln!("[supervisor] all children stopped — exiting");
 }
 
 #[cfg(unix)]
@@ -1168,5 +1280,32 @@ mod tests {
     fn default_base_path_is_pinned() {
         // Sanity: a pinned default exists on both platforms (never empty).
         assert!(!default_base_path().as_os_str().is_empty());
+    }
+
+    #[test]
+    fn ascii_no_emoji_flag_forces_ascii() {
+        // `--no-emoji` is deterministic regardless of the host OS / env.
+        assert!(ascii_mode_default(&args(&["--no-emoji"])));
+    }
+
+    #[test]
+    fn ascii_safe_leaves_ascii_untouched() {
+        assert_eq!(to_ascii_safe("plain ascii 123"), "plain ascii 123");
+    }
+
+    #[test]
+    fn ascii_safe_replaces_emoji_and_keeps_text() {
+        // The mojibake sources: warning sign + variation selector, and emoji.
+        assert_eq!(to_ascii_safe("\u{26a0}\u{fe0f}  ollama"), "!  ollama");
+        assert_eq!(to_ascii_safe("sleep \u{1f4a4} now"), "sleep [zzz] now");
+        // Unknown emoji → `?` (still ASCII, never mojibake).
+        assert_eq!(to_ascii_safe("trophy \u{1f3c6}"), "trophy [win]");
+        assert_eq!(to_ascii_safe("mystery \u{1f47d}"), "mystery ?");
+    }
+
+    #[test]
+    fn ascii_safe_output_is_always_ascii() {
+        let s = "\u{26a0}\u{fe0f} \u{1f680} \u{2705} \u{2014} \u{2026} \u{2022}";
+        assert!(to_ascii_safe(s).is_ascii());
     }
 }

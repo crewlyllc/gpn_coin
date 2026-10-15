@@ -335,6 +335,30 @@ it as a service, wrap `gpn_node.exe` with NSSM / a Windows Service.
 > (`gpn-node` is an authority miner on its own key — no `--force-authoring`
 > needed); the flag is accepted but no longer required.
 
+### Console encoding on Windows (emoji / mojibake)
+
+`gpn_node` prints a few non-ASCII glyphs (warning signs, a sleep/zzz marker,
+the winner trophy, …). On a **legacy Windows console** these mojibake even with
+`chcp 65001` (`⚠️` shows as `ΓÜá∩╕Å`, `💤` as `≡ƒÆñ`) because the text round-trips
+the PowerShell pipeline (e.g. `Tee-Object`) through the OEM code page.
+
+The supervisor now **sanitises every line it prints to ASCII** when needed:
+known symbols map to readable tokens (`⚠️` → `!`, `💤` → `[zzz]`, `🏆` → `[win]`,
+`📦` → `[pkg]`), dashes/ellipses map to `-`/`...`, and anything else becomes
+`?`. Nothing ever mojibakes.
+
+* **Default:** ASCII mode is **on for Windows**, **off for Linux/macOS** (modern
+  terminals render UTF-8 fine).
+* **Force it on** anywhere: pass `--no-emoji`, or set `GPN_ASCII_LOG=1`.
+* **Force it off** (keep emoji): set `GPN_ASCII_LOG=0`.
+
+```powershell
+# plain ASCII on any console (e.g. a legacy WS2016/2019 box):
+$env:GPN_ASCII_LOG = "1"
+.\bin\gpn_node.exe --config .\gpn-node.toml
+#   …or one-shot:  .\bin\gpn_node.exe --config .\gpn-node.toml --no-emoji
+```
+
 ## Watchdog — auto-recover a silently wedged node
 
 GPN has no finality, so a node can stay **p2p-connected** while its best block
@@ -407,6 +431,15 @@ it, but to migrate it cleanly: stop the `gpn*` processes, then either **wipe
 `chains/`** (and let it re-sync) or import the archive snapshot with
 `--base-path C:\gpn\data` (see the fast-sync doc and `docs/downloads.md` for the
 snapshot URL).
+
+> **Snapshot pruning marker.** A `gpn_snapshot` export from a modern `gpn-node`
+> is always an **archive** DB, so `gpn_snapshot import` now **stamps the
+> `.gpn-pruning-archive` marker by default** — including for older snapshots
+> whose manifest predates the marker feature and carries no `pruning` field.
+> `gpn_node` then knows the imported DB is safe to run with
+> `--state-pruning archive` (without the marker it conservatively leaves pruning
+> untouched). Override with `--pruning archive|none` (e.g.
+> `--pruning none` to import a legacy non-archive DB).
 
 > **Deeper root cause:** this failure mode only exists because GPN has **no
 > finality gadget**. Archive pruning + `--sync full` are the correct *workaround*
