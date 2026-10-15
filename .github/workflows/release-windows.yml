@@ -134,7 +134,10 @@ jobs:
           #      the .exe files are not locked. Also retire the legacy
           #      GPNProvider task + its run-provider.ps1 supervisor so exactly
           #      ONE supervisor runs (two would fight over :8094 + the DB).
-          foreach ($tn in @('GPN-Node','GPNProvider')) { schtasks /End /TN $tn 2>$null | Out-Null }
+          # native schtasks writes to stderr when a task is absent; that must not
+          # trip $ErrorActionPreference='Stop' — check exit codes explicitly.
+          $ErrorActionPreference = 'Continue'
+          foreach ($tn in @('GPN-Node','GPNProvider')) { schtasks /End /TN $tn 2>&1 | Out-Null }
           Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
             Where-Object { $_.CommandLine -like '*run-provider.ps1*' } |
             ForEach-Object { Write-Host "stopping supervisor pid=$($_.ProcessId)"; Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
@@ -143,10 +146,11 @@ jobs:
             Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
           }
           Start-Sleep -Seconds 2
-          schtasks /Query /TN GPNProvider 2>$null | Out-Null
-          if ($LASTEXITCODE -eq 0) { schtasks /Delete /TN GPNProvider /F 2>$null | Out-Null; Write-Host 'removed legacy GPNProvider task' }
+          schtasks /Query /TN GPNProvider 2>&1 | Out-Null
+          if ($LASTEXITCODE -eq 0) { schtasks /Delete /TN GPNProvider /F 2>&1 | Out-Null; Write-Host 'removed legacy GPNProvider task' }
 
           # ── 2. COPY the freshly built binaries over the (now unlocked) bins. ─
+          $ErrorActionPreference = 'Stop'   # strict again: a failed copy MUST fail the job
           Copy-Item 'gpn-agent\target\release\*.exe' $dst -Force
           Copy-Item 'gpn-node\target\release\gpn-node.exe' $dst -Force
           Write-Host "deployed to $dst :"
@@ -172,9 +176,10 @@ jobs:
             }
 
             $tr = 'cmd /c C:\gpn\start-node.cmd'
-            schtasks /Create /TN 'GPN-Node' /TR $tr /SC ONLOGON /RL HIGHEST /F | Out-Null
+            $ErrorActionPreference = 'Continue'   # schtasks is native; we check rc explicitly
+            schtasks /Create /TN 'GPN-Node' /TR $tr /SC ONLOGON /RL HIGHEST /F 2>&1 | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "schtasks /Create GPN-Node failed (rc=$LASTEXITCODE)" }
-            schtasks /Run /TN 'GPN-Node' | Out-Null
+            schtasks /Run /TN 'GPN-Node' 2>&1 | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "schtasks /Run GPN-Node failed (rc=$LASTEXITCODE)" }
             Write-Host 'GPN-Node scheduled task (re)created + started'
 
