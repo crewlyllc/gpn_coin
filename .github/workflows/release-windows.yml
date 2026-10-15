@@ -121,6 +121,10 @@ jobs:
           set "GPN_OLLAMA=http://127.0.0.1:11434"
           set "GPN_LISTEN=0.0.0.0:8093"
           set "GPN_BIN=C:\gpn\bin"
+          REM Pin the node base path so gpn_node's DB/pruning guard and the node's
+          REM --base-path agree. (A legacy DB at %LOCALAPPDATA%\gpn-node.exe\data
+          REM is still auto-detected by gpn_node for backward-compat.)
+          set "GPN_BASE_PATH=C:\gpn\data"
           set "GPN_NODE_KEY=8f9e5ccd99ed3f4516563495d598a7dbcfff5c18b658d3e5cea5718307a4ba74"
           set "GPN_BOOTNODES=/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo"
           cd /d C:\gpn

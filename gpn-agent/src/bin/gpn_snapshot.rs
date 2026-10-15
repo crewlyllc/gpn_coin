@@ -88,7 +88,31 @@ struct Manifest {
     impl_version: Option<u64>,
     /// True if the export was a best-effort copy of a live node (unsafe).
     live_export: bool,
+    /// Pruning mode of the source DB, when known (e.g. `"archive"`). Filled in
+    /// from the `.gpn-pruning-archive` marker `gpn_node` drops next to a DB it
+    /// created with archive pruning. On import this is re-materialised as the
+    /// same marker so `gpn_node` knows the imported DB is safe for archive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pruning: Option<String>,
     archive: ArchiveInfo,
+}
+
+/// Marker file (kept in sync with `gpn_node.rs`) that records "this DB was
+/// created with archive pruning" — the only thing that lets `gpn_node` safely
+/// request `archive` on an *existing* DB.
+const PRUNING_MARKER: &str = ".gpn-pruning-archive";
+
+fn read_pruning_marker(base: &Path) -> Option<String> {
+    if base.join(PRUNING_MARKER).is_file() {
+        Some("archive".to_string())
+    } else {
+        None
+    }
+}
+
+fn write_pruning_marker(base: &Path) {
+    let _ = fs::create_dir_all(base);
+    let _ = fs::write(base.join(PRUNING_MARKER), b"archive\n");
 }
 
 fn iso8601(ts: u64) -> String {
@@ -475,6 +499,7 @@ fn export(a: &Args) -> Result<(), String> {
         chain_dir: chain_dir.clone(),
         db_relative_path: format!("chains/{chain_dir}/db"),
         live_export,
+        pruning: read_pruning_marker(base),
         ..Default::default()
     };
     m.created_at_iso = iso8601(m.created_at);
@@ -494,6 +519,10 @@ fn export(a: &Args) -> Result<(), String> {
         m.chain_dir = keep.chain_dir;
         m.db_relative_path = keep.db_relative_path;
         m.live_export = keep.live_export;
+        // Prefer export-time pruning detection over a (possibly absent) --meta value.
+        if m.pruning.is_none() {
+            m.pruning = keep.pruning;
+        }
     } else if read_meta(&a.rpc, &mut m).is_ok() {
         println!("read best block from RPC {}", a.rpc);
     } else {
@@ -666,6 +695,17 @@ fn import(a: &Args) -> Result<(), String> {
             );
         }
         None => println!("✅ imported {count} files (no embedded manifest)"),
+    }
+
+    // Record the source DB's pruning mode as our marker, so `gpn_node` knows an
+    // imported *archive* DB is safe to run with `--state-pruning archive`
+    // (without it, gpn_node conservatively leaves pruning alone).
+    if manifest.as_ref().and_then(|m| m.pruning.as_deref()) == Some("archive") {
+        write_pruning_marker(base);
+        println!(
+            "   pruning:      archive (marked {} for gpn_node)",
+            PRUNING_MARKER
+        );
     }
     Ok(())
 }

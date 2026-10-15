@@ -41,7 +41,7 @@
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -88,7 +88,7 @@ struct Config {
     signer: String,
     account: String,
     endpoint: String,
-    base_path: Option<String>,
+    base_path: PathBuf,
     rpc_port: u16,
     node_key: Option<String>,
     bootnodes: Vec<String>,
@@ -134,14 +134,139 @@ fn split_list(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// True if any `<base_path>/chains/*/db` already exists (a pre-existing DB).
-fn existing_db(base_path: &Option<String>) -> bool {
-    let Some(bp) = base_path else { return false };
-    let chains = PathBuf::from(bp).join("chains");
+// ─────────────────────────────────────────────────────────────────────────────
+// Base path + DB-pruning detection
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The pinned default node base path used when neither `GPN_BASE_PATH` nor the
+/// config file's `base_path` is set.
+///
+/// **Why pinned at all?** Substrate, with no `--base-path`, writes to an
+/// OS-default data dir (`%LOCALAPPDATA%\gpn-node.exe\data` on Windows,
+/// `~/.local/share/gpn-node` on Unix). A guard that only inspects an *explicit*
+/// base path therefore looks at the WRONG directory when none is set — the node
+/// creates/reads its DB somewhere else — and can force `archive` onto a legacy
+/// DB → `Incompatible pruning modes` → crash-loop. Pinning a single path makes
+/// the DB-existence check and the node's `--base-path` agree.
+fn default_base_path() -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from(r"C:\gpn\data")
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from(expand_tilde("~/.gpn/node"))
+    }
+}
+
+/// The node's **OS-default** data dir (what Substrate uses with no
+/// `--base-path`). Used only for backward-compat detection of a DB created
+/// before we pinned a base path. Windows: `%LOCALAPPDATA%\gpn-node.exe\data`.
+fn os_default_node_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var("LOCALAPPDATA")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(|la| PathBuf::from(la).join("gpn-node.exe").join("data"))
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var("HOME")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(|h| PathBuf::from(h).join(".local/share/gpn-node"))
+    }
+}
+
+/// True if any `<base>/chains/*/db` already exists (a pre-existing DB).
+fn db_exists_at(base: &Path) -> bool {
+    let chains = base.join("chains");
     let Ok(rd) = std::fs::read_dir(&chains) else {
         return false;
     };
     rd.flatten().any(|e| e.path().join("db").is_dir())
+}
+
+/// Marker file we drop next to a DB **we** created with archive pruning.
+/// Its presence is the only thing that lets us safely request `archive` on an
+/// existing DB (Substrate locks the mode at creation; a legacy/unknown DB would
+/// hard-fail `Incompatible pruning modes`).
+const PRUNING_MARKER: &str = ".gpn-pruning-archive";
+
+fn has_archive_marker(base: &Path) -> bool {
+    base.join(PRUNING_MARKER).is_file()
+}
+
+fn write_archive_marker(base: &Path) {
+    // Best-effort: a missing marker only means the next start leaves pruning
+    // alone (safe), never a crash.
+    let _ = std::fs::create_dir_all(base);
+    let _ = std::fs::write(base.join(PRUNING_MARKER), b"archive\n");
+}
+
+/// Resolve the effective base path the node will actually use, and keep
+/// backward-compat with a legacy DB at the OS-default location.
+///
+/// * explicit (`GPN_BASE_PATH` / config `base_path`) wins — unless it has no DB
+///   while the OS-default dir DOES (then we point at the existing DB so we
+///   don't silently start a fresh chain and re-sync from scratch).
+/// * otherwise the pinned [`default_base_path`], with the same OS-default
+///   fallback if that legacy DB exists.
+fn resolve_effective_base(explicit: Option<PathBuf>) -> PathBuf {
+    resolve_effective_base_with(explicit, os_default_node_dir())
+}
+
+/// Testable core of [`resolve_effective_base`].
+fn resolve_effective_base_with(explicit: Option<PathBuf>, legacy: Option<PathBuf>) -> PathBuf {
+    let pinned = explicit.unwrap_or_else(default_base_path);
+    if !db_exists_at(&pinned) {
+        if let Some(legacy) = legacy {
+            if legacy != pinned && db_exists_at(&legacy) {
+                eprintln!(
+                    "[gpn_node] using existing legacy node DB at {} (OS-default base path; \
+                     set GPN_BASE_PATH to pin it — see docs/run-a-node.md)",
+                    legacy.display()
+                );
+                return legacy;
+            }
+        }
+    }
+    pinned
+}
+
+/// What pruning flags (if any) gpn_node should append for the node child.
+#[derive(Debug, PartialEq, Eq)]
+enum PruningPlan {
+    /// Fresh DB → request archive (+ write the marker).
+    Archive,
+    /// Existing DB with our marker → request archive (safe: we created it).
+    ArchiveKeep,
+    /// Existing legacy/unknown DB → request NO pruning flags (fall back to the
+    /// node's compiled defaults / the DB's stored mode) so it can never
+    /// hard-fail with `Incompatible pruning modes`.
+    LeaveAlone,
+    /// Operator set pruning explicitly (GPN_NODE_ARGS / node_args) → don't touch.
+    Explicit,
+}
+
+/// Decide the pruning plan WITHOUT side effects (unit-testable).
+fn pruning_plan(node_args: &[String], base: &Path) -> PruningPlan {
+    if has_flag(node_args, "--state-pruning")
+        || has_flag(node_args, "--blocks-pruning")
+        || has_flag(node_args, "--pruning")
+    {
+        return PruningPlan::Explicit;
+    }
+    if db_exists_at(base) {
+        if has_archive_marker(base) {
+            PruningPlan::ArchiveKeep
+        } else {
+            PruningPlan::LeaveAlone
+        }
+    } else {
+        PruningPlan::Archive
+    }
 }
 
 /// Does the node-args list already contain this flag (exact or `flag=`)?
@@ -220,9 +345,11 @@ impl Config {
                 .unwrap_or_else(|| "//Alice".into()),
             account: env_str("GPN_ACCOUNT").or(file.account).unwrap_or_default(),
             endpoint,
-            base_path: env_str("GPN_BASE_PATH")
-                .or(file.base_path)
-                .map(|s| expand_tilde(&s)),
+            base_path: resolve_effective_base(
+                env_str("GPN_BASE_PATH")
+                    .or(file.base_path)
+                    .map(|s| PathBuf::from(expand_tilde(&s))),
+            ),
             rpc_port,
             node_key: env_str("GPN_NODE_KEY").or(file.node_key),
             bootnodes: env_str("GPN_BOOTNODES")
@@ -646,10 +773,10 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
             argv.push("--node-key".into());
             argv.push(k.clone());
         }
-        if let Some(bp) = &cfg.base_path {
-            argv.push("--base-path".into());
-            argv.push(bp.clone());
-        }
+        // Always pass `--base-path` — the SAME path the DB-existence check
+        // uses, so the guard can never inspect a different dir than the node.
+        argv.push("--base-path".into());
+        argv.push(cfg.base_path.to_string_lossy().into_owned());
         for bn in &cfg.bootnodes {
             argv.push("--bootnodes".into());
             argv.push(bn.clone());
@@ -677,32 +804,40 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
         //    CAVEAT: Substrate locks the state-pruning mode into the DB at first
         //    creation; requesting `archive` on a legacy `256` DB HARD-FAILS
         //    ("Incompatible pruning modes"). So apply the archive default only to
-        //    a FRESH db dir; if a db already exists, leave its mode alone and warn
-        //    (the operator should re-create it — wipe, or import an archive
-        //    snapshot; see docs/fast-sync.md).
-        let db_exists = existing_db(&cfg.base_path);
+        //    a FRESH db dir, or to a dir WE previously created with archive (a
+        //    `.gpn-pruning-archive` marker). On any legacy/unknown existing DB we
+        //    request NO pruning flags (fall back to the node's compiled defaults,
+        //    which match the stored mode) and warn — the node must never
+        //    crash-loop on `Incompatible pruning modes`.
+        let plan = pruning_plan(&cfg.node_args, &cfg.base_path);
         if !has_flag(&cfg.node_args, "--sync") {
             argv.push("--sync".into());
             argv.push("full".into());
         }
-        if !has_flag(&cfg.node_args, "--state-pruning")
-            && !has_flag(&cfg.node_args, "--blocks-pruning")
-            && !has_flag(&cfg.node_args, "--pruning")
-        {
-            if db_exists {
-                log_event(
-                    "node",
-                    "existing DB — leaving its pruning mode untouched (requesting archive would hard-fail; 
-                     Substrate locks pruning at DB creation). A legacy 256-pruned DB cannot serve state on a 
-                     finality-less chain; re-create it (wipe, or import a fresh *archive* snapshot) for 
-                     stall-proof syncing — see docs/run-a-node.md",
-                );
-            } else {
+        match plan {
+            PruningPlan::Archive | PruningPlan::ArchiveKeep => {
+                if matches!(plan, PruningPlan::Archive) {
+                    write_archive_marker(&cfg.base_path);
+                }
                 argv.push("--state-pruning".into());
                 argv.push("archive".into());
                 argv.push("--blocks-pruning".into());
                 argv.push("archive".into());
             }
+            PruningPlan::LeaveAlone => {
+                log_event(
+                    "node",
+                    &format!(
+                        "existing DB at {} has no archive marker — leaving its pruning mode untouched \
+                         (requesting archive would hard-fail: Substrate locks pruning at DB creation). \
+                         A legacy 256-pruned DB cannot serve state on a finality-less chain; re-create it \
+                         (wipe chains/, or import a fresh *archive* snapshot) for stall-proof syncing — see \
+                         docs/run-a-node.md",
+                        cfg.base_path.display()
+                    ),
+                );
+            }
+            PruningPlan::Explicit => {}
         }
 
         argv.extend(cfg.node_args.iter().cloned());
@@ -928,4 +1063,110 @@ async fn wait_for_signal() {
 #[cfg(not(unix))]
 async fn wait_for_signal() {
     let _ = tokio::signal::ctrl_c().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal unique temp dir (no external crate).
+    fn td(tag: &str) -> PathBuf {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let p =
+            std::env::temp_dir().join(format!("gpn-node-test-{tag}-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+    fn mk_db(base: &Path) {
+        std::fs::create_dir_all(base.join("chains/gpn_testnet/db/full")).unwrap();
+    }
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn fresh_dir_requests_archive() {
+        let b = td("fresh");
+        assert!(!db_exists_at(&b));
+        assert_eq!(pruning_plan(&[], &b), PruningPlan::Archive);
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn legacy_db_is_left_alone() {
+        let b = td("legacy");
+        mk_db(&b);
+        // No marker → legacy/unknown (e.g. old --state-pruning 256) → do NOT
+        // force archive (that would crash-loop 'Incompatible pruning modes').
+        assert_eq!(pruning_plan(&[], &b), PruningPlan::LeaveAlone);
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn marked_archive_db_keeps_archive() {
+        let b = td("marked");
+        mk_db(&b);
+        write_archive_marker(&b);
+        assert_eq!(pruning_plan(&[], &b), PruningPlan::ArchiveKeep);
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn explicit_node_args_respected() {
+        let b = td("explicit");
+        mk_db(&b); // even with an existing DB, explicit flags win
+        assert_eq!(
+            pruning_plan(&args(&["--state-pruning", "256"]), &b),
+            PruningPlan::Explicit
+        );
+        assert_eq!(
+            pruning_plan(&args(&["--pruning=256"]), &b),
+            PruningPlan::Explicit
+        );
+        assert_eq!(
+            pruning_plan(&args(&["--blocks-pruning", "archive"]), &b),
+            PruningPlan::Explicit
+        );
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn legacy_os_default_db_is_detected() {
+        // Pinned path empty, legacy OS-default path has a DB → use the legacy.
+        let pinned = td("pinned-empty");
+        let legacy = td("legacy-os");
+        mk_db(&legacy);
+        assert_eq!(
+            resolve_effective_base_with(Some(pinned.clone()), Some(legacy.clone())),
+            legacy
+        );
+        let _ = std::fs::remove_dir_all(&pinned);
+        let _ = std::fs::remove_dir_all(&legacy);
+    }
+
+    #[test]
+    fn pinned_db_wins_over_empty_legacy() {
+        let pinned = td("pinned-db");
+        mk_db(&pinned);
+        let legacy = td("legacy-empty");
+        assert_eq!(
+            resolve_effective_base_with(Some(pinned.clone()), Some(legacy.clone())),
+            pinned
+        );
+        let _ = std::fs::remove_dir_all(&pinned);
+        let _ = std::fs::remove_dir_all(&legacy);
+    }
+
+    #[test]
+    fn default_base_path_is_pinned() {
+        // Sanity: a pinned default exists on both platforms (never empty).
+        assert!(!default_base_path().as_os_str().is_empty());
+    }
 }

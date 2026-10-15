@@ -134,6 +134,19 @@ So when you export a snapshot, take it from a node that was started with
 * importing an **`archive`** snapshot and launching with the defaults just works,
   and the node is stall-proof.
 
+> **How `gpn_node` decides.** `gpn_snapshot export` records the source DB's
+> pruning mode in the manifest and `gpn_snapshot import` re-materialises it as a
+> `.gpn-pruning-archive` marker next to the DB. So an **archive** snapshot
+> imported from a `gpn_node`-managed archive node is correctly marked, and
+> `gpn_node` then applies `--state-pruning archive --blocks-pruning archive` on
+> the imported DB just as it does for a fresh one. A legacy `256` snapshot is
+> left unmarked (and is honestly *not* what you want — re-export from an archive
+> node). If a snapshot's pruning mode is unknown/absent (e.g. from an older
+> tool), `gpn_node` conservatively leaves pruning untouched and logs a warning —
+> it never forces `archive` onto an unknown DB, so it can't crash-loop on
+> `Incompatible pruning modes`. (To force it, set
+> `GPN_NODE_ARGS="--state-pruning archive --blocks-pruning archive"`.)
+
 `gpn_snapshot export` records the **genesis hash**, **best block** and a
 `sha256` in the manifest, so an importer can check the snapshot is for the right
 chain and the file isn't corrupt. (The pruning mode isn't a manifest field; it's
@@ -160,6 +173,13 @@ Only the `chains\` subdir is swapped, so the node's network identity
 otherwise reset its on-chain full-node identity/uptime). `gpn_node` then
 defaults to `--sync full --state-pruning archive --blocks-pruning archive` and
 catches up only the last few blocks.
+
+> **Windows base path.** The deployed `C:\gpn\start-node.cmd` pins
+> `GPN_BASE_PATH=C:\gpn\data`, so import into `C:\gpn\data` (not the old
+> OS-default `%LOCALAPPDATA%\gpn-node.exe\data`). `gpn_node` still auto-detects a
+> DB left at the OS-default path and uses it if the pinned path has none, so an
+> existing box keeps working; but a *fresh* archive import should target
+> `C:\gpn\data` for a clean, consistent layout.
 
 **If no snapshot is available**, the equivalent manual recovery is to *wipe* the
 chain dir and let it re-sync from scratch

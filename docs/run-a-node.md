@@ -164,7 +164,7 @@ chain        = "testnet"                           # testnet | mainnet | dev | <
 signer       = "//Alice"                           # sr25519 URI or seed (provider identity / authoring key)
 account      = "5ENqSp5Q…"                         # payout / advertised ss58 address
 endpoint     = "ws://127.0.0.1:9944"               # chain RPC used by the provider loop
-base_path    = "~/.gpn/node"
+base_path    = "~/.gpn/node"                      # or set GPN_BASE_PATH; default: C:\gpn\data (Win) / ~/.gpn/node (Unix)
 rpc_port     = 9944
 node_key     = "<64-hex ed25519 secret>"           # node's network identity
 bootnodes    = ["/ip4/23.241.109.255/tcp/30333/p2p/12D3KooW…"]
@@ -232,15 +232,29 @@ one reliable combination (**on by default, overridable via `GPN_NODE_ARGS` /
 Archive is cheap here (the whole testnet DB is well under a gigabyte); there is
 no reason to prune on a chain this small.
 
-> ⚠️ **Legacy DB caveat.** Substrate **locks the state-pruning mode into the DB
-> at first creation**, and requesting `archive` on a DB that was created with
-> the old `256` default **hard-fails**:
+> ⚠️ **Legacy DB caveat — and the pinned base path.** Substrate **locks the
+> state-pruning mode into the DB at first creation**, and requesting `archive`
+> on a DB that was created with the old `256` default **hard-fails**:
 > `Incompatible pruning modes [stored: Constrained { max_blocks: Some(256) };
 > requested: ArchiveAll]`.
-> So `gpn_node` applies the `archive` default **only to a fresh data dir**. If it
-> finds an existing DB it leaves pruning untouched and logs a warning — that DB
-> must be **re-created** (see the Troubleshooting entry below) before it can be
-> stall-proof.
+>
+> So `gpn_node` now **pins a single base path** and uses it for *both* the DB
+> check and the node's `--base-path` (resolution: `GPN_BASE_PATH` → config
+> `base_path` → default `C:\gpn\data` on Windows / `~/.gpn/node` on Unix). This
+> matters because a node launched with **no** `--base-path` silently uses the
+> OS-default data dir (`%LOCALAPPDATA%\gpn-node.exe\data` on Windows) — a guard
+> that only inspected an *explicit* base path therefore looked at the wrong
+> directory and forced `archive` onto a legacy DB → crash-loop.
+>
+> The archive default is applied only when the DB is **fresh**, or when it
+> carries the `.gpn-pruning-archive` marker `gpn_node` drops next to a DB *it*
+> created with archive. For any **existing legacy/unknown DB** it requests **no**
+> pruning flags (so the node's compiled defaults match the stored mode) and logs
+> a clear warning — it can no longer crash-loop on `Incompatible pruning modes`.
+> For backward-compat, if no DB exists at the pinned path but one exists at the
+> OS-default path, the OS-default DB is detected and used (with a warning).
+> Such a legacy DB must still be **re-created** (see the Troubleshooting entry
+> below) before it can be stall-proof.
 
 ## What the supervisor does
 
@@ -387,8 +401,12 @@ mv ~/.gpn/node/chains/gpn_testnet/db ~/.gpn/node/chains/gpn_testnet/db.old
 scripts/gpn-snapshot.sh import --snapshot gpn-testnet-<tip>.tar.gz --base-path ~/.gpn/node --force
 ```
 
-On Windows, stop the `gpn*` processes first; see the fast-sync doc and
-`docs/downloads.md` for the snapshot URL.
+On Windows the legacy DB often lives at `%LOCALAPPDATA%\gpn-node.exe\data`
+(the OS default, used before the base path was pinned). `gpn_node` auto-detects
+it, but to migrate it cleanly: stop the `gpn*` processes, then either **wipe
+`chains/`** (and let it re-sync) or import the archive snapshot with
+`--base-path C:\gpn\data` (see the fast-sync doc and `docs/downloads.md` for the
+snapshot URL).
 
 > **Deeper root cause:** this failure mode only exists because GPN has **no
 > finality gadget**. Archive pruning + `--sync full` are the correct *workaround*
