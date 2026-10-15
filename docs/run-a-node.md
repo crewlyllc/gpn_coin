@@ -397,6 +397,69 @@ On Windows, stop the `gpn*` processes first; see the fast-sync doc and
 > [`docs/mainnet-launch-runbook.md`](mainnet-launch-runbook.md). Until then,
 > assume no finality and never rely on `finalized #> 0`.
 
+## Troubleshooting — slow LLM jobs on a dual-stack / AAAA-laggy host (the `/result` stall)
+
+**Symptom.** End-to-end text/image jobs through the access point work, but are
+**slow** — routinely 10–25s instead of <5s — even though the provider itself
+finishes inference in ~1s. The AP log shows it falling back to its ~11s
+on-chain *reconcile* instead of learning the result immediately.
+
+**Mechanism (why).** When the AP and provider are **co-located**, the AP still
+advertises a *public* callback URL (`GPN_PUBLIC_URL`, e.g.
+`http://gpn-testnet.duckdns.org:8092`) and the provider POSTs the finished
+result back to `{callback}/result/{id}`. `reqwest` resolves that host with
+`getaddrinfo(AF_UNSPEC)` — **both A and AAAA**. If the host resolver does *not*
+answer AAAA (a common router/DNS quirk — e.g. `192.168.1.1`), the AAAA leg
+blocks until it times out:
+
+```bash
+$ getent ahostsv6 gpn-testnet.duckdns.org    # hangs → rc=124 (timeout)
+$ getent ahostsv4 gpn-testnet.duckdns.org    # instant → A record, rc=0
+$ curl    http://gpn-testnet.duckdns.org:8092/health   # http=000 after ~8s (stalls)
+$ curl -4 http://gpn-testnet.duckdns.org:8092/health   # http=200 in ~0.02s
+```
+
+Because the `/result` return is best-effort with a hard **5s** budget, the stall
+makes it time out, the AP never learns the result off-chain, and it falls back
+to the slow reconcile — so e2e blows the <5s target. It is **not** an inference
+or chain problem; it is pure name resolution.
+
+**Fix (no root needed).** GPN is now robust to this: the provider's `/result`
+(and the AP's `/assign` push) use a **custom resolver that only issues A (IPv4)
+queries** plus a bounded connect timeout, so a slow/absent AAAA can never block
+them (see `gpn-agent/src/net.rs`). No host DNS change is required.
+
+**Optional — remove the dependency entirely (co-located boxes).** If your AP and
+provider run on the same machine, point the provider at loopback so no public
+lookup happens at all. In `~/.gpn/provider.env`:
+
+```bash
+# either form (a bare base, or the full .../result URL) works:
+GPN_RESULT_URL=http://127.0.0.1:8092
+# GPN_AP_URL=http://127.0.0.1:8092
+```
+
+Precedence is `GPN_RESULT_URL` > `GPN_AP_URL` > the AP-advertised `callback`
+(remote providers keep using the advertised URL). The AP itself now advertises
+loopback automatically when its `--listen` is a wildcard bind (`0.0.0.0:8092`)
+and no `GPN_PUBLIC_URL`/`GPN_AP_CALLBACK_URL`/`--callback-url` is set.
+
+**Verify.** Reproduce the raw stall and confirm the fix in one shot:
+
+```bash
+cd gpn-agent && cargo run --example dns_probe -- http://gpn-testnet.duckdns.org:8092/health
+# dual-stack   ERROR in 8.000s: error sending request …   ← the stall
+# ipv4-only    http=200 in 0.013s                        ← the fix
+```
+
+**Real host fix (needs root — optional; the above makes GPN robust without it).**
+Point the host resolver at a resolver that answers AAAA, then flush:
+
+```bash
+sudo resolvectl dns <iface> 1.1.1.1 192.168.1.1 && resolvectl flush-caches
+# e.g. iface = enp42s0
+```
+
 ## Fault isolation / why separate processes
 
 The supervisor deliberately keeps one process per part: an ollama/diffusion

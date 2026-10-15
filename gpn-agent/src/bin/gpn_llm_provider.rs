@@ -433,6 +433,32 @@ fn assignment_callback_token(id: u64) -> Option<String> {
         .filter(|c| !c.is_empty())
 }
 
+/// Resolve the AP base URL to POST the finished result back to.
+///
+/// Precedence: `GPN_RESULT_URL` (full base, e.g. `http://127.0.0.1:8092`) >
+/// `GPN_AP_URL` (alias) > the AP-advertised `callback` recorded on the
+/// assignment. When the AP is **co-located** with the provider, pinning the
+/// loopback address removes the public-DNS dependency entirely (a host whose
+/// resolver does not answer AAAA otherwise stalls this callback — the
+/// "host-DNS /result defect", see `docs/run-a-node.md`). Remote providers keep
+/// using the advertised callback.
+fn result_callback_base(advertised: &str) -> String {
+    for var in ["GPN_RESULT_URL", "GPN_AP_URL"] {
+        if let Ok(v) = std::env::var(var) {
+            let v = v.trim();
+            if !v.is_empty() {
+                // Allow either a bare base or a full `.../result` path.
+                return v
+                    .trim_end_matches('/')
+                    .trim_end_matches("/result")
+                    .trim_end_matches('/')
+                    .to_string();
+            }
+        }
+    }
+    advertised.trim_end_matches('/').to_string()
+}
+
 /// POST the finished job's off-chain result back to the requesting AP so ITS
 /// LlmStore learns the outcome (a remote provider cannot write the AP's store
 /// directly). Best-effort: a missing callback or an unreachable AP is ignored —
@@ -440,7 +466,7 @@ fn assignment_callback_token(id: u64) -> Option<String> {
 fn return_result(id: u64) {
     let Some(cb) = assignment_callback(id) else { return };
     let Some(j) = get_job(id) else { return };
-    let base = cb.trim_end_matches('/');
+    let base = result_callback_base(&cb);
     let url = format!("{base}/result/{id}");
     // Echo the per-job callback token (item #16 finding #2) so the AP authenticates
     // this result as the bound assignment (an unbound/forged POST is rejected 401).
@@ -452,10 +478,9 @@ fn return_result(id: u64) {
     if let Some(t) = assignment_callback_token(id) {
         body["callback_token"] = serde_json::Value::String(t);
     }
-    if let Ok(c) = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-    {
+    // IPv4-only resolver so an AAAA-laggy host resolver cannot stall this 5s
+    // best-effort callback (see src/net.rs).
+    if let Ok(c) = gpn_agent::net::ipv4_only_client(std::time::Duration::from_secs(5)) {
         match c.post(&url).json(&body).send() {
             Ok(_) => println!("[job {id}] result returned to AP ({base})"),
             Err(e) => eprintln!("[job {id}] result return to AP failed: {e}"),

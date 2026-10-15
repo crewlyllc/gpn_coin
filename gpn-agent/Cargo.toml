@@ -44,5 +44,9 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 # Async utilities
 futures = "0.3"
 
+# libc: AF_INET-only getaddrinfo for the IPv4-only callback resolver
+# (see src/net.rs — avoids the AAAA stall on hosts with an AAAA-laggy resolver)
+libc = "0.2"
+
 [dev-dependencies]
 sha3 = "0.10"

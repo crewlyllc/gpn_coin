@@ -678,6 +678,25 @@ fn rtt_overrides(v: &Value) -> RttOverrides {
     v.get("rtt").map(routing::parse_rtt_overrides).unwrap_or_default()
 }
 
+/// Rewrite a wildcard bind address (`0.0.0.0:8092`, `[::]:8092`) to its loopback
+/// equivalent (`127.0.0.1:8092`, `[::1]:8092`) for use as an advertised callback,
+/// so a co-located provider reaches the AP without any public-DNS lookup.
+fn loopback_if_wildcard(listen: &str) -> String {
+    match listen {
+        "0.0.0.0" => "127.0.0.1".to_string(),
+        "[::]" | "::" => "[::1]".to_string(),
+        _ => {
+            if let Some(rest) = listen.strip_prefix("0.0.0.0:") {
+                format!("127.0.0.1:{rest}")
+            } else if let Some(rest) = listen.strip_prefix("[::]:") {
+                format!("[::1]:{rest}")
+            } else {
+                listen.to_string()
+            }
+        }
+    }
+}
+
 /// PUSH an assignment to the chosen provider over HTTP, so a REMOTE provider (which
 /// can't read this AP's host-local assignments file) still learns the job is its. The
 /// provider's heartbeat (`POST /assign`) writes it into the provider's OWN local file AND
@@ -705,10 +724,7 @@ fn dispatch_assignment(
     // Sent as a header + body field; unset env ⇒ the provider stays legacy/permissive.
     let assign_token = std::env::var("GPN_ASSIGN_TOKEN").unwrap_or_default();
     let body = assignment_body(job_id, provider, model, pull, job_payload, callback_url, callback_token, &assign_token);
-    if let Ok(c) = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-    {
+    if let Ok(c) = gpn_agent::net::ipv4_only_client(std::time::Duration::from_secs(3)) {
         let mut req = c.post(&url).json(&body);
         if !assign_token.is_empty() {
             req = req.header("X-Gpn-Assign-Token", &assign_token);
@@ -842,11 +858,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // provider POSTs the finished result to (`{callback}/result/{id}`). Item #14:
     // a remote provider can be anywhere, so it needs an absolute URL back to us.
     // Precedence: --callback-url > GPN_AP_CALLBACK_URL > GPN_PUBLIC_URL > http://<listen>.
+    // When <listen> is a wildcard bind (0.0.0.0/::), advertise the **loopback**
+    // address: a co-located provider reaches it without any public-DNS lookup, so
+    // an AAAA-laggy host resolver cannot stall the `/result` return
+    // (see docs/run-a-node.md, "host-DNS /result defect"). Operators exposing a
+    // remote-reachable AP set GPN_PUBLIC_URL/GPN_AP_CALLBACK_URL explicitly.
     let callback_url = opt(&args, "--callback-url")
         .or_else(|| std::env::var("GPN_AP_CALLBACK_URL").ok())
         .or_else(|| std::env::var("GPN_PUBLIC_URL").ok())
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| format!("http://{listen}"));
+        .unwrap_or_else(|| format!("http://{}", loopback_if_wildcard(&listen)));
     // Optional bearer token. When set, state-changing (POST) + artifact requests
     // from NON-loopback clients must present it (local crons/monitors keep working).
     let ap_token = std::env::var("GPN_AP_TOKEN").unwrap_or_default();
@@ -2168,6 +2189,18 @@ mod tests {
         let igpu = mk_amd("amd-i", "http://i", 1, "AMD Radeon(TM) Graphics");
         assert_eq!(igpu.gpu_class, "integrated");
         assert!(pick(&vec![igpu], 0, 0, 0, 3.0, "llama3.2:1b", 0, &RttOverrides::new()).is_none());
+    }
+
+    #[test]
+    fn callback_default_uses_loopback_for_wildcard_binds() {
+        // A wildcard listen (0.0.0.0/::) is not a routable destination; the
+        // advertised callback should be loopback so a co-located provider
+        // reaches the AP with no public-DNS lookup (host-DNS /result defect).
+        assert_eq!(loopback_if_wildcard("0.0.0.0:8092"), "127.0.0.1:8092");
+        assert_eq!(loopback_if_wildcard("[::]:8092"), "[::1]:8092");
+        assert_eq!(loopback_if_wildcard("0.0.0.0"), "127.0.0.1");
+        // Non-wildcard binds are preserved verbatim.
+        assert_eq!(loopback_if_wildcard("10.0.0.5:8092"), "10.0.0.5:8092");
     }
 
     #[test]
