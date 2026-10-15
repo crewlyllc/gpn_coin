@@ -76,10 +76,19 @@ impl EthashGpuMiner {
         // most powerful card.
         gpus.sort_by_key(|(_, d)| {
             let name = d.name().unwrap_or_default().to_lowercase();
-            if name.contains("intel") { 1 } else { 0 }
+            if name.contains("intel") {
+                1
+            } else {
+                0
+            }
         });
         for (i, (pname, d)) in gpus.iter().enumerate() {
-            out.push(format!("[{}] {} :: {}", i, pname, d.name().unwrap_or_default()));
+            out.push(format!(
+                "[{}] {} :: {}",
+                i,
+                pname,
+                d.name().unwrap_or_default()
+            ));
         }
         out
     }
@@ -104,7 +113,11 @@ impl EthashGpuMiner {
         // the most powerful card, not a CPU-integrated iGPU.
         gpus.sort_by_key(|d| {
             let name = d.name().unwrap_or_default().to_lowercase();
-            if name.contains("intel") { 1 } else { 0 }
+            if name.contains("intel") {
+                1
+            } else {
+                0
+            }
         });
         let device = gpus.get(device_index).cloned().ok_or_else(|| {
             format!(

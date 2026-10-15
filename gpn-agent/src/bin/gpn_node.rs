@@ -138,7 +138,9 @@ fn split_list(s: &str) -> Vec<String> {
 fn existing_db(base_path: &Option<String>) -> bool {
     let Some(bp) = base_path else { return false };
     let chains = PathBuf::from(bp).join("chains");
-    let Ok(rd) = std::fs::read_dir(&chains) else { return false };
+    let Ok(rd) = std::fs::read_dir(&chains) else {
+        return false;
+    };
     rd.flatten().any(|e| e.path().join("db").is_dir())
 }
 
@@ -207,18 +209,20 @@ impl Config {
         let endpoint = env_str("GPN_ENDPOINT")
             .or(file.endpoint)
             .unwrap_or_else(|| "ws://127.0.0.1:9944".to_string());
-        let rpc_port = env_u16("GPN_RPC_PORT")
-            .or(file.rpc_port)
-            .unwrap_or(9944);
+        let rpc_port = env_u16("GPN_RPC_PORT").or(file.rpc_port).unwrap_or(9944);
 
         Ok(Config {
-            chain: env_str("GPN_CHAIN").or(file.chain).unwrap_or_else(|| "testnet".into()),
+            chain: env_str("GPN_CHAIN")
+                .or(file.chain)
+                .unwrap_or_else(|| "testnet".into()),
             signer: env_str("GPN_SIGNER")
                 .or(file.signer)
                 .unwrap_or_else(|| "//Alice".into()),
             account: env_str("GPN_ACCOUNT").or(file.account).unwrap_or_default(),
             endpoint,
-            base_path: env_str("GPN_BASE_PATH").or(file.base_path).map(|s| expand_tilde(&s)),
+            base_path: env_str("GPN_BASE_PATH")
+                .or(file.base_path)
+                .map(|s| expand_tilde(&s)),
             rpc_port,
             node_key: env_str("GPN_NODE_KEY").or(file.node_key),
             bootnodes: env_str("GPN_BOOTNODES")
@@ -244,12 +248,16 @@ impl Config {
             gflops: env_u64("GPN_GFLOPS").or(file.gflops).unwrap_or(0),
             capacity: env_u64("GPN_CAPACITY").or(file.capacity).unwrap_or(1),
             poll_ms: env_u64("GPN_POLL_MS").or(file.poll_ms).unwrap_or(300),
-            diffusion: env_bool("GPN_DIFFUSION").or(file.diffusion).unwrap_or(false),
+            diffusion: env_bool("GPN_DIFFUSION")
+                .or(file.diffusion)
+                .unwrap_or(false),
             diffusion_poll_ms: env_u64("GPN_DIFFUSION_POLL_MS")
                 .or(file.diffusion_poll_ms)
                 .unwrap_or(2000),
             bin_dir,
-            status_secs: env_u64("GPN_STATUS_SECS").or(file.status_secs).unwrap_or(15),
+            status_secs: env_u64("GPN_STATUS_SECS")
+                .or(file.status_secs)
+                .unwrap_or(15),
         })
     }
 
@@ -360,7 +368,10 @@ fn supervise(spec: ChildSpec, shared: Shared, shutdown: Arc<AtomicBool>) {
                 c
             }
             Err(e) => {
-                log_event(label, &format!("spawn failed: {e} — retrying in {backoff_ms}ms"));
+                log_event(
+                    label,
+                    &format!("spawn failed: {e} — retrying in {backoff_ms}ms"),
+                );
                 sleep_or_shutdown(&shutdown, backoff_ms);
                 backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
                 continue;
@@ -427,7 +438,10 @@ fn supervise(spec: ChildSpec, shared: Shared, shutdown: Arc<AtomicBool>) {
         };
         log_event(
             label,
-            &format!("exited ({detail}) after {}s — restarting in {backoff_ms}ms", ran.as_secs()),
+            &format!(
+                "exited ({detail}) after {}s — restarting in {backoff_ms}ms",
+                ran.as_secs()
+            ),
         );
         set_status(&shared, label, false, 0);
 
@@ -524,7 +538,11 @@ fn sleep_steps(shutdown: &Arc<AtomicBool>, ms: u64) {
 /// child (via SIGTERM — the supervisor then restarts it with backoff, and it
 /// re-syncs). Normal syncing advances `best` every check, so it never triggers;
 /// a node whose RPC isn't answering yet resets the clock rather than counting.
-fn spawn_stall_watchdog(cfg: &Config, shared: Shared, shutdown: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
+fn spawn_stall_watchdog(
+    cfg: &Config,
+    shared: Shared,
+    shutdown: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
     let port = cfg.rpc_port;
     std::thread::spawn(move || {
         let stall = Duration::from_secs(env_u64("GPN_STALL_SECS").unwrap_or(300).max(60));
@@ -548,9 +566,7 @@ fn spawn_stall_watchdog(cfg: &Config, shared: Shared, shutdown: Arc<AtomicBool>)
                     } else if last_change.elapsed() >= stall {
                         let (node_up, pid) = {
                             let m = shared.lock().unwrap();
-                            m.get("node")
-                                .map(|s| (s.up, s.pid))
-                                .unwrap_or((false, 0))
+                            m.get("node").map(|s| (s.up, s.pid)).unwrap_or((false, 0))
                         };
                         let peers = peer_count(port).unwrap_or(0);
                         if node_up && peers >= 1 && pid != 0 {
@@ -813,7 +829,10 @@ async fn main() {
     } else {
         println!("  account={}", cfg.account);
     }
-    println!("  heartbeat listen={} ollama={} gflops={}", cfg.listen, cfg.ollama, cfg.gflops);
+    println!(
+        "  heartbeat listen={} ollama={} gflops={}",
+        cfg.listen, cfg.ollama, cfg.gflops
+    );
 
     // ── Ollama is a first-class prerequisite: without it the node still mines,
     //    but the provider cannot serve any LLM job. Warn clearly & actionably. ──
@@ -823,9 +842,13 @@ async fn main() {
             cfg.ollama
         );
         eprintln!("      Install & start ollama (one-time):");
-        eprintln!("        Windows :  winget install Ollama.Ollama   (or  scripts\\install-ollama.ps1 )");
+        eprintln!(
+            "        Windows :  winget install Ollama.Ollama   (or  scripts\\install-ollama.ps1 )"
+        );
         eprintln!("        Linux   :  scripts/install-ollama.sh      (or  curl -fsSL https://ollama.com/install.sh | sh )");
-        eprintln!("      Then:  ollama serve        # keep it running (listens on 127.0.0.1:11434)");
+        eprintln!(
+            "      Then:  ollama serve        # keep it running (listens on 127.0.0.1:11434)"
+        );
         eprintln!("             ollama pull llama3.2:1b");
         eprintln!("      Docs: docs/run-a-node.md\n");
     } else {
@@ -848,7 +871,9 @@ async fn main() {
     for spec in specs {
         let shared = shared.clone();
         let shutdown = shutdown.clone();
-        handles.push(std::thread::spawn(move || supervise(spec, shared, shutdown)));
+        handles.push(std::thread::spawn(move || {
+            supervise(spec, shared, shutdown)
+        }));
     }
 
     // Status printer.

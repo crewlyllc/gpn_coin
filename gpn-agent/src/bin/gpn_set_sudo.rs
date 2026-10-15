@@ -24,12 +24,23 @@ use subxt::utils::AccountId32;
 /// storage key) so we don't depend on subxt dynamic Value byte decoding.
 async fn read_sudo_key(endpoint: &str) -> Option<[u8; 32]> {
     use sp_core::hashing::twox_128;
-    let http = endpoint.replace("ws://", "http://").replace("wss://", "https://");
+    let http = endpoint
+        .replace("ws://", "http://")
+        .replace("wss://", "https://");
     let client = reqwest::Client::new();
 
     // best block hash
-    let body = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"chain_getBlockHash","params":[]});
-    let resp: serde_json::Value = client.post(&http).json(&body).send().await.ok()?.json().await.ok()?;
+    let body =
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"chain_getBlockHash","params":[]});
+    let resp: serde_json::Value = client
+        .post(&http)
+        .json(&body)
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
     let head = resp.get("result")?.as_str()?.to_string();
 
     // twox128("Sudo") ++ twox128("Key")
@@ -39,7 +50,15 @@ async fn read_sudo_key(endpoint: &str) -> Option<[u8; 32]> {
     let key_hex = format!("0x{}", hex::encode(key));
 
     let body = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"state_getStorage","params":[key_hex, head]});
-    let resp: serde_json::Value = client.post(&http).json(&body).send().await.ok()?.json().await.ok()?;
+    let resp: serde_json::Value = client
+        .post(&http)
+        .json(&body)
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
     let raw = resp.get("result")?.as_str()?.trim_start_matches("0x");
     let bytes = hex::decode(raw).ok()?;
     let out: [u8; 32] = bytes.try_into().ok()?;
@@ -124,7 +143,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let after = read_sudo_key(&endpoint).await;
     match after {
         Some(b) if b == new_bytes => {
-            println!("✅ VERIFIED: Sudo::Key == new account {} (0x{})", ss58(&b), hex::encode(b));
+            println!(
+                "✅ VERIFIED: Sudo::Key == new account {} (0x{})",
+                ss58(&b),
+                hex::encode(b)
+            );
         }
         Some(b) => {
             eprintln!(

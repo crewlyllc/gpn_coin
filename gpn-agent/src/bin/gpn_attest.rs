@@ -27,10 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get(3)
         .map(|s| s.parse().unwrap_or(1000))
         .unwrap_or(1000);
-    let gflops: u64 = args
-        .get(4)
-        .map(|s| s.parse().unwrap_or(188))
-        .unwrap_or(188);
+    let gflops: u64 = args.get(4).map(|s| s.parse().unwrap_or(188)).unwrap_or(188);
 
     let stake_raw = stake_gpn * 1_000_000_000_000; // 12 decimals
 
@@ -45,8 +42,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Signing as: {}", signer.account_id());
 
     // 1. deposit_stake
-    let stake_call =
-        subxt::dynamic::tx("GPUAttestation", "deposit_stake", vec![Value::u128(stake_raw)]);
+    let stake_call = subxt::dynamic::tx(
+        "GPUAttestation",
+        "deposit_stake",
+        vec![Value::u128(stake_raw)],
+    );
     let nonce = signer::current_nonce(&client, &endpoint, &signer.account_id()).await;
     println!("Submitting deposit_stake [nonce {nonce}]...");
     signer::submit_signed(&client, &stake_call, &signer, nonce).await?;
@@ -61,7 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         vec![
             Value::from_bytes(&challenge),
             Value::from_bytes(&gpu_hash),
-            Value::u128(1),             // gpu_count
+            Value::u128(1),              // gpu_count
             Value::u128(gflops as u128), // compute_gflops
         ],
     );

@@ -309,7 +309,13 @@ impl LlmStore {
     }
 
     /// Set the completed response + result hash.
-    pub fn complete(&self, job_id: u64, response: &str, result_hash: &str, salt: Option<&str>) -> std::io::Result<()> {
+    pub fn complete(
+        &self,
+        job_id: u64,
+        response: &str,
+        result_hash: &str,
+        salt: Option<&str>,
+    ) -> std::io::Result<()> {
         let _g = self.lock.lock().unwrap();
         let mut map = self.load();
         if let Some(j) = map.get_mut(&job_id) {
@@ -365,7 +371,12 @@ pub fn get_job(job_id: u64) -> Option<LlmJob> {
     LlmStore::new().get(job_id)
 }
 /// Convenience: mark a job's response complete.
-pub fn set_response(job_id: u64, response: &str, result_hash: &str, salt: Option<&str>) -> std::io::Result<()> {
+pub fn set_response(
+    job_id: u64,
+    response: &str,
+    result_hash: &str,
+    salt: Option<&str>,
+) -> std::io::Result<()> {
     LlmStore::new().complete(job_id, response, result_hash, salt)
 }
 

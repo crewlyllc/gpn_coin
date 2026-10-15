@@ -9,9 +9,9 @@ use sc_client_api::BlockBackend;
 use sc_client_api::StorageProvider;
 use sc_consensus::{BlockImport, LongestChain};
 use sc_consensus_pow::{start_mining_worker, PowAlgorithm, PowBlockImport, PowImportQueue};
-use sc_network_sync::SyncingService;
 use sc_network::config::MultiaddrWithPeerId;
 use sc_network::{NetworkPeers, NetworkStatusProvider};
+use sc_network_sync::SyncingService;
 use sc_service::{error::Error as ServiceError, Configuration, TaskManager};
 use sc_telemetry::{Telemetry, TelemetryWorker};
 use sc_transaction_pool_api::OffchainTransactionPoolFactory;
@@ -469,19 +469,16 @@ pub fn new_full<
     // A skewed wall clock can wedge a node (block timestamps + timing-based
     // difficulty reject otherwise-valid blocks; the Windows box was ~57 s off).
     // Best-effort, non-fatal, and non-blocking: runs once on a background task.
-    task_manager.spawn_handle().spawn(
-        "gpn-clock-check",
-        None,
-        async move {
+    task_manager
+        .spawn_handle()
+        .spawn("gpn-clock-check", None, async move {
             let _ = tokio::task::spawn_blocking(crate::clock::run_startup_check).await;
-        },
-    );
+        });
     {
         let net = network.clone();
-        task_manager.spawn_handle().spawn(
-            "gpn-peer-watch",
-            None,
-            async move {
+        task_manager
+            .spawn_handle()
+            .spawn("gpn-peer-watch", None, async move {
                 let mut tick = tokio::time::interval(Duration::from_secs(30));
                 tick.tick().await; // consume the immediate first tick
                 loop {
@@ -494,8 +491,7 @@ pub fn new_full<
                         );
                     }
                 }
-            },
-        );
+            });
     }
 
     // ---- Persistent peer store (Bitcoin-style addrman) -------------------
@@ -506,28 +502,30 @@ pub fn new_full<
     {
         let net = network.clone();
         let base = base_path.clone();
-        task_manager.spawn_handle().spawn("gpn-peer-store", None, async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(60));
-            loop {
-                tick.tick().await;
-                let Ok(state) = net.network_state().await else {
-                    continue;
-                };
-                let mut addrs = Vec::new();
-                for (peer, info) in &state.connected_peers {
-                    for addr in &info.known_addresses {
-                        // `known_addresses` omit the peer id; add it back so the
-                        // stored entry is a dialable bootnode.
-                        addrs.push(format!("{addr}/p2p/{peer}"));
+        task_manager
+            .spawn_handle()
+            .spawn("gpn-peer-store", None, async move {
+                let mut tick = tokio::time::interval(Duration::from_secs(60));
+                loop {
+                    tick.tick().await;
+                    let Ok(state) = net.network_state().await else {
+                        continue;
+                    };
+                    let mut addrs = Vec::new();
+                    for (peer, info) in &state.connected_peers {
+                        for addr in &info.known_addresses {
+                            // `known_addresses` omit the peer id; add it back so the
+                            // stored entry is a dialable bootnode.
+                            addrs.push(format!("{addr}/p2p/{peer}"));
+                        }
+                    }
+                    if !addrs.is_empty() {
+                        if let Err(e) = crate::discovery::write_persisted_peers(&base, &addrs) {
+                            log::debug!("peer-store: persist failed: {e}");
+                        }
                     }
                 }
-                if !addrs.is_empty() {
-                    if let Err(e) = crate::discovery::write_persisted_peers(&base, &addrs) {
-                        log::debug!("peer-store: persist failed: {e}");
-                    }
-                }
-            }
-        });
+            });
     }
 
     // ---- On-chain discovery (GPN-native top-up) --------------------------
@@ -537,34 +535,36 @@ pub fn new_full<
     {
         let net = network.clone();
         let client = client.clone();
-        task_manager.spawn_handle().spawn("gpn-chain-discovery", None, async move {
-            {
-                let mut gate = tokio::time::interval(Duration::from_secs(30));
-                for _ in 0..10 {
-                    if net.sync_num_connected() > 0 {
-                        break;
-                    }
-                    gate.tick().await;
-                }
-            }
-            let mut tick = tokio::time::interval(Duration::from_secs(600));
-            loop {
-                tick.tick().await;
-                let endpoints = read_chain_endpoints(&client);
-                let mut added = 0usize;
-                for ma in endpoints {
-                    if let Ok(mw) = ma.parse::<MultiaddrWithPeerId>() {
-                        net.add_known_address(mw.peer_id, mw.multiaddr);
-                        added += 1;
+        task_manager
+            .spawn_handle()
+            .spawn("gpn-chain-discovery", None, async move {
+                {
+                    let mut gate = tokio::time::interval(Duration::from_secs(30));
+                    for _ in 0..10 {
+                        if net.sync_num_connected() > 0 {
+                            break;
+                        }
+                        gate.tick().await;
                     }
                 }
-                if added > 0 {
-                    log::info!("chain-discovery: dialing {added} on-chain peer(s)");
-                } else {
-                    log::debug!("chain-discovery: no dialable on-chain endpoints");
+                let mut tick = tokio::time::interval(Duration::from_secs(600));
+                loop {
+                    tick.tick().await;
+                    let endpoints = read_chain_endpoints(&client);
+                    let mut added = 0usize;
+                    for ma in endpoints {
+                        if let Ok(mw) = ma.parse::<MultiaddrWithPeerId>() {
+                            net.add_known_address(mw.peer_id, mw.multiaddr);
+                            added += 1;
+                        }
+                    }
+                    if added > 0 {
+                        log::info!("chain-discovery: dialing {added} on-chain peer(s)");
+                    } else {
+                        log::debug!("chain-discovery: no dialable on-chain endpoints");
+                    }
                 }
-            }
-        });
+            });
     }
 
     if config.offchain_worker.enabled {

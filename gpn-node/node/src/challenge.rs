@@ -194,8 +194,14 @@ mod tests {
         let base = [0x42u8; 32];
         let alice = provider_challenge(&base, b"alice-account");
         let bob = provider_challenge(&base, b"bob-account");
-        assert_ne!(alice, bob, "different providers must derive different challenges");
-        assert_ne!(alice, base, "the bound challenge must differ from the raw one");
+        assert_ne!(
+            alice, bob,
+            "different providers must derive different challenges"
+        );
+        assert_ne!(
+            alice, base,
+            "the bound challenge must differ from the raw one"
+        );
         // Deterministic for the same inputs (verifier + miner agree).
         assert_eq!(alice, provider_challenge(&base, b"alice-account"));
     }
@@ -209,7 +215,10 @@ mod tests {
         let alice = provider_challenge(&base, b"alice-account");
         let bob = provider_challenge(&base, b"bob-account");
         let seal = mine(&alice, target);
-        assert!(verify_challenge_solution(&alice, &seal, target), "alice's own seal must verify");
+        assert!(
+            verify_challenge_solution(&alice, &seal, target),
+            "alice's own seal must verify"
+        );
         assert!(
             !verify_challenge_solution(&bob, &seal, target),
             "alice's seal must be rejected for bob"

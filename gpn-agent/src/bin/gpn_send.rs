@@ -8,10 +8,10 @@
 //! Env: ENDPOINT, SIGNER_URI.
 
 use gpn_agent::chain::signer;
+use std::str::FromStr;
 use subxt::dynamic::Value;
 use subxt::tx::Signer as _;
 use subxt::utils::AccountId32;
-use std::str::FromStr;
 
 const GPN_UNITS: f64 = 1_000_000_000_000.0;
 

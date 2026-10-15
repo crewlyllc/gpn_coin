@@ -597,10 +597,7 @@ pub mod pallet {
 
             let now_raw = frame_system::Pallet::<T>::block_number();
             let now: u32 = now_raw.try_into().unwrap_or(0);
-            let deadline: u32 = now_raw
-                .saturating_add(ttl)
-                .try_into()
-                .unwrap_or(u32::MAX);
+            let deadline: u32 = now_raw.saturating_add(ttl).try_into().unwrap_or(u32::MAX);
             let deposit: u128 = amount.try_into().unwrap_or(u128::MAX);
 
             T::Currency::transfer(
@@ -764,10 +761,7 @@ pub mod pallet {
         /// its claim first. Only the funding requestor may reclaim.
         #[pallet::call_index(14)]
         #[pallet::weight(<T as Config>::WeightInfo::complete_job())]
-        pub fn refund_expired_channel(
-            origin: OriginFor<T>,
-            channel_id: u64,
-        ) -> DispatchResult {
+        pub fn refund_expired_channel(origin: OriginFor<T>, channel_id: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
             let channel = <Channels<T>>::get(channel_id).ok_or(Error::<T>::ChannelNotFound)?;
             ensure!(
@@ -1150,7 +1144,10 @@ pub mod pallet {
             // is still reclaimed permissionlessly by `expire_job` after the
             // deadline). The requestor may still fail from Pending/Accepted,
             // where no work has been done yet.
-            if matches!(job.state, JobState::Running | JobState::AwaitingVerification) {
+            if matches!(
+                job.state,
+                JobState::Running | JobState::AwaitingVerification
+            ) {
                 ensure!(provider.as_ref() == Some(&who), Error::<T>::NotJobProvider);
             }
 
@@ -1462,12 +1459,8 @@ pub mod pallet {
             balance_provider: u128,
             nonce: u64,
         ) -> DispatchResult {
-            ensure!(
-                nonce > channel.nonce,
-                Error::<T>::ChannelNonceTooLow
-            );
-            let escrow =
-                <ChannelEscrow<T>>::get(channel_id).ok_or(Error::<T>::ChannelNotFound)?;
+            ensure!(nonce > channel.nonce, Error::<T>::ChannelNonceTooLow);
+            let escrow = <ChannelEscrow<T>>::get(channel_id).ok_or(Error::<T>::ChannelNotFound)?;
             let deposit: u128 = escrow.try_into().unwrap_or(u128::MAX);
             ensure!(
                 balance_requestor.saturating_add(balance_provider) == deposit,
@@ -1516,12 +1509,8 @@ pub mod pallet {
         /// Used only by `refund_expired_channel`, which has already verified the
         /// channel is untouched (no co-signed state ⇒ nothing owed to the
         /// provider). Mirrors the bookkeeping of `settle_channel`.
-        fn refund_channel(
-            channel_id: u64,
-            mut channel: Channel<T::AccountId>,
-        ) -> DispatchResult {
-            let escrow =
-                <ChannelEscrow<T>>::get(channel_id).ok_or(Error::<T>::ChannelNotFound)?;
+        fn refund_channel(channel_id: u64, mut channel: Channel<T::AccountId>) -> DispatchResult {
+            let escrow = <ChannelEscrow<T>>::get(channel_id).ok_or(Error::<T>::ChannelNotFound)?;
             let requestor = channel.requestor.clone();
             let provider = channel.provider.clone();
             channel.state = ChannelState::Closed;
@@ -1554,8 +1543,8 @@ mod tests {
         assert_noop, construct_runtime, derive_impl, parameter_types,
         traits::{BuildGenesisConfig, ConstU128, ConstU16, ConstU32, ConstU64, Everything, Hooks},
     };
-    use sp_core::H256;
     use sp_core::Pair;
+    use sp_core::H256;
     use sp_runtime::{
         traits::{BlakeTwo256, IdentityLookup},
         BuildStorage,
@@ -1563,8 +1552,8 @@ mod tests {
 
     use crate::pallet as local_market;
     use crate::pallet::{
-        ActiveJobCount, ChannelEscrow, ChannelIndex, Channels, JobEscrow, JobProvider, JobSweepCursor,
-        Jobs, NextChannelId, NextJobId, ProviderEndpoints, RegisteredProviders,
+        ActiveJobCount, ChannelEscrow, ChannelIndex, Channels, JobEscrow, JobProvider,
+        JobSweepCursor, Jobs, NextChannelId, NextJobId, ProviderEndpoints, RegisteredProviders,
     };
 
     type Block = frame_system::mocking::MockBlock<Test>;
@@ -1683,11 +1672,7 @@ mod tests {
             CHANNEL_KEYS.with(|m| match m.borrow().get(who) {
                 Some(pair) => {
                     let sig = sp_core::sr25519::Signature::from_raw(*signature);
-                    <sp_core::sr25519::Pair as sp_core::Pair>::verify(
-                        &sig,
-                        payload,
-                        &pair.public(),
-                    )
+                    <sp_core::sr25519::Pair as sp_core::Pair>::verify(&sig, payload, &pair.public())
                 }
                 None => false,
             })
@@ -1700,13 +1685,7 @@ mod tests {
         pair
     }
     /// Sign a channel settlement as `id`.
-    fn sign_settle(
-        id: u64,
-        channel_id: u64,
-        br: u128,
-        bp: u128,
-        nonce: u64,
-    ) -> [u8; 64] {
+    fn sign_settle(id: u64, channel_id: u64, br: u128, bp: u128, nonce: u64) -> [u8; 64] {
         let pair = register_channel_key(id);
         let payload = MarketPallet::channel_settle_payload(channel_id, br, bp, nonce);
         pair.sign(&payload).to_raw()
@@ -2033,7 +2012,10 @@ mod tests {
             // The assigned provider still completes normally.
             MarketPallet::submit_result(RuntimeOrigin::signed(BOB), job_id, [5u8; 32], 1).unwrap();
             MarketPallet::complete_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
-            assert_eq!(Jobs::<Test>::get(job_id).unwrap().state, JobState::Completed);
+            assert_eq!(
+                Jobs::<Test>::get(job_id).unwrap().state,
+                JobState::Completed
+            );
         });
     }
 
@@ -2069,7 +2051,10 @@ mod tests {
             // The requestor MAY complete once a result exists (AwaitingVerification).
             MarketPallet::submit_result(RuntimeOrigin::signed(BOB), job_id, [9u8; 32], 1).unwrap();
             MarketPallet::complete_job(RuntimeOrigin::signed(ALICE), job_id).unwrap();
-            assert_eq!(Jobs::<Test>::get(job_id).unwrap().state, JobState::Completed);
+            assert_eq!(
+                Jobs::<Test>::get(job_id).unwrap().state,
+                JobState::Completed
+            );
         });
     }
 
@@ -2245,7 +2230,8 @@ mod tests {
             register_provider(BOB);
             let job_id = create_job(ALICE);
             // Not running yet — submit fails
-            let result = MarketPallet::submit_result(RuntimeOrigin::signed(BOB), job_id, [5u8; 32], 0);
+            let result =
+                MarketPallet::submit_result(RuntimeOrigin::signed(BOB), job_id, [5u8; 32], 0);
             assert_eq!(result, Err(Error::<Test>::JobNotRunning.into()));
         });
     }
@@ -2674,7 +2660,10 @@ mod tests {
                 .unwrap();
             assert_eq!(Balances::free_balance(ALICE), alice_before + br);
             assert_eq!(Balances::free_balance(BOB), bob_before + bp);
-            assert_eq!(Channels::<Test>::get(ch).unwrap().state, ChannelState::Closed);
+            assert_eq!(
+                Channels::<Test>::get(ch).unwrap().state,
+                ChannelState::Closed
+            );
             assert_eq!(ChannelEscrow::<Test>::get(ch), None);
             assert_eq!(ChannelIndex::<Test>::get((ALICE, BOB)), None);
             assert_eq!(Balances::free_balance(MarketPallet::account_id()), 0);
@@ -2712,15 +2701,8 @@ mod tests {
             let (br, bp, n) = (3_800u128, 1_000u128, 1u64);
             let sr = sign_settle(ALICE, ch, br, bp, n);
             let sp = sign_settle(BOB, ch, br, bp, n);
-            let res = MarketPallet::close_channel(
-                RuntimeOrigin::signed(ALICE),
-                ch,
-                br,
-                bp,
-                n,
-                sr,
-                sp,
-            );
+            let res =
+                MarketPallet::close_channel(RuntimeOrigin::signed(ALICE), ch, br, bp, n, sr, sp);
             assert_eq!(res, Err(Error::<Test>::ChannelBalanceMismatch.into()));
         });
     }
@@ -2731,14 +2713,8 @@ mod tests {
             let ch = open_default_channel();
             let (br, bp, n) = (3_800u128, 1_200u128, 1u64);
             let sp = sign_settle(BOB, ch, br, bp, n);
-            let res = MarketPallet::force_close_channel(
-                RuntimeOrigin::signed(ALICE),
-                ch,
-                br,
-                bp,
-                n,
-                sp,
-            );
+            let res =
+                MarketPallet::force_close_channel(RuntimeOrigin::signed(ALICE), ch, br, bp, n, sp);
             assert_eq!(res, Err(Error::<Test>::ChannelNotExpired.into()));
         });
     }
@@ -2751,17 +2727,13 @@ mod tests {
             let sp = sign_settle(BOB, ch, br, bp, n);
             System::set_block_number(101); // opened_at(1) + ttl(100)
             let bob_before = Balances::free_balance(BOB);
-            MarketPallet::force_close_channel(
-                RuntimeOrigin::signed(ALICE),
-                ch,
-                br,
-                bp,
-                n,
-                sp,
-            )
-            .unwrap();
+            MarketPallet::force_close_channel(RuntimeOrigin::signed(ALICE), ch, br, bp, n, sp)
+                .unwrap();
             assert_eq!(Balances::free_balance(BOB), bob_before + bp);
-            assert_eq!(Channels::<Test>::get(ch).unwrap().state, ChannelState::Closed);
+            assert_eq!(
+                Channels::<Test>::get(ch).unwrap().state,
+                ChannelState::Closed
+            );
         });
     }
 
@@ -2787,7 +2759,10 @@ mod tests {
             assert_eq!(Balances::free_balance(ALICE), alice_before + escrow);
             assert_eq!(ChannelEscrow::<Test>::get(ch), None);
             assert_eq!(ChannelIndex::<Test>::get((ALICE, BOB)), None);
-            assert_eq!(Channels::<Test>::get(ch).unwrap().state, ChannelState::Closed);
+            assert_eq!(
+                Channels::<Test>::get(ch).unwrap().state,
+                ChannelState::Closed
+            );
             assert_eq!(Balances::free_balance(MarketPallet::account_id()), 0);
         });
     }
@@ -2836,17 +2811,13 @@ mod tests {
             let (br, bp, n) = (3_000u128, 2_000u128, 1u64);
             let sr = sign_settle(ALICE, ch, br, bp, n);
             let bob_before = Balances::free_balance(BOB);
-            MarketPallet::force_close_channel(
-                RuntimeOrigin::signed(BOB),
-                ch,
-                br,
-                bp,
-                n,
-                sr,
-            )
-            .unwrap();
+            MarketPallet::force_close_channel(RuntimeOrigin::signed(BOB), ch, br, bp, n, sr)
+                .unwrap();
             assert_eq!(Balances::free_balance(BOB), bob_before + bp);
-            assert_eq!(Channels::<Test>::get(ch).unwrap().state, ChannelState::Closed);
+            assert_eq!(
+                Channels::<Test>::get(ch).unwrap().state,
+                ChannelState::Closed
+            );
             // The requestor's later refund now fails (channel already closed).
             System::set_block_number(151);
             let res = MarketPallet::refund_expired_channel(RuntimeOrigin::signed(ALICE), ch);

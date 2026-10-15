@@ -122,8 +122,14 @@ mod tests {
         let o = parse_rtt_overrides(&v);
 
         // URL key: with `/status`, trailing slash, and uppercase all normalize.
-        assert_eq!(lookup_override(&o, "", "http://GPN-testnet.duckdns.org:8093/status"), Some(30));
-        assert_eq!(lookup_override(&o, "", "http://gpn-testnet.duckdns.org:8093"), Some(30));
+        assert_eq!(
+            lookup_override(&o, "", "http://GPN-testnet.duckdns.org:8093/status"),
+            Some(30)
+        );
+        assert_eq!(
+            lookup_override(&o, "", "http://gpn-testnet.duckdns.org:8093"),
+            Some(30)
+        );
 
         // Address key, case-insensitive; float rounds to nearest ms.
         assert_eq!(lookup_override(&o, "5enqsp5qEXAMPLEaddress", ""), Some(13));
@@ -149,7 +155,10 @@ mod tests {
         // vs A client=80). With client RTT supplied, B must win.
         let ap = |a: u64, b: u64| -> (u64, u64) {
             // score in the *user* frame: min effective latency
-            (effective_latency_ms(a, Some(80)), effective_latency_ms(b, Some(10)))
+            (
+                effective_latency_ms(a, Some(80)),
+                effective_latency_ms(b, Some(10)),
+            )
         };
         let (a, b) = ap(5, 50);
         assert!(b < a, "client-nearest provider (B) must score lower than A");

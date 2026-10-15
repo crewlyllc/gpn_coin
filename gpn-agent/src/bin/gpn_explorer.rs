@@ -445,11 +445,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let canon = gpn_agent::network_registry::load_registry();
         if let Some(gen) = runtime
-            .block_on(rpc_call(&endpoint, "chain_getBlockHash", serde_json::json!([0])))
+            .block_on(rpc_call(
+                &endpoint,
+                "chain_getBlockHash",
+                serde_json::json!([0]),
+            ))
             .and_then(|v| v.as_str().map(String::from))
         {
-            let mismatch = !canon.genesis_is_placeholder()
-                && !canon.genesis_hash.eq_ignore_ascii_case(&gen);
+            let mismatch =
+                !canon.genesis_is_placeholder() && !canon.genesis_hash.eq_ignore_ascii_case(&gen);
             if mismatch && !allow_noncanonical {
                 return Err(format!(
                     "⚠️ DIFFERENT NETWORK: genesis {gen} != canonical {} ({}). Refusing to serve a non-canonical chain; pass --allow-noncanonical to override.",
@@ -460,7 +464,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if mismatch {
                 log::warn!("⚠️ serving NON-CANONICAL chain genesis {gen} (--allow-noncanonical)");
             } else {
-                println!("gpn_explorer: canonical chain OK (genesis {gen}, {})", canon.chain_id);
+                println!(
+                    "gpn_explorer: canonical chain OK (genesis {gen}, {})",
+                    canon.chain_id
+                );
             }
         }
     }

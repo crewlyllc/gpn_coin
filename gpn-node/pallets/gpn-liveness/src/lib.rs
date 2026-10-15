@@ -428,8 +428,7 @@ pub mod pallet {
                         // from total issuance), matching
                         // `profitability-oracle::slash_operator`.
                         if !penalty.is_zero() {
-                            let (imbalance, _) =
-                                T::Currency::slash(&Self::account_id(), penalty);
+                            let (imbalance, _) = T::Currency::slash(&Self::account_id(), penalty);
                             drop(imbalance); // negative imbalance = burned
                         }
                         Self::deposit_event(Event::<T>::BondSlashed {

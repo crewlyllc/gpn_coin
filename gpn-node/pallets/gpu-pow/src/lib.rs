@@ -19,8 +19,8 @@ use sp_runtime::SaturatedConversion;
 use serde::{Deserialize, Serialize};
 
 pub use pallet::*;
-pub use weights::WeightInfo;
 use pallet_gpu_attestation::GPUAttestationProvider;
+pub use weights::WeightInfo;
 
 /// A 256-bit unsigned integer for difficulty.
 pub type U256 = [u64; 4];
@@ -381,7 +381,10 @@ pub mod pallet {
             ensure_root(origin)?;
             let old_reward: BalanceOf<T> = <CurrentBlockReward<T>>::get();
             <CurrentBlockReward<T>>::put(new_reward);
-            Self::deposit_event(Event::<T>::BlockRewardSet { old_reward, new_reward });
+            Self::deposit_event(Event::<T>::BlockRewardSet {
+                old_reward,
+                new_reward,
+            });
             Ok(())
         }
     }
@@ -400,12 +403,13 @@ pub mod pallet {
             if reward.is_zero() {
                 return;
             }
-            let author = <T::FindAuthor as frame_support::traits::FindAuthor<T::AccountId>>::find_author(
-                frame_system::Pallet::<T>::digest()
-                    .logs
-                    .iter()
-                    .filter_map(|d| d.as_pre_runtime()),
-            );
+            let author =
+                <T::FindAuthor as frame_support::traits::FindAuthor<T::AccountId>>::find_author(
+                    frame_system::Pallet::<T>::digest()
+                        .logs
+                        .iter()
+                        .filter_map(|d| d.as_pre_runtime()),
+                );
             let payee = match author {
                 Some(a) => {
                     // Stake-free, PoW-verified "GPU-only" gate: count proven block
@@ -823,7 +827,10 @@ mod tests {
         new_test_ext().execute_with(|| {
             let parent = [0, 0, 0, 0x1000_0000_0000_0000];
             let adjusted = GpuPowPallet::adjust_difficulty(parent, 500); // 0.5s/block
-            assert!(GpuPowPallet::u256_lt(&adjusted, &parent), "sub-1s must harden");
+            assert!(
+                GpuPowPallet::u256_lt(&adjusted, &parent),
+                "sub-1s must harden"
+            );
             assert_ne!(adjusted, parent, "must not be a no-op (frozen)");
         });
     }
@@ -874,7 +881,10 @@ mod tests {
                 GpuPowPallet::on_initialize(b);
             }
             let after = Difficulty::<Test>::get();
-            assert!(GpuPowPallet::u256_lt(&after, &before), "sub-1s must harden, not freeze");
+            assert!(
+                GpuPowPallet::u256_lt(&after, &before),
+                "sub-1s must harden, not freeze"
+            );
         });
     }
 
@@ -938,7 +948,10 @@ mod tests {
                 valid_solution.clone(),
                 TestMaxDifficulty::get(),
             );
-            assert!(weak.is_err(), "a weaker-than-chain difficulty must be rejected");
+            assert!(
+                weak.is_err(),
+                "a weaker-than-chain difficulty must be rejected"
+            );
             assert_eq!(PendingBlockRewards::<Test>::get(), 0);
 
             // ...and even sitting on the chain target, the unground hash must fail
@@ -948,7 +961,10 @@ mod tests {
                 valid_solution,
                 TestMinDifficulty::get(),
             );
-            assert!(unground.is_err(), "a hash above the chain target must be rejected");
+            assert!(
+                unground.is_err(),
+                "a hash above the chain target must be rejected"
+            );
             assert_eq!(PendingBlockRewards::<Test>::get(), 0);
             assert!(PendingRewardBeneficiary::<Test>::get().is_none());
         });
@@ -1117,9 +1133,14 @@ mod tests {
     fn test_set_block_reward_requires_root() {
         new_test_ext().execute_with(|| {
             let before = CurrentBlockReward::<Test>::get();
-            assert!(GpuPowPallet::set_block_reward(RuntimeOrigin::signed(1), 12_000_000_000_000).is_err());
+            assert!(
+                GpuPowPallet::set_block_reward(RuntimeOrigin::signed(1), 12_000_000_000_000)
+                    .is_err()
+            );
             assert_eq!(CurrentBlockReward::<Test>::get(), before);
-            assert!(GpuPowPallet::set_block_reward(RuntimeOrigin::root(), 12_000_000_000_000).is_ok());
+            assert!(
+                GpuPowPallet::set_block_reward(RuntimeOrigin::root(), 12_000_000_000_000).is_ok()
+            );
             assert_eq!(CurrentBlockReward::<Test>::get(), 12_000_000_000_000);
         });
     }

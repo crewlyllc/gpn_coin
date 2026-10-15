@@ -64,8 +64,7 @@ pub mod pallet {
 
     /// Open proposals, keyed by the hash of the call.
     #[pallet::storage]
-    pub type Proposals<T: Config> =
-        StorageMap<_, Blake2_256, T::Hash, Proposal<T>, OptionQuery>;
+    pub type Proposals<T: Config> = StorageMap<_, Blake2_256, T::Hash, Proposal<T>, OptionQuery>;
 
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
@@ -198,7 +197,10 @@ pub mod pallet {
 
             let now = frame_system::Pallet::<T>::block_number();
             let elapsed = now.saturating_sub(proposal.created_at);
-            ensure!(elapsed >= T::TimelockPeriod::get(), Error::<T>::TimelockNotElapsed);
+            ensure!(
+                elapsed >= T::TimelockPeriod::get(),
+                Error::<T>::TimelockNotElapsed
+            );
 
             // Remove the proposal before dispatch (best-effort; a reentrant
             // failure leaves it gone, but Root calls here are trusted upgrades).
@@ -238,8 +240,10 @@ pub mod pallet {
     mod tests {
         use super::*;
         use crate as pallet_gpn_governance;
-        use frame_support::{assert_noop, assert_ok, construct_runtime, derive_impl, parameter_types,
-            traits::{ConstU16, ConstU64}};
+        use frame_support::{
+            assert_noop, assert_ok, construct_runtime, derive_impl, parameter_types,
+            traits::{ConstU16, ConstU64},
+        };
         use sp_runtime::{
             traits::{BlakeTwo256, IdentityLookup},
             BuildStorage,
@@ -278,7 +282,9 @@ pub mod pallet {
         }
 
         fn new_test_ext() -> sp_io::TestExternalities {
-            let mut t = frame_system::GenesisConfig::<Test>::default().build_storage().unwrap();
+            let mut t = frame_system::GenesisConfig::<Test>::default()
+                .build_storage()
+                .unwrap();
             pallet_gpn_governance::GenesisConfig::<Test> {
                 initial_members: vec![1, 2, 3],
                 _config: Default::default(),

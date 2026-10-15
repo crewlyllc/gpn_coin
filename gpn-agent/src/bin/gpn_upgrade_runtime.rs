@@ -22,10 +22,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get(1)
         .cloned()
         .unwrap_or_else(|| "ws://127.0.0.1:9944".to_string());
-    let wasm_path = args.get(2).cloned().unwrap_or_else(|| {
-        "gpn-node/runtime/gpn_runtime.compact.compressed.wasm".to_string()
-    });
-    let sudo_uri = args.get(3).cloned().unwrap_or_else(|| "//Alice".to_string());
+    let wasm_path = args
+        .get(2)
+        .cloned()
+        .unwrap_or_else(|| "gpn-node/runtime/gpn_runtime.compact.compressed.wasm".to_string());
+    let sudo_uri = args
+        .get(3)
+        .cloned()
+        .unwrap_or_else(|| "//Alice".to_string());
 
     let wasm = std::fs::read(&wasm_path)?;
     println!("== gpn_upgrade_runtime ==");

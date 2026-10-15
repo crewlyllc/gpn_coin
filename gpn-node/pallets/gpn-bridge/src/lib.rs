@@ -92,7 +92,8 @@ pub mod pallet {
 
     /// Replay guard: set of already-processed inbound message hashes.
     #[pallet::storage]
-    pub type ProcessedMessages<T: Config> = StorageMap<_, Blake2_128Concat, T::Hash, (), OptionQuery>;
+    pub type ProcessedMessages<T: Config> =
+        StorageMap<_, Blake2_128Concat, T::Hash, (), OptionQuery>;
 
     /// Circuit-breaker: when `true`, both directions are halted.
     #[pallet::storage]
@@ -212,12 +213,7 @@ pub mod pallet {
 
             // Move native GPN caller → treasury. Total issuance is unchanged.
             let treasury = T::BridgeTreasuryAccount::get();
-            T::Currency::transfer(
-                &who,
-                &treasury,
-                amount,
-                ExistenceRequirement::AllowDeath,
-            )?;
+            T::Currency::transfer(&who, &treasury, amount, ExistenceRequirement::AllowDeath)?;
 
             TotalLocked::<T>::mutate(|l| *l = l.saturating_add(amount));
 
@@ -250,7 +246,10 @@ pub mod pallet {
         ) -> DispatchResult {
             let relayer = ensure_signed(origin)?;
             Self::ensure_live()?;
-            ensure!(Relayers::<T>::contains_key(&relayer), Error::<T>::NotRelayer);
+            ensure!(
+                Relayers::<T>::contains_key(&relayer),
+                Error::<T>::NotRelayer
+            );
 
             ensure!(!amount.is_zero(), Error::<T>::AmountTooLow);
             ensure!(
@@ -447,12 +446,9 @@ pub mod pallet {
         use crate as pallet_gpn_bridge;
         use frame_support::{
             assert_noop, assert_ok, construct_runtime, derive_impl, parameter_types,
-            traits::{ConstU16, ConstU32, ConstU64, ConstU128, Everything},
+            traits::{ConstU128, ConstU16, ConstU32, ConstU64, Everything},
         };
-        use sp_runtime::{
-            traits::IdentityLookup,
-            BuildStorage,
-        };
+        use sp_runtime::{traits::IdentityLookup, BuildStorage};
 
         type Block = frame_system::mocking::MockBlock<Test>;
         type Balance = u128;

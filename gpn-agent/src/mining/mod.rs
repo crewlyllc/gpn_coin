@@ -219,10 +219,7 @@ fn mining_loop(cfg: MiningConfig, stop: Arc<AtomicBool>) {
                 "✅ SUBMITTED block #{} — reward paid to miner wallet",
                 tmpl.block_number
             ),
-            Ok(false) => log::info!(
-                "↩️  stale (block #{}) — refetching",
-                tmpl.block_number
-            ),
+            Ok(false) => log::info!("↩️  stale (block #{}) — refetching", tmpl.block_number),
             Err(e) => log::error!("[error] submit_solution: {e}"),
         }
 
@@ -459,8 +456,7 @@ fn submit_solution_direct(
             SubxtValue::u128(limbs[2] as u128),
             SubxtValue::u128(limbs[3] as u128),
         ]);
-        let call =
-            subxt::dynamic::tx("GPUPoW", "submit_solution", vec![solution, difficulty_val]);
+        let call = subxt::dynamic::tx("GPUPoW", "submit_solution", vec![solution, difficulty_val]);
 
         let nonce =
             crate::chain::signer::current_nonce(&client, endpoint, &signer.account_id()).await;

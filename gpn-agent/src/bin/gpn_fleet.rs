@@ -54,7 +54,13 @@ fn net_of(cfg: &Value, net: &str) -> (String, String) {
     (chain, bootnodes)
 }
 
-fn start_node(bin: &str, data: &str, chain: &str, bootnodes: &str, extra: &[String]) -> Result<Child, String> {
+fn start_node(
+    bin: &str,
+    data: &str,
+    chain: &str,
+    bootnodes: &str,
+    extra: &[String],
+) -> Result<Child, String> {
     let mut cmd = Command::new(bin);
     cmd.arg("--chain").arg(chain);
     if !data.is_empty() {
@@ -106,7 +112,11 @@ fn main() {
     let mut current: Option<String> = std::fs::read_to_string(&state_file)
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .and_then(|v| v.get("network").and_then(|x| x.as_str()).map(|s| s.to_string()));
+        .and_then(|v| {
+            v.get("network")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string())
+        });
 
     loop {
         let target = match fetch_directive(&directive_src) {
@@ -165,7 +175,9 @@ fn main() {
                     println!("[fleet] node exited ({status}) — restarting");
                     let net = current.clone().unwrap_or_default();
                     let (chain, bootnodes) = net_of(&networks, &net);
-                    if let Ok(c2) = start_node(&node_bin, &node_data, &chain, &bootnodes, &node_args) {
+                    if let Ok(c2) =
+                        start_node(&node_bin, &node_data, &chain, &bootnodes, &node_args)
+                    {
                         child = Some(c2);
                     }
                 }

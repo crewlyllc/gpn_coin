@@ -73,7 +73,11 @@ fn main() {
     println!("  reports file : {}", reports_path.display());
     println!("  denylist file: {}", deny_path.display());
     println!("  total reports: {}", s.total_reports);
-    println!("  time range   : {} .. {}", fmt_ts(s.first_ts), fmt_ts(s.last_ts));
+    println!(
+        "  time range   : {} .. {}",
+        fmt_ts(s.first_ts),
+        fmt_ts(s.last_ts)
+    );
     println!("  by kind      :");
     for (k, n) in &s.by_kind {
         println!("    {k:<10} {n}");

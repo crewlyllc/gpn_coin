@@ -25,5 +25,8 @@ fn main() {
     println!("public_hex\t0x{hex_pub}");
     println!("ss58\t{ss58}");
     // Tab-separated governance-keys.txt line (label filled by caller):
-    println!("keyline\t<label>\t{phrase}\t0x{}\t{ss58}", hex::encode(&seed));
+    println!(
+        "keyline\t<label>\t{phrase}\t0x{}\t{ss58}",
+        hex::encode(&seed)
+    );
 }

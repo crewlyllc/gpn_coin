@@ -4,7 +4,9 @@ use subxt::{backend::legacy::LegacyRpcMethods, backend::rpc::RpcClient, config::
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let endpoint = std::env::args().nth(1).unwrap_or_else(|| "ws://127.0.0.1:9944".into());
+    let endpoint = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "ws://127.0.0.1:9944".into());
     let block_arg = std::env::args().nth(2);
 
     let client = signer::connect(&endpoint).await?;
@@ -37,7 +39,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(e) => {
                 let fb = e.field_bytes();
                 let hx: String = fb.iter().map(|b| format!("{:02x}", b)).collect();
-                println!("[{i}] {}::{} fields=0x{}", e.pallet_name(), e.variant_name(), hx);
+                println!(
+                    "[{i}] {}::{} fields=0x{}",
+                    e.pallet_name(),
+                    e.variant_name(),
+                    hx
+                );
             }
             Err(err) => println!("[{i}] <decode error: {err}>"),
         }

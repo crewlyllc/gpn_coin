@@ -19,13 +19,13 @@ use codec::{Decode, Encode};
 use jsonrpsee::core::RpcResult;
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObject;
-use sc_client_api::UsageProvider;
 use sc_client_api::StorageProvider;
+use sc_client_api::UsageProvider;
 use sc_transaction_pool::TransactionPoolHandle;
 use sc_transaction_pool_api::{TransactionPool, TransactionSource};
 use serde::{Deserialize, Serialize};
-use sp_api::ProvideRuntimeApi;
 use sp_api::Core;
+use sp_api::ProvideRuntimeApi;
 use sp_blockchain::HeaderBackend;
 use sp_core::storage::StorageKey;
 use sp_core::{sr25519, Pair, H256, U256};
@@ -398,7 +398,8 @@ pub(crate) fn sign_confirm_challenge_extrinsic(
         (),
         (),
     );
-    let payload = SignedPayload::<RuntimeCall, SignedExtra>::from_raw(call.clone(), extra.clone(), implicit);
+    let payload =
+        SignedPayload::<RuntimeCall, SignedExtra>::from_raw(call.clone(), extra.clone(), implicit);
     let signature = payload.using_encoded(|bytes| signer.sign(bytes));
 
     let signer_account = gpn_runtime::AccountId::from(signer.public().0);
@@ -474,7 +475,8 @@ impl GpnChallengeApiServer for GpnChallengeRpc {
                 submitted: false,
                 tx_hash: None,
                 reason: Some(
-                    "seal is not a valid Ethash solution to this provider's bound challenge".to_string(),
+                    "seal is not a valid Ethash solution to this provider's bound challenge"
+                        .to_string(),
                 ),
             });
         }
@@ -495,13 +497,9 @@ impl GpnChallengeApiServer for GpnChallengeRpc {
             .map_err(|e| {
                 ErrorObject::owned(-32000, format!("nonce runtime api: {e}"), None::<()>)
             })?;
-        let version = self
-            .client
-            .runtime_api()
-            .version(at)
-            .map_err(|e| {
-                ErrorObject::owned(-32000, format!("version runtime api: {e}"), None::<()>)
-            })?;
+        let version = self.client.runtime_api().version(at).map_err(|e| {
+            ErrorObject::owned(-32000, format!("version runtime api: {e}"), None::<()>)
+        })?;
         let genesis = self.client.info().genesis_hash;
         let xt = sign_confirm_challenge_extrinsic(
             who.clone(),
@@ -511,20 +509,14 @@ impl GpnChallengeApiServer for GpnChallengeRpc {
             version.transaction_version,
             genesis,
         )
-        .map_err(|e| {
-            ErrorObject::owned(-32000, format!("extrinsic build: {e}"), None::<()>)
-        })?;
+        .map_err(|e| ErrorObject::owned(-32000, format!("extrinsic build: {e}"), None::<()>))?;
         let xt_hash = BlakeTwo256::hash_of(&xt);
         self.pool
             .submit_one(at, TransactionSource::External, xt)
             .await
             .map_err(|e| ErrorObject::owned(-32000, format!("pool submit: {e}"), None::<()>))?;
 
-        log::info!(
-            "challenge confirmed for {:?} (tx {:#x})",
-            who,
-            xt_hash
-        );
+        log::info!("challenge confirmed for {:?} (tx {:#x})", who, xt_hash);
         Ok(ConfirmChallengeResult {
             challenge: challenge_hex,
             provider_challenge: bound_hex,
@@ -649,9 +641,9 @@ fn parse_account(s: &str) -> RpcResult<gpn_runtime::AccountId> {
         let bytes = hex::decode(hex_part).map_err(|e| {
             ErrorObject::owned(-32602, format!("invalid hex account: {e}"), None::<()>)
         })?;
-        let arr: [u8; 32] = bytes.try_into().map_err(|_| {
-            ErrorObject::owned(-32602, "account hex must be 32 bytes", None::<()>)
-        })?;
+        let arr: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| ErrorObject::owned(-32602, "account hex must be 32 bytes", None::<()>))?;
         Ok(gpn_runtime::AccountId::from(arr))
     } else {
         gpn_runtime::AccountId::from_ss58check(s).map_err(|e| {

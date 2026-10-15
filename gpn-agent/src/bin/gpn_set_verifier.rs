@@ -24,13 +24,32 @@ fn storage_key() -> String {
 }
 
 async fn read_verifier(endpoint: &str) -> Option<[u8; 32]> {
-    let http = endpoint.replace("ws://", "http://").replace("wss://", "https://");
+    let http = endpoint
+        .replace("ws://", "http://")
+        .replace("wss://", "https://");
     let client = reqwest::Client::new();
-    let body = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"chain_getBlockHash","params":[]});
-    let resp: serde_json::Value = client.post(&http).json(&body).send().await.ok()?.json().await.ok()?;
+    let body =
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"chain_getBlockHash","params":[]});
+    let resp: serde_json::Value = client
+        .post(&http)
+        .json(&body)
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
     let head = resp.get("result")?.as_str()?.to_string();
     let body = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"state_getStorage","params":[storage_key(), head]});
-    let resp: serde_json::Value = client.post(&http).json(&body).send().await.ok()?.json().await.ok()?;
+    let resp: serde_json::Value = client
+        .post(&http)
+        .json(&body)
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
     let raw = match resp.get("result").and_then(|r| r.as_str()) {
         Some(r) => r.trim_start_matches("0x").to_string(),
         None => return None, // empty storage (falls back to compiled-in default)
@@ -57,21 +76,30 @@ fn parse_account(raw: &str) -> Result<[u8; 32], String> {
         out.copy_from_slice(&b);
         Ok(out)
     } else {
-        Ok(AccountId32::from_str(t).map_err(|e| format!("invalid ss58 '{t}': {e}"))?.0)
+        Ok(AccountId32::from_str(t)
+            .map_err(|e| format!("invalid ss58 '{t}': {e}"))?
+            .0)
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
-    let endpoint = args.get(1).cloned().unwrap_or_else(|| "ws://127.0.0.1:9944".into());
+    let endpoint = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| "ws://127.0.0.1:9944".into());
     let new_account = args.get(2).cloned();
     let sudo_uri = args.get(3).cloned().unwrap_or_else(|| "//Alice".into());
 
     println!("== gpn_set_verifier ==");
     println!("  endpoint: {endpoint}");
     match read_verifier(&endpoint).await {
-        Some(b) => println!("  ChallengeVerifierAccount (storage): {} (0x{})", ss58(&b), hex::encode(b)),
+        Some(b) => println!(
+            "  ChallengeVerifierAccount (storage): {} (0x{})",
+            ss58(&b),
+            hex::encode(b)
+        ),
         None => println!("  ChallengeVerifierAccount (storage): <empty → compiled-in default>"),
     }
 

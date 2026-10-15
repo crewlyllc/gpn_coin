@@ -15,7 +15,7 @@
 //! Env: ENDPOINT, SIGNER_URI, POLL_MS, OLLAMA_URL, GPN_ML_MODEL
 
 use gpn_agent::chain::ChainClient;
-use gpn_agent::llm::{normalize_ml_task, run_ml_inference, LlmJob, LlmStore, get_job};
+use gpn_agent::llm::{get_job, normalize_ml_task, run_ml_inference, LlmJob, LlmStore};
 use std::time::Duration;
 
 /// How many trailing jobs to inspect for self-claim each pass. A full

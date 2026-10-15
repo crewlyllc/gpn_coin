@@ -1,8 +1,8 @@
 //! Chain specification for the GPN network.
 
 use gpn_runtime::{
-    AccountId, BalancesConfig, GPNTokenConfig, GPNTreasuryConfig, GpnGovernanceConfig,
-    GPUAttestationConfig, GPUPoWConfig, GpnBridgeConfig, ProfitabilityOracleConfig,
+    AccountId, BalancesConfig, GPNTokenConfig, GPNTreasuryConfig, GPUAttestationConfig,
+    GPUPoWConfig, GpnBridgeConfig, GpnGovernanceConfig, ProfitabilityOracleConfig,
     RuntimeGenesisConfig,
 };
 use sc_chain_spec::Properties;
@@ -347,7 +347,11 @@ pub fn local_chain_spec() -> Result<ChainSpec, String> {
                 account_id_from_seed("Bob"),
                 account_id_from_seed("Charlie"),
             ], // admission committee
-            vec![account_id_from_seed("Alice"), account_id_from_seed("Bob"), account_id_from_seed("Charlie")], // governance council
+            vec![
+                account_id_from_seed("Alice"),
+                account_id_from_seed("Bob"),
+                account_id_from_seed("Charlie"),
+            ], // governance council
             vec![
                 account_id_from_seed("Alice"),
                 account_id_from_seed("Bob"),

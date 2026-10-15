@@ -125,7 +125,10 @@ impl GPUMonitor {
 
     /// ROCm driver version via `rocm-smi --showdriverversion`, if present.
     fn get_rocm_version() -> Option<String> {
-        let o = Command::new("rocm-smi").arg("--showdriverversion").output().ok()?;
+        let o = Command::new("rocm-smi")
+            .arg("--showdriverversion")
+            .output()
+            .ok()?;
         if !o.status.success() {
             return None;
         }
@@ -209,13 +212,23 @@ pub fn classify_gpu_name(name: &str) -> &'static str {
         return "unknown";
     }
     // Integrated first (some APU names also contain "radeon").
-    if n.contains("intel") && (n.contains("uhd") || n.contains("hd graphics") || n.contains("iris")) {
+    if n.contains("intel") && (n.contains("uhd") || n.contains("hd graphics") || n.contains("iris"))
+    {
         return "integrated";
     }
-    if n.contains("radeon") && (n.contains("graphics") || n.contains("vega") || n.contains("660m") || n.contains("680m") || n.contains("780m") || n.contains("760m")) {
+    if n.contains("radeon")
+        && (n.contains("graphics")
+            || n.contains("vega")
+            || n.contains("660m")
+            || n.contains("680m")
+            || n.contains("780m")
+            || n.contains("760m"))
+    {
         return "integrated";
     }
-    if n.contains("apple") && (n.contains("m1") || n.contains("m2") || n.contains("m3") || n.contains("m4")) {
+    if n.contains("apple")
+        && (n.contains("m1") || n.contains("m2") || n.contains("m3") || n.contains("m4"))
+    {
         return "integrated";
     }
     if n.contains("tegra") || n.contains("mali") || n.contains("adreno") {
@@ -256,45 +269,100 @@ pub fn estimate_tflops(name: &str) -> f64 {
     // isn't shadowed by "50".
     const TABLE: &[(&str, f64)] = &[
         // NVIDIA RTX 50-series
-        ("5090", 105.0), ("5080", 56.0), ("5070 ti", 44.0), ("5070", 30.0),
+        ("5090", 105.0),
+        ("5080", 56.0),
+        ("5070 ti", 44.0),
+        ("5070", 30.0),
         ("5060", 18.0),
         // NVIDIA RTX 40-series
-        ("4090", 82.6), ("4080", 48.7), ("4070 ti", 40.0), ("4070", 29.1),
-        ("4060 ti", 22.0), ("4060", 15.1),
+        ("4090", 82.6),
+        ("4080", 48.7),
+        ("4070 ti", 40.0),
+        ("4070", 29.1),
+        ("4060 ti", 22.0),
+        ("4060", 15.1),
         // NVIDIA RTX 30-series
-        ("3090", 35.6), ("3080 ti", 34.1), ("3080", 29.8), ("3070 ti", 21.7),
-        ("3070", 20.3), ("3060 ti", 16.2), ("3060", 12.7),
+        ("3090", 35.6),
+        ("3080 ti", 34.1),
+        ("3080", 29.8),
+        ("3070 ti", 21.7),
+        ("3070", 20.3),
+        ("3060 ti", 16.2),
+        ("3060", 12.7),
         // NVIDIA RTX 20-series / GTX 16
-        ("2080 ti", 13.4), ("2080", 10.1), ("2070", 7.5), ("2060", 6.5),
-        ("1660 ti", 5.4), ("1660", 5.0), ("1650", 2.9),
+        ("2080 ti", 13.4),
+        ("2080", 10.1),
+        ("2070", 7.5),
+        ("2060", 6.5),
+        ("1660 ti", 5.4),
+        ("1660", 5.0),
+        ("1650", 2.9),
         // Data-center NVIDIA
-        ("h100", 67.0), ("a100", 19.5), ("l40", 90.0), ("v100", 15.7),
-        ("t4", 8.1), ("p100", 9.3), ("a10", 31.2),
+        ("h100", 67.0),
+        ("a100", 19.5),
+        ("l40", 90.0),
+        ("v100", 15.7),
+        ("t4", 8.1),
+        ("p100", 9.3),
+        ("a10", 31.2),
         // AMD Radeon RX 7000-series (RDNA3) — specific SKU before the bare
         // family number so e.g. "7900 XTX" (61) isn't shadowed by "7900".
-        ("7900 xtx", 61.0), ("7900 xt", 52.0), ("7900", 52.0),
-        ("7800 xt", 37.0), ("7800", 37.0),
-        ("7700 xt", 35.0), ("7700", 35.0),
-        ("7600 xt", 22.0), ("7600", 21.7),
+        ("7900 xtx", 61.0),
+        ("7900 xt", 52.0),
+        ("7900", 52.0),
+        ("7800 xt", 37.0),
+        ("7800", 37.0),
+        ("7700 xt", 35.0),
+        ("7700", 35.0),
+        ("7600 xt", 22.0),
+        ("7600", 21.7),
         // AMD Radeon RX 6000-series (RDNA2)
-        ("6950 xt", 23.0), ("6950", 23.0), ("6900 xt", 23.0), ("6900", 23.0),
-        ("6800 xt", 20.7), ("6800", 20.7),
-        ("6700 xt", 13.2), ("6700", 13.2),
-        ("6650 xt", 11.4), ("6600 xt", 10.6), ("6600", 8.9),
+        ("6950 xt", 23.0),
+        ("6950", 23.0),
+        ("6900 xt", 23.0),
+        ("6900", 23.0),
+        ("6800 xt", 20.7),
+        ("6800", 20.7),
+        ("6700 xt", 13.2),
+        ("6700", 13.2),
+        ("6650 xt", 11.4),
+        ("6600 xt", 10.6),
+        ("6600", 8.9),
         // AMD Radeon RX 5000-series (RDNA1)
-        ("5700 xt", 9.8), ("5700", 7.9), ("5600 xt", 7.2), ("5600", 6.4),
+        ("5700 xt", 9.8),
+        ("5700", 7.9),
+        ("5600 xt", 7.2),
+        ("5600", 6.4),
         // AMD Vega (discrete) + Radeon Pro / Instinct (workstation dGPU)
-        ("vega 64", 12.6), ("vega 56", 10.5), ("radeon pro", 20.0),
-        ("instinct mi250", 45.3), ("instinct mi210", 22.6), ("instinct mi100", 23.1),
+        ("vega 64", 12.6),
+        ("vega 56", 10.5),
+        ("radeon pro", 20.0),
+        ("instinct mi250", 45.3),
+        ("instinct mi210", 22.6),
+        ("instinct mi100", 23.1),
         ("instinct", 23.0),
         // Intel Arc (discrete)
-        ("arc a770", 19.2), ("arc a750", 17.2), ("arc a380", 3.9),
+        ("arc a770", 19.2),
+        ("arc a750", 17.2),
+        ("arc a380", 3.9),
         // Integrated (APU) reference figures — never clear a ~3 TFLOPS floor.
-        ("iris xe", 2.0), ("iris", 1.8), ("uhd", 0.5), ("hd graphics", 0.4),
-        ("vega 11", 1.8), ("vega 10", 1.7), ("vega 8", 1.6), ("vega 7", 1.5),
-        ("radeon 890m", 4.3), ("radeon 880m", 4.0), ("radeon 780m", 4.3), ("radeon 760m", 3.4),
-        ("radeon 680m", 3.4), ("radeon 660m", 1.7), ("radeon graphics", 1.8),
-        ("780m", 4.3), ("680m", 3.4),
+        ("iris xe", 2.0),
+        ("iris", 1.8),
+        ("uhd", 0.5),
+        ("hd graphics", 0.4),
+        ("vega 11", 1.8),
+        ("vega 10", 1.7),
+        ("vega 8", 1.6),
+        ("vega 7", 1.5),
+        ("radeon 890m", 4.3),
+        ("radeon 880m", 4.0),
+        ("radeon 780m", 4.3),
+        ("radeon 760m", 3.4),
+        ("radeon 680m", 3.4),
+        ("radeon 660m", 1.7),
+        ("radeon graphics", 1.8),
+        ("780m", 4.3),
+        ("680m", 3.4),
     ];
     for (key, val) in TABLE {
         if n.contains(key) {
@@ -382,7 +450,10 @@ fn value_after_marker(line: &str, marker: &str) -> Option<String> {
     let val = if let Some(s) = after.strip_prefix('"') {
         s.split('"').next().unwrap_or("")
     } else {
-        after.split(|c: char| c == ',' || c == '"').next().unwrap_or("")
+        after
+            .split(|c: char| c == ',' || c == '"')
+            .next()
+            .unwrap_or("")
     };
     let v = val.trim();
     if v.is_empty() {
@@ -598,7 +669,7 @@ fn scan_display_lines<'a>(lines: impl Iterator<Item = &'a str>) -> (String, f64)
             || l.contains("display controller")
         {
             // `00:02.0 VGA compatible controller: Intel Corporation …`
-            if let Some(name) = line.splitn(2, ':' ).nth(1) {
+            if let Some(name) = line.splitn(2, ':').nth(1) {
                 names.push(name.trim());
             }
         }
@@ -647,21 +718,39 @@ mod tests {
         assert_eq!(classify_gpu_name("Intel(R) UHD Graphics 630"), "integrated");
         assert_eq!(classify_gpu_name("Intel Iris Xe Graphics"), "integrated");
         assert_eq!(classify_gpu_name("AMD Radeon(TM) Graphics"), "integrated");
-        assert_eq!(classify_gpu_name("AMD Radeon Vega 8 Graphics"), "integrated");
+        assert_eq!(
+            classify_gpu_name("AMD Radeon Vega 8 Graphics"),
+            "integrated"
+        );
         assert_eq!(classify_gpu_name("Apple M2 Pro"), "integrated");
         // Unknown / nonsense.
         assert_eq!(classify_gpu_name(""), "unknown");
-        assert_eq!(classify_gpu_name("Microsoft Basic Display Adapter"), "unknown");
+        assert_eq!(
+            classify_gpu_name("Microsoft Basic Display Adapter"),
+            "unknown"
+        );
     }
 
     #[test]
     fn tflops_estimates_are_ordered_and_igpus_stay_low() {
         // A 4090 out-rates a 4060; both are well above an iGPU.
-        assert!(estimate_tflops("NVIDIA GeForce RTX 4090") > estimate_tflops("NVIDIA GeForce RTX 4060"));
-        assert!(estimate_tflops("RTX 4060") >= 3.0, "discrete budget card clears a 3 TFLOPS floor");
+        assert!(
+            estimate_tflops("NVIDIA GeForce RTX 4090") > estimate_tflops("NVIDIA GeForce RTX 4060")
+        );
+        assert!(
+            estimate_tflops("RTX 4060") >= 3.0,
+            "discrete budget card clears a 3 TFLOPS floor"
+        );
         // Integrated parts never clear the ~3 TFLOPS floor.
-        for igpu in ["Intel(R) UHD Graphics 630", "Intel Iris Xe Graphics", "AMD Radeon(TM) Graphics"] {
-            assert!(estimate_tflops(igpu) < 3.0, "{igpu} must stay under the floor");
+        for igpu in [
+            "Intel(R) UHD Graphics 630",
+            "Intel Iris Xe Graphics",
+            "AMD Radeon(TM) Graphics",
+        ] {
+            assert!(
+                estimate_tflops(igpu) < 3.0,
+                "{igpu} must stay under the floor"
+            );
         }
         assert_eq!(estimate_tflops("Some Unknown Adapter"), 0.0);
     }
@@ -670,7 +759,11 @@ mod tests {
     fn scan_names_prefers_discrete_when_both_present() {
         // A laptop with an iGPU + a dGPU must classify as discrete.
         let (class, tflops) = scan_names(
-            ["Intel(R) Iris Xe Graphics", "NVIDIA GeForce RTX 4060 Laptop GPU"].into_iter(),
+            [
+                "Intel(R) Iris Xe Graphics",
+                "NVIDIA GeForce RTX 4060 Laptop GPU",
+            ]
+            .into_iter(),
         );
         assert_eq!(class, "discrete");
         assert!(tflops >= 3.0);
@@ -736,10 +829,16 @@ mod tests {
         ];
         for name in integrated {
             assert_eq!(classify_gpu_name(name), "integrated", "{name}");
-            assert!(estimate_tflops(name) < 5.0, "{name} is an iGPU (low TFLOPS)");
+            assert!(
+                estimate_tflops(name) < 5.0,
+                "{name} is an iGPU (low TFLOPS)"
+            );
         }
         for apu in ["AMD Radeon(TM) Graphics", "AMD Radeon Vega 8 Graphics"] {
-            assert!(estimate_tflops(apu) < 3.0, "{apu} must stay under the floor");
+            assert!(
+                estimate_tflops(apu) < 3.0,
+                "{apu} must stay under the floor"
+            );
         }
         // an unknown AMD-ish string stays unknown (must clear the floor to earn).
         assert_eq!(classify_gpu_name("AMD Something"), "unknown");
@@ -769,7 +868,8 @@ GPU[0]\t\t: Card vendor: \t\tAdvanced Micro Devices, Inc. [AMD/ATI]\n";
             Some("Navi 31 [Radeon RX 7900 XTX]")
         );
         // Newer JSON form.
-        let json = r#"{"card0": {"Card series": "Navi 32 [Radeon RX 7800 XT]", "Card model": "0x747e"}}"#;
+        let json =
+            r#"{"card0": {"Card series": "Navi 32 [Radeon RX 7800 XT]", "Card model": "0x747e"}}"#;
         assert_eq!(
             parse_rocm_smi_name(json).as_deref(),
             Some("Navi 32 [Radeon RX 7800 XT]")

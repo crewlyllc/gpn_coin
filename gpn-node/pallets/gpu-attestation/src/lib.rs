@@ -515,10 +515,7 @@ pub mod pallet {
         /// `confirm_challenge` consults (falling back to the compiled-in default).
         #[pallet::call_index(5)]
         #[pallet::weight(T::DbWeight::get().reads_writes(1, 1))]
-        pub fn set_challenge_verifier(
-            origin: OriginFor<T>,
-            who: T::AccountId,
-        ) -> DispatchResult {
+        pub fn set_challenge_verifier(origin: OriginFor<T>, who: T::AccountId) -> DispatchResult {
             ensure_root(origin)?;
             ChallengeVerifierAccount::<T>::put(&who);
             Self::deposit_event(Event::<T>::ChallengeVerifierSet { who });

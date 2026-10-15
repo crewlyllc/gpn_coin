@@ -102,7 +102,10 @@ async fn main() {
 
     println!("GPN network info");
     println!("  endpoint     : {endpoint}");
-    println!("  system_chain : {}", system_chain.unwrap_or_else(|| "?".into()));
+    println!(
+        "  system_chain : {}",
+        system_chain.unwrap_or_else(|| "?".into())
+    );
     println!("  chain-id     : {}", st.chain_id);
     println!("  genesis      : {genesis_hex}");
     println!("  spec_version : {spec_version}");

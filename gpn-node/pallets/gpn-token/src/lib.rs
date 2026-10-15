@@ -685,9 +685,7 @@ mod tests {
             // Mock tier = Silver (1500 bps) for both stakers, equal stake.
             MOCK_TIER.with(|c| c.set(1_500));
             MOCK_STAKE.with(|c| c.set(10_000));
-            assert!(
-                Token::distribute_staking_rewards(RuntimeOrigin::root(), vec![1, 2]).is_ok()
-            );
+            assert!(Token::distribute_staking_rewards(RuntimeOrigin::root(), vec![1, 2]).is_ok());
             assert_eq!(StakingRewardPool::<Test>::get(), 0);
         });
     }
@@ -709,9 +707,7 @@ mod tests {
             // Silver tier (1500 bps), equal stake -> equal weights -> 1 each.
             MOCK_TIER.with(|c| c.set(1_500));
             MOCK_STAKE.with(|c| c.set(10_000));
-            assert!(
-                Token::distribute_staking_rewards(RuntimeOrigin::root(), vec![1, 2]).is_ok()
-            );
+            assert!(Token::distribute_staking_rewards(RuntimeOrigin::root(), vec![1, 2]).is_ok());
             assert_eq!(StakingRewardPool::<Test>::get(), 0);
             assert_eq!(Balances::free_balance(&pallet_account), 0);
             assert_eq!(Balances::free_balance(&1), 1_000_001);
@@ -726,9 +722,7 @@ mod tests {
             let pallet_account = Token::account_id();
             Balances::force_set_balance(RuntimeOrigin::root(), pallet_account.clone(), 2).unwrap();
             <OracleRewardPool<Test>>::put(2u128);
-            assert!(
-                Token::distribute_oracle_rewards(RuntimeOrigin::root(), vec![1, 2]).is_ok()
-            );
+            assert!(Token::distribute_oracle_rewards(RuntimeOrigin::root(), vec![1, 2]).is_ok());
             assert_eq!(OracleRewardPool::<Test>::get(), 0);
             assert_eq!(Balances::free_balance(&pallet_account), 0);
             assert_eq!(Balances::free_balance(&1), 1_000_001);
@@ -803,9 +797,7 @@ mod tests {
             <StakingRewardPool<Test>>::put(5_000u128);
             MOCK_TIER.with(|c| c.set(1_500));
             MOCK_STAKE.with(|c| c.set(0));
-            assert!(
-                Token::distribute_staking_rewards(RuntimeOrigin::root(), vec![1, 2]).is_ok()
-            );
+            assert!(Token::distribute_staking_rewards(RuntimeOrigin::root(), vec![1, 2]).is_ok());
             assert_eq!(StakingRewardPool::<Test>::get(), 5_000);
         });
     }
@@ -816,9 +808,7 @@ mod tests {
             <StakingRewardPool<Test>>::put(5_000u128);
             MOCK_TIER.with(|c| c.set(0)); // Unattested
                                           // No attested stakers -> pool is restored, nothing paid.
-            assert!(
-                Token::distribute_staking_rewards(RuntimeOrigin::root(), vec![1, 2]).is_ok()
-            );
+            assert!(Token::distribute_staking_rewards(RuntimeOrigin::root(), vec![1, 2]).is_ok());
             assert_eq!(StakingRewardPool::<Test>::get(), 5_000);
         });
     }

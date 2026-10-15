@@ -14,7 +14,9 @@ use gpn_agent::chain::ChainClient;
 use serde_json::json;
 
 fn opt(args: &[String], flag: &str) -> Option<String> {
-    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1).cloned())
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1).cloned())
 }
 
 #[tokio::main]
@@ -26,8 +28,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("set --wallet <secret-seed> (your wallet)")?;
     let prompt = opt(&args, "--prompt").ok_or("set --prompt \"...\"")?;
     let model = opt(&args, "--model").unwrap_or_else(|| "llama3.2:1b".into());
-    let price_gpn: f64 = opt(&args, "--price").and_then(|s| s.parse().ok()).unwrap_or(10.0);
-    let min_gflops: u64 = opt(&args, "--min-gflops").and_then(|s| s.parse().ok()).unwrap_or(150);
+    let price_gpn: f64 = opt(&args, "--price")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10.0);
+    let min_gflops: u64 = opt(&args, "--min-gflops")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(150);
     let job_type = opt(&args, "--job-type").unwrap_or_else(|| "LLMInference".into());
     // Generative (image/video) params — only used when --job-type is an Image/Video generation.
     let gen_kind = if job_type.eq_ignore_ascii_case("ImageGeneration") {
@@ -38,12 +44,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
     let negative = opt(&args, "--negative-prompt");
-    let width: u32 = opt(&args, "--width").and_then(|s| s.parse().ok()).unwrap_or(512);
-    let height: u32 = opt(&args, "--height").and_then(|s| s.parse().ok()).unwrap_or(512);
-    let steps: u32 = opt(&args, "--steps").and_then(|s| s.parse().ok()).unwrap_or(8);
+    let width: u32 = opt(&args, "--width")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(512);
+    let height: u32 = opt(&args, "--height")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(512);
+    let steps: u32 = opt(&args, "--steps")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8);
     let seed: Option<i64> = opt(&args, "--seed").and_then(|s| s.parse().ok());
-    let frames: u32 = opt(&args, "--frames").and_then(|s| s.parse().ok()).unwrap_or(16);
-    let fps: u32 = opt(&args, "--fps").and_then(|s| s.parse().ok()).unwrap_or(8);
+    let frames: u32 = opt(&args, "--frames")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(16);
+    let fps: u32 = opt(&args, "--fps")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8);
     // Diffusion model default differs from the LLM fallback.
     let model = if gen_kind.is_some() {
         opt(&args, "--model").unwrap_or_else(|| "sd-turbo".into())
@@ -72,10 +88,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("== gpn_job ==");
     println!("  endpoint:  {endpoint}");
     println!("  scheduler: {scheduler}");
-    println!("  prompt:    \"{}\"  model={model}  price={price_gpn} GPN", prompt);
+    println!(
+        "  prompt:    \"{}\"  model={model}  price={price_gpn} GPN",
+        prompt
+    );
 
     client
-        .create_job(8192, 75, 1, 0, min_gflops, &job_type, "Spot", (price_gpn * 1e12) as u128, 0, 0, 1000, workload_hash)
+        .create_job(
+            8192,
+            75,
+            1,
+            0,
+            min_gflops,
+            &job_type,
+            "Spot",
+            (price_gpn * 1e12) as u128,
+            0,
+            0,
+            1000,
+            workload_hash,
+        )
         .await?;
     let id = client.get_next_job_id().await.saturating_sub(1);
     println!("  ✅ job #{id} created + escrowed from YOUR wallet");

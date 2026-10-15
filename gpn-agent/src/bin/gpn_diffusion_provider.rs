@@ -206,7 +206,9 @@ fn read_assigned(me: &str, addr: &str) -> Vec<(u64, String, bool)> {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) else {
         return vec![];
     };
-    let Some(m) = v.as_object() else { return vec![] };
+    let Some(m) = v.as_object() else {
+        return vec![];
+    };
     m.iter()
         .filter_map(|(k, pv)| {
             let id = k.parse::<u64>().ok()?;
@@ -214,12 +216,22 @@ fn read_assigned(me: &str, addr: &str) -> Vec<(u64, String, bool)> {
                 (s.to_string(), String::new(), false)
             } else {
                 (
-                    pv.get("provider").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                    pv.get("model").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    pv.get("provider")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    pv.get("model")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                     pv.get("pull").and_then(|x| x.as_bool()).unwrap_or(false),
                 )
             };
-            if p == me || p == addr { Some((id, model, pull)) } else { None }
+            if p == me || p == addr {
+                Some((id, model, pull))
+            } else {
+                None
+            }
         })
         .collect()
 }
@@ -306,9 +318,7 @@ async fn process_once(
                     }
                     Err(e) => eprintln!("[provider] reconcile #{id} (complete) failed: {e}"),
                 }
-            } else if state == "Accepted"
-                && get_job(id).map(|j| is_gen(&j)).unwrap_or(false)
-            {
+            } else if state == "Accepted" && get_job(id).map(|j| is_gen(&j)).unwrap_or(false) {
                 // Capacity reclaim: an `Accepted` gen job we own that was never
                 // started is a zombie holding a `MaxJobsPerProvider` slot. Our
                 // claim loop only starts `Pending` jobs, so it can never advance
@@ -419,10 +429,12 @@ async fn run_job(
     // operator does not serve BEFORE spending GPU time; settle on-chain so the
     // requestor's escrow refunds and the capacity slot frees.
     let policy = gpn_agent::provider_policy::ProviderPolicy::from_env();
-    if let gpn_agent::provider_policy::Decision::Refuse(r) = policy.check(&job.prompt, &job.model)
-    {
+    if let gpn_agent::provider_policy::Decision::Refuse(r) = policy.check(&job.prompt, &job.model) {
         let cat = r.category.unwrap_or("model_policy");
-        eprintln!("[job {id}] \u{26a0} policy refusal (category={cat}) \u{2014} not running: {}", r.reason);
+        eprintln!(
+            "[job {id}] \u{26a0} policy refusal (category={cat}) \u{2014} not running: {}",
+            r.reason
+        );
         let _ = LlmStore::new().set_error(id, &format!("gpn_policy_violation: {cat}"));
         match client.fail_job(id, 2).await {
             Ok(()) => println!("[job {id}] refused by provider policy \u{2014} escrow refunded"),
@@ -434,7 +446,10 @@ async fn run_job(
     // requestor is on this operator's denylist (shared with the AP).
     if let Some((_state, _price, Some(requestor), _prov)) = client.get_job_state(id).await {
         if let Some(r) = policy.requestor_refused(&requestor) {
-            eprintln!("[job {id}] \u{26a0} requestor denylist refusal \u{2014} not running: {}", r.reason);
+            eprintln!(
+                "[job {id}] \u{26a0} requestor denylist refusal \u{2014} not running: {}",
+                r.reason
+            );
             let _ = LlmStore::new().set_error(id, "gpn_policy_violation: requestor_denylist");
             match client.fail_job(id, 2).await {
                 Ok(()) => println!("[job {id}] requestor banned \u{2014} escrow refunded"),
@@ -464,7 +479,11 @@ async fn run_job(
     // receives the literal "auto" (invalid HF repo id) and wedges the job.
     let model = match job.model.as_str() {
         "" | "auto" => {
-            if job.kind == "video" { "ltx-video" } else { "sd-turbo" }
+            if job.kind == "video" {
+                "ltx-video"
+            } else {
+                "sd-turbo"
+            }
         }
         m => m,
     };

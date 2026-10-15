@@ -28,7 +28,10 @@ use std::time::Duration;
 static OLLAMA_WARNED: AtomicBool = AtomicBool::new(false);
 fn warn_ollama_missing_once() {
     if !OLLAMA_WARNED.swap(true, Ordering::Relaxed) {
-        eprintln!("[provider] ⚠️  {}", gpn_agent::llm::infer::ollama_missing_hint());
+        eprintln!(
+            "[provider] ⚠️  {}",
+            gpn_agent::llm::infer::ollama_missing_hint()
+        );
     }
 }
 
@@ -95,7 +98,8 @@ fn spawn_infer_server(listen: &str) {
             let path = req.url().split('?').next().unwrap_or("").to_string();
             let is_infer = req.method() == &tiny_http::Method::Post && path == "/infer";
             if !is_infer {
-                let _ = req.respond(tiny_http::Response::from_string("not found").with_status_code(404));
+                let _ = req
+                    .respond(tiny_http::Response::from_string("not found").with_status_code(404));
                 continue;
             }
             let mut body = String::new();
@@ -107,11 +111,15 @@ fn spawn_infer_server(listen: &str) {
             let max_tokens = v.get("max_tokens").and_then(|x| x.as_u64()).unwrap_or(256) as u32;
             let model_r = resolve_model(model);
             let resp = match rt.block_on(run_inference(&model_r, prompt, temp, max_tokens)) {
-                Ok((text, _hash)) => serde_json::json!({"ok": true, "text": text, "model": model_r}),
+                Ok((text, _hash)) => {
+                    serde_json::json!({"ok": true, "text": text, "model": model_r})
+                }
                 Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}),
             };
-            let hdr = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
-            let _ = req.respond(tiny_http::Response::from_string(resp.to_string()).with_header(hdr));
+            let hdr = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                .unwrap();
+            let _ =
+                req.respond(tiny_http::Response::from_string(resp.to_string()).with_header(hdr));
         }
     });
 }
@@ -205,8 +213,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
         .unwrap_or(true)
     {
-        let listen = std::env::var("GPN_INFER_LISTEN")
-            .unwrap_or_else(|_| "127.0.0.1:8094".to_string());
+        let listen =
+            std::env::var("GPN_INFER_LISTEN").unwrap_or_else(|_| "127.0.0.1:8094".to_string());
         spawn_infer_server(&listen);
     }
 
@@ -238,14 +246,19 @@ fn resolve_model(requested: &str) -> String {
         })
         .unwrap_or_default();
     let has = |name: &str| {
-        installed.iter().any(|n| n == name || n.split(':').next() == Some(name))
+        installed
+            .iter()
+            .any(|n| n == name || n.split(':').next() == Some(name))
     };
     if !requested.is_empty() && requested != "auto" && has(requested) {
         // Prefer the exact installed tag when a bare name was requested.
         if let Some(exact) = installed.iter().find(|n| n.as_str() == requested) {
             return exact.clone();
         }
-        if let Some(tag) = installed.iter().find(|n| n.split(':').next() == Some(requested)) {
+        if let Some(tag) = installed
+            .iter()
+            .find(|n| n.split(':').next() == Some(requested))
+        {
             return tag.clone();
         }
         return requested.to_string();
@@ -377,7 +390,8 @@ fn should_attempt(id: u64, model: &str) -> bool {
 /// either the hex or ss58 form of our account), plus the requested model +
 /// whether we must pull it on demand. Empty = no scheduler in play.
 /// Handles both the legacy string form and the `{provider,model,pull}` object.
-fn read_assigned(me: &str, addr: &str) -> Vec<(u64, String, bool)> {    let path = assignment_store_path();
+fn read_assigned(me: &str, addr: &str) -> Vec<(u64, String, bool)> {
+    let path = assignment_store_path();
     let Ok(s) = std::fs::read_to_string(&path) else {
         return vec![];
     };
@@ -394,8 +408,14 @@ fn read_assigned(me: &str, addr: &str) -> Vec<(u64, String, bool)> {    let path
                 (s.to_string(), String::new(), false)
             } else {
                 (
-                    pv.get("provider").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                    pv.get("model").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    pv.get("provider")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    pv.get("model")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                     pv.get("pull").and_then(|x| x.as_bool()).unwrap_or(false),
                 )
             };
@@ -464,7 +484,9 @@ fn result_callback_base(advertised: &str) -> String {
 /// directly). Best-effort: a missing callback or an unreachable AP is ignored —
 /// the on-chain `submit_result`/`complete_job` still settle the job.
 fn return_result(id: u64) {
-    let Some(cb) = assignment_callback(id) else { return };
+    let Some(cb) = assignment_callback(id) else {
+        return;
+    };
     let Some(j) = get_job(id) else { return };
     let base = result_callback_base(&cb);
     let url = format!("{base}/result/{id}");
@@ -510,10 +532,12 @@ fn ensure_model(model: &str) -> Result<String, String> {
         if let Ok(v) = r.json::<serde_json::Value>() {
             let have = v["models"]
                 .as_array()
-                .map(|a| a.iter().any(|m| {
-                    let n = m["name"].as_str().unwrap_or("");
-                    n == model || n.split(':').next() == Some(model)
-                }))
+                .map(|a| {
+                    a.iter().any(|m| {
+                        let n = m["name"].as_str().unwrap_or("");
+                        n == model || n.split(':').next() == Some(model)
+                    })
+                })
                 .unwrap_or(false);
             if have {
                 return Ok(format!("model {model} already present"));
@@ -532,7 +556,11 @@ fn ensure_model(model: &str) -> Result<String, String> {
     if r.status().is_success() {
         Ok(format!("pulled model {model} on demand"))
     } else {
-        Err(format!("pull {model} http {}: {}", r.status(), r.text().unwrap_or_default()))
+        Err(format!(
+            "pull {model} http {}: {}",
+            r.status(),
+            r.text().unwrap_or_default()
+        ))
     }
 }
 
@@ -579,84 +607,103 @@ async fn process_once(
     // reclaimed. Kind-agnostic so it also clears zombies with no off-chain
     // payload entry.
     if should_reconcile() {
-    let next = client.get_next_job_id().await;
-    for id in next.saturating_sub(RECONCILE_WINDOW)..next {
-        if let Some((state, _price, _req, _provider_now)) = client.get_job_state(id).await {
-            if state == "Pending" {
-                // Heal a fast-path leak: we served this job off-chain (store status
-                // `done` + a result hash) but the on-chain accept never landed (the
-                // AP's create hadn't been included when we claimed). Drive it
-                // Pending → Accepted → Running → submit_result → Completed so it
-                // doesn't strand as an orphan. Only for jobs we actually have a
-                // completed off-chain result for.
-                if let Some(j) = get_job(id) {
-                    if j.kind == "llm" && j.status == "done" {
-                        if let Some(bytes) = j.result_hash.as_deref().and_then(hex32) {
-                            let toks = (j.response.as_deref().unwrap_or("").chars().count() as u32 / 4).max(1);
-                            let a = if fast_claim { client.accept_job_fast(id).await } else { client.accept_job(id).await };
-                            let s = if fast_claim { client.start_job_fast(id).await } else { client.start_job(id).await };
-                            let r = if fast_claim { client.submit_result_fast(id, bytes, toks).await } else { client.submit_result(id, bytes, toks).await };
-                            let c = if fast_claim { client.complete_job_fast(id).await } else { client.complete_job(id).await };
-                            if a.is_ok() && s.is_ok() && r.is_ok() && c.is_ok() {
-                                println!("[provider] healed leaked Pending #{id} → Completed");
+        let next = client.get_next_job_id().await;
+        for id in next.saturating_sub(RECONCILE_WINDOW)..next {
+            if let Some((state, _price, _req, _provider_now)) = client.get_job_state(id).await {
+                if state == "Pending" {
+                    // Heal a fast-path leak: we served this job off-chain (store status
+                    // `done` + a result hash) but the on-chain accept never landed (the
+                    // AP's create hadn't been included when we claimed). Drive it
+                    // Pending → Accepted → Running → submit_result → Completed so it
+                    // doesn't strand as an orphan. Only for jobs we actually have a
+                    // completed off-chain result for.
+                    if let Some(j) = get_job(id) {
+                        if j.kind == "llm" && j.status == "done" {
+                            if let Some(bytes) = j.result_hash.as_deref().and_then(hex32) {
+                                let toks = (j.response.as_deref().unwrap_or("").chars().count()
+                                    as u32
+                                    / 4)
+                                .max(1);
+                                let a = if fast_claim {
+                                    client.accept_job_fast(id).await
+                                } else {
+                                    client.accept_job(id).await
+                                };
+                                let s = if fast_claim {
+                                    client.start_job_fast(id).await
+                                } else {
+                                    client.start_job(id).await
+                                };
+                                let r = if fast_claim {
+                                    client.submit_result_fast(id, bytes, toks).await
+                                } else {
+                                    client.submit_result(id, bytes, toks).await
+                                };
+                                let c = if fast_claim {
+                                    client.complete_job_fast(id).await
+                                } else {
+                                    client.complete_job(id).await
+                                };
+                                if a.is_ok() && s.is_ok() && r.is_ok() && c.is_ok() {
+                                    println!("[provider] healed leaked Pending #{id} → Completed");
+                                }
                             }
                         }
                     }
-                }
-                continue;
-            }
-            if _provider_now.as_deref() != Some(me) {
-                continue;
-            }
-            if state == "AwaitingVerification" {
-                // Kind-gate: skip jobs owned by the other provider (shared
-                // signer account means `provider == me` is true for both kinds).
-                if !job_kind_is_ours(id) {
                     continue;
                 }
-                match if fast_claim {
-                    client.complete_job_fast(id).await
-                } else {
-                    client.complete_job(id).await
-                } {
-                    Ok(()) => {
-                        println!("[provider] reconciled #{id} AwaitingVerification → Completed")
-                    }
-                    Err(e) if is_benign_state_err(&e.to_string()) => {
-                        // Already finalized elsewhere — quiet, not an error.
-                    }
-                    Err(e) => eprintln!("[provider] reconcile #{id} (complete) failed: {e}"),
-                }
-            } else if state == "Accepted" && job_kind_is_ours(id) {
-                // Capacity reclaim: an `Accepted` LLM job we own that was never
-                // started is a zombie (its start tx never landed) permanently
-                // holding one of our `MaxJobsPerProvider` slots → every later
-                // accept fails `MaxProviderCapacity`. Since our claim loop only
-                // *starts* `Pending` jobs, an `Accepted` job can never advance on
-                // its own — drive it Accepted → Running → Completed to free the
-                // slot (escrow is refunded by `complete_job`).
-                let start_res = if fast_claim {
-                    client.start_job_fast(id).await
-                } else {
-                    client.start_job(id).await
-                };
-                if let Err(e) = start_res {
-                    eprintln!("[provider] reconcile #{id} (start) failed: {e}");
+                if _provider_now.as_deref() != Some(me) {
                     continue;
                 }
-                match if fast_claim {
-                    client.complete_job_fast(id).await
-                } else {
-                    client.complete_job(id).await
-                } {
-                    Ok(()) => println!(
-                        "[provider] reconciled #{id} Accepted → Completed (capacity freed)"
-                    ),
-                    Err(e) => eprintln!("[provider] reconcile #{id} (complete) failed: {e}"),
+                if state == "AwaitingVerification" {
+                    // Kind-gate: skip jobs owned by the other provider (shared
+                    // signer account means `provider == me` is true for both kinds).
+                    if !job_kind_is_ours(id) {
+                        continue;
+                    }
+                    match if fast_claim {
+                        client.complete_job_fast(id).await
+                    } else {
+                        client.complete_job(id).await
+                    } {
+                        Ok(()) => {
+                            println!("[provider] reconciled #{id} AwaitingVerification → Completed")
+                        }
+                        Err(e) if is_benign_state_err(&e.to_string()) => {
+                            // Already finalized elsewhere — quiet, not an error.
+                        }
+                        Err(e) => eprintln!("[provider] reconcile #{id} (complete) failed: {e}"),
+                    }
+                } else if state == "Accepted" && job_kind_is_ours(id) {
+                    // Capacity reclaim: an `Accepted` LLM job we own that was never
+                    // started is a zombie (its start tx never landed) permanently
+                    // holding one of our `MaxJobsPerProvider` slots → every later
+                    // accept fails `MaxProviderCapacity`. Since our claim loop only
+                    // *starts* `Pending` jobs, an `Accepted` job can never advance on
+                    // its own — drive it Accepted → Running → Completed to free the
+                    // slot (escrow is refunded by `complete_job`).
+                    let start_res = if fast_claim {
+                        client.start_job_fast(id).await
+                    } else {
+                        client.start_job(id).await
+                    };
+                    if let Err(e) = start_res {
+                        eprintln!("[provider] reconcile #{id} (start) failed: {e}");
+                        continue;
+                    }
+                    match if fast_claim {
+                        client.complete_job_fast(id).await
+                    } else {
+                        client.complete_job(id).await
+                    } {
+                        Ok(()) => println!(
+                            "[provider] reconciled #{id} Accepted → Completed (capacity freed)"
+                        ),
+                        Err(e) => eprintln!("[provider] reconcile #{id} (complete) failed: {e}"),
+                    }
                 }
             }
         }
-    }
     } // end reconcile gate
 
     // 0. Auto-claim: if an access-point scheduler has assigned us specific jobs,
@@ -903,10 +950,12 @@ async fn run_job(
     // does not serve. On refusal we settle the job on-chain so the requestor's
     // escrow refunds and the capacity slot frees, then bail without inferring.
     let policy = gpn_agent::provider_policy::ProviderPolicy::from_env();
-    if let gpn_agent::provider_policy::Decision::Refuse(r) = policy.check(&job.prompt, &job.model)
-    {
+    if let gpn_agent::provider_policy::Decision::Refuse(r) = policy.check(&job.prompt, &job.model) {
         let cat = r.category.unwrap_or("model_policy");
-        eprintln!("[job {id}] \u{26a0} policy refusal (category={cat}) \u{2014} not running: {}", r.reason);
+        eprintln!(
+            "[job {id}] \u{26a0} policy refusal (category={cat}) \u{2014} not running: {}",
+            r.reason
+        );
         // Content-free off-chain marker (no prompt stored) so the job is never
         // re-attempted in this process.
         let _ = LlmStore::new().set_error(id, &format!("gpn_policy_violation: {cat}"));
@@ -926,7 +975,10 @@ async fn run_job(
     if let Some((_state, _price, Some(requestor), _prov)) = client.get_job_state(id).await {
         if let Some(r) = policy.requestor_refused(&requestor) {
             let cat = r.category.unwrap_or("requestor_denylist");
-            eprintln!("[job {id}] \u{26a0} requestor denylist refusal \u{2014} not running: {}", r.reason);
+            eprintln!(
+                "[job {id}] \u{26a0} requestor denylist refusal \u{2014} not running: {}",
+                r.reason
+            );
             let _ = LlmStore::new().set_error(id, &format!("gpn_policy_violation: {cat}"));
             let rr = if fast {
                 client.fail_job_fast(id, 2).await
@@ -1023,7 +1075,11 @@ mod settled_cache_tests {
 
     fn tmp(name: &str) -> String {
         std::env::temp_dir()
-            .join(format!("gpn-settled-test-{}-{}.json", std::process::id(), name))
+            .join(format!(
+                "gpn-settled-test-{}-{}.json",
+                std::process::id(),
+                name
+            ))
             .to_string_lossy()
             .to_string()
     }

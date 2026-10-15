@@ -524,13 +524,23 @@ mod tests {
         d.add_ip("10.0.0.1");
         let s = summarize(&reports, &d);
         assert_eq!(s.total_reports, 4);
-        assert_eq!(s.by_kind, vec![("account".into(), 2), ("ip".into(), 1), ("job".into(), 1)]);
+        assert_eq!(
+            s.by_kind,
+            vec![("account".into(), 2), ("ip".into(), 1), ("job".into(), 1)]
+        );
         assert_eq!(
             s.by_category,
-            vec![("csam".into(), 2), ("".into(), 1), ("weapons_mass_casualty".into(), 1)]
+            vec![
+                ("csam".into(), 2),
+                ("".into(), 1),
+                ("weapons_mass_casualty".into(), 1)
+            ]
         );
         assert_eq!((s.first_ts, s.last_ts), (100, 400));
-        assert_eq!((s.banned_accounts, s.banned_providers, s.banned_ips), (1, 1, 1));
+        assert_eq!(
+            (s.banned_accounts, s.banned_providers, s.banned_ips),
+            (1, 1, 1)
+        );
     }
 
     #[test]
@@ -550,7 +560,10 @@ mod tests {
         )
         .unwrap();
         let all = read_all_reports(&path);
-        assert_eq!(all.iter().map(|r| r.report_id.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
+        assert_eq!(
+            all.iter().map(|r| r.report_id.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
         let _ = std::fs::remove_file(&path);
     }
 

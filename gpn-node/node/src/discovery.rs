@@ -76,8 +76,7 @@ pub fn parse_seed_payload(text: &str) -> Vec<String> {
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
         match value {
             serde_json::Value::Array(items) => {
-                let out: Vec<String> =
-                    items.into_iter().filter_map(json_string).collect();
+                let out: Vec<String> = items.into_iter().filter_map(json_string).collect();
                 if !out.is_empty() {
                     return out;
                 }
@@ -295,9 +294,7 @@ pub async fn fetch_seed_url(url: &str) -> Result<Vec<String>, String> {
         if !response.status().is_success() {
             return Err(format!("GET {url}: HTTP {}", response.status()));
         }
-        response
-            .text()
-            .map_err(|e| format!("read body {url}: {e}"))
+        response.text().map_err(|e| format!("read body {url}: {e}"))
     })
     .await
     .map_err(|e| format!("join error: {e}"))??;
@@ -328,30 +325,43 @@ mod tests {
     use super::*;
 
     const A: &str = "/dns4/node1.example.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo";
-    const B: &str = "/ip4/203.0.113.7/tcp/30334/p2p/12D3KooW9ye8kXwMYT4vBJoJdCkM9VfRrcM7nGgqVDPq3Fy8i6xw";
+    const B: &str =
+        "/ip4/203.0.113.7/tcp/30334/p2p/12D3KooW9ye8kXwMYT4vBJoJdCkM9VfRrcM7nGgqVDPq3Fy8i6xw";
 
     #[test]
     fn parse_object_form() {
         let payload = format!(r#"{{"multiaddrs": ["{A}", "{B}"]}}"#);
-        assert_eq!(parse_seed_payload(&payload), vec![A.to_string(), B.to_string()]);
+        assert_eq!(
+            parse_seed_payload(&payload),
+            vec![A.to_string(), B.to_string()]
+        );
     }
 
     #[test]
     fn parse_array_form() {
         let payload = format!(r#"["{A}", "{B}"]"#);
-        assert_eq!(parse_seed_payload(&payload), vec![A.to_string(), B.to_string()]);
+        assert_eq!(
+            parse_seed_payload(&payload),
+            vec![A.to_string(), B.to_string()]
+        );
     }
 
     #[test]
     fn parse_plaintext_lines_and_comments() {
         let payload = format!("# seed list\n{A}\n\n  {B}  \n");
-        assert_eq!(parse_seed_payload(&payload), vec![A.to_string(), B.to_string()]);
+        assert_eq!(
+            parse_seed_payload(&payload),
+            vec![A.to_string(), B.to_string()]
+        );
     }
 
     #[test]
     fn parse_json_string_of_lines() {
         let payload = format!("\"{A}\\n{B}\"");
-        assert_eq!(parse_seed_payload(&payload), vec![A.to_string(), B.to_string()]);
+        assert_eq!(
+            parse_seed_payload(&payload),
+            vec![A.to_string(), B.to_string()]
+        );
     }
 
     #[test]
@@ -425,7 +435,8 @@ mod tests {
 
     #[test]
     fn merge_keeps_valid_from_later_group() {
-        let c = "/ip4/198.51.100.9/tcp/30333/p2p/12D3KooWB9tGm4vCnQ7uF7bH6kK3sXyNcZ9rQ8tW5eL2pY4dR1aZ";
+        let c =
+            "/ip4/198.51.100.9/tcp/30333/p2p/12D3KooWB9tGm4vCnQ7uF7bH6kK3sXyNcZ9rQ8tW5eL2pY4dR1aZ";
         let groups = vec![vec![A.to_string()], vec![c.to_string()]];
         let merged = merge_dedupe(&groups);
         assert_eq!(merged.len(), 2);
@@ -456,7 +467,10 @@ mod tests {
     #[test]
     fn decode_bytes_value_handles_scale_vec() {
         // SCALE: compact length 3 (0x0c) + bytes.
-        assert_eq!(decode_bytes_value(&[0x0c, b'a', b'b', b'c']), Some(b"abc".to_vec()));
+        assert_eq!(
+            decode_bytes_value(&[0x0c, b'a', b'b', b'c']),
+            Some(b"abc".to_vec())
+        );
         // Empty vec: compact 0 (0x00).
         assert_eq!(decode_bytes_value(&[0x00]), Some(vec![]));
         assert_eq!(decode_bytes_value(&[]), None);

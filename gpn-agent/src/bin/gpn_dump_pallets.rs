@@ -8,7 +8,10 @@ use gpn_agent::chain::signer;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
-    let endpoint = args.get(1).cloned().unwrap_or_else(|| "ws://127.0.0.1:9944".into());
+    let endpoint = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| "ws://127.0.0.1:9944".into());
     let filter = args.get(2).cloned();
     let call = args.get(3).cloned();
 

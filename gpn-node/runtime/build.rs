@@ -8,8 +8,7 @@
 #[cfg(all(feature = "std", not(feature = "metadata-hash")))]
 fn main() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set");
-    let committed =
-        std::path::Path::new(&manifest_dir).join("gpn_runtime.compact.compressed.wasm");
+    let committed = std::path::Path::new(&manifest_dir).join("gpn_runtime.compact.compressed.wasm");
 
     if committed.exists() {
         // Forward-slash absolute path (cross-platform `include_bytes!`).

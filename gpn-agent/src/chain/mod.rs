@@ -1071,10 +1071,7 @@ impl ChainClient {
     /// read, two back-to-back pool accepts. This replaces the old
     /// accept-then-wait-for-a-block-then-start sequence (~2 blocks ≈ 8–14s)
     /// with ~two pool acks (~ms).
-    pub async fn claim_job_pipelined(
-        &self,
-        job_id: u64,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn claim_job_pipelined(&self, job_id: u64) -> Result<(), Box<dyn std::error::Error>> {
         self.submit_fast(
             "ComputeMarketplace",
             "accept_job",
@@ -1175,7 +1172,11 @@ impl ChainClient {
     /// `ComputeMarketplace::fail_job(job_id, reason)` — mark a non-terminal job
     /// Failed and refund the escrow immediately. Callable by the assigned provider
     /// or the requestor. Frees the global `ActiveJobCount` slot.
-    pub async fn fail_job(&self, job_id: u64, reason: u8) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn fail_job(
+        &self,
+        job_id: u64,
+        reason: u8,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         self.submit_signed_call(
             "ComputeMarketplace",
             "fail_job",
@@ -1185,7 +1186,11 @@ impl ChainClient {
     }
 
     /// Inclusion-free `fail_job` for the shared nonce stream.
-    pub async fn fail_job_fast(&self, job_id: u64, reason: u8) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn fail_job_fast(
+        &self,
+        job_id: u64,
+        reason: u8,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         self.submit_fast(
             "ComputeMarketplace",
             "fail_job",
@@ -2037,7 +2042,10 @@ mod tests {
         let v = subxt::dynamic::Value::from_bytes(url);
         let out = bytes_from_dynamic(&v, 256);
         assert_eq!(&out[..], &url[..]);
-        assert_eq!(String::from_utf8_lossy(&out), "http://gpn-testnet.duckdns.org:8093/status");
+        assert_eq!(
+            String::from_utf8_lossy(&out),
+            "http://gpn-testnet.duckdns.org:8093/status"
+        );
     }
 
     #[test]

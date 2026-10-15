@@ -145,7 +145,10 @@ async fn connect_best_block<T: Config>(endpoint: &str) -> Option<OnlineClient<T>
     let best_hash = methods.chain_get_block_hash(None).await.ok()??;
     // `state_get_runtime_version` returns the legacy RPC `RuntimeVersion`; the
     // client constructor wants the `subxt_core` one.
-    let legacy_rt = methods.state_get_runtime_version(Some(best_hash)).await.ok()?;
+    let legacy_rt = methods
+        .state_get_runtime_version(Some(best_hash))
+        .await
+        .ok()?;
     let runtime_version = subxt::client::RuntimeVersion {
         spec_version: legacy_rt.spec_version,
         transaction_version: legacy_rt.transaction_version,
@@ -168,7 +171,8 @@ pub async fn runtime_spec_version(endpoint: &str) -> Option<u32> {
     let http_url = endpoint
         .replace("ws://", "http://")
         .replace("wss://", "https://");
-    let body = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"state_getRuntimeVersion","params":[]});
+    let body =
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"state_getRuntimeVersion","params":[]});
     let resp = reqwest::Client::new()
         .post(&http_url)
         .json(&body)
@@ -176,7 +180,10 @@ pub async fn runtime_spec_version(endpoint: &str) -> Option<u32> {
         .await
         .ok()?;
     let v: serde_json::Value = resp.json().await.ok()?;
-    v.get("result")?.get("specVersion")?.as_u64().map(|x| x as u32)
+    v.get("result")?
+        .get("specVersion")?
+        .as_u64()
+        .map(|x| x as u32)
 }
 
 /// Snapshot of node RPC readiness, used by the **RPC-readiness gate** (queue
@@ -224,8 +231,12 @@ pub fn parse_readiness(
         v.and_then(|x| x.get("result")).and_then(|r| r.get(k))
     }
     let peers = field(health, "peers").and_then(|x| x.as_u64()).unwrap_or(0);
-    let is_syncing = field(health, "isSyncing").and_then(|x| x.as_bool()).unwrap_or(false);
-    let should_have_peers = field(health, "shouldHavePeers").and_then(|x| x.as_bool()).unwrap_or(false);
+    let is_syncing = field(health, "isSyncing")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
+    let should_have_peers = field(health, "shouldHavePeers")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
     // Header.number is a 0x-prefixed hex string.
     let head_block = field(header, "number")
         .and_then(|x| x.as_str())
@@ -635,8 +646,12 @@ where
                 Some(Ok(TxStatus::Validated)) => break Ok(()),
                 Some(Ok(TxStatus::InBestBlock(_))) => break Ok(()),
                 Some(Ok(TxStatus::Error { message })) => break Err(format!("tx error: {message}")),
-                Some(Ok(TxStatus::Invalid { message })) => break Err(format!("tx invalid: {message}")),
-                Some(Ok(TxStatus::Dropped { message })) => break Err(format!("tx dropped: {message}")),
+                Some(Ok(TxStatus::Invalid { message })) => {
+                    break Err(format!("tx invalid: {message}"))
+                }
+                Some(Ok(TxStatus::Dropped { message })) => {
+                    break Err(format!("tx dropped: {message}"))
+                }
                 Some(Ok(_)) => continue,
                 Some(Err(e)) => break Err(e.to_string()),
                 None => break Err("tx subscription dropped".to_string()),
@@ -677,10 +692,7 @@ pub struct NonceStream {
 
 impl NonceStream {
     /// Connect once and seed the nonce counter from the chain's head block.
-    pub async fn new(
-        endpoint: &str,
-        signer_uri: &str,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn new(endpoint: &str, signer_uri: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let client = connect(endpoint).await?;
         let signer = Sr25519Signer::from_uri(signer_uri)?;
         let acct = signer.account_id();
@@ -894,14 +906,21 @@ mod tests {
     fn malformed_health_defaults_to_not_ready() {
         // Health present but empty result → peers/syncing default false, but a
         // missing head number parses to 0 → not ready.
-        let r = parse_readiness(true, Some(&json!({"result":{}})), Some(&json!({"result":{}})));
-        assert_eq!(r, NodeReadiness {
-            reachable: true,
-            head_block: 0,
-            peers: 0,
-            is_syncing: false,
-            should_have_peers: false,
-        });
+        let r = parse_readiness(
+            true,
+            Some(&json!({"result":{}})),
+            Some(&json!({"result":{}})),
+        );
+        assert_eq!(
+            r,
+            NodeReadiness {
+                reachable: true,
+                head_block: 0,
+                peers: 0,
+                is_syncing: false,
+                should_have_peers: false,
+            }
+        );
         assert!(!r.is_ready());
     }
 }

@@ -65,7 +65,11 @@ pub struct NetworkStatus {
 /// against the registry.
 pub fn classify(genesis_hex: &str, spec_version: u32, running_version: &str) -> NetworkStatus {
     let r = load_registry();
-    let placeholder = r.genesis_hash.trim_start_matches("0x").chars().all(|c| c == '0');
+    let placeholder = r
+        .genesis_hash
+        .trim_start_matches("0x")
+        .chars()
+        .all(|c| c == '0');
     let genesis_match = r.genesis_hash.eq_ignore_ascii_case(genesis_hex);
     let summary = if !placeholder && !genesis_match {
         format!(

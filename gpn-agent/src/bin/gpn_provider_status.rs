@@ -24,14 +24,16 @@
 //!                       [--ollama http://127.0.0.1:11434]
 //! Env: LISTEN, ADDRESS, GFLOPS, MODELS, CAPACITY, ACTIVE, GPN_OLLAMA
 
-use serde_json::json;
 use gpn_agent::gpu::{detect_gpu_capability, detect_vram_mb};
 use gpn_agent::llm::{LlmJob, LlmStore};
+use serde_json::json;
 use std::time::Duration;
 use tiny_http::{Header, Method, Response, Server};
 
 fn opt(args: &[String], flag: &str) -> Option<String> {
-    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1).cloned())
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1).cloned())
 }
 
 /// Constant-time string equality (don't leak the shared token via timing).
@@ -78,9 +80,17 @@ fn ollama_models(base: &str, fallback: &[String]) -> (Vec<String>, bool) {
             let v: serde_json::Value = r.json().unwrap_or_default();
             let names: Vec<String> = v["models"]
                 .as_array()
-                .map(|a| a.iter().filter_map(|m| m["name"].as_str().map(str::to_string)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|m| m["name"].as_str().map(str::to_string))
+                        .collect()
+                })
                 .unwrap_or_default();
-            if names.is_empty() { (fallback.to_vec(), true) } else { (names, true) }
+            if names.is_empty() {
+                (fallback.to_vec(), true)
+            } else {
+                (names, true)
+            }
         }
         Err(_) => (fallback.to_vec(), false),
     }
@@ -108,7 +118,12 @@ fn detect_ram_mb() -> u64 {
     if let Ok(s) = std::fs::read_to_string("/proc/meminfo") {
         for line in s.lines() {
             if let Some(rest) = line.strip_prefix("MemTotal:") {
-                let kb: u64 = rest.trim().trim_end_matches("kB").trim().parse().unwrap_or(0);
+                let kb: u64 = rest
+                    .trim()
+                    .trim_end_matches("kB")
+                    .trim()
+                    .parse()
+                    .unwrap_or(0);
                 return kb / 1024;
             }
         }
@@ -118,16 +133,35 @@ fn detect_ram_mb() -> u64 {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
-    let listen = opt(&args, "--listen").or_else(|| std::env::var("LISTEN").ok()).unwrap_or_else(|| "0.0.0.0:8093".into());
-    let address = opt(&args, "--address").or_else(|| std::env::var("ADDRESS").ok()).unwrap_or_default();
-    let gflops: u64 = opt(&args, "--gflops").or_else(|| std::env::var("GFLOPS").ok()).and_then(|s| s.parse().ok()).unwrap_or(0);
-    let models_csv = opt(&args, "--models").or_else(|| std::env::var("MODELS").ok()).unwrap_or_else(|| "llama3.2:1b".into());
-    let capacity: u64 = opt(&args, "--capacity").or_else(|| std::env::var("CAPACITY").ok()).and_then(|s| s.parse().ok()).unwrap_or(1);
-    let active: u64 = opt(&args, "--active").or_else(|| std::env::var("ACTIVE").ok()).and_then(|s| s.parse().ok()).unwrap_or(0);
-    let ollama = opt(&args, "--ollama").or_else(|| std::env::var("GPN_OLLAMA").ok()).unwrap_or_else(|| "http://127.0.0.1:11434".into());
+    let listen = opt(&args, "--listen")
+        .or_else(|| std::env::var("LISTEN").ok())
+        .unwrap_or_else(|| "0.0.0.0:8093".into());
+    let address = opt(&args, "--address")
+        .or_else(|| std::env::var("ADDRESS").ok())
+        .unwrap_or_default();
+    let gflops: u64 = opt(&args, "--gflops")
+        .or_else(|| std::env::var("GFLOPS").ok())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let models_csv = opt(&args, "--models")
+        .or_else(|| std::env::var("MODELS").ok())
+        .unwrap_or_else(|| "llama3.2:1b".into());
+    let capacity: u64 = opt(&args, "--capacity")
+        .or_else(|| std::env::var("CAPACITY").ok())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+    let active: u64 = opt(&args, "--active")
+        .or_else(|| std::env::var("ACTIVE").ok())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let ollama = opt(&args, "--ollama")
+        .or_else(|| std::env::var("GPN_OLLAMA").ok())
+        .unwrap_or_else(|| "http://127.0.0.1:11434".into());
     // Shared AP↔provider secret binding `POST /assign` (item #16 finding #7).
     // Empty ⇒ legacy accept (logged) so a rollout is non-breaking.
-    let assign_token = opt(&args, "--assign-token").or_else(|| std::env::var("GPN_ASSIGN_TOKEN").ok()).unwrap_or_default();
+    let assign_token = opt(&args, "--assign-token")
+        .or_else(|| std::env::var("GPN_ASSIGN_TOKEN").ok())
+        .unwrap_or_default();
     // Real compute economics for the rate card:
     //   --tok-per-s          the provider's MEASURED throughput (tokens/sec)
     //   --owner-cost-usd-hr  the provider's own cost/hr ($/kWh + amortized GPU)
@@ -166,7 +200,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|| std::env::var("TFLOPS").ok())
         .and_then(|s| s.parse().ok())
         .unwrap_or(tflops_detected);
-    let models: Vec<String> = models_csv.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    let models: Vec<String> = models_csv
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
 
     let server = Server::http(&listen).map_err(|e| format!("cannot bind {listen}: {e}"))?;
     println!("GPN provider heartbeat on http://{listen} — address={address} gflops={gflops} models={:?} active={active}/{capacity}", models);
@@ -182,7 +220,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let u = req.url().to_string();
             let is_assign = req.method() == &Method::Post && u.split('?').next() == Some("/assign");
             if is_assign {
-                let is_loopback = req.remote_addr().map(|a| a.ip().is_loopback()).unwrap_or(false);
+                let is_loopback = req
+                    .remote_addr()
+                    .map(|a| a.ip().is_loopback())
+                    .unwrap_or(false);
                 let provided = req
                     .headers()
                     .iter()
@@ -243,7 +284,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Item #16 finding #2: persist the per-job callback token so
                         // the provider can echo it when returning the result, binding
                         // the remote result channel to this assignment.
-                        let callback_token = v.get("callback_token").and_then(|x| x.as_str()).unwrap_or("");
+                        let callback_token = v
+                            .get("callback_token")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("");
                         let rec = json!({
                             "provider": v.get("provider").and_then(|x| x.as_str()).unwrap_or(address.as_str()),
                             "model": v.get("model").and_then(|x| x.as_str()).unwrap_or(""),

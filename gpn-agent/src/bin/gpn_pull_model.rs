@@ -103,16 +103,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(2);
                 }
             };
-            let name = rest
-                .get(2)
-                .cloned()
-                .unwrap_or_else(|| {
-                    let base = Path::new(file)
-                        .file_name()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| file.to_string());
-                    base.trim_end_matches(".gguf").to_string()
-                });
+            let name = rest.get(2).cloned().unwrap_or_else(|| {
+                let base = Path::new(file)
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| file.to_string());
+                base.trim_end_matches(".gguf").to_string()
+            });
 
             let url = format!("https://huggingface.co/{repo}/resolve/main/{file}");
             let dest = models.join(file);
@@ -124,10 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Generate a Modelfile and register the GGUF with ollama.
             let modelfile = models.join(format!("{name}.Modelfile"));
-            std::fs::write(
-                &modelfile,
-                format!("FROM \"{}\"\n", dest.to_string_lossy()),
-            )?;
+            std::fs::write(&modelfile, format!("FROM \"{}\"\n", dest.to_string_lossy()))?;
 
             println!("ollama create {name}");
             let status = Command::new(&ollama)

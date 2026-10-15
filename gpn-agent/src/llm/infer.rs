@@ -143,7 +143,9 @@ pub async fn run_ml_inference(
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(format!("ollama error {}: {}", status, &text[..text.len().min(300)]).into());
+            return Err(
+                format!("ollama error {}: {}", status, &text[..text.len().min(300)]).into(),
+            );
         }
         let parsed: EmbResponse = resp.json().await?;
         serde_json::json!({
@@ -166,7 +168,9 @@ pub async fn run_ml_inference(
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(format!("ollama error {}: {}", status, &text[..text.len().min(300)]).into());
+            return Err(
+                format!("ollama error {}: {}", status, &text[..text.len().min(300)]).into(),
+            );
         }
         let parsed: GenResponse = resp.json().await?;
         serde_json::json!({

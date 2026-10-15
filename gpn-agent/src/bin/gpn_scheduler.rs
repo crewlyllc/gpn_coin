@@ -38,7 +38,10 @@ fn recent_jobs() -> &'static Mutex<Vec<(u64, Instant, u64)>> {
 }
 
 fn record_created(id: u64, max_tokens: u64) {
-    recent_jobs().lock().unwrap().push((id, Instant::now(), max_tokens));
+    recent_jobs()
+        .lock()
+        .unwrap()
+        .push((id, Instant::now(), max_tokens));
 }
 
 /// Policy for how long a job may stay `Pending` before the janitor reclaims it.
@@ -106,7 +109,10 @@ fn spawn_janitor(client: Arc<ChainClient>, rt: Arc<tokio::runtime::Runtime>) {
         }
     }
     if seeded > 0 {
-        println!("[janitor] re-adopted {seeded} non-terminal job(s) from #{start}..#{} after restart", next.saturating_sub(1));
+        println!(
+            "[janitor] re-adopted {seeded} non-terminal job(s) from #{start}..#{} after restart",
+            next.saturating_sub(1)
+        );
     }
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(30));
@@ -216,7 +222,9 @@ struct Provider {
 }
 
 fn opt(args: &[String], flag: &str) -> Option<String> {
-    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1).cloned())
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1).cloned())
 }
 
 fn jpost(url: &str) -> Option<Value> {
@@ -263,7 +271,8 @@ fn refresh(
         // A provider discovered on-chain identifies itself by its storage KEY
         // (the AccountId), so keep url -> account so we can attribute an
         // endpoint whose /status heartbeat omits its own `address`.
-        let mut chain_addr: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut chain_addr: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         for (who, url) in rt.block_on(client.list_provider_endpoints()) {
             if let Some(addr) = hex_to_ss58(&who) {
                 chain_addr.entry(url.clone()).or_insert(addr);
@@ -289,7 +298,11 @@ fn refresh(
                     models: v
                         .get("models")
                         .and_then(|x| x.as_array())
-                        .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|s| s.as_str().map(String::from))
+                                .collect()
+                        })
                         .unwrap_or_default(),
                     can_pull: v.get("can_pull").and_then(|x| x.as_bool()).unwrap_or(false),
                     tok_per_s: v.get("tok_per_s").and_then(|x| x.as_f64()).unwrap_or(40.0),
@@ -297,7 +310,10 @@ fn refresh(
                         .get("owner_cost_usd_hr")
                         .and_then(|x| x.as_f64())
                         .unwrap_or(0.03),
-                    mem_bw_gbps: v.get("mem_bw_gbps").and_then(|x| x.as_f64()).unwrap_or(250.0),
+                    mem_bw_gbps: v
+                        .get("mem_bw_gbps")
+                        .and_then(|x| x.as_f64())
+                        .unwrap_or(250.0),
                     vram_mb: v.get("vram_mb").and_then(|x| x.as_u64()).unwrap_or(0),
                     ram_mb: v.get("ram_mb").and_then(|x| x.as_u64()).unwrap_or(0),
                     gpu_class: v
@@ -307,8 +323,15 @@ fn refresh(
                         .to_string(),
                     tflops: v.get("tflops").and_then(|x| x.as_f64()).unwrap_or(0.0),
                     active: v.get("active").and_then(|x| x.as_u64()).unwrap_or(0),
-                    capacity: v.get("capacity").and_then(|x| x.as_u64()).unwrap_or(1).max(1),
-                    latency_ms: v.get("__latency_ms").and_then(|x| x.as_u64()).unwrap_or(9999),
+                    capacity: v
+                        .get("capacity")
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(1)
+                        .max(1),
+                    latency_ms: v
+                        .get("__latency_ms")
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(9999),
                     last_seen: Some(Instant::now()),
                 },
                 None => Provider {
@@ -349,7 +372,11 @@ fn refresh(
 /// was started without `--address`), fall back to the provider's on-chain key so
 /// the entry stays attributable (assignments / `routed_to` / client RTT hints
 /// key on `address`).
-fn attribute_address(hb_addr: &str, url: &str, chain_addr: &std::collections::HashMap<String, String>) -> String {
+fn attribute_address(
+    hb_addr: &str,
+    url: &str,
+    chain_addr: &std::collections::HashMap<String, String>,
+) -> String {
     if hb_addr.is_empty() {
         chain_addr.get(url).cloned().unwrap_or_default()
     } else {
@@ -372,7 +399,9 @@ fn has_model(p: &Provider, model: &str) -> bool {
     if model.is_empty() || model == "auto" {
         !p.models.is_empty()
     } else {
-        p.models.iter().any(|m| m == model || m.split(':').next() == Some(model))
+        p.models
+            .iter()
+            .any(|m| m == model || m.split(':').next() == Some(model))
     }
 }
 
@@ -408,7 +437,14 @@ fn resolve_requested_model(reg: &[Provider], requested: &str) -> Result<String, 
 /// per-token pricing). Scales linearly with output pixels × denoise steps, so a
 /// bigger image or more steps costs more. Reference: 512×512 @ 8 steps ≈ REF_SECS
 /// of GPU time (including one-time model load).
-fn image_price_gpn(w: f64, h: f64, steps: f64, token_price_usd: f64, market_hr: f64, util: f64) -> f64 {
+fn image_price_gpn(
+    w: f64,
+    h: f64,
+    steps: f64,
+    token_price_usd: f64,
+    market_hr: f64,
+    util: f64,
+) -> f64 {
     const REF_SECS: f64 = 90.0;
     const MARGIN: f64 = 0.20;
     const REF_UNITS: f64 = 512.0 * 512.0 * 8.0;
@@ -510,7 +546,10 @@ fn moderation_block(prompt: &str) -> Option<gpn_agent::moderation::Category> {
         Mode::On => match moderate(prompt) {
             Verdict::Block { category } => {
                 // Abuse signal only — never the prompt content (design §5).
-                eprintln!("[moderation] refused a prompt in category {}", category.id());
+                eprintln!(
+                    "[moderation] refused a prompt in category {}",
+                    category.id()
+                );
                 Some(category)
             }
             Verdict::Allow => None,
@@ -590,7 +629,16 @@ fn usd_per_token_for(model: &str) -> f64 {
     base * params_b.max(0.5)
 }
 
-fn pick(registry: &[Provider], min_gflops: u64, min_vram_mb: u64, min_ram_mb: u64, min_tflops: f64, model: &str, pull_penalty_ms: u64, rtt: &RttOverrides) -> Option<(Provider, bool)> {
+fn pick(
+    registry: &[Provider],
+    min_gflops: u64,
+    min_vram_mb: u64,
+    min_ram_mb: u64,
+    min_tflops: f64,
+    model: &str,
+    pull_penalty_ms: u64,
+    rtt: &RttOverrides,
+) -> Option<(Provider, bool)> {
     // Hardware-capability gate (item 14): a job declaring a VRAM/RAM floor (e.g.
     // video needs a big-VRAM box) routes only to a provider that advertises AT
     // LEAST that much. This is a HARD requirement, so it FAILS CLOSED: a provider
@@ -621,16 +669,17 @@ fn pick(registry: &[Provider], min_gflops: u64, min_vram_mb: u64, min_ram_mb: u6
     };
     let live: Vec<&Provider> = registry
         .iter()
-        .filter(|p| {
-            p.last_seen.is_some() && p.gflops >= min_gflops && hw_ok(p) && gpu_ok(p)
-        })
+        .filter(|p| p.last_seen.is_some() && p.gflops >= min_gflops && hw_ok(p) && gpu_ok(p))
         .collect();
 
     // Effective latency for the *user's* path: a client-measured (user→provider)
     // RTT wins over the access-point-measured value when the caller supplied one
     // (item 3 — client-side RTT). Falls back to `latency_ms` otherwise.
     let eff = |p: &Provider| {
-        routing::effective_latency_ms(p.latency_ms, routing::lookup_override(rtt, &p.address, &p.status_url))
+        routing::effective_latency_ms(
+            p.latency_ms,
+            routing::lookup_override(rtt, &p.address, &p.status_url),
+        )
     };
 
     // Availability: a node currently running an AI job is NOT available (one GPU does one
@@ -638,7 +687,11 @@ fn pick(registry: &[Provider], min_gflops: u64, min_vram_mb: u64, min_ram_mb: u6
     let idle: Vec<&Provider> = live.iter().copied().filter(|p| p.active == 0).collect();
 
     // 1. Idle nodes that already HAVE the model -> lowest latency wins.
-    let mut ready: Vec<&Provider> = idle.iter().copied().filter(|p| has_model(p, model)).collect();
+    let mut ready: Vec<&Provider> = idle
+        .iter()
+        .copied()
+        .filter(|p| has_model(p, model))
+        .collect();
     ready.sort_by_key(|p| eff(p));
 
     // 2. Idle nodes that CAN pull the model -> lowest latency.
@@ -660,7 +713,11 @@ fn pick(registry: &[Provider], min_gflops: u64, min_vram_mb: u64, min_ram_mb: u6
         (None, None) => {
             // Every compatible node is busy: no idle node exists. Fall back to queuing on the
             // least-loaded, then lowest-latency node (the job waits; it is not run concurrently).
-            let mut busy: Vec<&Provider> = live.iter().copied().filter(|p| has_model(p, model)).collect();
+            let mut busy: Vec<&Provider> = live
+                .iter()
+                .copied()
+                .filter(|p| has_model(p, model))
+                .collect();
             busy.sort_by_key(|p| p.active * 1000 + eff(p) / 10);
             busy.first().map(|p| ((*p).clone(), false))
         }
@@ -675,7 +732,9 @@ fn pick(registry: &[Provider], min_gflops: u64, min_vram_mb: u64, min_ram_mb: u6
 /// Absent/malformed hints are ignored → routing falls back to the AP-measured
 /// latency (identical to the old behaviour).
 fn rtt_overrides(v: &Value) -> RttOverrides {
-    v.get("rtt").map(routing::parse_rtt_overrides).unwrap_or_default()
+    v.get("rtt")
+        .map(routing::parse_rtt_overrides)
+        .unwrap_or_default()
 }
 
 /// Rewrite a wildcard bind address (`0.0.0.0:8092`, `[::]:8092`) to its loopback
@@ -723,7 +782,16 @@ fn dispatch_assignment(
     // assignment push to its publicly-exposed heartbeat (item #16, finding #7).
     // Sent as a header + body field; unset env ⇒ the provider stays legacy/permissive.
     let assign_token = std::env::var("GPN_ASSIGN_TOKEN").unwrap_or_default();
-    let body = assignment_body(job_id, provider, model, pull, job_payload, callback_url, callback_token, &assign_token);
+    let body = assignment_body(
+        job_id,
+        provider,
+        model,
+        pull,
+        job_payload,
+        callback_url,
+        callback_token,
+        &assign_token,
+    );
     if let Ok(c) = gpn_agent::net::ipv4_only_client(std::time::Duration::from_secs(3)) {
         let mut req = c.post(&url).json(&body);
         if !assign_token.is_empty() {
@@ -886,7 +954,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // caller can run a job with no wallet at all. On MAINNET this MUST be off —
     // callers sign with their own wallet and the access point only routes.
     let allow_hot_wallet = args.iter().any(|a| a == "--allow-hot-wallet")
-        || std::env::var("GPN_ALLOW_HOT_WALLET").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+        || std::env::var("GPN_ALLOW_HOT_WALLET")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
     // Estimated cost (ms) of downloading a model on demand, used only for the
     // "download + be faster than a ready-but-slow provider" tie-break.
     let pull_penalty_ms: u64 = opt(&args, "--pull-penalty-ms")
@@ -915,11 +985,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Build the chain client (synchronous runtime for tiny_http handler).
     let rt = Arc::new(tokio::runtime::Runtime::new()?);
-    let client = Arc::new(rt.block_on(ChainClient::new(&endpoint))?.with_signer(&signer_uri));
+    let client = Arc::new(
+        rt.block_on(ChainClient::new(&endpoint))?
+            .with_signer(&signer_uri),
+    );
     spawn_janitor(client.clone(), rt.clone());
 
     let registry = Arc::new(Mutex::new(Vec::<Provider>::new()));
-    refresh(&registry, &Arc::new(urls.clone()), client.clone(), rt.clone());
+    refresh(
+        &registry,
+        &Arc::new(urls.clone()),
+        client.clone(),
+        rt.clone(),
+    );
     println!("  on-chain discovery: ENABLED (ComputeMarketplace::ProviderEndpoints)");
 
     let server = Server::http(&listen).map_err(|e| format!("cannot bind {listen}: {e}"))?;
@@ -927,13 +1005,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  chain: {endpoint}");
     println!("  providers: {} ({})", urls.len(), urls.join(", "));
     println!("  assign store: {assign_store}");
-    println!("  endpoints: /health /ping /providers /jobs /job/{{id}} /mode | POST /jobs /route/{{id}}");
-    println!("  abuse: denylist={} ({} bans) reports={}",
-        denylist_path.display(), denylist.lock().unwrap().accounts.len(), reports_path.display());
+    println!(
+        "  endpoints: /health /ping /providers /jobs /job/{{id}} /mode | POST /jobs /route/{{id}}"
+    );
+    println!(
+        "  abuse: denylist={} ({} bans) reports={}",
+        denylist_path.display(),
+        denylist.lock().unwrap().accounts.len(),
+        reports_path.display()
+    );
     println!(
         "  mode: {} ({})",
-        if allow_hot_wallet { "TESTNET / free-AI" } else { "MAINNET / client-signed" },
-        if allow_hot_wallet { "access-point hot wallet pays" } else { "callers must sign with their OWN wallet" }
+        if allow_hot_wallet {
+            "TESTNET / free-AI"
+        } else {
+            "MAINNET / client-signed"
+        },
+        if allow_hot_wallet {
+            "access-point hot wallet pays"
+        } else {
+            "callers must sign with their OWN wallet"
+        }
     );
 
     let hdr = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
@@ -954,468 +1046,593 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let denylist_path = denylist_path.clone();
         let reports_path = reports_path.clone();
         std::thread::spawn(move || {
-        let url = req.url().to_string();
-        let method = req.method().clone();
-        let mut body = String::new();
-        let _ = req.as_reader().read_to_string(&mut body);
-        let path: Vec<&str> = url.trim_start_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+            let url = req.url().to_string();
+            let method = req.method().clone();
+            let mut body = String::new();
+            let _ = req.as_reader().read_to_string(&mut body);
+            let path: Vec<&str> = url
+                .trim_start_matches('/')
+                .split('/')
+                .filter(|s| !s.is_empty())
+                .collect();
 
-        // Auth gate (non-loopback only).
-        if !ap_token.is_empty() {
-            let is_loopback = req.remote_addr().map(|a| a.ip().is_loopback()).unwrap_or(false);
-            // `/result/{id}` is the provider→AP result-return channel (item #14);
-            // a remote provider holds no user token, so the POST side is exempt
-            // from the caller-token gate — instead it is authenticated by the
-            // per-job callback token (item #16, finding #2) checked in its handler.
-            // The GET side (read the prompt/response) still requires the token.
-            let is_result_path = path.first().map(|s| *s == "result").unwrap_or(false);
-            let is_result_post = is_result_path && method == Method::Post;
-            // `/report` is the abuse-report path — anyone (user/provider/third
-            // party) must be able to file one, so it is exempt from the caller
-            // token too (design §3). It is content-free.
-            let is_report_post =
-                path.first().map(|s| *s == "report").unwrap_or(false) && method == Method::Post;
-            let protected = !is_result_post
-                && !is_report_post
-                && (method == Method::Post
-                    || is_result_path
-                    || path
-                        .first()
-                        .map(|s| *s == "artifact" || *s == "reports")
-                        .unwrap_or(false));
-            if protected && !is_loopback {
-                let want = format!("Bearer {ap_token}");
-                let ok = req.headers().iter().any(|h| {
-                    (h.field.equiv("Authorization") && h.value.as_str().trim() == want)
-                        || (h.field.equiv("X-Api-Key") && h.value.as_str().trim() == ap_token)
-                });
-                if !ok {
-                    let _ = req.respond(
-                        Response::from_string(json!({"error":"unauthorized"}).to_string())
-                            .with_header(hdr.clone())
-                            .with_status_code(401),
-                    );
-                    return;
+            // Auth gate (non-loopback only).
+            if !ap_token.is_empty() {
+                let is_loopback = req
+                    .remote_addr()
+                    .map(|a| a.ip().is_loopback())
+                    .unwrap_or(false);
+                // `/result/{id}` is the provider→AP result-return channel (item #14);
+                // a remote provider holds no user token, so the POST side is exempt
+                // from the caller-token gate — instead it is authenticated by the
+                // per-job callback token (item #16, finding #2) checked in its handler.
+                // The GET side (read the prompt/response) still requires the token.
+                let is_result_path = path.first().map(|s| *s == "result").unwrap_or(false);
+                let is_result_post = is_result_path && method == Method::Post;
+                // `/report` is the abuse-report path — anyone (user/provider/third
+                // party) must be able to file one, so it is exempt from the caller
+                // token too (design §3). It is content-free.
+                let is_report_post =
+                    path.first().map(|s| *s == "report").unwrap_or(false) && method == Method::Post;
+                let protected = !is_result_post
+                    && !is_report_post
+                    && (method == Method::Post
+                        || is_result_path
+                        || path
+                            .first()
+                            .map(|s| *s == "artifact" || *s == "reports")
+                            .unwrap_or(false));
+                if protected && !is_loopback {
+                    let want = format!("Bearer {ap_token}");
+                    let ok = req.headers().iter().any(|h| {
+                        (h.field.equiv("Authorization") && h.value.as_str().trim() == want)
+                            || (h.field.equiv("X-Api-Key") && h.value.as_str().trim() == ap_token)
+                    });
+                    if !ok {
+                        let _ = req.respond(
+                            Response::from_string(json!({"error":"unauthorized"}).to_string())
+                                .with_header(hdr.clone())
+                                .with_status_code(401),
+                        );
+                        return;
+                    }
                 }
             }
-        }
 
-        let resp = match (&method, path.as_slice()) {
-            (Method::Get, ["health"]) => {
-                let head = rt.block_on(async { 0 });
-                let _ = head;
-                json!({"status":"ok","providers": registry.lock().unwrap().len()})
-            }
-            // Cheap, unauthenticated RTT probe. A client times this GET to measure
-            // its OWN round-trip to this access point — used to pick the nearest AP
-            // when several are available (item 3, client-side RTT). No chain RPC, no
-            // state: safe to hammer.
-            (Method::Get, ["ping"]) => {
-                json!({"ok":true, "ap": listen, "t": now_secs()})
-            }
-            (Method::Get, ["providers"]) => {
-                let reg = registry.lock().unwrap();
-                json!({ "providers": reg.iter().map(|p| json!({
+            let resp = match (&method, path.as_slice()) {
+                (Method::Get, ["health"]) => {
+                    let head = rt.block_on(async { 0 });
+                    let _ = head;
+                    json!({"status":"ok","providers": registry.lock().unwrap().len()})
+                }
+                // Cheap, unauthenticated RTT probe. A client times this GET to measure
+                // its OWN round-trip to this access point — used to pick the nearest AP
+                // when several are available (item 3, client-side RTT). No chain RPC, no
+                // state: safe to hammer.
+                (Method::Get, ["ping"]) => {
+                    json!({"ok":true, "ap": listen, "t": now_secs()})
+                }
+                (Method::Get, ["providers"]) => {
+                    let reg = registry.lock().unwrap();
+                    json!({ "providers": reg.iter().map(|p| json!({
                     "status_url": p.status_url, "address": p.address, "gflops": p.gflops, "models": p.models,
                     "active": p.active, "capacity": p.capacity, "latency_ms": p.latency_ms,
                     "vram_mb": p.vram_mb, "ram_mb": p.ram_mb,
                     "gpu_class": p.gpu_class, "tflops": p.tflops,
                     "healthy": p.last_seen.is_some()
                 })).collect::<Vec<_>>() })
-            }
-            (Method::Get, ["mode"]) => json!({
-                "hot_wallet_enabled": allow_hot_wallet,
-                "mode": if allow_hot_wallet { "testnet_free_ai" } else { "mainnet_client_signed" },
-                "note": if allow_hot_wallet {
-                    "testnet: the access point pays for jobs (free AI); callers may also sign with their own wallet via POST /route/{id}"
-                } else {
-                    "mainnet: POST /jobs is disabled — sign the job with YOUR wallet and POST /route/{id}"
                 }
-            }),
-            // ── Abuse & safety: report path + ban lists (item #22, step 4) ────
-            // Anyone may file a report; it is recorded content-free (target +
-            // category only — NEVER the prompt/response text, design §5).
-            (Method::Post, ["report"]) => {
-                let v: Value = serde_json::from_str(&body).unwrap_or(json!({}));
-                let kind = v.get("kind").and_then(|x| x.as_str()).unwrap_or("account").to_string();
-                let target = v.get("target").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                let category = v.get("category").and_then(|x| x.as_str()).map(|s| s.to_string());
-                let reason = v.get("reason").and_then(|x| x.as_str()).map(|s| s.to_string());
-                let source = req
-                    .remote_addr()
-                    .map(|a| a.ip().to_string())
-                    .unwrap_or_else(|| "unknown".into());
-                let rep = gpn_agent::abuse::Report {
-                    report_id: gpn_agent::abuse::new_report_id(),
-                    ts: gpn_agent::abuse::now_secs(),
-                    kind,
-                    target,
-                    category,
-                    reason,
-                    source: Some(source),
-                };
-                match rep.validate() {
-                    Err(e) => json!({"ok": false, "error": e}),
-                    Ok(()) => match gpn_agent::abuse::append_report(&reports_path, &rep) {
-                        Ok(()) => {
-                            eprintln!(
-                                "[abuse] report {} kind={} category={} (recorded)",
-                                rep.report_id,
-                                rep.kind,
-                                rep.category.as_deref().unwrap_or("-")
-                            );
-                            json!({"ok": true, "report_id": rep.report_id})
-                        }
-                        Err(e) => json!({"ok": false, "error": format!("could not record report: {e}")}),
-                    },
-                }
-            }
-            // Operator view of recent reports (token-gated on non-loopback via
-            // the `reports` entry in the auth gate). Content-free.
-            (Method::Get, ["reports"]) => {
-                let reports = gpn_agent::abuse::read_reports(&reports_path, 50);
-                json!({"count": reports.len(), "reports": reports})
-            }
-            // Operator ban/unban (item #22, step 4). POST => token-gated.
-            (Method::Post, ["admin", "ban"]) => {
-                let v: Value = serde_json::from_str(&body).unwrap_or(json!({}));
-                let action = v.get("action").and_then(|x| x.as_str()).unwrap_or("ban").to_string();
-                let kind = v.get("kind").and_then(|x| x.as_str()).unwrap_or("account").to_string();
-                let value = v.get("value").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-                let valid_kind = ["account", "provider", "ip"].contains(&kind.as_str());
-                if value.is_empty() || !valid_kind {
-                    json!({"ok": false, "error": "need {action: ban|unban, kind: account|provider|ip, value}"})
-                } else {
-                    let mut d = denylist.lock().unwrap();
-                    let changed = match action.as_str() {
-                        "unban" | "remove" => d.remove(&kind, &value),
-                        _ => match kind.as_str() {
-                            "account" => d.add_account(&value),
-                            "provider" => d.add_provider(&value),
-                            "ip" => d.add_ip(&value),
-                            _ => false,
-                        },
+                (Method::Get, ["mode"]) => json!({
+                    "hot_wallet_enabled": allow_hot_wallet,
+                    "mode": if allow_hot_wallet { "testnet_free_ai" } else { "mainnet_client_signed" },
+                    "note": if allow_hot_wallet {
+                        "testnet: the access point pays for jobs (free AI); callers may also sign with their own wallet via POST /route/{id}"
+                    } else {
+                        "mainnet: POST /jobs is disabled — sign the job with YOUR wallet and POST /route/{id}"
+                    }
+                }),
+                // ── Abuse & safety: report path + ban lists (item #22, step 4) ────
+                // Anyone may file a report; it is recorded content-free (target +
+                // category only — NEVER the prompt/response text, design §5).
+                (Method::Post, ["report"]) => {
+                    let v: Value = serde_json::from_str(&body).unwrap_or(json!({}));
+                    let kind = v
+                        .get("kind")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("account")
+                        .to_string();
+                    let target = v
+                        .get("target")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let category = v
+                        .get("category")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string());
+                    let reason = v
+                        .get("reason")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string());
+                    let source = req
+                        .remote_addr()
+                        .map(|a| a.ip().to_string())
+                        .unwrap_or_else(|| "unknown".into());
+                    let rep = gpn_agent::abuse::Report {
+                        report_id: gpn_agent::abuse::new_report_id(),
+                        ts: gpn_agent::abuse::now_secs(),
+                        kind,
+                        target,
+                        category,
+                        reason,
+                        source: Some(source),
                     };
-                    let total = d.accounts.len() + d.providers.len() + d.ips.len();
-                    match d.save(&denylist_path) {
-                        Ok(()) => {
-                            eprintln!(
+                    match rep.validate() {
+                        Err(e) => json!({"ok": false, "error": e}),
+                        Ok(()) => match gpn_agent::abuse::append_report(&reports_path, &rep) {
+                            Ok(()) => {
+                                eprintln!(
+                                    "[abuse] report {} kind={} category={} (recorded)",
+                                    rep.report_id,
+                                    rep.kind,
+                                    rep.category.as_deref().unwrap_or("-")
+                                );
+                                json!({"ok": true, "report_id": rep.report_id})
+                            }
+                            Err(e) => {
+                                json!({"ok": false, "error": format!("could not record report: {e}")})
+                            }
+                        },
+                    }
+                }
+                // Operator view of recent reports (token-gated on non-loopback via
+                // the `reports` entry in the auth gate). Content-free.
+                (Method::Get, ["reports"]) => {
+                    let reports = gpn_agent::abuse::read_reports(&reports_path, 50);
+                    json!({"count": reports.len(), "reports": reports})
+                }
+                // Operator ban/unban (item #22, step 4). POST => token-gated.
+                (Method::Post, ["admin", "ban"]) => {
+                    let v: Value = serde_json::from_str(&body).unwrap_or(json!({}));
+                    let action = v
+                        .get("action")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("ban")
+                        .to_string();
+                    let kind = v
+                        .get("kind")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("account")
+                        .to_string();
+                    let value = v
+                        .get("value")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    let valid_kind = ["account", "provider", "ip"].contains(&kind.as_str());
+                    if value.is_empty() || !valid_kind {
+                        json!({"ok": false, "error": "need {action: ban|unban, kind: account|provider|ip, value}"})
+                    } else {
+                        let mut d = denylist.lock().unwrap();
+                        let changed = match action.as_str() {
+                            "unban" | "remove" => d.remove(&kind, &value),
+                            _ => match kind.as_str() {
+                                "account" => d.add_account(&value),
+                                "provider" => d.add_provider(&value),
+                                "ip" => d.add_ip(&value),
+                                _ => false,
+                            },
+                        };
+                        let total = d.accounts.len() + d.providers.len() + d.ips.len();
+                        match d.save(&denylist_path) {
+                            Ok(()) => {
+                                eprintln!(
                                 "[abuse] {action} {kind}={value} (changed={changed}, {total} total bans)"
                             );
-                            json!({"ok": true, "action": action, "kind": kind, "value": value,
+                                json!({"ok": true, "action": action, "kind": kind, "value": value,
                                    "changed": changed, "total_bans": total})
+                            }
+                            Err(e) => {
+                                json!({"ok": false, "error": format!("could not persist denylist: {e}")})
+                            }
                         }
-                        Err(e) => json!({"ok": false, "error": format!("could not persist denylist: {e}")}),
                     }
                 }
-            }
-            // ── OpenAI-compatible facade ─────────────────────────────────────
-            (Method::Get, ["v1", "models"]) => {
-                let reg = registry.lock().unwrap();
-                let mut ids: Vec<String> = reg.iter().flat_map(|p| p.models.clone()).collect();
-                ids.sort();
-                ids.dedup();
-                if ids.is_empty() {
-                    ids.push("llama3.2:1b".into());
-                }
-                json!({"object":"list", "data": ids.iter().map(|m| json!({
+                // ── OpenAI-compatible facade ─────────────────────────────────────
+                (Method::Get, ["v1", "models"]) => {
+                    let reg = registry.lock().unwrap();
+                    let mut ids: Vec<String> = reg.iter().flat_map(|p| p.models.clone()).collect();
+                    ids.sort();
+                    ids.dedup();
+                    if ids.is_empty() {
+                        ids.push("llama3.2:1b".into());
+                    }
+                    json!({"object":"list", "data": ids.iter().map(|m| json!({
                     "id": m, "object": "model", "owned_by": "gpn"
                 })).collect::<Vec<_>>()})
-            }
-            (Method::Post, ["v1", "chat", "completions"]) => {
-                let v: Value = serde_json::from_str(&body).unwrap_or(json!({}));
-                let model = v.get("model").and_then(|x| x.as_str()).unwrap_or("auto").to_string();
-                let stream = v.get("stream").and_then(|x| x.as_bool()).unwrap_or(false);
-                let prompt = messages_to_prompt(&v);
-                // Abuse guardrail (item #22): moderate the prompt at the AP, the
-                // user-facing chokepoint, BEFORE any on-chain create or routing.
-                if let Some(cat) = moderation_block(&prompt) {
-                    let r = Response::from_string(json!({
+                }
+                (Method::Post, ["v1", "chat", "completions"]) => {
+                    let v: Value = serde_json::from_str(&body).unwrap_or(json!({}));
+                    let model = v
+                        .get("model")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("auto")
+                        .to_string();
+                    let stream = v.get("stream").and_then(|x| x.as_bool()).unwrap_or(false);
+                    let prompt = messages_to_prompt(&v);
+                    // Abuse guardrail (item #22): moderate the prompt at the AP, the
+                    // user-facing chokepoint, BEFORE any on-chain create or routing.
+                    if let Some(cat) = moderation_block(&prompt) {
+                        let r = Response::from_string(json!({
                         "error": {"message": cat.reason(), "type": "gpn_policy_violation", "category": cat.id()}
                     }).to_string()).with_header(hdr.clone()).with_status_code(451);
-                    let _ = req.respond(r);
-                    return;
-                }
-                if !allow_hot_wallet {
-                    let r = Response::from_string(json!({
+                        let _ = req.respond(r);
+                        return;
+                    }
+                    if !allow_hot_wallet {
+                        let r = Response::from_string(json!({
                         "error": {"message": "hot-wallet inference is disabled on this access point (mainnet)", "type": "gpn_error"}
                     }).to_string()).with_header(hdr.clone()).with_status_code(403);
-                    let _ = req.respond(r);
-                    return;
-                }
-                // route to a provider — resolve/validate the model FIRST so we
-                // never create a job for a model no provider can serve (those
-                // orphaned Pending jobs saturate the global MaxActiveJobs cap).
-                let reg = registry.lock().unwrap().clone();
-                let model = match resolve_requested_model(&reg, &model) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        let r = Response::from_string(json!({
-                            "error": {"message": e, "type": "gpn_error"}
-                        }).to_string()).with_header(hdr.clone()).with_status_code(400);
                         let _ = req.respond(r);
                         return;
                     }
-                };
-                let chosen = pick(&reg, 0, 0, 0, 0.0, &model, pull_penalty_ms, &rtt_overrides(&v));
-                let (provider, needs_pull) = match chosen {
-                    Some(x) => x,
-                    None => {
-                        let r = Response::from_string(json!({
+                    // route to a provider — resolve/validate the model FIRST so we
+                    // never create a job for a model no provider can serve (those
+                    // orphaned Pending jobs saturate the global MaxActiveJobs cap).
+                    let reg = registry.lock().unwrap().clone();
+                    let model = match resolve_requested_model(&reg, &model) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            let r = Response::from_string(
+                                json!({
+                                    "error": {"message": e, "type": "gpn_error"}
+                                })
+                                .to_string(),
+                            )
+                            .with_header(hdr.clone())
+                            .with_status_code(400);
+                            let _ = req.respond(r);
+                            return;
+                        }
+                    };
+                    let chosen = pick(
+                        &reg,
+                        0,
+                        0,
+                        0,
+                        0.0,
+                        &model,
+                        pull_penalty_ms,
+                        &rtt_overrides(&v),
+                    );
+                    let (provider, needs_pull) = match chosen {
+                        Some(x) => x,
+                        None => {
+                            let r = Response::from_string(json!({
                             "error": {"message": "no compatible provider online", "type": "gpn_error"}
                         }).to_string()).with_header(hdr.clone()).with_status_code(503);
+                            let _ = req.respond(r);
+                            return;
+                        }
+                    };
+                    // Passthrough mode (`"mode":"passthrough"`): run inference
+                    // directly on the provider with NO on-chain job, escrow, commitment,
+                    // or billing. Answer returned; nothing recorded. Default = settle.
+                    let mode = v
+                        .get("mode")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("settle")
+                        .to_ascii_lowercase();
+                    let passthrough = mode == "passthrough";
+                    // create + route (hot wallet pays). Id comes from a process-local
+                    // allocator so concurrent requests never predict the same job id.
+                    // `_create_guard` serializes the create so exactly one is in flight.
+                    let _create_guard = CREATE_LOCK.lock().unwrap();
+                    let next_before = rt.block_on(client.get_next_job_id());
+                    let workload_hash = {
+                        use sha2::{Digest, Sha256};
+                        let mut h = Sha256::new();
+                        h.update(now_secs().to_le_bytes());
+                        h.update(prompt.as_bytes());
+                        let mut o = [0u8; 32];
+                        o.copy_from_slice(&h.finalize());
+                        o[0] |= 1;
+                        o
+                    };
+                    // Fast AP path (GPN_FAST_AP, default OFF): submit create_job
+                    // WITHOUT waiting for block inclusion and predict the id from the
+                    // pre-submit counter. Removes the AP's create_job ≈1-block stall
+                    // from the e2e path. The chain catches up in the background; the
+                    // provider self-heals any create/accept ordering race on its next
+                    // poll.
+                    //
+                    // NOTE: the process-local id allocator is only consulted on this
+                    // fast path, so it stays fully inert on the stop-and-wait path.
+                    let fast_ap = std::env::var("GPN_FAST_AP")
+                        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+                        .unwrap_or(true);
+                    let (created, id) = if passthrough {
+                        (false, 0u64)
+                    } else if fast_ap {
+                        // Serialized by `_create_guard`: exactly ONE create is in flight at a time, so
+                        // the process-local prediction IS the real on-chain id (the AP is the sole
+                        // creator; the chain assigns ids in submit order). Labeling with the prediction
+                        // avoids the concurrent-confirm misattribution (two in-flight creates binding to
+                        // one shared NextJobId → a stranded Pending job).
+                        let predicted = alloc_predicted_job_id(next_before);
+                        match rt.block_on(client.create_job_fast(
+                            8192u32,
+                            75u16,
+                            1u8,
+                            0u32,
+                            150u64,
+                            "LLMInference",
+                            "Spot",
+                            (1_000_000_000u128 * 512) as u128,
+                            1_000_000_000u128,
+                            512u32,
+                            1000,
+                            workload_hash,
+                        )) {
+                            Ok(()) => (true, predicted),
+                            Err(_) => {
+                                // The create may have landed despite a slow/!acked pool submit.
+                                // Confirm briefly; only trust it if it matches our prediction.
+                                let mut real: Option<u64> = None;
+                                let deadline = Instant::now() + Duration::from_millis(2000);
+                                while Instant::now() < deadline {
+                                    let after = rt.block_on(client.get_next_job_id());
+                                    if after > next_before {
+                                        real = Some(after - 1);
+                                        break;
+                                    }
+                                    std::thread::sleep(Duration::from_millis(200));
+                                }
+                                match real {
+                                    Some(id) if id == predicted => (true, id),
+                                    // Did not land: realign the allocator and report failure.
+                                    _ => {
+                                        align_alloc(next_before);
+                                        (false, predicted)
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        let _ = rt.block_on(client.create_job(
+                            8192u32,
+                            75u16,
+                            1u8,
+                            0u32,
+                            150u64,
+                            "LLMInference",
+                            "Spot",
+                            (1_000_000_000u128 * 512) as u128,
+                            1_000_000_000u128,
+                            512u32,
+                            1000,
+                            workload_hash,
+                        ));
+                        let after = rt.block_on(client.get_next_job_id());
+                        (after > next_before, after.saturating_sub(1))
+                    };
+                    drop(_create_guard);
+                    let mut text = String::new();
+                    if passthrough {
+                        // Direct provider call, no chain. Derive the off-chain infer
+                        // endpoint from the provider's status_url (:8093 → :8094).
+                        let infer_url = format!(
+                            "{}/infer",
+                            provider.status_url.replacen(":8093", ":8094", 1)
+                        );
+                        let body = json!({"model": model, "prompt": prompt, "temperature": 0.7, "max_tokens": 512});
+                        text = match reqwest::blocking::Client::new()
+                            .post(&infer_url)
+                            .json(&body)
+                            .send()
+                            .and_then(|r| r.json::<serde_json::Value>())
+                        {
+                            Ok(j) if j.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) => j
+                                .get("text")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            Ok(j) => format!(
+                                "[gpn error] {}",
+                                j.get("error")
+                                    .and_then(|x| x.as_str())
+                                    .unwrap_or("inference failed")
+                            ),
+                            Err(e) => format!("[gpn error] {e}"),
+                        };
+                    } else if created {
+                        record_created(id, 512);
+                        let _ = gpn_agent::llm::LlmStore::new().put(
+                            id,
+                            gpn_agent::llm::LlmJob::new_llm(&model, &prompt, 0.7, 512),
+                        );
+                        let job_payload = gpn_agent::llm::get_job(id);
+                        let callback_token = new_callback_token(id);
+                        let _ = write_assignment(
+                            &assign_store,
+                            id,
+                            &provider.address,
+                            &model,
+                            needs_pull,
+                            &callback_url,
+                            &callback_token,
+                        );
+                        dispatch_assignment(
+                            &provider.status_url,
+                            id,
+                            &provider.address,
+                            &model,
+                            needs_pull,
+                            job_payload.as_ref(),
+                            &callback_url,
+                            &callback_token,
+                        );
+                        // block until the provider finishes (OpenAI calls are synchronous)
+                        for _ in 0..1200 {
+                            if let Some(j) = gpn_agent::llm::get_job(id) {
+                                if j.status == "done" {
+                                    text = j.response.clone().unwrap_or_default();
+                                    break;
+                                }
+                                if j.status == "error" {
+                                    text = format!(
+                                        "[gpn error] {}",
+                                        j.error.clone().unwrap_or_default()
+                                    );
+                                    break;
+                                }
+                            }
+                            std::thread::sleep(Duration::from_millis(300));
+                        }
+                    } else {
+                        text = "[gpn error] could not create job".to_string();
+                    }
+                    if stream {
+                        let idc = format!("chatcmpl-gpn-{id}");
+                        let created = now_secs();
+                        let chunk1 = json!({"id":idc,"object":"chat.completion.chunk","created":created,"model":model,
+                        "choices":[{"index":0,"delta":{"role":"assistant","content":text},"finish_reason":serde_json::Value::Null}]});
+                        let chunk2 = json!({"id":idc,"object":"chat.completion.chunk","created":created,"model":model,
+                        "choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
+                        let sse = format!("data: {chunk1}\n\ndata: {chunk2}\n\ndata: [DONE]\n\n");
+                        let ct =
+                            Header::from_bytes(&b"Content-Type"[..], &b"text/event-stream"[..])
+                                .unwrap();
+                        let cc =
+                            Header::from_bytes(&b"Cache-Control"[..], &b"no-cache"[..]).unwrap();
+                        let r = Response::from_string(sse).with_header(ct).with_header(cc);
                         let _ = req.respond(r);
                         return;
                     }
-                };
-                // Passthrough mode (`"mode":"passthrough"`): run inference
-                // directly on the provider with NO on-chain job, escrow, commitment,
-                // or billing. Answer returned; nothing recorded. Default = settle.
-                let mode = v.get("mode").and_then(|x| x.as_str()).unwrap_or("settle").to_ascii_lowercase();
-                let passthrough = mode == "passthrough";
-                // create + route (hot wallet pays). Id comes from a process-local
-                // allocator so concurrent requests never predict the same job id.
-                // `_create_guard` serializes the create so exactly one is in flight.
-                let _create_guard = CREATE_LOCK.lock().unwrap();
-                let next_before = rt.block_on(client.get_next_job_id());
-                let workload_hash = {
-                    use sha2::{Digest, Sha256};
-                    let mut h = Sha256::new();
-                    h.update(now_secs().to_le_bytes());
-                    h.update(prompt.as_bytes());
-                    let mut o = [0u8; 32];
-                    o.copy_from_slice(&h.finalize());
-                    o[0] |= 1;
-                    o
-                };
-                // Fast AP path (GPN_FAST_AP, default OFF): submit create_job
-                // WITHOUT waiting for block inclusion and predict the id from the
-                // pre-submit counter. Removes the AP's create_job ≈1-block stall
-                // from the e2e path. The chain catches up in the background; the
-                // provider self-heals any create/accept ordering race on its next
-                // poll.
-                //
-                // NOTE: the process-local id allocator is only consulted on this
-                // fast path, so it stays fully inert on the stop-and-wait path.
-                let fast_ap = std::env::var("GPN_FAST_AP")
-                    .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-                    .unwrap_or(true);
-                let (created, id) = if passthrough {
-                    (false, 0u64)
-                } else if fast_ap {
-                    // Serialized by `_create_guard`: exactly ONE create is in flight at a time, so
-                    // the process-local prediction IS the real on-chain id (the AP is the sole
-                    // creator; the chain assigns ids in submit order). Labeling with the prediction
-                    // avoids the concurrent-confirm misattribution (two in-flight creates binding to
-                    // one shared NextJobId → a stranded Pending job).
-                    let predicted = alloc_predicted_job_id(next_before);
-                    match rt.block_on(client.create_job_fast(
-                        8192u32, 75u16, 1u8, 0u32, 150u64, "LLMInference", "Spot",
-                        (1_000_000_000u128 * 512) as u128, 1_000_000_000u128, 512u32, 1000,
-                        workload_hash,
-                    )) {
-                        Ok(()) => (true, predicted),
-                        Err(_) => {
-                            // The create may have landed despite a slow/!acked pool submit.
-                            // Confirm briefly; only trust it if it matches our prediction.
-                            let mut real: Option<u64> = None;
-                            let deadline = Instant::now() + Duration::from_millis(2000);
-                            while Instant::now() < deadline {
-                                let after = rt.block_on(client.get_next_job_id());
-                                if after > next_before {
-                                    real = Some(after - 1);
-                                    break;
-                                }
-                                std::thread::sleep(Duration::from_millis(200));
-                            }
-                            match real {
-                                Some(id) if id == predicted => (true, id),
-                                // Did not land: realign the allocator and report failure.
-                                _ => {
-                                    align_alloc(next_before);
-                                    (false, predicted)
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    let _ = rt.block_on(client.create_job(
-                        8192u32, 75u16, 1u8, 0u32, 150u64, "LLMInference", "Spot",
-                        (1_000_000_000u128 * 512) as u128, 1_000_000_000u128, 512u32, 1000,
-                        workload_hash,
-                    ));
-                    let after = rt.block_on(client.get_next_job_id());
-                    (after > next_before, after.saturating_sub(1))
-                };
-                drop(_create_guard);
-                let mut text = String::new();
-                if passthrough {
-                    // Direct provider call, no chain. Derive the off-chain infer
-                    // endpoint from the provider's status_url (:8093 → :8094).
-                    let infer_url = format!(
-                        "{}/infer",
-                        provider.status_url.replacen(":8093", ":8094", 1)
-                    );
-                    let body = json!({"model": model, "prompt": prompt, "temperature": 0.7, "max_tokens": 512});
-                    text = match reqwest::blocking::Client::new()
-                        .post(&infer_url)
-                        .json(&body)
-                        .send()
-                        .and_then(|r| r.json::<serde_json::Value>())
-                    {
-                        Ok(j) if j.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) => {
-                            j.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string()
-                        }
-                        Ok(j) => format!(
-                            "[gpn error] {}",
-                            j.get("error").and_then(|x| x.as_str()).unwrap_or("inference failed")
-                        ),
-                        Err(e) => format!("[gpn error] {e}"),
-                    };
-                } else if created {
-                    record_created(id, 512);
-                    let _ = gpn_agent::llm::LlmStore::new().put(id, gpn_agent::llm::LlmJob::new_llm(&model, &prompt, 0.7, 512));
-                    let job_payload = gpn_agent::llm::get_job(id);
-                    let callback_token = new_callback_token(id);
-                    let _ = write_assignment(&assign_store, id, &provider.address, &model, needs_pull, &callback_url, &callback_token);
-                    dispatch_assignment(&provider.status_url, id, &provider.address, &model, needs_pull, job_payload.as_ref(), &callback_url, &callback_token);
-                    // block until the provider finishes (OpenAI calls are synchronous)
-                    for _ in 0..1200 {
-                        if let Some(j) = gpn_agent::llm::get_job(id) {
-                            if j.status == "done" {
-                                text = j.response.clone().unwrap_or_default();
-                                break;
-                            }
-                            if j.status == "error" {
-                                text = format!("[gpn error] {}", j.error.clone().unwrap_or_default());
-                                break;
-                            }
-                        }
-                        std::thread::sleep(Duration::from_millis(300));
-                    }
-                } else {
-                    text = "[gpn error] could not create job".to_string();
+                    json!({
+                        "id": format!("chatcmpl-gpn-{id}"), "object": "chat.completion", "created": now_secs(),
+                        "model": model,
+                        "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
+                        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+                    })
                 }
-                if stream {
-                    let idc = format!("chatcmpl-gpn-{id}");
-                    let created = now_secs();
-                    let chunk1 = json!({"id":idc,"object":"chat.completion.chunk","created":created,"model":model,
-                        "choices":[{"index":0,"delta":{"role":"assistant","content":text},"finish_reason":serde_json::Value::Null}]});
-                    let chunk2 = json!({"id":idc,"object":"chat.completion.chunk","created":created,"model":model,
-                        "choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
-                    let sse = format!("data: {chunk1}\n\ndata: {chunk2}\n\ndata: [DONE]\n\n");
-                    let ct = Header::from_bytes(&b"Content-Type"[..], &b"text/event-stream"[..]).unwrap();
-                    let cc = Header::from_bytes(&b"Cache-Control"[..], &b"no-cache"[..]).unwrap();
-                    let r = Response::from_string(sse).with_header(ct).with_header(cc);
-                    let _ = req.respond(r);
-                    return;
-                }
-                json!({
-                    "id": format!("chatcmpl-gpn-{id}"), "object": "chat.completion", "created": now_secs(),
-                    "model": model,
-                    "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
-                    "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-                })
-            }
-            (Method::Post, ["jobs"]) => {
-                // Item #22 build-order step 4: refuse a banned client IP (per-AP
-                // denylist). Checked BEFORE any chain RPC or job creation.
-                if let Some(ip) = req.remote_addr().map(|a| a.ip().to_string()) {
-                    if denylist.lock().unwrap().is_ip_banned(&ip) {
-                        let _ = req.respond(
+                (Method::Post, ["jobs"]) => {
+                    // Item #22 build-order step 4: refuse a banned client IP (per-AP
+                    // denylist). Checked BEFORE any chain RPC or job creation.
+                    if let Some(ip) = req.remote_addr().map(|a| a.ip().to_string()) {
+                        if denylist.lock().unwrap().is_ip_banned(&ip) {
+                            let _ = req.respond(
                             Response::from_string(json!({
                                 "ok": false,
                                 "error": {"message": "service refused (operator denylist)", "type": "gpn_policy_violation"}
                             }).to_string()).with_header(hdr.clone()).with_status_code(403),
                         );
-                        return;
+                            return;
+                        }
                     }
-                }
-                if !allow_hot_wallet {
-                    let r = Response::from_string(json!({
+                    if !allow_hot_wallet {
+                        let r = Response::from_string(json!({
                         "ok": false,
                         "error": "hot-wallet jobs are disabled on this access point (mainnet). Sign the job with your own wallet and POST /route/{id} instead (see gpn_job)."
                     }).to_string()).with_header(hdr.clone()).with_status_code(403);
-                    let _ = req.respond(r);
-                    return;
-                }
-                let v: Value = serde_json::from_str(&body).unwrap_or(json!({}));
-                let g = |k: &str, d: u64| v.get(k).and_then(|x| x.as_u64()).unwrap_or(d);
-                let model = v.get("model").and_then(|x| x.as_str()).unwrap_or("auto").to_string();
-                let wait = v.get("wait").and_then(|x| x.as_bool()).unwrap_or(false);
-                let wait_secs: u64 = v.get("wait_secs").and_then(|x| x.as_u64()).unwrap_or(180);
-                // per-token billing (optional): rate × max_tokens = escrow ceiling.
-                let ppt_in: u128 = v.get("price_per_token").and_then(|x| x.as_u64()).unwrap_or(0) as u128;
-                let mtok: u32 = v.get("max_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
-                // Oracle + fleet cost economics → GPN per token.
-                //   market  = oracle avg_gpu_hour_price (per-class market rental)
-                //   target  = clamp(rental_frac × market, owner_cost, market)
-                //   tok/s   = fleet-average measured throughput
-                //   $/token = target_hr / (tok/s × 3600 × util) × (1 + margin)
-                //   gpn/tok = $/token ÷ token_price_usd
-                let (token_price_usd, market_hr, util) = rt
-                    .block_on(client.get_feed())
-                    .map(|f| (f.token_price_usd, f.avg_gpu_hour_price_usd, f.utilization))
-                    .unwrap_or((0.15, 3.0, 0.65));
-                let params_b = params_b_for(&model);
-                let (tok_per_s, owner_hr) = {
-                    let reg = registry.lock().unwrap().clone();
-                    let live: Vec<&Provider> = reg.iter().filter(|p| p.last_seen.is_some()).collect();
-                    if live.is_empty() {
-                        (roofline_tok_per_s(165.0, 250.0, params_b), 0.03_f64)
-                    } else {
-                        let t = live
-                            .iter()
-                            .map(|p| roofline_tok_per_s(p.gflops as f64, p.mem_bw_gbps, params_b))
-                            .sum::<f64>()
-                            / live.len() as f64;
-                        let o = live.iter().map(|p| p.owner_cost_usd_hr).fold(f64::MAX, f64::min);
-                        (t.max(1.0), o.max(0.001))
+                        let _ = req.respond(r);
+                        return;
                     }
-                };
-                let market_hr = market_hr.max(0.001);
-                let util = util.clamp(0.05, 1.0);
-                let target_hr = (rental_frac * market_hr).clamp(owner_hr, market_hr);
-                let usd_per_token = (target_hr / (tok_per_s * 3600.0 * util)) * (1.0 + margin);
-                let oracle_ppt: u128 =
-                    ((usd_per_token / token_price_usd.max(1e-9)) * 1e12).max(1.0) as u128;
-                let ppt: u128 = if ppt_in > 0 { ppt_in } else { oracle_ppt };
-                let mtok_eff: u32 = if mtok > 0 { mtok } else { 256 };
-                let min_gflops = g("min_gflops", 150);
-                // Hardware floor for this job (item 14): default 0 = no VRAM/RAM
-                // requirement; a video/gen job sends e.g. min_vram_mb=16000 so the
-                // scheduler skips small-VRAM boxes (the 8GB 4060 OOMs on video).
-                let min_vram_mb = g("min_vram_mb", 0);
-                let min_ram_mb = g("min_ram_mb", 0);
-                // Minimum GPU capability (item 19): a job may declare an FP32
-                // TFLOPS floor (`min_tflops`, or env `GPN_MIN_TFLOPS`) so it only
-                // routes to a real/discrete GPU that clears it. 0.0 = no floor
-                // (gate inert). Integrated GPUs advertise a low estimate and are
-                // excluded; a self-declared discrete card with no number yet is
-                // trusted (the attestation floor still gates earning on-chain).
-                let min_tflops: f64 = v
-                    .get("min_tflops")
-                    .and_then(|x| x.as_f64())
-                    .or_else(|| {
-                        std::env::var("GPN_MIN_TFLOPS")
-                            .ok()
-                            .and_then(|s| s.parse().ok())
-                    })
-                    .unwrap_or(0.0);
-                let price_gpn = v.get("price_gpn").and_then(|x| x.as_f64()).unwrap_or(10.0);
-                let job_type = v.get("job_type").and_then(|x| x.as_str()).unwrap_or("LLMInference");
-                // Effective prompt: `prompt` (native), `input` (ML), or an
-                // OpenAI-style `messages[]`/`system` body. Red-team finding #24
-                // (agent/AP input validation / orphan-job DoS): a native
-                // `POST /jobs` with no prompt was still created on-chain —
-                // escrow locked + a global `ActiveJobCount` and per-requestor
-                // slot consumed — but never written to the off-chain store, so
-                // no provider could claim it (a guaranteed unservable orphan
-                // until the expiry sweep) while the caller got `ok:true`.
-                // Reject it up front, BEFORE any on-chain create.
-                let prompt = resolve_job_prompt(&v);
-                if prompt.is_none() {
-                    let r = Response::from_string(
+                    let v: Value = serde_json::from_str(&body).unwrap_or(json!({}));
+                    let g = |k: &str, d: u64| v.get(k).and_then(|x| x.as_u64()).unwrap_or(d);
+                    let model = v
+                        .get("model")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("auto")
+                        .to_string();
+                    let wait = v.get("wait").and_then(|x| x.as_bool()).unwrap_or(false);
+                    let wait_secs: u64 = v.get("wait_secs").and_then(|x| x.as_u64()).unwrap_or(180);
+                    // per-token billing (optional): rate × max_tokens = escrow ceiling.
+                    let ppt_in: u128 = v
+                        .get("price_per_token")
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(0) as u128;
+                    let mtok: u32 =
+                        v.get("max_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+                    // Oracle + fleet cost economics → GPN per token.
+                    //   market  = oracle avg_gpu_hour_price (per-class market rental)
+                    //   target  = clamp(rental_frac × market, owner_cost, market)
+                    //   tok/s   = fleet-average measured throughput
+                    //   $/token = target_hr / (tok/s × 3600 × util) × (1 + margin)
+                    //   gpn/tok = $/token ÷ token_price_usd
+                    let (token_price_usd, market_hr, util) = rt
+                        .block_on(client.get_feed())
+                        .map(|f| (f.token_price_usd, f.avg_gpu_hour_price_usd, f.utilization))
+                        .unwrap_or((0.15, 3.0, 0.65));
+                    let params_b = params_b_for(&model);
+                    let (tok_per_s, owner_hr) = {
+                        let reg = registry.lock().unwrap().clone();
+                        let live: Vec<&Provider> =
+                            reg.iter().filter(|p| p.last_seen.is_some()).collect();
+                        if live.is_empty() {
+                            (roofline_tok_per_s(165.0, 250.0, params_b), 0.03_f64)
+                        } else {
+                            let t = live
+                                .iter()
+                                .map(|p| {
+                                    roofline_tok_per_s(p.gflops as f64, p.mem_bw_gbps, params_b)
+                                })
+                                .sum::<f64>()
+                                / live.len() as f64;
+                            let o = live
+                                .iter()
+                                .map(|p| p.owner_cost_usd_hr)
+                                .fold(f64::MAX, f64::min);
+                            (t.max(1.0), o.max(0.001))
+                        }
+                    };
+                    let market_hr = market_hr.max(0.001);
+                    let util = util.clamp(0.05, 1.0);
+                    let target_hr = (rental_frac * market_hr).clamp(owner_hr, market_hr);
+                    let usd_per_token = (target_hr / (tok_per_s * 3600.0 * util)) * (1.0 + margin);
+                    let oracle_ppt: u128 =
+                        ((usd_per_token / token_price_usd.max(1e-9)) * 1e12).max(1.0) as u128;
+                    let ppt: u128 = if ppt_in > 0 { ppt_in } else { oracle_ppt };
+                    let mtok_eff: u32 = if mtok > 0 { mtok } else { 256 };
+                    let min_gflops = g("min_gflops", 150);
+                    // Hardware floor for this job (item 14): default 0 = no VRAM/RAM
+                    // requirement; a video/gen job sends e.g. min_vram_mb=16000 so the
+                    // scheduler skips small-VRAM boxes (the 8GB 4060 OOMs on video).
+                    let min_vram_mb = g("min_vram_mb", 0);
+                    let min_ram_mb = g("min_ram_mb", 0);
+                    // Minimum GPU capability (item 19): a job may declare an FP32
+                    // TFLOPS floor (`min_tflops`, or env `GPN_MIN_TFLOPS`) so it only
+                    // routes to a real/discrete GPU that clears it. 0.0 = no floor
+                    // (gate inert). Integrated GPUs advertise a low estimate and are
+                    // excluded; a self-declared discrete card with no number yet is
+                    // trusted (the attestation floor still gates earning on-chain).
+                    let min_tflops: f64 = v
+                        .get("min_tflops")
+                        .and_then(|x| x.as_f64())
+                        .or_else(|| {
+                            std::env::var("GPN_MIN_TFLOPS")
+                                .ok()
+                                .and_then(|s| s.parse().ok())
+                        })
+                        .unwrap_or(0.0);
+                    let price_gpn = v.get("price_gpn").and_then(|x| x.as_f64()).unwrap_or(10.0);
+                    let job_type = v
+                        .get("job_type")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("LLMInference");
+                    // Effective prompt: `prompt` (native), `input` (ML), or an
+                    // OpenAI-style `messages[]`/`system` body. Red-team finding #24
+                    // (agent/AP input validation / orphan-job DoS): a native
+                    // `POST /jobs` with no prompt was still created on-chain —
+                    // escrow locked + a global `ActiveJobCount` and per-requestor
+                    // slot consumed — but never written to the off-chain store, so
+                    // no provider could claim it (a guaranteed unservable orphan
+                    // until the expiry sweep) while the caller got `ok:true`.
+                    // Reject it up front, BEFORE any on-chain create.
+                    let prompt = resolve_job_prompt(&v);
+                    if prompt.is_none() {
+                        let r = Response::from_string(
                         json!({
                             "ok": false,
                             "error": "missing prompt: provide `prompt`, `input`, or an OpenAI-style `messages` array"
@@ -1424,354 +1641,452 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )
                     .with_header(hdr.clone())
                     .with_status_code(400);
-                    let _ = req.respond(r);
-                    return;
-                }
-                // Abuse guardrail (item #22): refuse a prohibited-use prompt at
-                // the AP before the on-chain escrow create (fail-closed).
-                if let Some(cat) = moderation_block(prompt.as_deref().unwrap_or("")) {
-                    let r = Response::from_string(json!({
-                        "ok": false,
-                        "error": {"message": cat.reason(), "type": "gpn_policy_violation", "category": cat.id()}
-                    }).to_string()).with_header(hdr.clone()).with_status_code(451);
-                    let _ = req.respond(r);
-                    return;
-                }
-
-                // choose the best provider (model-aware). Generation jobs
-                // (image/video) are served by the diffusion provider, which
-                // self-claims from chain — the LLM model registry doesn't list
-                // gen models, so DON'T validate them here. Reject unknown models
-                // only for LLM/text jobs (prevents orphaned Pending jobs).
-                let jt_lc = job_type.to_ascii_lowercase();
-                let model_lc = model.to_ascii_lowercase();
-                let is_gen = jt_lc.contains("image")
-                    || jt_lc.contains("video")
-                    || model_lc.contains("sd-")
-                    || model_lc.contains("stable-diffusion")
-                    || model_lc.contains("sdxl")
-                    || model_lc.contains("flux")
-                    || model_lc.contains("ltx");
-                let reg = registry.lock().unwrap().clone();
-                let model = if is_gen {
-                    model
-                } else {
-                    match resolve_requested_model(&reg, &model) {
-                        Ok(m) => m,
-                        Err(e) => {
-                            let r = Response::from_string(json!({"ok":false,"error":e}).to_string())
-                                .with_header(hdr.clone()).with_status_code(400);
-                            let _ = req.respond(r);
-                            return;
-                        }
-                    }
-                };
-                let (provider, needs_pull) = match pick(&reg, min_gflops, min_vram_mb, min_ram_mb, min_tflops, &model, pull_penalty_ms, &rtt_overrides(&v)) {
-                    Some(x) => x,
-                    None => {
-                        let r = Response::from_string(json!({"ok":false,"error":"no compatible provider available"}).to_string())
-                            .with_header(hdr.clone()).with_status_code(503);
                         let _ = req.respond(r);
                         return;
                     }
-                };
-
-                // create the on-chain job (escrow) as the access-point signer
-                // workload hash: the marketplace rejects all-zeros, but we do NOT
-                // want the prompt recoverable on-chain. Use an opaque random-ish id
-                // (privacy: the question is never derivable from chain state).
-                let workload_hash = {
-                    use sha2::{Digest, Sha256};
-                    use std::sync::atomic::{AtomicU64, Ordering};
-                    use std::time::{SystemTime, UNIX_EPOCH};
-                    static CTR: AtomicU64 = AtomicU64::new(0);
-                    let n = CTR.fetch_add(1, Ordering::Relaxed);
-                    let t = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map(|d| d.as_nanos())
-                        .unwrap_or(0);
-                    let mut h = Sha256::new();
-                    h.update(t.to_le_bytes());
-                    h.update(n.to_le_bytes());
-                    h.update(std::process::id().to_le_bytes());
-                    let mut o = [0u8; 32];
-                    o.copy_from_slice(&h.finalize());
-                    o[0] |= 1;
-                    o
-                };
-                let next_before = rt.block_on(client.get_next_job_id());
-                // Job-relative pricing for generation jobs (pixels × steps), grounded
-                // in the oracle market GPU price; text jobs price per-token (ppt).
-                let price_gpn = if is_gen {
-                    match v.get("price_gpn").and_then(|x| x.as_f64()) {
-                        Some(p) if p > 0.0 => p, // explicit override
-                        _ => image_price_gpn(
-                            g("width", 512) as f64,
-                            g("height", 512) as f64,
-                            g("steps", 8) as f64,
-                            token_price_usd,
-                            market_hr,
-                            util,
-                        ),
+                    // Abuse guardrail (item #22): refuse a prohibited-use prompt at
+                    // the AP before the on-chain escrow create (fail-closed).
+                    if let Some(cat) = moderation_block(prompt.as_deref().unwrap_or("")) {
+                        let r = Response::from_string(json!({
+                        "ok": false,
+                        "error": {"message": cat.reason(), "type": "gpn_policy_violation", "category": cat.id()}
+                    }).to_string()).with_header(hdr.clone()).with_status_code(451);
+                        let _ = req.respond(r);
+                        return;
                     }
-                } else {
-                    price_gpn
-                };
-                // escrow/pricing: generation jobs use a flat, job-sized price
-                // (price_gpn from pixels×steps); text jobs use per-token billing.
-                let (escrow, job_ppt, job_mtok): (u128, u128, u32) = if is_gen {
-                    ((price_gpn * 1e12) as u128, 0u128, 0u32)
-                } else if ppt > 0 && mtok_eff > 0 {
-                    (ppt.saturating_mul(mtok_eff as u128), ppt, mtok_eff)
-                } else {
-                    ((price_gpn * 1e12) as u128, 0u128, 0u32)
-                };
-                let res = rt.block_on(client.create_job(
-                    min_vram_mb as u32,
-                    g("min_compute_capability", 75) as u16,
-                    g("min_gpu_count", 1) as u8,
-                    g("min_cuda_cores", 0) as u32,
-                    min_gflops, job_type, "Spot",
-                    escrow, job_ppt, job_mtok, 1000, workload_hash,
-                ));
-                // The signer can mis-attribute a *concurrent* extrinsic's failure
-                // (a busy chain packs several txs per block). So don't trust the
-                // Err blindly: re-read the job counter — if it advanced, OUR job
-                // was in fact created, and we must still route it.
-                let after = rt.block_on(client.get_next_job_id());
-                match (res, after > next_before) {
-                    (Ok(_), _) | (Err(_), true) => {
-                        let id = after.saturating_sub(1);
-                        // store the off-chain payload (prompt/model/params) if present.
-                        // Generation jobs (image/video) MUST be stored with a gen
-                        // kind, otherwise the LLM provider claims them and 404s on
-                        // a diffusion model; the diffusion provider only claims
-                        // jobs where `kind` is image/video.
-                        if let Some(p) = prompt.as_ref() {
-                            let jt = job_type.to_ascii_lowercase();
-                            // Guard: a diffusion/video model submitted with
-                            // job_type omitted (defaults to LLMInference) must
-                            // be routed to the diffusion provider, not the LLM
-                            // provider (which 404/500s pulling it from ollama).
-                            let model_l = model.to_ascii_lowercase();
-                            let model_diff = model_l.contains("sd-")
-                                || model_l.contains("stable-diffusion")
-                                || model_l.contains("sdxl")
-                                || model_l.contains("flux")
-                                || model_l.contains("ltx");
-                            let is_gen_kind =
-                                jt.contains("image") || jt.contains("video") || model_diff;
-                            let is_ml_kind = jt == "mlinference";
-                            let job = if is_gen_kind {
-                                let kind = if jt.contains("video") || model_l.contains("ltx") {
-                                    "video"
-                                } else {
-                                    "image"
-                                };
-                                let neg = v.get("negative_prompt").and_then(|x| x.as_str());
-                                gpn_agent::llm::LlmJob::new_gen(
-                                    kind,
-                                    &model,
-                                    p,
-                                    neg,
-                                    g("width", 512) as u32,
-                                    g("height", 512) as u32,
-                                    g("steps", 8) as u32,
-                                    v.get("seed").and_then(|x| x.as_i64()),
-                                    g("frames", 16) as u32,
-                                    g("fps", 8) as u32,
+
+                    // choose the best provider (model-aware). Generation jobs
+                    // (image/video) are served by the diffusion provider, which
+                    // self-claims from chain — the LLM model registry doesn't list
+                    // gen models, so DON'T validate them here. Reject unknown models
+                    // only for LLM/text jobs (prevents orphaned Pending jobs).
+                    let jt_lc = job_type.to_ascii_lowercase();
+                    let model_lc = model.to_ascii_lowercase();
+                    let is_gen = jt_lc.contains("image")
+                        || jt_lc.contains("video")
+                        || model_lc.contains("sd-")
+                        || model_lc.contains("stable-diffusion")
+                        || model_lc.contains("sdxl")
+                        || model_lc.contains("flux")
+                        || model_lc.contains("ltx");
+                    let reg = registry.lock().unwrap().clone();
+                    let model = if is_gen {
+                        model
+                    } else {
+                        match resolve_requested_model(&reg, &model) {
+                            Ok(m) => m,
+                            Err(e) => {
+                                let r = Response::from_string(
+                                    json!({"ok":false,"error":e}).to_string(),
                                 )
-                            } else if is_ml_kind {
-                                let task = v
-                                    .get("task")
-                                    .and_then(|x| x.as_str())
-                                    .unwrap_or("generate");
-                                gpn_agent::llm::LlmJob::new_ml(
-                                    &model,
-                                    p,
-                                    gpn_agent::llm::normalize_ml_task(Some(task)),
-                                    0.7,
-                                    256,
-                                )
-                            } else {
-                                gpn_agent::llm::LlmJob::new_llm(&model, p, 0.7, 256)
-                            };
-                            let _ = gpn_agent::llm::LlmStore::new().put(id, job);
-                        }
-                        // dispatch: record which provider (by address) should claim it,
-                        // plus the model + whether it must pull the model first.
-                        record_created(id, mtok_eff as u64);
-                        let job_payload = gpn_agent::llm::get_job(id);
-                        let callback_token = new_callback_token(id);
-                        let _ = write_assignment(&assign_store, id, &provider.address, &model, needs_pull, &callback_url, &callback_token);
-                        dispatch_assignment(&provider.status_url, id, &provider.address, &model, needs_pull, job_payload.as_ref(), &callback_url, &callback_token);
-                        // optional inline wait: poll the off-chain store and return the
-                        // answer in THIS response (no separate /result call).
-                        let mut answer: Option<serde_json::Value> = None;
-                        if wait {
-                            let deadline = std::time::Instant::now() + Duration::from_secs(wait_secs.min(600));
-                            while std::time::Instant::now() < deadline {
-                                if let Some(j) = gpn_agent::llm::get_job(id) {
-                                    if j.status == "done" || j.status == "error" {
-                                        answer = Some(json!({
-                                            "status": j.status, "response": j.response,
-                                            "result_hash": j.result_hash, "salt": j.salt,
-                                            "artifact_path": j.artifact_path,
-                                            "artifact_media_type": j.artifact_media_type,
-                                            "verify": "sha256(salt ++ response) == result_hash",
-                                            "error": j.error,
-                                        }));
-                                        break;
-                                    }
-                                }
-                                std::thread::sleep(Duration::from_millis(300));
+                                .with_header(hdr.clone())
+                                .with_status_code(400);
+                                let _ = req.respond(r);
+                                return;
                             }
                         }
-                        let mut out = json!({"ok":true,"job_id":id,"routed_to":provider.address,
+                    };
+                    let (provider, needs_pull) = match pick(
+                        &reg,
+                        min_gflops,
+                        min_vram_mb,
+                        min_ram_mb,
+                        min_tflops,
+                        &model,
+                        pull_penalty_ms,
+                        &rtt_overrides(&v),
+                    ) {
+                        Some(x) => x,
+                        None => {
+                            let r = Response::from_string(
+                                json!({"ok":false,"error":"no compatible provider available"})
+                                    .to_string(),
+                            )
+                            .with_header(hdr.clone())
+                            .with_status_code(503);
+                            let _ = req.respond(r);
+                            return;
+                        }
+                    };
+
+                    // create the on-chain job (escrow) as the access-point signer
+                    // workload hash: the marketplace rejects all-zeros, but we do NOT
+                    // want the prompt recoverable on-chain. Use an opaque random-ish id
+                    // (privacy: the question is never derivable from chain state).
+                    let workload_hash = {
+                        use sha2::{Digest, Sha256};
+                        use std::sync::atomic::{AtomicU64, Ordering};
+                        use std::time::{SystemTime, UNIX_EPOCH};
+                        static CTR: AtomicU64 = AtomicU64::new(0);
+                        let n = CTR.fetch_add(1, Ordering::Relaxed);
+                        let t = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_nanos())
+                            .unwrap_or(0);
+                        let mut h = Sha256::new();
+                        h.update(t.to_le_bytes());
+                        h.update(n.to_le_bytes());
+                        h.update(std::process::id().to_le_bytes());
+                        let mut o = [0u8; 32];
+                        o.copy_from_slice(&h.finalize());
+                        o[0] |= 1;
+                        o
+                    };
+                    let next_before = rt.block_on(client.get_next_job_id());
+                    // Job-relative pricing for generation jobs (pixels × steps), grounded
+                    // in the oracle market GPU price; text jobs price per-token (ppt).
+                    let price_gpn = if is_gen {
+                        match v.get("price_gpn").and_then(|x| x.as_f64()) {
+                            Some(p) if p > 0.0 => p, // explicit override
+                            _ => image_price_gpn(
+                                g("width", 512) as f64,
+                                g("height", 512) as f64,
+                                g("steps", 8) as f64,
+                                token_price_usd,
+                                market_hr,
+                                util,
+                            ),
+                        }
+                    } else {
+                        price_gpn
+                    };
+                    // escrow/pricing: generation jobs use a flat, job-sized price
+                    // (price_gpn from pixels×steps); text jobs use per-token billing.
+                    let (escrow, job_ppt, job_mtok): (u128, u128, u32) = if is_gen {
+                        ((price_gpn * 1e12) as u128, 0u128, 0u32)
+                    } else if ppt > 0 && mtok_eff > 0 {
+                        (ppt.saturating_mul(mtok_eff as u128), ppt, mtok_eff)
+                    } else {
+                        ((price_gpn * 1e12) as u128, 0u128, 0u32)
+                    };
+                    let res = rt.block_on(client.create_job(
+                        min_vram_mb as u32,
+                        g("min_compute_capability", 75) as u16,
+                        g("min_gpu_count", 1) as u8,
+                        g("min_cuda_cores", 0) as u32,
+                        min_gflops,
+                        job_type,
+                        "Spot",
+                        escrow,
+                        job_ppt,
+                        job_mtok,
+                        1000,
+                        workload_hash,
+                    ));
+                    // The signer can mis-attribute a *concurrent* extrinsic's failure
+                    // (a busy chain packs several txs per block). So don't trust the
+                    // Err blindly: re-read the job counter — if it advanced, OUR job
+                    // was in fact created, and we must still route it.
+                    let after = rt.block_on(client.get_next_job_id());
+                    match (res, after > next_before) {
+                        (Ok(_), _) | (Err(_), true) => {
+                            let id = after.saturating_sub(1);
+                            // store the off-chain payload (prompt/model/params) if present.
+                            // Generation jobs (image/video) MUST be stored with a gen
+                            // kind, otherwise the LLM provider claims them and 404s on
+                            // a diffusion model; the diffusion provider only claims
+                            // jobs where `kind` is image/video.
+                            if let Some(p) = prompt.as_ref() {
+                                let jt = job_type.to_ascii_lowercase();
+                                // Guard: a diffusion/video model submitted with
+                                // job_type omitted (defaults to LLMInference) must
+                                // be routed to the diffusion provider, not the LLM
+                                // provider (which 404/500s pulling it from ollama).
+                                let model_l = model.to_ascii_lowercase();
+                                let model_diff = model_l.contains("sd-")
+                                    || model_l.contains("stable-diffusion")
+                                    || model_l.contains("sdxl")
+                                    || model_l.contains("flux")
+                                    || model_l.contains("ltx");
+                                let is_gen_kind =
+                                    jt.contains("image") || jt.contains("video") || model_diff;
+                                let is_ml_kind = jt == "mlinference";
+                                let job = if is_gen_kind {
+                                    let kind = if jt.contains("video") || model_l.contains("ltx") {
+                                        "video"
+                                    } else {
+                                        "image"
+                                    };
+                                    let neg = v.get("negative_prompt").and_then(|x| x.as_str());
+                                    gpn_agent::llm::LlmJob::new_gen(
+                                        kind,
+                                        &model,
+                                        p,
+                                        neg,
+                                        g("width", 512) as u32,
+                                        g("height", 512) as u32,
+                                        g("steps", 8) as u32,
+                                        v.get("seed").and_then(|x| x.as_i64()),
+                                        g("frames", 16) as u32,
+                                        g("fps", 8) as u32,
+                                    )
+                                } else if is_ml_kind {
+                                    let task = v
+                                        .get("task")
+                                        .and_then(|x| x.as_str())
+                                        .unwrap_or("generate");
+                                    gpn_agent::llm::LlmJob::new_ml(
+                                        &model,
+                                        p,
+                                        gpn_agent::llm::normalize_ml_task(Some(task)),
+                                        0.7,
+                                        256,
+                                    )
+                                } else {
+                                    gpn_agent::llm::LlmJob::new_llm(&model, p, 0.7, 256)
+                                };
+                                let _ = gpn_agent::llm::LlmStore::new().put(id, job);
+                            }
+                            // dispatch: record which provider (by address) should claim it,
+                            // plus the model + whether it must pull the model first.
+                            record_created(id, mtok_eff as u64);
+                            let job_payload = gpn_agent::llm::get_job(id);
+                            let callback_token = new_callback_token(id);
+                            let _ = write_assignment(
+                                &assign_store,
+                                id,
+                                &provider.address,
+                                &model,
+                                needs_pull,
+                                &callback_url,
+                                &callback_token,
+                            );
+                            dispatch_assignment(
+                                &provider.status_url,
+                                id,
+                                &provider.address,
+                                &model,
+                                needs_pull,
+                                job_payload.as_ref(),
+                                &callback_url,
+                                &callback_token,
+                            );
+                            // optional inline wait: poll the off-chain store and return the
+                            // answer in THIS response (no separate /result call).
+                            let mut answer: Option<serde_json::Value> = None;
+                            if wait {
+                                let deadline = std::time::Instant::now()
+                                    + Duration::from_secs(wait_secs.min(600));
+                                while std::time::Instant::now() < deadline {
+                                    if let Some(j) = gpn_agent::llm::get_job(id) {
+                                        if j.status == "done" || j.status == "error" {
+                                            answer = Some(json!({
+                                                "status": j.status, "response": j.response,
+                                                "result_hash": j.result_hash, "salt": j.salt,
+                                                "artifact_path": j.artifact_path,
+                                                "artifact_media_type": j.artifact_media_type,
+                                                "verify": "sha256(salt ++ response) == result_hash",
+                                                "error": j.error,
+                                            }));
+                                            break;
+                                        }
+                                    }
+                                    std::thread::sleep(Duration::from_millis(300));
+                                }
+                            }
+                            let mut out = json!({"ok":true,"job_id":id,"routed_to":provider.address,
                                "model":model,"pull":needs_pull,
                                "status_url":provider.status_url,
                                "latency_ms":provider.latency_ms,"load":format!("{}/{}",provider.active,provider.capacity)});
-                        if let Some(a) = answer {
-                            out["answer"] = a;
-                        } else if wait {
-                            out["answer"] = json!({"status":"timeout","note":"not finished; poll /result/{id}"});
+                            if let Some(a) = answer {
+                                out["answer"] = a;
+                            } else if wait {
+                                out["answer"] = json!({"status":"timeout","note":"not finished; poll /result/{id}"});
+                            }
+                            out
                         }
-                        out
-                    }
-                    (Err(e), false) => json!({"ok":false,"error":format!("{e}")}),
-                }
-            }
-            (Method::Get, ["jobs"]) => {
-                let next = rt.block_on(client.get_next_job_id());
-                let start = next.saturating_sub(JOBS_LIST_WINDOW);
-                let mut jobs = vec![];
-                for id in start..next {
-                    if let Some((state, _p, _r, prov)) = rt.block_on(client.get_job_state(id)) {
-                        jobs.push(json!({"id":id,"state":state,"provider":prov}));
+                        (Err(e), false) => json!({"ok":false,"error":format!("{e}")}),
                     }
                 }
-                json!({"jobs":jobs, "from":start, "next":next})
-            }
-            (Method::Get, ["job", id]) => {
-                let idn: u64 = id.parse().unwrap_or(0);
-                match rt.block_on(client.get_job_state(idn)) {
-                    Some((state, price, req_, prov)) => json!({"id":idn,"state":state,"price_base":price.to_string(),"requestor":req_,"provider":prov}),
-                    None => json!({"error":"not found"}),
+                (Method::Get, ["jobs"]) => {
+                    let next = rt.block_on(client.get_next_job_id());
+                    let start = next.saturating_sub(JOBS_LIST_WINDOW);
+                    let mut jobs = vec![];
+                    for id in start..next {
+                        if let Some((state, _p, _r, prov)) = rt.block_on(client.get_job_state(id)) {
+                            jobs.push(json!({"id":id,"state":state,"provider":prov}));
+                        }
+                    }
+                    json!({"jobs":jobs, "from":start, "next":next})
                 }
-            }
-            // The answer/artifact lives OFF-chain in the provider's local store.
-            // On this testnet the access point shares the provider's box, so it can
-            // serve the result. (Production: the provider returns the result to the
-            // client directly, or encrypted to the client's key.)
-            (Method::Get, ["result", id]) => {
-                let idn: u64 = id.parse().unwrap_or(0);
-                match gpn_agent::llm::get_job(idn) {
-                    Some(j) => json!({
-                        "job_id": idn, "kind": j.kind, "model": j.model, "prompt": j.prompt,
-                        "status": j.status, "response": j.response,
-                        "result_hash": j.result_hash, "salt": j.salt,
-                        "artifact_path": j.artifact_path,
-                        "artifact_media_type": j.artifact_media_type,
-                        "verify": "sha256(salt ++ response) == result_hash",
-                        "error": j.error,
-                    }),
-                    None => json!({"job_id": idn, "error": "no off-chain record yet"}),
+                (Method::Get, ["job", id]) => {
+                    let idn: u64 = id.parse().unwrap_or(0);
+                    match rt.block_on(client.get_job_state(idn)) {
+                        Some((state, price, req_, prov)) => {
+                            json!({"id":idn,"state":state,"price_base":price.to_string(),"requestor":req_,"provider":prov})
+                        }
+                        None => json!({"error":"not found"}),
+                    }
                 }
-            }
-            // POST /result/{id} — the provider→AP result-return channel (item #14).
-            // A REMOTE provider runs the job against the payload we pushed in
-            // `/assign`, then POSTs the finished result here so THIS AP's own
-            // LlmStore learns the outcome and its inline waiter unblocks. Body:
-            // {status, response, result_hash, salt, artifact_path, artifact_media_type, error}.
-            (Method::Post, ["result", id]) => {
-                let idn: u64 = id.parse().unwrap_or(0);
-                let v: Value = serde_json::from_str(&body).unwrap_or(json!({}));
-                // Bind the callback to the assignment (item #16, finding #2): the
-                // AP issued a per-job token at dispatch and the provider must echo
-                // it. Without a match, ANY remote caller could inject/overwrite a
-                // job's result (answer poisoning). Loopback stays exempt so local
-                // tests/monitors keep working. A job with no recorded token (legacy
-                // pre-fix assignment) is accepted for backward-compat.
-                let is_loopback = req.remote_addr().map(|a| a.ip().is_loopback()).unwrap_or(false);
-                if !is_loopback {
-                    if let Some(want) = assignment_token(&assign_store, idn) {
-                        let got = v
-                            .get("callback_token")
-                            .and_then(|x| x.as_str())
-                            .map(str::to_string)
-                            .or_else(|| {
-                                req.headers().iter().find_map(|h| {
-                                    if h.field.equiv("X-Gpn-Callback-Token") {
-                                        Some(h.value.as_str().trim().to_string())
-                                    } else {
-                                        None
-                                    }
+                // The answer/artifact lives OFF-chain in the provider's local store.
+                // On this testnet the access point shares the provider's box, so it can
+                // serve the result. (Production: the provider returns the result to the
+                // client directly, or encrypted to the client's key.)
+                (Method::Get, ["result", id]) => {
+                    let idn: u64 = id.parse().unwrap_or(0);
+                    match gpn_agent::llm::get_job(idn) {
+                        Some(j) => json!({
+                            "job_id": idn, "kind": j.kind, "model": j.model, "prompt": j.prompt,
+                            "status": j.status, "response": j.response,
+                            "result_hash": j.result_hash, "salt": j.salt,
+                            "artifact_path": j.artifact_path,
+                            "artifact_media_type": j.artifact_media_type,
+                            "verify": "sha256(salt ++ response) == result_hash",
+                            "error": j.error,
+                        }),
+                        None => json!({"job_id": idn, "error": "no off-chain record yet"}),
+                    }
+                }
+                // POST /result/{id} — the provider→AP result-return channel (item #14).
+                // A REMOTE provider runs the job against the payload we pushed in
+                // `/assign`, then POSTs the finished result here so THIS AP's own
+                // LlmStore learns the outcome and its inline waiter unblocks. Body:
+                // {status, response, result_hash, salt, artifact_path, artifact_media_type, error}.
+                (Method::Post, ["result", id]) => {
+                    let idn: u64 = id.parse().unwrap_or(0);
+                    let v: Value = serde_json::from_str(&body).unwrap_or(json!({}));
+                    // Bind the callback to the assignment (item #16, finding #2): the
+                    // AP issued a per-job token at dispatch and the provider must echo
+                    // it. Without a match, ANY remote caller could inject/overwrite a
+                    // job's result (answer poisoning). Loopback stays exempt so local
+                    // tests/monitors keep working. A job with no recorded token (legacy
+                    // pre-fix assignment) is accepted for backward-compat.
+                    let is_loopback = req
+                        .remote_addr()
+                        .map(|a| a.ip().is_loopback())
+                        .unwrap_or(false);
+                    if !is_loopback {
+                        if let Some(want) = assignment_token(&assign_store, idn) {
+                            let got = v
+                                .get("callback_token")
+                                .and_then(|x| x.as_str())
+                                .map(str::to_string)
+                                .or_else(|| {
+                                    req.headers().iter().find_map(|h| {
+                                        if h.field.equiv("X-Gpn-Callback-Token") {
+                                            Some(h.value.as_str().trim().to_string())
+                                        } else {
+                                            None
+                                        }
+                                    })
                                 })
-                            })
-                            .unwrap_or_default();
-                        if !ct_eq(&want, &got) {
-                            let _ = req.respond(
-                                Response::from_string(json!({"error":"invalid callback token"}).to_string())
+                                .unwrap_or_default();
+                            if !ct_eq(&want, &got) {
+                                let _ = req.respond(
+                                    Response::from_string(
+                                        json!({"error":"invalid callback token"}).to_string(),
+                                    )
                                     .with_header(hdr.clone())
                                     .with_status_code(401),
-                            );
-                            return;
+                                );
+                                return;
+                            }
                         }
                     }
-                }
-                let status = v.get("status").and_then(|x| x.as_str()).unwrap_or("done");
-                let store = gpn_agent::llm::LlmStore::new();
-                let res = if status == "error" {
-                    store.set_error(idn, v.get("error").and_then(|x| x.as_str()).unwrap_or("remote inference error"))
-                } else if let Some(ap) = v.get("artifact_path").and_then(|x| x.as_str()) {
-                    store.complete_artifact(
-                        idn,
-                        ap,
-                        v.get("artifact_media_type").and_then(|x| x.as_str()).unwrap_or("application/octet-stream"),
-                        v.get("result_hash").and_then(|x| x.as_str()).unwrap_or(""),
-                    )
-                } else {
-                    store.complete(
-                        idn,
-                        v.get("response").and_then(|x| x.as_str()).unwrap_or(""),
-                        v.get("result_hash").and_then(|x| x.as_str()).unwrap_or(""),
-                        v.get("salt").and_then(|x| x.as_str()),
-                    )
-                };
-                match res {
-                    Ok(_) => {
-                        println!("[result] remote provider returned #{idn} ({status})");
-                        json!({"ok":true,"job_id":idn})
+                    let status = v.get("status").and_then(|x| x.as_str()).unwrap_or("done");
+                    let store = gpn_agent::llm::LlmStore::new();
+                    let res = if status == "error" {
+                        store.set_error(
+                            idn,
+                            v.get("error")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("remote inference error"),
+                        )
+                    } else if let Some(ap) = v.get("artifact_path").and_then(|x| x.as_str()) {
+                        store.complete_artifact(
+                            idn,
+                            ap,
+                            v.get("artifact_media_type")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("application/octet-stream"),
+                            v.get("result_hash").and_then(|x| x.as_str()).unwrap_or(""),
+                        )
+                    } else {
+                        store.complete(
+                            idn,
+                            v.get("response").and_then(|x| x.as_str()).unwrap_or(""),
+                            v.get("result_hash").and_then(|x| x.as_str()).unwrap_or(""),
+                            v.get("salt").and_then(|x| x.as_str()),
+                        )
+                    };
+                    match res {
+                        Ok(_) => {
+                            println!("[result] remote provider returned #{idn} ({status})");
+                            json!({"ok":true,"job_id":idn})
+                        }
+                        Err(e) => json!({"error": format!("store: {e}")}),
                     }
-                    Err(e) => json!({"error": format!("store: {e}")}),
                 }
-            }
-            // Download the generated artifact (image/video) for a job id.
-            // Serves the provider's on-disk file over HTTP so remote clients can
-            // fetch it (the AP has no other way to hand back the bytes).
-            (Method::Get, ["artifact", id]) => {
-                let idp = id.split('?').next().unwrap_or(id);
-                let idn: u64 = idp.parse().unwrap_or(0);
-                let rec = gpn_agent::llm::get_job(idn);
-                let path = rec.as_ref().and_then(|j| j.artifact_path.clone());
-                match path {
-                    Some(p) if std::path::Path::new(&p).exists() => match std::fs::read(&p) {
-                        Ok(bytes) => {
-                            let mt = rec
-                                .and_then(|j| j.artifact_media_type)
-                                .unwrap_or_else(|| "application/octet-stream".into());
-                            let name = std::path::Path::new(&p)
-                                .file_name()
-                                .map(|s| s.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| format!("job_{idn}"));
-                            let ct = Header::from_bytes(&b"Content-Type"[..], mt.as_bytes())
+                // Download the generated artifact (image/video) for a job id.
+                // Serves the provider's on-disk file over HTTP so remote clients can
+                // fetch it (the AP has no other way to hand back the bytes).
+                (Method::Get, ["artifact", id]) => {
+                    let idp = id.split('?').next().unwrap_or(id);
+                    let idn: u64 = idp.parse().unwrap_or(0);
+                    let rec = gpn_agent::llm::get_job(idn);
+                    let path = rec.as_ref().and_then(|j| j.artifact_path.clone());
+                    match path {
+                        Some(p) if std::path::Path::new(&p).exists() => match std::fs::read(&p) {
+                            Ok(bytes) => {
+                                let mt = rec
+                                    .and_then(|j| j.artifact_media_type)
+                                    .unwrap_or_else(|| "application/octet-stream".into());
+                                let name = std::path::Path::new(&p)
+                                    .file_name()
+                                    .map(|s| s.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| format!("job_{idn}"));
+                                let ct = Header::from_bytes(&b"Content-Type"[..], mt.as_bytes())
+                                    .unwrap_or_else(|_| hdr.clone());
+                                let cd = Header::from_bytes(
+                                    &b"Content-Disposition"[..],
+                                    format!("inline; filename=\"{name}\"").as_bytes(),
+                                )
                                 .unwrap_or_else(|_| hdr.clone());
+                                let _ = req.respond(
+                                    Response::from_data(bytes).with_header(ct).with_header(cd),
+                                );
+                            }
+                            Err(e) => {
+                                let _ = req.respond(
+                                    Response::from_string(
+                                        json!({"error": e.to_string()}).to_string(),
+                                    )
+                                    .with_header(hdr.clone())
+                                    .with_status_code(500),
+                                );
+                            }
+                        },
+                        _ => {
+                            let _ = req.respond(
+                            Response::from_string(
+                                json!({"error":"no artifact for that job (not generated yet?)"}).to_string(),
+                            )
+                            .with_header(hdr.clone())
+                            .with_status_code(404),
+                        );
+                        }
+                    }
+                    return;
+                }
+                // Serve the canonical chain-spec so a fresh node (e.g. Windows) can
+                // join THIS chain: `--chain <downloaded>.json` pins the exact genesis.
+                (Method::Get, ["genesis-spec"]) => {
+                    let p = std::env::var("GPN_SPEC_PATH").unwrap_or_else(|_| {
+                    "/home/jeremyg/shared_workspace/artifacts/project7/gpn-testnet-spec.json".to_string()
+                });
+                    match std::fs::read(&p) {
+                        Ok(bytes) => {
+                            let ct =
+                                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                                    .unwrap_or_else(|_| hdr.clone());
                             let cd = Header::from_bytes(
                                 &b"Content-Disposition"[..],
-                                format!("inline; filename=\"{name}\"").as_bytes(),
+                                &b"attachment; filename=\"gpn-testnet-spec.json\""[..],
                             )
                             .unwrap_or_else(|_| hdr.clone());
-                            let _ = req.respond(Response::from_data(bytes).with_header(ct).with_header(cd));
+                            let _ = req.respond(
+                                Response::from_data(bytes).with_header(ct).with_header(cd),
+                            );
                         }
                         Err(e) => {
                             let _ = req.respond(
@@ -1780,138 +2095,144 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .with_status_code(500),
                             );
                         }
-                    },
-                    _ => {
-                        let _ = req.respond(
-                            Response::from_string(
-                                json!({"error":"no artifact for that job (not generated yet?)"}).to_string(),
-                            )
-                            .with_header(hdr.clone())
-                            .with_status_code(404),
-                        );
                     }
+                    return;
                 }
-                return;
-            }
-            // Serve the canonical chain-spec so a fresh node (e.g. Windows) can
-            // join THIS chain: `--chain <downloaded>.json` pins the exact genesis.
-            (Method::Get, ["genesis-spec"]) => {
-                let p = std::env::var("GPN_SPEC_PATH").unwrap_or_else(|_| {
-                    "/home/jeremyg/shared_workspace/artifacts/project7/gpn-testnet-spec.json".to_string()
-                });
-                match std::fs::read(&p) {
-                    Ok(bytes) => {
-                        let ct = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-                            .unwrap_or_else(|_| hdr.clone());
-                        let cd = Header::from_bytes(
-                            &b"Content-Disposition"[..],
-                            &b"attachment; filename=\"gpn-testnet-spec.json\""[..],
-                        )
-                        .unwrap_or_else(|_| hdr.clone());
-                        let _ = req.respond(Response::from_data(bytes).with_header(ct).with_header(cd));
-                    }
-                    Err(e) => {
-                        let _ = req.respond(
-                            Response::from_string(json!({"error": e.to_string()}).to_string())
-                                .with_header(hdr.clone())
-                                .with_status_code(500),
-                        );
-                    }
-                }
-                return;
-            }
-            // Client-side signing: the caller already created + escrowed the job
-            // with THEIR OWN wallet; they just ask us to ROUTE it to a provider.
-            (Method::Post, ["route", id]) => {
-                // optional ?model=<m> in the query string
-                let (idp, query) = id.split_once('?').unwrap_or((id, ""));
-                let idn: u64 = idp.parse().unwrap_or(0);
-                let route_body: Value = serde_json::from_str(&body).unwrap_or(json!({}));
-                let qmodel = query
-                    .split('&')
-                    .find_map(|kv| kv.strip_prefix("model="))
-                    .map(|m| m.replace("%3A", ":").replace("%3a", ":"))
-                    .unwrap_or_else(|| "auto".to_string());
-                let job_state = rt.block_on(client.get_job_state(idn));
-                // Item #22 build-order step 4: enforce the operator denylist over
-                // the client IP AND the job's on-chain requestor/provider.
-                if let Some(ip) = req.remote_addr().map(|a| a.ip().to_string()) {
-                    if denylist.lock().unwrap().is_ip_banned(&ip) {
-                        let _ = req.respond(
+                // Client-side signing: the caller already created + escrowed the job
+                // with THEIR OWN wallet; they just ask us to ROUTE it to a provider.
+                (Method::Post, ["route", id]) => {
+                    // optional ?model=<m> in the query string
+                    let (idp, query) = id.split_once('?').unwrap_or((id, ""));
+                    let idn: u64 = idp.parse().unwrap_or(0);
+                    let route_body: Value = serde_json::from_str(&body).unwrap_or(json!({}));
+                    let qmodel = query
+                        .split('&')
+                        .find_map(|kv| kv.strip_prefix("model="))
+                        .map(|m| m.replace("%3A", ":").replace("%3a", ":"))
+                        .unwrap_or_else(|| "auto".to_string());
+                    let job_state = rt.block_on(client.get_job_state(idn));
+                    // Item #22 build-order step 4: enforce the operator denylist over
+                    // the client IP AND the job's on-chain requestor/provider.
+                    if let Some(ip) = req.remote_addr().map(|a| a.ip().to_string()) {
+                        if denylist.lock().unwrap().is_ip_banned(&ip) {
+                            let _ = req.respond(
                             Response::from_string(json!({
                                 "ok": false,
                                 "error": {"message": "service refused (operator denylist)", "type": "gpn_policy_violation"}
                             }).to_string()).with_header(hdr.clone()).with_status_code(403),
                         );
-                        return;
+                            return;
+                        }
                     }
-                }
-                if let Some((_st, _pr, req_acct, prov_acct)) = &job_state {
-                    let banned = {
-                        let d = denylist.lock().unwrap();
-                        req_acct.as_deref().map(|a| d.is_account_banned(a)).unwrap_or(false)
-                            || prov_acct.as_deref().map(|a| d.is_provider_banned(a)).unwrap_or(false)
-                    };
-                    if banned {
-                        let _ = req.respond(
+                    if let Some((_st, _pr, req_acct, prov_acct)) = &job_state {
+                        let banned = {
+                            let d = denylist.lock().unwrap();
+                            req_acct
+                                .as_deref()
+                                .map(|a| d.is_account_banned(a))
+                                .unwrap_or(false)
+                                || prov_acct
+                                    .as_deref()
+                                    .map(|a| d.is_provider_banned(a))
+                                    .unwrap_or(false)
+                        };
+                        if banned {
+                            let _ = req.respond(
                             Response::from_string(json!({
                                 "ok": false,
                                 "error": {"message": "service refused (operator denylist)", "type": "gpn_policy_violation"}
                             }).to_string()).with_header(hdr.clone()).with_status_code(403),
                         );
-                        return;
+                            return;
+                        }
                     }
-                }
-                if job_state.is_none() {
-                    json!({"ok":false,"error":"job not found"})
-                } else {
-                    let reg = registry.lock().unwrap().clone();
-                    match resolve_requested_model(&reg, &qmodel) {
-                        Err(e) => json!({"ok":false,"error":e}),
-                        Ok(qmodel) => match pick(&reg, 0, 0, 0, 0.0, &qmodel, pull_penalty_ms, &rtt_overrides(&route_body)) {
-                            Some((p, pull)) => {
-                                // Client-signed path: the prompt lives only in the
-                                // caller's body. If they included the off-chain job
-                                // (item #14) persist + push it, so a REMOTE provider
-                                // can run it; otherwise a remote provider will claim
-                                // but find no local prompt.
-                                let job_payload = route_body
-                                    .get("job")
-                                    .and_then(|jv| serde_json::from_value::<gpn_agent::llm::LlmJob>(jv.clone()).ok());
-                                // Abuse guardrail (item #22): the routing AP is the
-                                // chokepoint; refuse a prohibited-use prompt here
-                                // too (client-signed jobs still route through us).
-                                if let Some(cat) = job_payload
-                                    .as_ref()
-                                    .and_then(|j| moderation_block(&j.prompt))
-                                {
-                                    let r = Response::from_string(json!({
+                    if job_state.is_none() {
+                        json!({"ok":false,"error":"job not found"})
+                    } else {
+                        let reg = registry.lock().unwrap().clone();
+                        match resolve_requested_model(&reg, &qmodel) {
+                            Err(e) => json!({"ok":false,"error":e}),
+                            Ok(qmodel) => match pick(
+                                &reg,
+                                0,
+                                0,
+                                0,
+                                0.0,
+                                &qmodel,
+                                pull_penalty_ms,
+                                &rtt_overrides(&route_body),
+                            ) {
+                                Some((p, pull)) => {
+                                    // Client-signed path: the prompt lives only in the
+                                    // caller's body. If they included the off-chain job
+                                    // (item #14) persist + push it, so a REMOTE provider
+                                    // can run it; otherwise a remote provider will claim
+                                    // but find no local prompt.
+                                    let job_payload = route_body.get("job").and_then(|jv| {
+                                        serde_json::from_value::<gpn_agent::llm::LlmJob>(jv.clone())
+                                            .ok()
+                                    });
+                                    // Abuse guardrail (item #22): the routing AP is the
+                                    // chokepoint; refuse a prohibited-use prompt here
+                                    // too (client-signed jobs still route through us).
+                                    if let Some(cat) = job_payload
+                                        .as_ref()
+                                        .and_then(|j| moderation_block(&j.prompt))
+                                    {
+                                        let r = Response::from_string(json!({
                                         "ok": false,
                                         "error": {"message": cat.reason(), "type": "gpn_policy_violation", "category": cat.id()}
                                     }).to_string()).with_header(hdr.clone()).with_status_code(451);
-                                    let _ = req.respond(r);
-                                    return;
-                                }
-                                if let Some(j) = &job_payload {
-                                    let _ = gpn_agent::llm::LlmStore::new().put(idn, j.clone());
-                                }
-                                let callback_token = new_callback_token(idn);
-                                let _ = write_assignment(&assign_store, idn, &p.address, &qmodel, pull, &callback_url, &callback_token);
-                                dispatch_assignment(&p.status_url, idn, &p.address, &qmodel, pull, job_payload.as_ref(), &callback_url, &callback_token);
-                                json!({"ok":true,"job_id":idn,"routed_to":p.address,
+                                        let _ = req.respond(r);
+                                        return;
+                                    }
+                                    if let Some(j) = &job_payload {
+                                        let _ = gpn_agent::llm::LlmStore::new().put(idn, j.clone());
+                                    }
+                                    let callback_token = new_callback_token(idn);
+                                    let _ = write_assignment(
+                                        &assign_store,
+                                        idn,
+                                        &p.address,
+                                        &qmodel,
+                                        pull,
+                                        &callback_url,
+                                        &callback_token,
+                                    );
+                                    dispatch_assignment(
+                                        &p.status_url,
+                                        idn,
+                                        &p.address,
+                                        &qmodel,
+                                        pull,
+                                        job_payload.as_ref(),
+                                        &callback_url,
+                                        &callback_token,
+                                    );
+                                    json!({"ok":true,"job_id":idn,"routed_to":p.address,
                                        "model":qmodel,"pull":pull,
                                        "latency_ms":p.latency_ms,"load":format!("{}/{}",p.active,p.capacity)})
-                            }
-                            None => json!({"ok":false,"error":"no compatible provider available"}),
-                        },
+                                }
+                                None => {
+                                    json!({"ok":false,"error":"no compatible provider available"})
+                                }
+                            },
+                        }
                     }
                 }
-            }
-            _ => json!({"error":"not found"}),
-        };
+                _ => json!({"error":"not found"}),
+            };
 
-        let code = if resp.get("error").map(|v| !v.is_null()).unwrap_or(false) { 404 } else { 200 };
-        let _ = req.respond(Response::from_string(resp.to_string()).with_header(hdr.clone()).with_status_code(code));
+            let code = if resp.get("error").map(|v| !v.is_null()).unwrap_or(false) {
+                404
+            } else {
+                200
+            };
+            let _ = req.respond(
+                Response::from_string(resp.to_string())
+                    .with_header(hdr.clone())
+                    .with_status_code(code),
+            );
         });
     }
     Ok(())
@@ -1959,16 +2280,25 @@ mod tests {
     #[test]
     fn attribute_address_falls_back_to_the_chain_key_only_when_heartbeat_omits_it() {
         let mut chain = std::collections::HashMap::new();
-        chain.insert("http://win:8093/status".to_string(), "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty".to_string());
+        chain.insert(
+            "http://win:8093/status".to_string(),
+            "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty".to_string(),
+        );
         // Heartbeat omits address -> use the on-chain key.
         assert_eq!(
             attribute_address("", "http://win:8093/status", &chain),
             "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
         );
         // Heartbeat reports its own address -> trust it.
-        assert_eq!(attribute_address("5GrwvaE", "http://win:8093/status", &chain), "5GrwvaE");
+        assert_eq!(
+            attribute_address("5GrwvaE", "http://win:8093/status", &chain),
+            "5GrwvaE"
+        );
         // Unknown endpoint + no heartbeat address -> empty (unchanged behaviour).
-        assert_eq!(attribute_address("", "http://other:8093/status", &chain), "");
+        assert_eq!(
+            attribute_address("", "http://other:8093/status", &chain),
+            ""
+        );
     }
 
     #[test]
@@ -1978,7 +2308,17 @@ mod tests {
             prov("A", "http://a:8093", 5, "llama3.2:1b"),
             prov("B", "http://b:8093", 50, "llama3.2:1b"),
         ];
-        let (p, _) = pick(&reg, 0, 0, 0, 0.0, "llama3.2:1b", 120_000, &RttOverrides::new()).unwrap();
+        let (p, _) = pick(
+            &reg,
+            0,
+            0,
+            0,
+            0.0,
+            "llama3.2:1b",
+            120_000,
+            &RttOverrides::new(),
+        )
+        .unwrap();
         assert_eq!(p.address, "A");
     }
 
@@ -1993,7 +2333,10 @@ mod tests {
         rtt.insert("a".into(), 120); // user is far from A
         rtt.insert("b".into(), 8); // user is near B
         let (p, _) = pick(&reg, 0, 0, 0, 0.0, "llama3.2:1b", 120_000, &rtt).unwrap();
-        assert_eq!(p.address, "B", "client-measured RTT must override AP-measured latency");
+        assert_eq!(
+            p.address, "B",
+            "client-measured RTT must override AP-measured latency"
+        );
     }
 
     #[test]
@@ -2016,7 +2359,10 @@ mod tests {
         let ok = "write a haiku about the ocean";
 
         std::env::set_var("GPN_MODERATION", "on");
-        assert_eq!(moderation_block(blocked).map(|c| c.id()), Some("weapons_mass_casualty"));
+        assert_eq!(
+            moderation_block(blocked).map(|c| c.id()),
+            Some("weapons_mass_casualty")
+        );
         assert!(moderation_block(ok).is_none());
         assert!(moderation_block("   ").is_none());
 
@@ -2060,8 +2406,14 @@ mod tests {
         // Red-team finding #24: a prompt-less POST /jobs used to create an
         // unservable orphan on-chain while returning ok:true. The prompt is now
         // resolved up front and a body with no prompt is rejected.
-        assert_eq!(resolve_job_prompt(&json!({"prompt": "hi"})).as_deref(), Some("hi"));
-        assert_eq!(resolve_job_prompt(&json!({"input": "vec"})).as_deref(), Some("vec"));
+        assert_eq!(
+            resolve_job_prompt(&json!({"prompt": "hi"})).as_deref(),
+            Some("hi")
+        );
+        assert_eq!(
+            resolve_job_prompt(&json!({"input": "vec"})).as_deref(),
+            Some("vec")
+        );
         // OpenAI-style body: previously silently ignored on this endpoint.
         let m = resolve_job_prompt(&json!({"messages": [{"role": "user", "content": "yo"}]}))
             .expect("messages body must yield a prompt");
@@ -2099,7 +2451,10 @@ mod tests {
             p.vram_mb = vram;
             p
         };
-        let reg = vec![mk("small", "http://s", 5, 8188), mk("big", "http://b", 50, 24576)];
+        let reg = vec![
+            mk("small", "http://s", 5, 8188),
+            mk("big", "http://b", 50, 24576),
+        ];
         // With a 16 GB floor, only the big node qualifies even though `small` is faster.
         let (p, _) = pick(&reg, 0, 16000, 0, 0.0, "ltx-video", 0, &RttOverrides::new()).unwrap();
         assert_eq!(p.address, "big", "16GB job must skip the 8GB node");
@@ -2128,7 +2483,17 @@ mod tests {
         let mut hi = prov("hi", "http://h", 50, "llama3.2:1b");
         hi.ram_mb = 64000;
         let reg2 = vec![low, hi];
-        let (p, _) = pick(&reg2, 0, 0, 32000, 0.0, "llama3.2:1b", 0, &RttOverrides::new()).unwrap();
+        let (p, _) = pick(
+            &reg2,
+            0,
+            0,
+            32000,
+            0.0,
+            "llama3.2:1b",
+            0,
+            &RttOverrides::new(),
+        )
+        .unwrap();
         assert_eq!(p.address, "hi", "32GB RAM floor must skip the 8GB-RAM node");
 
         // No floor -> the gate is inert (the faster unadvertised node still wins).
@@ -2156,19 +2521,52 @@ mod tests {
         ];
         // With a 3 TFLOPS floor the integrated node is excluded despite being faster.
         let (p, _) = pick(&reg, 0, 0, 0, 3.0, "llama3.2:1b", 0, &RttOverrides::new()).unwrap();
-        assert_eq!(p.address, "dgpu", "3 TFLOPS job must skip the integrated GPU");
+        assert_eq!(
+            p.address, "dgpu",
+            "3 TFLOPS job must skip the integrated GPU"
+        );
         // No floor -> the faster integrated node wins (gate inert).
         let (p2, _) = pick(&reg, 0, 0, 0, 0.0, "llama3.2:1b", 0, &RttOverrides::new()).unwrap();
         assert_eq!(p2.address, "apu");
 
         // A known-but-too-low tflops is excluded even if it claims "discrete"...
         let weak = mk("weak", "http://w", 1, "discrete", 2.0);
-        assert!(pick(&vec![weak.clone()], 0, 0, 0, 3.0, "llama3.2:1b", 0, &RttOverrides::new()).is_none());
+        assert!(pick(
+            &vec![weak.clone()],
+            0,
+            0,
+            0,
+            3.0,
+            "llama3.2:1b",
+            0,
+            &RttOverrides::new()
+        )
+        .is_none());
         // ...and an *unknown* tflops (0) is trusted ONLY when self-declared discrete.
         let unknown_disc = mk("ud", "http://ud", 1, "discrete", 0.0);
-        assert!(pick(&vec![unknown_disc], 0, 0, 0, 3.0, "llama3.2:1b", 0, &RttOverrides::new()).is_some());
+        assert!(pick(
+            &vec![unknown_disc],
+            0,
+            0,
+            0,
+            3.0,
+            "llama3.2:1b",
+            0,
+            &RttOverrides::new()
+        )
+        .is_some());
         let unknown_integ = mk("ui", "http://ui", 1, "integrated", 0.0);
-        assert!(pick(&vec![unknown_integ], 0, 0, 0, 3.0, "llama3.2:1b", 0, &RttOverrides::new()).is_none());
+        assert!(pick(
+            &vec![unknown_integ],
+            0,
+            0,
+            0,
+            3.0,
+            "llama3.2:1b",
+            0,
+            &RttOverrides::new()
+        )
+        .is_none());
     }
 
     #[test]
@@ -2184,11 +2582,31 @@ mod tests {
         // An AMD RX 7900 XTX is a discrete dGPU → admitted by the class flag.
         let dgpu = mk_amd("amd-d", "http://d", 50, "AMD Radeon RX 7900 XTX");
         assert_eq!(dgpu.gpu_class, "discrete");
-        assert!(pick(&vec![dgpu], 0, 0, 0, 3.0, "llama3.2:1b", 0, &RttOverrides::new()).is_some());
+        assert!(pick(
+            &vec![dgpu],
+            0,
+            0,
+            0,
+            3.0,
+            "llama3.2:1b",
+            0,
+            &RttOverrides::new()
+        )
+        .is_some());
         // An AMD APU (Radeon Graphics) is integrated + sub-floor → excluded.
         let igpu = mk_amd("amd-i", "http://i", 1, "AMD Radeon(TM) Graphics");
         assert_eq!(igpu.gpu_class, "integrated");
-        assert!(pick(&vec![igpu], 0, 0, 0, 3.0, "llama3.2:1b", 0, &RttOverrides::new()).is_none());
+        assert!(pick(
+            &vec![igpu],
+            0,
+            0,
+            0,
+            3.0,
+            "llama3.2:1b",
+            0,
+            &RttOverrides::new()
+        )
+        .is_none());
     }
 
     #[test]
@@ -2209,7 +2627,16 @@ mod tests {
         // remote provider knows where to POST the finished result.
         let p = std::env::temp_dir().join(format!("gpn-assign-test-{}.json", std::process::id()));
         let ps = p.to_string_lossy().to_string();
-        write_assignment(&ps, 42, "5Bob", "qwen2.5:7b", true, "http://gpn-testnet.duckdns.org:8092", "tok-abc").unwrap();
+        write_assignment(
+            &ps,
+            42,
+            "5Bob",
+            "qwen2.5:7b",
+            true,
+            "http://gpn-testnet.duckdns.org:8092",
+            "tok-abc",
+        )
+        .unwrap();
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&ps).unwrap()).unwrap();
         assert_eq!(v["42"]["provider"], "5Bob");
         assert_eq!(v["42"]["model"], "qwen2.5:7b");
@@ -2236,7 +2663,16 @@ mod tests {
 
     #[test]
     fn assignment_push_carries_the_shared_token_that_binds_it_to_the_provider() {
-        let body = assignment_body(7, "prov", "llama3.2:1b", false, None, "http://ap:8092", "ctok", "s3cret");
+        let body = assignment_body(
+            7,
+            "prov",
+            "llama3.2:1b",
+            false,
+            None,
+            "http://ap:8092",
+            "ctok",
+            "s3cret",
+        );
         assert_eq!(body["assign_token"], "s3cret");
         assert_eq!(body["callback_token"], "ctok");
         assert_eq!(body["job_id"], 7);
