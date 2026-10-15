@@ -128,7 +128,9 @@ jobs:
           set "GPN_NODE_KEY=8f9e5ccd99ed3f4516563495d598a7dbcfff5c18b658d3e5cea5718307a4ba74"
           set "GPN_BOOTNODES=/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo"
           cd /d C:\gpn
-          "C:\gpn\bin\gpn_node.exe" >> "C:\gpn\node.log" 2>&1
+          REM show output live in the console AND append to node.log (Tee), so an
+          REM operator can watch what's happening without tailing the file.
+          powershell -NoProfile -Command "& 'C:\gpn\bin\gpn_node.exe' 2>&1 | Tee-Object -FilePath 'C:\gpn\node.log' -Append"
           '@
           $script = $script.Replace('__CHAIN__', $chain)
           Set-Content -Path 'C:\gpn\start-node.cmd' -Value $script -Encoding ascii
