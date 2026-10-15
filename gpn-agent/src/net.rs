@@ -27,6 +27,7 @@
 //! (`sudo resolvectl dns <iface> 1.1.1.1 && resolvectl flush-caches`) still
 //! helps every other client, but this keeps GPN robust without root.
 
+#[cfg(unix)]
 use std::ffi::CString;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::time::Duration;
@@ -62,6 +63,14 @@ fn ipv4_addrs(host: &str) -> Result<Vec<SocketAddr>, Box<dyn std::error::Error +
     if let Ok(ip) = host.parse::<Ipv4Addr>() {
         return Ok(vec![SocketAddr::V4(SocketAddrV4::new(ip, 0))]);
     }
+    resolve_ipv4_only(host)
+}
+
+/// Unix (`libc`) AF_INET-only resolution — never issues an AAAA query.
+#[cfg(unix)]
+fn resolve_ipv4_only(
+    host: &str,
+) -> Result<Vec<SocketAddr>, Box<dyn std::error::Error + Send + Sync>> {
     let c_host = CString::new(host)?;
     let mut hints: libc::addrinfo = unsafe { std::mem::zeroed() };
     hints.ai_family = libc::AF_INET; // A-only — never queries AAAA
@@ -92,6 +101,66 @@ fn ipv4_addrs(host: &str) -> Result<Vec<SocketAddr>, Box<dyn std::error::Error +
     }
     unsafe { libc::freeaddrinfo(res) };
     Ok(out)
+}
+
+/// Windows AF_INET-only resolution via `GetAddrInfoW` — the `libc` crate does
+/// not export the Winsock `getaddrinfo`/`addrinfo`/`sockaddr_in` symbols on
+/// Windows, so we bind the Win32 API directly through `windows-sys`. Same
+/// semantics: `AF_INET` hints, so no AAAA query is ever sent.
+#[cfg(windows)]
+fn resolve_ipv4_only(
+    host: &str,
+) -> Result<Vec<SocketAddr>, Box<dyn std::error::Error + Send + Sync>> {
+    use windows_sys::Win32::Networking::WinSock::{
+        FreeAddrInfoW, GetAddrInfoW, ADDRINFOW, AF_INET, IPPROTO_TCP, SOCKADDR_IN, SOCK_STREAM,
+    };
+
+    // `GetAddrInfoW` takes a NUL-terminated UTF-16 node name.
+    let mut node: Vec<u16> = host.encode_utf16().collect();
+    node.push(0);
+
+    let mut hints: ADDRINFOW = unsafe { std::mem::zeroed() };
+    hints.ai_family = AF_INET as i32; // A-only — never queries AAAA
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+
+    let mut res: *mut ADDRINFOW = std::ptr::null_mut();
+    let rc = unsafe { GetAddrInfoW(node.as_ptr(), std::ptr::null(), &hints, &mut res) };
+    if rc != 0 {
+        // `windows-sys` does not export `gai_strerror`, so surface the code.
+        return Err(format!("IPv4 GetAddrInfoW for '{host}' failed: {rc}").into());
+    }
+
+    let mut out = Vec::new();
+    let mut cur = res;
+    while !cur.is_null() {
+        let ai = unsafe { &*cur };
+        if ai.ai_family == AF_INET as i32 && !ai.ai_addr.is_null() {
+            let sin = unsafe { &*(ai.ai_addr as *const SOCKADDR_IN) };
+            let ip = Ipv4Addr::from(u32::from_be(unsafe { sin.sin_addr.S_un.S_addr }));
+            out.push(SocketAddr::V4(SocketAddrV4::new(ip, 0)));
+        }
+        cur = ai.ai_next;
+    }
+    unsafe { FreeAddrInfoW(res) };
+    Ok(out)
+}
+
+/// Portable fallback for any other target: `ToSocketAddrs` filtered to IPv4.
+#[cfg(not(any(unix, windows)))]
+fn resolve_ipv4_only(
+    host: &str,
+) -> Result<Vec<SocketAddr>, Box<dyn std::error::Error + Send + Sync>> {
+    use std::net::ToSocketAddrs;
+    let addrs = (host, 0u16)
+        .to_socket_addrs()?
+        .filter(SocketAddr::is_ipv4)
+        .map(|mut a| {
+            a.set_port(0);
+            a
+        })
+        .collect();
+    Ok(addrs)
 }
 
 /// Build a blocking HTTP client that (a) resolves **IPv4 only** (no AAAA stall),

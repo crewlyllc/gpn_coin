@@ -44,9 +44,19 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 # Async utilities
 futures = "0.3"
 
-# libc: AF_INET-only getaddrinfo for the IPv4-only callback resolver
+# libc (Unix): AF_INET-only getaddrinfo for the IPv4-only callback resolver
 # (see src/net.rs — avoids the AAAA stall on hosts with an AAAA-laggy resolver)
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# windows-sys (Windows): GetAddrInfoW AF_INET-only resolver. The `libc` crate
+# does not export the Winsock getaddrinfo/addrinfo/sockaddr_in symbols on
+# Windows, so the Windows path in src/net.rs binds the Win32 API directly.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinSock",
+] }
 
 [dev-dependencies]
 sha3 = "0.10"
