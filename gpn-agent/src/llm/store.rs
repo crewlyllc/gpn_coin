@@ -295,6 +295,21 @@ impl LlmStore {
 
     pub fn get(&self, job_id: u64) -> Option<LlmJob> {
         let _g = self.lock.lock().unwrap();
+        // Fast path: on an mtime cache hit, return ONLY the requested entry
+        // instead of deep-cloning the entire job map. `load()` clones the full
+        // map on every hit, and the provider poll loop calls get_job() ~128x
+        // per 300ms pass, so cloning the whole (~4.3k-entry) map each time was a
+        // sustained ~90-100% CPU burn that scaled with the ledger. Semantics are
+        // unchanged: on a miss (or stale cache) we fall back to load().
+        let mtime = file_mtime_ns(&self.path);
+        {
+            let cache = store_cache().lock().unwrap();
+            if let Some((m, map)) = cache.get(&self.path) {
+                if *m == mtime && !(mtime == 0 && map.is_empty()) {
+                    return map.get(&job_id).cloned();
+                }
+            }
+        }
         self.load().get(&job_id).cloned()
     }
 
