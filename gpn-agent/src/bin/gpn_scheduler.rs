@@ -868,16 +868,11 @@ fn write_assignment(
     callback_url: &str,
     callback_token: &str,
 ) -> std::io::Result<()> {
-    let mut m: serde_json::Map<String, Value> = std::fs::read_to_string(store)
-        .ok()
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .and_then(|v| v.as_object().cloned())
-        .unwrap_or_default();
-    m.insert(
-        job_id.to_string(),
-        json!({"provider": provider, "model": model, "pull": pull, "callback": callback_url, "callback_token": callback_token}),
-    );
-    std::fs::write(store, serde_json::to_string_pretty(&Value::Object(m))?)
+    // Cross-process locked read-modify-write: the AP, heartbeat + providers all
+    // share `assignments.json`, so an unlocked RMW here could drop another
+    // process's just-written assignment (same lost-update class as `LlmStore`).
+    let rec = json!({"provider": provider, "model": model, "pull": pull, "callback": callback_url, "callback_token": callback_token});
+    gpn_agent::llm::merge_json_object(std::path::Path::new(store), &job_id.to_string(), rec)
 }
 
 /// Generate an unguessable per-job callback token (item #16, red-team finding #2).

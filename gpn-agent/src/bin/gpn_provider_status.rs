@@ -111,15 +111,9 @@ fn write_assignment(job_id: u64, rec: serde_json::Value) -> std::io::Result<()> 
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     let path = std::env::var("GPN_ASSIGN_STORE")
         .unwrap_or_else(|_| format!("{home}/.gpn/assignments.json"));
-    let mut m: serde_json::Map<String, serde_json::Value> = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
-    m.insert(job_id.to_string(), rec);
-    if let Some(dir) = std::path::Path::new(&path).parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    std::fs::write(&path, serde_json::Value::Object(m).to_string())
+    // Cross-process locked read-modify-write (see `gpn_agent::llm::StoreLock`):
+    // the AP + heartbeat + providers share `assignments.json`.
+    gpn_agent::llm::merge_json_object(std::path::Path::new(&path), &job_id.to_string(), rec)
 }
 
 /// Total system RAM (MiB) from `/proc/meminfo`; 0 if unknown (e.g. Windows).

@@ -12,8 +12,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// Process-global cache of the parsed store, keyed by path, invalidated when the
 /// file's mtime changes. Without this, every `get()` re-reads + JSON-parses the
@@ -47,6 +48,81 @@ pub fn default_store_path() -> PathBuf {
             let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
             PathBuf::from(format!("{home}/.gpn/llm_store.json"))
         })
+}
+
+/// Portable cross-process advisory lock for a shared store file.
+///
+/// The access-point, the LLM/diffusion/ML providers and the provider heartbeat
+/// all share `~/.gpn/llm_store.json` + `~/.gpn/assignments.json` and each does a
+/// read-modify-write of the WHOLE file. A per-process `Mutex` does not stop one
+/// process from clobbering another's write with a stale in-memory map (a lost
+/// update — e.g. the AP's `put()` for job 4858 was overwritten by an unrelated
+/// provider `complete()` that had loaded the file first). This serialises the
+/// RMW across processes with an atomic lock DIRECTORY (`create_dir` is atomic on
+/// every OS); a stale lock left by a crashed holder is broken after `STALE`.
+/// Std-only ⇒ no new deps, builds on Linux + Windows; the critical sections here
+/// are a few milliseconds.
+pub struct StoreLock {
+    dir: PathBuf,
+}
+
+impl StoreLock {
+    pub fn acquire(target: &Path) -> std::io::Result<StoreLock> {
+        let dir = target.with_extension("lockdir");
+        if let Some(parent) = dir.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let start = Instant::now();
+        loop {
+            match std::fs::create_dir(&dir) {
+                Ok(_) => return Ok(StoreLock { dir }),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // Break a stale lock left by a crashed writer.
+                    if let Ok(md) = std::fs::metadata(&dir) {
+                        if let Ok(modified) = md.modified() {
+                            if modified.elapsed().map(|d| d.as_secs() > 30).unwrap_or(false) {
+                                let _ = std::fs::remove_dir_all(&dir);
+                                continue;
+                            }
+                        }
+                    }
+                    // Never deadlock the caller: after a bounded wait, proceed
+                    // (a single raced write is far better than a stalled AP).
+                    if start.elapsed() >= Duration::from_secs(10) {
+                        return Ok(StoreLock {
+                            dir: PathBuf::new(),
+                        });
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}
+
+impl Drop for StoreLock {
+    fn drop(&mut self) {
+        if !self.dir.as_os_str().is_empty() {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+}
+
+/// Read-modify-write one key into a shared JSON *object* file under the
+/// cross-process [`StoreLock`] (used for `assignments.json`).
+pub fn merge_json_object(path: &Path, key: &str, value: serde_json::Value) -> std::io::Result<()> {
+    let _lock = StoreLock::acquire(path)?;
+    let mut m: serde_json::Map<String, serde_json::Value> = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    m.insert(key.to_string(), value);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    std::fs::write(path, serde_json::Value::Object(m).to_string())
 }
 
 /// A single generation job's off-chain payload. Used for LLM inference AND
@@ -273,6 +349,16 @@ impl LlmStore {
         map
     }
 
+    /// Always read the store from disk, bypassing the process cache. Used by the
+    /// mutators *under the cross-process lock* so a stale in-memory map can never
+    /// overwrite another process's concurrent write.
+    fn load_fresh(&self) -> HashMap<u64, LlmJob> {
+        match std::fs::read_to_string(&self.path) {
+            Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+            Err(_) => HashMap::new(),
+        }
+    }
+
     fn save(&self, map: &HashMap<u64, LlmJob>) -> std::io::Result<()> {
         let tmp = self.path.with_extension("tmp");
         std::fs::write(&tmp, serde_json::to_string_pretty(map).unwrap_or_default())?;
@@ -288,7 +374,8 @@ impl LlmStore {
 
     pub fn put(&self, job_id: u64, job: LlmJob) -> std::io::Result<()> {
         let _g = self.lock.lock().unwrap();
-        let mut map = self.load();
+        let _x = StoreLock::acquire(&self.path)?;
+        let mut map = self.load_fresh();
         map.insert(job_id, job);
         self.save(&map)
     }
@@ -315,7 +402,8 @@ impl LlmStore {
 
     pub fn set_status(&self, job_id: u64, status: &str) -> std::io::Result<()> {
         let _g = self.lock.lock().unwrap();
-        let mut map = self.load();
+        let _x = StoreLock::acquire(&self.path)?;
+        let mut map = self.load_fresh();
         if let Some(j) = map.get_mut(&job_id) {
             j.status = status.to_string();
             self.save(&map)?;
@@ -332,7 +420,8 @@ impl LlmStore {
         salt: Option<&str>,
     ) -> std::io::Result<()> {
         let _g = self.lock.lock().unwrap();
-        let mut map = self.load();
+        let _x = StoreLock::acquire(&self.path)?;
+        let mut map = self.load_fresh();
         if let Some(j) = map.get_mut(&job_id) {
             j.response = Some(response.to_string());
             j.result_hash = Some(result_hash.to_string());
@@ -354,7 +443,8 @@ impl LlmStore {
         result_hash: &str,
     ) -> std::io::Result<()> {
         let _g = self.lock.lock().unwrap();
-        let mut map = self.load();
+        let _x = StoreLock::acquire(&self.path)?;
+        let mut map = self.load_fresh();
         if let Some(j) = map.get_mut(&job_id) {
             j.artifact_path = Some(artifact_path.to_string());
             j.artifact_media_type = Some(media_type.to_string());
@@ -367,7 +457,8 @@ impl LlmStore {
 
     pub fn set_error(&self, job_id: u64, err: &str) -> std::io::Result<()> {
         let _g = self.lock.lock().unwrap();
-        let mut map = self.load();
+        let _x = StoreLock::acquire(&self.path)?;
+        let mut map = self.load_fresh();
         if let Some(j) = map.get_mut(&job_id) {
             j.error = Some(err.to_string());
             j.status = "error".to_string();
@@ -417,6 +508,66 @@ mod tests {
         assert_eq!(back.kind, "ml");
         assert_eq!(back.task.as_deref(), Some("embeddings"));
         assert_eq!(back.prompt, "hello world");
+    }
+
+    #[test]
+    fn store_lock_is_mutually_exclusive() {
+        let dir = std::env::temp_dir().join(format!("gpn-lock-{}", std::process::id()));
+        let target = dir.join("store.json");
+        let a = StoreLock::acquire(&target).unwrap();
+        // A second acquire must block until the first is dropped.
+        let handle = std::thread::spawn(move || {
+            let b = StoreLock::acquire(&target).unwrap();
+            drop(b);
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(handle.is_finished() == false, "second lock acquired while held");
+        drop(a);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn merge_json_object_preserves_existing_keys() {
+        let dir = std::env::temp_dir().join(format!("gpn-merge-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("assignments.json");
+        merge_json_object(&p, "1", serde_json::json!({"a": 1})).unwrap();
+        merge_json_object(&p, "2", serde_json::json!({"b": 2})).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(v["1"]["a"], 1);
+        assert_eq!(v["2"]["b"], 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_puts_do_not_lose_entries() {
+        // Two independent handles (as the AP and a provider are) writing to the
+        // SAME file concurrently must not clobber each other — the lost-update
+        // defect that dropped the #4858 payload.
+        let dir = std::env::temp_dir().join(format!("gpn-conc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("llm_store.json");
+        let p1 = p.clone();
+        let p2 = p.clone();
+        let t1 = std::thread::spawn(move || {
+            let s = LlmStore::with_path(p1);
+            for i in 0..50u64 {
+                s.put(i, LlmJob::new_llm("m", "p", 0.7, 1)).unwrap();
+            }
+        });
+        let t2 = std::thread::spawn(move || {
+            let s = LlmStore::with_path(p2);
+            for i in 50..100u64 {
+                s.put(i, LlmJob::new_llm("m", "p", 0.7, 1)).unwrap();
+            }
+        });
+        t1.join().unwrap();
+        t2.join().unwrap();
+        let s = LlmStore::with_path(p);
+        for i in 0..100u64 {
+            assert!(s.get(i).is_some(), "entry {i} lost to a concurrent write");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
