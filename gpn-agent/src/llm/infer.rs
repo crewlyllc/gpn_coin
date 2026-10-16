@@ -17,6 +17,14 @@ pub fn default_ollama_url() -> String {
 /// spamming `pull … failed: error sending request` every poll.
 pub const OLLAMA_UNAVAILABLE: &str = "ollama-unavailable";
 
+/// How long ollama should keep the model resident after a request (seconds).
+///
+/// ollama's default is 5 min; a serving provider that goes idle longer than
+/// that pays a full model-load (~13 s on qwen2.5:0.5b) on its next job, which
+/// pushes job e2e past the 5 s ceiling. Pin it for 1 h so an always-on node
+/// keeps the model warm across idle gaps.
+const KEEP_ALIVE_SECS: u64 = 3600;
+
 /// The one-line, actionable guidance printed when ollama is missing.
 pub fn ollama_missing_hint() -> String {
     format!(
@@ -72,6 +80,7 @@ pub async fn run_inference(
         "stream": false,
         "temperature": temperature,
         "max_tokens": max_tokens,
+        "keep_alive": KEEP_ALIVE_SECS,
     });
 
     let client = reqwest::Client::builder()
@@ -137,7 +146,7 @@ pub async fn run_ml_inference(
     let result_json = if task == "embeddings" {
         let resp = client
             .post(format!("{base}/api/embeddings"))
-            .json(&serde_json::json!({"model": model, "prompt": input}))
+            .json(&serde_json::json!({"model": model, "prompt": input, "keep_alive": KEEP_ALIVE_SECS}))
             .send()
             .await?;
         let status = resp.status();
@@ -161,6 +170,7 @@ pub async fn run_ml_inference(
                 "model": model,
                 "prompt": input,
                 "stream": false,
+                "keep_alive": KEEP_ALIVE_SECS,
                 "options": {"temperature": temperature, "num_predict": max_tokens},
             }))
             .send()
