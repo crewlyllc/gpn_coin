@@ -47,6 +47,54 @@ impl SubstrateCli for Cli {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    /// Stub-argv test for the regression this fixes: a **bare** `gpn-node`
+    /// launch (no `--validator`, no `--alice`, no `--force-authoring`) must
+    /// still end up as an authority whose miner is spawned.
+    ///
+    /// The CLI alone derives nothing (role=Full, force_authoring=false) — that
+    /// is the exact divergence that produced "Prepared block for proposing…"
+    /// with no seal. `service::force_mining` + `service::miner_should_run`
+    /// close it: mining follows the (forced) role, never the unused flag.
+    #[test]
+    fn bare_argv_is_forced_to_authority_and_spawns_miner() {
+        let cli = Cli::try_parse_from(["gpn-node", "--chain", "dev", "--tmp"])
+            .expect("a plain run argv must parse");
+
+        // The stub argv sets none of the flags Substrate would otherwise need.
+        assert!(!cli.run.validator, "bare argv must not rely on --validator");
+        assert!(!cli.run.alice, "bare argv must not rely on --alice");
+        assert!(
+            !cli.run.force_authoring,
+            "bare argv must not have to pass --force-authoring"
+        );
+
+        // The miner decision is driven by the ROLE only — and a forced
+        // Authority always mines, with or without --force-authoring.
+        assert!(service::miner_should_run(sc_service::Role::Authority));
+        assert!(!service::miner_should_run(sc_service::Role::Full));
+    }
+
+    /// `--alice` (what the supervisor passes via `author = "alice"`) sets
+    /// role=Authority but *not* `--force-authoring` — the historical gate that
+    /// left a proposer with no miner. It must still mine.
+    #[test]
+    fn alice_without_force_authoring_spawns_miner() {
+        let cli = Cli::try_parse_from(["gpn-node", "--chain", "dev", "--tmp", "--alice"])
+            .expect("argv parses");
+        assert!(cli.run.alice);
+        assert!(
+            !cli.run.force_authoring,
+            "--alice does not imply --force-authoring on this Substrate rev"
+        );
+        assert!(service::miner_should_run(sc_service::Role::Authority));
+    }
+}
+
 /// Parse and run command line arguments
 pub fn run() -> sc_cli::Result<()> {
     let cli = Cli::from_args();
@@ -133,9 +181,9 @@ pub fn run() -> sc_cli::Result<()> {
             // Force the authority role + authoring on the runner's config *before*
             // anything reads it, so the startup banner reports `Role: AUTHORITY`
             // (not the misleading `FULL`) and the service mines by default —
-            // with no `--force-authoring` / `--validator` required.
-            runner.config_mut().role = sc_service::Role::Authority;
-            runner.config_mut().force_authoring = true;
+            // with no `--force-authoring` / `--validator` required. The same
+            // invariants are re-applied inside `service::new_full`.
+            service::force_mining(runner.config_mut());
             // Extra peer-discovery seed sources (Bitcoin-style DNS seeds + HTTP
             // seed lists) declared on the CLI. Merged with the static
             // bootnodes + persisted peer store in `prepare_network_config`.

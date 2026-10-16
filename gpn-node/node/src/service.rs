@@ -391,6 +391,36 @@ fn read_chain_endpoints(client: &FullClient) -> Vec<String> {
     out
 }
 
+/// Force the "a GPN node always mines" invariants onto a [`Configuration`]:
+/// the Authority role AND `force_authoring`. Idempotent.
+///
+/// Applied on the CLI runner config in `command.rs` (so the startup banner
+/// prints `Role: AUTHORITY` before anything reads it) and again here in
+/// [`new_full`] for every other service entry point.
+pub(crate) fn force_mining(config: &mut sc_service::Configuration) {
+    config.role = sc_service::Role::Authority;
+    config.force_authoring = true;
+}
+
+/// The **single decision** that gates the seal-producing miner.
+///
+/// A GPN node whose role is `Authority` always mines: the block *proposer*
+/// (the `sc_consensus_pow` mining worker) is started under exactly this
+/// condition, so the seal-producing *miner* MUST be started under it too. If
+/// the two are gated on different predicates the node exhibits the classic PoW
+/// gate bug — the proposer logs `Prepared block for proposing at #N` forever
+/// while no miner exists to seal it, and the node idles at the same best block.
+///
+/// `--force-authoring` is deliberately **not** part of this decision. On this
+/// Substrate rev sc-service never reads `Configuration::force_authoring` for a
+/// PoW node (it only feeds Aura/Babe), so it is an *unused, CLI-derived* input
+/// that can silently diverge from the role: `--alice`/`--validator`/a keyring
+/// set `role = Authority` but leave `force_authoring = false`, which previously
+/// left the proposer running with no miner to seal behind it.
+pub(crate) fn miner_should_run(role: sc_service::Role) -> bool {
+    role.is_authority()
+}
+
 /// Builds a new service for a full client.
 pub fn new_full<
     N: sc_network::NetworkBackend<Block, <Block as sp_runtime::traits::Block>::Hash>,
@@ -406,8 +436,7 @@ pub fn new_full<
     // `Role: FULL` → no mining worker, no GPU-miner lines, no rewards.
     // The flags remain *accepted* (harmless) for backward compatibility.
     let mut config = config;
-    config.role = sc_service::Role::Authority;
-    config.force_authoring = true;
+    force_mining(&mut config);
 
     let sc_service::PartialComponents {
         client,
@@ -591,7 +620,6 @@ pub fn new_full<
     }
 
     let role = config.role;
-    let force_authoring = config.force_authoring;
     let prometheus_registry = config.prometheus_registry().cloned();
 
     let rpc_extensions_builder = {
@@ -667,9 +695,19 @@ pub fn new_full<
         // fetch templates and submit seals over RPC.
         *miner_worker_slot.lock().unwrap() = Some(worker.clone());
 
-        if force_authoring {
+        // Wire the seal-producing miner from the SAME predicate that started
+        // the proposer above (`miner_should_run(role)`), NOT from the unused
+        // `--force-authoring` flag. A plain `gpn-node` — including one launched
+        // with `--alice`/`--validator`/a keyring, which set role=Authority but
+        // leave force_authoring=false — therefore always gets a miner to seal
+        // the blocks its proposer builds.
+        if miner_should_run(role) {
             // The node's own wallet is its block-reward payout address (Bitcoin-style).
             let author = mining_account(keystore_container.keystore().as_ref());
+            log::info!(
+                "⛏  Mining enabled (role={role}): starting seal-producing miner 
+                 (no --force-authoring required)"
+            );
             spawn_miner(worker, author);
         }
     }
@@ -711,6 +749,13 @@ fn gpu_yield_requested() -> bool {
 /// OpenCL GPU is available, falls back to the light-cache CPU miner so the
 /// node still produces blocks on machines without a GPU.
 fn spawn_miner(worker: MiningWorker, author: Option<[u8; 32]>) {
+    log::info!(
+        "⛏  miner start: probing GPU (device 0); author={} — will seal every block the proposer builds",
+        match author {
+            Some(_) => "set",
+            None => "none (runtime BlockRewardBeneficiary fallback)",
+        }
+    );
     match EthashGpuMiner::new(0) {
         Ok(_) => spawn_gpu_miner(worker, author),
         Err(e) => {
@@ -766,7 +811,9 @@ fn spawn_gpu_miner(worker: MiningWorker, author: Option<[u8; 32]>) {
             let miner = match EthashGpuMiner::new(0) {
                 Ok(m) => m,
                 Err(e) => {
-                    log::error!("GPU miner init failed: {e}");
+                    // Never leave the proposer without a miner: fall back to CPU.
+                    log::error!("GPU miner init failed: {e}; falling back to CPU light-cache miner");
+                    spawn_cpu_miner(worker, author);
                     return;
                 }
             };
@@ -781,7 +828,12 @@ fn spawn_gpu_miner(worker: MiningWorker, author: Option<[u8; 32]>) {
             let dag = match miner.build_dag(&cache, full_size) {
                 Ok(d) => d,
                 Err(e) => {
-                    log::error!("GPU DAG build failed: {e}");
+                    // e.g. OpenCL OOM when the GPU is busy with an inference job:
+                    // keep producing blocks via the CPU miner rather than idling.
+                    log::error!(
+                        "GPU DAG build failed: {e}; falling back to CPU light-cache miner"
+                    );
+                    spawn_cpu_miner(worker, author);
                     return;
                 }
             };
@@ -817,7 +869,17 @@ fn spawn_gpu_miner(worker: MiningWorker, author: Option<[u8; 32]>) {
                     match miner.mine_batch(&dag, &header, &target_le, nonce, GPU_BATCH) {
                         Ok(Some(seal)) => {
                             let seal_bytes = seal_with_author(seal.to_seal_bytes(), author);
-                            let _ = futures::executor::block_on(worker.submit(seal_bytes));
+                            let nonce_found = seal.nonce;
+                            let ok = futures::executor::block_on(worker.submit(seal_bytes));
+                            if ok {
+                                log::info!(
+                                    "⛏  GPU sealed block: nonce={nonce_found} pre_hash={pre_hash:?}"
+                                );
+                            } else {
+                                log::warn!(
+                                    "GPU seal for pre_hash={pre_hash:?} (nonce={nonce_found}) was rejected by the node; retrying"
+                                );
+                            }
                             nonce = nonce.wrapping_add(GPU_BATCH as u64);
                         }
                         Ok(None) => {
@@ -844,6 +906,7 @@ fn spawn_cpu_miner(worker: MiningWorker, author: Option<[u8; 32]>) {
         .spawn(move || {
             let cache = ethash_cache();
             let full_size = ethash_full_size();
+            log::info!("CPU light-cache miner online (epoch {DEV_EPOCH}); no GPU backend");
             let mut nonce: u64 = 0;
             loop {
                 // AI-compute full stop (same contract as the GPU miner): while a
@@ -872,7 +935,17 @@ fn spawn_cpu_miner(worker: MiningWorker, author: Option<[u8; 32]>) {
                             if let Some(a) = author {
                                 seal.extend_from_slice(&a);
                             }
-                            let _ = futures::executor::block_on(worker.submit(seal));
+                            let nonce_found = nonce;
+                            let ok = futures::executor::block_on(worker.submit(seal));
+                            if ok {
+                                log::info!(
+                                    "⛏  CPU sealed block: nonce={nonce_found} pre_hash={pre_hash:?}"
+                                );
+                            } else {
+                                log::warn!(
+                                    "CPU seal for pre_hash={pre_hash:?} (nonce={nonce_found}) was rejected by the node; retrying"
+                                );
+                            }
                             nonce = nonce.wrapping_add(1);
                             break;
                         }
@@ -1018,5 +1091,34 @@ mod seal_tests {
             !verify_seal(&other_pre_hash.into(), &seal, target),
             "seal bound to wrong header accepted"
         );
+    }
+}
+
+#[cfg(test)]
+mod mining_gate_tests {
+    use super::*;
+    use sc_service::Role;
+
+    /// THE regression this fix addresses: a node whose role is Authority must
+    /// spawn the seal-producing miner **even with no `--force-authoring`**.
+    ///
+    /// Before the fix the miner spawn was gated on `config.force_authoring`,
+    /// a separate (and, for PoW, *unused*) CLI-derived flag. `--alice` /
+    /// `--validator` / a keyring set role=Authority but leave
+    /// force_authoring=false, so the proposer ran while no miner existed to
+    /// seal its proposals → the node idled at the same best block forever.
+    #[test]
+    fn authority_without_force_authoring_still_runs_miner() {
+        // The decision ignores force_authoring entirely; it is driven by role.
+        assert!(
+            miner_should_run(Role::Authority),
+            "an Authority node must always spawn a miner (no --force-authoring needed)"
+        );
+    }
+
+    /// A plain full node does not mine (the proposer is not started either).
+    #[test]
+    fn full_node_does_not_run_miner() {
+        assert!(!miner_should_run(Role::Full));
     }
 }
