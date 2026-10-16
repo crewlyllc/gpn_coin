@@ -210,6 +210,9 @@ fn ascii_token(ch: char) -> &'static str {
         '💤' => "[zzz]",
         '🔧' => "[fix]",
         '🛑' => "[stop]",
+        '⛏' => "[mine]",
+        '🎁' => "[blk]",
+        '🔨' => "[pow]",
         // common typography → ASCII look-alikes (keeps messages readable)
         '—' | '–' | '·' => "-",
         '…' => "...",
@@ -882,7 +885,7 @@ fn status_line(cfg: &Config, shared: &Shared) -> String {
             }
         }
     }
-    let mut line = format!("[status] node_count={}", parts.len());
+    let mut line = format!("[status] children={}", parts.len());
     for p in &parts {
         line.push(' ');
         line.push_str(p);
