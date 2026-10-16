@@ -43,6 +43,9 @@ node is a **miner AND an AI worker**. Mining-only is half the machine.
 **Guidelines (architecture):**
 - Chain = coordination + escrow. **Never move AI compute on-chain.**
 - **One GPU does one job at a time.** An AI job yields mining; a machine never mines *and* infers.
+  **One job at a time = MUTUAL EXCLUSION — NOT a limit on job types.** Every node is equipped by
+  design to serve **every** job type (LLM · image · video · ML inference · fine-tune) and advertises
+  all of them; a constrained box can opt a capability out, but the default is everything ON.
 - Privacy: on-chain values salted/opaque.
 - **Reward and block time are coupled:** `emission_rate = block_reward / target_block_time`.
 
@@ -67,6 +70,11 @@ node is a **miner AND an AI worker**. Mining-only is half the machine.
 
 A GPN node does **not** mine and serve AI simultaneously — the one GPU does one thing. The node is
 in **one of three modes**:
+
+> **⚑ "One GPU, one job" = MUTUAL EXCLUSION, not a restriction on job types.** The GPU runs exactly
+> **one job at a time** (never two concurrent), but **every node is equipped by design to serve every
+> job type** — LLM · image · video · ML inference · fine-tune — and advertises all of them. All
+> capabilities are ON by default (per-capability opt-out exists for constrained boxes).
 - **Mining** — hashing GPN blocks (GPU-PoW) → newly-minted GPN.
 - **Compute** — serving AI jobs (LLM / image / video / fine-tune) → GPN from job escrow.
 - **Staking** — *(Phase C, not live at launch)* → staking APR.

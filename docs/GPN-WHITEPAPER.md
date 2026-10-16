@@ -87,6 +87,8 @@ Rates are **cost-derived** — a roofline estimate of the provider's true throug
 A buyer hits a single **access point** (`gpn_scheduler`) and never needs a provider's address. The scheduler:
 1. **Filters** by capability (GFLOPS, VRAM/RAM, model availability).
 2. **Requires availability** — a node currently running a job is not available (one GPU, one job).
+   ("One job" = mutual exclusion — the GPU does one job *at a time*; it is **not** a limit on job
+   *types*. Every node serves every job type — LLM · image · video · ML · fine-tune — by design.)
 3. **Picks the lowest-latency (least-ms)** eligible provider, with a model-aware fallback (a provider that *can pull* a model wins only if downloading still finishes sooner).
 4. **Dispatches** the assignment (pushed over HTTP to the provider) and the chain escrows + enforces the capability gate.
 

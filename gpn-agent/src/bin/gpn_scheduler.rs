@@ -215,6 +215,10 @@ struct Provider {
     gpu_class: String,
     /// Estimated FP32 TFLOP/s advertised by the heartbeat; 0.0 = unknown.
     tflops: f64,
+    /// Job types this provider advertises it can serve (`capabilities[]` from
+    /// the heartbeat). Defaults to the full set when a box omits the field, so
+    /// a node designed to serve everything is routable for everything.
+    capabilities: Vec<String>,
     active: u64,
     capacity: u64,
     latency_ms: u64,
@@ -322,6 +326,16 @@ fn refresh(
                         .unwrap_or("unknown")
                         .to_string(),
                     tflops: v.get("tflops").and_then(|x| x.as_f64()).unwrap_or(0.0),
+                    capabilities: v
+                        .get("capabilities")
+                        .and_then(|x| x.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|s| s.as_str().map(String::from))
+                                .collect()
+                        })
+                        .filter(|c: &Vec<String>| !c.is_empty())
+                        .unwrap_or_else(default_capabilities),
                     active: v.get("active").and_then(|x| x.as_u64()).unwrap_or(0),
                     capacity: v
                         .get("capacity")
@@ -347,6 +361,7 @@ fn refresh(
                     ram_mb: 0,
                     gpu_class: "unknown".to_string(),
                     tflops: 0.0,
+                    capabilities: default_capabilities(),
                     active: 0,
                     capacity: 0,
                     latency_ms: 9999,
@@ -393,6 +408,24 @@ fn hex_to_ss58(hex_addr: &str) -> Option<String> {
     let raw = hex_addr.strip_prefix("0x").unwrap_or(hex_addr);
     let bytes: [u8; 32] = hex::decode(raw).ok()?.try_into().ok()?;
     Some(sp_core::sr25519::Public::from_raw(bytes).to_ss58check())
+}
+
+/// The full job-type capability set a node serves *by design*. Used when a
+/// provider's `/status` omits `capabilities[]` (older heartbeat): assume it is
+/// equipped for everything rather than silently dropping its job types. Note
+/// “one GPU, one job” is mutual exclusion (one job at a time) — never a cap on
+/// how many *kinds* of job a node may serve.
+fn default_capabilities() -> Vec<String> {
+    [
+        "LLMInference",
+        "ImageGeneration",
+        "VideoGeneration",
+        "MLInference",
+        "FineTuning",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 fn has_model(p: &Provider, model: &str) -> bool {
@@ -1119,6 +1152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "active": p.active, "capacity": p.capacity, "latency_ms": p.latency_ms,
                     "vram_mb": p.vram_mb, "ram_mb": p.ram_mb,
                     "gpu_class": p.gpu_class, "tflops": p.tflops,
+                    "capabilities": p.capabilities,
                     "healthy": p.last_seen.is_some()
                 })).collect::<Vec<_>>() })
                 }
@@ -2256,6 +2290,7 @@ mod tests {
             ram_mb: 0,
             gpu_class: "unknown".to_string(),
             tflops: 0.0,
+            capabilities: default_capabilities(),
             active: 0,
             capacity: 4,
             latency_ms,

@@ -9,7 +9,10 @@
 
 # A GPN node is ALWAYS both a miner and an AI provider — there is no role
 # option. Every start brings up the chain node/miner, the provider heartbeat,
-# and the provider loop(s) together.
+# and ALL provider loops together. "One GPU, one job" means ONE JOB AT A TIME
+# (mutual exclusion) — NOT a limit on job types: by design every node can serve
+# LLM · image · video · ML inference · fine-tune. Per-capability OPT-OUT below
+# exists for constrained boxes; the default is everything ON.
 
 # ── node / miner ────────────────────────────────────────────────────────────
 chain     = "testnet"                    # testnet | mainnet | dev | <path to chain-spec.json>
@@ -31,8 +34,13 @@ listen            = "0.0.0.0:8093"
 gflops            = 0
 capacity          = 1
 poll_ms           = 300
-diffusion         = false
+# ── optional providers: ON by design; set false to OPT a capability OUT ──
+diffusion         = true     # image/video provider (gpn_diffusion_provider)
 diffusion_poll_ms = 2000
+ml                = true     # ML-inference provider (gpn_ml_provider)
+ml_poll_ms        = 2000
+finetune          = true     # fine-tune provider (gpn_finetune_provider)
+finetune_poll_ms  = 4000
 
 # ── supervisor ──────────────────────────────────────────────────────────────
 # bin_dir     = "~/.local/bin"   # dir holding the child binaries (default: dir of gpn_node)

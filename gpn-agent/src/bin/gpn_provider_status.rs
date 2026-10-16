@@ -1,7 +1,15 @@
 //! gpn_provider_status — a tiny HTTP heartbeat for a provider, polled by the
 //! access-point scheduler to learn capabilities + load + latency.
 //!
-//! `GET /status` → `{ address, gflops, models[], can_pull, active, capacity, vram_mb, ram_mb, gpu_class, tflops }`
+//! `GET /status` → `{ address, gflops, models[], capabilities[], can_pull, active, capacity, vram_mb, ram_mb, gpu_class, tflops }`
+//!
+//! `capabilities[]` lists the JOB TYPES this node serves — `LLMInference`,
+//! `ImageGeneration`, `VideoGeneration`, `MLInference`, `FineTuning`. A GPN
+//! node is equipped to serve **every** job type by design ("one GPU, one job"
+//! means one job *at a time* — mutual exclusion — NOT a restriction on job
+//! types). Advertised so the scheduler routes every kind of job here. Override
+//! with `--capabilities` (env `CAPABILITIES`); a constrained box that opts a
+//! provider out narrows the list.
 //!
 //! `vram_mb`/`ram_mb` advertise this box's hardware so the scheduler can gate a
 //! job that declares a VRAM/RAM floor (item 14 — e.g. video needs a big-VRAM box).
@@ -22,7 +30,8 @@
 //!   gpn_provider_status --listen <ip:port> --address <ss58> --gflops <n>
 //!                       [--models <m1,m2>] [--capacity <n>] [--active <n>]
 //!                       [--ollama http://127.0.0.1:11434]
-//! Env: LISTEN, ADDRESS, GFLOPS, MODELS, CAPACITY, ACTIVE, GPN_OLLAMA
+//!                       [--capabilities <LLMInference,ImageGeneration,…>]
+//! Env: LISTEN, ADDRESS, GFLOPS, MODELS, CAPACITY, ACTIVE, GPN_OLLAMA, CAPABILITIES
 
 use gpn_agent::gpu::{detect_gpu_capability, detect_vram_mb};
 use gpn_agent::llm::{LlmJob, LlmStore};
@@ -157,6 +166,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ollama = opt(&args, "--ollama")
         .or_else(|| std::env::var("GPN_OLLAMA").ok())
         .unwrap_or_else(|| "http://127.0.0.1:11434".into());
+    // Job-type capabilities this node serves. A GPN node serves EVERY job type
+    // by design ("one GPU, one job" = one job *at a time*, mutual exclusion —
+    // NOT a limit on job types). Advertised so the scheduler can route
+    // LLM/image/video/ML/fine-tune jobs here. Filtered to what this box
+    // actually runs (a constrained box may opt a provider out).
+    let caps_default = "LLMInference,ImageGeneration,VideoGeneration,MLInference,FineTuning";
+    let capabilities_csv = opt(&args, "--capabilities")
+        .or_else(|| std::env::var("CAPABILITIES").ok())
+        .unwrap_or_else(|| caps_default.into());
     // Shared AP↔provider secret binding `POST /assign` (item #16 finding #7).
     // Empty ⇒ legacy accept (logged) so a rollout is non-breaking.
     let assign_token = opt(&args, "--assign-token")
@@ -205,9 +223,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
+    let capabilities: Vec<String> = capabilities_csv
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
 
     let server = Server::http(&listen).map_err(|e| format!("cannot bind {listen}: {e}"))?;
-    println!("GPN provider heartbeat on http://{listen} — address={address} gflops={gflops} models={:?} active={active}/{capacity}", models);
+    println!("GPN provider heartbeat on http://{listen} — address={address} gflops={gflops} models={:?} active={active}/{capacity} capabilities={:?}", models, capabilities);
 
     let hdr = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
     if assign_token.is_empty() {
@@ -251,6 +274,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 json!({
                     "address": address, "gflops": gflops, "models": models_now,
                     "can_pull": can_pull, "active": active, "capacity": capacity.max(1),
+                    "capabilities": capabilities,
                     "tok_per_s": tok_per_s, "owner_cost_usd_hr": owner_cost_usd_hr,
                     "mem_bw_gbps": mem_bw_gbps, "vram_mb": vram_mb, "ram_mb": ram_mb,
                     "gpu_class": gpu_class, "tflops": tflops

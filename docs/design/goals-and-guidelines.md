@@ -26,7 +26,9 @@ rewards; the heavy compute runs **off-chain**.
 ### Architecture
 - **Chain = coordination + escrow. Compute = off-chain.** Never move AI compute on-chain.
 - **One GPU does one job at a time.** An AI job yields mining (the network as a whole
-  keeps mining); a machine never mines *and* infers at once.
+  keeps mining); a machine never mines *and* infers at once. "One job at a time" is **mutual
+  exclusion** (never two concurrent jobs) — **not** a limit on job types: every node serves every
+  job type by design.
 - **1 GPU = 1 reward** — rewards gated on hardware attestation (anti-spoof).
 - **Privacy**: Q&A stay off-chain; on-chain values are salted/opaque (verifiable by
   the holder, meaningless to observers).

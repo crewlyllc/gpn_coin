@@ -11,6 +11,18 @@ the chain node/miner *and* the AI serving stack. The node mines and serves AI,
 **auto-yielding the one GPU** to a job while it runs (mining fully stops for the
 job's duration, then resumes — see #24).
 
+> **⚑ “One GPU, one job” = MUTUAL EXCLUSION, not a limit on job types.**
+> The single GPU runs **exactly one job at a time** — never two concurrent — so
+> it never over-subscribes its compute/VRAM. It does **NOT** mean only some job
+> types are available: **every node is equipped by design to serve every job
+> type** — LLM chat · image · video · ML inference · fine-tune — and advertises
+> all of them. The scheduler routes each incoming job to a node that can serve
+> it; that node runs that **one** job to completion (mining paused) before
+> accepting another. All capabilities are ON by default; a constrained box can
+> opt a capability out with `GPN_DIFFUSION=0` / `GPN_ML=0` / `GPN_FINETUNE=0`
+> (or `diffusion = false` etc. in the config file), but the default is
+> “everything available”.
+
 Internally the parts stay **separate processes** (fault isolation: a crash in
 the AI stack cannot take the chain node down), but the operator never has to
 manage them individually.
@@ -19,11 +31,11 @@ manage them individually.
                        ┌──────────────────────────────┐
    one command  ───▶   │          gpn_node            │
    one config          │      (supervisor)            │
-   one log             └───┬───────────┬──────────┬───┘
-   one status line         │           │          │
-                       [node]     [heartbeat] [provider]
-                      gpn-node   gpn_provider  gpn_llm_provider
-                      (miner)      _status     (+ gpn_diffusion_provider)
+   one log             └──┬──────┬──────┬──────┬─────┬┘
+   one status line       │      │      │      │     │
+                    [node] [heartbeat] [provider] [diffuse] [ml] [finetune]
+                   gpn-node  gpn_provider gpn_llm_  gpn_diffusion_  gpn_ml_  gpn_finetune_
+                   (miner)    _status    provider   provider      provider  provider
 ```
 
 ## Quick start
@@ -132,19 +144,29 @@ quantized) and prefer **Linux** for full AMD GPU serving.
 to the CPU, giving ~10–50× lower token/s. The node still works and still mines;
 just budget latency accordingly.
 
-## What it starts (always)
+## What it starts (all by default)
 
 | Child       | Process                                                                    | Log prefix  |
 |-------------|----------------------------------------------------------------------------|-------------|
 | miner/node  | the chain node / miner (`gpn-node …` — mines by default)                     | `[node]`    |
 | heartbeat   | `gpn_provider_status` (advertises capability + load, `:8093`)               | `[heartbeat]` |
 | provider    | `gpn_llm_provider` (claims + runs + settles LLM jobs)                       | `[provider]` |
-| diffuse     | `gpn_diffusion_provider` (only when `diffusion = true`)                     | `[diffuse]` |
+| diffuse     | `gpn_diffusion_provider` (image/video jobs) — opt-out `GPN_DIFFUSION=0`      | `[diffuse]` |
+| ml          | `gpn_ml_provider` (ML-inference jobs) — opt-out `GPN_ML=0`                   | `[ml]`      |
+| finetune    | `gpn_finetune_provider` (LoRA fine-tune jobs) — opt-out `GPN_FINETUNE=0`     | `[finetune]` |
 
-There is nothing to select — a node is miner + provider. `gpn_node` honours the
-#24 semantics: **mine-by-default**, and the provider holds the (separate) job
-flag so the miner fully stops during a job; the supervisor runs the miner and
-the AI stack side by side.
+There is nothing to select — a node is miner + **every** provider. A node is
+**designed to serve every job type** (LLM, image, video, ML inference,
+fine-tune); the one-GPU rule only means it does **one job at a time**.
+`gpn_node` honours the #24 semantics: **mine-by-default**, and the provider
+holds the (separate) job flag so the miner fully stops during a job; the
+supervisor runs the miner and the AI stack side by side.
+
+> **Missing model/dep is non-fatal.** A provider whose model, helper script, or
+> binary is absent is simply logged with a clear warning and skipped — the node,
+> the miner, and the other providers stay healthy. (If the provider *binary* is
+> missing, that one capability is disabled on the box; the node still comes up.)
+> A failed/absent `ollama` likewise only disables LLM serving — mining continues.
 
 ## Config: one small file + env overrides
 
@@ -178,7 +200,13 @@ listen       = "0.0.0.0:8093"                      # heartbeat bind
 gflops       = 30000
 capacity     = 1
 poll_ms      = 300
-diffusion    = false                               # also run gpn_diffusion_provider
+# ── optional providers: ALL ON by design; set false to opt a capability OUT ──
+diffusion    = true                                # image/video provider (gpn_diffusion_provider)
+diffusion_poll_ms = 2000
+ml           = true                                # ML-inference provider (gpn_ml_provider)
+ml_poll_ms   = 2000
+finetune     = true                                # fine-tune provider (gpn_finetune_provider)
+finetune_poll_ms = 4000
 ```
 
 ### Environment variables (overrides)
@@ -203,8 +231,12 @@ diffusion    = false                               # also run gpn_diffusion_prov
 | `GPN_GFLOPS` | advertised compute | `0` |
 | `GPN_CAPACITY` | concurrent jobs | `1` |
 | `GPN_POLL_MS` | provider poll interval | `300` |
-| `GPN_DIFFUSION` | also run the diffusion provider | `false` |
+| `GPN_DIFFUSION` | image/video provider — set `0` to OPT OUT (default ON) | `1` |
 | `GPN_DIFFUSION_POLL_MS` | diffusion poll interval | `2000` |
+| `GPN_ML` | ML-inference provider — set `0` to OPT OUT (default ON) | `1` |
+| `GPN_ML_POLL_MS` | ML-inference poll interval | `2000` |
+| `GPN_FINETUNE` | fine-tune provider — set `0` to OPT OUT (default ON) | `1` |
+| `GPN_FINETUNE_POLL_MS` | fine-tune poll interval | `4000` |
 | `GPN_BIN` | dir holding the child binaries | dir of `gpn_node` |
 | `GPN_STATUS_SECS` | status-line interval | `15` |
 | `GPN_STALL_SECS` | sync-stall watchdog: restart node after `best` frozen this long (min 60) | `300` |
@@ -259,7 +291,8 @@ no reason to prune on a chain this small.
 ## What the supervisor does
 
 - **Spawns each child with a label** and forwards its stdout/stderr with a
-  `[node]` / `[heartbeat]` / `[provider]` / `[diffuse]` prefix.
+  `[node]` / `[heartbeat]` / `[provider]` / `[diffuse]` / `[ml]` / `[finetune]`
+  prefix.
 - **Restarts a crashed child** with bounded backoff (1s → 2s → … → 30s); the
   backoff resets once a child has been healthy for 60s. Every start / exit /
   restart is logged as `[supervisor HH:MM:SS] <label>: …`.
@@ -269,7 +302,7 @@ no reason to prune on a chain this small.
 - **Prints one aggregated status line** every `status_secs` (default 15s):
 
   ```
-  [status] node_count=3 node=up(pid 123) heartbeat=up(pid 456) provider=up(pid 789) best=#107535
+  [status] node_count=6 node=up(pid 123) heartbeat=up(pid 456) provider=up(pid 789) diffuse=up(pid 790) ml=up(pid 791) finetune=up(pid 792) best=#107535
   ```
 
   `best` is the node's best block, read cheaply from its own RPC

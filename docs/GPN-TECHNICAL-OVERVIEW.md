@@ -7,6 +7,10 @@ A GPN node is **one entity** — one GPU, one identity/wallet — in **one of th
 **Mining** (hash blocks → minted GPN), **Compute** (serve AI jobs → escrow GPN), or *(later)* **Staking**.
 It **auto-switches** based on a USD/hr comparison of the modes (~5% hysteresis, no thrashing).
 
+> **"One GPU, one job" note:** "one job at a time" is **mutual exclusion** — the GPU never runs two
+> jobs concurrently — and is **NOT** a restriction on job *types*. Every node is equipped by design to
+> serve **every** job type (LLM · image · video · ML inference · fine-tune) and advertises all of them.
+
 **The chain is thin:** it coordinates jobs, holds escrow, enforces eligibility/capability gates, and settles rewards. **Compute runs off-chain.**
 
 ## Consensus

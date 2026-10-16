@@ -110,7 +110,8 @@ Running → AwaitingVerification → Completed` (plus cancelled/failed states).
   GPU-rental**, and clamped at or above the provider's cost so a GPU **at least covers its cost**.
 - **Least-latency routing.** A buyer hits a single access point and never needs a provider's
   address. The scheduler filters by capability (GFLOPS, VRAM/RAM, model availability), requires
-  the node to be idle (one GPU, one job), then picks the **lowest-latency** eligible provider.
+  the node to be idle (one GPU, one job — i.e. one job *at a time*, mutual exclusion, **not** a limit
+  on job types: every node serves every job type by design), then picks the **lowest-latency** eligible provider.
   Providers **register and advertise their endpoint on-chain**, so access points discover them
   from the chain — not a hand-maintained list.
 - **Model on demand.** Providers can pull a model on demand (via Ollama/Hugging Face), so

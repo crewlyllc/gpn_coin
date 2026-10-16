@@ -11,15 +11,30 @@
 //! stack together. The node mines and serves AI, auto-yielding the one GPU to
 //! a job while it runs (#24: full stop mining during a job, resume after).
 //!
+//! **“One GPU, one job” = MUTUAL EXCLUSION (one job *at a time*), NOT a limit on
+//! job types.** Every node is equipped by design to serve **every** job type —
+//! LLM chat · image · video · ML inference · fine-tune — and advertises all of
+//! them. A default start brings up *all* providers; per-capability OPT-OUT envs
+//! exist for constrained boxes (`GPN_DIFFUSION=0`, `GPN_ML=0`,
+//! `GPN_FINETUNE=0`) but the default is “everything available”.
+//!
 //! ```text
-//!   gpn_node                 # starts: node + heartbeat + provider (always)
+//!   gpn_node                 # starts: node + heartbeat + all 5 providers (default)
 //! ```
 //!
-//! ## Children (all always started)
+//! ## Children (all started by default)
 //! - the chain node/miner (`gpn-node …` — mines by default) — log `[node]`
 //! - the heartbeat (`gpn_provider_status … :8093`) — log `[heartbeat]`
-//! - the provider loop (`gpn_llm_provider …`) — log `[provider]`
-//!   (+ `gpn_diffusion_provider …` when `diffusion = true`) — `[diffuse]`
+//! - the LLM provider loop (`gpn_llm_provider …`) — log `[provider]`
+//! - the image/video provider (`gpn_diffusion_provider …`) — log `[diffuse]`
+//!   (opt-out: `GPN_DIFFUSION=0`)
+//! - the ML-inference provider (`gpn_ml_provider …`) — log `[ml]`
+//!   (opt-out: `GPN_ML=0`)
+//! - the fine-tune provider (`gpn_finetune_provider …`) — log `[finetune]`
+//!   (opt-out: `GPN_FINETUNE=0`)
+//!
+//! A missing model/dependency for one optional provider is **non-fatal**: the
+//! node logs a clear warning and keeps the node + the other providers healthy;
 //!
 //! ## Config (small TOML file) + env overrides
 //! The file is `--config <path>`, else `$GPN_CONFIG`, else `$GPN_PREFIX/node.toml`
@@ -30,7 +45,8 @@
 //!
 //! ## Supervise / shutdown / status
 //! - Each child runs in its own supervisor thread; its stdout/stderr is
-//!   forwarded with a `[node]`/`[heartbeat]`/`[provider]`/`[diffuse]` prefix.
+//!   forwarded with a `[node]`/`[heartbeat]`/`[provider]`/`[diffuse]`/`[ml]`/
+//!   `[finetune]` prefix.
 //! - A child that exits unexpectedly is restarted with bounded backoff
 //!   (1s → 30s), and every lifecycle event is logged.
 //! - On Ctrl-C / SIGTERM every child is stopped gracefully (SIGTERM → wait →
@@ -77,6 +93,10 @@ struct FileConfig {
     poll_ms: Option<u64>,
     diffusion: Option<bool>,
     diffusion_poll_ms: Option<u64>,
+    ml: Option<bool>,
+    ml_poll_ms: Option<u64>,
+    finetune: Option<bool>,
+    finetune_poll_ms: Option<u64>,
     bin_dir: Option<String>,
     /// How often the aggregated status line is printed (seconds).
     status_secs: Option<u64>,
@@ -104,6 +124,10 @@ struct Config {
     poll_ms: u64,
     diffusion: bool,
     diffusion_poll_ms: u64,
+    ml: bool,
+    ml_poll_ms: u64,
+    finetune: bool,
+    finetune_poll_ms: u64,
     bin_dir: PathBuf,
     status_secs: u64,
 }
@@ -484,12 +508,23 @@ impl Config {
             gflops: env_u64("GPN_GFLOPS").or(file.gflops).unwrap_or(0),
             capacity: env_u64("GPN_CAPACITY").or(file.capacity).unwrap_or(1),
             poll_ms: env_u64("GPN_POLL_MS").or(file.poll_ms).unwrap_or(300),
-            diffusion: env_bool("GPN_DIFFUSION")
-                .or(file.diffusion)
-                .unwrap_or(false),
+            // ── Optional providers: ON by design, opt OUT per capability ──────
+            // A GPN node serves EVERY job type by default. The GPU still runs
+            // only ONE job at a time (mutual exclusion ≠ a limit on job types).
+            // A constrained box can disable a capability with `GPN_*=0` (env)
+            // or `<capability> = false` (config file).
+            diffusion: env_bool("GPN_DIFFUSION").or(file.diffusion).unwrap_or(true),
             diffusion_poll_ms: env_u64("GPN_DIFFUSION_POLL_MS")
                 .or(file.diffusion_poll_ms)
                 .unwrap_or(2000),
+            ml: env_bool("GPN_ML").or(file.ml).unwrap_or(true),
+            ml_poll_ms: env_u64("GPN_ML_POLL_MS")
+                .or(file.ml_poll_ms)
+                .unwrap_or(2000),
+            finetune: env_bool("GPN_FINETUNE").or(file.finetune).unwrap_or(true),
+            finetune_poll_ms: env_u64("GPN_FINETUNE_POLL_MS")
+                .or(file.finetune_poll_ms)
+                .unwrap_or(4000),
             bin_dir,
             status_secs: env_u64("GPN_STATUS_SECS")
                 .or(file.status_secs)
@@ -838,7 +873,7 @@ fn spawn_stall_watchdog(
 fn status_line(cfg: &Config, shared: &Shared) -> String {
     let m = shared.lock().unwrap();
     let mut parts: Vec<String> = Vec::new();
-    for label in ["node", "heartbeat", "provider", "diffuse"] {
+    for label in ["node", "heartbeat", "provider", "diffuse", "ml", "finetune"] {
         if let Some(st) = m.get(label) {
             if st.up {
                 parts.push(format!("{label}=up(pid {})", st.pid));
@@ -967,6 +1002,20 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
 
     {
         // Heartbeat (:8093): advertises capability + load to the scheduler.
+        // Advertise EVERY capability this node serves so the scheduler routes
+        // LLM/image/video/ML/fine-tune jobs to it. One GPU still runs one job
+        // at a time (mutual exclusion), but the node is equipped for them all.
+        let mut caps: Vec<&str> = vec!["LLMInference"];
+        if cfg.diffusion {
+            caps.push("ImageGeneration");
+            caps.push("VideoGeneration");
+        }
+        if cfg.ml {
+            caps.push("MLInference");
+        }
+        if cfg.finetune {
+            caps.push("FineTuning");
+        }
         let mut argv = vec![
             cfg.resolve("gpn_provider_status"),
             "--listen".into(),
@@ -977,6 +1026,8 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
             cfg.capacity.to_string(),
             "--ollama".into(),
             cfg.ollama.clone(),
+            "--capabilities".into(),
+            caps.join(","),
         ];
         if !cfg.account.is_empty() {
             argv.push("--address".into());
@@ -1014,21 +1065,103 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
         });
 
         if cfg.diffusion {
-            specs.push(ChildSpec {
-                label: "diffuse",
-                prefix: "[diffuse]",
-                argv: vec![
-                    cfg.resolve("gpn_diffusion_provider"),
-                    cfg.endpoint.clone(),
-                    cfg.signer.clone(),
-                    cfg.diffusion_poll_ms.to_string(),
-                ],
-                envs: vec![("SIGNER_URI".to_string(), cfg.signer.clone())],
-            });
+            if optional_provider_available(cfg, "gpn_diffusion_provider") {
+                specs.push(ChildSpec {
+                    label: "diffuse",
+                    prefix: "[diffuse]",
+                    argv: vec![
+                        cfg.resolve("gpn_diffusion_provider"),
+                        cfg.endpoint.clone(),
+                        cfg.signer.clone(),
+                        cfg.diffusion_poll_ms.to_string(),
+                    ],
+                    envs: vec![("SIGNER_URI".to_string(), cfg.signer.clone())],
+                });
+            } else {
+                log_event(
+                    "diffuse",
+                    "gpn_diffusion_provider not found — image/video capability DISABLED on this node \n                     (node + other providers stay healthy). Install the provider binary or set GPN_DIFFUSION=0 to silence this.",
+                );
+            }
+        }
+
+        // ML-inference provider (job type `MLInference`) — ON by default.
+        if cfg.ml {
+            if optional_provider_available(cfg, "gpn_ml_provider") {
+                specs.push(ChildSpec {
+                    label: "ml",
+                    prefix: "[ml]",
+                    argv: vec![
+                        cfg.resolve("gpn_ml_provider"),
+                        cfg.endpoint.clone(),
+                        cfg.signer.clone(),
+                        cfg.ml_poll_ms.to_string(),
+                    ],
+                    envs: vec![
+                        ("SIGNER_URI".to_string(), cfg.signer.clone()),
+                        ("OLLAMA_URL".to_string(), cfg.ollama.clone()),
+                    ],
+                });
+            } else {
+                log_event(
+                    "ml",
+                    "gpn_ml_provider not found — ML-inference capability DISABLED on this node \n                     (node + other providers stay healthy). Install the provider binary or set GPN_ML=0 to silence this.",
+                );
+            }
+        }
+
+        // Fine-tune provider (job type `FineTuning`) — ON by default.
+        if cfg.finetune {
+            if optional_provider_available(cfg, "gpn_finetune_provider") {
+                specs.push(ChildSpec {
+                    label: "finetune",
+                    prefix: "[finetune]",
+                    argv: vec![
+                        cfg.resolve("gpn_finetune_provider"),
+                        cfg.endpoint.clone(),
+                        cfg.signer.clone(),
+                        cfg.finetune_poll_ms.to_string(),
+                    ],
+                    envs: vec![("SIGNER_URI".to_string(), cfg.signer.clone())],
+                });
+            } else {
+                log_event(
+                    "finetune",
+                    "gpn_finetune_provider not found — fine-tune capability DISABLED on this node \n                     (node + other providers stay healthy). Install the provider binary or set GPN_FINETUNE=0 to silence this.",
+                );
+            }
         }
     }
 
     specs
+}
+
+/// Is an *optional* provider binary present (in `bin_dir`, or on `$PATH`)?
+///
+/// A missing optional provider must be **non-fatal**: we log a clear warning
+/// and simply don't start that child, rather than crash-loop it. The node and
+/// its other providers stay fully healthy — a box without (say) the diffusion
+/// binary still mines and serves LLM/ML/fine-tune jobs.
+fn optional_provider_available(cfg: &Config, name: &str) -> bool {
+    if cfg.bin_dir.join(name).is_file() {
+        return true;
+    }
+    if cfg.bin_dir.join(format!("{name}.exe")).is_file() {
+        return true;
+    }
+    on_path(name)
+}
+
+/// Whether `name` (or `name.exe`) resolves on `$PATH`.
+fn on_path(name: &str) -> bool {
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            if dir.join(name).is_file() || dir.join(format!("{name}.exe")).is_file() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Report whether an ollama server answers at `url` (short timeout). Used to
