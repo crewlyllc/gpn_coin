@@ -298,42 +298,80 @@ fn settled_store_path() -> String {
     })
 }
 
-/// Parse a settled-id set from `path`. Accepts a JSON array of ids (what we
-/// write) and tolerates a JSON object keyed by id (forward/backward compat).
-/// Path is a parameter so the parse is unit-testable without touching `$HOME`.
-fn read_settled_from(path: &str) -> std::collections::HashSet<u64> {
+/// Parse a settled-id set from `path`, dropping any id that has not yet been
+/// issued by the chain (`>= chain_tip`, i.e. the live `ComputeMarketplace::
+/// NextJobId`).
+///
+/// Item #29: an id is only ever *settled* once it exists on-chain, so an id at
+/// or above the chain tip is necessarily a **predicted off-chain label** that
+/// ran ahead of the chain (the AP's label-vs-`NextJobId` drift). Persisting such
+/// a write-off blacklists a *future real job id* forever — job #4858 was skipped
+/// exactly this way (written off at 16:29 when the tip was ~4773). Filtering at
+/// load time heals every poisoned entry without touching the file by hand: as
+/// soon as the tip is below an id it stops being trusted as settled.
+///
+/// Backward compat: a legacy bare JSON array (or a JSON object keyed by id) is
+/// still accepted, and is filtered by the same tip rule. A `chain_tip` of 0
+/// (chain unreachable) drops everything — a single pass re-queries rather than
+/// risk hiding a real job, and the cache is rewritten from what we re-learn.
+fn read_settled_from_with_tip(path: &str, chain_tip: u64) -> (std::collections::HashSet<u64>, bool) {
     let mut set = std::collections::HashSet::new();
+    let mut dropped = false;
     let Ok(s) = std::fs::read_to_string(path) else {
-        return set;
+        return (set, dropped);
     };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) else {
-        return set;
+        return (set, dropped);
+    };
+    let mut keep = |n: u64| {
+        if n < chain_tip {
+            set.insert(n);
+        } else {
+            dropped = true;
+        }
     };
     match v {
         serde_json::Value::Array(a) => {
             for x in a {
                 if let Some(n) = x.as_u64() {
-                    set.insert(n);
+                    keep(n);
                 }
             }
         }
         serde_json::Value::Object(o) => {
-            for k in o.keys() {
-                if let Ok(n) = k.parse::<u64>() {
-                    set.insert(n);
+            // New form: {"watermark":N,"ids":[...]}; legacy form: {id: ...}.
+            if let Some(ids) = o.get("ids").and_then(|x| x.as_array()) {
+                for x in ids {
+                    if let Some(n) = x.as_u64() {
+                        keep(n);
+                    }
+                }
+            } else {
+                for k in o.keys() {
+                    if let Ok(n) = k.parse::<u64>() {
+                        keep(n);
+                    }
                 }
             }
         }
         _ => {}
     }
-    set
+    (set, dropped)
 }
 
-/// Persist a settled-id set as a sorted JSON array (stable, diff-friendly).
-fn write_settled_to(path: &str, set: &std::collections::HashSet<u64>) -> std::io::Result<()> {
-    let mut ids: Vec<u64> = set.iter().copied().collect();
+/// Persist a settled-id set stamped with the chain tip observed at write time
+/// (`{"watermark":N,"ids":[…]}`), sorted for stable, diff-friendly output.
+/// The watermark is informational — the load-side trust rule uses the *current*
+/// tip — but it makes a poisoned write-off auditable after the fact.
+fn write_settled_to(
+    path: &str,
+    set: &std::collections::HashSet<u64>,
+    chain_tip: u64,
+) -> std::io::Result<()> {
+    let mut ids: Vec<u64> = set.iter().copied().filter(|id| *id < chain_tip).collect();
     ids.sort_unstable();
-    std::fs::write(path, serde_json::to_string(&ids)?)
+    let doc = serde_json::json!({ "watermark": chain_tip, "ids": ids });
+    std::fs::write(path, serde_json::to_string(&doc)?)
 }
 
 /// Persistent per-job inference-failure counter. We give up after a small
@@ -755,9 +793,18 @@ async fn process_once(
     // finding #34: skip ids we've already settled so the unbounded
     // assignments.json can't drive O(history) chain reads every poll. The set
     // is in-memory here and persisted once per pass (below).
+    //
+    // Item #29: only trust ids the chain has actually issued (id < NextJobId);
+    // a write-off above the tip is a predicted label and must never blacklist a
+    // future real job.
     let settled_path = settled_store_path();
-    let mut settled = read_settled_from(&settled_path);
-    let mut settled_dirty = false;
+    let chain_tip = client.get_next_job_id().await;
+    let (mut settled, pruned) = read_settled_from_with_tip(&settled_path, chain_tip);
+    let mut settled_dirty = pruned;
+    // Write-offs for ids the chain has NOT issued yet (predicted labels from the
+    // AP's +drift). They are skipped in memory only, never persisted: one that
+    // later turns out to be a real job id must not be blacklisted (#29).
+    let mut predicted_writeoff: std::collections::HashSet<u64> = std::collections::HashSet::new();
     // Jobs we claim this pass but (in fast mode) never wait on-chain for; we
     // run them directly below rather than re-reading chain state that may not
     // have advanced yet.
@@ -765,7 +812,10 @@ async fn process_once(
     for job_id in targets {
         // Already settled (non-Pending or written off) on a previous pass — no
         // need to spend two chain reads rediscovering that every cycle.
-        if settled.contains(&job_id) {
+        if job_id < chain_tip && settled.contains(&job_id) {
+            continue;
+        }
+        if predicted_writeoff.contains(&job_id) {
             continue;
         }
         // Skip only a job KNOWN to belong to another kind (e.g. a mis-assigned
@@ -811,9 +861,14 @@ async fn process_once(
                     // Write off a never-created / permanently-absent id so it is
                     // not rescanned on every future pass (the counter itself
                     // resets on removal, so without this the id would loop
-                    // forever).
-                    settled.insert(job_id);
-                    settled_dirty = true;
+                    // forever). An id at/above the chain tip is a *predicted*
+                    // label: skip it for this process only (#29).
+                    if job_id < chain_tip {
+                        settled.insert(job_id);
+                        settled_dirty = true;
+                    } else {
+                        predicted_writeoff.insert(job_id);
+                    }
                     continue;
                 }
             }
@@ -848,7 +903,7 @@ async fn process_once(
 
     // Persist any newly-settled ids (one write per pass, not per id).
     if settled_dirty {
-        if let Err(e) = write_settled_to(&settled_path, &settled) {
+        if let Err(e) = write_settled_to(&settled_path, &settled, chain_tip) {
             eprintln!("[provider] could not persist settled-id cache: {e}");
         }
     }
@@ -1092,23 +1147,63 @@ mod settled_cache_tests {
         set.insert(5);
         set.insert(2049);
         set.insert(0);
-        write_settled_to(&p, &set).unwrap();
-        let back = read_settled_from(&p);
+        write_settled_to(&p, &set, 4096).unwrap();
+        let (back, dropped) = read_settled_from_with_tip(&p, 4096);
         assert_eq!(back, set);
+        assert!(!dropped);
         let _ = std::fs::remove_file(&p);
     }
 
     #[test]
     fn settled_reads_tolerate_object_and_missing_file() {
-        // Forward/backward compat: a JSON object keyed by id also parses.
+        // Backward compat: a legacy JSON object keyed by id also parses.
         let obj = tmp("obj");
         std::fs::write(&obj, r#"{"7":{"provider":"x"},"9":{}}"#).unwrap();
-        let s = read_settled_from(&obj);
+        let (s, _) = read_settled_from_with_tip(&obj, 100);
         assert!(s.contains(&7) && s.contains(&9) && s.len() == 2);
+        // ...and so does a legacy bare array (the pre-#29 on-disk format).
+        let arr = tmp("arr");
+        std::fs::write(&arr, r#"[7,9,11]"#).unwrap();
+        let (s2, _) = read_settled_from_with_tip(&arr, 100);
+        assert!(s2.contains(&7) && s2.contains(&11) && s2.len() == 3);
         let _ = std::fs::remove_file(&obj);
+        let _ = std::fs::remove_file(&arr);
 
         // A missing file is simply an empty set (first run), never a panic.
-        assert!(read_settled_from("/nonexistent/gpn-settled.json").is_empty());
+        let (empty, _) = read_settled_from_with_tip("/nonexistent/gpn-settled.json", 100);
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn settled_drops_ids_at_or_above_the_chain_tip() {
+        // Item #29 regression: a write-off recorded for a *predicted* label must
+        // not blacklist the real job that later takes that id. Ids beyond the
+        // chain's NextJobId are not issued yet ⇒ never trusted as settled.
+        let p = tmp("poison");
+        let mut set = std::collections::HashSet::new();
+        set.insert(4772);
+        set.insert(4858); // written off for a drift label; real job #4858 later
+        set.insert(9999);
+        write_settled_to(&p, &set, 10000).unwrap();
+
+        // At load time the chain tip is 4773 ⇒ only the genuinely issued id is kept.
+        let (back, dropped) = read_settled_from_with_tip(&p, 4773);
+        assert!(back.contains(&4772), "issued + settled id stays skipped");
+        assert!(!back.contains(&4858), "future id must not be blacklisted");
+        assert!(dropped, "pruning must mark the cache dirty so the file shrinks");
+        let _ = std::fs::remove_file(&p);
+
+        // Persisting also refuses to record anything at/above the tip.
+        let p2 = tmp("poison-write");
+        let mut s2 = std::collections::HashSet::new();
+        s2.insert(10);
+        s2.insert(500);
+        write_settled_to(&p2, &s2, 100).unwrap();
+        let raw = std::fs::read_to_string(&p2).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(doc["watermark"], 100);
+        assert_eq!(doc["ids"], serde_json::json!([10]));
+        let _ = std::fs::remove_file(&p2);
     }
 
     #[test]
