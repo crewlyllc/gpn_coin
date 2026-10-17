@@ -184,9 +184,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match std::env::var("GPN_PROVIDER_ENDPOINT") {
         Ok(ep) if !ep.trim().is_empty() => {
             let ep = ep.trim().to_string();
-            match client.set_provider_endpoint(&ep).await {
-                Ok(()) => println!("[provider] advertised on-chain endpoint: {ep}"),
-                Err(e) => eprintln!("[provider] set_provider_endpoint({ep}) failed: {e}"),
+            // Bounded: this is a non-fatal advert, but `submit_signed_call` waits
+            // for INCLUDED-IN-BEST-BLOCK (up to its 300 s tx-inclusion timeout).
+            // Restarting during a block-import stall (single-peer ban loop) made
+            // startup block here for minutes: no claim loop, no infer server, one
+            // request timeout after another. Cap it so serving starts regardless;
+            // the advert retries on the next restart.
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                client.set_provider_endpoint(&ep),
+            )
+            .await
+            {
+                Ok(Ok(())) => println!("[provider] advertised on-chain endpoint: {ep}"),
+                Ok(Err(e)) => eprintln!("[provider] set_provider_endpoint({ep}) failed: {e}"),
+                Err(_) => eprintln!(
+                    "[provider] set_provider_endpoint({ep}) timed out after 15s (chain stalled?) — continuing startup"
+                ),
             }
         }
         _ => println!("[provider] GPN_PROVIDER_ENDPOINT unset/empty — on-chain discovery disabled"),
@@ -804,8 +818,14 @@ async fn process_once(
                         client.complete_job(id).await
                     } {
                         Ok(()) => {
-                            println!("[provider] reconciled #{id} AwaitingVerification → Completed");
-                            heal_forget(id);
+                            // submit_fast is pool-ack only: keep the (id, Complete)
+                            // cooldown instead of forgetting it. Otherwise the next
+                            // 10 s tick re-reads a chain head that has not yet
+                            // included this tx (esp. during block-import stalls)
+                            // and fires a duplicate completion, burning nonces and
+                            // pool slots. The terminal branch below clears the
+                            // entry once the chain actually reports Completed.
+                            println!("[provider] reconcile #{id}: completion submitted (AwaitingVerification)");
                         }
                         Err(e) if is_benign_state_err(&e.to_string()) => {
                             // Already finalized elsewhere — quiet, not an error.
