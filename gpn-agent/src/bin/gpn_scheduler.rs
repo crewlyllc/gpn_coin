@@ -22,6 +22,7 @@
 use gpn_agent::chain::ChainClient;
 use gpn_agent::routing::{self, RttOverrides};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::io::Read;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -171,6 +172,49 @@ fn spawn_janitor(client: Arc<ChainClient>, rt: Arc<tokio::runtime::Runtime>) {
 /// the chain counter. Fixes store/assignment collisions + provider claim storms.
 static NEXT_JOB_ID: Mutex<Option<u64>> = Mutex::new(None);
 
+/// Predicted job ids whose `create_job` tx is **submitted but not yet included**.
+///
+/// The fast path returns the predicted id as soon as the pool acks, which is a
+/// block or more (10–45 s) before the id exists in `ComputeMarketplace::Jobs`.
+/// `GET /job/{id}` resolved only from chain storage, so it answered
+/// `{"error":"not found"}` for a job the AP had *just handed the caller* — clients
+/// and monitors read that as a lost job (change-log 2026-10-16 20:05 flagged it as
+/// an anomaly). Track in-flight creates so the status endpoint can report the truth:
+/// `Pending`, not yet included. Entries expire so a genuinely failed create cannot
+/// masquerade as pending forever.
+fn pending_creates() -> &'static Mutex<HashMap<u64, Instant>> {
+    static P: OnceLock<Mutex<HashMap<u64, Instant>>> = OnceLock::new();
+    P.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// How long a predicted id may be reported as "pending inclusion". Must exceed the
+/// create-confirm window (45 s default) plus a slow block; a create that lands after
+/// this is visible from chain state anyway, and one that never lands must not linger.
+const PENDING_CREATE_TTL: Duration = Duration::from_secs(180);
+
+/// Is a create submitted `elapsed` ago still plausibly awaiting inclusion?
+fn pending_create_is_live(elapsed: Duration) -> bool {
+    elapsed <= PENDING_CREATE_TTL
+}
+
+fn mark_create_pending(id: u64) {
+    let mut m = pending_creates().lock().unwrap();
+    let now = Instant::now();
+    m.retain(|_, at| pending_create_is_live(now.duration_since(*at)));
+    m.insert(id, now);
+}
+
+fn create_is_pending(id: u64) -> bool {
+    let mut m = pending_creates().lock().unwrap();
+    let now = Instant::now();
+    m.retain(|_, at| pending_create_is_live(now.duration_since(*at)));
+    m.contains_key(&id)
+}
+
+fn clear_create_pending(id: u64) {
+    pending_creates().lock().unwrap().remove(&id);
+}
+
 /// Serializes on-chain job CREATION so exactly ONE create is in flight at a time.
 /// The AP is the sole creator and the chain assigns ids in submit order, so with
 /// serialization the process-local prediction is exactly the real on-chain id — and
@@ -278,6 +322,7 @@ where
     F: FnOnce() -> Result<(), Box<dyn std::error::Error>>,
 {
     let predicted = alloc_predicted_job_id(next_before);
+    mark_create_pending(predicted);
     match submit() {
         Ok(()) if fast => CreateOutcome { created: true, id: predicted, err: None },
         Ok(()) => match confirm_created(rt, client, next_before, predicted) {
@@ -2023,8 +2068,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let idn: u64 = id.parse().unwrap_or(0);
                     match rt.block_on(client.get_job_state(idn)) {
                         Some((state, price, req_, prov)) => {
+                            clear_create_pending(idn);
                             json!({"id":idn,"state":state,"price_base":price.to_string(),"requestor":req_,"provider":prov})
                         }
+                        // The create is in the pool but not yet in a block: report the
+                        // real state instead of a confusing 404 (the caller got this id
+                        // from POST /jobs seconds ago).
+                        None if create_is_pending(idn) => json!({
+                            "id": idn,
+                            "state": "Pending",
+                            "pending_inclusion": true,
+                            "note": "create submitted; awaiting block inclusion"
+                        }),
                         None => json!({"error":"not found"}),
                     }
                 }
@@ -2388,6 +2443,24 @@ mod tests {
         assert_eq!(create_confirm_ms(), 45_000);
         std::env::remove_var("GPN_CREATE_CONFIRM_MS");
         assert_eq!(create_confirm_ms(), 45_000);
+    }
+
+    #[test]
+    fn pending_create_is_reported_until_the_ttl_expires() {
+        // POST /jobs returns the predicted id before inclusion, so /job/{id} must say
+        // "pending inclusion" instead of "not found" for a genuinely in-flight create
+        // — and must stop doing so once the window passes (a create that never landed
+        // must not masquerade as pending forever).
+        assert!(pending_create_is_live(Duration::from_secs(0)));
+        assert!(pending_create_is_live(PENDING_CREATE_TTL));
+        assert!(!pending_create_is_live(PENDING_CREATE_TTL + Duration::from_secs(1)));
+
+        let id = 900_001;
+        assert!(!create_is_pending(id), "unknown ids stay not-found");
+        mark_create_pending(id);
+        assert!(create_is_pending(id), "a submitted create reads as pending, not lost");
+        clear_create_pending(id);
+        assert!(!create_is_pending(id), "once the chain knows the id, the marker is gone");
     }
 
     #[test]
