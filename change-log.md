@@ -4001,3 +4001,9 @@ STATUS: **GREEN** (latency restored to the documented class).
 **ACTION TAKEN:** none mutating. `sessions_list` still shows **only this cron session** ⇒ no MAIN exists to APPROVE ⇒ **escalated to Jeremy: reply APPROVE to apply item #34.**
 **SEVERITY:** cosmetic/efficiency (a no-op extrinsic per affected job, ~2 per hour of heal traffic); no client impact, no stranded jobs, no 1014s.
 **STATUS: GREEN serving (e2e 1.30 s, 0 errors); open low-severity drain = duplicate heal txs, root cause now exact and fix scoped.**
+
+## 2026-10-17 05:05 PT / 12:05 UTC — PM07 GPN debug (cron 1a4f19ab) — serving GREEN; known item #34 duplicate-heal drain unchanged, rate 28% this window; no new cause, no action (still awaiting APPROVE).
+**CHECKS:** `journalctl -u gpn-provider -n 15` + 70 min grep → **0** error/panic/1014/`too low`/`not reachable`. e2e `POST /v1/chat/completions` → **0.43 s** HTTP 200 ("pong", `chatcmpl-gpn-5050`). `/jobs` 256 entries, **0 orphans** (all Pending have `pending_inclusion:true`, #5048/#5049 Completed); 8 `claiming LLM job` lines / 40 min (no storm); tx pool draining.
+**ANOMALY (not new):** 55 heal/reconcile lines / 70 min → **12 wasted extrinsics (28%)**, same `(job,step)` pairs re-submitted ~51 s apart (#5048 result ×2 + completion ×2, #5041 accept ×2, #5037 accept+complete ×2, etc.). Identical signature to the 03:15 finding (#34): head-advance is not inclusion evidence; the 45 s wall-clock gate re-fires behind a pool backlog. Slightly above the 21.6% all-day baseline but same class/severity.
+**ACTION:** none mutating (no restart, no flag, no state edit). #34 nonce-based fix remains unapplied — cron has no MAIN session to approve; escalation to Jeremy still open.
+**STATUS: GREEN serving; open low-severity drain = duplicate heal txs (unchanged root cause).**
