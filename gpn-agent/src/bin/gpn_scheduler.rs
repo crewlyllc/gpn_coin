@@ -197,6 +197,118 @@ fn align_alloc(next_id: u64) {
     *g = Some(next_id);
 }
 
+/// `GPN_FAST_AP` (default ON): return the predicted id as soon as the pool accepts the
+/// create instead of waiting for block inclusion.
+fn fast_ap_enabled() -> bool {
+    std::env::var("GPN_FAST_AP")
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(true)
+}
+
+/// How long a create may take to appear on-chain before we give up on it. GPN blocks are
+/// PoW-mined on a 15 s target with observed gaps of 2–30 s, so the old fixed 2 s window was
+/// shorter than a single block: a create that landed normally was treated as "did not land",
+/// the allocator was rewound to a stale tip, and the *next* create reused the id the slow tx
+/// was about to take (the documented +N label drift).
+fn create_confirm_ms() -> u64 {
+    std::env::var("GPN_CREATE_CONFIRM_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v >= 200)
+        .unwrap_or(45_000)
+}
+
+/// Poll `ComputeMarketplace::NextJobId` until it moves past `next_before` (our create was
+/// included) or the deadline expires. Returns the id the chain actually assigned.
+fn confirm_created(
+    rt: &tokio::runtime::Runtime,
+    client: &gpn_agent::chain::ChainClient,
+    next_before: u64,
+    predicted: u64,
+) -> Option<u64> {
+    let deadline = Instant::now() + Duration::from_millis(create_confirm_ms());
+    while Instant::now() < deadline {
+        let after = rt.block_on(client.get_next_job_id());
+        if after > next_before {
+            let landed = after - 1;
+            if landed != predicted {
+                println!(
+                    "[ids] create landed as #{landed} (predicted #{predicted}) — realigning allocator"
+                );
+                align_alloc(after);
+            }
+            return Some(landed);
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    None
+}
+
+/// Outcome of one `create_job` submission.
+struct CreateOutcome {
+    created: bool,
+    id: u64,
+    err: Option<String>,
+}
+
+/// Submit a `create_job` through the AP's ONE fast nonce stream and resolve the job id.
+///
+/// Root cause this exists for: the access point used to have **two** nonce allocators for
+/// the same hot-wallet account — `submit_signed` (stop-and-wait creates: `POST /jobs`, and
+/// the `GPN_FAST_AP=0` fallback) read the nonce straight from chain state, while
+/// `NonceStream` (fast path: `/v1/chat/completions`, the janitor) kept its own pipeline.
+/// When both were used, whichever submitted second reused a nonce the other already owned:
+/// the pool rejected it (`1014 Priority is too low`) or, if the other tx had been included
+/// meanwhile, the chain rejected it (`1010 Transaction is outdated`) — a create lost
+/// outright, and its locally-consumed id left the predictor one ahead of the chain.
+///
+/// Now **every** create goes through the stream (single nonce authority). `fast` only decides
+/// whether we report the predicted id immediately or wait for inclusion and report the id the
+/// chain actually assigned.
+///
+/// MUST be called with `CREATE_LOCK` held (exactly one create in flight).
+fn submit_create<F>(
+    rt: &tokio::runtime::Runtime,
+    client: &gpn_agent::chain::ChainClient,
+    next_before: u64,
+    fast: bool,
+    submit: F,
+) -> CreateOutcome
+where
+    F: FnOnce() -> Result<(), Box<dyn std::error::Error>>,
+{
+    let predicted = alloc_predicted_job_id(next_before);
+    match submit() {
+        Ok(()) if fast => CreateOutcome { created: true, id: predicted, err: None },
+        Ok(()) => match confirm_created(rt, client, next_before, predicted) {
+            Some(id) => CreateOutcome { created: true, id, err: None },
+            None => {
+                // Pool-acked but not visible yet: keep the prediction, don't rewind the
+                // allocator (the tx is still in the pool and will take that id).
+                println!(
+                    "[ids] create not confirmed within {} ms — keeping predicted #{predicted}",
+                    create_confirm_ms()
+                );
+                CreateOutcome { created: true, id: predicted, err: None }
+            }
+        },
+        Err(e) => {
+            println!("[create] create_job submit rejected: {e}");
+            // The create may still have landed despite a slow / un-acked pool submit.
+            match confirm_created(rt, client, next_before, predicted) {
+                Some(id) => CreateOutcome { created: true, id, err: None },
+                None => {
+                    // Genuinely did not land: realign to the *current* tip (never to the
+                    // pre-submit snapshot — the chain may have advanced meanwhile).
+                    let tip = rt.block_on(client.get_next_job_id());
+                    align_alloc(if tip > next_before { tip } else { next_before });
+                    CreateOutcome { created: false, id: predicted, err: Some(e.to_string()) }
+                }
+            }
+        }
+    }
+}
+
 /// A known provider endpoint + its last-seen health.
 #[derive(Clone)]
 struct Provider {
@@ -1369,90 +1481,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         o[0] |= 1;
                         o
                     };
-                    // Fast AP path (GPN_FAST_AP, default OFF): submit create_job
-                    // WITHOUT waiting for block inclusion and predict the id from the
-                    // pre-submit counter. Removes the AP's create_job ≈1-block stall
-                    // from the e2e path. The chain catches up in the background; the
-                    // provider self-heals any create/accept ordering race on its next
-                    // poll.
-                    //
-                    // NOTE: the process-local id allocator is only consulted on this
-                    // fast path, so it stays fully inert on the stop-and-wait path.
-                    let fast_ap = std::env::var("GPN_FAST_AP")
-                        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-                        .unwrap_or(true);
-                    // Preserve the create failure reason instead of discarding it:
-                    // a bare "could not create job" left the 2026-10-16 19:19 failure
-                    // undiagnosable (no error text in the journal or the response).
+                    // Fast AP path (GPN_FAST_AP, default ON): report the predicted id as soon
+                    // as the pool accepts (no block wait). With the flag off we still submit
+                    // through the same stream (one nonce authority) but wait for inclusion and
+                    // return the id the chain actually assigned.
+                    let fast_ap = fast_ap_enabled();
+                    // Preserve the create failure reason instead of discarding it.
                     let mut create_err: Option<String> = None;
                     let (created, id) = if passthrough {
                         (false, 0u64)
-                    } else if fast_ap {
-                        // Serialized by `_create_guard`: exactly ONE create is in flight at a time, so
-                        // the process-local prediction IS the real on-chain id (the AP is the sole
-                        // creator; the chain assigns ids in submit order). Labeling with the prediction
-                        // avoids the concurrent-confirm misattribution (two in-flight creates binding to
-                        // one shared NextJobId → a stranded Pending job).
-                        let predicted = alloc_predicted_job_id(next_before);
-                        match rt.block_on(client.create_job_fast(
-                            8192u32,
-                            75u16,
-                            1u8,
-                            0u32,
-                            150u64,
-                            "LLMInference",
-                            "Spot",
-                            (1_000_000_000u128 * 512) as u128,
-                            1_000_000_000u128,
-                            512u32,
-                            1000,
-                            workload_hash,
-                        )) {
-                            Ok(()) => (true, predicted),
-                            Err(e) => {
-                                // env_logger defaults to ERROR, so log::warn would be
-                                // invisible in the unit journal — print instead.
-                                println!("[create] create_job_fast rejected: {e}");
-                                // The create may have landed despite a slow/!acked pool submit.
-                                // Confirm briefly; only trust it if it matches our prediction.
-                                let mut real: Option<u64> = None;
-                                let deadline = Instant::now() + Duration::from_millis(2000);
-                                while Instant::now() < deadline {
-                                    let after = rt.block_on(client.get_next_job_id());
-                                    if after > next_before {
-                                        real = Some(after - 1);
-                                        break;
-                                    }
-                                    std::thread::sleep(Duration::from_millis(200));
-                                }
-                                match real {
-                                    Some(id) if id == predicted => (true, id),
-                                    // Did not land: realign the allocator and report failure.
-                                    _ => {
-                                        align_alloc(next_before);
-                                        create_err = Some(e.to_string());
-                                        (false, predicted)
-                                    }
-                                }
-                            }
-                        }
                     } else {
-                        let _ = rt.block_on(client.create_job(
-                            8192u32,
-                            75u16,
-                            1u8,
-                            0u32,
-                            150u64,
-                            "LLMInference",
-                            "Spot",
-                            (1_000_000_000u128 * 512) as u128,
-                            1_000_000_000u128,
-                            512u32,
-                            1000,
-                            workload_hash,
-                        ));
-                        let after = rt.block_on(client.get_next_job_id());
-                        (after > next_before, after.saturating_sub(1))
+                        // Serialized by `_create_guard`: exactly ONE create is in flight at a
+                        // time, so the process-local prediction IS the real on-chain id (the AP
+                        // is the sole creator; the chain assigns ids in submit order).
+                        let outcome = submit_create(&rt, &client, next_before, fast_ap, || {
+                            rt.block_on(client.create_job_fast(
+                                8192u32,
+                                75u16,
+                                1u8,
+                                0u32,
+                                150u64,
+                                "LLMInference",
+                                "Spot",
+                                (1_000_000_000u128 * 512) as u128,
+                                1_000_000_000u128,
+                                512u32,
+                                1000,
+                                workload_hash,
+                            ))
+                        });
+                        if let Some(e) = outcome.err {
+                            create_err = Some(e);
+                        }
+                        (outcome.created, outcome.id)
                     };
                     drop(_create_guard);
                     let mut text = String::new();
@@ -1799,28 +1860,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         ((price_gpn * 1e12) as u128, 0u128, 0u32)
                     };
-                    let res = rt.block_on(client.create_job(
-                        min_vram_mb as u32,
-                        g("min_compute_capability", 75) as u16,
-                        g("min_gpu_count", 1) as u8,
-                        g("min_cuda_cores", 0) as u32,
-                        min_gflops,
-                        job_type,
-                        "Spot",
-                        escrow,
-                        job_ppt,
-                        job_mtok,
-                        1000,
-                        workload_hash,
-                    ));
-                    // The signer can mis-attribute a *concurrent* extrinsic's failure
-                    // (a busy chain packs several txs per block). So don't trust the
-                    // Err blindly: re-read the job counter — if it advanced, OUR job
-                    // was in fact created, and we must still route it.
-                    let after = rt.block_on(client.get_next_job_id());
-                    match (res, after > next_before) {
-                        (Ok(_), _) | (Err(_), true) => {
-                            let id = after.saturating_sub(1);
+                    // ONE nonce authority: create through the shared fast stream (the same one
+                    // the chat path + janitor use) instead of a stop-and-wait `submit_signed` that
+                    // grabbed a nonce straight from chain state — the two allocators used to fight
+                    // over the hot wallet's nonces ("Transaction is outdated" / "Priority is too
+                    // low"), dropping creates outright. With `GPN_FAST_AP` on we also drop the
+                    // ~1-block (~15 s, observed up to 27 s) create stall from `POST /jobs`.
+                    let fast_ap = fast_ap_enabled();
+                    let _create_guard = CREATE_LOCK.lock().unwrap();
+                    let outcome = submit_create(&rt, &client, next_before, fast_ap, || {
+                        rt.block_on(client.create_job_fast(
+                            min_vram_mb as u32,
+                            g("min_compute_capability", 75) as u16,
+                            g("min_gpu_count", 1) as u8,
+                            g("min_cuda_cores", 0) as u32,
+                            min_gflops,
+                            job_type,
+                            "Spot",
+                            escrow,
+                            job_ppt,
+                            job_mtok,
+                            1000,
+                            workload_hash,
+                        ))
+                    });
+                    drop(_create_guard);
+                    match outcome.created {
+                        true => {
+                            let id = outcome.id;
                             // store the off-chain payload (prompt/model/params) if present.
                             // Generation jobs (image/video) MUST be stored with a gen
                             // kind, otherwise the LLM provider claims them and 404s on
@@ -1935,7 +2002,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             out
                         }
-                        (Err(e), false) => json!({"ok":false,"error":format!("{e}")}),
+                        false => match outcome.err {
+                            Some(e) => json!({"ok":false,"error":format!("{e}")}),
+                            None => json!({"ok":false,"error":"could not create job"}),
+                        },
                     }
                 }
                 (Method::Get, ["jobs"]) => {
@@ -2302,6 +2372,22 @@ mod tests {
             latency_ms,
             last_seen: Some(Instant::now()),
         }
+    }
+
+    #[test]
+    fn create_confirm_window_honours_env_and_floors_out_absurd_values() {
+        // The pre-fix confirm window was a hardcoded 2 s — shorter than one GPN block, so a
+        // create that landed normally looked "lost" and the id allocator was rewound onto an
+        // id that tx was about to take (the +N label drift). The window must be tunable and
+        // must never collapse back to a sub-block value.
+        std::env::set_var("GPN_CREATE_CONFIRM_MS", "12000");
+        assert_eq!(create_confirm_ms(), 12_000);
+        std::env::set_var("GPN_CREATE_CONFIRM_MS", "50");
+        assert_eq!(create_confirm_ms(), 45_000, "absurdly small values fall back to the default");
+        std::env::set_var("GPN_CREATE_CONFIRM_MS", "nonsense");
+        assert_eq!(create_confirm_ms(), 45_000);
+        std::env::remove_var("GPN_CREATE_CONFIRM_MS");
+        assert_eq!(create_confirm_ms(), 45_000);
     }
 
     #[test]
