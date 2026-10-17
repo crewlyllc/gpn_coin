@@ -1021,6 +1021,22 @@ impl ChainClient {
         call_name: &str,
         args: Vec<Value>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        self.submit_fast_nonce(pallet, call_name, args)
+            .await
+            .map(|_| ())
+    }
+
+    /// Same as [`ChainClient::submit_fast`], but returns the **nonce** the tx was
+    /// signed with. Callers can later compare it against the account nonce read
+    /// at a later head: a strictly greater account nonce is proof that this tx
+    /// was included (nonces are ordered and never skipped), which is the only
+    /// exact evidence that a pool-ack submit actually landed.
+    pub async fn submit_fast_nonce(
+        &self,
+        pallet: &str,
+        call_name: &str,
+        args: Vec<Value>,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
         let mut guard = self.fast.lock().await;
         // Runtime-upgrade resilience: if the chain's spec_version changed since the
         // stream connected, its metadata is stale → post-upgrade calls get dropped and
@@ -1055,7 +1071,7 @@ impl ChainClient {
                     call_name,
                     nonce
                 );
-                Ok(())
+                Ok(nonce)
             }
             Err(e) => {
                 // Drop the stream: its local nonce may now be ahead of / behind
@@ -1145,6 +1161,79 @@ impl ChainClient {
             vec![Value::u128(job_id as u128)],
         )
         .await
+    }
+
+    /// Nonce-returning variants used by the provider's heal gate. The heal gate
+    /// needs the submitted nonce as inclusion evidence; every other caller keeps
+    /// the plain `Result<()>` shape above.
+    pub async fn accept_job_fast_nonce(
+        &self,
+        job_id: u64,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        self.submit_fast_nonce(
+            "ComputeMarketplace",
+            "accept_job",
+            vec![Value::u128(job_id as u128)],
+        )
+        .await
+    }
+
+    pub async fn start_job_fast_nonce(
+        &self,
+        job_id: u64,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        self.submit_fast_nonce(
+            "ComputeMarketplace",
+            "start_job",
+            vec![Value::u128(job_id as u128)],
+        )
+        .await
+    }
+
+    pub async fn submit_result_fast_nonce(
+        &self,
+        job_id: u64,
+        result_hash: [u8; 32],
+        actual_tokens: u32,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        self.submit_fast_nonce(
+            "ComputeMarketplace",
+            "submit_result",
+            vec![
+                Value::u128(job_id as u128),
+                Value::from_bytes(result_hash),
+                Value::u128(actual_tokens as u128),
+            ],
+        )
+        .await
+    }
+
+    pub async fn complete_job_fast_nonce(
+        &self,
+        job_id: u64,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        self.submit_fast_nonce(
+            "ComputeMarketplace",
+            "complete_job",
+            vec![Value::u128(job_id as u128)],
+        )
+        .await
+    }
+
+    /// Account nonce at the best head, or `None` when it cannot be read. Unlike
+    /// [`ChainClient::get_account_nonce`] (which folds failures into `0`), this
+    /// preserves the distinction — the heal gate must never mistake an
+    /// unreadable nonce for evidence that a tx was included.
+    pub async fn account_nonce_at_head(&self, address: &str) -> Option<u64> {
+        let client = self.client.as_ref()?;
+        let addr32 = address.parse::<subxt::utils::AccountId32>().ok()?;
+        let storage_addr = subxt::dynamic::storage(
+            "System",
+            "Account",
+            vec![Value::from_bytes(addr32.as_ref() as &[u8; 32])],
+        );
+        let v = self.storage_at_head(client, &storage_addr).await?;
+        get_u32_field(&v, "nonce").map(|n| n as u64)
     }
 
     /// `ComputeMarketplace::cancel_job(job_id)` — the **requestor** cancels a
