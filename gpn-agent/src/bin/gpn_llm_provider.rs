@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::io::Read as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Warn **once** (not every poll) that ollama is missing, so a box without it
 /// logs a single clear, actionable message instead of spamming pull failures.
@@ -629,6 +629,88 @@ fn is_benign_state_err(s: &str) -> bool {
 /// trailing window suffices and keeps the poll loop tight.
 const RECONCILE_WINDOW: u64 = 128;
 
+/// How long to wait before re-submitting the SAME heal transition for the same
+/// job. `submit_fast` is pool-ack only, so a caller cannot tell whether the tx
+/// it just broadcast will be included; at ~15–18 s block times a retry inside
+/// one block interval would allocate a **fresh nonce** for work that is still
+/// queued, run the shared nonce stream ahead of the chain, and churn the pool
+/// (this is what turned one leak into 2–5 identical 4-tx bursts per job).
+/// 45 s ≈ 2–3 block intervals: long enough for inclusion to show up as a state
+/// change, short enough that a genuinely dropped tx is retried promptly.
+const HEAL_RETRY_COOLDOWN: Duration = Duration::from_secs(45);
+
+/// Last attempt time per `(job id, transition)`. Only touched from the single
+/// reconcile pass, but a `Mutex` keeps it sound if the loop is ever parallelised.
+fn heal_gate() -> &'static Mutex<HashMap<(u64, HealStep), Instant>> {
+    static GATE: OnceLock<Mutex<HashMap<(u64, HealStep), Instant>>> = OnceLock::new();
+    GATE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// True when this `(job, transition)` may be submitted now; records the attempt
+/// so the next tick cannot re-fire it inside `HEAL_RETRY_COOLDOWN`.
+fn heal_attempt_allowed(id: u64, step: HealStep) -> bool {
+    let now = Instant::now();
+    let mut gate = heal_gate().lock().unwrap_or_else(|e| e.into_inner());
+    // Drop entries for finished steps/nonexistent ids now and then so the map
+    // stays tiny (it is keyed by (id, step), not by history).
+    if gate.len() > 512 {
+        gate.retain(|_, t| now.duration_since(*t) < HEAL_RETRY_COOLDOWN);
+    }
+    match gate.get(&(id, step)) {
+        Some(last) if now.duration_since(*last) < HEAL_RETRY_COOLDOWN => false,
+        _ => {
+            gate.insert((id, step), now);
+            true
+        }
+    }
+}
+
+/// Forget a job's throttle state once it is out of the heal path (terminal, or
+/// owned by another provider), so the map cannot grow without bound.
+fn heal_forget(id: u64) {
+    let mut gate = heal_gate().lock().unwrap_or_else(|e| e.into_inner());
+    gate.retain(|(jid, _), _| *jid != id);
+}
+
+/// What the reconcile pass should do next for a job whose off-chain result is
+/// already `done` but whose on-chain state has not caught up.
+///
+/// HISTORY (root cause of the 2–5×-per-id `healed leaked Pending` churn): the
+/// heal branch used to fire the WHOLE `accept → start → submit_result →
+/// complete` burst on every reconcile tick. With the fast path each call is
+/// `submit_fast` = pool-ack only (no inclusion check), so a burst fired while
+/// its predecessors were still queued could not land as a unit; the job stayed
+/// `Pending`, the next 10 s tick re-fired all four calls, and the code only
+/// logged on *complete* success (`if a.is_ok() && s.is_ok() && …`), so any
+/// failing leg — and the retry itself — was silent. Result: 2–5 duplicate
+/// 4-tx bursts per job (~240 wasted extrinsics/h) with zero diagnostic output.
+///
+/// FIX: mirror the real state machine — submit exactly ONE transition per
+/// tick, chosen from the state we just read. Each tick costs at most one
+/// extrinsic, a leg that did not land is simply retried (idempotent: the
+/// pallet answers `JobNotPending`/`JobNotAccepted`, which is benign), and every
+/// failure is logged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum HealStep {
+    Accept,
+    Start,
+    SubmitResult,
+    Complete,
+    Wait,
+}
+
+/// Next heal transition for an on-chain state, or `Wait` if the job is not on
+/// the heal path (terminal / unknown states).
+fn heal_step_for_state(state: &str) -> HealStep {
+    match state {
+        "Pending" => HealStep::Accept,
+        "Accepted" => HealStep::Start,
+        "Running" => HealStep::SubmitResult,
+        "AwaitingVerification" => HealStep::Complete,
+        _ => HealStep::Wait,
+    }
+}
+
 async fn process_once(
     client: &ChainClient,
     me: &str,
@@ -647,56 +729,73 @@ async fn process_once(
     if should_reconcile() {
         let next = client.get_next_job_id().await;
         for id in next.saturating_sub(RECONCILE_WINDOW)..next {
-            if let Some((state, _price, _req, _provider_now)) = client.get_job_state(id).await {
-                if state == "Pending" {
-                    // Heal a fast-path leak: we served this job off-chain (store status
-                    // `done` + a result hash) but the on-chain accept never landed (the
-                    // AP's create hadn't been included when we claimed). Drive it
-                    // Pending → Accepted → Running → submit_result → Completed so it
-                    // doesn't strand as an orphan. Only for jobs we actually have a
-                    // completed off-chain result for.
-                    if let Some(j) = get_job(id) {
-                        if j.kind == "llm" && j.status == "done" {
-                            if let Some(bytes) = j.result_hash.as_deref().and_then(hex32) {
-                                let toks = (j.response.as_deref().unwrap_or("").chars().count()
-                                    as u32
-                                    / 4)
-                                .max(1);
-                                let a = if fast_claim {
-                                    client.accept_job_fast(id).await
-                                } else {
-                                    client.accept_job(id).await
-                                };
-                                let s = if fast_claim {
-                                    client.start_job_fast(id).await
-                                } else {
-                                    client.start_job(id).await
-                                };
-                                let r = if fast_claim {
-                                    client.submit_result_fast(id, bytes, toks).await
-                                } else {
-                                    client.submit_result(id, bytes, toks).await
-                                };
-                                let c = if fast_claim {
-                                    client.complete_job_fast(id).await
-                                } else {
-                                    client.complete_job(id).await
-                                };
-                                if a.is_ok() && s.is_ok() && r.is_ok() && c.is_ok() {
-                                    println!("[provider] healed leaked Pending #{id} → Completed");
-                                }
-                            }
+            if let Some((state, _price, _req, provider_now)) = client.get_job_state(id).await {
+                // Heal a fast-path leak: we served this job off-chain (store status
+                // `done` + a result hash) but the on-chain state never caught up (the
+                // AP's create/accept had not been included when we claimed). Walk it
+                // one transition per tick toward `Completed` so it doesn't strand as
+                // an orphan AND the provider still gets paid per token.
+                let heal = get_job(id).filter(|j| {
+                    j.kind == "llm"
+                        && j.status == "done"
+                        && j.result_hash.as_deref().and_then(hex32).is_some()
+                });
+
+                let step = heal_step_for_state(&state);
+
+                if step == HealStep::Accept {
+                    // `provider == me` cannot be checked here: a job on this path is
+                    // still `Pending` (no provider assigned), which is exactly why the
+                    // accept has to be re-driven.
+                    if heal.is_some() && heal_attempt_allowed(id, step) {
+                        match if fast_claim {
+                            client.accept_job_fast(id).await
+                        } else {
+                            client.accept_job(id).await
+                        } {
+                            Ok(()) => println!("[provider] heal #{id}: accept submitted (Pending)"),
+                            Err(e) if is_benign_state_err(&e.to_string()) => {}
+                            Err(e) => eprintln!("[provider] heal #{id} (accept) failed: {e}"),
                         }
                     }
                     continue;
                 }
-                if _provider_now.as_deref() != Some(me) {
+                if provider_now.as_deref() != Some(me) {
+                    heal_forget(id);
                     continue;
                 }
-                if state == "AwaitingVerification" {
+                if step == HealStep::SubmitResult {
+                    // Only meaningful for a job we already produced a result for;
+                    // a result-less `Running` job is the job's own claim loop's
+                    // business (we cannot invent a result hash for it).
+                    if let Some(j) = &heal {
+                        if job_kind_is_ours(id) && heal_attempt_allowed(id, step) {
+                            let bytes = j.result_hash.as_deref().and_then(hex32).unwrap();
+                            let toks = (j.response.as_deref().unwrap_or("").chars().count() as u32
+                                / 4)
+                            .max(1);
+                            match if fast_claim {
+                                client.submit_result_fast(id, bytes, toks).await
+                            } else {
+                                client.submit_result(id, bytes, toks).await
+                            } {
+                                Ok(()) => {
+                                    println!("[provider] heal #{id}: result submitted (Running)")
+                                }
+                                Err(e) if is_benign_state_err(&e.to_string()) => {}
+                                Err(e) => {
+                                    eprintln!("[provider] heal #{id} (submit_result) failed: {e}")
+                                }
+                            }
+                        }
+                    }
+                } else if step == HealStep::Complete {
                     // Kind-gate: skip jobs owned by the other provider (shared
                     // signer account means `provider == me` is true for both kinds).
                     if !job_kind_is_ours(id) {
+                        continue;
+                    }
+                    if !heal_attempt_allowed(id, step) {
                         continue;
                     }
                     match if fast_claim {
@@ -705,28 +804,38 @@ async fn process_once(
                         client.complete_job(id).await
                     } {
                         Ok(()) => {
-                            println!("[provider] reconciled #{id} AwaitingVerification → Completed")
+                            println!("[provider] reconciled #{id} AwaitingVerification → Completed");
+                            heal_forget(id);
                         }
                         Err(e) if is_benign_state_err(&e.to_string()) => {
                             // Already finalized elsewhere — quiet, not an error.
                         }
                         Err(e) => eprintln!("[provider] reconcile #{id} (complete) failed: {e}"),
                     }
-                } else if state == "Accepted" && job_kind_is_ours(id) {
-                    // Capacity reclaim: an `Accepted` LLM job we own that was never
-                    // started is a zombie (its start tx never landed) permanently
-                    // holding one of our `MaxJobsPerProvider` slots → every later
-                    // accept fails `MaxProviderCapacity`. Since our claim loop only
-                    // *starts* `Pending` jobs, an `Accepted` job can never advance on
-                    // its own — drive it Accepted → Running → Completed to free the
-                    // slot (escrow is refunded by `complete_job`).
+                } else if step == HealStep::Start && job_kind_is_ours(id) {
+                    // Start ONE transition. Two cases:
+                    //  (a) we already produced a result (`heal`) ⇒ start only; the
+                    //      next tick sees `Running` and submits the result, so the
+                    //      provider is paid per token instead of the job being
+                    //      completed result-less for a full refund.
+                    //  (b) plain zombie (no result) ⇒ start + complete as before, to
+                    //      reclaim the `MaxJobsPerProvider` slot.
+                    if !heal_attempt_allowed(id, step) {
+                        continue;
+                    }
                     let start_res = if fast_claim {
                         client.start_job_fast(id).await
                     } else {
                         client.start_job(id).await
                     };
                     if let Err(e) = start_res {
-                        eprintln!("[provider] reconcile #{id} (start) failed: {e}");
+                        if !is_benign_state_err(&e.to_string()) {
+                            eprintln!("[provider] reconcile #{id} (start) failed: {e}");
+                        }
+                        continue;
+                    }
+                    if heal.is_some() {
+                        println!("[provider] heal #{id}: started (Accepted)");
                         continue;
                     }
                     match if fast_claim {
@@ -739,6 +848,10 @@ async fn process_once(
                         ),
                         Err(e) => eprintln!("[provider] reconcile #{id} (complete) failed: {e}"),
                     }
+                }
+                // Terminal / unknown: drop the throttle entry so the map stays small.
+                if matches!(state.as_str(), "Completed" | "Failed" | "Cancelled") {
+                    heal_forget(id);
                 }
             }
         }
@@ -1120,6 +1233,35 @@ async fn run_job(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod heal_step_tests {
+    use super::{heal_attempt_allowed, heal_step_for_state, HealStep};
+
+    #[test]
+    fn heal_gate_admits_one_attempt_per_cooldown() {
+        // Unique ids: the gate is process-global and tests run in parallel.
+        assert!(heal_attempt_allowed(9_100_001, HealStep::Accept));
+        assert!(!heal_attempt_allowed(9_100_001, HealStep::Accept));
+        // A different transition is a different key — it may proceed at once.
+        assert!(heal_attempt_allowed(9_100_001, HealStep::Start));
+    }
+
+    #[test]
+    fn heal_walks_one_transition_per_tick() {
+        assert_eq!(heal_step_for_state("Pending"), HealStep::Accept);
+        assert_eq!(heal_step_for_state("Accepted"), HealStep::Start);
+        assert_eq!(heal_step_for_state("Running"), HealStep::SubmitResult);
+        assert_eq!(heal_step_for_state("AwaitingVerification"), HealStep::Complete);
+    }
+
+    #[test]
+    fn heal_ignores_terminal_and_unknown_states() {
+        for s in ["Completed", "Failed", "Cancelled", "Bogus", ""] {
+            assert_eq!(heal_step_for_state(s), HealStep::Wait, "state {s}");
+        }
+    }
 }
 
 #[cfg(test)]
