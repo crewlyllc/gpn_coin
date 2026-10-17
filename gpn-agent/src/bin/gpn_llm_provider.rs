@@ -661,59 +661,122 @@ const HEAL_RETRY_COOLDOWN: Duration = Duration::from_secs(45);
 /// transition with a fresh nonce (`accept`/`start`/`complete` duplicates).
 const HEAL_RETRY_FLOOR: Duration = Duration::from_secs(120);
 
-/// Last attempt per `(job id, transition)` = (instant, nonce the tx was signed
-/// with). Only touched from the single reconcile pass, but a `Mutex` keeps it
-/// sound if the loop is ever parallelised.
-///
-/// The nonce (not the head number) is the inclusion evidence: a block being
-/// produced says nothing about *our* tx (it may still be queued behind other
-/// people's extrinsics), whereas the account nonce only advances when the txs
-/// below it have actually been applied. `None` = not yet known (or a slow-path
-/// submit that already waited for inclusion).
-fn heal_gate() -> &'static Mutex<HashMap<(u64, HealStep), (Instant, Option<u64>)>> {
-    static GATE: OnceLock<Mutex<HashMap<(u64, HealStep), (Instant, Option<u64>)>>> = OnceLock::new();
+/// Absolute ceiling on the backoff applied when a heal tx is *included* but
+/// leaves the on-chain state unchanged. That means the dispatch **reverted**
+/// inside the block (e.g. `accept_job` rejected for provider capacity while the
+/// single GPU slot was busy): the nonce is consumed, nothing happens, and the
+/// plain 45 s cadence simply re-submits the identical call — measured as ~14–20%
+/// duplicated heal lines with **no diagnostic line at all**, which made the
+/// retries look spurious. Each ineffective attempt doubles the wait up to this
+/// cap (45 → 90 → 180 → 360 s), so a persistently reverting step stops burning
+/// nonces and pool slots while still retrying for liveness.
+const HEAL_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(360);
+
+/// Gate state for one `(job id, transition)`.
+#[derive(Debug, Clone, Copy)]
+struct HealAttempt {
+    /// When the transition was last submitted (or last admitted for submission).
+    last: Instant,
+    /// Nonce the tx was signed with. The nonce (not the head number) is the
+    /// inclusion evidence: a block being produced says nothing about *our* tx
+    /// (it may still be queued behind other people's extrinsics), whereas the
+    /// account nonce only advances once the txs below it have been applied.
+    /// `None` = not yet known (or a slow-path submit that already waited).
+    nonce: Option<u64>,
+    /// How many consecutive attempts were *included* and left the state
+    /// unchanged (dispatch reverted). Drives the backoff + the diagnostic.
+    ineffective: u32,
+}
+
+/// Last attempt per `(job id, transition)`. Only touched from the single
+/// reconcile pass, but a `Mutex` keeps it sound if the loop is ever parallelised.
+fn heal_gate() -> &'static Mutex<HashMap<(u64, HealStep), HealAttempt>> {
+    static GATE: OnceLock<Mutex<HashMap<(u64, HealStep), HealAttempt>>> = OnceLock::new();
     GATE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Pure retry decision: inside the cooldown never; after it, only with evidence
-/// that the previous tx was included (account nonce passed ours) or once the
-/// absolute floor has elapsed (it was probably dropped).
-fn heal_retry_decision(elapsed: Duration, inclusion_evidence: bool) -> bool {
+fn heal_step_name(step: HealStep) -> &'static str {
+    match step {
+        HealStep::Accept => "accept",
+        HealStep::Start => "start",
+        HealStep::SubmitResult => "result submitted",
+        HealStep::Complete => "completion",
+        HealStep::Wait => "wait",
+    }
+}
+
+/// Wait required before re-submitting the same transition, given how many prior
+/// attempts were included without effect: 45 s, then ×2 per revert, capped.
+fn heal_backoff(ineffective: u32) -> Duration {
+    let d = HEAL_RETRY_COOLDOWN * (1u32 << ineffective.min(3));
+    if d > HEAL_RETRY_MAX_BACKOFF {
+        HEAL_RETRY_MAX_BACKOFF
+    } else {
+        d
+    }
+}
+
+/// Pure retry decision. With inclusion evidence (our tx landed) retry once the
+/// (backoff-scaled) cooldown has elapsed; without it, only after the absolute
+/// floor — i.e. assume a queued tx is still coming, but never wedge forever.
+fn heal_retry_decision(elapsed: Duration, inclusion_evidence: bool, ineffective: u32) -> bool {
+    if inclusion_evidence {
+        return elapsed >= heal_backoff(ineffective);
+    }
     if elapsed < HEAL_RETRY_COOLDOWN {
         return false;
     }
-    inclusion_evidence || elapsed >= HEAL_RETRY_FLOOR
+    elapsed >= HEAL_RETRY_FLOOR
 }
 
 /// True when this `(job, transition)` may be submitted now; records the attempt
-/// so the next tick cannot re-fire it inside `HEAL_RETRY_COOLDOWN`, and a tx
-/// still queued behind a full block cannot re-fire it at all until the account
-/// nonce proves it landed (or `HEAL_RETRY_FLOOR` passes).
+/// so the next tick cannot re-fire it inside the cooldown, and a tx still queued
+/// behind a full block cannot re-fire it until the account nonce proves it
+/// landed (or `HEAL_RETRY_FLOOR` passes).
+///
+/// When the previous tx *did* land and the state still has not moved, the
+/// dispatch must have reverted: log that once (it used to be completely silent)
+/// and escalate the backoff instead of re-submitting at the plain cadence.
 fn heal_attempt_allowed(id: u64, step: HealStep, account_nonce: Option<u64>) -> bool {
     let now = Instant::now();
     let mut gate = heal_gate().lock().unwrap_or_else(|e| e.into_inner());
     // Drop entries for finished steps/nonexistent ids now and then so the map
     // stays tiny (it is keyed by (id, step), not by history).
     if gate.len() > 512 {
-        gate.retain(|_, (t, _)| now.duration_since(*t) < HEAL_RETRY_FLOOR);
+        gate.retain(|_, a| now.duration_since(a.last) < HEAL_RETRY_FLOOR);
     }
-    match gate.get(&(id, step)) {
-        Some((last, submitted_nonce)) => {
-            let elapsed = now.duration_since(*last);
+    match gate.get(&(id, step)).copied() {
+        Some(prev) => {
+            let elapsed = now.duration_since(prev.last);
             // `System::Account.nonce` is the NEXT nonce to use, so a tx signed
             // with `n` is included only once the account nonce is strictly > n.
-            let landed = match (submitted_nonce, account_nonce) {
-                (Some(n), Some(cur)) => cur > *n,
+            let landed = match (prev.nonce, account_nonce) {
+                (Some(n), Some(cur)) => cur > n,
                 _ => false,
             };
-            if !heal_retry_decision(elapsed, landed) {
+            if !heal_retry_decision(elapsed, landed, prev.ineffective) {
                 return false;
             }
-            gate.insert((id, step), (now, None));
+            let ineffective = if landed { prev.ineffective + 1 } else { prev.ineffective };
+            gate.insert(
+                (id, step),
+                HealAttempt { last: now, nonce: None, ineffective },
+            );
+            if landed {
+                eprintln!(
+                    "[provider] heal #{id} ({}): previous tx was included but the state did not move — dispatch reverted; next retry backs off {}s (ineffective attempt {})",
+                    heal_step_name(step),
+                    heal_backoff(ineffective).as_secs(),
+                    ineffective
+                );
+            }
             true
         }
         None => {
-            gate.insert((id, step), (now, None));
+            gate.insert(
+                (id, step),
+                HealAttempt { last: now, nonce: None, ineffective: 0 },
+            );
             true
         }
     }
@@ -723,8 +786,11 @@ fn heal_attempt_allowed(id: u64, step: HealStep, account_nonce: Option<u64>) -> 
 /// tell whether it was included. Called only right after a successful submit.
 fn heal_record_nonce(id: u64, step: HealStep, nonce: u64) {
     let mut gate = heal_gate().lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((instant, _)) = gate.get(&(id, step)).copied() {
-        gate.insert((id, step), (instant, Some(nonce)));
+    if let Some(prev) = gate.get(&(id, step)).copied() {
+        gate.insert(
+            (id, step),
+            HealAttempt { nonce: Some(nonce), ..prev },
+        );
     }
 }
 
@@ -1355,16 +1421,25 @@ async fn run_job(
 #[cfg(test)]
 mod heal_step_tests {
     use super::{
-        heal_attempt_allowed, heal_gate, heal_record_nonce, heal_retry_decision, heal_step_for_state,
-        HealStep,
+        heal_attempt_allowed, heal_backoff, heal_gate, heal_record_nonce, heal_retry_decision,
+        heal_step_for_state, HealAttempt, HealStep, HEAL_RETRY_MAX_BACKOFF,
     };
     use std::time::{Duration, Instant};
 
     /// Backdate a gate entry so the cooldown is already over (tests cannot sleep
     /// 45 s). Mirrors what a real earlier attempt leaves behind.
-    fn seed_attempt(id: u64, step: HealStep, age: Duration, nonce: Option<u64>) {
+    fn seed_attempt(
+        id: u64,
+        step: HealStep,
+        age: Duration,
+        nonce: Option<u64>,
+        ineffective: u32,
+    ) {
         let mut gate = heal_gate().lock().unwrap_or_else(|e| e.into_inner());
-        gate.insert((id, step), (Instant::now() - age, nonce));
+        gate.insert(
+            (id, step),
+            HealAttempt { last: Instant::now() - age, nonce, ineffective },
+        );
     }
 
     #[test]
@@ -1383,8 +1458,8 @@ mod heal_step_tests {
         heal_record_nonce(9_100_002, HealStep::Complete, 77);
         let gate = heal_gate().lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(
-            gate.get(&(9_100_002, HealStep::Complete)).map(|(_, n)| *n),
-            Some(Some(77))
+            gate.get(&(9_100_002, HealStep::Complete)).and_then(|a| a.nonce),
+            Some(77)
         );
     }
 
@@ -1394,31 +1469,60 @@ mod heal_step_tests {
         // signed with ⇒ our tx is queued behind a full block (the dominant case:
         // the head advances every ~11 s, ours does not land). Do NOT burn a new
         // nonce on a duplicate. This is what made the head-based #33 gate a no-op.
-        seed_attempt(9_100_003, HealStep::Start, Duration::from_secs(51), Some(100));
+        seed_attempt(9_100_003, HealStep::Start, Duration::from_secs(51), Some(100), 0);
         assert!(!heal_attempt_allowed(9_100_003, HealStep::Start, Some(100)));
         // Account nonce passed ours ⇒ the tx was applied (real inclusion evidence).
-        seed_attempt(9_100_004, HealStep::Start, Duration::from_secs(51), Some(100));
+        seed_attempt(9_100_004, HealStep::Start, Duration::from_secs(51), Some(100), 0);
         assert!(heal_attempt_allowed(9_100_004, HealStep::Start, Some(101)));
         // Unreadable account nonce is conservative: never evidence.
-        seed_attempt(9_100_005, HealStep::Start, Duration::from_secs(51), Some(100));
+        seed_attempt(9_100_005, HealStep::Start, Duration::from_secs(51), Some(100), 0);
         assert!(!heal_attempt_allowed(9_100_005, HealStep::Start, None));
         // Absolute floor still guarantees liveness for a genuinely dropped tx.
-        seed_attempt(9_100_006, HealStep::Start, Duration::from_secs(121), Some(100));
+        seed_attempt(9_100_006, HealStep::Start, Duration::from_secs(121), Some(100), 0);
         assert!(heal_attempt_allowed(9_100_006, HealStep::Start, Some(100)));
     }
 
     #[test]
     fn retry_needs_inclusion_evidence_or_the_absolute_floor() {
         // Inside the cooldown: never, regardless of inclusion.
-        assert!(!heal_retry_decision(Duration::from_secs(10), true));
-        assert!(!heal_retry_decision(Duration::from_secs(44), false));
+        assert!(!heal_retry_decision(Duration::from_secs(10), true, 0));
+        assert!(!heal_retry_decision(Duration::from_secs(44), false, 0));
         // Cooldown elapsed but our tx provably has not landed: no retry.
-        assert!(!heal_retry_decision(Duration::from_secs(51), false));
+        assert!(!heal_retry_decision(Duration::from_secs(51), false, 0));
         // Our nonce advanced: retry.
-        assert!(heal_retry_decision(Duration::from_secs(51), true));
+        assert!(heal_retry_decision(Duration::from_secs(51), true, 0));
         // Absolute floor: assume the tx was dropped and retry for liveness.
-        assert!(heal_retry_decision(Duration::from_secs(120), false));
-        assert!(heal_retry_decision(Duration::from_secs(600), false));
+        assert!(heal_retry_decision(Duration::from_secs(120), false, 0));
+        assert!(heal_retry_decision(Duration::from_secs(600), false, 0));
+    }
+
+    /// Item #35: a heal tx that IS included but leaves the state unchanged has
+    /// had its dispatch reverted (e.g. `MaxProviderCapacity`). Re-submitting at
+    /// the plain 45 s cadence wastes a nonce per attempt, so the gate must back
+    /// off progressively instead — while still retrying, never wedging.
+    #[test]
+    fn reverted_dispatch_backs_off_instead_of_resubmitting() {
+        // One inclusion-but-reverted attempt: 51 s is no longer enough.
+        seed_attempt(9_100_007, HealStep::Accept, Duration::from_secs(51), Some(100), 1);
+        assert!(!heal_attempt_allowed(9_100_007, HealStep::Accept, Some(101)));
+        // After the doubled backoff it retries, and the counter escalates.
+        seed_attempt(9_100_008, HealStep::Accept, Duration::from_secs(91), Some(100), 1);
+        assert!(heal_attempt_allowed(9_100_008, HealStep::Accept, Some(101)));
+        {
+            let gate = heal_gate().lock().unwrap_or_else(|e| e.into_inner());
+            assert_eq!(
+                gate.get(&(9_100_008, HealStep::Accept)).map(|a| a.ineffective),
+                Some(2)
+            );
+        }
+        // Pure schedule: 45 → 90 → 180 → 360 (capped), never unbounded.
+        assert_eq!(heal_backoff(0), Duration::from_secs(45));
+        assert_eq!(heal_backoff(1), Duration::from_secs(90));
+        assert_eq!(heal_backoff(2), Duration::from_secs(180));
+        assert_eq!(heal_backoff(3), HEAL_RETRY_MAX_BACKOFF);
+        assert_eq!(heal_backoff(9), HEAL_RETRY_MAX_BACKOFF);
+        assert!(!heal_retry_decision(Duration::from_secs(89), true, 1));
+        assert!(heal_retry_decision(Duration::from_secs(90), true, 1));
     }
 
     #[test]
