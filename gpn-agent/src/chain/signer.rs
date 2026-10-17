@@ -720,10 +720,42 @@ impl NonceStream {
         args: Vec<Value>,
     ) -> Result<u64, Box<dyn std::error::Error>> {
         let call = subxt::dynamic::tx(pallet, call_name, args);
-        let nonce = self.next_nonce;
-        submit_signed_no_wait(&self.client, &call, &self.signer, nonce).await?;
-        self.next_nonce += 1;
-        Ok(nonce)
+        // A pool collision here means the node already holds a tx at our next
+        // nonce (typically one this process submitted before a restart or before
+        // the stream was dropped, while the block that includes it is still
+        // importing). Retrying the SAME nonce can never win — the pool rejects it
+        // with 1014 "Priority is too low" every time and the caller re-seeds from
+        // the head nonce, which is still behind the pool, so the storm repeats.
+        // Step the local counter forward instead (same rule as `submit_signed`).
+        const MAX_NONCE_RETRIES: u32 = 8;
+        let mut last_err: Option<Box<dyn std::error::Error>> = None;
+        for attempt in 0..MAX_NONCE_RETRIES {
+            let nonce = self.next_nonce;
+            match submit_signed_no_wait(&self.client, &call, &self.signer, nonce).await {
+                Ok(()) => {
+                    self.next_nonce = nonce + 1;
+                    return Ok(nonce);
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    if is_nonce_collision(&msg) && attempt + 1 < MAX_NONCE_RETRIES {
+                        log::warn!(
+                            "fast submit {}::{} nonce {} collision: {} — retrying at {}",
+                            pallet,
+                            call_name,
+                            nonce,
+                            msg,
+                            nonce + 1
+                        );
+                        self.next_nonce = nonce + 1;
+                        last_err = Some(e);
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| "nonce collision: exceeded maximum retries".into()))
     }
 
     /// Re-read the on-chain nonce and pull the local counter forward (never
