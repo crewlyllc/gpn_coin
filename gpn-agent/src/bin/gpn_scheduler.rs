@@ -1381,6 +1381,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let fast_ap = std::env::var("GPN_FAST_AP")
                         .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
                         .unwrap_or(true);
+                    // Preserve the create failure reason instead of discarding it:
+                    // a bare "could not create job" left the 2026-10-16 19:19 failure
+                    // undiagnosable (no error text in the journal or the response).
+                    let mut create_err: Option<String> = None;
                     let (created, id) = if passthrough {
                         (false, 0u64)
                     } else if fast_ap {
@@ -1405,7 +1409,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             workload_hash,
                         )) {
                             Ok(()) => (true, predicted),
-                            Err(_) => {
+                            Err(e) => {
+                                // env_logger defaults to ERROR, so log::warn would be
+                                // invisible in the unit journal — print instead.
+                                println!("[create] create_job_fast rejected: {e}");
                                 // The create may have landed despite a slow/!acked pool submit.
                                 // Confirm briefly; only trust it if it matches our prediction.
                                 let mut real: Option<u64> = None;
@@ -1423,6 +1430,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     // Did not land: realign the allocator and report failure.
                                     _ => {
                                         align_alloc(next_before);
+                                        create_err = Some(e.to_string());
                                         (false, predicted)
                                     }
                                 }
@@ -1520,7 +1528,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             std::thread::sleep(Duration::from_millis(300));
                         }
                     } else {
-                        text = "[gpn error] could not create job".to_string();
+                        text = match &create_err {
+                            Some(e) => format!("[gpn error] could not create job: {e}"),
+                            None => "[gpn error] could not create job".to_string(),
+                        };
                     }
                     if stream {
                         let idc = format!("chatcmpl-gpn-{id}");
