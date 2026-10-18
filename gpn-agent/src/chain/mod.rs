@@ -68,6 +68,23 @@ pub struct ChainClient {
     fast: std::sync::Arc<tokio::sync::Mutex<Option<signer::NonceStream>>>,
 }
 
+/// A dropped/closed RPC socket, not a chain-level rejection. jsonrpsee reports a
+/// dead background task as `RestartNeeded` ("The background task closed ...;
+/// restart required"); other variants say the connection closed / is not
+/// connected. None of these mean the transaction was rejected — the submit never
+/// reached the node — so a fresh connection may safely resubmit the same call.
+fn is_connection_lost(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    m.contains("restart required")
+        || m.contains("background task closed")
+        || m.contains("connection closed")
+        || m.contains("connection reset")
+        || m.contains("closed connection")
+        || m.contains("not connected")
+        || m.contains("disconnected")
+        || m.contains("broken pipe")
+}
+
 /// Resolve the readiness-gate timeout/poll from the environment and wait for the
 /// node RPC to report a live best block. Bounded and non-fatal — on timeout it
 /// returns the last [`signer::NodeReadiness`] so the caller can log and proceed
@@ -1052,32 +1069,56 @@ impl ChainClient {
                 *guard = None;
             }
         }
-        if guard.is_none() {
-            let Some(uri) = &self.signer_uri else {
-                return Err(format!(
-                    "No signer configured; cannot submit {}::{}.",
-                    pallet, call_name
-                )
-                .into());
-            };
-            *guard = Some(signer::NonceStream::new(&self.endpoint, uri).await?);
-        }
-        let stream = guard.as_mut().expect("fast stream initialized above");
-        match stream.submit(pallet, call_name, args).await {
-            Ok(nonce) => {
-                log::info!(
-                    "{}::{} accepted into pool at nonce {} (no inclusion wait)",
-                    pallet,
-                    call_name,
-                    nonce
-                );
-                Ok(nonce)
+        // One bounded reconnect retry. The cached stream holds a long-lived WS
+        // client; if it idles long enough for the node / RPC server to close the
+        // socket, jsonrpsee's background task ends and the NEXT submit fails with
+        // `RestartNeeded` ("The background task closed ...; restart required")
+        // even though the chain is healthy. Previously that surfaced to the user
+        // as a failed request and only the following request (which re-created the
+        // stream) succeeded. Treat it as "our socket is stale": rebuild once and
+        // resubmit. Bounded to a single extra attempt, still pool-ack only.
+        let mut reconnected = false;
+        loop {
+            if guard.is_none() {
+                let Some(uri) = &self.signer_uri else {
+                    return Err(format!(
+                        "No signer configured; cannot submit {}::{}.",
+                        pallet, call_name
+                    )
+                    .into());
+                };
+                *guard = Some(signer::NonceStream::new(&self.endpoint, uri).await?);
             }
-            Err(e) => {
-                // Drop the stream: its local nonce may now be ahead of / behind
-                // the chain. The next submit_fast reconnects and re-seeds.
-                *guard = None;
-                Err(e)
+            let stream = guard.as_mut().expect("fast stream initialized above");
+            match stream.submit(pallet, call_name, args.clone()).await {
+                Ok(nonce) => {
+                    log::info!(
+                        "{}::{} accepted into pool at nonce {} (no inclusion wait)",
+                        pallet,
+                        call_name,
+                        nonce
+                    );
+                    return Ok(nonce);
+                }
+                Err(e) => {
+                    // Drop the stream: its local nonce may now be ahead of / behind
+                    // the chain. The next submit_fast reconnects and re-seeds.
+                    *guard = None;
+                    if !reconnected && is_connection_lost(&e.to_string()) {
+                        reconnected = true;
+                        log::warn!(
+                            "fast submit {}::{} lost its RPC connection ({}) — reconnecting once",
+                            pallet,
+                            call_name,
+                            e
+                        );
+                        println!(
+                            "[submit_fast] {pallet}::{call_name} RPC connection lost — reconnecting once"
+                        );
+                        continue;
+                    }
+                    return Err(e);
+                }
             }
         }
     }
