@@ -84,6 +84,15 @@ fn past_deadline(created_at: u32, max_duration: u32, head: u64) -> bool {
 /// list) are still reclaimed once past their on-chain deadline.
 const JANITOR_SEED_LOOKBACK: u64 = 256;
 
+/// How many trailing job ids the janitor re-scans on **every** pass to adopt
+/// orphans it never tracked. Needed because the startup seed above reads
+/// `NextJobId` at process start: a `create_job` submitted by the previous
+/// process (no-wait fast path) can still be in the tx pool then, land a block
+/// later, and thus be *newer* than the seeded counter — invisible to the seed,
+/// never in `recent_jobs()`, and therefore never cancelled or expired by us
+/// while it holds an `ActiveJobCount` slot. Observed 2026-10-18: #5503/#5504.
+const JANITOR_ADOPT_WINDOW: u64 = 32;
+
 /// Every 30s, reclaim this AP's orphaned jobs:
 ///   1. **Primary — pallet `expire_job` (permissionless):** any non-terminal job
 ///      past its on-chain `created_at + max_duration` deadline is reclaimed via the
@@ -115,8 +124,35 @@ fn spawn_janitor(client: Arc<ChainClient>, rt: Arc<tokio::runtime::Runtime>) {
             next.saturating_sub(1)
         );
     }
+    // Our own address in the same hex form `get_job_state` reports for requestor.
+    let me = client.signer_address_hex();
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(30));
+        // Adopt untracked non-terminal jobs of ours from the trailing id window
+        // (creates that were in the pool when this process seeded `next`).
+        if let Some(me) = me.as_deref() {
+            let next = rt.block_on(client.get_next_job_id());
+            let scan_from = next.saturating_sub(JANITOR_ADOPT_WINDOW);
+            let tracked: Vec<u64> = recent_jobs()
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(id, _, _)| *id)
+                .collect();
+            for id in scan_from..next {
+                if tracked.contains(&id) {
+                    continue;
+                }
+                if let Some((state, _, req, _)) = rt.block_on(client.get_job_state(id)) {
+                    if req.as_deref() == Some(me) && !is_terminal_state(&state) {
+                        record_created(id, 0);
+                        println!(
+                            "[janitor] adopted untracked #{id} ({state}) — created in-flight across an AP restart"
+                        );
+                    }
+                }
+            }
+        }
         let now = Instant::now();
         let head = rt.block_on(client.head_block_number()).unwrap_or(0);
         let snapshot: Vec<(u64, Instant, u64)> = recent_jobs().lock().unwrap().clone();

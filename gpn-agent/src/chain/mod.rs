@@ -1299,6 +1299,15 @@ impl ChainClient {
         Some(s.account_id().to_string())
     }
 
+    /// Signer address as lowercase `0x…` hex — the exact format `get_job_state`
+    /// returns for `requestor`, so callers can match "is this job mine?".
+    pub fn signer_address_hex(&self) -> Option<String> {
+        let uri = self.signer_uri.as_ref()?;
+        let s = signer::Sr25519Signer::from_uri(uri).ok()?;
+        use subxt::tx::Signer as _;
+        Some(format!("0x{}", hex::encode(s.account_id().0)))
+    }
+
     /// `ComputeMarketplace::fail_job(job_id, reason)` — mark a non-terminal job
     /// Failed and refund the escrow immediately. Callable by the assigned provider
     /// or the requestor. Frees the global `ActiveJobCount` slot.
