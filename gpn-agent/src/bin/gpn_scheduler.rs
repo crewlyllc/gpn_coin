@@ -1446,7 +1446,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .unwrap_or("auto")
                         .to_string();
                     let stream = v.get("stream").and_then(|x| x.as_bool()).unwrap_or(false);
-                    let prompt = messages_to_prompt(&v);
+                    // Item #37: resolve the prompt from OpenAI `messages[]`/`system` **or** a
+                    // top-level `prompt`/`input` (llama.cpp / Ollama-style clients pointed at
+                    // this facade send those), and refuse a body with no usable prompt BEFORE
+                    // any create — otherwise the flat prompt degrades to the bare `"assistant:"`
+                    // suffix, a nonsense job is created, routed and paid, and the caller gets
+                    // HTTP 200 with an off-topic answer (the item-#24 orphan class, one layer up).
+                    let prompt = match resolve_job_prompt(&v) {
+                        Some(p) => p,
+                        None => {
+                            let r = Response::from_string(json!({
+                                "error": {"message": "missing prompt: send messages[] (OpenAI) or prompt/input", "type": "gpn_error"}
+                            }).to_string())
+                            .with_header(hdr.clone())
+                            .with_status_code(400);
+                            let _ = req.respond(r);
+                            return;
+                        }
+                    };
                     // Abuse guardrail (item #22): moderate the prompt at the AP, the
                     // user-facing chokepoint, BEFORE any on-chain create or routing.
                     if let Some(cat) = moderation_block(&prompt) {
@@ -2629,6 +2646,30 @@ mod tests {
             resolve_job_prompt(&json!({"prompt": "P", "input": "I"})).as_deref(),
             Some("P")
         );
+    }
+
+    #[test]
+    fn chat_facade_keeps_the_callers_prompt_and_rejects_an_empty_one() {
+        // Item #37: the OpenAI facade used to flatten ONLY `messages[]`, so a
+        // `prompt`-only body (llama.cpp / Ollama-style client) collapsed to the
+        // bare "assistant:" suffix and a nonsense job was created, routed and
+        // paid. Both shapes must now carry the caller's text, and a body with
+        // neither must be refused instead of producing the empty-prompt job.
+        assert_eq!(
+            resolve_job_prompt(&json!({"model": "llama3.2:1b", "prompt": "capital of France?"}))
+                .as_deref(),
+            Some("capital of France?")
+        );
+        let m = resolve_job_prompt(&json!({
+            "model": "llama3.2:1b",
+            "messages": [{"role": "user", "content": "capital of France?"}]
+        }))
+        .expect("OpenAI body must yield a prompt");
+        assert!(m.contains("capital of France?"));
+        assert!(m.ends_with("assistant:"));
+        // The degenerate body that used to become a paid, unservable job.
+        let empty = resolve_job_prompt(&json!({"model": "llama3.2:1b"}));
+        assert_eq!(empty, None, "no prompt => 400, no create, no escrow");
     }
 
     #[test]
