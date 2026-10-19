@@ -49,6 +49,41 @@ fn missing_counter() -> &'static Mutex<HashMap<u64, u32>> {
     M.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Item #41: ids already warned about being payload-less (warn once each, not
+/// once per 500 ms poll).
+fn payloadless_warned() -> &'static Mutex<std::collections::HashSet<u64>> {
+    static W: OnceLock<Mutex<std::collections::HashSet<u64>>> = OnceLock::new();
+    W.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Decision for one candidate job at the claim boundary (item #41).
+///
+/// A provider may only claim a job whose off-chain payload it holds locally:
+/// the AP writes the payload BEFORE dispatching / pushing `/assign`, so an
+/// assignment without a payload means that write was lost. Such a job can
+/// never be run by us — claiming it burns `accept`+`start` extrinsics on every
+/// poll (68 duplicate claims measured on #5629) and wedges it `Running` with
+/// the escrow locked until expiry.
+#[derive(Debug, PartialEq, Eq)]
+enum ClaimGate {
+    /// Payload present — claim normally.
+    Claim,
+    /// No payload, already warned about this id — skip silently.
+    SkipSilently,
+    /// No payload, first sighting — skip and log once.
+    SkipAndWarn,
+}
+
+fn payload_gate(has_payload: bool, first_sighting: bool) -> ClaimGate {
+    if has_payload {
+        ClaimGate::Claim
+    } else if first_sighting {
+        ClaimGate::SkipAndWarn
+    } else {
+        ClaimGate::SkipSilently
+    }
+}
+
 /// Parse a "0x"-prefixed 32-byte hex string into `[u8; 32]`.
 fn hex32(s: &str) -> Option<[u8; 32]> {
     let h = s.trim_start_matches("0x");
@@ -1169,6 +1204,24 @@ async fn process_once(
                 }
             }
         }
+        // Item #41: refuse to claim a job we hold no off-chain payload for.
+        let gate = if get_job(job_id).is_some() {
+            ClaimGate::Claim
+        } else {
+            let first_sighting = payloadless_warned().lock().unwrap().insert(job_id);
+            payload_gate(false, first_sighting)
+        };
+        match gate {
+            ClaimGate::Claim => {}
+            ClaimGate::SkipAndWarn => {
+                eprintln!(
+                    "[provider] skipping LLM job #{job_id}: assigned but no local payload — \
+                     cannot run it; leaving it Pending (expires on-chain)"
+                );
+                continue;
+            }
+            ClaimGate::SkipSilently => continue,
+        }
         println!("[provider] claiming LLM job #{job_id}");
         if fast_claim {
             // accept_job + start_job as one nonce-ordered burst, no block wait.
@@ -1416,6 +1469,22 @@ async fn run_job(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod claim_gate_tests {
+    use super::{payload_gate, ClaimGate};
+
+    /// Item #41: a job with no local payload must never be claimed (claiming it
+    /// burns accept+start on every poll and wedges it `Running`); the skip is
+    /// logged exactly once per id.
+    #[test]
+    fn payload_gate_claims_only_jobs_we_can_actually_run() {
+        assert_eq!(payload_gate(true, false), ClaimGate::Claim);
+        assert_eq!(payload_gate(true, true), ClaimGate::Claim);
+        assert_eq!(payload_gate(false, true), ClaimGate::SkipAndWarn);
+        assert_eq!(payload_gate(false, false), ClaimGate::SkipSilently);
+    }
 }
 
 #[cfg(test)]
