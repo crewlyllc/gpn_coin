@@ -65,6 +65,11 @@ hex = "0.4"
 hickory-resolver = "0.25"
 attohttpc = { version = "0.24", default-features = false }
 
+# Automatic NAT port mapping (design §5.5): UPnP-IGD discovery + AddPortMapping.
+# igd-next is already in the dependency graph via libp2p-upnp, so this adds no
+# new transitive crates. Version is pinned to the locked 0.14.x.
+igd-next = { version = "0.14", default-features = false }
+
 # Real Ethash PoW (memory-hard, GPU-mineable). Light-cache mode lets a CPU
 # mine/verify the same algorithm a GPU miner targets with the full DAG.
 ethash = "0.4"

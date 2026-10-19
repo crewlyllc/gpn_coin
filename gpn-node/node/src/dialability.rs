@@ -509,8 +509,9 @@ pub fn listen_port(listen: &[Multiaddr]) -> Option<u16> {
 /// 10-minute re-check.
 ///
 /// Emitted **once per degraded transition** (startup, or dialable → not
-/// dialable), after any NAT-mapping attempt (none in this build — see queue
-/// #46 Phase 1), and never in the per-block log loop.
+/// dialable), after the automatic NAT-mapping attempt in [`crate::portmap`] —
+/// so a successful UPnP/NAT-PMP mapping never shows this notice — and never in
+/// the per-block log loop.
 pub fn degradation_notice(
     lan_ip: Option<IpAddr>,
     port: u16,
@@ -585,8 +586,9 @@ To fix it (about 5 minutes):
      Linux (firewalld):
        sudo firewall-cmd --add-port={port}/tcp --permanent && sudo firewall-cmd --reload
 
-  4. UPnP/NAT-PMP mapping is not enabled in this build; use step 2 (or set
-     GPN_PUBLIC_ADDR if a forward maps a different external port).
+  4. UPnP/NAT-PMP: the node already tried this automatically (GPN_UPNP=auto is
+     the default). If your router has UPnP disabled, either enable it and
+     restart, or use step 2. Disable the attempt with --no-upnp / GPN_UPNP=off.
 
   5. CGNAT: if your router's WAN address is in 100.64.0.0/10, no port forward
      can work. {cgnat_tail}
@@ -994,6 +996,10 @@ mod tests {
             "the opt-out must be indented as a runnable flag: {note}"
         );
         assert!(note.contains("100.64.0.0/10"), "must explain CGNAT: {note}");
+        assert!(
+            note.contains("UPnP/NAT-PMP") && note.contains("--no-upnp"),
+            "step 4 must reflect that mapping was attempted automatically: {note}"
+        );
         assert!(
             note.contains("ufw allow 30333/tcp"),
             "must show the firewall step: {note}"

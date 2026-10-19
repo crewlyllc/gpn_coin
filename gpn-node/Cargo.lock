@@ -3140,6 +3140,7 @@ dependencies = [
  "gpn-runtime",
  "hex",
  "hickory-resolver 0.25.2",
+ "igd-next",
  "jsonrpsee",
  "log",
  "opencl3",

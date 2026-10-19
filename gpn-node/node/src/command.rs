@@ -104,6 +104,12 @@ mod tests {
         // (an unset flag leaves the environment, hence the default, alone).
         assert!(!bare.require_backbone);
         assert!(!bare.no_require_backbone);
+        // Port mapping is ON by default; only the opt-out flag exists.
+        assert!(!bare.no_upnp);
+
+        let no_upnp =
+            Cli::try_parse_from(["gpn-node", "--chain", "dev", "--no-upnp"]).expect("argv parses");
+        assert!(no_upnp.no_upnp);
 
         let private = Cli::try_parse_from([
             "gpn-node",
@@ -157,6 +163,9 @@ pub fn apply_membership_flags(cli: &Cli) {
         std::env::set_var("GPN_REQUIRE_BACKBONE", "1");
     } else if cli.no_require_backbone {
         std::env::set_var("GPN_REQUIRE_BACKBONE", "0");
+    }
+    if cli.no_upnp {
+        std::env::set_var("GPN_UPNP", "off");
     }
 }
 

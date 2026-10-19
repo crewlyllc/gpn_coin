@@ -85,12 +85,19 @@ At startup the node probes inbound reachability for up to **120 s**
 1. explicit `GPN_PUBLIC_ADDR` / `--public-addr` → verify by dial-back;
 2. direct public listen address, libp2p `Identify` external addresses, or an
    actual inbound peer on `:30333`;
-3. UPnP-IGD / NAT-PMP mapping attempt (~10 s) if `GPN_UPNP=auto` — **not yet
-   implemented in this build** (queue #46, Phase 1 remainder); steps 3–4 are
-   currently manual port-forwarding only;
-4. CGNAT detection (`100.64.0.0/10` WAN address) → no forward is possible;
+3. UPnP-IGD / NAT-PMP mapping attempt (~10 s) if `GPN_UPNP=auto` (the
+   default). If the router accepts the rule, its reported **external
+   `ip:port`** becomes this node's advertised public address. CGNAT is detected
+   here first: a WAN address in `100.64.0.0/10` (or an RFC1918 WAN address)
+   means no forward can work, and the attempt is skipped;
+4. CGNAT/private WAN → no forward is possible (reported by the notice);
 5. not dialable: print the notice and **exit 78** (default), or continue in
    degraded mode with `--no-require-backbone`.
+
+A successful mapping is **not** proof of reachability on its own: the gate still
+waits for an inbound peer (or a matching `Identify` observation) before the node
+declares itself dialable. The mapping is renewed at half its lease (default
+3600 s) and re-reads the WAN address each time.
 
 Only globally routable addresses count — RFC1918 (`10/8`, `172.16/12`,
 `192.168/16`), CGNAT (`100.64/10`), loopback, link-local and `0.0.0.0` never do.
@@ -106,8 +113,7 @@ Only globally routable addresses count — RFC1918 (`10/8`, `172.16/12`,
 | `--no-seed` / `GPN_SEED=0` | Never publish as a seed; also silences the not-dialable notice. | — |
 | `--discoverable` / `GPN_DISCOVERABLE=1` | Announce endpoint, accept inbound. | **on** |
 | `--no-discoverable` / `GPN_DISCOVERABLE=0` | Privacy mode: no announce, no inbound, not in any list. Implies `--no-seed`. | — |
-| `--no-upnp` / `GPN_UPNP=off` | Never attempt UPnP/NAT-PMP. **Reserved:** automatic
-mapping is not yet implemented in this build (queue #46 Phase 1). | `auto` |
+| `--no-upnp` / `GPN_UPNP=off` | Never contact the router; no UPnP/NAT-PMP attempt. The attempt is logged when it happens. | `auto` |
 | `--public-addr` / `GPN_PUBLIC_ADDR` | Explicit public multiaddr; always wins over detection. | unset |
 | `--require-backbone` / `GPN_REQUIRE_BACKBONE=1` | **Default.** Exit 78 instead of degrading. | **on** |
 | `--no-require-backbone` / `GPN_REQUIRE_BACKBONE=0` | Opt out: run degraded when not dialable (re-checks every 10 min). | — |
@@ -156,8 +162,9 @@ To fix it (about 5 minutes):
      Linux (firewalld):
        sudo firewall-cmd --add-port=30333/tcp --permanent && sudo firewall-cmd --reload
 
-  4. UPnP/NAT-PMP mapping is not enabled in this build; use step 2 (or set
-     GPN_PUBLIC_ADDR if a forward maps a different external port).
+  4. UPnP/NAT-PMP: the node already tried this automatically (GPN_UPNP=auto is
+     the default). If your router has UPnP disabled, either enable it and
+     restart, or use step 2. Disable the attempt with --no-upnp / GPN_UPNP=off.
 
   5. CGNAT: if your router's WAN address is in 100.64.0.0/10, no port forward
      can work. Run the node on a cheap VPS with a public IP.
@@ -277,19 +284,74 @@ sudo firewall-cmd --list-ports
 `gpn_node` binary (or `sudo /usr/libexec/ApplicationFirewall/socketfilterfw
 --add /path/to/gpn_node`).
 
-### 3. UPnP / NAT-PMP (planned — not in this build yet)
+### 3. UPnP / NAT-PMP — automatic (on by default)
 
-When implemented, the node will ask the router to create the mapping itself
-(UPnP-IGD or NAT-PMP, 10 s budget, TCP only, released on clean shutdown). Until
-then, `--no-upnp` is accepted and reserved, and a manual forward (step 1) is
-the only automatic-free path. When it lands, a successful mapping logs:
+Most home users do **not** need step 1. Before the node decides it is not
+dialable, it asks the router to open the port for it:
+
+1. **UPnP-IGD** (SSDP discovery + `AddPortMapping` TCP `30333 -> this host`,
+   lease 3600 s), then
+2. **NAT-PMP** (RFC 6886, UDP/5351) as a fallback for Apple and other routers
+   that implement NAT-PMP but not UPnP.
+
+Only **one TCP port** is opened — never UDP, never a range, never a DMZ. The
+rule is renewed at half-life and expires on its own if the node dies, so a
+crashed node never leaves a permanent hole in the router.
+
+It is never silent. A successful mapping logs (the log line is the consent
+record):
 
 ```
-UPnP: mapped TCP 30333 -> 192.168.1.42:30333 via 192.168.1.1; disable with --no-upnp
+portmap: UPnP: mapped TCP 30333 -> 192.168.1.42:30333 via 192.168.1.1 (UPnP-IGD); external address is 23.241.109.255:30333. Disable with GPN_UPNP=off or --no-upnp
 ```
 
-Security note: UPnP lets any program on the LAN open a port. If you do not want
-that, run with `--no-upnp` and use a manual forward (step 1).
+and the router-reported external `ip:port` becomes the node's advertised
+address — including when the router assigns a **different external port**
+(`45123 -> 30333` is advertised as `…:45123`, no `GPN_PUBLIC_ADDR` needed).
+
+A failed attempt is also logged, and the node falls through to the manual
+instructions in the notice:
+
+```
+portmap: automatic port mapping FAILED (no gateway: ...); TCP 30333 must be forwarded manually. If your router has UPnP disabled, enabling it - or adding the forward - is the fix.
+```
+
+**Turn it off:** `--no-upnp` (or `GPN_UPNP=off`). The node then never sends a
+packet to the router and behaves exactly like a manually-forwarded host. Use
+this if you consider UPnP a security surface you do not want exposed; a manual
+forward (step 1) is equally valid.
+
+**It will not work when:**
+
+- the router has UPnP/IGD (and NAT-PMP) disabled — common on ISP-supplied
+  routers, and the default on many business routers;
+- the WAN address is CGNAT (`100.64.0.0/10`) or private (double NAT) — detected
+  before the attempt, reported as CGNAT;
+- the router is on a different L2 segment (guest/VLAN isolation, Docker
+  bridge networking, some VPNs) so SSDP never reaches it;
+- Windows: NAT-PMP needs `GPN_NATPMP_GATEWAY=<router IP>` (gateway detection is
+  implemented for Linux/macOS only; UPnP needs no such hint).
+
+When a mapping succeeds but the node is still not dialable after 120 s, the
+mapping was accepted but the inbound path is blocked (host firewall, ISP
+filtering, or the router applied it to the wrong interface). Step 2 (host
+firewall) is then the usual fix.
+
+**Renewal / IP change.** The rule is renewed at half the lease. If the ISP
+changes the WAN IP, or the router assigns a different external port, the new
+address is logged at `warn` and used for subsequent checks; the running
+libp2p instance cannot change its announced address set, so **restart the node
+to advertise the new address**. Peers that learn the address through
+`Identify` will still find the new path in the meantime.
+
+**Advanced knobs** (rarely needed):
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `GPN_UPNP` | `auto` or `off`. | `auto` |
+| `GPN_UPNP_LEASE_SECS` | Mapping lease requested from the router (minimum 60). | `3600` |
+| `GPN_NATPMP_GATEWAY` | Router IP for NAT-PMP when OS gateway detection is unavailable (e.g. Windows). | auto |
+| `GPN_SEED_PORT` | The TCP port to open; also the internal port. | `30333` |
 
 ### 4. CGNAT — when forwarding is impossible
 
@@ -604,7 +666,9 @@ finetune_poll_ms = 4000
 | `GPN_REQUIRE_BACKBONE` | Hard gate: exit 78 when not dialable (instead of degrading). | `0` |
 | `GPN_SEED` | Willing to be published as a seed candidate; `0` also silences the not-dialable notice. | `1` |
 | `GPN_DISCOVERABLE` | Announce endpoint / accept inbound; `0` implies `GPN_SEED=0`. | `1` |
-| `GPN_UPNP` | Try UPnP-IGD/NAT-PMP (`auto`/`off`). | `auto` |
+| `GPN_UPNP` | Try UPnP-IGD/NAT-PMP (`auto`/`off`). See [UPnP / NAT-PMP](#3-upnp--nat-pmp--automatic-on-by-default). | `auto` |
+| `GPN_UPNP_LEASE_SECS` | Mapping lease requested from the router. | `3600` |
+| `GPN_NATPMP_GATEWAY` | Router IP for NAT-PMP when OS detection is unavailable. | auto |
 | `GPN_DIALABLE_TIMEOUT_SECS` | Grace window for dialability evidence. | `120` |
 | `GPN_AUTHOR` | short authoring key name → `--<name>` | _(none)_ |
 | `GPN_NODE_ARGS` | extra raw args appended to `gpn-node` | _(none)_ |

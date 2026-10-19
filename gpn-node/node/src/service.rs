@@ -452,6 +452,79 @@ pub async fn new_full<
     // Captured before `config` is moved: used by the persistent peer store.
     let base_path = config.base_path.path().to_path_buf();
 
+    // ---- Automatic NAT port mapping (design §5.1 step 3, §5.5) -----------
+    // A home node behind a NAT router cannot be dialable without a forwarded
+    // port. Rather than making every operator find their router admin page, we
+    // ask the router (UPnP-IGD, then NAT-PMP) to open exactly one TCP port.
+    //
+    // This runs BEFORE `build_network` on purpose: libp2p's announced address
+    // set is fixed at construction, so the external `ip:port` the router
+    // reports has to be known now to be advertised. The learnt address is also
+    // the address the dialability gate then tries to confirm by observation.
+    //
+    // Consent: on by default (`GPN_UPNP=auto`), never silent (one log line on
+    // attempt, one on the result), fully disabled by `GPN_UPNP=off`/`--no-upnp`.
+    let mut gate_cfg = crate::dialability::GateConfig::from_env(&config.network.public_addresses);
+    let mut portmap_session: Option<crate::portmap::MappingSession> = None;
+    {
+        let listen_port = crate::dialability::listen_port(&config.network.listen_addresses)
+            .unwrap_or(crate::dialability::DEFAULT_SEED_PORT);
+        let pm_cfg = crate::portmap::PortMapConfig::from_env(Some(listen_port));
+        let configured = gate_cfg.public_addr.clone();
+        if !gate_cfg.require {
+            log::debug!("portmap: skipped (dialability probe disabled)");
+        } else if !gate_cfg.discoverable {
+            log::debug!("portmap: skipped (--no-discoverable / GPN_DISCOVERABLE=0)");
+        } else if configured.is_some() {
+            // Ladder step 1: an explicit address wins; never touch the router.
+            log::debug!(
+                "portmap: skipped - GPN_PUBLIC_ADDR/--public-addr {} is configured",
+                configured
+                    .as_ref()
+                    .map(|a| a.to_string())
+                    .unwrap_or_default()
+            );
+        } else if !pm_cfg.enabled {
+            // `GPN_UPNP=off` / `--no-upnp`: never contact the router.
+            crate::portmap::log_outcome(&crate::portmap::MapOutcome::Disabled, pm_cfg.port);
+        } else {
+            match crate::dialability::detect_lan_ipv4() {
+                Some(lan) => {
+                    let session = crate::portmap::start(&pm_cfg, lan).await;
+                    crate::portmap::log_outcome(&session.outcome, pm_cfg.port);
+                    if let Some(mapping) = session.mapping() {
+                        // Advertise the router-reported external ip:port. This
+                        // is correct even when external != internal port, and
+                        // it becomes the address the gate must see observed.
+                        let advertised = crate::portmap::advertised_address(
+                            gate_cfg.public_addr.as_ref(),
+                            Some(mapping),
+                        );
+                        if let Some(addr) = advertised {
+                            if !config.network.public_addresses.contains(&addr) {
+                                config.network.public_addresses.push(addr.clone());
+                            }
+                            log::info!(
+                                "portmap: advertising public address {addr} (from {} mapping)",
+                                mapping.method
+                            );
+                            // The gate must verify THIS address, not a stale one.
+                            gate_cfg.public_addr = Some(addr);
+                        }
+                    }
+                    portmap_session = Some(session);
+                }
+                None => {
+                    log::warn!(
+                        "portmap: no private/public LAN IPv4 found - cannot ask the router to \
+                         forward TCP {}; skipping automatic mapping",
+                        pm_cfg.port
+                    );
+                }
+            }
+        }
+    }
+
     let net_config = sc_network::config::FullNetworkConfiguration::<
         Block,
         <Block as sp_runtime::traits::Block>::Hash,
@@ -473,6 +546,24 @@ pub async fn new_full<
             block_relay: None,
             metrics,
         })?;
+
+    // ---- Keep the NAT mapping alive (design §5.5) ------------------------
+    // The router grant expires (default lease 3600 s); renew at half-life so a
+    // home node stays dialable indefinitely. Renewal also re-reads the WAN
+    // address and logs an IP/port change. A mapping that is lost is retried on
+    // the next tick, and the soft-mode dialability watcher will report the
+    // state change.
+    if let Some(session) = portmap_session {
+        if let (Some(mapper), Some(mapping)) = (session.mapper.clone(), session.mapping().cloned())
+        {
+            let port = session.config.port;
+            task_manager
+                .spawn_handle()
+                .spawn("gpn-portmap-renew", None, async move {
+                    crate::portmap::run_renewal(mapper, mapping, port).await;
+                });
+        }
+    }
 
     // ---- Network identity banner + peer guard ----------------------------
     // (design-network-identity-fork-tolerance.md). Print chain-id + genesis +
@@ -502,7 +593,6 @@ pub async fn new_full<
     // soft mode: run degraded, re-check every 10 min, print NOW DIALABLE once
     // the forward works (design §5.3).
     {
-        let gate_cfg = crate::dialability::GateConfig::from_env(&config.network.public_addresses);
         if gate_cfg.require {
             log::info!(
                 "dialability: probing inbound reachability within {}s — seed={} discoverable={} \

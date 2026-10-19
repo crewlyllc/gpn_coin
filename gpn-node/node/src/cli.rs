@@ -59,6 +59,12 @@ pub struct Cli {
     /// growing.
     #[arg(long = "no-require-backbone")]
     pub no_require_backbone: bool,
+
+    /// Never contact the router: disable automatic UPnP-IGD / NAT-PMP port
+    /// mapping. The port must then be forwarded manually (or `--public-addr`
+    /// used). Mapping is on by default and is logged when it happens.
+    #[arg(long = "no-upnp")]
+    pub no_upnp: bool,
 }
 
 #[derive(Debug, clap::Subcommand)]

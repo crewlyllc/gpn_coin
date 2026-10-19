@@ -447,7 +447,9 @@ out of scope." V2 says: **try hard, tell the operator exactly what to do, and on
                       + an actual inbound peer connecting on :30333
                       → public & inbound-verified ⇒ backbone. Done.
 3. NAT mapping         if (2) failed and GPN_UPNP=auto → try UPnP-IGD / NAT-PMP (igd-next), 10 s budget.
-                      On success: verify externally, then adopt the mapped address. Done.
+                      Runs BEFORE build_network so the learnt external ip:port can be
+                      injected into public_addresses. On success: verify externally
+                      (inbound peer / Identify), then adopt the mapped address. Done.
 4. CGNAT check         WAN address in 100.64.0.0/10, or observed ≠ local and no mapping
                       → no forward is possible. Skip to 5.
 5. Degrade             print the §5.2 notice. Default: exit EXIT_NOT_DIALABLE (78).
@@ -596,19 +598,38 @@ Semantics worth stating: `GPN_SEED` controls **publication as a bootstrap target
 gives a normal backbone node that is never listed; `--no-discoverable` gives a private node. The two are
 not synonyms, and the docs must not conflate them.
 
-### 5.5 UPnP/NAT-PMP — now in scope (v2 change)
+### 5.5 UPnP/NAT-PMP — implemented (v2 change)
 
 V1 excluded it (security surface, opens a router port without informed consent, often broken). V2
 includes it **because seed-by-default otherwise silently fails for the majority of home users**, which
 is the whole point of the change. Guardrails:
 
+- **Crates / protocols.** UPnP-IGD via `igd-next` 0.14 (already in the dependency graph through
+  `libp2p-upnp`, so no new transitive crates; blocking API driven on `spawn_blocking`, 5 s SSDP
+  search). NAT-PMP (RFC 6886) is hand-rolled on a plain `UdpSocket` (port 5351, 3 × 400 ms) — no
+  crate, `natpmp` is unmaintained. Pure PCP is not implemented; NAT-PMP covers the routers it needs
+  to. STUN remains useless here (the listener is TCP; GPN does not do TCP hole-punching).
+- **Ladder order:** explicit `GPN_PUBLIC_ADDR` (skip — do not touch the router) → UPnP-IGD → NAT-PMP.
+  Each backend: WAN address → CGNAT/private check → `AddPortMapping` TCP. A CGNAT or private WAN
+  short-circuits the ladder (`MapOutcome::Cgnat`), since no later backend can beat it.
+- **Timing / advertisement:** the attempt runs **before `build_network`**. A successful mapping's
+  router-reported external `ip:port` is appended to `NetworkConfiguration::public_addresses` and
+  becomes the address the dialability gate must see observed. This is what makes a router-assigned
+  external port (`45123 -> 30333`) work with no configuration. `GPN_PUBLIC_ADDR` still wins.
 - **Consent is explicit:** enabled by default only because the product's stated default is "be a
-  backbone node". `--no-upnp` fully disables it, and the first successful mapping is logged loudly
-  (`"UPnP: mapped TCP 30333 → 192.168.1.42:30333 via 192.168.1.1; disable with --no-upnp"`).
-- **Scope is minimal:** one TCP port, lease-renewed, released on clean shutdown; never UDP, never a
-  port range, never SSDP beyond the discovery probe.
-- **Failure is normal:** 10 s budget, then fall through to §5.2. Many routers have IGD disabled.
-- STUN remains useless here (the listener is TCP; GPN does not do TCP hole-punching).
+  backbone node". `--no-upnp` / `GPN_UPNP=off` fully disables it, and every attempt and result is
+  logged (`portmap: UPnP: mapped TCP 30333 -> 192.168.1.42:30333 via 192.168.1.1 (UPnP-IGD);
+  external address is 203.0.113.7:30333. Disable with GPN_UPNP=off or --no-upnp`). The log line is the
+  consent record — the mapping itself is never silent.
+- **Scope is minimal:** one TCP port, lease 3600 s (`GPN_UPNP_LEASE_SECS`), renewed at half-life,
+  expires on its own if the node dies; never UDP, never a port range, never SSDP beyond the discovery
+  probe. Windows NAT-PMP needs `GPN_NATPMP_GATEWAY` (no portable gateway detection); UPnP does not.
+- **Failure is normal:** ~10 s budget, then fall through to §5.2. Many routers have IGD disabled.
+- **Truth model:** a mapping is not proof. §5.2 still fires unless an inbound peer or a matching
+  Identify observation arrives within the grace window.
+- **Renewal / change:** renewed at half-life; a WAN IP or external-port change is logged at `warn`.
+  libp2p's announced address set is fixed at construction, so the new address is authoritative on the
+  next restart (peers can still find it via Identify in the meantime).
 
 ---
 
@@ -620,7 +641,8 @@ is the whole point of the change. Guardrails:
 - Dialability gate: **dialable is REQUIRED by default** — probe-and-exit 78 with the full §5.2 notice.
   `--no-require-backbone` / `GPN_REQUIRE_BACKBONE=0` opts into probe-and-degrade (v2 behavior).
   This is the single highest-value change and is independent of everything else — ship it first.
-- Add §5.1 NAT mapping (UPnP) + the §5.2 warning + the flags in §5.4.
+- Add §5.1 NAT mapping (UPnP) + the §5.2 warning + the flags in §5.4. **Done:** `node/src/portmap.rs`
+  (UPnP-IGD + NAT-PMP), pre-`build_network` advertisement, lease renewal, CGNAT short-circuit.
 - AP: add `GET /assignments` + leases. Keep `POST /assign` dispatch. `GPN_JOB_TRANSPORT=push|pull|both`
   (default `both`).
 - Providers: poll loop behind `GPN_ASSIGN_SOURCE` (default `both`).
