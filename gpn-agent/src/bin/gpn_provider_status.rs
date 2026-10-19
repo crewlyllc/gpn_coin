@@ -1,7 +1,7 @@
 //! gpn_provider_status — a tiny HTTP heartbeat for a provider, polled by the
 //! access-point scheduler to learn capabilities + load + latency.
 //!
-//! `GET /status` → `{ address, gflops, models[], capabilities[], can_pull, active, capacity, vram_mb, ram_mb, gpu_class, tflops }`
+//! `GET /status` → `{ address, gflops, models[], capabilities[], can_pull, active, capacity, vram_mb, ram_mb, gpu_class, tflops, disk_free_mb, disk_total_mb, disk_free_pct }`
 //!
 //! `capabilities[]` lists the JOB TYPES this node serves — `LLMInference`,
 //! `ImageGeneration`, `VideoGeneration`, `MLInference`, `FineTuning`. A GPN
@@ -33,6 +33,7 @@
 //!                       [--capabilities <LLMInference,ImageGeneration,…>]
 //! Env: LISTEN, ADDRESS, GFLOPS, MODELS, CAPACITY, ACTIVE, GPN_OLLAMA, CAPABILITIES
 
+use gpn_agent::disk::{disk_space, LOW_DISK_PERCENT};
 use gpn_agent::gpu::{detect_gpu_capability, detect_vram_mb};
 use gpn_agent::llm::{LlmJob, LlmStore};
 use serde_json::json;
@@ -226,6 +227,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server = Server::http(&listen).map_err(|e| format!("cannot bind {listen}: {e}"))?;
     println!("GPN provider heartbeat on http://{listen} — address={address} gflops={gflops} models={:?} active={active}/{capacity} capabilities={:?}", models, capabilities);
 
+    // Item #43: warn LOUDLY at startup if the filesystem holding our data is
+    // nearly full — a full disk silently halts the chain (2026-10-19 ENOSPC
+    // block-persist failure). 0 = unknown, never treated as full.
+    let disk_path = std::env::var("GPN_DATA_DIR").or_else(|_| std::env::var("HOME")).unwrap_or_else(|_| ".".into());
+    let boot_disk = disk_space(&disk_path);
+    if let Some(pct) = boot_disk.free_percent() {
+        if pct < LOW_DISK_PERCENT {
+            eprintln!(
+                "⚠ LOW DISK: {pct}% free on {disk_path} ({} MiB of {} MiB) — below {LOW_DISK_PERCENT}%; the chain will halt if this reaches 0 (see docs/run-a-node.md \"Disk headroom\")",
+                boot_disk.free_mb, boot_disk.total_mb
+            );
+        }
+    }
+
     let hdr = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
     if assign_token.is_empty() {
         eprintln!("⚠ assign-token not configured — POST /assign is UNAUTHENTICATED (set GPN_ASSIGN_TOKEN; item #16 finding #7)");
@@ -265,13 +280,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let body = match (req.method(), req.url()) {
             (Method::Get, "/status") => {
                 let (models_now, can_pull) = ollama_models(&ollama, &models);
+                // Item #43: report free space so a monitor can alert before
+                // ENOSPC silently halts block production. 0/null = unknown.
+                let disk = disk_space(&std::env::var("GPN_DATA_DIR").or_else(|_| std::env::var("HOME")).unwrap_or_else(|_| ".".into()));
                 json!({
                     "address": address, "gflops": gflops, "models": models_now,
                     "can_pull": can_pull, "active": active, "capacity": capacity.max(1),
                     "capabilities": capabilities,
                     "tok_per_s": tok_per_s, "owner_cost_usd_hr": owner_cost_usd_hr,
                     "mem_bw_gbps": mem_bw_gbps, "vram_mb": vram_mb, "ram_mb": ram_mb,
-                    "gpu_class": gpu_class, "tflops": tflops
+                    "gpu_class": gpu_class, "tflops": tflops,
+                    "disk_free_mb": disk.free_mb, "disk_total_mb": disk.total_mb,
+                    "disk_free_pct": disk.free_percent()
                 })
             }
             (Method::Get, "/health") => json!({"status":"ok"}),

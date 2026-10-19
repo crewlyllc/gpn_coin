@@ -8,6 +8,7 @@ pub mod chain;
 pub mod cli;
 pub mod compute;
 pub mod config;
+pub mod disk;
 pub mod gpu;
 pub mod gpu_yield;
 pub mod llm;

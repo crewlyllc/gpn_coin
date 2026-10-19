@@ -288,6 +288,28 @@ no reason to prune on a chain this small.
 > Such a legacy DB must still be **re-created** (see the Troubleshooting entry
 > below) before it can be stall-proof.
 
+### Disk headroom (why your chain can halt with a full disk)
+
+On 2026-10-19 the root filesystem filled to **100%** and the only symptom was a
+**chain halt**: the node mined a block but could not persist its header
+(`ENOSPC`), so its in-memory best chain kept a hash that could never be fetched
+again. Nothing warned beforehand.
+
+- **Check it:** `df -h <your data dir>` (Linux/macOS) or
+  `Get-PSDrive C` (Windows). Keep **≥10% free** (≈ 20 GB on a typical build box).
+- **The heartbeat reports it:** `GET /status` on the provider heartbeat (`:8093`)
+  now includes `disk_free_mb`, `disk_total_mb`, `disk_free_pct` (probe of
+  `$GPN_DATA_DIR` or `$HOME`; `0`/`null` = probe unavailable, **not** full). The
+  heartbeat also prints a `⚠ LOW DISK:` line at startup below 10%. Point a
+  monitor at `disk_free_pct`.
+- **Build hosts:** Rust `target/debug` is the usual culprit (it reached **217 GB**
+  here). Run `cargo clean --profile dev` — or `cargo clean` — regularly, and keep
+  `target/` on a **different filesystem** from the node's data directory where
+  possible.
+- **Recovery if it already halted:** free space, then restart the node
+  (`systemctl --user restart gpn-fleet`). Freeing space alone does **not** clear
+  the stale in-memory best-chain hash.
+
 ## What the supervisor does
 
 - **Spawns each child with a label** and forwards its stdout/stderr with a
