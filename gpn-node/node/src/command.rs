@@ -261,11 +261,15 @@ pub fn run() -> sc_cli::Result<()> {
             // invariants are re-applied inside `service::new_full`.
             service::force_mining(runner.config_mut());
             // Extra peer-discovery seed sources (Bitcoin-style DNS seeds + HTTP
-            // seed lists) declared on the CLI. Merged with the static
-            // bootnodes + persisted peer store in `prepare_network_config`.
+            // seed lists) declared on the CLI, falling back to the live network
+            // directory when the operator did not override it.
             let seed_sources = crate::discovery::SeedSources {
                 dns: cli.bootnodes_dns.clone(),
-                urls: cli.bootnodes_url.clone(),
+                urls: if cli.bootnodes_url.is_empty() {
+                    vec![crate::discovery::DEFAULT_SEED_URL.to_string()]
+                } else {
+                    cli.bootnodes_url.clone()
+                },
             };
             runner.run_node_until_exit(|config| async move {
                 let config = service::prepare_network_config(config, &seed_sources).await;

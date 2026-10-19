@@ -12,7 +12,8 @@
 //! 2. **DNS seed** — `--bootnodes-dns <name>` (Bitcoin-style): resolve a DNS
 //!    name and read the peer multiaddrs it publishes as TXT records.
 //! 3. **HTTP(S) seed list** — `--bootnodes-url <url>`: fetch a published
-//!    peer-list JSON.
+//!    peer-list JSON. The default source is the live network directory at
+//!    <https://gpncoin.ai/seeds.json> (see [`DEFAULT_SEED_URL`]).
 //! 4. **On-chain discovery** — read the `gpn-liveness` full-node registry and
 //!    `ComputeMarketplace::ProviderEndpoints` and dial them (see `service.rs`).
 //!
@@ -42,10 +43,17 @@
 use sc_network::config::MultiaddrWithPeerId;
 use sc_network::Multiaddr;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Filename (under the node's base path) of the persisted peer store.
 pub const PEERS_FILE: &str = "gpn-peers.json";
+
+/// Default `--bootnodes-url`: the live network directory served by the
+/// gpncoin.ai Worker. It merges the compiled-in seed list with the access
+/// point's currently-healthy providers. Failure is non-fatal — the compiled-in
+/// bootnodes remain the hard fallback.
+pub const DEFAULT_SEED_URL: &str = "https://gpncoin.ai/seeds.json";
 
 /// Upper bound on how many peers we persist / carry over (keeps the file small
 /// and the bootnode set dialable in a bounded time).
@@ -279,26 +287,182 @@ pub async fn resolve_dns_seed(name: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// Fetch and parse a published seed-list JSON over HTTP(S).
+/// Fetch and parse a published seed-list JSON over HTTP or HTTPS.
 ///
-/// Note: the node is built without TLS (see `Cargo.toml`), so `https://` URLs
-/// fail with a clear error that is logged and ignored — startup is unaffected.
-/// Prefer plain `http://` seed sources reachable from the node.
+/// `http://` uses attohttpc (no TLS stack). `https://` uses a minimal
+/// HTTP/1.1 GET over rustls — the default directory
+/// ([`DEFAULT_SEED_URL`]) is HTTPS, and the node must not depend on the host
+/// having a TLS client or a proxy. Both paths are bounded by a 20 s timeout and
+/// return `Err` on any failure; callers log and continue.
 pub async fn fetch_seed_url(url: &str) -> Result<Vec<String>, String> {
-    let url = url.to_string();
-    let text = tokio::task::spawn_blocking(move || {
-        let response = attohttpc::get(&url)
-            .timeout(Duration::from_secs(20))
-            .send()
-            .map_err(|e| format!("GET {url}: {e}"))?;
-        if !response.status().is_success() {
-            return Err(format!("GET {url}: HTTP {}", response.status()));
-        }
-        response.text().map_err(|e| format!("read body {url}: {e}"))
-    })
-    .await
-    .map_err(|e| format!("join error: {e}"))??;
+    let trimmed = url.trim();
+    let text = if trimmed.to_ascii_lowercase().starts_with("https://") {
+        tokio::time::timeout(Duration::from_secs(20), https_get_text(trimmed))
+            .await
+            .map_err(|_| format!("GET {trimmed}: timed out"))??
+    } else {
+        let url = trimmed.to_string();
+        tokio::task::spawn_blocking(move || {
+            let response = attohttpc::get(&url)
+                .timeout(Duration::from_secs(20))
+                .send()
+                .map_err(|e| format!("GET {url}: {e}"))?;
+            if !response.status().is_success() {
+                return Err(format!("GET {url}: HTTP {}", response.status()));
+            }
+            response.text().map_err(|e| format!("read body {url}: {e}"))
+        })
+        .await
+        .map_err(|e| format!("join error: {e}"))??
+    };
     Ok(parse_seed_payload(&text))
+}
+
+/// Minimal HTTPS GET (HTTP/1.1 over rustls, `Connection: close`).
+///
+/// Deliberately tiny: the seed client needs one request per source at startup,
+/// so a full HTTP client is unnecessary. Redirects are treated as an error
+/// (publish the final URL); compressed bodies are avoided by asking for
+/// `identity`.
+async fn https_get_text(url: &str) -> Result<String, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let parsed = url::Url::parse(url).map_err(|e| format!("parse {url}: {e}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| format!("{url}: no host"))?
+        .to_string();
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| format!("{url}: no port"))?;
+    let mut target = parsed.path().to_string();
+    if target.is_empty() {
+        target.push('/');
+    }
+    if let Some(query) = parsed.query() {
+        target.push('?');
+        target.push_str(query);
+    }
+
+    let tcp = tokio::net::TcpStream::connect((host.as_str(), port))
+        .await
+        .map_err(|e| format!("connect {host}:{port}: {e}"))?;
+    let server_name = rustls::pki_types::ServerName::try_from(host.clone())
+        .map_err(|e| format!("bad server name {host}: {e}"))?;
+    let connector = tokio_rustls::TlsConnector::from(tls_client_config()?);
+    let mut stream = connector
+        .connect(server_name, tcp)
+        .await
+        .map_err(|e| format!("TLS handshake {host}: {e}"))?;
+
+    let request = format!(
+        "GET {target} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: gpn-node/{}\r\n\
+         Accept: application/json, text/plain, */*\r\nAccept-Encoding: identity\r\n\
+         Connection: close\r\n\r\n",
+        env!("CARGO_PKG_VERSION")
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|e| format!("write {url}: {e}"))?;
+
+    let mut raw = Vec::new();
+    stream
+        .read_to_end(&mut raw)
+        .await
+        .map_err(|e| format!("read {url}: {e}"))?;
+    parse_http_response(&raw)
+}
+
+/// Shared rustls client config: Mozilla's webpki root store, ring provider.
+fn tls_client_config() -> Result<Arc<rustls::ClientConfig>, String> {
+    static CONFIG: std::sync::OnceLock<Arc<rustls::ClientConfig>> = std::sync::OnceLock::new();
+    if let Some(config) = CONFIG.get() {
+        return Ok(config.clone());
+    }
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| format!("tls config: {e}"))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let config = Arc::new(config);
+    let _ = CONFIG.set(config.clone());
+    Ok(config)
+}
+
+/// Parse one HTTP/1.1 response: status line, headers, body (incl. chunked).
+fn parse_http_response(raw: &[u8]) -> Result<String, String> {
+    let split = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .ok_or_else(|| "malformed HTTP response: no header terminator".to_string())?;
+    let head = String::from_utf8_lossy(&raw[..split]);
+    let body = &raw[split + 4..];
+
+    let mut lines = head.split("\r\n");
+    let status_line = lines.next().unwrap_or_default();
+    let code: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .ok_or_else(|| format!("bad status line: {status_line:?}"))?;
+    if !(200..300).contains(&code) {
+        return Err(format!("HTTP {code}"));
+    }
+
+    let mut chunked = false;
+    let mut content_length: Option<usize> = None;
+    for line in lines {
+        if let Some((name, value)) = line.split_once(':') {
+            match name.trim().to_ascii_lowercase().as_str() {
+                "transfer-encoding" => {
+                    chunked = value.trim().to_ascii_lowercase().contains("chunked")
+                }
+                "content-length" => content_length = value.trim().parse().ok(),
+                _ => {}
+            }
+        }
+    }
+
+    let body = if chunked {
+        decode_chunked(body)?
+    } else {
+        match content_length {
+            Some(n) if n <= body.len() => body[..n].to_vec(),
+            _ => body.to_vec(),
+        }
+    };
+    String::from_utf8(body).map_err(|e| format!("non-UTF-8 body: {e}"))
+}
+
+/// Decode `Transfer-Encoding: chunked`.
+fn decode_chunked(mut data: &[u8]) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    loop {
+        let line_end = data
+            .windows(2)
+            .position(|w| w == b"\r\n")
+            .ok_or_else(|| "chunked body: missing chunk size".to_string())?;
+        let size_line = String::from_utf8_lossy(&data[..line_end]);
+        let size_hex = size_line.split(';').next().unwrap_or("").trim();
+        let size = usize::from_str_radix(size_hex, 16)
+            .map_err(|_| format!("chunked body: bad chunk size {size_hex:?}"))?;
+        data = &data[line_end + 2..];
+        if size == 0 {
+            return Ok(out);
+        }
+        if data.len() < size {
+            return Err("chunked body: truncated chunk".to_string());
+        }
+        out.extend_from_slice(&data[..size]);
+        data = &data[size..];
+        if data.starts_with(b"\r\n") {
+            data = &data[2..];
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -497,5 +661,66 @@ mod tests {
         // Port 1 on loopback is refused immediately — no external network needed.
         let r = fetch_seed_url("http://127.0.0.1:1/seed.json").await;
         assert!(r.is_err(), "expected a connection error, got {r:?}");
+    }
+
+    #[test]
+    fn http_response_content_length() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\n{\"a\":1}";
+        assert_eq!(parse_http_response(raw).unwrap(), "{\"a\":1}");
+    }
+
+    #[test]
+    fn http_response_chunked() {
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n{\"a\"\r\n3\r\n:1}\r\n0\r\n\r\n";
+        assert_eq!(parse_http_response(raw).unwrap(), "{\"a\":1}");
+    }
+
+    #[test]
+    fn http_response_non_200_is_error() {
+        let raw = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n";
+        assert!(parse_http_response(raw).is_err());
+        assert!(parse_http_response(b"garbage").is_err());
+    }
+
+    #[test]
+    fn directory_payload_parses_as_seed_list() {
+        // The exact shape served by https://gpncoin.ai/seeds.json.
+        let payload = format!(
+            r#"{{"network":"GPN Public Testnet","genesis":"0xab","chain_id":"gpn_testnet","updated_at":"2026-10-19T22:00:00Z","ttl":60,"multiaddrs":["{A}"],"nodes":[{{"multiaddr":"{A}","role":"seed"}}]}}"#
+        );
+        assert_eq!(parse_seed_payload(&payload), vec![A.to_string()]);
+    }
+
+    #[test]
+    fn default_seed_url_is_the_public_directory() {
+        assert_eq!(DEFAULT_SEED_URL, "https://gpncoin.ai/seeds.json");
+        assert!(DEFAULT_SEED_URL.starts_with("https://"));
+    }
+
+    // Network smoke tests. Ignored by default so `cargo test` stays offline:
+    //   cargo test -p gpn-node --offline discovery::tests::live -- --ignored
+    #[tokio::test]
+    #[ignore = "network: HTTPS GET + TLS stack smoke test"]
+    async fn live_https_get_smoke() {
+        let body = https_get_text("https://example.com/")
+            .await
+            .expect("https GET example.com");
+        assert!(
+            body.contains("Example Domain"),
+            "unexpected body: {body:.200}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "network: fetches the deployed network directory"]
+    async fn live_directory_fetch_smoke() {
+        let seeds = fetch_seed_url(DEFAULT_SEED_URL)
+            .await
+            .expect("fetch the live directory");
+        assert!(
+            !seeds.is_empty(),
+            "directory returned no dialable multiaddrs"
+        );
+        assert!(seeds.iter().all(|s| s.contains("/p2p/")));
     }
 }

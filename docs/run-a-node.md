@@ -492,6 +492,51 @@ rotated by GPN, used only as dial targets — not co-located with the oracle
 operators. Inclusion is by invitation against the criteria above (distinct
 operators/jurisdictions, ≤2 changes per release), not by uptime ranking alone.
 
+### The live network directory — `https://gpncoin.ai/seeds.json`
+
+Every node also fetches a live directory at startup, with **no flag needed**:
+
+```
+https://gpncoin.ai/seeds.json      # JSON  (what gpn-node fetches)
+https://gpncoin.ai/bootnodes.txt   # the same dialable multiaddrs, one per line
+```
+
+The directory is a Cloudflare Worker that unions (a) the compiled-in seed list
+with (b) the access point's **currently healthy providers**, and caches the
+result for 60 s (`Cache-Control: public, max-age=60`). The node merges it with
+its static bootnodes and persisted peers exactly like any other seed source:
+entries are deduplicated, invalid ones dropped, and **a failed fetch is logged
+and ignored** — the compiled-in bootnodes still get it online.
+
+```bash
+curl -s https://gpncoin.ai/seeds.json | head -40
+```
+
+```json
+{
+  "network": "GPN Public Testnet",
+  "chain_id": "gpn_testnet",
+  "genesis": "0xb8e4636a65d0c812abb437c38dd7e937bd7c3355c54c54d63060f26a33519a5c",
+  "updated_at": "2026-10-19T22:00:00.000Z",
+  "ttl": 60,
+  "multiaddrs": ["/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooW…"],
+  "nodes": [{ "multiaddr": "/dns4/…/p2p/12D3KooW…", "role": "seed" }]
+}
+```
+
+**Override / add sources.** `--bootnodes-url <URL>` (or `bootnodes_url = […]`
+in `node.toml`, `GPN_BOOTNODES_URL`) **replaces** the default directory; pass
+several to union them. `--bootnodes-dns` works alongside it.
+
+**Publishing a node.** There is no registration form and no permission: run a
+healthy, dialable node (see the criteria above). It announces its endpoint
+on-chain by itself, appears in `GET /providers` on the access point once it is
+serving, and therefore in the live directory. Only multiaddrs that carry a
+`/p2p/<peer-id>` are dialable by `gpn-node`; provider entries that publish only
+an HTTP `status_url` are listed under `nodes[]` for tooling but are not dialled.
+The hardcoded seed set changes only with a release (or a `network.json`
+update) — being in the live directory does not compile you into clients.
+
 ## Ollama is a REQUIRED component (bundled installer + hard gate)
 
 A GPN node is **always miner AND AI provider**. Ollama is therefore a
@@ -673,6 +718,7 @@ base_path    = "~/.gpn/node"                      # or set GPN_BASE_PATH; defaul
 rpc_port     = 9944
 node_key     = "<64-hex ed25519 secret>"           # node's network identity
 bootnodes    = ["/ip4/23.241.109.255/tcp/30333/p2p/12D3KooW…"]
+bootnodes_url = []                                 # [] → https://gpncoin.ai/seeds.json (live directory)
 public_addr  = "/ip4/<your-public-ip>/tcp/30333"     # REQUIRED (see above; forward this port)
 author       = "alice"                             # passed as --alice to gpn-node (authoring key)
 node_args    = ["--no-telemetry", "--no-prometheus"]
@@ -705,6 +751,7 @@ finetune_poll_ms = 4000
 | `GPN_RPC_PORT` | node RPC port | `9944` |
 | `GPN_NODE_KEY` | node network key (64-hex) | _(none — node needs one)_ |
 | `GPN_BOOTNODES` | comma/space list of bootnodes | _(none)_ |
+| `GPN_BOOTNODES_URL` | comma/space list of published seed-list URLs. Replaces the built-in live directory. | `https://gpncoin.ai/seeds.json` |
 | `GPN_PUBLIC_ADDR` | `--public-addr` (e.g. `/dns4/host/tcp/30333`). Recommended for a public node; the capability probe also reads it. | _(none)_ |
 | `GPN_REQUIRE_DIALABLE` | Run the inbound-reachability probe. `0` skips it entirely (local testing only). | `1` |
 | `GPN_REQUIRE_BACKBONE` | Hard gate: exit 78 when not dialable (instead of degrading). | `0` |

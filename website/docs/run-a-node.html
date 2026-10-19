@@ -465,6 +465,69 @@ nc -vz &lt;your-public-ip&gt; 30333
 <p>If it still fails: confirm the rule is <strong>TCP</strong> (not UDP), the internal IP is
 current (DHCP may have moved it), the host firewall allows it, and the ISP is
 not blocking inbound ports (some block 30333; use another <code>GPN_SEED_PORT</code>).</p>
+<h2 id="pull-vs-push-work-behind-nat">Pull vs push — work behind NAT</h2>
+<p>A provider used to learn about its jobs only when the access point <strong>pushed</strong>
+them to the provider's heartbeat port (<code>POST /assign</code> on <code>:8093</code>). That needs
+an <strong>inbound</strong> port, which a CGNAT or locked-down router cannot give you — the
+node would sync, mine, and be reachable <em>outbound</em>, yet never receive a job.</p>
+<p>The <strong>pull</strong> transport inverts it: the provider asks the access point for its
+own assignments (<code>GET /assignments</code>, a bounded long-poll) and writes them into
+the same local stores the claim loop already reads. Nothing downstream changes:
+claiming, inference, result return and settlement are identical, and the
+provider behind NAT now earns.</p>
+<pre><code class="language-toml"># ~/.gpn/node.toml — the only new setting
+ap_url = &quot;http://gpn-testnet.duckdns.org:8092&quot;
+assign_source = &quot;both&quot;          # push | pull | both  (default: both)
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Meaning</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GPN_AP_URL</code></td>
+<td>Access point base URL used for the poll. <strong>Required</strong> for pull.</td>
+<td><em>(unset → push only)</em></td>
+</tr>
+<tr>
+<td><code>GPN_ASSIGN_SOURCE</code></td>
+<td><code>push</code> (old behaviour), <code>pull</code> (poll only), <code>both</code> (poll <strong>and</strong> listen)</td>
+<td><code>both</code></td>
+</tr>
+<tr>
+<td><code>GPN_ASSIGN_WAIT_MS</code></td>
+<td>Long-poll budget. The AP answers the instant it has work, so this only sets how long an <strong>idle</strong> poll waits before returning empty.</td>
+<td><code>25000</code></td>
+</tr>
+<tr>
+<td><code>GPN_ASSIGN_TOKEN</code></td>
+<td>Shared AP↔provider secret. The poll is authenticated with the same header as <code>POST /assign</code>; a remote provider must present the AP's token.</td>
+<td><em>(empty → permissive, warns)</em></td>
+</tr>
+</tbody>
+</table>
+<p>Notes:</p>
+<ul>
+<li><strong>Mixed fleets are safe.</strong> <code>both</code> means an old, reachable provider keeps
+getting pushes while a NAT'd one is served by pull. The two paths write the
+same records, so a provider can receive the same job twice — that is a no-op
+(the local payload is never overwritten, so a finished job cannot be reset).</li>
+<li><strong>The cursor survives restarts</strong> (<code>~/.gpn/assign-cursor.json</code>). On the first
+start of a pull-enabled build the cursor is seeded from the highest id already
+in <code>~/.gpn/assignments.json</code>, so upgrading does not re-deliver history.</li>
+<li><strong>One request per idle poll.</strong> A healthy idle provider makes one request per
+<code>GPN_ASSIGN_WAIT_MS</code> (25 s); a busy one is answered immediately.</li>
+<li>CGNAT users should still read <a href="#4-cgnat--when-forwarding-is-impossible">§4</a>:
+pull keeps you <em>earning</em>, but only a dialable node can be a backbone seed.</li>
+<li>Check it worked: the provider log prints
+  <code>[assign] pull transport starting — ap=… since=…</code> at boot and
+  <code>[assign] pulled #&lt;id&gt; (payload stored)</code> per assignment. <code>[assign] AP rejected
+the pull (401)</code> means <code>GPN_ASSIGN_TOKEN</code> does not match the AP's.</li>
+</ul>
 <h2 id="how-to-become-a-seed-bootstrap-node">How to become a seed / bootstrap node</h2>
 <p>A <strong>seed</strong> is a backbone node that is published as a bootstrap dial target.
 Nothing is registered and no permission is granted — a seed has no privileges.</p>
@@ -491,6 +554,40 @@ five compiled-in seed IPs as a DNS/HTTP-independent floor. Those five are a
 rotated by GPN, used only as dial targets — not co-located with the oracle
 operators. Inclusion is by invitation against the criteria above (distinct
 operators/jurisdictions, ≤2 changes per release), not by uptime ranking alone.</p>
+<h3 id="the-live-network-directory-httpsgpncoinaiseedsjson">The live network directory — <code>https://gpncoin.ai/seeds.json</code></h3>
+<p>Every node also fetches a live directory at startup, with <strong>no flag needed</strong>:</p>
+<pre><code>https://gpncoin.ai/seeds.json      # JSON  (what gpn-node fetches)
+https://gpncoin.ai/bootnodes.txt   # the same dialable multiaddrs, one per line
+</code></pre>
+<p>The directory is a Cloudflare Worker that unions (a) the compiled-in seed list
+with (b) the access point's <strong>currently healthy providers</strong>, and caches the
+result for 60 s (<code>Cache-Control: public, max-age=60</code>). The node merges it with
+its static bootnodes and persisted peers exactly like any other seed source:
+entries are deduplicated, invalid ones dropped, and <strong>a failed fetch is logged
+and ignored</strong> — the compiled-in bootnodes still get it online.</p>
+<pre><code class="language-bash">curl -s https://gpncoin.ai/seeds.json | head -40
+</code></pre>
+<pre><code class="language-json">{
+  &quot;network&quot;: &quot;GPN Public Testnet&quot;,
+  &quot;chain_id&quot;: &quot;gpn_testnet&quot;,
+  &quot;genesis&quot;: &quot;0xb8e4636a65d0c812abb437c38dd7e937bd7c3355c54c54d63060f26a33519a5c&quot;,
+  &quot;updated_at&quot;: &quot;2026-10-19T22:00:00.000Z&quot;,
+  &quot;ttl&quot;: 60,
+  &quot;multiaddrs&quot;: [&quot;/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooW…&quot;],
+  &quot;nodes&quot;: [{ &quot;multiaddr&quot;: &quot;/dns4/…/p2p/12D3KooW…&quot;, &quot;role&quot;: &quot;seed&quot; }]
+}
+</code></pre>
+<p><strong>Override / add sources.</strong> <code>--bootnodes-url &lt;URL&gt;</code> (or <code>bootnodes_url = […]</code>
+in <code>node.toml</code>, <code>GPN_BOOTNODES_URL</code>) <strong>replaces</strong> the default directory; pass
+several to union them. <code>--bootnodes-dns</code> works alongside it.</p>
+<p><strong>Publishing a node.</strong> There is no registration form and no permission: run a
+healthy, dialable node (see the criteria above). It announces its endpoint
+on-chain by itself, appears in <code>GET /providers</code> on the access point once it is
+serving, and therefore in the live directory. Only multiaddrs that carry a
+<code>/p2p/&lt;peer-id&gt;</code> are dialable by <code>gpn-node</code>; provider entries that publish only
+an HTTP <code>status_url</code> are listed under <code>nodes[]</code> for tooling but are not dialled.
+The hardcoded seed set changes only with a release (or a <code>network.json</code>
+update) — being in the live directory does not compile you into clients.</p>
 <h2 id="ollama-is-a-required-component-bundled-installer-hard-gate">Ollama is a REQUIRED component (bundled installer + hard gate)</h2>
 <p>A GPN node is <strong>always miner AND AI provider</strong>. Ollama is therefore a
 <strong>first-class, required component</strong>, not an optional extra:</p>
@@ -722,6 +819,7 @@ base_path    = &quot;~/.gpn/node&quot;                      # or set GPN_BASE_PA
 rpc_port     = 9944
 node_key     = &quot;&lt;64-hex ed25519 secret&gt;&quot;           # node's network identity
 bootnodes    = [&quot;/ip4/23.241.109.255/tcp/30333/p2p/12D3KooW…&quot;]
+bootnodes_url = []                                 # [] → https://gpncoin.ai/seeds.json (live directory)
 public_addr  = &quot;/ip4/&lt;your-public-ip&gt;/tcp/30333&quot;     # REQUIRED (see above; forward this port)
 author       = &quot;alice&quot;                             # passed as --alice to gpn-node (authoring key)
 node_args    = [&quot;--no-telemetry&quot;, &quot;--no-prometheus&quot;]
@@ -792,6 +890,11 @@ finetune_poll_ms = 4000
 <td><em>(none)</em></td>
 </tr>
 <tr>
+<td><code>GPN_BOOTNODES_URL</code></td>
+<td>comma/space list of published seed-list URLs. Replaces the built-in live directory.</td>
+<td><code>https://gpncoin.ai/seeds.json</code></td>
+</tr>
+<tr>
 <td><code>GPN_PUBLIC_ADDR</code></td>
 <td><code>--public-addr</code> (e.g. <code>/dns4/host/tcp/30333</code>). Recommended for a public node; the capability probe also reads it.</td>
 <td><em>(none)</em></td>
@@ -853,8 +956,23 @@ finetune_poll_ms = 4000
 </tr>
 <tr>
 <td><code>GPN_ASSIGN_TOKEN</code></td>
-<td>shared AP↔provider secret (<code>POST /assign</code> auth)</td>
+<td>shared AP↔provider secret (<code>POST /assign</code> <strong>and</strong> <code>GET /assignments</code> auth)</td>
 <td><em>(empty → legacy-permissive, warns)</em></td>
+</tr>
+<tr>
+<td><code>GPN_AP_URL</code></td>
+<td>access point base URL for the <strong>pull</strong> transport (e.g. <code>http://gpn-testnet.duckdns.org:8092</code>). Unset → push only.</td>
+<td><em>(none)</em></td>
+</tr>
+<tr>
+<td><code>GPN_ASSIGN_SOURCE</code></td>
+<td><code>push</code> | <code>pull</code> | <code>both</code> — how this provider receives assignments (see <a href="#pull-vs-push--work-behind-nat">Pull vs push</a>).</td>
+<td><code>both</code></td>
+</tr>
+<tr>
+<td><code>GPN_ASSIGN_WAIT_MS</code></td>
+<td>pull long-poll budget (the AP answers immediately when there is work)</td>
+<td><code>25000</code></td>
 </tr>
 <tr>
 <td><code>GPN_OLLAMA</code></td>

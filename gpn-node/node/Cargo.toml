@@ -57,13 +57,20 @@ jsonrpsee = { version = "0.24", features = ["server", "macros"] }
 serde_json = "1"
 hex = "0.4"
 
-# Peer discovery: Bitcoin-style DNS seeds (TXT multiaddrs) + HTTP seed lists.
+# Peer discovery: Bitcoin-style DNS seeds (TXT multiaddrs) + HTTP(S) seed lists.
 # hickory-resolver is already in the dependency graph via litep2p, so this adds
-# no new crates. attohttpc is built WITHOUT TLS (default-features = false): seed
-# lists should be served over plain http://; https sources are logged and
-# skipped rather than pulling a TLS stack into the node.
+# no new crates. Plain http:// seed lists use attohttpc (built without TLS).
+# https:// seed lists (the default network directory is
+# https://gpncoin.ai/seeds.json) use tokio-rustls + rustls + webpki-roots —
+# all three are already in the dependency graph (rustls 0.23 / tokio-rustls
+# 0.26 via libp2p), so this adds no new transitive crates, only the `ring`
+# crypto provider that the existing graph already builds.
 hickory-resolver = "0.25"
 attohttpc = { version = "0.24", default-features = false }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "0.26"
+url = "2"
 
 # Automatic NAT port mapping (design §5.5): UPnP-IGD discovery + AddPortMapping.
 # igd-next is already in the dependency graph via libp2p-upnp, so this adds no

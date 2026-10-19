@@ -64,7 +64,8 @@ the persistent-peer-store task and the on-chain discovery task).</p>
    periodically snapshots the addresses of peers it is <em>connected to</em> and
    re-dials them on the next start.</li>
 <li><strong>DNS seed</strong> — <code>--bootnodes-dns &lt;name&gt;</code> (repeatable).</li>
-<li><strong>HTTP seed list</strong> — <code>--bootnodes-url &lt;url&gt;</code> (repeatable).</li>
+<li><strong>HTTP seed list</strong> — <code>--bootnodes-url &lt;url&gt;</code> (repeatable). <strong>Defaults to the
+   live network directory at <a href="https://gpncoin.ai/seeds.json">https://gpncoin.ai/seeds.json</a></strong> — no flag needed.</li>
 </ol>
 <p>Sources are resolved independently. <strong>A source that is unreachable, malformed or
 slow is logged and skipped — it never aborts startup.</strong> Only entries that parse
@@ -74,7 +75,12 @@ merge.</p>
 <pre><code>--bootnodes &lt;MULTIADDR&gt;...        # static (pre-existing), e.g. the hardcoded fallback
 --bootnodes-dns &lt;NAME&gt;...         # resolve NAME's DNS TXT records as seeds
 --bootnodes-url &lt;URL&gt;...          # fetch a published seed-list JSON
+                                  # default: https://gpncoin.ai/seeds.json
 </code></pre>
+<p><code>--bootnodes-url</code> <strong>replaces</strong> the default directory when given (pass several to
+union them); the compiled-in <code>--bootnodes</code> always remain as the last-resort
+fallback. The supervisor exposes the same setting as <code>bootnodes_url</code> in
+<code>node.toml</code> and as <code>GPN_BOOTNODES_URL</code>.</p>
 <h3 id="on-chain-discovery-gpn-native-top-up">On-chain discovery (GPN-native top-up)</h3>
 <p>Once the node has at least one connection, a background task reads two on-chain
 registries via the node's own chain client and dials the endpoints it finds:</p>
@@ -118,12 +124,93 @@ during the libp2p handshake, so a wrong or malicious address simply fails to
 connect — it cannot impersonate a node.</p>
 <p>The <strong>persistent peer store</strong> (<code>gpn-peers.json</code>) uses the same object form, so it
 is itself a valid seed source you can inspect, copy or hand to another node.</p>
+<h2 id="the-network-directory-httpsgpncoinaiseedsjson">The network directory (<code>https://gpncoin.ai/seeds.json</code>)</h2>
+<p>The default seed source is a Cloudflare Worker in this repo
+(<code>worker/worker.js</code>, deployed as the <code>gpn-coin</code> Worker that also serves this
+site). It is the GPN equivalent of a DDNS name for the whole network: nodes ask
+one stable hostname "who is up right now" instead of every operator tracking
+every address.</p>
+<p><strong>Endpoints</strong></p>
+<table>
+<thead>
+<tr>
+<th>URL</th>
+<th>Body</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET https://gpncoin.ai/seeds.json</code></td>
+<td>JSON (the shape below)</td>
+</tr>
+<tr>
+<td><code>GET https://gpncoin.ai/bootnodes.txt</code></td>
+<td>the dialable multiaddrs, one per line</td>
+</tr>
+<tr>
+<td><code>GET https://gpncoin.ai/seeds.txt</code></td>
+<td>alias of <code>/bootnodes.txt</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Response</strong></p>
+<pre><code class="language-json">{
+  &quot;network&quot;: &quot;GPN Public Testnet&quot;,
+  &quot;chain_id&quot;: &quot;gpn_testnet&quot;,
+  &quot;genesis&quot;: &quot;0xb8e4636a65d0c812abb437c38dd7e937bd7c3355c54c54d63060f26a33519a5c&quot;,
+  &quot;updated_at&quot;: &quot;2026-10-19T22:00:00.000Z&quot;,
+  &quot;updated&quot;: 1760990400,
+  &quot;ttl&quot;: 60,
+  &quot;source&quot;: &quot;static+ap&quot;,
+  &quot;live_providers&quot;: 1,
+  &quot;multiaddrs&quot;: [
+    &quot;/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo&quot;
+  ],
+  &quot;nodes&quot;: [
+    { &quot;multiaddr&quot;: &quot;…&quot;, &quot;peer_id&quot;: &quot;12D3Koo…&quot;, &quot;role&quot;: &quot;seed&quot;, &quot;source&quot;: &quot;compiled-in&quot; },
+    { &quot;endpoint&quot;: &quot;http://203.0.113.7:8093/status&quot;, &quot;multiaddr&quot;: &quot;/ip4/203.0.113.7/tcp/8093&quot;,
+      &quot;peer_id&quot;: null, &quot;role&quot;: &quot;provider&quot;, &quot;source&quot;: &quot;ap&quot;, &quot;address&quot;: &quot;5ENq…&quot; }
+  ],
+  &quot;publisher&quot;: &quot;gpncoin.ai&quot;
+}
+</code></pre>
+<ul>
+<li><code>multiaddrs</code> is what <code>gpn-node</code> consumes; the rest is metadata for humans and
+tooling. <code>source</code> is <code>static+ap</code>, <code>static+ap-empty</code>, or <code>static-fallback</code> (the
+AP was unreachable) — the endpoint <strong>never</strong> returns 5xx for a discovery
+failure.</li>
+<li><code>genesis</code>/<code>chain_id</code> let a client reject a list for the wrong network
+without parsing every address.</li>
+<li><code>nodes[]</code> also carries providers that only publish an HTTP <code>status_url</code>: they
+have no <code>/p2p/&lt;peer-id&gt;</code>, so they appear for tooling but are <strong>not</strong> added to
+<code>multiaddrs</code> (the node cannot dial a peer without a peer id).</li>
+</ul>
+<p><strong>Where the live half comes from.</strong> The Worker fetches <code>GET /providers</code> from
+the access point (wrangler var <code>AP_URL</code>), keeps entries the AP reports as
+<code>healthy</code>, converts each <code>status_url</code> to a multiaddr, and merges. The result is
+cached in-isolate for 60 s and served with <code>Cache-Control: public, max-age=60</code>.</p>
+<p>The AP listens on a non-standard port (<code>:8092</code>), which the Workers <code>fetch()</code>
+API refuses. The Worker therefore tries <code>fetch()</code> first (so an HTTPS ingress
+always wins and is the recommended production setup — e.g. a Cloudflare Tunnel
+mapping <code>https://ap.gpncoin.ai</code> → <code>127.0.0.1:8092</code>) and falls back to a raw
+HTTP/1.1 GET over <code>cloudflare:sockets</code>, which can reach any port. That fallback
+is what keeps the directory live today, with no extra infrastructure.</p>
+<blockquote>
+<p><strong>Deployment.</strong> The Worker and the site are one deployment: pushing to <code>main</code>
+rebuilds it and <code>https://gpncoin.ai/seeds.json</code> goes live (the custom domain
+is already attached). Before that build lands — or on a fork without the
+domain — the same endpoint is on the <code>workers.dev</code> hostname of the <code>gpn-coin</code>
+Worker. Confirm with <code>curl -s https://gpncoin.ai/seeds.json | head</code>;
+<code>"source": "static+ap"</code> means the live merge worked, <code>static-fallback</code> means
+the AP was unreachable (the list is still valid).</p>
+</blockquote>
 <h2 id="hosting-a-seed">Hosting a seed</h2>
 <p>Any HTTP host works (static file, object store, small service):</p>
 <ol>
-<li>Publish the JSON at a stable URL, e.g. <code>https://seeds.example.org/gpn.json</code>.</li>
+<li>Publish the JSON at a stable URL, e.g. <code>https://gpncoin.ai/seeds.json</code>.</li>
 <li>Ensure it is reachable from the machines that run GPN nodes.</li>
-<li>Operators add it with <code>--bootnodes-url https://seeds.example.org/gpn.json</code>.</li>
+<li>Operators add it with <code>--bootnodes-url https://…</code> — or just point at the
+   default directory, which is already wired in.</li>
 </ol>
 <p>A <strong>DNS seed</strong> is a hostname whose <strong>TXT records</strong> contain seed lists:</p>
 <pre><code>$ dig +short TXT seed.example.org
@@ -132,11 +219,10 @@ is itself a valid seed source you can inspect, copy or hand to another node.</p>
 <p>Regenerate it from your node inventory whenever peers change (a DNS provider
 with an API, or a tiny cron job, both work).</p>
 <blockquote>
-<p><strong>Note on TLS:</strong> the node currently ships an HTTP-only seed client
-(<code>attohttpc</code> without a TLS stack) to avoid pulling a TLS implementation into
-every node. <code>https://</code> seed URLs therefore fail with a clear, non-fatal log
-message. Prefer a plain <code>http://</code> seed reachable by the node, or a local
-reverse proxy. (This is a deliberate, easily-reversible build decision.)</p>
+<p><strong>TLS:</strong> <code>https://</code> seed sources are fetched natively (rustls + webpki roots —
+already in the node's dependency graph). <code>http://</code> sources still use the
+HTTP-only client. Both are best-effort and time-bounded; no TLS stack is
+required on the host.</p>
 </blockquote>
 <h2 id="security-model">Security model</h2>
 <ul>

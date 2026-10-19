@@ -22,6 +22,9 @@ base_path = "~/.gpn/node"
 rpc_port  = 9944
 node_key  = ""                           # 64-hex ed25519 network key (the node requires one)
 bootnodes = []                           # e.g. ["/ip4/23.241.109.255/tcp/30333/p2p/12D3KooW…"]
+bootnodes_url = []                       # [] → the built-in live directory
+                                         # https://gpncoin.ai/seeds.json
+                                         # (set entries to REPLACE it)
 author    = ""                           # short authoring key name → --<name> (e.g. "alice")
 node_args = ["--no-telemetry", "--no-prometheus"]
 

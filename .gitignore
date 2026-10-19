@@ -68,3 +68,7 @@ githubinfo
 # Python bytecode
 __pycache__/
 *.pyc
+
+# Wrangler / Worker build artifacts
+.wrangler/
+worker/node_modules/

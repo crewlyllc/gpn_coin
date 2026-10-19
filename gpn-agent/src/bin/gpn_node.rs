@@ -87,6 +87,9 @@ struct FileConfig {
     rpc_port: Option<u16>,
     node_key: Option<String>,
     bootnodes: Option<Vec<String>>,
+    /// Published seed-list URLs (`--bootnodes-url`). Empty → the node uses its
+    /// built-in default, the live directory at https://gpncoin.ai/seeds.json.
+    bootnodes_url: Option<Vec<String>>,
     public_addr: Option<String>,
     /// Authority short name passed as `--<author>` (e.g. `"alice"`).
     author: Option<String>,
@@ -120,6 +123,7 @@ struct Config {
     rpc_port: u16,
     node_key: Option<String>,
     bootnodes: Vec<String>,
+    bootnodes_url: Vec<String>,
     public_addr: Option<String>,
     author: Option<String>,
     node_args: Vec<String>,
@@ -499,6 +503,10 @@ impl Config {
             bootnodes: env_str("GPN_BOOTNODES")
                 .map(|s| split_list(&s))
                 .or(file.bootnodes)
+                .unwrap_or_default(),
+            bootnodes_url: env_str("GPN_BOOTNODES_URL")
+                .map(|s| split_list(&s))
+                .or(file.bootnodes_url)
                 .unwrap_or_default(),
             public_addr: env_str("GPN_PUBLIC_ADDR").or(file.public_addr),
             author: env_str("GPN_AUTHOR").or(file.author),
@@ -975,6 +983,12 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
         for bn in &cfg.bootnodes {
             argv.push("--bootnodes".into());
             argv.push(bn.clone());
+        }
+        // Explicit URLs replace the node's built-in default; leaving the list
+        // empty lets gpn-node use https://gpncoin.ai/seeds.json on its own.
+        for url in &cfg.bootnodes_url {
+            argv.push("--bootnodes-url".into());
+            argv.push(url.clone());
         }
         if let Some(pa) = &cfg.public_addr {
             argv.push("--public-addr".into());

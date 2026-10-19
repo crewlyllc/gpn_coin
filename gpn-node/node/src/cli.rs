@@ -26,6 +26,10 @@ pub struct Cli {
 
     /// Published seed-list JSON to fetch and merge into the bootnode set
     /// (accepts `{"multiaddrs": [...]}` or a plain array). Repeatable.
+    ///
+    /// Defaults to `https://gpncoin.ai/seeds.json` — the live network
+    /// directory. Passing any value here **replaces** that default; the
+    /// compiled-in `--bootnodes` remain as the hard fallback either way.
     #[arg(long = "bootnodes-url", value_name = "URL")]
     pub bootnodes_url: Vec<String>,
 
