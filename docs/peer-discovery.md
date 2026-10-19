@@ -180,6 +180,37 @@ Any HTTP host works (static file, object store, small service):
 3. Operators add it with `--bootnodes-url https://…` — or just point at the
    default directory, which is already wired in.
 
+### Generating the list from the chain (`gpn_seedlist`)
+
+Don't hand-curate it. `gpn_seedlist` derives the list from on-chain liveness, so
+anyone can audit — or re-publish — the same result:
+
+```
+gpn_seedlist ws://127.0.0.1:9944 --out /srv/www/seeds.json --ttl 300
+```
+
+Promotion is earned, not asserted: a node is published only when the chain shows
+it is reachable (≥3 distinct bonded witnesses — `Liveness::WitnessCounts`), is
+reliably online (uptime ≥ 95%), was confirmed online in the last window, and has
+a **dialable** endpoint (a real `/p2p/<peer-id>` multiaddr — placeholders and
+`http://…/status` URLs are dropped). Survivors are ranked by uptime and the top
+16 published; the write is atomic (temp + rename), so a cron publisher can never
+serve a half-written file.
+
+```
+gpn_seedlist --print                       # dry run: who qualifies, and why not
+```
+
+An **empty list is a valid publication** (nobody qualifies yet); the tool only
+exits non-zero when the *chain* is unreachable, so a cron publisher fails loudly
+instead of replacing a good list with `[]`. Publishing needs no privileges — a
+captured publisher still cannot inject a node, because peers verify the libp2p
+handshake and the genesis hash.
+
+Run it from cron every few minutes (the `ttl` field tells clients how long to
+cache). Set `--min-witnesses`/`--min-uptime-bps` only if you deliberately want a
+looser/tighter policy, and say so where you publish.
+
 A **DNS seed** is a hostname whose **TXT records** contain seed lists:
 
 ```

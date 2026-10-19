@@ -1678,6 +1678,131 @@ impl ChainClient {
         Some((active, missed, last_win, uptime))
     }
 
+    /// `(LivenessWindow, UptimeLookback)` from the live runtime metadata.
+    /// Falls back to the runtime defaults (14_400 blocks, 10 windows) when the
+    /// constants are unreadable, so the exporter never invents an uptime.
+    pub async fn liveness_constants(&self) -> (u64, u32) {
+        let Some(client) = self.client.as_ref() else {
+            return (14_400, 10);
+        };
+        let window = client
+            .constants()
+            .at(&subxt::dynamic::constant("Liveness", "LivenessWindow"))
+            .ok()
+            .and_then(|c| c.to_value().ok())
+            .and_then(|v| v.as_u128())
+            .map(|v| v as u64)
+            .filter(|v| *v > 0)
+            .unwrap_or(14_400);
+        let lookback = client
+            .constants()
+            .at(&subxt::dynamic::constant("Liveness", "UptimeLookback"))
+            .ok()
+            .and_then(|c| c.to_value().ok())
+            .and_then(|v| v.as_u128())
+            .map(|v| v as u32)
+            .filter(|v| *v > 0)
+            .unwrap_or(10);
+        (window, lookback)
+    }
+
+    /// Every registered full node with its liveness record, declared endpoint
+    /// and current-window witness count — the input to the seed-list exporter
+    /// (`gpn_agent::seedlist`, design §3.4).
+    ///
+    /// `reachable` is the *maximum* of the current and previous window's distinct
+    /// witness counts: witnesses are submitted during a window and finalised a
+    /// window later, so reading only the current one would publish an empty list
+    /// early in every window.
+    pub async fn list_liveness_nodes(&self) -> Vec<crate::seedlist::NodeLiveness> {
+        use std::collections::HashMap;
+        let Some(client) = self.client.as_ref() else {
+            return Vec::new();
+        };
+        let Some(hash) = self.head_block_hash().await else {
+            return Vec::new();
+        };
+
+        // Declared endpoints: hex account -> multiaddr string.
+        let mut endpoints: HashMap<String, String> = HashMap::new();
+        let ep_addr = subxt::dynamic::storage("Liveness", "Endpoints", vec![]);
+        if let Ok(mut stream) = client.storage().at(hash).iter(ep_addr).await {
+            while let Some(Ok(kv)) = stream.next().await {
+                let Some(key) = kv.keys.first() else { continue };
+                let account = account_id_to_string(key);
+                if let Ok(v) = kv.value.to_value() {
+                    let bytes = bytes_from_dynamic(&v.remove_context(), 512);
+                    let s = String::from_utf8_lossy(&bytes).trim().to_string();
+                    if !s.is_empty() {
+                        endpoints.insert(account, s);
+                    }
+                }
+            }
+        }
+
+        let (window_blocks, lookback) = self.liveness_constants().await;
+        let head = self.head_block_number().await.unwrap_or(0);
+        let current_window = if window_blocks == 0 { 0 } else { head / window_blocks };
+
+        let mut out = Vec::new();
+        let fn_addr = subxt::dynamic::storage("Liveness", "FullNodes", vec![]);
+        let Ok(mut stream) = client.storage().at(hash).iter(fn_addr).await else {
+            return out;
+        };
+        while let Some(Ok(kv)) = stream.next().await {
+            let Some(key) = kv.keys.first() else { continue };
+            let account = account_id_to_string(key);
+            let mut account_bytes: Vec<u8> = Vec::with_capacity(32);
+            collect_account_bytes(key, &mut account_bytes);
+            if account_bytes.len() != 32 {
+                continue;
+            }
+            let Ok(mut value) = kv.value.to_value() else {
+                continue;
+            };
+            let v = value.remove_context();
+            let active = get_field(&v, "active")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false);
+            let bits = get_u32_field(&v, "uptime_bits").unwrap_or(0);
+            let last_window = get_u64_field(&v, "last_confirmed_window").unwrap_or(0);
+            let uptime_bps = popcount(bits) * 10_000u32 / lookback;
+
+            let mut reachable = 0u32;
+            for win in [current_window, current_window.saturating_sub(1)] {
+                let key = vec![
+                    Value::from(win),
+                    Value::from_bytes(account_bytes.as_slice()),
+                ];
+                let wc = subxt::dynamic::storage("Liveness", "WitnessCounts", key);
+                if let Some(val) = self.storage_at_head(client, &wc).await {
+                    reachable = reachable.max(val.as_u128().unwrap_or(0) as u32);
+                }
+            }
+
+            out.push(crate::seedlist::NodeLiveness {
+                account: account.clone(),
+                endpoint: endpoints.get(&account).cloned().unwrap_or_default(),
+                active,
+                uptime_bps,
+                uptime_bits: bits,
+                last_confirmed_window: last_window,
+                reachable,
+            });
+        }
+        out.sort_by(|a, b| a.account.cmp(&b.account));
+        out
+    }
+
+    /// Current liveness window id (`head / LivenessWindow`), for exporters.
+    pub async fn current_liveness_window(&self) -> u64 {
+        let (window_blocks, _) = self.liveness_constants().await;
+        if window_blocks == 0 {
+            return 0;
+        }
+        self.head_block_number().await.unwrap_or(0) / window_blocks
+    }
+
     // ---- Treasury (vested, governance-controlled) -----------------------
 
     /// The treasury pallet account (mirrors `pallet_gpn_treasury::account_id`).

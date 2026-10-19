@@ -115,7 +115,7 @@ cargo build --release --manifest-path "$SRC/gpn-agent/Cargo.toml" --bins
 log "installing binaries → $BIN_DIR"
 mkdir -p "$BIN_DIR"
 ln -sf "$SRC/gpn-node/target/release/gpn-node" "$BIN_DIR/gpn-node"
-for b in gpn_node gpn_provider_status gpn_llm_provider gpn_diffusion_provider gpn_gpu_mine gpn_external_miner gpn_gpu_compute gpn_simulate_autoswitch gpn_pull_model gpn_snapshot; do
+for b in gpn_node gpn_provider_status gpn_llm_provider gpn_diffusion_provider gpn_gpu_mine gpn_external_miner gpn_gpu_compute gpn_simulate_autoswitch gpn_pull_model gpn_snapshot gpn_seedlist; do
   [ -f "$SRC/gpn-agent/target/release/$b" ] && ln -sf "$SRC/gpn-agent/target/release/$b" "$BIN_DIR/$b"
 done
 

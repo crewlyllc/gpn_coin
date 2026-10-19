@@ -22,6 +22,7 @@ pub mod ollama;
 pub mod profitability;
 pub mod provider_policy;
 pub mod routing;
+pub mod seedlist;
 pub mod utils;
 
 // Re-export the scripted feed for the headless simulator binary.

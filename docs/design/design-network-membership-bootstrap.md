@@ -288,6 +288,36 @@ cannot inject a node that peers will accept. This is the "self-organizing bootno
 liveness design, made concrete. Source A (≤5) is deliberately *outside* this pipeline: it must be stable
 when the pipeline is broken.
 
+**Implemented (2026-10-19):** `gpn_seedlist` (`gpn-agent/src/bin/gpn_seedlist.rs`, policy +
+unit tests in `gpn-agent/src/seedlist.rs`, chain read `ChainClient::list_liveness_nodes`).
+
+```
+# rank on-chain liveness and publish atomically (tmp + rename — a poller can
+# never see a half-written file)
+gpn_seedlist ws://127.0.0.1:9944 --out /srv/seeds.json --ttl 300 --max 16
+gpn_seedlist --print            # dry run: show every node and why it qualified
+```
+
+Notes on the implementation, so the rule stays auditable:
+
+- **Freshness is `last_confirmed_window + 1 >= current_window`**, because finalisation lags one window;
+  demanding the current window would publish nothing.
+- **`reachable` = max(witnesses in the current window, witnesses in the previous window)** for the same
+  lag reason. Witness counts are still the pallet's own (`WitnessCounts`), never self-reported.
+- **Undialable endpoints are dropped**, not published: anything without a `/p2p/<peer-id>` suffix (a
+  placeholder, an `http://…/status` URL, a bare `/ip4/…/tcp/…`) would cost every client a dial timeout.
+- **Ranking is fully deterministic** (uptime → confirmed window → multiaddr → account), so two publishers
+  holding the same chain state emit byte-identical lists and clients see no churn.
+- **An empty list is a valid publication** (nobody qualifies). Only an *unreachable chain* is an error,
+  and the tool exits non-zero then — so a publisher's CI fails loudly instead of overwriting a good
+  `seeds.json` with `[]`.
+- `account` is emitted in **ss58**, the form every other GPN tool shows.
+
+Live check on this testnet: the chain currently has **no registered full nodes** (`Liveness::FullNodes`
+is empty — confirmed by direct `state_getKeysPaged`), so the tool correctly publishes an empty list. On a
+throwaway dev chain (registered `//Alice` with a real multiaddr) it decoded the endpoint, rendered the
+ss58 account and gated the node out on witnesses — the promotion rule working end-to-end.
+
 ---
 
 ## 4. Pull-based job protocol (unchanged from v1)
