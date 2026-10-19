@@ -57,74 +57,279 @@ gpn_node
 That's it. `gpn_node` reads its config from a small file + env, then starts and
 supervises all of the children — always: the miner and the AI serving stack.
 
-## REQUIRED: a public address + a forwarded port (every node must be dialable)
+## Backbone by default — dialability is a goal, not a gate
 
-**A GPN node must be dialable to join the network.** Peers have to be able to
-open an **inbound** connection to your node — not just for your node to reach
-them. Every node being dialable is what makes GPN a **full mesh**: any node can
-serve blocks/state to any other node, and the bootnode is only a **seed** that
-introduces peers to each other. A node behind NAT with no port forward can dial
-out and sync, but nobody can dial *it* — that collapses the mesh into a star
-around the bootnode — so **it is not allowed to join**: it fails loudly and does
-not sync, mine, or serve.
+Every GPN node **tries** to be inbound-reachable. A dialable node is a
+**backbone** node: it announces its endpoint, accepts inbound peers, relays and
+serves blocks for the mesh, and earns the `gpn-liveness` uptime credit that
+gates the Silver/Gold staking multiplier. The best nodes become **seeds**
+(bootstrap targets) automatically — see [How to become a seed](#how-to-become-a-seed--bootstrap-node).
 
-Required setup, on every node:
+But **not being dialable no longer stops a node from joining**. If inbound
+reachability cannot be established (NAT with no forward, CGNAT, restrictive
+firewall), the node prints a prominent notice and **keeps running in degraded,
+non-discoverable mode**: it still syncs the chain, mines, and serves AI jobs,
+and it earns the same block rewards and job payouts. The only things it does
+not get are liveness credit, seed-list eligibility, and a small routing
+tie-break.
 
-1. **Forward a TCP port** on your router/firewall to this machine (the node
-   listen port, default **30333**; use a different one if you run several nodes).
-2. **Tell the node its public address**, either in `~/.gpn/node.toml`:
+At startup the node probes inbound reachability for up to **120 s**
+(`GPN_DIALABLE_TIMEOUT_SECS`), in this order:
 
-   ```toml
-   public_addr = "/ip4/203.0.113.10/tcp/30333"
-   ```
+1. explicit `GPN_PUBLIC_ADDR` / `--public-addr` → verify by dial-back;
+2. direct public listen address, libp2p `Identify` external addresses, or an
+   actual inbound peer on `:30333`;
+3. UPnP-IGD / NAT-PMP mapping attempt (~10 s) if `GPN_UPNP=auto` (default);
+4. CGNAT detection (`100.64.0.0/10` WAN address) → no forward is possible;
+5. degrade: print the notice, continue as a non-discoverable participant.
 
-   or via the environment (wins over the config file / `--public-addr`):
-
-   ```bash
-   GPN_PUBLIC_ADDR=/ip4/203.0.113.10/tcp/30333
-   ```
-
-   Use `/ip6/<addr>/tcp/<port>` for IPv6, and the **same port** you forwarded.
-3. **Restart** `gpn_node`. It verifies inbound reachability before it joins.
-
-If you are on a VPS with a directly bound public IP, the gate also accepts a
-public **listen** address; still set `public_addr` so peers are told the right
-endpoint.
-
-### The dialability gate
-
-After the network starts, the node waits up to **120 s**
-(`GPN_DIALABLE_TIMEOUT_SECS`) for evidence that it is inbound-reachable:
-
-- a peer **dials us** (an inbound connection), or
-- the **configured public address** is observed by peers (`GPN_PUBLIC_ADDR` /
-  `--public-addr`, exact IP **and** port), or
-- the node listens directly on a **public** IP.
-
-Only public (globally routable) addresses count — RFC1918 (`10/8`, `172.16/12`,
+Only globally routable addresses count — RFC1918 (`10/8`, `172.16/12`,
 `192.168/16`), CGNAT (`100.64/10`), loopback, link-local and `0.0.0.0` never do.
 
-If no evidence appears, the node **fails closed** — it logs:
+> **Want a guarantee?** `--require-backbone` (or `GPN_REQUIRE_BACKBONE=1`)
+> restores the old hard gate: the node logs the error and exits with code **78**
+> (`EX_CONFIG`) if it is not dialable. Use this only on hosts that must be
+> backbone (e.g. a monitoring fleet), never for a home node.
+
+| Flag / env | Meaning | Default |
+|---|---|---|
+| `--seed` / `GPN_SEED=1` | Willing to be published as a seed candidate. | **on** |
+| `--no-seed` / `GPN_SEED=0` | Never publish as a seed; also silences the not-dialable notice. | — |
+| `--discoverable` / `GPN_DISCOVERABLE=1` | Announce endpoint, accept inbound. | **on** |
+| `--no-discoverable` / `GPN_DISCOVERABLE=0` | Privacy mode: no announce, no inbound, not in any list. Implies `--no-seed`. | — |
+| `--no-upnp` / `GPN_UPNP=off` | Never attempt UPnP/NAT-PMP. | `auto` |
+| `--public-addr` / `GPN_PUBLIC_ADDR` | Explicit public multiaddr; always wins over detection. | unset |
+| `--require-backbone` / `GPN_REQUIRE_BACKBONE=1` | Exit 78 instead of degrading. | off |
+| `GPN_DIALABLE_TIMEOUT_SECS` | Probe grace window. | `120` |
+| `GPN_SEED_PORT` | Inbound port to open/probe. | `30333` |
+
+If the node is not dialable you will see this once (exact text, LAN IP and port
+filled in):
 
 ```
-❌ this node is NOT dialable — set GPN_PUBLIC_ADDR to /ip4/<public-ip>/tcp/<port>
-   and forward that port on your router; refusing to join the network
+================================================================================
+  YOUR NODE IS NOT DIALABLE
+================================================================================
+Other nodes cannot open a connection to this machine on TCP 30333.
+
+Your node is running and fully functional: it syncs, mines and serves AI jobs.
+What you lose: it is not listed as a backbone/seed node, so it earns no
+liveness credit, gets no seed-list eligibility, and cannot be a bootstrap target.
+Nothing is taken away from block rewards or job payouts.
+
+To fix it (about 5 minutes):
+
+  1. Find this machine's LAN IP. Detected: 192.168.1.42
+     (Windows: ipconfig | Linux/macOS: ip addr or ifconfig)
+
+  2. On your router, add a port-forwarding rule:
+        Protocol ............ TCP
+        External port ....... 30333
+        Internal port ....... 30333
+        Internal IP/host .... 192.168.1.42
+     Router admin is usually http://192.168.1.1 or http://192.168.0.1.
+
+  3. Allow the port in this machine's firewall.
+     Windows (Administrator PowerShell):
+       New-NetFirewallRule -DisplayName "GPN node" -Direction Inbound `
+         -Protocol TCP -LocalPort 30333 -Action Allow
+     Linux (ufw):
+       sudo ufw allow 30333/tcp
+     Linux (firewalld):
+       sudo firewall-cmd --add-port=30333/tcp --permanent && sudo firewall-cmd --reload
+
+  4. Or let the node ask the router via UPnP/NAT-PMP (already attempted at
+     startup; on by default). If your router has UPnP disabled, enable it or
+     use step 2. Disable this behavior with --no-upnp.
+
+  5. CGNAT: if your router's WAN address is in 100.64.0.0/10, no port forward
+     can work. Run the node on a cheap VPS, or keep participating as-is.
+     This is a supported outcome, not an error.
+
+Full guide with per-OS detail:
+  https://gpn.network/docs/run-a-node#make-your-node-dialable
+
+This node re-checks every 10 minutes and will print NOW DIALABLE here when
+the fix works. You can also restart to force a check.
+
+Make this fatal instead:   --require-backbone
+Run private, silence:      --no-seed   (or GPN_SEED=0)
+================================================================================
 ```
 
-and exits with code **78** (`EX_CONFIG`) *before* starting the miner or the RPC
-service. `gpn_node` surfaces this as `node=down(not dialable, restarts N)` in its
-`[status]` line and retries with the bounded backoff (≥30 s, no tight loop) —
-fix the port forward and it will join on the next attempt.
+When a fix succeeds, the node confirms it once:
 
-> **Local / single-node testing only:** set `GPN_REQUIRE_DIALABLE=0` to skip the
-gate and restore the old behaviour (the node will run even though it is not
-reachable). Do **not** use this on a real network node.
+```
+================================================================================
+  NOW DIALABLE - your node is reachable on TCP 30333
+================================================================================
+Inbound reachability was confirmed. This node now announces itself as a backbone
+node and is eligible for seed listing. Nothing else to do.
 
-| Env var | Meaning | Default |
-|---------|---------|---------|
-| `GPN_REQUIRE_DIALABLE` | Enforce the inbound-reachability gate. `0`/`false`/`no`/`off` opts out (local testing only). | `1` (ON) |
-| `GPN_PUBLIC_ADDR` | This node's public multiaddress, e.g. `/ip4/203.0.113.10/tcp/30333`. Must match the forwarded port. | _(none → `--public-addr`/`public_addr`)_ |
-| `GPN_DIALABLE_TIMEOUT_SECS` | How long to wait for inbound evidence before failing closed. | `120` |
+(This message is shown once.)
+================================================================================
+```
+
+## Make your node dialable
+
+The rest of this section is the manual walkthrough. You do **not** need it to
+run a node — only to get backbone/seed benefits.
+
+### 1. Forward TCP 30333 on your router
+
+1. Find this machine's **LAN IP**: `ipconfig` (Windows) or `ip addr` /
+   `ifconfig` (Linux/macOS). Prefer a **DHCP reservation** or static lease so it
+   does not change.
+2. Open the router admin page — usually `http://192.168.1.1` or
+   `http://192.168.0.1`; the address is printed on the router label.
+3. Find **Port Forwarding** (sometimes *Virtual Server*, *NAT*, or *Games &
+   Applications*).
+4. Add a rule:
+   - **Protocol:** TCP (not UDP)
+   - **External / WAN port:** `30333`
+   - **Internal / LAN port:** `30333`
+   - **Internal host / IP:** this machine's LAN IP (e.g. `192.168.1.42`)
+5. Save and reboot the router if it asks.
+
+Running more than one node on the same network? Give each a distinct
+`GPN_SEED_PORT` and forward each port to its own machine.
+
+### 2. Open the host firewall
+
+Forwarding at the router is not enough if the OS firewall drops the packet.
+
+**Windows** (Administrator PowerShell — note the backtick line continuation):
+
+```powershell
+New-NetFirewallRule -DisplayName "GPN node" -Direction Inbound `
+  -Protocol TCP -LocalPort 30333 -Action Allow
+```
+
+Verify: `Get-NetFirewallRule -DisplayName "GPN node"`.
+
+**Linux — ufw** (Debian/Ubuntu):
+
+```bash
+sudo ufw allow 30333/tcp
+sudo ufw status verbose
+```
+
+**Linux — firewalld** (Fedora/RHEL/CentOS):
+
+```bash
+sudo firewall-cmd --add-port=30333/tcp --permanent
+sudo firewall-cmd --reload
+sudo firewall-cmd --list-ports
+```
+
+**macOS:** System Settings → Network → Firewall → Options → allow the
+`gpn_node` binary (or `sudo /usr/libexec/ApplicationFirewall/socketfilterfw
+--add /path/to/gpn_node`).
+
+### 3. UPnP / NAT-PMP (optional, automatic)
+
+By default the node asks the router to create the mapping itself (UPnP-IGD or
+NAT-PMP, 10 s budget, TCP only, released on clean shutdown). This works only if
+UPnP is **enabled** on the router, and many ISPs/routers ship it disabled. When
+it succeeds the node logs:
+
+```
+UPnP: mapped TCP 30333 -> 192.168.1.42:30333 via 192.168.1.1; disable with --no-upnp
+```
+
+Security note: UPnP lets any program on the LAN open a port. If you do not want
+that, run with `--no-upnp` and use a manual forward (step 1).
+
+### 4. CGNAT — when forwarding is impossible
+
+Check the **WAN address** on the router status page (not the LAN address):
+
+- `100.64.0.0/10` → **carrier-grade NAT**. Your ISP does not give you a public
+  IPv4; no port forward can work. Options: ask the ISP for a public/static IP,
+  use IPv6 if your ISP routes a public prefix, or run the node on a cheap VPS.
+- A public WAN address that differs from what a "what is my IP" site reports →
+  also CGNAT (double NAT).
+
+CGNAT is a **supported outcome**. The node keeps syncing, mining and serving
+jobs; it just is not a backbone/seed candidate.
+
+### 5. Tell the node its public address (only if detection fails)
+
+Auto-detection covers most hosts. Set it explicitly when the router rewrites
+ports or detection is ambiguous:
+
+```toml
+# ~/.gpn/node.toml
+public_addr = "/ip4/203.0.113.10/tcp/30333"
+```
+
+or:
+
+```bash
+GPN_PUBLIC_ADDR=/ip4/203.0.113.10/tcp/30333   # env wins over the config file
+```
+
+Use `/ip6/<addr>/tcp/<port>` for IPv6. The port must be the **external** port you
+forwarded, not necessarily the listen port. On a VPS with a directly bound
+public IP this is usually unnecessary, but setting it is harmless and makes the
+announced endpoint exact.
+
+### 6. Verify from outside
+
+The node re-checks every 10 minutes, but you can confirm the forward yourself:
+
+- **From another network** (phone hotspot, a friend's house, a VPS) — not from
+  the same LAN, where NAT hairpinning can give a false positive:
+
+  ```powershell
+  # Windows
+  Test-NetConnection <your-public-ip> -Port 30333
+  # => TcpTestSucceeded : True
+  ```
+
+  ```bash
+  # Linux/macOS
+  nc -vz <your-public-ip> 30333
+  ```
+
+- **Online port checker** (e.g. `portchecker.io`, `canyouseeme.org`): check
+  TCP `30333` against your public IP.
+- The authoritative check is the node itself: `gpn_node --status` shows
+  `tier: backbone` once reachable, and the console prints `NOW DIALABLE`.
+
+If it still fails: confirm the rule is **TCP** (not UDP), the internal IP is
+current (DHCP may have moved it), the host firewall allows it, and the ISP is
+not blocking inbound ports (some block 30333; use another `GPN_SEED_PORT`).
+
+## How to become a seed / bootstrap node
+
+A **seed** is a backbone node that is published as a bootstrap dial target.
+Nothing is registered and no permission is granted — a seed has no privileges.
+
+**What qualifies:**
+
+- inbound-reachable on TCP `30333` with a **stable public IPv4** (static, or a
+  DDNS name kept current);
+- same `genesis_hash`, released unmodified binary, always-on and monitored;
+  target **≥ 99.5% monthly reachability**;
+- `backbone` tier with `uptime_bps ≥ 9500` (95%) over the liveness window and
+  `reachable_count ≥ 3` distinct peer witnesses;
+- a published abuse/ops contact and a named maintainer.
+
+**How promotion works:** the node announces its endpoint on-chain by itself.
+An off-chain exporter (`gpn_seedlist`, permissionless to run) reads
+`pallet-gpn-liveness` and publishes the top **16** eligible nodes by
+`(uptime_bps, cumulative_online_blocks)` to `seeds.json`, which every client
+fetches at startup. There is nothing to apply for; running a healthy dialable
+node is the application. Anyone can audit or re-publish the list from chain
+state.
+
+**The hardcoded 5-seed list is separate.** Every client also ships with up to
+five compiled-in seed IPs as a DNS/HTTP-independent floor. Those five are a
+**dedicated bootstrap set**: separately operated cheap VPSes controlled and
+rotated by GPN, used only as dial targets — not co-located with the oracle
+operators. Inclusion is by invitation against the criteria above (distinct
+operators/jurisdictions, ≤2 changes per release), not by uptime ranking alone.
 
 ## Ollama is a REQUIRED component (bundled installer + hard gate)
 
@@ -339,9 +544,13 @@ finetune_poll_ms = 4000
 | `GPN_RPC_PORT` | node RPC port | `9944` |
 | `GPN_NODE_KEY` | node network key (64-hex) | _(none — node needs one)_ |
 | `GPN_BOOTNODES` | comma/space list of bootnodes | _(none)_ |
-| `GPN_PUBLIC_ADDR` | `--public-addr` (e.g. `/dns4/host/tcp/30333`). **Required for a public node** — the dialability gate also reads it. | _(none)_ |
-| `GPN_REQUIRE_DIALABLE` | Enforce inbound reachability (must be dialable to join). `0` opts out for local testing only. | `1` |
-| `GPN_DIALABLE_TIMEOUT_SECS` | Grace window for dialability evidence before exit 78. | `120` |
+| `GPN_PUBLIC_ADDR` | `--public-addr` (e.g. `/dns4/host/tcp/30333`). Recommended for a public node; the capability probe also reads it. | _(none)_ |
+| `GPN_REQUIRE_DIALABLE` | Run the inbound-reachability probe. `0` skips it entirely (local testing only). | `1` |
+| `GPN_REQUIRE_BACKBONE` | Hard gate: exit 78 when not dialable (instead of degrading). | `0` |
+| `GPN_SEED` | Willing to be published as a seed candidate; `0` also silences the not-dialable notice. | `1` |
+| `GPN_DISCOVERABLE` | Announce endpoint / accept inbound; `0` implies `GPN_SEED=0`. | `1` |
+| `GPN_UPNP` | Try UPnP-IGD/NAT-PMP (`auto`/`off`). | `auto` |
+| `GPN_DIALABLE_TIMEOUT_SECS` | Grace window for dialability evidence. | `120` |
 | `GPN_AUTHOR` | short authoring key name → `--<name>` | _(none)_ |
 | `GPN_NODE_ARGS` | extra raw args appended to `gpn-node` | _(none)_ |
 | `GPN_PROVIDER_ENDPOINT` | public `/status` URL advertised on-chain | _(none → discovery off)_ |
@@ -454,9 +663,11 @@ again. Nothing warned beforehand.
   `best` is the node's best block, read cheaply from its own RPC
   (`chain_getHeader`); `?` if the node's RPC isn't answering yet.
 
-  A node that failed the **dialability gate** is shown distinctly as
-  `node=down(not dialable, restarts N)` (the child exited 78), with an
-  actionable hint in the log — set `GPN_PUBLIC_ADDR` and forward the port.
+  A node that failed the **dialability gate** with `--require-backbone` set is
+  shown distinctly as `node=down(not dialable, restarts N)` (the child exited
+  78), with an actionable hint in the log — set `GPN_PUBLIC_ADDR` and forward
+  the port. Without `--require-backbone`, a non-dialable node stays `up` and
+  simply runs degraded.
 
 ## Linux
 

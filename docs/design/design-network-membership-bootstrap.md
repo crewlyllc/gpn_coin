@@ -6,6 +6,8 @@
 ships with **two bootstrap sources** — a hardcoded **≤5-seed list** and a **DDNS/HTTP bootstrap list**;
 seed-by-default dialability (UPnP/NAT-PMP, then graceful degradation) is specified; tiers/rewards
 rebalanced accordingly.
+**v2.1 (2026-10-19, Jeremy):** §3.1 resolved — the 5 seeds are a **dedicated bootstrap set** (option i);
+the §5.2 operator notice and the "now dialable" re-check message are finalized verbatim.
 **Supersedes:** the "every node must be dialable" policy in `node/src/dialability.rs` (queue #45), the
 mandatory `POST /assign` dispatch in `design-access-points-scheduler.md` / master-ref §6.1, and v1's
 framing of backbone as an *optional* tier.
@@ -166,24 +168,21 @@ operator request, or a `genesis`/network change. Rotation = normal client releas
 in) **plus** the DNS alias, so a pure IP change never needs a release. Never rotate all 5 at once —
 change at most 2 per release, so no two adjacent releases share zero seeds.
 
-**⚠ Ambiguity to resolve (called out explicitly).** The corpus contains **no "5 seed nodes" document**.
-The only existing set of five is **D1's 5 oracle operators** (`GPN-MASTER-REFERENCE.md` §11: closed set,
-seeded at genesis). Jeremy's "5 seed nodes" is therefore new, and there are two readings:
+**Decision (Jeremy, 2026-10-19): option (i) — a dedicated bootstrap set.** The five seeds are **five
+separate cheap VPSes, controlled and rotated by GPN, used only as dial targets**. They are **not
+co-located with the five oracle operators**, and share no role, box or key with them. Rationale: an
+oracle operator is a *consensus-adjacent, bonded, identity-bearing* role with a genesis-defined closed
+set; a bootstrap seed is a *disposable, stateless dial target*. Coupling them would (i) turn a seed
+outage into an oracle-ops incident, (ii) put oracle key material and seed hosting in one blast radius,
+and (iii) make the seed set unrotatable without touching a locked launch decision.
 
-- **(Recommended) A dedicated bootstrap set.** Five separate boxes, chosen/operated/rotated by the
-  criteria above. Rationale: an oracle operator is a *consensus-adjacent, bonded, identity-bearing*
-  role with a genesis-defined closed set; a bootstrap seed is a *disposable, stateless dial target*.
-  Coupling them means (i) a seed outage becomes an oracle-ops incident, (ii) oracle key material and
-  seed hosting share a blast radius, and (iii) the seed set can never rotate without touching a locked
-  launch decision. Keep them separate.
-- **(Alternative) Co-locate with the 5 oracle operators.** One box, two roles: cheap (no new VPSes) and
-  fine technically, since a seed has no privileges. Choose this only if ops budget dominates.
+The same *people* may operate both, but never the same box, the same process, or the same `peer_id`.
+The five are enumerated in Phase 2; until then `bootstrap_seeds[]` ships with the entries it has (fewer
+than five is valid — a floor of one is still a floor).
 
-**Recommendation:** dedicated bootstrap set, **but** allow the same operators to host them (same *people*,
-separate *processes/boxes* is not even required — separate *role and key* is). If Jeremy wants one set of
-five boxes doing both, the only hard requirements are: distinct `peer_id` from any validator/oracle
-identity, and the seed role documented as revocable independently. **This needs a one-line decision from
-Jeremy before Phase 2.**
+**Operational consequence:** the cost of this decision is five small VPSes and a quarterly rotation
+chore. That is the price of keeping bootstrap independent of consensus; it is budgeted as an ops line,
+not a protocol cost.
 
 ### 3.2 Source B — the DDNS / bootstrap list
 
@@ -442,45 +441,103 @@ out of scope." V2 says: **try hard, tell the operator exactly what to do, and on
                       On success: verify externally, then adopt the mapped address. Done.
 4. CGNAT check         WAN address in 100.64.0.0/10, or observed ≠ local and no mapping
                       → no forward is possible. Skip to 5.
-5. Degrade             run as NON-DISCOVERABLE participant. Print the warning block once. Continue.
+5. Degrade             run as NON-DISCOVERABLE participant. Print the §5.2 notice once. Continue.
 ```
 
 Nothing in this sequence is fatal. `EXIT_NOT_DIALABLE` (78) survives **only** behind
 `--require-backbone` (§5.4).
 
-### 5.2 Degradation warning (exact behavior)
+### 5.2 Degradation notice (exact behavior)
 
-Printed **once per start** to stderr, and summarized in `gpn_node --status`; not repeated in the log
-loop, not a per-block event:
+The notice is **the product**, not a log line: it is the only channel by which a non-expert operator
+learns that their node is not dialable and what to do about it. Requirements:
+
+- Printed **once per degraded transition** (startup, or dialable → not dialable) to **stderr** and to
+  the console at `warn` level, so it survives the default log filter; each line is emitted verbatim so
+  the box is never mangled by the logger. It must not be interleaved with per-block output.
+- Summarized in `gpn_node --status` as `tier: private (degraded)`.
+- Emitted **after** the UPnP/NAT-PMP attempt, so a successful mapping never shows it.
+- Suppressed entirely when the operator passed `--no-seed` / `GPN_SEED=0` (they asked to be private).
+- The LAN IP and port are filled in from the detected interface and the actual listen port.
+- **ASCII only** (Windows consoles; see the mojibake incident in `docs/run-a-node.md`).
+
+Exact text (`{lan}` = detected LAN IPv4, `{port}` = listen port, default 30333):
 
 ```
-────────────────────────────────────────────────────────────────────────
- GPN: running in NON-DISCOVERABLE mode (backbone unavailable)
- This node syncs, mines and serves AI jobs normally. To also act as a
- backbone/seed node (liveness credit, seed-list eligibility), allow
- inbound TCP 30333:
+================================================================================
+  YOUR NODE IS NOT DIALABLE
+================================================================================
+Other nodes cannot open a connection to this machine on TCP {port}.
 
-   1. Router → Port Forwarding → add rule:
-        Protocol: TCP   External: 30333   Internal: 30333
-        Target:   <this host's LAN IP>  (e.g. 192.168.1.42)
-   2. If your ISP uses CGNAT (WAN IP 100.64.0.0/10) you cannot forward;
-      use a small VPS instead, or ignore this notice — participation is
-      unaffected.
-   3. Re-run, or wait ~10 min; detection is automatic.
+Your node is running and fully functional: it syncs, mines and serves AI jobs.
+What you lose: it is not listed as a backbone/seed node, so it earns no
+liveness credit, gets no seed-list eligibility, and cannot be a bootstrap target.
+Nothing is taken away from block rewards or job payouts.
 
- Silence this notice:  --no-seed   (or GPN_SEED=0)
-────────────────────────────────────────────────────────────────────────
+To fix it (about 5 minutes):
+
+  1. Find this machine's LAN IP. Detected: {lan}
+     (Windows: ipconfig | Linux/macOS: ip addr or ifconfig)
+
+  2. On your router, add a port-forwarding rule:
+        Protocol ............ TCP
+        External port ....... {port}
+        Internal port ....... {port}
+        Internal IP/host .... {lan}
+     Router admin is usually http://192.168.1.1 or http://192.168.0.1.
+
+  3. Allow the port in this machine's firewall.
+     Windows (Administrator PowerShell):
+       New-NetFirewallRule -DisplayName "GPN node" -Direction Inbound `
+         -Protocol TCP -LocalPort {port} -Action Allow
+     Linux (ufw):
+       sudo ufw allow {port}/tcp
+     Linux (firewalld):
+       sudo firewall-cmd --add-port={port}/tcp --permanent && sudo firewall-cmd --reload
+
+  4. Or let the node ask the router via UPnP/NAT-PMP (already attempted at
+     startup; on by default). If your router has UPnP disabled, enable it or
+     use step 2. Disable this behavior with --no-upnp.
+
+  5. CGNAT: if your router's WAN address is in 100.64.0.0/10, no port forward
+     can work. Run the node on a cheap VPS, or keep participating as-is.
+     This is a supported outcome, not an error.
+
+Full guide with per-OS detail:
+  https://gpn.network/docs/run-a-node#make-your-node-dialable
+
+This node re-checks every 10 minutes and will print NOW DIALABLE here when
+the fix works. You can also restart to force a check.
+
+Make this fatal instead:   --require-backbone
+Run private, silence:      --no-seed   (or GPN_SEED=0)
+================================================================================
 ```
 
-Requirements: the LAN IP is filled in from the detected interface; the block is emitted **after** the
-UPnP attempt, so a successful mapping never shows it; it must not be printed when the operator passed
-`--no-seed` (they asked for this).
-
-### 5.3 Re-detection
+### 5.3 Re-detection and the "now dialable" message
 
 - Re-evaluate every **10 min** and on `external_addresses` change. A residential IP change is normal.
 - On change: update the on-chain endpoint via `set_provider_endpoint` (rate-limited to once per hour to
   avoid tx churn) and re-run the probe.
+- **State is edge-triggered, not level-triggered.** Keep `last_dialable: bool`. Print the §5.2 notice
+  only on `dialable → not dialable`; print the message below only on `not dialable → dialable`. Never
+  repeat either while the state is unchanged.
+- The promotion message is printed **once per transition**, to stderr/console (same visibility rules as
+  §5.2), so the operator knows their router/firewall change worked without reading logs:
+
+```
+================================================================================
+  NOW DIALABLE - your node is reachable on TCP {port}
+================================================================================
+Inbound reachability was confirmed. This node now announces itself as a backbone
+node and is eligible for seed listing. Nothing else to do.
+
+(This message is shown once.)
+================================================================================
+```
+
+- If the node later becomes unreachable (IP change, router reboot, CGNAT change), the §5.2 notice
+  fires once on that transition — not on every probe.
 - **CGNAT is terminal but not an error.** Documented as a normal, supported outcome — the same class as
   "IPv6-only". A degraded node is a first-class member (§2), not a failure.
 
@@ -539,7 +596,8 @@ is the whole point of the change. Guardrails:
 - `GPN_JOB_TRANSPORT=pull`. `POST /assign` is a wake hint only; `dispatch_assignment` failures log at
   debug, never count as job failures.
 - AP stops polling non-discoverable `/status`; routing uses `caps` + poll RTT.
-- **Requires the 5-seed decision in §3.1 before shipping.**
+- **The 5-seed decision (§3.1) is settled:** five separately operated cheap VPSes, controlled and
+  rotated by GPN, used only as dial targets. Provisioning them is a Phase 2 prerequisite.
 
 **Phase 3 — remove push.** Delete the mandatory dispatch path and the inbound-status dependency. Keep
 `POST /assign` as a no-op/wake endpoint for one release, then delete.
@@ -582,8 +640,9 @@ consequence: tier label + seed eligibility + routing bonus, instead of refusing 
 
 ## 8. Open questions / risks
 
-1. **The 5-seed ambiguity (§3.1).** Dedicated set vs co-located with the 5 oracle operators. **Needs a
-   decision from Jeremy.** Recommendation: dedicated set, distinct `peer_id` from any oracle identity.
+1. ~~**The 5-seed ambiguity (§3.1).**~~ **Resolved 2026-10-19: dedicated bootstrap set** — five
+   separately operated VPSes, not co-located with the oracle operators, distinct `peer_id` from any
+   oracle identity. See §3.1.
 2. **Prompt confidentiality at the AP.** Pull does not change it — the AP already holds the plaintext
    prompt. But `GET /assignments` now returns prompts over the network to providers. Require HTTPS, and
    consider end-to-end encryption (customer key → provider) as a follow-up; token auth is not
