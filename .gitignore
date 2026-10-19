@@ -64,3 +64,7 @@ governance-addrs.txt
 
 # GitHub credentials (never commit)
 githubinfo
+
+# Python bytecode
+__pycache__/
+*.pyc
