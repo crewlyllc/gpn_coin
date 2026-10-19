@@ -418,6 +418,50 @@ If it still fails: confirm the rule is **TCP** (not UDP), the internal IP is
 current (DHCP may have moved it), the host firewall allows it, and the ISP is
 not blocking inbound ports (some block 30333; use another `GPN_SEED_PORT`).
 
+## Pull vs push — work behind NAT
+
+A provider used to learn about its jobs only when the access point **pushed**
+them to the provider's heartbeat port (`POST /assign` on `:8093`). That needs
+an **inbound** port, which a CGNAT or locked-down router cannot give you — the
+node would sync, mine, and be reachable *outbound*, yet never receive a job.
+
+The **pull** transport inverts it: the provider asks the access point for its
+own assignments (`GET /assignments`, a bounded long-poll) and writes them into
+the same local stores the claim loop already reads. Nothing downstream changes:
+claiming, inference, result return and settlement are identical, and the
+provider behind NAT now earns.
+
+```toml
+# ~/.gpn/node.toml — the only new setting
+ap_url = "http://gpn-testnet.duckdns.org:8092"
+assign_source = "both"          # push | pull | both  (default: both)
+```
+
+| Setting | Meaning | Default |
+|---|---|---|
+| `GPN_AP_URL` | Access point base URL used for the poll. **Required** for pull. | _(unset → push only)_ |
+| `GPN_ASSIGN_SOURCE` | `push` (old behaviour), `pull` (poll only), `both` (poll **and** listen) | `both` |
+| `GPN_ASSIGN_WAIT_MS` | Long-poll budget. The AP answers the instant it has work, so this only sets how long an **idle** poll waits before returning empty. | `25000` |
+| `GPN_ASSIGN_TOKEN` | Shared AP↔provider secret. The poll is authenticated with the same header as `POST /assign`; a remote provider must present the AP's token. | _(empty → permissive, warns)_ |
+
+Notes:
+
+- **Mixed fleets are safe.** `both` means an old, reachable provider keeps
+getting pushes while a NAT'd one is served by pull. The two paths write the
+same records, so a provider can receive the same job twice — that is a no-op
+(the local payload is never overwritten, so a finished job cannot be reset).
+- **The cursor survives restarts** (`~/.gpn/assign-cursor.json`). On the first
+start of a pull-enabled build the cursor is seeded from the highest id already
+in `~/.gpn/assignments.json`, so upgrading does not re-deliver history.
+- **One request per idle poll.** A healthy idle provider makes one request per
+`GPN_ASSIGN_WAIT_MS` (25 s); a busy one is answered immediately.
+- CGNAT users should still read [§4](#4-cgnat--when-forwarding-is-impossible):
+pull keeps you *earning*, but only a dialable node can be a backbone seed.
+- Check it worked: the provider log prints
+  `[assign] pull transport starting — ap=… since=…` at boot and
+  `[assign] pulled #<id> (payload stored)` per assignment. `[assign] AP rejected
+the pull (401)` means `GPN_ASSIGN_TOKEN` does not match the AP's.
+
 ## How to become a seed / bootstrap node
 
 A **seed** is a backbone node that is published as a bootstrap dial target.
@@ -673,7 +717,10 @@ finetune_poll_ms = 4000
 | `GPN_AUTHOR` | short authoring key name → `--<name>` | _(none)_ |
 | `GPN_NODE_ARGS` | extra raw args appended to `gpn-node` | _(none)_ |
 | `GPN_PROVIDER_ENDPOINT` | public `/status` URL advertised on-chain | _(none → discovery off)_ |
-| `GPN_ASSIGN_TOKEN` | shared AP↔provider secret (`POST /assign` auth) | _(empty → legacy-permissive, warns)_ |
+| `GPN_ASSIGN_TOKEN` | shared AP↔provider secret (`POST /assign` **and** `GET /assignments` auth) | _(empty → legacy-permissive, warns)_ |
+| `GPN_AP_URL` | access point base URL for the **pull** transport (e.g. `http://gpn-testnet.duckdns.org:8092`). Unset → push only. | _(none)_ |
+| `GPN_ASSIGN_SOURCE` | `push` \| `pull` \| `both` — how this provider receives assignments (see [Pull vs push](#pull-vs-push--work-behind-nat)). | `both` |
+| `GPN_ASSIGN_WAIT_MS` | pull long-poll budget (the AP answers immediately when there is work) | `25000` |
 | `GPN_OLLAMA` | ollama base URL | `http://127.0.0.1:11434` |
 | `GPN_REQUIRE_OLLAMA` | Hard gate: refuse to start when ollama is unreachable. `0` opts out (special cases only). | `1` |
 | `GPN_OLLAMA_SETUP` | Attempt the automated install/start if ollama is missing | `1` |

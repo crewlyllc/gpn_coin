@@ -1176,6 +1176,127 @@ fn assignment_token(store: &str, job_id: u64) -> Option<String> {
         .filter(|t| !t.is_empty())
 }
 
+/// Read a raw query-string value (no decoding) from a request URL.
+fn query_param<'a>(url: &'a str, key: &str) -> Option<&'a str> {
+    let (_, q) = url.split_once('?')?;
+    q.split('&').find_map(|kv| match kv.split_once('=') {
+        Some((k, v)) if k == key => Some(v),
+        _ => None,
+    })
+}
+
+/// Percent-decode a query value (`%2F`, `%3A`, `+`). Providers send hex/ss58,
+/// so this only has to undo what an HTTP client may have escaped.
+fn pct_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'%' if i + 2 < b.len() => {
+                let hex = std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or("");
+                match u8::from_str_radix(hex, 16) {
+                    Ok(v) => {
+                        out.push(v);
+                        i += 3;
+                    }
+                    Err(_) => {
+                        out.push(b[i]);
+                        i += 1;
+                    }
+                }
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
+/// Does an assignment record's `provider` denote the caller? The AP stores the
+/// ss58 form, but a provider may present its hex account id (or vice versa),
+/// so compare canonicalised addresses when either side is hex.
+fn provider_matches(record: &str, asked: &str) -> bool {
+    if record.eq_ignore_ascii_case(asked) {
+        return true;
+    }
+    let canon = |s: &str| {
+        if s.starts_with("0x") || s.starts_with("0X") {
+            hex_to_ss58(s)
+        } else {
+            Some(s.to_string())
+        }
+    };
+    match (canon(record), canon(asked)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Max leases returned per `/assignments` response (the provider-side cap is
+/// the same; see `gpn_agent::assign_pull::MAX_LEASES`).
+const MAX_PULL_LEASES: usize = 20;
+
+/// Build the lease list for one provider: every assignment record for it with a
+/// job id above `since`, joined with the AP's own off-chain job payload
+/// (prompt/model), which the provider needs in order to RUN the job.
+///
+/// Ordered by job id ascending and capped, so a provider that has been away
+/// catches up over a few polls instead of receiving an unbounded backlog.
+fn collect_leases(store: &str, provider: &str, since: u64, limit: usize) -> Vec<Value> {
+    let Ok(s) = std::fs::read_to_string(store) else {
+        return vec![];
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&s) else {
+        return vec![];
+    };
+    let Some(map) = v.as_object() else {
+        return vec![];
+    };
+    let mut ids: Vec<u64> = map
+        .iter()
+        .filter_map(|(k, rec)| {
+            let id = k.parse::<u64>().ok()?;
+            if id <= since {
+                return None;
+            }
+            let p = rec.get("provider").and_then(|x| x.as_str()).unwrap_or("");
+            if p.is_empty() || !provider_matches(p, provider) {
+                return None;
+            }
+            Some(id)
+        })
+        .collect();
+    ids.sort_unstable();
+    ids.truncate(limit);
+    ids.into_iter()
+        .map(|id| {
+            let rec = map.get(&id.to_string()).cloned().unwrap_or(json!({}));
+            let mut lease = json!({
+                "job_id": id,
+                "provider": provider,
+                "model": rec.get("model").and_then(|x| x.as_str()).unwrap_or(""),
+                "pull": rec.get("pull").and_then(|x| x.as_bool()).unwrap_or(false),
+                "callback": rec.get("callback").and_then(|x| x.as_str()).unwrap_or(""),
+                "callback_token": rec.get("callback_token").and_then(|x| x.as_str()).unwrap_or(""),
+                "lease_ms": 60_000,
+            });
+            if let Some(job) = gpn_agent::llm::get_job(id) {
+                if let Ok(jv) = serde_json::to_value(&job) {
+                    lease["job"] = jv;
+                }
+            }
+            lease
+        })
+        .collect()
+}
+
 /// Constant-time string equality (avoid leaking the token via timing).
 fn ct_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
@@ -1388,6 +1509,71 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             let resp = match (&method, path.as_slice()) {
+                // GET /assignments — the provider-PULL transport (#46 Phase 1).
+                // A provider asks for ITS OWN queued assignments instead of waiting
+                // for a push to its (possibly un-reachable) heartbeat port, so a
+                // NAT'd / CGNAT home node works with no port forward at all.
+                // Bounded long-poll: each request is served on its own thread, so
+                // holding it up to `wait` ms (max 25 s) costs nothing elsewhere;
+                // it returns the moment there is work. A healthy idle provider
+                // therefore makes one request per 25 s.
+                (Method::Get, [first, ..]) if first.split('?').next() == Some("assignments") => {
+                    let is_loopback = req
+                        .remote_addr()
+                        .map(|a| a.ip().is_loopback())
+                        .unwrap_or(false);
+                    // Providers hold no user token: bind the endpoint to the same
+                    // shared AP↔provider secret `POST /assign` uses (loopback is
+                    // exempt so local tests/monitors keep working).
+                    let want = std::env::var("GPN_ASSIGN_TOKEN").unwrap_or_default();
+                    if !want.is_empty() && !is_loopback {
+                        let got = req
+                            .headers()
+                            .iter()
+                            .find(|h| h.field.equiv("X-Gpn-Assign-Token"))
+                            .map(|h| h.value.as_str().trim().to_string())
+                            .unwrap_or_default();
+                        if !ct_eq(&want, &got) {
+                            let _ = req.respond(
+                                Response::from_string(
+                                    json!({"error":"invalid assign token"}).to_string(),
+                                )
+                                .with_header(hdr.clone())
+                                .with_status_code(401),
+                            );
+                            return;
+                        }
+                    }
+                    let provider = query_param(&url, "provider")
+                        .map(pct_decode)
+                        .unwrap_or_default();
+                    if provider.is_empty() {
+                        json!({"error": "missing provider"})
+                    } else {
+                        let since: u64 = query_param(&url, "since")
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0);
+                        let wait_ms: u64 = query_param(&url, "wait")
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0)
+                            .min(25_000);
+                        let deadline = std::time::Instant::now()
+                            + std::time::Duration::from_millis(wait_ms);
+                        loop {
+                            let leases =
+                                collect_leases(&assign_store, &provider, since, MAX_PULL_LEASES);
+                            if !leases.is_empty() || std::time::Instant::now() >= deadline {
+                                let seq = leases
+                                    .iter()
+                                    .filter_map(|l| l.get("job_id").and_then(|x| x.as_u64()))
+                                    .max()
+                                    .unwrap_or(since);
+                                break json!({"provider": provider, "seq": seq, "leases": leases});
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(250));
+                        }
+                    }
+                }
                 (Method::Get, ["health"]) => {
                     let head = rt.block_on(async { 0 });
                     let _ = head;
@@ -3085,5 +3271,71 @@ mod tests {
         assert_eq!(back.model, "qwen2.5:7b");
         assert_eq!(back.prompt, "hello world");
         assert_eq!(back.status, "queued");
+    }
+
+    #[test]
+    fn pull_query_parsing_handles_escapes_and_missing_keys() {
+        // #46 pull transport: the provider asks `/assignments?provider=..&since=..&wait=..`.
+        let url = "/assignments?provider=0xab%2Fcd&since=17&wait=25000&x=1";
+        assert_eq!(query_param(url, "provider"), Some("0xab%2Fcd"));
+        assert_eq!(pct_decode("0xab%2Fcd"), "0xab/cd");
+        assert_eq!(pct_decode("a+b"), "a b");
+        assert_eq!(
+            query_param(url, "since").and_then(|s| s.parse::<u64>().ok()),
+            Some(17)
+        );
+        assert_eq!(query_param(url, "missing"), None);
+        // A URL with no query must not panic or invent values.
+        assert_eq!(query_param("/assignments", "provider"), None);
+        // Malformed escapes pass through untouched rather than eating bytes.
+        assert_eq!(pct_decode("100%"), "100%");
+    }
+
+    #[test]
+    fn provider_identity_matches_across_hex_and_ss58() {
+        // The AP records the ss58 form; a provider may present its hex account id.
+        let hex = "0x8eaf04151687736326c9fea17e25fc5287613693c912909cb226aa4794f26a48";
+        let ss58 = "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty";
+        assert!(provider_matches(ss58, hex));
+        assert!(provider_matches(hex, ss58));
+        assert!(provider_matches(ss58, ss58));
+        assert!(!provider_matches(ss58, "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"));
+        assert!(!provider_matches("", ss58));
+    }
+
+    #[test]
+    fn collect_leases_filters_by_provider_and_cursor() {
+        let dir = std::env::temp_dir().join(format!("gpn-lease-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let store = dir.join("assignments.json");
+        let body = serde_json::json!({
+            "10": {"provider": "5Me", "model": "m", "pull": false,
+                    "callback": "http://ap", "callback_token": "t10"},
+            "11": {"provider": "5Other", "model": "m", "pull": false,
+                    "callback": "http://ap", "callback_token": "t11"},
+            "12": {"provider": "5Me", "model": "m2", "pull": true,
+                    "callback": "http://ap", "callback_token": "t12"}
+        });
+        std::fs::write(&store, body.to_string()).unwrap();
+        let path = store.to_str().unwrap().to_string();
+
+        // Only our own assignments, above the cursor, ascending.
+        let got = collect_leases(&path, "5Me", 10, MAX_PULL_LEASES);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0]["job_id"], 12);
+        assert_eq!(got[0]["callback_token"], "t12");
+        assert_eq!(got[0]["pull"], true);
+
+        // Cursor 0 returns both of ours; someone else's never leaks in.
+        let all = collect_leases(&path, "5Me", 0, MAX_PULL_LEASES);
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().all(|l| l["provider"] == "5Me"));
+        assert!(all.iter().all(|l| l["job_id"] != 11));
+
+        // The cap is honoured (a long-absent provider catches up over polls).
+        assert_eq!(collect_leases(&path, "5Me", 0, 1).len(), 1);
+        // A missing store is empty, never fatal.
+        assert!(collect_leases("/nonexistent/assignments.json", "5Me", 0, 20).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -198,6 +198,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         gpn_agent::llm::infer::default_ollama_url()
     );
 
+    // #46 Phase 1 — provider-PULL assignments. The AP can only push to us if our
+    // heartbeat port is inbound-reachable; behind NAT/CGNAT it never is. The pull
+    // loop asks the AP for our own assignments instead and writes them into the
+    // same stores the claim loop already reads (push stays on unless
+    // GPN_ASSIGN_SOURCE=pull).
+    if let Some(cfg) = gpn_agent::assign_pull::PullConfig::from_env(&me) {
+        gpn_agent::assign_pull::spawn(cfg);
+    }
+
     // Guaranteed baseline: every node ships a starter model set so the network
     // always has at least one usable LLM, even before any demand-driven pulls.
     let baseline = std::env::var("GPN_BASELINE_MODELS")

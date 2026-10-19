@@ -644,8 +644,14 @@ is the whole point of the change. Guardrails:
 - Add §5.1 NAT mapping (UPnP) + the §5.2 warning + the flags in §5.4. **Done:** `node/src/portmap.rs`
   (UPnP-IGD + NAT-PMP), pre-`build_network` advertisement, lease renewal, CGNAT short-circuit.
 - AP: add `GET /assignments` + leases. Keep `POST /assign` dispatch. `GPN_JOB_TRANSPORT=push|pull|both`
-  (default `both`).
-- Providers: poll loop behind `GPN_ASSIGN_SOURCE` (default `both`).
+  (default `both`). **Done (2026-10-19):** `GET /assignments?provider=&since=&wait=` in
+  `gpn_scheduler.rs` — bounded (≤25 s) long-poll, cursor by job id, cap 20 leases/poll, joined with the
+  AP's own `LlmStore` payload, authenticated by `GPN_ASSIGN_TOKEN` off-loopback.
+- Providers: poll loop behind `GPN_ASSIGN_SOURCE` (default `both`). **Done (2026-10-19):**
+  `gpn-agent/src/assign_pull.rs` (persists into `assignments.json` + `LlmStore` exactly like `POST
+  /assign`, never overwriting a payload we already hold, cursor in `~/.gpn/assign-cursor.json` seeded
+  from the store on first run) wired into all four provider bins; `GPN_AP_URL` selects the AP.
+- **Still open for Phase-1 sign-off:** the two acceptance checks below (they need a real NAT'd box).
 - Verify: (a) a NAT'd box with no forward runs a job end-to-end and prints the warning; (b) a box with
   UPnP available auto-promotes to backbone with no config.
 
