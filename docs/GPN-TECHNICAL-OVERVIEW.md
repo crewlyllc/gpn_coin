@@ -37,7 +37,7 @@ switch. *(A separate **Staking** role is planned.)*
 - **Safety:** permissionless expiry, per-job failure refunds, a bounded on-chain expiry sweep, and a per-requestor cap.
 
 ## Tokenomics
-Fair launch via mining; **halving every ~2 years**; 50 GPN/block @ 15 s; **effective max supply ≈ 520 M**; vested 100 M treasury (13-of-25); 5% fee split (40% staking / 30% treasury / 20% burn / 10% oracle).
+Fair launch via mining; **halving every ~2 years**; 50 GPN/block @ 15 s; **hard supply cap ≈ 520.5 M GPN** (≈ 420.48 M emitted + 100 M treasury); the 100 M treasury is held by a keyless pallet account (70 M genesis-unlocked, 30 M vested over 10 yr) and spendable only by a 13-of-25 governance roster; 5% fee split (40% staking / 30% treasury / 20% burn / 10% oracle).
 
 ## Privacy
 A **shielded pool** (Sapling-style commitments + nullifiers): **deposit** hides a note; **spend** proves ownership in zero knowledge, publishing only an unlinkable nullifier; supports shielded↔shielded and shielded→transparent with value conservation. Production security relies on a **multi-party trusted-setup ceremony** (trapdoor destroyed by independent contributors).

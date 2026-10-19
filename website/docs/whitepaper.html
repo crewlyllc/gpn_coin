@@ -143,8 +143,8 @@ Payment is <strong>per token</strong>: the requestor escrows <code>rate × max_o
 <li><strong>Token:</strong> GPN, 12 decimals. <strong>Fair launch via mining</strong> — no ICO, no liquid premine.</li>
 <li><strong>Emission:</strong> all GPN is minted per block and <strong>halves every 4,204,800 blocks (~2 years at 15 s)</strong>. Halving is the sole emission mechanism.</li>
 <li><strong>Block reward:</strong> 50 GPN/block (≈ 3.33 GPN/s). The reward and block time are coupled via <code>emission_rate = reward / target_block_time</code>.</li>
-<li><strong>Supply:</strong> a nominal 1 B cap; the implemented emission path yields ≈ <strong>420 M mineable</strong>, giving an <strong>effective max supply ≈ 520 M</strong> including treasury.</li>
-<li><strong>Treasury:</strong> a disclosed, <strong>vested</strong> 100 M GPN (70 M genesis-unlocked + 30 M over 10 years), held by a pallet account and spendable only via a <strong>13-of-25</strong> governance roster.</li>
+<li><strong>Supply:</strong> the <strong>hard supply cap is ≈ 520.5 M GPN</strong> — ≈ 420.48 M emitted over the halving schedule (2 × 50 GPN × 4,204,800) plus 100 M allocated to the treasury. The treasury allocation is fixed and does not grow, and emission converges at 420.48 M, so 520.5 M is the true maximum.</li>
+<li><strong>Treasury:</strong> 100 M GPN held by a keyless pallet account — 70 M unlocked at genesis and 30 M vesting over 10 years — spendable only by a <strong>13-of-25</strong> governance roster.</li>
 <li><strong>Fees:</strong> a 5% marketplace fee is split <strong>40% staking rewards · 30% treasury · 20% burn · 10% oracle operators</strong>.</li>
 <li><strong>Value anchor:</strong> an oracle supplies a GPN/USD price (seeded at $0.15 for the testnet); the token's long-run value is intended to derive from <strong>real AI-marketplace demand</strong>, not mining inflation.</li>
 </ul>
@@ -189,7 +189,7 @@ Payment is <strong>per token</strong>: the requestor escrows <code>rate × max_o
 <hr />
 <h2 id="12-conclusion">12. Conclusion</h2>
 <p>The GPU is the most abundant and most under-used source of compute in the world. Mining monopolized it; AI rental markets fight over it; neither lets the hardware move to where the money is. <strong>GPN makes a GPU earn from both markets at once</strong> — mining when that pays, serving AI when that pays — coordinated by a trust-minimal chain, priced against real cost, and settled without a middleman. The token is a fair-launch proof-of-work coin whose durable value comes from the AI compute it enables.</p>
-<p><em>Get paid for the GPU time you're wasting.</em></p>
+<p><em>A GPU should not have to choose.</em></p>
 <hr />
 <h3 id="references-project-corpus">References (project corpus)</h3>
 <p>Design synthesis and full technical detail live in the GPN project artifacts: <code>goals-and-guidelines.md</code>, <code>design-tokenomics-spec.md</code>, <code>design-pricing-model.md</code>, <code>design-access-points-scheduler.md</code>, <code>design-offchain-escrow-channels.md</code>, <code>design-verifiable-gpu-proof-2026-10-06.md</code>, <code>design-liveness-selforg-fullnode-tiers.md</code>, <code>design-ceremony.md</code>, <code>design-crosschain-bridge.md</code>, <code>GPN-MASTER-REFERENCE.md</code>, and the security report <code>redteam-2026-10-08/REPORT.md</code>.</p>

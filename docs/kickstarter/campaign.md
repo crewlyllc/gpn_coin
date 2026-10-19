@@ -139,10 +139,10 @@ things this campaign funds.
 ### The token — stated carefully
 
 GPN is a **fair-launch, GPU-mineable proof-of-work coin**. There was **no ICO and no presale**.
-One thing is disclosed rather than hidden: a **10% governance treasury** (100M GPN — 70M
-genesis-unlocked plus 30M vesting over 10 years), held by a pallet account and spendable only via
-a **13-of-25 governance roster** — no single admin key. Mining halving is every ~2 years; the
-effective maximum supply is ≈520M GPN including the treasury.
+One thing is disclosed rather than hidden: a **100M GPN governance treasury** (≈19% of the
+hard cap — 70M genesis-unlocked plus 30M vesting over 10 years), held by a keyless pallet account
+and spendable only via a **13-of-25 governance roster** — no single admin key. Mining halving is
+every ~2 years; the hard supply cap is ≈520M GPN (≈420M emitted + 100M treasury).
 
 **This campaign does not sell GPN, and no tokens are offered as rewards.** GPN has **no live
 price pre-mainnet** and **no listings**; the market will set any price after mainnet. The token's
@@ -255,7 +255,7 @@ We lead with the catch. Here's what can go wrong and what we're doing about it.
   scrutinized.
   **Mitigation:** GPN is a **fair-launch mining coin** — **no ICO, no presale, no token sale
   here** — and this campaign offers **no tokens, equity, or financial return**. We disclose the
-  10% governance treasury rather than hide it. We'll take legal review before any market-facing
+  100M GPN governance treasury rather than hide it. We'll take legal review before any market-facing
   step. *(Not legal advice; we'll engage counsel.)*
 
 - **Hardware and GPU availability.** Rewards that involve hardware, and the seed full nodes we
@@ -346,8 +346,8 @@ No. Staking is **optional** — it raises your tier and reward multiplier, but a
 pay-eligible by simply producing seal-verified blocks.
 
 **12. What's the governance treasury?**
-A **disclosed 10% of supply** (100M GPN — 70M genesis-unlocked + 30M vesting over 10 years) held by
-a pallet account, spendable only via a **13-of-25 roster**. There was no ICO. It's disclosed, not
+A **disclosed 100M GPN (≈19% of the hard cap)** — 70M genesis-unlocked + 30M vesting over 10
+years — held by a keyless pallet account, spendable only via a **13-of-25 roster**. There was no ICO. It's disclosed, not
 hidden.
 
 **13. What if the campaign doesn't reach the goal?**

@@ -9,20 +9,24 @@
 ---
 
 **How it works**
+
 - **Mining** — GPU proof-of-work; the node that produces a block **keeps that block's reward** (Bitcoin-style).
 - **Serving AI** — LLM inference, image/video generation, ML inference, fine-tuning — priced **per token** against real cost, escrowed trust-minimally.
 - **The switch** — per job, not per market cycle: an incoming job pauses mining, frees VRAM, runs on the whole GPU, then mining resumes. One GPU runs exactly one job at a time.
 - **Routing** — buyers hit one endpoint; the network picks the **lowest-latency, least-loaded** verified GPU. Providers are discovered **on-chain**.
 
 **Why it's different**
+
 - **Both markets, one machine** — no incumbent (NiceHash, Vast, RunPod, Render, Akash, io.net) is both a native PoW miner and an AI marketplace on the same card.
 - **Trust-minimal** — on-chain escrow, optional **payment channels** (no per-job block delay), opaque/private on-chain values.
 - **GPU-only, verifiably** — proof-of-work + hardware attestation + a compute challenge; a CPU/iGPU can't earn.
 
 **Token (GPN)**
-- **Fair launch via mining** — no ICO, no premine. 12 decimals.
+
+- **Fair launch via mining** — no ICO, no hidden allocation. 12 decimals.
 - **Halving every ~2 years** (4,204,800 blocks); block reward 50 GPN @ 15 s.
-- **Disclosed, vested treasury** (100 M over 10 yr, 13-of-25 governance).
+- **Hard supply cap ≈ 520 M GPN** — 420 M emitted over the halving schedule plus 100 M allocated to the treasury.
+- **Disclosed, vested treasury** — 100 M GPN held by a keyless pallet account; 70 M unlocked at genesis, 30 M vesting over 10 years; spendable only by a 13-of-25 governance roster.
 - **Token value derives from real AI-compute demand** — not just mining inflation.
 
 **Privacy.** A shielded pool supports private transfers and withdrawals (zero-knowledge spends; nullifier-based double-spend protection).

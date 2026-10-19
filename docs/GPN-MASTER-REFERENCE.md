@@ -129,8 +129,8 @@ populations is a gap to close.*
 - **Per-node wallets:** each node runs with its **own** key/keystore; its own account is its payout
   address (`GPN_MINER_ACCOUNT` overrides). No shared `--alice`.
 - **Block reward:** **50 GPN/block** (restored 2026-10-08 via `set_block_reward`; was briefly 12 for
-  the 4 s era). **Halving every 4,204,800 blocks (~2 yrs at 15 s).** ⚠️ **Max mineable = 2 × reward ×
-  interval ≈ 420 M** (+100 M treasury ⇒ **~520 M effective cap**, not the advertised 1 B) — see §7 / D1.
+  the 4 s era). **Halving every 4,204,800 blocks (~2 yrs at 15 s).** **Max mineable = 2 × reward ×
+  interval = 420.48 M** (+100 M treasury ⇒ **~520.5 M hard supply cap**) — see §7 / D1.
 
 ### 4.1 Forks, desync & self-healing (at scale)
 
@@ -336,19 +336,20 @@ into a registry each cycle.
 ## 7. Tokenomics (`design-tokenomics-spec.md` is the source-of-record)
 
 - **Token:** GPN, 12 decimals, 1 GPN = 1e12 raw. **Fair launch via mining** (no ICO, no liquid
-  premine). Hard cap **1,000,000,000 GPN**.
+  premine). Hard supply cap **≈ 520.5 M GPN** (≈ 420.48 M emission + 100 M treasury).
 - **Emission:** all GPN minted by `gpn-token::mint_block_reward` on block seal. **Halving is the
   sole emission** (every 4,204,800 blocks — **~2 yr at the 15 s cadence**, restored 2026-10-08); the
   vestigial 10%→1% inflation curve was removed 2026-09-16.
 - **Block reward / block time coupled:** `emission_rate = reward / target_block_time`. Current:
   **50 GPN / 15 s ≈ 3.33 GPN/s**. `TargetBlockTime` is the shared runtime const → mainnet uses the
-  same 15 s cadence. **(D1 RESOLVED 2026-10-08: reverted 4→15 s. The ~520 M effective cap is a
+  same 15 s cadence. **(D1 RESOLVED 2026-10-08: reverted 4→15 s. The ~520.5 M hard supply cap is a
   reward × interval fact — see below — not a cadence issue.)**
-- **Supply split:** cap is nominally 1 B, but the implemented emission path makes **max mineable
-  ≈ 420 M** (2 × 50 GPN × 4,204,800) → **effective max supply ≈ 520 M** (+100 M treasury). The old
-  "900 M mineable" figure was **never reachable** with these params (D1; docs corrected). Treasury
-  **100 M (10%)**: 70 M genesis-unlocked + 30 M vested
-  over 10 yr (20 × 1.5M / 6mo), held by `gpn/trsy` pallet account, spendable only via
+- **Supply split:** **hard supply cap ≈ 520.5 M GPN** — **420.48 M emitted** over the halving
+  schedule (2 × 50 GPN × 4,204,800) plus **100 M allocated to the treasury**. Emission converges at
+  420.48 M and the treasury allocation is fixed, so 520.5 M is the true maximum. The old
+  earlier (unreachable) cap and mineable figures were **never achievable** with these params
+  (D1; docs corrected). Treasury **100 M**: 70 M genesis-unlocked + 30 M vested
+  over 10 yr (20 × 1.5M / 6mo), held by a keyless `gpn/trsy` pallet account, spendable only via a
   **13-of-25** governance roster.
 - **Fee distribution** (`distribute_fees`, must sum to 500 bps = 5%): **Staking pool 200 (40%) ·
   Treasury 150 (30%) · Burn 100 (20%) · Oracle operators 50 (10%)**.

@@ -107,11 +107,13 @@ arrives.
 
 ### 6.3 Supply / accounting anomaly (SEV1)
 *Symptom:* `TotalMinted` jumps unexpectedly, disagrees with `BlocksMined × reward`, or exceeds
-the **1B cap**; treasury balance mutates outside the pallet.
+the **≈ 520.5 M hard cap**; treasury balance mutates outside the pallet.
 *Actions:*
 1. Snapshot `gpn_token::TotalMinted`, treasury balance, and recent block rewards.
-2. Compare against `initial_minted = 200M (treasury) + 50 GPN/block`. Any divergence is a P0.
-3. **Invariant:** `TotalMinted ≤ 1_000_000_000 GPN`; issuance = treasury allocation + mined.
+2. Compare against `initial_minted = 100M (treasury) + mined` (50 GPN/block, halving every
+   4,204,800 blocks). Any divergence is a P0.
+3. **Invariant:** `TotalMinted ≤ 520_500_000 GPN` (420.48 M emission + 100 M treasury);
+   issuance = treasury allocation + mined.
    If violated, treat as a critical runtime bug — freeze, preserve evidence, prepare an urgent
    governed fix. Do **not** paper over with a manual mint.
 4. Do **not** touch the proof bytes or the value-balance verification key as a "fix".
@@ -184,6 +186,7 @@ mine→attest→paid-job loop, commit, then promote. Testnet's ops sudo may be u
 
 - The **shielded-pool proof bytes** and the **value-balance verification key** must not change
   without explicit sign-off (on-chain compatibility).
-- The **1B GPN cap** holds: `treasury_allocation (200M) + all mined issuance ≤ 1B`.
+- The **≈ 520.5 M GPN hard cap** holds: `treasury_allocation (100M) + all mined issuance
+  (≤ 420.48 M) ≤ 520.5 M`.
 - The treasury is **keyless**; funds move only via 13-of-25 governance within unlocked tranches.
 - Mainnet sudo is **inert**; never re-introduce a usable privileged key without governed approval.

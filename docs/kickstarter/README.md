@@ -47,9 +47,10 @@ token/equity/financial-return rewards.
 - **"Could / can / estimate"** — never "will / guaranteed."
 - **Disclose the Phase-1 centralized oracle** in anything touching decentralization or the switch.
 - **Never claim a pre-mainnet price, listing, or settlement.** GPN has no live price pre-mainnet.
-- **No invented numbers.** Verified figures only (1B cap, ~2yr halving, 50 GPN @ 15s, ≈520M
-  effective supply, RTX 4090 AI rental $0.14–0.34/hr). Everything else is marked "est."
-- The canonical tokenomics line: *"Fair-launch GPU-PoW, no ICO, disclosed 10% governance treasury,
+- **No invented numbers.** Verified figures only (≈520M hard supply cap — ≈420M emission + 100M
+  treasury, ~2yr halving at 15s, 50 GPN/block, RTX 4090 AI rental $0.14–0.34/hr). Everything else
+  is marked "est."
+- The canonical tokenomics line: *"Fair-launch GPU-PoW, no ICO, disclosed 100M governance treasury,
   no single admin key."*
 
 ---

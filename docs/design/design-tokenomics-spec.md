@@ -117,9 +117,9 @@ real on-chain feed driving Mining→Compute and serving a paid job.
 
 | Parameter | Preliminary (synthesis) | Implemented (this spec) | Note |
 |-----------|-------------------------|--------------------------|------|
-| Total supply | 1,000,000,000 | **1,000,000,000** | Hard cap |
-| Genesis supply | 0 (fair launch) | **100,000,000 (10%)** | Vested treasury — see §4 |
-| Mining alloc | 65% of initial | **900,000,000 (90%)** via PoW | Cap minus treasury |
+| Total supply | 1,000,000,000 | **≈ 520,500,000** | Hard supply cap (420.48M emission + 100M treasury) |
+| Genesis supply | 0 (fair launch) | **100,000,000 (≈19.2%)** | Vested treasury — see §4 |
+| Mining alloc | 65% of initial | **420,480,000 (≈80.8%)** via PoW | Emission path: 2 × 50 GPN × 4,204,800 |
 | Staking rewards | 20% | Fee pool (40% of 5% fee) + attestation | Fee-driven |
 | Treasury | 10% vested (paper) | **10% vested (adopted)** — 70M genesis + 30M vested | See §4 |
 | Community | 5% | — | — |
@@ -142,9 +142,9 @@ fair-launch stance. Full design: `design-treasury-vesting.md`.
 
 | Parameter | Value |
 |---|---|
-| Allocation | **100,000,000 GPN (10% of the 1B cap)** |
+| Allocation | **100,000,000 GPN (fixed; ≈19.2% of the ≈520.5M hard cap)** |
 | Account | `gpn/trsy` pallet account (no private key — spendable only via governance) |
-| Counts against cap | **Yes** → max mineable = 900,000,000 GPN |
+| Counts against cap | **Yes** → max mineable = 420,480,000 GPN; hard cap ≈ 520.5M |
 | Unlock at genesis | **70,000,000 GPN** — immediately spendable |
 | Vested | **30,000,000 GPN** over 10 years → 20 × 1,500,000 (6-month) |
 | Governance | Fixed **25-address roster**; **13-of-25** approvals to spend |
@@ -162,9 +162,9 @@ fair-launch stance. Full design: `design-treasury-vesting.md`.
 
 ## 7. Open Questions (for Phase 4 / mainnet prep)
 
-1. **Bonding curve / supply cap:** `SupplyCapExceeded` exists in errors but no hard cap is
-   configured — decide whether GPN is capped (e.g., 28.7B like Kaspa, or 1B) or uncapped
-   disinflationary.
+1. **Bonding curve / supply cap — RESOLVED:** the hard supply cap is **≈ 520.5M GPN**
+   (≈ 420.48M emission + 100M treasury). The `MaxSupply` constant in `pallet-gpn-token`
+   (1B) is an unreachable safety rail, not the effective cap.
 2. **Burn mechanics:** burn share (20% of fees) is accounted in the event but not yet
    actually removed from issuance — wire an explicit burn (transfer to a dead account /
    `T::Currency::slash`).

@@ -89,14 +89,14 @@ governance runtime call) or the on-chain <strong><code>pallet-gpn-treasury</code
 <td><code>TREASURY_ALLOC_GPN</code></td>
 </tr>
 <tr>
-<td>Hard cap</td>
-<td><strong>1,000,000,000 GPN</strong> (<code>MaxSupply</code>)</td>
-<td><code>pallet-gpn-token</code> (canonical)</td>
+<td>Hard supply cap</td>
+<td><strong>≈ 520.5 M GPN</strong> (≈ 420.48 M emitted + 100 M treasury)</td>
+<td>emission path + <code>TREASURY_ALLOC_GPN</code></td>
 </tr>
 <tr>
 <td>Max <em>mineable</em></td>
-<td><strong>900,000,000 GPN</strong> (cap − treasury allocation)</td>
-<td><code>initial_minted = treasury_alloc</code></td>
+<td><strong>420,480,000 GPN</strong> (2 × 50 GPN × 4,204,800)</td>
+<td><code>InitialBlockReward</code>, <code>HalvingInterval</code></td>
 </tr>
 <tr>
 <td>Block reward</td>
@@ -105,16 +105,16 @@ governance runtime call) or the on-chain <strong><code>pallet-gpn-treasury</code
 </tr>
 <tr>
 <td>Block time</td>
-<td><strong>~4 s target</strong> (shared runtime <code>TargetBlockTime=4</code>; self-tuning from 2^232 difficulty)</td>
+<td><strong>15 s target</strong> (shared runtime <code>TargetBlockTime=15</code>; self-tuning from 2^232 difficulty)</td>
 <td><code>initial_difficulty</code></td>
 </tr>
 </tbody>
 </table>
 <blockquote>
-<p><strong>Cadence note (open decision §10):</strong> the runtime is shared by testnet and mainnet, so
-<code>TargetBlockTime=4 s</code> applies to <strong>both</strong> today — mainnet has <strong>no separate 15 s cadence</strong> yet.
-The <code>HalvingInterval</code> (4,204,800 blocks) is ~2 yr at 15 s but only <strong>~194 days at 4 s</strong>; resolve
-via §10 before launch.
+<p><strong>Cadence note:</strong> <code>TargetBlockTime</code> was reverted 4 s → <strong>15 s</strong> on 2026-10-08 (D1 resolved), so
+<code>HalvingInterval</code> (4,204,800 blocks) is <strong>~2 years</strong> on both testnet and mainnet. Emission
+therefore converges at <strong>420.48 M GPN</strong>. A 1 B <code>MaxSupply</code> value remains in <code>pallet-gpn-token</code>
+as an <strong>unreachable safety rail</strong> — it is not the supply cap.
 | Consensus | Ethash PoW (<code>gpu-pow</code>) + PoSG attestation | pallet runtime |
 | Oracle operators at genesis | <strong>none</strong> (added by governance) | <code>initial_operators = vec![]</code> |
 | Endowed accounts | <strong>none</strong> (fair launch) | <code>endowed_accounts = vec![]</code> |
@@ -181,7 +181,8 @@ PY
 - <code>balances</code> = the single <code>gpn/trsy</code> pallet account with <code>100000000000000000000</code> raw
   (<code>100,000,000 GPN × 10¹²</code>). No other account.
 - <code>block_reward_beneficiary</code> = <code>null</code> (set post-launch via governance, §6).
-- <code>gpn_token.initial_minted</code> = the treasury allocation (counts against the 1B cap).
+- <code>gpn_token.initial_minted</code> = the treasury allocation (<strong>100,000,000 GPN</strong>; counts toward the
+  ≈ 520.5 M hard cap).
 - <code>sudo.key</code> = <code>5C4hrfjw9DjXZTzV3MwzrrAr9P1MJhSrvWGWqi1eSuyUpnhM</code> (all-zeros).
 - 21 schedule entries: <strong>70M unlocked at block 0</strong>, then 20 × 1.5M six-month tranches (30M over
   10 yr). 70M is spendable at launch.</p>
@@ -228,7 +229,7 @@ curl -s -H 'Content-Type: application/json' \
   -d '{&quot;id&quot;:1,&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;chain_getBlockHash&quot;,&quot;params&quot;:[0]}' \
   http://127.0.0.1:9944
 
-# supply counter: seeds at 200M and must rise by exactly 50 GPN per mined block
+# supply counter: seeds at 100M and must rise by exactly 50 GPN per mined block
 python3 - &lt;&lt;'PY'
 # gpn_token.TotalMinted via storage; use gpn_check_state / gpn_explorer
 PY
@@ -266,7 +267,7 @@ governed <code>Sudo.sudo → &lt;call&gt;</code> or via the governance committee
 4. <strong>Publish operator onboarding</strong> (<code>operator-onboarding.md</code>) and the RPC endpoint list.</p>
 <hr />
 <h2 id="7-treasury-operations-pallet-gpn-treasury">7. Treasury operations (<code>pallet-gpn-treasury</code>)</h2>
-<p>The 200M allocation sits in the <strong>keyless</strong> <code>gpn/trsy</code> pallet account. There is no private key;
+<p>The 100M allocation sits in the <strong>keyless</strong> <code>gpn/trsy</code> pallet account. There is no private key;
 funds move only through the 13-of-25 roster flow, bounded by unlocked tranches.</p>
 <pre><code class="language-bash"># read-only
 gpn_treasury status      # balance, unlocked, spendable, threshold, roster size

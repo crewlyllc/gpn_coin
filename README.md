@@ -82,7 +82,7 @@ projectmanager07/
 | Staking | PoSG (Proof of Staked GPU) | GPU attestation + weight multipliers |
 | Marketplace | Hybrid auction + queue | Covers all use cases |
 | Auto-switch | Agent-based | Fast decisions, no on-chain overhead |
-| Tokenomics | Mining + disclosed vested treasury (20%), disinflationary | Market trust, no ICO |
+| Tokenomics | Mining + disclosed vested treasury (100 M of ≈ 520.5 M cap), halving-only | Market trust, no ICO |
 
 ## Getting Started
 
@@ -113,9 +113,9 @@ cargo run --release -- --chain dev --bob --bootnodes /ip4/127.0.0.1/tcp/30333/p2
   NO endowed accounts (fair-launch economics, operators get stake via off-chain drip faucet),
   bootstrap oracle operators Alice+Bob seeded at genesis, ops sudo key Alice; identical
   difficulty/reward/inflation/cap to mainnet.
-- `mainnet` — mining launch (Cycle 35) with a **disclosed 20% vested treasury**
-  (200M GPN, 6-month tranche schedule, 13-of-25 governance — see `pallet-gpn-treasury`);
-  zero oracle operators at genesis; inert sudo. Max mineable = 800M GPN.
+- `mainnet` — mining launch (Cycle 35) with a **disclosed vested treasury**
+  (100M GPN: 70M genesis-unlocked, 30M over 10 years, 13-of-25 governance — see `pallet-gpn-treasury`);
+  zero oracle operators at genesis; inert sudo. Max mineable = 420.48M GPN (hard cap ≈ 520.5M with treasury).
 
 ### Set-aside reserves (funding a specific account at genesis)
 
@@ -149,12 +149,12 @@ Notes:
 
 ### Vested treasury (`pallet-gpn-treasury`)
 
-Mainnet ships with a **disclosed, vested treasury**: 20% of the 1B cap (200,000,000 GPN)
-funded to the `gpn/trsy` pallet account at genesis and locked by a **6-month tranche
-schedule** (8 × 12.5M over 48 months, then 20 × 5M over 120 months). Spending requires a
-**13-of-25** approval from the governance roster (`GPN_TREASURY_ROSTER` env, else
-placeholders). Nothing is unlocked at launch; the allocation counts against the 1B cap
-(so max mineable = 800M GPN). See `design-treasury-vesting.md`.
+Mainnet ships with a **disclosed, vested treasury**: **100,000,000 GPN** funded to the
+keyless `gpn/trsy` pallet account at genesis. **70 M is unlocked at genesis** and the
+remaining **30 M vests over 10 years** (20 × 1.5M six-month tranches). Spending requires
+a **13-of-25** approval from the governance roster (`GPN_TREASURY_ROSTER` env, else
+placeholders). The allocation is fixed and counts toward the **≈ 520.5 M GPN hard cap**
+(≈ 420.48 M mined + 100 M treasury). See `design-treasury-vesting.md`.
 
 **Operating the treasury** — the `gpn_treasury` CLI:
 ```bash

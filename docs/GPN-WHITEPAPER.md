@@ -107,8 +107,8 @@ Jobs that stall are reclaimable: a **permissionless `expire_job`** (after `creat
 - **Token:** GPN, 12 decimals. **Fair launch via mining** — no ICO, no liquid premine.
 - **Emission:** all GPN is minted per block and **halves every 4,204,800 blocks (~2 years at 15 s)**. Halving is the sole emission mechanism.
 - **Block reward:** 50 GPN/block (≈ 3.33 GPN/s). The reward and block time are coupled via `emission_rate = reward / target_block_time`.
-- **Supply:** a nominal 1 B cap; the implemented emission path yields ≈ **420 M mineable**, giving an **effective max supply ≈ 520 M** including treasury.
-- **Treasury:** a disclosed, **vested** 100 M GPN (70 M genesis-unlocked + 30 M over 10 years), held by a pallet account and spendable only via a **13-of-25** governance roster.
+- **Supply:** the **hard supply cap is ≈ 520.5 M GPN** — ≈ 420.48 M emitted over the halving schedule (2 × 50 GPN × 4,204,800) plus 100 M allocated to the treasury. The treasury allocation is fixed and does not grow, and emission converges at 420.48 M, so 520.5 M is the true maximum.
+- **Treasury:** 100 M GPN held by a keyless pallet account — 70 M unlocked at genesis and 30 M vesting over 10 years — spendable only by a **13-of-25** governance roster.
 - **Fees:** a 5% marketplace fee is split **40% staking rewards · 30% treasury · 20% burn · 10% oracle operators**.
 - **Value anchor:** an oracle supplies a GPN/USD price (seeded at $0.15 for the testnet); the token's long-run value is intended to derive from **real AI-marketplace demand**, not mining inflation.
 

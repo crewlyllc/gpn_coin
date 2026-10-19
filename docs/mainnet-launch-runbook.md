@@ -28,15 +28,15 @@ Companion docs:
 | Chain id / name | `gpn_mainnet` / "GPN Mainnet" | `chain_spec::mainnet_chain_spec()` |
 | Chain type | `Live` | same |
 | Genesis supply | **0 mined**, **100,000,000 GPN** disclosed vested treasury | `TREASURY_ALLOC_GPN` |
-| Hard cap | **1,000,000,000 GPN** (`MaxSupply`) | `pallet-gpn-token` (canonical) |
-| Max *mineable* | **900,000,000 GPN** (cap − treasury allocation) | `initial_minted = treasury_alloc` |
+| Hard supply cap | **≈ 520.5 M GPN** (≈ 420.48 M emitted + 100 M treasury) | emission path + `TREASURY_ALLOC_GPN` |
+| Max *mineable* | **420,480,000 GPN** (2 × 50 GPN × 4,204,800) | `InitialBlockReward`, `HalvingInterval` |
 | Block reward | **50 GPN/block**, halving-only (**no** inflation curve) | `gpu_po_w.initial_block_reward` |
-| Block time | **~4 s target** (shared runtime `TargetBlockTime=4`; self-tuning from 2^232 difficulty) | `initial_difficulty` |
+| Block time | **15 s target** (shared runtime `TargetBlockTime=15`; self-tuning from 2^232 difficulty) | `initial_difficulty` |
 
-> **Cadence note (open decision §10):** the runtime is shared by testnet and mainnet, so
-> `TargetBlockTime=4 s` applies to **both** today — mainnet has **no separate 15 s cadence** yet.
-> The `HalvingInterval` (4,204,800 blocks) is ~2 yr at 15 s but only **~194 days at 4 s**; resolve
-> via §10 before launch.
+> **Cadence note:** `TargetBlockTime` was reverted 4 s → **15 s** on 2026-10-08 (D1 resolved), so
+> `HalvingInterval` (4,204,800 blocks) is **~2 years** on both testnet and mainnet. Emission
+> therefore converges at **420.48 M GPN**. A 1 B `MaxSupply` value remains in `pallet-gpn-token`
+> as an **unreachable safety rail** — it is not the supply cap.
 | Consensus | Ethash PoW (`gpu-pow`) + PoSG attestation | pallet runtime |
 | Oracle operators at genesis | **none** (added by governance) | `initial_operators = vec![]` |
 | Endowed accounts | **none** (fair launch) | `endowed_accounts = vec![]` |
@@ -113,7 +113,8 @@ Expected:
 - `balances` = the single `gpn/trsy` pallet account with `100000000000000000000` raw
   (`100,000,000 GPN × 10¹²`). No other account.
 - `block_reward_beneficiary` = `null` (set post-launch via governance, §6).
-- `gpn_token.initial_minted` = the treasury allocation (counts against the 1B cap).
+- `gpn_token.initial_minted` = the treasury allocation (**100,000,000 GPN**; counts toward the
+  ≈ 520.5 M hard cap).
 - `sudo.key` = `5C4hrfjw9DjXZTzV3MwzrrAr9P1MJhSrvWGWqi1eSuyUpnhM` (all-zeros).
 - 21 schedule entries: **70M unlocked at block 0**, then 20 × 1.5M six-month tranches (30M over
   10 yr). 70M is spendable at launch.
@@ -171,7 +172,7 @@ curl -s -H 'Content-Type: application/json' \
   -d '{"id":1,"jsonrpc":"2.0","method":"chain_getBlockHash","params":[0]}' \
   http://127.0.0.1:9944
 
-# supply counter: seeds at 200M and must rise by exactly 50 GPN per mined block
+# supply counter: seeds at 100M and must rise by exactly 50 GPN per mined block
 python3 - <<'PY'
 # gpn_token.TotalMinted via storage; use gpn_check_state / gpn_explorer
 PY
@@ -217,7 +218,7 @@ governed `Sudo.sudo → <call>` or via the governance committee per
 
 ## 7. Treasury operations (`pallet-gpn-treasury`)
 
-The 200M allocation sits in the **keyless** `gpn/trsy` pallet account. There is no private key;
+The 100M allocation sits in the **keyless** `gpn/trsy` pallet account. There is no private key;
 funds move only through the 13-of-25 roster flow, bounded by unlocked tranches.
 
 ```bash

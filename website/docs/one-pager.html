@@ -48,23 +48,30 @@
 <p><strong>The problem.</strong> A GPU owner has two ways to earn — mine a coin, or rent the card for AI work — and must <strong>pick one</strong>. Mine and the coin dips → you lose. Rent and nobody books you → $0. The card can't move to where the money is.</p>
 <p><strong>The fix.</strong> GPN removes the choice: the node mines by default and <strong>yields the GPU to each AI job</strong>, so the same card earns from both markets. The chain does coordination + escrow + settlement; the heavy compute runs off-chain.</p>
 <hr />
-<p><strong>How it works</strong>
-- <strong>Mining</strong> — GPU proof-of-work; the node that produces a block <strong>keeps that block's reward</strong> (Bitcoin-style).
-- <strong>Serving AI</strong> — LLM inference, image/video generation, ML inference, fine-tuning — priced <strong>per token</strong> against real cost, escrowed trust-minimally.
-- <strong>The switch</strong> — per job, not per market cycle: an incoming job pauses mining, frees VRAM, runs on the whole GPU, then mining resumes. One GPU runs exactly one job at a time.
-- <strong>Routing</strong> — buyers hit one endpoint; the network picks the <strong>lowest-latency, least-loaded</strong> verified GPU. Providers are discovered <strong>on-chain</strong>.</p>
-<p><strong>Why it's different</strong>
-- <strong>Both markets, one machine</strong> — no incumbent (NiceHash, Vast, RunPod, Render, Akash, io.net) is both a native PoW miner and an AI marketplace on the same card.
-- <strong>Trust-minimal</strong> — on-chain escrow, optional <strong>payment channels</strong> (no per-job block delay), opaque/private on-chain values.
-- <strong>GPU-only, verifiably</strong> — proof-of-work + hardware attestation + a compute challenge; a CPU/iGPU can't earn.</p>
-<p><strong>Token (GPN)</strong>
-- <strong>Fair launch via mining</strong> — no ICO, no premine. 12 decimals.
-- <strong>Halving every ~2 years</strong> (4,204,800 blocks); block reward 50 GPN @ 15 s.
-- <strong>Disclosed, vested treasury</strong> (100 M over 10 yr, 13-of-25 governance).
-- <strong>Token value derives from real AI-compute demand</strong> — not just mining inflation.</p>
+<p><strong>How it works</strong></p>
+<ul>
+<li><strong>Mining</strong> — GPU proof-of-work; the node that produces a block <strong>keeps that block's reward</strong> (Bitcoin-style).</li>
+<li><strong>Serving AI</strong> — LLM inference, image/video generation, ML inference, fine-tuning — priced <strong>per token</strong> against real cost, escrowed trust-minimally.</li>
+<li><strong>The switch</strong> — per job, not per market cycle: an incoming job pauses mining, frees VRAM, runs on the whole GPU, then mining resumes. One GPU runs exactly one job at a time.</li>
+<li><strong>Routing</strong> — buyers hit one endpoint; the network picks the <strong>lowest-latency, least-loaded</strong> verified GPU. Providers are discovered <strong>on-chain</strong>.</li>
+</ul>
+<p><strong>Why it's different</strong></p>
+<ul>
+<li><strong>Both markets, one machine</strong> — no incumbent (NiceHash, Vast, RunPod, Render, Akash, io.net) is both a native PoW miner and an AI marketplace on the same card.</li>
+<li><strong>Trust-minimal</strong> — on-chain escrow, optional <strong>payment channels</strong> (no per-job block delay), opaque/private on-chain values.</li>
+<li><strong>GPU-only, verifiably</strong> — proof-of-work + hardware attestation + a compute challenge; a CPU/iGPU can't earn.</li>
+</ul>
+<p><strong>Token (GPN)</strong></p>
+<ul>
+<li><strong>Fair launch via mining</strong> — no ICO, no hidden allocation. 12 decimals.</li>
+<li><strong>Halving every ~2 years</strong> (4,204,800 blocks); block reward 50 GPN @ 15 s.</li>
+<li><strong>Hard supply cap ≈ 520 M GPN</strong> — 420 M emitted over the halving schedule plus 100 M allocated to the treasury.</li>
+<li><strong>Disclosed, vested treasury</strong> — 100 M GPN held by a keyless pallet account; 70 M unlocked at genesis, 30 M vesting over 10 years; spendable only by a 13-of-25 governance roster.</li>
+<li><strong>Token value derives from real AI-compute demand</strong> — not just mining inflation.</li>
+</ul>
 <p><strong>Privacy.</strong> A shielded pool supports private transfers and withdrawals (zero-knowledge spends; nullifier-based double-spend protection).</p>
 <p><strong>Where it is.</strong> Live on a public testnet: PoW chain, per-node rewards, the full AI marketplace (LLM/image/video/ML/fine-tune), payment channels, shielded spends, on-chain provider discovery, peer discovery, committee governance. Next: the public CRS ceremony, mainnet, and a cross-chain bridge.</p>
-<p><strong>One line:</strong> <em>Get paid for the GPU time you're wasting.</em></p>
+<p><strong>One line:</strong> <em>A GPU should not have to choose.</em></p>
 <p><code>gpncoin.ai</code> · whitepaper + docs at https://gpncoin.ai/docs/</p>
     </article>
     <p class="doc-updated small muted">Last generated 2026-10-19 from the project documentation set.</p>

@@ -16,26 +16,23 @@ for GPU compute), not just speculative demand.
 
 | Parameter | Value |
 |---|---|
-| Hard cap | **1,000,000,000 GPN** (1B) |
-| Mining allocation | **900,000,000 GPN** (90%) via GPU PoW |
-| Treasury allocation | **100,000,000 GPN** (10%) — see below |
+| Hard supply cap | **≈ 520.5 M GPN** — ≈ 420.48 M mined + 100 M treasury |
+| Mining allocation | **420,480,000 GPN** emitted over the halving schedule |
+| Treasury allocation | **100,000,000 GPN** (fixed; part of the ≈ 520.5 M cap) — see below |
 | ICO / token sale | **None** — no sale, no hidden allocation |
 
 ## Emission
 
-- Block reward: **50 GPN/block**. Runtime target block time is **4 s** (shared testnet/mainnet
-  cadence) → **~1,080,000 GPN/day** at target. (Older docs said "~15 s → ~288,000/day"; the
-  15 s cadence is **not** implemented — see the cadence note below.)
-- Reward **halves every 4,204,800 blocks** — that is ~2 years at 15 s but **~194 days at the
-  current 4 s cadence**; the block-time/halving parity is an **open mainnet decision**
-  (`docs/mainnet-launch-runbook.md` §10).
+- Block reward: **50 GPN/block**. Runtime target block time is **15 s** (shared testnet/mainnet
+  cadence) → **~288,000 GPN/day** at target (≈ 3.33 GPN/s).
+- Reward **halves every 4,204,800 blocks** — **~2 years at the 15 s cadence**. Halving is the sole
+  emission mechanism; there is no separate inflation curve.
 - All newly issued GPN comes from mining block rewards; there is no other mint.
 
-## Treasury (10% — a growth fund, not a payout)
+## Treasury (100 M — a growth fund, not a payout)
 
-100,000,000 GPN (10% of the cap) is allocated at genesis to a **keyless treasury
-account** (`gpn/trsy`) — it has no private key and can only spend via on-chain
-governance (**13-of-25** signers).
+100,000,000 GPN is held by a **keyless treasury account** (`gpn/trsy`) — it has no private
+key and can only spend via on-chain governance (**13-of-25** signers).
 
 **Purpose — promote GPN on two fronts:**
 1. **As a coin** — marketing, advertising, exchange listings, community and liquidity
