@@ -92,6 +92,30 @@ fn survives_absent_read(age_secs: u64, max_tokens: u64) -> bool {
     age_secs <= stale_secs(max_tokens).saturating_add(JANITOR_ABSENT_GRACE_SECS)
 }
 
+/// Does this job's off-chain record already carry a provider result?
+///
+/// "Work was delivered" is strictly stronger evidence than any age heuristic.
+/// A job whose result the AP already stored must never be requestor-cancelled:
+/// the only outcomes are losing the provider's payment for finished work or
+/// burning a tx the chain rejects as non-`Pending`. Observed 2026-10-18: #5534 was
+/// claimed and answered at 18:58 but its accept/start txs sat in the pool behind
+/// ~61 s blocks, so at 19:00 it still read `Pending` on-chain and the janitor
+/// cancelled a fully served job.
+fn job_has_result(status: &str) -> bool {
+    matches!(status, "done" | "error")
+}
+
+/// Should the janitor issue a requestor `cancel_job` for this tracked job?
+///
+/// Only for our own still-`Pending` job past its token-scaled stale window, and
+/// **never** once the provider's result is already in hand — that would cancel
+/// delivered work (observed 2026-10-18 on #5534: answered at 18:58, still read
+/// `Pending` on-chain at 19:00 because the accept/start txs were queued behind
+/// ~61 s blocks).
+fn should_cancel_stale(state: &str, age_secs: u64, max_tokens: u64, delivered: bool) -> bool {
+    state == "Pending" && !delivered && age_secs > stale_secs(max_tokens)
+}
+
 /// Has a job outlived its on-chain deadline (`now > created_at + max_duration`)?
 /// Mirrors `pallet-compute-marketplace::expire_job`'s guard exactly (strict `>`).
 fn past_deadline(created_at: u32, max_duration: u32, head: u64) -> bool {
@@ -209,12 +233,28 @@ fn spawn_janitor(client: Arc<ChainClient>, rt: Arc<tokio::runtime::Runtime>) {
             }
             // Fast path: requestor cancel of our own stale Pending jobs.
             if state == "Pending" && age_secs > stale_secs(mt) {
+                // Never cancel work the provider already delivered: the on-chain
+                // state lags the real work whenever our accept/start txs are
+                // queued behind slow blocks. Leave it to the completion path (and
+                // to the pallet `expire_job` past its on-chain deadline).
+                let delivered = gpn_agent::llm::get_job(id)
+                    .map(|job| job_has_result(&job.status))
+                    .unwrap_or(false);
+                if !should_cancel_stale(&state, age_secs, mt, delivered) {
+                    keep.push((id, t, mt));
+                    continue;
+                }
                 match rt.block_on(client.cancel_job_fast(id)) {
                     Ok(()) => {
                         println!(
                             "[janitor] cancelled stale Pending #{id} (max_tokens {mt}, waited >{}s)",
                             stale_secs(mt)
                         );
+                        // Keep tracking (with a fresh retry clock) instead of
+                        // dropping the entry: dropping it let the adopt scan
+                        // re-add the id as `max_tokens 0`, collapsing the
+                        // token-scaled window to the 120 s floor.
+                        keep.push((id, Instant::now(), mt));
                         continue;
                     }
                     Err(e) => eprintln!("[janitor] cancel #{id} failed: {e}"),
@@ -2690,6 +2730,32 @@ mod tests {
         assert!(!survives_absent_read(241, 0));
         assert!(survives_absent_read(1019, u64::MAX));
         assert!(!survives_absent_read(1021, u64::MAX));
+    }
+
+    #[test]
+    fn delivered_results_are_never_janitor_cancelled() {
+        // The cancel gate is `Pending && aged past the token window`; a delivered
+        // result must veto it regardless of age (the chain lags behind reality
+        // while our accept/start txs queue behind slow blocks).
+        for status in ["done", "error"] {
+            assert!(job_has_result(status), "{status} means work already happened");
+        }
+        for status in ["queued", "running", ""] {
+            assert!(!job_has_result(status), "{status} must still be cancellable");
+        }
+        // Composite decision: the #5534 case exactly.
+        let mt = 512; // stale_secs(512) = 60 + 25*2 = 120 (the floor)
+        assert_eq!(stale_secs(mt), 120);
+        // Delivered but still Pending on-chain and past the window -> DO NOT cancel.
+        assert!(!should_cancel_stale("Pending", 361, mt, true));
+        // Not delivered -> the age heuristic still reclaims a stranded Pending job.
+        assert!(should_cancel_stale("Pending", 361, mt, false));
+        // …but only past its own token-scaled window.
+        assert!(!should_cancel_stale("Pending", 119, mt, false));
+        // Work already started on-chain is never requestor-cancelled.
+        for s in ["Accepted", "Running", "AwaitingVerification"] {
+            assert!(!should_cancel_stale(s, 10_000, mt, false));
+        }
     }
 
     #[test]
