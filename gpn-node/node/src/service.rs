@@ -641,7 +641,7 @@ pub async fn new_full<
                     // Only reachable with --no-seed; never fail silently.
                     None => log::error!(
                         "dialability: this node is NOT dialable ({}) — see \
-                         https://gpn.network/docs/run-a-node#make-your-node-dialable",
+                         https://gpncoin.ai/docs/run-a-node#make-your-node-dialable",
                         verdict.detail
                     ),
                 }

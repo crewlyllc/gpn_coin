@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Technical overview — GPN docs</title>
+<meta name="description" content="A short technical summary of GPN: node model, mining, AI marketplace, escrow and settlement." />
+<meta name="theme-color" content="#07090f" />
+<link rel="canonical" href="https://gpncoin.ai/docs/technical-overview.html" />
+<meta property="og:site_name" content="GPN" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://gpncoin.ai/docs/technical-overview.html" />
+<meta property="og:title" content="Technical overview — GPN docs" />
+<meta property="og:description" content="A short technical summary of GPN: node model, mining, AI marketplace, escrow and settlement." />
+<meta name="twitter:card" content="summary" />
+<meta name="twitter:title" content="Technical overview — GPN docs" />
+<meta name="twitter:description" content="A short technical summary of GPN: node model, mining, AI marketplace, escrow and settlement." />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237c6cff'/%3E%3Ctext x='16' y='22' font-size='16' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%2307090f'%3EG%3C/text%3E%3C/svg%3E" />
+<link rel="stylesheet" href="../assets/style.css" />
+<link rel="stylesheet" href="../assets/docs.css" />
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap nav">
+    <a class="brand" href="../index.html" aria-label="GPN home"><span class="dot" aria-hidden="true">G</span><span>GPN<br><small>GPU-NATIVE NETWORK</small></span></a>
+    <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Toggle navigation">☰</button>
+    <nav class="nav-links" id="nav-links" aria-label="Primary">
+      <a href="../index.html">Home</a>
+      <a href="../download.html">Download</a>
+      <a href="../deploy.html">Deploy</a>
+      <a href="../ai.html">AI</a>
+      <a href="../access-points.html">Access Points</a>
+      <a href="../buy.html">Buy GPN</a>
+      <a href="index.html" aria-current="page">Docs</a>
+    </nav>
+    <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
+  </div>
+</header>
+
+<main id="main" class="doc-main">
+  <div class="wrap doc-wrap">
+    <nav class="crumbs" aria-label="Breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Docs</a> / <span>Technical overview</span></nav>
+    <article class="prose">
+<h1>GPN — Technical Overview</h1>
+<p><em>A short, site-friendly technical summary. See <code>GPN-WHITEPAPER.md</code> for the full paper.</em></p>
+<h2 id="the-model">The model</h2>
+<p>A GPN node is <strong>one entity</strong> — one GPU, one identity/wallet — that is <strong>always both a miner and an AI
+provider</strong>. It mines whenever the GPU is free; when a job arrives it <strong>pauses mining, frees VRAM, runs the
+job to completion, then resumes mining</strong>. There is no provider-only or mine-only mode, and no profitability
+switch. <em>(A separate </em><em>Staking</em><em> role is planned.)</em></p>
+<blockquote>
+<p><strong>"One GPU, one job" note:</strong> "one job at a time" is <strong>mutual exclusion</strong> — the GPU never runs two
+jobs concurrently — and is <strong>NOT</strong> a restriction on job <em>types</em>. Every node is equipped by design to
+serve <strong>every</strong> job type (LLM · image · video · ML inference · fine-tune) and advertises all of them.</p>
+</blockquote>
+<p><strong>The chain is thin:</strong> it coordinates jobs, holds escrow, enforces eligibility/capability gates, and settles rewards. <strong>Compute runs off-chain.</strong></p>
+<h2 id="consensus">Consensus</h2>
+<ul>
+<li><strong>Ethash-derived GPU proof-of-work</strong>; anyone can mine; no validator set.</li>
+<li><strong>15-second blocks</strong>; self-tuning difficulty (millisecond resolution, runaway-proof).</li>
+<li><strong>Bitcoin-style rewards:</strong> the block producer keeps the block reward (account bound via pre-runtime digest).</li>
+<li><strong>Per-node wallets:</strong> each miner pays out to its own account.</li>
+<li><strong>Fork tolerance:</strong> explicit network identity (chain-id + genesis hash + version); divergent chains warned + starved, not banned. No finality gadget → confirmation is probabilistic by depth.</li>
+</ul>
+<h2 id="eligibility-gpu-only">Eligibility (GPU-only)</h2>
+<ul>
+<li><strong>Proof-of-Staked-GPU</strong> attestation (GPU count + measured GFLOPS) → <strong>tiers</strong> (Bronze/Silver/Gold) → <strong>reward multiplier</strong> (staking raises your reward, optionally).</li>
+<li><strong>Stake-free path:</strong> producing a <strong>seal-verified block</strong> <em>is</em> the proof of GPU work; the reward goes to the producer after a small number of authored blocks.</li>
+<li><strong>Capability gates:</strong> <code>min_gflops</code>, <code>min_vram_mb</code>, <code>min_ram_mb</code> — the router won't send a job to a device that can't meet it.</li>
+<li><strong>Capacity challenge:</strong> random compute challenges make throughput <em>proven</em>, not self-reported.</li>
+<li><strong>Liveness:</strong> always-on, publicly-reachable full nodes earn credit and gate top tiers.</li>
+</ul>
+<h2 id="ai-marketplace">AI marketplace</h2>
+<ul>
+<li><strong>Job lifecycle:</strong> Pending → Accepted → Running → AwaitingVerification → Completed (+ Cancelled/Failed).</li>
+<li><strong>Per-token escrow:</strong> cap = rate × max tokens; charge = rate × actual; <strong>surplus auto-refunds</strong>; dollar-stable, GPN-settled.</li>
+<li><strong>Cost-derived pricing:</strong> a roofline of the provider's true throughput × margin, clamped ≥ cost.</li>
+<li><strong>Routing:</strong> capability filter → require idle → <strong>lowest-latency (least-ms)</strong> → dispatch the assignment. Providers <strong>register + advertise endpoints on-chain</strong> for discovery; models can be pulled on demand.</li>
+<li><strong>Off-chain escrow:</strong> <strong>payment channels</strong> lock funds once and settle each job off-chain → <strong>no per-job block delay</strong>; either side can force-settle on-chain.</li>
+<li><strong>Safety:</strong> permissionless expiry, per-job failure refunds, a bounded on-chain expiry sweep, and a per-requestor cap.</li>
+</ul>
+<h2 id="tokenomics">Tokenomics</h2>
+<p>Fair launch via mining; <strong>halving every ~2 years</strong>; 50 GPN/block @ 15 s; <strong>effective max supply ≈ 520 M</strong>; vested 100 M treasury (13-of-25); 5% fee split (40% staking / 30% treasury / 20% burn / 10% oracle).</p>
+<h2 id="privacy">Privacy</h2>
+<p>A <strong>shielded pool</strong> (Sapling-style commitments + nullifiers): <strong>deposit</strong> hides a note; <strong>spend</strong> proves ownership in zero knowledge, publishing only an unlinkable nullifier; supports shielded↔shielded and shielded→transparent with value conservation. Production security relies on a <strong>multi-party trusted-setup ceremony</strong> (trapdoor destroyed by independent contributors).</p>
+<h2 id="governance-upgrades">Governance &amp; upgrades</h2>
+<p>Committee-root governance after a timelock (no single key acts alone); <strong>immutable genesis</strong>; runtime upgrades <strong>forklessly</strong> via <code>set_code</code>; review-first.</p>
+<h2 id="network">Network</h2>
+<p>Permissionless, redundant <strong>access points</strong>; <strong>Bitcoin-style peer discovery</strong> (persistent peer store + DNS/HTTP seeds + on-chain registry + a compiled-in bootnode fallback).</p>
+<hr />
+<p><em>Status:</em> live on a public testnet (chain, marketplace, channels, shielded spends, discovery, governance). <em>Next:</em> public CRS ceremony, mainnet, bridge.</p>
+    </article>
+    <p class="doc-updated small muted">Last generated 2026-10-19 from the project documentation set.</p>
+  </div>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="foot-grid">
+      <div><a class="brand" href="../index.html" style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a><p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute. <em>A GPU should not have to choose.</em></p></div>
+      <div><h4>Product</h4><a href="../download.html">Download</a><a href="../deploy.html">Deploy</a><a href="../ai.html">Access the AI</a><a href="../access-points.html">Access Points</a></div>
+      <div><h4>Learn</h4><a href="index.html">Docs</a><a href="whitepaper.html">Whitepaper</a><a href="one-pager.html">One-pager</a><a href="technical-overview.html">Technical overview</a></div>
+      <div><h4>Project</h4><a href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">Source on GitHub</a><a href="run-a-node.html">Run a node</a><a href="wallet.html">Wallet</a><a href="../buy.html">Token &amp; purchasing</a></div>
+    </div>
+    <div class="foot-bottom">
+      <p class="small muted">© <span data-year>2026</span> GPN · Public testnet. Not investment advice.</p>
+      <p class="small muted">Testnet only — tokens here have no monetary value.</p>
+    </div>
+  </div>
+</footer>
+
+<script src="../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Mainnet launch runbook — GPN docs</title>
+<meta name="description" content="Operational checklist for the mainnet launch: genesis, keys, bootstrap and go/no-go." />
+<meta name="theme-color" content="#07090f" />
+<link rel="canonical" href="https://gpncoin.ai/docs/mainnet-launch-runbook.html" />
+<meta property="og:site_name" content="GPN" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://gpncoin.ai/docs/mainnet-launch-runbook.html" />
+<meta property="og:title" content="Mainnet launch runbook — GPN docs" />
+<meta property="og:description" content="Operational checklist for the mainnet launch: genesis, keys, bootstrap and go/no-go." />
+<meta name="twitter:card" content="summary" />
+<meta name="twitter:title" content="Mainnet launch runbook — GPN docs" />
+<meta name="twitter:description" content="Operational checklist for the mainnet launch: genesis, keys, bootstrap and go/no-go." />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237c6cff'/%3E%3Ctext x='16' y='22' font-size='16' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%2307090f'%3EG%3C/text%3E%3C/svg%3E" />
+<link rel="stylesheet" href="../assets/style.css" />
+<link rel="stylesheet" href="../assets/docs.css" />
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap nav">
+    <a class="brand" href="../index.html" aria-label="GPN home"><span class="dot" aria-hidden="true">G</span><span>GPN<br><small>GPU-NATIVE NETWORK</small></span></a>
+    <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Toggle navigation">☰</button>
+    <nav class="nav-links" id="nav-links" aria-label="Primary">
+      <a href="../index.html">Home</a>
+      <a href="../download.html">Download</a>
+      <a href="../deploy.html">Deploy</a>
+      <a href="../ai.html">AI</a>
+      <a href="../access-points.html">Access Points</a>
+      <a href="../buy.html">Buy GPN</a>
+      <a href="index.html" aria-current="page">Docs</a>
+    </nav>
+    <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
+  </div>
+</header>
+
+<main id="main" class="doc-main">
+  <div class="wrap doc-wrap">
+    <nav class="crumbs" aria-label="Breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Docs</a> / <span>Mainnet launch runbook</span></nav>
+    <div class="doc-notice" role="note">Mainnet has not launched. This is the internal runbook, published for transparency; it is not a launch announcement.</div>
+<article class="prose">
+<h1>GPN Mainnet Launch Runbook</h1>
+<p><strong>Audience:</strong> the launch operator (currently Jeremy). <strong>Status:</strong> ready to execute, pending a
+go/no-go and the open business decisions listed in §10.</p>
+<p>This runbook covers standing up the <strong><code>--chain=mainnet</code></strong> network: the genesis artifact, the
+bootnode/full-node set, post-launch governance actions (block beneficiary, oracle operators),
+treasury operations, monitoring, verification, and abort/rollback criteria.</p>
+<p>Companion docs:
+- Tokenomics (source of truth): <code>design/tokenomics/01-gpn-tokenomics.md</code>
+- Pallet map: <code>design/pallets/00-pallet-overview.md</code>
+- Public <strong>testnet</strong> runbook: <code>shared/artifacts/project7/testnet-public-runbook.md</code>
+- Incident response: <code>docs/incident-response.md</code>
+- Security policy: <code>SECURITY.md</code></p>
+<blockquote>
+<p>Nothing in this runbook uses <code>sudo</code> on mainnet — the mainnet sudo key is an <strong>inert
+all-zeros placeholder</strong> (<code>AccountId::new([0u8;32])</code>) with no private key. Every privileged
+action listed below is done through <strong>root/governance</strong> (<code>Sudo</code>-only calls are replaced by a
+governance runtime call) or the on-chain <strong><code>pallet-gpn-treasury</code> 13-of-25</strong> flow. See §6.</p>
+</blockquote>
+<hr />
+<h2 id="1-what-mainnet-actually-is-facts-to-verify-not-assume">1. What mainnet actually is (facts to verify, not assume)</h2>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Value</th>
+<th>Where it comes from</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Chain id / name</td>
+<td><code>gpn_mainnet</code> / "GPN Mainnet"</td>
+<td><code>chain_spec::mainnet_chain_spec()</code></td>
+</tr>
+<tr>
+<td>Chain type</td>
+<td><code>Live</code></td>
+<td>same</td>
+</tr>
+<tr>
+<td>Genesis supply</td>
+<td><strong>0 mined</strong>, <strong>100,000,000 GPN</strong> disclosed vested treasury</td>
+<td><code>TREASURY_ALLOC_GPN</code></td>
+</tr>
+<tr>
+<td>Hard cap</td>
+<td><strong>1,000,000,000 GPN</strong> (<code>MaxSupply</code>)</td>
+<td><code>pallet-gpn-token</code> (canonical)</td>
+</tr>
+<tr>
+<td>Max <em>mineable</em></td>
+<td><strong>900,000,000 GPN</strong> (cap − treasury allocation)</td>
+<td><code>initial_minted = treasury_alloc</code></td>
+</tr>
+<tr>
+<td>Block reward</td>
+<td><strong>50 GPN/block</strong>, halving-only (<strong>no</strong> inflation curve)</td>
+<td><code>gpu_po_w.initial_block_reward</code></td>
+</tr>
+<tr>
+<td>Block time</td>
+<td><strong>~4 s target</strong> (shared runtime <code>TargetBlockTime=4</code>; self-tuning from 2^232 difficulty)</td>
+<td><code>initial_difficulty</code></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Cadence note (open decision §10):</strong> the runtime is shared by testnet and mainnet, so
+<code>TargetBlockTime=4 s</code> applies to <strong>both</strong> today — mainnet has <strong>no separate 15 s cadence</strong> yet.
+The <code>HalvingInterval</code> (4,204,800 blocks) is ~2 yr at 15 s but only <strong>~194 days at 4 s</strong>; resolve
+via §10 before launch.
+| Consensus | Ethash PoW (<code>gpu-pow</code>) + PoSG attestation | pallet runtime |
+| Oracle operators at genesis | <strong>none</strong> (added by governance) | <code>initial_operators = vec![]</code> |
+| Endowed accounts | <strong>none</strong> (fair launch) | <code>endowed_accounts = vec![]</code> |
+| Sudo | <strong>inert all-zeros key</strong> | <code>AccountId::new([0u8;32])</code> |
+| Treasury account | keyless <code>gpn/trsy</code> <code>PalletId</code> account | <code>chain_spec::treasury_account()</code> |
+| Treasury governance | <strong>13-of-25</strong> roster | <code>TREASURY_THRESHOLD</code>, <code>GPN_TREASURY_ROSTER</code> |</p>
+</blockquote>
+<p><strong>Invariants that must never change after genesis</strong> (on-chain compatibility): the proof bytes of
+the shielded-pool verifier and the <strong>value-balance verification key</strong>. See <code>SECURITY.md</code>.</p>
+<hr />
+<h2 id="2-preconditions-t-7-days-and-earlier">2. Preconditions (T-7 days and earlier)</h2>
+<ol>
+<li><strong>Code freeze + clean tree.</strong> <code>git status</code> clean on the release commit; record the commit hash.</li>
+<li><strong>Green workspace.</strong></li>
+</ol>
+<pre><code class="language-bash">cd gpn-node &amp;&amp; cargo test --workspace          # expect 252 passed / 4 ignored
+cd ../gpn-agent &amp;&amp; cargo test --workspace      # expect lib + bins green
+cd .. &amp;&amp; cargo fmt --all --check
+cd gpn-node &amp;&amp; cargo clippy --workspace --all-targets -- -D warnings
+</code></pre>
+<ol start="3">
+<li><strong>Reproducible release binary.</strong></li>
+</ol>
+<pre><code class="language-bash">cd gpn-node &amp;&amp; cargo build --release
+sha256sum target/release/gpn-node | tee ../artifacts/gpn-node.sha256
+</code></pre>
+<p>Publish the binary + hash so bootnode operators can verify the artifact they run.
+4. <strong>Treasury roster finalized.</strong> Produce the 25 governance addresses as ss58:</p>
+<pre><code class="language-bash"># one ss58 per line (or comma-separated via GPN_TREASURY_ROSTER)
+cat treasury-roster-addrs.txt
+</code></pre>
+<p>Confirm <strong>25</strong> distinct addresses, each independently controlled, and that 13 of them are
+   reachable at launch time. If <code>GPN_TREASURY_ROSTER</code> is unset the spec falls back to dev
+   placeholder keys — <strong>never launch mainnet with placeholders.</strong>
+5. <strong>Decision log closed.</strong> Update/replace the inert sudo path decision and the business items in §10.
+6. <strong>Testnet rehearsal passed.</strong> At minimum: the two-node GPU p2p testnet and a full
+   mine → attest → paid-job loop on <code>--chain testnet</code> (see public testnet runbook §7).</p>
+<hr />
+<h2 id="3-build-the-mainnet-genesis-artifact-t-1-day">3. Build the mainnet genesis artifact (T-1 day)</h2>
+<pre><code class="language-bash">cd gpn-node
+# Build the spec. Export GPN_TREASURY_ROSTER first if the roster is not baked in.
+export GPN_TREASURY_ROSTER=&quot;$(paste -sd, treasury-roster-addrs.txt)&quot;   # 25 ss58 addrs
+cargo run --release -- build-spec --chain mainnet --disable-default-bootnode &gt; /tmp/gpn-mainnet.json
+</code></pre>
+<p><strong>Verify the genesis, line by line (do NOT skip):</strong></p>
+<pre><code class="language-bash">python3 - &lt;&lt;'PY'
+import json
+# NB: the runtime GenesisConfig serializes with **camelCase** keys
+# (`gpuPoW`, `gpnToken`, `gpnTreasury`, `profitabilityOracle`, …).
+g = json.load(open('/tmp/gpn-mainnet.json'))['genesis']['runtimeGenesis']['config']
+b = g['balances']['balances']
+print('endowed accounts (must be treasury-only):', b)
+print('gpuPoW.blockRewardBeneficiary (must be null):', g['gpuPoW']['blockRewardBeneficiary'])
+print('gpuPoW.initialBlockReward (must be 50e12):', g['gpuPoW']['initialBlockReward'])
+print('gpnToken.initialMinted (must be 100e6 * 1e12):', g['gpnToken']['initialMinted'])
+print('treasury threshold (must be 13):', g['gpnTreasury']['threshold'])
+print('treasury roster size (must be 25):', len(g['gpnTreasury']['roster']))
+print('treasury tranches (must be 21):', len(g['gpnTreasury']['schedule']))
+print('oracle operators (must be empty):', g['profitabilityOracle']['initialOperators'])
+print('sudo key (must be the all-zeros placeholder):', g['sudo']['key'])
+PY
+</code></pre>
+<p>Expected:
+- <code>balances</code> = the single <code>gpn/trsy</code> pallet account with <code>100000000000000000000</code> raw
+  (<code>100,000,000 GPN × 10¹²</code>). No other account.
+- <code>block_reward_beneficiary</code> = <code>null</code> (set post-launch via governance, §6).
+- <code>gpn_token.initial_minted</code> = the treasury allocation (counts against the 1B cap).
+- <code>sudo.key</code> = <code>5C4hrfjw9DjXZTzV3MwzrrAr9P1MJhSrvWGWqi1eSuyUpnhM</code> (all-zeros).
+- 21 schedule entries: <strong>70M unlocked at block 0</strong>, then 20 × 1.5M six-month tranches (30M over
+  10 yr). 70M is spendable at launch.</p>
+<p>Hash and publish the canonical spec:</p>
+<pre><code class="language-bash">sha256sum /tmp/gpn-mainnet.json | tee artifacts/gpn-mainnet-genesis.sha256
+# distribute gpn-mainnet.json ONLY to operators you trust to verify the hash jointly in §5
+</code></pre>
+<hr />
+<h2 id="4-stand-up-the-network-t-0">4. Stand up the network (T-0)</h2>
+<p>There is <strong>no validator authority set</strong> — GPN is PoW; the "bootnode layer" is a set of
+always-on, publicly reachable full nodes. A permissionless liveness scheme
+(<code>pallet-gpn-liveness</code>) rewards reachable full nodes and slashes unreachable ones, so
+bootnodes emerge organically rather than being founder-funded.</p>
+<ol>
+<li><strong>Seed bootnodes (2–4).</strong> Each operator runs:</li>
+</ol>
+<pre><code class="language-bash">gpn-node --chain /tmp/gpn-mainnet.json \
+  --base-path /var/lib/gpn --name &lt;human-name&gt; \
+  --node-key-file /etc/gpn/node.key \
+  --listen-addr /ip4/0.0.0.0/tcp/30333 --listen-addr /ip4/0.0.0.0/tcp/30334/ws \
+  --rpc-port 9944 --rpc-external --rpc-methods=safe \
+  --prometheus-port 9615 --prometheus-external
+
+# publish the real peer id
+gpn-node key inspect-node-key --file /etc/gpn/node.key
+</code></pre>
+<p>Note: a <strong>fresh <code>--base-path</code> requires a <code>--node-key</code>/<code>--node-key-file</code></strong>, otherwise the node
+   fails with <code>NetworkKeyNotFound</code>. Reuse the same key file across restarts so peer IDs are stable.
+2. <strong>Announce the bootnode list:</strong> <code>--bootnodes /ip4/&lt;IP&gt;/tcp/30333/p2p/&lt;PEER_ID&gt;</code> for each.
+3. <strong>Confirm chain progress.</strong> Blocks are only produced by GPU PoW; watch for the first seals:</p>
+<pre><code class="language-bash">gpn-node --chain /tmp/gpn-mainnet.json ...   # any full node
+# separate terminal
+curl -s -H 'Content-Type: application/json' \
+  -d '{&quot;id&quot;:1,&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;chain_getHeader&quot;,&quot;params&quot;:[]}' \
+  http://127.0.0.1:9944 | python3 -m json.tool
+</code></pre>
+<p>A healthy launch has <strong>new blocks every ~10–15 s</strong>. If no block appears within ~10 min, treat
+   as a launch incident (see <code>docs/incident-response.md</code> §6.1).</p>
+<hr />
+<h2 id="5-independent-verification-within-the-first-hour">5. Independent verification (within the first hour)</h2>
+<p>Run on a node that is <strong>not</strong> the one that built the spec, and compare notes publicly:</p>
+<pre><code class="language-bash"># genesis hash must match across all nodes
+curl -s -H 'Content-Type: application/json' \
+  -d '{&quot;id&quot;:1,&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;chain_getBlockHash&quot;,&quot;params&quot;:[0]}' \
+  http://127.0.0.1:9944
+
+# supply counter: seeds at 200M and must rise by exactly 50 GPN per mined block
+python3 - &lt;&lt;'PY'
+# gpn_token.TotalMinted via storage; use gpn_check_state / gpn_explorer
+PY
+gpn-agent/target/release/gpn_check_state --endpoint ws://127.0.0.1:9944 | head
+</code></pre>
+<p>Checklist:
+- [ ] All nodes report the <strong>same genesis hash</strong>.
+- [ ] <code>TotalMinted</code> seeds at <code>100e6 GPN</code> and increases by <code>50 GPN</code> per block.
+- [ ] <code>Balances</code> shows the treasury <code>gpn/trsy</code> account holding 100M, <strong>70M spendable</strong>
+      (70M unlocked at genesis; the remaining 30M vests over 10 yr).
+- [ ] No endowed user accounts exist.
+- [ ] Sudo is unreachable (the all-zeros key is not funded and has no known private key).</p>
+<hr />
+<h2 id="6-post-launch-governance-actions-first-days">6. Post-launch governance actions (first days)</h2>
+<p>All of these are <strong>root/governance</strong> calls (mainnet has no usable sudo). Queue them as a
+governed <code>Sudo.sudo → &lt;call&gt;</code> or via the governance committee per
+<code>design/protocols/05-oracle-governance.md</code>.</p>
+<ol>
+<li><strong>Set the block-reward beneficiary.</strong> Without this, mined blocks pay <strong>no one</strong> (the genesis
+   beneficiary is <code>None</code> — deliberate, no hardcoded dev backdoor). Set the mining pool / ops
+   account:</li>
+</ol>
+<pre><code class="language-text">gpu_pow.set_block_beneficiary(account)   # call_index 1, root-only
+</code></pre>
+<p>Verify: mine a block, confirm the beneficiary balance rose by exactly the block reward and a
+   <code>BlockRewardPaid</code> event fired (one payment per block — a manual <code>submit_solution</code> claim and the
+   automatic path can never double-pay).
+2. <strong>Admit oracle operators</strong> so the profitability feed is populated:</p>
+<pre><code class="language-text">profitability_oracle.add_operator(account)   # root; then operator posts update_feed
+</code></pre>
+<p>Client-side: an operator runs <code>gpn_operate_oracle ws://&lt;node&gt;:9944 &lt;values.toml&gt; &lt;interval&gt; //&lt;key&gt;</code>.
+3. <strong>Fund/operate the treasury</strong> only through the 13-of-25 flow (§7). <strong>70M is unlocked at
+   genesis</strong> (spendable immediately), and 1.5M unlocks every <code>SIX_MONTHS_BLOCKS</code> = <strong>1,036,800
+   blocks</strong> thereafter until the 30M vest completes (10 yr).
+4. <strong>Publish operator onboarding</strong> (<code>operator-onboarding.md</code>) and the RPC endpoint list.</p>
+<hr />
+<h2 id="7-treasury-operations-pallet-gpn-treasury">7. Treasury operations (<code>pallet-gpn-treasury</code>)</h2>
+<p>The 200M allocation sits in the <strong>keyless</strong> <code>gpn/trsy</code> pallet account. There is no private key;
+funds move only through the 13-of-25 roster flow, bounded by unlocked tranches.</p>
+<pre><code class="language-bash"># read-only
+gpn_treasury status      # balance, unlocked, spendable, threshold, roster size
+gpn_treasury schedule    # tranches: unlock block, amount, unlocked?
+gpn_treasury roster      # roster size + threshold
+gpn_treasury proposals   # pending spend proposals
+
+# signed — each signer must be a roster member (real seed phrase or secure URI)
+gpn_treasury propose &lt;dest-ss58&gt; &lt;amount-gpn&gt;        --signer &lt;uri1&gt;   # auto-approves as proposer
+gpn_treasury approve &lt;proposal-id&gt;                   --signer &lt;uri2&gt;   # repeat to reach 13
+gpn_treasury execute &lt;proposal-id&gt;                   --signer &lt;uri1&gt;   # after ≥13 approvals
+</code></pre>
+<p>Rules the pallet enforces: <code>NotInRoster</code>, <code>NotEnoughApprovals</code> (&lt; 13), <code>InsufficientUnlocked</code>
+(beyond unlocked tranche total), <code>AlreadyExecuted</code>, <code>RosterEmpty</code>. Amounts are <strong>whole GPN</strong>
+(converted to 12-decimal base units). Coordinate signers out-of-band; never collect keys in one
+place.</p>
+<hr />
+<h2 id="8-monitoring">8. Monitoring</h2>
+<table>
+<thead>
+<tr>
+<th>Surface</th>
+<th>What</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Prometheus (<code>:9615</code>)</td>
+<td>Substrate metrics: block height, peers, import queue, finality lag</td>
+<td>scrape into your TSDB; alert on height stall</td>
+</tr>
+<tr>
+<td><code>gpn_explorer</code></td>
+<td>Human dashboard + JSON API (<code>/api/chain</code>, <code>/api/blocks</code>, <code>/api/account</code>, <code>/api/jobs</code>)</td>
+<td><code>--endpoint ws://&lt;node&gt;:9944 --listen 0.0.0.0:8082</code></td>
+</tr>
+<tr>
+<td>Node logs</td>
+<td><code>BlockRewardPaid</code>, difficulty retarget, seal validity, <code>check_expired</code> finalization</td>
+<td>ship to a log store</td>
+</tr>
+<tr>
+<td><code>gpn_check_state</code> / <code>gpn_check_feed</code></td>
+<td>Quick CLI health probes</td>
+<td>CI/ops</td>
+</tr>
+</tbody>
+</table>
+<p>Minimum alerts: <strong>no new block for &gt;2× target (30 s)</strong>; <strong>peer count 0</strong>; <strong><code>TotalMinted</code> not
+advancing</strong>; <strong>any treasury proposal nearing execution</strong>; <strong>difficulty collapsing or exploding</strong>.
+The faucet (<code>gpn_faucet</code>) is <strong>testnet-only — do NOT run it on mainnet.</strong></p>
+<hr />
+<h2 id="9-abort-rollback-criteria">9. Abort / rollback criteria</h2>
+<p>Launch is aborted (announce, stop bootnodes, keep genesis private) if any of:
+- the genesis hash differs between operators (spec mismatch), or
+- genesis verification in §3 fails (wrong endowment / non-null beneficiary / wrong
+  <code>initial_minted</code> / oversized roster), or
+- the WASM runtime hash does not match the published release binary, or
+- &gt; 10 min with zero blocks and no mining explanation.</p>
+<p>There is <strong>no chain rollback tool</strong> worse than re-genesis: if a fatal genesis bug ships, the
+network must be restarted from a corrected spec at block 0 (nothing of value exists yet). After
+value exists, recovery is governance-driven and slow by design — which is why §3/§5 verification
+is non-negotiable.</p>
+<hr />
+<h2 id="10-open-business-decisions-need-jeremy">10. Open business decisions (need Jeremy)</h2>
+<ol>
+<li>Rotate the mainnet sudo placeholder into a <strong>governed</strong> path (or leave permanently inert) —
+   see <code>design/protocols/05-oracle-governance.md</code>.</li>
+<li>Bootnode + full-node set and the decentralization plan (who runs the first nodes, where).</li>
+<li>Token listing / liquidity plan (CEX/DEX).</li>
+<li>Marketplace go-live: first paying customers + SLA / reputation policy
+   (<code>marketplace-sla-reputation-proposal.md</code>).</li>
+<li>The 25 treasury roster members and the 13-of-25 signer operational runbook.</li>
+<li><strong>Block-time / halving parity.</strong> The shared runtime currently sets <code>TargetBlockTime = 4 s</code>
+   (labelled "fast testnet cadence") for <strong>both</strong> testnet and mainnet, while <code>HalvingInterval</code>
+   (4,204,800 blocks) is documented as "~2 years" (true only at 15 s). Decide the launch cadence;
+   if mainnet should differ from testnet, the runtime constant must change (forkless <code>set_code</code>,
+   reviewed) before the mainnet genesis is cut.</li>
+</ol>
+    </article>
+    <p class="doc-updated small muted">Last generated 2026-10-19 from the project documentation set.</p>
+  </div>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="foot-grid">
+      <div><a class="brand" href="../index.html" style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a><p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute. <em>A GPU should not have to choose.</em></p></div>
+      <div><h4>Product</h4><a href="../download.html">Download</a><a href="../deploy.html">Deploy</a><a href="../ai.html">Access the AI</a><a href="../access-points.html">Access Points</a></div>
+      <div><h4>Learn</h4><a href="index.html">Docs</a><a href="whitepaper.html">Whitepaper</a><a href="one-pager.html">One-pager</a><a href="technical-overview.html">Technical overview</a></div>
+      <div><h4>Project</h4><a href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">Source on GitHub</a><a href="run-a-node.html">Run a node</a><a href="wallet.html">Wallet</a><a href="../buy.html">Token &amp; purchasing</a></div>
+    </div>
+    <div class="foot-bottom">
+      <p class="small muted">© <span data-year>2026</span> GPN · Public testnet. Not investment advice.</p>
+      <p class="small muted">Testnet only — tokens here have no monetary value.</p>
+    </div>
+  </div>
+</footer>
+
+<script src="../assets/app.js"></script>
+</body>
+</html>

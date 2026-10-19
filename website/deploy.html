@@ -4,8 +4,19 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Deploy GPN — run a miner/node, a provider, or an access point</title>
-<meta name="description" content="Step-by-step deployment for GPN: run a miner/node, onboard as an LLM/diffusion provider, or stand up an access point. Covers config, ports (30333, 9944, 8092, 8093), the Windows provider path, and the one-GPU auto-switch." />
+<meta name="description" content="Step-by-step deployment for GPN: run a miner/node, onboard as an LLM/diffusion provider, or stand up an access point. Covers config, ports (30333, 9944, 8092, 8093), the Windows path, one-GPU-one-job behavior, and dialability." />
 <meta name="theme-color" content="#07090f" />
+<link rel="canonical" href="https://gpncoin.ai/deploy.html" />
+<meta property="og:site_name" content="GPN" />
+<meta property="og:url" content="https://gpncoin.ai/deploy.html" />
+<meta property="og:image" content="https://gpncoin.ai/assets/og.png" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:image" content="https://gpncoin.ai/assets/og.png" />
+<meta property="og:title" content="Deploy GPN — run a node, a provider, or an access point" />
+<meta property="og:description" content="Run a GPN node (always miner + AI provider), stand up an access point, or follow the Windows path. Config, ports and dialability." />
+<meta property="og:type" content="article" />
+<meta name="twitter:title" content="Deploy GPN — run a node, a provider, or an access point" />
+<meta name="twitter:description" content="Run a GPN node (always miner + AI provider), stand up an access point, or follow the Windows path." />
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237c6cff'/%3E%3Ctext x='16' y='22' font-size='16' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%2307090f'%3EG%3C/text%3E%3C/svg%3E" />
 <link rel="stylesheet" href="assets/style.css" />
 </head>
@@ -23,7 +34,7 @@
       <a href="ai.html">AI</a>
       <a href="access-points.html">Access Points</a>
       <a href="buy.html">Buy GPN</a>
-      <a href="../GPN-WHITEPAPER.html">Whitepaper</a>
+      <a href="docs/index.html">Docs</a>
     </nav>
     <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
   </div>
@@ -285,7 +296,7 @@ GPN_PROVIDERS=http://127.0.0.1:8093
         host does. If your ISP uses CGNAT, inbound forwarding won't work at all.</p>
       <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:10px">
         <a class="btn" href="ai.html">Next: use the AI →</a>
-        <a class="btn ghost" href="../linux-install-guide.md">Full Linux install guide</a>
+        <a class="btn ghost" href="docs/run-a-node.html">Full run-a-node guide</a>
       </div>
     </div>
   </section>
@@ -296,8 +307,8 @@ GPN_PROVIDERS=http://127.0.0.1:8093
     <div class="foot-grid">
       <div><a class="brand" href="index.html" style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a><p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute. <em>A GPU should not have to choose.</em></p></div>
       <div><h4>Product</h4><a href="download.html">Download</a><a href="deploy.html">Deploy</a><a href="ai.html">Access the AI</a><a href="access-points.html">Access Points</a></div>
-      <div><h4>Learn</h4><a href="../GPN-WHITEPAPER.html">Whitepaper</a><a href="../GPN-ONE-PAGER.md">One-pager</a><a href="../GPN-TECHNICAL-OVERVIEW.md">Technical overview</a><a href="buy.html">Token &amp; purchasing</a></div>
-      <div><h4>Project</h4><a href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">Source on GitHub</a><a href="../USE-GPN.md">Usage guide</a><a href="../linux-install-guide.md">Linux install guide</a><a href="../windows-client-test.md">Windows guide</a></div>
+      <div><h4>Learn</h4><a href="docs/index.html">Documentation</a><a href="docs/whitepaper.html">Whitepaper</a><a href="docs/one-pager.html">One-pager</a><a href="docs/technical-overview.html">Technical overview</a></div>
+      <div><h4>Project</h4><a href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">Source on GitHub</a><a href="docs/run-a-node.html">Run a node</a><a href="docs/downloads.html">Releases</a><a href="docs/wallet.html">Wallet</a></div>
     </div>
     <div class="foot-bottom">
       <p class="small muted">© <span data-year>2026</span> GPN · Public testnet. Not investment advice.</p>

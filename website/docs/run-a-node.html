@@ -1,0 +1,1279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Run a node — GPN docs</title>
+<meta name="description" content="One command runs a GPN node: chain node/miner plus the AI serving stack. Covers install, config, ports, dialability (port-forward / UPnP / CGNAT) and troubleshooting." />
+<meta name="theme-color" content="#07090f" />
+<link rel="canonical" href="https://gpncoin.ai/docs/run-a-node.html" />
+<meta property="og:site_name" content="GPN" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://gpncoin.ai/docs/run-a-node.html" />
+<meta property="og:title" content="Run a node — GPN docs" />
+<meta property="og:description" content="One command runs a GPN node: chain node/miner plus the AI serving stack. Covers install, config, ports, dialability (port-forward / UPnP / CGNAT) and troubleshooting." />
+<meta name="twitter:card" content="summary" />
+<meta name="twitter:title" content="Run a node — GPN docs" />
+<meta name="twitter:description" content="One command runs a GPN node: chain node/miner plus the AI serving stack. Covers install, config, ports, dialability (port-forward / UPnP / CGNAT) and troubleshooting." />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237c6cff'/%3E%3Ctext x='16' y='22' font-size='16' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%2307090f'%3EG%3C/text%3E%3C/svg%3E" />
+<link rel="stylesheet" href="../assets/style.css" />
+<link rel="stylesheet" href="../assets/docs.css" />
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap nav">
+    <a class="brand" href="../index.html" aria-label="GPN home"><span class="dot" aria-hidden="true">G</span><span>GPN<br><small>GPU-NATIVE NETWORK</small></span></a>
+    <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Toggle navigation">☰</button>
+    <nav class="nav-links" id="nav-links" aria-label="Primary">
+      <a href="../index.html">Home</a>
+      <a href="../download.html">Download</a>
+      <a href="../deploy.html">Deploy</a>
+      <a href="../ai.html">AI</a>
+      <a href="../access-points.html">Access Points</a>
+      <a href="../buy.html">Buy GPN</a>
+      <a href="index.html" aria-current="page">Docs</a>
+    </nav>
+    <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
+  </div>
+</header>
+
+<main id="main" class="doc-main">
+  <div class="wrap doc-wrap">
+    <nav class="crumbs" aria-label="Breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Docs</a> / <span>Run a node</span></nav>
+    <article class="prose">
+<h1>Run a node (single command)</h1>
+<p>GPN ships a <strong>single-node supervisor</strong>, <code>gpn_node</code>, so an operator runs <strong>one
+command</strong> and gets <strong>one node</strong> — the chain node/miner, the provider heartbeat,
+and the provider loop(s) — started, logged (one prefixed stream), monitored
+(one status line) and stopped cleanly, together.</p>
+<p><strong>A GPN node is always both a miner and an AI provider.</strong> There is no role
+option and no mine-only / provider-only mode: every <code>gpn_node</code> start brings up
+the chain node/miner <em>and</em> the AI serving stack. The node mines and serves AI,
+<strong>auto-yielding the one GPU</strong> to a job while it runs (mining fully stops for the
+job's duration, then resumes — see #24).</p>
+<blockquote>
+<p><strong>⚑ “One GPU, one job” = MUTUAL EXCLUSION, not a limit on job types.</strong>
+The single GPU runs <strong>exactly one job at a time</strong> — never two concurrent — so
+it never over-subscribes its compute/VRAM. It does <strong>NOT</strong> mean only some job
+types are available: <strong>every node is equipped by design to serve every job
+type</strong> — LLM chat · image · video · ML inference · fine-tune — and advertises
+all of them. The scheduler routes each incoming job to a node that can serve
+it; that node runs that <strong>one</strong> job to completion (mining paused) before
+accepting another. All capabilities are ON by default; a constrained box can
+opt a capability out with <code>GPN_DIFFUSION=0</code> / <code>GPN_ML=0</code> / <code>GPN_FINETUNE=0</code>
+(or <code>diffusion = false</code> etc. in the config file), but the default is
+“everything available”.</p>
+</blockquote>
+<p>Internally the parts stay <strong>separate processes</strong> (fault isolation: a crash in
+the AI stack cannot take the chain node down), but the operator never has to
+manage them individually.</p>
+<pre><code>                       ┌──────────────────────────────┐
+   one command  ───▶   │          gpn_node            │
+   one config          │      (supervisor)            │
+   one log             └──┬──────┬──────┬──────┬─────┬┘
+   one status line       │      │      │      │     │
+                    [node] [heartbeat] [provider] [diffuse] [ml] [finetune]
+                   gpn-node  gpn_provider gpn_llm_  gpn_diffusion_  gpn_ml_  gpn_finetune_
+                   (miner)    _status    provider   provider      provider  provider
+</code></pre>
+<h2 id="quick-start">Quick start</h2>
+<pre><code class="language-bash"># 1) install (builds gpn-node + the gpn-agent bins, generates a wallet)
+curl -fsSL &lt;REPO&gt;/install.sh | sh      # or ./install.sh from a clone
+
+# 2) ollama is REQUIRED (a node = miner + AI provider). `--setup` installs,
+#    starts, and pulls the baseline model in one shot; a normal start does the
+#    same automatically and REFUSES to run if ollama cannot be reached.
+./scripts/install-ollama.sh            # Linux/macOS; Windows: scripts\install-ollama.ps1
+./gpn_node --setup                     # verify/bootstrap (exit 0 = ready)
+
+# 3) run ONE command — starts the miner AND the AI provider together
+gpn_node
+</code></pre>
+<p>That's it. <code>gpn_node</code> reads its config from a small file + env, then starts and
+supervises all of the children — always: the miner and the AI serving stack.</p>
+<h2 id="backbone-by-default-dialable-is-required">Backbone by default — dialable is REQUIRED</h2>
+<p>Every GPN node is a <strong>backbone</strong> node: it announces its endpoint, accepts
+inbound peers, relays and serves blocks for the mesh, and earns the
+<code>gpn-liveness</code> uptime credit that gates the Silver/Gold staking multiplier. The
+best nodes become <strong>seeds</strong> (bootstrap targets) automatically — see
+<a href="#how-to-become-a-seed--bootstrap-node">How to become a seed</a>.</p>
+<p>The network is still growing, so <strong>inbound reachability is required by
+default</strong>. A node that cannot be dialled prints the notice below and <strong>exits
+with code 78</strong> (<code>EX_CONFIG</code>, reported as <code>node=down(not dialable)</code>). Nothing is
+silently half-joined.</p>
+<blockquote>
+<p><strong>Opting out (not recommended while the network is growing).</strong>
+<code>--no-require-backbone</code> (or <code>GPN_REQUIRE_BACKBONE=0</code>) keeps the node running
+when it cannot be dialled: it prints the same notice and continues in
+<strong>degraded, non-discoverable mode</strong> — syncing, mining and serving AI jobs with
+the same block rewards and job payouts. The only things it does not get are
+liveness credit, seed-list eligibility, and a small routing tie-break. In
+this mode it re-checks every <strong>10 minutes</strong> and prints <code>NOW DIALABLE</code> once
+when the forward starts working.</p>
+</blockquote>
+<p>At startup the node probes inbound reachability for up to <strong>120 s</strong>
+(<code>GPN_DIALABLE_TIMEOUT_SECS</code>), in this order:</p>
+<ol>
+<li>explicit <code>GPN_PUBLIC_ADDR</code> / <code>--public-addr</code> → verify by dial-back;</li>
+<li>direct public listen address, libp2p <code>Identify</code> external addresses, or an
+   actual inbound peer on <code>:30333</code>;</li>
+<li>UPnP-IGD / NAT-PMP mapping attempt (~10 s) if <code>GPN_UPNP=auto</code> (the
+   default). If the router accepts the rule, its reported <strong>external
+   <code>ip:port</code></strong> becomes this node's advertised public address. CGNAT is detected
+   here first: a WAN address in <code>100.64.0.0/10</code> (or an RFC1918 WAN address)
+   means no forward can work, and the attempt is skipped;</li>
+<li>CGNAT/private WAN → no forward is possible (reported by the notice);</li>
+<li>not dialable: print the notice and <strong>exit 78</strong> (default), or continue in
+   degraded mode with <code>--no-require-backbone</code>.</li>
+</ol>
+<p>A successful mapping is <strong>not</strong> proof of reachability on its own: the gate still
+waits for an inbound peer (or a matching <code>Identify</code> observation) before the node
+declares itself dialable. The mapping is renewed at half its lease (default
+3600 s) and re-reads the WAN address each time.</p>
+<p>Only globally routable addresses count — RFC1918 (<code>10/8</code>, <code>172.16/12</code>,
+<code>192.168/16</code>), CGNAT (<code>100.64/10</code>), loopback, link-local and <code>0.0.0.0</code> never do.</p>
+<blockquote>
+<p><strong>Opting out.</strong> <code>--no-require-backbone</code> (or <code>GPN_REQUIRE_BACKBONE=0</code>)
+disables the hard gate: the node logs the same notice and continues as a
+non-discoverable participant instead of exiting. Use it for a machine that
+physically cannot be forwarded (CGNAT) and must still run.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Flag / env</th>
+<th>Meaning</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--seed</code> / <code>GPN_SEED=1</code></td>
+<td>Willing to be published as a seed candidate.</td>
+<td><strong>on</strong></td>
+</tr>
+<tr>
+<td><code>--no-seed</code> / <code>GPN_SEED=0</code></td>
+<td>Never publish as a seed; also silences the not-dialable notice.</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>--discoverable</code> / <code>GPN_DISCOVERABLE=1</code></td>
+<td>Announce endpoint, accept inbound.</td>
+<td><strong>on</strong></td>
+</tr>
+<tr>
+<td><code>--no-discoverable</code> / <code>GPN_DISCOVERABLE=0</code></td>
+<td>Privacy mode: no announce, no inbound, not in any list. Implies <code>--no-seed</code>.</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>--no-upnp</code> / <code>GPN_UPNP=off</code></td>
+<td>Never contact the router; no UPnP/NAT-PMP attempt. The attempt is logged when it happens.</td>
+<td><code>auto</code></td>
+</tr>
+<tr>
+<td><code>--public-addr</code> / <code>GPN_PUBLIC_ADDR</code></td>
+<td>Explicit public multiaddr; always wins over detection.</td>
+<td>unset</td>
+</tr>
+<tr>
+<td><code>--require-backbone</code> / <code>GPN_REQUIRE_BACKBONE=1</code></td>
+<td><strong>Default.</strong> Exit 78 instead of degrading.</td>
+<td><strong>on</strong></td>
+</tr>
+<tr>
+<td><code>--no-require-backbone</code> / <code>GPN_REQUIRE_BACKBONE=0</code></td>
+<td>Opt out: run degraded when not dialable (re-checks every 10 min).</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>GPN_DIALABLE_TIMEOUT_SECS</code></td>
+<td>Probe grace window.</td>
+<td><code>120</code></td>
+</tr>
+<tr>
+<td><code>GPN_SEED_PORT</code></td>
+<td>Inbound port to open/probe.</td>
+<td><code>30333</code></td>
+</tr>
+</tbody>
+</table>
+<p>If the node is not dialable you will see this (exact text, LAN IP and port
+filled in) and, by default, the process exits:</p>
+<pre><code>================================================================================
+  YOUR NODE IS NOT DIALABLE
+================================================================================
+Other nodes cannot open a connection to this machine on TCP 30333.
+
+Your node is running and fully functional: it syncs, mines and serves AI jobs.
+What you lose: it is not listed as a backbone/seed node, so it earns no
+liveness credit, gets no seed-list eligibility, and cannot be a bootstrap target.
+Nothing is taken away from block rewards or job payouts.
+
+To fix it (about 5 minutes):
+
+  1. Find this machine's LAN IP. Detected: 192.168.1.42
+     (Windows: ipconfig | Linux/macOS: ip addr or ifconfig)
+
+  2. On your router, add a port-forwarding rule:
+        Protocol ............ TCP
+        External port ....... 30333
+        Internal port ....... 30333
+        Internal IP/host .... 192.168.1.42
+     Router admin is usually http://192.168.1.1 or http://192.168.0.1.
+
+     Recommended setup (EXAMPLE - these are example values, not detected):
+       - Give this machine a DHCP reservation so its LAN IP never changes
+         (example: 192.168.1.50).
+       - Forward exactly one TCP port, external = internal (30333).
+       - Example router rule:  TCP 30333 -&gt; 192.168.1.50:30333
+     Detected on this machine: LAN 192.168.1.42, port 30333.
+
+  3. Allow the port in this machine's firewall.
+     Windows (Administrator PowerShell):
+       New-NetFirewallRule -DisplayName &quot;GPN node&quot; -Direction Inbound `
+         -Protocol TCP -LocalPort 30333 -Action Allow
+     Linux (ufw):
+       sudo ufw allow 30333/tcp
+     Linux (firewalld):
+       sudo firewall-cmd --add-port=30333/tcp --permanent &amp;&amp; sudo firewall-cmd --reload
+
+  4. UPnP/NAT-PMP: the node already tried this automatically (GPN_UPNP=auto is
+     the default). If your router has UPnP disabled, either enable it and
+     restart, or use step 2. Disable the attempt with --no-upnp / GPN_UPNP=off.
+
+  5. CGNAT: if your router's WAN address is in 100.64.0.0/10, no port forward
+     can work. Run the node on a cheap VPS with a public IP.
+
+Full guide with per-OS detail:
+  https://gpncoin.ai/docs/run-a-node#make-your-node-dialable
+
+This node will exit until it is dialable.
+To run anyway (not recommended while the network is growing):
+  --no-require-backbone
+================================================================================
+</code></pre>
+<p>In the opt-out mode (<code>--no-require-backbone</code>) the last block reads instead:</p>
+<pre><code>This node re-checks every 10 minutes and will print NOW DIALABLE here when
+the fix works. You can also restart to force a check.
+
+Soft mode is active (--no-require-backbone / GPN_REQUIRE_BACKBONE=0).
+Run private, silence:      --no-seed   (or GPN_SEED=0)
+================================================================================
+</code></pre>
+<p>When a fix succeeds, the node confirms it once (opt-out mode only — in the
+default mode you just restart into a clean start):</p>
+<pre><code>================================================================================
+  NOW DIALABLE - your node is reachable on TCP 30333
+================================================================================
+Inbound reachability was confirmed. This node now announces itself as a backbone
+node and is eligible for seed listing. Nothing else to do.
+
+(This message is shown once.)
+================================================================================
+</code></pre>
+<h2 id="make-your-node-dialable">Make your node dialable</h2>
+<p>The walkthrough below is what the notice above tells you to do. You need it on
+any host that is not already directly reachable on a public IP.</p>
+<h3 id="recommended-setup-example">Recommended setup (example)</h3>
+<p>A setup that works on most home routers, in three steps:</p>
+<ol>
+<li><strong>Pin the LAN IP with a DHCP reservation</strong> on the router, so the address the
+   forward points at never changes. Example: <code>192.168.1.50</code> (the node prints
+   the address it actually detected, which may be e.g. <code>192.168.1.42</code>).</li>
+<li><strong>Forward one port, external = internal: <code>30333</code> → <code>30333</code>.</strong> Keeping the
+   numbers equal means no <code>GPN_PUBLIC_ADDR</code> is needed when the probe sees the
+   mapping.</li>
+<li><strong>Allow <code>30333/tcp</code> in the host firewall</strong> (commands in step 2 below).</li>
+</ol>
+<p>Concrete example rule, as it appears on a typical router page:</p>
+<pre><code>Name ............ GPN node
+Protocol ........ TCP
+External port ... 30333
+Internal port ... 30333
+Internal IP ..... 192.168.1.50
+</code></pre>
+<p>That is the whole recipe. The rest of this section explains each step and the
+failure modes (multiple nodes, CGNAT, port rewritten by the router).</p>
+<h3 id="1-forward-tcp-30333-on-your-router">1. Forward TCP 30333 on your router</h3>
+<ol>
+<li>Find this machine's <strong>LAN IP</strong>: <code>ipconfig</code> (Windows) or <code>ip addr</code> /
+   <code>ifconfig</code> (Linux/macOS). Prefer a <strong>DHCP reservation</strong> or static lease so it
+   does not change.</li>
+<li>Open the router admin page — usually <code>http://192.168.1.1</code> or
+   <code>http://192.168.0.1</code>; the address is printed on the router label.</li>
+<li>Find <strong>Port Forwarding</strong> (sometimes <em>Virtual Server</em>, <em>NAT</em>, or <em>Games &amp;
+   Applications</em>).</li>
+<li>Add a rule:
+   - <strong>Protocol:</strong> TCP (not UDP)
+   - <strong>External / WAN port:</strong> <code>30333</code>
+   - <strong>Internal / LAN port:</strong> <code>30333</code>
+   - <strong>Internal host / IP:</strong> this machine's LAN IP (e.g. <code>192.168.1.42</code>)</li>
+<li>Save and reboot the router if it asks.</li>
+</ol>
+<p>Running more than one node on the same network? Give each a distinct
+<code>GPN_SEED_PORT</code> and forward each port to its own machine.</p>
+<h3 id="2-open-the-host-firewall">2. Open the host firewall</h3>
+<p>Forwarding at the router is not enough if the OS firewall drops the packet.</p>
+<p><strong>Windows</strong> (Administrator PowerShell — note the backtick line continuation):</p>
+<pre><code class="language-powershell">New-NetFirewallRule -DisplayName &quot;GPN node&quot; -Direction Inbound `
+  -Protocol TCP -LocalPort 30333 -Action Allow
+</code></pre>
+<p>Verify: <code>Get-NetFirewallRule -DisplayName "GPN node"</code>.</p>
+<p><strong>Linux — ufw</strong> (Debian/Ubuntu):</p>
+<pre><code class="language-bash">sudo ufw allow 30333/tcp
+sudo ufw status verbose
+</code></pre>
+<p><strong>Linux — firewalld</strong> (Fedora/RHEL/CentOS):</p>
+<pre><code class="language-bash">sudo firewall-cmd --add-port=30333/tcp --permanent
+sudo firewall-cmd --reload
+sudo firewall-cmd --list-ports
+</code></pre>
+<p><strong>macOS:</strong> System Settings → Network → Firewall → Options → allow the
+<code>gpn_node</code> binary (or <code>sudo /usr/libexec/ApplicationFirewall/socketfilterfw
+--add /path/to/gpn_node</code>).</p>
+<h3 id="3-upnp-nat-pmp-automatic-on-by-default">3. UPnP / NAT-PMP — automatic (on by default)</h3>
+<p>Most home users do <strong>not</strong> need step 1. Before the node decides it is not
+dialable, it asks the router to open the port for it:</p>
+<ol>
+<li><strong>UPnP-IGD</strong> (SSDP discovery + <code>AddPortMapping</code> TCP <code>30333 -&gt; this host</code>,
+   lease 3600 s), then</li>
+<li><strong>NAT-PMP</strong> (RFC 6886, UDP/5351) as a fallback for Apple and other routers
+   that implement NAT-PMP but not UPnP.</li>
+</ol>
+<p>Only <strong>one TCP port</strong> is opened — never UDP, never a range, never a DMZ. The
+rule is renewed at half-life and expires on its own if the node dies, so a
+crashed node never leaves a permanent hole in the router.</p>
+<p>It is never silent. A successful mapping logs (the log line is the consent
+record):</p>
+<pre><code>portmap: UPnP: mapped TCP 30333 -&gt; 192.168.1.42:30333 via 192.168.1.1 (UPnP-IGD); external address is 23.241.109.255:30333. Disable with GPN_UPNP=off or --no-upnp
+</code></pre>
+<p>and the router-reported external <code>ip:port</code> becomes the node's advertised
+address — including when the router assigns a <strong>different external port</strong>
+(<code>45123 -&gt; 30333</code> is advertised as <code>…:45123</code>, no <code>GPN_PUBLIC_ADDR</code> needed).</p>
+<p>A failed attempt is also logged, and the node falls through to the manual
+instructions in the notice:</p>
+<pre><code>portmap: automatic port mapping FAILED (no gateway: ...); TCP 30333 must be forwarded manually. If your router has UPnP disabled, enabling it - or adding the forward - is the fix.
+</code></pre>
+<p><strong>Turn it off:</strong> <code>--no-upnp</code> (or <code>GPN_UPNP=off</code>). The node then never sends a
+packet to the router and behaves exactly like a manually-forwarded host. Use
+this if you consider UPnP a security surface you do not want exposed; a manual
+forward (step 1) is equally valid.</p>
+<p><strong>It will not work when:</strong></p>
+<ul>
+<li>the router has UPnP/IGD (and NAT-PMP) disabled — common on ISP-supplied
+  routers, and the default on many business routers;</li>
+<li>the WAN address is CGNAT (<code>100.64.0.0/10</code>) or private (double NAT) — detected
+  before the attempt, reported as CGNAT;</li>
+<li>the router is on a different L2 segment (guest/VLAN isolation, Docker
+  bridge networking, some VPNs) so SSDP never reaches it;</li>
+<li>Windows: NAT-PMP needs <code>GPN_NATPMP_GATEWAY=&lt;router IP&gt;</code> (gateway detection is
+  implemented for Linux/macOS only; UPnP needs no such hint).</li>
+</ul>
+<p>When a mapping succeeds but the node is still not dialable after 120 s, the
+mapping was accepted but the inbound path is blocked (host firewall, ISP
+filtering, or the router applied it to the wrong interface). Step 2 (host
+firewall) is then the usual fix.</p>
+<p><strong>Renewal / IP change.</strong> The rule is renewed at half the lease. If the ISP
+changes the WAN IP, or the router assigns a different external port, the new
+address is logged at <code>warn</code> and used for subsequent checks; the running
+libp2p instance cannot change its announced address set, so <strong>restart the node
+to advertise the new address</strong>. Peers that learn the address through
+<code>Identify</code> will still find the new path in the meantime.</p>
+<p><strong>Advanced knobs</strong> (rarely needed):</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Meaning</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GPN_UPNP</code></td>
+<td><code>auto</code> or <code>off</code>.</td>
+<td><code>auto</code></td>
+</tr>
+<tr>
+<td><code>GPN_UPNP_LEASE_SECS</code></td>
+<td>Mapping lease requested from the router (minimum 60).</td>
+<td><code>3600</code></td>
+</tr>
+<tr>
+<td><code>GPN_NATPMP_GATEWAY</code></td>
+<td>Router IP for NAT-PMP when OS gateway detection is unavailable (e.g. Windows).</td>
+<td>auto</td>
+</tr>
+<tr>
+<td><code>GPN_SEED_PORT</code></td>
+<td>The TCP port to open; also the internal port.</td>
+<td><code>30333</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="4-cgnat-when-forwarding-is-impossible">4. CGNAT — when forwarding is impossible</h3>
+<p>Check the <strong>WAN address</strong> on the router status page (not the LAN address):</p>
+<ul>
+<li><code>100.64.0.0/10</code> → <strong>carrier-grade NAT</strong>. Your ISP does not give you a public
+  IPv4; no port forward can work. Options: ask the ISP for a public/static IP,
+  use IPv6 if your ISP routes a public prefix, or run the node on a cheap VPS.</li>
+<li>A public WAN address that differs from what a "what is my IP" site reports →
+  also CGNAT (double NAT).</li>
+</ul>
+<p>CGNAT is <strong>not</strong> an error. By default the node exits with the notice (it cannot
+be a backbone member); with <code>--no-require-backbone</code> it keeps syncing, mining and
+serving jobs as a non-discoverable participant.</p>
+<h3 id="5-tell-the-node-its-public-address-only-if-detection-fails">5. Tell the node its public address (only if detection fails)</h3>
+<p>Auto-detection covers most hosts. Set it explicitly when the router rewrites
+ports or detection is ambiguous:</p>
+<pre><code class="language-toml"># ~/.gpn/node.toml
+public_addr = &quot;/ip4/203.0.113.10/tcp/30333&quot;
+</code></pre>
+<p>or:</p>
+<pre><code class="language-bash">GPN_PUBLIC_ADDR=/ip4/203.0.113.10/tcp/30333   # env wins over the config file
+</code></pre>
+<p>Use <code>/ip6/&lt;addr&gt;/tcp/&lt;port&gt;</code> for IPv6. The port must be the <strong>external</strong> port you
+forwarded, not necessarily the listen port. On a VPS with a directly bound
+public IP this is usually unnecessary, but setting it is harmless and makes the
+announced endpoint exact.</p>
+<h3 id="6-verify-from-outside">6. Verify from outside</h3>
+<p>The node re-checks every 10 minutes <strong>when it is running in the opt-out mode</strong>
+(<code>--no-require-backbone</code>); by default it exits instead, so restart it after the
+forward is in place. You can also confirm the forward yourself:</p>
+<ul>
+<li><strong>From another network</strong> (phone hotspot, a friend's house, a VPS) — not from
+  the same LAN, where NAT hairpinning can give a false positive:</li>
+</ul>
+<pre><code class="language-powershell"># Windows
+Test-NetConnection &lt;your-public-ip&gt; -Port 30333
+# =&gt; TcpTestSucceeded : True
+</code></pre>
+<pre><code class="language-bash"># Linux/macOS
+nc -vz &lt;your-public-ip&gt; 30333
+</code></pre>
+<ul>
+<li><strong>Online port checker</strong> (e.g. <code>portchecker.io</code>, <code>canyouseeme.org</code>): check
+  TCP <code>30333</code> against your public IP.</li>
+<li>The authoritative check is the node itself: <code>gpn_node --status</code> shows
+  <code>tier: backbone</code> once reachable, and (in opt-out mode) the console prints
+  <code>NOW DIALABLE</code>.</li>
+</ul>
+<p>If it still fails: confirm the rule is <strong>TCP</strong> (not UDP), the internal IP is
+current (DHCP may have moved it), the host firewall allows it, and the ISP is
+not blocking inbound ports (some block 30333; use another <code>GPN_SEED_PORT</code>).</p>
+<h2 id="how-to-become-a-seed-bootstrap-node">How to become a seed / bootstrap node</h2>
+<p>A <strong>seed</strong> is a backbone node that is published as a bootstrap dial target.
+Nothing is registered and no permission is granted — a seed has no privileges.</p>
+<p><strong>What qualifies:</strong></p>
+<ul>
+<li>inbound-reachable on TCP <code>30333</code> with a <strong>stable public IPv4</strong> (static, or a
+  DDNS name kept current);</li>
+<li>same <code>genesis_hash</code>, released unmodified binary, always-on and monitored;
+  target <strong>≥ 99.5% monthly reachability</strong>;</li>
+<li><code>backbone</code> tier with <code>uptime_bps ≥ 9500</code> (95%) over the liveness window and
+  <code>reachable_count ≥ 3</code> distinct peer witnesses;</li>
+<li>a published abuse/ops contact and a named maintainer.</li>
+</ul>
+<p><strong>How promotion works:</strong> the node announces its endpoint on-chain by itself.
+An off-chain exporter (<code>gpn_seedlist</code>, permissionless to run) reads
+<code>pallet-gpn-liveness</code> and publishes the top <strong>16</strong> eligible nodes by
+<code>(uptime_bps, cumulative_online_blocks)</code> to <code>seeds.json</code>, which every client
+fetches at startup. There is nothing to apply for; running a healthy dialable
+node is the application. Anyone can audit or re-publish the list from chain
+state.</p>
+<p><strong>The hardcoded 5-seed list is separate.</strong> Every client also ships with up to
+five compiled-in seed IPs as a DNS/HTTP-independent floor. Those five are a
+<strong>dedicated bootstrap set</strong>: separately operated cheap VPSes controlled and
+rotated by GPN, used only as dial targets — not co-located with the oracle
+operators. Inclusion is by invitation against the criteria above (distinct
+operators/jurisdictions, ≤2 changes per release), not by uptime ranking alone.</p>
+<h2 id="ollama-is-a-required-component-bundled-installer-hard-gate">Ollama is a REQUIRED component (bundled installer + hard gate)</h2>
+<p>A GPN node is <strong>always miner AND AI provider</strong>. Ollama is therefore a
+<strong>first-class, required component</strong>, not an optional extra:</p>
+<ul>
+<li>the installers <strong>ship inside the release package</strong> (<code>scripts/install-ollama.ps1</code>,
+  <code>scripts/install-ollama.sh</code>, <code>scripts/install-ollama-amd.sh</code>), together with
+  <code>gpn-node.example.toml</code> and <code>README-FIRST-RUN.txt</code>;</li>
+<li><code>gpn_node</code> <strong>probes <code>GPN_OLLAMA</code> on every start</strong>, and if nothing answers it
+  runs the <strong>automated first-run bootstrap</strong>: install (winget / official
+  installer / bundled script) → start <code>ollama serve</code> detached → wait for
+  <code>/api/tags</code> → pull the baseline model;</li>
+<li>if ollama is <strong>still unreachable</strong>, the node <strong>REFUSES TO START</strong>. It logs an
+  actionable error, prints <code>node=down(no ollama)</code>, and exits <strong>69</strong>
+  (<code>EX_UNAVAILABLE</code>) so a supervisor/service manager reports the real cause.
+  It never silently runs miner-only.</li>
+</ul>
+<h3 id="one-shot-setup">One-shot setup</h3>
+<pre><code class="language-bash">./gpn_node --setup          # Linux / macOS
+</code></pre>
+<pre><code class="language-powershell">gpn_node.exe --setup        # Windows
+</code></pre>
+<p>Exit code <code>0</code> means ollama is serving and every baseline model is present;
+otherwise it exits <code>69</code> with install instructions.</p>
+<h3 id="manual-install-what-setup-automates">Manual install (what <code>--setup</code> automates)</h3>
+<pre><code class="language-bash"># Linux / macOS
+./scripts/install-ollama.sh                    # installs, starts, pulls the baseline
+# or manually
+curl -fsSL https://ollama.com/install.sh | sh
+ollama serve &amp;                                 # keep running (listens on 127.0.0.1:11434)
+ollama pull llama3.2:1b
+</code></pre>
+<pre><code class="language-powershell"># Windows
+powershell -ExecutionPolicy Bypass -File scripts\install-ollama.ps1
+# or manually
+winget install Ollama.Ollama
+ollama serve
+ollama pull llama3.2:1b
+</code></pre>
+<h3 id="gate-environment">Gate + environment</h3>
+<table>
+<thead>
+<tr>
+<th>Env var</th>
+<th>Meaning</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GPN_OLLAMA</code></td>
+<td>ollama base URL</td>
+<td><code>http://127.0.0.1:11434</code></td>
+</tr>
+<tr>
+<td><code>GPN_REQUIRE_OLLAMA</code></td>
+<td>Hard gate. <code>0</code>/<code>false</code>/<code>no</code>/<code>off</code> opts out (<strong>special cases only</strong>)</td>
+<td><code>1</code> (ON)</td>
+</tr>
+<tr>
+<td><code>GPN_OLLAMA_SETUP</code></td>
+<td>Attempt the automated install/start on startup</td>
+<td><code>1</code> (ON)</td>
+</tr>
+<tr>
+<td><code>GPN_BASELINE_MODELS</code></td>
+<td>Comma-separated models to pull</td>
+<td><code>llama3.2:1b</code></td>
+</tr>
+<tr>
+<td><code>GPN_OLLAMA_WAIT_SECS</code></td>
+<td>Grace window for <code>/api/tags</code> after starting</td>
+<td><code>60</code></td>
+</tr>
+<tr>
+<td><code>GPN_OLLAMA_PULL_TIMEOUT_SECS</code></td>
+<td>Max time for one model pull</td>
+<td><code>900</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>GPN_REQUIRE_OLLAMA=0</code> starts the node in a loud <strong>degraded</strong> mode (mining
+only). It exists for CI smoke tests and deliberately mining-only boxes — it is
+<strong>not</strong> a supported production configuration.</p>
+<h3 id="first-run-flow">First-run flow</h3>
+<ol>
+<li>Unpack the release zip (binaries + <code>scripts/</code> + <code>README-FIRST-RUN.txt</code>).</li>
+<li>Run <code>gpn_node --setup</code> (or just start <code>gpn_node</code> — it does the same).</li>
+<li>Set <code>GPN_PUBLIC_ADDR</code> (+ <code>GPN_ACCOUNT</code>, <code>GPN_SIGNER</code>, <code>GPN_NODE_KEY</code>).</li>
+<li>Start <code>gpn_node</code>: it passes the ollama gate, then starts the miner, the
+   heartbeat, and every provider loop.</li>
+</ol>
+<p>When ollama is up but a model is merely missing, the node still starts (model
+presence is not the gate); the provider pulls/retries and logs a <strong>single</strong>
+actionable warning instead of per-poll <code>pull … failed</code> spam.</p>
+<h2 id="amd-radeon-support-rocm">AMD / Radeon support (ROCm)</h2>
+<p>GPN is GPU-native and supports <strong>AMD</strong> as a first-class vendor alongside NVIDIA.
+Two independent things use the GPU, and they have different requirements:</p>
+<table>
+<thead>
+<tr>
+<th>Use</th>
+<th>Needs</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Mining</strong> (Ethash)</td>
+<td>an <strong>OpenCL</strong> ICD</td>
+<td>vendor-agnostic — AMD, NVIDIA, Intel all mine. Install <code>rocm-opencl-runtime</code> on Linux (then reboot).</td>
+</tr>
+<tr>
+<td><strong>Serving LLMs</strong> (ollama)</td>
+<td>an ollama-supported backend</td>
+<td>Linux: <strong>ROCm</strong>; Windows: limited → often <strong>CPU</strong> fallback.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>GPU detection is automatic and vendor-agnostic.</strong> The heartbeat
+(<code>gpn_provider_status</code>) and the node probe the local GPU and advertise
+<code>gpu_class</code> (<code>discrete</code>/<code>integrated</code>/<code>unknown</code>), <code>vram_mb</code>, and an FP32 <code>tflops</code>
+estimate so the min-GPU gate (#19) and the scheduler route correctly:</p>
+<ul>
+<li>Linux — <code>nvidia-smi</code>, then <strong><code>rocm-smi</code></strong> (<code>--showproductname</code>,
+  <code>--showmeminfo vram</code>), then <code>lspci</code> + <code>/sys/class/drm</code>.</li>
+<li>Windows — <code>Win32_VideoController</code> (<code>Get-CimInstance</code> / <code>wmic</code>) for name +
+  <code>AdapterRAM</code>. ⚠️ Windows caps <code>AdapterRAM</code> at 4 GiB, so set <code>--vram-mb</code> (or
+  <code>VRAM_MB</code>) to the real figure for big cards.</li>
+</ul>
+<p>Override anything with <code>--gpu-class</code>/<code>--tflops</code>/<code>--vram-mb</code> (or the <code>GPU_CLASS</code>,
+<code>TFLOPS</code>, <code>VRAM_MB</code> env vars).</p>
+<h3 id="serving-llms-on-amd-linux-rocm">Serving LLMs on AMD (Linux — ROCm)</h3>
+<pre><code class="language-bash"># 1) the OpenCL ICD (mining) + the ROCm runtime (ollama):
+sudo apt install rocm-opencl-runtime          # mining; then reboot
+# 2) bring ollama up on ROCm (installs, starts, pulls the baseline):
+./scripts/install-ollama-amd.sh
+</code></pre>
+<p>Ollama's bundled ROCm supports a <strong>subset</strong> of AMD cards (RDNA2/RDNA3 — RX
+6000/7000 series, plus some older GCN). If it errors with <em>"unsupported gfx"</em>,
+pin the compute target <strong>before</strong> <code>ollama serve</code>:</p>
+<pre><code class="language-bash">export HSA_OVERRIDE_GFX_VERSION=11.0.0   # RX 7000 (gfx1100/1101/1102)
+# export HSA_OVERRIDE_GFX_VERSION=10.3.0  # RX 6000 (gfx1030/1031/1032)
+ollama serve
+</code></pre>
+<p>Confirm GPU inference (not CPU): <code>ollama ps</code> (the <code>PROCESSOR</code> column should say
+<code>ROCm</code>/<code>GPU</code>) — or <code>grep -i 'inference compute' ~/.gpn/ollama.log</code>.</p>
+<h3 id="windows-amd-rocm-is-limited">Windows + AMD (ROCm is limited)</h3>
+<p>On Windows, ollama's ROCm support is limited/experimental. In practice an AMD
+Windows box either <strong>(a)</strong> runs ollama on the <strong>CPU — correct but slow</strong>, or
+<strong>(b)</strong> needs a DirectML/ROCm build if one exists for the card. <strong>Mining is
+unaffected</strong> (pure OpenCL). This is why an AMD <strong>Windows</strong> box may show high
+latency on LLM jobs even though it mines fine — set expectations (small models,
+quantized) and prefer <strong>Linux</strong> for full AMD GPU serving.</p>
+<blockquote>
+<p><strong>CPU-fallback caveat:</strong> when ollama cannot use the GPU it silently falls back
+to the CPU, giving ~10–50× lower token/s. The node still works and still mines;
+just budget latency accordingly.</p>
+</blockquote>
+<h2 id="what-it-starts-all-by-default">What it starts (all by default)</h2>
+<table>
+<thead>
+<tr>
+<th>Child</th>
+<th>Process</th>
+<th>Log prefix</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>miner/node</td>
+<td>the chain node / miner (<code>gpn-node …</code> — mines by default)</td>
+<td><code>[node]</code></td>
+</tr>
+<tr>
+<td>heartbeat</td>
+<td><code>gpn_provider_status</code> (advertises capability + load, <code>:8093</code>)</td>
+<td><code>[heartbeat]</code></td>
+</tr>
+<tr>
+<td>provider</td>
+<td><code>gpn_llm_provider</code> (claims + runs + settles LLM jobs)</td>
+<td><code>[provider]</code></td>
+</tr>
+<tr>
+<td>diffuse</td>
+<td><code>gpn_diffusion_provider</code> (image/video jobs) — opt-out <code>GPN_DIFFUSION=0</code></td>
+<td><code>[diffuse]</code></td>
+</tr>
+<tr>
+<td>ml</td>
+<td><code>gpn_ml_provider</code> (ML-inference jobs) — opt-out <code>GPN_ML=0</code></td>
+<td><code>[ml]</code></td>
+</tr>
+<tr>
+<td>finetune</td>
+<td><code>gpn_finetune_provider</code> (LoRA fine-tune jobs) — opt-out <code>GPN_FINETUNE=0</code></td>
+<td><code>[finetune]</code></td>
+</tr>
+</tbody>
+</table>
+<p>There is nothing to select — a node is miner + <strong>every</strong> provider. A node is
+<strong>designed to serve every job type</strong> (LLM, image, video, ML inference,
+fine-tune); the one-GPU rule only means it does <strong>one job at a time</strong>.
+<code>gpn_node</code> honours the #24 semantics: <strong>mine-by-default</strong>, and the provider
+holds the (separate) job flag so the miner fully stops during a job; the
+supervisor runs the miner and the AI stack side by side.</p>
+<blockquote>
+<p><strong>Missing optional model/dep is non-fatal.</strong> A provider whose model, helper
+script, or <em>optional</em> binary is absent is logged with a clear warning and
+skipped — the node, the miner, and the other providers stay healthy. This
+does <strong>not</strong> apply to ollama: ollama is required and the node will refuse to
+start without it (see above; <code>GPN_REQUIRE_OLLAMA=0</code> for special cases).</p>
+</blockquote>
+<h2 id="config-one-small-file-env-overrides">Config: one small file + env overrides</h2>
+<p>Resolution order per field: <strong><code>GPN_*</code> env var → config file → default</strong>.</p>
+<p>The config file is, in order:</p>
+<ol>
+<li><code>--config &lt;path&gt;</code></li>
+<li><code>$GPN_CONFIG</code></li>
+<li><code>$GPN_PREFIX/node.toml</code> (<code>$GPN_PREFIX</code> defaults to <code>~/.gpn</code>)</li>
+<li><code>./gpn-node.toml</code></li>
+</ol>
+<p>Example (<code>~/.gpn/node.toml</code>, also see <code>gpn-node.example.toml</code>):</p>
+<pre><code class="language-toml">chain        = &quot;testnet&quot;                           # testnet | mainnet | dev | &lt;path to chain-spec.json&gt;
+signer       = &quot;//Alice&quot;                           # sr25519 URI or seed (provider identity / authoring key)
+account      = &quot;5ENqSp5Q…&quot;                         # payout / advertised ss58 address
+endpoint     = &quot;ws://127.0.0.1:9944&quot;               # chain RPC used by the provider loop
+base_path    = &quot;~/.gpn/node&quot;                      # or set GPN_BASE_PATH; default: C:\gpn\data (Win) / ~/.gpn/node (Unix)
+rpc_port     = 9944
+node_key     = &quot;&lt;64-hex ed25519 secret&gt;&quot;           # node's network identity
+bootnodes    = [&quot;/ip4/23.241.109.255/tcp/30333/p2p/12D3KooW…&quot;]
+public_addr  = &quot;/ip4/&lt;your-public-ip&gt;/tcp/30333&quot;     # REQUIRED (see above; forward this port)
+author       = &quot;alice&quot;                             # passed as --alice to gpn-node (authoring key)
+node_args    = [&quot;--no-telemetry&quot;, &quot;--no-prometheus&quot;]
+
+provider_endpoint = &quot;http://&lt;your-public-ip&gt;:8093/status&quot;   # advertised on-chain
+assign_token      = &quot;&lt;shared AP↔provider secret&gt;&quot;           # GPN_ASSIGN_TOKEN (see below)
+ollama       = &quot;http://127.0.0.1:11434&quot;
+listen       = &quot;0.0.0.0:8093&quot;                      # heartbeat bind
+gflops       = 30000
+capacity     = 1
+poll_ms      = 300
+# ── optional providers: ALL ON by design; set false to opt a capability OUT ──
+diffusion    = true                                # image/video provider (gpn_diffusion_provider)
+diffusion_poll_ms = 2000
+ml           = true                                # ML-inference provider (gpn_ml_provider)
+ml_poll_ms   = 2000
+finetune     = true                                # fine-tune provider (gpn_finetune_provider)
+finetune_poll_ms = 4000
+</code></pre>
+<h3 id="environment-variables-overrides">Environment variables (overrides)</h3>
+<table>
+<thead>
+<tr>
+<th>Env var</th>
+<th>Meaning</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GPN_CHAIN</code></td>
+<td>chain spec (<code>testnet</code>/<code>mainnet</code>/<code>dev</code>/path)</td>
+<td><code>testnet</code></td>
+</tr>
+<tr>
+<td><code>GPN_SIGNER</code></td>
+<td>signer URI / seed</td>
+<td><code>//Alice</code></td>
+</tr>
+<tr>
+<td><code>GPN_ACCOUNT</code></td>
+<td>payout / advertised address</td>
+<td><em>(empty)</em></td>
+</tr>
+<tr>
+<td><code>GPN_ENDPOINT</code></td>
+<td>chain RPC (ws) for the provider loop</td>
+<td><code>ws://127.0.0.1:9944</code></td>
+</tr>
+<tr>
+<td><code>GPN_BASE_PATH</code></td>
+<td>node data dir</td>
+<td><em>(node default)</em></td>
+</tr>
+<tr>
+<td><code>GPN_RPC_PORT</code></td>
+<td>node RPC port</td>
+<td><code>9944</code></td>
+</tr>
+<tr>
+<td><code>GPN_NODE_KEY</code></td>
+<td>node network key (64-hex)</td>
+<td><em>(none — node needs one)</em></td>
+</tr>
+<tr>
+<td><code>GPN_BOOTNODES</code></td>
+<td>comma/space list of bootnodes</td>
+<td><em>(none)</em></td>
+</tr>
+<tr>
+<td><code>GPN_PUBLIC_ADDR</code></td>
+<td><code>--public-addr</code> (e.g. <code>/dns4/host/tcp/30333</code>). Recommended for a public node; the capability probe also reads it.</td>
+<td><em>(none)</em></td>
+</tr>
+<tr>
+<td><code>GPN_REQUIRE_DIALABLE</code></td>
+<td>Run the inbound-reachability probe. <code>0</code> skips it entirely (local testing only).</td>
+<td><code>1</code></td>
+</tr>
+<tr>
+<td><code>GPN_REQUIRE_BACKBONE</code></td>
+<td>Hard gate: exit 78 when not dialable (instead of degrading).</td>
+<td><code>0</code></td>
+</tr>
+<tr>
+<td><code>GPN_SEED</code></td>
+<td>Willing to be published as a seed candidate; <code>0</code> also silences the not-dialable notice.</td>
+<td><code>1</code></td>
+</tr>
+<tr>
+<td><code>GPN_DISCOVERABLE</code></td>
+<td>Announce endpoint / accept inbound; <code>0</code> implies <code>GPN_SEED=0</code>.</td>
+<td><code>1</code></td>
+</tr>
+<tr>
+<td><code>GPN_UPNP</code></td>
+<td>Try UPnP-IGD/NAT-PMP (<code>auto</code>/<code>off</code>). See <a href="#3-upnp--nat-pmp--automatic-on-by-default">UPnP / NAT-PMP</a>.</td>
+<td><code>auto</code></td>
+</tr>
+<tr>
+<td><code>GPN_UPNP_LEASE_SECS</code></td>
+<td>Mapping lease requested from the router.</td>
+<td><code>3600</code></td>
+</tr>
+<tr>
+<td><code>GPN_NATPMP_GATEWAY</code></td>
+<td>Router IP for NAT-PMP when OS detection is unavailable.</td>
+<td>auto</td>
+</tr>
+<tr>
+<td><code>GPN_DIALABLE_TIMEOUT_SECS</code></td>
+<td>Grace window for dialability evidence.</td>
+<td><code>120</code></td>
+</tr>
+<tr>
+<td><code>GPN_AUTHOR</code></td>
+<td>short authoring key name → <code>--&lt;name&gt;</code></td>
+<td><em>(none)</em></td>
+</tr>
+<tr>
+<td><code>GPN_NODE_ARGS</code></td>
+<td>extra raw args appended to <code>gpn-node</code></td>
+<td><em>(none)</em></td>
+</tr>
+<tr>
+<td><code>GPN_PROVIDER_ENDPOINT</code></td>
+<td>public <code>/status</code> URL advertised on-chain</td>
+<td><em>(none → discovery off)</em></td>
+</tr>
+<tr>
+<td><code>GPN_ASSIGN_TOKEN</code></td>
+<td>shared AP↔provider secret (<code>POST /assign</code> auth)</td>
+<td><em>(empty → legacy-permissive, warns)</em></td>
+</tr>
+<tr>
+<td><code>GPN_OLLAMA</code></td>
+<td>ollama base URL</td>
+<td><code>http://127.0.0.1:11434</code></td>
+</tr>
+<tr>
+<td><code>GPN_REQUIRE_OLLAMA</code></td>
+<td>Hard gate: refuse to start when ollama is unreachable. <code>0</code> opts out (special cases only).</td>
+<td><code>1</code></td>
+</tr>
+<tr>
+<td><code>GPN_OLLAMA_SETUP</code></td>
+<td>Attempt the automated install/start if ollama is missing</td>
+<td><code>1</code></td>
+</tr>
+<tr>
+<td><code>GPN_BASELINE_MODELS</code></td>
+<td>Comma-separated baseline model(s) to pull on first run</td>
+<td><code>llama3.2:1b</code></td>
+</tr>
+<tr>
+<td><code>GPN_OLLAMA_WAIT_SECS</code></td>
+<td>Grace window for <code>/api/tags</code> after <code>ollama serve</code></td>
+<td><code>60</code></td>
+</tr>
+<tr>
+<td><code>GPN_LISTEN</code></td>
+<td>heartbeat bind addr</td>
+<td><code>0.0.0.0:8093</code></td>
+</tr>
+<tr>
+<td><code>GPN_GFLOPS</code></td>
+<td>advertised compute</td>
+<td><code>0</code></td>
+</tr>
+<tr>
+<td><code>GPN_CAPACITY</code></td>
+<td>concurrent jobs</td>
+<td><code>1</code></td>
+</tr>
+<tr>
+<td><code>GPN_POLL_MS</code></td>
+<td>provider poll interval</td>
+<td><code>300</code></td>
+</tr>
+<tr>
+<td><code>GPN_DIFFUSION</code></td>
+<td>image/video provider — set <code>0</code> to OPT OUT (default ON)</td>
+<td><code>1</code></td>
+</tr>
+<tr>
+<td><code>GPN_DIFFUSION_POLL_MS</code></td>
+<td>diffusion poll interval</td>
+<td><code>2000</code></td>
+</tr>
+<tr>
+<td><code>GPN_ML</code></td>
+<td>ML-inference provider — set <code>0</code> to OPT OUT (default ON)</td>
+<td><code>1</code></td>
+</tr>
+<tr>
+<td><code>GPN_ML_POLL_MS</code></td>
+<td>ML-inference poll interval</td>
+<td><code>2000</code></td>
+</tr>
+<tr>
+<td><code>GPN_FINETUNE</code></td>
+<td>fine-tune provider — set <code>0</code> to OPT OUT (default ON)</td>
+<td><code>1</code></td>
+</tr>
+<tr>
+<td><code>GPN_FINETUNE_POLL_MS</code></td>
+<td>fine-tune poll interval</td>
+<td><code>4000</code></td>
+</tr>
+<tr>
+<td><code>GPN_BIN</code></td>
+<td>dir holding the child binaries</td>
+<td>dir of <code>gpn_node</code></td>
+</tr>
+<tr>
+<td><code>GPN_STATUS_SECS</code></td>
+<td>status-line interval</td>
+<td><code>15</code></td>
+</tr>
+<tr>
+<td><code>GPN_STALL_SECS</code></td>
+<td>sync-stall watchdog: restart node after <code>best</code> frozen this long (min 60)</td>
+<td><code>300</code></td>
+</tr>
+<tr>
+<td><code>GPN_STALL_CHECK_SECS</code></td>
+<td>sync-stall watchdog poll interval (min 10)</td>
+<td><code>60</code></td>
+</tr>
+<tr>
+<td><code>GPN_CONFIG</code></td>
+<td>config-file path</td>
+<td><em>(see search order)</em></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Secrets stay in the environment.</strong> <code>gpn_node</code> reads the signer/seed and the
+assign token from env / the config file and never writes them anywhere. Put
+the token in <code>GPN_ASSIGN_TOKEN</code> (or the service <code>EnvironmentFile</code>), and keep
+the config file <code>chmod 600</code>.</p>
+</blockquote>
+<h3 id="sync-robustness-defaults-why-your-node-wont-wedge">Sync-robustness defaults (why your node won't wedge)</h3>
+<p>GPN has <strong>no finality gadget</strong> — the finalized head stays at <code>#0</code>. That breaks
+both of the things a node normally leans on to sync, so <code>gpn_node</code> bakes in the
+one reliable combination (<strong>on by default, overridable via <code>GPN_NODE_ARGS</code> /
+<code>node_args</code></strong>):</p>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--sync full</code></td>
+<td><code>fast</code>/<code>warp</code> build their proof from a <strong>finalized</strong> block; with no finality they burst then stall early. (<code>full</code> is also the node default, but we pin it explicitly so a stray <code>--sync fast</code> can't re-introduce the wedge.)</td>
+</tr>
+<tr>
+<td><code>--state-pruning archive</code></td>
+<td>The node default is <code>256</code>, pruned <strong>relative to finality</strong> — i.e. it discards state almost immediately on GPN, so a peer that asks for it gets <em>"State already discarded"</em>, the peer bans us, and our best block freezes. <code>archive</code> never discards state.</td>
+</tr>
+<tr>
+<td><code>--blocks-pruning archive</code></td>
+<td>Same finality-relative problem for block bodies (default <code>archive-canonical</code>). <code>archive</code> keeps every body so we can always serve a syncing peer.</td>
+</tr>
+</tbody>
+</table>
+<p>Archive is cheap here (the whole testnet DB is well under a gigabyte); there is
+no reason to prune on a chain this small.</p>
+<blockquote>
+<p>⚠️ <strong>Legacy DB caveat — and the pinned base path.</strong> Substrate <strong>locks the
+state-pruning mode into the DB at first creation</strong>, and requesting <code>archive</code>
+on a DB that was created with the old <code>256</code> default <strong>hard-fails</strong>:
+<code>Incompatible pruning modes [stored: Constrained { max_blocks: Some(256) };
+requested: ArchiveAll]</code>.</p>
+<p>So <code>gpn_node</code> now <strong>pins a single base path</strong> and uses it for <em>both</em> the DB
+check and the node's <code>--base-path</code> (resolution: <code>GPN_BASE_PATH</code> → config
+<code>base_path</code> → default <code>C:\gpn\data</code> on Windows / <code>~/.gpn/node</code> on Unix). This
+matters because a node launched with <strong>no</strong> <code>--base-path</code> silently uses the
+OS-default data dir (<code>%LOCALAPPDATA%\gpn-node.exe\data</code> on Windows) — a guard
+that only inspected an <em>explicit</em> base path therefore looked at the wrong
+directory and forced <code>archive</code> onto a legacy DB → crash-loop.</p>
+<p>The archive default is applied only when the DB is <strong>fresh</strong>, or when it
+carries the <code>.gpn-pruning-archive</code> marker <code>gpn_node</code> drops next to a DB <em>it</em>
+created with archive. For any <strong>existing legacy/unknown DB</strong> it requests <strong>no</strong>
+pruning flags (so the node's compiled defaults match the stored mode) and logs
+a clear warning — it can no longer crash-loop on <code>Incompatible pruning modes</code>.
+For backward-compat, if no DB exists at the pinned path but one exists at the
+OS-default path, the OS-default DB is detected and used (with a warning).
+Such a legacy DB must still be <strong>re-created</strong> (see the Troubleshooting entry
+below) before it can be stall-proof.</p>
+</blockquote>
+<h3 id="disk-headroom-why-your-chain-can-halt-with-a-full-disk">Disk headroom (why your chain can halt with a full disk)</h3>
+<p>On 2026-10-19 the root filesystem filled to <strong>100%</strong> and the only symptom was a
+<strong>chain halt</strong>: the node mined a block but could not persist its header
+(<code>ENOSPC</code>), so its in-memory best chain kept a hash that could never be fetched
+again. Nothing warned beforehand.</p>
+<ul>
+<li><strong>Check it:</strong> <code>df -h &lt;your data dir&gt;</code> (Linux/macOS) or
+  <code>Get-PSDrive C</code> (Windows). Keep <strong>≥10% free</strong> (≈ 20 GB on a typical build box).</li>
+<li><strong>The heartbeat reports it:</strong> <code>GET /status</code> on the provider heartbeat (<code>:8093</code>)
+  now includes <code>disk_free_mb</code>, <code>disk_total_mb</code>, <code>disk_free_pct</code> (probe of
+  <code>$GPN_DATA_DIR</code> or <code>$HOME</code>; <code>0</code>/<code>null</code> = probe unavailable, <strong>not</strong> full). The
+  heartbeat also prints a <code>⚠ LOW DISK:</code> line at startup below 10%. Point a
+  monitor at <code>disk_free_pct</code>.</li>
+<li><strong>Build hosts:</strong> Rust <code>target/debug</code> is the usual culprit (it reached <strong>217 GB</strong>
+  here). Run <code>cargo clean --profile dev</code> — or <code>cargo clean</code> — regularly, and keep
+  <code>target/</code> on a <strong>different filesystem</strong> from the node's data directory where
+  possible.</li>
+<li><strong>Recovery if it already halted:</strong> free space, then restart the node
+  (<code>systemctl --user restart gpn-fleet</code>). Freeing space alone does <strong>not</strong> clear
+  the stale in-memory best-chain hash.</li>
+</ul>
+<h2 id="what-the-supervisor-does">What the supervisor does</h2>
+<ul>
+<li><strong>Spawns each child with a label</strong> and forwards its stdout/stderr with a
+  <code>[node]</code> / <code>[heartbeat]</code> / <code>[provider]</code> / <code>[diffuse]</code> / <code>[ml]</code> / <code>[finetune]</code>
+  prefix.</li>
+<li><strong>Restarts a crashed child</strong> with bounded backoff (1s → 2s → … → 30s); the
+  backoff resets once a child has been healthy for 60s. Every start / exit /
+  restart is logged as <code>[supervisor HH:MM:SS] &lt;label&gt;: …</code>.</li>
+<li><strong>Stops all children gracefully</strong> on <code>Ctrl-C</code> / <code>SIGTERM</code>: each child gets
+  <code>SIGTERM</code>, is waited on for up to 10s, then <code>SIGKILL</code>ed, and the supervisor
+  exits.</li>
+<li><strong>Prints one aggregated status line</strong> every <code>status_secs</code> (default 15s):</li>
+</ul>
+<pre><code>[status] node_count=6 node=up(pid 123) heartbeat=up(pid 456) provider=up(pid 789) diffuse=up(pid 790) ml=up(pid 791) finetune=up(pid 792) best=#107535
+</code></pre>
+<p><code>best</code> is the node's best block, read cheaply from its own RPC
+  (<code>chain_getHeader</code>); <code>?</code> if the node's RPC isn't answering yet.</p>
+<p>A node that failed the <strong>dialability gate</strong> with <code>--require-backbone</code> set is
+  shown distinctly as <code>node=down(not dialable, restarts N)</code> (the child exited
+  78), with an actionable hint in the log — set <code>GPN_PUBLIC_ADDR</code> and forward
+  the port. Without <code>--require-backbone</code>, a non-dialable node stays <code>up</code> and
+  simply runs degraded.</p>
+<h2 id="linux">Linux</h2>
+<pre><code class="language-bash"># foreground (Ctrl-C stops everything) — always miner + provider
+GPN_SIGNER=//Alice \
+GPN_PROVIDER_ENDPOINT=http://&lt;public-ip&gt;:8093/status \
+GPN_ASSIGN_TOKEN=$GPN_ASSIGN_TOKEN \
+gpn_node
+</code></pre>
+<p>As a <strong>systemd (user) service</strong> — one unit replaces the per-part units:</p>
+<pre><code class="language-ini"># ~/.config/systemd/user/gpn-node.service
+[Unit]
+Description=GPN node (supervised: miner + heartbeat + provider)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.gpn/node.env        # GPN_SIGNER, GPN_ASSIGN_TOKEN, …
+ExecStart=%h/.local/bin/gpn_node --config %h/.gpn/node.toml
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target
+</code></pre>
+<pre><code class="language-bash">systemctl --user daemon-reload
+systemctl --user enable --now gpn-node.service
+journalctl --user -u gpn-node.service -f     # the one prefixed log stream
+</code></pre>
+<h2 id="windows">Windows</h2>
+<p><code>gpn_node.exe</code> is the same binary. From the release bundle (<code>.\bin\</code>):</p>
+<pre><code class="language-powershell"># everything supervised under one console window (miner + provider)
+$env:GPN_SIGNER           = &quot;//Alice&quot;          # or your seed
+$env:GPN_CHAIN            = &quot;testnet&quot;
+$env:GPN_PROVIDER_ENDPOINT= &quot;http://&lt;public-ip&gt;:8093/status&quot;
+$env:GPN_ASSIGN_TOKEN     = &quot;&lt;shared secret&gt;&quot;
+.\bin\gpn_node.exe --config .\gpn-node.toml
+</code></pre>
+<p>Use <strong>Ctrl-C</strong> in the window (or close it) to stop all children cleanly. To run
+it as a service, wrap <code>gpn_node.exe</code> with NSSM / a Windows Service.</p>
+<blockquote>
+<p>Windows note: the connect step for a syncing node (<code>run-windows.bat</code>) still
+applies — a second node authoring on the <strong>same key</strong> would fork the chain.
+Only the single designated author should mine. Every node mines by default
+(<code>gpn-node</code> is an authority miner on its own key — no <code>--force-authoring</code>
+needed); the flag is accepted but no longer required.</p>
+</blockquote>
+<h3 id="console-encoding-on-windows-emoji-mojibake">Console encoding on Windows (emoji / mojibake)</h3>
+<p><code>gpn_node</code> prints a few non-ASCII glyphs (warning signs, a sleep/zzz marker,
+the winner trophy, …). On a <strong>legacy Windows console</strong> these mojibake even with
+<code>chcp 65001</code> (<code>⚠️</code> shows as <code>ΓÜá∩╕Å</code>, <code>💤</code> as <code>≡ƒÆñ</code>) because the text round-trips
+the PowerShell pipeline (e.g. <code>Tee-Object</code>) through the OEM code page.</p>
+<p>The supervisor now <strong>sanitises every line it prints to ASCII</strong> when needed:
+known symbols map to readable tokens (<code>⚠️</code> → <code>!</code>, <code>💤</code> → <code>[zzz]</code>, <code>🏆</code> → <code>[win]</code>,
+<code>📦</code> → <code>[pkg]</code>), dashes/ellipses map to <code>-</code>/<code>...</code>, and anything else becomes
+<code>?</code>. Nothing ever mojibakes.</p>
+<ul>
+<li><strong>Default:</strong> ASCII mode is <strong>on for Windows</strong>, <strong>off for Linux/macOS</strong> (modern
+  terminals render UTF-8 fine).</li>
+<li><strong>Force it on</strong> anywhere: pass <code>--no-emoji</code>, or set <code>GPN_ASCII_LOG=1</code>.</li>
+<li><strong>Force it off</strong> (keep emoji): set <code>GPN_ASCII_LOG=0</code>.</li>
+</ul>
+<pre><code class="language-powershell"># plain ASCII on any console (e.g. a legacy WS2016/2019 box):
+$env:GPN_ASCII_LOG = &quot;1&quot;
+.\bin\gpn_node.exe --config .\gpn-node.toml
+#   …or one-shot:  .\bin\gpn_node.exe --config .\gpn-node.toml --no-emoji
+</code></pre>
+<h2 id="watchdog-auto-recover-a-silently-wedged-node">Watchdog — auto-recover a silently wedged node</h2>
+<p>GPN has no finality, so a node can stay <strong>p2p-connected</strong> while its best block
+silently freezes (see the Troubleshooting entry below). <code>gpn_node</code> watches for
+exactly this: it polls the node's own RPC (<code>chain_getHeader</code> → best number)
+every <code>GPN_STALL_CHECK_SECS</code> (default <strong>60 s</strong>). If <code>best</code> is <strong>unchanged for
+more than <code>GPN_STALL_SECS</code> (default 300 s = 5 min)</strong> <em>while at least one peer is
+connected</em>, it logs a loud <code>SYNC STALL</code> alert and <strong>restarts the node child</strong>
+(SIGTERM → the supervisor restarts it with its normal backoff → it re-syncs).</p>
+<p>It is deliberately conservative so it never fights healthy behaviour:</p>
+<ul>
+<li>normal syncing advances <code>best</code> on every check → never triggers;</li>
+<li>if the node's RPC isn't answering yet (startup / mid-restart) the clock is
+  <strong>reset</strong>, not counted;</li>
+<li>with <strong>zero</strong> peers it logs but does <strong>not</strong> restart (a peerless node can't
+  sync anyway — that's a different problem);</li>
+<li>after a restart it resets its timer, so it can't spiral into a tight kill loop.</li>
+</ul>
+<p>Tune it with <code>GPN_STALL_SECS</code> (min 60) and <code>GPN_STALL_CHECK_SECS</code> (min 10).</p>
+<h2 id="troubleshooting-node-connected-but-not-syncing">Troubleshooting — node connected but not syncing</h2>
+<p><strong>Symptom.</strong> The node shows peers at the p2p layer — <code>system_peers</code> lists them as
+<code>FULL</code>/<code>AUTHORITY</code> — but its <strong>best block is frozen</strong> while the network head
+keeps advancing. <code>system_syncState</code> shows <code>currentBlock</code> stuck. Logs may show
+<code>State already discarded</code> followed by <code>Same block request multiple times.
+Banned, disconnecting</code> — the sync peer bans the node, it has no other peer, and
+it never imports another block. This is the <em>silent wedge</em>.</p>
+<p><strong>Mechanism (why).</strong> GPN has <strong>no finality gadget</strong> — the finalized head is
+<code>#0</code> forever. Two things then go wrong:</p>
+<ol>
+<li><strong>Finality-relative pruning.</strong> The node's default pruning is
+   <code>--state-pruning 256</code> / <code>--blocks-pruning archive-canonical</code>, both measured
+   <em>from the finalized block</em>. With finality pinned at <code>#0</code>, the node discards
+   state and block bodies almost immediately. A peer that requests them gets
+   <em>"State already discarded"</em>, the request repeats, and the peer bans us.</li>
+<li><strong>Finality-dependent sync modes.</strong> <code>--sync fast</code> / <code>warp</code> need a <em>finalized</em>
+   block to build their state proof. With no finality they burst for a moment
+   then stall early.</li>
+</ol>
+<p>Because the node loses its only peer to a ban, it can no longer sync and its
+best block freezes — while still looking "connected" in the peer list.</p>
+<p><strong>Fix.</strong> Run with the reliable combination (which <code>gpn_node</code> now defaults to):</p>
+<pre><code class="language-bash">gpn-node --chain testnet --base-path ~/.gpn/node --sync full \
+  --state-pruning archive --blocks-pruning archive …
+</code></pre>
+<p><strong>If the node already has a (legacy <code>256</code>) DB</strong>, the pruning mode is locked in
+and <code>archive</code> will hard-fail — re-create the data dir and let it re-sync, or
+import a fresh <strong>archive</strong> DB snapshot (fast — see
+<a href="fast-sync.html"><code>docs/fast-sync.md</code></a>):</p>
+<pre><code class="language-bash"># option A — re-sync from scratch (keep the node key / config):
+mv ~/.gpn/node/chains/gpn_testnet/db ~/.gpn/node/chains/gpn_testnet/db.old
+#   …then restart gpn_node: it creates a FRESH archive DB and full-syncs.
+
+# option B — fast onboarding from a snapshot (recommended for a slow box):
+scripts/gpn-snapshot.sh import --snapshot gpn-testnet-&lt;tip&gt;.tar.gz --base-path ~/.gpn/node --force
+</code></pre>
+<p>On Windows the legacy DB often lives at <code>%LOCALAPPDATA%\gpn-node.exe\data</code>
+(the OS default, used before the base path was pinned). <code>gpn_node</code> auto-detects
+it, but to migrate it cleanly: stop the <code>gpn*</code> processes, then either <strong>wipe
+<code>chains/</code></strong> (and let it re-sync) or import the archive snapshot with
+<code>--base-path C:\gpn\data</code> (see the fast-sync doc and <code>docs/downloads.md</code> for the
+snapshot URL).</p>
+<blockquote>
+<p><strong>Snapshot pruning marker.</strong> A <code>gpn_snapshot</code> export from a modern <code>gpn-node</code>
+is always an <strong>archive</strong> DB, so <code>gpn_snapshot import</code> now <strong>stamps the
+<code>.gpn-pruning-archive</code> marker by default</strong> — including for older snapshots
+whose manifest predates the marker feature and carries no <code>pruning</code> field.
+<code>gpn_node</code> then knows the imported DB is safe to run with
+<code>--state-pruning archive</code> (without the marker it conservatively leaves pruning
+untouched). Override with <code>--pruning archive|none</code> (e.g.
+<code>--pruning none</code> to import a legacy non-archive DB).</p>
+<p><strong>Deeper root cause:</strong> this failure mode only exists because GPN has <strong>no
+finality gadget</strong>. Archive pruning + <code>--sync full</code> are the correct <em>workaround</em>
+and make nodes robust today, but the <em>real</em> fix is to add finality at mainnet
+— see the finality-gadget design cross-reference in
+<a href="mainnet-launch-runbook.html"><code>docs/mainnet-launch-runbook.md</code></a>. Until then,
+assume no finality and never rely on <code>finalized #&gt; 0</code>.</p>
+</blockquote>
+<h2 id="troubleshooting-slow-llm-jobs-on-a-dual-stack-aaaa-laggy-host-the-result-stall">Troubleshooting — slow LLM jobs on a dual-stack / AAAA-laggy host (the <code>/result</code> stall)</h2>
+<p><strong>Symptom.</strong> End-to-end text/image jobs through the access point work, but are
+<strong>slow</strong> — routinely 10–25s instead of &lt;5s — even though the provider itself
+finishes inference in ~1s. The AP log shows it falling back to its ~11s
+on-chain <em>reconcile</em> instead of learning the result immediately.</p>
+<p><strong>Mechanism (why).</strong> When the AP and provider are <strong>co-located</strong>, the AP still
+advertises a <em>public</em> callback URL (<code>GPN_PUBLIC_URL</code>, e.g.
+<code>http://gpn-testnet.duckdns.org:8092</code>) and the provider POSTs the finished
+result back to <code>{callback}/result/{id}</code>. <code>reqwest</code> resolves that host with
+<code>getaddrinfo(AF_UNSPEC)</code> — <strong>both A and AAAA</strong>. If the host resolver does <em>not</em>
+answer AAAA (a common router/DNS quirk — e.g. <code>192.168.1.1</code>), the AAAA leg
+blocks until it times out:</p>
+<pre><code class="language-bash">$ getent ahostsv6 gpn-testnet.duckdns.org    # hangs → rc=124 (timeout)
+$ getent ahostsv4 gpn-testnet.duckdns.org    # instant → A record, rc=0
+$ curl    http://gpn-testnet.duckdns.org:8092/health   # http=000 after ~8s (stalls)
+$ curl -4 http://gpn-testnet.duckdns.org:8092/health   # http=200 in ~0.02s
+</code></pre>
+<p>Because the <code>/result</code> return is best-effort with a hard <strong>5s</strong> budget, the stall
+makes it time out, the AP never learns the result off-chain, and it falls back
+to the slow reconcile — so e2e blows the &lt;5s target. It is <strong>not</strong> an inference
+or chain problem; it is pure name resolution.</p>
+<p><strong>Fix (no root needed).</strong> GPN is now robust to this: the provider's <code>/result</code>
+(and the AP's <code>/assign</code> push) use a <strong>custom resolver that only issues A (IPv4)
+queries</strong> plus a bounded connect timeout, so a slow/absent AAAA can never block
+them (see <code>gpn-agent/src/net.rs</code>). No host DNS change is required.</p>
+<p><strong>Optional — remove the dependency entirely (co-located boxes).</strong> If your AP and
+provider run on the same machine, point the provider at loopback so no public
+lookup happens at all. In <code>~/.gpn/provider.env</code>:</p>
+<pre><code class="language-bash"># either form (a bare base, or the full .../result URL) works:
+GPN_RESULT_URL=http://127.0.0.1:8092
+# GPN_AP_URL=http://127.0.0.1:8092
+</code></pre>
+<p>Precedence is <code>GPN_RESULT_URL</code> &gt; <code>GPN_AP_URL</code> &gt; the AP-advertised <code>callback</code>
+(remote providers keep using the advertised URL). The AP itself now advertises
+loopback automatically when its <code>--listen</code> is a wildcard bind (<code>0.0.0.0:8092</code>)
+and no <code>GPN_PUBLIC_URL</code>/<code>GPN_AP_CALLBACK_URL</code>/<code>--callback-url</code> is set.</p>
+<p><strong>Verify.</strong> Reproduce the raw stall and confirm the fix in one shot:</p>
+<pre><code class="language-bash">cd gpn-agent &amp;&amp; cargo run --example dns_probe -- http://gpn-testnet.duckdns.org:8092/health
+# dual-stack   ERROR in 8.000s: error sending request …   ← the stall
+# ipv4-only    http=200 in 0.013s                        ← the fix
+</code></pre>
+<p><strong>Real host fix (needs root — optional; the above makes GPN robust without it).</strong>
+Point the host resolver at a resolver that answers AAAA, then flush:</p>
+<pre><code class="language-bash">sudo resolvectl dns &lt;iface&gt; 1.1.1.1 192.168.1.1 &amp;&amp; resolvectl flush-caches
+# e.g. iface = enp42s0
+</code></pre>
+<h2 id="fault-isolation-why-separate-processes">Fault isolation / why separate processes</h2>
+<p>The supervisor deliberately keeps one process per part: an ollama/diffusion
+crash, an OOM in the AI stack, or a wedged inference never takes the chain node
+down — the supervisor restarts just that child. Folding everything into one
+binary is tracked separately (task #26, deferred).</p>
+    </article>
+    <p class="doc-updated small muted">Last generated 2026-10-19 from the project documentation set.</p>
+  </div>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="foot-grid">
+      <div><a class="brand" href="../index.html" style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a><p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute. <em>A GPU should not have to choose.</em></p></div>
+      <div><h4>Product</h4><a href="../download.html">Download</a><a href="../deploy.html">Deploy</a><a href="../ai.html">Access the AI</a><a href="../access-points.html">Access Points</a></div>
+      <div><h4>Learn</h4><a href="index.html">Docs</a><a href="whitepaper.html">Whitepaper</a><a href="one-pager.html">One-pager</a><a href="technical-overview.html">Technical overview</a></div>
+      <div><h4>Project</h4><a href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">Source on GitHub</a><a href="run-a-node.html">Run a node</a><a href="wallet.html">Wallet</a><a href="../buy.html">Token &amp; purchasing</a></div>
+    </div>
+    <div class="foot-bottom">
+      <p class="small muted">© <span data-year>2026</span> GPN · Public testnet. Not investment advice.</p>
+      <p class="small muted">Testnet only — tokens here have no monetary value.</p>
+    </div>
+  </div>
+</footer>
+
+<script src="../assets/app.js"></script>
+</body>
+</html>

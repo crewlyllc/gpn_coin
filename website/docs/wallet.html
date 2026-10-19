@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Wallet — GPN docs</title>
+<meta name="description" content="gpn_wallet: a node-free sr25519 wallet for holding and moving GPN." />
+<meta name="theme-color" content="#07090f" />
+<link rel="canonical" href="https://gpncoin.ai/docs/wallet.html" />
+<meta property="og:site_name" content="GPN" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://gpncoin.ai/docs/wallet.html" />
+<meta property="og:title" content="Wallet — GPN docs" />
+<meta property="og:description" content="gpn_wallet: a node-free sr25519 wallet for holding and moving GPN." />
+<meta name="twitter:card" content="summary" />
+<meta name="twitter:title" content="Wallet — GPN docs" />
+<meta name="twitter:description" content="gpn_wallet: a node-free sr25519 wallet for holding and moving GPN." />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237c6cff'/%3E%3Ctext x='16' y='22' font-size='16' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%2307090f'%3EG%3C/text%3E%3C/svg%3E" />
+<link rel="stylesheet" href="../assets/style.css" />
+<link rel="stylesheet" href="../assets/docs.css" />
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap nav">
+    <a class="brand" href="../index.html" aria-label="GPN home"><span class="dot" aria-hidden="true">G</span><span>GPN<br><small>GPU-NATIVE NETWORK</small></span></a>
+    <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Toggle navigation">☰</button>
+    <nav class="nav-links" id="nav-links" aria-label="Primary">
+      <a href="../index.html">Home</a>
+      <a href="../download.html">Download</a>
+      <a href="../deploy.html">Deploy</a>
+      <a href="../ai.html">AI</a>
+      <a href="../access-points.html">Access Points</a>
+      <a href="../buy.html">Buy GPN</a>
+      <a href="index.html" aria-current="page">Docs</a>
+    </nav>
+    <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
+  </div>
+</header>
+
+<main id="main" class="doc-main">
+  <div class="wrap doc-wrap">
+    <nav class="crumbs" aria-label="Breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Docs</a> / <span>Wallet</span></nav>
+    <article class="prose">
+<h1>GPN node-free wallet (`gpn_wallet`)</h1>
+<p>A lightweight <strong>sr25519</strong> wallet so an AI user / trader can create, hold and move GPN
+<strong>without running a full GPN node</strong>. Standard Substrate key derivation — the address and
+mnemonic are interoperable with any Substrate wallet (Polkadot.js, <code>subkey</code>, …). There is no
+GPN-specific crypto.</p>
+<p>The chain stays the coordination + escrow + settlement layer; the wallet just talks to a plain
+RPC endpoint (a public access point or any node) for <strong>balance</strong> and <strong>send</strong>. Everything else
+(<code>keygen</code>, <code>address</code>, <code>sign</code>) is <strong>fully offline</strong>.</p>
+<h2 id="mental-model">Mental model</h2>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>Needs a node?</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>keygen</code></td>
+<td>no</td>
+<td>fresh sr25519 mnemonic → ss58 address; optional 0600 JSON keystore</td>
+</tr>
+<tr>
+<td><code>address</code></td>
+<td>no</td>
+<td>derive the ss58 address from a keystore / mnemonic / URI</td>
+</tr>
+<tr>
+<td><code>sign</code></td>
+<td>no</td>
+<td>sign a message/payload (e.g. authorize a job payment) → signature</td>
+</tr>
+<tr>
+<td><code>balance</code></td>
+<td>yes (RPC)</td>
+<td>read the free balance of an address</td>
+</tr>
+<tr>
+<td><code>send</code></td>
+<td>yes (RPC)</td>
+<td>sign + submit <code>Balances.transfer_allow_death</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="usage">Usage</h2>
+<pre><code class="language-bash">gpn_wallet keygen  [--out &lt;file&gt;] [--password &lt;pw&gt;]
+gpn_wallet address &lt;keystore.json|mnemonic|//URI&gt; [--password &lt;pw&gt;]
+gpn_wallet balance &lt;endpoint&gt; &lt;ss58|0xhex|keystore.json|//URI&gt; [--password &lt;pw&gt;]
+gpn_wallet send    &lt;endpoint&gt; &lt;keystore.json|mnemonic|//URI&gt; &lt;dest&gt; &lt;amount_gpn&gt; [--password &lt;pw&gt;]
+gpn_wallet sign    &lt;keystore.json|mnemonic|//URI&gt; &lt;message&gt; [--hex] [--password &lt;pw&gt;]
+</code></pre>
+<p>Environment: <code>ENDPOINT</code> (default <code>ws://127.0.0.1:9944</code>), <code>GPN_WALLET_PASSWORD</code>.</p>
+<h3 id="keystore-format">Keystore format</h3>
+<p><code>keygen --out</code> writes a JSON document (mode <code>0600</code>):</p>
+<pre><code class="language-json">{
+  &quot;address&quot;: &quot;5…&quot;,
+  &quot;crypto&quot;: &quot;sr25519&quot;,
+  &quot;mnemonic&quot;: &quot;twelve word recovery phrase …&quot;
+}
+</code></pre>
+<p>The mnemonic is the private key — back it up offline, never share it. A wallet source can be a
+keystore path, a raw mnemonic, or a dev/derivation URI (<code>//Alice</code>, <code>phrase//hard//soft</code>). A
+password-protected source uses <code>--password</code> (or <code>GPN_WALLET_PASSWORD</code>); a password changes the
+derived address, so it must be supplied on every use.</p>
+<h2 id="examples">Examples</h2>
+<pre><code class="language-bash"># offline: make a wallet
+gpn_wallet keygen --out wallet.json
+
+# offline: address + signature
+gpn_wallet address wallet.json
+gpn_wallet sign wallet.json &quot;pay:job=42;amount=1.5&quot;
+
+# online: balance + send (1 GPN)
+gpn_wallet balance ws://127.0.0.1:9944 wallet.json
+gpn_wallet send    ws://127.0.0.1:9944 wallet.json 5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY 1.0
+</code></pre>
+<h2 id="security-notes">Security notes</h2>
+<ul>
+<li><strong>Never log or transmit the mnemonic.</strong> The keystore is written <code>0600</code>; keep it that way.</li>
+<li><code>send</code> signs <strong>locally</strong> — the private key never leaves the machine; only the signed extrinsic
+  is submitted to the RPC endpoint.</li>
+<li>An amount <strong>below the runtime existential deposit</strong> is rejected by the chain (the transfer
+  fails dispatch). Use an amount ≥ the ED for a first-time recipient.</li>
+<li>Interoperability is by construction: this is standard Substrate sr25519 derivation, verified
+  against the well-known dev vectors in the unit tests.</li>
+</ul>
+<h2 id="related">Related</h2>
+<ul>
+<li><code>USE-GPN.md</code> §2.1 — the short how-to.</li>
+<li><code>gpn_send</code> — the older ops-only transfer tool (takes a signer URI); <code>gpn_wallet</code> is the
+  user-facing, node-free replacement that also does keygen and offline signing.</li>
+</ul>
+    </article>
+    <p class="doc-updated small muted">Last generated 2026-10-19 from the project documentation set.</p>
+  </div>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="foot-grid">
+      <div><a class="brand" href="../index.html" style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a><p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute. <em>A GPU should not have to choose.</em></p></div>
+      <div><h4>Product</h4><a href="../download.html">Download</a><a href="../deploy.html">Deploy</a><a href="../ai.html">Access the AI</a><a href="../access-points.html">Access Points</a></div>
+      <div><h4>Learn</h4><a href="index.html">Docs</a><a href="whitepaper.html">Whitepaper</a><a href="one-pager.html">One-pager</a><a href="technical-overview.html">Technical overview</a></div>
+      <div><h4>Project</h4><a href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">Source on GitHub</a><a href="run-a-node.html">Run a node</a><a href="wallet.html">Wallet</a><a href="../buy.html">Token &amp; purchasing</a></div>
+    </div>
+    <div class="foot-bottom">
+      <p class="small muted">© <span data-year>2026</span> GPN · Public testnet. Not investment advice.</p>
+      <p class="small muted">Testnet only — tokens here have no monetary value.</p>
+    </div>
+  </div>
+</footer>
+
+<script src="../assets/app.js"></script>
+</body>
+</html>

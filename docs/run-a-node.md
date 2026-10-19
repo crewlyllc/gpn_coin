@@ -170,7 +170,7 @@ To fix it (about 5 minutes):
      can work. Run the node on a cheap VPS with a public IP.
 
 Full guide with per-OS detail:
-  https://gpn.network/docs/run-a-node#make-your-node-dialable
+  https://gpncoin.ai/docs/run-a-node#make-your-node-dialable
 
 This node will exit until it is dialable.
 To run anyway (not recommended while the network is growing):

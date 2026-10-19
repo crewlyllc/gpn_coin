@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Fast sync — GPN docs</title>
+<meta name="description" content="Snapshots, checkpoints, and why a fresh GPN node re-verifies Ethash seals." />
+<meta name="theme-color" content="#07090f" />
+<link rel="canonical" href="https://gpncoin.ai/docs/fast-sync.html" />
+<meta property="og:site_name" content="GPN" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://gpncoin.ai/docs/fast-sync.html" />
+<meta property="og:title" content="Fast sync — GPN docs" />
+<meta property="og:description" content="Snapshots, checkpoints, and why a fresh GPN node re-verifies Ethash seals." />
+<meta name="twitter:card" content="summary" />
+<meta name="twitter:title" content="Fast sync — GPN docs" />
+<meta name="twitter:description" content="Snapshots, checkpoints, and why a fresh GPN node re-verifies Ethash seals." />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237c6cff'/%3E%3Ctext x='16' y='22' font-size='16' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%2307090f'%3EG%3C/text%3E%3C/svg%3E" />
+<link rel="stylesheet" href="../assets/style.css" />
+<link rel="stylesheet" href="../assets/docs.css" />
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap nav">
+    <a class="brand" href="../index.html" aria-label="GPN home"><span class="dot" aria-hidden="true">G</span><span>GPN<br><small>GPU-NATIVE NETWORK</small></span></a>
+    <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Toggle navigation">☰</button>
+    <nav class="nav-links" id="nav-links" aria-label="Primary">
+      <a href="../index.html">Home</a>
+      <a href="../download.html">Download</a>
+      <a href="../deploy.html">Deploy</a>
+      <a href="../ai.html">AI</a>
+      <a href="../access-points.html">Access Points</a>
+      <a href="../buy.html">Buy GPN</a>
+      <a href="index.html" aria-current="page">Docs</a>
+    </nav>
+    <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
+  </div>
+</header>
+
+<main id="main" class="doc-main">
+  <div class="wrap doc-wrap">
+    <nav class="crumbs" aria-label="Breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Docs</a> / <span>Fast sync</span></nav>
+    <article class="prose">
+<h1>Fast node onboarding — snapshots, checkpoints, and why fast-sync won't help</h1>
+<p><strong>Task:</strong> GPN-TASKS #23 · <strong>Status:</strong> snapshot tooling SHIPPED + live-verified; checkpoint DESIGNED (gated).</p>
+<p>A fresh GPN node re-verifies every block, including recomputing its <strong>Ethash seal</strong>
+(<code>hashimoto_light</code> on the light cache) for each imported block. So the time to
+reach the tip grows with chain length (~<strong>123k blocks</strong> at the time of writing,
+~+1 min of sync per ~14k blocks). The fix that actually works on this chain is a
+<strong>database snapshot</strong>: hand the new node a copy of an already-synced RocksDB and
+let it fetch only the last few blocks.</p>
+<hr />
+<h2 id="1-findings-the-nodes-own-fast-sync-modes-dont-work-here">1. Findings — the node's own fast-sync modes don't work here</h2>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>Result on GPN</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--sync fast</code> / <code>fast-unsafe</code></td>
+<td>Bursts (~270 blk/s) then <strong>stalls early (~#4097)</strong>. The state proof needs a <strong>finalized</strong> block; GPN has no finality gadget.</td>
+</tr>
+<tr>
+<td><code>--sync warp</code></td>
+<td>Same problem — <strong>requires finality</strong> to build the warp proof.</td>
+</tr>
+<tr>
+<td>default (<code>full</code>)</td>
+<td>Reliable, but re-verifies every Ethash seal from genesis → grows with chain length.</td>
+</tr>
+</tbody>
+</table>
+<p>So the fastest <em>reliable</em> path is to not re-sync at all: copy a synced DB.</p>
+<h2 id="2-recommended-onboarding-db-snapshot">2. Recommended onboarding: <strong>DB snapshot</strong></h2>
+<p><code>gpn_snapshot</code> (in <code>gpn-agent</code>) exports a node's RocksDB plus a <strong>manifest</strong>, and
+imports it into a fresh base-path:</p>
+<pre><code class="language-bash"># 1) capture block metadata while the node is UP (a stopped node has no RPC):
+gpn_snapshot info --rpc http://127.0.0.1:9944 --out meta.json
+
+# 2) export. Two safe options:
+#    a) STOP the node, then:
+gpn_snapshot export --base-path ~/.gpn/node --out gpn-testnet-123670.tar.gz --meta meta.json
+#    b) or snapshot it LIVE with a consistent hot copy (SIGSTOP → copy → SIGCONT):
+gpn_snapshot export --base-path ~/.gpn/node --out gpn-testnet-123670.tar.gz --freeze
+
+# 3) on the NEW machine / fresh dir:
+gpn_snapshot import --snapshot gpn-testnet-123670.tar.gz --base-path /new/node
+gpn-node --chain testnet --base-path /new/node --port 30333 --rpc-port 9944 ...
+</code></pre>
+<p>Wrappers: <code>scripts/gpn-snapshot.sh</code> (Linux) and <code>scripts/gpn-snapshot.ps1</code>
+(Windows). On Windows the flow is identical; only <code>--freeze</code> is Unix-only (stop
+the node first).</p>
+<h3 id="safety-you-must-stop-the-node-or-freeze-it">Safety — you MUST stop the node, or freeze it</h3>
+<p>RocksDB copied while a node is writing to it can be <strong>torn/inconsistent</strong>. The
+tool detects a <code>gpn-node</code> bound to the same <code>--base-path</code> and refuses unless you
+pass:</p>
+<ul>
+<li><strong><code>--freeze</code></strong> — SIGSTOP the node, copy, SIGCONT. This is a <em>consistent</em> hot
+  copy (files can't change while the process is frozen) and — unlike a stop — it
+  <strong>survives a supervisor</strong> (<code>gpn_fleet</code>) that would otherwise restart the node
+  mid-copy. <code>SIGCONT</code> is guaranteed even on error/panic.</li>
+<li><strong><code>--allow-live</code></strong> — a best-effort copy of a running DB. <em>Unsafe</em>; use only as
+  a last resort.</li>
+</ul>
+<p>Because a <strong>stopped</strong> node has no RPC, capture the block metadata <em>before</em>
+stopping (<code>gpn_snapshot info --out meta.json</code>) and pass <code>--meta</code>. <code>export</code> will
+also read RPC directly if one is reachable.</p>
+<h3 id="tradeoffs-trust">Tradeoffs — trust</h3>
+<p>A snapshot is only as trustworthy as its <strong>source</strong>:</p>
+<ul>
+<li>Verify the <strong>genesis hash</strong> in the manifest matches the chain you expect
+  (import prints it).</li>
+<li>For anything security-sensitive, compare a <strong>recent block hash</strong> to an
+  independent node — a snapshot lets you <em>skip work</em>, but it also means you
+  adopt the exporter's view of history.</li>
+<li>The archive carries a <code>sha256</code> in its manifest for <strong>integrity</strong> (detect a
+  corrupt transfer), not <strong>authenticity</strong> (it does not prove who made it).</li>
+</ul>
+<h3 id="measured-this-node-2026-10-12">Measured (this node, 2026-10-12)</h3>
+<table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DB size (<code>chains/gpn_testnet/db/full</code>)</td>
+<td><strong>155 MB</strong></td>
+</tr>
+<tr>
+<td>Snapshot (<code>.tar.zst</code>, recommended)</td>
+<td><strong>~81 MiB</strong>, 71 files, export <strong>~1 s</strong> (<code>zstd</code> binary)</td>
+</tr>
+<tr>
+<td>Snapshot (<code>.tar.gz</code>, pure-Rust fallback)</td>
+<td>~124 MiB, export ~4.5 s</td>
+</tr>
+<tr>
+<td>Import time</td>
+<td>~3–5 s</td>
+</tr>
+<tr>
+<td>New node → tip</td>
+<td>starts at <strong>#123670</strong> (snapshot tip), catches up to head in <strong>~5 s</strong>, then idle-following</td>
+</tr>
+<tr>
+<td>Full re-sync (measured, fast local peer)</td>
+<td><strong>~235 blk/s</strong> → ~9 min for 123,676 blocks (network/CPU-bound; longer over a WAN or on slower hardware)</td>
+</tr>
+</tbody>
+</table>
+<p>Net: onboarding drops from <em>minutes-and-growing</em> (a full re-sync) to <em>seconds</em>
+(the copy + import + the last handful of blocks). For a slower box (e.g. the
+Windows provider) the win is larger, since a full sync there is network-bound.</p>
+<h2 id="3-assume-valid-checkpoint-stretch-design-only-gated">3. Assume-valid checkpoint (stretch) — DESIGN only, gated</h2>
+<p>A Bitcoin <code>assumevalid</code>-style checkpoint would skip the expensive seal
+verification for blocks <em>before</em> a trusted block, while fully verifying from the
+checkpoint forward. This touches block-import verification, so it is
+<strong>review-first</strong> — the design + gated plan live in
+<a href="design-assume-valid-checkpoint.html"><code>design/design-assume-valid-checkpoint.md</code></a>.
+It is <strong>not implemented</strong> (no consensus change without explicit go-ahead).</p>
+<h2 id="4-why-not-just-ship-the-db-in-the-repo">4. Why not just ship the DB in the repo?</h2>
+<p>The DB is ~81–124 MiB compressed and <strong>changes every block</strong> — it would bloat the
+repo and go stale immediately. Publish it out-of-band (an object store / HTTP
+endpoint) and pin the manifest hash; the tool is agnostic to where the file
+lives.</p>
+<h2 id="5-tarzst-vs-targz">5. <code>.tar.zst</code> vs <code>.tar.gz</code></h2>
+<p>Pick the format from the <code>--out</code> extension:</p>
+<ul>
+<li><strong><code>.tar.zst</code></strong> (recommended) — uses the external <code>zstd</code> binary: ~81 MiB and
+  ~1 s (multi-threaded). Needs <code>zstd</code> installed (<code>apt install zstd</code> / <code>choco
+  install zstd</code>).</li>
+<li><strong><code>.tar.gz</code></strong> — pure-Rust (no external tools), so it always works (including
+  the Windows box), at ~124 MiB / ~4.5 s.</li>
+</ul>
+<h2 id="6-snapshot-pruning-mode-matters-export-from-an-archive-db">6. Snapshot pruning mode matters — export from an <strong>archive</strong> DB</h2>
+<p>Substrate <strong>locks the state-pruning mode into the DB at creation</strong>, and a
+snapshot carries that mode with it. The node's legacy default
+<code>--state-pruning 256</code> (+ <code>--blocks-pruning archive-canonical</code>) prunes <em>relative
+to finality</em> — which GPN has none of — so a DB created with it <strong>cannot serve
+state</strong> and will <strong>wedge</strong> (see the "node connected but not syncing" entry in
+<a href="run-a-node.html"><code>run-a-node.md</code></a>).</p>
+<p>So when you export a snapshot, take it from a node that was started with
+<code>--state-pruning archive --blocks-pruning archive</code>:</p>
+<ul>
+<li>importing a <strong>legacy <code>256</code></strong> snapshot and then launching with the (default)
+  <code>archive</code> flags <strong>hard-fails</strong>:
+  <code>Incompatible pruning modes [stored: Constrained { max_blocks: Some(256) };
+  requested: ArchiveAll]</code>;</li>
+<li>importing an <strong><code>archive</code></strong> snapshot and launching with the defaults just works,
+  and the node is stall-proof.</li>
+</ul>
+<blockquote>
+<p><strong>How <code>gpn_node</code> decides.</strong> <code>gpn_snapshot export</code> records the source DB's
+pruning mode in the manifest and <code>gpn_snapshot import</code> re-materialises it as a
+<code>.gpn-pruning-archive</code> marker next to the DB. So an <strong>archive</strong> snapshot
+imported from a <code>gpn_node</code>-managed archive node is correctly marked, and
+<code>gpn_node</code> then applies <code>--state-pruning archive --blocks-pruning archive</code> on
+the imported DB just as it does for a fresh one. A legacy <code>256</code> snapshot is
+left unmarked (and is honestly <em>not</em> what you want — re-export from an archive
+node). If a snapshot's pruning mode is unknown/absent (e.g. from an older
+tool), <code>gpn_node</code> conservatively leaves pruning untouched and logs a warning —
+it never forces <code>archive</code> onto an unknown DB, so it can't crash-loop on
+<code>Incompatible pruning modes</code>. (To force it, set
+<code>GPN_NODE_ARGS="--state-pruning archive --blocks-pruning archive"</code>.)</p>
+</blockquote>
+<p><code>gpn_snapshot export</code> records the <strong>genesis hash</strong>, <strong>best block</strong> and a
+<code>sha256</code> in the manifest, so an importer can check the snapshot is for the right
+chain and the file isn't corrupt. (The pruning mode isn't a manifest field; it's
+determined by how the exporting node was started — so make sure you export from
+an <code>archive</code> node.) Recommended snapshot URLs are listed in
+<a href="downloads.html"><code>downloads.md</code></a>.</p>
+<h2 id="7-recovering-a-wedged-node-windows-provider-box-2">7. Recovering a wedged node (Windows provider, "box #2")</h2>
+<p>A node whose best block is frozen at an old height while peers stay connected
+(the "silent wedge") is fixed by giving it a <strong>fresh, archive</strong> DB and starting
+it with the robust defaults. On a Windows box, one copy-paste PowerShell line
+(adjust <code>$URL</code> to the current snapshot from <code>downloads.md</code>; it downloads from
+the AP at <code>gpn-testnet.duckdns.org:8083</code>, stops every <code>gpn*</code> process, swaps out
+only the <code>chains</code> DB dir — keeping the node identity/keystore — imports the
+fresh <strong>archive</strong> DB, and starts <code>gpn_node</code>):</p>
+<pre><code class="language-powershell">$URL='http://gpn-testnet.duckdns.org:8083/gpn-testnet-snapshot.tar.gz'; $BP=&quot;$env:USERPROFILE\.gpn\node&quot;; Get-Process gpn* -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep 3; Invoke-WebRequest $URL -OutFile &quot;$env:TEMP\gpn-snap.tar.gz&quot;; if (Test-Path &quot;$BP\chains&quot;) { Rename-Item &quot;$BP\chains&quot; &quot;$BP\chains.bak-$(Get-Date -f yyyyMMddHHmmss)&quot; }; New-Item -ItemType Directory -Force -Path &quot;$BP\chains&quot; | Out-Null; &amp; &quot;$env:USERPROFILE\.local\bin\gpn_snapshot.exe&quot; import --snapshot &quot;$env:TEMP\gpn-snap.tar.gz&quot; --base-path $BP --force; &amp; &quot;$env:USERPROFILE\.local\bin\gpn_node.exe&quot;
+</code></pre>
+<p>Only the <code>chains\</code> subdir is swapped, so the node's network identity
+(<code>network/secret_ed25519</code>) and keystore are preserved (a new peer-id would
+otherwise reset its on-chain full-node identity/uptime). <code>gpn_node</code> then
+defaults to <code>--sync full --state-pruning archive --blocks-pruning archive</code> and
+catches up only the last few blocks.</p>
+<blockquote>
+<p><strong>Windows base path.</strong> The deployed <code>C:\gpn\start-node.cmd</code> pins
+<code>GPN_BASE_PATH=C:\gpn\data</code>, so import into <code>C:\gpn\data</code> (not the old
+OS-default <code>%LOCALAPPDATA%\gpn-node.exe\data</code>). <code>gpn_node</code> still auto-detects a
+DB left at the OS-default path and uses it if the pinned path has none, so an
+existing box keeps working; but a <em>fresh</em> archive import should target
+<code>C:\gpn\data</code> for a clean, consistent layout.</p>
+</blockquote>
+<p><strong>If no snapshot is available</strong>, the equivalent manual recovery is to <em>wipe</em> the
+chain dir and let it re-sync from scratch
+(<code>Rename-Item "$BP\chains" "$BP\chains.old"</code> and restart) — slower, but with
+the new defaults it syncs all the way to the tip without stalling.</p>
+    </article>
+    <p class="doc-updated small muted">Last generated 2026-10-19 from the project documentation set.</p>
+  </div>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="foot-grid">
+      <div><a class="brand" href="../index.html" style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a><p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute. <em>A GPU should not have to choose.</em></p></div>
+      <div><h4>Product</h4><a href="../download.html">Download</a><a href="../deploy.html">Deploy</a><a href="../ai.html">Access the AI</a><a href="../access-points.html">Access Points</a></div>
+      <div><h4>Learn</h4><a href="index.html">Docs</a><a href="whitepaper.html">Whitepaper</a><a href="one-pager.html">One-pager</a><a href="technical-overview.html">Technical overview</a></div>
+      <div><h4>Project</h4><a href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">Source on GitHub</a><a href="run-a-node.html">Run a node</a><a href="wallet.html">Wallet</a><a href="../buy.html">Token &amp; purchasing</a></div>
+    </div>
+    <div class="foot-bottom">
+      <p class="small muted">© <span data-year>2026</span> GPN · Public testnet. Not investment advice.</p>
+      <p class="small muted">Testnet only — tokens here have no monetary value.</p>
+    </div>
+  </div>
+</footer>
+
+<script src="../assets/app.js"></script>
+</body>
+</html>

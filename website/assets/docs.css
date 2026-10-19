@@ -1,0 +1,88 @@
+/* ============================================================
+   GPN — docs pages (generated HTML from Markdown)
+   Layered on assets/style.css. Prose-first, same theme vars.
+   ============================================================ */
+
+.doc-main { padding: 42px 0 72px; }
+.doc-wrap { max-width: 880px; }
+
+.crumbs { font-size: .82rem; color: var(--muted-2); margin-bottom: 22px; }
+.crumbs a { color: var(--muted); }
+.crumbs span { color: var(--text); }
+
+.doc-notice {
+  border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--line));
+  background: color-mix(in srgb, var(--amber) 12%, var(--panel));
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  margin: 0 0 26px;
+  font-size: .92rem;
+  color: var(--text);
+}
+.doc-notice a { color: var(--accent-2); }
+
+.prose { font-size: 1rem; line-height: 1.72; }
+.prose h1 { font-size: clamp(1.8rem, 1.3rem + 2vw, 2.6rem); margin: 0 0 18px; }
+.prose h2 {
+  font-size: clamp(1.3rem, 1.05rem + 1vw, 1.7rem);
+  margin: 42px 0 12px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line-soft);
+}
+.prose h3 { font-size: 1.12rem; margin: 28px 0 8px; color: var(--text); }
+.prose h4 { font-size: 1rem; margin: 22px 0 6px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+.prose p { margin: 0 0 14px; }
+.prose ul, .prose ol { margin: 0 0 16px; padding-left: 22px; }
+.prose li { margin: 4px 0; }
+.prose li > p { margin-bottom: 6px; }
+.prose a { color: var(--accent-2); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent-2) 40%, transparent); }
+.prose a:hover { text-decoration-color: currentColor; }
+.prose hr { border: 0; border-top: 1px solid var(--line); margin: 34px 0; }
+
+.prose blockquote {
+  margin: 20px 0;
+  padding: 12px 18px;
+  border-left: 4px solid var(--accent);
+  background: var(--panel);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  color: var(--text);
+}
+.prose blockquote p:last-child { margin-bottom: 0; }
+
+.prose pre {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  overflow-x: auto;
+  font-size: .86rem;
+  line-height: 1.55;
+}
+.prose pre code { background: none; border: 0; padding: 0; font-size: inherit; }
+
+.prose table { width: 100%; border-collapse: collapse; margin: 18px 0 22px; font-size: .9rem; display: block; overflow-x: auto; }
+.prose th, .prose td { border: 1px solid var(--line); padding: 8px 11px; text-align: left; vertical-align: top; }
+.prose th { background: var(--panel); font-weight: 700; white-space: nowrap; }
+
+.prose img { max-width: 100%; height: auto; border-radius: var(--radius-sm); }
+
+.doc-updated { margin-top: 44px; padding-top: 16px; border-top: 1px solid var(--line-soft); }
+
+/* Docs hub */
+.doc-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin: 26px 0 8px; }
+.doc-card {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 18px 18px 16px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
+}
+.doc-card:hover { border-color: var(--accent); text-decoration: none; transform: translateY(-2px); transition: .15s ease; }
+.doc-card b { font-size: 1.02rem; }
+.doc-card span { color: var(--muted); font-size: .9rem; line-height: 1.5; }
+
+@media (max-width: 640px) {
+  .doc-main { padding-top: 26px; }
+  .prose { font-size: .97rem; }
+}

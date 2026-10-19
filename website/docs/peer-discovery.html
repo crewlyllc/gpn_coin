@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Peer discovery — GPN docs</title>
+<meta name="description" content="How a GPN node finds peers: static bootnodes, seed lists, DNS seeds and the security model." />
+<meta name="theme-color" content="#07090f" />
+<link rel="canonical" href="https://gpncoin.ai/docs/peer-discovery.html" />
+<meta property="og:site_name" content="GPN" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://gpncoin.ai/docs/peer-discovery.html" />
+<meta property="og:title" content="Peer discovery — GPN docs" />
+<meta property="og:description" content="How a GPN node finds peers: static bootnodes, seed lists, DNS seeds and the security model." />
+<meta name="twitter:card" content="summary" />
+<meta name="twitter:title" content="Peer discovery — GPN docs" />
+<meta name="twitter:description" content="How a GPN node finds peers: static bootnodes, seed lists, DNS seeds and the security model." />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237c6cff'/%3E%3Ctext x='16' y='22' font-size='16' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%2307090f'%3EG%3C/text%3E%3C/svg%3E" />
+<link rel="stylesheet" href="../assets/style.css" />
+<link rel="stylesheet" href="../assets/docs.css" />
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap nav">
+    <a class="brand" href="../index.html" aria-label="GPN home"><span class="dot" aria-hidden="true">G</span><span>GPN<br><small>GPU-NATIVE NETWORK</small></span></a>
+    <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Toggle navigation">☰</button>
+    <nav class="nav-links" id="nav-links" aria-label="Primary">
+      <a href="../index.html">Home</a>
+      <a href="../download.html">Download</a>
+      <a href="../deploy.html">Deploy</a>
+      <a href="../ai.html">AI</a>
+      <a href="../access-points.html">Access Points</a>
+      <a href="../buy.html">Buy GPN</a>
+      <a href="index.html" aria-current="page">Docs</a>
+    </nav>
+    <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
+  </div>
+</header>
+
+<main id="main" class="doc-main">
+  <div class="wrap doc-wrap">
+    <nav class="crumbs" aria-label="Breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Docs</a> / <span>Peer discovery</span></nav>
+    <article class="prose">
+<h1>GPN Peer Discovery</h1>
+<p>How a GPN node finds peers at startup — Bitcoin-style. This documents the seed
+sources, the seed-list wire format, how to host a seed, and the security model.</p>
+<p>Historically a GPN node had exactly one way to find peers: a static
+<code>--bootnodes &lt;multiaddr&gt;</code> passed on the command line (or baked into the chain
+spec). That is a single point of failure. Discovery now layers four independent
+sources on top of it.</p>
+<blockquote>
+<p>Implementation: <code>gpn-node/node/src/discovery.rs</code> (parsing / DNS / HTTP /
+persistence) and <code>gpn-node/node/src/service.rs</code> (<code>prepare_network_config</code>,
+the persistent-peer-store task and the on-chain discovery task).</p>
+</blockquote>
+<h2 id="sources-all-merged-deduplicated-best-effort">Sources (all merged, deduplicated, best-effort)</h2>
+<p>At startup the effective bootnode set is the <strong>union</strong> of:</p>
+<ol>
+<li><strong>Static bootnodes</strong> — <code>--bootnodes &lt;multiaddr&gt;</code> / chain-spec bootnodes /
+   the compiled-in <code>network.json</code> bootnodes. Kept first as the hard fallback.</li>
+<li><strong>Persistent peer store (addrman)</strong> — <code>&lt;base-path&gt;/gpn-peers.json</code>. The node
+   periodically snapshots the addresses of peers it is <em>connected to</em> and
+   re-dials them on the next start.</li>
+<li><strong>DNS seed</strong> — <code>--bootnodes-dns &lt;name&gt;</code> (repeatable).</li>
+<li><strong>HTTP seed list</strong> — <code>--bootnodes-url &lt;url&gt;</code> (repeatable).</li>
+</ol>
+<p>Sources are resolved independently. <strong>A source that is unreachable, malformed or
+slow is logged and skipped — it never aborts startup.</strong> Only entries that parse
+as a dialable libp2p multiaddress (i.e. end in <code>/p2p/&lt;peer-id&gt;</code>) survive the
+merge.</p>
+<h3 id="cli-flags">CLI flags</h3>
+<pre><code>--bootnodes &lt;MULTIADDR&gt;...        # static (pre-existing), e.g. the hardcoded fallback
+--bootnodes-dns &lt;NAME&gt;...         # resolve NAME's DNS TXT records as seeds
+--bootnodes-url &lt;URL&gt;...          # fetch a published seed-list JSON
+</code></pre>
+<h3 id="on-chain-discovery-gpn-native-top-up">On-chain discovery (GPN-native top-up)</h3>
+<p>Once the node has at least one connection, a background task reads two on-chain
+registries via the node's own chain client and dials the endpoints it finds:</p>
+<ul>
+<li><code>Liveness::Endpoints</code> — the endpoint each registered full node declared
+  (<code>gpn-liveness::register_fullnode</code>), and</li>
+<li><code>ComputeMarketplace::ProviderEndpoints</code> — the endpoint each registered
+  compute provider published.</li>
+</ul>
+<p>Each endpoint is converted to a multiaddress (a libp2p multiaddr is used as-is;
+an <code>http(s)://host:port</code>, <code>ws(s)://…</code> or bare <code>host:port</code> becomes
+<code>/dns4|ip4|ip6/…/tcp/&lt;port&gt;</code>). Only endpoints that carry a peer id are dialable,
+so provider HTTP endpoints (which have none) are recorded but not dialed —
+best-effort by design. This runs after bootstrap deliberately: a brand-new node
+with zero peers has no way to trust on-chain data yet, so it must first reach
+the network through a static / DNS / URL / persisted peer, then top up. Startup
+is never blocked on it.</p>
+<h2 id="seed-list-wire-format">Seed-list wire format</h2>
+<p>A seed source yields a list of libp2p multiaddresses, each carrying the peer id
+in a trailing <code>/p2p/&lt;peer-id&gt;</code> component. JSON payloads may be <strong>either</strong> an
+object with a <code>multiaddrs</code> array:</p>
+<pre><code class="language-json">{
+  &quot;multiaddrs&quot;: [
+    &quot;/dns4/node1.example.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo&quot;,
+    &quot;/ip4/203.0.113.7/tcp/30334/p2p/12D3KooW9ye8kXwMYT4vBJoJdCkM9VfRrcM7nGgqVDPq3Fy8i6xw&quot;
+  ]
+}
+</code></pre>
+<p><strong>or</strong> a plain array:</p>
+<pre><code class="language-json">[&quot;/dns4/node1.example.org/tcp/30333/p2p/12D3Koo…&quot;, &quot;/ip4/203.0.113.7/tcp/30334/p2p/12D3Koo…&quot;]
+</code></pre>
+<p>Non-JSON bodies (and each DNS <strong>TXT</strong> record) are also accepted as
+newline-separated multiaddr strings — one multiaddr per line; blank lines and
+<code>#</code> comments are ignored:</p>
+<pre><code># GPN seed list — example.org
+/dns4/node1.example.org/tcp/30333/p2p/12D3KooWAFt…
+/ip4/203.0.113.7/tcp/30334/p2p/12D3KooW9ye…
+</code></pre>
+<p>The peer id after <code>/p2p/</code> is what lets a client dial safely: it is verified
+during the libp2p handshake, so a wrong or malicious address simply fails to
+connect — it cannot impersonate a node.</p>
+<p>The <strong>persistent peer store</strong> (<code>gpn-peers.json</code>) uses the same object form, so it
+is itself a valid seed source you can inspect, copy or hand to another node.</p>
+<h2 id="hosting-a-seed">Hosting a seed</h2>
+<p>Any HTTP host works (static file, object store, small service):</p>
+<ol>
+<li>Publish the JSON at a stable URL, e.g. <code>https://seeds.example.org/gpn.json</code>.</li>
+<li>Ensure it is reachable from the machines that run GPN nodes.</li>
+<li>Operators add it with <code>--bootnodes-url https://seeds.example.org/gpn.json</code>.</li>
+</ol>
+<p>A <strong>DNS seed</strong> is a hostname whose <strong>TXT records</strong> contain seed lists:</p>
+<pre><code>$ dig +short TXT seed.example.org
+&quot;\&quot;/ip4/203.0.113.7/tcp/30333/p2p/12D3KooW9ye…\&quot;&quot;
+</code></pre>
+<p>Regenerate it from your node inventory whenever peers change (a DNS provider
+with an API, or a tiny cron job, both work).</p>
+<blockquote>
+<p><strong>Note on TLS:</strong> the node currently ships an HTTP-only seed client
+(<code>attohttpc</code> without a TLS stack) to avoid pulling a TLS implementation into
+every node. <code>https://</code> seed URLs therefore fail with a clear, non-fatal log
+message. Prefer a plain <code>http://</code> seed reachable by the node, or a local
+reverse proxy. (This is a deliberate, easily-reversible build decision.)</p>
+</blockquote>
+<h2 id="security-model">Security model</h2>
+<ul>
+<li><strong>Run several independent seeds.</strong> A single DNS seed or a single seed URL is a
+  centralization <em>and</em> censorship point: whoever controls it can eclipse the
+  node from the network. Operate at least two independent DNS seeds and two
+  independent HTTP seed sources, ideally on separate infrastructure/providers.</li>
+<li><strong>Keep the compiled-in bootnode as the hardcoded fallback.</strong> Pass it via
+  <code>--bootnodes</code> (or bake it into <code>network.json</code>); never rely solely on remote
+  seeds.</li>
+<li><strong>Peer identity is content-addressed.</strong> Because every seed entry ends in
+  <code>/p2p/&lt;peer-id&gt;</code> and libp2p verifies that id during the handshake, an attacker
+  who tampers with a seed list cannot impersonate an existing node — they can at
+  worst redirect you to nodes they control, which is why several independent
+  seeds matter.</li>
+<li><strong>Seed list poisoning is limited.</strong> Invalid entries are dropped; duplicate
+  entries are deduplicated; the effective set is bounded by the persisted-store
+  cap.</li>
+<li><strong>Genesis still rules.</strong> Discovery does not change the network identity model:
+  a node is on a network iff its genesis matches. Connecting to a peer on a
+  different network is harmless (it is rejected during the handshake).</li>
+</ul>
+    </article>
+    <p class="doc-updated small muted">Last generated 2026-10-19 from the project documentation set.</p>
+  </div>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="foot-grid">
+      <div><a class="brand" href="../index.html" style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a><p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute. <em>A GPU should not have to choose.</em></p></div>
+      <div><h4>Product</h4><a href="../download.html">Download</a><a href="../deploy.html">Deploy</a><a href="../ai.html">Access the AI</a><a href="../access-points.html">Access Points</a></div>
+      <div><h4>Learn</h4><a href="index.html">Docs</a><a href="whitepaper.html">Whitepaper</a><a href="one-pager.html">One-pager</a><a href="technical-overview.html">Technical overview</a></div>
+      <div><h4>Project</h4><a href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">Source on GitHub</a><a href="run-a-node.html">Run a node</a><a href="wallet.html">Wallet</a><a href="../buy.html">Token &amp; purchasing</a></div>
+    </div>
+    <div class="foot-bottom">
+      <p class="small muted">© <span data-year>2026</span> GPN · Public testnet. Not investment advice.</p>
+      <p class="small muted">Testnet only — tokens here have no monetary value.</p>
+    </div>
+  </div>
+</footer>
+
+<script src="../assets/app.js"></script>
+</body>
+</html>

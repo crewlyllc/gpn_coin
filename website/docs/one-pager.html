@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>One-pager — GPN docs</title>
+<meta name="description" content="GPN in one page: the problem, the fix, how it works, and the token." />
+<meta name="theme-color" content="#07090f" />
+<link rel="canonical" href="https://gpncoin.ai/docs/one-pager.html" />
+<meta property="og:site_name" content="GPN" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://gpncoin.ai/docs/one-pager.html" />
+<meta property="og:title" content="One-pager — GPN docs" />
+<meta property="og:description" content="GPN in one page: the problem, the fix, how it works, and the token." />
+<meta name="twitter:card" content="summary" />
+<meta name="twitter:title" content="One-pager — GPN docs" />
+<meta name="twitter:description" content="GPN in one page: the problem, the fix, how it works, and the token." />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237c6cff'/%3E%3Ctext x='16' y='22' font-size='16' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%2307090f'%3EG%3C/text%3E%3C/svg%3E" />
+<link rel="stylesheet" href="../assets/style.css" />
+<link rel="stylesheet" href="../assets/docs.css" />
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap nav">
+    <a class="brand" href="../index.html" aria-label="GPN home"><span class="dot" aria-hidden="true">G</span><span>GPN<br><small>GPU-NATIVE NETWORK</small></span></a>
+    <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Toggle navigation">☰</button>
+    <nav class="nav-links" id="nav-links" aria-label="Primary">
+      <a href="../index.html">Home</a>
+      <a href="../download.html">Download</a>
+      <a href="../deploy.html">Deploy</a>
+      <a href="../ai.html">AI</a>
+      <a href="../access-points.html">Access Points</a>
+      <a href="../buy.html">Buy GPN</a>
+      <a href="index.html" aria-current="page">Docs</a>
+    </nav>
+    <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
+  </div>
+</header>
+
+<main id="main" class="doc-main">
+  <div class="wrap doc-wrap">
+    <nav class="crumbs" aria-label="Breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Docs</a> / <span>One-pager</span></nav>
+    <article class="prose">
+<h1>GPN — One-Pager</h1>
+<p><strong>What it is.</strong> GPN is a <strong>GPU-native network</strong> where every node is <strong>both a miner and an AI provider</strong>. One install, one card: mining runs whenever the GPU is free, and an AI job pre-empts it, runs on the whole GPU, then hands it back.</p>
+<p><strong>The problem.</strong> A GPU owner has two ways to earn — mine a coin, or rent the card for AI work — and must <strong>pick one</strong>. Mine and the coin dips → you lose. Rent and nobody books you → $0. The card can't move to where the money is.</p>
+<p><strong>The fix.</strong> GPN removes the choice: the node mines by default and <strong>yields the GPU to each AI job</strong>, so the same card earns from both markets. The chain does coordination + escrow + settlement; the heavy compute runs off-chain.</p>
+<hr />
+<p><strong>How it works</strong>
+- <strong>Mining</strong> — GPU proof-of-work; the node that produces a block <strong>keeps that block's reward</strong> (Bitcoin-style).
+- <strong>Serving AI</strong> — LLM inference, image/video generation, ML inference, fine-tuning — priced <strong>per token</strong> against real cost, escrowed trust-minimally.
+- <strong>The switch</strong> — per job, not per market cycle: an incoming job pauses mining, frees VRAM, runs on the whole GPU, then mining resumes. One GPU runs exactly one job at a time.
+- <strong>Routing</strong> — buyers hit one endpoint; the network picks the <strong>lowest-latency, least-loaded</strong> verified GPU. Providers are discovered <strong>on-chain</strong>.</p>
+<p><strong>Why it's different</strong>
+- <strong>Both markets, one machine</strong> — no incumbent (NiceHash, Vast, RunPod, Render, Akash, io.net) is both a native PoW miner and an AI marketplace on the same card.
+- <strong>Trust-minimal</strong> — on-chain escrow, optional <strong>payment channels</strong> (no per-job block delay), opaque/private on-chain values.
+- <strong>GPU-only, verifiably</strong> — proof-of-work + hardware attestation + a compute challenge; a CPU/iGPU can't earn.</p>
+<p><strong>Token (GPN)</strong>
+- <strong>Fair launch via mining</strong> — no ICO, no premine. 12 decimals.
+- <strong>Halving every ~2 years</strong> (4,204,800 blocks); block reward 50 GPN @ 15 s.
+- <strong>Disclosed, vested treasury</strong> (100 M over 10 yr, 13-of-25 governance).
+- <strong>Token value derives from real AI-compute demand</strong> — not just mining inflation.</p>
+<p><strong>Privacy.</strong> A shielded pool supports private transfers and withdrawals (zero-knowledge spends; nullifier-based double-spend protection).</p>
+<p><strong>Where it is.</strong> Live on a public testnet: PoW chain, per-node rewards, the full AI marketplace (LLM/image/video/ML/fine-tune), payment channels, shielded spends, on-chain provider discovery, peer discovery, committee governance. Next: the public CRS ceremony, mainnet, and a cross-chain bridge.</p>
+<p><strong>One line:</strong> <em>A GPU should not have to choose.</em></p>
+<p><code>gpncoin.ai</code> · whitepaper + docs at https://gpncoin.ai/docs/</p>
+    </article>
+    <p class="doc-updated small muted">Last generated 2026-10-19 from the project documentation set.</p>
+  </div>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="foot-grid">
+      <div><a class="brand" href="../index.html" style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a><p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute. <em>A GPU should not have to choose.</em></p></div>
+      <div><h4>Product</h4><a href="../download.html">Download</a><a href="../deploy.html">Deploy</a><a href="../ai.html">Access the AI</a><a href="../access-points.html">Access Points</a></div>
+      <div><h4>Learn</h4><a href="index.html">Docs</a><a href="whitepaper.html">Whitepaper</a><a href="one-pager.html">One-pager</a><a href="technical-overview.html">Technical overview</a></div>
+      <div><h4>Project</h4><a href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">Source on GitHub</a><a href="run-a-node.html">Run a node</a><a href="wallet.html">Wallet</a><a href="../buy.html">Token &amp; purchasing</a></div>
+    </div>
+    <div class="foot-bottom">
+      <p class="small muted">© <span data-year>2026</span> GPN · Public testnet. Not investment advice.</p>
+      <p class="small muted">Testnet only — tokens here have no monetary value.</p>
+    </div>
+  </div>
+</footer>
+
+<script src="../assets/app.js"></script>
+</body>
+</html>

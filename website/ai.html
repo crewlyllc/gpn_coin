@@ -6,6 +6,17 @@
 <title>Access the AI — GPN compute, live access node</title>
 <meta name="description" content="Use the GPN AI marketplace: an OpenAI-compatible chat API plus an image/video/fine-tune job API, priced per token in GPN. Try it live against a public testnet access point." />
 <meta name="theme-color" content="#07090f" />
+<link rel="canonical" href="https://gpncoin.ai/ai.html" />
+<meta property="og:site_name" content="GPN" />
+<meta property="og:url" content="https://gpncoin.ai/ai.html" />
+<meta property="og:image" content="https://gpncoin.ai/assets/og.png" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:image" content="https://gpncoin.ai/assets/og.png" />
+<meta property="og:title" content="Access the AI — GPN compute marketplace" />
+<meta property="og:description" content="OpenAI-compatible chat plus an image/video/fine-tune job API, routed to idle GPUs and settled in GPN." />
+<meta property="og:type" content="article" />
+<meta name="twitter:title" content="Access the AI — GPN compute marketplace" />
+<meta name="twitter:description" content="OpenAI-compatible chat plus an image/video/fine-tune job API, routed to idle GPUs and settled in GPN." />
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237c6cff'/%3E%3Ctext x='16' y='22' font-size='16' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%2307090f'%3EG%3C/text%3E%3C/svg%3E" />
 <link rel="stylesheet" href="assets/style.css" />
 </head>
@@ -23,7 +34,7 @@
       <a href="ai.html" aria-current="page">AI</a>
       <a href="access-points.html">Access Points</a>
       <a href="buy.html">Buy GPN</a>
-      <a href="../GPN-WHITEPAPER.html">Whitepaper</a>
+      <a href="docs/index.html">Docs</a>
     </nav>
     <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
   </div>
@@ -47,6 +58,14 @@
       <h2>Try it now</h2>
       <p class="sub">This widget POSTs a chat request straight to a public testnet access point from your
         browser. It defaults to the current network entry point — change it if you run your own.</p>
+
+      <div class="callout warn">
+        <span class="ct">On gpncoin.ai this widget will be blocked</span>
+        <p class="mb-0">The public testnet access point speaks plain <code>http://</code> on port 8092, and a
+          page served over <code>https://</code> cannot call it (mixed content). Use the
+          <a href="#curl"><code>curl</code> example</a> below from your machine, or run this site locally over
+          <code>http://</code>. An HTTPS access point is on the roadmap.</p>
+      </div>
 
       <div class="grid cols-2">
         <form class="card" id="try-form" autocomplete="off">
@@ -149,7 +168,7 @@ GET /job/{id}/artifact   # PNG / MP4 / adapter</code></pre>
         </div>
       </div>
 
-      <div class="field" style="margin-top:20px">
+      <div class="field" id="curl" style="margin-top:20px">
         <label for="curl-chat">Copy-paste: chat with the live access point</label>
         <pre id="curl-chat"><code>curl http://gpn-testnet.duckdns.org:8092/v1/chat/completions \
   -H 'Content-Type: application/json' \
@@ -264,8 +283,8 @@ GET /job/{id}/artifact   # PNG / MP4 / adapter</code></pre>
     <div class="foot-grid">
       <div><a class="brand" href="index.html" style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a><p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute. <em>A GPU should not have to choose.</em></p></div>
       <div><h4>Product</h4><a href="download.html">Download</a><a href="deploy.html">Deploy</a><a href="ai.html">Access the AI</a><a href="access-points.html">Access Points</a></div>
-      <div><h4>Learn</h4><a href="../GPN-WHITEPAPER.html">Whitepaper</a><a href="../GPN-ONE-PAGER.md">One-pager</a><a href="../GPN-TECHNICAL-OVERVIEW.md">Technical overview</a><a href="buy.html">Token &amp; purchasing</a></div>
-      <div><h4>Project</h4><a href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">Source on GitHub</a><a href="../USE-GPN.md">Usage guide</a><a href="../linux-install-guide.md">Linux install guide</a><a href="../windows-client-test.md">Windows guide</a></div>
+      <div><h4>Learn</h4><a href="docs/index.html">Documentation</a><a href="docs/whitepaper.html">Whitepaper</a><a href="docs/one-pager.html">One-pager</a><a href="docs/technical-overview.html">Technical overview</a></div>
+      <div><h4>Project</h4><a href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">Source on GitHub</a><a href="docs/run-a-node.html">Run a node</a><a href="docs/downloads.html">Releases</a><a href="docs/wallet.html">Wallet</a></div>
     </div>
     <div class="foot-bottom">
       <p class="small muted">© <span data-year>2026</span> GPN · Public testnet. Not investment advice.</p>

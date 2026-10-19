@@ -3,9 +3,10 @@
 *A short, site-friendly technical summary. See `GPN-WHITEPAPER.md` for the full paper.*
 
 ## The model
-A GPN node is **one entity** — one GPU, one identity/wallet — in **one of three modes at a time**:
-**Mining** (hash blocks → minted GPN), **Compute** (serve AI jobs → escrow GPN), or *(later)* **Staking**.
-It **auto-switches** based on a USD/hr comparison of the modes (~5% hysteresis, no thrashing).
+A GPN node is **one entity** — one GPU, one identity/wallet — that is **always both a miner and an AI
+provider**. It mines whenever the GPU is free; when a job arrives it **pauses mining, frees VRAM, runs the
+job to completion, then resumes mining**. There is no provider-only or mine-only mode, and no profitability
+switch. *(A separate **Staking** role is planned.)*
 
 > **"One GPU, one job" note:** "one job at a time" is **mutual exclusion** — the GPU never runs two
 > jobs concurrently — and is **NOT** a restriction on job *types*. Every node is equipped by design to

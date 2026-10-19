@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Whitepaper — GPN docs</title>
+<meta name="description" content="GPN whitepaper v0.9 (draft): a GPU-native network for mining and AI compute." />
+<meta name="theme-color" content="#07090f" />
+<link rel="canonical" href="https://gpncoin.ai/docs/whitepaper.html" />
+<meta property="og:site_name" content="GPN" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://gpncoin.ai/docs/whitepaper.html" />
+<meta property="og:title" content="Whitepaper — GPN docs" />
+<meta property="og:description" content="GPN whitepaper v0.9 (draft): a GPU-native network for mining and AI compute." />
+<meta name="twitter:card" content="summary" />
+<meta name="twitter:title" content="Whitepaper — GPN docs" />
+<meta name="twitter:description" content="GPN whitepaper v0.9 (draft): a GPU-native network for mining and AI compute." />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237c6cff'/%3E%3Ctext x='16' y='22' font-size='16' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%2307090f'%3EG%3C/text%3E%3C/svg%3E" />
+<link rel="stylesheet" href="../assets/style.css" />
+<link rel="stylesheet" href="../assets/docs.css" />
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap nav">
+    <a class="brand" href="../index.html" aria-label="GPN home"><span class="dot" aria-hidden="true">G</span><span>GPN<br><small>GPU-NATIVE NETWORK</small></span></a>
+    <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Toggle navigation">☰</button>
+    <nav class="nav-links" id="nav-links" aria-label="Primary">
+      <a href="../index.html">Home</a>
+      <a href="../download.html">Download</a>
+      <a href="../deploy.html">Deploy</a>
+      <a href="../ai.html">AI</a>
+      <a href="../access-points.html">Access Points</a>
+      <a href="../buy.html">Buy GPN</a>
+      <a href="index.html" aria-current="page">Docs</a>
+    </nav>
+    <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
+  </div>
+</header>
+
+<main id="main" class="doc-main">
+  <div class="wrap doc-wrap">
+    <nav class="crumbs" aria-label="Breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Docs</a> / <span>Whitepaper</span></nav>
+    <div class="doc-notice" role="note">Whitepaper v0.9 is a draft. Section 3 still describes the earlier mined-or-served three-mode model; today a node is always miner + AI provider. See <a href='run-a-node.html'>Run a node</a> for current behavior.</div>
+<article class="prose">
+<h1>GPN — A GPU-Native Network for Mining and AI Compute</h1>
+<p><strong>Whitepaper v0.9 (draft)</strong> · GPN Network · 2026-10-09</p>
+<hr />
+<h2 id="abstract">Abstract</h2>
+<p>GPN is a <strong>GPU-native blockchain network</strong> that turns a single GPU into an earning machine two ways: it can <strong>mine</strong> the network's proof-of-work token, or it can <strong>serve AI compute</strong> to paying users — and it <strong>auto-switches</strong> between the two based on which pays more. Unlike GPU rental markets and mining pools, which force an owner to pick one and lock into it, GPN watches both markets continuously and moves the GPU to the more profitable one.</p>
+<p>The chain does <strong>coordination, escrow, and settlement</strong>; the heavy compute runs <strong>off-chain</strong>. Rewards are <strong>Bitcoin-style</strong>: the node that produces a block keeps that block's reward. Eligibility is <strong>GPU-only</strong>, enforced by proof-of-work and hardware attestation. AI jobs are priced per token against a cost-derived rate, escrowed on-chain (optionally off-chain via payment channels for zero block delay), and routed to the <strong>nearest, least-loaded</strong> verified provider.</p>
+<p>GPN's thesis: the durable value of a commodity GPU is not mining, but <strong>serving real AI demand</strong> — and a network that lets every GPU do both, without friction, captures more of that value than either market alone.</p>
+<hr />
+<h2 id="1-introduction">1. Introduction</h2>
+<h3 id="11-the-problem">1.1 The problem</h3>
+<p>Owning a GPU presents two ways to earn, and they have always been <strong>different products</strong>:</p>
+<ol>
+<li><strong>Mine</strong> a proof-of-work coin — you're paid whatever the coin is worth today.</li>
+<li><strong>Rent</strong> the GPU for AI work (inference, image/video generation, fine-tuning) — you're paid whatever compute is worth today.</li>
+</ol>
+<p>The catch: <strong>you have to pick one.</strong> Point the card at mining, and if the coin dips you mine at a loss. List it on a compute marketplace, and if nobody rents it, it earns $0. The GPU can't see that "the other side is paying more right now" and move.</p>
+<p>Meanwhile, AI compute is expensive and concentrated: buyers pay hyperscaler prices, and consumer GPUs (the cheapest compute on earth, ~$0.14–0.34/hr on spot markets) sit idle.</p>
+<h3 id="12-the-idea">1.2 The idea</h3>
+<p><strong>Don't make the owner pick.</strong> GPN is a network where each GPU <strong>mines <em>or</em> serves AI</strong>, <strong>auto-switching</strong> to whichever earns more, and where AI buyers get a single, simple interface that routes their work to that same pool of GPUs — coordinated and settled by a blockchain that no single party controls.</p>
+<hr />
+<h2 id="2-system-overview">2. System Overview</h2>
+<p>A GPN node is <strong>one entity</strong> — one identity, one wallet, one GPU — that operates in <strong>one of three modes</strong> at a time:</p>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>What the GPU does</th>
+<th>Earns</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Mining</strong></td>
+<td>Hashes GPN blocks (Ethash-derived GPU PoW)</td>
+<td>Newly-minted GPN (block reward)</td>
+</tr>
+<tr>
+<td><strong>Compute</strong></td>
+<td>Serves AI jobs (LLM, image/video, fine-tune)</td>
+<td>GPN from job escrow (paid by requestors)</td>
+</tr>
+<tr>
+<td><strong>Staking</strong></td>
+<td><em>(later)</em> staked-provider rewards</td>
+<td>Staking APR</td>
+</tr>
+</tbody>
+</table>
+<p>At launch the practical switch is <strong>Mining ⇄ Compute</strong>.</p>
+<p><strong>The switch is a decision, not a guess.</strong> Every cycle the node estimates each mode's revenue in <strong>USD/hr</strong> — using an on-chain oracle feed of token price, GPU-hour rental price, utilization, and staking APR — and switches <strong>only when the other mode beats the current one by a hysteresis margin (~5%)</strong>, so the GPU doesn't thrash on tiny price crossings. A switch is a real <strong>stop/start of GPU work</strong>: entering Compute stops the miner and frees VRAM before the model loads.</p>
+<p><strong>The chain is thin and trust-minimal.</strong> It holds the job lifecycle, escrow, and payouts, enforces capability and eligibility gates, and settles rewards. The compute — inference, generation, training — <strong>never touches the chain</strong>.</p>
+<hr />
+<h2 id="3-consensus-and-mining">3. Consensus and Mining</h2>
+<ul>
+<li><strong>Proof-of-work.</strong> GPN uses a memory-hard, Ethash-derived PoW. Anyone can mine; there is <strong>no permissioned validator set</strong>. A node produces blocks by finding a valid seal; the network's consensus verifies it.</li>
+<li><strong>GPU-only by construction.</strong> PoW difficulty is tuned to a target block time; at network difficulty a general-purpose CPU cannot competitively produce blocks, so mining is effectively GPU-only. A <strong>minimum-GPU capability gate</strong> (discrete GPU, or ≥ a measured-TFLOPS floor) makes this explicit for eligibility.</li>
+<li><strong>Block time: 15 s.</strong> Chosen to keep a Bitcoin-like cadence and a ~2-year halving. (The network briefly ran at 4 s to speed up <em>block-bound AI coordination</em>; once AI escrow moved off-chain, 4 s bought nothing, so the original 15 s cadence was restored.)</li>
+<li><strong>Self-tuning difficulty.</strong> A single global difficulty target retargets toward the target block time using <strong>millisecond-resolution</strong> timing (so it can harden even at sub-second block rates — no runaway for a fast miner).</li>
+<li><strong>Bitcoin-style rewards.</strong> The <strong>block producer keeps that block's reward</strong> — a coinbase model. The producer's account is bound to the block via a <strong>pre-runtime digest</strong>, so the reward is deterministic at execution. There is no separate claim and no shared beneficiary.</li>
+<li><strong>Per-node wallets.</strong> Each node mines with its <strong>own</strong> key; its own account is its payout address. Two miners on one chain each grow their own balance.</li>
+<li><strong>Fork tolerance.</strong> Identity is explicit: <strong>(chain-id, genesis hash, runtime version)</strong>. An incompatible node fails to peer; a divergent network is <strong>warned about loudly and starved of value</strong>, never banned (banning would break legitimate private chains).</li>
+</ul>
+<hr />
+<h2 id="4-eligibility-attestation-staking-and-liveness">4. Eligibility: Attestation, Staking, and Liveness</h2>
+<p>Earning requires proving you are a <strong>real GPU</strong> — not spoofable, and not a CPU/APU.</p>
+<ul>
+<li><strong>Proof-of-Staked-GPU (PoSG).</strong> An operator <strong>attests</strong> a GPU (count + measured GFLOPS) and, historically, posted a <strong>stake</strong> (1,000 GPN). Attestation carries a <strong>tier</strong> (Bronze/Silver/Gold) and a <strong>reward multiplier</strong> (1.0× / 1.5× / 2.5×) — i.e., <strong>staking increases your reward</strong>.</li>
+<li><strong>Stake-free eligibility, verified by work.</strong> The mandatory stake was removed. A miner becomes pay-eligible by <strong>producing blocks</strong>: a seal-verified block <em>is</em> proof of real GPU work (the node verifies the Ethash seal on import), so after a small number of authored blocks the producer is paid directly. Staking remains <strong>optional</strong> — a lever that raises your tier and your reward share, not a gate.</li>
+<li><strong>Capability gates.</strong> Jobs carry requirements — <code>min_gflops</code>, <code>min_vram_mb</code>, <code>min_ram_mb</code> — and the scheduler <strong>will not route</strong> a job to a provider that can't meet them (so a video job only goes to a big-VRAM card).</li>
+<li><strong>Capacity challenge (proof, not claim).</strong> Because GFLOPS is self-reported, a random <strong>compute challenge</strong> lets a verifier confirm the device actually delivers the throughput it claims, gating high tiers on <em>proven</em> compute.</li>
+<li><strong>Self-organizing full-node layer.</strong> A <strong>liveness</strong> pallet rewards always-on, publicly-reachable full nodes (peer-witnessed uptime) and gates top tiers behind being one — so the network's bootnode/reachability layer emerges organically rather than depending on a founder.</li>
+</ul>
+<hr />
+<h2 id="5-the-ai-compute-marketplace">5. The AI Compute Marketplace</h2>
+<h3 id="51-jobs-and-escrow">5.1 Jobs and escrow</h3>
+<p>A requestor submits a job; the chain runs it through a lifecycle:
+<code>Pending → Accepted → Running → AwaitingVerification → Completed</code> (+ <code>Cancelled</code>, <code>Failed</code>).
+Payment is <strong>per token</strong>: the requestor escrows <code>rate × max_output_tokens</code> (a cap), the provider meters <strong>actual</strong> usage, the charge is <code>rate × actual</code>, and the <strong>surplus auto-refunds</strong>. Priced in dollars, settled in GPN, so a buyer's <em>dollar</em> cost is stable while the GPN amount floats.</p>
+<h3 id="52-pricing">5.2 Pricing</h3>
+<p>Rates are <strong>cost-derived</strong> — a roofline estimate of the provider's true throughput (compute- and memory-bandwidth-bound), divided by realized tokens/sec, times a margin — targeting roughly half of comparable market GPU-rental, and clamped at or above the provider's cost so <strong>a GPU always at least covers its cost</strong>.</p>
+<h3 id="53-routing-who-runs-a-job">5.3 Routing: who runs a job</h3>
+<p>A buyer hits a single <strong>access point</strong> (<code>gpn_scheduler</code>) and never needs a provider's address. The scheduler:
+1. <strong>Filters</strong> by capability (GFLOPS, VRAM/RAM, model availability).
+2. <strong>Requires availability</strong> — a node currently running a job is not available (one GPU, one job).
+   ("One job" = mutual exclusion — the GPU does one job <em>at a time</em>; it is <strong>not</strong> a limit on job
+   <em>types</em>. Every node serves every job type — LLM · image · video · ML · fine-tune — by design.)
+3. <strong>Picks the lowest-latency (least-ms)</strong> eligible provider, with a model-aware fallback (a provider that <em>can pull</em> a model wins only if downloading still finishes sooner).
+4. <strong>Dispatches</strong> the assignment (pushed over HTTP to the provider) and the chain escrows + enforces the capability gate.</p>
+<p>Providers <strong>register and advertise their endpoint on-chain</strong>, so access points <strong>discover</strong> them from the chain rather than a hand-maintained list. Providers can also pull a model on demand (via Ollama/HuggingFace), so requestor demand grows the catalog organically.</p>
+<h3 id="54-off-chain-escrow-payment-channels">5.4 Off-chain escrow (payment channels)</h3>
+<p>The block-bound part of a job is the <em>coordination</em> (create/escrow → accept → settle), one transaction per step. To remove it, GPN supports <strong>payment channels</strong>: funds are locked <strong>once</strong> on-chain, and each job is settled <strong>off-chain</strong> by mutually-signed state updates. Either party can force-settle on-chain, so the chain remains the root of trust — and the <strong>AI path has zero per-job transactions</strong>, i.e. <strong>no block delay</strong>.</p>
+<h3 id="55-job-lifecycle-safety">5.5 Job lifecycle safety</h3>
+<p>Jobs that stall are reclaimable: a <strong>permissionless <code>expire_job</code></strong> (after <code>created_at + max_duration</code>), a <strong>per-job failure refund</strong> (<code>fail_job</code>), a <strong>bounded on-chain expiry sweep</strong>, and a <strong>per-requestor active-job cap</strong> — so a single actor can't deny service by exhausting slots. Providers are paid only for work actually delivered: once work has started, only the assigned provider (or the permissionless expiry) can finalize a job.</p>
+<hr />
+<h2 id="6-tokenomics">6. Tokenomics</h2>
+<ul>
+<li><strong>Token:</strong> GPN, 12 decimals. <strong>Fair launch via mining</strong> — no ICO, no liquid premine.</li>
+<li><strong>Emission:</strong> all GPN is minted per block and <strong>halves every 4,204,800 blocks (~2 years at 15 s)</strong>. Halving is the sole emission mechanism.</li>
+<li><strong>Block reward:</strong> 50 GPN/block (≈ 3.33 GPN/s). The reward and block time are coupled via <code>emission_rate = reward / target_block_time</code>.</li>
+<li><strong>Supply:</strong> a nominal 1 B cap; the implemented emission path yields ≈ <strong>420 M mineable</strong>, giving an <strong>effective max supply ≈ 520 M</strong> including treasury.</li>
+<li><strong>Treasury:</strong> a disclosed, <strong>vested</strong> 100 M GPN (70 M genesis-unlocked + 30 M over 10 years), held by a pallet account and spendable only via a <strong>13-of-25</strong> governance roster.</li>
+<li><strong>Fees:</strong> a 5% marketplace fee is split <strong>40% staking rewards · 30% treasury · 20% burn · 10% oracle operators</strong>.</li>
+<li><strong>Value anchor:</strong> an oracle supplies a GPN/USD price (seeded at $0.15 for the testnet); the token's long-run value is intended to derive from <strong>real AI-marketplace demand</strong>, not mining inflation.</li>
+</ul>
+<hr />
+<h2 id="7-privacy-shielded-pool">7. Privacy: Shielded Pool</h2>
+<p>GPN includes a <strong>shielded pool</strong> with Sapling-style note commitments and nullifiers:</p>
+<ul>
+<li><strong>Deposit</strong> converts transparent GPN into a hidden <strong>note</strong> (a commitment in a Merkle tree) — value and owner are hidden.</li>
+<li><strong>Spend</strong> proves, in zero knowledge, <em>"I own a note in the tree and haven't spent it"</em> — publishing only an <strong>unlinkable nullifier</strong> — and supports <strong>shielded→shielded</strong> (private transfer) and <strong>shielded→transparent</strong> (withdraw), enforcing value conservation.</li>
+<li>Because the tree grows, the chain keeps a <strong>bounded history of Merkle roots</strong> so an earlier note stays spendable.</li>
+<li>The zero-knowledge setup requires a <strong>trusted ceremony</strong>: a multi-party Powers-of-Tau / phase-2 setup where <strong>the trapdoor is destroyed concurrently by independent contributors</strong>. The network ships the <strong>ceremony tooling</strong>; the production CRS is produced by a <strong>public ceremony</strong> (secure as long as a single participant is honest). Until then, testnet proofs are guarded only by the on-chain nullifier/root/value checks.</li>
+</ul>
+<hr />
+<h2 id="8-governance-and-upgrades">8. Governance and Upgrades</h2>
+<ul>
+<li><strong>Committee governance.</strong> A committee proposes and executes <strong>root</strong> calls (e.g., fee splits, parameters) after a timelock — <strong>no single key acts alone</strong>. The mainnet sudo key is <strong>inert</strong>; governance is the committee.</li>
+<li><strong>Forkless upgrades.</strong> The runtime upgrades <strong>in place</strong> via <code>set_code</code> with a separately-built WASM; the genesis — chain-spec, difficulty, supply, and the canonical runtime WASM — is <strong>immutable</strong>. A change that would reset the chain requires explicit sign-off.</li>
+<li><strong>Review-first.</strong> Every change is logged (what/why/risk/rollback) and reviewed before it lands.</li>
+</ul>
+<hr />
+<h2 id="9-network-and-decentralization">9. Network and Decentralization</h2>
+<ul>
+<li><strong>Access points</strong> are permissionless and redundant — anyone can run one; a buyer hits the nearest, and the scheduler routes network-wide.</li>
+<li><strong>Peer discovery</strong> follows the Bitcoin pattern: a <strong>persistent peer store</strong>, <strong>DNS seeds</strong>, and <strong>published seed lists</strong>, plus <strong>on-chain discovery</strong> from the network's own node registry — with the compiled-in bootnode as a hardcoded fallback.</li>
+<li><strong>On-chain node registry</strong> (liveness + provider endpoints) lets the network find its own reachable nodes without a central index.</li>
+</ul>
+<hr />
+<h2 id="10-security-considerations">10. Security Considerations</h2>
+<ul>
+<li><strong>Double-spend / theft-of-service.</strong> The marketplace's authorization and escrow rules are designed so a party cannot prematurely finalize a job to reclaim escrow while a provider is mid-work, and so failures/expiries refund trust-minimally.</li>
+<li><strong>PoW integrity.</strong> Block rewards are bound to the block's producer and to chain difficulty; a claim can't be validated against a self-chosen (easier) target.</li>
+<li><strong>Privacy caveats.</strong> A shielded pool is only as strong as its trusted setup — hence the public ceremony requirement — and its on-chain nullifier/root checks.</li>
+<li><strong>Eligibility spoofing.</strong> Because capability is self-reported, it is layered with <strong>proof-of-work</strong> and a <strong>capacity challenge</strong> so eligibility reflects <em>demonstrated</em> compute.</li>
+<li><strong>Fork/clock/version.</strong> Persistent desync is guarded against by explicit network identity and loud warnings; transient forks self-heal via the heaviest-chain rule (GPN has no finality gadget; confirmation is probabilistic by depth).</li>
+</ul>
+<hr />
+<h2 id="11-roadmap">11. Roadmap</h2>
+<ul>
+<li><strong>Shipped on testnet:</strong> PoW chain with Bitcoin-style per-node rewards; GPU-only, stake-free, work-verified eligibility; the AI marketplace (LLM, image, video, ML, fine-tuning) with per-token escrow, pricing, least-ms routing, on-chain provider discovery, and VRAM/RAM gates; payment channels; shielded spends; the liveness layer; peer discovery; committee governance.</li>
+<li><strong>Next:</strong> the public <strong>CRS ceremony</strong>; <strong>client-side RTT</strong> (user→nearest node); folding a node's own miner into the <strong>auto-switch</strong>; <strong>mainnet</strong> genesis and launch; a <strong>cross-chain bridge</strong> (post-mainnet).</li>
+</ul>
+<hr />
+<h2 id="12-conclusion">12. Conclusion</h2>
+<p>The GPU is the most abundant and most under-used source of compute in the world. Mining monopolized it; AI rental markets fight over it; neither lets the hardware move to where the money is. <strong>GPN makes a GPU earn from both markets at once</strong> — mining when that pays, serving AI when that pays — coordinated by a trust-minimal chain, priced against real cost, and settled without a middleman. The token is a fair-launch proof-of-work coin whose durable value comes from the AI compute it enables.</p>
+<p><em>A GPU should not have to choose.</em></p>
+<hr />
+<h3 id="references-project-corpus">References (project corpus)</h3>
+<p>Design synthesis and full technical detail live in the GPN project artifacts: <code>goals-and-guidelines.md</code>, <code>design-tokenomics-spec.md</code>, <code>design-pricing-model.md</code>, <code>design-access-points-scheduler.md</code>, <code>design-offchain-escrow-channels.md</code>, <code>design-verifiable-gpu-proof-2026-10-06.md</code>, <code>design-liveness-selforg-fullnode-tiers.md</code>, <code>design-ceremony.md</code>, <code>design-crosschain-bridge.md</code>, <code>GPN-MASTER-REFERENCE.md</code>, and the security report <code>redteam-2026-10-08/REPORT.md</code>.</p>
+    </article>
+    <p class="doc-updated small muted">Last generated 2026-10-19 from the project documentation set.</p>
+  </div>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="foot-grid">
+      <div><a class="brand" href="../index.html" style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a><p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute. <em>A GPU should not have to choose.</em></p></div>
+      <div><h4>Product</h4><a href="../download.html">Download</a><a href="../deploy.html">Deploy</a><a href="../ai.html">Access the AI</a><a href="../access-points.html">Access Points</a></div>
+      <div><h4>Learn</h4><a href="index.html">Docs</a><a href="whitepaper.html">Whitepaper</a><a href="one-pager.html">One-pager</a><a href="technical-overview.html">Technical overview</a></div>
+      <div><h4>Project</h4><a href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">Source on GitHub</a><a href="run-a-node.html">Run a node</a><a href="wallet.html">Wallet</a><a href="../buy.html">Token &amp; purchasing</a></div>
+    </div>
+    <div class="foot-bottom">
+      <p class="small muted">© <span data-year>2026</span> GPN · Public testnet. Not investment advice.</p>
+      <p class="small muted">Testnet only — tokens here have no monetary value.</p>
+    </div>
+  </div>
+</footer>
+
+<script src="../assets/app.js"></script>
+</body>
+</html>

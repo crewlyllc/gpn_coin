@@ -594,7 +594,7 @@ To fix it (about 5 minutes):
      can work. {cgnat_tail}
 
 Full guide with per-OS detail:
-  https://gpn.network/docs/run-a-node#make-your-node-dialable
+  https://gpncoin.ai/docs/run-a-node#make-your-node-dialable
 
 {tail}
 ================================================================================",

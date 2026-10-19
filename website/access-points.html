@@ -6,6 +6,17 @@
 <title>GPN Access Points — public entry list</title>
 <meta name="description" content="Known GPN access points: public job APIs that route AI work to the best idle GPU. Includes the current testnet entry point and a one-command installer to run your own." />
 <meta name="theme-color" content="#07090f" />
+<link rel="canonical" href="https://gpncoin.ai/access-points.html" />
+<meta property="og:site_name" content="GPN" />
+<meta property="og:url" content="https://gpncoin.ai/access-points.html" />
+<meta property="og:image" content="https://gpncoin.ai/assets/og.png" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:image" content="https://gpncoin.ai/assets/og.png" />
+<meta property="og:title" content="GPN Access Points — public entry list" />
+<meta property="og:description" content="Known GPN access points and the three public testnet nodes (one Linux bootnode, two Windows full nodes)." />
+<meta property="og:type" content="article" />
+<meta name="twitter:title" content="GPN Access Points — public entry list" />
+<meta name="twitter:description" content="Known GPN access points and the three public testnet nodes." />
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237c6cff'/%3E%3Ctext x='16' y='22' font-size='16' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%2307090f'%3EG%3C/text%3E%3C/svg%3E" />
 <link rel="stylesheet" href="assets/style.css" />
 </head>
@@ -23,7 +34,7 @@
       <a href="ai.html">AI</a>
       <a href="access-points.html" aria-current="page">Access Points</a>
       <a href="buy.html">Buy GPN</a>
-      <a href="../GPN-WHITEPAPER.html">Whitepaper</a>
+      <a href="docs/index.html">Docs</a>
     </nav>
     <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
   </div>
@@ -79,7 +90,8 @@
         network grows, additional regional access points will be listed here.</p>
 
       <h2>Network nodes (bootnodes)</h2>
-      <p class="sub">Always-on, publicly-reachable full nodes that new nodes dial to join (P2P multiaddrs).</p>
+      <p class="sub">Three always-on, publicly-reachable full nodes run the testnet: one Linux bootnode and two
+        Windows full nodes. New nodes dial these to join (P2P multiaddrs).</p>
       <div class="table-wrap">
         <table>
           <caption class="sr-only" style="position:absolute;left:-9999px">GPN full nodes / bootnodes</caption>
@@ -97,6 +109,12 @@
               <td><b>gpn-fullnode-2</b> (Windows)</td>
               <td><code>12D3KooWRWv…</code></td>
               <td><code>/ip4/142.129.54.88/tcp/30334/p2p/12D3KooWRWv4yVdJGiVg7xRgdUJY9G57EeutB596gWVpAwGC9qQ2</code></td>
+              <td><span class="chip up"><span class="d" aria-hidden="true"></span> Live</span></td>
+            </tr>
+            <tr>
+              <td><b>gpn-fullnode-3</b> (Windows)</td>
+              <td><code>12D3KooWMXU2…</code></td>
+              <td><code>/ip4/23.241.109.255/tcp/30333/p2p/12D3KooWMXU21xpjF9NgG4NsYQo8EejaMCZ8JWPUbSW6q8T7d69Y</code></td>
               <td><span class="chip up"><span class="d" aria-hidden="true"></span> Live</span></td>
             </tr>
           </tbody>
@@ -159,7 +177,8 @@ gpn-accesspoint-run</code></pre>
       </div>
       <p class="small muted" style="margin-top:12px">Config is written to <code>~/.gpn/accesspoint.env</code>
         (chmod 600). Secrets stay there — never in a repo or on a webpage. Full details in the
-        <a href="../access-point-install-guide.md">access-point install guide</a>.</p>
+        <a href="deploy.html#access-point">deploy guide</a> and the
+        <a href="docs/run-a-node.html">run-a-node guide</a>.</p>
 
       <div class="callout" style="margin-top:20px">
         <span class="ct">Want to be listed here?</span>
@@ -175,8 +194,8 @@ gpn-accesspoint-run</code></pre>
     <div class="foot-grid">
       <div><a class="brand" href="index.html" style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a><p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute. <em>A GPU should not have to choose.</em></p></div>
       <div><h4>Product</h4><a href="download.html">Download</a><a href="deploy.html">Deploy</a><a href="ai.html">Access the AI</a><a href="access-points.html">Access Points</a></div>
-      <div><h4>Learn</h4><a href="../GPN-WHITEPAPER.html">Whitepaper</a><a href="../GPN-ONE-PAGER.md">One-pager</a><a href="../GPN-TECHNICAL-OVERVIEW.md">Technical overview</a><a href="buy.html">Token &amp; purchasing</a></div>
-      <div><h4>Project</h4><a href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">Source on GitHub</a><a href="../USE-GPN.md">Usage guide</a><a href="../linux-install-guide.md">Linux install guide</a><a href="../windows-client-test.md">Windows guide</a></div>
+      <div><h4>Learn</h4><a href="docs/index.html">Documentation</a><a href="docs/whitepaper.html">Whitepaper</a><a href="docs/one-pager.html">One-pager</a><a href="docs/technical-overview.html">Technical overview</a></div>
+      <div><h4>Project</h4><a href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">Source on GitHub</a><a href="docs/run-a-node.html">Run a node</a><a href="docs/downloads.html">Releases</a><a href="docs/wallet.html">Wallet</a></div>
     </div>
     <div class="foot-bottom">
       <p class="small muted">© <span data-year>2026</span> GPN · Public testnet. Not investment advice.</p>

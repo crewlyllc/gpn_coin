@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Design: assume-valid checkpoint — GPN docs</title>
+<meta name="description" content="Design note on the fast-sync checkpoint mechanism." />
+<meta name="theme-color" content="#07090f" />
+<link rel="canonical" href="https://gpncoin.ai/docs/design-assume-valid-checkpoint.html" />
+<meta property="og:site_name" content="GPN" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://gpncoin.ai/docs/design-assume-valid-checkpoint.html" />
+<meta property="og:title" content="Design: assume-valid checkpoint — GPN docs" />
+<meta property="og:description" content="Design note on the fast-sync checkpoint mechanism." />
+<meta name="twitter:card" content="summary" />
+<meta name="twitter:title" content="Design: assume-valid checkpoint — GPN docs" />
+<meta name="twitter:description" content="Design note on the fast-sync checkpoint mechanism." />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237c6cff'/%3E%3Ctext x='16' y='22' font-size='16' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%2307090f'%3EG%3C/text%3E%3C/svg%3E" />
+<link rel="stylesheet" href="../assets/style.css" />
+<link rel="stylesheet" href="../assets/docs.css" />
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap nav">
+    <a class="brand" href="../index.html" aria-label="GPN home"><span class="dot" aria-hidden="true">G</span><span>GPN<br><small>GPU-NATIVE NETWORK</small></span></a>
+    <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Toggle navigation">☰</button>
+    <nav class="nav-links" id="nav-links" aria-label="Primary">
+      <a href="../index.html">Home</a>
+      <a href="../download.html">Download</a>
+      <a href="../deploy.html">Deploy</a>
+      <a href="../ai.html">AI</a>
+      <a href="../access-points.html">Access Points</a>
+      <a href="../buy.html">Buy GPN</a>
+      <a href="index.html" aria-current="page">Docs</a>
+    </nav>
+    <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
+  </div>
+</header>
+
+<main id="main" class="doc-main">
+  <div class="wrap doc-wrap">
+    <nav class="crumbs" aria-label="Breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Docs</a> / <span>Design: assume-valid checkpoint</span></nav>
+    <article class="prose">
+<h1>Design — assume-valid checkpoint (skip deep PoW before a trusted block)</h1>
+<p><strong>Task:</strong> GPN-TASKS #23 (stretch) · <strong>Status:</strong> DESIGN ONLY — <strong>not implemented</strong>.
+<strong>Review-first:</strong> this weakens block verification, so it needs an explicit
+go-ahead before any code lands. Nothing here changes the runtime, genesis, or
+the canonical WASM.</p>
+<p>Related: <code>docs/fast-sync.md</code> (the snapshot tooling that <em>is</em> shipped),
+<code>design-fork-choice-heaviest.md</code> (finding #17 — longest vs heaviest).</p>
+<h2 id="1-problem">1. Problem</h2>
+<p>A fresh GPN node imports and <strong>verifies the Ethash seal of every block</strong> from
+genesis. The expensive step is, per block, in <code>gpn-node/node/src/service.rs</code>:</p>
+<pre><code class="language-rust">fn verify_seal(pre_hash, seal, target) -&gt; bool {
+    // ...
+    let (computed_mix, result) = ethash::hashimoto_light(header_hash, nonce,
+                                                          ethash_full_size(),
+                                                          ethash_cache());
+    computed_mix == mix &amp;&amp; U256::from_little_endian(result) &lt; target
+}
+
+impl PowAlgorithm&lt;Block&gt; for GPNPowAlgorithm {
+    fn verify(&amp;self, _parent, pre_hash, _pre_digest, seal, difficulty) -&gt; ... {
+        Ok(verify_seal(pre_hash, seal, difficulty))   // service.rs ~:179-187
+    }
+}
+</code></pre>
+<p><code>PowBlockImport</code> (service.rs ~:273) calls <code>verify</code> for every imported block.
+This is what makes full sync scale with chain length.</p>
+<p>The <strong>snapshot</strong> path (shipped) sidesteps this by not re-syncing at all. The
+<strong>checkpoint</strong> path is the complementary technique for operators who <em>do</em> sync
+from peers: trust a recent block, verify nothing before it, verify everything
+from it forward.</p>
+<h2 id="2-analogy">2. Analogy</h2>
+<p>Bitcoin Core's <code>-assumevalid=&lt;hash&gt;</code>: signature/script validation is skipped for
+blocks <strong>below</strong> a hard-coded checkpoint height while <strong>header</strong> (PoW) and all
+validation from the checkpoint forward stays on. GPN has no scripts — the
+expensive per-block work <em>is</em> the PoW seal — so "assume valid" here means
+<em>skip the seal recomputation below the checkpoint</em>, not the header chain.</p>
+<h2 id="3-proposed-change-node-only-forkless-reversible">3. Proposed change (node-only, forkless, reversible)</h2>
+<p>Add an <strong>optional</strong> constructor field to <code>GPNPowAlgorithm</code>:</p>
+<pre><code class="language-rust">struct Checkpoint { number: u64, hash: H256 }
+struct GPNPowAlgorithm { client: Arc&lt;FullClient&gt;, assume_valid: Option&lt;Checkpoint&gt; }
+</code></pre>
+<p>and gate <code>verify</code>:</p>
+<pre><code class="language-rust">fn verify(&amp;self, _parent, pre_hash, _digest, seal, difficulty) -&gt; ... {
+    Ok(match &amp;self.assume_valid {
+        // Below the checkpoint: trust the seal (the header hash is still
+        // checked by the client; the checkpoint hash is enforced below).
+        Some(cp) if header_number_of(pre_hash) &lt; cp.number =&gt; true,
+        _ =&gt; verify_seal(pre_hash, seal, difficulty),
+    })
+}
+</code></pre>
+<p>Because <code>verify</code> only receives <code>pre_hash</code> (not the block number directly), the
+cleanest variant is a thin <strong><code>BlockImport</code> wrapper</strong> around <code>PowBlockImport</code>
+that decides per block using the header's number, rather than inspecting
+<code>pre_hash</code>:</p>
+<pre><code>VerifyFromCheckpoint&lt;Inner&gt; {
+   inner: PowBlockImport&lt;..&gt;,
+   checkpoint: Option&lt;(u64, H256)&gt;,
+}
+impl BlockImport for VerifyFromCheckpoint {
+  fn import_block(block) {
+     if before_checkpoint(block) { /* skip inner's pow verify */ }
+     if block.number == cp.number &amp;&amp; block.hash != cp.hash { return Err(...) } // fail closed
+     inner.import_block(block)   // full verify from cp.number+1 forward
+  }
+}
+</code></pre>
+<p>Either shape is acceptable; the wrapper is preferred because the block number
+and hash are directly available and the "exactly at the checkpoint" equality
+check is trivial.</p>
+<h3 id="guarantees-we-keep">Guarantees we keep</h3>
+<ul>
+<li><strong>Header linkage is unchanged</strong> — the client still rejects a block whose
+  <code>parent_hash</code> doesn't match the stored parent, so the header chain is intact
+  all the way down to the trusted checkpoint.</li>
+<li><strong>Fail closed at the checkpoint</strong> — when the node imports the block at
+  <code>cp.number</code>, its hash <strong>must equal</strong> <code>cp.hash</code>; otherwise the import errors
+  and the node will not accept the chain. This is the one hard anchor.</li>
+<li><strong>Full verification from the checkpoint forward</strong> — every block at/after the
+  checkpoint is verified exactly as today.</li>
+<li><strong>Default OFF</strong> — without the flag, behaviour is byte-for-byte unchanged.</li>
+</ul>
+<h3 id="what-we-give-up-residual-risk-must-be-stated">What we give up (residual risk — must be stated)</h3>
+<ul>
+<li>Blocks <strong>below</strong> the checkpoint are accepted without seal verification. A
+  malicious peer could feed a fabricated sub-checkpoint history that happens to
+  hash-link to the checkpoint — but it cannot produce a <em>different</em> block at
+  <code>cp.number</code> (that would change the hash and fail the anchor), and it cannot
+  forge anything at/after the checkpoint. This is the same trust transfer as a
+  snapshot: you trust the <em>source of the checkpoint hash</em>.</li>
+<li><strong>Fork interplay (finding #17):</strong> GPN's fork choice is by height, not
+  cumulative work. A checkpoint must be on the <strong>canonical</strong> chain; a competing
+  branch below the checkpoint would be accepted unverified. Mitigations:
+  (a) publish the checkpoint <strong>close to the tip</strong> so the trusted span is short;
+  (b) pin the checkpoint hash to a value an operator obtained out-of-band
+  (explorer / another node / the snapshot manifest) — never from the peer you
+  are syncing from; (c) ideally gate this behind the eventual work-based fork
+  choice.</li>
+</ul>
+<h2 id="4-gated-implementation-plan-do-not-start-without-go-ahead">4. Gated implementation plan (do NOT start without go-ahead)</h2>
+<ol>
+<li><strong>Flag + plumbing</strong> — <code>--assume-valid &lt;block-number&gt;:&lt;0xhash&gt;</code> on the node
+   CLI (<code>node/src/cli.rs</code> / <code>command.rs</code>), threaded into the service and the new
+   wrapper. Parse/validate the hex; reject a malformed or absent hash.</li>
+<li><strong>Wrapper</strong> — implement <code>VerifyFromCheckpoint</code> around <code>PowBlockImport</code> using
+   <code>sc_consensus::{BlockImport, ImportResult}</code>; wire it in <code>new_partial</code> (both
+   the full and the validating/parachain paths, service.rs ~:273 and ~:624).</li>
+<li><strong>Unit tests</strong> (<code>node/src/service.rs</code> or a small module):
+   * a block below the checkpoint passes import even with a <strong>bad seal</strong>;
+   * a block at the checkpoint with the <strong>wrong hash</strong> is <strong>rejected</strong>;
+   * a block at/after the checkpoint with a <strong>bad seal</strong> is <strong>rejected</strong>
+     (verification is still on);
+   * with no flag, a bad seal below any height is still rejected.</li>
+<li><strong>E2E (live, on a throwaway base-path):</strong>
+   * <code>gpn-node --assume-valid &lt;N&gt;:&lt;hash&gt;</code> from genesis against a peer →
+     reaches the tip; confirm it rejected nothing below N and that a
+     deliberately-wrong checkpoint hash makes the node <strong>stall/error</strong> at N.
+   * regression: no-flag run still full-verifies (unchanged).</li>
+<li><strong>Docs</strong> — extend <code>docs/fast-sync.md</code>; add the flag to the node's <code>--help</code>
+   and the Windows run script.</li>
+<li><strong>Review gate</strong> — land only on explicit approval, since it is a
+   verification-weakening change. Prefer to pair it with (or defer it until)
+   the work-based fork choice (#17).</li>
+</ol>
+<h2 id="5-recommendation">5. Recommendation</h2>
+<p>The <strong>snapshot</strong> already removes the re-sync cost for the common case (a new
+node / the Windows box after a restart). Ship that now (done). Treat the
+assume-valid checkpoint as a <strong>shipped-on-request</strong> follow-up — it only helps
+the peer-sync-from-genesis case and carries a small trust/fork-choice cost, so
+it should ride alongside the #17 fork-choice work rather than a one-off.</p>
+    </article>
+    <p class="doc-updated small muted">Last generated 2026-10-19 from the project documentation set.</p>
+  </div>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="foot-grid">
+      <div><a class="brand" href="../index.html" style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a><p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute. <em>A GPU should not have to choose.</em></p></div>
+      <div><h4>Product</h4><a href="../download.html">Download</a><a href="../deploy.html">Deploy</a><a href="../ai.html">Access the AI</a><a href="../access-points.html">Access Points</a></div>
+      <div><h4>Learn</h4><a href="index.html">Docs</a><a href="whitepaper.html">Whitepaper</a><a href="one-pager.html">One-pager</a><a href="technical-overview.html">Technical overview</a></div>
+      <div><h4>Project</h4><a href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">Source on GitHub</a><a href="run-a-node.html">Run a node</a><a href="wallet.html">Wallet</a><a href="../buy.html">Token &amp; purchasing</a></div>
+    </div>
+    <div class="foot-bottom">
+      <p class="small muted">© <span data-year>2026</span> GPN · Public testnet. Not investment advice.</p>
+      <p class="small muted">Testnet only — tokens here have no monetary value.</p>
+    </div>
+  </div>
+</footer>
+
+<script src="../assets/app.js"></script>
+</body>
+</html>

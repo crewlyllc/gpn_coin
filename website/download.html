@@ -4,8 +4,19 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Download GPN — installers &amp; release artifacts</title>
-<meta name="description" content="Install GPN with a single command, or download release artifacts for Unix and Windows. Prerequisites: a discrete GPU with OpenCL/CUDA; Rust for building from source." />
+<meta name="description" content="Install GPN with a single command, or download rolling release builds for Windows, Linux and macOS. Prerequisites: a discrete GPU with OpenCL/CUDA; Rust to build from source. Repository is private today — access on request." />
 <meta name="theme-color" content="#07090f" />
+<link rel="canonical" href="https://gpncoin.ai/download.html" />
+<meta property="og:site_name" content="GPN" />
+<meta property="og:url" content="https://gpncoin.ai/download.html" />
+<meta property="og:image" content="https://gpncoin.ai/assets/og.png" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:image" content="https://gpncoin.ai/assets/og.png" />
+<meta property="og:title" content="Download GPN — installers &amp; release artifacts" />
+<meta property="og:description" content="One-command installers plus rolling Windows, Linux and macOS release builds." />
+<meta property="og:type" content="website" />
+<meta name="twitter:title" content="Download GPN — installers &amp; release artifacts" />
+<meta name="twitter:description" content="One-command installers plus rolling Windows, Linux and macOS release builds." />
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237c6cff'/%3E%3Ctext x='16' y='22' font-size='16' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%2307090f'%3EG%3C/text%3E%3C/svg%3E" />
 <link rel="stylesheet" href="assets/style.css" />
 </head>
@@ -23,7 +34,7 @@
       <a href="ai.html">AI</a>
       <a href="access-points.html">Access Points</a>
       <a href="buy.html">Buy GPN</a>
-      <a href="../GPN-WHITEPAPER.html">Whitepaper</a>
+      <a href="docs/index.html">Docs</a>
     </nav>
     <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
   </div>
@@ -34,8 +45,15 @@
     <div class="wrap">
       <span class="kicker">Download</span>
       <h1>Get GPN in one command</h1>
-      <p>Install the node + miner/agent, generate a wallet, and be ready to earn. Everything below is on the
-        public <a href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">source repository</a>.</p>
+      <p>Install the node + miner/agent, generate a wallet, and start mining and serving AI jobs. Builds are
+        published as rolling GitHub releases; the source repository is <b>private today</b> (access on
+        request).</p>
+      <div class="callout warn" style="margin-top:18px">
+        <span class="ct">Private repository</span>
+        <p class="mb-0">The source repo and its release assets are private at this stage. The links below
+          will return 404 until your GitHub account is granted access — ask the team to be added, then use
+          them normally. Prebuilt artifacts do not require a Rust toolchain.</p>
+      </div>
     </div>
   </section>
 
@@ -43,8 +61,8 @@
   <section>
     <div class="wrap">
       <h2>One-command installers</h2>
-      <p class="sub">Two scripts cover the two install paths (a node, or an access point). Both can run from a local clone (recommended
-        until the repo URL is fixed for public fetch) or from a hosted URL.</p>
+      <p class="sub">Two scripts cover the two install paths (a node, or an access point). Both run from a
+        local clone of the repository (access required today) or from a hosted copy once the repo is public.</p>
 
       <div class="grid cols-2">
         <div class="card">
@@ -57,7 +75,7 @@
             <pre id="cmd-install"><code>./install.sh</code></pre>
             <button class="btn small ghost no-print" data-copy="#cmd-install" type="button">Copy</button>
           </div>
-          <p class="small muted mb-0">Or pipe from a hosted copy (once public):
+          <p class="small muted mb-0">Or pipe from a hosted copy (once the repo is public):
             <code>curl -fsSL &lt;REPO&gt;/install.sh | sh</code>. Override with
             <code>GPN_PREFIX</code>, <code>GPN_BIN</code>, <code>GPN_NETWORK</code>, <code>GPN_REPO_URL</code>.</p>
         </div>
@@ -84,35 +102,42 @@
   <section>
     <div class="wrap">
       <h2>Release artifacts</h2>
-      <p class="sub">Pre-built binaries are produced by CI. If you'd rather not build from source, grab the
-        matching artifact.</p>
+      <p class="sub">Pre-built binaries are produced by CI and published as <b>rolling releases</b> — the
+        tags always point at the newest green build, so download links stay stable. No build toolchain needed.</p>
 
       <div class="table-wrap">
         <table>
           <thead>
-            <tr><th scope="col">Platform</th><th scope="col">Artifact</th><th scope="col">Contents</th></tr>
+            <tr><th scope="col">Platform</th><th scope="col">Release</th><th scope="col">Asset</th><th scope="col">Contents</th></tr>
           </thead>
           <tbody>
             <tr>
-              <td><b>Unix</b> (Linux / macOS)</td>
-              <td><code>install.sh</code> / source build</td>
-              <td><code>gpn-node</code>, <code>gpn-agent</code> binaries (<code>gpn_api</code>,
-                providers, <code>gpn_gpu_compute</code>, <code>gpn_scheduler</code>, …)</td>
+              <td><b>Windows</b></td>
+              <td><a href="https://github.com/jeremyzguo/gpn_coin/releases/tag/windows-latest" rel="noopener"><code>windows-latest</code></a></td>
+              <td><code>gpn-windows.zip</code></td>
+              <td><code>gpn_node.exe</code>, <code>gpn_register.exe</code>, provider binaries, Ollama installer scripts,
+                <code>run-windows-provider.ps1</code></td>
             </tr>
             <tr>
-              <td><b>Windows</b></td>
-              <td><code>gpn-windows</code> (CI artifact)</td>
-              <td><code>gpn-node.exe</code>, <code>gpn_llm_provider.exe</code>,
-                <code>gpn_provider_status.exe</code>, <code>gpn_register.exe</code></td>
+              <td><b>Linux</b></td>
+              <td><a href="https://github.com/jeremyzguo/gpn_coin/releases/tag/linux-latest" rel="noopener"><code>linux-latest</code></a></td>
+              <td><code>gpn-linux.tar.gz</code></td>
+              <td><code>gpn-node</code>, <code>gpn-agent</code> binaries (provider, scheduler, GPU compute, …),
+                example config, first-run notes</td>
+            </tr>
+            <tr>
+              <td><b>macOS</b></td>
+              <td><a href="https://github.com/jeremyzguo/gpn_coin/releases/tag/macos-latest" rel="noopener"><code>macos-latest</code></a></td>
+              <td><code>gpn-macos.tar.gz</code></td>
+              <td>Same layout as Linux. Apple GPUs are not a mining target; serving is CPU/limited.</td>
             </tr>
           </tbody>
         </table>
       </div>
-      <p class="small muted" style="margin-top:12px">Windows: unpack the artifacts into a <code>bin\</code>
-        folder next to <code>run-windows-provider.ps1</code>, then follow the
-        <a href="deploy.html#windows">Windows provider path</a> (it installs/starts Ollama for you). Artifact
-        download links live on the
-        repository's <a href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">Actions / Releases</a>.</p>
+      <p class="small muted" style="margin-top:12px">All three tags are private today. Windows: unpack into a
+        <code>bin\</code> folder next to <code>run-windows-provider.ps1</code>, then follow the
+        <a href="deploy.html#windows">Windows node path</a> (it installs/starts Ollama for you). Linux/macOS: unpack
+        and put the binaries on <code>PATH</code>, or just use <code>install.sh</code>.</p>
     </div>
   </section>
 
@@ -147,8 +172,9 @@
 
       <div class="callout" style="margin-top:20px">
         <span class="ct">No OpenCL detected?</span>
-        <p class="mb-0">Mining will fall back to CPU (much slower). Install the vendor OpenCL runtime above
-          and reboot to mine on your GPU.</p>
+        <p class="mb-0">Install the vendor OpenCL runtime above and reboot. The miner can fall back to CPU
+          hashing, but at network difficulty a CPU is far below the <b>GPU-only eligibility gate</b> — a
+          node needs a discrete GPU (or one meeting the measured-TFLOPS floor) to earn.</p>
       </div>
 
       <div class="callout" style="margin-top:20px">
@@ -198,13 +224,14 @@ ollama pull llama3.2:1b</code></pre>
       <span class="kicker">Source</span>
       <h2>Clone it</h2>
       <div class="field">
-        <label for="cmd-clone">Repository</label>
+        <label for="cmd-clone">Repository (private — access required)</label>
         <pre id="cmd-clone"><code>git clone https://github.com/jeremyzguo/gpn_coin.git
 cd gpn_coin</code></pre>
         <button class="btn small ghost no-print" data-copy="#cmd-clone" type="button">Copy</button>
       </div>
       <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:6px">
         <a class="btn" href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">Open the repository</a>
+        <a class="btn ghost" href="docs/run-a-node.html">Run-a-node guide →</a>
         <a class="btn ghost" href="deploy.html">Next: deploy a node →</a>
       </div>
     </div>
@@ -219,8 +246,8 @@ cd gpn_coin</code></pre>
         <p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute. <em>A GPU should not have to choose.</em></p>
       </div>
       <div><h4>Product</h4><a href="download.html">Download</a><a href="deploy.html">Deploy</a><a href="ai.html">Access the AI</a><a href="access-points.html">Access Points</a></div>
-      <div><h4>Learn</h4><a href="../GPN-WHITEPAPER.html">Whitepaper</a><a href="../GPN-ONE-PAGER.md">One-pager</a><a href="../GPN-TECHNICAL-OVERVIEW.md">Technical overview</a><a href="buy.html">Token &amp; purchasing</a></div>
-      <div><h4>Project</h4><a href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">Source on GitHub</a><a href="../USE-GPN.md">Usage guide</a><a href="../linux-install-guide.md">Linux install guide</a><a href="../windows-client-test.md">Windows guide</a></div>
+      <div><h4>Learn</h4><a href="docs/index.html">Documentation</a><a href="docs/whitepaper.html">Whitepaper</a><a href="docs/one-pager.html">One-pager</a><a href="docs/technical-overview.html">Technical overview</a></div>
+      <div><h4>Project</h4><a href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">Source on GitHub</a><a href="docs/run-a-node.html">Run a node</a><a href="docs/downloads.html">Releases</a><a href="docs/wallet.html">Wallet</a></div>
     </div>
     <div class="foot-bottom">
       <p class="small muted">© <span data-year>2026</span> GPN · Public testnet. Not investment advice.</p>

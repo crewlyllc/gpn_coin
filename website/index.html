@@ -4,11 +4,21 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>GPN — A GPU-Native Network for Mining and AI Compute</title>
-<meta name="description" content="GPN is a GPU-native network where every GPU mines or serves AI compute — auto-switching to whichever pays more. Bitcoin-style proof-of-work rewards, a trust-minimal AI marketplace, and per-token escrow." />
+<meta name="description" content="GPN is a GPU-native network where one node both mines GPN and serves AI compute on the same GPU — pausing mining for each job, then resuming. Bitcoin-style proof-of-work, a trust-minimal AI marketplace, and per-job escrow. Public testnet." />
 <meta name="theme-color" content="#07090f" />
+<link rel="canonical" href="https://gpncoin.ai/" />
+<meta property="og:site_name" content="GPN" />
+<meta property="og:url" content="https://gpncoin.ai/" />
+<meta property="og:image" content="https://gpncoin.ai/assets/og.png" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:image" content="https://gpncoin.ai/assets/og.png" />
 <meta property="og:title" content="GPN — A GPU should not have to choose." />
-<meta property="og:description" content="Mine or serve AI on the same GPU, auto-switching to whichever pays more." />
+<meta property="og:description" content="Mine GPN and serve AI on the same GPU — one node, one card, one job at a time." />
 <meta property="og:type" content="website" />
+<meta name="twitter:title" content="GPN — A GPU should not have to choose." />
+<meta name="twitter:description" content="Mine GPN and serve AI on the same GPU — one node, one card, one job at a time." />
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237c6cff'/%3E%3Ctext x='16' y='22' font-size='16' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%2307090f'%3EG%3C/text%3E%3C/svg%3E" />
 <link rel="stylesheet" href="assets/style.css" />
 </head>
@@ -29,7 +39,7 @@
       <a href="ai.html">AI</a>
       <a href="access-points.html">Access Points</a>
       <a href="buy.html">Buy GPN</a>
-      <a href="../GPN-WHITEPAPER.html">Whitepaper</a>
+      <a href="docs/index.html">Docs</a>
     </nav>
     <div class="nav-actions">
       <button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button>
@@ -42,14 +52,15 @@
   <!-- ============ HERO ============ -->
   <section class="hero first">
     <div class="wrap inner">
-      <span class="badge"><span class="live-dot" aria-hidden="true"></span> Live on public testnet</span>
+      <span class="badge"><span class="live-dot" aria-hidden="true"></span> Public testnet · 3 nodes live</span>
       <h1>A GPU should not have to <span class="grad">choose.</span></h1>
-      <p class="lede">Point a card at mining and you lose when the coin dips. List it for AI work and you earn
-        $0 when nobody books it. GPN is a GPU-native network where the <b>same GPU mines <em>or</em> serves AI
-        compute — and auto-switches</b> to whichever pays more, coordinated by a trust-minimal blockchain.</p>
+      <p class="lede">Mine a coin and you're exposed to its price. Rent the card for AI and it earns nothing
+        when nobody books it. GPN removes the choice: <b>every node is both a miner and an AI provider</b> on
+        the same GPU. It mines by default, and when a job arrives it pauses mining, frees the VRAM, runs the
+        job, and resumes — one card, one job at a time.</p>
       <div class="hero-cta">
-        <a class="btn" href="download.html">Download &amp; start earning</a>
-        <a class="btn ghost" href="../GPN-WHITEPAPER.html">Read the whitepaper</a>
+        <a class="btn" href="download.html">Download &amp; run a node</a>
+        <a class="btn ghost" href="docs/whitepaper.html">Read the whitepaper</a>
       </div>
     </div>
   </section>
@@ -88,34 +99,35 @@
   <section id="answer">
     <div class="wrap">
       <span class="kicker">GPN's answer</span>
-      <h2>Don't make the owner pick. Let the GPU work both markets.</h2>
-      <p class="sub">GPN is a network where each GPU <b>mines <em>or</em> serves AI</b>, auto-switching to
-        whichever earns more — and where AI buyers get a single interface that routes their work to that
-        same pool of GPUs. A thin chain handles coordination, escrow, and settlement; the heavy compute
-        runs off-chain.</p>
+      <h2>One node, two income streams, no mode to pick.</h2>
+      <p class="sub">A GPN node is <b>always a miner <em>and</em> an AI provider</b> — one identity, one wallet,
+        one GPU. Mining runs whenever the card is free. An incoming AI job pre-empts it: mining stops, VRAM is
+        released, the job runs to completion, mining resumes. The chain handles coordination, escrow, and
+        settlement; the heavy compute stays off-chain.</p>
 
       <div class="modes">
         <div class="mode">
           <div class="ring" aria-hidden="true">⛏</div>
-          <div class="m-title">Mining</div>
-          <div class="m-earn">Hashes GPN blocks (GPU proof-of-work)</div>
+          <div class="m-title">Mining — the default</div>
+          <div class="m-earn">Hashes GPN blocks (GPU proof-of-work) whenever no job is running</div>
           <span class="m-tag">Earns minted GPN</span>
         </div>
         <div class="mode active">
           <div class="ring" aria-hidden="true">⇄</div>
-          <div class="m-title">The auto-switch</div>
-          <div class="m-earn">Every cycle, compares each mode's revenue in USD/hr</div>
-          <span class="m-tag">~5% hysteresis</span>
+          <div class="m-title">Auto-yield</div>
+          <div class="m-earn">A job pauses mining and takes the whole GPU; mining resumes when it settles</div>
+          <span class="m-tag">One GPU · one job</span>
         </div>
         <div class="mode">
           <div class="ring" aria-hidden="true">✦</div>
-          <div class="m-title">Compute</div>
-          <div class="m-earn">Serves AI jobs (LLM, image/video, fine-tune)</div>
+          <div class="m-title">Serving AI</div>
+          <div class="m-earn">LLM chat, image/video, ML inference, fine-tune — every job type, on by default</div>
           <span class="m-tag">Earns escrowed GPN</span>
         </div>
       </div>
-      <p class="switch-note">A switch is a real <b>stop/start of GPU work</b>: entering Compute stops the
-        miner and frees VRAM before the model loads. A third mode, <b>Staking</b>, is planned.</p>
+      <p class="switch-note">There is no provider-only or mine-only mode, and no profitability switch. The GPU
+        is fully yielded per job — so a job never contends with the miner for VRAM. A separate
+        <b>Staking</b> role is planned.</p>
     </div>
   </section>
 
@@ -124,8 +136,8 @@
     <div class="wrap">
       <span class="kicker">How it works</span>
       <h2>Mine, serve, route, settle</h2>
-      <p class="sub">One install gives you a node that mines on its GPU and can serve AI jobs. A buyer hits
-        one endpoint; the network does the rest.</p>
+      <p class="sub">One install gives you a node that mines on its GPU and serves AI jobs when they arrive.
+        A buyer hits one endpoint; the network does the rest.</p>
 
       <div class="grid cols-3">
         <div class="card">
@@ -140,10 +152,10 @@
             priced <b>per token</b> against real cost, with per-job escrow and an automatic surplus refund.</p>
         </div>
         <div class="card">
-          <h3><span class="ico" aria-hidden="true">⇄</span> The switch</h3>
-          <p class="muted mb-0">Each cycle the node compares mining vs. compute revenue in <b>USD/hr</b> from
-            an on-chain oracle feed and flips when one beats the other by more than ~5% — so it doesn't
-            thrash on tiny price crossings.</p>
+          <h3><span class="ico" aria-hidden="true">⇄</span> One GPU, one job</h3>
+          <p class="muted mb-0">A job <b>pre-empts mining</b>: the miner stops, VRAM is freed before the model
+            loads, and mining resumes the instant the job settles. No two jobs ever share a card — so it never
+            over-subscribes compute or memory. Every job type is enabled by default.</p>
         </div>
         <div class="card">
           <h3><span class="ico" aria-hidden="true">🧭</span> Routing</h3>
@@ -163,6 +175,14 @@
             transfers and withdrawals. The chain sees job specs and result hashes — not prompts, models,
             or outputs.</p>
         </div>
+      </div>
+
+      <div class="callout" style="margin-top:22px">
+        <span class="ct">Live network today</span>
+        <p class="mb-0"><b>Three public nodes</b> — one Linux bootnode and two Windows full nodes — are
+          reachable on the testnet. Builds roll out through rolling GitHub releases
+          (<code>windows-latest</code>, <code>linux-latest</code>, <code>macos-latest</code>). The repository
+          is still <b>private</b>; ask for access to download.</p>
       </div>
     </div>
   </section>
@@ -185,12 +205,12 @@
             <tr>
               <td><b>NiceHash</b></td>
               <td>Hashpower marketplace — sells your GPU hashing to the highest bidder (among PoW coins).</td>
-              <td>GPN also <b>serves AI compute</b>, and switches between mining and serving automatically.</td>
+              <td>GPN also <b>serves AI compute on the same card</b> — mining runs whenever no job is queued, and pauses while a job owns the GPU.</td>
             </tr>
             <tr>
               <td><b>Vast.ai</b></td>
               <td>Rental marketplace that lists GPUs for rent; owner picks a listing and a price.</td>
-              <td>GPN routes AI jobs to your card by capability + latency and pairs it with a mining fallback.</td>
+              <td>GPN routes AI jobs to your card by capability + latency and runs mining on it the rest of the time — no listing step.</td>
             </tr>
             <tr>
               <td><b>RunPod</b></td>
@@ -200,7 +220,7 @@
             <tr>
               <td><b>Render</b></td>
               <td>Decentralized GPU rendering network; job-based payouts to node operators.</td>
-              <td>GPN couples the marketplace with a <b>native proof-of-work chain</b> and an auto-switch to mining.</td>
+              <td>GPN couples the marketplace with a <b>native proof-of-work chain</b> and mines whenever the GPU is idle.</td>
             </tr>
             <tr>
               <td><b>Akash</b></td>
@@ -293,8 +313,8 @@
 
       <div style="margin-top:24px;display:flex;gap:12px;flex-wrap:wrap">
         <a class="btn" href="buy.html">How to get GPN</a>
-        <a class="btn ghost" href="../GPN-WHITEPAPER.html">Whitepaper (HTML)</a>
-        <a class="btn ghost" href="../GPN-WHITEPAPER.md">Whitepaper (Markdown)</a>
+        <a class="btn ghost" href="docs/whitepaper.html">Whitepaper</a>
+        <a class="btn ghost" href="docs/index.html">All docs</a>
       </div>
     </div>
   </section>
@@ -318,17 +338,17 @@
       </div>
       <div>
         <h4>Learn</h4>
-        <a href="../GPN-WHITEPAPER.html">Whitepaper</a>
-        <a href="../GPN-ONE-PAGER.md">One-pager</a>
-        <a href="../GPN-TECHNICAL-OVERVIEW.md">Technical overview</a>
-        <a href="buy.html">Token &amp; purchasing</a>
+        <a href="docs/index.html">Documentation</a>
+        <a href="docs/whitepaper.html">Whitepaper</a>
+        <a href="docs/one-pager.html">One-pager</a>
+        <a href="docs/technical-overview.html">Technical overview</a>
       </div>
       <div>
         <h4>Project</h4>
         <a href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">Source on GitHub</a>
-        <a href="../USE-GPN.md">Usage guide</a>
-        <a href="../linux-install-guide.md">Linux install guide</a>
-        <a href="../windows-client-test.md">Windows guide</a>
+        <a href="docs/run-a-node.html">Run a node</a>
+        <a href="docs/downloads.html">Releases</a>
+        <a href="docs/wallet.html">Wallet</a>
       </div>
     </div>
     <div class="foot-bottom">
