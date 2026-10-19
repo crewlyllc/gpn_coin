@@ -54,6 +54,75 @@ gpn_node
 That's it. `gpn_node` reads its config from a small file + env, then starts and
 supervises all of the children — always: the miner and the AI serving stack.
 
+## REQUIRED: a public address + a forwarded port (every node must be dialable)
+
+**A GPN node must be dialable to join the network.** Peers have to be able to
+open an **inbound** connection to your node — not just for your node to reach
+them. Every node being dialable is what makes GPN a **full mesh**: any node can
+serve blocks/state to any other node, and the bootnode is only a **seed** that
+introduces peers to each other. A node behind NAT with no port forward can dial
+out and sync, but nobody can dial *it* — that collapses the mesh into a star
+around the bootnode — so **it is not allowed to join**: it fails loudly and does
+not sync, mine, or serve.
+
+Required setup, on every node:
+
+1. **Forward a TCP port** on your router/firewall to this machine (the node
+   listen port, default **30333**; use a different one if you run several nodes).
+2. **Tell the node its public address**, either in `~/.gpn/node.toml`:
+
+   ```toml
+   public_addr = "/ip4/203.0.113.10/tcp/30333"
+   ```
+
+   or via the environment (wins over the config file / `--public-addr`):
+
+   ```bash
+   GPN_PUBLIC_ADDR=/ip4/203.0.113.10/tcp/30333
+   ```
+
+   Use `/ip6/<addr>/tcp/<port>` for IPv6, and the **same port** you forwarded.
+3. **Restart** `gpn_node`. It verifies inbound reachability before it joins.
+
+If you are on a VPS with a directly bound public IP, the gate also accepts a
+public **listen** address; still set `public_addr` so peers are told the right
+endpoint.
+
+### The dialability gate
+
+After the network starts, the node waits up to **120 s**
+(`GPN_DIALABLE_TIMEOUT_SECS`) for evidence that it is inbound-reachable:
+
+- a peer **dials us** (an inbound connection), or
+- the **configured public address** is observed by peers (`GPN_PUBLIC_ADDR` /
+  `--public-addr`, exact IP **and** port), or
+- the node listens directly on a **public** IP.
+
+Only public (globally routable) addresses count — RFC1918 (`10/8`, `172.16/12`,
+`192.168/16`), CGNAT (`100.64/10`), loopback, link-local and `0.0.0.0` never do.
+
+If no evidence appears, the node **fails closed** — it logs:
+
+```
+❌ this node is NOT dialable — set GPN_PUBLIC_ADDR to /ip4/<public-ip>/tcp/<port>
+   and forward that port on your router; refusing to join the network
+```
+
+and exits with code **78** (`EX_CONFIG`) *before* starting the miner or the RPC
+service. `gpn_node` surfaces this as `node=down(not dialable, restarts N)` in its
+`[status]` line and retries with the bounded backoff (≥30 s, no tight loop) —
+fix the port forward and it will join on the next attempt.
+
+> **Local / single-node testing only:** set `GPN_REQUIRE_DIALABLE=0` to skip the
+gate and restore the old behaviour (the node will run even though it is not
+reachable). Do **not** use this on a real network node.
+
+| Env var | Meaning | Default |
+|---------|---------|---------|
+| `GPN_REQUIRE_DIALABLE` | Enforce the inbound-reachability gate. `0`/`false`/`no`/`off` opts out (local testing only). | `1` (ON) |
+| `GPN_PUBLIC_ADDR` | This node's public multiaddress, e.g. `/ip4/203.0.113.10/tcp/30333`. Must match the forwarded port. | _(none → `--public-addr`/`public_addr`)_ |
+| `GPN_DIALABLE_TIMEOUT_SECS` | How long to wait for inbound evidence before failing closed. | `120` |
+
 ## Ollama is a prerequisite (for serving LLMs)
 
 A GPN node **cannot serve LLM jobs without ollama** — the provider talks to
@@ -190,6 +259,7 @@ base_path    = "~/.gpn/node"                      # or set GPN_BASE_PATH; defaul
 rpc_port     = 9944
 node_key     = "<64-hex ed25519 secret>"           # node's network identity
 bootnodes    = ["/ip4/23.241.109.255/tcp/30333/p2p/12D3KooW…"]
+public_addr  = "/ip4/<your-public-ip>/tcp/30333"     # REQUIRED (see above; forward this port)
 author       = "alice"                             # passed as --alice to gpn-node (authoring key)
 node_args    = ["--no-telemetry", "--no-prometheus"]
 
@@ -221,7 +291,9 @@ finetune_poll_ms = 4000
 | `GPN_RPC_PORT` | node RPC port | `9944` |
 | `GPN_NODE_KEY` | node network key (64-hex) | _(none — node needs one)_ |
 | `GPN_BOOTNODES` | comma/space list of bootnodes | _(none)_ |
-| `GPN_PUBLIC_ADDR` | `--public-addr` (e.g. `/dns4/host/tcp/30333`) | _(none)_ |
+| `GPN_PUBLIC_ADDR` | `--public-addr` (e.g. `/dns4/host/tcp/30333`). **Required for a public node** — the dialability gate also reads it. | _(none)_ |
+| `GPN_REQUIRE_DIALABLE` | Enforce inbound reachability (must be dialable to join). `0` opts out for local testing only. | `1` |
+| `GPN_DIALABLE_TIMEOUT_SECS` | Grace window for dialability evidence before exit 78. | `120` |
 | `GPN_AUTHOR` | short authoring key name → `--<name>` | _(none)_ |
 | `GPN_NODE_ARGS` | extra raw args appended to `gpn-node` | _(none)_ |
 | `GPN_PROVIDER_ENDPOINT` | public `/status` URL advertised on-chain | _(none → discovery off)_ |
@@ -329,6 +401,10 @@ again. Nothing warned beforehand.
 
   `best` is the node's best block, read cheaply from its own RPC
   (`chain_getHeader`); `?` if the node's RPC isn't answering yet.
+
+  A node that failed the **dialability gate** is shown distinctly as
+  `node=down(not dialable, restarts N)` (the child exited 78), with an
+  actionable hint in the log — set `GPN_PUBLIC_ADDR` and forward the port.
 
 ## Linux
 

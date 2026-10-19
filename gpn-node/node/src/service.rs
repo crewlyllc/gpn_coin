@@ -10,7 +10,7 @@ use sc_client_api::StorageProvider;
 use sc_consensus::{BlockImport, LongestChain};
 use sc_consensus_pow::{start_mining_worker, PowAlgorithm, PowBlockImport, PowImportQueue};
 use sc_network::config::MultiaddrWithPeerId;
-use sc_network::{NetworkPeers, NetworkStatusProvider};
+use sc_network::{NetworkPeers, NetworkStateInfo, NetworkStatusProvider};
 use sc_network_sync::SyncingService;
 use sc_service::{error::Error as ServiceError, Configuration, TaskManager};
 use sc_telemetry::{Telemetry, TelemetryWorker};
@@ -422,7 +422,7 @@ pub(crate) fn miner_should_run(role: sc_service::Role) -> bool {
 }
 
 /// Builds a new service for a full client.
-pub fn new_full<
+pub async fn new_full<
     N: sc_network::NetworkBackend<Block, <Block as sp_runtime::traits::Block>::Hash>,
 >(
     config: Configuration,
@@ -494,6 +494,65 @@ pub fn new_full<
         log::info!("  identity : {}", st.summary);
         log::info!("==============================================================");
     }
+    // ---- Dialability gate: a node MUST be dialable to join the network ----
+    // Every GPN node must be inbound-reachable (public address + forwarded
+    // port). A node that is only outbound-reachable can dial out and sync but
+    // no peer can dial *it*, so it cannot participate in the mesh. The gate
+    // waits for direct evidence (an inbound peer, or an observed/bound public
+    // address matching the configured one) and, if none appears, logs an
+    // actionable error and exits BEFORE the miner or the RPC service start —
+    // so a non-dialable node never syncs, mines or serves.
+    {
+        let gate_cfg =
+            crate::dialability::GateConfig::from_env(&config.network.public_addresses);
+        if gate_cfg.require {
+            log::info!(
+                "dialability: gate ON — verifying this node is inbound-reachable within {}s 
+                 (GPN_PUBLIC_ADDR={})",
+                gate_cfg.timeout.as_secs(),
+                gate_cfg
+                    .public_addr
+                    .as_ref()
+                    .map(|a| a.to_string())
+                    .unwrap_or_else(|| "unset".into()),
+            );
+            let verdict = crate::dialability::wait_for_dialability(&network, &gate_cfg).await;
+            if verdict.dialable {
+                log::info!(
+                    "✅ dialability: this node IS dialable — {} ({})",
+                    verdict
+                        .evidence
+                        .as_ref()
+                        .map(|e| e.to_string())
+                        .unwrap_or_default(),
+                    verdict.detail
+                );
+            } else {
+                log::error!("==============================================================");
+                log::error!(
+                    "❌ this node is NOT dialable — set GPN_PUBLIC_ADDR to /ip4/<public-ip>/tcp/<port> and forward that port on your router; refusing to join the network"
+                );
+                log::error!("   reason: {}", verdict.detail);
+                log::error!(
+                    "   fix: set GPN_PUBLIC_ADDR (or --public-addr) and forward that TCP port to 
+                     this machine, then restart"
+                );
+                log::error!(
+                    "   (single-node / local testing only: GPN_REQUIRE_DIALABLE=0 disables this gate)"
+                );
+                log::error!("==============================================================");
+                // Distinct exit code so `gpn_node` can report
+                // `node=down(not dialable)` instead of a generic crash.
+                std::process::exit(crate::dialability::EXIT_NOT_DIALABLE);
+            }
+        } else {
+            log::warn!(
+                "dialability: gate DISABLED (GPN_REQUIRE_DIALABLE=0) — this node may be 
+                 unreachable from the internet; local/single-node testing only"
+            );
+        }
+    }
+
     // ---- Clock / NTP skew check (roadmap item 8) -------------------------
     // A skewed wall clock can wedge a node (block timestamps + timing-based
     // difficulty reject otherwise-valid blocks; the Windows box was ~57 s off).

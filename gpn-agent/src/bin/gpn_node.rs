@@ -565,6 +565,9 @@ struct ChildStatus {
     up: bool,
     pid: u32,
     restarts: u64,
+    /// Exit code of the most recent crash, if it exited with one. Used to
+    /// surface a distinct `down(not dialable)` state (node exit code 78).
+    last_exit: Option<i32>,
 }
 
 type Shared = Arc<Mutex<BTreeMap<&'static str, ChildStatus>>>;
@@ -574,10 +577,26 @@ fn set_status(shared: &Shared, label: &'static str, up: bool, pid: u32) {
     let e = m.entry(label).or_default();
     e.up = up;
     e.pid = pid;
-    if !up {
+    if up {
+        // A fresh (or restarted) child starts with a clean slate.
+        e.last_exit = None;
+    } else {
         e.restarts += 1;
     }
 }
+
+/// Record the exit code of a crashed child (drives `down(not dialable)`).
+fn set_exit_code(shared: &Shared, label: &'static str, code: Option<i32>) {
+    let mut m = shared.lock().unwrap();
+    if let Some(e) = m.get_mut(label) {
+        e.last_exit = code;
+    }
+}
+
+/// Exit code the node uses when the dialability gate fails (`EXIT_NOT_DIALABLE`,
+/// sysexits `EX_CONFIG`). Keep in sync with `gpn-node`'s
+/// `dialability::EXIT_NOT_DIALABLE`.
+const NODE_EXIT_NOT_DIALABLE: i32 = 78;
 
 /// Send SIGTERM on Unix (taskkill on Windows) so the child can shut down cleanly.
 fn send_term(pid: u32) {
@@ -703,6 +722,7 @@ fn supervise(spec: ChildSpec, shared: Shared, shutdown: Arc<AtomicBool>) {
 
         // Unexpected exit → restart with backoff.
         let ran = started.elapsed();
+        let code = status.as_ref().and_then(|st| st.code());
         let detail = match status {
             Some(st) => st
                 .code()
@@ -710,6 +730,15 @@ fn supervise(spec: ChildSpec, shared: Shared, shutdown: Arc<AtomicBool>) {
                 .unwrap_or_else(|| "terminated by signal".to_string()),
             None => "unknown".to_string(),
         };
+        if code == Some(NODE_EXIT_NOT_DIALABLE) {
+            log_event(
+                label,
+                "NOT DIALABLE: the node refused to join the network (no inbound/reachable public \
+                 address). Set `public_addr` / GPN_PUBLIC_ADDR to /ip4/<public-ip>/tcp/<port> and \
+                 forward that port on the router. Retrying with backoff — the status line shows \
+                 `node=down(not dialable)`.",
+            );
+        }
         log_event(
             label,
             &format!(
@@ -718,10 +747,19 @@ fn supervise(spec: ChildSpec, shared: Shared, shutdown: Arc<AtomicBool>) {
             ),
         );
         set_status(&shared, label, false, 0);
+        set_exit_code(&shared, label, code);
 
-        // A child that had been healthy for a while → reset the backoff.
-        if ran.as_secs() >= 60 {
+        // A child that had been healthy for a while → reset the backoff —
+        // EXCEPT for a not-dialable exit, which is a configuration error that
+        // will persist until the operator forwards the port.
+        if ran.as_secs() >= 60 && code != Some(NODE_EXIT_NOT_DIALABLE) {
             backoff_ms = 1000;
+        }
+        // A not-dialable node will stay not-dialable until the operator fixes
+        // the port forward; use the existing bounded backoff but never the
+        // tight 1-2 s ramp that would hammer the router/NAT.
+        if code == Some(NODE_EXIT_NOT_DIALABLE) {
+            backoff_ms = backoff_ms.max(30_000);
         }
         sleep_or_shutdown(&shutdown, backoff_ms);
         backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
@@ -880,6 +918,8 @@ fn status_line(cfg: &Config, shared: &Shared) -> String {
         if let Some(st) = m.get(label) {
             if st.up {
                 parts.push(format!("{label}=up(pid {})", st.pid));
+            } else if st.last_exit == Some(NODE_EXIT_NOT_DIALABLE) {
+                parts.push(format!("{label}=down(not dialable, restarts {})", st.restarts));
             } else {
                 parts.push(format!("{label}=down(restarts {})", st.restarts));
             }

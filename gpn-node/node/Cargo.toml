@@ -73,6 +73,11 @@ ethereum-types = "0.8"
 # GPU Ethash mining via OpenCL (runtime-loaded kernels — no CUDA/C headers).
 opencl3 = { version = "0.12", features = ["dynamic"] }
 
+[dev-dependencies]
+# Used by the dialability gate's stub-network tests (implements the async
+# sc-network traits).
+async-trait = "0.1"
+
 [features]
 default = []
 runtime-benchmarks = [

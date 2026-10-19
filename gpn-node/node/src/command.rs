@@ -200,9 +200,11 @@ pub fn run() -> sc_cli::Result<()> {
                             <Block as sp_runtime::traits::Block>::Hash,
                         >,
                     >(config)
+                    .await
                     .map_err(sc_cli::Error::Service),
                     sc_network::config::NetworkBackendType::Litep2p => {
                         service::new_full::<sc_network::Litep2pNetworkBackend>(config)
+                            .await
                             .map_err(sc_cli::Error::Service)
                     }
                 }
