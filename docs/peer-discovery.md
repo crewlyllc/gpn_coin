@@ -16,14 +16,46 @@ sources on top of it.
 
 At startup the effective bootnode set is the **union** of:
 
-1. **Static bootnodes** — `--bootnodes <multiaddr>` / chain-spec bootnodes /
-   the compiled-in `network.json` bootnodes. Kept first as the hard fallback.
+1. **Static bootnodes & hardcoded seeds** — `--bootnodes <multiaddr>` / chain-spec
+   bootnodes / the compiled-in `network.json`, which carries both `bootnodes[]`
+   and **Source A** `bootstrap_seeds[]` (≤5 hardcoded IP dial targets, §"Source
+   A" below). Kept first as the hard fallback — it works with no DNS, no HTTP
+   and no chain (see design §3.0/§3.1).
 2. **Persistent peer store (addrman)** — `<base-path>/gpn-peers.json`. The node
    periodically snapshots the addresses of peers it is *connected to* and
    re-dials them on the next start.
 3. **DNS seed** — `--bootnodes-dns <name>` (repeatable).
 4. **HTTP seed list** — `--bootnodes-url <url>` (repeatable). **Defaults to the
-   live network directory at <https://gpncoin.ai/seeds.json>** — no flag needed.
+   registry's `bootstrap_urls[]` (Source B), else the live network directory at
+   <https://gpncoin.ai/seeds.json>** — no flag needed.
+
+### Source A — the hardcoded seeds (`network.json` → `bootstrap_seeds[]`)
+
+```json
+"bootstrap_seeds": [
+  { "id": "seed-1", "ip4": "142.129.54.88", "port": 30333,
+    "peer_id": "12D3KooWAFt…", "dns4": "gpn-testnet.duckdns.org",
+    "operator": "gpn-core" }
+]
+```
+
+* `ip4` is **authoritative** (a literal IPv4 is the cold-start path); `dns4` is an
+  optional alias **in the same entry** and is dialled *as well*, so an IP change
+  survives a DNS update without shipping a client.
+* `peer_id` is **mandatory**: it is the real identity check (a dial to a wrong or
+  hostile host fails the libp2p handshake). An entry without a usable peer id,
+  or with neither `ip4` nor `dns4`, is logged and skipped at load time.
+* Fewer than five entries is valid — "a floor of one is still a floor".
+* An operator override (`~/.gpn/network.json` / `GPN_NETWORK_REGISTRY`) may change
+  identity fields but **cannot blank this floor**: empty `bootstrap_seeds` /
+  `bootstrap_urls` in an override are filled from the compiled-in registry
+  (`network_registry::apply_bootstrap_floor`).
+
+### Source B — `network.json` → `bootstrap_urls[]`
+
+The default `--bootnodes-url` list, unioned (not replaced) across publishers. A
+failing URL is logged and skipped. `seeds.json` is produced by `gpn_seedlist`
+from on-chain liveness (`docs/peer-discovery.md` §"Publishing a seed list").
 
 Sources are resolved independently. **A source that is unreachable, malformed or
 slow is logged and skipped — it never aborts startup.** Only entries that parse

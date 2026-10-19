@@ -316,14 +316,21 @@ pub async fn prepare_network_config(
 ) -> Configuration {
     let base = config.base_path.path().to_path_buf();
 
-    // Existing bootnodes + the compiled-in registry fallback.
+    // Existing bootnodes + the compiled-in registry fallback. The registry
+    // carries both the legacy `bootnodes[]` list and "Source A" — the
+    // hardcoded ≤5 `bootstrap_seeds[]`, which are a *floor*: they must work
+    // with no DNS, no HTTP and no chain (see design §3.0/§3.1).
+    let registry = crate::network_registry::load_registry();
     let mut existing: Vec<String> = config
         .network
         .boot_nodes
         .iter()
         .map(|b| b.to_string())
         .collect();
-    existing.extend(crate::network_registry::load_registry().bootnodes);
+    existing.extend(registry.bootnodes);
+    existing.extend(crate::discovery::bootstrap_seed_addrs(
+        &registry.bootstrap_seeds,
+    ));
 
     // Resolve each extra source independently (each returns Result, never panics).
     let mut results: Vec<Result<Vec<String>, String>> = Vec::new();

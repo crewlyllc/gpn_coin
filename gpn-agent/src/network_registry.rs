@@ -19,7 +19,34 @@ pub struct Registry {
     pub spec_version: u32,
     #[serde(default)]
     pub bootnodes: Vec<String>,
+    /// Source A: hardcoded bootstrap seeds (dial targets only).
+    #[serde(default)]
+    pub bootstrap_seeds: Vec<BootstrapSeed>,
+    /// Source B: bootstrap-list URLs.
+    #[serde(default)]
+    pub bootstrap_urls: Vec<String>,
     pub latest_version: String,
+}
+
+/// One hardcoded bootstrap seed; see the node-side registry for the rationale.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct BootstrapSeed {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub ip4: String,
+    #[serde(default = "default_seed_port")]
+    pub port: u16,
+    #[serde(default)]
+    pub peer_id: String,
+    #[serde(default)]
+    pub dns4: String,
+    #[serde(default)]
+    pub operator: String,
+}
+
+fn default_seed_port() -> u16 {
+    30333
 }
 
 impl Registry {

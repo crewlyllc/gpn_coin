@@ -7,5 +7,18 @@
     "/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
     "/ip4/142.129.54.88/tcp/30334/p2p/12D3KooWRWv4yVdJGiVg7xRgdUJY9G57EeutB596gWVpAwGC9qQ2"
   ],
+  "bootstrap_seeds": [
+    {
+      "id": "seed-1",
+      "ip4": "142.129.54.88",
+      "port": 30333,
+      "peer_id": "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
+      "dns4": "gpn-testnet.duckdns.org",
+      "operator": "gpn-core"
+    }
+  ],
+  "bootstrap_urls": [
+    "https://gpncoin.ai/seeds.json"
+  ],
   "latest_version": "0.1.0"
 }

@@ -688,6 +688,13 @@ is the whole point of the change. Guardrails:
 **Phase 2 — bootstrap lists + pull default.**
 - Ship `bootstrap_seeds[]` (Source A) and `bootstrap_urls[]` (Source B) in `network.json`; publish
   `seeds.json` from `gpn_seedlist`; add `_gpn-seeds._tcp` TXT.
+  **Done (2026-10-19):** `network.json` carries `bootstrap_seeds[]` (currently one entry — the five
+  dedicated VPSes are still to be provisioned, and "a floor of one is still a floor") and
+  `bootstrap_urls[]`; `discovery::bootstrap_seed_multiaddrs`/`bootstrap_seed_addrs` expand an entry
+  into its `/ip4/…` arm **and** its `/dns4/…` alias, rejecting any entry without a usable `peer_id`;
+  `prepare_network_config` merges them next to `bootnodes[]`; `--bootnodes-url` now defaults to the
+  registry's `bootstrap_urls`; an operator override cannot blank the compiled floor
+  (`network_registry::apply_bootstrap_floor`). `_gpn-seeds._tcp` TXT is still open.
 - `GPN_JOB_TRANSPORT=pull`. `POST /assign` is a wake hint only; `dispatch_assignment` failures log at
   debug, never count as job failures.
 - AP stops polling non-discoverable `/status`; routing uses `caps` + poll RTT.

@@ -40,6 +40,7 @@
 //! multiaddr strings (one per line; `#`-prefixed lines are comments) so a seed
 //! can be as simple as a text file behind nginx.
 
+use crate::network_registry::BootstrapSeed;
 use sc_network::config::MultiaddrWithPeerId;
 use sc_network::Multiaddr;
 use std::path::Path;
@@ -194,6 +195,63 @@ fn host_port_to_multiaddr(host: &str, port: u16) -> String {
         Ok(std::net::IpAddr::V6(_)) => format!("/ip6/{host}/tcp/{port}"),
         Err(_) => format!("/dns4/{host}/tcp/{port}"),
     }
+}
+
+/// Expand one hardcoded bootstrap seed ("Source A") into dialable multiaddrs.
+///
+/// `ip4` is authoritative; a `dns4` alias in the same entry is emitted **as
+/// well**, so an IP change survives a DNS update without a client release
+/// while the literal IP remains the cold-start fallback. An entry without a
+/// valid `peer_id` yields nothing (logged) — a seed is a dial target, and the
+/// peer id is what makes a dial to a wrong or hostile host useless.
+pub fn bootstrap_seed_multiaddrs(seed: &BootstrapSeed) -> Vec<String> {
+    let id = if seed.id.is_empty() {
+        seed.peer_id.as_str()
+    } else {
+        seed.id.as_str()
+    };
+    let peer = seed.peer_id.trim();
+    if peer.is_empty() {
+        log::warn!("peer-discovery: bootstrap seed '{id}' has no peer_id — skipped");
+        return Vec::new();
+    }
+    let port = if seed.port == 0 { 30333 } else { seed.port };
+
+    let mut candidates: Vec<String> = Vec::new();
+    let ip4 = seed.ip4.trim();
+    if !ip4.is_empty() {
+        match ip4.parse::<std::net::Ipv4Addr>() {
+            Ok(parsed) => candidates.push(format!("/ip4/{parsed}/tcp/{port}/p2p/{peer}")),
+            Err(_) => log::warn!(
+                "peer-discovery: bootstrap seed '{id}' has a non-IPv4 'ip4' value '{ip4}' — \
+                 that arm skipped"
+            ),
+        }
+    }
+    let dns4 = seed.dns4.trim();
+    if !dns4.is_empty() {
+        candidates.push(format!("/dns4/{dns4}/tcp/{port}/p2p/{peer}"));
+    }
+    if candidates.is_empty() {
+        log::warn!("peer-discovery: bootstrap seed '{id}' has neither ip4 nor dns4 — skipped");
+        return Vec::new();
+    }
+
+    // The parse *is* the validation (peer id + multiaddr syntax).
+    let out: Vec<String> = candidates
+        .into_iter()
+        .filter_map(|c| canonical_bootnode(&c))
+        .collect();
+    if out.is_empty() {
+        log::warn!("peer-discovery: bootstrap seed '{id}' is not dialable — skipped");
+    }
+    out
+}
+
+/// Expand every hardcoded seed into a flat, de-duplicated multiaddr list.
+pub fn bootstrap_seed_addrs(seeds: &[BootstrapSeed]) -> Vec<String> {
+    let groups: Vec<Vec<String>> = seeds.iter().map(bootstrap_seed_multiaddrs).collect();
+    merge_dedupe(&groups)
 }
 
 /// Flatten several sources into one deduplicated, canonical bootnode list,
@@ -722,5 +780,97 @@ mod tests {
             "directory returned no dialable multiaddrs"
         );
         assert!(seeds.iter().all(|s| s.contains("/p2p/")));
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_seed_tests {
+    use super::*;
+
+    fn seed(id: &str, ip4: &str, port: u16, peer: &str, dns4: &str) -> BootstrapSeed {
+        BootstrapSeed {
+            id: id.into(),
+            ip4: ip4.into(),
+            port,
+            peer_id: peer.into(),
+            dns4: dns4.into(),
+            operator: "test".into(),
+        }
+    }
+
+    const PEER: &str = "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo";
+
+    #[test]
+    fn seed_emits_the_ip_arm_and_the_dns_alias() {
+        let s = seed("seed-1", "203.0.113.10", 30333, PEER, "seed-a.example.org");
+        let addrs = bootstrap_seed_multiaddrs(&s);
+        assert_eq!(
+            addrs,
+            vec![
+                format!("/ip4/203.0.113.10/tcp/30333/p2p/{PEER}"),
+                format!("/dns4/seed-a.example.org/tcp/30333/p2p/{PEER}"),
+            ],
+            "ip4 is authoritative, dns4 is an additive alias"
+        );
+    }
+
+    #[test]
+    fn seed_without_a_peer_id_is_never_dialed() {
+        // A seed is a dial target; without an identity check a wrong/rogue host
+        // would just be a wasted connection. Reject rather than guess.
+        let s = seed("seed-x", "203.0.113.10", 30333, "", "seed-a.example.org");
+        assert!(bootstrap_seed_multiaddrs(&s).is_empty());
+    }
+
+    #[test]
+    fn seed_falls_back_to_dns_when_the_ip_is_unusable() {
+        let s = seed("seed-y", "not-an-ip", 30333, PEER, "seed-a.example.org");
+        assert_eq!(
+            bootstrap_seed_multiaddrs(&s),
+            vec![format!("/dns4/seed-a.example.org/tcp/30333/p2p/{PEER}")]
+        );
+        // Neither arm usable ⇒ nothing at all.
+        let none = seed("seed-z", "not-an-ip", 30333, PEER, "");
+        assert!(bootstrap_seed_multiaddrs(&none).is_empty());
+    }
+
+    #[test]
+    fn seed_port_zero_defaults_to_30333_and_entries_dedupe() {
+        let a = seed("a", "203.0.113.10", 0, PEER, "");
+        let b = seed("b", "203.0.113.10", 30333, PEER, "");
+        assert_eq!(
+            bootstrap_seed_multiaddrs(&a),
+            vec![format!("/ip4/203.0.113.10/tcp/30333/p2p/{PEER}")]
+        );
+        assert_eq!(
+            bootstrap_seed_addrs(&[a, b]).len(),
+            1,
+            "the same dial target from two entries must appear once"
+        );
+    }
+
+    #[test]
+    fn shipped_registry_has_a_usable_floor() {
+        // Parse the *embedded* registry: `load_registry()` honours an operator
+        // override (`~/.gpn/network.json`), which is a different file and must
+        // not be able to make this assertion vacuous.
+        let registry: crate::network_registry::Registry =
+            serde_json::from_str(crate::network_registry::EMBEDDED_REGISTRY)
+                .expect("embedded network.json must parse");
+        assert!(
+            !registry.bootstrap_seeds.is_empty(),
+            "network.json must ship at least one hardcoded seed (a floor of one is still a floor)"
+        );
+        let addrs = bootstrap_seed_addrs(&registry.bootstrap_seeds);
+        assert!(!addrs.is_empty(), "shipped seeds must resolve to dialable multiaddrs");
+        assert!(addrs.iter().all(|a| a.contains("/p2p/")));
+        assert!(
+            !registry.bootstrap_urls.is_empty(),
+            "network.json must ship Source B bootstrap URLs"
+        );
+        assert!(registry
+            .bootstrap_urls
+            .iter()
+            .all(|u| u.starts_with("https://")));
     }
 }

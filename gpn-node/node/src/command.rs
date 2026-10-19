@@ -261,12 +261,19 @@ pub fn run() -> sc_cli::Result<()> {
             // invariants are re-applied inside `service::new_full`.
             service::force_mining(runner.config_mut());
             // Extra peer-discovery seed sources (Bitcoin-style DNS seeds + HTTP
-            // seed lists) declared on the CLI, falling back to the live network
-            // directory when the operator did not override it.
+            // seed lists) declared on the CLI, falling back to the network
+            // registry's "Source B" bootstrap URLs (independent publishers)
+            // and finally to the live network directory. A failing URL is
+            // logged and ignored — it never aborts startup.
             let seed_sources = crate::discovery::SeedSources {
                 dns: cli.bootnodes_dns.clone(),
                 urls: if cli.bootnodes_url.is_empty() {
-                    vec![crate::discovery::DEFAULT_SEED_URL.to_string()]
+                    let registry = crate::network_registry::load_registry();
+                    if registry.bootstrap_urls.is_empty() {
+                        vec![crate::discovery::DEFAULT_SEED_URL.to_string()]
+                    } else {
+                        registry.bootstrap_urls
+                    }
                 } else {
                     cli.bootnodes_url.clone()
                 },
