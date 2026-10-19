@@ -73,6 +73,25 @@ fn is_terminal_state(state: &str) -> bool {
     matches!(state, "Completed" | "Cancelled" | "Failed")
 }
 
+/// Extra slack added to a job's token-scaled stale window before an *unreadable*
+/// chain record is treated as "the job is gone".
+///
+/// A missing `ComputeMarketplace::Jobs[id]` is ambiguous: the no-wait fast create
+/// path is pool-ack only, so a job we just created has no storage item for a
+/// block or more, and a transient RPC failure looks identical. Treating that as
+/// "gone" dropped the tracking entry and lost its `max_tokens`, after which the
+/// adopt scan re-added it with `0` — collapsing the token-scaled window to the
+/// 120 s floor and exposing a large legitimate job to a premature self-cancel.
+const JANITOR_ABSENT_GRACE_SECS: u64 = 120;
+
+/// Should a tracked job survive a reconcile pass in which its on-chain record
+/// could not be read? Yes until it has aged past its own stale window plus
+/// [`JANITOR_ABSENT_GRACE_SECS`] — a create that never lands still ages out
+/// here and frees the slot, so nothing leaks.
+fn survives_absent_read(age_secs: u64, max_tokens: u64) -> bool {
+    age_secs <= stale_secs(max_tokens).saturating_add(JANITOR_ABSENT_GRACE_SECS)
+}
+
 /// Has a job outlived its on-chain deadline (`now > created_at + max_duration`)?
 /// Mirrors `pallet-compute-marketplace::expire_job`'s guard exactly (strict `>`).
 fn past_deadline(created_at: u32, max_duration: u32, head: u64) -> bool {
@@ -158,8 +177,16 @@ fn spawn_janitor(client: Arc<ChainClient>, rt: Arc<tokio::runtime::Runtime>) {
         let snapshot: Vec<(u64, Instant, u64)> = recent_jobs().lock().unwrap().clone();
         let mut keep: Vec<(u64, Instant, u64)> = Vec::with_capacity(snapshot.len());
         for (id, t, mt) in snapshot {
+            let age_secs = now.duration_since(t).as_secs();
             let Some((state, _, _, _)) = rt.block_on(client.get_job_state(id)) else {
-                continue; // gone / unreadable — stop tracking
+                // Absent ≠ gone: our own create may still be in the pool. Keep the
+                // entry (and its real `max_tokens`) through the grace window so the
+                // token-scaled stale threshold stays meaningful and the adopt scan
+                // does not re-add it as `max_tokens 0`.
+                if survives_absent_read(age_secs, mt) {
+                    keep.push((id, t, mt));
+                }
+                continue;
             };
             if is_terminal_state(&state) {
                 continue; // slot already freed
@@ -181,7 +208,7 @@ fn spawn_janitor(client: Arc<ChainClient>, rt: Arc<tokio::runtime::Runtime>) {
                 }
             }
             // Fast path: requestor cancel of our own stale Pending jobs.
-            if state == "Pending" && now.duration_since(t).as_secs() > stale_secs(mt) {
+            if state == "Pending" && age_secs > stale_secs(mt) {
                 match rt.block_on(client.cancel_job_fast(id)) {
                     Ok(()) => {
                         println!(
@@ -2641,6 +2668,28 @@ mod tests {
         assert!(!is_terminal_state("Accepted"));
         assert!(!is_terminal_state("Running"));
         assert!(!is_terminal_state("AwaitingVerification"));
+    }
+
+    #[test]
+    fn absent_chain_record_keeps_a_young_job_tracked() {
+        // A fast create is pool-ack only: `Jobs[id]` does not exist yet, which is
+        // indistinguishable from "gone". Dropping the entry loses `max_tokens` and
+        // the adopt scan re-adds it as 0 (window collapses to the 120 s floor) —
+        // so a large in-flight job could be cancelled by our own janitor.
+        let mt = 4000; // stale_secs(4000) = 60 + 200*2 = 460
+        assert_eq!(stale_secs(mt), 460);
+        assert!(survives_absent_read(0, mt));
+        assert!(survives_absent_read(36, mt)); // observed create->inclusion latency
+        assert!(survives_absent_read(460, mt));
+        assert!(survives_absent_read(580, mt)); // stale window + grace
+        // Past the grace it is treated as gone, so a create that never lands
+        // still ages out of the tracking list (no slot leak).
+        assert!(!survives_absent_read(581, mt));
+        // Same shape at the floor and the cap (no overflow, still bounded).
+        assert!(survives_absent_read(239, 0));
+        assert!(!survives_absent_read(241, 0));
+        assert!(survives_absent_read(1019, u64::MAX));
+        assert!(!survives_absent_read(1021, u64::MAX));
     }
 
     #[test]
