@@ -93,17 +93,17 @@ jobs:
             gpn-node/target/release/gpn-node.exe
           if-no-files-found: error
 
-      - name: ollama pre-flight (REQUIRED — refuse to deploy a node that cannot serve)
+      - name: ollama pre-flight (REQUIRED - refuse to deploy a node that cannot serve)
         shell: powershell
         run: |
           $ErrorActionPreference = 'Continue'
-          Write-Host '── ollama pre-flight: a GPN node is miner AND AI provider ──'
+          Write-Host '== ollama pre-flight: a GPN node is miner AND AI provider =='
           try {
             $r = Invoke-RestMethod 'http://127.0.0.1:11434/api/tags' -TimeoutSec 4
             Write-Host "ollama OK: $($r.models.Count) model(s) available"
             exit 0
           } catch {
-            Write-Host "ollama not answering ($($_.Exception.Message)) — attempting install + start"
+            Write-Host "ollama not answering ($($_.Exception.Message)) - attempting install + start"
           }
           & powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install-ollama.ps1
           try {
@@ -111,7 +111,7 @@ jobs:
             Write-Host "ollama OK after install: $($r.models.Count) model(s) available"
             exit 0
           } catch { }
-          Write-Host '::error::ollama is REQUIRED and is not reachable at http://127.0.0.1:11434 — refusing to deploy a node that cannot serve LLM jobs'
+          Write-Host '::error::ollama is REQUIRED and is not reachable at http://127.0.0.1:11434 - refusing to deploy a node that cannot serve LLM jobs'
           exit 1
 
       - name: deploy binaries + restart node to C:\gpn\bin  (auto-update)
