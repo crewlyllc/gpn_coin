@@ -5,9 +5,5 @@
   "assets": {
     "directory": "./website",
     "not_found_handling": "404-page"
-  },
-  "routes": [
-    { "pattern": "gpncoin.ai", "custom_domain": true },
-    { "pattern": "www.gpncoin.ai", "custom_domain": true }
-  ]
+  }
 }
