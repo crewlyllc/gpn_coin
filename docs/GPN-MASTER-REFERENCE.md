@@ -346,8 +346,8 @@ into a registry each cycle.
   reward × interval fact — see below — not a cadence issue.)**
 - **Supply split:** **hard supply cap ≈ 520.5 M GPN** — **420.48 M emitted** over the halving
   schedule (2 × 50 GPN × 4,204,800) plus **100 M allocated to the treasury**. Emission converges at
-  420.48 M and the treasury allocation is fixed, so 520.5 M is the true maximum. The old
-  earlier (unreachable) cap and mineable figures were **never achievable** with these params
+  420.48 M and the treasury allocation is fixed, so 520.5 M is the true maximum. Earlier
+  (unreachable) cap and mineable figures were **never achievable** with these params
   (D1; docs corrected). Treasury **100 M**: 70 M genesis-unlocked + 30 M vested
   over 10 yr (20 × 1.5M / 6mo), held by a keyless `gpn/trsy` pallet account, spendable only via a
   **13-of-25** governance roster.
