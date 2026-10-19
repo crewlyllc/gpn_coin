@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gpn-coin",
+  "compatibility_date": "2026-10-19",
+  "assets": {
+    "directory": "./website",
+    "not_found_handling": "404-page"
+  },
+  "routes": [
+    { "pattern": "gpncoin.ai", "custom_domain": true },
+    { "pattern": "www.gpncoin.ai", "custom_domain": true }
+  ]
+}
