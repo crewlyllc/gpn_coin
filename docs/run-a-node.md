@@ -44,8 +44,11 @@ manage them individually.
 # 1) install (builds gpn-node + the gpn-agent bins, generates a wallet)
 curl -fsSL <REPO>/install.sh | sh      # or ./install.sh from a clone
 
-# 2) make sure ollama is running (REQUIRED to serve LLM jobs — see below)
+# 2) ollama is REQUIRED (a node = miner + AI provider). `--setup` installs,
+#    starts, and pulls the baseline model in one shot; a normal start does the
+#    same automatically and REFUSES to run if ollama cannot be reached.
 ./scripts/install-ollama.sh            # Linux/macOS; Windows: scripts\install-ollama.ps1
+./gpn_node --setup                     # verify/bootstrap (exit 0 = ready)
 
 # 3) run ONE command — starts the miner AND the AI provider together
 gpn_node
@@ -123,18 +126,40 @@ reachable). Do **not** use this on a real network node.
 | `GPN_PUBLIC_ADDR` | This node's public multiaddress, e.g. `/ip4/203.0.113.10/tcp/30333`. Must match the forwarded port. | _(none → `--public-addr`/`public_addr`)_ |
 | `GPN_DIALABLE_TIMEOUT_SECS` | How long to wait for inbound evidence before failing closed. | `120` |
 
-## Ollama is a prerequisite (for serving LLMs)
+## Ollama is a REQUIRED component (bundled installer + hard gate)
 
-A GPN node **cannot serve LLM jobs without ollama** — the provider talks to
-`http://127.0.0.1:11434`. **Mining still works** without it, but every AI job
-fails (`pull … failed: error sending request for url (http://127.0.0.1:11434/api/pull)`),
-and `gpn_node` prints a clear warning at startup telling you exactly this.
+A GPN node is **always miner AND AI provider**. Ollama is therefore a
+**first-class, required component**, not an optional extra:
 
-Install + start it once (idempotent helpers are in `scripts/`):
+* the installers **ship inside the release package** (`scripts/install-ollama.ps1`,
+  `scripts/install-ollama.sh`, `scripts/install-ollama-amd.sh`), together with
+  `gpn-node.example.toml` and `README-FIRST-RUN.txt`;
+* `gpn_node` **probes `GPN_OLLAMA` on every start**, and if nothing answers it
+  runs the **automated first-run bootstrap**: install (winget / official
+  installer / bundled script) → start `ollama serve` detached → wait for
+  `/api/tags` → pull the baseline model;
+* if ollama is **still unreachable**, the node **REFUSES TO START**. It logs an
+  actionable error, prints `node=down(no ollama)`, and exits **69**
+  (`EX_UNAVAILABLE`) so a supervisor/service manager reports the real cause.
+  It never silently runs miner-only.
+
+### One-shot setup
+
+```bash
+./gpn_node --setup          # Linux / macOS
+```
+```powershell
+gpn_node.exe --setup        # Windows
+```
+
+Exit code `0` means ollama is serving and every baseline model is present;
+otherwise it exits `69` with install instructions.
+
+### Manual install (what `--setup` automates)
 
 ```bash
 # Linux / macOS
-./scripts/install-ollama.sh                    # installs, starts, pulls llama3.2:1b
+./scripts/install-ollama.sh                    # installs, starts, pulls the baseline
 # or manually
 curl -fsSL https://ollama.com/install.sh | sh
 ollama serve &                                 # keep running (listens on 127.0.0.1:11434)
@@ -150,9 +175,32 @@ ollama serve
 ollama pull llama3.2:1b
 ```
 
-The baseline model(s) can be overridden with `GPN_BASELINE_MODELS`
-(default `llama3.2:1b,qwen2.5:0.5b`). When ollama is down the provider logs a
-**single** actionable warning (never a per-poll `pull … failed` spam).
+### Gate + environment
+
+| Env var | Meaning | Default |
+|---------|---------|---------|
+| `GPN_OLLAMA` | ollama base URL | `http://127.0.0.1:11434` |
+| `GPN_REQUIRE_OLLAMA` | Hard gate. `0`/`false`/`no`/`off` opts out (**special cases only**) | `1` (ON) |
+| `GPN_OLLAMA_SETUP` | Attempt the automated install/start on startup | `1` (ON) |
+| `GPN_BASELINE_MODELS` | Comma-separated models to pull | `llama3.2:1b` |
+| `GPN_OLLAMA_WAIT_SECS` | Grace window for `/api/tags` after starting | `60` |
+| `GPN_OLLAMA_PULL_TIMEOUT_SECS` | Max time for one model pull | `900` |
+
+`GPN_REQUIRE_OLLAMA=0` starts the node in a loud **degraded** mode (mining
+only). It exists for CI smoke tests and deliberately mining-only boxes — it is
+**not** a supported production configuration.
+
+### First-run flow
+
+1. Unpack the release zip (binaries + `scripts/` + `README-FIRST-RUN.txt`).
+2. Run `gpn_node --setup` (or just start `gpn_node` — it does the same).
+3. Set `GPN_PUBLIC_ADDR` (+ `GPN_ACCOUNT`, `GPN_SIGNER`, `GPN_NODE_KEY`).
+4. Start `gpn_node`: it passes the ollama gate, then starts the miner, the
+   heartbeat, and every provider loop.
+
+When ollama is up but a model is merely missing, the node still starts (model
+presence is not the gate); the provider pulls/retries and logs a **single**
+actionable warning instead of per-poll `pull … failed` spam.
 
 ## AMD / Radeon support (ROCm)
 
@@ -231,11 +279,11 @@ fine-tune); the one-GPU rule only means it does **one job at a time**.
 holds the (separate) job flag so the miner fully stops during a job; the
 supervisor runs the miner and the AI stack side by side.
 
-> **Missing model/dep is non-fatal.** A provider whose model, helper script, or
-> binary is absent is simply logged with a clear warning and skipped — the node,
-> the miner, and the other providers stay healthy. (If the provider *binary* is
-> missing, that one capability is disabled on the box; the node still comes up.)
-> A failed/absent `ollama` likewise only disables LLM serving — mining continues.
+> **Missing optional model/dep is non-fatal.** A provider whose model, helper
+> script, or *optional* binary is absent is logged with a clear warning and
+> skipped — the node, the miner, and the other providers stay healthy. This
+> does **not** apply to ollama: ollama is required and the node will refuse to
+> start without it (see above; `GPN_REQUIRE_OLLAMA=0` for special cases).
 
 ## Config: one small file + env overrides
 
@@ -299,6 +347,10 @@ finetune_poll_ms = 4000
 | `GPN_PROVIDER_ENDPOINT` | public `/status` URL advertised on-chain | _(none → discovery off)_ |
 | `GPN_ASSIGN_TOKEN` | shared AP↔provider secret (`POST /assign` auth) | _(empty → legacy-permissive, warns)_ |
 | `GPN_OLLAMA` | ollama base URL | `http://127.0.0.1:11434` |
+| `GPN_REQUIRE_OLLAMA` | Hard gate: refuse to start when ollama is unreachable. `0` opts out (special cases only). | `1` |
+| `GPN_OLLAMA_SETUP` | Attempt the automated install/start if ollama is missing | `1` |
+| `GPN_BASELINE_MODELS` | Comma-separated baseline model(s) to pull on first run | `llama3.2:1b` |
+| `GPN_OLLAMA_WAIT_SECS` | Grace window for `/api/tags` after `ollama serve` | `60` |
 | `GPN_LISTEN` | heartbeat bind addr | `0.0.0.0:8093` |
 | `GPN_GFLOPS` | advertised compute | `0` |
 | `GPN_CAPACITY` | concurrent jobs | `1` |

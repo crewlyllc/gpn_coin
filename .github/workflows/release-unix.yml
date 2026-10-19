@@ -70,7 +70,16 @@ jobs:
           os=$(echo "$RUNNER_OS" | tr '[:upper:]' '[:lower:]')
           tag="${os}-latest"
           asset="gpn-${os}.tar.gz"
-          tar -czf "$RUNNER_TEMP/$asset" gpn-agent/target/release/gpn_* gpn-node/target/release/gpn-node
+          # Package binaries + the bundled ollama installer, example config and
+          # first-run docs (mirrors the Windows zip).
+          stage="$RUNNER_TEMP/gpn-${os}-stage"
+          rm -rf "$stage" && mkdir -p "$stage/scripts"
+          cp gpn-agent/target/release/gpn_* gpn-node/target/release/gpn-node "$stage/"
+          cp scripts/install-ollama.sh scripts/install-ollama-amd.sh "$stage/scripts/"
+          cp gpn-node.example.toml README-FIRST-RUN.txt "$stage/"
+          chmod +x "$stage"/gpn_* "$stage/scripts/"*.sh
+          ( cd "$stage" && tar -czf "$RUNNER_TEMP/$asset" . )
+          echo "package contents:"; find "$stage" -type f | sed "s|$stage/|  |"
           hdr=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json")
           relid=$(curl -s "${hdr[@]}" "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$tag" | jq -r '.id // empty')
           if [ -z "$relid" ]; then

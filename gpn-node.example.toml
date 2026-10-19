@@ -29,6 +29,9 @@ node_args = ["--no-telemetry", "--no-prometheus"]
 endpoint          = "ws://127.0.0.1:9944"                    # chain RPC the provider loop uses
 provider_endpoint = ""                                       # public /status URL advertised on-chain
 assign_token      = ""                                       # shared AP<->provider secret (GPN_ASSIGN_TOKEN)
+# ollama is REQUIRED (a node is miner AND AI provider). If it is not reachable
+# here, `gpn_node` attempts an automated install/start (`GPN_OLLAMA_SETUP=1`)
+# and then REFUSES TO START unless GPN_REQUIRE_OLLAMA=0. See docs/run-a-node.md.
 ollama            = "http://127.0.0.1:11434"
 listen            = "0.0.0.0:8093"
 gflops            = 0

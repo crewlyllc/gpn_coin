@@ -93,6 +93,27 @@ jobs:
             gpn-node/target/release/gpn-node.exe
           if-no-files-found: error
 
+      - name: ollama pre-flight (REQUIRED — refuse to deploy a node that cannot serve)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          Write-Host '── ollama pre-flight: a GPN node is miner AND AI provider ──'
+          try {
+            $r = Invoke-RestMethod 'http://127.0.0.1:11434/api/tags' -TimeoutSec 4
+            Write-Host "ollama OK: $($r.models.Count) model(s) available"
+            exit 0
+          } catch {
+            Write-Host "ollama not answering ($($_.Exception.Message)) — attempting install + start"
+          }
+          & powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install-ollama.ps1
+          try {
+            $r = Invoke-RestMethod 'http://127.0.0.1:11434/api/tags' -TimeoutSec 10
+            Write-Host "ollama OK after install: $($r.models.Count) model(s) available"
+            exit 0
+          } catch { }
+          Write-Host '::error::ollama is REQUIRED and is not reachable at http://127.0.0.1:11434 — refusing to deploy a node that cannot serve LLM jobs'
+          exit 1
+
       - name: deploy binaries + restart node to C:\gpn\bin  (auto-update)
         shell: powershell
         run: |
@@ -169,7 +190,7 @@ jobs:
           #     it survives teardown — this box IS the self-hosted runner, so a
           #     plain Start-Process would take the node offline again.
           if ('${{ vars.GPN_AUTOSTART_NODE }}' -ne 'false') {
-            # ollama best-effort, detached (never fails the job if absent).
+            # ollama is REQUIRED — start it detached; fail the job if it can't serve.
             try {
               Invoke-RestMethod 'http://127.0.0.1:11434/api/tags' -TimeoutSec 3 | Out-Null
               Write-Host 'ollama already serving'
@@ -178,7 +199,17 @@ jobs:
                 Write-Host 'starting ollama serve (detached)'
                 ([wmiclass]'Win32_Process').Create('cmd /c ollama serve') | Out-Null
                 Start-Sleep -Seconds 3
-              } else { Write-Host 'ollama not installed — node will MINE but cannot serve LLM jobs' }
+              } else {
+                # The pre-flight step already gated this; never silently deploy a
+                # node that cannot serve LLM jobs.
+                throw 'ollama is REQUIRED and not installed — aborting deploy (node would be miner-only)'
+              }
+              try {
+                Invoke-RestMethod 'http://127.0.0.1:11434/api/tags' -TimeoutSec 10 | Out-Null
+                Write-Host 'ollama is serving after start'
+              } catch {
+                throw 'ollama did not come up — aborting deploy (node would be miner-only)'
+              }
             }
 
             $tr = 'cmd /c C:\gpn\start-node.cmd'
@@ -212,8 +243,24 @@ jobs:
           $repo = $env:GITHUB_REPOSITORY
           $tag = 'windows-latest'
           $zip = Join-Path $env:RUNNER_TEMP 'gpn-windows.zip'
-          $files = @((Get-ChildItem 'gpn-agent\target\release\*.exe').FullName) + @((Get-Item 'gpn-node\target\release\gpn-node.exe').FullName)
-          Compress-Archive -Path $files -DestinationPath $zip -Force
+          # ── Stage the package: binaries at the root + the bundled installer,
+          #    example config and first-run docs. The release zip must be enough
+          #    to bring a brand-new box to a working (ollama-backed) node.
+          $stage = Join-Path $env:RUNNER_TEMP 'gpn-windows-stage'
+          if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item 'gpn-agent\target\release\*.exe' $stage -Force
+          Copy-Item 'gpn-node\target\release\gpn-node.exe' $stage -Force
+          New-Item -ItemType Directory -Force -Path (Join-Path $stage 'scripts') | Out-Null
+          foreach ($f in @('scripts\install-ollama.ps1','scripts\install-ollama.sh','scripts\install-ollama-amd.sh')) {
+            if (Test-Path $f) { Copy-Item $f (Join-Path $stage 'scripts') -Force } else { throw "missing required package file: $f" }
+          }
+          foreach ($f in @('gpn-node.example.toml','README-FIRST-RUN.txt')) {
+            if (Test-Path $f) { Copy-Item $f $stage -Force } else { throw "missing required package file: $f" }
+          }
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Force
+          Write-Host 'package contents:'
+          Get-ChildItem $stage -Recurse -File | ForEach-Object { Write-Host ('  ' + $_.FullName.Substring($stage.Length + 1)) }
           $rel = $null
           try { $rel = Invoke-RestMethod -Headers $h "https://api.github.com/repos/$repo/releases/tags/$tag" } catch {}
           if (-not $rel) {

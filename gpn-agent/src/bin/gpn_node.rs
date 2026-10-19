@@ -36,6 +36,13 @@
 //! A missing model/dependency for one optional provider is **non-fatal**: the
 //! node logs a clear warning and keeps the node + the other providers healthy;
 //!
+//! **Ollama, however, is REQUIRED.** A node is miner *and* AI provider, so
+//! `gpn_node` probes `GPN_OLLAMA` at startup, attempts the automated bootstrap
+//! (install → `ollama serve` → pull the baseline), and **refuses to start**
+//! (exit 69, `node=down(no ollama)`) if ollama is still unreachable.
+//! `gpn_node --setup` runs that bootstrap explicitly; `GPN_REQUIRE_OLLAMA=0`
+//! is the documented opt-out (degraded, mining-only). See `docs/run-a-node.md`.
+//!
 //! ## Config (small TOML file) + env overrides
 //! The file is `--config <path>`, else `$GPN_CONFIG`, else `$GPN_PREFIX/node.toml`
 //! (`$GPN_PREFIX` defaults to `~/.gpn`), else `./gpn-node.toml`. Every field has
@@ -54,6 +61,7 @@
 //! - Every `GPN_STATUS_SECS` (default 15) one aggregated line is printed:
 //!   child up/down + the node's best block (read cheaply from its RPC).
 
+use gpn_agent::ollama;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
@@ -1207,22 +1215,87 @@ fn on_path(name: &str) -> bool {
     false
 }
 
-/// Report whether an ollama server answers at `url` (short timeout). Used to
-/// warn clearly at startup when the box can mine but can't serve LLMs yet.
-fn ollama_reachable(url: &str) -> bool {
-    let base = url.trim_end_matches('/');
-    let client = match reqwest::blocking::Client::builder()
-        .timeout(Duration::from_millis(1500))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    client
-        .get(format!("{base}/api/tags"))
-        .send()
-        .map(|r| r.status().is_success())
-        .unwrap_or(false)
+/// `gpn_node --setup` — one-shot bootstrap of the REQUIRED ollama component.
+///
+/// Installs (if absent), starts `ollama serve` detached, waits for `/api/tags`,
+/// and pulls the baseline model(s). Exit 0 when ollama is serving, otherwise
+/// [`gpn_agent::ollama::EXIT_NO_OLLAMA`].
+fn run_setup(cfg: &Config) -> i32 {
+    asciiprintln!("gpn_node --setup — preparing the REQUIRED ollama component");
+    asciiprintln!("  endpoint={}", cfg.ollama);
+
+    let opts = ollama::SetupOpts::from_env(&cfg.ollama, true);
+    asciiprintln!("  baseline={}", opts.baseline.join(", "));
+    let outcome = ollama::ensure(&opts);
+
+    asciiprintln!("  attempted_install={} installed={}", outcome.attempted_install, outcome.installed);
+    if outcome.models.is_empty() {
+        asciiprintln!("  models: (none reported)");
+    } else {
+        asciiprintln!("  models: {}", outcome.models.join(", "));
+    }
+
+    if outcome.serving {
+        if outcome.model_ready {
+            asciiprintln!("  [ok] {}", outcome.detail);
+        } else {
+            asciieprintln!("  ! ollama is up, but not every baseline model is present: {}", outcome.detail);
+        }
+        asciiprintln!("  setup complete — a normal `gpn_node` start will pass the ollama gate.");
+        0
+    } else {
+        asciieprintln!("\n  [x] SETUP FAILED: {}", outcome.detail);
+        asciieprintln!("      Fix ollama, then re-run:  gpn_node --setup");
+        asciieprintln!("        Windows :  winget install Ollama.Ollama   (or scripts\\install-ollama.ps1)");
+        asciieprintln!("        Linux   :  scripts/install-ollama.sh");
+        asciieprintln!("        Then    :  ollama serve   &&   ollama pull llama3.2:1b\n");
+        ollama::EXIT_NO_OLLAMA
+    }
+}
+
+/// The REQUIRED-ollama gate, run on every start.
+///
+/// Probes `GPN_OLLAMA`; if missing, attempts the automated bootstrap (unless
+/// `GPN_OLLAMA_SETUP=0`). If ollama is still unreachable and
+/// `GPN_REQUIRE_OLLAMA` is on (the default), the node **refuses to start** —
+/// it never silently runs miner-only.
+fn enforce_ollama_gate(cfg: &Config) -> i32 {
+    let require = ollama::require_ollama(env_str("GPN_REQUIRE_OLLAMA").as_deref());
+    let opts = ollama::SetupOpts::from_env(&cfg.ollama, false);
+    let outcome = ollama::ensure(&opts);
+
+    match ollama::gate(require, outcome.serving) {
+        ollama::GateDecision::Allow => {
+            asciiprintln!("  ollama: {}", outcome.detail);
+            0
+        }
+        ollama::GateDecision::AllowDegraded => {
+            asciieprintln!(
+                "\n  ! ollama NOT reachable at {} and GPN_REQUIRE_OLLAMA=0 — starting in DEGRADED mode:",
+                cfg.ollama
+            );
+            asciieprintln!("      the node will MINE, but it CANNOT serve LLM jobs.");
+            asciieprintln!("      Startup will not be blocked, but this is NOT a supported production node.");
+            asciieprintln!("      Fix: gpn_node --setup\n");
+            0
+        }
+        ollama::GateDecision::Refuse => {
+            asciieprintln!("\n  [x] REFUSING TO START: ollama is REQUIRED and is not reachable.");
+            asciieprintln!("      endpoint: {}", cfg.ollama);
+            asciieprintln!("      reason  : {}", outcome.detail);
+            asciieprintln!("      A GPN node is miner AND AI provider — a miner-only node is not valid.");
+            asciieprintln!("      Fix it with the one-shot bootstrap:");
+            asciieprintln!("        gpn_node --setup");
+            asciieprintln!("      Manual install:");
+            asciieprintln!("        Windows : winget install Ollama.Ollama   (or scripts\\install-ollama.ps1)");
+            asciieprintln!("        Linux   : scripts/install-ollama.sh");
+            asciieprintln!("        then    : ollama serve   &&   ollama pull llama3.2:1b");
+            asciieprintln!("      Docs: docs/run-a-node.md");
+            asciieprintln!("      (special cases only: GPN_REQUIRE_OLLAMA=0 starts degraded)");
+            asciieprintln!("\n      node=down(no ollama)\n");
+            ollama::EXIT_NO_OLLAMA
+        }
+    }
 }
 
 #[tokio::main]
@@ -1257,25 +1330,29 @@ async fn main() {
         cfg.gflops
     );
 
-    // ── Ollama is a first-class prerequisite: without it the node still mines,
-    //    but the provider cannot serve any LLM job. Warn clearly & actionably. ──
-    if !ollama_reachable(&cfg.ollama) {
-        asciieprintln!(
-            "\n  ⚠️  ollama NOT reachable at {} — the node will MINE, but it CANNOT serve LLM jobs until ollama is running.",
-            cfg.ollama
-        );
-        asciieprintln!("      Install & start ollama (one-time):");
-        asciieprintln!(
-            "        Windows :  winget install Ollama.Ollama   (or  scripts\\install-ollama.ps1 )"
-        );
-        asciieprintln!("        Linux   :  scripts/install-ollama.sh      (or  curl -fsSL https://ollama.com/install.sh | sh )");
-        asciieprintln!(
-            "      Then:  ollama serve        # keep it running (listens on 127.0.0.1:11434)"
-        );
-        asciieprintln!("             ollama pull llama3.2:1b");
-        asciieprintln!("      Docs: docs/run-a-node.md\n");
-    } else {
-        asciiprintln!("  ollama: reachable at {}", cfg.ollama);
+    // ── `--setup`: explicit one-shot bootstrap of the REQUIRED ollama part. ──
+    // Run on a plain thread: the ollama probe/pull use reqwest's *blocking*
+    // client, which must not be created/dropped inside the async runtime.
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.iter().any(|a| a == "--setup") {
+        let cfg = cfg.clone();
+        let code = std::thread::spawn(move || run_setup(&cfg))
+            .join()
+            .unwrap_or(ollama::EXIT_NO_OLLAMA);
+        std::process::exit(code);
+    }
+
+    // ── Ollama is a REQUIRED first-class component (not optional): probe, try
+    //    the automated bootstrap, then HARD-FAIL if it is still unreachable.
+    //    A GPN node is always miner + AI provider; miner-only is not valid. ──
+    let gate_code = {
+        let cfg = cfg.clone();
+        std::thread::spawn(move || enforce_ollama_gate(&cfg))
+            .join()
+            .unwrap_or(ollama::EXIT_NO_OLLAMA)
+    };
+    if gate_code != 0 {
+        std::process::exit(gate_code);
     }
 
     let specs = build_children(&cfg);
