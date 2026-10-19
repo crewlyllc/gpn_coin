@@ -79,7 +79,9 @@ At startup the node probes inbound reachability for up to **120 s**
 1. explicit `GPN_PUBLIC_ADDR` / `--public-addr` → verify by dial-back;
 2. direct public listen address, libp2p `Identify` external addresses, or an
    actual inbound peer on `:30333`;
-3. UPnP-IGD / NAT-PMP mapping attempt (~10 s) if `GPN_UPNP=auto` (default);
+3. UPnP-IGD / NAT-PMP mapping attempt (~10 s) if `GPN_UPNP=auto` — **not yet
+   implemented in this build** (queue #46, Phase 1 remainder); steps 3–4 are
+   currently manual port-forwarding only;
 4. CGNAT detection (`100.64.0.0/10` WAN address) → no forward is possible;
 5. degrade: print the notice, continue as a non-discoverable participant.
 
@@ -97,7 +99,8 @@ Only globally routable addresses count — RFC1918 (`10/8`, `172.16/12`,
 | `--no-seed` / `GPN_SEED=0` | Never publish as a seed; also silences the not-dialable notice. | — |
 | `--discoverable` / `GPN_DISCOVERABLE=1` | Announce endpoint, accept inbound. | **on** |
 | `--no-discoverable` / `GPN_DISCOVERABLE=0` | Privacy mode: no announce, no inbound, not in any list. Implies `--no-seed`. | — |
-| `--no-upnp` / `GPN_UPNP=off` | Never attempt UPnP/NAT-PMP. | `auto` |
+| `--no-upnp` / `GPN_UPNP=off` | Never attempt UPnP/NAT-PMP. **Reserved:** automatic
+mapping is not yet implemented in this build (queue #46 Phase 1). | `auto` |
 | `--public-addr` / `GPN_PUBLIC_ADDR` | Explicit public multiaddr; always wins over detection. | unset |
 | `--require-backbone` / `GPN_REQUIRE_BACKBONE=1` | Exit 78 instead of degrading. | off |
 | `GPN_DIALABLE_TIMEOUT_SECS` | Probe grace window. | `120` |
@@ -138,9 +141,8 @@ To fix it (about 5 minutes):
      Linux (firewalld):
        sudo firewall-cmd --add-port=30333/tcp --permanent && sudo firewall-cmd --reload
 
-  4. Or let the node ask the router via UPnP/NAT-PMP (already attempted at
-     startup; on by default). If your router has UPnP disabled, enable it or
-     use step 2. Disable this behavior with --no-upnp.
+  4. UPnP/NAT-PMP mapping is not enabled in this build; use step 2 (or set
+     GPN_PUBLIC_ADDR if a forward maps a different external port).
 
   5. CGNAT: if your router's WAN address is in 100.64.0.0/10, no port forward
      can work. Run the node on a cheap VPS, or keep participating as-is.
@@ -149,8 +151,7 @@ To fix it (about 5 minutes):
 Full guide with per-OS detail:
   https://gpn.network/docs/run-a-node#make-your-node-dialable
 
-This node re-checks every 10 minutes and will print NOW DIALABLE here when
-the fix works. You can also restart to force a check.
+Restart the node after fixing the forward; detection runs at startup.
 
 Make this fatal instead:   --require-backbone
 Run private, silence:      --no-seed   (or GPN_SEED=0)

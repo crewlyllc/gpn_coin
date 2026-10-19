@@ -28,6 +28,28 @@ pub struct Cli {
     /// (accepts `{"multiaddrs": [...]}` or a plain array). Repeatable.
     #[arg(long = "bootnodes-url", value_name = "URL")]
     pub bootnodes_url: Vec<String>,
+
+    /// Willing to be published as a seed candidate (network default).
+    #[arg(long = "seed", conflicts_with = "no_seed")]
+    pub seed: bool,
+
+    /// Do not publish this node as a seed candidate; also silences the
+    /// "non-discoverable mode" notice. Syncing, mining and jobs are unaffected.
+    #[arg(long = "no-seed")]
+    pub no_seed: bool,
+
+    /// Announce this node's endpoint and accept inbound peers (default).
+    #[arg(long = "discoverable", conflicts_with = "no_discoverable")]
+    pub discoverable: bool,
+
+    /// Privacy mode: no endpoint announcement, no inbound expectation, not in
+    /// any published list. Implies `--no-seed`.
+    #[arg(long = "no-discoverable")]
+    pub no_discoverable: bool,
+
+    /// Old hard gate: exit (code 78) unless the node is inbound-reachable.
+    #[arg(long = "require-backbone")]
+    pub require_backbone: bool,
 }
 
 #[derive(Debug, clap::Subcommand)]

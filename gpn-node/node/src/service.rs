@@ -494,22 +494,23 @@ pub async fn new_full<
         log::info!("  identity : {}", st.summary);
         log::info!("==============================================================");
     }
-    // ---- Dialability gate: a node MUST be dialable to join the network ----
-    // Every GPN node must be inbound-reachable (public address + forwarded
-    // port). A node that is only outbound-reachable can dial out and sync but
-    // no peer can dial *it*, so it cannot participate in the mesh. The gate
-    // waits for direct evidence (an inbound peer, or an observed/bound public
-    // address matching the configured one) and, if none appears, logs an
-    // actionable error and exits BEFORE the miner or the RPC service start —
-    // so a non-dialable node never syncs, mines or serves.
+    // ---- Dialability: capability probe, NOT a membership gate (queue #46) ----
+    // A node is a backbone node by default, but failing to be inbound-reachable
+    // is no longer fatal: the node degrades to a non-discoverable participant
+    // that still syncs, mines and serves AI jobs (design §2/§5). `--require-
+    // backbone` / `GPN_REQUIRE_BACKBONE=1` restores the old hard gate for
+    // operators who must guarantee inbound reachability.
     {
         let gate_cfg =
             crate::dialability::GateConfig::from_env(&config.network.public_addresses);
         if gate_cfg.require {
             log::info!(
-                "dialability: gate ON — verifying this node is inbound-reachable within {}s 
-                 (GPN_PUBLIC_ADDR={})",
+                "dialability: probing inbound reachability within {}s — seed={} discoverable={} \
+                 require_backbone={} (GPN_PUBLIC_ADDR={})",
                 gate_cfg.timeout.as_secs(),
+                gate_cfg.seed,
+                gate_cfg.discoverable,
+                gate_cfg.require_backbone,
                 gate_cfg
                     .public_addr
                     .as_ref()
@@ -519,36 +520,60 @@ pub async fn new_full<
             let verdict = crate::dialability::wait_for_dialability(&network, &gate_cfg).await;
             if verdict.dialable {
                 log::info!(
-                    "✅ dialability: this node IS dialable — {} ({})",
+                    "✅ dialability: this node IS dialable — {} ({}) [tier: {}]",
                     verdict
                         .evidence
                         .as_ref()
                         .map(|e| e.to_string())
                         .unwrap_or_default(),
-                    verdict.detail
+                    verdict.detail,
+                    gate_cfg.intended_tier(true),
                 );
-            } else {
+            } else if gate_cfg.require_backbone {
                 log::error!("==============================================================");
                 log::error!(
-                    "❌ this node is NOT dialable — set GPN_PUBLIC_ADDR to /ip4/<public-ip>/tcp/<port> and forward that port on your router; refusing to join the network"
+                    "❌ this node is NOT dialable and --require-backbone is set — set \
+                     GPN_PUBLIC_ADDR to /ip4/<public-ip>/tcp/<port> and forward that port, \
+                     or drop --require-backbone to run as a non-discoverable participant"
                 );
                 log::error!("   reason: {}", verdict.detail);
-                log::error!(
-                    "   fix: set GPN_PUBLIC_ADDR (or --public-addr) and forward that TCP port to 
-                     this machine, then restart"
-                );
-                log::error!(
-                    "   (single-node / local testing only: GPN_REQUIRE_DIALABLE=0 disables this gate)"
-                );
                 log::error!("==============================================================");
                 // Distinct exit code so `gpn_node` can report
                 // `node=down(not dialable)` instead of a generic crash.
                 std::process::exit(crate::dialability::EXIT_NOT_DIALABLE);
+            } else {
+                // Degrade gracefully: keep syncing/mining/serving.
+                let port = network
+                    .listen_addresses()
+                    .iter()
+                    .find_map(|a| crate::dialability::endpoint_of(a).map(|(_, p)| p))
+                    .unwrap_or(30333);
+                match crate::dialability::degradation_notice(
+                    crate::dialability::detect_lan_ipv4(),
+                    port,
+                    gate_cfg.seed,
+                ) {
+                    Some(notice) => {
+                        for line in notice.lines() {
+                            log::warn!("{line}");
+                        }
+                    }
+                    None => log::info!(
+                        "dialability: not inbound-reachable and seed publication is disabled \
+                         (--no-seed) — running as a non-discoverable participant ({} )",
+                        verdict.detail
+                    ),
+                }
+                log::warn!(
+                    "dialability: continuing in degraded mode [tier: {}] — participation is \
+                     unaffected",
+                    gate_cfg.intended_tier(false)
+                );
             }
         } else {
             log::warn!(
-                "dialability: gate DISABLED (GPN_REQUIRE_DIALABLE=0) — this node may be 
-                 unreachable from the internet; local/single-node testing only"
+                "dialability: probe DISABLED (GPN_REQUIRE_DIALABLE=0) — inbound \
+                 reachability is not checked; local/single-node testing only"
             );
         }
     }

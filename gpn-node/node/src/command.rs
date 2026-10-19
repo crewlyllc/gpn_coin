@@ -93,6 +93,60 @@ mod tests {
         );
         assert!(service::miner_should_run(sc_service::Role::Authority));
     }
+
+    /// Membership flags: seed/discoverable default OFF *as flags* (the service
+    /// defaults them ON), and the opt-outs parse cleanly.
+    #[test]
+    fn membership_flags_parse() {
+        let bare = Cli::try_parse_from(["gpn-node", "--chain", "dev"]).expect("argv parses");
+        assert!(!bare.seed && !bare.no_seed && !bare.discoverable && !bare.no_discoverable);
+        assert!(!bare.require_backbone, "the hard gate must be opt-in");
+
+        let private = Cli::try_parse_from([
+            "gpn-node",
+            "--chain",
+            "dev",
+            "--no-discoverable",
+            "--require-backbone",
+        ])
+        .expect("argv parses");
+        assert!(private.no_discoverable);
+        assert!(private.require_backbone);
+
+        // Mutually exclusive pairs must be rejected, not silently resolved.
+        assert!(Cli::try_parse_from(["gpn-node", "--seed", "--no-seed"]).is_err());
+        assert!(Cli::try_parse_from([
+            "gpn-node",
+            "--discoverable",
+            "--no-discoverable"
+        ])
+        .is_err());
+    }
+}
+
+/// Translate the membership CLI flags into the `GPN_*` environment that
+/// [`service::new_full`] reads.
+///
+/// The service entry point only sees a `Configuration`, so the flags are
+/// normalised into the (already documented) env interface at the CLI boundary.
+/// Only flags the operator actually passed are set — an unset flag leaves the
+/// environment (and therefore the default) untouched.
+pub fn apply_membership_flags(cli: &Cli) {
+    if cli.no_discoverable {
+        std::env::set_var("GPN_DISCOVERABLE", "0");
+        // `--no-discoverable` implies `--no-seed`.
+        std::env::set_var("GPN_SEED", "0");
+    } else if cli.discoverable {
+        std::env::set_var("GPN_DISCOVERABLE", "1");
+    }
+    if cli.no_seed {
+        std::env::set_var("GPN_SEED", "0");
+    } else if cli.seed {
+        std::env::set_var("GPN_SEED", "1");
+    }
+    if cli.require_backbone {
+        std::env::set_var("GPN_REQUIRE_BACKBONE", "1");
+    }
 }
 
 /// Parse and run command line arguments
@@ -176,6 +230,8 @@ pub fn run() -> sc_cli::Result<()> {
             runner.sync_run(|config| cmd.run::<Block>(&config))
         }
         None => {
+            // Membership flags → env before anything builds the service config.
+            apply_membership_flags(&cli);
             let mut runner = cli.create_runner(&cli.run)?;
             // A GPN node ALWAYS mines: mining is structural, not an opt-in flag.
             // Force the authority role + authoring on the runner's config *before*

@@ -30,17 +30,26 @@
 //! Anything else — only loopback/private/listen-on-0.0.0.0 with no observation
 //! — is NOT dialable and fails the gate after the grace window.
 //!
-//! # Behaviour
+//! # Behaviour (v2 — seed-by-default, *non-fatal*)
 //!
-//! * ON by default. `GPN_REQUIRE_DIALABLE=0` (also `false`/`no`/`off`) opts out
-//!   for single-node / local testing and restores the old behaviour.
+//! A node is a **backbone node by default**: it announces its endpoint and
+//! accepts inbound peers. But dialability is a **capability probe, not a
+//! membership gate** — a node that cannot be dialled (CGNAT, no forward) still
+//! syncs, mines and serves AI jobs. It only *degrades* to non-discoverable.
+//!
+//! * Probe is ON by default. `GPN_REQUIRE_DIALABLE=0` (also `false`/`no`/`off`)
+//!   skips the probe entirely (local/single-node testing).
+//! * On failure the node logs the actionable [`degradation_notice`] block once
+//!   and **continues** as a non-discoverable participant.
+//! * `GPN_REQUIRE_BACKBONE=1` (or `--require-backbone`) restores the old hard
+//!   gate: log the error and **exit with [`EXIT_NOT_DIALABLE`] (78)**.
+//! * `GPN_SEED=0` / `--no-seed` silences the notice (the operator asked to be
+//!   private). `GPN_DISCOVERABLE=0` / `--no-discoverable` implies `--no-seed`.
 //! * Grace window: `GPN_DIALABLE_TIMEOUT_SECS` (default 120 s).
-//! * On failure the node logs an actionable error and **exits with code
-//!   [`EXIT_NOT_DIALABLE`] (78)** before starting the miner or the RPC service,
-//!   so it neither syncs, mines nor serves.
 //!
-//! The pure decision functions ([`classify_ip`], [`evaluate`]) are unit-tested
-//! without a network; [`wait_for_dialability`] is exercised with a stub.
+//! The pure decision functions ([`classify_ip`], [`evaluate`],
+//! [`degradation_notice`]) are unit-tested without a network;
+//! [`wait_for_dialability`] is exercised with a stub.
 
 use sc_network::multiaddr::{Multiaddr, Protocol};
 use sc_network::network_state::{NetworkState, PeerEndpoint};
@@ -321,8 +330,18 @@ fn class_desc(c: IpClass) -> &'static str {
 /// Gate configuration, resolved from the environment (+ `--public-addr`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GateConfig {
-    /// Whether the gate is enforced. Default: `true`.
+    /// Whether the capability probe runs at all. Default: `true`.
     pub require: bool,
+    /// Hard gate (`--require-backbone`): exit [`EXIT_NOT_DIALABLE`] when the
+    /// probe fails. Default: `false` (degrade gracefully).
+    pub require_backbone: bool,
+    /// Willing to be published as a seed (`GPN_SEED`, default `true`).
+    /// Controls the operator notice only; publication is decided by peer
+    /// witnesses, never by this flag.
+    pub seed: bool,
+    /// Announce the endpoint and accept inbound peers (`GPN_DISCOVERABLE`,
+    /// default `true`). `false` implies `seed = false`.
+    pub discoverable: bool,
     /// How long to wait for dialability evidence.
     pub timeout: Duration,
     /// The configured public address, if any.
@@ -347,8 +366,16 @@ impl GateConfig {
             .map(|s| s.max(10))
             .unwrap_or(DEFAULT_TIMEOUT_SECS);
 
+        let discoverable = parse_discoverable(std::env::var("GPN_DISCOVERABLE").ok().as_deref());
+        let seed = discoverable && parse_seed(std::env::var("GPN_SEED").ok().as_deref());
+
         GateConfig {
             require: parse_require_dialable(std::env::var("GPN_REQUIRE_DIALABLE").ok().as_deref()),
+            require_backbone: parse_require_backbone(
+                std::env::var("GPN_REQUIRE_BACKBONE").ok().as_deref(),
+            ),
+            seed,
+            discoverable,
             timeout: Duration::from_secs(timeout),
             public_addr,
         }
@@ -356,7 +383,32 @@ impl GateConfig {
 
     /// Explicit constructor (used by tests / callers with resolved values).
     pub fn new(require: bool, timeout: Duration, public_addr: Option<Multiaddr>) -> Self {
-        GateConfig { require, timeout, public_addr }
+        GateConfig {
+            require,
+            require_backbone: false,
+            seed: true,
+            discoverable: true,
+            timeout,
+            public_addr,
+        }
+    }
+
+    /// The capability tier this configuration aims for (for logs/status).
+    ///
+    /// This is the *intent*; the honoured tier comes from peer witnesses
+    /// (`gpn-liveness`), never from a self-reported flag.
+    pub fn intended_tier(&self, dialable: bool) -> &'static str {
+        if !self.discoverable {
+            "private"
+        } else if dialable {
+            if self.seed {
+                "seed-candidate"
+            } else {
+                "backbone"
+            }
+        } else {
+            "private (degraded)"
+        }
     }
 }
 
@@ -367,6 +419,109 @@ pub fn parse_require_dialable(raw: Option<&str>) -> bool {
         Some(v) if matches!(v.as_str(), "0" | "false" | "no" | "off") => false,
         _ => true,
     }
+}
+
+/// Parse `GPN_SEED`. Default **ON**; an explicit false-y value opts out of
+/// seed publication (and silences the degradation notice).
+pub fn parse_seed(raw: Option<&str>) -> bool {
+    match raw.map(|s| s.trim().to_ascii_lowercase()) {
+        Some(v) if matches!(v.as_str(), "0" | "false" | "no" | "off") => false,
+        _ => true,
+    }
+}
+
+/// Parse `GPN_DISCOVERABLE`. Default **ON**.
+pub fn parse_discoverable(raw: Option<&str>) -> bool {
+    match raw.map(|s| s.trim().to_ascii_lowercase()) {
+        Some(v) if matches!(v.as_str(), "0" | "false" | "no" | "off") => false,
+        _ => true,
+    }
+}
+
+/// Parse `GPN_REQUIRE_BACKBONE`. Default **OFF** — failing the probe degrades,
+/// it does not stop the node.
+pub fn parse_require_backbone(raw: Option<&str>) -> bool {
+    match raw.map(|s| s.trim().to_ascii_lowercase()) {
+        Some(v) if matches!(v.as_str(), "1" | "true" | "yes" | "on") => true,
+        _ => false,
+    }
+}
+
+/// Best-effort local LAN IPv4 address (no packet is sent: a UDP `connect` only
+/// selects a route). Returns `None` when it cannot be determined — the caller
+/// then prints a generic placeholder instead of failing.
+pub fn detect_lan_ipv4() -> Option<IpAddr> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    // TEST-NET-1: never routed, but enough for the kernel to pick a source IP.
+    sock.connect("192.0.2.1:9").ok()?;
+    let ip = sock.local_addr().ok()?.ip();
+    match classify_ip(&ip) {
+        IpClass::Private | IpClass::Public => Some(ip),
+        _ => None,
+    }
+}
+
+/// The operator-facing degradation notice (design §5.2), or `None` when the
+/// operator opted out of seed publication.
+///
+/// Emitted **once per start**, after any NAT-mapping attempt (none in this
+/// build — see queue #46 Phase 1), and never in the log loop.
+pub fn degradation_notice(lan_ip: Option<IpAddr>, port: u16, seed: bool) -> Option<String> {
+    if !seed {
+        return None;
+    }
+    let lan = lan_ip
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "<this host's LAN IP>".to_string());
+    Some(format!(
+        "\
+================================================================================
+  YOUR NODE IS NOT DIALABLE
+================================================================================
+Other nodes cannot open a connection to this machine on TCP {port}.
+
+Your node is running and fully functional: it syncs, mines and serves AI jobs.
+What you lose: it is not listed as a backbone/seed node, so it earns no
+liveness credit, gets no seed-list eligibility, and cannot be a bootstrap target.
+Nothing is taken away from block rewards or job payouts.
+
+To fix it (about 5 minutes):
+
+  1. Find this machine's LAN IP. Detected: {lan}
+     (Windows: ipconfig | Linux/macOS: ip addr or ifconfig)
+
+  2. On your router, add a port-forwarding rule:
+        Protocol ............ TCP
+        External port ....... {port}
+        Internal port ....... {port}
+        Internal IP/host .... {lan}
+     Router admin is usually http://192.168.1.1 or http://192.168.0.1.
+
+  3. Allow the port in this machine's firewall.
+     Windows (Administrator PowerShell):
+       New-NetFirewallRule -DisplayName \"GPN node\" -Direction Inbound `
+         -Protocol TCP -LocalPort {port} -Action Allow
+     Linux (ufw):
+       sudo ufw allow {port}/tcp
+     Linux (firewalld):
+       sudo firewall-cmd --add-port={port}/tcp --permanent && sudo firewall-cmd --reload
+
+  4. UPnP/NAT-PMP mapping is not enabled in this build; use step 2 (or set
+     GPN_PUBLIC_ADDR if a forward maps a different external port).
+
+  5. CGNAT: if your router's WAN address is in 100.64.0.0/10, no port forward
+     can work. Run the node on a cheap VPS, or keep participating as-is.
+     This is a supported outcome, not an error.
+
+Full guide with per-OS detail:
+  https://gpn.network/docs/run-a-node#make-your-node-dialable
+
+Restart the node after fixing the forward; detection runs at startup.
+
+Make this fatal instead:   --require-backbone
+Run private, silence:      --no-seed   (or GPN_SEED=0)
+================================================================================"
+    ))
 }
 
 /// Wait until the node is demonstrably dialable, or the grace window expires.
@@ -574,6 +729,68 @@ mod tests {
         for v in ["0", "false", "FALSE", "no", "off", " 0 "] {
             assert!(!parse_require_dialable(Some(v)), "{v} should opt out");
         }
+    }
+
+    // ── v2 membership: seed-by-default, soft gate ─────────────────────────
+
+    #[test]
+    fn seed_and_discoverable_default_on_and_opt_out() {
+        assert!(parse_seed(None));
+        assert!(parse_seed(Some("1")));
+        assert!(parse_seed(Some("")));
+        for v in ["0", "false", "FALSE", "no", "off", " 0 "] {
+            assert!(!parse_seed(Some(v)), "{v} should opt out of seed");
+        }
+        assert!(parse_discoverable(None));
+        for v in ["0", "false", "no", "off"] {
+            assert!(!parse_discoverable(Some(v)), "{v} should opt out");
+        }
+    }
+
+    #[test]
+    fn require_backbone_is_off_by_default() {
+        assert!(!parse_require_backbone(None));
+        assert!(!parse_require_backbone(Some("0")));
+        assert!(!parse_require_backbone(Some("false")));
+        assert!(parse_require_backbone(Some("1")));
+        assert!(parse_require_backbone(Some("on")));
+    }
+
+    #[test]
+    fn no_discoverable_implies_no_seed() {
+        let mut cfg = GateConfig::new(true, Duration::from_secs(10), None);
+        cfg.discoverable = false;
+        cfg.seed = false;
+        assert_eq!(cfg.intended_tier(true), "private");
+    }
+
+    #[test]
+    fn intended_tier_labels_dialable_and_degraded() {
+        let mut cfg = GateConfig::new(true, Duration::from_secs(10), None);
+        assert_eq!(cfg.intended_tier(true), "seed-candidate");
+        assert_eq!(cfg.intended_tier(false), "private (degraded)");
+        cfg.seed = false;
+        assert_eq!(cfg.intended_tier(true), "backbone");
+    }
+
+    #[test]
+    fn degradation_notice_is_actionable_and_suppressed_by_no_seed() {
+        let lan: IpAddr = "192.168.1.42".parse().unwrap();
+        let note = degradation_notice(Some(lan), 30333, true).expect("notice when seeding");
+        assert!(note.contains("YOUR NODE IS NOT DIALABLE"), "{note}");
+        assert!(note.contains("192.168.1.42"), "LAN IP must be filled in: {note}");
+        assert!(note.contains("External port ....... 30333"), "port: {note}");
+        assert!(note.contains("--no-seed"), "must document the opt-out: {note}");
+        assert!(note.contains("--require-backbone"), "must document the hard gate: {note}");
+        assert!(note.contains("100.64.0.0/10"), "must explain CGNAT: {note}");
+        assert!(note.contains("ufw allow 30333/tcp"), "must show the firewall step: {note}");
+
+        // Unknown LAN IP still yields a usable block (placeholder, not a panic).
+        let generic = degradation_notice(None, 30333, true).unwrap();
+        assert!(generic.contains("LAN IP"), "{generic}");
+
+        // The operator asked to be private: never nag.
+        assert!(degradation_notice(Some(lan), 30333, false).is_none());
     }
 
     // ── wait loop with a stub network ─────────────────────────────────────
