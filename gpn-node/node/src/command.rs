@@ -100,7 +100,10 @@ mod tests {
     fn membership_flags_parse() {
         let bare = Cli::try_parse_from(["gpn-node", "--chain", "dev"]).expect("argv parses");
         assert!(!bare.seed && !bare.no_seed && !bare.discoverable && !bare.no_discoverable);
-        assert!(!bare.require_backbone, "the hard gate must be opt-in");
+        // The hard gate is the default; both flags are opt-in at the CLI level
+        // (an unset flag leaves the environment, hence the default, alone).
+        assert!(!bare.require_backbone);
+        assert!(!bare.no_require_backbone);
 
         let private = Cli::try_parse_from([
             "gpn-node",
@@ -113,14 +116,20 @@ mod tests {
         assert!(private.no_discoverable);
         assert!(private.require_backbone);
 
+        // The documented opt-out must parse and must conflict with the explicit
+        // hard-gate flag (never silently resolve).
+        let soft = Cli::try_parse_from(["gpn-node", "--chain", "dev", "--no-require-backbone"])
+            .expect("argv parses");
+        assert!(soft.no_require_backbone);
+        assert!(!soft.require_backbone);
+        assert!(
+            Cli::try_parse_from(["gpn-node", "--require-backbone", "--no-require-backbone"])
+                .is_err()
+        );
+
         // Mutually exclusive pairs must be rejected, not silently resolved.
         assert!(Cli::try_parse_from(["gpn-node", "--seed", "--no-seed"]).is_err());
-        assert!(Cli::try_parse_from([
-            "gpn-node",
-            "--discoverable",
-            "--no-discoverable"
-        ])
-        .is_err());
+        assert!(Cli::try_parse_from(["gpn-node", "--discoverable", "--no-discoverable"]).is_err());
     }
 }
 
@@ -146,6 +155,8 @@ pub fn apply_membership_flags(cli: &Cli) {
     }
     if cli.require_backbone {
         std::env::set_var("GPN_REQUIRE_BACKBONE", "1");
+    } else if cli.no_require_backbone {
+        std::env::set_var("GPN_REQUIRE_BACKBONE", "0");
     }
 }
 

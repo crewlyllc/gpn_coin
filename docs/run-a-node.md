@@ -57,21 +57,27 @@ gpn_node
 That's it. `gpn_node` reads its config from a small file + env, then starts and
 supervises all of the children — always: the miner and the AI serving stack.
 
-## Backbone by default — dialability is a goal, not a gate
+## Backbone by default — dialable is REQUIRED
 
-Every GPN node **tries** to be inbound-reachable. A dialable node is a
-**backbone** node: it announces its endpoint, accepts inbound peers, relays and
-serves blocks for the mesh, and earns the `gpn-liveness` uptime credit that
-gates the Silver/Gold staking multiplier. The best nodes become **seeds**
-(bootstrap targets) automatically — see [How to become a seed](#how-to-become-a-seed--bootstrap-node).
+Every GPN node is a **backbone** node: it announces its endpoint, accepts
+inbound peers, relays and serves blocks for the mesh, and earns the
+`gpn-liveness` uptime credit that gates the Silver/Gold staking multiplier. The
+best nodes become **seeds** (bootstrap targets) automatically — see
+[How to become a seed](#how-to-become-a-seed--bootstrap-node).
 
-But **not being dialable no longer stops a node from joining**. If inbound
-reachability cannot be established (NAT with no forward, CGNAT, restrictive
-firewall), the node prints a prominent notice and **keeps running in degraded,
-non-discoverable mode**: it still syncs the chain, mines, and serves AI jobs,
-and it earns the same block rewards and job payouts. The only things it does
-not get are liveness credit, seed-list eligibility, and a small routing
-tie-break.
+The network is still growing, so **inbound reachability is required by
+default**. A node that cannot be dialled prints the notice below and **exits
+with code 78** (`EX_CONFIG`, reported as `node=down(not dialable)`). Nothing is
+silently half-joined.
+
+> **Opting out (not recommended while the network is growing).**
+> `--no-require-backbone` (or `GPN_REQUIRE_BACKBONE=0`) keeps the node running
+> when it cannot be dialled: it prints the same notice and continues in
+> **degraded, non-discoverable mode** — syncing, mining and serving AI jobs with
+> the same block rewards and job payouts. The only things it does not get are
+> liveness credit, seed-list eligibility, and a small routing tie-break. In
+> this mode it re-checks every **10 minutes** and prints `NOW DIALABLE` once
+> when the forward starts working.
 
 At startup the node probes inbound reachability for up to **120 s**
 (`GPN_DIALABLE_TIMEOUT_SECS`), in this order:
@@ -83,15 +89,16 @@ At startup the node probes inbound reachability for up to **120 s**
    implemented in this build** (queue #46, Phase 1 remainder); steps 3–4 are
    currently manual port-forwarding only;
 4. CGNAT detection (`100.64.0.0/10` WAN address) → no forward is possible;
-5. degrade: print the notice, continue as a non-discoverable participant.
+5. not dialable: print the notice and **exit 78** (default), or continue in
+   degraded mode with `--no-require-backbone`.
 
 Only globally routable addresses count — RFC1918 (`10/8`, `172.16/12`,
 `192.168/16`), CGNAT (`100.64/10`), loopback, link-local and `0.0.0.0` never do.
 
-> **Want a guarantee?** `--require-backbone` (or `GPN_REQUIRE_BACKBONE=1`)
-> restores the old hard gate: the node logs the error and exits with code **78**
-> (`EX_CONFIG`) if it is not dialable. Use this only on hosts that must be
-> backbone (e.g. a monitoring fleet), never for a home node.
+> **Opting out.** `--no-require-backbone` (or `GPN_REQUIRE_BACKBONE=0`)
+> disables the hard gate: the node logs the same notice and continues as a
+> non-discoverable participant instead of exiting. Use it for a machine that
+> physically cannot be forwarded (CGNAT) and must still run.
 
 | Flag / env | Meaning | Default |
 |---|---|---|
@@ -102,12 +109,13 @@ Only globally routable addresses count — RFC1918 (`10/8`, `172.16/12`,
 | `--no-upnp` / `GPN_UPNP=off` | Never attempt UPnP/NAT-PMP. **Reserved:** automatic
 mapping is not yet implemented in this build (queue #46 Phase 1). | `auto` |
 | `--public-addr` / `GPN_PUBLIC_ADDR` | Explicit public multiaddr; always wins over detection. | unset |
-| `--require-backbone` / `GPN_REQUIRE_BACKBONE=1` | Exit 78 instead of degrading. | off |
+| `--require-backbone` / `GPN_REQUIRE_BACKBONE=1` | **Default.** Exit 78 instead of degrading. | **on** |
+| `--no-require-backbone` / `GPN_REQUIRE_BACKBONE=0` | Opt out: run degraded when not dialable (re-checks every 10 min). | — |
 | `GPN_DIALABLE_TIMEOUT_SECS` | Probe grace window. | `120` |
 | `GPN_SEED_PORT` | Inbound port to open/probe. | `30333` |
 
-If the node is not dialable you will see this once (exact text, LAN IP and port
-filled in):
+If the node is not dialable you will see this (exact text, LAN IP and port
+filled in) and, by default, the process exits:
 
 ```
 ================================================================================
@@ -132,6 +140,13 @@ To fix it (about 5 minutes):
         Internal IP/host .... 192.168.1.42
      Router admin is usually http://192.168.1.1 or http://192.168.0.1.
 
+     Recommended setup (EXAMPLE - these are example values, not detected):
+       - Give this machine a DHCP reservation so its LAN IP never changes
+         (example: 192.168.1.50).
+       - Forward exactly one TCP port, external = internal (30333).
+       - Example router rule:  TCP 30333 -> 192.168.1.50:30333
+     Detected on this machine: LAN 192.168.1.42, port 30333.
+
   3. Allow the port in this machine's firewall.
      Windows (Administrator PowerShell):
        New-NetFirewallRule -DisplayName "GPN node" -Direction Inbound `
@@ -145,20 +160,30 @@ To fix it (about 5 minutes):
      GPN_PUBLIC_ADDR if a forward maps a different external port).
 
   5. CGNAT: if your router's WAN address is in 100.64.0.0/10, no port forward
-     can work. Run the node on a cheap VPS, or keep participating as-is.
-     This is a supported outcome, not an error.
+     can work. Run the node on a cheap VPS with a public IP.
 
 Full guide with per-OS detail:
   https://gpn.network/docs/run-a-node#make-your-node-dialable
 
-Restart the node after fixing the forward; detection runs at startup.
+This node will exit until it is dialable.
+To run anyway (not recommended while the network is growing):
+  --no-require-backbone
+================================================================================
+```
 
-Make this fatal instead:   --require-backbone
+In the opt-out mode (`--no-require-backbone`) the last block reads instead:
+
+```
+This node re-checks every 10 minutes and will print NOW DIALABLE here when
+the fix works. You can also restart to force a check.
+
+Soft mode is active (--no-require-backbone / GPN_REQUIRE_BACKBONE=0).
 Run private, silence:      --no-seed   (or GPN_SEED=0)
 ================================================================================
 ```
 
-When a fix succeeds, the node confirms it once:
+When a fix succeeds, the node confirms it once (opt-out mode only — in the
+default mode you just restart into a clean start):
 
 ```
 ================================================================================
@@ -173,8 +198,33 @@ node and is eligible for seed listing. Nothing else to do.
 
 ## Make your node dialable
 
-The rest of this section is the manual walkthrough. You do **not** need it to
-run a node — only to get backbone/seed benefits.
+The walkthrough below is what the notice above tells you to do. You need it on
+any host that is not already directly reachable on a public IP.
+
+### Recommended setup (example)
+
+A setup that works on most home routers, in three steps:
+
+1. **Pin the LAN IP with a DHCP reservation** on the router, so the address the
+   forward points at never changes. Example: `192.168.1.50` (the node prints
+   the address it actually detected, which may be e.g. `192.168.1.42`).
+2. **Forward one port, external = internal: `30333` → `30333`.** Keeping the
+   numbers equal means no `GPN_PUBLIC_ADDR` is needed when the probe sees the
+   mapping.
+3. **Allow `30333/tcp` in the host firewall** (commands in step 2 below).
+
+Concrete example rule, as it appears on a typical router page:
+
+```
+Name ............ GPN node
+Protocol ........ TCP
+External port ... 30333
+Internal port ... 30333
+Internal IP ..... 192.168.1.50
+```
+
+That is the whole recipe. The rest of this section explains each step and the
+failure modes (multiple nodes, CGNAT, port rewritten by the router).
 
 ### 1. Forward TCP 30333 on your router
 
@@ -227,12 +277,12 @@ sudo firewall-cmd --list-ports
 `gpn_node` binary (or `sudo /usr/libexec/ApplicationFirewall/socketfilterfw
 --add /path/to/gpn_node`).
 
-### 3. UPnP / NAT-PMP (optional, automatic)
+### 3. UPnP / NAT-PMP (planned — not in this build yet)
 
-By default the node asks the router to create the mapping itself (UPnP-IGD or
-NAT-PMP, 10 s budget, TCP only, released on clean shutdown). This works only if
-UPnP is **enabled** on the router, and many ISPs/routers ship it disabled. When
-it succeeds the node logs:
+When implemented, the node will ask the router to create the mapping itself
+(UPnP-IGD or NAT-PMP, 10 s budget, TCP only, released on clean shutdown). Until
+then, `--no-upnp` is accepted and reserved, and a manual forward (step 1) is
+the only automatic-free path. When it lands, a successful mapping logs:
 
 ```
 UPnP: mapped TCP 30333 -> 192.168.1.42:30333 via 192.168.1.1; disable with --no-upnp
@@ -251,8 +301,9 @@ Check the **WAN address** on the router status page (not the LAN address):
 - A public WAN address that differs from what a "what is my IP" site reports →
   also CGNAT (double NAT).
 
-CGNAT is a **supported outcome**. The node keeps syncing, mining and serving
-jobs; it just is not a backbone/seed candidate.
+CGNAT is **not** an error. By default the node exits with the notice (it cannot
+be a backbone member); with `--no-require-backbone` it keeps syncing, mining and
+serving jobs as a non-discoverable participant.
 
 ### 5. Tell the node its public address (only if detection fails)
 
@@ -277,7 +328,9 @@ announced endpoint exact.
 
 ### 6. Verify from outside
 
-The node re-checks every 10 minutes, but you can confirm the forward yourself:
+The node re-checks every 10 minutes **when it is running in the opt-out mode**
+(`--no-require-backbone`); by default it exits instead, so restart it after the
+forward is in place. You can also confirm the forward yourself:
 
 - **From another network** (phone hotspot, a friend's house, a VPS) — not from
   the same LAN, where NAT hairpinning can give a false positive:
@@ -296,7 +349,8 @@ The node re-checks every 10 minutes, but you can confirm the forward yourself:
 - **Online port checker** (e.g. `portchecker.io`, `canyouseeme.org`): check
   TCP `30333` against your public IP.
 - The authoritative check is the node itself: `gpn_node --status` shows
-  `tier: backbone` once reachable, and the console prints `NOW DIALABLE`.
+  `tier: backbone` once reachable, and (in opt-out mode) the console prints
+  `NOW DIALABLE`.
 
 If it still fails: confirm the rule is **TCP** (not UDP), the internal IP is
 current (DHCP may have moved it), the host firewall allows it, and the ISP is

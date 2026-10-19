@@ -30,19 +30,22 @@
 //! Anything else — only loopback/private/listen-on-0.0.0.0 with no observation
 //! — is NOT dialable and fails the gate after the grace window.
 //!
-//! # Behaviour (v2 — seed-by-default, *non-fatal*)
+//! # Behaviour (v2.2 — dialable is REQUIRED by default)
 //!
-//! A node is a **backbone node by default**: it announces its endpoint and
-//! accepts inbound peers. But dialability is a **capability probe, not a
-//! membership gate** — a node that cannot be dialled (CGNAT, no forward) still
-//! syncs, mines and serves AI jobs. It only *degrades* to non-discoverable.
+//! A node is a **backbone node**: it announces its endpoint and accepts inbound
+//! peers. The network is still growing, so **inbound reachability is a hard
+//! requirement by default** — a node that cannot be dialled prints the full
+//! operator notice and exits with [`EXIT_NOT_DIALABLE`] (78) after the grace
+//! window.
 //!
 //! * Probe is ON by default. `GPN_REQUIRE_DIALABLE=0` (also `false`/`no`/`off`)
 //!   skips the probe entirely (local/single-node testing).
-//! * On failure the node logs the actionable [`degradation_notice`] block once
-//!   and **continues** as a non-discoverable participant.
-//! * `GPN_REQUIRE_BACKBONE=1` (or `--require-backbone`) restores the old hard
-//!   gate: log the error and **exit with [`EXIT_NOT_DIALABLE`] (78)**.
+//! * Hard gate is the **default**: `--require-backbone` is implicit;
+//!   `GPN_REQUIRE_BACKBONE` defaults to ON.
+//! * Opt out with `--no-require-backbone` / `GPN_REQUIRE_BACKBONE=0`: the node
+//!   logs the actionable [`degradation_notice`] block once and **continues** as
+//!   a non-discoverable participant, re-checking every 10 minutes and printing
+//!   [`promotion_notice`] once when it becomes dialable.
 //! * `GPN_SEED=0` / `--no-seed` silences the notice (the operator asked to be
 //!   private). `GPN_DISCOVERABLE=0` / `--no-discoverable` implies `--no-seed`.
 //! * Grace window: `GPN_DIALABLE_TIMEOUT_SECS` (default 120 s).
@@ -66,6 +69,17 @@ pub const EXIT_NOT_DIALABLE: i32 = 78;
 
 /// Default grace window for evidence of inbound reachability.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 120;
+
+/// Default inbound port (`GPN_SEED_PORT`); also the recommended external port.
+pub const DEFAULT_SEED_PORT: u16 = 30333;
+
+/// Example LAN IP used in the "recommended setup" block of the operator
+/// notice. It is deliberately a *documentation* example — the detected LAN IP
+/// is printed separately, right next to it.
+pub const RECOMMENDED_LAN_EXAMPLE: &str = "192.168.1.50";
+
+/// How often a running node re-checks its inbound reachability (design §5.3).
+pub const RECHECK_SECS: u64 = 600;
 
 /// Poll cadence while waiting for the gate.
 const POLL_SECS: u64 = 5;
@@ -197,11 +211,19 @@ pub struct Verdict {
 
 impl Verdict {
     fn pass(evidence: Evidence, detail: impl Into<String>) -> Self {
-        Verdict { dialable: true, evidence: Some(evidence), detail: detail.into() }
+        Verdict {
+            dialable: true,
+            evidence: Some(evidence),
+            detail: detail.into(),
+        }
     }
 
     fn fail(detail: impl Into<String>) -> Self {
-        Verdict { dialable: false, evidence: None, detail: detail.into() }
+        Verdict {
+            dialable: false,
+            evidence: None,
+            detail: detail.into(),
+        }
     }
 }
 
@@ -289,7 +311,10 @@ pub fn evaluate(
         }
     }
 
-    let listen_ports: Vec<u16> = listen.iter().filter_map(|l| endpoint_of(l).map(|(_, p)| p)).collect();
+    let listen_ports: Vec<u16> = listen
+        .iter()
+        .filter_map(|l| endpoint_of(l).map(|(_, p)| p))
+        .collect();
     for o in observed {
         if let Some((ip, port)) = endpoint_of(o) {
             if classify_ip(&ip).is_public() && listen_ports.contains(&port) {
@@ -313,7 +338,11 @@ fn join(addrs: &[Multiaddr]) -> String {
     if addrs.is_empty() {
         return "none".into();
     }
-    addrs.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ")
+    addrs
+        .iter()
+        .map(|a| a.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn class_desc(c: IpClass) -> &'static str {
@@ -332,8 +361,9 @@ fn class_desc(c: IpClass) -> &'static str {
 pub struct GateConfig {
     /// Whether the capability probe runs at all. Default: `true`.
     pub require: bool,
-    /// Hard gate (`--require-backbone`): exit [`EXIT_NOT_DIALABLE`] when the
-    /// probe fails. Default: `false` (degrade gracefully).
+    /// Hard gate (`--require-backbone`, **DEFAULT**): exit
+    /// [`EXIT_NOT_DIALABLE`] when the probe fails. Opt out with
+    /// `--no-require-backbone` / `GPN_REQUIRE_BACKBONE=0` to run degraded.
     pub require_backbone: bool,
     /// Willing to be published as a seed (`GPN_SEED`, default `true`).
     /// Controls the operator notice only; publication is decided by peer
@@ -385,7 +415,7 @@ impl GateConfig {
     pub fn new(require: bool, timeout: Duration, public_addr: Option<Multiaddr>) -> Self {
         GateConfig {
             require,
-            require_backbone: false,
+            require_backbone: true,
             seed: true,
             discoverable: true,
             timeout,
@@ -438,12 +468,16 @@ pub fn parse_discoverable(raw: Option<&str>) -> bool {
     }
 }
 
-/// Parse `GPN_REQUIRE_BACKBONE`. Default **OFF** — failing the probe degrades,
-/// it does not stop the node.
+/// Parse `GPN_REQUIRE_BACKBONE`. Default **ON** — a node that cannot be
+/// dialled prints the §5.2 notice and exits [`EXIT_NOT_DIALABLE`].
+///
+/// Only an explicit false-y value (`0`/`false`/`no`/`off`) opts out into the
+/// soft mode: run degraded, re-check every 10 minutes, print NOW DIALABLE on
+/// promotion.
 pub fn parse_require_backbone(raw: Option<&str>) -> bool {
     match raw.map(|s| s.trim().to_ascii_lowercase()) {
-        Some(v) if matches!(v.as_str(), "1" | "true" | "yes" | "on") => true,
-        _ => false,
+        Some(v) if matches!(v.as_str(), "0" | "false" | "no" | "off") => false,
+        _ => true,
     }
 }
 
@@ -461,18 +495,56 @@ pub fn detect_lan_ipv4() -> Option<IpAddr> {
     }
 }
 
+/// The listen port to advertise/probe, preferring the first listen address.
+pub fn listen_port(listen: &[Multiaddr]) -> Option<u16> {
+    listen.iter().find_map(|a| endpoint_of(a).map(|(_, p)| p))
+}
+
 /// The operator-facing degradation notice (design §5.2), or `None` when the
 /// operator opted out of seed publication.
 ///
-/// Emitted **once per start**, after any NAT-mapping attempt (none in this
-/// build — see queue #46 Phase 1), and never in the log loop.
-pub fn degradation_notice(lan_ip: Option<IpAddr>, port: u16, seed: bool) -> Option<String> {
+/// `hard_gate` selects the postamble: the **default** hard gate prints the
+/// notice and exits with [`EXIT_NOT_DIALABLE`]; `--no-require-backbone` (soft
+/// mode) keeps running as a non-discoverable participant and promises the
+/// 10-minute re-check.
+///
+/// Emitted **once per degraded transition** (startup, or dialable → not
+/// dialable), after any NAT-mapping attempt (none in this build — see queue
+/// #46 Phase 1), and never in the per-block log loop.
+pub fn degradation_notice(
+    lan_ip: Option<IpAddr>,
+    port: u16,
+    seed: bool,
+    hard_gate: bool,
+) -> Option<String> {
     if !seed {
         return None;
     }
     let lan = lan_ip
         .map(|ip| ip.to_string())
         .unwrap_or_else(|| "<this host's LAN IP>".to_string());
+    let status_line = if hard_gate {
+        "This node will NOT start until it is dialable. Nothing else on this machine\n\
+         is affected - fix the forward/firewall below and start it again."
+    } else {
+        "Your node is running and fully functional: it syncs, mines and serves AI jobs.\n\
+         It continues in degraded (non-discoverable) mode."
+    };
+    let cgnat_tail = if hard_gate {
+        "Run the node on a cheap VPS with a public IP."
+    } else {
+        "Run the node on a cheap VPS, or keep participating as-is.\n     This is a supported outcome, not an error."
+    };
+    let tail = if hard_gate {
+        "This node will exit until it is dialable.\n\
+         To run anyway (not recommended while the network is growing):\n\
+         \x20 --no-require-backbone"
+    } else {
+        "This node re-checks every 10 minutes and will print NOW DIALABLE here when\n\
+         the fix works. You can also restart to force a check.\n\n\
+         Soft mode is active (--no-require-backbone / GPN_REQUIRE_BACKBONE=0).\n\
+         Run private, silence:      --no-seed   (or GPN_SEED=0)"
+    };
     Some(format!(
         "\
 ================================================================================
@@ -480,7 +552,7 @@ pub fn degradation_notice(lan_ip: Option<IpAddr>, port: u16, seed: bool) -> Opti
 ================================================================================
 Other nodes cannot open a connection to this machine on TCP {port}.
 
-Your node is running and fully functional: it syncs, mines and serves AI jobs.
+{status_line}
 What you lose: it is not listed as a backbone/seed node, so it earns no
 liveness credit, gets no seed-list eligibility, and cannot be a bootstrap target.
 Nothing is taken away from block rewards or job payouts.
@@ -497,6 +569,13 @@ To fix it (about 5 minutes):
         Internal IP/host .... {lan}
      Router admin is usually http://192.168.1.1 or http://192.168.0.1.
 
+     Recommended setup (EXAMPLE - these are example values, not detected):
+       - Give this machine a DHCP reservation so its LAN IP never changes
+         (example: {example_lan}).
+       - Forward exactly one TCP port, external = internal ({port}).
+       - Example router rule:  TCP {port} -> {example_lan}:{port}
+     Detected on this machine: LAN {lan}, port {port}.
+
   3. Allow the port in this machine's firewall.
      Windows (Administrator PowerShell):
        New-NetFirewallRule -DisplayName \"GPN node\" -Direction Inbound `
@@ -510,18 +589,109 @@ To fix it (about 5 minutes):
      GPN_PUBLIC_ADDR if a forward maps a different external port).
 
   5. CGNAT: if your router's WAN address is in 100.64.0.0/10, no port forward
-     can work. Run the node on a cheap VPS, or keep participating as-is.
-     This is a supported outcome, not an error.
+     can work. {cgnat_tail}
 
 Full guide with per-OS detail:
   https://gpn.network/docs/run-a-node#make-your-node-dialable
 
-Restart the node after fixing the forward; detection runs at startup.
-
-Make this fatal instead:   --require-backbone
-Run private, silence:      --no-seed   (or GPN_SEED=0)
-================================================================================"
+{tail}
+================================================================================",
+        example_lan = RECOMMENDED_LAN_EXAMPLE,
     ))
+}
+
+/// The one-time promotion block (design §5.3), printed on the
+/// `not dialable → dialable` transition only.
+pub fn promotion_notice(port: u16) -> String {
+    format!(
+        "\
+================================================================================
+  NOW DIALABLE - your node is reachable on TCP {port}
+================================================================================
+Inbound reachability was confirmed. This node now announces itself as a backbone
+node and is eligible for seed listing. Nothing else to do.
+
+(This message is shown once.)
+================================================================================"
+    )
+}
+
+/// Edge-triggered state change between two dialability observations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialabilityChange {
+    /// State unchanged — print nothing (never nag).
+    None,
+    /// `not dialable → dialable`: print [`promotion_notice`] once.
+    BecameDialable,
+    /// `dialable → not dialable`: print [`degradation_notice`] once.
+    BecameUndialable,
+}
+
+/// Pure edge detector (design §5.3: edge-triggered, not level-triggered).
+pub fn edge_transition(last_dialable: bool, now_dialable: bool) -> DialabilityChange {
+    match (last_dialable, now_dialable) {
+        (false, true) => DialabilityChange::BecameDialable,
+        (true, false) => DialabilityChange::BecameUndialable,
+        _ => DialabilityChange::None,
+    }
+}
+
+/// Periodic re-check loop (design §5.3): every [`RECHECK_SECS`], re-evaluate
+/// inbound reachability and print the edge-triggered notice exactly once per
+/// transition. `initial_dialable` is the startup verdict, so the watcher does
+/// not repeat a notice the startup path already printed.
+///
+/// Returns immediately if the probe is disabled. Runs forever otherwise.
+pub async fn watch_dialability<N>(
+    network: std::sync::Arc<N>,
+    cfg: GateConfig,
+    initial_dialable: bool,
+) where
+    N: NetworkStatusProvider + NetworkStateInfo + Send + Sync + 'static + ?Sized,
+{
+    if !cfg.require {
+        return;
+    }
+    let mut last_dialable = initial_dialable;
+    let mut tick = tokio::time::interval(Duration::from_secs(RECHECK_SECS));
+    tick.tick().await; // consume the immediate first tick
+    loop {
+        tick.tick().await;
+        let inbound = match network.network_state().await {
+            Ok(state) => inbound_peer_count(&state),
+            Err(_) => 0,
+        };
+        let listen = network.listen_addresses();
+        let observed = network.external_addresses();
+        let verdict = evaluate(inbound, &listen, &observed, cfg.public_addr.as_ref());
+        let port = listen_port(&listen).unwrap_or(DEFAULT_SEED_PORT);
+
+        match edge_transition(last_dialable, verdict.dialable) {
+            DialabilityChange::None => {}
+            DialabilityChange::BecameDialable => {
+                last_dialable = true;
+                log::info!(
+                    "dialability: inbound reachability confirmed ({})",
+                    verdict.detail
+                );
+                for line in promotion_notice(port).lines() {
+                    log::info!("{line}");
+                }
+            }
+            DialabilityChange::BecameUndialable => {
+                last_dialable = false;
+                log::warn!(
+                    "dialability: lost inbound reachability ({})",
+                    verdict.detail
+                );
+                if let Some(notice) = degradation_notice(detect_lan_ipv4(), port, cfg.seed, false) {
+                    for line in notice.lines() {
+                        log::warn!("{line}");
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Wait until the node is demonstrably dialable, or the grace window expires.
@@ -563,7 +733,12 @@ where
             );
         }
 
-        let sleep = POLL_SECS.min(deadline.saturating_duration_since(Instant::now()).as_secs().max(1));
+        let sleep = POLL_SECS.min(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .as_secs()
+                .max(1),
+        );
         tokio::time::sleep(Duration::from_secs(sleep)).await;
     }
 }
@@ -599,18 +774,27 @@ mod tests {
 
     #[test]
     fn loopback_link_local_unspecified() {
-        assert_eq!(classify_ip(&IpAddr::V4(Ipv4Addr::LOCALHOST)), IpClass::Loopback);
-        assert_eq!(classify_ip(&IpAddr::V4(Ipv4Addr::UNSPECIFIED)), IpClass::Unspecified);
+        assert_eq!(
+            classify_ip(&IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            IpClass::Loopback
+        );
+        assert_eq!(
+            classify_ip(&IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+            IpClass::Unspecified
+        );
         assert_eq!(
             classify_ip(&"169.254.10.20".parse().unwrap()),
             IpClass::LinkLocal
         );
-        assert_eq!(classify_ip(&IpAddr::V6(Ipv6Addr::LOCALHOST)), IpClass::Loopback);
-        assert_eq!(classify_ip(&IpAddr::V6(Ipv6Addr::UNSPECIFIED)), IpClass::Unspecified);
         assert_eq!(
-            classify_ip(&"fe80::1".parse().unwrap()),
-            IpClass::LinkLocal
+            classify_ip(&IpAddr::V6(Ipv6Addr::LOCALHOST)),
+            IpClass::Loopback
         );
+        assert_eq!(
+            classify_ip(&IpAddr::V6(Ipv6Addr::UNSPECIFIED)),
+            IpClass::Unspecified
+        );
+        assert_eq!(classify_ip(&"fe80::1".parse().unwrap()), IpClass::LinkLocal);
         assert_eq!(classify_ip(&"fd00::1".parse().unwrap()), IpClass::Private);
         assert_eq!(
             classify_ip(&"2001:4860:4860::8888".parse().unwrap()),
@@ -622,9 +806,10 @@ mod tests {
 
     #[test]
     fn endpoint_extraction_ignores_p2p_suffix() {
-        let ma: Multiaddr = "/ip4/1.2.3.4/tcp/30333/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN"
-            .parse()
-            .unwrap();
+        let ma: Multiaddr =
+            "/ip4/1.2.3.4/tcp/30333/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN"
+                .parse()
+                .unwrap();
         assert_eq!(
             endpoint_of(&ma),
             Some((IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 30333))
@@ -675,12 +860,22 @@ mod tests {
     #[test]
     fn configured_addr_must_match_exactly() {
         let cfg = ma("/ip4/1.2.3.4/tcp/30333");
-        let pass = evaluate(0, &[ma("/ip4/0.0.0.0/tcp/30333")], &[ma("/ip4/1.2.3.4/tcp/30333")], Some(&cfg));
+        let pass = evaluate(
+            0,
+            &[ma("/ip4/0.0.0.0/tcp/30333")],
+            &[ma("/ip4/1.2.3.4/tcp/30333")],
+            Some(&cfg),
+        );
         assert!(pass.dialable);
         assert_eq!(pass.evidence, Some(Evidence::ConfiguredAddrObserved));
 
         // Right IP, wrong port → the forward is not open on the configured port.
-        let fail = evaluate(0, &[ma("/ip4/0.0.0.0/tcp/30333")], &[ma("/ip4/1.2.3.4/tcp/54321")], Some(&cfg));
+        let fail = evaluate(
+            0,
+            &[ma("/ip4/0.0.0.0/tcp/30333")],
+            &[ma("/ip4/1.2.3.4/tcp/54321")],
+            Some(&cfg),
+        );
         assert!(!fail.dialable);
     }
 
@@ -748,12 +943,15 @@ mod tests {
     }
 
     #[test]
-    fn require_backbone_is_off_by_default() {
-        assert!(!parse_require_backbone(None));
-        assert!(!parse_require_backbone(Some("0")));
-        assert!(!parse_require_backbone(Some("false")));
+    fn require_backbone_is_on_by_default() {
+        assert!(parse_require_backbone(None));
+        assert!(parse_require_backbone(Some("")));
         assert!(parse_require_backbone(Some("1")));
         assert!(parse_require_backbone(Some("on")));
+        // Explicit opt-out into soft mode.
+        for v in ["0", "false", "FALSE", "no", "off", " 0 "] {
+            assert!(!parse_require_backbone(Some(v)), "{v} must opt out");
+        }
     }
 
     #[test]
@@ -776,21 +974,108 @@ mod tests {
     #[test]
     fn degradation_notice_is_actionable_and_suppressed_by_no_seed() {
         let lan: IpAddr = "192.168.1.42".parse().unwrap();
-        let note = degradation_notice(Some(lan), 30333, true).expect("notice when seeding");
+        let note = degradation_notice(Some(lan), 30333, true, true).expect("notice when seeding");
         assert!(note.contains("YOUR NODE IS NOT DIALABLE"), "{note}");
-        assert!(note.contains("192.168.1.42"), "LAN IP must be filled in: {note}");
+        assert!(
+            note.contains("192.168.1.42"),
+            "LAN IP must be filled in: {note}"
+        );
         assert!(note.contains("External port ....... 30333"), "port: {note}");
-        assert!(note.contains("--no-seed"), "must document the opt-out: {note}");
-        assert!(note.contains("--require-backbone"), "must document the hard gate: {note}");
+        assert!(
+            note.contains("--no-require-backbone"),
+            "must document the opt-out: {note}"
+        );
+        assert!(
+            note.contains("This node will exit until it is dialable"),
+            "hard mode must say it exits: {note}"
+        );
+        assert!(
+            note.contains("\n  --no-require-backbone\n"),
+            "the opt-out must be indented as a runnable flag: {note}"
+        );
         assert!(note.contains("100.64.0.0/10"), "must explain CGNAT: {note}");
-        assert!(note.contains("ufw allow 30333/tcp"), "must show the firewall step: {note}");
+        assert!(
+            note.contains("ufw allow 30333/tcp"),
+            "must show the firewall step: {note}"
+        );
+        assert!(
+            note.contains("Recommended setup (EXAMPLE"),
+            "must include the recommended example block: {note}"
+        );
+        assert!(
+            note.contains("TCP 30333 -> 192.168.1.50:30333"),
+            "must show a concrete example router rule: {note}"
+        );
+        assert!(
+            note.is_ascii(),
+            "Windows consoles: notice must be ASCII only"
+        );
 
         // Unknown LAN IP still yields a usable block (placeholder, not a panic).
-        let generic = degradation_notice(None, 30333, true).unwrap();
+        let generic = degradation_notice(None, 30333, true, true).unwrap();
         assert!(generic.contains("LAN IP"), "{generic}");
 
         // The operator asked to be private: never nag.
-        assert!(degradation_notice(Some(lan), 30333, false).is_none());
+        assert!(degradation_notice(Some(lan), 30333, false, true).is_none());
+        assert!(degradation_notice(Some(lan), 30333, false, false).is_none());
+    }
+
+    #[test]
+    fn soft_mode_notice_promises_recheck_and_continues() {
+        let lan: IpAddr = "192.168.1.42".parse().unwrap();
+        let note = degradation_notice(Some(lan), 30333, true, false).expect("notice in soft mode");
+        assert!(note.contains("re-checks every 10 minutes"), "{note}");
+        assert!(
+            !note.contains("This node will exit"),
+            "soft mode must not claim exit: {note}"
+        );
+        assert!(note.contains("--no-require-backbone"), "{note}");
+        assert!(
+            note.is_ascii(),
+            "Windows consoles: notice must be ASCII only"
+        );
+    }
+
+    #[test]
+    fn promotion_notice_is_exact_and_ascii() {
+        let note = promotion_notice(30333);
+        assert!(
+            note.contains("NOW DIALABLE - your node is reachable on TCP 30333"),
+            "{note}"
+        );
+        assert!(note.contains("eligib"));
+        assert!(note.contains("(This message is shown once.)"), "{note}");
+        assert!(
+            note.is_ascii(),
+            "Windows consoles: notice must be ASCII only"
+        );
+    }
+
+    #[test]
+    fn edge_transitions_fire_once_per_change() {
+        // Steady state prints nothing (edge-triggered, never level-triggered).
+        assert_eq!(edge_transition(false, false), DialabilityChange::None);
+        assert_eq!(edge_transition(true, true), DialabilityChange::None);
+        // not dialable -> dialable promotes exactly once.
+        assert_eq!(
+            edge_transition(false, true),
+            DialabilityChange::BecameDialable
+        );
+        // A later loss of reachability degrades exactly once (and can re-promote).
+        assert_eq!(
+            edge_transition(true, false),
+            DialabilityChange::BecameUndialable
+        );
+        assert_eq!(
+            edge_transition(false, true),
+            DialabilityChange::BecameDialable
+        );
+    }
+
+    #[test]
+    fn listen_port_prefers_the_listen_address() {
+        assert_eq!(listen_port(&[ma("/ip4/0.0.0.0/tcp/30333")]), Some(30333));
+        assert_eq!(listen_port(&[]), None);
     }
 
     // ── wait loop with a stub network ─────────────────────────────────────
@@ -804,7 +1089,12 @@ mod tests {
 
     impl StubNet {
         fn new(inbound: usize, listen: Vec<Multiaddr>, observed: Vec<Multiaddr>) -> Self {
-            StubNet { inbound, listen, observed, polls: AtomicUsize::new(0) }
+            StubNet {
+                inbound,
+                listen,
+                observed,
+                polls: AtomicUsize::new(0),
+            }
         }
     }
 
@@ -862,7 +1152,11 @@ mod tests {
         let v = wait_for_dialability(&net, &cfg).await;
         assert!(v.dialable);
         assert_eq!(v.evidence, Some(Evidence::InboundPeer));
-        assert_eq!(net.polls.load(Ordering::SeqCst), 1, "should return on first poll");
+        assert_eq!(
+            net.polls.load(Ordering::SeqCst),
+            1,
+            "should return on first poll"
+        );
     }
 
     #[tokio::test]

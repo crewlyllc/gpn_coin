@@ -47,9 +47,18 @@ pub struct Cli {
     #[arg(long = "no-discoverable")]
     pub no_discoverable: bool,
 
-    /// Old hard gate: exit (code 78) unless the node is inbound-reachable.
-    #[arg(long = "require-backbone")]
+    /// Hard gate (DEFAULT): exit (code 78) unless the node is inbound-reachable.
+    ///
+    /// This is the default posture — the network is growing and every node is
+    /// expected to be part of the backbone.
+    #[arg(long = "require-backbone", conflicts_with = "no_require_backbone")]
     pub require_backbone: bool,
+
+    /// Opt OUT of the hard gate: keep running as a non-discoverable participant
+    /// when this node cannot be dialed. Not recommended while the network is
+    /// growing.
+    #[arg(long = "no-require-backbone")]
+    pub no_require_backbone: bool,
 }
 
 #[derive(Debug, clap::Subcommand)]

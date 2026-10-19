@@ -8,6 +8,10 @@ seed-by-default dialability (UPnP/NAT-PMP, then graceful degradation) is specifi
 rebalanced accordingly.
 **v2.1 (2026-10-19, Jeremy):** §3.1 resolved — the 5 seeds are a **dedicated bootstrap set** (option i);
 the §5.2 operator notice and the "now dialable" re-check message are finalized verbatim.
+**v2.2 (2026-10-19, Jeremy — supersedes the v2 default):** **dialable is REQUIRED by default.**
+The network is still growing, so the hard gate is the default posture: a node that cannot be dialled
+prints the §5.2 notice and exits `EXIT_NOT_DIALABLE` (78). Opting out is now `--no-require-backbone` /
+`GPN_REQUIRE_BACKBONE=0`, which restores the v2 "run degraded" behavior (plus §5.3 re-check).
 **Supersedes:** the "every node must be dialable" policy in `node/src/dialability.rs` (queue #45), the
 mandatory `POST /assign` dispatch in `design-access-points-scheduler.md` / master-ref §6.1, and v1's
 framing of backbone as an *optional* tier.
@@ -41,7 +45,7 @@ difference from v1 is intent and inversion:
 | Default posture | participant (outbound-only) | **backbone / seed** (announce + accept inbound) |
 | How you leave the backbone | never joined | explicit `--no-seed` / `GPN_DISCOVERABLE=0`, or automatic degradation |
 | Seed candidacy | opt-in by being dialable | **default-on**; `--no-seed` opts out of publication only |
-| Failure to become dialable | normal | **degraded mode with a loud, actionable warning** (never fatal) |
+| Failure to become dialable | normal | **fatal by default** — full notice + exit 78; `--no-require-backbone` opts into a loud degraded warning |
 
 Rationale: a network where backbone is *optional* and defaults off converges to a star (everyone behind
 NAT, a handful of volunteers carrying all inbound). A network where backbone is the default, and only
@@ -74,6 +78,11 @@ the assignment push. The gate becomes a **capability probe with a fallback**, an
 
 One class of member; three **capability states**. There is **no membership gate, allowlist, or
 identity**. "Tier" describes what your box *can* do, not whether it is welcome.
+
+Posture note (v2.2): being **dialable is required by default** — the network is still growing and
+every node is expected to be part of the backbone. A node that cannot be dialled prints the §5.2
+notice and exits unless the operator opts out with `--no-require-backbone`. The table below describes
+the capability states; the non-discoverable column is the opt-out mode.
 
 | | **Non-discoverable** (opt-out) | **Backbone** (**DEFAULT**) | **Seed** (published) |
 |---|---|---|---|
@@ -441,11 +450,15 @@ out of scope." V2 says: **try hard, tell the operator exactly what to do, and on
                       On success: verify externally, then adopt the mapped address. Done.
 4. CGNAT check         WAN address in 100.64.0.0/10, or observed ≠ local and no mapping
                       → no forward is possible. Skip to 5.
-5. Degrade             run as NON-DISCOVERABLE participant. Print the §5.2 notice once. Continue.
+5. Degrade             print the §5.2 notice. Default: exit EXIT_NOT_DIALABLE (78).
+                      With --no-require-backbone: continue as a NON-DISCOVERABLE
+                      participant and re-check every 10 min (§5.3).
 ```
 
-Nothing in this sequence is fatal. `EXIT_NOT_DIALABLE` (78) survives **only** behind
-`--require-backbone` (§5.4).
+**In the default posture, failing step 2–4 is fatal** (exit 78) after printing the full notice.
+`--no-require-backbone` / `GPN_REQUIRE_BACKBONE=0` opts into the soft mode where the sequence is
+non-fatal. §5.3's re-check/promotion path exists **only** in that opt-out mode (a hard-gated node
+exits, so there is nothing to promote).
 
 ### 5.2 Degradation notice (exact behavior)
 
@@ -453,8 +466,9 @@ The notice is **the product**, not a log line: it is the only channel by which a
 learns that their node is not dialable and what to do about it. Requirements:
 
 - Printed **once per degraded transition** (startup, or dialable → not dialable) to **stderr** and to
-  the console at `warn` level, so it survives the default log filter; each line is emitted verbatim so
-  the box is never mangled by the logger. It must not be interleaved with per-block output.
+  the console at `warn` level (`error` in the default hard-gate mode), so it survives the default log
+  filter; each line is emitted verbatim so the box is never mangled by the logger. It must not be
+  interleaved with per-block output.
 - Summarized in `gpn_node --status` as `tier: private (degraded)`.
 - Emitted **after** the UPnP/NAT-PMP attempt, so a successful mapping never shows it.
 - Suppressed entirely when the operator passed `--no-seed` / `GPN_SEED=0` (they asked to be private).
@@ -469,7 +483,8 @@ Exact text (`{lan}` = detected LAN IPv4, `{port}` = listen port, default 30333):
 ================================================================================
 Other nodes cannot open a connection to this machine on TCP {port}.
 
-Your node is running and fully functional: it syncs, mines and serves AI jobs.
+This node will NOT start until it is dialable. Nothing else on this machine
+is affected - fix the forward/firewall below and start it again.
 What you lose: it is not listed as a backbone/seed node, so it earns no
 liveness credit, gets no seed-list eligibility, and cannot be a bootstrap target.
 Nothing is taken away from block rewards or job payouts.
@@ -486,6 +501,13 @@ To fix it (about 5 minutes):
         Internal IP/host .... {lan}
      Router admin is usually http://192.168.1.1 or http://192.168.0.1.
 
+     Recommended setup (EXAMPLE - these are example values, not detected):
+       - Give this machine a DHCP reservation so its LAN IP never changes
+         (example: 192.168.1.50).
+       - Forward exactly one TCP port, external = internal ({port}).
+       - Example router rule:  TCP {port} -> 192.168.1.50:{port}
+     Detected on this machine: LAN {lan}, port {port}.
+
   3. Allow the port in this machine's firewall.
      Windows (Administrator PowerShell):
        New-NetFirewallRule -DisplayName "GPN node" -Direction Inbound `
@@ -500,21 +522,34 @@ To fix it (about 5 minutes):
      use step 2. Disable this behavior with --no-upnp.
 
   5. CGNAT: if your router's WAN address is in 100.64.0.0/10, no port forward
-     can work. Run the node on a cheap VPS, or keep participating as-is.
-     This is a supported outcome, not an error.
+     can work. Run the node on a cheap VPS with a public IP.
 
 Full guide with per-OS detail:
   https://gpn.network/docs/run-a-node#make-your-node-dialable
 
+This node will exit until it is dialable.
+To run anyway (not recommended while the network is growing):
+  --no-require-backbone
+================================================================================
+```
+
+In soft mode (`--no-require-backbone`) the body line becomes "Your node is running ..." and the tail
+is:
+
+```
 This node re-checks every 10 minutes and will print NOW DIALABLE here when
 the fix works. You can also restart to force a check.
 
-Make this fatal instead:   --require-backbone
+Soft mode is active (--no-require-backbone / GPN_REQUIRE_BACKBONE=0).
 Run private, silence:      --no-seed   (or GPN_SEED=0)
 ================================================================================
 ```
 
-### 5.3 Re-detection and the "now dialable" message
+### 5.3 Re-detection and the "now dialable" message (**soft mode only**)
+
+This section applies **only** when the hard gate is opted out
+(`--no-require-backbone` / `GPN_REQUIRE_BACKBONE=0`). A hard-gated node exits on the first failed
+probe, so there is nothing to re-check in-process.
 
 - Re-evaluate every **10 min** and on `external_addresses` change. A residential IP change is normal.
 - On change: update the on-chain endpoint via `set_provider_endpoint` (rate-limited to once per hour to
@@ -551,7 +586,8 @@ node and is eligible for seed listing. Nothing else to do.
 | `--no-discoverable` / `GPN_DISCOVERABLE=0` | — | **Privacy mode.** No announce, no inbound, not in any list. Implies `--no-seed`. Job pull, mining, sync unchanged |
 | `GPN_UPNP=auto\|off` (`--no-upnp`) | `auto` | Try UPnP-IGD/NAT-PMP; `off` never touches the router |
 | `--public-addr <multiaddr>` / `GPN_PUBLIC_ADDR` | unset | Explicit address; **always wins** over detection (needed when a forward rewrites the port) |
-| `--require-backbone` | off | Old hard gate: exit 78 if not dialable. For operators who must guarantee it |
+| `--require-backbone` / `GPN_REQUIRE_BACKBONE=1` | **on (default)** | Hard gate: print the §5.2 notice and exit 78 when not dialable |
+| `--no-require-backbone` / `GPN_REQUIRE_BACKBONE=0` | — | Opt out: run degraded, re-check every 10 min, print NOW DIALABLE on promotion |
 | `GPN_SEED_PORT` | `30333` | Inbound port to open/probe |
 | `--bootnodes-url` / `--bootnodes-dns` | from `network.json` | Override/extend Source B |
 
@@ -581,7 +617,8 @@ is the whole point of the change. Guardrails:
 **Phase 0 — design (this doc).** No code.
 
 **Phase 1 — soft gate + pull in parallel (highest value, no flag day).**
-- Dialability gate: default becomes **probe-and-degrade**, not exit. `--require-backbone` restores exit 78.
+- Dialability gate: **dialable is REQUIRED by default** — probe-and-exit 78 with the full §5.2 notice.
+  `--no-require-backbone` / `GPN_REQUIRE_BACKBONE=0` opts into probe-and-degrade (v2 behavior).
   This is the single highest-value change and is independent of everything else — ship it first.
 - Add §5.1 NAT mapping (UPnP) + the §5.2 warning + the flags in §5.4.
 - AP: add `GET /assignments` + leases. Keep `POST /assign` dispatch. `GPN_JOB_TRANSPORT=push|pull|both`
