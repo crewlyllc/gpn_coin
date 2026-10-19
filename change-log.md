@@ -4105,3 +4105,9 @@ STATUS: **GREEN** (latency restored to the documented class).
 **#42 (P0, infra):** `/` was **100% full (164 MB free)**. The node mined block 157753 but **could not persist its header** (`chain_getHeader(0xb4e2…d4cf)` = null) while its in-memory best chain kept the hash ⇒ `SelectChain` failed forever (`Failed to get header for hash 0xb4e2…d4cf`) and block production froze at **#157752** from 04:18 (~14 min). Cause of the fullness: `.openclaw` = 248 GB, of which **Rust `target/debug` = 217 GB** (`gpn-node` 139 GB + `gpn-agent` 78 GB, regenerable). Fix: truncated the 499 MB `~/.gpn/ollama-serve.log`, removed both `target/debug` trees → **219 GB free (48%)**, then a **bounded `systemctl --user restart gpn-fleet`** (space alone could not clear the stale in-memory entry) → head resumed 157753 → 157759, `🏆 Imported` normal, txpool 15 → 3; rule-5a restarts of accesspoint/provider/heartbeat; e2e 200, job #5630 landed + claimed + ran, heal `accept → started` one line per transition. Canonical genesis WASM `76f37b23…` intact; no `set_code`.
 **#43 opened (TODO):** add a disk-headroom guard (heartbeat `/status` + cron alert at <10% free, `cargo clean --profile dev` in the ops docs) so ENOSPC can never again appear first as a chain halt.
 **STATUS: GREEN — chain producing blocks; serving verified.**
+
+## 2026-10-19 05:0x PT — item #43 DONE (disk-headroom guard)
+- New `gpn_agent::disk` (df -Pk / Get-PSDrive; 0/null = unknown, never "full") + 4 unit tests.
+- Heartbeat `GET /status` now returns `disk_free_mb`/`disk_total_mb`/`disk_free_pct`; startup warns `⚠ LOW DISK` below 10%.
+- `docs/run-a-node.md` → "Disk headroom" (cargo clean --profile dev; keep target/ off the data FS; restart required after ENOSPC recovery).
+- Live: `:8093/status` = 223104/449071 MiB (49% free); e2e job #5633 HTTP 200; commit `35cea86`.
