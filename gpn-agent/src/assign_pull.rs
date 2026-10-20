@@ -19,13 +19,20 @@
 //!
 //! `GPN_ASSIGN_SOURCE` selects the transport:
 //!
-//! * `push` — old behaviour only (AP must be able to reach `:8093`).
-//! * `pull` — poll only.
-//! * `both` — **default**: pull in parallel with the push listener. The push
-//!   is then only a latency optimisation, and a NAT'd provider still works.
+//! * `pull` — **default** (#46 Phase 2): poll only. Works behind NAT/CGNAT,
+//!   which is the population the network is meant to grow.
+//! * `push` — pre-#46 behaviour only (the AP must be able to reach `:8093`).
+//! * `both` — pull in parallel with the push listener, during a migration.
+//!
+//! A tip-off push (`POST /assign`) is still accepted by the heartbeat whatever
+//! the mode: it is a **wake hint** carrying the same payload the poll returns,
+//! so it can only ever help. The AP writes the lease row *before* sending it,
+//! so the long-poll already answers within ~250 ms — a hint that is dropped
+//! (the usual case behind NAT) costs nothing and is never a job failure.
 //!
 //! `GPN_AP_URL` is required for pull (e.g. `http://gpn-testnet.duckdns.org:8092`);
-//! without it the mode degrades to push and says so once.
+//! without it the mode degrades to push and says so loudly, once, at startup —
+//! a provider must never silently stop receiving work.
 //!
 //! # Cursor
 //!
@@ -56,6 +63,9 @@ pub const MAX_LEASES: usize = 20;
 /// an idle heartbeat, not a delay: one request per 25 s when nothing happens.
 pub const DEFAULT_WAIT_MS: u64 = 25_000;
 
+/// Default transport when `GPN_ASSIGN_SOURCE` is unset (#46 Phase 2).
+pub const DEFAULT_SOURCE: &str = "pull";
+
 /// Which transport(s) this provider uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssignSource {
@@ -63,18 +73,33 @@ pub enum AssignSource {
     Push,
     /// `GET /assignments` only.
     Pull,
-    /// Both, in parallel (default).
+    /// Both, in parallel (migration mode).
     Both,
 }
 
+/// Effective transport given the `GPN_ASSIGN_SOURCE` value and whether an AP
+/// URL is configured. Pull without an AP URL cannot work, so it degrades to
+/// push — the pre-#46 path that at least still receives local assignments.
+/// Pure so the fallback matrix is testable without touching the environment.
+pub fn resolve(source: &str, ap_url: Option<&str>) -> AssignSource {
+    let want = AssignSource::parse(source);
+    if want.pulls() && ap_url.is_none() {
+        AssignSource::Push
+    } else {
+        want
+    }
+}
+
 impl AssignSource {
-    /// Parse `GPN_ASSIGN_SOURCE`; unknown values fall back to `Both` so a typo
-    /// can never silently leave a NAT'd provider unreachable.
+    /// Parse `GPN_ASSIGN_SOURCE`. `pull` is the default, and so is every value
+    /// we do not recognise: a typo must never quietly pin a NAT'd provider to
+    /// a transport it cannot receive on (`resolve` still falls back to push
+    /// when there is no AP URL at all, so nothing is lost either way).
     pub fn parse(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
             "push" => AssignSource::Push,
-            "pull" => AssignSource::Pull,
-            _ => AssignSource::Both,
+            "both" => AssignSource::Both,
+            _ => AssignSource::Pull,
         }
     }
 
@@ -115,19 +140,29 @@ pub struct PullConfig {
 }
 
 impl PullConfig {
-    /// Resolve from the environment. `None` when pull is not requested or no
-    /// `GPN_AP_URL` is configured (the caller then keeps push-only behaviour).
+    /// Resolve from the environment. `None` when the effective transport does
+    /// not pull — either because push was asked for explicitly, or because no
+    /// `GPN_AP_URL` is configured (then we keep the old push-only behaviour and
+    /// say so, instead of polling a URL that does not exist).
     pub fn from_env(provider: &str) -> Option<Self> {
-        let source = AssignSource::parse(
-            &std::env::var("GPN_ASSIGN_SOURCE").unwrap_or_else(|_| "both".into()),
-        );
-        if !source.pulls() {
-            return None;
-        }
+        let raw = std::env::var("GPN_ASSIGN_SOURCE").unwrap_or_else(|_| DEFAULT_SOURCE.into());
         let ap_url = std::env::var("GPN_AP_URL")
             .ok()
             .map(|s| s.trim().trim_end_matches('/').to_string())
-            .filter(|s| !s.is_empty())?;
+            .filter(|s| !s.is_empty());
+        let source = resolve(&raw, ap_url.as_deref());
+        if source.pulls() != AssignSource::parse(&raw).pulls() {
+            eprintln!(
+                "⚠ [assign] GPN_ASSIGN_SOURCE={} needs GPN_AP_URL (e.g. http://<ap-host>:8092) — \
+                 no AP URL is set, so this provider stays PUSH-only and cannot receive work \
+                 behind NAT. Set GPN_AP_URL to use the pull transport.",
+                raw.trim()
+            );
+        }
+        if !source.pulls() {
+            return None;
+        }
+        let ap_url = ap_url?;
         Some(Self {
             ap_url,
             provider: provider.to_string(),
@@ -447,16 +482,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn source_parsing_defaults_safely() {
+    fn source_parsing_defaults_to_pull_and_falls_back_without_an_ap() {
         assert_eq!(AssignSource::parse("push"), AssignSource::Push);
         assert_eq!(AssignSource::parse(" PULL "), AssignSource::Pull);
         assert_eq!(AssignSource::parse("both"), AssignSource::Both);
-        // A typo must not leave a NAT'd provider unreachable.
-        assert_eq!(AssignSource::parse("pul"), AssignSource::Both);
-        assert_eq!(AssignSource::parse(""), AssignSource::Both);
+        // #46 Phase 2: pull is the default, and a typo must not leave a NAT'd
+        // provider pinned to a transport it cannot receive on.
+        assert_eq!(AssignSource::parse("pul"), AssignSource::Pull);
+        assert_eq!(AssignSource::parse(""), AssignSource::Pull);
         assert!(AssignSource::Both.pulls() && AssignSource::Both.pushes());
         assert!(!AssignSource::Push.pulls());
         assert!(!AssignSource::Pull.pushes());
+        assert_eq!(DEFAULT_SOURCE, "pull");
+    }
+
+    #[test]
+    fn a_missing_ap_url_degrades_to_push_instead_of_polling_nothing() {
+        let ap = Some("http://ap:8092");
+        // With an AP: the requested mode is honoured.
+        assert_eq!(resolve("pull", ap), AssignSource::Pull);
+        assert_eq!(resolve("both", ap), AssignSource::Both);
+        assert_eq!(resolve("push", ap), AssignSource::Push);
+        assert_eq!(resolve("", ap), AssignSource::Pull);
+        // Without one: anything that wanted to pull keeps the old push path.
+        assert_eq!(resolve("pull", None), AssignSource::Push);
+        assert_eq!(resolve("both", None), AssignSource::Push);
+        assert_eq!(resolve("", None), AssignSource::Push);
+        assert_eq!(resolve("push", None), AssignSource::Push);
     }
 
     #[test]

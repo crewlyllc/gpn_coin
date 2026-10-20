@@ -314,9 +314,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // wedges Running. The `callback` is stored so the provider can
                         // POST the result back to the requesting AP.
                         let mut stored_job = false;
+                        let is_hint = v.get("hint").and_then(|x| x.as_bool()).unwrap_or(false);
                         if let Some(jv) = v.get("job") {
-                            if let Ok(job) = serde_json::from_value::<LlmJob>(jv.clone()) {
-                                stored_job = LlmStore::new().put(jid, job).is_ok();
+                            // #46 Phase 2: the push is a wake HINT, not the delivery
+                            // path, so it must never clobber work we already hold —
+                            // a late hint carrying the original `queued` payload
+                            // would otherwise reset an in-flight/completed job and
+                            // make us run it twice (the pull lease applies the same
+                            // rule). Only seed an id we know nothing about.
+                            if LlmStore::new().get(jid).is_none() {
+                                if let Ok(job) = serde_json::from_value::<LlmJob>(jv.clone()) {
+                                    stored_job = LlmStore::new().put(jid, job).is_ok();
+                                }
                             }
                         }
                         // Item #16 finding #2: persist the per-job callback token so
@@ -334,7 +343,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "callback_token": callback_token,
                         });
                         match write_assignment(jid, rec) {
-                            Ok(_) => json!({"ok": true, "job_id": jid, "job_stored": stored_job}),
+                            Ok(_) => json!({"ok": true, "job_id": jid, "job_stored": stored_job, "hint": is_hint}),
                             Err(e) => json!({"error": format!("{e}")}),
                         }
                     }

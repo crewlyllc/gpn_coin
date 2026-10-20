@@ -448,20 +448,30 @@ claiming, inference, result return and settlement are identical, and the
 provider behind NAT now earns.
 
 ```toml
-# ~/.gpn/node.toml — the only new setting
+# ~/.gpn/node.toml — the only setting you need
 ap_url = "http://gpn-testnet.duckdns.org:8092"
-assign_source = "both"          # push | pull | both  (default: both)
+assign_source = "pull"          # push | pull | both  (default: pull)
 ```
 
 | Setting | Meaning | Default |
 |---|---|---|
-| `GPN_AP_URL` | Access point base URL used for the poll. **Required** for pull. | _(unset → push only)_ |
-| `GPN_ASSIGN_SOURCE` | `push` (old behaviour), `pull` (poll only), `both` (poll **and** listen) | `both` |
+| `GPN_AP_URL` | Access point base URL used for the poll. **Required** for pull. | _(unset → push only, with a warning)_ |
+| `GPN_ASSIGN_SOURCE` | `pull` (poll only — the default), `push` (old behaviour), `both` (poll **and** listen) | `pull` |
 | `GPN_ASSIGN_WAIT_MS` | Long-poll budget. The AP answers the instant it has work, so this only sets how long an **idle** poll waits before returning empty. | `25000` |
 | `GPN_ASSIGN_TOKEN` | Shared AP↔provider secret. The poll is authenticated with the same header as `POST /assign`; a remote provider must present the AP's token. | _(empty → permissive, warns)_ |
 
 Notes:
 
+- **Pull is the default since #46 Phase 2 (2026-10-19)** and needs `GPN_AP_URL`.
+  Without an AP URL the provider logs a loud one-time warning and stays
+  push-only — it never polls a URL that does not exist, and never silently
+  stops receiving work.
+- **`POST /assign` is now a wake hint, not the delivery path.** The AP writes
+  the lease row *before* it sends the hint, so a polling provider learns about
+  the job within ~250 ms. A hint that never arrives (the normal case behind
+  NAT) or one that is rejected is **not** a lost job, and the heartbeat accepts
+  a hint without ever overwriting a payload it already holds (a late hint
+  cannot reset a finished job).
 - **Mixed fleets are safe.** `both` means an old, reachable provider keeps
 getting pushes while a NAT'd one is served by pull. The two paths write the
 same records, so a provider can receive the same job twice — that is a no-op
@@ -782,8 +792,8 @@ finetune_poll_ms = 4000
 | `GPN_NODE_ARGS` | extra raw args appended to `gpn-node` | _(none)_ |
 | `GPN_PROVIDER_ENDPOINT` | public `/status` URL advertised on-chain | _(none → discovery off)_ |
 | `GPN_ASSIGN_TOKEN` | shared AP↔provider secret (`POST /assign` **and** `GET /assignments` auth) | _(empty → legacy-permissive, warns)_ |
-| `GPN_AP_URL` | access point base URL for the **pull** transport (e.g. `http://gpn-testnet.duckdns.org:8092`). Unset → push only. | _(none)_ |
-| `GPN_ASSIGN_SOURCE` | `push` \| `pull` \| `both` — how this provider receives assignments (see [Pull vs push](#pull-vs-push--work-behind-nat)). | `both` |
+| `GPN_AP_URL` | access point base URL for the **pull** transport (e.g. `http://gpn-testnet.duckdns.org:8092`). Unset → push only, with a warning. | _(none)_ |
+| `GPN_ASSIGN_SOURCE` | `pull` (default) \| `push` \| `both` — how this provider receives assignments (see [Pull vs push](#pull-vs-push--work-behind-nat)). | `pull` |
 | `GPN_ASSIGN_WAIT_MS` | pull long-poll budget (the AP answers immediately when there is work) | `25000` |
 | `GPN_OLLAMA` | ollama base URL | `http://127.0.0.1:11434` |
 | `GPN_REQUIRE_OLLAMA` | Hard gate: refuse to start when ollama is unreachable. `0` opts out (special cases only). | `1` |

@@ -456,7 +456,7 @@ bookkeeping is wrong.
 - New config `GPN_AP_URL` (or `--ap-url`); a poll loop replacing "wait for `/assign` then
   `read_assigned()`".
 - `assignments.json` stays as the **cache** of leased work, so the run/settle code is untouched.
-- `GPN_ASSIGN_SOURCE=push|pull|both` (default `both` during migration).
+- `GPN_ASSIGN_SOURCE=push|pull|both` (default `pull` since #46 Phase 2; `both` during migration).
 - Heartbeat `/status` server may be disabled entirely (`--no-status`) for pure participants.
 
 **Chain / runtime: none.** No new pallet, no `set_code`, no genesis change. `ProviderEndpoints` becomes
@@ -677,7 +677,8 @@ is the whole point of the change. Guardrails:
   (default `both`). **Done (2026-10-19):** `GET /assignments?provider=&since=&wait=` in
   `gpn_scheduler.rs` — bounded (≤25 s) long-poll, cursor by job id, cap 20 leases/poll, joined with the
   AP's own `LlmStore` payload, authenticated by `GPN_ASSIGN_TOKEN` off-loopback.
-- Providers: poll loop behind `GPN_ASSIGN_SOURCE` (default `both`). **Done (2026-10-19):**
+- Providers: poll loop behind `GPN_ASSIGN_SOURCE` (default `pull` since Phase 2; `both` during
+  migration). **Done (2026-10-19):**
   `gpn-agent/src/assign_pull.rs` (persists into `assignments.json` + `LlmStore` exactly like `POST
   /assign`, never overwriting a payload we already hold, cursor in `~/.gpn/assign-cursor.json` seeded
   from the store on first run) wired into all four provider bins; `GPN_AP_URL` selects the AP.
@@ -697,6 +698,17 @@ is the whole point of the change. Guardrails:
   (`network_registry::apply_bootstrap_floor`). `_gpn-seeds._tcp` TXT is still open.
 - `GPN_JOB_TRANSPORT=pull`. `POST /assign` is a wake hint only; `dispatch_assignment` failures log at
   debug, never count as job failures.
+  **Done (2026-10-19, #46 Phase 2 step 3):** the provider-side default is now **`pull`**
+  (`GPN_ASSIGN_SOURCE` unset ⇒ poll; `push`/`both` still selectable, unknown values resolve to
+  pull). Pull without `GPN_AP_URL` degrades to push **with a loud one-time warning** instead of
+  silently polling nothing (`assign_pull::resolve`, unit-tested across the whole matrix). The AP's
+  `POST /assign` body is stamped `"hint": true` and the heartbeat treats it as a hint: it answers
+  `{ok, hint}` and **never overwrites a payload it already holds** (a late hint carrying the
+  original `queued` payload can no longer reset a running/finished job and make it run twice). The
+  AP already wrote the lease row before dispatching, so the long-poll answers within ~250 ms and a
+  dropped hint (the normal case behind NAT) costs nothing. Live: this host's provider runs with
+  `GPN_ASSIGN_SOURCE` unset, starts in pull, pulls each job and serves it end-to-end.
+  **Still open:** delete push entirely (Phase 3) and the 5-VPS seed provisioning.
 - AP stops polling non-discoverable `/status`; routing uses `caps` + poll RTT.
 - **The 5-seed decision (§3.1) is settled:** five separately operated cheap VPSes, controlled and
   rotated by GPN, used only as dial targets. Provisioning them is a Phase 2 prerequisite.

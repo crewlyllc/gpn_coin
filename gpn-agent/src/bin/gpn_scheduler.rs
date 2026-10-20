@@ -1056,6 +1056,13 @@ fn loopback_if_wildcard(listen: &str) -> String {
 /// so a remote provider can actually RUN the job (the prompt lives only in the AP's
 /// store otherwise). The push also carries a `callback` URL so the provider can return
 /// the result to this AP. Best-effort — silently no-ops if the provider is unreachable.
+/// Best-effort **wake hint** (#46 Phase 2): assignments are delivered by the
+/// provider's own long-poll (`GET /assignments`), which works behind NAT. This
+/// push to the provider's `:8093` is now only a latency optimisation — the AP
+/// writes the lease row BEFORE calling this, so a provider that polls learns
+/// about the job within ~250 ms whether or not this arrives. A failure here is
+/// therefore NOT a lost job: it is swallowed (never logged as a job failure)
+/// and is the normal case for a CGNAT'd provider.
 fn dispatch_assignment(
     status_url: &str,
     job_id: u64,
@@ -1109,7 +1116,7 @@ fn assignment_body(
     let mut body = json!({
         "job_id": job_id, "provider": provider, "model": model,
         "pull": pull, "callback": callback_url, "callback_token": callback_token,
-        "assign_token": assign_token
+        "assign_token": assign_token, "hint": true
     });
     if let Some(j) = job_payload {
         if let Ok(v) = serde_json::to_value(j) {
@@ -3254,6 +3261,8 @@ mod tests {
         assert_eq!(body["assign_token"], "s3cret");
         assert_eq!(body["callback_token"], "ctok");
         assert_eq!(body["job_id"], 7);
+        // #46 Phase 2: the push is a wake hint; delivery is the provider's poll.
+        assert_eq!(body["hint"], true);
         // Empty token still serializes (provider treats it as "no secret configured").
         let body2 = assignment_body(7, "prov", "m", false, None, "http://ap", "ctok", "");
         assert_eq!(body2["assign_token"], "");
