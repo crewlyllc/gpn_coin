@@ -38,24 +38,141 @@ manage them individually.
                    (miner)    _status    provider   provider      provider  provider
 ```
 
-## Quick start
+## Install on a new computer
+
+Three steps, one question.
+
+```
+1. Download + extract
+2. ./gpn_node --setup        (answer: generate or import a wallet)
+3. ./gpn_node
+```
+
+That is the whole install. Nothing else has to be set: the chain spec, data
+folder, payout address, peer list and public address are all resolved
+automatically. `--setup` also installs/starts ollama and pulls the baseline
+model, because a GPN node is always **miner + AI provider**.
+
+### 1. Download + extract
+
+Grab the release archive for your OS (Linux, macOS, Windows) and unpack it
+anywhere. It contains `gpn_node`, `gpn-node`, the `gpn_*` agent binaries, the
+`scripts/` folder and `gpn-node.example.toml`.
+
+Building from source instead: see [Appendix A](#appendix-a--manual--detailed-installation).
+
+### 2. `./gpn_node --setup`
+
+```
+$ ./gpn_node --setup
+[gpn_node] base path: /home/you/.gpn/node (node database + wallet — where GPN keeps its data; default)
+[gpn_node] chain spec: http://gpn-testnet.duckdns.org:8092/genesis-spec -> /home/you/.gpn/node/testnet-spec.json (auto)
+[gpn_node] no wallet configured — starting the one-time wallet setup (stores /home/you/.gpn/node/keystore.json; owner-only)
+
+Set up your wallet
+Your wallet is your node identity and receives all mining/job earnings.
+  1) Generate a new wallet (recommended)
+  2) Import an existing wallet (mnemonic or 0x seed)
+Choose [1]: 1
+
+========================================================================
+  WRITE THIS DOWN — IT CONTROLS YOUR EARNINGS
+  It cannot be recovered. Anyone who has it can take your funds.
+========================================================================
+
+  secret phrase (12 words):
+
+    word1 word2 word3 word4 word5 word6 word7 word8 word9 word10 word11 word12
+
+========================================================================
+
+  address (SS58): 5EWTxdpdiaSydouhVkGmnxvNe6DrX8VHBvcuWMCb9vznBkje
+  keystore: /home/you/.gpn/node/keystore.json  (owner-only: 0600 / user ACL)
+[gpn_node] config written: /home/you/.gpn/node.toml (second run is zero-config)
+…
+  Start the node:  ./gpn_node
+```
+
+The wallet question is the **only** prompt. Choosing *import* asks for the
+mnemonic or `0x` seed and validates it (3 attempts). The secret is written to
+`<base>/keystore.json` with owner-only permissions (`0600` on Unix; inheritance
+removed and only the current user granted on Windows) and is **never** stored in
+the config file or the repo.
+
+Run `--setup` more than once and it is idempotent: an existing wallet is kept
+(press Enter), an existing spec is reused, and ollama is re-verified.
+
+### 3. `./gpn_node`
+
+One command starts the miner, the heartbeat and every AI provider, supervised
+as one node with one log stream and one status line. The second run needs no
+flags and no environment variables — it reads `~/.gpn/node.toml`.
+
+### What happens automatically
+
+| Item | Automatic behaviour | Override |
+|---|---|---|
+| **Data folder** | `~/.gpn/node` (Unix) / `C:\gpn\data` (Windows), created on first run. Holds the chain DB **and** the wallet. | `GPN_BASE_PATH` |
+| **Chain spec** | If no `GPN_CHAIN` and no `<base>/testnet-spec.json`, it is downloaded once from `http://gpn-testnet.duckdns.org:8092/genesis-spec`, validated (`genesis` field required) and pinned in the base dir. One log line, no prompt. | `GPN_CHAIN`, `GPN_SPEC_URL` |
+| **Wallet** | Generated or imported by the wizard; SS58 address printed once. Later runs read the keystore silently. | `GPN_SIGNER`, `GPN_SIGNER_FILE` |
+| **Payout account** | Derived from the wallet, so earnings can never go to a placeholder. | `GPN_ACCOUNT` |
+| **Peers** | `https://gpncoin.ai/seeds.json` (live directory) + compiled-in bootnodes; failing URLs are logged and ignored. | `GPN_BOOTNODES`, `GPN_BOOTNODES_URL` |
+| **Public address** | `GPN_PUBLIC_ADDR` → public-IP detection → **UPnP-IGD / NAT-PMP auto-mapping** (on by default). A successful mapping needs no configuration at all. | `GPN_PUBLIC_ADDR`, `GPN_UPNP=off`, `--no-upnp` |
+| **Ollama** | Installed/started and the baseline model pulled on `--setup` (and on a normal start if missing). | `GPN_OLLAMA`, `GPN_REQUIRE_OLLAMA=0` |
+| **Config** | `~/.gpn/node.toml` written once (base path, chain, keystore path, autostart). | `--config`, `GPN_CONFIG`, `GPN_PREFIX` |
+
+### Fallbacks (the rare cases)
+
+* **First run with no internet** — the spec fetch fails after ~45 s and the
+  node starts on its built-in `testnet` spec with a warning. Set `GPN_CHAIN`
+  to a local spec file if the genesis hash must match a specific network.
+* **Router with UPnP disabled** — the node prints the NOT-DIALABLE notice with
+  the exact port-forward rule (TCP 30333 → this machine) and exits `78`. See
+  [Make your node dialable](#make-your-node-dialable). If the router rewrites
+  the external port, set `GPN_PUBLIC_ADDR=/ip4/<ip>/tcp/<port>`.
+* **CGNAT** (`100.64.0.0/10` WAN address) — no forward can work; run the node
+  on a host with a public IP, or opt out of the gate with
+  `--no-require-backbone` (degraded mode).
+* **systemd / container / CI (no TTY)** — the wizard never hangs: with no wallet
+  configured it exits `2` and tells you to run `gpn_node --setup` once
+  interactively. After that the service starts with no prompts.
+* **Different data disk** — set `GPN_BASE_PATH` (or `base_path` in the config)
+  before the first run.
+
+## Appendix A — manual / detailed installation
+
+### Build from a clone
 
 ```bash
-# 1) install (builds gpn-node + the gpn-agent bins, generates a wallet)
+# builds gpn-node + the gpn-agent bins, generates a wallet
 curl -fsSL <REPO>/install.sh | sh      # or ./install.sh from a clone
 
-# 2) ollama is REQUIRED (a node = miner + AI provider). `--setup` installs,
-#    starts, and pulls the baseline model in one shot; a normal start does the
-#    same automatically and REFUSES to run if ollama cannot be reached.
+# ollama is REQUIRED (a node = miner + AI provider)
 ./scripts/install-ollama.sh            # Linux/macOS; Windows: scripts\install-ollama.ps1
 ./gpn_node --setup                     # verify/bootstrap (exit 0 = ready)
 
-# 3) run ONE command — starts the miner AND the AI provider together
-gpn_node
+gpn_node                               # one command: miner + AI provider
 ```
 
-That's it. `gpn_node` reads its config from a small file + env, then starts and
-supervises all of the children — always: the miner and the AI serving stack.
+### Everything the wizard would otherwise do, by hand
+
+```bash
+export GPN_BASE_PATH="$HOME/.gpn/node"                    # data + wallet
+mkdir -p "$GPN_BASE_PATH"
+curl -fsS http://gpn-testnet.duckdns.org:8092/genesis-spec \
+  -o "$GPN_BASE_PATH/testnet-spec.json"                   # pin the spec
+export GPN_CHAIN="$GPN_BASE_PATH/testnet-spec.json"
+export GPN_SIGNER="<your mnemonic or 0x seed>"           # or GPN_SIGNER_FILE
+# optional: export GPN_PUBLIC_ADDR=/ip4/203.0.113.10/tcp/30333
+```
+
+Secrets can live in `~/.gpn/node.toml` (`signer = "…"`) or, better, in a
+systemd `EnvironmentFile` / Windows environment variable. Compromise: put the
+seed in a keystore file (`0600`) and set `signer_file = "<path>"` — the wizard
+does exactly this.
+
+See the rest of this document for the full environment-variable reference,
+systemd/Windows service units, snapshots, and troubleshooting.
 
 ## Backbone by default — dialable is REQUIRED
 
@@ -638,10 +755,16 @@ only). It exists for CI smoke tests and deliberately mining-only boxes — it is
 ### First-run flow
 
 1. Unpack the release zip (binaries + `scripts/` + `README-FIRST-RUN.txt`).
-2. Run `gpn_node --setup` (or just start `gpn_node` — it does the same).
-3. Set `GPN_PUBLIC_ADDR` (+ `GPN_ACCOUNT`, `GPN_SIGNER`, `GPN_NODE_KEY`).
-4. Start `gpn_node`: it passes the ollama gate, then starts the miner, the
-   heartbeat, and every provider loop.
+2. Run `gpn_node --setup` — one question: generate or import a wallet.
+   (A plain `gpn_node` start asks the same question when no wallet is
+   configured, so the two commands are interchangeable.)
+3. Run `gpn_node`: chain spec, data folder, payout address, peers and the
+   public address are already resolved; it passes the ollama gate, then starts
+   the miner, the heartbeat, and every provider loop.
+
+`GPN_PUBLIC_ADDR` is only needed when the router rewrites the external port —
+otherwise public-IP detection + UPnP/NAT-PMP handle it (see
+[Make your node dialable](#make-your-node-dialable)).
 
 When ollama is up but a model is merely missing, the node still starts (model
 presence is not the gate); the provider pulls/retries and logs a **single**
@@ -744,9 +867,10 @@ The config file is, in order:
 Example (`~/.gpn/node.toml`, also see `gpn-node.example.toml`):
 
 ```toml
-chain        = "testnet"                           # testnet | mainnet | dev | <path to chain-spec.json>
+chain        = "/home/you/.gpn/node/testnet-spec.json"   # testnet | mainnet | dev | <path to chain-spec.json>
 signer       = "//Alice"                           # sr25519 URI or seed (provider identity / authoring key)
-account      = "5ENqSp5Q…"                         # payout / advertised ss58 address
+signer_file  = "/home/you/.gpn/node/keystore.json" # owner-only keystore; alternative to `signer`
+account      = "5ENqSp5Q…"                         # payout / advertised ss58 address (auto-derived from the wallet)
 endpoint     = "ws://127.0.0.1:9944"               # chain RPC used by the provider loop
 base_path    = "~/.gpn/node"                      # or set GPN_BASE_PATH; default: C:\gpn\data (Win) / ~/.gpn/node (Unix)
 rpc_port     = 9944
@@ -777,11 +901,14 @@ finetune_poll_ms = 4000
 
 | Env var | Meaning | Default |
 |---------|---------|---------|
-| `GPN_CHAIN` | chain spec (`testnet`/`mainnet`/`dev`/path) | `testnet` |
-| `GPN_SIGNER` | signer URI / seed | `//Alice` |
+| `GPN_CHAIN` | chain spec (`testnet`/`mainnet`/`dev`/path) | auto: `<base>/testnet-spec.json`, fetched if missing |
+| `GPN_SIGNER` | signer URI / seed / mnemonic | _(none — first-run wizard, else `//Alice` on `dev`)_ |
+| `GPN_SIGNER_FILE` | path to an sr25519 JSON keystore (owner-only) | `<base>/keystore.json` when it exists |
+| `GPN_SPEC_URL` | where to fetch the chain spec from | `http://gpn-testnet.duckdns.org:8092/genesis-spec` |
+| `GPN_AUTOSTART` | informational: operator intends to install a service unit | `false` |
 | `GPN_ACCOUNT` | payout / advertised address | _(empty)_ |
 | `GPN_ENDPOINT` | chain RPC (ws) for the provider loop | `ws://127.0.0.1:9944` |
-| `GPN_BASE_PATH` | node data dir | _(node default)_ |
+| `GPN_BASE_PATH` | node data dir (**database + wallet**) | `~/.gpn/node` (Unix) / `C:\gpn\data` (Windows) |
 | `GPN_RPC_PORT` | node RPC port | `9944` |
 | `GPN_NODE_KEY` | node network key (64-hex) | _(none — node needs one)_ |
 | `GPN_BOOTNODES` | comma/space list of bootnodes | _(none)_ |
@@ -824,10 +951,11 @@ finetune_poll_ms = 4000
 | `GPN_STALL_CHECK_SECS` | sync-stall watchdog poll interval (min 10) | `60` |
 | `GPN_CONFIG` | config-file path | _(see search order)_ |
 
-> **Secrets stay in the environment.** `gpn_node` reads the signer/seed and the
-> assign token from env / the config file and never writes them anywhere. Put
-> the token in `GPN_ASSIGN_TOKEN` (or the service `EnvironmentFile`), and keep
-> the config file `chmod 600`.
+> **Secrets stay out of the config file.** `gpn_node` reads the signer/seed and
+> the assign token from env / the config file and only ever writes a secret when
+> you ask the wizard to create/import a wallet — into `<base>/keystore.json` with
+> owner-only permissions. Put the token in `GPN_ASSIGN_TOKEN` (or the service
+> `EnvironmentFile`), and keep the config file `chmod 600`.
 
 ### Sync-robustness defaults (why your node won't wedge)
 

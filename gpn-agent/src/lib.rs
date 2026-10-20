@@ -10,6 +10,7 @@ pub mod cli;
 pub mod compute;
 pub mod config;
 pub mod disk;
+pub mod firstrun;
 pub mod gpu;
 pub mod gpu_yield;
 pub mod llm;

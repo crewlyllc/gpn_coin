@@ -64,7 +64,7 @@
 use gpn_agent::ollama;
 use serde::Deserialize;
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -81,6 +81,10 @@ use std::time::{Duration, Instant};
 struct FileConfig {
     chain: Option<String>,
     signer: Option<String>,
+    /// Path to an sr25519 JSON keystore (owner-only). Written by `--setup`
+    /// and read silently on every later start; never contains the secret in
+    /// this file.
+    signer_file: Option<String>,
     account: Option<String>,
     endpoint: Option<String>,
     base_path: Option<String>,
@@ -109,6 +113,8 @@ struct FileConfig {
     finetune: Option<bool>,
     finetune_poll_ms: Option<u64>,
     bin_dir: Option<String>,
+    /// Informational only: the operator intends to install a service unit.
+    autostart: Option<bool>,
     /// How often the aggregated status line is printed (seconds).
     status_secs: Option<u64>,
 }
@@ -142,6 +148,10 @@ struct Config {
     finetune_poll_ms: u64,
     bin_dir: PathBuf,
     status_secs: u64,
+    /// Informational: the config asks for boot-start.
+    autostart: bool,
+    /// The config file that was read (None when defaults are in use).
+    config_path: Option<PathBuf>,
 }
 
 fn env_str(k: &str) -> Option<String> {
@@ -297,14 +307,7 @@ macro_rules! asciieprintln {
 /// DB → `Incompatible pruning modes` → crash-loop. Pinning a single path makes
 /// the DB-existence check and the node's `--base-path` agree.
 fn default_base_path() -> PathBuf {
-    #[cfg(windows)]
-    {
-        PathBuf::from(r"C:\gpn\data")
-    }
-    #[cfg(not(windows))]
-    {
-        PathBuf::from(expand_tilde("~/.gpn/node"))
-    }
+    gpn_agent::firstrun::default_base_path()
 }
 
 /// The node's **OS-default** data dir (what Substrate uses with no
@@ -425,12 +428,7 @@ fn has_flag(args: &[String], flag: &str) -> bool {
 
 /// Expand a leading `~` to `$HOME`.
 fn expand_tilde(p: &str) -> String {
-    if let Some(rest) = p.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{home}/{rest}");
-        }
-    }
-    p.to_string()
+    gpn_agent::firstrun::expand_tilde(p)
 }
 
 impl Config {
@@ -443,13 +441,14 @@ impl Config {
             .and_then(|i| argv.get(i + 1).cloned())
             .or_else(|| env_str("GPN_CONFIG"));
 
-        let file = match &cfg_path {
+        let (file, config_path) = match &cfg_path {
             Some(p) => {
                 let p = expand_tilde(p);
                 let text = std::fs::read_to_string(&p)
                     .map_err(|e| format!("cannot read config '{p}': {e}"))?;
-                toml::from_str::<FileConfig>(&text)
-                    .map_err(|e| format!("invalid config '{p}': {e}"))?
+                let parsed = toml::from_str::<FileConfig>(&text)
+                    .map_err(|e| format!("invalid config '{p}': {e}"))?;
+                (parsed, Some(PathBuf::from(p)))
             }
             None => {
                 // Default locations: $GPN_PREFIX/node.toml then ./gpn-node.toml.
@@ -460,17 +459,18 @@ impl Config {
                     Some(p) => {
                         let text = std::fs::read_to_string(p)
                             .map_err(|e| format!("cannot read config '{p}': {e}"))?;
-                        toml::from_str::<FileConfig>(&text)
-                            .map_err(|e| format!("invalid config '{p}': {e}"))?
+                        let parsed = toml::from_str::<FileConfig>(&text)
+                            .map_err(|e| format!("invalid config '{p}': {e}"))?;
+                        (parsed, Some(PathBuf::from(p)))
                     }
-                    None => FileConfig::default(),
+                    None => (FileConfig::default(), None),
                 }
             }
         };
 
         // bin dir: env GPN_BIN > file > dir of this exe > $HOME/.local/bin
         let bin_dir = env_str("GPN_BIN")
-            .or(file.bin_dir)
+            .or(file.bin_dir.clone())
             .map(|s| PathBuf::from(expand_tilde(&s)))
             .or_else(|| {
                 std::env::current_exe()
@@ -480,24 +480,105 @@ impl Config {
             .unwrap_or_else(|| PathBuf::from(expand_tilde("~/.local/bin")));
 
         let endpoint = env_str("GPN_ENDPOINT")
-            .or(file.endpoint)
+            .or(file.endpoint.clone())
             .unwrap_or_else(|| "ws://127.0.0.1:9944".to_string());
         let rpc_port = env_u16("GPN_RPC_PORT").or(file.rpc_port).unwrap_or(9944);
 
+        // ── 1. Base path: explicit → config → OS default (created) ─────────
+        // `~/.gpn/node` (Unix) / `C:\gpn\data` (Windows) holds the chain DB
+        // AND the wallet — the one directory that makes a second run
+        // zero-config. It is created here, before anything needs it.
+        let explicit_base = env_str("GPN_BASE_PATH")
+            .or(file.base_path.clone())
+            .map(|s| PathBuf::from(expand_tilde(&s)));
+        let base_is_default = explicit_base.is_none();
+        let base_path = resolve_effective_base(explicit_base);
+        std::fs::create_dir_all(&base_path)
+            .map_err(|e| format!("cannot create base path {}: {e}", base_path.display()))?;
+        if base_is_default {
+            asciiprintln!(
+                "[gpn_node] base path: {} (node database + wallet — where GPN keeps its data; default)",
+                base_path.display()
+            );
+        }
+
+        // ── 2. Chain spec: explicit → <base>/testnet-spec.json → auto-fetch ─
+        // A first run with no GPN_CHAIN downloads the canonical spec from the
+        // public access point and pins it in the base dir (no prompt).
+        let chain = gpn_agent::firstrun::resolve_chain(
+            env_str("GPN_CHAIN").or(file.chain.clone()),
+            &base_path,
+        )
+        .chain;
+
+        // ── 3. Signer: env → config signer → keystore env/config → default
+        //       keystore → first-run wizard (or a clear non-TTY refusal). ────
+        let keystore_path = gpn_agent::firstrun::default_keystore_path(&base_path);
+        let configured_keystore = env_str("GPN_SIGNER_FILE")
+            .or(file.signer_file.clone())
+            .map(|s| PathBuf::from(expand_tilde(&s)));
+        let signer = if let Some(uri) = env_str("GPN_SIGNER").or(file.signer.clone()) {
+            uri
+        } else if let Some(path) = configured_keystore
+            .clone()
+            .or_else(|| keystore_path.is_file().then(|| keystore_path.clone()))
+        {
+            gpn_agent::firstrun::secret_from_keystore(&path)?
+        } else if chain == "dev" || chain == "local" || chain.is_empty() {
+            // Dev chains are throwaway: the well-known dev key is the default
+            // (and the wizard is never triggered for them).
+            "//Alice".to_string()
+        } else {
+            let is_tty = std::io::stdin().is_terminal();
+            gpn_agent::firstrun::ensure_interactive(is_tty)?;
+            asciiprintln!(
+                "[gpn_node] no wallet configured — starting the one-time wallet setup \
+                 (stores {}; owner-only)",
+                keystore_path.display()
+            );
+            let mut stdin = std::io::stdin().lock();
+            let mut stdout = std::io::stdout();
+            gpn_agent::firstrun::wallet_wizard(&mut stdin, &mut stdout, &keystore_path)?.mnemonic
+        };
+
+        // Payout account: derived from the wallet when not set explicitly, so
+        // earnings can never be sent to a default/placeholder address.
+        let mut account = env_str("GPN_ACCOUNT")
+            .or(file.account.clone())
+            .unwrap_or_default();
+        if account.is_empty() {
+            if let Ok(addr) = gpn_agent::firstrun::ss58_of(&signer) {
+                account = addr;
+            }
+        }
+
+        // ── 4. Zero-config second run: write the config file once. ──────────
+        // Only when no config file existed (never overwrite an operator's
+        // file) and never at a `--config` path we were told to read.
+        if config_path.is_none() {
+            let prefix = expand_tilde(&env_str("GPN_PREFIX").unwrap_or_else(|| "~/.gpn".into()));
+            let target = PathBuf::from(prefix).join("node.toml");
+            let body = gpn_agent::firstrun::config_toml(
+                &base_path,
+                &chain,
+                keystore_path.is_file().then_some(keystore_path.as_path()),
+            );
+            match gpn_agent::firstrun::write_config_if_missing(&target, &body) {
+                Ok(true) => asciiprintln!(
+                    "[gpn_node] config written: {} (second run is zero-config)",
+                    target.display()
+                ),
+                Ok(false) => {}
+                Err(e) => asciieprintln!("[gpn_node] ! could not write config: {e}"),
+            }
+        }
+
         Ok(Config {
-            chain: env_str("GPN_CHAIN")
-                .or(file.chain)
-                .unwrap_or_else(|| "testnet".into()),
-            signer: env_str("GPN_SIGNER")
-                .or(file.signer)
-                .unwrap_or_else(|| "//Alice".into()),
-            account: env_str("GPN_ACCOUNT").or(file.account).unwrap_or_default(),
+            chain,
+            signer,
+            account,
             endpoint,
-            base_path: resolve_effective_base(
-                env_str("GPN_BASE_PATH")
-                    .or(file.base_path)
-                    .map(|s| PathBuf::from(expand_tilde(&s))),
-            ),
+            base_path,
             rpc_port,
             node_key: env_str("GPN_NODE_KEY").or(file.node_key),
             bootnodes: env_str("GPN_BOOTNODES")
@@ -548,6 +629,10 @@ impl Config {
             status_secs: env_u64("GPN_STATUS_SECS")
                 .or(file.status_secs)
                 .unwrap_or(15),
+            autostart: env_bool("GPN_AUTOSTART")
+                .or(file.autostart)
+                .unwrap_or(false),
+            config_path,
         })
     }
 
@@ -935,7 +1020,10 @@ fn status_line(cfg: &Config, shared: &Shared) -> String {
             if st.up {
                 parts.push(format!("{label}=up(pid {})", st.pid));
             } else if st.last_exit == Some(NODE_EXIT_NOT_DIALABLE) {
-                parts.push(format!("{label}=down(not dialable, restarts {})", st.restarts));
+                parts.push(format!(
+                    "{label}=down(not dialable, restarts {})",
+                    st.restarts
+                ));
             } else {
                 parts.push(format!("{label}=down(restarts {})", st.restarts));
             }
@@ -1242,7 +1330,11 @@ fn run_setup(cfg: &Config) -> i32 {
     asciiprintln!("  baseline={}", opts.baseline.join(", "));
     let outcome = ollama::ensure(&opts);
 
-    asciiprintln!("  attempted_install={} installed={}", outcome.attempted_install, outcome.installed);
+    asciiprintln!(
+        "  attempted_install={} installed={}",
+        outcome.attempted_install,
+        outcome.installed
+    );
     if outcome.models.is_empty() {
         asciiprintln!("  models: (none reported)");
     } else {
@@ -1253,17 +1345,55 @@ fn run_setup(cfg: &Config) -> i32 {
         if outcome.model_ready {
             asciiprintln!("  [ok] {}", outcome.detail);
         } else {
-            asciieprintln!("  ! ollama is up, but not every baseline model is present: {}", outcome.detail);
+            asciieprintln!(
+                "  ! ollama is up, but not every baseline model is present: {}",
+                outcome.detail
+            );
         }
         asciiprintln!("  setup complete — a normal `gpn_node` start will pass the ollama gate.");
+        print_setup_summary(cfg);
         0
     } else {
         asciieprintln!("\n  [x] SETUP FAILED: {}", outcome.detail);
         asciieprintln!("      Fix ollama, then re-run:  gpn_node --setup");
-        asciieprintln!("        Windows :  winget install Ollama.Ollama   (or scripts\\install-ollama.ps1)");
+        asciieprintln!(
+            "        Windows :  winget install Ollama.Ollama   (or scripts\\install-ollama.ps1)"
+        );
         asciieprintln!("        Linux   :  scripts/install-ollama.sh");
         asciieprintln!("        Then    :  ollama serve   &&   ollama pull llama3.2:1b\n");
         ollama::EXIT_NO_OLLAMA
+    }
+}
+
+/// The last thing `--setup` prints: what is configured, what is automatic, and
+/// the one command to run next. The dialability sentence is the actionable one
+/// from the NOT-DIALABLE notice, reduced to what a fresh install needs.
+fn print_setup_summary(cfg: &Config) {
+    asciiprintln!("\n  node data   : {}", cfg.base_path.display());
+    asciiprintln!("  chain spec  : {}", cfg.chain);
+    match gpn_agent::firstrun::ss58_of(&cfg.signer) {
+        Ok(addr) => asciiprintln!("  wallet      : {addr}"),
+        Err(_) => asciiprintln!("  wallet      : {} (dev URI)", cfg.signer),
+    }
+    asciiprintln!("  payout      : {}", cfg.account);
+    asciiprintln!(
+        "  public addr : {}",
+        cfg.public_addr.as_deref().unwrap_or("<auto>")
+    );
+    asciiprintln!(
+        "\n  Network reachability is automatic: configured address -> public-IP detection -> \
+         UPnP/NAT-PMP port mapping (on by default). If UPnP is disabled on your router, \
+         forward TCP 30333 to this machine — the node prints the exact rule if it cannot get in."
+    );
+    asciiprintln!("\n  Start the node:  {}\n", exe_hint());
+}
+
+/// `./gpn_node` (Unix) / `gpn_node.exe` (Windows) for the final hint.
+fn exe_hint() -> &'static str {
+    if cfg!(windows) {
+        "gpn_node.exe"
+    } else {
+        "./gpn_node"
     }
 }
 
@@ -1289,7 +1419,9 @@ fn enforce_ollama_gate(cfg: &Config) -> i32 {
                 cfg.ollama
             );
             asciieprintln!("      the node will MINE, but it CANNOT serve LLM jobs.");
-            asciieprintln!("      Startup will not be blocked, but this is NOT a supported production node.");
+            asciieprintln!(
+                "      Startup will not be blocked, but this is NOT a supported production node."
+            );
             asciieprintln!("      Fix: gpn_node --setup\n");
             0
         }
@@ -1297,11 +1429,15 @@ fn enforce_ollama_gate(cfg: &Config) -> i32 {
             asciieprintln!("\n  [x] REFUSING TO START: ollama is REQUIRED and is not reachable.");
             asciieprintln!("      endpoint: {}", cfg.ollama);
             asciieprintln!("      reason  : {}", outcome.detail);
-            asciieprintln!("      A GPN node is miner AND AI provider — a miner-only node is not valid.");
+            asciieprintln!(
+                "      A GPN node is miner AND AI provider — a miner-only node is not valid."
+            );
             asciieprintln!("      Fix it with the one-shot bootstrap:");
             asciieprintln!("        gpn_node --setup");
             asciieprintln!("      Manual install:");
-            asciieprintln!("        Windows : winget install Ollama.Ollama   (or scripts\\install-ollama.ps1)");
+            asciieprintln!(
+                "        Windows : winget install Ollama.Ollama   (or scripts\\install-ollama.ps1)"
+            );
             asciieprintln!("        Linux   : scripts/install-ollama.sh");
             asciieprintln!("        then    : ollama serve   &&   ollama pull llama3.2:1b");
             asciieprintln!("      Docs: docs/run-a-node.md");
@@ -1343,6 +1479,18 @@ async fn main() {
         cfg.ollama,
         cfg.gflops
     );
+    asciiprintln!(
+        "  base_path={} (node database + wallet)",
+        cfg.base_path.display()
+    );
+    if let Some(p) = &cfg.config_path {
+        asciiprintln!("  config={}", p.display());
+    }
+    if cfg.autostart {
+        asciiprintln!(
+            "  autostart=true (informational — install a service unit; see docs/run-a-node.md)"
+        );
+    }
 
     // ── `--setup`: explicit one-shot bootstrap of the REQUIRED ollama part. ──
     // Run on a plain thread: the ollama probe/pull use reqwest's *blocking*

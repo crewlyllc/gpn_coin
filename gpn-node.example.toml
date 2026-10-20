@@ -16,9 +16,15 @@
 
 # ── node / miner ────────────────────────────────────────────────────────────
 chain     = "testnet"                    # testnet | mainnet | dev | <path to chain-spec.json>
+                                        # Unset + no <base>/testnet-spec.json → fetched
+                                        # automatically from the public access point.
 signer    = "//Alice"                    # sr25519 URI or seed (authoring key + provider identity)
-account   = ""                           # payout / advertised ss58 address (optional)
-base_path = "~/.gpn/node"
+# signer_file = "~/.gpn/node/keystore.json"  # preferred: owner-only keystore written by --setup
+                                        # (and read silently on every later start)
+account   = ""                           # payout / advertised ss58 address (auto-derived
+                                        # from the wallet when left empty)
+base_path = "~/.gpn/node"                # node database + wallet; created on first run
+                                        # (default: C:\gpn\data on Windows)
 rpc_port  = 9944
 node_key  = ""                           # 64-hex ed25519 network key (the node requires one)
 bootnodes = []                           # e.g. ["/ip4/23.241.109.255/tcp/30333/p2p/12D3KooW…"]
@@ -51,3 +57,4 @@ finetune_poll_ms  = 4000
 # ── supervisor ──────────────────────────────────────────────────────────────
 # bin_dir     = "~/.local/bin"   # dir holding the child binaries (default: dir of gpn_node)
 # status_secs = 15               # aggregated status-line interval
+# autostart   = false            # informational: you intend to install a service unit

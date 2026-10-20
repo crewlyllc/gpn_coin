@@ -151,9 +151,13 @@ EOF
 # 7 ── Done ──────────────────────────────────────────────────────────────────
 log "installed. wallet: $WALLET"
 echo
-echo "Start earning (ONE command — supervised node: miner + AI provider together):"
-echo "  GPN_SIGNER=<your-key> GPN_AUTHOR=alice gpn_node"
+echo "Start earning — three steps, one question:"
+echo "  gpn_node --setup     # generate a new wallet, or import the one above"
+echo "  gpn_node             # one command: miner + AI providers, supervised"
 echo "  (a GPN node always mines AND serves AI — no role option; config + env reference: docs/run-a-node.md)"
+echo ""
+echo "The chain spec, data folder, payout address, peers and public address are automatic."
+echo "Wallet generated above (if any): $PREFIX/wallet — import it with --setup to keep it."
 echo
 echo "Or run just the chain node/miner directly (mines by default):"
 echo "  gpn-node --chain $NETWORK --base-path \"$PREFIX/data\""
