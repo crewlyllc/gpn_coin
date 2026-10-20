@@ -586,6 +586,7 @@ impl Config {
                 .or(file.bootnodes)
                 .unwrap_or_default(),
             bootnodes_url: env_str("GPN_BOOTNODES_URL")
+                .or_else(|| env_str("GPN_SEEDS_URL"))
                 .map(|s| split_list(&s))
                 .or(file.bootnodes_url)
                 .unwrap_or_default(),
@@ -1185,6 +1186,14 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
         if !cfg.account.is_empty() {
             argv.push("--address".into());
             argv.push(cfg.account.clone());
+        }
+        // The heartbeat reads the node's libp2p peer-id over the node RPC.
+        // Pass the configured endpoint explicitly (GPN_ENDPOINT) — the child
+        // otherwise falls back to ws://127.0.0.1:9944, which is wrong when the
+        // node's RPC runs on a non-default port (e.g. box #2 uses 9945).
+        if !cfg.endpoint.is_empty() {
+            argv.push("--endpoint".into());
+            argv.push(cfg.endpoint.clone());
         }
         let mut envs = Vec::new();
         if !cfg.assign_token.is_empty() {
