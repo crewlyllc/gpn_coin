@@ -455,27 +455,26 @@ assign_source = "pull"          # push | pull | both  (default: pull)
 
 | Setting | Meaning | Default |
 |---|---|---|
-| `GPN_AP_URL` | Access point base URL used for the poll. **Required** for pull. | _(unset → push only, with a warning)_ |
-| `GPN_ASSIGN_SOURCE` | `pull` (poll only — the default), `push` (old behaviour), `both` (poll **and** listen) | `pull` |
+| `GPN_AP_URL` | Access point base URL used for the poll. **Required** — without it nothing is delivered (see below). | _(unset → degraded, with a warning)_ |
+| `GPN_ASSIGN_SOURCE` | `pull` (poll only — the only delivery path since #46 Phase 3), `both` (pull + the legacy no-op `/assign` listener), `push` (**degraded**: no delivery) | `pull` |
 | `GPN_ASSIGN_WAIT_MS` | Long-poll budget. The AP answers the instant it has work, so this only sets how long an **idle** poll waits before returning empty. | `25000` |
 | `GPN_ASSIGN_TOKEN` | Shared AP↔provider secret. The poll is authenticated with the same header as `POST /assign`; a remote provider must present the AP's token. | _(empty → permissive, warns)_ |
 
 Notes:
 
-- **Pull is the default since #46 Phase 2 (2026-10-19)** and needs `GPN_AP_URL`.
-  Without an AP URL the provider logs a loud one-time warning and stays
-  push-only — it never polls a URL that does not exist, and never silently
-  stops receiving work.
-- **`POST /assign` is now a wake hint, not the delivery path.** The AP writes
-  the lease row *before* it sends the hint, so a polling provider learns about
-  the job within ~250 ms. A hint that never arrives (the normal case behind
-  NAT) or one that is rejected is **not** a lost job, and the heartbeat accepts
-  a hint without ever overwriting a payload it already holds (a late hint
-  cannot reset a finished job).
-- **Mixed fleets are safe.** `both` means an old, reachable provider keeps
-getting pushes while a NAT'd one is served by pull. The two paths write the
-same records, so a provider can receive the same job twice — that is a no-op
-(the local payload is never overwritten, so a finished job cannot be reset).
+- **Pull is the only delivery path since #46 Phase 3 (2026-10-19)** and needs
+  `GPN_AP_URL`. The assignment **push is gone**: the AP no longer dials
+  `:8093`, so a provider behind NAT/CGNAT receives work with no inbound port.
+  Without an AP URL the provider logs a loud one-time warning and serves only
+  jobs already in its local store.
+- **`POST /assign` survives for one release as a deprecated no-op.** It
+  answers `{ok, deprecated, ignored, wake}` and writes **nothing** (that is what
+  makes it safe: a late push carrying a stale `queued` payload can no longer
+  reset an in-flight or finished job). All delivery is the lease the AP writes
+  *before* it would have dispatched, which the long-poll returns within ~250 ms.
+- **Mixed fleets are safe.** An old AP's push is accepted-and-ignored while the
+  job is picked up by the poll; a provider that cannot poll still self-claims
+  `Pending` jobs from the chain (first-claim-wins), so nothing breaks.
 - **The cursor survives restarts** (`~/.gpn/assign-cursor.json`). On the first
 start of a pull-enabled build the cursor is seeded from the highest id already
 in `~/.gpn/assignments.json`, so upgrading does not re-deliver history.
@@ -791,9 +790,9 @@ finetune_poll_ms = 4000
 | `GPN_AUTHOR` | short authoring key name → `--<name>` | _(none)_ |
 | `GPN_NODE_ARGS` | extra raw args appended to `gpn-node` | _(none)_ |
 | `GPN_PROVIDER_ENDPOINT` | public `/status` URL advertised on-chain | _(none → discovery off)_ |
-| `GPN_ASSIGN_TOKEN` | shared AP↔provider secret (`POST /assign` **and** `GET /assignments` auth) | _(empty → legacy-permissive, warns)_ |
-| `GPN_AP_URL` | access point base URL for the **pull** transport (e.g. `http://gpn-testnet.duckdns.org:8092`). Unset → push only, with a warning. | _(none)_ |
-| `GPN_ASSIGN_SOURCE` | `pull` (default) \| `push` \| `both` — how this provider receives assignments (see [Pull vs push](#pull-vs-push--work-behind-nat)). | `pull` |
+| `GPN_ASSIGN_TOKEN` | shared AP↔provider secret (`GET /assignments` auth; the legacy `POST /assign` still checks it) | _(empty → legacy-permissive, warns)_ |
+| `GPN_AP_URL` | access point base URL for the **pull** transport (e.g. `http://gpn-testnet.duckdns.org:8092`). Unset → no delivery, with a loud warning. | _(none)_ |
+| `GPN_ASSIGN_SOURCE` | `pull` (the only delivery path) \| `both` \| `push` (**degraded**, no delivery) — see [Pull vs push](#pull-vs-push--work-behind-nat). | `pull` |
 | `GPN_ASSIGN_WAIT_MS` | pull long-poll budget (the AP answers immediately when there is work) | `25000` |
 | `GPN_OLLAMA` | ollama base URL | `http://127.0.0.1:11434` |
 | `GPN_REQUIRE_OLLAMA` | Hard gate: refuse to start when ollama is unreachable. `0` opts out (special cases only). | `1` |

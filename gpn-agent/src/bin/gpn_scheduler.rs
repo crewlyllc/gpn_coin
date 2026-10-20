@@ -1063,68 +1063,15 @@ fn loopback_if_wildcard(listen: &str) -> String {
 /// about the job within ~250 ms whether or not this arrives. A failure here is
 /// therefore NOT a lost job: it is swallowed (never logged as a job failure)
 /// and is the normal case for a CGNAT'd provider.
-fn dispatch_assignment(
-    status_url: &str,
-    job_id: u64,
-    provider: &str,
-    model: &str,
-    pull: bool,
-    job_payload: Option<&gpn_agent::llm::LlmJob>,
-    callback_url: &str,
-    callback_token: &str,
-) {
-    let base = status_url
-        .trim_end_matches('/')
-        .trim_end_matches("/status")
-        .trim_end_matches('/');
-    let url = format!("{base}/assign");
-    // Shared AP↔provider secret so a remote provider can reject a forged
-    // assignment push to its publicly-exposed heartbeat (item #16, finding #7).
-    // Sent as a header + body field; unset env ⇒ the provider stays legacy/permissive.
-    let assign_token = std::env::var("GPN_ASSIGN_TOKEN").unwrap_or_default();
-    let body = assignment_body(
-        job_id,
-        provider,
-        model,
-        pull,
-        job_payload,
-        callback_url,
-        callback_token,
-        &assign_token,
-    );
-    if let Ok(c) = gpn_agent::net::ipv4_only_client(std::time::Duration::from_secs(3)) {
-        let mut req = c.post(&url).json(&body);
-        if !assign_token.is_empty() {
-            req = req.header("X-Gpn-Assign-Token", &assign_token);
-        }
-        let _ = req.send();
-    }
-}
-
-/// Build the `POST /assign` JSON body. Split out so the assignment-push auth
-/// binding (item #16 finding #7) is unit-testable without an HTTP round trip.
-fn assignment_body(
-    job_id: u64,
-    provider: &str,
-    model: &str,
-    pull: bool,
-    job_payload: Option<&gpn_agent::llm::LlmJob>,
-    callback_url: &str,
-    callback_token: &str,
-    assign_token: &str,
-) -> Value {
-    let mut body = json!({
-        "job_id": job_id, "provider": provider, "model": model,
-        "pull": pull, "callback": callback_url, "callback_token": callback_token,
-        "assign_token": assign_token, "hint": true
-    });
-    if let Some(j) = job_payload {
-        if let Ok(v) = serde_json::to_value(j) {
-            body["job"] = v;
-        }
-    }
-    body
-}
+// #46 Phase 3: the assignment PUSH is gone. The access point no longer dials a
+// provider's heartbeat to hand over work — that required an inbound port and
+// was already redundant: the lease row (`write_assignment`) is written BEFORE
+// any delivery attempt, and the provider's `GET /assignments` long-poll returns
+// the job payload + callback + token within ~250 ms. Providers that cannot be
+// dialled (NAT/CGNAT) are therefore first-class. `POST /assign` survives on the
+// heartbeat for exactly one release as a deprecated no-op/wake endpoint so an
+// old AP's push does not 404; its payload is ignored and the job is picked up
+// by the poll (or by the chain first-claim fallback).
 
 fn write_assignment(
     store: &str,
@@ -1908,7 +1855,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             id,
                             gpn_agent::llm::LlmJob::new_llm(&model, &prompt, 0.7, 512),
                         );
-                        let job_payload = gpn_agent::llm::get_job(id);
                         let callback_token = new_callback_token(id);
                         let _ = write_assignment(
                             &assign_store,
@@ -1919,16 +1865,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &callback_url,
                             &callback_token,
                         );
-                        dispatch_assignment(
-                            &provider.status_url,
-                            id,
-                            &provider.address,
-                            &model,
-                            needs_pull,
-                            job_payload.as_ref(),
-                            &callback_url,
-                            &callback_token,
-                        );
+                        // #46 Phase 3: delivery is the provider's pull long-poll;
+                        // the lease row above is the only hand-off.
                         // block until the provider finishes (OpenAI calls are synchronous)
                         for _ in 0..1200 {
                             if let Some(j) = gpn_agent::llm::get_job(id) {
@@ -2305,7 +2243,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // dispatch: record which provider (by address) should claim it,
                             // plus the model + whether it must pull the model first.
                             record_created(id, mtok_eff as u64);
-                            let job_payload = gpn_agent::llm::get_job(id);
                             let callback_token = new_callback_token(id);
                             let _ = write_assignment(
                                 &assign_store,
@@ -2316,16 +2253,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &callback_url,
                                 &callback_token,
                             );
-                            dispatch_assignment(
-                                &provider.status_url,
-                                id,
-                                &provider.address,
-                                &model,
-                                needs_pull,
-                                job_payload.as_ref(),
-                                &callback_url,
-                                &callback_token,
-                            );
+                            // #46 Phase 3: delivery is the provider's pull long-poll;
+                            // the lease row above is the only hand-off.
                             // optional inline wait: poll the off-chain store and return the
                             // answer in THIS response (no separate /result call).
                             let mut answer: Option<serde_json::Value> = None;
@@ -2677,16 +2606,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         &callback_url,
                                         &callback_token,
                                     );
-                                    dispatch_assignment(
-                                        &p.status_url,
-                                        idn,
-                                        &p.address,
-                                        &qmodel,
-                                        pull,
-                                        job_payload.as_ref(),
-                                        &callback_url,
-                                        &callback_token,
-                                    );
+                                    // #46 Phase 3: no push — the provider's pull
+                                    // long-poll delivers the lease written above.
                                     json!({"ok":true,"job_id":idn,"routed_to":p.address,
                                        "model":qmodel,"pull":pull,
                                        "latency_ms":p.latency_ms,"load":format!("{}/{}",p.active,p.capacity)})
@@ -3247,32 +3168,10 @@ mod tests {
     }
 
     #[test]
-    fn assignment_push_carries_the_shared_token_that_binds_it_to_the_provider() {
-        let body = assignment_body(
-            7,
-            "prov",
-            "llama3.2:1b",
-            false,
-            None,
-            "http://ap:8092",
-            "ctok",
-            "s3cret",
-        );
-        assert_eq!(body["assign_token"], "s3cret");
-        assert_eq!(body["callback_token"], "ctok");
-        assert_eq!(body["job_id"], 7);
-        // #46 Phase 2: the push is a wake hint; delivery is the provider's poll.
-        assert_eq!(body["hint"], true);
-        // Empty token still serializes (provider treats it as "no secret configured").
-        let body2 = assignment_body(7, "prov", "m", false, None, "http://ap", "ctok", "");
-        assert_eq!(body2["assign_token"], "");
-    }
-
-    #[test]
     fn assignment_job_payload_roundtrips_as_llmjob() {
-        // The AP serializes the full off-chain LlmJob into the `/assign` push and
-        // the provider heartbeat deserializes it back into its own store. Guard
-        // that wire shape (item #14 remote-provider run path).
+        // #46 Phase 3: the payload travels in the pull lease (never a push), so
+        // this wire shape is what `collect_leases` embeds and the provider's
+        // `assign_pull::apply_lease` deserializes back into its own store.
         let job = gpn_agent::llm::LlmJob::new_llm("qwen2.5:7b", "hello world", 0.7, 256);
         let v = serde_json::to_value(&job).unwrap();
         let back: gpn_agent::llm::LlmJob = serde_json::from_value(v).unwrap();

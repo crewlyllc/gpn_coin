@@ -716,12 +716,26 @@ is the whole point of the change. Guardrails:
 **Phase 3 — remove push.** Delete the mandatory dispatch path and the inbound-status dependency. Keep
 `POST /assign` as a no-op/wake endpoint for one release, then delete.
 
+**Done 2026-10-19 (step 1 — push deleted):** the AP's `dispatch_assignment`/`assignment_body`
+plumbing is **gone** from all three create paths (`/v1/chat/completions`, `POST /jobs`, `/route/{id}`);
+the lease row (`write_assignment`) is written first and is now the *only* hand-off, which the provider's
+long-poll returns within ~250 ms. The heartbeat's `POST /assign` is a **deprecated no-op**: it answers
+`{ok, deprecated, ignored, wake}`, warns once, and writes nothing (so a stale late push can no longer
+reset a running/finished job). `GPN_ASSIGN_SOURCE=push` is now explicitly **degraded** — nothing is
+pushed, so such a provider serves only payloads already in its local store — and logs that loudly;
+pull without `GPN_AP_URL` says the same. Mixed fleets stay safe via the chain first-claim fallback.
+**Still open:** delete the `POST /assign` endpoint next release; drop the inbound-`/status` dependency
+(provider caps must travel in the poll so routing needs no inbound port); the 5 seed VPSes; the two
+Phase-1 hardware acceptance checks.
+
 **Backward compatibility**
 - Old providers (no poll loop) keep working while `GPN_JOB_TRANSPORT=both`, because push still runs.
 - Old APs + new providers: providers still self-claim `Pending` jobs from the chain (the dual path), so
   the network degrades to first-claim-wins rather than breaking.
 - New clients ignore unknown `network.json` keys, so adding `bootstrap_seeds`/`bootstrap_urls` is safe
   for old builds (they simply keep their compiled-in bootnode).
+- Old APs + new providers: the push is accepted-and-ignored by the heartbeat (Phase 3) while the job is
+  delivered by the poll; a provider that cannot poll still self-claims `Pending` jobs from the chain.
 - Mixed fleets are safe at every step; no flag day.
 
 **What happens to the dialability gate:** it stops being `EXIT_NOT_DIALABLE` and becomes the **backbone

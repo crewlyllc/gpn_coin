@@ -35,9 +35,12 @@
 
 use gpn_agent::disk::{disk_space, LOW_DISK_PERCENT};
 use gpn_agent::gpu::{detect_gpu_capability, detect_vram_mb};
-use gpn_agent::llm::{LlmJob, LlmStore};
 use serde_json::json;
+use std::sync::Once;
 use std::time::Duration;
+
+/// `POST /assign` is a deprecated no-op since #46 Phase 3 — warn exactly once.
+static ASSIGN_DEPRECATED: Once = Once::new();
 use tiny_http::{Header, Method, Response, Server};
 
 fn opt(args: &[String], flag: &str) -> Option<String> {
@@ -59,20 +62,25 @@ fn ct_eq(a: &str, b: &str) -> bool {
     diff == 0
 }
 
-/// Authorization for `POST /assign` (item #16, red-team finding #7).
+/// Authorization for the legacy `POST /assign` endpoint (item #16, red-team
+/// finding #7).
 ///
 /// The provider heartbeat (:8093) is *publicly* reachable — the Windows box
-/// forwards it to the internet — and `POST /assign` writes an attacker-supplied
-/// job + `callback` into the provider's OWN store. Left unauthenticated, any
-/// remote caller could (a) make the provider run an arbitrary prompt on its GPU
-/// with no on-chain job/escrow, and (b) overwrite a pending assignment's
-/// `callback`/`callback_token` so the provider returns a *user's* inference
-/// result to the attacker (result hijack / data exfiltration).
+/// forwards it to the internet — and `POST /assign` used to write an
+/// attacker-supplied job + `callback` into the provider's OWN store. Left
+/// unauthenticated, any remote caller could (a) make the provider run an
+/// arbitrary prompt on its GPU with no on-chain job/escrow, and (b) overwrite a
+/// pending assignment's `callback`/`callback_token` so the provider returns a
+/// *user's* inference result to the attacker (result hijack / data
+/// exfiltration).
 ///
-/// Bind the push to a shared AP↔provider secret (`GPN_ASSIGN_TOKEN`): when a
-/// token is configured, a NON-loopback caller must present it. Loopback stays
-/// exempt (the local AP / tests share the secret implicitly) and an *unset*
-/// token keeps legacy behaviour so a rollout never breaks an existing box.
+/// Since #46 Phase 3 the endpoint writes nothing at all, so the gate is now
+/// defence-in-depth rather than the only barrier; it is kept so an old AP's
+/// push is still authenticated and so the surface does not silently widen.
+/// When a token is configured, a NON-loopback caller must present it. Loopback
+/// stays exempt (the local AP / tests share the secret implicitly) and an
+/// *unset* token keeps legacy behaviour so a rollout never breaks an existing
+/// box.
 fn assign_authorized(is_loopback: bool, required: &str, provided: &str) -> bool {
     if required.is_empty() || is_loopback {
         return true;
@@ -104,17 +112,6 @@ fn ollama_models(base: &str, fallback: &[String]) -> (Vec<String>, bool) {
         }
         Err(_) => (fallback.to_vec(), false),
     }
-}
-
-/// Merge one assignment into the provider's local `~/.gpn/assignments.json` —
-/// the file the provider loop's `read_assigned` reads.
-fn write_assignment(job_id: u64, rec: serde_json::Value) -> std::io::Result<()> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    let path = std::env::var("GPN_ASSIGN_STORE")
-        .unwrap_or_else(|_| format!("{home}/.gpn/assignments.json"));
-    // Cross-process locked read-modify-write (see `gpn_agent::llm::StoreLock`):
-    // the AP + heartbeat + providers share `assignments.json`.
-    gpn_agent::llm::merge_json_object(std::path::Path::new(&path), &job_id.to_string(), rec)
 }
 
 /// Total system RAM (MiB) from `/proc/meminfo`; 0 if unknown (e.g. Windows).
@@ -295,60 +292,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
             }
             (Method::Get, "/health") => json!({"status":"ok"}),
-            // POST /assign — the access point PUSHES a job assignment for this provider.
-            // We write it into the provider's OWN ~/.gpn/assignments.json (what the
-            // provider loop reads), so a REMOTE provider gets its assignment without
-            // needing to see the AP's host-local file.
+            // POST /assign — DEPRECATED (#46 Phase 3). The access point no longer
+            // pushes assignments: delivery is the provider's `GET /assignments`
+            // long-poll, so a provider behind NAT/CGNAT receives work with no
+            // inbound port at all. This endpoint survives for exactly one release
+            // so an old AP's push does not 404 — it is a NO-OP wake: it answers,
+            // logs once, and deliberately writes nothing (a late push carrying a
+            // stale `queued` payload can no longer reset work we already hold).
             (Method::Post, "/assign") => {
                 let mut body = String::new();
                 let _ = req.as_reader().read_to_string(&mut body);
-                match serde_json::from_str::<serde_json::Value>(&body) {
-                    Ok(v) => {
-                        let jid = v.get("job_id").and_then(|x| x.as_u64()).unwrap_or(0);
-                        let callback = v.get("callback").and_then(|x| x.as_str()).unwrap_or("");
-                        // Item #14: the assignment now carries the FULL off-chain job
-                        // payload. Persist it into THIS provider's own LlmStore so a
-                        // REMOTE provider (which never created the job and has no local
-                        // entry) can actually RUN it. Without this the provider claims
-                        // but `run_job` finds no `get_job(id)` and skips → the job
-                        // wedges Running. The `callback` is stored so the provider can
-                        // POST the result back to the requesting AP.
-                        let mut stored_job = false;
-                        let is_hint = v.get("hint").and_then(|x| x.as_bool()).unwrap_or(false);
-                        if let Some(jv) = v.get("job") {
-                            // #46 Phase 2: the push is a wake HINT, not the delivery
-                            // path, so it must never clobber work we already hold —
-                            // a late hint carrying the original `queued` payload
-                            // would otherwise reset an in-flight/completed job and
-                            // make us run it twice (the pull lease applies the same
-                            // rule). Only seed an id we know nothing about.
-                            if LlmStore::new().get(jid).is_none() {
-                                if let Ok(job) = serde_json::from_value::<LlmJob>(jv.clone()) {
-                                    stored_job = LlmStore::new().put(jid, job).is_ok();
-                                }
-                            }
-                        }
-                        // Item #16 finding #2: persist the per-job callback token so
-                        // the provider can echo it when returning the result, binding
-                        // the remote result channel to this assignment.
-                        let callback_token = v
-                            .get("callback_token")
-                            .and_then(|x| x.as_str())
-                            .unwrap_or("");
-                        let rec = json!({
-                            "provider": v.get("provider").and_then(|x| x.as_str()).unwrap_or(address.as_str()),
-                            "model": v.get("model").and_then(|x| x.as_str()).unwrap_or(""),
-                            "pull": v.get("pull").and_then(|x| x.as_bool()).unwrap_or(false),
-                            "callback": callback,
-                            "callback_token": callback_token,
-                        });
-                        match write_assignment(jid, rec) {
-                            Ok(_) => json!({"ok": true, "job_id": jid, "job_stored": stored_job, "hint": is_hint}),
-                            Err(e) => json!({"error": format!("{e}")}),
-                        }
-                    }
-                    Err(e) => json!({"error": format!("bad body: {e}")}),
-                }
+                ASSIGN_DEPRECATED.call_once(|| {
+                    eprintln!(
+                        "⚠ POST /assign is deprecated and ignored (#46 Phase 3): assignments are \
+                         pulled via GET /assignments — set GPN_AP_URL on the provider"
+                    );
+                });
+                json!({
+                    "ok": true,
+                    "deprecated": true,
+                    "ignored": true,
+                    "wake": true,
+                    "message": "assignment push removed; poll GET /assignments"
+                })
             }
             _ => json!({"error":"not found"}),
         };

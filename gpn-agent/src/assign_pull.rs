@@ -15,24 +15,22 @@
 //! provider claim loop already reads those files, so nothing downstream
 //! changes: run / settle / heal are untouched.
 //!
-//! # Mixed fleets
+//! # Mixed fleets / Phase 3
 //!
 //! `GPN_ASSIGN_SOURCE` selects the transport:
 //!
-//! * `pull` — **default** (#46 Phase 2): poll only. Works behind NAT/CGNAT,
-//!   which is the population the network is meant to grow.
-//! * `push` — pre-#46 behaviour only (the AP must be able to reach `:8093`).
-//! * `both` — pull in parallel with the push listener, during a migration.
+//! * `pull` — **the only transport** since #46 Phase 3 (and the default since
+//!   Phase 2). Works behind NAT/CGNAT, which is the population the network is
+//!   meant to grow.
+//! * `push` — **degraded**: the AP no longer pushes assignments (only a
+//!   deprecated no-op `POST /assign` remains on the heartbeat for one release),
+//!   so a push-only provider serves only jobs whose payload is already in its
+//!   local store. Logged loudly at startup.
+//! * `both` — pull, with the legacy no-op `/assign` endpoint also answering.
 //!
-//! A tip-off push (`POST /assign`) is still accepted by the heartbeat whatever
-//! the mode: it is a **wake hint** carrying the same payload the poll returns,
-//! so it can only ever help. The AP writes the lease row *before* sending it,
-//! so the long-poll already answers within ~250 ms — a hint that is dropped
-//! (the usual case behind NAT) costs nothing and is never a job failure.
-//!
-//! `GPN_AP_URL` is required for pull (e.g. `http://gpn-testnet.duckdns.org:8092`);
-//! without it the mode degrades to push and says so loudly, once, at startup —
-//! a provider must never silently stop receiving work.
+//! The old wake hint is gone with the push path: the AP writes the lease row
+//! before it would have dispatched, and our long-poll answers within ~250 ms,
+//! so there is nothing left to wake.
 //!
 //! # Cursor
 //!
@@ -69,18 +67,20 @@ pub const DEFAULT_SOURCE: &str = "pull";
 /// Which transport(s) this provider uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssignSource {
-    /// `POST /assign` only (pre-#46 behaviour).
+    /// No pull loop (degraded since #46 Phase 3: nothing is pushed any more,
+    /// so only payloads already in the local store can be served).
     Push,
     /// `GET /assignments` only.
     Pull,
-    /// Both, in parallel (migration mode).
+    /// Both, in parallel (pull + the legacy no-op `/assign` endpoint).
     Both,
 }
 
 /// Effective transport given the `GPN_ASSIGN_SOURCE` value and whether an AP
 /// URL is configured. Pull without an AP URL cannot work, so it degrades to
-/// push — the pre-#46 path that at least still receives local assignments.
-/// Pure so the fallback matrix is testable without touching the environment.
+/// push — which since #46 Phase 3 is a *degraded* mode (no delivery), signalled
+/// loudly by `PullConfig::from_env`. Pure so the fallback matrix is testable
+/// without touching the environment.
 pub fn resolve(source: &str, ap_url: Option<&str>) -> AssignSource {
     let want = AssignSource::parse(source);
     if want.pulls() && ap_url.is_none() {
@@ -108,7 +108,9 @@ impl AssignSource {
         matches!(self, AssignSource::Pull | AssignSource::Both)
     }
 
-    /// Does this mode keep the `POST /assign` listener authoritative?
+    /// Does this mode keep the legacy `POST /assign` listener answering?
+    /// Since #46 Phase 3 that endpoint is a no-op, so this only controls log
+    /// noise — it never decides whether work arrives.
     pub fn pushes(self) -> bool {
         matches!(self, AssignSource::Push | AssignSource::Both)
     }
@@ -142,8 +144,13 @@ pub struct PullConfig {
 impl PullConfig {
     /// Resolve from the environment. `None` when the effective transport does
     /// not pull — either because push was asked for explicitly, or because no
-    /// `GPN_AP_URL` is configured (then we keep the old push-only behaviour and
-    /// say so, instead of polling a URL that does not exist).
+    /// `GPN_AP_URL` is configured.
+    ///
+    /// #46 Phase 3 removed the push *delivery* path, so a non-pulling provider
+    /// receives no assignments from a remote AP at all: it can only serve jobs
+    /// whose payload already exists in its local store (i.e. one sharing the
+    /// AP's `~/.gpn`) plus whatever it wins by first-claim on chain. That is a
+    /// degraded mode, so it is logged loudly rather than silently.
     pub fn from_env(provider: &str) -> Option<Self> {
         let raw = std::env::var("GPN_ASSIGN_SOURCE").unwrap_or_else(|_| DEFAULT_SOURCE.into());
         let ap_url = std::env::var("GPN_AP_URL")
@@ -151,15 +158,17 @@ impl PullConfig {
             .map(|s| s.trim().trim_end_matches('/').to_string())
             .filter(|s| !s.is_empty());
         let source = resolve(&raw, ap_url.as_deref());
-        if source.pulls() != AssignSource::parse(&raw).pulls() {
-            eprintln!(
-                "⚠ [assign] GPN_ASSIGN_SOURCE={} needs GPN_AP_URL (e.g. http://<ap-host>:8092) — \
-                 no AP URL is set, so this provider stays PUSH-only and cannot receive work \
-                 behind NAT. Set GPN_AP_URL to use the pull transport.",
-                raw.trim()
-            );
-        }
         if !source.pulls() {
+            eprintln!(
+                "⚠ [assign] NO pull transport ({}) — assignment PUSH was removed in #46 Phase 3, \
+                 so this provider will only serve jobs whose payload is already in its local \
+                 store; set GPN_AP_URL (e.g. http://<ap-host>:8092) to receive work.",
+                if ap_url.is_none() {
+                    format!("GPN_ASSIGN_SOURCE={} but GPN_AP_URL is unset", raw.trim())
+                } else {
+                    format!("GPN_ASSIGN_SOURCE={} selects push only", raw.trim())
+                }
+            );
             return None;
         }
         let ap_url = ap_url?;
@@ -267,7 +276,7 @@ pub fn parse_leases(body: &str) -> Vec<Lease> {
         .collect()
 }
 
-/// Persist one lease exactly like `POST /assign` does, so every downstream
+/// Persist one lease exactly what the old push path wrote, so every downstream
 /// consumer (claim loops, `run_job`, result callback) is unchanged.
 ///
 /// Returns whether the off-chain payload was stored.
