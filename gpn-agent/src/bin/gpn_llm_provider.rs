@@ -49,6 +49,24 @@ fn missing_counter() -> &'static Mutex<HashMap<u64, u32>> {
     M.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Item #49: at most one "waiting for the create" line per id per minute, so a
+/// slow create cannot spam the journal (and the counter above, which is reset by
+/// unrelated arms, cannot make the warning chatter).
+fn should_announce_wait(job_id: u64) -> bool {
+    use std::time::{Duration, Instant};
+    static LAST: OnceLock<Mutex<HashMap<u64, Instant>>> = OnceLock::new();
+    let m = LAST.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut m = m.lock().unwrap_or_else(|e| e.into_inner());
+    let now = Instant::now();
+    match m.get(&job_id) {
+        Some(t) if now.duration_since(*t) < Duration::from_secs(60) => false,
+        _ => {
+            m.insert(job_id, now);
+            true
+        }
+    }
+}
+
 /// Item #41: ids already warned about being payload-less (warn once each, not
 /// once per 500 ms poll).
 fn payloadless_warned() -> &'static Mutex<std::collections::HashSet<u64>> {
@@ -81,6 +99,27 @@ fn payload_gate(has_payload: bool, first_sighting: bool) -> ClaimGate {
         ClaimGate::SkipAndWarn
     } else {
         ClaimGate::SkipSilently
+    }
+}
+
+/// What an on-chain read says about whether a job may be claimed right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaimRead {
+    /// Chain has it in `Pending` — accept it.
+    Claim,
+    /// Chain has it, but in another state (already accepted/running/terminal).
+    NotPending,
+    /// Chain does not have the id at all yet: the AP's create is still in the
+    /// pool. Claiming now would revert (`accept_job` needs the job to exist),
+    /// so wait for inclusion instead (item #49).
+    NotYetOnChain,
+}
+
+fn claim_read_gate(read: Option<&str>) -> ClaimRead {
+    match read {
+        Some("Pending") => ClaimRead::Claim,
+        Some(_) => ClaimRead::NotPending,
+        None => ClaimRead::NotYetOnChain,
     }
 }
 
@@ -836,6 +875,21 @@ fn heal_attempt_allowed(id: u64, step: HealStep, account_nonce: Option<u64>) -> 
     }
 }
 
+/// Mark a transition as *just attempted* without a nonce (item #49). The claim
+/// path submits `accept` through the same nonce stream as the heal path, so the
+/// reconcile pass must not re-drive the same `accept` while the claim's tx is
+/// still in the pool — that is one wasted extrinsic per job (the pallet answers
+/// `JobNotPending` once it lands). Inserting the gate entry makes the ordinary
+/// retry floor apply instead of an immediate duplicate submit.
+fn heal_mark_attempt(id: u64, step: HealStep) {
+    let mut gate = heal_gate().lock().unwrap_or_else(|e| e.into_inner());
+    gate.entry((id, step)).or_insert(HealAttempt {
+        last: Instant::now(),
+        nonce: None,
+        ineffective: 0,
+    });
+}
+
 /// Record the nonce a heal transition was submitted with, so the next pass can
 /// tell whether it was included. Called only right after a successful submit.
 fn heal_record_nonce(id: u64, step: HealStep, nonce: u64) {
@@ -919,6 +973,15 @@ async fn process_once(
     // payload entry.
     if should_reconcile() {
         let next = client.get_next_job_id().await;
+        // Item #49: the reconcile pass used to fail completely silently (a `0`
+        // from `get_next_job_id`, or a `None` state for every id) so a stranded
+        // job looked like "nothing to do". `GPN_RECONCILE_DEBUG=1` prints one
+        // summary line per pass plus a line per candidate id.
+        let debug = std::env::var("GPN_RECONCILE_DEBUG")
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(false);
+        let mut scanned = 0u32;
+        let mut decoded = 0u32;
         // Account nonce at the start of this pass: the heal gate keys retries on
         // the nonce each attempted tx was signed with. A block being produced is
         // NOT evidence that our tx landed (it may be queued behind other people's
@@ -927,7 +990,16 @@ async fn process_once(
         // inclusion.
         let account_nonce = client.account_nonce_at_head(me).await;
         for id in next.saturating_sub(RECONCILE_WINDOW)..next {
+            scanned += 1;
             if let Some((state, _price, _req, provider_now)) = client.get_job_state(id).await {
+                decoded += 1;
+                if debug {
+                    println!(
+                        "[reconcile] #{id} state={state} provider={} healable={}",
+                        provider_now.as_deref().unwrap_or("-"),
+                        heal_step_for_state(&state) != HealStep::Wait
+                    );
+                }
                 // Heal a fast-path leak: we served this job off-chain (store status
                 // `done` + a result hash) but the on-chain state never caught up (the
                 // AP's create/accept had not been included when we claimed). Walk it
@@ -945,7 +1017,25 @@ async fn process_once(
                     // `provider == me` cannot be checked here: a job on this path is
                     // still `Pending` (no provider assigned), which is exactly why the
                     // accept has to be re-driven.
-                    if heal.is_some() && heal_attempt_allowed(id, step, account_nonce) {
+                    if heal.is_none() {
+                        // Nothing off-chain to heal with — say so when asked, since
+                        // this used to be another silent reason a stranded job was
+                        // never re-driven (item #49).
+                        if debug {
+                            println!(
+                                "[reconcile] #{id} Pending but no off-chain result in the store \
+                                 — nothing to heal"
+                            );
+                        }
+                        continue;
+                    }
+                    if !heal_attempt_allowed(id, step, account_nonce) {
+                        if debug {
+                            println!("[reconcile] #{id} accept held by the retry gate");
+                        }
+                        continue;
+                    }
+                    {
                         let res = if fast_claim {
                             client.accept_job_fast_nonce(id).await.map(Some)
                         } else {
@@ -959,6 +1049,11 @@ async fn process_once(
                                 println!("[provider] heal #{id}: accept submitted (Pending)")
                             }
                             Err(e) if is_benign_state_err(&e.to_string()) => {
+                                if debug {
+                                    println!(
+                                        "[reconcile] #{id} accept rejected as a benign state race: {e}"
+                                    );
+                                }
                                 heal_clear_step(id, step)
                             }
                             Err(e) => {
@@ -1092,6 +1187,29 @@ async fn process_once(
                 }
             }
         }
+        // Item #49: never be silent about a pass that looked at nothing or could
+        // not read anything — both mean "we would never heal a stranded job" and
+        // used to be indistinguishable from "nothing to do".
+        if debug {
+            println!("[reconcile] next={next} scanned={scanned} decoded={decoded}");
+        }
+        if scanned > 0 && decoded == 0 {
+            eprintln!(
+                "[provider] reconcile: scanned {scanned} id(s) from next={next} but decoded NONE \
+                 — chain reads are failing (stranded jobs would not heal)"
+            );
+        } else if next == 0 {
+            // Once per process: a 0 tip is indistinguishable from an empty chain
+            // and is exactly how the 15:1x RPC outage hid (silent `0`).
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static WARNED_ZERO: AtomicBool = AtomicBool::new(false);
+            if !WARNED_ZERO.swap(true, Ordering::Relaxed) {
+                eprintln!(
+                    "[provider] reconcile: NextJobId read as 0 — chain read failing? \
+                     (stranded jobs would not heal; repeated after every start)"
+                );
+            }
+        }
     } // end reconcile gate
 
     // 0. Auto-claim: if an access-point scheduler has assigned us specific jobs,
@@ -1182,27 +1300,38 @@ async fn process_once(
                 continue;
             }
         }
-        // Only claim a Pending job — skip ones already accepted/started. In fast
-        // mode a job may be absent from chain state while the AP's no-wait create
-        // is still in flight: tolerate that, but bound it so a job that never
-        // appears can't storm the chain with doomed accepts.
-        match client.get_job_state(job_id).await {
-            Some((state, _, _, _)) => {
+        // Only claim a job the chain actually has in `Pending`. A job that is
+        // absent (AP create still in the pool) is WAITED for, not claimed
+        // optimistically — an early accept always reverts (item #49) — but the
+        // wait is bounded so a never-created id can't be rescanned forever.
+        match claim_read_gate(
+            client
+                .get_job_state(job_id)
+                .await
+                .as_ref()
+                .map(|(state, _, _, _)| state.as_str()),
+        ) {
+            ClaimRead::Claim => {
                 missing_counter().lock().unwrap().remove(&job_id);
-                if state != "Pending" {
-                    // Conclusively not claimable (Accepted/Running/terminal) —
-                    // remember it so we never re-query this id again.
-                    settled.insert(job_id);
-                    settled_dirty = true;
-                    continue;
-                }
             }
-            None => {
+            ClaimRead::NotPending => {
+                missing_counter().lock().unwrap().remove(&job_id);
+                // Conclusively not claimable (Accepted/Running/terminal) —
+                // remember it so we never re-query this id again.
+                settled.insert(job_id);
+                settled_dirty = true;
+                continue;
+            }
+            ClaimRead::NotYetOnChain => {
                 // Not on-chain yet — the AP's no-wait `create_job` is still in
-                // flight. Claim optimistically so we serve the client fast; if the
-                // accept races ahead of the create it fails, and the reconcile pass
-                // heals it (Pending + done-store → Completed). Bound the counter so
-                // a never-created id isn't re-checked forever.
+                // flight. DO NOT claim optimistically (item #49): `accept_job`
+                // requires the job to exist, so a claim dispatched before the
+                // create is included *reverts* — it burns 3 extrinsics, the
+                // provider never learns (fast path is pool-ack only), the
+                // submit_result reverts too, and the job strands `Pending` even
+                // though we ran it. Waiting costs only the block time the create
+                // needs anyway. Bound the counter so a never-created id isn't
+                // re-checked forever.
                 let mut m = missing_counter().lock().unwrap();
                 let n = m.entry(job_id).or_insert(0);
                 *n += 1;
@@ -1221,6 +1350,14 @@ async fn process_once(
                     }
                     continue;
                 }
+                drop(m);
+                if should_announce_wait(job_id) {
+                    println!(
+                        "[provider] job #{job_id} is not on chain yet (create in flight) — \
+                         waiting for inclusion before claiming (no optimistic claim)"
+                    );
+                }
+                continue;
             }
         }
         // Item #41: refuse to claim a job we hold no off-chain payload for.
@@ -1246,6 +1383,9 @@ async fn process_once(
             // accept_job + start_job as one nonce-ordered burst, no block wait.
             match client.claim_job_pipelined(job_id).await {
                 Ok(()) => {
+                    // The claim's own `accept` is now in the pool: stop the
+                    // reconcile pass from re-driving it (item #49).
+                    heal_mark_attempt(job_id, HealStep::Accept);
                     just_claimed.push(job_id);
                     // One GPU = one job: accept AT MOST ONE per pass; the next job
                     // is only claimed once this one has been run to completion.
@@ -1492,7 +1632,7 @@ async fn run_job(
 
 #[cfg(test)]
 mod claim_gate_tests {
-    use super::{payload_gate, ClaimGate};
+    use super::{claim_read_gate, payload_gate, ClaimGate, ClaimRead};
 
     /// Item #41: a job with no local payload must never be claimed (claiming it
     /// burns accept+start on every poll and wedges it `Running`); the skip is
@@ -1503,6 +1643,29 @@ mod claim_gate_tests {
         assert_eq!(payload_gate(true, true), ClaimGate::Claim);
         assert_eq!(payload_gate(false, true), ClaimGate::SkipAndWarn);
         assert_eq!(payload_gate(false, false), ClaimGate::SkipSilently);
+    }
+
+    /// Item #49: only a job the chain already holds in `Pending` may be claimed.
+    /// An absent id is the AP's `create_job` still in the pool — claiming then
+    /// reverts (`JobNotFound`/`JobNotPending`), so it must be waited for, not
+    /// claimed optimistically.
+    #[test]
+    fn claim_waits_for_the_create_to_land_instead_of_reverting() {
+        assert_eq!(claim_read_gate(Some("Pending")), ClaimRead::Claim);
+        // Absent from chain state (create still pooled) => never claim.
+        assert_eq!(claim_read_gate(None), ClaimRead::NotYetOnChain);
+        // Any other state is conclusively not claimable.
+        for s in [
+            "Accepted",
+            "Running",
+            "AwaitingVerification",
+            "Completed",
+            "Failed",
+            "Cancelled",
+            "?",
+        ] {
+            assert_eq!(claim_read_gate(Some(s)), ClaimRead::NotPending, "state {s}");
+        }
     }
 }
 
