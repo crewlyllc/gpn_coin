@@ -724,9 +724,22 @@ long-poll returns within ~250 ms. The heartbeat's `POST /assign` is a **deprecat
 reset a running/finished job). `GPN_ASSIGN_SOURCE=push` is now explicitly **degraded** — nothing is
 pushed, so such a provider serves only payloads already in its local store — and logs that loudly;
 pull without `GPN_AP_URL` says the same. Mixed fleets stay safe via the chain first-claim fallback.
-**Still open:** delete the `POST /assign` endpoint next release; drop the inbound-`/status` dependency
-(provider caps must travel in the poll so routing needs no inbound port); the 5 seed VPSes; the two
-Phase-1 hardware acceptance checks.
+**Still open:** ~~delete the `POST /assign` endpoint next release; drop the inbound-`/status` dependency~~
+(done in step 2, below); the 5 seed VPSes; the two Phase-1 hardware acceptance checks.
+
+**Done 2026-10-19 (step 2 — endpoint + inbound-status dependency deleted):** the heartbeat's
+`POST /assign` route, its shared-secret auth gate and its no-op body are **gone** (an old AP's push now
+404s; the lease row written before dispatch still delivers the job via the poll, so nothing is lost).
+The AP learned provider capabilities by dialling each provider's `:8093` `/status`, so a NAT'd box was
+pollable but never *routable*; the poll now carries a `caps` snapshot (`GET /assignments?…&caps=…`,
+read from the provider's **local** heartbeat over loopback, `GPN_STATUS_URL`) which the AP ingests into
+its registry (`ingest_caps`/`apply_poll_caps`). A snapshot merges with an on-chain-discovered entry for
+the same ss58 (keeping the AP-measured latency + endpoint as routing keys) and retires after 90 s
+(≈three missed 25 s polls), so a vanished provider still drops out. **Routing no longer needs any
+inbound port on the provider side.**
+
+**Still open after step 2:** the 5 dedicated seed VPSes, the `_gpn-seeds._tcp` TXT record, and the two
+Phase-1 hardware acceptance checks (NAT'd box serving with no forward; UPnP box auto-promoting).
 
 **Backward compatibility**
 - Old providers (no poll loop) keep working while `GPN_JOB_TRANSPORT=both`, because push still runs.
@@ -734,8 +747,8 @@ Phase-1 hardware acceptance checks.
   the network degrades to first-claim-wins rather than breaking.
 - New clients ignore unknown `network.json` keys, so adding `bootstrap_seeds`/`bootstrap_urls` is safe
   for old builds (they simply keep their compiled-in bootnode).
-- Old APs + new providers: the push is accepted-and-ignored by the heartbeat (Phase 3) while the job is
-  delivered by the poll; a provider that cannot poll still self-claims `Pending` jobs from the chain.
+- Old APs + new providers: the push is 404'd by the heartbeat (Phase 3 step 2) while the job is
+delivered by the poll; a provider that cannot poll still self-claims `Pending` jobs from the chain.
 - Mixed fleets are safe at every step; no flag day.
 
 **What happens to the dialability gate:** it stops being `EXIT_NOT_DIALABLE` and becomes the **backbone

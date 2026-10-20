@@ -36,56 +36,14 @@
 use gpn_agent::disk::{disk_space, LOW_DISK_PERCENT};
 use gpn_agent::gpu::{detect_gpu_capability, detect_vram_mb};
 use serde_json::json;
-use std::sync::Once;
 use std::time::Duration;
 
-/// `POST /assign` is a deprecated no-op since #46 Phase 3 — warn exactly once.
-static ASSIGN_DEPRECATED: Once = Once::new();
 use tiny_http::{Header, Method, Response, Server};
 
 fn opt(args: &[String], flag: &str) -> Option<String> {
     args.iter()
         .position(|a| a == flag)
         .and_then(|i| args.get(i + 1).cloned())
-}
-
-/// Constant-time string equality (don't leak the shared token via timing).
-fn ct_eq(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
-
-/// Authorization for the legacy `POST /assign` endpoint (item #16, red-team
-/// finding #7).
-///
-/// The provider heartbeat (:8093) is *publicly* reachable — the Windows box
-/// forwards it to the internet — and `POST /assign` used to write an
-/// attacker-supplied job + `callback` into the provider's OWN store. Left
-/// unauthenticated, any remote caller could (a) make the provider run an
-/// arbitrary prompt on its GPU with no on-chain job/escrow, and (b) overwrite a
-/// pending assignment's `callback`/`callback_token` so the provider returns a
-/// *user's* inference result to the attacker (result hijack / data
-/// exfiltration).
-///
-/// Since #46 Phase 3 the endpoint writes nothing at all, so the gate is now
-/// defence-in-depth rather than the only barrier; it is kept so an old AP's
-/// push is still authenticated and so the surface does not silently widen.
-/// When a token is configured, a NON-loopback caller must present it. Loopback
-/// stays exempt (the local AP / tests share the secret implicitly) and an
-/// *unset* token keeps legacy behaviour so a rollout never breaks an existing
-/// box.
-fn assign_authorized(is_loopback: bool, required: &str, provided: &str) -> bool {
-    if required.is_empty() || is_loopback {
-        return true;
-    }
-    ct_eq(required, provided)
 }
 
 /// Live model inventory from Ollama. Returns (models, can_pull).
@@ -167,11 +125,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let capabilities_csv = opt(&args, "--capabilities")
         .or_else(|| std::env::var("CAPABILITIES").ok())
         .unwrap_or_else(|| caps_default.into());
-    // Shared AP↔provider secret binding `POST /assign` (item #16 finding #7).
-    // Empty ⇒ legacy accept (logged) so a rollout is non-breaking.
-    let assign_token = opt(&args, "--assign-token")
-        .or_else(|| std::env::var("GPN_ASSIGN_TOKEN").ok())
-        .unwrap_or_default();
     // Real compute economics for the rate card:
     //   --tok-per-s          the provider's MEASURED throughput (tokens/sec)
     //   --owner-cost-usd-hr  the provider's own cost/hr ($/kWh + amortized GPU)
@@ -239,48 +192,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let hdr = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
-    if assign_token.is_empty() {
-        eprintln!("⚠ assign-token not configured — POST /assign is UNAUTHENTICATED (set GPN_ASSIGN_TOKEN; item #16 finding #7)");
-    }
-    for mut req in server.incoming_requests() {
-        // Auth gate for the assignment push (item #16, red-team finding #7): a
-        // publicly-reachable `POST /assign` must carry the shared token.
-        {
-            let u = req.url().to_string();
-            let is_assign = req.method() == &Method::Post && u.split('?').next() == Some("/assign");
-            if is_assign {
-                let is_loopback = req
-                    .remote_addr()
-                    .map(|a| a.ip().is_loopback())
-                    .unwrap_or(false);
-                let provided = req
-                    .headers()
-                    .iter()
-                    .find_map(|h| {
-                        if h.field.equiv("X-Gpn-Assign-Token") {
-                            Some(h.value.as_str().trim().to_string())
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_default();
-                if !assign_authorized(is_loopback, &assign_token, &provided) {
-                    let _ = req.respond(
-                        Response::from_string(json!({"error":"invalid assign token"}).to_string())
-                            .with_header(hdr.clone())
-                            .with_status_code(401),
-                    );
-                    continue;
-                }
-            }
-        }
-        let body = match (req.method(), req.url()) {
+    for req in server.incoming_requests() {
+        let (body, code) = match (req.method(), req.url()) {
             (Method::Get, "/status") => {
                 let (models_now, can_pull) = ollama_models(&ollama, &models);
                 // Item #43: report free space so a monitor can alert before
                 // ENOSPC silently halts block production. 0/null = unknown.
                 let disk = disk_space(&std::env::var("GPN_DATA_DIR").or_else(|_| std::env::var("HOME")).unwrap_or_else(|_| ".".into()));
-                json!({
+                (json!({
                     "address": address, "gflops": gflops, "models": models_now,
                     "can_pull": can_pull, "active": active, "capacity": capacity.max(1),
                     "capabilities": capabilities,
@@ -289,66 +208,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "gpu_class": gpu_class, "tflops": tflops,
                     "disk_free_mb": disk.free_mb, "disk_total_mb": disk.total_mb,
                     "disk_free_pct": disk.free_percent()
-                })
+                }), 200)
             }
-            (Method::Get, "/health") => json!({"status":"ok"}),
-            // POST /assign — DEPRECATED (#46 Phase 3). The access point no longer
-            // pushes assignments: delivery is the provider's `GET /assignments`
-            // long-poll, so a provider behind NAT/CGNAT receives work with no
-            // inbound port at all. This endpoint survives for exactly one release
-            // so an old AP's push does not 404 — it is a NO-OP wake: it answers,
-            // logs once, and deliberately writes nothing (a late push carrying a
-            // stale `queued` payload can no longer reset work we already hold).
-            (Method::Post, "/assign") => {
-                let mut body = String::new();
-                let _ = req.as_reader().read_to_string(&mut body);
-                ASSIGN_DEPRECATED.call_once(|| {
-                    eprintln!(
-                        "⚠ POST /assign is deprecated and ignored (#46 Phase 3): assignments are \
-                         pulled via GET /assignments — set GPN_AP_URL on the provider"
-                    );
-                });
-                json!({
-                    "ok": true,
-                    "deprecated": true,
-                    "ignored": true,
-                    "wake": true,
-                    "message": "assignment push removed; poll GET /assignments"
-                })
-            }
-            _ => json!({"error":"not found"}),
+            (Method::Get, "/health") => (json!({"status":"ok"}), 200),
+            // `POST /assign` was REMOVED in #46 Phase 3 step 2. The access point
+            // never pushes work: delivery is the provider's `GET /assignments`
+            // long-poll on the AP itself, so a provider behind NAT/CGNAT needs no
+            // inbound port. Keeping a "one release" no-op would preserve the exact
+            // inbound surface (and the shared secret) the pull transport exists to
+            // remove, so an old AP's push gets a real 404 and the job is picked up
+            // by the poll (which is written before any delivery attempt).
+            _ => (json!({"error":"not found"}), 404),
         };
-        let _ = req.respond(Response::from_string(body.to_string()).with_header(hdr.clone()));
+        let _ = req.respond(
+            Response::from_string(body.to_string())
+                .with_header(hdr.clone())
+                .with_status_code(code),
+        );
     }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn assign_token_gate_rejects_remote_callers_with_the_wrong_or_missing_token() {
-        // Token configured: a non-loopback caller must present it exactly.
-        assert!(!assign_authorized(false, "s3cret", ""));
-        assert!(!assign_authorized(false, "s3cret", "wrong"));
-        assert!(assign_authorized(false, "s3cret", "s3cret"));
-        // Loopback stays exempt so the local AP / tests keep working.
-        assert!(assign_authorized(true, "s3cret", ""));
-    }
-
-    #[test]
-    fn assign_token_gate_is_inert_when_unconfigured() {
-        // Rollout safety: no token configured ⇒ legacy (accept) behaviour.
-        assert!(assign_authorized(false, "", ""));
-        assert!(assign_authorized(false, "", "anything"));
-    }
-
-    #[test]
-    fn ct_eq_matches_only_equal_same_length_strings() {
-        assert!(ct_eq("abc", "abc"));
-        assert!(!ct_eq("abc", "abd"));
-        assert!(!ct_eq("abc", "abcd"));
-        assert!(ct_eq("", ""));
-    }
+    // The former `POST /assign` auth-gate tests were removed with the endpoint
+    // itself (#46 Phase 3 step 2): the heartbeat no longer accepts assignments,
+    // so there is nothing to authenticate — the pull endpoint on the AP is the
+    // only delivery surface and it carries its own `GPN_ASSIGN_TOKEN` gate.
 }

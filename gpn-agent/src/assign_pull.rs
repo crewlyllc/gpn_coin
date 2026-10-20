@@ -22,15 +22,23 @@
 //! * `pull` — **the only transport** since #46 Phase 3 (and the default since
 //!   Phase 2). Works behind NAT/CGNAT, which is the population the network is
 //!   meant to grow.
-//! * `push` — **degraded**: the AP no longer pushes assignments (only a
-//!   deprecated no-op `POST /assign` remains on the heartbeat for one release),
-//!   so a push-only provider serves only jobs whose payload is already in its
-//!   local store. Logged loudly at startup.
-//! * `both` — pull, with the legacy no-op `/assign` endpoint also answering.
+//! * `push` — **degraded**: the AP no longer pushes assignments (the heartbeat's
+//!   `POST /assign` endpoint was removed in Phase 3 step 2), so a push-only
+//!   provider serves only jobs whose payload is already in its local store.
+//!   Logged loudly at startup.
+//! * `both` — identical to `pull` (accepted so an existing config keeps working).
 //!
 //! The old wake hint is gone with the push path: the AP writes the lease row
 //! before it would have dispatched, and our long-poll answers within ~250 ms,
 //! so there is nothing left to wake.
+//!
+//! # Capabilities ride the poll
+//!
+//! The AP used to learn a provider's models/GFLOPS/VRAM/load by dialling its
+//! `:8093` `/status`. That made an unreachable heartbeat a routing black hole:
+//! a NAT'd box could poll for work yet never be chosen. Each poll now carries a
+//! `caps` snapshot read from the LOCAL heartbeat (loopback), so the AP's
+//! registry is fed entirely by the provider's outbound connection.
 //!
 //! # Cursor
 //!
@@ -64,6 +72,11 @@ pub const DEFAULT_WAIT_MS: u64 = 25_000;
 /// Default transport when `GPN_ASSIGN_SOURCE` is unset (#46 Phase 2).
 pub const DEFAULT_SOURCE: &str = "pull";
 
+/// Local heartbeat the capability snapshot is read from. Loopback, so it works
+/// on a box whose `:8093` is not reachable from anywhere else — which is the
+/// whole point of #46 Phase 3 step 2.
+pub const DEFAULT_STATUS_URL: &str = "http://127.0.0.1:8093/status";
+
 /// Which transport(s) this provider uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssignSource {
@@ -72,7 +85,8 @@ pub enum AssignSource {
     Push,
     /// `GET /assignments` only.
     Pull,
-    /// Both, in parallel (pull + the legacy no-op `/assign` endpoint).
+    /// Same as `Pull`; kept so an existing `GPN_ASSIGN_SOURCE=both` config
+    /// keeps working after the push endpoint was removed.
     Both,
 }
 
@@ -108,9 +122,10 @@ impl AssignSource {
         matches!(self, AssignSource::Pull | AssignSource::Both)
     }
 
-    /// Does this mode keep the legacy `POST /assign` listener answering?
-    /// Since #46 Phase 3 that endpoint is a no-op, so this only controls log
-    /// noise — it never decides whether work arrives.
+    /// Does this mode keep answering pushes from an old AP? Since #46 Phase 3
+    /// step 2 the heartbeat has no `/assign` endpoint at all, so this only
+    /// labels the (degraded) configuration — it never decides whether work
+    /// arrives.
     pub fn pushes(self) -> bool {
         matches!(self, AssignSource::Push | AssignSource::Both)
     }
@@ -184,16 +199,62 @@ impl PullConfig {
         })
     }
 
-    /// Build the poll URL for a cursor position.
-    pub fn poll_url(&self, since: u64) -> String {
-        format!(
+    /// Build the poll URL for a cursor position, carrying this provider's
+    /// capabilities (`caps`) so the AP can route to us without ever dialling
+    /// our `:8093` (#46 Phase 3 step 2).
+    pub fn poll_url(&self, since: u64, caps: &str) -> String {
+        let mut url = format!(
             "{}/assignments?provider={}&since={}&wait={}",
             self.ap_url,
             urlencode(&self.provider),
             since,
             self.wait_ms
-        )
+        );
+        if !caps.is_empty() {
+            url.push_str("&caps=");
+            url.push_str(&urlencode(caps));
+        }
+        url
     }
+}
+
+/// Snapshot this provider's capabilities for the poll.
+///
+/// The AP used to learn them by dialling the provider's `/status` heartbeat,
+/// which needs an inbound port and therefore silently dropped every NAT'd /
+/// CGNAT box from routing (it could poll and work, but never be picked). We
+/// read the **local** heartbeat over loopback and ship the same JSON in the
+/// poll, so the AP's registry is fed by the provider's own outbound connection.
+///
+/// Best-effort by design: if the heartbeat is down we still send the identity
+/// plus a sane capacity, because an address-only entry is still routable.
+pub fn caps_snapshot(provider: &str) -> String {
+    let url = std::env::var("GPN_STATUS_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_STATUS_URL.to_string());
+    let fetched = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(1500))
+        .build()
+        .ok()
+        .and_then(|c| c.get(&url).send().ok())
+        .and_then(|r| r.json::<Value>().ok());
+    let mut v = match fetched {
+        Some(Value::Object(m)) => Value::Object(m),
+        _ => Value::Object(serde_json::Map::new()),
+    };
+    if let Some(o) = v.as_object_mut() {
+        if o.get("address")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .is_empty()
+        {
+            o.insert("address".into(), Value::String(provider.to_string()));
+        }
+        o.entry("capacity").or_insert(serde_json::json!(1));
+        o.insert("poll".into(), serde_json::json!(true));
+    }
+    v.to_string()
 }
 
 /// Minimal percent-encoding for a query value (providers are `0x…`/base58, so
@@ -411,7 +472,10 @@ pub fn run_loop(cfg: PullConfig, provider_label: String) {
         cfg.wait_ms
     );
     loop {
-        let url = cfg.poll_url(since);
+        // Fresh caps every poll: `active` (the one-GPU-one-job lock) and the
+        // model list change minute to minute, so a cached snapshot would route
+        // work to a box that is mid-job.
+        let url = cfg.poll_url(since, &caps_snapshot(&cfg.provider));
         let client = match crate::net::ipv4_only_client(Duration::from_millis(cfg.wait_ms + 10_000))
         {
             Ok(c) => c,
@@ -530,10 +594,30 @@ mod tests {
             max_backoff: Duration::from_secs(30),
         };
         assert_eq!(
-            cfg.poll_url(42),
+            cfg.poll_url(42, ""),
             "http://ap:8092/assignments?provider=5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY&since=42&wait=25000"
         );
+        // #46 Phase 3 step 2: caps ride the poll, percent-encoded.
+        assert_eq!(
+            cfg.poll_url(42, r#"{"gflops":2500}"#),
+            "http://ap:8092/assignments?provider=5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY&since=42&wait=25000&caps=%7B%22gflops%22%3A2500%7D"
+        );
         assert_eq!(urlencode("0xab/cd+ef"), "0xab%2Fcd%2Bef");
+    }
+
+    #[test]
+    fn caps_snapshot_always_carries_identity_and_capacity() {
+        // Point at a dead port so the heartbeat fetch fails deterministically.
+        std::env::set_var("GPN_STATUS_URL", "http://127.0.0.1:1/status");
+        let s = caps_snapshot("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY");
+        let v: Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(
+            v.get("address").and_then(|x| x.as_str()),
+            Some("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY")
+        );
+        assert_eq!(v.get("capacity").and_then(|x| x.as_u64()), Some(1));
+        assert_eq!(v.get("poll").and_then(|x| x.as_bool()), Some(true));
+        std::env::remove_var("GPN_STATUS_URL");
     }
 
     #[test]

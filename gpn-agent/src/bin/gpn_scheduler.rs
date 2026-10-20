@@ -512,6 +512,143 @@ fn jpost(url: &str) -> Option<Value> {
     Some(v)
 }
 
+/// How long a capability snapshot received in a pull poll is trusted. The
+/// poll long-poll is 25 s, so a live provider refreshes this every ~25 s; three
+/// missed polls (75 s) retire it, which is the same order as the 5 s `/status`
+/// poll's tolerance for a box that has gone away.
+const POLL_CAPS_TTL_SECS: u64 = 90;
+
+/// Latency assumed for a provider we have never dialled (pull-only behind
+/// NAT). It is deliberately neutral: a client-measured RTT hint still wins in
+/// `pick()`, and an AP-measured value (when a `/status` endpoint exists) is
+/// preferred over it.
+fn pull_default_latency_ms() -> u64 {
+    std::env::var("GPN_PULL_DEFAULT_LATENCY_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(100)
+}
+
+/// Build a registry entry from a capability snapshot that arrived in a pull
+/// poll (#46 Phase 3 step 2). This is the SAME field set `/status` provides,
+/// minus anything the provider did not report (defaults mirror the `/status`
+/// path so a partial snapshot cannot make an entry unroutable).
+fn provider_from_caps(addr: &str, v: &Value, status_url: String, latency_ms: u64) -> Provider {
+    let arr_of = |key: &str| -> Vec<String> {
+        v.get(key)
+            .and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let caps = arr_of("capabilities");
+    Provider {
+        status_url,
+        address: addr.to_string(),
+        gflops: v.get("gflops").and_then(|x| x.as_u64()).unwrap_or(0),
+        models: arr_of("models"),
+        can_pull: v.get("can_pull").and_then(|x| x.as_bool()).unwrap_or(false),
+        tok_per_s: v.get("tok_per_s").and_then(|x| x.as_f64()).unwrap_or(40.0),
+        owner_cost_usd_hr: v
+            .get("owner_cost_usd_hr")
+            .and_then(|x| x.as_f64())
+            .unwrap_or(0.03),
+        mem_bw_gbps: v.get("mem_bw_gbps").and_then(|x| x.as_f64()).unwrap_or(250.0),
+        vram_mb: v.get("vram_mb").and_then(|x| x.as_u64()).unwrap_or(0),
+        ram_mb: v.get("ram_mb").and_then(|x| x.as_u64()).unwrap_or(0),
+        gpu_class: v
+            .get("gpu_class")
+            .and_then(|x| x.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+        tflops: v.get("tflops").and_then(|x| x.as_f64()).unwrap_or(0.0),
+        capabilities: if caps.is_empty() {
+            default_capabilities()
+        } else {
+            caps
+        },
+        active: v.get("active").and_then(|x| x.as_u64()).unwrap_or(0),
+        capacity: v
+            .get("capacity")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(1)
+            .max(1),
+        latency_ms,
+        last_seen: Some(Instant::now()),
+    }
+}
+
+/// Record a capability snapshot delivered by `GET /assignments?…&caps=…`.
+///
+/// Keyed by the canonical ss58 address (the poll's `provider` may be hex), so
+/// a snapshot merges with an on-chain-discovered entry for the same box rather
+/// than duplicating it.
+fn ingest_caps(
+    poll_caps: &Arc<Mutex<std::collections::HashMap<String, (Instant, Value)>>>,
+    provider: &str,
+    caps: &Value,
+) {
+    let addr = if provider.starts_with("0x") || provider.starts_with("0X") {
+        hex_to_ss58(provider).unwrap_or_else(|| provider.to_string())
+    } else {
+        provider.to_string()
+    };
+    // The snapshot's own `address` must never redirect the entry: the caller is
+    // authenticated as `provider`, so that is who these capabilities belong to.
+    poll_caps
+        .lock()
+        .unwrap()
+        .insert(addr, (Instant::now(), caps.clone()));
+}
+
+/// Merge fresh poll-delivered capability snapshots into the `/status`-pulled
+/// registry (#46 Phase 3 step 2).
+///
+/// This is what removes the inbound-`/status` dependency: a provider behind
+/// NAT/CGNAT never appears in the URL list (it has no reachable endpoint), but
+/// its own poll feeds the registry, so the scheduler can route to it. A snapshot
+/// for a box that also has a dialable `/status` replaces the measured fields
+/// but KEEPS the AP-measured latency and the endpoint URL (the endpoint is a
+/// routing key for client RTT hints and the diffusion port mapping).
+fn apply_poll_caps(
+    out: &mut Vec<Provider>,
+    poll_caps: &Arc<Mutex<std::collections::HashMap<String, (Instant, Value)>>>,
+) {
+    let snapshots: Vec<(String, Value)> = {
+        let map = poll_caps.lock().unwrap();
+        map.iter()
+            .filter(|(_, (seen, _))| seen.elapsed().as_secs() <= POLL_CAPS_TTL_SECS)
+            .map(|(addr, (_, v))| (addr.clone(), v.clone()))
+            .collect()
+    };
+    for (addr, caps) in snapshots {
+        let existing = out
+            .iter()
+            .position(|p| p.address.eq_ignore_ascii_case(&addr));
+        match existing {
+            Some(i) => {
+                let status_url = out[i].status_url.clone();
+                let measured = out[i].latency_ms;
+                let latency = if measured > 0 && measured < 9999 {
+                    measured
+                } else {
+                    pull_default_latency_ms()
+                };
+                out[i] = provider_from_caps(&addr, &caps, status_url, latency);
+            }
+            None => out.push(provider_from_caps(
+                &addr,
+                &caps,
+                format!("pull://{addr}"),
+                pull_default_latency_ms(),
+            )),
+        }
+    }
+}
+
 /// Poll every provider's /status into the shared registry.
 ///
 /// The candidate set is the **union** of (a) any static `--providers` URLs and
@@ -526,6 +663,7 @@ fn refresh(
     urls: &Arc<Vec<String>>,
     client: Arc<ChainClient>,
     rt: Arc<tokio::runtime::Runtime>,
+    poll_caps: Arc<Mutex<std::collections::HashMap<String, (Instant, Value)>>>,
 ) {
     let reg = registry.clone();
     let urls = urls.clone();
@@ -636,6 +774,11 @@ fn refresh(
         out.sort_by_key(|p| p.latency_ms);
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         out.retain(|p| p.address.is_empty() || seen.insert(p.address.clone()));
+
+        // 4. Merge capabilities delivered by providers' own pull polls (#46
+        //    Phase 3 step 2). This is the ONLY way a NAT'd/CGNAT provider can
+        //    enter the registry: the AP never dials it.
+        apply_poll_caps(&mut out, &poll_caps);
 
         *reg.lock().unwrap() = out;
         std::thread::sleep(Duration::from_secs(5));
@@ -1049,30 +1192,16 @@ fn loopback_if_wildcard(listen: &str) -> String {
     }
 }
 
-/// PUSH an assignment to the chosen provider over HTTP, so a REMOTE provider (which
-/// can't read this AP's host-local assignments file) still learns the job is its. The
-/// provider's heartbeat (`POST /assign`) writes it into the provider's OWN local file AND
-/// (item #14) persists the full off-chain job payload into the provider's own LlmStore,
-/// so a remote provider can actually RUN the job (the prompt lives only in the AP's
-/// store otherwise). The push also carries a `callback` URL so the provider can return
-/// the result to this AP. Best-effort — silently no-ops if the provider is unreachable.
-/// Best-effort **wake hint** (#46 Phase 2): assignments are delivered by the
-/// provider's own long-poll (`GET /assignments`), which works behind NAT. This
-/// push to the provider's `:8093` is now only a latency optimisation — the AP
-/// writes the lease row BEFORE calling this, so a provider that polls learns
-/// about the job within ~250 ms whether or not this arrives. A failure here is
-/// therefore NOT a lost job: it is swallowed (never logged as a job failure)
-/// and is the normal case for a CGNAT'd provider.
-// #46 Phase 3: the assignment PUSH is gone. The access point no longer dials a
-// provider's heartbeat to hand over work — that required an inbound port and
-// was already redundant: the lease row (`write_assignment`) is written BEFORE
-// any delivery attempt, and the provider's `GET /assignments` long-poll returns
-// the job payload + callback + token within ~250 ms. Providers that cannot be
-// dialled (NAT/CGNAT) are therefore first-class. `POST /assign` survives on the
-// heartbeat for exactly one release as a deprecated no-op/wake endpoint so an
-// old AP's push does not 404; its payload is ignored and the job is picked up
-// by the poll (or by the chain first-claim fallback).
-
+/// Write the lease row for a job handed to `provider` (#46 Phase 3 step 2).
+///
+/// This IS the delivery: the access point no longer pushes to a provider's
+/// heartbeat. A provider learns about the job from its own `GET /assignments`
+/// long-poll within ~250 ms, so a NAT'd/CGNAT box with no inbound port is a
+/// first-class provider. The record carries the callback URL + per-job token
+/// the provider echoes on `POST /result/{id}`.
+///
+/// (History: this used to be followed by a `POST /assign` HTTP push; the push
+/// path and the heartbeat's `/assign` endpoint were both deleted in Phase 3.)
 fn write_assignment(
     store: &str,
     job_id: u64,
@@ -1355,11 +1484,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     spawn_janitor(client.clone(), rt.clone());
 
     let registry = Arc::new(Mutex::new(Vec::<Provider>::new()));
+    // #46 Phase 3 step 2: capabilities delivered by providers' own pull polls.
+    // Kept beside the registry (not in it) because it must survive the 5 s
+    // `/status` rebuild, and it is keyed by canonical address.
+    let poll_caps: Arc<Mutex<std::collections::HashMap<String, (Instant, Value)>>> =
+        Arc::new(Mutex::new(std::collections::HashMap::new()));
     refresh(
         &registry,
         &Arc::new(urls.clone()),
         client.clone(),
         rt.clone(),
+        poll_caps.clone(),
     );
     println!("  on-chain discovery: ENABLED (ComputeMarketplace::ProviderEndpoints)");
 
@@ -1400,6 +1535,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let rt = rt.clone();
         let client = client.clone();
         let registry = registry.clone();
+        let poll_caps = poll_caps.clone();
         let assign_store = assign_store.clone();
         let callback_url = callback_url.clone();
         let hdr = hdr.clone();
@@ -1477,7 +1613,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .map(|a| a.ip().is_loopback())
                         .unwrap_or(false);
                     // Providers hold no user token: bind the endpoint to the same
-                    // shared AP↔provider secret `POST /assign` uses (loopback is
+                    // shared AP↔provider secret the provider's poll presents
+                    // (loopback is
                     // exempt so local tests/monitors keep working).
                     let want = std::env::var("GPN_ASSIGN_TOKEN").unwrap_or_default();
                     if !want.is_empty() && !is_loopback {
@@ -1504,6 +1641,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if provider.is_empty() {
                         json!({"error": "missing provider"})
                     } else {
+                        // #46 Phase 3 step 2: the poll doubles as our heartbeat.
+                        // The provider is authenticated (loopback or the shared
+                        // token) and sends its own capabilities, so the AP learns
+                        // them WITHOUT dialling its `:8093` — the reason a NAT'd
+                        // provider could never be routed to before.
+                        if let Some(raw) = query_param(&url, "caps") {
+                            let decoded = pct_decode(raw);
+                            match serde_json::from_str::<Value>(&decoded) {
+                                Ok(caps) if caps.is_object() => {
+                                    ingest_caps(&poll_caps, &provider, &caps);
+                                }
+                                Ok(_) => eprintln!(
+                                    "[assign] ignoring non-object caps from {}",
+                                    pct_decode(&provider)
+                                ),
+                                Err(e) => eprintln!(
+                                    "[assign] ignoring malformed caps from {}: {e}",
+                                    pct_decode(&provider)
+                                ),
+                            }
+                        }
                         let since: u64 = query_param(&url, "since")
                             .and_then(|s| s.parse().ok())
                             .unwrap_or(0);
@@ -2640,6 +2798,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #46 Phase 3 step 2: a provider the AP can never dial (NAT/CGNAT) enters
+    /// the registry from its own pull poll, and a snapshot for a box the AP
+    /// CAN dial updates the measured fields without losing its endpoint or the
+    /// AP-measured latency. Stale snapshots retire on their own.
+    #[test]
+    fn pull_poll_caps_register_a_provider_the_ap_cannot_dial() {
+        let map: Arc<Mutex<std::collections::HashMap<String, (Instant, Value)>>> =
+            Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let hex = "0xd43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d";
+        let ss58 = hex_to_ss58(hex).unwrap();
+        let caps = json!({
+            "address": "0xIGNORED", "gflops": 2500, "models": ["llama3.2:1b"],
+            "can_pull": true, "vram_mb": 24000, "ram_mb": 32000,
+            "tflops": 40.0, "gpu_class": "discrete", "capacity": 1, "active": 0,
+            "capabilities": ["LLMInference"]
+        });
+        ingest_caps(&map, hex, &caps);
+
+        // A NAT'd provider: no /status entry exists at all.
+        let mut out: Vec<Provider> = vec![];
+        apply_poll_caps(&mut out, &map);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].address, ss58, "keyed by canonical ss58, not the caps body");
+        assert_eq!(out[0].gflops, 2500);
+        assert_eq!(out[0].vram_mb, 24000);
+        assert!(out[0].can_pull);
+        assert_eq!(out[0].capabilities, vec!["LLMInference".to_string()]);
+        assert!(out[0].last_seen.is_some(), "a fresh poll is a live heartbeat");
+        assert_eq!(out[0].status_url, format!("pull://{ss58}"));
+
+        // The same box also reachable over /status: keep the endpoint + the
+        // AP-measured latency, refresh everything else.
+        let mut out2 = vec![prov(&ss58, "http://box:8093/status", 17, "old-model")];
+        apply_poll_caps(&mut out2, &map);
+        assert_eq!(out2.len(), 1, "merged, not duplicated");
+        assert_eq!(out2[0].status_url, "http://box:8093/status");
+        assert_eq!(out2[0].latency_ms, 17);
+        assert_eq!(out2[0].models, vec!["llama3.2:1b".to_string()]);
+
+        // A snapshot that stopped arriving expires and cannot keep a dead box
+        // routable forever.
+        {
+            let mut m = map.lock().unwrap();
+            m.insert(
+                ss58.clone(),
+                (
+                    Instant::now() - std::time::Duration::from_secs(POLL_CAPS_TTL_SECS + 1),
+                    caps.clone(),
+                ),
+            );
+        }
+        let mut out3: Vec<Provider> = vec![];
+        apply_poll_caps(&mut out3, &map);
+        assert!(out3.is_empty(), "stale caps are dropped");
+    }
 
     fn prov(addr: &str, url: &str, latency_ms: u64, model: &str) -> Provider {
         Provider {
