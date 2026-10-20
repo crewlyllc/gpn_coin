@@ -53,6 +53,19 @@ folder, payout address, peer list and public address are all resolved
 automatically. `--setup` also installs/starts ollama and pulls the baseline
 model, because a GPN node is always **miner + AI provider**.
 
+### Check the version / all options
+
+```
+$ ./gpn_node --version
+gpn_node 0.1.0 (spec 41)
+
+$ ./gpn_node --help      # usage, --setup/--version/--help, key GPN_* env vars
+```
+
+Both flags answer immediately and exit `0`: no config is read, no data dir is
+created, nothing is downloaded and no wallet prompt appears. Use them to confirm
+which build a machine is running before debugging anything else.
+
 ### 1. Download + extract
 
 Grab the release archive for your OS (Linux, macOS, Windows) and unpack it

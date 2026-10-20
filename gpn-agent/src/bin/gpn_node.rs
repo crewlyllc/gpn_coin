@@ -1451,7 +1451,25 @@ fn enforce_ollama_gate(cfg: &Config) -> i32 {
 #[tokio::main]
 async fn main() {
     env_logger::init();
-    set_ascii_mode(ascii_mode_default(&std::env::args().collect::<Vec<_>>()));
+    let argv: Vec<String> = std::env::args().collect();
+    set_ascii_mode(ascii_mode_default(&argv));
+
+    // ── Informational flags, answered BEFORE first-run/setup detection. ─────
+    // `--version`/`-V` and `--help`/`-h` must never enter `Config::load()`
+    // (that creates the base dir, may fetch the chain spec and can run the
+    // wallet wizard). Pure output, exit 0.
+    match gpn_agent::firstrun::info_request(&argv) {
+        Some(gpn_agent::firstrun::InfoRequest::Version) => {
+            println!("{}", gpn_agent::firstrun::version_line());
+            std::process::exit(0);
+        }
+        Some(gpn_agent::firstrun::InfoRequest::Help) => {
+            print!("{}", gpn_agent::firstrun::help_text());
+            std::process::exit(0);
+        }
+        None => {}
+    }
+
     let cfg = match Config::load() {
         Ok(c) => c,
         Err(e) => {
@@ -1495,7 +1513,6 @@ async fn main() {
     // ── `--setup`: explicit one-shot bootstrap of the REQUIRED ollama part. ──
     // Run on a plain thread: the ollama probe/pull use reqwest's *blocking*
     // client, which must not be created/dropped inside the async runtime.
-    let argv: Vec<String> = std::env::args().collect();
     if argv.iter().any(|a| a == "--setup") {
         let cfg = cfg.clone();
         let code = std::thread::spawn(move || run_setup(&cfg))

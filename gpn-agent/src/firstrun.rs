@@ -46,6 +46,87 @@ pub const NO_WALLET_NON_TTY: &str =
      Alternatively set GPN_SIGNER (mnemonic/seed) or GPN_SIGNER_FILE (keystore path).";
 
 // ─────────────────────────────────────────────────────────────────────────────
+// CLI info — answered BEFORE any setup detection
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// An informational flag that must be answered immediately, before the
+/// first-run detection (and therefore before any network fetch, config write
+/// or wallet prompt).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InfoRequest {
+    Help,
+    Version,
+}
+
+/// Detect `-h`/`--help` and `-V`/`--version` in a full `argv` (index 0 is the
+/// program name and is skipped).
+///
+/// This is a **pure** function on purpose: the caller can answer it without
+/// touching the filesystem, the network, or the wallet wizard. The first
+/// recognised flag wins, so `gpn_node --setup --help` prints help.
+pub fn info_request(argv: &[String]) -> Option<InfoRequest> {
+    for a in argv.iter().skip(1) {
+        match a.as_str() {
+            "-h" | "--help" => return Some(InfoRequest::Help),
+            "-V" | "--version" => return Some(InfoRequest::Version),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The one-line `--version` output, e.g. `gpn_node 0.1.0 (spec 41)`.
+///
+/// The runtime `spec_version` is injected at build time from
+/// `gpn-node/runtime/src/lib.rs` (see `build.rs`); when that file is not
+/// present (the crate built outside the repo) only the package version is
+/// printed.
+pub fn version_line() -> String {
+    match option_env!("GPN_RUNTIME_SPEC_VERSION") {
+        Some(spec) if !spec.is_empty() => {
+            format!("gpn_node {} (spec {spec})", env!("CARGO_PKG_VERSION"))
+        }
+        _ => format!("gpn_node {}", env!("CARGO_PKG_VERSION")),
+    }
+}
+
+/// The `--help` text: usage, the two one-shot flags, and the key env vars.
+///
+/// ASCII-only so it renders the same on every console.
+pub fn help_text() -> String {
+    concat!(
+        "gpn_node - the single-node supervisor (miner + AI provider, one command).\n",
+        "\n",
+        "Usage:\n",
+        "  gpn_node               start (and supervise) the node\n",
+        "  gpn_node --setup       one-time bootstrap: wallet + ollama (interactive)\n",
+        "  gpn_node --version     print the version and exit\n",
+        "  gpn_node --help        print this help and exit\n",
+        "\n",
+        "Everything else is automatic on first run (chain spec, data dir, peers,\n",
+        "public address). Only a wallet is asked for, once, by `--setup`.\n",
+        "\n",
+        "Environment (all optional; a TOML config can set the same values):\n",
+        "  GPN_BASE_PATH         node data dir - chain DB + wallet\n",
+        "                        (default ~/.gpn/node; Windows C:\\gpn\\data)\n",
+        "  GPN_CHAIN             chain spec: testnet | mainnet | dev | <path>\n",
+        "  GPN_SIGNER            signer URI / seed / mnemonic\n",
+        "  GPN_SIGNER_FILE       sr25519 JSON keystore (owner-only, 0600)\n",
+        "  GPN_PUBLIC_ADDR       public multiaddr, e.g. /dns4/host/tcp/30333\n",
+        "  GPN_UPNP              auto (default) | off\n",
+        "  GPN_SEEDS_URL         published seed-list URL(s)\n",
+        "                        (alias: GPN_BOOTNODES_URL)\n",
+        "  GPN_REQUIRE_BACKBONE  1 = refuse to run unless dialable (default 0)\n",
+        "  GPN_SEED              1 = may be published as a seed (default 1)\n",
+        "  GPN_DISCOVERABLE      0 = private: no announce, no inbound (implies GPN_SEED=0)\n",
+        "  GPN_OLLAMA            ollama base URL (default http://127.0.0.1:11434)\n",
+        "\n",
+        "Docs: docs/run-a-node.md\n",
+    )
+    .to_string()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Base path
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -791,6 +872,60 @@ mod tests {
 
     const ALICE_PHRASE: &str =
         "bottom drive obey lake curtain smoke basket hold race lonely fit walk";
+
+    // ── CLI info: answered before the wizard / network / filesystem ─────────
+
+    fn argv(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn info_flags_are_recognised() {
+        assert_eq!(info_request(&argv(&["gpn_node", "--help"])), Some(InfoRequest::Help));
+        assert_eq!(info_request(&argv(&["gpn_node", "-h"])), Some(InfoRequest::Help));
+        assert_eq!(
+            info_request(&argv(&["gpn_node", "--version"])),
+            Some(InfoRequest::Version)
+        );
+        assert_eq!(
+            info_request(&argv(&["gpn_node", "-V"])),
+            Some(InfoRequest::Version)
+        );
+        // The program name itself is never a flag.
+        assert_eq!(info_request(&argv(&["gpn_node"])), None);
+        assert_eq!(info_request(&argv(&["--setup"])), None);
+        assert_eq!(info_request(&argv(&["--helpful"])), None);
+    }
+
+    #[test]
+    fn version_line_has_the_package_version() {
+        let v = version_line();
+        assert!(v.starts_with("gpn_node "), "{v}");
+        assert!(v.contains(env!("CARGO_PKG_VERSION")), "{v}");
+        assert!(v.is_ascii(), "{v}");
+    }
+
+    #[test]
+    fn help_text_documents_flags_and_env() {
+        let h = help_text();
+        assert!(h.is_ascii(), "help must be ASCII");
+        assert!(h.contains("--version") && h.contains("--help") && h.contains("--setup"), "{h}");
+        for key in [
+            "GPN_BASE_PATH",
+            "GPN_CHAIN",
+            "GPN_SIGNER",
+            "GPN_SIGNER_FILE",
+            "GPN_PUBLIC_ADDR",
+            "GPN_UPNP",
+            "GPN_SEEDS_URL",
+            "GPN_BOOTNODES_URL",
+            "GPN_REQUIRE_BACKBONE",
+            "GPN_SEED",
+            "GPN_DISCOVERABLE",
+        ] {
+            assert!(h.contains(key), "help is missing {key}");
+        }
+    }
 
     // ── chain resolution: explicit → file → fetched → builtin ──────────────
 
