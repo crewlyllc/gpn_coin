@@ -1,7 +1,7 @@
 //! gpn_provider_status — a tiny HTTP heartbeat for a provider, polled by the
 //! access-point scheduler to learn capabilities + load + latency.
 //!
-//! `GET /status` → `{ address, gflops, models[], capabilities[], can_pull, active, capacity, vram_mb, ram_mb, gpu_class, tflops, disk_free_mb, disk_total_mb, disk_free_pct }`
+//! `GET /status` → `{ address, gflops, models[], capabilities[], can_pull, active, capacity, vram_mb, ram_mb, gpu_class, tflops, disk_free_mb, disk_total_mb, disk_free_pct, peer_id?, multiaddrs[]?, p2p_port?, listen_addrs[]? }`
 //!
 //! `capabilities[]` lists the JOB TYPES this node serves — `LLMInference`,
 //! `ImageGeneration`, `VideoGeneration`, `MLInference`, `FineTuning`. A GPN
@@ -26,17 +26,29 @@
 //! always sees what this machine actually has. `can_pull` = Ollama is reachable,
 //! i.e. this provider could download a requested model on demand.
 //!
+//! `peer_id` / `multiaddrs` / `p2p_port` (peer-id publication) let the public
+//! directory (`https://gpncoin.ai/seeds.json`) turn this provider into a
+//! **dialable** libp2p peer instead of an informational HTTP endpoint. The peer
+//! id + listen addresses are read from the local node over JSON-RPC
+//! (`system_localPeerId` / `system_localListenAddresses`) and cached; a public
+//! address (`GPN_PUBLIC_ADDR` / `--public-addr`) is preferred when configured
+//! because a box listening on `0.0.0.0` cannot know its own public IP. If the
+//! RPC is unreachable the fields are simply omitted — the heartbeat NEVER fails
+//! because peer-id publication failed.
+//!
 //! Usage:
 //!   gpn_provider_status --listen <ip:port> --address <ss58> --gflops <n>
 //!                       [--models <m1,m2>] [--capacity <n>] [--active <n>]
 //!                       [--ollama http://127.0.0.1:11434]
 //!                       [--capabilities <LLMInference,ImageGeneration,…>]
-//! Env: LISTEN, ADDRESS, GFLOPS, MODELS, CAPACITY, ACTIVE, GPN_OLLAMA, CAPABILITIES
+//!                       [--endpoint ws://127.0.0.1:9944] [--public-addr <ip:port>]
+//! Env: LISTEN, ADDRESS, GFLOPS, MODELS, CAPACITY, ACTIVE, GPN_OLLAMA, CAPABILITIES,
+//!      GPN_ENDPOINT, GPN_PUBLIC_ADDR
 
 use gpn_agent::disk::{disk_space, LOW_DISK_PERCENT};
 use gpn_agent::gpu::{detect_gpu_capability, detect_vram_mb};
-use serde_json::json;
-use std::time::Duration;
+use serde_json::{json, Value};
+use std::time::{Duration, Instant};
 
 use tiny_http::{Header, Method, Response, Server};
 
@@ -52,6 +64,259 @@ fn opt(args: &[String], flag: &str) -> Option<String> {
 /// same class as item #48 in `gpn_llm_provider`. Short enough that a freshly
 /// pulled model still appears almost immediately.
 const MODELS_TTL: Duration = Duration::from_secs(10);
+
+/// How long a peer-id snapshot is reused. The peer id never changes for a
+/// running node, but the listen addresses can (restart on a different port), so
+/// refresh occasionally instead of once at boot. A failure is retried sooner:
+/// the node RPC may simply not be up yet when the heartbeat starts.
+const P2P_TTL: Duration = Duration::from_secs(60);
+const P2P_RETRY_TTL: Duration = Duration::from_secs(10);
+
+/// What the directory needs to publish this provider as a dialable peer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct P2pInfo {
+    peer_id: String,
+    /// Dialable, public multiaddrs (already carrying `/p2p/<peer_id>`).
+    multiaddrs: Vec<String>,
+    /// The libp2p TCP port peers can dial (advertised even when the listen
+    /// address itself is `0.0.0.0`, so the AP can combine the peer id + port
+    /// with the host it already reached us on).
+    p2p_port: Option<u16>,
+    /// Raw `system_localListenAddresses` for diagnostics.
+    listen_addrs: Vec<String>,
+}
+
+/// Convert a `ws(s)://` / `http(s)://` endpoint to plain HTTP for JSON-RPC and
+/// issue one call. Any failure is `None` — callers treat that as "unknown".
+fn rpc_call(endpoint: &str, method: &str, params: Value) -> Option<Value> {
+    let http_url = endpoint
+        .replace("ws://", "http://")
+        .replace("wss://", "https://");
+    let body = json!({"jsonrpc":"2.0","id":1,"method":method,"params":params});
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(1500))
+        .build()
+        .ok()?;
+    let v: Value = client.post(&http_url).json(&body).send().ok()?.json().ok()?;
+    v.get("result").cloned()
+}
+
+/// Accept only a plausible libp2p peer id (base58-ish, ed25519 `12D3Koo…` or
+/// legacy multihash `Qm…`). Anything else is dropped rather than relayed.
+fn normalize_peer_id(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    if !(40..=64).contains(&s.len()) {
+        return None;
+    }
+    if !s.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    if s.starts_with("12D3Koo") || s.starts_with("Qm") {
+        Some(s.to_string())
+    } else {
+        None
+    }
+}
+
+fn is_public_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || v4.is_unspecified()
+                // 100.64.0.0/10 carrier-grade NAT is not globally routable.
+                || (v4.octets()[0] == 100 && (64..=127).contains(&v4.octets()[1])))
+        }
+        std::net::IpAddr::V6(v6) => {
+            let first = v6.segments()[0];
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                // fc00::/7 unique local, fe80::/10 link local
+                || (first & 0xfe00) == 0xfc00
+                || (first & 0xffc0) == 0xfe80)
+        }
+    }
+}
+
+/// `/ip4/1.2.3.4/tcp/30333` | `/dns4/node.example/tcp/30333` | `1.2.3.4:30333`
+/// → a base multiaddr (no peer id). Returns `None` for anything that is not a
+/// single host + TCP port.
+fn base_multiaddr(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if s.starts_with('/') {
+        // expected /<proto>/<host>/tcp/<port>
+        let parts: Vec<&str> = s.split('/').filter(|p| !p.is_empty()).collect();
+        if parts.len() != 4 || parts[2] != "tcp" {
+            return None;
+        }
+        if !matches!(parts[0], "ip4" | "ip6" | "dns" | "dns4" | "dns6") {
+            return None;
+        }
+        let port: u32 = parts[3].parse().ok()?;
+        if !(1..=65535).contains(&port) {
+            return None;
+        }
+        return Some(format!("/{}/{}/tcp/{port}", parts[0], parts[1]));
+    }
+    // bare `host:port` (optionally with a scheme — stripped off)
+    let text = s.rsplit_once("://").map(|(_, rest)| rest).unwrap_or(s);
+    let authority = text.split(['/', '?', '#']).next()?;
+    let host_port = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    let (host, port) = if let Some(rest) = host_port.strip_prefix('[') {
+        let (h, tail) = rest.split_once(']')?;
+        (h, tail.strip_prefix(':')?)
+    } else {
+        host_port.rsplit_once(':')?
+    };
+    let port: u32 = port.parse().ok()?;
+    if host.is_empty() || !(1..=65535).contains(&port) {
+        return None;
+    }
+    let kind = if host.parse::<std::net::Ipv4Addr>().is_ok() {
+        "ip4"
+    } else if host.parse::<std::net::Ipv6Addr>().is_ok() {
+        "ip6"
+    } else {
+        "dns4"
+    };
+    Some(format!("/{kind}/{}/tcp/{port}", host.to_lowercase()))
+}
+
+fn port_of(multiaddr: &str) -> Option<u16> {
+    let (_, rest) = multiaddr.split_once("/tcp/")?;
+    let port: u32 = rest.split('/').next()?.parse().ok()?;
+    if (1..=65535).contains(&port) {
+        Some(port as u16)
+    } else {
+        None
+    }
+}
+
+/// Build the published peer information. `public_addr` is authoritative when
+/// configured (a NATed box listening on `0.0.0.0` cannot infer its own public
+/// IP). Otherwise every listen address that is globally routable is used.
+fn build_p2p_info(
+    peer_id: String,
+    public_addr: Option<&str>,
+    listen_addrs: Vec<String>,
+) -> P2pInfo {
+    let mut bases: Vec<String> = Vec::new();
+    if let Some(base) = public_addr.and_then(base_multiaddr) {
+        bases.push(base);
+    } else {
+        for ma in &listen_addrs {
+            let host_part = ma
+                .strip_prefix("/ip4/")
+                .or_else(|| ma.strip_prefix("/ip6/"));
+            if let Some(rest) = host_part {
+                let host = rest.split('/').next().unwrap_or("");
+                if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+                    if !is_public_ip(ip) {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            } else if !ma.starts_with("/dns4/") && !ma.starts_with("/dns6/") {
+                continue;
+            }
+            if let Some(base) = base_multiaddr(ma) {
+                if !bases.contains(&base) {
+                    bases.push(base);
+                }
+            }
+        }
+    }
+
+    let mut multiaddrs: Vec<String> = bases
+        .into_iter()
+        .map(|b| format!("{b}/p2p/{peer_id}"))
+        .collect();
+    multiaddrs.sort();
+    multiaddrs.dedup();
+
+    let p2p_port = multiaddrs
+        .first()
+        .and_then(|m| port_of(m))
+        .or_else(|| listen_addrs.iter().find_map(|m| port_of(m)));
+
+    P2pInfo {
+        peer_id,
+        multiaddrs,
+        p2p_port,
+        listen_addrs,
+    }
+}
+
+/// Read peer id + listen addresses from the node RPC. `None` when the node is
+/// unreachable or answers something unexpected.
+fn read_p2p_info(endpoint: &str, public_addr: Option<&str>) -> Option<P2pInfo> {
+    p2p_info_from_rpc(
+        &|method| rpc_call(endpoint, method, json!([])),
+        public_addr,
+    )
+}
+
+/// RPC-agnostic core of [`read_p2p_info`] — injectable so tests can mock the
+/// node without a socket.
+fn p2p_info_from_rpc(
+    rpc: &dyn Fn(&str) -> Option<Value>,
+    public_addr: Option<&str>,
+) -> Option<P2pInfo> {
+    let peer_id = rpc("system_localPeerId").and_then(|v| v.as_str().map(normalize_peer_id))??;
+    let listen_addrs = rpc("system_localListenAddresses")
+        .and_then(|v| {
+            v.as_array().map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+        })
+        .unwrap_or_default();
+    Some(build_p2p_info(peer_id, public_addr, listen_addrs))
+}
+
+/// Attach the peer-id fields to a `/status` body. Omitted entirely when there
+/// is nothing to publish, so the shape stays backwards compatible.
+fn attach_p2p(body: &mut Value, info: Option<&P2pInfo>) {
+    if let Some(p2p) = info {
+        body["peer_id"] = json!(p2p.peer_id);
+        body["multiaddrs"] = json!(p2p.multiaddrs);
+        body["p2p_port"] = json!(p2p.p2p_port);
+        body["listen_addrs"] = json!(p2p.listen_addrs);
+    }
+}
+
+fn p2p_cache() -> &'static std::sync::Mutex<Option<(Instant, Option<P2pInfo>)>> {
+    static C: std::sync::OnceLock<std::sync::Mutex<Option<(Instant, Option<P2pInfo>)>>> =
+        std::sync::OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Cached [`read_p2p_info`]. Never blocks the heartbeat for long: the RPC calls
+/// are time-bounded at 1.5 s and a miss (node not up yet) is retried in 10 s.
+fn p2p_info(endpoint: &str, public_addr: Option<&str>) -> Option<P2pInfo> {
+    if let Ok(guard) = p2p_cache().lock() {
+        if let Some((at, info)) = guard.as_ref() {
+            let ttl = if info.is_some() { P2P_TTL } else { P2P_RETRY_TTL };
+            if at.elapsed() < ttl {
+                return info.clone();
+            }
+        }
+    }
+    let answer = read_p2p_info(endpoint, public_addr);
+    if let Ok(mut guard) = p2p_cache().lock() {
+        *guard = Some((Instant::now(), answer.clone()));
+    }
+    answer
+}
 
 fn models_cache(
 ) -> &'static std::sync::Mutex<Option<(Vec<String>, bool, std::time::Instant)>> {
@@ -146,6 +411,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ollama = opt(&args, "--ollama")
         .or_else(|| std::env::var("GPN_OLLAMA").ok())
         .unwrap_or_else(|| "http://127.0.0.1:11434".into());
+    // Peer-id publication: read the local node's libp2p identity over RPC so
+    // the public directory can publish this provider as a dialable peer. The
+    // node RPC defaults to the same box (`ws://127.0.0.1:9944`); a remote
+    // endpoint can be given with `GPN_ENDPOINT` / `--endpoint`.
+    let endpoint = opt(&args, "--endpoint")
+        .or_else(|| std::env::var("GPN_ENDPOINT").ok())
+        .unwrap_or_else(|| "ws://127.0.0.1:9944".into());
+    // The address peers should dial — REQUIRED for a box behind NAT that
+    // listens on 0.0.0.0. Accepts a multiaddr (`/ip4/1.2.3.4/tcp/30333`) or
+    // `host:port`.
+    let public_addr = opt(&args, "--public-addr").or_else(|| std::env::var("GPN_PUBLIC_ADDR").ok());
     // Job-type capabilities this node serves. A GPN node serves EVERY job type
     // by design ("one GPU, one job" = one job *at a time*, mutual exclusion —
     // NOT a limit on job types). Advertised so the scheduler can route
@@ -229,7 +505,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Item #43: report free space so a monitor can alert before
                 // ENOSPC silently halts block production. 0/null = unknown.
                 let disk = disk_space(&std::env::var("GPN_DATA_DIR").or_else(|_| std::env::var("HOME")).unwrap_or_else(|_| ".".into()));
-                (json!({
+                let mut body = json!({
                     "address": address, "gflops": gflops, "models": models_now,
                     "can_pull": can_pull, "active": active, "capacity": capacity.max(1),
                     "capabilities": capabilities,
@@ -238,7 +514,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "gpu_class": gpu_class, "tflops": tflops,
                     "disk_free_mb": disk.free_mb, "disk_total_mb": disk.total_mb,
                     "disk_free_pct": disk.free_percent()
-                }), 200)
+                });
+                // Peer-id publication (best-effort). Omitted — not null — when
+                // the node RPC cannot be read, so consumers see the same shape
+                // they always have.
+                attach_p2p(&mut body, p2p_info(&endpoint, public_addr.as_deref()).as_ref());
+                (body, 200)
             }
             (Method::Get, "/health") => (json!({"status":"ok"}), 200),
             // `POST /assign` was REMOVED in #46 Phase 3 step 2. The access point
@@ -265,4 +546,127 @@ mod tests {
     // itself (#46 Phase 3 step 2): the heartbeat no longer accepts assignments,
     // so there is nothing to authenticate — the pull endpoint on the AP is the
     // only delivery surface and it carries its own `GPN_ASSIGN_TOKEN` gate.
+
+    use super::*;
+
+    #[test]
+    fn status_json_gets_the_fields_when_the_rpc_answers() {
+        let pid = "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo";
+        let rpc = |method: &str| -> Option<Value> {
+            match method {
+                "system_localPeerId" => Some(json!(pid)),
+                "system_localListenAddresses" => {
+                    Some(json!(["/ip4/0.0.0.0/tcp/30333", "/ip4/127.0.0.1/tcp/30333"]))
+                }
+                _ => None,
+            }
+        };
+        let info = p2p_info_from_rpc(&rpc, Some("/ip4/203.0.113.7/tcp/30333"));
+        assert!(info.is_some());
+        let mut body = json!({"address": "5Abc", "gflops": 1});
+        attach_p2p(&mut body, info.as_ref());
+        assert_eq!(body["peer_id"], json!(pid));
+        assert_eq!(body["p2p_port"], json!(30333));
+        assert_eq!(
+            body["multiaddrs"],
+            json!([format!("/ip4/203.0.113.7/tcp/30333/p2p/{pid}")])
+        );
+        assert_eq!(body["listen_addrs"][0], json!("/ip4/0.0.0.0/tcp/30333"));
+    }
+
+    #[test]
+    fn status_json_omits_the_fields_when_the_rpc_is_down() {
+        let rpc = |_method: &str| -> Option<Value> { None };
+        assert!(p2p_info_from_rpc(&rpc, None).is_none());
+        let mut body = json!({"address": "5Abc"});
+        attach_p2p(&mut body, None);
+        assert!(body.get("peer_id").is_none());
+        assert!(body.get("multiaddrs").is_none());
+        assert!(body.get("p2p_port").is_none());
+        // The heartbeat still has its normal fields.
+        assert_eq!(body["address"], json!("5Abc"));
+    }
+
+    #[test]
+    fn garbage_peer_id_from_rpc_publishes_nothing() {
+        let rpc = |method: &str| -> Option<Value> {
+            match method {
+                "system_localPeerId" => Some(json!("../../etc/passwd")),
+                "system_localListenAddresses" => Some(json!([])),
+                _ => None,
+            }
+        };
+        assert!(p2p_info_from_rpc(&rpc, Some("1.2.3.4:30333")).is_none());
+    }
+
+    #[test]
+    fn peer_id_is_whitelisted() {
+        let id = "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo";
+        assert_eq!(normalize_peer_id(id).as_deref(), Some(id));
+        assert_eq!(normalize_peer_id(&format!(" {id} ")).as_deref(), Some(id));
+        assert_eq!(normalize_peer_id("QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG"), Some("QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG".into()));
+        assert!(normalize_peer_id("").is_none());
+        assert!(normalize_peer_id("12D3Koo/../../etc").is_none());
+        assert!(normalize_peer_id("notapeeridbutlongenoughxxxxxxxxxxxxxxxxxxxxxxxx").is_none());
+    }
+
+    #[test]
+    fn base_multiaddr_parses_the_operator_shapes() {
+        assert_eq!(base_multiaddr("/ip4/1.2.3.4/tcp/30333").as_deref(), Some("/ip4/1.2.3.4/tcp/30333"));
+        assert_eq!(base_multiaddr("1.2.3.4:30333").as_deref(), Some("/ip4/1.2.3.4/tcp/30333"));
+        assert_eq!(base_multiaddr("https://Node.Example.org:30333/x").as_deref(), Some("/dns4/node.example.org/tcp/30333"));
+        assert_eq!(base_multiaddr("[2001:db8::1]:30333").as_deref(), Some("/ip6/2001:db8::1/tcp/30333"));
+        assert!(base_multiaddr("/ip4/1.2.3.4/tcp/30333/p2p/12D3KooWx").is_none());
+        assert!(base_multiaddr("host-without-port").is_none());
+        assert!(base_multiaddr("1.2.3.4:0").is_none());
+        assert!(base_multiaddr("").is_none());
+    }
+
+    #[test]
+    fn public_addr_wins_and_carries_the_peer_id() {
+        let pid = "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo".to_string();
+        let info = build_p2p_info(
+            pid.clone(),
+            Some("/ip4/203.0.113.7/tcp/30333"),
+            vec!["/ip4/0.0.0.0/tcp/30333".into()],
+        );
+        assert_eq!(info.peer_id, pid);
+        assert_eq!(
+            info.multiaddrs,
+            vec![format!("/ip4/203.0.113.7/tcp/30333/p2p/{pid}")]
+        );
+        assert_eq!(info.p2p_port, Some(30333));
+        assert_eq!(info.listen_addrs, vec!["/ip4/0.0.0.0/tcp/30333".to_string()]);
+    }
+
+    #[test]
+    fn a_wildcard_listener_publishes_the_port_but_no_fake_address() {
+        let pid = "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo".to_string();
+        let info = build_p2p_info(pid, None, vec!["/ip4/0.0.0.0/tcp/30333".into()]);
+        // No public address is knowable — the AP combines p2p_port with the
+        // host it already reached this provider on.
+        assert!(info.multiaddrs.is_empty());
+        assert_eq!(info.p2p_port, Some(30333));
+    }
+
+    #[test]
+    fn private_and_loopback_listeners_are_not_published() {
+        let pid = "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo".to_string();
+        let info = build_p2p_info(
+            pid.clone(),
+            None,
+            vec![
+                "/ip4/127.0.0.1/tcp/30333".into(),
+                "/ip4/192.168.1.5/tcp/30333".into(),
+                "/ip4/100.64.1.2/tcp/30333".into(),
+                "/ip6/::1/tcp/30333".into(),
+                "/ip4/142.129.54.88/tcp/30334".into(),
+            ],
+        );
+        assert_eq!(
+            info.multiaddrs,
+            vec![format!("/ip4/142.129.54.88/tcp/30334/p2p/{pid}")]
+        );
+        assert_eq!(info.p2p_port, Some(30334));
+    }
 }

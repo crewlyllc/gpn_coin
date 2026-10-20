@@ -507,6 +507,15 @@ struct Provider {
     /// the heartbeat). Defaults to the full set when a box omits the field, so
     /// a node designed to serve everything is routable for everything.
     capabilities: Vec<String>,
+    /// libp2p peer id published by the heartbeat (`system_localPeerId`). Only
+    /// present on boxes that can talk to their node RPC.
+    peer_id: Option<String>,
+    /// Public, dialable p2p multiaddrs (each ends in `/p2p/<peer_id>`).
+    /// Sanitised on ingest — never relayed blindly.
+    p2p_multiaddrs: Vec<String>,
+    /// The provider's libp2p TCP port, advertised even behind NAT (the
+    /// directory combines it with the host it reaches the provider on).
+    p2p_port: Option<u16>,
     active: u64,
     capacity: u64,
     latency_ms: u64,
@@ -557,6 +566,136 @@ fn pull_default_latency_ms() -> u64 {
         .unwrap_or(100)
 }
 
+/// Protocols a published p2p multiaddr may contain. A whitelist, because the
+/// AP relays these strings to the public directory: anything unrecognised is a
+/// reason to drop the address, not to pass it on.
+const P2P_PROTOCOLS: &[&str] = &[
+    "ip4",
+    "ip6",
+    "dns",
+    "dns4",
+    "dns6",
+    "tcp",
+    "udp",
+    "quic",
+    "quic-v1",
+    "p2p",
+    "tls",
+    "sni",
+    "ws",
+    "wss",
+];
+
+/// Accept only a plausible libp2p peer id (base58, ed25519 `12D3Koo…` or
+/// legacy `Qm…`).
+fn clean_peer_id(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    if !(40..=64).contains(&s.len()) || !s.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    if s.starts_with("12D3Koo") || s.starts_with("Qm") {
+        Some(s.to_string())
+    } else {
+        None
+    }
+}
+
+/// Structural multiaddr check: `/proto/value/…`, every protocol whitelisted,
+/// numeric ports in range, and a trailing `/p2p/<peer-id>` (without one the
+/// client cannot dial it, so it is not worth publishing).
+fn clean_p2p_multiaddr(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    if !s.starts_with('/') || s.len() > 256 {
+        return None;
+    }
+    if s.chars()
+        .any(|c| c.is_whitespace() || c.is_control() || c == '\\' || c == '"')
+    {
+        return None;
+    }
+    let parts: Vec<&str> = s.split('/').skip(1).collect();
+    if parts.iter().any(|p| p.is_empty()) || parts.len() < 4 {
+        return None;
+    }
+    let mut i = 0;
+    let mut has_p2p = false;
+    while i + 1 < parts.len() {
+        let proto = parts[i];
+        let value = parts[i + 1];
+        if !P2P_PROTOCOLS.contains(&proto) {
+            return None;
+        }
+        match proto {
+            "tcp" | "udp" => {
+                let port: u32 = value.parse().ok()?;
+                if !(1..=65535).contains(&port) {
+                    return None;
+                }
+            }
+            "p2p" => {
+                // Must be the last component.
+                if i + 2 != parts.len() || clean_peer_id(value).is_none() {
+                    return None;
+                }
+                has_p2p = true;
+            }
+            _ => {}
+        }
+        i += 2;
+    }
+    if i != parts.len() || !has_p2p {
+        return None;
+    }
+    Some(s.to_string())
+}
+
+fn p2p_port_of(multiaddr: &str) -> Option<u16> {
+    let (_, rest) = multiaddr.split_once("/tcp/")?;
+    let port: u32 = rest.split('/').next()?.parse().ok()?;
+    if (1..=65535).contains(&port) {
+        Some(port as u16)
+    } else {
+        None
+    }
+}
+
+/// Extract + sanitise the peer-publication fields from a heartbeat/caps value.
+///
+/// A peer id is required before any multiaddr is trusted: every address must
+/// end in `/p2p/<that same id>`, so a provider cannot advertise an address for
+/// somebody else's identity.
+fn p2p_fields(v: &Value) -> (Option<String>, Vec<String>, Option<u16>) {
+    let peer_id = v
+        .get("peer_id")
+        .and_then(|x| x.as_str())
+        .and_then(clean_peer_id);
+
+    let mut multiaddrs: Vec<String> = Vec::new();
+    if let Some(pid) = peer_id.as_deref() {
+        if let Some(arr) = v.get("multiaddrs").and_then(|x| x.as_array()) {
+            for raw in arr.iter().filter_map(|s| s.as_str()) {
+                if let Some(ma) = clean_p2p_multiaddr(raw) {
+                    let trailing = ma.rsplit_once("/p2p/").map(|(_, id)| id).unwrap_or("");
+                    if trailing == pid {
+                        multiaddrs.push(ma);
+                    }
+                }
+            }
+        }
+        multiaddrs.sort();
+        multiaddrs.dedup();
+    }
+
+    let p2p_port = v
+        .get("p2p_port")
+        .and_then(|x| x.as_u64())
+        .filter(|p| (1..=65535).contains(p))
+        .map(|p| p as u16)
+        .or_else(|| multiaddrs.iter().find_map(|m| p2p_port_of(m)));
+
+    (peer_id, multiaddrs, p2p_port)
+}
+
 /// Build a registry entry from a capability snapshot that arrived in a pull
 /// poll (#46 Phase 3 step 2). This is the SAME field set `/status` provides,
 /// minus anything the provider did not report (defaults mirror the `/status`
@@ -573,6 +712,7 @@ fn provider_from_caps(addr: &str, v: &Value, status_url: String, latency_ms: u64
             .unwrap_or_default()
     };
     let caps = arr_of("capabilities");
+    let (peer_id, p2p_multiaddrs, p2p_port) = p2p_fields(v);
     Provider {
         status_url,
         address: addr.to_string(),
@@ -598,6 +738,9 @@ fn provider_from_caps(addr: &str, v: &Value, status_url: String, latency_ms: u64
         } else {
             caps
         },
+        peer_id,
+        p2p_multiaddrs,
+        p2p_port,
         active: v.get("active").and_then(|x| x.as_u64()).unwrap_or(0),
         capacity: v
             .get("capacity")
@@ -717,63 +860,18 @@ fn refresh(
         for u in all.iter() {
             let v = jpost(u);
             let p = match v {
-                Some(v) => Provider {
-                    status_url: u.clone(),
-                    address: attribute_address(
+                Some(v) => {
+                    let addr = attribute_address(
                         v.get("address").and_then(|x| x.as_str()).unwrap_or(""),
                         u,
                         &chain_addr,
-                    ),
-                    gflops: v.get("gflops").and_then(|x| x.as_u64()).unwrap_or(0),
-                    models: v
-                        .get("models")
-                        .and_then(|x| x.as_array())
-                        .map(|a| {
-                            a.iter()
-                                .filter_map(|s| s.as_str().map(String::from))
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                    can_pull: v.get("can_pull").and_then(|x| x.as_bool()).unwrap_or(false),
-                    tok_per_s: v.get("tok_per_s").and_then(|x| x.as_f64()).unwrap_or(40.0),
-                    owner_cost_usd_hr: v
-                        .get("owner_cost_usd_hr")
-                        .and_then(|x| x.as_f64())
-                        .unwrap_or(0.03),
-                    mem_bw_gbps: v
-                        .get("mem_bw_gbps")
-                        .and_then(|x| x.as_f64())
-                        .unwrap_or(250.0),
-                    vram_mb: v.get("vram_mb").and_then(|x| x.as_u64()).unwrap_or(0),
-                    ram_mb: v.get("ram_mb").and_then(|x| x.as_u64()).unwrap_or(0),
-                    gpu_class: v
-                        .get("gpu_class")
-                        .and_then(|x| x.as_str())
-                        .unwrap_or("unknown")
-                        .to_string(),
-                    tflops: v.get("tflops").and_then(|x| x.as_f64()).unwrap_or(0.0),
-                    capabilities: v
-                        .get("capabilities")
-                        .and_then(|x| x.as_array())
-                        .map(|a| {
-                            a.iter()
-                                .filter_map(|s| s.as_str().map(String::from))
-                                .collect()
-                        })
-                        .filter(|c: &Vec<String>| !c.is_empty())
-                        .unwrap_or_else(default_capabilities),
-                    active: v.get("active").and_then(|x| x.as_u64()).unwrap_or(0),
-                    capacity: v
-                        .get("capacity")
-                        .and_then(|x| x.as_u64())
-                        .unwrap_or(1)
-                        .max(1),
-                    latency_ms: v
+                    );
+                    let latency = v
                         .get("__latency_ms")
                         .and_then(|x| x.as_u64())
-                        .unwrap_or(9999),
-                    last_seen: Some(Instant::now()),
-                },
+                        .unwrap_or(9999);
+                    provider_from_caps(&addr, &v, u.clone(), latency)
+                }
                 None => Provider {
                     status_url: u.clone(),
                     address: String::new(),
@@ -788,6 +886,9 @@ fn refresh(
                     gpu_class: "unknown".to_string(),
                     tflops: 0.0,
                     capabilities: default_capabilities(),
+                    peer_id: None,
+                    p2p_multiaddrs: vec![],
+                    p2p_port: None,
                     active: 0,
                     capacity: 0,
                     latency_ms: 9999,
@@ -1734,6 +1835,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "vram_mb": p.vram_mb, "ram_mb": p.ram_mb,
                     "gpu_class": p.gpu_class, "tflops": p.tflops,
                     "capabilities": p.capabilities,
+                    "peer_id": p.peer_id, "multiaddrs": p.p2p_multiaddrs,
+                    "p2p_port": p.p2p_port,
                     "healthy": p.last_seen.is_some()
                 })).collect::<Vec<_>>() })
                 }
@@ -2877,6 +2980,77 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
 
+    /// Peer-id publication: a heartbeat that publishes a peer id + public p2p
+    /// multiaddr is relayed, but every string is validated first — the AP is a
+    /// public directory and must not become a relay for arbitrary text.
+    #[test]
+    fn p2p_fields_are_whitelisted_before_relay() {
+        let pid = "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo";
+        let good = format!("/ip4/203.0.113.7/tcp/30333/p2p/{pid}");
+        let v = json!({
+            "peer_id": pid,
+            "p2p_port": 30333,
+            "multiaddrs": [
+                good,
+                // duplicate — collapsed
+                good,
+                // somebody else's peer id
+                "/ip4/203.0.113.9/tcp/30333/p2p/12D3KooW9ye8kXwMYT4vBJoJdCkM9VfRrcM7nGgqVDPq3Fy8i6xw",
+                // no peer id -> not dialable
+                "/ip4/203.0.113.9/tcp/30333",
+                // not a multiaddr at all
+                "http://203.0.113.9:8093/status",
+                // unknown protocol
+                "/ip4/203.0.113.9/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo/http/evil",
+            ],
+        });
+        let (peer_id, mas, port) = p2p_fields(&v);
+        assert_eq!(peer_id.as_deref(), Some(pid));
+        assert_eq!(mas, vec![good.clone()]);
+        assert_eq!(port, Some(30333));
+
+        let p = provider_from_caps("5Abc", &v, "http://203.0.113.7:8093/status".into(), 5);
+        assert_eq!(p.peer_id.as_deref(), Some(pid));
+        assert_eq!(p.p2p_multiaddrs, vec![good]);
+        assert_eq!(p.p2p_port, Some(30333));
+    }
+
+    #[test]
+    fn p2p_fields_are_dropped_without_a_valid_peer_id() {
+        let v = json!({
+            "peer_id": "../../etc/passwd",
+            "p2p_port": 30333,
+            "multiaddrs": ["/ip4/203.0.113.7/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo"],
+        });
+        let (peer_id, mas, port) = p2p_fields(&v);
+        assert!(peer_id.is_none());
+        assert!(mas.is_empty(), "an unverified id cannot vouch for an address");
+        assert_eq!(port, Some(30333), "the port is still harmless metadata");
+    }
+
+    #[test]
+    fn p2p_port_falls_back_to_the_multiaddr() {
+        let pid = "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo";
+        let v = json!({
+            "peer_id": pid,
+            "multiaddrs": [format!("/ip4/203.0.113.7/tcp/30399/p2p/{pid}")],
+        });
+        let (_, _, port) = p2p_fields(&v);
+        assert_eq!(port, Some(30399));
+    }
+
+    #[test]
+    fn multiaddr_validation_rejects_junk() {
+        let pid = "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo";
+        assert!(clean_p2p_multiaddr(&format!("/ip4/1.2.3.4/tcp/30333/p2p/{pid}")).is_some());
+        assert!(clean_p2p_multiaddr(&format!("/dns4/node.example/tcp/30333/p2p/{pid}")).is_some());
+        assert!(clean_p2p_multiaddr("/ip4/1.2.3.4/tcp/99999/p2p/12D3KooWAFt").is_none());
+        assert!(clean_p2p_multiaddr("/ip4/1.2.3.4/tcp/30333").is_none());
+        assert!(clean_p2p_multiaddr("/ip4/1.2.3.4/tcp/30333/p2p/bad id").is_none());
+        assert!(clean_p2p_multiaddr("ip4/1.2.3.4/tcp/30333/p2p/12D3KooWAFt").is_none());
+        assert!(clean_p2p_multiaddr("/ip4//tcp/30333/p2p/12D3KooWAFt").is_none());
+    }
+
     /// Item #41 residual: a job's off-chain payload write must be VERIFIED before
     /// the job is advertised. Every old call site did `let _ = put(..)`, so a
     /// failed write produced an on-chain job with escrow locked and no payload —
@@ -2981,6 +3155,9 @@ mod tests {
             gpu_class: "unknown".to_string(),
             tflops: 0.0,
             capabilities: default_capabilities(),
+            peer_id: None,
+            p2p_multiaddrs: vec![],
+            p2p_port: None,
             active: 0,
             capacity: 4,
             latency_ms,

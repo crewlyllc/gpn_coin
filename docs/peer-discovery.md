@@ -204,6 +204,29 @@ without parsing every address.
 have no `/p2p/<peer-id>`, so they appear for tooling but are **not** added to
 `multiaddrs` (the node cannot dial a peer without a peer id).
 
+**Provider peer-id publication.** A provider can make itself dialable by
+publishing its libp2p identity alongside its heartbeat (see
+[Publishing a provider as a dialable peer](#publishing-a-provider-as-a-dialable-peer)).
+When it does, the directory emits a real multiaddr for it:
+
+```json
+{
+  "multiaddrs": [
+    "/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFt...",
+    "/ip4/203.0.113.7/tcp/30333/p2p/12D3KooW9ye..."
+  ],
+  "nodes": [
+    { "multiaddr": "/ip4/203.0.113.7/tcp/30333/p2p/12D3KooW9ye...",
+      "peer_id": "12D3KooW9ye...", "role": "provider", "source": "ap",
+      "endpoint": "http://203.0.113.7:8093/status", "address": "5ENq..." }
+  ]
+}
+```
+
+Duplicate addresses (a provider that is also a compiled-in seed, or two
+heartbeats reporting the same listener) are collapsed - one entry per
+multiaddr.
+
 **Where the live half comes from.** The Worker fetches `GET /providers` from
 the access point (wrangler var `AP_URL`), keeps entries the AP reports as
 `healthy`, converts each `status_url` to a multiaddr, and merges. The result is
@@ -223,6 +246,81 @@ is what keeps the directory live today, with no extra infrastructure.
 > Worker. Confirm with `curl -s https://gpncoin.ai/seeds.json | head`;
 > `"source": "static+ap"` means the live merge worked, `static-fallback` means
 > the AP was unreachable (the list is still valid).
+
+## Publishing a provider as a dialable peer
+
+The access point's `/providers` list only contains what each provider's
+heartbeat (`gpn_provider_status`, `:8093`) reports. Historically that was
+`status_url` + SS58 address - enough to *monitor* a box, not enough to *dial*
+it. A provider now also publishes its node's libp2p identity:
+
+**1. The provider reads its own node over JSON-RPC** (`GPN_ENDPOINT`, default
+`ws://127.0.0.1:9944`):
+
+| RPC | Used for |
+|---|---|
+| `system_localPeerId` | the `12D3Koo...` peer id |
+| `system_localListenAddresses` | `/ip4/<public>/tcp/30333`, ... |
+
+**2. It chooses what to publish.** `GPN_PUBLIC_ADDR` / `--public-addr`
+(`/ip4/1.2.3.4/tcp/30333` or `1.2.3.4:30333`) is authoritative when set - a box
+listening on `0.0.0.0` cannot know its own public IP. Without it, every
+*globally routable* listen address is published; loopback, RFC1918, CGNAT and
+link-local listeners are discarded rather than advertised as if dialable.
+
+**3. `GET /status` gains these fields** (all optional: omitted - never `null` -
+when the node RPC cannot be read):
+
+```json
+{
+  "peer_id": "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
+  "multiaddrs": ["/ip4/203.0.113.7/tcp/30333/p2p/12D3KooWAFt..."],
+  "p2p_port": 30333,
+  "listen_addrs": ["/ip4/0.0.0.0/tcp/30333", "/ip4/127.0.0.1/tcp/30333"]
+}
+```
+
+The peer id + listen addresses are cached for 60 s (a failure is retried after
+10 s, because the heartbeat may start before the node RPC is up). A peer-id
+lookup failure **never** fails the heartbeat - the rest of `/status` is
+unaffected.
+
+**4. The AP validates and relays.** `GET /providers` entries gain
+`peer_id`, `multiaddrs[]` and `p2p_port`:
+
+```json
+{ "providers": [
+  { "status_url": "http://203.0.113.7:8093/status", "address": "5ENq...",
+    "peer_id": "12D3KooWAFt...",
+    "multiaddrs": ["/ip4/203.0.113.7/tcp/30333/p2p/12D3KooWAFt..."],
+    "p2p_port": 30333, "healthy": true }
+] }
+```
+
+This is a public directory, so the AP does not relay arbitrary strings: the
+peer id must be a base58 `12D3Koo...`/`Qm...` id; a multiaddr must be a
+`/proto/value/...` chain of whitelisted protocols (`ip4 ip6 dns dns4 dns6 tcp
+udp quic quic-v1 p2p tls sni ws wss`) with a numeric port and a **trailing**
+`/p2p/<peer-id>`; and that trailing id must equal the `peer_id` in the same
+snapshot. Anything else is dropped (the port alone may survive as metadata).
+
+**5. The Worker merges.** A provider with a peer id and a public p2p address is
+written into `multiaddrs` (dialable, deduplicated against the compiled-in
+seeds). If it reports only `peer_id` + `p2p_port` - the normal NAT case, where
+it listens on `0.0.0.0` - the Worker combines the port with the **host the AP
+already reached it on** (`status_url`) to form
+`/ip4/<host>/tcp/<p2p_port>/p2p/<peer_id>`.
+
+**Fallback.** A provider that cannot publish a peer id (no RPC access, no
+`GPN_PUBLIC_ADDR` and no routable listener, or a failed validation) stays in
+`nodes[]` with `endpoint` only, exactly as before: listed for humans/tooling but
+never added to `multiaddrs`. A server that can reach its node RPC but does not
+know its own public IP should set `GPN_PUBLIC_ADDR` - that is the one piece the
+provider cannot infer.
+
+> The `gpn_node` supervisor does not pass `--endpoint` to the heartbeat child
+> yet; it inherits `GPN_ENDPOINT` from the environment and otherwise defaults to
+> `ws://127.0.0.1:9944`, which is correct when the node runs on the same box.
 
 ## Hosting a seed
 

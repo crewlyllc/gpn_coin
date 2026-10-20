@@ -334,27 +334,45 @@ function buildDirectory(providers) {
       if (!p || p.healthy === false) continue;
       const statusUrl = typeof p.status_url === "string" ? p.status_url : "";
       if (!statusUrl) continue;
-      const ma = multiaddrFromUrl(statusUrl);
-      const entry = {
+      live += 1;
+
+      // Peer-id publication: a provider that reports its libp2p identity can
+      // be published as a DIALABLE peer. Without a peer id it stays
+      // informational (status_url only), exactly as before.
+      const statusMa = multiaddrFromUrl(statusUrl);
+      const statusPeerId = statusMa ? sanitizePeerId(peerIdOf(statusMa)) : null;
+      const peerId = sanitizePeerId(p.peer_id) || statusPeerId;
+      const dialable = peerId ? dialableMultiaddrs(p, statusUrl, peerId) : [];
+
+      if (dialable.length > 0) {
+        for (const ma of dialable) {
+          if (seen.has(ma)) continue;
+          seen.add(ma);
+          multiaddrs.push(ma);
+          nodes.push({
+            multiaddr: ma,
+            peer_id: peerId,
+            role: "provider",
+            source: "ap",
+            endpoint: statusUrl,
+            address: typeof p.address === "string" ? p.address : null,
+            best: false,
+          });
+        }
+        continue;
+      }
+
+      // Not dialable: keep the endpoint visible for tooling/monitoring.
+      const ma = statusMa;
+      endpoints.push({
         endpoint: statusUrl,
         multiaddr: ma || null,
-        peer_id: ma ? peerIdOf(ma) : null,
+        peer_id: peerId || null,
         role: "provider",
         source: "ap",
         address: typeof p.address === "string" ? p.address : null,
         best: false,
-      };
-      live += 1;
-      // Only a multiaddr carrying a /p2p/<peer-id> is dialable by gpn-node.
-      if (ma && ma.includes("/p2p/")) {
-        if (!seen.has(ma)) {
-          seen.add(ma);
-          multiaddrs.push(ma);
-          nodes.push(entry);
-        }
-      } else {
-        endpoints.push(entry);
-      }
+      });
     }
   }
 
@@ -375,6 +393,92 @@ function buildDirectory(providers) {
     nodes: nodes.concat(endpoints),
     publisher: "gpncoin.ai",
   };
+}
+
+/**
+ * Multiaddrs for a provider that published its peer id. Prefers the addresses
+ * the provider's heartbeat reported; when those are absent (a box listening on
+ * 0.0.0.0 cannot know its own public IP) it synthesises one from the host the
+ * AP already reached it on + the advertised p2p port.
+ *
+ * Every returned address ends in `/p2p/<peerId>` and passed `sanitizeMultiaddr`.
+ * @param {object} p
+ * @param {string} statusUrl
+ * @param {string} peerId
+ * @returns {string[]}
+ */
+function dialableMultiaddrs(p, statusUrl, peerId) {
+  const out = [];
+  if (Array.isArray(p.multiaddrs)) {
+    for (const raw of p.multiaddrs) {
+      const ma = sanitizeMultiaddr(raw);
+      if (!ma) continue;
+      if (peerIdOf(ma) !== peerId) continue; // an address cannot vouch for another id
+      if (!out.includes(ma)) out.push(ma);
+    }
+  }
+  if (out.length > 0) return out;
+
+  const port = Number.isInteger(p.p2p_port) && p.p2p_port >= 1 && p.p2p_port <= 65535 ? p.p2p_port : null;
+  const base = multiaddrFromUrl(statusUrl);
+  // Legacy shape: some publishers list a full multiaddr as `status_url`.
+  if (base && peerIdOf(base) === peerId && sanitizeMultiaddr(base)) return [base];
+  if (!port || !base) return out;
+  const hostBase = base.replace(/\/tcp\/\d+$/, "");
+  const ma = `${hostBase}/tcp/${port}/p2p/${peerId}`;
+  if (sanitizeMultiaddr(ma)) out.push(ma);
+  return out;
+}
+
+/**
+ * Accept only a plausible libp2p peer id (base58, `12D3Koo…` or `Qm…`).
+ * @param {unknown} raw
+ * @returns {string | null}
+ */
+function sanitizePeerId(raw) {
+  if (typeof raw !== "string") return null;
+  const s = raw.trim();
+  if (s.length < 40 || s.length > 64) return null;
+  if (!/^[A-Za-z0-9]+$/.test(s)) return null;
+  return s.startsWith("12D3Koo") || s.startsWith("Qm") ? s : null;
+}
+
+/** Protocols a published p2p multiaddr may contain. */
+const P2P_PROTOCOLS = new Set([
+  "ip4", "ip6", "dns", "dns4", "dns6", "tcp", "udp", "quic", "quic-v1", "p2p", "tls", "sni", "ws", "wss",
+]);
+
+/**
+ * Structural multiaddr check: `/proto/value/…`, whitelisted protocols, a
+ * numeric TCP/UDP port, and a trailing `/p2p/<peer-id>` (the only form a
+ * `gpn-node` can dial). Returns the trimmed string or `null`.
+ * @param {unknown} raw
+ * @returns {string | null}
+ */
+function sanitizeMultiaddr(raw) {
+  if (typeof raw !== "string") return null;
+  const s = raw.trim();
+  if (!s.startsWith("/") || s.length > 256) return null;
+  if (/[\s"\\]/.test(s)) return null;
+  const parts = s.split("/").slice(1);
+  if (parts.length < 4 || parts.length % 2 !== 0 || parts.some((p) => p === "")) return null;
+  let hasP2p = false;
+  for (let i = 0; i + 1 < parts.length; i += 2) {
+    const proto = parts[i];
+    const value = parts[i + 1];
+    if (!P2P_PROTOCOLS.has(proto)) return null;
+    if (proto === "tcp" || proto === "udp") {
+      if (!/^\d{1,5}$/.test(value)) return null;
+      const n = Number(value);
+      if (n < 1 || n > 65535) return null;
+    }
+    if (proto === "p2p") {
+      if (i + 2 !== parts.length) return null; // must be last
+      if (!sanitizePeerId(value)) return null;
+      hasP2p = true;
+    }
+  }
+  return hasP2p ? s : null;
 }
 
 /** @param {string} ma */
@@ -469,4 +573,13 @@ function withCors(res) {
 }
 
 // Exported for unit tests (`node --test`). Not used by the Worker runtime.
-export const __test = { buildDirectory, multiaddrFromUrl, peerIdOf, parseHttpBody, STATIC_BOOTNODES };
+export const __test = {
+  buildDirectory,
+  dialableMultiaddrs,
+  multiaddrFromUrl,
+  peerIdOf,
+  sanitizeMultiaddr,
+  sanitizePeerId,
+  parseHttpBody,
+  STATIC_BOOTNODES,
+};
