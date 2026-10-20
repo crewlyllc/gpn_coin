@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>GPN live node directory — seeds, providers, and how to join</title>
+<meta name="description" content="The live GPN directory: every seed and provider node the network knows about, read from the same /seeds.json that bootstrapping nodes use. Auto-refreshes every 60 seconds." />
+<meta name="theme-color" content="#07090f" />
+<link rel="canonical" href="https://gpncoin.ai/nodes.html" />
+<meta property="og:site_name" content="GPN" />
+<meta property="og:url" content="https://gpncoin.ai/nodes.html" />
+<meta property="og:image" content="https://gpncoin.ai/assets/og.png" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:image" content="https://gpncoin.ai/assets/og.png" />
+<meta property="og:title" content="GPN — live node directory" />
+<meta property="og:description" content="Seeds, providers, and dialable multiaddrs — the network's own directory, live." />
+<meta property="og:type" content="website" />
+<meta name="twitter:title" content="GPN — live node directory" />
+<meta name="twitter:description" content="Seeds, providers, and dialable multiaddrs — the network's own directory, live." />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237c6cff'/%3E%3Ctext x='16' y='22' font-size='16' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%2307090f'%3EG%3C/text%3E%3C/svg%3E" />
+<link rel="stylesheet" href="assets/style.css" />
+<style>
+  /* Page-scoped additions — same tokens as the rest of the site. */
+  .dir-status { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 18px; }
+  .dir-status .chip { font-variant-numeric: tabular-nums; }
+  .stat .v.mono { font-family: var(--mono); font-size: 1.02rem; font-weight: 700; word-break: break-all; }
+  .stat .v.tiny { font-size: .95rem; }
+  .dir-table td { font-size: .86rem; }
+  .dir-table td .ma { font-family: var(--mono); font-size: .8rem; word-break: break-all; line-height: 1.5; }
+  .dir-table td .ep { font-family: var(--mono); font-size: .8rem; word-break: break-all; }
+  .dir-table td .ep a { word-break: break-all; }
+  .copy-btn {
+    display: inline-flex; align-items: center; gap: 5px; margin-left: 8px;
+    background: var(--bg-2); border: 1px solid var(--line); color: var(--muted);
+    border-radius: 7px; padding: 3px 8px; font-size: .72rem; font-weight: 700;
+    cursor: pointer; vertical-align: 1px; font-family: var(--font);
+  }
+  .copy-btn:hover { border-color: var(--accent); color: var(--text); }
+  .copy-btn:active { transform: translateY(1px); }
+  .peer-short { font-family: var(--mono); font-size: .8rem; cursor: help; }
+  .role-seed { color: var(--accent-2); }
+  .role-backbone { color: var(--amber); }
+  .role-provider { color: var(--green); }
+  .dir-empty { color: var(--muted-2); }
+  .join-steps { display: grid; gap: 10px; margin: 12px 0 16px; padding: 0; list-style: none; counter-reset: step; }
+  .join-steps li { position: relative; padding-left: 38px; color: var(--muted); counter-increment: step; }
+  .join-steps li::before {
+    content: counter(step); position: absolute; left: 0; top: 1px;
+    width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    background: rgba(124,108,255,.14); border: 1px solid rgba(124,108,255,.4);
+    color: var(--text); font-size: .76rem; font-weight: 800;
+  }
+  .join-steps li b { color: var(--text); }
+  .callout pre { margin: 10px 0 0; }
+  .callout pre code { font-size: .82rem; }
+  .dir-note { margin-top: 12px; }
+  @media (max-width: 700px) {
+    .dir-table { min-width: 0; }
+    .dir-table thead { display: none; }
+    .dir-table, .dir-table tbody, .dir-table tr, .dir-table td { display: block; width: 100%; }
+    .dir-table tr {
+      border-bottom: 1px solid var(--line); padding: 12px 14px;
+    }
+    .dir-table tr:last-child { border-bottom: 0; }
+    .dir-table td { border: 0; padding: 4px 0; }
+    .dir-table td::before {
+      content: attr(data-label); display: block;
+      font-size: .68rem; text-transform: uppercase; letter-spacing: .07em;
+      color: var(--muted-2); font-weight: 700; margin-bottom: 1px;
+    }
+    .dir-table td:empty { display: none; }
+    .stats { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap nav">
+    <a class="brand" href="index.html" aria-label="GPN home"><span class="dot" aria-hidden="true">G</span><span>GPN<br><small>GPU-NATIVE NETWORK</small></span></a>
+    <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Toggle navigation">☰</button>
+    <nav class="nav-links" id="nav-links" aria-label="Primary">
+      <a href="index.html">Home</a>
+      <a href="download.html">Download</a>
+      <a href="deploy.html">Deploy</a>
+      <a href="ai.html">AI</a>
+      <a href="access-points.html">Access Points</a>
+      <a href="nodes.html" aria-current="page">Nodes</a>
+      <a href="buy.html">Buy GPN</a>
+      <a href="docs/index.html">Docs</a>
+    </nav>
+    <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
+  </div>
+</header>
+
+<main id="main">
+
+  <section class="page-head first">
+    <div class="wrap">
+      <span class="kicker">Network</span>
+      <h1>Live node directory</h1>
+      <p>Every node this network knows how to reach: the <b>seeds</b> shipped with the client, plus the
+        <b>providers</b> an access point currently reports as healthy. It is read straight from
+        <code>/seeds.json</code> — the same directory a bootstrapping node uses, not a marketing list.</p>
+      <div class="dir-status">
+        <span class="chip neutral" id="status-chip"><span class="d"></span><span id="status-text">Loading directory…</span></span>
+        <span class="small muted" id="refresh-text" aria-live="polite">—</span>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+
+      <div class="callout danger" id="dir-error" hidden>
+        <span class="ct">Directory unreachable</span>
+        <p class="mb-0">The live directory could not be fetched, so nothing is listed here. This does not mean
+          the network is down — nodes still ship with the compiled-in seed list and will keep dialing it.
+          Try reloading, or read the raw JSON at <a href="/seeds.json"><code>/seeds.json</code></a>.</p>
+      </div>
+
+      <h2>Network at a glance</h2>
+      <p class="sub">Directory metadata, as published by the network itself.</p>
+
+      <div class="stats" id="summary">
+        <div class="stat"><div class="v tiny" id="s-network">…</div><div class="l">Network</div></div>
+        <div class="stat"><div class="v mono" id="s-chain">…</div><div class="l">Chain ID</div></div>
+        <div class="stat"><div class="v mono" id="s-genesis" title="">…</div><div class="l">Genesis (short)</div></div>
+        <div class="stat"><div class="v" id="s-updated">…</div><div class="l">Directory updated</div></div>
+        <div class="stat"><div class="v tiny" id="s-source">…</div><div class="l">Source</div></div>
+        <div class="stat"><div class="v" id="s-ttl">…</div><div class="l">TTL</div></div>
+        <div class="stat"><div class="v" id="s-providers">…</div><div class="l">Live providers</div></div>
+        <div class="stat"><div class="v" id="s-count">…</div><div class="l">Nodes listed</div></div>
+      </div>
+
+      <h2 style="margin-top:34px">Nodes</h2>
+      <p class="sub">A <b>seed</b> is a fixed entry point shipped with the client. A <b>backbone</b> node is a
+        long-lived public full node. A <b>provider</b> is a GPU serving AI jobs right now. Only entries with a
+        <code>/p2p/&lt;peer-id&gt;</code> multiaddr are dialable; endpoints without one are shown for reference.</p>
+
+      <div class="table-wrap">
+        <table class="dir-table" id="nodes-table">
+          <caption class="sr-only" style="position:absolute;left:-9999px">Live GPN node directory</caption>
+          <thead>
+            <tr>
+              <th scope="col">Role</th>
+              <th scope="col">Multiaddr</th>
+              <th scope="col">Peer ID</th>
+              <th scope="col">Source</th>
+              <th scope="col">Endpoint / address</th>
+            </tr>
+          </thead>
+          <tbody id="nodes-body">
+            <tr><td colspan="5" class="dir-empty">Loading the directory…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="small muted dir-note">Peer IDs are shortened to 8…6 characters; hover for the full value, or
+        use the copy button. Multiaddrs are copied in full.</p>
+
+      <h2 style="margin-top:34px">How to join</h2>
+      <div class="callout">
+        <span class="ct">Run a node and it shows up here</span>
+        <ol class="join-steps">
+          <li><b>Download the client</b> for Linux, macOS, or Windows from
+            <a href="download.html">the download page</a>.</li>
+          <li><b>Start it</b> with one of the installers — mining begins by default and the node serves AI
+            work when a job arrives. Steps are in <a href="docs/run-a-node.html">run a node</a>.</li>
+          <li><b>Become dialable.</b> Open the P2P port (default <code>30333</code>, or whatever
+            <code>listen_addr</code> you set) so other peers can reach you; a node behind NAT is still a
+            client, but it cannot be listed as a seed.</li>
+          <li><b>Get discovered.</b> A healthy provider registered with an access point is published in this
+            directory automatically, usually within one TTL (60 s).</li>
+        </ol>
+        <div style="display:flex;gap:12px;flex-wrap:wrap">
+          <a class="btn small" href="download.html">Download</a>
+          <a class="btn ghost small" href="docs/run-a-node.html">Run a node</a>
+        </div>
+      </div>
+
+      <h2 style="margin-top:34px">Machine-readable</h2>
+      <div class="callout">
+        <span class="ct">The same data, without the HTML</span>
+        <p class="mb-0">Point a node at the directory and it bootstraps from the whole list — seeds plus live
+          providers — instead of a hardcoded address:</p>
+        <pre><code>GPN_BOOTNODES_URL=https://gpncoin.ai/seeds.json gpn-node</code></pre>
+        <p class="small muted" style="margin:12px 0 0">Endpoints (all CORS-enabled, cached for 60 s):</p>
+        <pre><code>GET https://gpncoin.ai/seeds.json      # metadata + multiaddrs + per-node detail
+GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code></pre>
+        <p class="small muted" style="margin:12px 0 0">The wire format is stable: <code>multiaddrs</code> is
+          always present and is all a simple client needs. <code>nodes</code> adds roles, peer IDs, and
+          provider endpoints; <code>source</code> says whether the AP answered
+          (<code>static+ap</code>) or only the compiled-in seeds were available
+          (<code>static-fallback</code>).</p>
+      </div>
+
+      <div class="callout warn">
+        <span class="ct">Testnet</span>
+        <p class="mb-0">This is the public <b>testnet</b>. Nodes come and go, the chain can be reset, and
+          testnet tokens have no monetary value. Directory freshness is bounded by the 60 s TTL — a node that
+          just went offline can appear for up to a minute.</p>
+      </div>
+
+    </div>
+  </section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="foot-grid">
+      <div>
+        <a class="brand" href="index.html" style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a>
+        <p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute.
+          <em>Get paid for the GPU time you're wasting.</em></p>
+      </div>
+      <div>
+        <h4>Product</h4>
+        <a href="download.html">Download</a>
+        <a href="deploy.html">Deploy</a>
+        <a href="ai.html">Access the AI</a>
+        <a href="access-points.html">Access Points</a>
+        <a href="nodes.html">Live nodes</a>
+      </div>
+      <div>
+        <h4>Learn</h4>
+        <a href="docs/index.html">Documentation</a>
+        <a href="docs/whitepaper.html">Whitepaper</a>
+        <a href="docs/one-pager.html">One-pager</a>
+        <a href="docs/technical-overview.html">Technical overview</a>
+      </div>
+      <div>
+        <h4>Project</h4>
+        <a href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">Source on GitHub</a>
+        <a href="docs/run-a-node.html">Run a node</a>
+        <a href="docs/downloads.html">Releases</a>
+        <a href="docs/wallet.html">Wallet</a>
+      </div>
+    </div>
+    <div class="foot-bottom">
+      <p class="small muted">© <span data-year>2026</span> GPN · Public testnet. Not investment advice.</p>
+      <p class="small muted">Testnet only — tokens here have no monetary value.</p>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/app.js"></script>
+<script>
+/* ============================================================
+   Live node directory.
+   Fetches /seeds.json (the same document gpn-node reads) and
+   renders it. Vanilla JS, no dependencies, no innerHTML with
+   node-provided values — every string goes through textContent.
+   ============================================================ */
+(function () {
+  "use strict";
+
+  var REFRESH_MS = 60000;   /* aligned with the directory TTL */
+  var TICK_MS = 1000;
+
+  /* Optional local mock for previewing without a backend:
+     append ?mock=1 and the page renders a fixture instead of fetching. */
+  var MOCK = {
+    network: "GPN Public Testnet",
+    chain_id: "gpn_testnet",
+    genesis: "0xb8e4636a65d0c812abb437c38dd7e937bd7c3355c54c54d63060f26a33519a5c",
+    updated_at: new Date().toISOString(),
+    updated: Math.floor(Date.now() / 1000),
+    ttl: 60,
+    source: "static+ap",
+    live_providers: 2,
+    multiaddrs: [
+      "/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
+      "/ip4/142.129.54.88/tcp/30334/p2p/12D3KooWRWv4yVdJGiVg7xRgdUJY9G57EeutB596gWVpAwGC9qQ2"
+    ],
+    nodes: [
+      { multiaddr: "/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo", peer_id: "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo", role: "seed", source: "compiled-in" },
+      { multiaddr: "/ip4/142.129.54.88/tcp/30334/p2p/12D3KooWRWv4yVdJGiVg7xRgdUJY9G57EeutB596gWVpAwGC9qQ2", peer_id: "12D3KooWRWv4yVdJGiVg7xRgdUJY9G57EeutB596gWVpAwGC9qQ2", role: "seed", source: "compiled-in" },
+      { endpoint: "http://gpn-testnet.duckdns.org:8093/status", multiaddr: "/dns4/gpn-testnet.duckdns.org/tcp/8093", peer_id: null, role: "provider", source: "ap", address: "5ENqExampleAddress0000000000000000000000000000000000" }
+    ]
+  };
+
+  var state = {
+    lastFetch: 0,       /* Date.now() of the last completed attempt */
+    updatedAt: 0,       /* the directory's own updated_at, ms */
+    ok: false,
+    timer: null
+  };
+
+  function $(id) { return document.getElementById(id); }
+
+  function setText(el, value) {
+    if (el) el.textContent = value == null || value === "" ? "—" : String(value);
+  }
+
+  function short(s, head, tail) {
+    s = String(s || "");
+    if (s.length <= head + tail + 1) return s;
+    return s.slice(0, head) + "…" + s.slice(-tail);
+  }
+
+  function shortGenesis(g) {
+    g = String(g || "");
+    if (g.length <= 16) return g || "—";
+    return g.slice(0, 10) + "…" + g.slice(-6);
+  }
+
+  function ago(ms) {
+    if (!ms) return "—";
+    var s = Math.round((Date.now() - ms) / 1000);
+    if (s < -5) return "just now";       /* clock skew: don't show negatives */
+    if (s < 1) return "just now";
+    if (s < 60) return s + "s ago";
+    var m = Math.floor(s / 60);
+    if (m < 60) return m + "m " + (s % 60) + "s ago";
+    var h = Math.floor(m / 60);
+    if (h < 48) return h + "h " + (m % 60) + "m ago";
+    return Math.floor(h / 24) + "d ago";
+  }
+
+  function sourceLabel(src) {
+    switch (src) {
+      case "static+ap": return "static + access point";
+      case "static+ap-empty": return "static (AP empty)";
+      case "static-fallback":
+      case "static": return "static fallback";
+      default: return src || "unknown";
+    }
+  }
+
+  function roleClass(role) {
+    var r = String(role || "").toLowerCase();
+    if (r === "seed") return "role-seed";
+    if (r === "backbone") return "role-backbone";
+    if (r === "provider") return "role-provider";
+    return "muted";
+  }
+
+  /* ---------- copy helper (works on dynamically built buttons) ---------- */
+  function copyText(text, btn) {
+    var done = function () {
+      if (!btn) return;
+      var old = btn.textContent;
+      btn.textContent = "Copied ✓";
+      setTimeout(function () { btn.textContent = old; }, 1400);
+    };
+    var fallback = function () {
+      try {
+        var ta = document.createElement("textarea");
+        ta.value = text;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.left = "-9999px";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+        done();
+      } catch (e) { /* nothing else we can do */ }
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, fallback);
+    } else {
+      fallback();
+    }
+  }
+
+  function copyButton(text, label) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.className = "copy-btn";
+    b.textContent = label || "Copy";
+    b.setAttribute("aria-label", (label || "Copy") + ": " + short(text, 18, 8));
+    b.addEventListener("click", function () { copyText(text, b); });
+    return b;
+  }
+
+  /* ---------- render ---------- */
+  function renderSummary(data) {
+    setText($("s-network"), data.network);
+    setText($("s-chain"), data.chain_id);
+
+    var gen = $("s-genesis");
+    if (gen) {
+      gen.textContent = shortGenesis(data.genesis);
+      if (data.genesis) gen.title = String(data.genesis);
+    }
+
+    state.updatedAt = data.updated_at ? Date.parse(data.updated_at)
+                    : (data.updated ? data.updated * 1000 : 0);
+    if (!isFinite(state.updatedAt)) state.updatedAt = 0;
+    setText($("s-updated"), state.updatedAt ? ago(state.updatedAt) : "just now");
+
+    setText($("s-source"), sourceLabel(data.source));
+    setText($("s-ttl"), (data.ttl != null ? data.ttl : 60) + " s");
+    setText($("s-providers"), data.live_providers != null ? String(data.live_providers) : "0");
+    setText($("s-count"), String(Array.isArray(data.nodes) ? data.nodes.length : 0));
+  }
+
+  function td(label) {
+    var cell = document.createElement("td");
+    cell.setAttribute("data-label", label);
+    return cell;
+  }
+
+  function renderNodes(data) {
+    var body = $("nodes-body");
+    if (!body) return;
+    while (body.firstChild) body.removeChild(body.firstChild);
+
+    var nodes = Array.isArray(data.nodes) ? data.nodes : [];
+    /* Back-compat: a directory with only `multiaddrs` still renders. */
+    if (!nodes.length && Array.isArray(data.multiaddrs)) {
+      nodes = data.multiaddrs.map(function (ma) {
+        return { multiaddr: ma, peer_id: peerIdOf(ma), role: "seed", source: "compiled-in" };
+      });
+    }
+
+    if (!nodes.length) {
+      var empty = document.createElement("tr");
+      var c = td("");
+      c.colSpan = 5;
+      c.className = "dir-empty";
+      c.textContent = "The directory answered, but lists no nodes right now.";
+      empty.appendChild(c);
+      body.appendChild(empty);
+      return;
+    }
+
+    nodes.forEach(function (n) {
+      if (!n || typeof n !== "object") return;
+      var tr = document.createElement("tr");
+
+      /* Role */
+      var roleCell = td("Role");
+      var role = document.createElement("span");
+      role.className = roleClass(n.role);
+      role.textContent = String(n.role || "node");
+      roleCell.appendChild(role);
+
+      /* Multiaddr + copy */
+      var maCell = td("Multiaddr");
+      if (n.multiaddr) {
+        var ma = document.createElement("span");
+        ma.className = "ma";
+        ma.textContent = String(n.multiaddr);
+        maCell.appendChild(ma);
+        maCell.appendChild(copyButton(String(n.multiaddr)));
+      } else {
+        var dash = document.createElement("span");
+        dash.className = "dir-empty";
+        dash.textContent = "not dialable (no multiaddr)";
+        maCell.appendChild(dash);
+      }
+
+      /* Peer id */
+      var peerCell = td("Peer ID");
+      var pid = n.peer_id || peerIdOf(n.multiaddr);
+      if (pid) {
+        var p = document.createElement("span");
+        p.className = "peer-short";
+        p.textContent = short(pid, 8, 6);
+        p.title = String(pid);
+        peerCell.appendChild(p);
+        peerCell.appendChild(copyButton(String(pid)));
+      } else {
+        var pd = document.createElement("span");
+        pd.className = "dir-empty";
+        pd.textContent = "—";
+        peerCell.appendChild(pd);
+      }
+
+      /* Source */
+      var srcCell = td("Source");
+      srcCell.appendChild(document.createTextNode(String(n.source || "unknown")));
+
+      /* Endpoint / address */
+      var epCell = td("Endpoint / address");
+      if (n.endpoint) {
+        var e = document.createElement("span");
+        e.className = "ep";
+        var a = document.createElement("a");
+        a.href = String(n.endpoint);
+        a.rel = "noopener";
+        a.textContent = String(n.endpoint);
+        e.appendChild(a);
+        epCell.appendChild(e);
+      }
+      if (n.address) {
+        if (n.endpoint) epCell.appendChild(document.createElement("br"));
+        var addr = document.createElement("span");
+        addr.className = "ep";
+        addr.textContent = String(n.address);
+        addr.title = String(n.address);
+        epCell.appendChild(addr);
+        epCell.appendChild(copyButton(String(n.address)));
+      }
+      if (!n.endpoint && !n.address) {
+        var none = document.createElement("span");
+        none.className = "dir-empty";
+        none.textContent = "—";
+        epCell.appendChild(none);
+      }
+
+      tr.appendChild(roleCell);
+      tr.appendChild(maCell);
+      tr.appendChild(peerCell);
+      tr.appendChild(srcCell);
+      tr.appendChild(epCell);
+      body.appendChild(tr);
+    });
+  }
+
+  function peerIdOf(ma) {
+    if (!ma) return null;
+    var s = String(ma);
+    var i = s.lastIndexOf("/p2p/");
+    return i >= 0 ? s.slice(i + 5) : null;
+  }
+
+  function showError(msg) {
+    var box = $("dir-error");
+    if (box) box.hidden = false;
+    var chip = $("status-chip");
+    if (chip) { chip.className = "chip down"; }
+    setText($("status-text"), "directory unreachable");
+    setText($("refresh-text"), msg || "Retrying in 60 s");
+    var body = $("nodes-body");
+    if (body) {
+      while (body.firstChild) body.removeChild(body.firstChild);
+      var tr = document.createElement("tr");
+      var c = td("");
+      c.colSpan = 5;
+      c.className = "dir-empty";
+      c.textContent = "No directory data. The static seeds are still used by nodes.";
+      tr.appendChild(c);
+      body.appendChild(tr);
+    }
+  }
+
+  function showOk(data) {
+    var box = $("dir-error");
+    if (box) box.hidden = true;
+    var chip = $("status-chip");
+    if (chip) chip.className = "chip up";
+    var src = data.source || "static";
+    setText($("status-text"), src === "static-fallback" ? "live · AP unreachable" : "live directory");
+  }
+
+  function tick() {
+    if (state.ok) {
+      setText($("s-updated"), state.updatedAt ? ago(state.updatedAt) : "just now");
+      setText($("refresh-text"),
+        "last refreshed " + ago(state.lastFetch) + " · auto-refresh every " + (REFRESH_MS / 1000) + "s" +
+        (document.hidden ? " (paused)" : ""));
+    }
+  }
+
+  function load() {
+    if (document.hidden) return; /* don't poll a background tab */
+    var url = "/seeds.json";
+    var useMock = false;
+    try { useMock = new URLSearchParams(location.search).get("mock") === "1"; } catch (e) {}
+
+    var req = useMock
+      ? Promise.resolve({ ok: true, json: function () { return Promise.resolve(MOCK); } })
+      : fetch(url, { cache: "no-store", headers: { accept: "application/json" } })
+          .then(function (res) {
+            if (!res.ok) throw new Error("HTTP " + res.status);
+            return res.json();
+          });
+
+    req.then(function (data) {
+      state.lastFetch = Date.now();
+      state.ok = true;
+      renderSummary(data);
+      renderNodes(data);
+      showOk(data);
+      tick();
+    }).catch(function (err) {
+      state.lastFetch = Date.now();
+      state.ok = false;
+      showError("Retrying in 60 s. (" + (err && err.message ? err.message : "network error") + ")");
+    });
+  }
+
+  function init() {
+    load();
+    state.timer = setInterval(tick, TICK_MS);
+    setInterval(load, REFRESH_MS);
+    document.addEventListener("visibilitychange", function () {
+      /* Catch up immediately when the tab comes back. */
+      if (!document.hidden && Date.now() - state.lastFetch > REFRESH_MS) load();
+    });
+  }
+
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
+  else init();
+})();
+</script>
+</body>
+</html>

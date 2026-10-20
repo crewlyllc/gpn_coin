@@ -97,6 +97,7 @@ NAV = [
     ("../deploy.html", "Deploy", "deploy"),
     ("../ai.html", "AI", "ai"),
     ("../access-points.html", "Access Points", "access-points"),
+    ("../nodes.html", "Nodes", "nodes"),
     ("../buy.html", "Buy GPN", "buy"),
     ("index.html", "Docs", "docs"),
 ]
@@ -142,7 +143,7 @@ FOOT = """
   <div class="wrap">
     <div class="foot-grid">
       <div><a class="brand" href="../index.html" style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a><p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute. <em>Get paid for the GPU time you're wasting.</em></p></div>
-      <div><h4>Product</h4><a href="../download.html">Download</a><a href="../deploy.html">Deploy</a><a href="../ai.html">Access the AI</a><a href="../access-points.html">Access Points</a></div>
+      <div><h4>Product</h4><a href="../download.html">Download</a><a href="../deploy.html">Deploy</a><a href="../ai.html">Access the AI</a><a href="../access-points.html">Access Points</a><a href="../nodes.html">Live nodes</a></div>
       <div><h4>Learn</h4><a href="index.html">Docs</a><a href="whitepaper.html">Whitepaper</a><a href="one-pager.html">One-pager</a><a href="technical-overview.html">Technical overview</a></div>
       <div><h4>Project</h4><a href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">Source on GitHub</a><a href="run-a-node.html">Run a node</a><a href="wallet.html">Wallet</a><a href="../buy.html">Token &amp; purchasing</a></div>
     </div>

@@ -1,10 +1,24 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "gpn-coin",
+  "main": "worker/worker.js",
   "compatibility_date": "2026-10-19",
   "assets": {
     "directory": "./website",
-    "not_found_handling": "404-page"
+    "binding": "ASSETS",
+    "not_found_handling": "404-page",
+    // These paths have no file in ./website — the Worker must answer them
+    // before the asset layer (otherwise they fall through to 404.html).
+    "run_worker_first": ["/seeds.json", "/seeds", "/bootnodes.txt", "/seeds.txt"]
+  },
+  "vars": {
+    // Access point used for the live half of the directory. Leave empty for a
+    // static-only list. The Worker tries a normal `fetch()` first (works for
+    // an HTTPS ingress such as a Cloudflare Tunnel at https://ap.gpncoin.ai)
+    // and falls back to a raw TCP socket for non-standard ports like :8092,
+    // which the Workers `fetch()` API refuses. Either way an unreachable AP
+    // yields the static seed list — never a 500.
+    "AP_URL": "http://142.129.54.88:8092"
   },
   "routes": [
     { "pattern": "gpncoin.ai", "custom_domain": true },

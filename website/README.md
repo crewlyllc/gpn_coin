@@ -14,6 +14,7 @@ no build step at serve time.
 | `buy.html` | Honest status: testnet today (faucet / mining / job earnings), the mainnet listing plan, fair launch + treasury/vesting + halving, disclaimer. |
 | `ai.html` | The AI marketplace: OpenAI-compatible chat + job API, models, pricing, and a **“Try it”** widget (see the mixed-content note). |
 | `access-points.html` | Known access points and the three public testnet nodes (1 Linux bootnode + 2 Windows full nodes). |
+| `nodes.html` | **Live node directory** — fetches `/seeds.json` client-side and renders the network's own directory (seeds + live providers, multiaddrs, peer IDs, endpoints), auto-refreshing every 60 s. Canonical URL is `/nodes`. |
 | `404.html` | Static not-found page (Cloudflare Pages serves it automatically per directory; root copy). |
 | `docs/` | **Generated** static docs pages — see below. |
 | `assets/style.css` | Shared styles. Dark-first, light-friendly (theme toggle), responsive, print-friendly. |
