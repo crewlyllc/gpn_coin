@@ -45,6 +45,34 @@ fn record_created(id: u64, max_tokens: u64) {
         .push((id, Instant::now(), max_tokens));
 }
 
+/// Attempts for the off-chain payload write before we give up on a job.
+const PAYLOAD_PUT_ATTEMPTS: u32 = 3;
+/// Small pause between payload-write attempts (the store lock is held for
+/// milliseconds, so a contended write usually succeeds on the retry).
+const PAYLOAD_PUT_BACKOFF_MS: u64 = 50;
+
+/// Persist a job's off-chain payload, **verifying** the write (item #41
+/// residual). Every previous call site discarded the `Result` (`let _ = put(..)`),
+/// so a failed write left an on-chain job with escrow locked and no payload:
+/// no provider can ever run it (#41 skips payload-less jobs on purpose), so it
+/// wedges until the on-chain deadline refunds it and the caller waits out a
+/// timeout. A job is therefore only advertised (lease written) once its payload
+/// is durable; a write that survives `PAYLOAD_PUT_ATTEMPTS` fails loudly instead.
+fn persist_job_payload(store: &gpn_agent::llm::LlmStore, id: u64, job: &gpn_agent::llm::LlmJob) -> bool {
+    for attempt in 1..=PAYLOAD_PUT_ATTEMPTS {
+        match store.put(id, job.clone()) {
+            Ok(()) => return true,
+            Err(e) => eprintln!(
+                "[store] payload write for job #{id} failed (attempt {attempt}/{PAYLOAD_PUT_ATTEMPTS}): {e}"
+            ),
+        }
+        if attempt < PAYLOAD_PUT_ATTEMPTS {
+            std::thread::sleep(Duration::from_millis(PAYLOAD_PUT_BACKOFF_MS));
+        }
+    }
+    false
+}
+
 /// Policy for how long a job may stay `Pending` before the janitor reclaims it.
 /// Scales with the requested output size (a job that asked for more tokens may
 /// legitimately take longer), clamped to `[MIN, MAX]` so tiny jobs are reclaimed
@@ -2009,10 +2037,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
                     } else if created {
                         record_created(id, 512);
-                        let _ = gpn_agent::llm::LlmStore::new().put(
-                            id,
-                            gpn_agent::llm::LlmJob::new_llm(&model, &prompt, 0.7, 512),
-                        );
+                        let job = gpn_agent::llm::LlmJob::new_llm(&model, &prompt, 0.7, 512);
+                        let store = gpn_agent::llm::LlmStore::new();
+                        if !persist_job_payload(&store, id, &job) {
+                            // Same rule as POST /jobs: never advertise a job whose payload
+                            // never landed (the provider would skip it and it would sit
+                            // until expiry). Refund, skip the lease, tell the caller.
+                            let refunded = rt.block_on(client.fail_job_fast(id, 0)).is_ok();
+                            eprintln!(
+                                "[store] chat job #{id}: payload not persisted — not dispatched ({})",
+                                if refunded { "escrow refunded" } else { "refund pending; on-chain expiry will reclaim it" }
+                            );
+                            text = format!(
+                                "[gpn error] could not persist the job payload; the job was not dispatched (job #{id})"
+                            );
+                        } else {
                         let callback_token = new_callback_token(id);
                         let _ = write_assignment(
                             &assign_store,
@@ -2041,6 +2080,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                             std::thread::sleep(Duration::from_millis(300));
+                        }
                         }
                     } else {
                         text = match &create_err {
@@ -2396,7 +2436,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 } else {
                                     gpn_agent::llm::LlmJob::new_llm(&model, p, 0.7, 256)
                                 };
-                                let _ = gpn_agent::llm::LlmStore::new().put(id, job);
+                                let store = gpn_agent::llm::LlmStore::new();
+                                if !persist_job_payload(&store, id, &job) {
+                                    // No payload ⇒ nobody can ever run this job. Refund the
+                                    // escrow now (requestor may fail a Pending job, finding
+                                    // #12) and refuse to advertise it, instead of returning a
+                                    // fake `ok:true` for a job that can only expire (#41).
+                                    let refunded = rt.block_on(client.fail_job_fast(id, 0)).is_ok();
+                                    eprintln!(
+                                        "[store] job #{id}: payload not persisted — not dispatched ({})",
+                                        if refunded { "escrow refunded" } else { "refund pending; on-chain expiry will reclaim it" }
+                                    );
+                                    let r = Response::from_string(
+                                        json!({
+                                            "ok": false,
+                                            "job_id": id,
+                                            "refunded": refunded,
+                                            "error": "could not persist the job payload to the off-chain store; the job was not dispatched"
+                                        })
+                                        .to_string(),
+                                    )
+                                    .with_header(hdr.clone())
+                                    .with_status_code(500);
+                                    let _ = req.respond(r);
+                                    return;
+                                }
                             }
                             // dispatch: record which provider (by address) should claim it,
                             // plus the model + whether it must pull the model first.
@@ -2751,9 +2815,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let _ = req.respond(r);
                                         return;
                                     }
+                                    let mut payload_ok = true;
                                     if let Some(j) = &job_payload {
-                                        let _ = gpn_agent::llm::LlmStore::new().put(idn, j.clone());
+                                        let store = gpn_agent::llm::LlmStore::new();
+                                        payload_ok = persist_job_payload(&store, idn, j);
                                     }
+                                    if !payload_ok {
+                                        // Advertise nothing: a lease for a job whose payload
+                                        // never landed can only be skipped by the provider
+                                        // (#41) and left to expire. The client keeps its own
+                                        // on-chain job and may retry the route call.
+                                        eprintln!(
+                                            "[store] route job #{idn}: payload not persisted — not advertised"
+                                        );
+                                        json!({"ok": false, "job_id": idn,
+                                            "error": "could not persist the job payload to the off-chain store; the job was not advertised"})
+                                    } else {
                                     let callback_token = new_callback_token(idn);
                                     let _ = write_assignment(
                                         &assign_store,
@@ -2769,6 +2846,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     json!({"ok":true,"job_id":idn,"routed_to":p.address,
                                        "model":qmodel,"pull":pull,
                                        "latency_ms":p.latency_ms,"load":format!("{}/{}",p.active,p.capacity)})
+                                    }
                                 }
                                 None => {
                                     json!({"ok":false,"error":"no compatible provider available"})
@@ -2798,6 +2876,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Item #41 residual: a job's off-chain payload write must be VERIFIED before
+    /// the job is advertised. Every old call site did `let _ = put(..)`, so a
+    /// failed write produced an on-chain job with escrow locked and no payload —
+    /// unrunnable by design, and only reclaimed at its deadline while the caller
+    /// waited out a timeout.
+    #[test]
+    fn payload_write_is_verified_before_a_job_is_advertised() {
+        let dir = std::env::temp_dir().join(format!(
+            "gpn-payload-verify-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let job = gpn_agent::llm::LlmJob::new_llm("m", "keep the caller's prompt", 0.7, 16);
+
+        // A writable store persists the payload and reads it back.
+        let good = gpn_agent::llm::LlmStore::with_path(dir.join("store.json"));
+        assert!(persist_job_payload(&good, 7, &job));
+        assert_eq!(
+            good.get(7).map(|j| j.prompt),
+            Some("keep the caller's prompt".to_string())
+        );
+
+        // An unwritable target is reported (this is the case the old code ate).
+        let blocked = dir.join("blocked.json");
+        std::fs::create_dir_all(&blocked).unwrap();
+        let bad = gpn_agent::llm::LlmStore::with_path(blocked);
+        assert!(!persist_job_payload(&bad, 8, &job));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// #46 Phase 3 step 2: a provider the AP can never dial (NAT/CGNAT) enters
     /// the registry from its own pull poll, and a snapshot for a box the AP
