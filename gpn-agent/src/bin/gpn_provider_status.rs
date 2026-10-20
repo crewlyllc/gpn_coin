@@ -46,8 +46,38 @@ fn opt(args: &[String], flag: &str) -> Option<String> {
         .and_then(|i| args.get(i + 1).cloned())
 }
 
-/// Live model inventory from Ollama. Returns (models, can_pull).
+/// How long a model-inventory answer is reused. The access point polls
+/// `/status` every ~5 s, so an uncached live probe here meant one blocking
+/// `ollama /api/tags` GET every 5 s forever (~12 req/min of pure noise) — the
+/// same class as item #48 in `gpn_llm_provider`. Short enough that a freshly
+/// pulled model still appears almost immediately.
+const MODELS_TTL: Duration = Duration::from_secs(10);
+
+fn models_cache(
+) -> &'static std::sync::Mutex<Option<(Vec<String>, bool, std::time::Instant)>> {
+    static C: std::sync::OnceLock<std::sync::Mutex<Option<(Vec<String>, bool, std::time::Instant)>>> =
+        std::sync::OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Live model inventory from Ollama, cached for [`MODELS_TTL`]. Returns
+/// (models, can_pull).
 fn ollama_models(base: &str, fallback: &[String]) -> (Vec<String>, bool) {
+    if let Ok(guard) = models_cache().lock() {
+        if let Some((models, can_pull, at)) = guard.as_ref() {
+            if gpn_agent::llm::infer::cache_is_fresh(*at, std::time::Instant::now(), MODELS_TTL) {
+                return (models.clone(), *can_pull);
+            }
+        }
+    }
+    let answer = ollama_models_uncached(base, fallback);
+    if let Ok(mut guard) = models_cache().lock() {
+        *guard = Some((answer.0.clone(), answer.1, std::time::Instant::now()));
+    }
+    answer
+}
+
+fn ollama_models_uncached(base: &str, fallback: &[String]) -> (Vec<String>, bool) {
     let cli = reqwest::blocking::Client::builder()
         .timeout(Duration::from_millis(2500))
         .build();

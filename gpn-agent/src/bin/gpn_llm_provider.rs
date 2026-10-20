@@ -612,6 +612,14 @@ fn ensure_model(model: &str) -> Result<String, String> {
     if model.is_empty() || model == "auto" {
         return Ok("no specific model requested".into());
     }
+    // Item #48: the claim loop re-asked this for every assigned-but-unfinished
+    // job on EVERY pass, and each ask cost two blocking `/api/tags` GETs — a
+    // measured ~2.4 req/s of ollama traffic (and ollama journal noise) that never
+    // stopped, driven by long-stale `queued` store entries. A cached "present"
+    // answer makes the steady state zero HTTP.
+    if gpn_agent::llm::infer::model_presence_cached(model) == Some(true) {
+        return Ok(format!("model {model} already present"));
+    }
     let base = gpn_agent::llm::infer::default_ollama_url();
     let cli = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(3600))
@@ -636,6 +644,7 @@ fn ensure_model(model: &str) -> Result<String, String> {
                 })
                 .unwrap_or(false);
             if have {
+                gpn_agent::llm::infer::remember_model_presence(model, true);
                 return Ok(format!("model {model} already present"));
             }
         }
@@ -650,6 +659,7 @@ fn ensure_model(model: &str) -> Result<String, String> {
         .send()
         .map_err(|e| format!("pull {model} failed: {e}"))?;
     if r.status().is_success() {
+        gpn_agent::llm::infer::remember_model_presence(model, true);
         Ok(format!("pulled model {model} on demand"))
     } else {
         Err(format!(

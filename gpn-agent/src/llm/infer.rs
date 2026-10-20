@@ -35,22 +35,131 @@ pub fn ollama_missing_hint() -> String {
     )
 }
 
-/// Quick liveness probe: does the local ollama server answer right now?
-/// Blocking + short timeout so providers can cheaply gate model pulls.
-pub fn ollama_reachable() -> bool {
-    let base = default_ollama_url();
-    let base = base.trim_end_matches('/');
-    let Ok(client) = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_millis(1500))
+/// How long a reachability answer may be reused. The provider asks on every
+/// claim pass for every assigned-but-unfinished job; without this a single
+/// probe became two `/api/tags` GETs per job per pass (measured ~2.4 req/s of
+/// ollama journal noise for days, see change-log 2026-10-19 23:3x).
+const REACHABLE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long a "this model is present" answer may be reused. Model pulls are
+/// rare (on demand / baseline), so a stale *present* can only cost one failed
+/// request if an operator deletes a model out from under a running provider.
+pub const MODEL_PRESENCE_TTL: std::time::Duration = std::time::Duration::from_secs(120);
+
+#[derive(Clone, Copy)]
+struct CacheEntry {
+    value: bool,
+    at: std::time::Instant,
+}
+
+fn reachable_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, CacheEntry>> {
+    static C: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, CacheEntry>>> =
+        std::sync::OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn model_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, CacheEntry>> {
+    static C: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, CacheEntry>>> =
+        std::sync::OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Pure freshness predicate (kept separate so it is unit-testable).
+/// `Instant::duration_since` saturates, so a clock that appears to go backwards
+/// reads as fresh rather than panicking.
+pub fn cache_is_fresh(
+    recorded: std::time::Instant,
+    now: std::time::Instant,
+    ttl: std::time::Duration,
+) -> bool {
+    now.duration_since(recorded) < ttl
+}
+
+fn cache_get(
+    map: &std::sync::Mutex<std::collections::HashMap<String, CacheEntry>>,
+    key: &str,
+    ttl: std::time::Duration,
+) -> Option<bool> {
+    let now = std::time::Instant::now();
+    let guard = map.lock().ok()?;
+    guard
+        .get(key)
+        .filter(|e| cache_is_fresh(e.at, now, ttl))
+        .map(|e| e.value)
+}
+
+fn cache_put(
+    map: &std::sync::Mutex<std::collections::HashMap<String, CacheEntry>>,
+    key: &str,
+    value: bool,
+) {
+    if let Ok(mut guard) = map.lock() {
+        guard.insert(
+            key.to_string(),
+            CacheEntry {
+                value,
+                at: std::time::Instant::now(),
+            },
+        );
+    }
+}
+
+/// Cached "is `model` already installed?" answer (no HTTP when fresh).
+/// `None` = unknown / stale, the caller must look.
+pub fn model_presence_cached(model: &str) -> Option<bool> {
+    cache_get(model_cache(), model, MODEL_PRESENCE_TTL)
+}
+
+/// Record a model-presence answer so the next claim passes need no HTTP.
+pub fn remember_model_presence(model: &str, present: bool) {
+    cache_put(model_cache(), model, present);
+}
+
+/// Drop a cached answer (used when a run fails for a model we believed present).
+pub fn forget_model_presence(model: &str) {
+    if let Ok(mut guard) = model_cache().lock() {
+        guard.remove(model);
+    }
+}
+
+/// One probe. `Some(false)` = answered but unhappy, `None` = no answer at all.
+fn probe_once(base: &str, timeout_ms: u64) -> Option<bool> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_millis(timeout_ms))
         .build()
-    else {
-        return false;
-    };
+        .ok()?;
     client
         .get(format!("{base}/api/tags"))
         .send()
+        .ok()
         .map(|r| r.status().is_success())
-        .unwrap_or(false)
+}
+
+/// Quick liveness probe: does the local ollama server answer right now?
+/// Blocking, but cached for [`REACHABLE_TTL`] so a polling caller cannot turn it
+/// into a request stream.
+///
+/// A single short-timeout probe is **not** enough to declare ollama missing: a
+/// measured 4.4 s host-side stall of `ollama serve` (2026-10-19 23:24) tripped
+/// the old 1.5 s probe and logged "ollama not reachable — install & start it"
+/// while ollama was up and healthy. So one retry with a longer budget is allowed
+/// before answering `false`, which makes the warning mean what it says.
+pub fn ollama_reachable() -> bool {
+    if let Some(v) = cache_get(reachable_cache(), "ollama", REACHABLE_TTL) {
+        return v;
+    }
+    let base = default_ollama_url();
+    let base = base.trim_end_matches('/');
+    let ok = match probe_once(base, 1500) {
+        Some(v) => v,
+        None => {
+            // Transient stall vs genuinely down: give it one longer chance.
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            probe_once(base, 6000).unwrap_or(false)
+        }
+    };
+    cache_put(reachable_cache(), "ollama", ok);
+    ok
 }
 
 #[derive(Deserialize)]
@@ -208,5 +317,42 @@ mod tests {
         assert_eq!(normalize_ml_task(Some(" Embeddings ")), "embeddings");
         assert_eq!(normalize_ml_task(Some("embed")), "embeddings");
         assert_eq!(normalize_ml_task(Some("nonsense")), "generate");
+    }
+
+    #[test]
+    fn cache_freshness_is_bounded_by_its_ttl() {
+        let now = std::time::Instant::now();
+        let ttl = std::time::Duration::from_secs(120);
+        assert!(cache_is_fresh(now, now, ttl));
+        assert!(cache_is_fresh(
+            now - std::time::Duration::from_secs(119),
+            now,
+            ttl
+        ));
+        // At/past the TTL the answer must be re-derived, not reused.
+        assert!(!cache_is_fresh(
+            now - std::time::Duration::from_secs(120),
+            now,
+            ttl
+        ));
+        assert!(!cache_is_fresh(
+            now - std::time::Duration::from_secs(600),
+            now,
+            ttl
+        ));
+        // A clock that appears to move backwards must read as fresh, never panic.
+        assert!(cache_is_fresh(now, now - std::time::Duration::from_secs(5), ttl));
+    }
+
+    #[test]
+    fn model_presence_is_cached_so_repeat_passes_cost_no_http() {
+        let model = "unit-test-cached-model:1b";
+        assert_eq!(model_presence_cached(model), None, "unknown before any look");
+        remember_model_presence(model, true);
+        assert_eq!(model_presence_cached(model), Some(true), "a present model is reused");
+        // A retained answer for a *different* model must not leak across keys.
+        assert_eq!(model_presence_cached("unit-test-other-model:1b"), None);
+        forget_model_presence(model);
+        assert_eq!(model_presence_cached(model), None, "forget re-opens the probe");
     }
 }
