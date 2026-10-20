@@ -587,8 +587,9 @@ To fix it (about 5 minutes):
        sudo firewall-cmd --add-port={port}/tcp --permanent && sudo firewall-cmd --reload
 
   4. UPnP/NAT-PMP: the node already tried this automatically (GPN_UPNP=auto is
-     the default). If your router has UPnP disabled, either enable it and
-     restart, or use step 2. Disable the attempt with --no-upnp / GPN_UPNP=off.
+     the default) and keeps retrying every 10 minutes - just enable UPnP on
+     your router and it is picked up without a restart. Or use step 2.
+     Disable the attempt with --no-upnp / GPN_UPNP=off.
 
   5. CGNAT: if your router's WAN address is in 100.64.0.0/10, no port forward
      can work. {cgnat_tail}

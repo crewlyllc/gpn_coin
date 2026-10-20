@@ -52,6 +52,15 @@ use std::time::Duration;
 /// Default mapping lease: one hour, renewed at half-life.
 pub const DEFAULT_LEASE_SECS: u32 = 3600;
 
+/// How often a node with **no usable mapping** re-detects a router (design
+/// §5.3/§5.5: "re-check every 10 minutes").
+///
+/// This is the answer to the two cases a startup-only attempt cannot handle:
+/// the operator enables UPnP *after* starting the node, and the router reboots
+/// (or changes its WAN address) and drops the rule. Neither needs a node
+/// restart any more.
+pub const RECOVERY_SECS: u64 = 600;
+
 /// UPnP SSDP discovery budget (design §5.1: ~10 s total).
 pub const UPNP_SEARCH_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -454,6 +463,9 @@ pub struct PortMapConfig {
     pub port: u16,
     /// Lease duration; renewed at half-life.
     pub lease: Duration,
+    /// How often to re-run discovery while no mapping is live
+    /// (`GPN_UPNP_RETRY_SECS`, default [`RECOVERY_SECS`], floor 30 s).
+    pub retry: Duration,
     /// `GPN_NATPMP_GATEWAY` — skip OS gateway detection.
     pub gateway_override: Option<IpAddr>,
 }
@@ -476,13 +488,26 @@ impl PortMapConfig {
         let gateway_override = std::env::var("GPN_NATPMP_GATEWAY")
             .ok()
             .and_then(|s| s.trim().parse::<IpAddr>().ok());
+        let retry = Duration::from_secs(parse_retry_secs(
+            std::env::var("GPN_UPNP_RETRY_SECS").ok().as_deref(),
+        ));
         PortMapConfig {
             enabled,
             port,
             lease: Duration::from_secs(lease as u64),
+            retry,
             gateway_override,
         }
     }
+}
+
+/// Parse `GPN_UPNP_RETRY_SECS`. Default [`RECOVERY_SECS`]; a too-small value is
+/// floored at 30 s so a typo cannot hammer the router, and a huge one is capped
+/// at one hour so re-detection never effectively stops.
+pub fn parse_retry_secs(raw: Option<&str>) -> u64 {
+    raw.and_then(|s| s.trim().parse::<u64>().ok())
+        .map(|s| s.clamp(30, 3600))
+        .unwrap_or(RECOVERY_SECS)
 }
 
 /// Parse `GPN_UPNP`. Default **on** (`auto`); only an explicit off opts out.
@@ -598,10 +623,13 @@ pub fn ladder(mappers: &[&dyn PortMapper], lan: IpAddr, port: u16, lease: Durati
 pub struct MappingSession {
     /// What happened (drives the gate and the notice).
     pub outcome: MapOutcome,
-    /// The backend that owns the live rule (for [`run_renewal`]).
+    /// The backend that owns the live rule (for [`run_maintenance`]).
     pub mapper: Option<Arc<dyn PortMapper>>,
     /// The config used (port + lease), for renewal.
     pub config: PortMapConfig,
+    /// This host's LAN address — the mapping target, reused by every
+    /// re-detection attempt in [`run_maintenance`].
+    pub lan: IpAddr,
 }
 
 impl MappingSession {
@@ -617,20 +645,33 @@ impl MappingSession {
 /// Build the backend list and run [`ladder`] off the async runtime.
 ///
 /// Returns the outcome plus the backend that owns the rule (if any), so the
-/// caller can spawn [`run_renewal`].
+/// caller can spawn [`run_maintenance`].
 pub async fn start(cfg: &PortMapConfig, lan: IpAddr) -> MappingSession {
     let (outcome, mapper) = attempt(cfg, lan).await;
     MappingSession {
         outcome,
         mapper,
         config: cfg.clone(),
+        lan,
     }
 }
 
-/// Build the backend list and run [`ladder`] off the async runtime.
+/// Build the backend list and run [`ladder`] off the async runtime (announcing
+/// the attempt: the startup path's consent record).
 pub async fn attempt(
     cfg: &PortMapConfig,
     lan: IpAddr,
+) -> (MapOutcome, Option<Arc<dyn PortMapper>>) {
+    attempt_with(cfg, lan, true).await
+}
+
+/// [`attempt`], with the consent-record log lines suppressed when this is a
+/// silent re-detection retry (`announce = false`). The outcome still reaches
+/// the operator through [`maintenance_notice`] — on **change** only.
+async fn attempt_with(
+    cfg: &PortMapConfig,
+    lan: IpAddr,
+    announce: bool,
 ) -> (MapOutcome, Option<Arc<dyn PortMapper>>) {
     if !cfg.enabled {
         log::info!(
@@ -641,13 +682,21 @@ pub async fn attempt(
         return (MapOutcome::Disabled, None);
     }
 
-    log::info!(
-        "portmap: attempting automatic mapping of TCP {} -> {lan}:{} via UPnP-IGD, then \
-         NAT-PMP (lease {}s; disable with GPN_UPNP=off or --no-upnp)",
-        cfg.port,
-        cfg.port,
-        cfg.lease.as_secs()
-    );
+    if announce {
+        log::info!(
+            "portmap: attempting automatic mapping of TCP {} -> {lan}:{} via UPnP-IGD, then \
+             NAT-PMP (lease {}s; disable with GPN_UPNP=off or --no-upnp)",
+            cfg.port,
+            cfg.port,
+            cfg.lease.as_secs()
+        );
+    } else {
+        log::debug!(
+            "portmap: re-detection attempt for TCP {} -> {lan}:{}",
+            cfg.port,
+            cfg.port
+        );
+    }
 
     let cfg = cfg.clone();
     let outcome = tokio::task::spawn_blocking(move || {
@@ -735,93 +784,207 @@ pub fn log_outcome(outcome: &MapOutcome, port: u16) {
     }
 }
 
-/// What the renewal loop should do after a re-check.
+/// The dialability-relevant state of the mapping ladder. Used for
+/// **edge-triggered** logging: a retry that fails the same way again is silent.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RenewalAction {
-    /// Rule is healthy and the external address is unchanged.
-    Renewed,
-    /// The external `ip:port` changed: log it and (restart-time) re-advertise.
-    AddressChanged(SocketAddr),
-    /// The router lost the rule and it could not be re-added.
-    Lost(String),
+pub enum MapState {
+    /// A rule is live; this is the internet-side address the router reported.
+    Mapped(SocketAddr),
+    /// The router's WAN address is CGNAT/private: no forward can ever work.
+    Cgnat(IpAddr),
+    /// No usable rule (no gateway, refused, or mapping disabled).
+    Unavailable,
 }
 
-/// Decide the renewal action from the old and the freshly observed mapping.
-pub fn renewal_action(old: &Mapping, fresh: Result<Mapping, String>) -> RenewalAction {
-    match fresh {
-        Ok(m) if m.external == old.external => RenewalAction::Renewed,
-        Ok(m) => RenewalAction::AddressChanged(m.external),
-        Err(e) => RenewalAction::Lost(e),
+/// Collapse a ladder outcome to the state we log against.
+pub fn state_of(outcome: &MapOutcome) -> MapState {
+    match outcome {
+        MapOutcome::Mapped(m) => MapState::Mapped(m.external),
+        MapOutcome::Cgnat { wan, .. } => MapState::Cgnat(*wan),
+        MapOutcome::Failed { .. } | MapOutcome::Disabled => MapState::Unavailable,
     }
 }
 
-/// Renew `mapping` before the lease expires; repeat forever.
-///
-/// Renewal re-runs `AddPortMapping` with the same ports (UPnP treats a
-/// re-add as a refresh; NAT-PMP likewise). If the WAN address or the assigned
-/// external port changed, it is logged at `warn` — the running swarm's
-/// advertised set is fixed at startup, so the new address becomes authoritative
-/// on the next restart. The lease means a crashed node never leaves a
-/// permanent hole in the router.
-pub async fn run_renewal(mapper: Arc<dyn PortMapper>, initial: Mapping, port: u16) {
-    let mut current = initial;
-    let interval = (current.lease / 2).max(Duration::from_secs(30));
-    let mut tick = tokio::time::interval(interval);
-    tick.tick().await; // consume the immediate first tick
-    loop {
-        tick.tick().await;
-        let internal = current.internal;
-        let lease = current.lease;
-        let m = mapper.clone();
-        let fresh = tokio::task::spawn_blocking(move || -> Result<Mapping, String> {
-            let wan = m.wan_ip().map_err(|e| e.to_string())?;
-            match classify_wan(&wan) {
-                WanClass::Public => {}
-                other => {
-                    return Err(format!(
-                        "WAN address {wan} is no longer public ({other:?}) - CGNAT change?"
-                    ))
-                }
-            }
-            let external_port = m
-                .add_tcp(internal, port, lease)
-                .map_err(|e| e.to_string())?;
-            Ok(Mapping {
-                internal,
-                external: SocketAddr::new(wan, external_port),
-                method: m.method(),
-                lease,
-                gateway: m.gateway(),
-            })
-        })
-        .await
-        .unwrap_or_else(|e| Err(e.to_string()));
+/// One line to log when the mapping state changes, and how loudly.
+pub struct MaintenanceNotice {
+    /// `true` → `warn`, `false` → `info`.
+    pub warn: bool,
+    /// The line, already log-safe and ASCII.
+    pub line: String,
+}
 
-        match renewal_action(&current, fresh) {
-            RenewalAction::Renewed => {
+/// Decide what to say when the mapping state changes (design §5.3:
+/// edge-triggered, never nag). `None` means "say nothing".
+pub fn maintenance_notice(
+    prev: &MapState,
+    now: &MapState,
+    port: u16,
+    retry: Duration,
+) -> Option<MaintenanceNotice> {
+    if prev == now {
+        return None;
+    }
+    let every = retry.as_secs();
+    Some(match now {
+        MapState::Mapped(addr) => MaintenanceNotice {
+            warn: false,
+            line: match prev {
+                MapState::Cgnat(wan) => format!(
+                    "portmap: the router's WAN address is public again ({wan} -> {addr}); TCP \
+                     {port} is now mapped. The dialability watcher will confirm inbound \
+                     reachability; restart the node to advertise the new address."
+                ),
+                MapState::Mapped(old) => format!(
+                    "portmap: the mapped external address CHANGED {old} -> {addr}; the rule was \
+                     renewed with the new address. libp2p's announced address set is fixed at \
+                     startup - restart the node to advertise it."
+                ),
+                _ => format!(
+                    "portmap: automatic mapping is ACTIVE again on TCP {port} -> {addr} \
+                     (UPnP-IGD/NAT-PMP re-established). The dialability watcher will confirm \
+                     inbound reachability; restart the node to advertise the new address."
+                ),
+            },
+        },
+        MapState::Cgnat(wan) => MaintenanceNotice {
+            warn: true,
+            line: format!(
+                "portmap: the router's WAN address is {wan} (CGNAT or double NAT) - no port \
+                 forward can make TCP {port} dialable. Re-checking every {every}s in case the \
+                 ISP changes it; GPN_UPNP=off silences this."
+            ),
+        },
+        MapState::Unavailable => MaintenanceNotice {
+            warn: true,
+            line: format!(
+                "portmap: no automatic mapping for TCP {port} (no UPnP-IGD/NAT-PMP gateway, or \
+                 the router refused). Still trying every {every}s - enable UPnP on the router, \
+                 or forward the port manually; GPN_UPNP=off silences this."
+            ),
+        },
+    })
+}
+
+/// Re-add (refresh) one existing rule through the backend that owns it.
+async fn renew_once(
+    mapper: &Arc<dyn PortMapper>,
+    current: &Mapping,
+    port: u16,
+) -> Result<Mapping, String> {
+    let m = mapper.clone();
+    let internal = current.internal;
+    let lease = current.lease;
+    tokio::task::spawn_blocking(move || -> Result<Mapping, String> {
+        let wan = m.wan_ip().map_err(|e| e.to_string())?;
+        match classify_wan(&wan) {
+            WanClass::Public => {}
+            other => {
+                return Err(format!(
+                    "WAN address {wan} is no longer public ({other:?}) - CGNAT change?"
+                ))
+            }
+        }
+        let external_port = m
+            .add_tcp(internal, port, lease)
+            .map_err(|e| e.to_string())?;
+        Ok(Mapping {
+            internal,
+            external: SocketAddr::new(wan, external_port),
+            method: m.method(),
+            lease,
+            gateway: m.gateway(),
+        })
+    })
+    .await
+    .unwrap_or_else(|e| Err(e.to_string()))
+}
+
+/// Keep the rule alive **and** re-detect a router when there is none.
+///
+/// Two cadences, one loop:
+///
+/// * **live mapping** → renew at half the lease (default every 30 min). A
+///   renewal that fails drops the stale backend and immediately re-runs full
+///   discovery — a router reboot or WAN change no longer needs a node restart
+///   to get the port back.
+/// * **no mapping** → re-run the whole UPnP-IGD → NAT-PMP ladder every
+///   `cfg.retry` (default 10 min). This is what makes "enable UPnP on the
+///   router" work without restarting the node, and it also picks up a WAN
+///   address that moved off CGNAT.
+///
+/// Logging is edge-triggered via [`maintenance_notice`], so a permanently
+/// non-mappable node says so once, not every 10 minutes.
+pub async fn run_maintenance(initial: MappingSession) {
+    let cfg = initial.config.clone();
+    if !cfg.enabled {
+        return;
+    }
+    let lan = initial.lan;
+    let mut current: Option<Mapping> = initial.mapping().cloned();
+    let mut mapper: Option<Arc<dyn PortMapper>> = initial.mapper.clone();
+    let mut last = state_of(&initial.outcome);
+
+    loop {
+        let delay = match &current {
+            Some(m) => (m.lease / 2).max(Duration::from_secs(30)),
+            None => cfg.retry,
+        };
+        tokio::time::sleep(delay).await;
+
+        let outcome = match (current.clone(), mapper.clone()) {
+            (Some(m), Some(mp)) => match renew_once(&mp, &m, cfg.port).await {
+                Ok(fresh) => {
+                    log::debug!(
+                        "portmap: renewed {} mapping for TCP {} (external {})",
+                        fresh.method,
+                        cfg.port,
+                        fresh.external
+                    );
+                    MapOutcome::Mapped(fresh)
+                }
+                Err(reason) => {
+                    log::debug!(
+                        "portmap: renewal of TCP {} failed ({reason}); re-running discovery",
+                        cfg.port
+                    );
+                    let (o, mp2) = attempt_with(&cfg, lan, false).await;
+                    mapper = mp2;
+                    o
+                }
+            },
+            _ => {
+                let (o, mp2) = attempt_with(&cfg, lan, false).await;
+                mapper = mp2;
+                o
+            }
+        };
+
+        current = match &outcome {
+            MapOutcome::Mapped(m) => Some(m.clone()),
+            _ => None,
+        };
+        if current.is_none() {
+            mapper = None;
+        }
+
+        let now = state_of(&outcome);
+        if let Some(n) = maintenance_notice(&last, &now, cfg.port, cfg.retry) {
+            if n.warn {
+                log::warn!("{}", n.line);
+            } else {
+                log::info!("{}", n.line);
+            }
+        }
+        if let MapOutcome::Mapped(m) = &outcome {
+            if m.external.port() != m.internal.port() {
                 log::debug!(
-                    "portmap: renewed {} mapping for TCP {} (external {})",
-                    current.method,
-                    port,
-                    current.external
-                );
-            }
-            RenewalAction::AddressChanged(addr) => {
-                log::warn!(
-                    "portmap: external address CHANGED {} -> {addr}; the mapping and advertised \
-                     address are updated, but libp2p's announced address set is fixed at startup \
-                     - restart the node to re-advertise the new address",
-                    current.external
-                );
-                current.external = addr;
-            }
-            RenewalAction::Lost(reason) => {
-                log::warn!(
-                    "portmap: mapping for TCP {port} was LOST and could not be renewed ({reason}); \
-                     the node may stop being dialable until the next successful renewal"
+                    "portmap: router keeps external port {} for internal {}",
+                    m.external.port(),
+                    m.internal.port()
                 );
             }
         }
+        last = now;
     }
 }
 
@@ -1079,25 +1242,127 @@ mod tests {
         }
     }
 
+    // ── maintenance: edge-triggered notices + retry cadence ──────────────
+
+    fn addr(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
     #[test]
-    fn renewal_detects_ip_and_port_changes() {
-        let old = mapping("23.241.109.255:30333");
+    fn mapping_states_collapse_outcomes() {
+        let m = mapping("23.241.109.255:30333");
         assert_eq!(
-            renewal_action(&old, Ok(mapping("23.241.109.255:30333"))),
-            RenewalAction::Renewed
+            state_of(&MapOutcome::Mapped(m.clone())),
+            MapState::Mapped(addr("23.241.109.255:30333"))
         );
         assert_eq!(
-            renewal_action(&old, Ok(mapping("23.241.109.254:30333"))),
-            RenewalAction::AddressChanged("23.241.109.254:30333".parse().unwrap())
+            state_of(&MapOutcome::Cgnat {
+                wan: ip("100.64.1.1"),
+                method: MapMethod::UpnpIgd
+            }),
+            MapState::Cgnat(ip("100.64.1.1"))
         );
         assert_eq!(
-            renewal_action(&old, Ok(mapping("23.241.109.255:45123"))),
-            RenewalAction::AddressChanged("23.241.109.255:45123".parse().unwrap())
+            state_of(&MapOutcome::Failed {
+                reason: "no gateway".into()
+            }),
+            MapState::Unavailable
         );
-        assert!(matches!(
-            renewal_action(&old, Err("router gone".into())),
-            RenewalAction::Lost(r) if r.contains("router gone")
-        ));
+        assert_eq!(state_of(&MapOutcome::Disabled), MapState::Unavailable);
+    }
+
+    #[test]
+    fn maintenance_is_edge_triggered_and_never_nags() {
+        let retry = Duration::from_secs(RECOVERY_SECS);
+        let mapped = MapState::Mapped(addr("23.241.109.255:30333"));
+
+        // Unchanged state says nothing, whatever it is.
+        assert!(maintenance_notice(&mapped, &mapped, 30333, retry).is_none());
+        assert!(maintenance_notice(&MapState::Unavailable, &MapState::Unavailable, 30333, retry)
+            .is_none());
+        assert!(
+            maintenance_notice(&MapState::Cgnat(ip("100.64.1.1")), &MapState::Cgnat(ip("100.64.1.1")), 30333, retry)
+                .is_none()
+        );
+
+        // Losing the rule warns once, and says it keeps trying.
+        let lost = maintenance_notice(&mapped, &MapState::Unavailable, 30333, retry).unwrap();
+        assert!(lost.warn);
+        assert!(lost.line.contains("no automatic mapping"), "{}", lost.line);
+        assert!(lost.line.contains("600s"), "{}", lost.line);
+        assert!(lost.line.is_ascii());
+
+        // Regaining it is good news, and points at the restart-to-advertise rule.
+        let back = maintenance_notice(&MapState::Unavailable, &mapped, 30333, retry).unwrap();
+        assert!(!back.warn);
+        assert!(back.line.contains("ACTIVE again"), "{}", back.line);
+        assert!(back.line.contains("restart"), "{}", back.line);
+
+        // A WAN/port change is explicitly called out, not reported as a recovery.
+        let moved = MapState::Mapped(addr("23.241.109.254:45123"));
+        let changed = maintenance_notice(&mapped, &moved, 30333, retry).unwrap();
+        assert!(!changed.warn);
+        assert!(changed.line.contains("CHANGED"), "{}", changed.line);
+        assert!(changed.line.contains("45123"), "{}", changed.line);
+
+        // Falling into CGNAT warns, and is recoverable when the WAN moves again.
+        let cgnat = maintenance_notice(&mapped, &MapState::Cgnat(ip("100.64.9.9")), 30333, retry)
+            .unwrap();
+        assert!(cgnat.warn);
+        assert!(cgnat.line.contains("CGNAT"), "{}", cgnat.line);
+        let recovered = maintenance_notice(&MapState::Cgnat(ip("100.64.9.9")), &mapped, 30333, retry)
+            .unwrap();
+        assert!(!recovered.warn);
+        assert!(recovered.line.contains("public again"), "{}", recovered.line);
+    }
+
+    #[test]
+    fn retry_cadence_defaults_to_ten_minutes_and_is_bounded() {
+        assert_eq!(parse_retry_secs(None), RECOVERY_SECS);
+        assert_eq!(RECOVERY_SECS, 600);
+        assert_eq!(parse_retry_secs(Some("600")), 600);
+        assert_eq!(parse_retry_secs(Some(" 90 ")), 90);
+        // A typo cannot hammer the router every second...
+        assert_eq!(parse_retry_secs(Some("1")), 30);
+        assert_eq!(parse_retry_secs(Some("0")), 30);
+        // ...and re-detection never effectively stops.
+        assert_eq!(parse_retry_secs(Some("999999")), 3600);
+        assert_eq!(parse_retry_secs(Some("nonsense")), RECOVERY_SECS);
+    }
+
+    #[test]
+    fn a_failed_ladder_is_retried_not_fatal() {
+        // Two backends that cannot reach a router: the ladder reports a failure
+        // (so `run_maintenance` keeps looping) instead of returning an error
+        // that would end the task and leave the node permanently unmapped.
+        let dead = MockMapper {
+            method: MapMethod::NatPmp,
+            gateway: ip("192.168.1.1"),
+            wan: Err(MapError::NoGateway("udp/5351 silent".into())),
+            assigned: 0,
+            add_err: None,
+            added: Mutex::new(Vec::new()),
+        };
+        let out = ladder(&[&dead], lan(), 30333, Duration::from_secs(60));
+        assert!(matches!(out, MapOutcome::Failed { .. }), "{out:?}");
+        assert_eq!(state_of(&out), MapState::Unavailable);
+
+        // And the session carries the LAN address the retry loop targets.
+        let session = MappingSession {
+            outcome: out,
+            mapper: None,
+            config: PortMapConfig {
+                enabled: true,
+                port: 30333,
+                lease: Duration::from_secs(3600),
+                retry: Duration::from_secs(RECOVERY_SECS),
+                gateway_override: None,
+            },
+            lan: lan(),
+        };
+        assert!(session.mapping().is_none());
+        assert_eq!(session.lan, lan());
+        assert_eq!(session.config.retry, Duration::from_secs(RECOVERY_SECS));
     }
 
     // ── NAT-PMP wire format (no network: encodes requests only) ───────────

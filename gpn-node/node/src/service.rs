@@ -554,20 +554,19 @@ pub async fn new_full<
             metrics,
         })?;
 
-    // ---- Keep the NAT mapping alive (design §5.5) ------------------------
-    // The router grant expires (default lease 3600 s); renew at half-life so a
-    // home node stays dialable indefinitely. Renewal also re-reads the WAN
-    // address and logs an IP/port change. A mapping that is lost is retried on
-    // the next tick, and the soft-mode dialability watcher will report the
-    // state change.
+    // ---- Keep the NAT mapping alive, and re-detect a router when there is
+    // none (design §5.5 / §5.3) ------------------------------------------
+    // A live rule is renewed at half its lease. When there is **no** rule the
+    // loop re-runs UPnP-IGD -> NAT-PMP discovery every 10 minutes, so an
+    // operator who enables UPnP after starting the node, or a router that
+    // rebooted and dropped the rule, recovers without a node restart.
+    // Logging is edge-triggered inside the loop (no per-retry nag).
     if let Some(session) = portmap_session {
-        if let (Some(mapper), Some(mapping)) = (session.mapper.clone(), session.mapping().cloned())
-        {
-            let port = session.config.port;
+        if session.config.enabled {
             task_manager
                 .spawn_handle()
-                .spawn("gpn-portmap-renew", None, async move {
-                    crate::portmap::run_renewal(mapper, mapping, port).await;
+                .spawn("gpn-portmap-maintain", None, async move {
+                    crate::portmap::run_maintenance(session).await;
                 });
         }
     }

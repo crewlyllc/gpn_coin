@@ -339,10 +339,25 @@ firewall) is then the usual fix.
 
 **Renewal / IP change.** The rule is renewed at half the lease. If the ISP
 changes the WAN IP, or the router assigns a different external port, the new
-address is logged at `warn` and used for subsequent checks; the running
-libp2p instance cannot change its announced address set, so **restart the node
-to advertise the new address**. Peers that learn the address through
-`Identify` will still find the new path in the meantime.
+address is logged and used for subsequent checks; the running libp2p instance
+cannot change its announced address set, so **restart the node to advertise the
+new address**. Peers that learn the address through `Identify` will still find
+the new path in the meantime.
+
+**Re-detection (no restart needed).** With **no** live mapping the node re-runs
+the whole UPnP-IGD → NAT-PMP ladder every **10 minutes** (`GPN_UPNP_RETRY_SECS`,
+floor 30 s, cap 3600 s). Three cases this covers, all previously "restart the
+node":
+
+- you enable UPnP on the router after the node started;
+- the router reboots or is replaced and drops the rule (the stale handle is
+discarded and discovery starts over);
+- the WAN address moves off CGNAT (e.g. the ISP hands you a public IP).
+
+If a **live** rule stops renewing, the node immediately re-runs discovery
+rather than waiting for the next 10-minute tick. Logging is edge-triggered: a
+node that stays unmappable says so **once** (plus a single line when it
+recovers), never every 10 minutes.
 
 **Advanced knobs** (rarely needed):
 
@@ -350,6 +365,7 @@ to advertise the new address**. Peers that learn the address through
 |---|---|---|
 | `GPN_UPNP` | `auto` or `off`. | `auto` |
 | `GPN_UPNP_LEASE_SECS` | Mapping lease requested from the router (minimum 60). | `3600` |
+| `GPN_UPNP_RETRY_SECS` | Re-detection cadence while no mapping is live (30–3600). | `600` |
 | `GPN_NATPMP_GATEWAY` | Router IP for NAT-PMP when OS gateway detection is unavailable (e.g. Windows). | auto |
 | `GPN_SEED_PORT` | The TCP port to open; also the internal port. | `30333` |
 
@@ -758,6 +774,7 @@ finetune_poll_ms = 4000
 | `GPN_SEED` | Willing to be published as a seed candidate; `0` also silences the not-dialable notice. | `1` |
 | `GPN_DISCOVERABLE` | Announce endpoint / accept inbound; `0` implies `GPN_SEED=0`. | `1` |
 | `GPN_UPNP` | Try UPnP-IGD/NAT-PMP (`auto`/`off`). See [UPnP / NAT-PMP](#3-upnp--nat-pmp--automatic-on-by-default). | `auto` |
+| `GPN_UPNP_RETRY_SECS` | Re-detection cadence while no mapping is live (30–3600). | `600` |
 | `GPN_UPNP_LEASE_SECS` | Mapping lease requested from the router. | `3600` |
 | `GPN_NATPMP_GATEWAY` | Router IP for NAT-PMP when OS detection is unavailable. | auto |
 | `GPN_DIALABLE_TIMEOUT_SECS` | Grace window for dialability evidence. | `120` |
