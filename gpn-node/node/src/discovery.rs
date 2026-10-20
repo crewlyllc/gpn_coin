@@ -313,6 +313,194 @@ pub fn write_persisted_peers(base: &Path, addrs: &[String]) -> Result<(), String
 }
 
 // ---------------------------------------------------------------------------
+// Last-good seed cache (design §3.3)
+// ---------------------------------------------------------------------------
+
+/// Filename (under the node's base path) of the last-good seed-list cache.
+pub const SEED_CACHE_FILE: &str = "gpn-seeds-cache.json";
+
+/// A cache entry older than this is ignored: a week-old seed list is far more
+/// likely to be stale/moved than a week-old *peer* is to be useful.
+pub const SEED_CACHE_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Read the last-good seed list published by a previous successful fetch.
+///
+/// Missing, corrupt or **too old** (`> max_age_secs`) files yield an empty
+/// list — a stale cache must never quietly pin the node to dead seeds.
+pub fn read_seed_cache(base: &Path, max_age_secs: u64) -> Vec<String> {
+    let path = base.join(SEED_CACHE_FILE);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let updated = value.get("updated_unix").and_then(|v| v.as_u64());
+    match updated {
+        Some(ts) if now_unix().saturating_sub(ts) <= max_age_secs => {}
+        // No timestamp = unknown age = untrusted (we only ever write one).
+        _ => return Vec::new(),
+    }
+    value
+        .get("multiaddrs")
+        .cloned()
+        .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
+        .map(|v| merge_dedupe(&[v]))
+        .unwrap_or_default()
+}
+
+/// Persist a freshly-fetched seed list as the last-good cache. Best-effort:
+/// a read-only data dir must not break discovery.
+pub fn write_seed_cache(base: &Path, addrs: &[String]) -> Result<(), String> {
+    let list: Vec<String> = merge_dedupe(&[addrs.to_vec()])
+        .into_iter()
+        .take(MAX_PERSISTED_PEERS)
+        .collect();
+    if list.is_empty() {
+        return Ok(());
+    }
+    let doc = serde_json::json!({ "updated_unix": now_unix(), "multiaddrs": list });
+    let path = base.join(SEED_CACHE_FILE);
+    let bytes = serde_json::to_vec_pretty(&doc).map_err(|e| e.to_string())?;
+    std::fs::write(&path, bytes).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+// ---------------------------------------------------------------------------
+// Periodic refresh policy (design §3.3)
+// ---------------------------------------------------------------------------
+
+/// Refresh cadence: `15 min` while the node is short of peers, `1 h` once it
+/// has enough (`PEER_TARGET`). Consecutive failures multiply the wait
+/// (1×, 2×, 4×, 8× … capped) so a dead publisher is not hammered forever.
+pub const PEER_TARGET: usize = 8;
+pub const REFRESH_FAST_SECS: u64 = 15 * 60;
+pub const REFRESH_SLOW_SECS: u64 = 60 * 60;
+pub const REFRESH_MAX_SECS: u64 = 4 * 60 * 60;
+
+/// The wait before the next seed-list refresh, given how many peers we have
+/// and how many consecutive refreshes have failed.
+///
+/// `jitter_pct` (0..=100) shortens the wait by up to 15 %: nodes that start
+/// together would otherwise hit the publisher on the same 15-minute boundary in
+/// one burst. The caller supplies the sample from the clock so this stays a
+/// pure, testable function, and jitter only ever *reduces* the wait — it can
+/// never push a refresh past the cap.
+pub fn refresh_interval_secs(connected: usize, failures: u32, jitter_pct: u64) -> u64 {
+    refresh_interval_secs_with(connected, failures, jitter_pct, REFRESH_FAST_SECS)
+}
+
+/// The fast cadence, honouring `GPN_SEED_REFRESH_SECS` (floor 30 s, cap 4 h).
+///
+/// The default is the design's 15 minutes; the override exists so an operator
+/// (or a test) can refresh aggressively without rebuilding.
+pub fn fast_refresh_secs() -> u64 {
+    std::env::var("GPN_SEED_REFRESH_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|v| v.clamp(30, REFRESH_MAX_SECS))
+        .unwrap_or(REFRESH_FAST_SECS)
+}
+
+/// [`refresh_interval_secs`] with an explicit fast cadence (pure, testable).
+pub fn refresh_interval_secs_with(
+    connected: usize,
+    failures: u32,
+    jitter_pct: u64,
+    fast_secs: u64,
+) -> u64 {
+    let base = if connected < PEER_TARGET {
+        fast_secs
+    } else {
+        REFRESH_SLOW_SECS
+    };
+    let backoff = 1u64 << failures.min(3); // 1, 2, 4, 8
+    let scaled = base.saturating_mul(backoff).min(REFRESH_MAX_SECS);
+    let jitter_pct = jitter_pct.min(100);
+    scaled.saturating_sub(scaled * 15 / 100 * jitter_pct / 100)
+}
+
+/// Fisher–Yates shuffle using a deterministic xorshift seed, so the whole
+/// published list is dialled in a spread-out order rather than first-only (a
+/// publisher that sorts by uptime would otherwise concentrate every node on
+/// the same three seeds). Deterministic for tests via `seed`.
+pub fn shuffle_in_place(addrs: &mut [String], seed: u64) {
+    if addrs.len() < 2 {
+        return;
+    }
+    let mut state = seed | 1;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    for i in (1..addrs.len()).rev() {
+        let j = (next() % (i as u64 + 1)) as usize;
+        addrs.swap(i, j);
+    }
+}
+
+/// Fetch every configured seed source once and merge the results.
+///
+/// Returns `Ok(list)` only when at least one source produced a dialable
+/// address; `Err` carries a short reason when every source failed (the caller
+/// logs it and keeps the last-good cache). Shared by the startup merge and the
+/// periodic refresh so both obey identical semantics.
+pub async fn fetch_all_seeds(sources: &SeedSources) -> Result<Vec<String>, String> {
+    if sources.dns.is_empty() && sources.urls.is_empty() {
+        return Err("no seed sources configured".to_string());
+    }
+    let mut merged: Vec<String> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    for name in &sources.dns {
+        match resolve_dns_seed(name).await {
+            Ok(v) => merged.extend(v),
+            Err(e) => errors.push(e),
+        }
+    }
+    for url in &sources.urls {
+        match fetch_seed_url(url).await {
+            Ok(v) => merged.extend(v),
+            Err(e) => errors.push(e),
+        }
+    }
+    let list = merge_dedupe(&[merged]);
+    if list.is_empty() {
+        return Err(if errors.is_empty() {
+            "every seed source returned an empty list".to_string()
+        } else {
+            errors.join("; ")
+        });
+    }
+    Ok(list)
+}
+
+// ---------------------------------------------------------------------------
+// Active seed sources (set once at startup, reused by the refresh task)
+// ---------------------------------------------------------------------------
+
+static ACTIVE_SOURCES: std::sync::OnceLock<SeedSources> = std::sync::OnceLock::new();
+
+/// Record the seed sources resolved at startup. First call wins (the sources
+/// are derived from the CLI + registry and cannot change while the node runs).
+pub fn set_active_sources(sources: &SeedSources) {
+    let _ = ACTIVE_SOURCES.set(sources.clone());
+}
+
+/// The seed sources the node was started with (`None` in unit tests / if
+/// startup never ran the merge).
+pub fn active_sources() -> Option<&'static SeedSources> {
+    ACTIVE_SOURCES.get()
+}
+
+// ---------------------------------------------------------------------------
 // Runtime resolvers (best-effort; each returns Result, never panics)
 // ---------------------------------------------------------------------------
 
@@ -753,6 +941,137 @@ mod tests {
     fn default_seed_url_is_the_public_directory() {
         assert_eq!(DEFAULT_SEED_URL, "https://gpncoin.ai/seeds.json");
         assert!(DEFAULT_SEED_URL.starts_with("https://"));
+    }
+
+    // ---- last-good cache -------------------------------------------------
+
+    fn tmp_base(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "gpn-seed-cache-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn seed_cache_roundtrips_and_dedupes() {
+        let base = tmp_base("rt");
+        assert!(read_seed_cache(&base, SEED_CACHE_MAX_AGE_SECS).is_empty());
+        write_seed_cache(&base, &[A.to_string(), A.to_string()]).unwrap();
+        let back = read_seed_cache(&base, SEED_CACHE_MAX_AGE_SECS);
+        assert_eq!(back, vec![A.to_string()], "duplicate seeds collapse");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn stale_or_undated_cache_is_ignored() {
+        // A week-old seed list is more likely moved than useful, so an expired
+        // cache must yield nothing rather than pin the node to dead seeds.
+        let base = tmp_base("stale");
+        write_seed_cache(&base, &[A.to_string()]).unwrap();
+        assert!(read_seed_cache(&base, 3600).len() == 1);
+        // Age it by rewriting with an old timestamp.
+        let path = base.join(SEED_CACHE_FILE);
+        let doc = serde_json::json!({ "updated_unix": 1u64, "multiaddrs": [A] });
+        std::fs::write(&path, serde_json::to_vec(&doc).unwrap()).unwrap();
+        assert!(read_seed_cache(&base, SEED_CACHE_MAX_AGE_SECS).is_empty());
+        // No timestamp at all ⇒ unknown age ⇒ untrusted.
+        let doc = serde_json::json!({ "multiaddrs": [A] });
+        std::fs::write(&path, serde_json::to_vec(&doc).unwrap()).unwrap();
+        assert!(read_seed_cache(&base, SEED_CACHE_MAX_AGE_SECS).is_empty());
+        // Corrupt file ⇒ empty, never a panic.
+        std::fs::write(&path, b"not json").unwrap();
+        assert!(read_seed_cache(&base, SEED_CACHE_MAX_AGE_SECS).is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn empty_fetch_never_clobbers_a_good_cache() {
+        let base = tmp_base("noclobber");
+        write_seed_cache(&base, &[A.to_string()]).unwrap();
+        write_seed_cache(&base, &[]).unwrap();
+        assert_eq!(read_seed_cache(&base, SEED_CACHE_MAX_AGE_SECS).len(), 1);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---- refresh cadence -------------------------------------------------
+
+    #[test]
+    fn refresh_is_fast_while_short_of_peers_and_slow_once_stocked() {
+        assert_eq!(refresh_interval_secs(0, 0, 0), REFRESH_FAST_SECS);
+        assert_eq!(refresh_interval_secs(PEER_TARGET - 1, 0, 0), REFRESH_FAST_SECS);
+        assert_eq!(refresh_interval_secs(PEER_TARGET, 0, 0), REFRESH_SLOW_SECS);
+        assert_eq!(refresh_interval_secs(64, 0, 0), REFRESH_SLOW_SECS);
+    }
+
+    #[test]
+    fn consecutive_failures_back_off_and_are_capped() {
+        let f0 = refresh_interval_secs(0, 0, 0);
+        assert_eq!(refresh_interval_secs(0, 1, 0), f0 * 2);
+        assert_eq!(refresh_interval_secs(0, 2, 0), f0 * 4);
+        assert_eq!(refresh_interval_secs(0, 3, 0), f0 * 8);
+        // Beyond three failures the multiplier stops growing, and the absolute
+        // cap keeps a permanently dead publisher from sleeping forever.
+        assert_eq!(refresh_interval_secs(0, 9, 0), f0 * 8);
+        for failures in 0..10 {
+            for connected in [0usize, 8, 100] {
+                let w = refresh_interval_secs(connected, failures, 50);
+                assert!(w <= REFRESH_MAX_SECS, "{w} exceeds the cap");
+                assert!(w >= REFRESH_FAST_SECS / 2, "{w} is implausibly short");
+            }
+        }
+    }
+
+    #[test]
+    fn jitter_spreads_the_herd_without_changing_the_order_of_magnitude() {
+        let none = refresh_interval_secs(0, 0, 0);
+        let most = refresh_interval_secs(0, 0, 100);
+        assert_eq!(none, REFRESH_FAST_SECS, "no sample = the nominal interval");
+        assert_eq!(most, REFRESH_FAST_SECS * 85 / 100, "max = -15 %");
+        // Out-of-range samples must not panic, explode or exceed the nominal.
+        assert!(refresh_interval_secs(0, 0, 9_999) <= REFRESH_MAX_SECS);
+        assert!(refresh_interval_secs(0, 0, 9_999) >= REFRESH_FAST_SECS * 85 / 100);
+    }
+
+    // ---- shuffle ---------------------------------------------------------
+
+    #[test]
+    fn shuffle_is_a_permutation_and_spreads_first_place() {
+        let items: Vec<String> = (0..12).map(|i| format!("node{i:02}")).collect();
+        let mut firsts = std::collections::HashSet::new();
+        for seed in 1..200u64 {
+            let mut v = items.clone();
+            shuffle_in_place(&mut v, seed);
+            let mut sorted = v.clone();
+            sorted.sort();
+            assert_eq!(sorted, items, "shuffle must be a permutation");
+            firsts.insert(v[0].clone());
+        }
+        assert!(firsts.len() > 3, "the head of the list must not be fixed");
+        // Degenerate inputs are no-ops.
+        let mut one = vec!["solo".to_string()];
+        shuffle_in_place(&mut one, 7);
+        assert_eq!(one, vec!["solo".to_string()]);
+        let mut empty: Vec<String> = Vec::new();
+        shuffle_in_place(&mut empty, 7);
+        assert!(empty.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_all_seeds_reports_failure_when_every_source_is_dead() {
+        let sources = SeedSources::default();
+        assert!(fetch_all_seeds(&sources).await.is_err());
+        let sources = SeedSources {
+            dns: vec!["nonexistent-seed.invalid".into()],
+            urls: vec!["http://127.0.0.1:9/seeds.json".into()],
+        };
+        assert!(
+            fetch_all_seeds(&sources).await.is_err(),
+            "all sources dead must be an error so the caller keeps the cache"
+        );
     }
 
     // Network smoke tests. Ignored by default so `cargo test` stays offline:

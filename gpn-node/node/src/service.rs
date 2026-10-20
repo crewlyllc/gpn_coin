@@ -332,13 +332,45 @@ pub async fn prepare_network_config(
         &registry.bootstrap_seeds,
     ));
 
+    // The refresh task reuses exactly these sources, so record them once.
+    crate::discovery::set_active_sources(sources);
+
     // Resolve each extra source independently (each returns Result, never panics).
     let mut results: Vec<Result<Vec<String>, String>> = Vec::new();
+    let mut from_network: Vec<String> = Vec::new();
     for name in &sources.dns {
-        results.push(crate::discovery::resolve_dns_seed(name).await);
+        let r = crate::discovery::resolve_dns_seed(name).await;
+        if let Ok(v) = &r {
+            from_network.extend(v.clone());
+        }
+        results.push(r);
     }
     for url in &sources.urls {
-        results.push(crate::discovery::fetch_seed_url(url).await);
+        let r = crate::discovery::fetch_seed_url(url).await;
+        if let Ok(v) = &r {
+            from_network.extend(v.clone());
+        }
+        results.push(r);
+    }
+    // Fresh network results are the last-good cache for the next start: if the
+    // publisher is down later, the node still knows who to dial (design §3.3).
+    if !from_network.is_empty() {
+        if let Err(e) = crate::discovery::write_seed_cache(&base, &from_network) {
+            log::debug!("peer-discovery: seed cache write failed: {e}");
+        }
+    } else {
+        // Nothing fetched: fall back to the cached list (bounded age).
+        let cached = crate::discovery::read_seed_cache(
+            &base,
+            crate::discovery::SEED_CACHE_MAX_AGE_SECS,
+        );
+        if !cached.is_empty() {
+            log::info!(
+                "peer-discovery: seed sources unavailable — using {} cached seed(s)",
+                cached.len()
+            );
+            results.push(Ok(cached));
+        }
     }
     // The persisted peer store acts as one more (always-available) source.
     results.push(Ok(crate::discovery::read_persisted_peers(&base)));
@@ -790,6 +822,75 @@ pub async fn new_full<
                     }
                 }
             });
+    }
+
+    // ---- Periodic seed-list refresh (design §3.3) ------------------------
+    // Startup resolution is a snapshot: a publisher that adds seeds, a DNS
+    // seed that changes, or a long-running node that drifts down to zero peers
+    // would otherwise never re-read it. Refresh at 15 min while short of
+    // peers / 1 h otherwise, with ±15 % jitter and a backoff multiplier on
+    // consecutive failures. Newly-published seeds are dialled immediately
+    // (`add_known_address`) and written to the last-good cache.
+    if let Some(sources) = crate::discovery::active_sources() {
+        if !(sources.dns.is_empty() && sources.urls.is_empty()) {
+            let net = network.clone();
+            let base = base_path.clone();
+            let sources = sources.clone();
+            task_manager
+                .spawn_handle()
+                .spawn("gpn-seed-refresh", None, async move {
+                    let mut failures: u32 = 0;
+                    let fast = crate::discovery::fast_refresh_secs();
+                    loop {
+                        let connected = net.sync_num_connected();
+                        let sample = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.subsec_nanos() as u64)
+                            .unwrap_or(0);
+                        let jitter = (sample / 10) % 100;
+                        let wait = crate::discovery::refresh_interval_secs_with(
+                            connected, failures, jitter, fast,
+                        );
+                        tokio::time::sleep(Duration::from_secs(wait)).await;
+
+                        match crate::discovery::fetch_all_seeds(&sources).await {
+                            Ok(mut addrs) => {
+                                failures = 0;
+                                if let Err(e) =
+                                    crate::discovery::write_seed_cache(&base, &addrs)
+                                {
+                                    log::debug!("seed-refresh: cache write failed: {e}");
+                                }
+                                crate::discovery::shuffle_in_place(&mut addrs, sample | 1);
+                                let mut dialled = 0usize;
+                                for ma in addrs {
+                                    if let Ok(mw) = ma.parse::<MultiaddrWithPeerId>() {
+                                        net.add_known_address(mw.peer_id, mw.multiaddr);
+                                        dialled += 1;
+                                    }
+                                }
+                                log::info!(
+                                    "seed-refresh: {dialled} seed(s) re-read from {} source(s) \
+                                     (peers {connected}); next refresh in {}s",
+                                    sources.dns.len() + sources.urls.len(),
+                                    crate::discovery::refresh_interval_secs_with(
+                                        connected, 0, jitter, fast
+                                    )
+                                );
+                            }
+                            Err(e) => {
+                                failures = failures.saturating_add(1);
+                                // Quiet while retrying: a down publisher is
+                                // expected and must not spam the operator.
+                                log::debug!(
+                                    "seed-refresh: source(s) unavailable ({e}); \
+                                     attempt {failures}, backing off"
+                                );
+                            }
+                        }
+                    }
+                });
+        }
     }
 
     if config.offchain_worker.enabled {

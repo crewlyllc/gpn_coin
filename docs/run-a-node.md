@@ -368,6 +368,7 @@ recovers), never every 10 minutes.
 | `GPN_UPNP_RETRY_SECS` | Re-detection cadence while no mapping is live (30–3600). | `600` |
 | `GPN_NATPMP_GATEWAY` | Router IP for NAT-PMP when OS gateway detection is unavailable (e.g. Windows). | auto |
 | `GPN_SEED_PORT` | The TCP port to open; also the internal port. | `30333` |
+| `GPN_SEED_REFRESH_SECS` | How often the published seed list is re-read while the node has fewer than 8 peers (30–14400). The list is cached for 7 days, so a publisher outage does not strand a restart. | `900` |
 
 ### 4. CGNAT — when forwarding is impossible
 

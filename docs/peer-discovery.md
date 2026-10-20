@@ -76,6 +76,27 @@ union them); the compiled-in `--bootnodes` always remain as the last-resort
 fallback. The supervisor exposes the same setting as `bootnodes_url` in
 `node.toml` and as `GPN_BOOTNODES_URL`.
 
+### Refresh + last-good cache (a node does not re-read the list only once)
+
+Startup resolution is a snapshot, so the node keeps reading it:
+
+* **Cadence** — every **15 minutes while it has fewer than 8 peers**, otherwise
+  **hourly**, with ±15 % (downward) jitter so a fleet started together does not
+  hit the publisher in one burst. Consecutive failures multiply the wait
+  (2×, 4×, 8×) and the wait is capped at 4 h, so a dead publisher is not
+  hammered and never stops being retried.
+* **Dialling** — each refreshed list is **shuffled** before dialling (Fisher–
+  Yates) and every entry is passed to `add_known_address`, so a list sorted by
+  uptime cannot funnel the whole network onto the same three seeds.
+* **Last-good cache** — every successful fetch is written to
+  `<base-path>/gpn-seeds-cache.json` (`{updated_unix, multiaddrs[]}`). If the
+  publishers are all unreachable at startup, the node falls back to that cache
+  and logs `seed sources unavailable — using N cached seed(s)`. A cache older
+  than **7 days** is ignored rather than pinning the node to moved seeds; an
+  empty fetch never overwrites a good cache.
+* `GPN_SEED_REFRESH_SECS` overrides the 15-minute cadence (floor 30 s, cap 4 h)
+  — useful for testing an aggressive refresh.
+
 ### On-chain discovery (GPN-native top-up)
 
 Once the node has at least one connection, a background task reads two on-chain
