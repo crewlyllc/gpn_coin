@@ -113,7 +113,7 @@ fn print_help() {
            --expect-code-hash <h>   expected :code blake2_256 (verify)\n\
            --track <name>           governance track (only `committee` exists)\n\
            --call <name>            set_code (default) | set_code_without_checks (emergency)\n\
-           --mode <inline|preimage> proposal encoding (preimage needs a staged runtime patch)\n\
+           --mode <inline|preimage> proposal encoding (preimage needs the staged design)\n\
            --block-time <secs>      seconds per block for ETA display (default {DEFAULT_BLOCK_TIME})\n\
            --timeout <secs>         verify timeout (default 900)\n\
            --interval <secs>        verify poll interval (default 6)\n\
