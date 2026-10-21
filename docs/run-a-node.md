@@ -675,6 +675,94 @@ pull keeps you *earning*, but only a dialable node can be a backbone seed.
   `[assign] pulled #<id> (payload stored)` per assignment. `[assign] AP rejected
 the pull (401)` means `GPN_ASSIGN_TOKEN` does not match the AP's.
 
+## Off-chain escrow (payment channels) — AI jobs without a block wait
+
+By default an AI job is escrowed **per job** on chain
+(`create_job` → `claim` → `submit_result` → `complete_job`), so it waits on the
+block clock (typically ~15–20 s, occasionally 60–140 s on a slow seal).
+
+**Channel mode** locks a deposit **once** per provider and then moves the
+per-job payment off-chain as two signatures. Measured steady state on the dev
+fleet: **~0.2–0.4 s** end-to-end for a short LLM answer, with **zero per-job
+transactions**. Design and guarantees:
+`docs/design/design-offchain-escrow-channels.md` (§11–18).
+
+It is on by default and **falls back per request** to the on-chain path if
+anything is unavailable (provider doesn't serve `/channel/job`, the channel
+can't be opened, a signature fails), so enabling it can never lose a job.
+
+### Access point
+
+```bash
+# defaults: GPN_ESCROW_MODE=channel, deposit 100 GPN, TTL 25 920 blocks
+gpn_scheduler --listen 0.0.0.0:8092 --signer-uri <ap-seed> --allow-hot-wallet
+```
+
+| Env | Default | Meaning |
+|---|---|---|
+| `GPN_ESCROW_MODE` | `channel` | `onchain` = always use per-job escrow (the old behaviour) |
+| `GPN_HUB_CHANNEL_DEPOSIT` | `1e14` (100 GPN) | locked once per provider; `0` disables channel mode |
+| `GPN_HUB_CHANNEL_TTL` | `25920` blocks | the channel deadline (force-close window) |
+| `GPN_HUB_CLOSE_AT` | `deposit/2` | cooperative settle threshold (provider balance) |
+| `GPN_HUB_CLOSE_NONCE` | `500` | ...or this many off-chain updates |
+| `GPN_HUB_STATE` | `~/.gpn/hub_channels.json` | channel registry (restart-safe) |
+
+Watch it work:
+
+```
+[hub] opening channel → 5ENq… (deposit=100000000000000 ttl=25920 blocks, once)
+[hub] channel 2 ready for 5ENq… (deposit 100000000000000)
+[hub] job 1792609125307 served off-chain on channel 2 (nonce 2, provider balance 6026365344)
+[hub] settling channel 2 (nonce 2, provider 6026365344)
+[hub] channel 2 settled on chain
+```
+
+`POST /jobs` responses gain `"escrow":"channel"`, `channel_id`, and the
+off-chain `job_id` (a local id, **not** a chain job id). The channel's on-chain
+state stays at its last settled nonce until the settler runs — that is correct,
+not a bug.
+
+### Provider
+
+The provider serves `POST /channel/job` on **heartbeat port + 1** (the same
+loopback server as the chain-free `/infer`, i.e. `:8094` next to `:8093`), so no
+new inbound port is needed. Actions:
+
+- accept a signed assignment (verify both signatures, nonce, exact price,
+  deadline) and persist the pre-paid state **before** running inference;
+- sign the result (or a full refund) plus its half of the channel settlement;
+- keep state in `GPN_PROVIDER_CHANNEL_STATE` (default
+  `~/.gpn/provider_channels.json`).
+
+`GPN_ESCROW_MODE=onchain` on the provider disables the endpoint (it 404s and
+the AP falls back). `GPN_CHANNEL_SKIP_CHAIN_CHECK=1` skips the one-time
+on-chain channel verification — **dev only**.
+
+### Client: deposit and withdraw
+
+```bash
+# once per provider — this is the only funding tx
+gpn_channel deposit ws://127.0.0.1:9944 //Charlie 5ENq…Sp5Q 100000000000000 25920
+gpn_channel id      ws://127.0.0.1:9944 //Charlie 5ENq…Sp5Q
+gpn_channel info    ws://127.0.0.1:9944 1
+# settle back
+gpn_channel withdraw ws://127.0.0.1:9944 //Charlie 1 <br> <bp> <nonce> <sig_req> <sig_prov>
+```
+
+(`open`/`close` are the same commands; `sign` produces one party's half for an
+out-of-band exchange.)
+
+### Prove it end-to-end
+
+```bash
+PROVIDER_SIGNER=<registered-provider-seed> PROVIDER_ADDR=<its ss58> JOBS=3 \
+  bash scripts/test-channel-e2e.sh
+```
+
+The script snapshots `ComputeMarketplace::NextJobId`, serves N jobs through a
+channel, asserts `NextJobId` **did not move** (no per-job tx), prints each job's
+wall time and the off-chain channel state, then settles on chain cooperatively.
+
 ## How to become a seed / bootstrap node
 
 A **seed** is a backbone node that is published as a bootstrap dial target.
