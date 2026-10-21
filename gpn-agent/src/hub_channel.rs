@@ -79,6 +79,18 @@ impl PubKey {
     }
 }
 
+impl PubKey {
+    /// Accept either a `0x`-hex 32-byte public key or an ss58 address (the
+    /// scheduler's provider registry keys on ss58).
+    pub fn parse(s: &str) -> Option<Self> {
+        if let Some(p) = Self::from_hex(s) {
+            return Some(p);
+        }
+        use sp_core::crypto::Ss58Codec;
+        Public::from_ss58check(s.trim()).ok().map(|p| Self(p.0))
+    }
+}
+
 impl Signature64 {
     pub fn to_hex(self) -> String {
         format!("0x{}", hex::encode(self.0))
@@ -516,7 +528,11 @@ impl HubChannel {
         if r.channel_id != self.channel_id {
             return Err(HubError::ChannelMismatch);
         }
-        let p = self.pending.get(&r.job_id).ok_or(HubError::UnknownJob)?.clone();
+        let p = self
+            .pending
+            .get(&r.job_id)
+            .ok_or(HubError::UnknownJob)?
+            .clone();
         // Authenticate before interpreting the state: a forged result must never
         // be classified by its (attacker-chosen) balances.
         if !verify_sig(&r.provider, &result_payload(r), &r.sig_provider) {
@@ -589,15 +605,14 @@ impl HubChannel {
     }
 
     /// Build the cooperative-close material for the *latest signed* state.
-    pub fn close_material(
-        &self,
-        signer: &Sr25519Signer,
-    ) -> Result<CloseMaterial, HubError> {
+    pub fn close_material(&self, signer: &Sr25519Signer) -> Result<CloseMaterial, HubError> {
         let sig_provider = self.latest_provider_sig.ok_or(HubError::UnknownJob)?;
         Ok(CloseMaterial {
             channel_id: self.channel_id,
             state: self.state,
-            sig_requestor: Signature64(signer.sign_raw(&self.state.settle_payload(self.channel_id))),
+            sig_requestor: Signature64(
+                signer.sign_raw(&self.state.settle_payload(self.channel_id)),
+            ),
             sig_provider,
         })
     }
@@ -657,8 +672,10 @@ impl ProviderChannel {
             return Err(HubError::Expired);
         }
         if a.price == 0
-            || a.state_after.balance_requestor != a.state_before.balance_requestor.saturating_sub(a.price)
-            || a.state_after.balance_provider != a.state_before.balance_provider.saturating_add(a.price)
+            || a.state_after.balance_requestor
+                != a.state_before.balance_requestor.saturating_sub(a.price)
+            || a.state_after.balance_provider
+                != a.state_before.balance_provider.saturating_add(a.price)
             || a.state_after.nonce != a.state_before.nonce + 1
         {
             return Err(HubError::PaymentNotExact);
@@ -703,7 +720,11 @@ impl ProviderChannel {
         prompt_tokens: u32,
         completion_tokens: u32,
     ) -> Result<JobResultMsg, HubError> {
-        let job = self.accepted.get(&job_id).ok_or(HubError::UnknownJob)?.clone();
+        let job = self
+            .accepted
+            .get(&job_id)
+            .ok_or(HubError::UnknownJob)?
+            .clone();
         let mut r = JobResultMsg {
             channel_id: self.channel_id,
             job_id,
@@ -730,7 +751,11 @@ impl ProviderChannel {
         job_id: u64,
         error: &str,
     ) -> Result<JobResultMsg, HubError> {
-        let job = self.accepted.get(&job_id).ok_or(HubError::UnknownJob)?.clone();
+        let job = self
+            .accepted
+            .get(&job_id)
+            .ok_or(HubError::UnknownJob)?
+            .clone();
         let after = ChannelState {
             balance_requestor: job.before.balance_requestor,
             balance_provider: job.before.balance_provider,
@@ -812,7 +837,17 @@ mod tests {
     fn happy_path_moves_exact_value_and_advances_nonce() {
         let (ap, prov, mut ch, mut pch) = setup(1_000);
         let a = ch
-            .begin_job_for(&ap, PubKey(prov.public_key()), 1, "m", "hello", 32, 700, 100, 0)
+            .begin_job_for(
+                &ap,
+                PubKey(prov.public_key()),
+                1,
+                "m",
+                "hello",
+                32,
+                700,
+                100,
+                0,
+            )
             .unwrap();
         pch.accept(&a).unwrap();
         assert_eq!(pch.state.balance_provider, 100);
@@ -835,7 +870,17 @@ mod tests {
     fn assignment_signature_binds_prompt_and_price() {
         let (ap, prov, mut ch, mut pch) = setup(1_000);
         let a = ch
-            .begin_job_for(&ap, PubKey(prov.public_key()), 1, "m", "hello", 32, 700, 100, 0)
+            .begin_job_for(
+                &ap,
+                PubKey(prov.public_key()),
+                1,
+                "m",
+                "hello",
+                32,
+                700,
+                100,
+                0,
+            )
             .unwrap();
         // Tamper: same state, a bigger prompt / cheaper price.
         let mut t = a.clone();
@@ -1088,14 +1133,27 @@ mod tests {
     }
 
     #[test]
+    fn pubkey_parses_hex_and_ss58() {
+        // The scheduler's provider registry keys on ss58; signatures need the
+        // 32 raw bytes. Both forms must resolve to the same key.
+        let ss58 = "5ENqSp5Q65bxfgryZExQDRnV1rEW1qb2UBztvswLamkoUrqj";
+        let want = PubKey::parse(ss58).expect("ss58");
+        assert_eq!(
+            want.to_hex(),
+            "0x664c6e12d0eff26c646b764f733f0468d44deea02f856ab9f1b629af06993d01"
+        );
+        assert_eq!(PubKey::parse(&want.to_hex()), Some(want));
+        assert_eq!(PubKey::parse("garbage"), None);
+    }
+
+    #[test]
     fn registry_roundtrips_and_keeps_channel_state() {
         let (ap, prov, mut ch, _pch) = setup(500);
         let _ = ch
             .begin_job_for(&ap, PubKey(prov.public_key()), 1, "m", "p", 8, 0, 5, 0)
             .unwrap();
         let mut reg = HubRegistry::default();
-        reg.channels
-            .insert(PubKey(prov.public_key()).to_hex(), ch);
+        reg.channels.insert(PubKey(prov.public_key()).to_hex(), ch);
         let dir = std::env::temp_dir().join(format!("gpn-hub-{}", std::process::id()));
         let p = dir.join("hub.json");
         let _ = std::fs::remove_dir_all(&dir);

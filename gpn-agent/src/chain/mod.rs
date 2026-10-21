@@ -47,6 +47,22 @@ pub struct OnChainFeed {
     pub updated_at_block: u64,
 }
 
+/// An on-chain escrow channel (`ComputeMarketplace::Channels` + its escrow).
+#[derive(Clone, Debug)]
+pub struct OnChainChannel {
+    pub channel_id: u64,
+    /// `0x`-hex account ids as stored on chain.
+    pub requestor_hex: String,
+    pub provider_hex: String,
+    /// Locked escrow (0 once settled).
+    pub deposit: u128,
+    pub balance_requestor: u128,
+    pub balance_provider: u128,
+    pub nonce: u64,
+    pub deadline: u32,
+    pub is_open: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AccountInfo {
     pub address: String,
@@ -876,6 +892,108 @@ impl ChainClient {
             ],
         )
         .await
+    }
+
+    /// Look up the live channel for a `(requestor, provider)` pair
+    /// (`ComputeMarketplace::ChannelIndex`). Returns `None` when no channel is
+    /// open or the chain is unreachable.
+    pub async fn get_channel_id(&self, requestor: &[u8; 32], provider: &[u8; 32]) -> Option<u64> {
+        let client = self.client.as_ref()?;
+        let addr = subxt::dynamic::storage(
+            "ComputeMarketplace",
+            "ChannelIndex",
+            vec![Value::unnamed_composite(vec![
+                Value::from_bytes(requestor.as_slice()),
+                Value::from_bytes(provider.as_slice()),
+            ])],
+        );
+        if let Some(v) = self.storage_at_head(client, &addr).await {
+            if let Some(n) = v.as_u128() {
+                return Some(n as u64);
+            }
+        }
+        // Fallback: a composite `(AccountId, AccountId)` storage key is not
+        // reliably addressable through subxt's dynamic-key builder, and a tuple
+        // key is not reliably iterable either. Channels are few (one live per
+        // pair), so scan `Channels[1..NextChannelId]` and match the parties.
+        // This runs at most once per provider per AP process (the result is
+        // cached in the hub registry), so the cost is irrelevant.
+        let next = self.get_next_channel_id().await?;
+        for id in 1..next.max(2) {
+            if let Some(c) = self.get_channel(id).await {
+                if !c.is_open {
+                    continue;
+                }
+                if c.requestor_hex == format!("0x{}", hex::encode(requestor))
+                    && c.provider_hex == format!("0x{}", hex::encode(provider))
+                {
+                    return Some(id);
+                }
+            }
+        }
+        None
+    }
+
+    /// `ComputeMarketplace::NextChannelId` (the next id to be assigned).
+    pub async fn get_next_channel_id(&self) -> Option<u64> {
+        let client = self.client.as_ref()?;
+        let addr = subxt::dynamic::storage("ComputeMarketplace", "NextChannelId", vec![]);
+        let v = self.storage_at_head(client, &addr).await?;
+        v.as_u128().map(|n| n as u64)
+    }
+
+    /// Read an on-chain channel record + its locked escrow.
+    pub async fn get_channel(&self, channel_id: u64) -> Option<OnChainChannel> {
+        let client = self.client.as_ref()?;
+        let addr = subxt::dynamic::storage(
+            "ComputeMarketplace",
+            "Channels",
+            vec![Value::u128(channel_id as u128)],
+        );
+        let v = self.storage_at_head(client, &addr).await?;
+        let state = get_field(&v, "state")
+            .map(|t| {
+                use subxt::ext::scale_value::ValueDef;
+                match &t.value {
+                    ValueDef::Variant(v) => v.name.clone(),
+                    _ => String::new(),
+                }
+            })
+            .unwrap_or_default();
+        let deposit = {
+            let e = subxt::dynamic::storage(
+                "ComputeMarketplace",
+                "ChannelEscrow",
+                vec![Value::u128(channel_id as u128)],
+            );
+            self.storage_at_head(client, &e)
+                .await
+                .and_then(|x| x.as_u128())
+                .unwrap_or(0)
+        };
+        Some(OnChainChannel {
+            channel_id,
+            requestor_hex: get_field(&v, "requestor")
+                .map(|x| format!("0x{}", hex::encode(bytes_from_dynamic(x, 32))))
+                .unwrap_or_default(),
+            provider_hex: get_field(&v, "provider")
+                .map(|x| format!("0x{}", hex::encode(bytes_from_dynamic(x, 32))))
+                .unwrap_or_default(),
+            deposit,
+            balance_requestor: get_field(&v, "balance_requestor")
+                .and_then(|x| x.as_u128())
+                .unwrap_or(0),
+            balance_provider: get_field(&v, "balance_provider")
+                .and_then(|x| x.as_u128())
+                .unwrap_or(0),
+            nonce: get_field(&v, "nonce")
+                .and_then(|x| x.as_u128())
+                .unwrap_or(0) as u64,
+            deadline: get_field(&v, "deadline")
+                .and_then(|x| x.as_u128())
+                .unwrap_or(0) as u32,
+            is_open: state == "Open",
+        })
     }
 
     /// `ComputeMarketplace::create_job(...)` — a requestor posts a paid AI job
@@ -1754,7 +1872,11 @@ impl ChainClient {
 
         let (window_blocks, lookback) = self.liveness_constants().await;
         let head = self.head_block_number().await.unwrap_or(0);
-        let current_window = if window_blocks == 0 { 0 } else { head / window_blocks };
+        let current_window = if window_blocks == 0 {
+            0
+        } else {
+            head / window_blocks
+        };
 
         let mut out = Vec::new();
         let fn_addr = subxt::dynamic::storage("Liveness", "FullNodes", vec![]);
@@ -2214,6 +2336,33 @@ fn account_id_to_string(value: &subxt::dynamic::Value) -> String {
 
 /// Recursively collect up to 32 byte-sized (0..=255) leaf primitives from a
 /// scale-value tree, descending through any nested composites/variants.
+/// Like [`collect_account_bytes`] but **without** the 32-byte cap, so a
+/// composite tuple key `(AccountId, AccountId)` can be reconstructed in full.
+fn collect_key_bytes(value: &subxt::dynamic::Value, out: &mut Vec<u8>) {
+    use subxt::ext::scale_value::ValueDef;
+    match &value.value {
+        ValueDef::Composite(c) => {
+            for v in c.values() {
+                collect_key_bytes(v, out);
+            }
+        }
+        ValueDef::Variant(v) => {
+            for v in v.values.values() {
+                collect_key_bytes(v, out);
+            }
+        }
+        ValueDef::Primitive(subxt::ext::scale_value::Primitive::U128(n)) => {
+            if *n <= 255 {
+                out.push(*n as u8);
+            }
+        }
+        ValueDef::Primitive(subxt::ext::scale_value::Primitive::U256(b)) => {
+            out.extend_from_slice(b);
+        }
+        _ => {}
+    }
+}
+
 fn collect_account_bytes(value: &subxt::dynamic::Value, out: &mut Vec<u8>) {
     use subxt::ext::scale_value::ValueDef;
     if out.len() >= 32 {
