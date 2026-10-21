@@ -883,8 +883,107 @@ fn return_result(id: u64) {
     }
 }
 
+/// Item #56: how long a single `/api/pull` may block before we consider the
+/// worker wedged and let another one start. Was 3600 s — a wedged pull could
+/// hold a worker thread for an hour.
+const MODEL_PULL_TIMEOUT_SECS: u64 = 600;
+
+/// Also the in-flight window: while a prep worker started less than this ago is
+/// running for a model, no second worker is started for it. A failed pull
+/// records its finish time here, so a broken model is retried every ~10 min
+/// instead of once per poll pass.
+const MODEL_PREP_STUCK_AFTER: Duration = Duration::from_secs(MODEL_PULL_TIMEOUT_SECS);
+
+enum PrepAction {
+    /// No worker holds this model (or the previous one is past the stuck
+    /// window) — start one.
+    Spawn,
+    /// A worker is already working on it — do nothing.
+    Busy,
+}
+
+/// Pure decision: may a prep worker be started for a model whose current book
+/// entry is `prev`?
+fn prep_action(prev: Option<Instant>, now: Instant) -> PrepAction {
+    match prev {
+        // `checked_` so a stamp in the future (clock moved backwards) reads as
+        // "not in flight" rather than locking the model out until the clocks
+        // agree again.
+        Some(started) => match now.checked_duration_since(started) {
+            Some(elapsed) if elapsed < MODEL_PREP_STUCK_AFTER => PrepAction::Busy,
+            _ => PrepAction::Spawn,
+        },
+        None => PrepAction::Spawn,
+    }
+}
+
+/// Model → when its last prep worker started (or finished, on failure).
+fn model_prep() -> &'static Mutex<HashMap<String, Instant>> {
+    static BOOK: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    BOOK.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Item #56: start (or find already running) a BACKGROUND probe+pull for
+/// `model`, and return immediately.
+///
+/// Root cause this exists for: the pre-claim loop used to call `ensure_model`
+/// synchronously for every assigned job, and `ensure_model` blocks on
+/// `POST /api/pull` with a 3600 s timeout. One client asking for an uninstalled
+/// model therefore parked the whole claim loop for 10 m 33 s (2026-10-21
+/// 15:10) and every other job — all using an already-installed model — missed
+/// the AP's 120 s window and was cancelled.
+///
+/// Correctness note: nothing is blocked *waiting* for this. The job can still
+/// be claimed and run this pass — `resolve_model` already falls back to an
+/// installed model when the requested one is absent — so a cold pull costs
+/// model fidelity for a few jobs, never availability for all of them.
+fn kick_model_prep(model: &str) -> PrepAction {
+    if model.is_empty() || model == "auto" {
+        return PrepAction::Busy; // nothing concrete to prepare
+    }
+    if gpn_agent::llm::infer::model_presence_cached(model) == Some(true) {
+        return PrepAction::Busy; // already present: zero work, zero HTTP
+    }
+    let now = Instant::now();
+    {
+        let Ok(mut book) = model_prep().lock() else {
+            return PrepAction::Busy; // poisoned book: never block the claim lane
+        };
+        if let PrepAction::Busy = prep_action(book.get(model).copied(), now) {
+            return PrepAction::Busy;
+        }
+        book.insert(model.to_string(), now);
+    }
+    let owned = model.to_string();
+    std::thread::spawn(move || {
+        match ensure_model(&owned) {
+            Ok(note) => println!("[provider] model prep: {note}"),
+            Err(e) => {
+                if !is_ollama_unavailable(&e) {
+                    eprintln!("[provider] model prep {owned}: {e}");
+                }
+            }
+        }
+        if let Ok(mut book) = model_prep().lock() {
+            if gpn_agent::llm::infer::model_presence_cached(&owned) == Some(true) {
+                // Present now: the cache short-circuits future passes, so the
+                // book entry is no longer needed.
+                book.remove(&owned);
+            } else {
+                // Failed (or not confirmed): keep the finish time so the retry
+                // waits out the stuck window instead of spinning on a pull.
+                book.insert(owned.clone(), Instant::now());
+            }
+        }
+    });
+    PrepAction::Spawn
+}
+
 /// Ensure `model` is present locally; if not, pull it from Ollama / HuggingFace.
 /// Returns a human-readable note about what happened.
+///
+/// BLOCKING — may sit in `/api/pull` for up to `MODEL_PULL_TIMEOUT_SECS`.
+/// Never call this from the claim loop; use `kick_model_prep` there.
 fn ensure_model(model: &str) -> Result<String, String> {
     if model.is_empty() || model == "auto" {
         return Ok("no specific model requested".into());
@@ -899,7 +998,7 @@ fn ensure_model(model: &str) -> Result<String, String> {
     }
     let base = gpn_agent::llm::infer::default_ollama_url();
     let cli = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(3600))
+        .timeout(Duration::from_secs(MODEL_PULL_TIMEOUT_SECS))
         .build()
         .map_err(|e| e.to_string())?;
     // Preflight: without ollama there is nothing to pull. Warn once, clearly,
@@ -1484,7 +1583,9 @@ async fn process_once(
             .map(|(id, _)| id)
             .collect()
     } else {
-        // Model-aware: pull any requested-but-missing model BEFORE claiming.
+        // Model-aware: prepare any requested-but-missing model. Item #56: this
+        // is now a BACKGROUND kick, never a blocking pull — a cold model used to
+        // park the whole claim lane for minutes and starve every other job.
         // Only LLM jobs: ignore image/video jobs the scheduler may have (mis)assigned,
         // otherwise we spam `ollama pull` for foreign models (e.g. sd-turbo) forever.
         // Also skip finished jobs and `auto`/empty requests (nothing concrete to pull).
@@ -1497,10 +1598,12 @@ async fn process_once(
                 continue;
             }
             let _ = pull;
-            if let Err(e) = ensure_model(model) {
-                if !is_ollama_unavailable(&e) {
-                    eprintln!("[provider] job #{id}: {e}");
-                }
+            if let PrepAction::Spawn = kick_model_prep(model) {
+                println!(
+                    "[provider] job #{id}: model {model} not installed — pulling in the \
+                     background (this job runs on the installed fallback meanwhile, so other \
+                     jobs are NOT held up)"
+                );
             }
         }
         assigned
@@ -1899,6 +2002,46 @@ async fn run_job(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod model_prep_tests {
+    use super::{prep_action, PrepAction, MODEL_PREP_STUCK_AFTER};
+    use std::time::{Duration, Instant};
+
+    /// Item #56: a cold-model pull must never park the claim lane. The book
+    /// allows exactly one worker per model, and a wedged worker stops counting
+    /// as in-flight once its window expires so a stuck pull cannot pin a model
+    /// forever.
+    #[test]
+    fn model_prep_starts_once_and_releases_after_the_stuck_window() {
+        let now = Instant::now();
+        // Nothing in flight => start a worker.
+        assert!(matches!(prep_action(None, now), PrepAction::Spawn));
+        // Just started => do not stack a second pull for the same model.
+        assert!(matches!(
+            prep_action(Some(now - Duration::from_secs(1)), now),
+            PrepAction::Busy
+        ));
+        assert!(matches!(
+            prep_action(Some(now - MODEL_PREP_STUCK_AFTER + Duration::from_secs(1)), now),
+            PrepAction::Busy
+        ));
+        // Window elapsed (wedged pull, or a recorded failure) => retry allowed.
+        assert!(matches!(
+            prep_action(Some(now - MODEL_PREP_STUCK_AFTER), now),
+            PrepAction::Spawn
+        ));
+        assert!(matches!(
+            prep_action(Some(now - Duration::from_secs(3600)), now),
+            PrepAction::Spawn
+        ));
+        // A clock that appears to jump backwards must not lock the model out.
+        assert!(matches!(
+            prep_action(Some(now + Duration::from_secs(60)), now),
+            PrepAction::Spawn
+        ));
+    }
 }
 
 #[cfg(test)]
