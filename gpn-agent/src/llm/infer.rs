@@ -165,6 +165,10 @@ pub fn ollama_reachable() -> bool {
 #[derive(Deserialize)]
 struct ChatResponse {
     choices: Vec<Choice>,
+    /// ollama's OpenAI-compatible endpoints return `usage`; older builds may
+    /// omit it, so a missing block is `None`, never an error.
+    #[serde(default)]
+    usage: Option<Usage>,
 }
 #[derive(Deserialize)]
 struct Choice {
@@ -174,6 +178,46 @@ struct Choice {
 struct Message {
     content: String,
 }
+#[derive(Deserialize)]
+struct Usage {
+    #[serde(default)]
+    prompt_tokens: u32,
+    #[serde(default)]
+    completion_tokens: u32,
+    #[serde(default)]
+    total_tokens: u32,
+}
+
+/// Token counts reported by the inference backend for one completion.
+///
+/// This is the *authoritative* usage number: ollama counts with the model's own
+/// tokenizer, so it is what an OpenAI-compatible client expects in
+/// `usage.prompt_tokens` / `usage.completion_tokens`. Absent/unreported stays
+/// `None` — callers must not invent a count (a char/4 heuristic is only ever a
+/// billing fallback, never what the API reports).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenUsage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
+}
+
+impl TokenUsage {
+    /// Build from a backend report; `total` is derived when the backend leaves
+    /// it at 0 (ollama sets it, but a proxy in front of it may not).
+    pub fn new(prompt_tokens: u32, completion_tokens: u32, total_tokens: u32) -> Self {
+        let total = if total_tokens == 0 {
+            prompt_tokens.saturating_add(completion_tokens)
+        } else {
+            total_tokens
+        };
+        Self {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: total,
+        }
+    }
+}
 
 /// Run a single chat completion. Returns (text, sha256_hex_of_text).
 pub async fn run_inference(
@@ -182,6 +226,18 @@ pub async fn run_inference(
     temperature: f32,
     max_tokens: u32,
 ) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let (text, hash, _usage) = run_inference_with_usage(model, prompt, temperature, max_tokens).await?;
+    Ok((text, hash))
+}
+
+/// Same call as [`run_inference`], but also returns the backend's token usage
+/// (`None` when the backend does not report it).
+pub async fn run_inference_with_usage(
+    model: &str,
+    prompt: &str,
+    temperature: f32,
+    max_tokens: u32,
+) -> Result<(String, String, Option<TokenUsage>), Box<dyn std::error::Error>> {
     let url = format!("{}/v1/chat/completions", default_ollama_url());
     let body = serde_json::json!({
         "model": model,
@@ -202,6 +258,9 @@ pub async fn run_inference(
         return Err(format!("ollama error {}: {}", status, &text[..text.len().min(300)]).into());
     }
     let parsed: ChatResponse = resp.json().await?;
+    let usage = parsed.usage.map(|u| {
+        TokenUsage::new(u.prompt_tokens, u.completion_tokens, u.total_tokens)
+    });
     let text = parsed
         .choices
         .into_iter()
@@ -212,7 +271,7 @@ pub async fn run_inference(
     let mut h = Sha256::new();
     h.update(text.as_bytes());
     let hash = hex::encode(h.finalize());
-    Ok((text, hash))
+    Ok((text, hash, usage))
 }
 
 #[derive(Deserialize)]
@@ -317,6 +376,18 @@ mod tests {
         assert_eq!(normalize_ml_task(Some(" Embeddings ")), "embeddings");
         assert_eq!(normalize_ml_task(Some("embed")), "embeddings");
         assert_eq!(normalize_ml_task(Some("nonsense")), "generate");
+    }
+
+    #[test]
+    fn usage_total_is_derived_when_the_backend_omits_it() {
+        let u = TokenUsage::new(12, 30, 42);
+        assert_eq!((u.prompt_tokens, u.completion_tokens, u.total_tokens), (12, 30, 42));
+        // A proxy in front of ollama may drop `total_tokens`; derive it.
+        let u = TokenUsage::new(12, 30, 0);
+        assert_eq!(u.total_tokens, 42);
+        // Saturating, never wrapping.
+        let u = TokenUsage::new(u32::MAX, u32::MAX, 0);
+        assert_eq!(u.total_tokens, u32::MAX);
     }
 
     #[test]

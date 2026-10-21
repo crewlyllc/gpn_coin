@@ -167,6 +167,13 @@ pub struct LlmJob {
     /// e.g. "image/png", "video/mp4"
     pub artifact_media_type: Option<String>,
     pub error: Option<String>,
+    /// Token counts reported by the inference backend (item #53). `None` when
+    /// the backend did not report them (or for artifact/embedding jobs); never a
+    /// guess. `#[serde(default)]` keeps every older store entry readable.
+    #[serde(default)]
+    pub prompt_tokens: Option<u32>,
+    #[serde(default)]
+    pub completion_tokens: Option<u32>,
 }
 
 impl LlmJob {
@@ -196,6 +203,8 @@ impl LlmJob {
             artifact_media_type: None,
             error: None,
             salt: None,
+            prompt_tokens: None,
+            completion_tokens: None,
         }
     }
 
@@ -237,6 +246,8 @@ impl LlmJob {
             artifact_media_type: None,
             error: None,
             salt: None,
+            prompt_tokens: None,
+            completion_tokens: None,
         }
     }
     /// New fine-tuning job (kind = "finetune"). dataset is a JSON array string
@@ -266,6 +277,8 @@ impl LlmJob {
             artifact_media_type: None,
             error: None,
             salt: None,
+            prompt_tokens: None,
+            completion_tokens: None,
         }
     }
 
@@ -298,6 +311,8 @@ impl LlmJob {
             artifact_media_type: None,
             error: None,
             salt: None,
+            prompt_tokens: None,
+            completion_tokens: None,
         }
     }
 }
@@ -434,6 +449,25 @@ impl LlmStore {
         Ok(())
     }
 
+    /// Record the backend-reported token usage for a job (item #53). Separate
+    /// from `complete` so every completion path keeps its existing signature.
+    pub fn set_usage(
+        &self,
+        job_id: u64,
+        prompt_tokens: Option<u32>,
+        completion_tokens: Option<u32>,
+    ) -> std::io::Result<()> {
+        let _g = self.lock.lock().unwrap();
+        let _x = StoreLock::acquire(&self.path)?;
+        let mut map = self.load_fresh();
+        if let Some(j) = map.get_mut(&job_id) {
+            j.prompt_tokens = prompt_tokens;
+            j.completion_tokens = completion_tokens;
+            self.save(&map)?;
+        }
+        Ok(())
+    }
+
     /// Set a completed generation artifact (image/video file) + its sha256 hash.
     pub fn complete_artifact(
         &self,
@@ -510,9 +544,37 @@ mod tests {
         assert_eq!(back.prompt, "hello world");
     }
 
+    /// Item #53: token usage is persisted per job and an entry written before the
+    /// fields existed still loads (they default to `None`, never an error).
     #[test]
-    fn store_lock_is_mutually_exclusive() {
-        let dir = std::env::temp_dir().join(format!("gpn-lock-{}", std::process::id()));
+    fn usage_roundtrips_and_legacy_entries_still_load() {
+        let dir = std::env::temp_dir().join(format!("gpn-usage-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("llm_store.json");
+        let s = LlmStore::with_path(p.clone());
+        s.put(7, LlmJob::new_llm("m", "p", 0.7, 16)).unwrap();
+        // A fresh job carries no counts — 0 must not be fabricated.
+        assert_eq!(s.get(7).unwrap().prompt_tokens, None);
+        s.complete(7, "hello", "0xdead", None).unwrap();
+        s.set_usage(7, Some(11), Some(3)).unwrap();
+        let j = s.get(7).unwrap();
+        assert_eq!(j.prompt_tokens, Some(11));
+        assert_eq!(j.completion_tokens, Some(3));
+        assert_eq!(j.status, "done", "usage must not disturb completion state");
+        // A pre-#53 record (no usage keys at all) parses with `None`.
+        std::fs::write(
+            &p,
+            r#"{"8":{"kind":"llm","model":"m","prompt":"p","temperature":0.7,"max_tokens":1,"dataset":null,"lora_r":null,"epochs":null,"task":null,"negative_prompt":null,"width":null,"height":null,"steps":null,"seed":null,"frames":null,"fps":null,"status":"done","response":"x","result_hash":"0x0","salt":null,"artifact_path":null,"artifact_media_type":null,"error":null}}"#,
+        )
+        .unwrap();
+        let legacy = LlmStore::with_path(p).get(8).unwrap();
+        assert_eq!(legacy.prompt_tokens, None);
+        assert_eq!(legacy.completion_tokens, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn store_lock_is_mutually_exclusive() {        let dir = std::env::temp_dir().join(format!("gpn-lock-{}", std::process::id()));
         let target = dir.join("store.json");
         let a = StoreLock::acquire(&target).unwrap();
         // A second acquire must block until the first is dropped.

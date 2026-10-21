@@ -16,7 +16,7 @@
 
 use gpn_agent::chain::signer::Sr25519Signer;
 use gpn_agent::chain::ChainClient;
-use gpn_agent::llm::{get_job, run_inference, set_response, LlmStore};
+use gpn_agent::llm::{get_job, run_inference, run_inference_with_usage, set_response, LlmStore};
 use std::collections::HashMap;
 use std::io::Read as _;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -632,6 +632,14 @@ fn return_result(id: u64) {
         "salt": j.salt, "artifact_path": j.artifact_path,
         "artifact_media_type": j.artifact_media_type, "error": j.error,
     });
+    // Item #53: report the backend's real token counts so the AP can answer with a
+    // truthful OpenAI `usage` block for a REMOTE provider too (absent = omitted).
+    if let Some(p) = j.prompt_tokens {
+        body["prompt_tokens"] = serde_json::Value::from(p);
+    }
+    if let Some(c) = j.completion_tokens {
+        body["completion_tokens"] = serde_json::Value::from(c);
+    }
     if let Some(t) = assignment_callback_token(id) {
         body["callback_token"] = serde_json::Value::String(t);
     }
@@ -1573,10 +1581,10 @@ async fn run_job(
     // loses nothing.
     let result = {
         let _yield = gpn_agent::gpu_yield::GpuYieldGuard::acquire();
-        run_inference(&model, &job.prompt, job.temperature, job.max_tokens).await
+        run_inference_with_usage(&model, &job.prompt, job.temperature, job.max_tokens).await
     };
     match result {
-        Ok((text, hash)) => {
+        Ok((text, hash, usage)) => {
             // Salted commitment: on-chain value = sha256(salt ‖ answer). The salt is
             // random + kept OFF-chain, so the on-chain value is opaque to observers
             // but anyone holding the salt can verify the answer. (A bare
@@ -1585,10 +1593,23 @@ async fn run_job(
             let commit = salted_commit(&salt, &text);
             let commit_hex = format!("0x{}", hex::encode(commit));
             let _ = set_response(id, &text, &commit_hex, Some(&salt));
+            // Item #53: persist the backend's real token counts so the AP can
+            // report a truthful OpenAI `usage` block instead of hard-coded 0s.
+            let store = LlmStore::new();
+            let _ = store.set_usage(
+                id,
+                usage.map(|u| u.prompt_tokens),
+                usage.map(|u| u.completion_tokens),
+            );
             // Return the result to the requesting AP (remote providers; item #14).
             return_result(id);
-            // Rough output-token meter for per-token billing (chars/4 heuristic).
-            let est_tokens: u32 = ((text.chars().count() as u32) / 4).max(1);
+            // On-chain billing tokens: the backend count when it is real (sum of
+            // prompt+completion, which is what the requestor is charged for), else
+            // the chars/4 heuristic used before.
+            let est_tokens: u32 = match usage {
+                Some(u) if u.total_tokens > 0 => u.total_tokens,
+                _ => ((text.chars().count() as u32) / 4).max(1),
+            };
             if fast {
                 // Continue the pipelined nonce stream — no block-inclusion wait.
                 client.submit_result_fast(id, commit, est_tokens).await?;
