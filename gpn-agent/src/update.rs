@@ -1001,9 +1001,24 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
         return None;
     }
-    haystack
-        .windows(needle.len())
-        .position(|w| w == needle)
+    let first = needle[0];
+    let mut i = 0usize;
+    while i + needle.len() <= haystack.len() {
+        match haystack[i..].iter().position(|b| *b == first) {
+            Some(k) => {
+                let at = i + k;
+                if at + needle.len() > haystack.len() {
+                    return None;
+                }
+                if &haystack[at..at + needle.len()] == needle {
+                    return Some(at);
+                }
+                i = at + 1;
+            }
+            None => return None,
+        }
+    }
+    None
 }
 
 /// Parse the version token right after the stamp prefix, if it is a real one.
@@ -1022,25 +1037,59 @@ fn parse_stamp_version(tail: &[u8]) -> Option<String> {
 /// Prove that the tree in `dir` really is version `version` before it can ever
 /// become `current`.
 ///
-/// Both `gpn_node` and `gpn-node` must carry the stamp. A bundle whose
-/// supervisor and node disagree is exactly the failure the bundle model exists
-/// to prevent, so it is an error, not a warning.
+/// * the **supervisor** (`gpn_node`) must carry a `gpn-build-v1` stamp and it
+///   must be the manifest version — that is the binary this process execs;
+/// * every *other* stamp found anywhere in the bundle must agree too (one
+///   mismatched binary is the failure the bundle model exists to prevent);
+/// * `gpn-node` must be present.
+///
+/// Only `gpn_node` is stamped in practice — `build.rs` lives in `gpn-agent`, and
+/// `gpn-node` is a separate workspace crate with no build script — so a rule
+/// that demanded a stamp in both rejected every real release.
 pub fn verify_bundle_stamps(dir: &Path, version: &str) -> Result<(), UpdateError> {
     let want = version.trim();
-    for name in [node_bin_name(), rust_node_bin_name()] {
-        let p = dir.join(name);
-        if !p.is_file() {
-            return Err(UpdateError::BundleShape(format!(
-                "{} is missing from the bundle ({} expected)",
-                name,
-                want
-            )));
+    let supervisor = node_bin(dir);
+    if !supervisor.is_file() {
+        return Err(UpdateError::BundleShape(format!(
+            "{} is missing from the bundle ({} expected)",
+            node_bin_name(),
+            want
+        )));
+    }
+    if !dir.join(rust_node_bin_name()).is_file() {
+        return Err(UpdateError::BundleShape(format!(
+            "{} is missing from the bundle ({} expected)",
+            rust_node_bin_name(),
+            want
+        )));
+    }
+
+    match read_build_stamp(&supervisor)? {
+        Some(actual) if version_cmp(&actual, want) == Some(Ordering::Equal) => {}
+        Some(actual) => {
+            return Err(UpdateError::BadStamp {
+                file: supervisor.display().to_string(),
+                expected: want.to_string(),
+                actual,
+            })
         }
-        let actual = read_build_stamp(&p)?.ok_or_else(|| UpdateError::BadStamp {
-            file: p.display().to_string(),
-            expected: want.to_string(),
-            actual: "no gpn-build-v1 stamp".into(),
-        })?;
+        None => {
+            return Err(UpdateError::BadStamp {
+                file: supervisor.display().to_string(),
+                expected: want.to_string(),
+                actual: "no gpn-build-v1 stamp".into(),
+            })
+        }
+    }
+
+    for entry in std::fs::read_dir(dir)? {
+        let p = entry?.path();
+        if !p.is_file() || p == supervisor {
+            continue;
+        }
+        let Some(actual) = read_build_stamp(&p)? else {
+            continue;
+        };
         if version_cmp(&actual, want) != Some(Ordering::Equal) {
             return Err(UpdateError::BadStamp {
                 file: p.display().to_string(),
@@ -2304,6 +2353,115 @@ mod tests {
         );
         assert_eq!(installed_version(&state).as_deref(), Some("0.4.0"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_bundle_whose_stamps_disagree_is_rejected() {
+        let dir = td("stamp-disagree");
+        let exe = dir.join(node_bin_name());
+        let node = dir.join(rust_node_bin_name());
+        std::fs::write(&exe, stamped_binary("0.2.0")).unwrap();
+        std::fs::write(&node, stamped_binary("0.1.9")).unwrap();
+        match verify_bundle_stamps(&dir, "0.2.0") {
+            Err(UpdateError::BadStamp { actual, .. }) => assert_eq!(actual, "0.1.9"),
+            other => panic!("expected BadStamp, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_the_supervisor_needs_a_stamp_but_one_stamp_is_mandatory() {
+        // What the real release looks like: build.rs is in gpn-agent, so only
+        // gpn_node carries a stamp; the other ~60 binaries do not.
+        let dir = td("stamp-shape");
+        std::fs::write(dir.join(node_bin_name()), stamped_binary("0.2.0")).unwrap();
+        std::fs::write(dir.join(rust_node_bin_name()), b"no stamp here").unwrap();
+        std::fs::write(dir.join("gpn_scheduler"), b"no stamp here").unwrap();
+        assert!(verify_bundle_stamps(&dir, "0.2.0").is_ok());
+
+        // Nothing stamped at all: there is no evidence of what this tree is.
+        std::fs::write(dir.join(node_bin_name()), b"no stamp here").unwrap();
+        assert!(matches!(
+            verify_bundle_stamps(&dir, "0.2.0"),
+            Err(UpdateError::BadStamp { .. })
+        ));
+
+        // A missing gpn-node is not a GPN release.
+        std::fs::write(dir.join(node_bin_name()), stamped_binary("0.2.0")).unwrap();
+        std::fs::remove_file(dir.join(rust_node_bin_name())).unwrap();
+        assert!(matches!(
+            verify_bundle_stamps(&dir, "0.2.0"),
+            Err(UpdateError::BundleShape(_))
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Manual validation against a **real** release tree:
+    ///
+    /// ```bash
+    /// tar -xzf gpn-linux.tar.gz -C /tmp/gpnstage
+    /// GPN_REAL_BUNDLE_TREE=/tmp/gpnstage cargo test --lib real_release_tree_verifies -- --ignored
+    /// ```
+    #[test]
+    #[ignore = "needs a real release tree (GPN_REAL_BUNDLE_TREE)"]
+    fn real_release_tree_verifies() {
+        let dir = std::env::var("GPN_REAL_BUNDLE_TREE")
+            .expect("set GPN_REAL_BUNDLE_TREE to an unpacked release bundle");
+        let version = std::env::var("GPN_REAL_BUNDLE_VERSION").unwrap_or_else(|_| "0.2.0".into());
+        verify_bundle_stamps(Path::new(&dir), &version)
+            .unwrap_or_else(|e| panic!("a real release tree must verify: {e}"));
+    }
+
+    /// The whole flow against the published 331 MB artifact: verify → extract →
+    /// stamps → version dir → `current` flip → the switched-in binary reports the
+    /// version the manifest named.
+    ///
+    /// ```bash
+    /// GPN_REAL_BUNDLE_ARCHIVE=/tmp/gpn-linux.tar.gz \
+    ///   cargo test --lib real_release_bundle_stages -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs the real release archive (GPN_REAL_BUNDLE_ARCHIVE)"]
+    fn real_release_bundle_stages_and_switches() {
+        let archive = std::env::var("GPN_REAL_BUNDLE_ARCHIVE")
+            .expect("set GPN_REAL_BUNDLE_ARCHIVE to gpn-linux.tar.gz");
+        let version = std::env::var("GPN_REAL_BUNDLE_VERSION").unwrap_or_else(|_| "0.2.0".into());
+        let archive = PathBuf::from(archive);
+        let bytes = std::fs::metadata(&archive).unwrap().len();
+        let asset = ReleaseAsset {
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            url: "https://github.com/crewlyllc/gpn_coin/releases/download/linux-latest/gpn-linux.tar.gz"
+                .into(),
+            sha256: sha256_file(&archive).unwrap(),
+            size: bytes,
+            layout: LAYOUT_BUNDLE.into(),
+            files: BTreeMap::new(),
+        };
+        let state = td("real-bundle");
+        let pending = stage_bundle_file(&state, &version, &asset, &archive).expect("stage");
+        assert_eq!(pending.version, version);
+        let applied = apply_pending(&state, Path::new("/bin/true"))
+            .unwrap()
+            .unwrap()
+            .expect("applied");
+        assert_eq!(installed_version(&state).as_deref(), Some(version.as_str()));
+        assert!(applied.exec.is_file());
+        let out = std::process::Command::new(&applied.exec)
+            .arg("--version")
+            .output()
+            .expect("the switched-in supervisor must run");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            text.contains(&version),
+            "switched-in binary must report {version}: {text}"
+        );
+        eprintln!("switched-in: {}", text.trim());
+        let _ = std::fs::remove_dir_all(&state);
     }
 
     #[test]

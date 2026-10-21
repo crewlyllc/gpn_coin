@@ -238,8 +238,9 @@ tree per version** and switches between them.
    an updater gets OOM-killed mid-update);
 3. verify the bundle's `sha256` **and** `size`;
 4. extract into `versions/.<version>.tmp-<pid>/` — a hidden staging directory;
-5. **prove identity**: `gpn_node` and `gpn-node` inside it must both carry the
-   `gpn-build-v1 version=<manifest version>` stamp, and every per-file hash the
+5. **prove identity**: the extracted `gpn_node` must carry the
+   `gpn-build-v1 version=<manifest version>` stamp, every other stamp in the
+   tree must agree, `gpn-node` must be present, and every per-file hash the
    manifest declares must match. A bundle that says 0.1.9 while the manifest
    says 0.2.0 is refused here;
 6. `rename` the staging directory to `versions/<version>` (same directory, so it
@@ -266,6 +267,18 @@ tree is the version the manifest names* — it comes from `gpn-agent/build.rs` a
 is baked in at compile time, so it cannot be fabricated without rebuilding. That
 is the check that catches "the bundle asset was not re-uploaded after the bump",
 which would otherwise install a 0.1.9 tree as 0.2.0 and then blame the release.
+
+Only `gpn_node` actually carries the stamp — `build.rs` lives in `gpn-agent`, and
+`gpn-node` is a separate workspace crate with no build script. So the rule is:
+the supervisor **must** be stamped with the manifest version, and any *other*
+stamp found in the tree must agree with it. Requiring a stamp on `gpn-node` too
+(the first version of this check) rejected every real release. Verified against
+the published artifact:
+
+```
+$ GPN_REAL_BUNDLE_TREE=/tmp/gpnstage cargo test --lib real_release_tree_verifies -- --ignored
+switched-in: gpn_node 0.2.0 (spec 41, 7e9ff08)
+```
 
 ### `--check-updates` is bundle-aware
 
