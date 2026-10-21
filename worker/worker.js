@@ -1201,6 +1201,26 @@ async function handleApi(request, env, path) {
     );
   }
 
+  // A 401 here is OUR misconfiguration, not the caller's: the browser never
+  // sends a token, the Worker does. Say so plainly instead of echoing an
+  // `unauthorized` the visitor cannot act on.
+  if (res.status === 401) {
+    const configured = !!(env && env.AP_TOKEN && String(env.AP_TOKEN).trim());
+    return apiJson(
+      {
+        error: {
+          message: configured
+            ? "the access point rejected the proxy's token — AP_TOKEN is set but not accepted (rotate it)"
+            : "the AI proxy is not configured yet: the AP_TOKEN secret is missing on this Worker",
+          type: "gpn_proxy_auth",
+        },
+      },
+      502,
+      origin,
+      isChat ? "POST" : "GET",
+    );
+  }
+
   const headers = new Headers();
   headers.set("content-type", res.contentType || "application/json; charset=utf-8");
   headers.set("cache-control", cache);
