@@ -358,6 +358,22 @@ Then start the node again. Practical notes:
   intentional: roll back to a version that is still supported, or accept
   sync-only until the fix ships.
 
+### Diagnosing: `--check-updates`
+
+Read-only. Fetches the manifest, verifies the signature, applies the cutoff logic
+and prints the verdict — no download, no install, no children started:
+
+```bash
+$ gpn_node --check-updates
+  updates: auto=off (manual) every 6h restart_to_apply=true manifest=https://gpncoin.ai/releases.json
+  update: manifest verified (https://gpncoin.ai/releases.json): latest=0.2.0 min=0.1.5
+
+  result: this node (0.1.0) is supported — it would mine
+```
+
+This is the first thing to run when a node stops mining unexpectedly: it
+distinguishes "below the cutoff" from "no peers", "no ollama", or a stuck miner.
+
 ### If an update fails
 
 | Symptom | Meaning | Action |

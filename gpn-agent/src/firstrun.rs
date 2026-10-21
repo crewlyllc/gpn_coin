@@ -100,6 +100,7 @@ pub fn help_text() -> String {
         "Usage:\n",
         "  gpn_node               start (and supervise) the node\n",
         "  gpn_node --setup       one-time bootstrap: wallet + ollama (interactive)\n",
+        "  gpn_node --check-updates  is this build still allowed to mine? (read-only)\n",
         "  gpn_node --version     print the version and exit\n",
         "  gpn_node --help        print this help and exit\n",
         "\n",

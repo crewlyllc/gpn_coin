@@ -1012,6 +1012,17 @@ fn log_upgrade_required(current: &str, min: &str, enforcing: bool) {
     asciieprintln!("");
 }
 
+/// Run a blocking job (the updater uses `reqwest::blocking`) on a plain thread.
+///
+/// `reqwest::blocking` builds its own runtime and **panics if it is created or
+/// dropped inside an async context** ("Cannot drop a runtime in a context where
+/// blocking is not allowed"). Both the supervisor's `main` and the `--setup`
+/// path are inside `#[tokio::main]`, so every blocking call must go through a
+/// thread — exactly like the ollama gate does.
+fn on_plain_thread<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static, fallback: T) -> T {
+    std::thread::spawn(f).join().unwrap_or(fallback)
+}
+
 /// One manifest check at startup.
 ///
 /// Sets `cfg.standby` when this build is below the signed `min_version`. A
@@ -2027,6 +2038,29 @@ async fn main() {
     //    spawned, so this process can be replaced cleanly (short outage). ─────
     apply_staged_or_reexec(&cfg);
 
+    // ── `--check-updates`: answer "is this build still allowed to mine?" and
+    //    exit. Read-only: fetches nothing but the manifest, installs nothing.
+    if argv.iter().any(|a| a == "--check-updates") {
+        let mut probe = cfg.clone();
+        let standby = on_plain_thread(
+            move || {
+                startup_update_check(&mut probe);
+                probe.standby
+            },
+            false,
+        );
+        asciiprintln!(
+            "\n  result: this node ({}) {}",
+            env!("CARGO_PKG_VERSION"),
+            if standby {
+                "is BELOW the minimum version — it would SYNC but NOT MINE"
+            } else {
+                "is supported — it would mine"
+            }
+        );
+        std::process::exit(0);
+    }
+
     // ── `--setup`: explicit one-shot bootstrap of the REQUIRED ollama part. ──
     // Run on a plain thread: the ollama probe/pull use reqwest's *blocking*
     // client, which must not be created/dropped inside the async runtime.
@@ -2040,8 +2074,18 @@ async fn main() {
 
     // ── Minimum-version cutoff: one signed-manifest check at startup. ────────
     // Independent of the auto-update OPT-IN: a manual updater still has to be
-    // told that its build is too old to mine.
-    startup_update_check(&mut cfg);
+    // told that its build is too old to mine. Runs on a plain thread: the
+    // blocking HTTP client must not be created inside the async runtime.
+    cfg.standby = {
+        let mut probe = cfg.clone();
+        on_plain_thread(
+            move || {
+                startup_update_check(&mut probe);
+                probe.standby
+            },
+            false,
+        )
+    };
 
     // ── Ollama is a REQUIRED first-class component (not optional): probe, try
     //    the automated bootstrap, then HARD-FAIL if it is still unreachable.
