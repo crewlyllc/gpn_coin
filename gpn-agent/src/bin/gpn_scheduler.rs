@@ -620,75 +620,21 @@ fn pull_default_latency_ms() -> u64 {
         .unwrap_or(100)
 }
 
-/// Protocols a published p2p multiaddr may contain. A whitelist, because the
-/// AP relays these strings to the public directory: anything unrecognised is a
-/// reason to drop the address, not to pass it on.
-const P2P_PROTOCOLS: &[&str] = &[
-    "ip4", "ip6", "dns", "dns4", "dns6", "tcp", "udp", "quic", "quic-v1", "p2p", "tls", "sni",
-    "ws", "wss",
-];
-
 /// Accept only a plausible libp2p peer id (base58, ed25519 `12D3Koo…` or
 /// legacy `Qm…`).
 fn clean_peer_id(raw: &str) -> Option<String> {
-    let s = raw.trim();
-    if !(40..=64).contains(&s.len()) || !s.chars().all(|c| c.is_ascii_alphanumeric()) {
-        return None;
-    }
-    if s.starts_with("12D3Koo") || s.starts_with("Qm") {
-        Some(s.to_string())
-    } else {
-        None
-    }
+    gpn_agent::seedlist::clean_peer_id(raw)
 }
 
 /// Structural multiaddr check: `/proto/value/…`, every protocol whitelisted,
 /// numeric ports in range, and a trailing `/p2p/<peer-id>` (without one the
 /// client cannot dial it, so it is not worth publishing).
+///
+/// Delegates to [`gpn_agent::seedlist::clean_published_multiaddr`] so the access
+/// point and the provider heartbeat share ONE definition — a round-trip test
+/// there proves the emitter's output is accepted here.
 fn clean_p2p_multiaddr(raw: &str) -> Option<String> {
-    let s = raw.trim();
-    if !s.starts_with('/') || s.len() > 256 {
-        return None;
-    }
-    if s.chars()
-        .any(|c| c.is_whitespace() || c.is_control() || c == '\\' || c == '"')
-    {
-        return None;
-    }
-    let parts: Vec<&str> = s.split('/').skip(1).collect();
-    if parts.iter().any(|p| p.is_empty()) || parts.len() < 4 {
-        return None;
-    }
-    let mut i = 0;
-    let mut has_p2p = false;
-    while i + 1 < parts.len() {
-        let proto = parts[i];
-        let value = parts[i + 1];
-        if !P2P_PROTOCOLS.contains(&proto) {
-            return None;
-        }
-        match proto {
-            "tcp" | "udp" => {
-                let port: u32 = value.parse().ok()?;
-                if !(1..=65535).contains(&port) {
-                    return None;
-                }
-            }
-            "p2p" => {
-                // Must be the last component.
-                if i + 2 != parts.len() || clean_peer_id(value).is_none() {
-                    return None;
-                }
-                has_p2p = true;
-            }
-            _ => {}
-        }
-        i += 2;
-    }
-    if i != parts.len() || !has_p2p {
-        return None;
-    }
-    Some(s.to_string())
+    gpn_agent::seedlist::clean_published_multiaddr(raw)
 }
 
 fn p2p_port_of(multiaddr: &str) -> Option<u16> {
@@ -1359,6 +1305,12 @@ fn pick(
                 && hw_ok(p)
                 && gpu_ok(p)
                 && deliverable(p)
+                // Item 3 (model side of the item-14 hardware gate): the model's
+                // weights must fit the provider's VRAM. A provider that claims
+                // `qwen2.5:7b` on a 4 GB card either OOMs or silently swaps to
+                // CPU; either way the caller waited for a wrong answer. Unknown
+                // model size or unadvertised VRAM (0) does not gate.
+                && gpn_agent::models::model_fits_vram(model, p.vram_mb)
         })
         .collect();
 
@@ -2094,12 +2046,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 // ── OpenAI-compatible facade ─────────────────────────────────────
+                // Item 4: the public catalogue is a shop window. Fine-tune
+                // artifacts (`tuned-<job>`), toy models (`stories260K`, <0.3B)
+                // and anything unvetted are served internally if asked for by
+                // name, but they are not listed here. GPN_PUBLIC_MODELS (CSV)
+                // replaces the allowlist when an operator wants to publish more.
                 (Method::Get, ["v1", "models"]) => {
                     let reg = registry.lock().unwrap();
-                    let mut ids: Vec<String> = reg.iter().flat_map(|p| p.models.clone()).collect();
+                    let ids = gpn_agent::models::filter_public_models(
+                        reg.iter().flat_map(|p| p.models.clone()),
+                    );
+                    let mut ids = ids;
                     ids.sort();
                     ids.dedup();
                     if ids.is_empty() {
+                        // Never leave an empty catalogue: clients call
+                        // /v1/models before anything else and treat [] as an
+                        // outage. Advertise the baseline only when no provider
+                        // is online but a provider COULD serve it.
                         ids.push("llama3.2:1b".into());
                     }
                     json!({"object":"list", "data": ids.iter().map(|m| json!({
@@ -3526,6 +3490,41 @@ mod tests {
             // gate (item #55) stays inert for them.
             pulled_seen: Some(Instant::now()),
         }
+    }
+
+    #[test]
+    fn pick_gates_on_whether_the_model_fits_the_provider_vram() {
+        // Item 3: a 7B model needs ~5.4 GB with headroom. The faster 4 GB box
+        // must not be chosen even though it claims the model, or the caller
+        // waits for an OOM/CPU fallback.
+        let mut small = prov("small", "http://s", 5, "qwen2.5:7b");
+        small.vram_mb = 4096;
+        let mut big = prov("big", "http://b", 50, "qwen2.5:7b");
+        big.vram_mb = 8188;
+        let reg = vec![small.clone(), big];
+        let (p, _) = pick(&reg, 0, 0, 0, 0.0, "qwen2.5:7b", 0, &RttOverrides::new()).unwrap();
+        assert_eq!(p.address, "big", "the 4GB box cannot hold a 7B model");
+        // A model that fits both: the faster box wins again.
+        let mut small2 = small.clone();
+        small2.models = vec!["llama3.2:1b".into()];
+        let mut big2 = reg[1].clone();
+        big2.models = vec!["llama3.2:1b".into()];
+        let reg2 = vec![small2, big2];
+        let (p2, _) = pick(&reg2, 0, 0, 0, 0.0, "llama3.2:1b", 0, &RttOverrides::new()).unwrap();
+        assert_eq!(p2.address, "small");
+        // Unknown VRAM (0) does not gate: an unprobed box keeps working.
+        let mut unknown = prov("unknown", "http://u", 1, "qwen2.5:7b");
+        unknown.vram_mb = 0;
+        let reg3 = vec![unknown];
+        assert!(pick(&reg3, 0, 0, 0, 0.0, "qwen2.5:7b", 0, &RttOverrides::new()).is_some());
+    }
+
+    #[test]
+    fn the_public_catalogue_hides_fine_tunes_and_toys() {
+        // Item 4: /v1/models goes through the same filter.
+        let published =
+            gpn_agent::models::filter_public_models(["tuned-42", "stories260K", "llama3.2:1b"]);
+        assert_eq!(published, vec!["llama3.2:1b".to_string()]);
     }
 
     #[test]

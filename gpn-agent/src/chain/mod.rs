@@ -1651,6 +1651,7 @@ impl ChainClient {
         };
         let next = self.get_next_job_id().await;
         let mut out = Vec::new();
+        let mut gated = 0usize;
         for id in 0..next {
             let addr = subxt::dynamic::storage(
                 "ComputeMarketplace",
@@ -1678,6 +1679,37 @@ impl ChainClient {
                 .unwrap_or(0);
             if is_job_claimable(min_gflops, attested_gflops) {
                 out.push((id, min_gflops));
+            } else {
+                gated += 1;
+            }
+        }
+        if gated > 0 {
+            // Item 5: an unattested/0-GFLOPS provider is invisible to every
+            // gated job. Rate-limited to one line per minute so the 300 ms poll
+            // does not flood the journal, and loud enough that gflops=0 is never
+            // mistaken for "no work available".
+            static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+            let should_log = match LAST.lock() {
+                Ok(mut last) => match *last {
+                    Some(t) if t.elapsed().as_secs() < 60 => false,
+                    _ => {
+                        *last = Some(std::time::Instant::now());
+                        true
+                    }
+                },
+                Err(_) => false,
+            };
+            if should_log {
+                let why = if attested_gflops == 0 {
+                    "attested compute is 0 GFLOPS (attestation failed) — re-attest on a working GPU"
+                        .to_string()
+                } else {
+                    format!("attested {attested_gflops} GFLOPS")
+                };
+                eprintln!(
+                    "[marketplace] skipping {gated} pending job(s) whose min_gflops exceeds this \
+                     provider ({why})"
+                );
             }
         }
         out

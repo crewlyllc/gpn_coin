@@ -73,6 +73,84 @@ pub fn multiaddr_of(endpoint: &str) -> Option<String> {
     Some(e.to_string())
 }
 
+/// Protocols a published p2p multiaddr may contain.
+pub const P2P_PROTOCOLS: &[&str] = &[
+    "ip4", "ip6", "dns", "dns4", "dns6", "tcp", "udp", "quic", "quic-v1", "p2p", "tls", "sni",
+    "ws", "wss",
+];
+
+/// Accept only a plausible libp2p peer id (base58, ed25519 `12D3Koo…` or the
+/// legacy multihash form `Qm…`).
+pub fn clean_peer_id(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    if !(40..=64).contains(&s.len()) || !s.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    if s.starts_with("12D3Koo") || s.starts_with("Qm") {
+        Some(s.to_string())
+    } else {
+        None
+    }
+}
+
+/// The **access point's** structural multiaddr gate, as a library function.
+///
+/// One definition, two users: the provider heartbeat emits addresses and the
+/// scheduler/access point consumes them. Keeping the rules here lets a
+/// round-trip test prove the emitter produces something the consumer accepts —
+/// the bug that made every provider look peer-less was exactly a mismatch
+/// between these two (a doubled `/p2p/<id>/p2p/<id>` suffix that the gate
+/// rightly rejected).
+///
+/// Rules: `/proto/value/…` pairs only, whitelisted protocols, a numeric
+/// TCP/UDP port in range, and exactly one `/p2p/<peer-id>` as the final
+/// component.
+pub fn clean_published_multiaddr(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    if !s.starts_with('/') || s.len() > 256 {
+        return None;
+    }
+    if s.chars()
+        .any(|c| c.is_whitespace() || c.is_control() || c == '\\' || c == '"')
+    {
+        return None;
+    }
+    let parts: Vec<&str> = s.split('/').skip(1).collect();
+    if parts.iter().any(|p| p.is_empty()) || parts.len() < 4 {
+        return None;
+    }
+    let mut i = 0;
+    let mut has_p2p = false;
+    while i + 1 < parts.len() {
+        let proto = parts[i];
+        let value = parts[i + 1];
+        if !P2P_PROTOCOLS.contains(&proto) {
+            return None;
+        }
+        match proto {
+            "tcp" | "udp" => {
+                let port: u32 = value.parse().ok()?;
+                if !(1..=65535).contains(&port) {
+                    return None;
+                }
+            }
+            "p2p" => {
+                // Must be the last component, and a real peer id.
+                if i + 2 != parts.len() || clean_peer_id(value).is_none() {
+                    return None;
+                }
+                has_p2p = true;
+            }
+            _ => {}
+        }
+        i += 2;
+    }
+    if i != parts.len() || !has_p2p {
+        return None;
+    }
+    Some(s.to_string())
+}
+
 /// The promotion rule from the design, as one predicate.
 ///
 /// `current_window` comes from `block_number / LivenessWindow`. A node confirmed
@@ -215,7 +293,12 @@ mod tests {
         inactive.active = false;
         assert!(!is_candidate(&inactive, 11, 3, 9_500));
         // Placeholder endpoint.
-        assert!(!is_candidate(&node("a", "placeholder", 9_900, 9), 11, 3, 9_500));
+        assert!(!is_candidate(
+            &node("a", "placeholder", 9_900, 9),
+            11,
+            3,
+            9_500
+        ));
         // Stale: last confirmed two windows back (finalisation lags one).
         let mut stale = good.clone();
         stale.last_confirmed_window = 9;

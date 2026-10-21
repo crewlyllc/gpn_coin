@@ -91,6 +91,11 @@ struct FileConfig {
     base_path: Option<String>,
     rpc_port: Option<u16>,
     node_key: Option<String>,
+    /// File holding the node's libp2p secret (hex, 64 chars). Preferred over
+    /// `node_key` for anything a human copies between machines: the file can be
+    /// generated per box (`gpn-node key generate-node-key --file …`) and never
+    /// leaks into a shared `run-fleet.sh`.
+    node_key_file: Option<String>,
     bootnodes: Option<Vec<String>>,
     /// Published seed-list URLs (`--bootnodes-url`). Empty → the node uses its
     /// built-in default, the live directory at https://gpncoin.ai/seeds.json.
@@ -144,6 +149,7 @@ struct Config {
     base_path: PathBuf,
     rpc_port: u16,
     node_key: Option<String>,
+    node_key_file: Option<String>,
     bootnodes: Vec<String>,
     bootnodes_url: Vec<String>,
     public_addr: Option<String>,
@@ -629,6 +635,7 @@ impl Config {
             base_path,
             rpc_port,
             node_key: env_str("GPN_NODE_KEY").or(file.node_key),
+            node_key_file: env_str("GPN_NODE_KEY_FILE").or(file.node_key_file),
             bootnodes: env_str("GPN_BOOTNODES")
                 .map(|s| split_list(&s))
                 .or(file.bootnodes)
@@ -1793,6 +1800,24 @@ fn status_line(cfg: &Config, shared: &Shared) -> String {
 fn build_children(cfg: &Config) -> Vec<ChildSpec> {
     let mut specs = Vec::new();
 
+    // Item 6: a libp2p node key copied from another machine gives BOTH boxes the
+    // same peer id — peers dial the wrong host, the directory collapses the two
+    // into one entry, and neither can be reached reliably. The key below is the
+    // one shipped in the fleet template; warn loudly rather than silently
+    // running a duplicate identity.
+    const SHARED_FLEET_NODE_KEY: &str =
+        "4ecac9dd3ce8f61ac2216dec9c366fb490a0d946db37947e05a4dc4de6ab543c";
+    if let Some(k) = &cfg.node_key {
+        if k.trim() == SHARED_FLEET_NODE_KEY {
+            asciieprintln!(
+                "[gpn_node] !!!! node key is the SHARED fleet key — this box will advertise the \
+                 SAME peer id as any other box using it (peers will dial the wrong host).\n\
+                 [gpn_node] Fix: gpn-node key generate-node-key --file ~/.gpn/node-key, then set \
+                 GPN_NODE_KEY_FILE=~/.gpn/node-key and unset GPN_NODE_KEY, then restart."
+            );
+        }
+    }
+
     // A GPN node is always both: mine + serve. Every node starts the chain
     // node/miner, the provider heartbeat, and the provider loop(s).
     {
@@ -1808,6 +1833,11 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
         if let Some(k) = &cfg.node_key {
             argv.push("--node-key".into());
             argv.push(k.clone());
+        } else if let Some(f) = &cfg.node_key_file {
+            // Preferred shape: a per-machine key file, generated once with
+            // `gpn-node key generate-node-key --file <path>`.
+            argv.push("--node-key-file".into());
+            argv.push(f.clone());
         }
         // Always pass `--base-path` — the SAME path the DB-existence check
         // uses, so the guard can never inspect a different dir than the node.
@@ -2521,6 +2551,7 @@ mod tests {
             base_path: PathBuf::from("/tmp/gpn-test-base"),
             rpc_port: 9944,
             node_key: None,
+            node_key_file: None,
             bootnodes: vec![],
             bootnodes_url: vec![],
             public_addr: None,

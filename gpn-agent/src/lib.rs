@@ -19,6 +19,7 @@ pub mod hub_ap;
 pub mod hub_channel;
 pub mod llm;
 pub mod mining;
+pub mod models;
 pub mod moderation;
 pub mod modes;
 pub mod net;

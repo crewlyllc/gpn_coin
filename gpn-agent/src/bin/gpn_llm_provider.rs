@@ -550,11 +550,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+/// This box's VRAM in MiB (0 = unknown), probed once per process.
+fn node_vram_mb() -> u64 {
+    static VRAM: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *VRAM.get_or_init(|| gpn_agent::gpu::detect_vram_mb())
+}
+
 /// Resolve a requested model to a concrete one. `auto`/empty means "pick any
 /// model this machine has" — choose the first from the local Ollama, falling
 /// back to the guaranteed baseline model.
+///
+/// Item 3: models whose weights cannot fit this box's VRAM are removed from the
+/// candidate set, so a job requesting `deepseek-r1:14b` on an 8 GB card is
+/// served by a model that actually runs instead of OOMing mid-inference (or
+/// silently crawling on CPU). Internal/toy models stay usable — this filters
+/// on *fit*, not on the public catalogue.
 fn resolve_model(requested: &str) -> String {
     let base = gpn_agent::llm::infer::default_ollama_url();
+    let vram_mb = node_vram_mb();
     let installed: Vec<String> = reqwest::blocking::Client::builder()
         .timeout(Duration::from_millis(2500))
         .build()
@@ -569,11 +582,36 @@ fn resolve_model(requested: &str) -> String {
             })
         })
         .unwrap_or_default();
+    let installed: Vec<String> = installed
+        .into_iter()
+        .filter(|m| {
+            let fit = gpn_agent::models::check_model_vram(m, vram_mb);
+            if let Some(reason) = fit.skip_reason(m) {
+                println!("[provider] {reason} — not claiming it");
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
     let has = |name: &str| {
         installed
             .iter()
             .any(|n| n == name || n.split(':').next() == Some(name))
     };
+    if !requested.is_empty() && requested != "auto" {
+        if let Some(reason) =
+            gpn_agent::models::check_model_vram(requested, vram_mb).skip_reason(requested)
+        {
+            println!("[provider] {reason} — falling back to a model that fits");
+            return installed
+                .iter()
+                .find(|n| n.as_str() == "llama3.2:1b")
+                .or_else(|| installed.first())
+                .cloned()
+                .unwrap_or_else(|| "llama3.2:1b".to_string());
+        }
+    }
     if !requested.is_empty() && requested != "auto" && has(requested) {
         // Prefer the exact installed tag when a bare name was requested.
         if let Some(exact) = installed.iter().find(|n| n.as_str() == requested) {
@@ -2024,7 +2062,10 @@ mod model_prep_tests {
             PrepAction::Busy
         ));
         assert!(matches!(
-            prep_action(Some(now - MODEL_PREP_STUCK_AFTER + Duration::from_secs(1)), now),
+            prep_action(
+                Some(now - MODEL_PREP_STUCK_AFTER + Duration::from_secs(1)),
+                now
+            ),
             PrepAction::Busy
         ));
         // Window elapsed (wedged pull, or a recorded failure) => retry allowed.

@@ -45,7 +45,9 @@ impl GPUMiningNodeAgent {
     }
 
     /// Create a new agent from an already-loaded configuration.
-    pub async fn with_config(config: config::AgentConfig) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn with_config(
+        config: config::AgentConfig,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let chain_client = chain::ChainClient::new(&config.chain_endpoint)
             .await?
             .with_signer(&config.signer_uri);
@@ -199,7 +201,30 @@ impl GPUMiningNodeAgent {
 
         // Measure real compute throughput (GFLOPS) on the GPU — this is the
         // on-chain attestable metric proving real AI-compute capability.
-        let gflops = gpu::measure_gflops(self.config.mining_device_index).unwrap_or(0);
+        //
+        // Item 5: never let a failed measurement become a SILENT 0. A 0 here is
+        // written on-chain as `compute_gflops = 0`, which makes the provider
+        // ineligible for every `min_gflops > 0` job (and puts it in the lowest
+        // attestation tier) — so say exactly why it happened.
+        let gflops = match gpu::measure_gflops(self.config.mining_device_index) {
+            Ok(g) => g,
+            Err(e) => {
+                log::warn!(
+                    "⚠ GPU compute measurement FAILED ({e}) — attesting gflops=0. This provider \
+                     will only be routed jobs with min_gflops=0 and will not reach a paid \
+                     attestation tier. Fix the OpenCL/CUDA device (device index \
+                     {}) or set GFLOPS explicitly.",
+                    self.config.mining_device_index
+                );
+                0
+            }
+        };
+        if gflops == 0 {
+            log::warn!(
+                "⚠ measured 0 GFLOPS — the GEMM benchmark returned no throughput (GPU busy, \
+                 driver mismatch, or OpenCL runtime missing)"
+            );
+        }
         log::info!("Measured GPU compute: {} GFLOPS (FP32)", gflops);
 
         // Submit attestation to chain
@@ -286,6 +311,18 @@ impl GPUMiningNodeAgent {
 
         // 3. Find pending jobs we can actually satisfy.
         let claimable = self.chain_client.list_claimable_jobs(attested_gflops).await;
+        if attested_gflops == 0 {
+            // Item 5: gflops=0 silently narrows the marketplace to `min_gflops=0`
+            // jobs only. Say it once, with the reason, instead of looking idle.
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                log::warn!(
+                    "attested compute is 0 GFLOPS — every marketplace job with min_gflops > 0 \
+                     will be skipped by list_claimable_jobs. Re-run attestation once the GPU \
+                     measurement works (see the 'GPU compute measurement FAILED' line above)."
+                );
+            });
+        }
         if claimable.is_empty() {
             log::debug!(
                 "no claimable marketplace jobs (attested {} GFLOPS)",
@@ -373,11 +410,16 @@ fn config_path_from(argv: &[String]) -> String {
 
 /// Returns the offending argument when `argv[1]` still looks like a flag.
 fn unexpected_flag(argv: &[String]) -> Option<&str> {
-    argv.get(1).map(|s| s.as_str()).filter(|s| s.starts_with('-'))
+    argv.get(1)
+        .map(|s| s.as_str())
+        .filter(|s| s.starts_with('-'))
 }
 
 fn print_legacy_help() {
-    println!("gpn-agent {} (legacy GPU miner/compute agent)", env!("CARGO_PKG_VERSION"));
+    println!(
+        "gpn-agent {} (legacy GPU miner/compute agent)",
+        env!("CARGO_PKG_VERSION")
+    );
     println!();
     println!("Usage:");
     println!("  gpn-agent [CONFIG.toml]   start mining/compute (default config/default.toml)");
@@ -441,15 +483,36 @@ mod startup_args_tests {
     #[test]
     fn a_flag_is_never_taken_as_a_config_path() {
         // No argument: the built-in default (unchanged behaviour).
-        assert_eq!(config_path_from(&argv(&["gpn-agent"])), "config/default.toml");
+        assert_eq!(
+            config_path_from(&argv(&["gpn-agent"])),
+            "config/default.toml"
+        );
         // A real path is used verbatim.
-        assert_eq!(config_path_from(&argv(&["gpn-agent", "/etc/gpn.toml"])), "/etc/gpn.toml");
+        assert_eq!(
+            config_path_from(&argv(&["gpn-agent", "/etc/gpn.toml"])),
+            "/etc/gpn.toml"
+        );
         // Every flag-shaped argv[1] is caught before it can become a path —
         // this is the class that started a miner on `--version`.
-        for flag in ["--version", "-V", "--help", "-h", "--setup", "-x", "--versio"] {
-            assert_eq!(unexpected_flag(&argv(&["gpn-agent", flag])), Some(flag), "{flag}");
+        for flag in [
+            "--version",
+            "-V",
+            "--help",
+            "-h",
+            "--setup",
+            "-x",
+            "--versio",
+        ] {
+            assert_eq!(
+                unexpected_flag(&argv(&["gpn-agent", flag])),
+                Some(flag),
+                "{flag}"
+            );
         }
         assert_eq!(unexpected_flag(&argv(&["gpn-agent"])), None);
-        assert_eq!(unexpected_flag(&argv(&["gpn-agent", "cfg/agent.toml"])), None);
+        assert_eq!(
+            unexpected_flag(&argv(&["gpn-agent", "cfg/agent.toml"])),
+            None
+        );
     }
 }

@@ -298,6 +298,12 @@ Only globally routable addresses count — RFC1918 (`10/8`, `172.16/12`,
 | `GPN_STUN_SERVER` | External STUN server for the mapping probe; `off` disables it. | `stun.l.google.com:19302` |
 | `GPN_DIALABILITY_SAFETY` | `0` lets the hard gate exit even when that would stop the last authority. | on |
 | `GPN_SEED_PORT` | Inbound port to open/probe. | `30333` |
+| `GPN_DIALABILITY_STATE` | Where the gate writes its verdict for the provider heartbeat (`public_endpoint`, evidence). | `~/.gpn/dialability.json` |
+| `GPN_NODE_KEY_FILE` | Per-machine libp2p key file; preferred over a literal `--node-key` (a copied key = a duplicated `peer_id`). | unset |
+
+> The provider side of this — what the heartbeat publishes (`multiaddrs`,
+> `listen_addrs`), the VRAM model gate and the public `/v1/models` catalogue —
+> is documented in [provider-address-and-models.md](provider-address-and-models.md).
 
 If the node is not dialable you will see this (exact text, LAN IP and port
 filled in) and, by default, the process exits:

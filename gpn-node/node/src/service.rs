@@ -30,6 +30,61 @@ pub(crate) type FullClient = sc_service::TFullClient<
     RuntimeApi,
     sc_executor::WasmExecutor<sp_io::SubstrateHostFunctions>,
 >;
+
+// ── Dialability state publication ────────────────────────────────────────
+//
+// The provider heartbeat (`gpn_provider_status`) publishes `multiaddrs` to the
+// access point, but it is a SEPARATE process: it cannot see this node's
+// dialability verdict (an inbound peer observed, a UPnP-IGD/NAT-PMP mapping the
+// router confirmed, a STUN mapping). Without that evidence it can only publish
+// an address it knows itself — which behind NAT is nothing, so the box looks
+// unroutable even though the node proved it is reachable.
+//
+// So the gate writes its conclusion where the heartbeat reads it:
+// `$GPN_DIALABILITY_STATE`, default `$HOME/.gpn/dialability.json`. Purely
+// advisory — a write failure is logged at debug and never affects the node.
+fn dialability_state_path() -> std::path::PathBuf {
+    use std::path::PathBuf;
+    if let Ok(p) = std::env::var("GPN_DIALABILITY_STATE") {
+        if !p.trim().is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(".gpn").join("dialability.json")
+}
+
+fn publish_dialability_state(
+    public: Option<&sc_network::multiaddr::Multiaddr>,
+    source: &str,
+    dialable: bool,
+    detail: &str,
+) {
+    let path = dialability_state_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let body = serde_json::json!({
+        "public_endpoint": public.map(|a| a.to_string()),
+        "source": source,
+        "dialable": dialable,
+        "detail": detail,
+        "updated_unix": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    });
+    let Ok(text) = serde_json::to_string_pretty(&body) else {
+        return;
+    };
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, text).is_err() || std::fs::rename(&tmp, &path).is_err() {
+        log::debug!(
+            "dialability: could not write state file {} (heartbeat will fall back to its own evidence)",
+            path.display()
+        );
+    }
+}
 type FullBackend = sc_service::TFullBackend<Block>;
 type FullSelectChain = LongestChain<FullBackend, Block>;
 
@@ -378,10 +433,8 @@ pub async fn prepare_network_config(
         }
     } else {
         // Nothing fetched: fall back to the cached list (bounded age).
-        let cached = crate::discovery::read_seed_cache(
-            &base,
-            crate::discovery::SEED_CACHE_MAX_AGE_SECS,
-        );
+        let cached =
+            crate::discovery::read_seed_cache(&base, crate::discovery::SEED_CACHE_MAX_AGE_SECS);
         if !cached.is_empty() {
             log::info!(
                 "peer-discovery: seed sources unavailable — using {} cached seed(s)",
@@ -718,6 +771,20 @@ pub async fn new_full<
                     .unwrap_or_else(|| "unset".into()),
             );
             let verdict = crate::dialability::wait_for_dialability(&network, &gate_cfg).await;
+            // Publish the outcome for the provider heartbeat (see
+            // `publish_dialability_state`). The address is only written when the
+            // gate has EVIDENCE for it — never a guess.
+            publish_dialability_state(
+                gate_cfg.public_addr.as_ref(),
+                verdict
+                    .evidence
+                    .as_ref()
+                    .map(|e| e.to_string())
+                    .as_deref()
+                    .unwrap_or("none"),
+                verdict.dialable,
+                &verdict.detail,
+            );
             if verdict.dialable {
                 log::info!(
                     "✅ dialability: this node IS dialable — {} ({}) [tier: {}]",
@@ -774,8 +841,8 @@ pub async fn new_full<
                     };
 
                     if let Some(reason) = override_reason {
-                        for line in crate::dialability::safety_valve_notice(reason, &verdict.detail)
-                            .lines()
+                        for line in
+                            crate::dialability::safety_valve_notice(reason, &verdict.detail).lines()
                         {
                             log::warn!("{line}");
                         }
@@ -786,16 +853,14 @@ pub async fn new_full<
                         );
                         let watch_cfg = gate_cfg.clone();
                         let watch_net = network.clone();
-                        task_manager
-                            .spawn_handle()
-                            .spawn("gpn-dialability-watch", None, async move {
-                                crate::dialability::watch_dialability(
-                                    watch_net,
-                                    watch_cfg,
-                                    false,
-                                )
-                                .await;
-                            });
+                        task_manager.spawn_handle().spawn(
+                            "gpn-dialability-watch",
+                            None,
+                            async move {
+                                crate::dialability::watch_dialability(watch_net, watch_cfg, false)
+                                    .await;
+                            },
+                        );
                     } else {
                         log::error!("   reason: {}", verdict.detail);
                         // Distinct exit code so `gpn_node` can report
@@ -968,9 +1033,7 @@ pub async fn new_full<
                         match crate::discovery::fetch_all_seeds(&sources).await {
                             Ok(mut addrs) => {
                                 failures = 0;
-                                if let Err(e) =
-                                    crate::discovery::write_seed_cache(&base, &addrs)
-                                {
+                                if let Err(e) = crate::discovery::write_seed_cache(&base, &addrs) {
                                     log::debug!("seed-refresh: cache write failed: {e}");
                                 }
                                 crate::discovery::shuffle_in_place(&mut addrs, sample | 1);
