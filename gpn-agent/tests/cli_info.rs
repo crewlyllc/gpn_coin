@@ -13,10 +13,7 @@ fn scratch(tag: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let p = std::env::temp_dir().join(format!(
-        "gpn-cli-{tag}-{}-{n}",
-        std::process::id()
-    ));
+    let p = std::env::temp_dir().join(format!("gpn-cli-{tag}-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&p).unwrap();
     p
 }
@@ -72,12 +69,45 @@ fn short_version_flag_works() {
     assert_untouched(&home);
 }
 
+/// The release tooling reads the version and git SHA out of the artifact by
+/// scanning for this marker, so it must survive into the linked binary (a
+/// Windows `.exe` cannot be executed to ask it).
+#[test]
+fn binary_carries_the_build_id_marker() {
+    let bytes = std::fs::read(BIN).expect("read the built binary");
+    let needle = format!("gpn-build-v1 version={} sha=", env!("CARGO_PKG_VERSION"));
+    assert!(
+        bytes
+            .windows(needle.len())
+            .any(|window| window == needle.as_bytes()),
+        "binary does not contain {needle:?} — scripts/gen-release-manifest.py \
+         could not derive the version from it"
+    );
+}
+
+/// The version line may carry `(spec <n>, <sha>)`; whatever it carries must be
+/// one line, ASCII, and not leak the `unknown` placeholder.
+#[test]
+fn version_line_shape_is_sane() {
+    let (ok, stdout, _, home) = run(&["--version"]);
+    assert!(ok);
+    let line = stdout.trim_end_matches(['\r', '\n']);
+    assert!(line.starts_with(concat!("gpn_node ", env!("CARGO_PKG_VERSION"))), "{line:?}");
+    assert!(line.is_ascii(), "{line:?}");
+    assert!(!line.contains("unknown"), "{line:?}");
+    assert_eq!(line.matches('(').count(), line.matches(')').count(), "{line:?}");
+    assert_untouched(&home);
+}
+
 #[test]
 fn help_exits_zero_and_documents_flags() {
     let (ok, stdout, stderr, home) = run(&["--help"]);
     assert!(ok, "--help must exit 0; stderr: {stderr}");
     for needle in ["Usage:", "--version", "--help", "--setup", "GPN_BASE_PATH"] {
-        assert!(stdout.contains(needle), "help is missing {needle}: {stdout:?}");
+        assert!(
+            stdout.contains(needle),
+            "help is missing {needle}: {stdout:?}"
+        );
     }
     assert_untouched(&home);
 }

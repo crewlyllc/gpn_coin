@@ -27,7 +27,80 @@ of the release manifest, made with the GPN release key.
 
 ---
 
-## 1. The release manifest
+## 1. Version numbering
+
+There is **exactly one version** in GPN, and one tool that changes it:
+
+```text
+Cargo.toml  ──▶  CARGO_PKG_VERSION  ──▶  gpn_node --version
+     │                                        │
+     │                                        ├─▶ gpn-build-v1 stamp in the binary
+     │                                        │        │
+     └── scripts/bump-version.py               │        ▼
+                                              │   scripts/gen-release-manifest.py
+                                              │        │   (reads the stamp, not a flag)
+                                              ▼        ▼
+                                       updater compares manifest.version with its own
+```
+
+Never edit a version by hand, and never type one into a release command. A
+version that only exists in a hand-typed `--version 0.2.0` flag is how 0.1.0
+came to be reported by every build from 2026-10-14 to 2026-10-21: the manifest
+copied a value that never moved, so `is_newer()` was always false and the
+`min_version` cutoff could never fire.
+
+### The commands
+
+```bash
+scripts/bump-version.py patch        # 0.2.0 -> 0.2.1
+scripts/bump-version.py minor        # 0.2.1 -> 0.3.0
+scripts/bump-version.py major        # 0.3.0 -> 1.0.0
+scripts/bump-version.py --set 0.2.0  # explicit; refuses to go backwards
+scripts/bump-version.py --check      # print the version; fail if the crates disagree
+```
+
+It updates `gpn-agent/Cargo.toml` (`[package]`), `gpn-node/Cargo.toml`
+(`[workspace.package]`), every workspace member's literal version, and prepends
+a `CHANGELOG.md` stub. It validates strict `MAJOR.MINOR.PATCH` (no `-rc1`, no
+`+build` — `update.rs::parse_version` ignores suffixes, so two builds could
+compare equal and the updater would never fire), is idempotent, and refuses to
+guess when the crates disagree.
+
+### What each level means
+
+| Level | When | `min_version` | libp2p protocol id |
+|---|---|---|---|
+| **MAJOR** | Breaking change to the **wire, consensus or p2p**: block/extrinsic format, the RPC a peer or the scheduler depends on, the p2p message set, the release-manifest canonical form. Also: a release that makes older nodes' data wrong. | **Raise it to the new version** (in the same release) | **Bump** |
+| **MINOR** | New features, backwards compatible: a new endpoint, a new optional field, a new tool. An old node still interoperates. | Leave it, unless the release genuinely requires everyone to move | Leave it |
+| **PATCH** | Fixes only — no format, no schema, no new capability. | Leave it | Leave it |
+
+A runtime-only change (`set_code`) is **not** a reason to bump either the
+protocol id or `min_version`: the runtime ships forklessly at a known block and
+old and new *nodes* interoperate fine while it happens. Bumping the protocol id
+is the network half of the cutoff — it isolates an incompatible peer instead of
+letting it half-work (§6.2).
+
+Bump **exactly one** level, in the commit that carries the change it describes,
+and land the bump with that change — not in a later "release" commit. The
+`0.x` line is not an excuse: while `MAJOR` is 0, a `MINOR` bump *may* break
+compatibility, so `MINOR` + a raised `min_version` is the pre-1.0 way to ship a
+breaking change. It is still a separate decision per release: nothing in this
+repo raises a cutoff automatically.
+
+### Where the version lives
+
+| Path | Field | Written by |
+|---|---|---|
+| `gpn-agent/Cargo.toml` | `[package] version` → `CARGO_PKG_VERSION` of the node/agents | `bump-version.py` |
+| `gpn-node/Cargo.toml` | `[workspace.package] version` | `bump-version.py` |
+| `gpn-node/{runtime,node,gpn-shield,pallets/*}/Cargo.toml` | `[package] version` (literal, not inherited) | `bump-version.py` |
+| `CHANGELOG.md` | newest `## [x.y.z]` heading | `bump-version.py` (stub) then a human |
+| artifact bytes | `gpn-build-v1 version=x.y.z sha=<sha> spec=<n>` | `gpn-agent/build.rs` at compile time |
+| `website/releases.json` | `version` / `min_version` | `gen-release-manifest.py` (reads the artifact stamp) |
+
+`Cargo.lock` is left alone — cargo rewrites it on the next build.
+
+## 2. The release manifest
 
 `https://gpncoin.ai/releases.json`
 
@@ -90,7 +163,7 @@ the signature.
 
 ---
 
-## 2. Key custody
+## 3. Key custody
 
 | | Where it lives | Who has it |
 |---|---|---|
@@ -125,13 +198,76 @@ If you regenerate, you **must** update `RELEASE_PUBKEY_HEX` in
 
 ---
 
-## 3. Publishing a release (release ops)
+## 4. Publishing a release: the checklist
+
+Every step is required; each one has a failure mode that only shows up on an
+operator's machine.
 
 ```bash
-# 1. build the artifacts (per platform; do NOT regenerate the canonical
-#    gpn_runtime.compact.compressed.wasm — the embedded genesis WASM is immutable)
+# 1. BUMP — one level, with the change that earned it (docs above).
+scripts/bump-version.py minor
+$EDITOR CHANGELOG.md                 # replace the TODOs; this text ships
+scripts/bump-version.py --check      # all crates agree, version is strict semver
 
-# 2. sign + publish the manifest
+# 2. BUILD — from a CLEAN tree at the commit you will tag. The version and SHA
+#    baked into the artifact come from here, not from the manifest command.
+git status --porcelain               # must be empty — the stamp records the
+                                     # COMMIT, so uncommitted changes would ship
+                                     # under a SHA that does not contain them
+cargo build --release --manifest-path gpn-node/Cargo.toml -p gpn-node
+cargo build --release --manifest-path gpn-agent/Cargo.toml --bins
+gpn-agent/target/release/gpn_node --version   # gpn_node 0.2.0 (spec 41, <sha7>)
+
+#    Windows: build on the Windows box (run-windows-provider.ps1 /
+#    windows-build-log.md) and copy the .exe into dist/. It cannot be built
+#    cross-platform here, and it is stamped the same way.
+
+# 3. STAGE — one directory, one release, versioned FILE NAMES (the manifest's
+#    url is the local basename, so a stable name would make a stale CDN copy
+#    indistinguishable from the new build until the hash check fails).
+mkdir -p dist/0.2.0
+dist/0.2.0/gpn_node-0.2.0-linux-x86_64        <- the Linux binary
+dist/0.2.0/gpn_node-0.2.0-win-x86_64.exe      <- the Windows binary
+
+# 4. MANIFEST — the version comes OUT of the artifacts (no --version).
+scripts/gen-release-manifest.py \
+    --asset linux/x86_64=dist/0.2.0/gpn_node-0.2.0-linux-x86_64 \
+    --asset windows/x86_64=dist/0.2.0/gpn_node-0.2.0-win-x86_64.exe \
+    --min-version 0.1.0 \
+    --url-base https://gpncoin.ai/dl \
+    --out dist/0.2.0/releases.json
+#    check the printed  version=… sha=…  and the cutoff line before signing.
+#    Right now nothing is incompatible, so this release keeps min_version 0.1.0
+#    rather than the same-minor policy default (0.2.0).
+
+# 5. SIGN — the same command with the real key (it signs as it writes; step 4
+#    already exercised the scheme with --verify). Keep the key off the network
+#    box if that is how you work: copy the unsigned manifest over, sign, copy back.
+GPN_RELEASE_KEY=~/.openclaw/credentials/gpn-release-key.txt \
+  scripts/gen-release-manifest.py --asset … --out website/releases.json
+
+# 6. PUBLISH — artifacts FIRST, manifest SECOND (never a manifest pointing at a 404).
+#    upload dist/0.2.0/gpn_node-0.2.0-* to https://gpncoin.ai/dl/
+#    then deploy website/releases.json (worker/worker.js serves it; 503 = unpublished)
+
+# 7. VERIFY — on an OLD node, before announcing.
+gpn_node --check-updates
+#    expect: manifest verified … latest=0.2.0 min=0.1.0
+#            result: this node (0.1.0) is supported — it would mine
+#    then, with auto-update on: GPN_AUTO_UPDATE=1 GPN_UPDATE_CHECK_HOURS=1 gpn_node
+#    and watch for "update: downloading 0.2.0" → "staged … signature OK" → "restarting to apply"
+```
+
+**Do not** sign or publish a manifest over a `dist/` directory that does not
+match the commit you built from: the signature makes it authoritative, and every
+auto-updating node will install it. If a release is wrong, publish a new version
+(a PATCH); do not re-sign the same one.
+
+### The pre-0.2.0 workflow (for reference)
+
+This documented a hand-typed version and a hand-typed `min_version`:
+
+```bash
 scripts/gen-release-manifest.py \
     --version 0.2.0 \
     --min-version 0.1.5 \
@@ -140,10 +276,14 @@ scripts/gen-release-manifest.py \
     --url-base https://gpncoin.ai/dl \
     --key ~/.openclaw/credentials/gpn-release-key.txt \
     --out website/releases.json
-
-# 3. verify what you just wrote (what every node will do)
-scripts/gen-release-manifest.py --verify website/releases.json
 ```
+
+`--version` still exists, but only as an **assertion**: if it disagrees with
+what the artifact was built from, the script now fails instead of publishing a
+manifest nobody's binary matches (that mismatch — `0.2.0` in the manifest,
+`0.1.0` in the binary — is what made the first auto-update a no-op). A
+cutoff-only manifest (`--allow-empty-assets`) still needs `--version`, because
+there is no artifact to read.
 
 The script **verifies its own output before finishing** — it will not leave an
 unsigned or mis-signed `releases.json` behind. Deploy `website/releases.json`
@@ -163,7 +303,7 @@ window, or to force everyone off a bad build.
 
 ---
 
-## 4. Opting in to auto-update
+## 5. Opting in to auto-update
 
 ### At setup
 
@@ -252,7 +392,7 @@ Then a normal restart (or a service restart) applies it.
 
 ---
 
-## 5. The minimum-version cutoff
+## 6. The minimum-version cutoff
 
 Three layers, weakest to strongest. Only the first is implemented in this
 release; the other two are **designed and staged** (see
@@ -331,7 +471,7 @@ untouched.
 
 ---
 
-## 6. Rollback
+## 7. Rollback
 
 Every swap keeps the previous binary: `<gpn_node>.bak`.
 
@@ -387,7 +527,7 @@ distinguishes "below the cutoff" from "no peers", "no ollama", or a stuck miner.
 
 ---
 
-## 7. Reference
+## 8. Reference
 
 ### Env vars
 
@@ -417,6 +557,10 @@ Config-file equivalents (`~/.gpn/node.toml`): `auto_update`, `update_url`,
 | Path | Role |
 |---|---|
 | `gpn-agent/src/update.rs` | manifest parse + signature verify, version compare, cutoff decision, staging/swap, cached state, the embedded public key |
+| `gpn-agent/build.rs` | injects `GPN_RUNTIME_SPEC_VERSION`, `GPN_GIT_SHA` and the `GPN_BUILD_ID` stamp |
+| `gpn-agent/src/firstrun.rs` | `version_line()` → `gpn_node <ver> (spec <n>, <sha>)` |
+| `scripts/bump-version.py` | the only writer of the version (+ `CHANGELOG.md` stub) |
+| `CHANGELOG.md` | one heading per released version, newest first |
 | `gpn-agent/src/bin/gpn_node.rs` | opt-in policy, startup check, updater thread, restart, `--setup` question |
 | `gpn-node/node/src/service.rs` | `GPN_STANDBY` → no proposer, no miner |
 | `scripts/gen-release-manifest.py` | build + sign + verify the manifest |

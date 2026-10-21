@@ -24,8 +24,9 @@
 //! | `sha` | `$GPN_GIT_SHA`, else `git rev-parse --short=7 HEAD` | `unknown` |
 //! | `spec` | `gpn-node/runtime/src/lib.rs`'s `VERSION` const | field omitted |
 //!
-//! `GPN_GIT_SHA` is also injected on its own (`gpn_agent::buildinfo::GIT_SHA`,
-//! `option_env!`) for callers that only want the SHA.
+//! `GPN_GIT_SHA` is also injected on its own (`option_env!`) for callers that
+//! only want the SHA; `firstrun::git_sha()` derives it from the stamp instead so
+//! the literal is always referenced and therefore always linked in.
 //!
 //! Nothing here may fail the build: a tarball release, a vendored crate, or a
 //! container without `git` must still compile.

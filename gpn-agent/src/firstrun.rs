@@ -75,18 +75,72 @@ pub fn info_request(argv: &[String]) -> Option<InfoRequest> {
     None
 }
 
-/// The one-line `--version` output, e.g. `gpn_node 0.1.0 (spec 41)`.
+/// The machine-readable build stamp, injected by `build.rs`:
+/// `gpn-build-v1 version=0.2.0 sha=d606264 spec=41`.
+///
+/// It is a plain string literal in the binary, which is how
+/// `scripts/gen-release-manifest.py` reads the **version and SHA an artifact was
+/// actually built from** — including for a Windows `.exe` that cannot be
+/// executed on the release host. Do not change the `gpn-build-v1 version=`
+/// prefix without updating that script.
+pub fn build_id() -> &'static str {
+    option_env!("GPN_BUILD_ID").unwrap_or("gpn-build-v1 version=unknown sha=unknown")
+}
+
+/// The git commit this binary was built from, injected by `build.rs`.
+///
+/// `unknown` when the crate is built outside a git work tree (or git is not
+/// installed). Callers must tolerate that; nothing depends on the value, it
+/// exists so an operator can tell two same-version builds apart
+/// (`docs/updates.md` → "Version numbering").
+///
+/// Read out of `build_id()` rather than a separate `option_env!` so the stamp
+/// is guaranteed to be referenced by the program and therefore to survive into
+/// the linked binary.
+pub fn git_sha() -> &'static str {
+    build_id()
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix("sha="))
+        .unwrap_or("unknown")
+}
+
+/// The one-line `--version` output, e.g. `gpn_node 0.2.0 (spec 41, d606264)`.
 ///
 /// The runtime `spec_version` is injected at build time from
-/// `gpn-node/runtime/src/lib.rs` (see `build.rs`); when that file is not
-/// present (the crate built outside the repo) only the package version is
-/// printed.
+/// `gpn-node/runtime/src/lib.rs` and the git SHA from `git rev-parse` (see
+/// `build.rs`); when a piece is unavailable it is omitted, so the line degrades
+/// to `gpn_node 0.2.0 (spec 41)`, `gpn_node 0.2.0 (d606264)` or
+/// `gpn_node 0.2.0`.
 pub fn version_line() -> String {
-    match option_env!("GPN_RUNTIME_SPEC_VERSION") {
-        Some(spec) if !spec.is_empty() => {
-            format!("gpn_node {} (spec {spec})", env!("CARGO_PKG_VERSION"))
-        }
-        _ => format!("gpn_node {}", env!("CARGO_PKG_VERSION")),
+    version_line_with(
+        env!("CARGO_PKG_VERSION"),
+        option_env!("GPN_RUNTIME_SPEC_VERSION"),
+        Some(git_sha()),
+    )
+}
+
+/// `version_line` with its inputs supplied — the formatting rules, testable
+/// without a particular build environment.
+///
+/// * the version is always printed;
+/// * `spec <n>` is printed when the runtime spec version is known;
+/// * the short git SHA is printed when it is known (never `unknown`);
+/// * details are wrapped in one `(...)`, comma-separated, ASCII only.
+pub fn version_line_with(version: &str, spec: Option<&str>, sha: Option<&str>) -> String {
+    let mut details: Vec<String> = Vec::new();
+    if let Some(spec) = spec.map(str::trim).filter(|s| !s.is_empty()) {
+        details.push(format!("spec {spec}"));
+    }
+    if let Some(sha) = sha
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "unknown")
+    {
+        details.push(sha.to_string());
+    }
+    if details.is_empty() {
+        format!("gpn_node {version}")
+    } else {
+        format!("gpn_node {version} ({})", details.join(", "))
     }
 }
 
@@ -890,8 +944,14 @@ mod tests {
 
     #[test]
     fn info_flags_are_recognised() {
-        assert_eq!(info_request(&argv(&["gpn_node", "--help"])), Some(InfoRequest::Help));
-        assert_eq!(info_request(&argv(&["gpn_node", "-h"])), Some(InfoRequest::Help));
+        assert_eq!(
+            info_request(&argv(&["gpn_node", "--help"])),
+            Some(InfoRequest::Help)
+        );
+        assert_eq!(
+            info_request(&argv(&["gpn_node", "-h"])),
+            Some(InfoRequest::Help)
+        );
         assert_eq!(
             info_request(&argv(&["gpn_node", "--version"])),
             Some(InfoRequest::Version)
@@ -912,13 +972,82 @@ mod tests {
         assert!(v.starts_with("gpn_node "), "{v}");
         assert!(v.contains(env!("CARGO_PKG_VERSION")), "{v}");
         assert!(v.is_ascii(), "{v}");
+        assert_eq!(v.lines().count(), 1, "{v}");
+    }
+
+    #[test]
+    fn version_line_includes_the_git_sha_when_known() {
+        let v = version_line();
+        match git_sha() {
+            "unknown" => assert!(!v.contains("unknown"), "{v}"),
+            sha => assert!(v.contains(sha), "{v}"),
+        }
+        // Whether or not the SHA is present, the parens stay balanced and there
+        // is at most one group.
+        assert!(v.matches('(').count() <= 1, "{v}");
+        assert_eq!(v.matches('(').count(), v.matches(')').count(), "{v}");
+    }
+
+    #[test]
+    fn build_id_is_the_marker_the_release_tooling_scans_for() {
+        let id = build_id();
+        assert!(id.starts_with("gpn-build-v1 version="), "{id}");
+        assert!(id.contains(env!("CARGO_PKG_VERSION")), "{id}");
+        assert!(id.is_ascii(), "{id}");
+        // `git_sha()` must agree with the stamp the artifact carries.
+        let sha = git_sha();
+        assert!(id.contains(&format!("sha={sha}")), "{id}");
+        if sha != "unknown" {
+            let core = sha.strip_suffix("-dirty").unwrap_or(sha);
+            assert!(
+                (7..=40).contains(&core.len()) && core.chars().all(|c| c.is_ascii_hexdigit()),
+                "sha looks wrong: {sha:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn version_line_formatting_rules() {
+        assert_eq!(version_line_with("0.2.0", None, None), "gpn_node 0.2.0");
+        assert_eq!(
+            version_line_with("0.2.0", Some("41"), None),
+            "gpn_node 0.2.0 (spec 41)"
+        );
+        assert_eq!(
+            version_line_with("0.2.0", None, Some("d606264")),
+            "gpn_node 0.2.0 (d606264)"
+        );
+        assert_eq!(
+            version_line_with("0.2.0", Some("41"), Some("d606264")),
+            "gpn_node 0.2.0 (spec 41, d606264)"
+        );
+        assert_eq!(
+            version_line_with("0.2.0", Some("41"), Some("d606264-dirty")),
+            "gpn_node 0.2.0 (spec 41, d606264-dirty)"
+        );
+        // Builds outside a work tree degrade, never print `unknown`.
+        assert_eq!(
+            version_line_with("0.2.0", None, Some("unknown")),
+            "gpn_node 0.2.0"
+        );
+        assert_eq!(
+            version_line_with("0.2.0", Some("41"), Some("unknown")),
+            "gpn_node 0.2.0 (spec 41)"
+        );
+        assert_eq!(
+            version_line_with("0.2.0", Some(""), Some("  ")),
+            "gpn_node 0.2.0"
+        );
     }
 
     #[test]
     fn help_text_documents_flags_and_env() {
         let h = help_text();
         assert!(h.is_ascii(), "help must be ASCII");
-        assert!(h.contains("--version") && h.contains("--help") && h.contains("--setup"), "{h}");
+        assert!(
+            h.contains("--version") && h.contains("--help") && h.contains("--setup"),
+            "{h}"
+        );
         for key in [
             "GPN_BASE_PATH",
             "GPN_CHAIN",
