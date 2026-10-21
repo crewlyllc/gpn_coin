@@ -184,7 +184,7 @@
           } else if (status === 429) {
             hint = "Rate limit reached. The free endpoint allows 12 chats per 10 minutes per IP.";
           } else if (status === 502) {
-            hint = "The proxy could not reach the access point. Check /api/health, then retry.";
+            hint = "The proxy could not complete the call (access point unreachable, or its token is not configured). Check /api/health, then retry.";
           } else if (status === 400) {
             hint = "The request was rejected — check the model name against /api/v1/models.";
           } else {
