@@ -323,6 +323,31 @@ fn spawn_infer_server(listen: &str, chan: Option<ChannelServeCtx>) {
             .expect("infer runtime");
         for mut req in server.incoming_requests() {
             let path = req.url().split('?').next().unwrap_or("").to_string();
+            if req.method() == &tiny_http::Method::Get && path == "/channel/status" {
+                // Capability probe: the AP checks this BEFORE opening (and
+                // funding) a channel, so a provider that cannot serve channel
+                // jobs never costs the AP a locked deposit.
+                let hdr = tiny_http::Header::from_bytes(
+                    &b"Content-Type"[..],
+                    &b"application/json"[..],
+                )
+                .unwrap();
+                let body = match chan.as_ref() {
+                    Some(ctx) => {
+                        let ids: Vec<u64> =
+                            load_provider_channels(&ctx.state_path).keys().copied().collect();
+                        serde_json::json!({
+                            "ok": true, "channel": true,
+                            "provider": ctx.me.to_hex(), "channels": ids,
+                        })
+                    }
+                    None => serde_json::json!({"ok": false, "channel": false}),
+                };
+                let _ = req.respond(
+                    tiny_http::Response::from_string(body.to_string()).with_header(hdr),
+                );
+                continue;
+            }
             if req.method() == &tiny_http::Method::Post && path == "/channel/job" {
                 let mut body = String::new();
                 let _ = req.as_reader().read_to_string(&mut body);

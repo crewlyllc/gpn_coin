@@ -134,6 +134,32 @@ pub fn channel_endpoint(status_url: &str) -> Option<String> {
     ))
 }
 
+/// Ask the provider whether it serves the channel protocol, **before** the AP
+/// opens (and funds) a channel. A provider on an older build 404s here, so no
+/// deposit is ever locked against a peer that cannot use it.
+pub fn probe_channel_support(status_url: &str) -> bool {
+    let Some(job_url) = channel_endpoint(status_url) else {
+        return false;
+    };
+    let Some(base) = job_url.strip_suffix("/channel/job") else {
+        return false;
+    };
+    let url = format!("{base}/channel/status");
+    let Ok(c) = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(2_500))
+        .build()
+    else {
+        return false;
+    };
+    match c.get(&url).send() {
+        Ok(r) if r.status().is_success() => r
+            .json::<serde_json::Value>()
+            .map(|v| v.get("channel").and_then(|x| x.as_bool()).unwrap_or(false))
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
 pub struct ChannelJobOut {
     pub channel_id: u64,
     pub job_id: u64,
@@ -166,6 +192,22 @@ pub fn try_channel_job(
         return None;
     }
     let endpoint = channel_endpoint(status_url)?;
+    // Only pay for a channel open when the provider actually speaks the
+    // protocol. Existing channels skip the probe (they already worked).
+    let have_channel = {
+        let reg = hub.registry.lock().unwrap();
+        reg.channels
+            .get(provider_addr_hex)
+            .map(|c| c.state.balance_requestor > 0)
+            .unwrap_or(false)
+    };
+    if !have_channel && !probe_channel_support(status_url) {
+        eprintln!(
+            "[hub] provider {provider_addr_hex} does not serve /channel/status — staying on-chain (no channel opened)"
+        );
+        hub.mark_unsupported(provider_addr_hex);
+        return None;
+    }
     let channel_id = ensure_hub_channel(hub, rt, client, provider_addr_hex, &provider_pub)?;
 
     // Price the job under the registry lock, then release it for the HTTP call.

@@ -286,10 +286,17 @@ happens once per settlement batch.
 | `GPN_PROVIDER_CHANNEL_STATE` | `~/.gpn/provider_channels.json` | provider channel state (persisted before inference runs) |
 | `GPN_CHANNEL_SKIP_CHAIN_CHECK` | `0` | dev only: trust the assignment's deposit without verifying the channel on chain |
 
+The provider exposes two endpoints on `status_port + 1`:
+`GET /channel/status` (capability probe: `{ok, channel, provider, channels[]}`)
+and `POST /channel/job` (the assignment).
+
 **The fallback is per-request and silent-safe.** The channel path is attempted
 only when all of the following hold: mode is `channel`, the job is a text job,
 the provider's heartbeat port yields a derivable channel endpoint
-(`status_port + 1`), and a channel exists or can be opened. Any error — connect
+(`status_port + 1`), and — when no channel exists yet — the provider answers
+`GET /channel/status` with `{"channel":true}`. That probe is what stops the AP
+from **locking a deposit against a provider that cannot serve channel jobs**
+(an older build 404s the probe; no `open_channel` is submitted). Any error — connect
 refused, 404 (provider built without channel support), bad signature, timeout —
 marks that provider "unsupported" for 60 s and the job continues down the
 **existing on-chain escrow path**. A job is therefore never lost by enabling

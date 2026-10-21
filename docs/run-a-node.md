@@ -724,9 +724,11 @@ not a bug.
 
 ### Provider
 
-The provider serves `POST /channel/job` on **heartbeat port + 1** (the same
-loopback server as the chain-free `/infer`, i.e. `:8094` next to `:8093`), so no
-new inbound port is needed. Actions:
+The provider serves `GET /channel/status` (a capability probe) and
+`POST /channel/job` on **heartbeat port + 1** (the same loopback server as the
+chain-free `/infer`, i.e. `:8094` next to `:8093`), so no new inbound port is
+needed. The AP probes `/channel/status` **before** it opens (and funds) a
+channel, so an older provider never costs it a locked deposit. Actions:
 
 - accept a signed assignment (verify both signatures, nonce, exact price,
   deadline) and persist the pre-paid state **before** running inference;
