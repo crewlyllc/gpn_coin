@@ -39,10 +39,13 @@ pub struct GPUMiningNodeAgent {
 }
 
 impl GPUMiningNodeAgent {
-    /// Create a new agent with the given configuration
+    /// Create a new agent from a config file path.
     pub async fn new(config_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let config = config::AgentConfig::from_file(config_path)?;
+        Self::with_config(config::AgentConfig::from_file(config_path)?).await
+    }
 
+    /// Create a new agent from an already-loaded configuration.
+    pub async fn with_config(config: config::AgentConfig) -> Result<Self, Box<dyn std::error::Error>> {
         let chain_client = chain::ChainClient::new(&config.chain_endpoint)
             .await?
             .with_signer(&config.signer_uri);
@@ -351,17 +354,102 @@ impl GPUMiningNodeAgent {
     }
 }
 
+/// The config path this bin was asked to use.
+///
+/// `gpn-agent` is the **legacy** single-purpose miner/compute agent: its only
+/// argument is an optional TOML config path. It does no other argument
+/// parsing, which used to make a probe flag (`--version`, `--help`, a typo)
+/// silently become a *path*: `AgentConfig::from_file()` returns defaults for a
+/// missing path, so `./gpn-agent --version` started a full GPU miner instead of
+/// printing anything (a 5 h / 100 % CPU orphan was found that way on
+/// 2026-10-20). Flags are now answered or rejected before this is reached.
+const DEFAULT_CONFIG_PATH: &str = "config/default.toml";
+
+fn config_path_from(argv: &[String]) -> String {
+    argv.get(1)
+        .cloned()
+        .unwrap_or_else(|| DEFAULT_CONFIG_PATH.to_string())
+}
+
+/// Returns the offending argument when `argv[1]` still looks like a flag.
+fn unexpected_flag(argv: &[String]) -> Option<&str> {
+    argv.get(1).map(|s| s.as_str()).filter(|s| s.starts_with('-'))
+}
+
+fn print_legacy_help() {
+    println!("gpn-agent {} (legacy GPU miner/compute agent)", env!("CARGO_PKG_VERSION"));
+    println!();
+    println!("Usage:");
+    println!("  gpn-agent [CONFIG.toml]   start mining/compute (default config/default.toml)");
+    println!("  gpn-agent --version       print the version and exit");
+    println!("  gpn-agent --help          print this help and exit");
+    println!();
+    println!("Most operators want `gpn_node` (one command: node + heartbeat + provider).");
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logging
     env_logger::init();
 
-    let config_path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "config/default.toml".to_string());
+    let argv: Vec<String> = std::env::args().collect();
 
-    let agent = GPUMiningNodeAgent::new(&config_path).await?;
+    // Informational flags FIRST: they must never reach `from_file()` (which
+    // treats any string as a path and silently falls back to defaults).
+    match gpn_agent::firstrun::info_request(&argv) {
+        Some(gpn_agent::firstrun::InfoRequest::Version) => {
+            println!("gpn-agent {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        Some(gpn_agent::firstrun::InfoRequest::Help) => {
+            print_legacy_help();
+            return Ok(());
+        }
+        None => {}
+    }
+
+    if let Some(flag) = unexpected_flag(&argv) {
+        eprintln!("gpn-agent: unexpected option `{flag}`");
+        eprintln!("usage: gpn-agent [CONFIG.toml] | --version | --help");
+        std::process::exit(2);
+    }
+
+    let config_path = config_path_from(&argv);
+
+    // An explicitly supplied path must exist (a typo is reported, not
+    // silently replaced by defaults); only the built-in default may be absent.
+    let config = if argv.len() > 1 {
+        config::AgentConfig::from_file(&config_path)?
+    } else {
+        config::AgentConfig::from_file_or_default(&config_path)?
+    };
+
+    let agent = GPUMiningNodeAgent::with_config(config).await?;
     agent.run().await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod startup_args_tests {
+    use super::{config_path_from, unexpected_flag};
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_flag_is_never_taken_as_a_config_path() {
+        // No argument: the built-in default (unchanged behaviour).
+        assert_eq!(config_path_from(&argv(&["gpn-agent"])), "config/default.toml");
+        // A real path is used verbatim.
+        assert_eq!(config_path_from(&argv(&["gpn-agent", "/etc/gpn.toml"])), "/etc/gpn.toml");
+        // Every flag-shaped argv[1] is caught before it can become a path —
+        // this is the class that started a miner on `--version`.
+        for flag in ["--version", "-V", "--help", "-h", "--setup", "-x", "--versio"] {
+            assert_eq!(unexpected_flag(&argv(&["gpn-agent", flag])), Some(flag), "{flag}");
+        }
+        assert_eq!(unexpected_flag(&argv(&["gpn-agent"])), None);
+        assert_eq!(unexpected_flag(&argv(&["gpn-agent", "cfg/agent.toml"])), None);
+    }
 }

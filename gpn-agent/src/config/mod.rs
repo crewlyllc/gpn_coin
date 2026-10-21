@@ -156,19 +156,35 @@ fn default_feed_aggregation() -> String {
 }
 
 impl AgentConfig {
+    /// Load a config from an explicitly requested path.
+    ///
+    /// A missing path is an **error**: silently substituting the defaults made
+    /// a mistyped path (or a probe flag mistaken for a path) start a full GPU
+    /// miner with default settings and no indication that the config was
+    /// ignored. Use [`AgentConfig::from_file_or_default`] where a built-in
+    /// default path may legitimately be absent.
     pub fn from_file(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let path = Path::new(path);
         if !path.exists() {
-            log::warn!(
-                "Config file not found at {}, using defaults",
-                path.display()
-            );
-            return Ok(Self::default());
+            return Err(format!("config file not found: {}", path.display()).into());
         }
 
         let contents = std::fs::read_to_string(path)?;
         let config: AgentConfig = toml::from_str(&contents)?;
         Ok(config)
+    }
+
+    /// Load a config, falling back to the defaults when the file is absent.
+    ///
+    /// Only for the *implemented* default path, where absence is expected on a
+    /// fresh box; an explicitly supplied path must go through [`Self::from_file`]
+    /// so a typo is reported instead of ignored.
+    pub fn from_file_or_default(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        if !Path::new(path).exists() {
+            log::warn!("Config file not found at {}, using defaults", path);
+            return Ok(Self::default());
+        }
+        Self::from_file(path)
     }
 
     pub fn validate(&self) -> Result<(), Vec<String>> {
@@ -202,6 +218,16 @@ mod tests {
     #[test]
     fn default_feed_ttl_is_safe_1440() {
         assert_eq!(AgentConfig::default().feed_staleness_ttl_blocks, Some(1440));
+    }
+
+    #[test]
+    fn a_missing_explicit_config_is_an_error_not_silent_defaults() {
+        // The class that let `./gpn-agent --version` start a miner: a string
+        // that is not a config file must never be accepted as "use defaults".
+        let missing = "config/definitely-not-here-20261020.toml";
+        assert!(AgentConfig::from_file(missing).is_err());
+        // The default-path helper keeps the lenient behaviour for a fresh box.
+        assert!(AgentConfig::from_file_or_default(missing).is_ok());
     }
 
     #[test]
