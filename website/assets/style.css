@@ -170,6 +170,7 @@ img, svg { max-width: 100%; }
 .tag.live { color: var(--green); border-color: rgba(63,185,80,.45); background: rgba(63,185,80,.12); }
 .tag.live::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
 .tag.soon { color: var(--amber); border-color: rgba(240,166,58,.4); background: rgba(240,166,58,.1); }
+.tag.wip { color: var(--accent-2); border-color: rgba(124,108,255,.45); background: rgba(124,108,255,.12); }
 .hero h1 { font-size: clamp(2.05rem, 1.2rem + 4.2vw, 3.6rem); margin: 0 0 18px; }
 .hero h1 .grad { background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .hero .lede { max-width: 720px; font-size: clamp(1.02rem, .95rem + .4vw, 1.22rem); color: var(--muted); margin-bottom: 28px; }
@@ -419,6 +420,17 @@ section[id], [id="join"] { scroll-margin-top: 74px; }
 }
 .qs-panel { padding: 18px 20px 20px; }
 .qs-panel[hidden] { display: none; }
+.qs-panel.sub { padding: 0; }
+/* Second-level selector inside an environment tab (PowerShell / Python variants). */
+.subtabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 12px; padding: 0; border: 0; }
+.subtabs .tab {
+  font-size: .78rem; font-weight: 700; padding: 5px 12px;
+  border: 1px solid var(--line); border-radius: 999px; border-bottom: 1px solid var(--line);
+}
+.subtabs .tab:hover { background: var(--panel); }
+.subtabs .tab[aria-selected="true"] {
+  background: var(--bg-2); color: var(--text); border-color: var(--accent); box-shadow: none;
+}
 .codeblock {
   background: var(--bg); border: 1px solid var(--line);
   border-radius: var(--radius-sm); margin: 0 0 14px;
