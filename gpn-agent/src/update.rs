@@ -1233,6 +1233,31 @@ mod tests {
         );
     }
 
+    /// A two-asset manifest produced by the **Python** signer
+    /// (`scripts/gen-release-manifest.py`) must verify with the Rust verifier.
+    /// This is the format-drift guard: if either side changes the canonical
+    /// text, this fails.
+    #[test]
+    fn fixture_signed_by_the_release_script_verifies() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("manifest-signed-multiplatform.json");
+        let body = std::fs::read(&path).expect("fixture is committed");
+        let m = verify_manifest(&body, RELEASE_PUBKEY_HEX).expect("fixture must verify");
+        assert_eq!(m.version, "0.3.0");
+        assert_eq!(m.min_version, "0.2.1");
+        assert_eq!(m.assets.len(), 2);
+        // Both platforms are selectable, and neither is a newer *node* concern.
+        assert!(select_asset(&m, "linux", "x86_64").is_ok());
+        assert!(select_asset(&m, "windows", "x86_64").is_ok());
+        // The signed hashes are over the fixture's fake artifacts; a real
+        // download of those bytes must match, anything else must not.
+        assert!(verify_bytes(b"fake-linux-binary", select_asset(&m, "linux", "x86_64").unwrap()).is_ok());
+        assert!(verify_bytes(b"fake-win-binary!!", select_asset(&m, "windows", "x86_64").unwrap()).is_ok());
+        assert!(verify_bytes(b"evil", select_asset(&m, "linux", "x86_64").unwrap()).is_err());
+    }
+
     // ── persisting the `--setup` answer ─────────────────────────────────────
 
     #[test]

@@ -115,6 +115,25 @@ the config file or the repo.
 Run `--setup` more than once and it is idempotent: an existing wallet is kept
 (press Enter), an existing spec is reused, and ollama is re-verified.
 
+After the ollama check, `--setup` asks **one** question about updates:
+
+```
+  Keep this node auto-updated? [y/N]
+    yes: verify + install GPN releases automatically (signed manifest,
+         ed25519), restarting briefly when one is published. Recommended:
+         the network drops nodes that fall below the minimum version, and an
+         old node cannot mine.
+    no : you update manually. This node will REFUSE TO MINE once its
+         version is below the published minimum (it keeps syncing).
+  Currently: off
+  >
+```
+
+`y` writes `auto_update = true` into `~/.gpn/node.toml`; pressing Enter (or `n`)
+leaves it off. It is genuinely optional — but see
+[Updates](#updates-auto-update-and-the-minimum-version-cutoff) for what "off"
+means once a release raises the floor.
+
 ### 3. `./gpn_node`
 
 One command starts the miner, the heartbeat and every AI provider, supervised
@@ -132,6 +151,7 @@ flags and no environment variables — it reads `~/.gpn/node.toml`.
 | **Peers** | `https://gpncoin.ai/seeds.json` (live directory) + compiled-in bootnodes; failing URLs are logged and ignored. | `GPN_BOOTNODES`, `GPN_BOOTNODES_URL` |
 | **Public address** | `GPN_PUBLIC_ADDR` → public-IP detection → **UPnP-IGD / NAT-PMP auto-mapping** (on by default). A successful mapping needs no configuration at all. | `GPN_PUBLIC_ADDR`, `GPN_UPNP=off`, `--no-upnp` |
 | **Ollama** | Installed/started and the baseline model pulled on `--setup` (and on a normal start if missing). | `GPN_OLLAMA`, `GPN_REQUIRE_OLLAMA=0` |
+| **Updates** | Auto-update is **off** unless you opted in at `--setup`. The minimum-version check runs either way: an outdated node syncs but does not mine. | `GPN_AUTO_UPDATE`, see [Updates](#updates-auto-update-and-the-minimum-version-cutoff) |
 | **Config** | `~/.gpn/node.toml` written once (base path, chain, keystore path, autostart). | `--config`, `GPN_CONFIG`, `GPN_PREFIX` |
 
 ### Fallbacks (the rare cases)
@@ -812,6 +832,55 @@ When ollama is up but a model is merely missing, the node still starts (model
 presence is not the gate); the provider pulls/retries and logs a **single**
 actionable warning instead of per-poll `pull … failed` spam.
 
+## Updates — auto-update and the minimum-version cutoff
+
+Short version: **opt in and forget it, or update by hand — but a node that falls
+too far behind stops mining.** Full detail: [`docs/updates.md`](updates.md).
+
+```bash
+# opt in (or answer `y` at --setup, which writes this to node.toml)
+GPN_AUTO_UPDATE=1 gpn_node
+
+# manual (the default): nothing is downloaded, ever
+#   ...but when a release raises min_version this node will SYNC and NOT MINE
+```
+
+**Auto-update** (opt-in, `GPN_AUTO_UPDATE=1` / `auto_update = true`):
+
+* checks `https://gpncoin.ai/releases.json` at start and every
+  `GPN_UPDATE_CHECK_HOURS` (default 6);
+* **verifies an ed25519 signature** over the manifest with the key compiled into
+  the node — a forged manifest (or a compromised web host) is rejected before a
+  single byte is downloaded;
+* verifies the artifact's `sha256` **twice**: in memory after the download, and
+  again from disk immediately before the swap;
+* stages it as `gpn_node.new`, keeps the old binary as `gpn_node.bak`, and swaps
+  atomically;
+* restarts to run it. **That is a short outage** (seconds: children stop
+  cleanly, sync resumes) — it is the only way to execute new code. Prefer to
+  choose the moment? `GPN_UPDATE_RESTART=0` stages it and applies it on your next
+  restart.
+
+**The cutoff** (not optional): every start — auto-update or not — the signed
+manifest's `min_version` is checked. Below it:
+
+```
+  !! UPGRADE REQUIRED — this node is 0.1.0, the network requires >= 0.2.0
+  This node will SYNC ... but will NOT MINE and will NOT ANNOUNCE itself.
+```
+
+The supervisor launches the chain node with `--no-seed --no-discoverable` and
+`GPN_STANDBY=1`, which stops the proposer and the miner. The node keeps syncing,
+keeps its RPC, and can be upgraded in place. The last verified cutoff is cached
+in `<base>/update/update-state.json`, so it still applies if the manifest is
+unreachable.
+
+**Rollback:** if a release is bad, stop the node, move `gpn_node.bak` back over
+`gpn_node`, and restart (§6 of `docs/updates.md`).
+
+> The on-chain half of the cutoff (a `MinNodeVersion` storage item) is **staged,
+> not applied**: `docs/design/design-min-node-version.md`.
+
 ## AMD / Radeon support (ROCm)
 
 GPN is GPU-native and supports **AMD** as a first-class vendor alongside NVIDIA.
@@ -937,6 +1006,14 @@ ml           = true                                # ML-inference provider (gpn_
 ml_poll_ms   = 2000
 finetune     = true                                # fine-tune provider (gpn_finetune_provider)
 finetune_poll_ms = 4000
+
+# ── updates: auto-update is OPT-IN; the version cutoff applies regardless ──
+auto_update         = false   # true = install signed GPN releases automatically
+update_url          = "https://gpncoin.ai/releases.json"
+update_check_hours  = 6       # how often to look for a release (1-168)
+update_restart      = true    # false = stage it, apply on the next start
+update_check        = true    # false = air-gapped: never fetch the manifest
+min_version_enforce = true    # false = mine below the minimum (unsupported)
 ```
 
 ### Environment variables (overrides)
@@ -973,6 +1050,12 @@ finetune_poll_ms = 4000
 | `GPN_ASSIGN_SOURCE` | `pull` (the only delivery path) \| `both` \| `push` (**degraded**, no delivery) — see [Pull vs push](#pull-vs-push--work-behind-nat). | `pull` |
 | `GPN_ASSIGN_WAIT_MS` | pull long-poll budget (the AP answers immediately when there is work) | `25000` |
 | `GPN_OLLAMA` | ollama base URL | `http://127.0.0.1:11434` |
+| `GPN_AUTO_UPDATE` | `1` = install signed GPN releases automatically (**opt-in**) | `0` |
+| `GPN_UPDATE_URL` | signed release manifest URL | `https://gpncoin.ai/releases.json` |
+| `GPN_UPDATE_CHECK_HOURS` | hours between auto-update checks (1–168) | `6` |
+| `GPN_UPDATE_RESTART` | `0` = stage an update but apply it at the next start | `1` |
+| `GPN_UPDATE_CHECK` | `0` = never fetch the manifest (air-gapped; the cutoff is then not evaluated) | `1` |
+| `GPN_MIN_VERSION_ENFORCE` | `0` = mine even when below the published minimum (emergency only, unsupported) | `1` |
 | `GPN_REQUIRE_OLLAMA` | Hard gate: refuse to start when ollama is unreachable. `0` opts out (special cases only). | `1` |
 | `GPN_OLLAMA_SETUP` | Attempt the automated install/start if ollama is missing | `1` |
 | `GPN_BASELINE_MODELS` | Comma-separated baseline model(s) to pull on first run | `llama3.2:1b` |

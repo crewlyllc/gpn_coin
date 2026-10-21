@@ -1,0 +1,23 @@
+{
+  "version": "0.3.0",
+  "min_version": "0.2.1",
+  "published_at": "2026-10-21T17:39:31Z",
+  "assets": [
+    {
+      "os": "linux",
+      "arch": "x86_64",
+      "url": "https://gpncoin.ai/dl/gpn_node",
+      "sha256": "ce9e6d6a16f4863e322b47eedbe6c4c402aeddbba134dd7052968e020a84e771",
+      "size": 17
+    },
+    {
+      "os": "windows",
+      "arch": "x86_64",
+      "url": "https://gpncoin.ai/dl/gpn_node.exe",
+      "sha256": "8c80d7377f68064ec218a5095a15057d882a6960d57467c164c169268a968f3a",
+      "size": 17
+    }
+  ],
+  "signing_key": "78015fab541c9a6230d3fb302a89f1a9950d1b181652cdf0a65901b6f0278c5e",
+  "signature": "8831f150637017ac0c6a5f03b8134964079fc5de62d0077bfbf84e9813d64007492187b52fd1e53ecd9354669fc3e5bb9f6d2a956f0771695343172ba7385700"
+}
