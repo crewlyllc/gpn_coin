@@ -565,6 +565,15 @@ struct Provider {
     capacity: u64,
     latency_ms: u64,
     last_seen: Option<Instant>,
+    /// When this provider last delivered a pull poll (`GET /assignments`) — i.e.
+    /// when we last proved we can actually HAND it work.
+    ///
+    /// The `POST /assign` push was deleted (#46 Phase 3), so a provider's own
+    /// poll is the ONLY transport left. A box that only ever *answered* `/status`
+    /// (a push-era build, or one pointed at a different access point) is
+    /// reachable and reports `healthy: true`, yet no lease can ever reach it —
+    /// routing to it black-holes the job until the janitor cancels it (#6237).
+    pulled_seen: Option<Instant>,
 }
 
 fn opt(args: &[String], flag: &str) -> Option<String> {
@@ -792,6 +801,7 @@ fn provider_from_caps(addr: &str, v: &Value, status_url: String, latency_ms: u64
             .max(1),
         latency_ms,
         last_seen: Some(Instant::now()),
+        pulled_seen: None,
     }
 }
 
@@ -852,13 +862,18 @@ fn apply_poll_caps(
                     pull_default_latency_ms()
                 };
                 out[i] = merge_poll_snapshot(&out[i], &caps, status_url, latency);
+                out[i].pulled_seen = Some(Instant::now());
             }
-            None => out.push(provider_from_caps(
-                &addr,
-                &caps,
-                format!("pull://{addr}"),
-                pull_default_latency_ms(),
-            )),
+            None => {
+                let mut fresh = provider_from_caps(
+                    &addr,
+                    &caps,
+                    format!("pull://{addr}"),
+                    pull_default_latency_ms(),
+                );
+                fresh.pulled_seen = Some(Instant::now());
+                out.push(fresh);
+            }
         }
     }
 }
@@ -983,6 +998,7 @@ fn refresh(
                     capacity: 0,
                     latency_ms: 9999,
                     last_seen: None,
+                    pulled_seen: None,
                 },
             };
             out.push(p);
@@ -1322,9 +1338,28 @@ fn pick(
         }
         p.gpu_class == "discrete"
     };
+    // Delivery gate (item #55): since #46 Phase 3 deleted the `POST /assign`
+    // push, a provider's own `GET /assignments` poll is the ONLY way work
+    // reaches it. A push-era build (or one pointed at a different access point)
+    // still answers `/status`, so it looks healthy and is selectable — but no
+    // lease can ever reach it, so the job sits `Pending` until the janitor
+    // cancels it (live: #6237 was leased to the Windows box at 14:46 and
+    // cancelled at 14:48:46 while THIS host's provider was idle the whole time).
+    // Fail closed: only a provider that has polled recently can be given work.
+    let deliverable = |p: &Provider| {
+        p.pulled_seen
+            .map(|t| t.elapsed().as_secs() <= POLL_CAPS_TTL_SECS)
+            .unwrap_or(false)
+    };
     let live: Vec<&Provider> = registry
         .iter()
-        .filter(|p| p.last_seen.is_some() && p.gflops >= min_gflops && hw_ok(p) && gpu_ok(p))
+        .filter(|p| {
+            p.last_seen.is_some()
+                && p.gflops >= min_gflops
+                && hw_ok(p)
+                && gpu_ok(p)
+                && deliverable(p)
+        })
         .collect();
 
     // Effective latency for the *user's* path: a client-measured (user→provider)
@@ -3487,7 +3522,38 @@ mod tests {
             capacity: 4,
             latency_ms,
             last_seen: Some(Instant::now()),
+            // Routing tests describe *deliverable* providers, so the delivery
+            // gate (item #55) stays inert for them.
+            pulled_seen: Some(Instant::now()),
         }
+    }
+
+    #[test]
+    fn a_provider_that_never_polls_is_not_routable() {
+        // item #55: the push (`POST /assign`) is gone, so a provider that only
+        // answers `/status` can never be handed a lease — routing to it makes the
+        // job sit Pending until the janitor cancels it (live: #6237). The gate is
+        // fail-closed and prefers the provider we can actually deliver to.
+        let mut push_only = prov("box", "http://box/status", 1, "llama3.2:1b");
+        push_only.pulled_seen = None;
+        let polling = prov("local", "http://local/status", 90, "llama3.2:1b");
+
+        // Even though the push-only box is 90x "faster", it is not a candidate.
+        let reg = vec![push_only.clone(), polling.clone()];
+        let (p, _) = pick(&reg, 0, 0, 0, 0.0, "llama3.2:1b", 0, &RttOverrides::new()).unwrap();
+        assert_eq!(p.address, "local");
+
+        // A poll older than the caps TTL is not evidence of a live poller either.
+        let mut stale = prov("stale", "http://stale/status", 1, "llama3.2:1b");
+        stale.pulled_seen = Some(Instant::now() - Duration::from_secs(POLL_CAPS_TTL_SECS + 1));
+        let reg = vec![stale, polling.clone()];
+        let (p, _) = pick(&reg, 0, 0, 0, 0.0, "llama3.2:1b", 0, &RttOverrides::new()).unwrap();
+        assert_eq!(p.address, "local");
+
+        // Nothing polling at all ⇒ no candidate, so the AP fails closed (503)
+        // instead of black-holing a created, escrowed job.
+        let reg = vec![push_only];
+        assert!(pick(&reg, 0, 0, 0, 0.0, "llama3.2:1b", 0, &RttOverrides::new()).is_none());
     }
 
     #[test]
