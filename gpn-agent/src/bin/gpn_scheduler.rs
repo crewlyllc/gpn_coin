@@ -1647,9 +1647,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|| std::env::var("GPN_PUBLIC_URL").ok())
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| format!("http://{}", loopback_if_wildcard(&listen)));
-    // Optional bearer token. When set, state-changing (POST) + artifact requests
-    // from NON-loopback clients must present it (local crons/monitors keep working).
-    let ap_token = std::env::var("GPN_AP_TOKEN").unwrap_or_default();
+    // Bearer token for non-loopback callers. Precedence: `GPN_AP_TOKEN` in the
+    // environment > `GPN_AP_TOKEN=` in the env file (~/.gpn/accesspoint.env) >
+    // generated on first boot and persisted to that file (mode 0600). The
+    // generated value is printed exactly once — see src/ap_token.rs. An
+    // explicitly supplied token is never overwritten.
+    let ap_auth = gpn_agent::ap_token::resolve();
+    let ap_token = ap_auth.token.clone();
     // Item #22 build-order step 4: the abuse **report path + operator denylist**.
     // The denylist (accounts / providers / IPs) is enforced at this AP and read
     // by providers from the SAME file (`GPN_DENY_FILE` / `~/.gpn/denylist.json`);
@@ -1749,6 +1753,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "callers must sign with their OWN wallet"
         }
     );
+    gpn_agent::ap_token::announce(&ap_auth);
 
     let hdr = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
     // Handle each request on its OWN thread. Previously the loop handled requests

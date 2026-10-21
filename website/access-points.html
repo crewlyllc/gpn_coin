@@ -173,12 +173,16 @@ gpn-accesspoint-run</code></pre>
             <tr><td><code>GPN_ENDPOINT</code></td><td>Chain RPC endpoint</td><td><code>ws://127.0.0.1:9944</code></td></tr>
             <tr><td><code>GPN_PROVIDERS</code></td><td>Comma list of provider <code>/status</code> URLs to route to</td><td><code>http://127.0.0.1:8093</code></td></tr>
             <tr><td><code>GPN_SIGNER_URI</code></td><td>Hot-wallet seed for testnet free-AI mode (creates + escrows jobs)</td><td>unset (mainnet = client-signed)</td></tr>
-            <tr><td><code>GPN_AP_TOKEN</code></td><td>Bearer token required for non-loopback POSTs</td><td>unset (set your own)</td></tr>
+            <tr><td><code>GPN_AP_TOKEN</code></td><td>Bearer token required for non-loopback POSTs. Omit it and the first boot generates one (48 hex chars) and prints it once</td><td>generated on first boot</td></tr>
           </tbody>
         </table>
       </div>
       <p class="small muted" style="margin-top:12px">Config is written to <code>~/.gpn/accesspoint.env</code>
-        (chmod 600). Secrets stay there — never in a repo or on a webpage. Full details in the
+        (chmod 600). Secrets stay there — never in a repo or on a webpage. The auth token is
+        <b>generated on the first boot</b> and printed exactly once; retrieve it later with
+        <code>grep GPN_AP_TOKEN ~/.gpn/accesspoint.env</code> and hand it to your callers
+        (<code>./scripts/set-ap-token.sh</code> sets the <code>AP_TOKEN</code> secret on the gpncoin.ai
+        Worker). Full details in the
         <a href="deploy.html#access-point">deploy guide</a> and the
         <a href="docs/run-a-node.html">run-a-node guide</a>.</p>
 

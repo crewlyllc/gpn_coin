@@ -4,6 +4,7 @@
 //! profitability calculator, and compute executor used by the agent binary.
 
 pub mod abuse;
+pub mod ap_token;
 pub mod assign_pull;
 pub mod chain;
 pub mod cli;

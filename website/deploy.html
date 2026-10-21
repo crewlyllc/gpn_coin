@@ -175,7 +175,11 @@ gpn-accesspoint-run</code></pre></div>
 curl http://127.0.0.1:8092/providers  # live registry (gflops, latency_ms, models, active)</code></pre></div>
         <div class="step"><h4>Expose it</h4><p>Point callers at <code>http://&lt;your-host&gt;:8092</code>.
           Non-loopback POSTs require <code>Authorization: Bearer &lt;GPN_AP_TOKEN&gt;</code> (or
-          <code>X-Api-Key</code>) — set your own token in the env; never commit it.</p></div>
+          <code>X-Api-Key</code>). You don't have to invent that token: the <b>first boot</b> generates
+          one into <code>~/.gpn/accesspoint.env</code> (mode 600) and prints it <b>once</b> — copy it to
+          your callers, e.g. <code>./scripts/set-ap-token.sh</code> for the Cloudflare Worker. Every later
+          boot prints only the first 8 chars. Retrieve it with
+          <code>grep GPN_AP_TOKEN ~/.gpn/accesspoint.env</code>.</p></div>
       </div>
       <p class="small muted" style="margin-top:14px">See the current public entry point and how to add yours
         on the <a href="access-points.html">Access Points</a> page.</p>
@@ -265,8 +269,11 @@ OLLAMA_MODELS=~/.gpn/models</code></pre>
 GPN_ENDPOINT=ws://127.0.0.1:9944
 GPN_PROVIDERS=http://127.0.0.1:8093
 # GPN_SIGNER_URI=          # testnet free-AI hot wallet (omit for mainnet client-signed)
-# GPN_AP_TOKEN=            # required for non-loopback POSTs
+# GPN_AP_TOKEN=            # generated on first boot; printed once, then mode 600
 # GPN_PUBLIC_URL=http://your-host:8092</code></pre>
+          <p class="small muted" style="margin-top:10px">Leave <code>GPN_AP_TOKEN</code> unset and the
+            first start generates a 48-hex-char token here and prints it once. Read it later with
+            <code>grep GPN_AP_TOKEN ~/.gpn/accesspoint.env</code>.</p>
         </div>
       </div>
     </div>

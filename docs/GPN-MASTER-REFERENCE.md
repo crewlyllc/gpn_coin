@@ -326,7 +326,11 @@ into a registry each cycle.
 ### 6.3 Known ops facts (2026-10-06)
 - AP requires **`Authorization: Bearer <GPN_AP_TOKEN>`** (or `X-Api-Key`) on **non-loopback**
   POSTs; loopback is exempt. Token lives in `~/.gpn/accesspoint.env`. (Value is a secret — read
-  from that file, don't hardcode.)
+  from that file, don't hardcode.) Since 2026-10-21 the AP **generates** it on first boot
+  (24 CSPRNG bytes → 48 lowercase hex, mode 0600, atomic write, other env vars preserved) and
+  prints it exactly once; later boots print only the first 8 chars. Precedence:
+  env var > env file > generated — an explicitly supplied token is never overwritten.
+  Retrieve later: `grep GPN_AP_TOKEN ~/.gpn/accesspoint.env`.
 - Image gen end-to-end works after restarting a **wedged** provider (`systemctl --user restart
   gpn-diffusion`); a stale provider instance can sit idle (its `list_claimable_jobs` returns nothing
   if its attestation/state is stale) and jobs get reaped by the janitor.

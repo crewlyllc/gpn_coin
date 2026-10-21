@@ -698,6 +698,47 @@ can't be opened, a signature fails), so enabling it can never lose a job.
 gpn_scheduler --listen 0.0.0.0:8092 --signer-uri <ap-seed> --allow-hot-wallet
 ```
 
+#### Auth token — generated on the first boot
+
+Non-loopback callers must send `Authorization: Bearer <token>` (or
+`X-Api-Key: <token>`) on POSTs; loopback is exempt, so local crons keep working.
+You do not have to invent that token — the access point bootstraps it:
+
+* **On the first boot**, if `GPN_AP_TOKEN` is unset in the environment *and*
+  absent from `~/.gpn/accesspoint.env`, the AP generates 24 random bytes
+  (48 lowercase hex chars, same format as a hand-rolled token), writes it to
+  `~/.gpn/accesspoint.env` at mode `0600` (creating `~/.gpn` if needed, written
+  atomically via temp-file + rename, other variables in the file preserved), and
+  prints it **once**:
+
+  ```
+  generated a new AP token — set this as the AP_TOKEN secret on the Cloudflare
+  Worker (or run scripts/set-ap-token.sh); it will not be printed again:
+
+      GPN_AP_TOKEN=3f9c…
+  ```
+
+  Copy it somewhere safe at that moment (the Cloudflare Worker holds the same
+  value as its `AP_TOKEN` secret, so `/api/*` via gpncoin.ai keeps working).
+* **Every later boot** prints only the prefix — `AP token loaded from
+  ~/.gpn/accesspoint.env (3f9c1a2b…)`. The full value never appears in the logs
+  again.
+* **Precedence:** environment > env file > generated. An explicitly supplied
+  token (exported, or set in the file) is **never** overwritten.
+* **Retrieve it later:**
+
+  ```bash
+  grep GPN_AP_TOKEN ~/.gpn/accesspoint.env
+  ./scripts/set-ap-token.sh        # push it to the Cloudflare Worker
+  ```
+
+A missing or unreadable env file is not fatal: the AP keeps running. If the
+file cannot be written, the printed token is marked **EPHEMERAL** (it will
+change on the next start) — fix the permissions on `~/.gpn` and restart. An
+unparseable file is moved aside as `accesspoint.env.corrupt.<epoch>` rather
+than being overwritten. Set `GPN_AP_TOKEN_FILE` to relocate the file (tests and
+multi-instance hosts).
+
 | Env | Default | Meaning |
 |---|---|---|
 | `GPN_ESCROW_MODE` | `channel` | `onchain` = always use per-job escrow (the old behaviour) |
@@ -1136,6 +1177,8 @@ min_version_enforce = true    # false = mine below the minimum (unsupported)
 | `GPN_NODE_ARGS` | extra raw args appended to `gpn-node` | _(none)_ |
 | `GPN_PROVIDER_ENDPOINT` | public `/status` URL advertised on-chain | _(none → discovery off)_ |
 | `GPN_ASSIGN_TOKEN` | shared AP↔provider secret (`GET /assignments` auth) | _(empty → legacy-permissive, warns)_ |
+| `GPN_AP_TOKEN` | access-point bearer token for non-loopback callers. Unset → read from the env file → generate on first boot and print once. | _(generated)_ |
+| `GPN_AP_TOKEN_FILE` | where the AP reads/writes `GPN_AP_TOKEN` | `~/.gpn/accesspoint.env` |
 | `GPN_AP_URL` | access point base URL for the **pull** transport (e.g. `http://gpn-testnet.duckdns.org:8092`). Unset → no delivery, with a loud warning. | _(none)_ |
 | `GPN_ASSIGN_SOURCE` | `pull` (the only delivery path) \| `both` \| `push` (**degraded**, no delivery) — see [Pull vs push](#pull-vs-push--work-behind-nat). | `pull` |
 | `GPN_ASSIGN_WAIT_MS` | pull long-poll budget (the AP answers immediately when there is work) | `25000` |

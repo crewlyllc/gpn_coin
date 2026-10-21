@@ -21,6 +21,10 @@
 #   GPN_SIGNER_URI  hot-wallet seed for testnet free-AI mode (omit for mainnet client-signed)
 #   GPN_REPO_URL    git URL if there's no local clone
 #   GPN_INSTALL_SERVICE 1 to also install+start a systemd --user unit (default 0)
+#   GPN_AP_TOKEN    bearer token for non-loopback callers; omit and the first
+#                   boot generates one (48 hex chars) into $PREFIX/accesspoint.env
+#                   and prints it once — copy it wherever your callers live
+#                   (e.g. the Cloudflare Worker's AP_TOKEN secret).
 set -euo pipefail
 
 PREFIX="${GPN_PREFIX:-$HOME/.gpn}"
@@ -70,6 +74,9 @@ GPN_PROVIDERS=$PROVIDERS
 $( [ -n "$SIGNER_URI" ] && echo "GPN_SIGNER_URI=$SIGNER_URI" || echo "# GPN_SIGNER_URI=   # set for testnet free-AI (hot wallet); omit for mainnet client-signed" )
 # Optional: a public base URL to advertise (so clients can find this AP). 
 # GPN_PUBLIC_URL=http://your-host:8092
+# GPN_AP_TOKEN is generated on the first boot (and printed once). Leave it
+# unset here unless you want to supply your own; retrieve it later with:
+#   grep GPN_AP_TOKEN ~/.gpn/accesspoint.env
 EOF
 chmod 600 "$PREFIX/accesspoint.env"
 
@@ -112,6 +119,13 @@ echo "  (or with systemd: GPN_INSTALL_SERVICE=1 ./install-accesspoint.sh)"
 echo
 echo "Config:  $PREFIX/accesspoint.env"
 echo "Test:    curl http://127.0.0.1:${LISTEN##*:}/health"
+echo
+echo "Auth:    the first boot generates GPN_AP_TOKEN (48 hex chars) into"
+echo "         $PREFIX/accesspoint.env and prints it ONCE. Copy it to every"
+echo "         non-loopback caller (the gpncoin.ai Worker uses it as AP_TOKEN):"
+echo "           ./scripts/set-ap-token.sh          # sets the Worker's AP_TOKEN secret"
+echo "         Retrieve it any time with:"
+echo "           grep GPN_AP_TOKEN $PREFIX/accesspoint.env"
 echo
 echo "⚠️  To be reachable by others, expose the listen port (default 8092) and share"
 echo "    http://<your-host>:8092 as an access point. The scheduler routes jobs to the"

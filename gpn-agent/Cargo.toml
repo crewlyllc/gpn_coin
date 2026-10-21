@@ -31,6 +31,9 @@ opencl3 = { version = "0.12", features = ["dynamic"] }
 ethash = "0.4"
 hex = "0.4"
 ethereum-types = "0.8"
+# First-boot AP token generation (24 CSPRNG bytes). Already in the tree via
+# sp-core; pinned here so the token source cannot silently change.
+getrandom = "0.2"
 
 # Crypto
 sha2 = "0.10"
