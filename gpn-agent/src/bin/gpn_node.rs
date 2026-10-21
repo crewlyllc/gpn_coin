@@ -124,6 +124,9 @@ struct FileConfig {
     update_url: Option<String>,
     /// Hours between auto-update checks (`GPN_UPDATE_CHECK_HOURS`).
     update_check_hours: Option<u64>,
+    /// Max seconds to wait before downloading a found update
+    /// (`GPN_UPDATE_SPREAD_SECS`; 0 disables the stagger).
+    update_spread_secs: Option<u64>,
     /// Restart automatically to apply a staged update (`GPN_UPDATE_RESTART`).
     update_restart: Option<bool>,
     /// Fetch the manifest at all (`GPN_UPDATE_CHECK=0` for air-gapped hosts).
@@ -167,8 +170,12 @@ struct Config {
     auto_update: bool,
     /// Signed release manifest URL.
     update_url: String,
-    /// Hours between update checks.
+    /// Hours between update checks (the base: the real schedule is
+    /// `interval ± jitter`, offset by a per-node phase).
     update_check_hours: u64,
+    /// Max seconds between "an update exists" and starting the download, so a
+    /// release day does not have the whole fleet pull at once (0 = no stagger).
+    update_spread_secs: u64,
     /// Restart automatically to apply a staged update (a short outage).
     update_restart: bool,
     /// Whether to fetch the manifest at all (off = air-gapped).
@@ -685,6 +692,9 @@ impl Config {
             update_check_hours: env_u64("GPN_UPDATE_CHECK_HOURS")
                 .or(file.update_check_hours)
                 .unwrap_or(6),
+            update_spread_secs: env_u64("GPN_UPDATE_SPREAD_SECS")
+                .or(file.update_spread_secs)
+                .unwrap_or(update::DEFAULT_SPREAD_SECS),
             update_restart: env_bool("GPN_UPDATE_RESTART")
                 .or(file.update_restart)
                 .unwrap_or(true),
@@ -712,6 +722,23 @@ impl Config {
     /// Where updater bookkeeping lives (staged marker, cached cutoff).
     fn update_dir(&self) -> PathBuf {
         self.base_path.join("update")
+    }
+
+    /// A stable, non-secret identity for the fleet-spread schedule.
+    ///
+    /// The payout account is the natural choice: every node has its own, it
+    /// survives restarts and upgrades, and it is already public. A node with no
+    /// account yet (dev chain, or before the wallet exists) falls back to its
+    /// base path, which is unique per box. The signer is deliberately NOT used:
+    /// it can be a secret URI, and a hash of a secret is still a secret-derived
+    /// value we have no reason to compute.
+    fn update_identity(&self) -> String {
+        let account = self.account.trim();
+        if !account.is_empty() {
+            format!("account:{account}")
+        } else {
+            format!("path:{}", self.base_path.display())
+        }
     }
 }
 
@@ -1256,7 +1283,18 @@ fn download_and_stage(
 }
 
 /// One full check cycle (used at startup-with-auto-update and on a timer).
-fn update_once(cfg: &Config, restart: &AtomicBool) -> Result<(), String> {
+///
+/// `seed` is the node's fleet-spread seed and `spread` the configured install
+/// stagger: if this check finds a newer release, the **download** waits a random
+/// `[0, spread]` first, so a fleet that checks together does not pull 300 MB
+/// together. The wait is interruptible, so shutdown never hangs on it.
+fn update_once(
+    cfg: &Config,
+    restart: &AtomicBool,
+    shutdown: &AtomicBool,
+    seed: &[u8; 32],
+    spread: Duration,
+) -> Result<(), String> {
     let m = fetch_verified_manifest(cfg)?;
 
     // The cutoff can tighten between checks as well as at start.
@@ -1273,6 +1311,25 @@ fn update_once(cfg: &Config, restart: &AtomicBool) -> Result<(), String> {
     if !update::is_newer(&m.version, env!("CARGO_PKG_VERSION")) {
         return Ok(());
     }
+
+    let delay = update::spread_delay(spread, seed, &m.version);
+    if delay > Duration::ZERO {
+        log_event(
+            "update",
+            &format!(
+                "{} is available — waiting {} before downloading so the fleet does not \
+                 stampede the release host (GPN_UPDATE_SPREAD_SECS={}s, chosen for this node \
+                 and version from its identity; 0 disables)",
+                m.version,
+                fmt_mins(delay),
+                spread.as_secs()
+            ),
+        );
+        if sleep_interruptible(delay, shutdown) {
+            return Ok(());
+        }
+    }
+
     let pending = download_and_stage(cfg, &m)?;
 
     // Cache the staged version so a restart knows what to expect.
@@ -1324,35 +1381,82 @@ fn sleep_interruptible(total: Duration, shutdown: &AtomicBool) -> bool {
     shutdown.load(Ordering::SeqCst)
 }
 
+/// Render a duration as `12m 34s` for the update log.
+fn fmt_mins(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    }
+}
+
 /// The auto-update thread. Only spawned when the operator opted in.
+///
+/// **Schedule** (see `docs/updates.md`):
+///
+/// * first check at `start + phase`, where the phase is derived from the node's
+///   identity (account, else base path) and covers `[0, interval)`;
+/// * then every `interval ± jitter` (5–10 %), so a fleet the same age drifts
+///   apart instead of checking in lock step;
+/// * a found update is downloaded after a further `[0, GPN_UPDATE_SPREAD_SECS]`.
+///
+/// The whole thing lives on its own thread, so a starting node never waits for
+/// the phase or the spread — the supervisor is already supervising children
+/// while this thread is still asleep.
 fn spawn_auto_updater(
     cfg: Config,
     shutdown: Arc<AtomicBool>,
     restart: Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<()> {
     let interval = update::check_interval(Some(cfg.update_check_hours));
+    let spread = update::spread_max(Some(cfg.update_spread_secs));
+    let seed = update::schedule_seed(&cfg.update_identity());
+    let identity = cfg.update_identity();
+    let phase = update::check_phase(&seed, interval, update::now_unix());
     std::thread::spawn(move || {
         log_event(
             "update",
             &format!(
-                "auto-update ON — checking {} every {}h (restart_to_apply={})",
-                cfg.update_url, cfg.update_check_hours, cfg.update_restart
+                "auto-update ON — checking {} every {}h ±5–10% jitter, first check in {} \
+                 (phase from {identity}; install spread {}; restart_to_apply={})",
+                cfg.update_url,
+                cfg.update_check_hours,
+                fmt_mins(phase),
+                if spread.is_zero() {
+                    "off".to_string()
+                } else {
+                    format!("0–{}s", spread.as_secs())
+                },
+                cfg.update_restart
             ),
         );
-        // First check shortly after start, then on the interval.
-        if sleep_interruptible(Duration::from_secs(45), &shutdown) {
+        if sleep_interruptible(phase, &shutdown) {
             return;
         }
+        let mut counter = 0u64;
         loop {
             if update::read_pending(&cfg.update_dir()).is_none() {
-                if let Err(e) = update_once(&cfg, &restart) {
+                if let Err(e) = update_once(&cfg, &restart, &shutdown, &seed, spread) {
                     log_event("update", &format!("check failed: {e}"));
                 }
             }
             if restart.load(Ordering::SeqCst) {
                 return;
             }
-            if sleep_interruptible(interval, &shutdown) {
+            counter = counter.saturating_add(1);
+            let jitter = update::check_jitter(&seed, counter, interval);
+            let wait = update::next_interval(interval, jitter);
+            log_event(
+                "update",
+                &format!(
+                    "next check in {} ({}{}s)",
+                    fmt_mins(wait),
+                    if jitter >= 0 { "+" } else { "-" },
+                    jitter.unsigned_abs()
+                ),
+            );
+            if sleep_interruptible(wait, &shutdown) {
                 return;
             }
         }
@@ -2441,12 +2545,38 @@ mod tests {
             auto_update: false,
             update_url: update::MANIFEST_URL.to_string(),
             update_check_hours: 6,
+            update_spread_secs: 0,
             update_restart: true,
             update_check: true,
             min_version_enforce: true,
             standby: false,
             config_path: None,
         }
+    }
+
+    /// The spread schedule is only as unique as its seed: the payout account is
+    /// per-node and survives upgrades, and a node with no account yet must fall
+    /// back to something unique rather than to a constant.
+    #[test]
+    fn update_identity_is_per_node_and_not_the_signer() {
+        let mut cfg = test_config();
+        cfg.account = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY".into();
+        cfg.signer = "//Alice".into();
+        cfg.base_path = PathBuf::from("/home/a/.gpn");
+        let a = cfg.update_identity();
+        assert!(a.starts_with("account:"), "the account wins: {a}");
+        assert!(!a.contains("Alice"), "the signer must never be hashed: {a}");
+
+        cfg.account = "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty".into();
+        assert_ne!(a, cfg.update_identity(), "two nodes, two phases");
+
+        // No account (dev chain, pre-wallet): the base path distinguishes nodes.
+        cfg.account = "  ".into();
+        cfg.base_path = PathBuf::from("/home/a/.gpn");
+        let p1 = cfg.update_identity();
+        cfg.base_path = PathBuf::from("/home/b/.gpn");
+        assert!(p1.starts_with("path:"), "{p1}");
+        assert_ne!(p1, cfg.update_identity());
     }
 
     fn node_spec(cfg: &Config) -> ChildSpec {
@@ -2496,13 +2626,15 @@ mod tests {
         assert!(!spec.envs.iter().any(|(k, _)| k == "GPN_STANDBY"));
     }
 
-    /// Auto-update is opt-in: a config that does not ask for it must produce an
-    /// updater that is never spawned.
+    /// The config default is opt-in (`auto_update` absent = off), while the
+    /// `GPN_AUTO_UPDATE` env helper is opt-out: an explicit `GPN_AUTO_UPDATE=0`
+    /// is the only thing that turns it off through the env path.
     #[test]
-    fn auto_update_defaults_to_off() {
+    fn auto_update_env_helper_is_opt_out() {
         let cfg = test_config();
         assert!(!cfg.auto_update);
-        assert!(!update::auto_update_enabled(None));
+        assert!(update::auto_update_enabled(None));
+        assert!(!update::auto_update_enabled(Some("0")));
         assert!(update::auto_update_enabled(Some("1")));
     }
 

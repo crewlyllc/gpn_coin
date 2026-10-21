@@ -502,7 +502,9 @@ auto_update = true
 
 ### What it actually does
 
-On start (after 45 s) and every `GPN_UPDATE_CHECK_HOURS` (default 6):
+On a **per-node randomized schedule** (see "The schedule" below) — first check
+somewhere in the first `GPN_UPDATE_CHECK_HOURS` after start, then roughly every
+`GPN_UPDATE_CHECK_HOURS` (default 6):
 
 1. `GET https://gpncoin.ai/releases.json` — 15 s timeout, no retries.
 2. **Verify the signature.** Wrong key, missing signature, tampered field, or
@@ -511,6 +513,9 @@ On start (after 45 s) and every `GPN_UPDATE_CHECK_HOURS` (default 6):
 3. Compare `version` with this binary. Not newer → nothing to do (one log line
    only when it *is* newer).
 4. Select the `os`/`arch` asset. None for this platform → log and stop.
+4b. Wait a random `[0, GPN_UPDATE_SPREAD_SECS]` (default 20 min) **before
+   downloading** — the install stagger, so release day does not turn into N
+   simultaneous 300 MB pulls. Logged with the reason; `0` disables it.
 5. Is it a **bundle** (`layout: "bundle"`, or a `.tar.gz`/`.zip` URL)?
    * **bundle** — stream it to a temp file, verify `sha256`+`size`, extract into
      `versions/.<version>.tmp-<pid>/`, prove `gpn_node` **and** `gpn-node` carry
@@ -532,13 +537,73 @@ On start (after 45 s) and every `GPN_UPDATE_CHECK_HOURS` (default 6):
 The log looks like this:
 
 ```
-[supervisor 03:14:07] update: auto-update ON — checking https://gpncoin.ai/releases.json every 6h (restart_to_apply=true)
-[supervisor 03:14:09] update: downloading 0.2.0 (linux/x86_64, layout=bundle) sha256=… size=331643208
-[supervisor 03:14:41] update: downloaded 320/316 MiB
-[supervisor 03:14:44] update: staged bundle 0.2.0 at /home/you/.gpn/node/update/versions/0.2.0 — archive sha256 verified, build stamps matched, previous version kept for rollback
-[supervisor 03:14:44] update: restarting to apply 0.2.0 — this is a SHORT OUTAGE: children stop cleanly, the binary is swapped atomically and the node comes back up (chain sync resumes)
-[supervisor 03:14:47] update: 0.2.0 verified and switched in; previous build kept at /home/you/.gpn/node/update/versions/0.1.0 (rollback: point current at it and restart); re-exec into /home/you/.gpn/node/update/versions/0.2.0/gpn_node — short outage
+[supervisor 03:14:07] update: auto-update ON — checking https://gpncoin.ai/releases.json every 6h ±5–10% jitter, first check in 2h 41m (phase from account:5Grwva…; install spread 0–1200s; restart_to_apply=true)
+[supervisor 05:55:09] update: downloading 0.2.0 (linux/x86_64, layout=bundle) sha256=… size=331643208
 ```
+
+On release day the download is preceded by the stagger line:
+
+```
+[supervisor 05:55:08] update: 0.2.0 is available — waiting 7m 12s before downloading so the fleet does not stampede the release host (GPN_UPDATE_SPREAD_SECS=1200s, chosen for this node and version from its identity; 0 disables)
+```
+
+…and after each check the next wait is logged:
+
+```
+[supervisor 05:56:41] update: next check in 6h 24m 31s (+1471s)
+```
+
+#### The schedule (why not "every 6 hours from now")
+
+A fleet of identical nodes installed from one image would otherwise check the
+manifest in the same second and, on release day, pull the same 331 MB archive in
+the same second. That is a self-inflicted DDoS on the release host, and it is
+entirely avoidable without a server-side scheduler. Three independent pieces:
+
+1. **Per-node phase.** The first check happens at `start + phase`, where
+
+   ```
+   seed  = sha256("gpn-update-phase-v1" NUL identity)     # identity = payout account, else base path
+   phase = (seed[0..8] XOR (hash(seed, start_unix)[0..8] & 0xFFF)) mod interval
+   ```
+
+   `phase ∈ [0, interval)`, is stable for a given node (same identity + same
+   start second → same phase), and covers the whole interval across a fleet. The
+   restart term is only 12 bits of bounce, so a restart re-rolls the phase
+   *lightly* instead of moving a node to the far side of the day. The identity is
+   the payout account (public, unique per node, survives upgrades) or the base
+   path when no account exists yet. The signer is never hashed: it may be a
+   secret URI.
+
+2. **Per-check jitter.** After each check the wait is
+
+   ```
+   jitter = ±[5 %, 10 %] of interval, from sha256("gpn-update-jitter-v1" seed counter)
+   wait   = interval + jitter
+   ```
+
+   so nodes that happened to start together drift apart instead of staying
+   locked in step forever.
+
+3. **Install spread.** Finding a newer release does not start the download: the
+   node waits `hash("gpn-update-spread-v1", seed, version) mod (spread + 1)`,
+   i.e. uniform in `[0, GPN_UPDATE_SPREAD_SECS]` (default 1200 s = 20 min).
+   Deterministic per `(node, version)`, so a retry after a failed download waits
+   the same amount rather than re-rolling.
+
+All of it runs on the auto-update thread, which is spawned after the supervisor
+is already up: **a starting node never waits for the phase or the spread.** Both
+sleeps are interruptible in 500 ms steps, so shutdown is prompt.
+
+| Knob | Default | Meaning |
+|---|---|---|
+| `GPN_UPDATE_CHECK_HOURS` / `update_check_hours` | `6` | base interval, clamped to 1–168 h; the real wait is this ±5–10 % |
+| `GPN_UPDATE_SPREAD_SECS` / `update_spread_secs` | `1200` | max delay between "update found" and starting the download (clamped to ≤ 86400); `0` disables the stagger |
+| `GPN_UPDATE_RESTART` | `1` | apply immediately (short outage) vs. on the next start |
+
+With 100 simulated nodes the phase schedule occupies 87 distinct one-minute
+buckets of a 6 h interval, with no minute ever holding more than 5 % of the
+fleet — versus all 100 in the same second without it.
 
 ### The restart is a short outage — by design
 

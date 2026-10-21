@@ -545,3 +545,108 @@ test("/api/join rejects GET, answers OPTIONS preflight", async () => {
   assert.equal(opt.status, 204);
   assert.match(opt.headers.get("access-control-allow-methods"), /POST/);
 });
+
+/* ── /api/* access-point proxy ─────────────────────────────────────────────── */
+
+test("parseHttpResponse preserves non-2xx status, headers and body", () => {
+  const enc = new TextEncoder();
+  const raw = enc.encode(
+    "HTTP/1.1 451 Unavailable For Legal Reasons\r\nContent-Type: application/json\r\n" +
+      "Content-Length: 28\r\n\r\n" + '{"error":"policy_violation"}' + "\n",
+  );
+  const res = __test.parseHttpResponse(raw);
+  assert.equal(res.status, 451);
+  assert.equal(res.headers["content-type"], "application/json");
+  assert.equal(res.body, '{"error":"policy_violation"}');
+
+  // The 2xx-only reader the directory uses still refuses it.
+  assert.equal(__test.parseHttpBody(raw), null);
+});
+
+test("/api proxy: unknown route, wrong method, no AP configured", async () => {
+  const call = (req, env = {}) => worker.fetch(req, env, { waitUntil() {} });
+
+  const unknown = await call(new Request("https://gpncoin.ai/api/nope"));
+  assert.equal(unknown.status, 404);
+  assert.equal(unknown.headers.get("access-control-allow-origin"), "*");
+
+  const wrong1 = await call(new Request("https://gpncoin.ai/api/v1/models", { method: "POST" }));
+  assert.equal(wrong1.status, 405);
+  const wrong2 = await call(new Request("https://gpncoin.ai/api/v1/chat/completions"));
+  assert.equal(wrong2.status, 405);
+
+  const down = await call(
+    new Request("https://gpncoin.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "cf-connecting-ip": "198.51.100.7" },
+      body: JSON.stringify({ model: "llama3.2:1b", messages: [{ role: "user", content: "hi" }] }),
+    }),
+  );
+  assert.equal(down.status, 502);
+  assert.match((await down.json()).error.message, /not configured|unavailable/);
+});
+
+test("/api proxy: body cap, bad JSON, missing prompt", async () => {
+  const post = (body, ip) =>
+    worker.fetch(
+      new Request("https://gpncoin.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json", "cf-connecting-ip": ip },
+        body,
+      }),
+      {},
+      { waitUntil() {} },
+    );
+
+  const big = await post(
+    JSON.stringify({ model: "m", messages: [{ role: "user", content: "x".repeat(__test.AP_PROXY_MAX_BODY + 32) }] }),
+    "198.51.100.8",
+  );
+  assert.equal(big.status, 413);
+
+  const bad = await post("{nope", "198.51.100.9");
+  assert.equal(bad.status, 400);
+  assert.match((await bad.json()).error.message, /JSON/);
+
+  const empty = await post(JSON.stringify({ model: "m" }), "198.51.100.10");
+  assert.equal(empty.status, 400);
+  assert.match((await empty.json()).error.message, /prompt/);
+});
+
+test("/api proxy: CORS is public for reads, site-scoped for chat POST", async () => {
+  const pre = (origin) =>
+    worker.fetch(
+      new Request("https://gpncoin.ai/api/v1/chat/completions", {
+        method: "OPTIONS",
+        headers: { origin, "access-control-request-method": "POST" },
+      }),
+      {},
+      { waitUntil() {} },
+    );
+
+  const good = await pre("https://gpncoin.ai");
+  assert.equal(good.status, 204);
+  assert.equal(good.headers.get("access-control-allow-origin"), "https://gpncoin.ai");
+  assert.match(good.headers.get("access-control-allow-methods"), /POST/);
+
+  const bad = await pre("https://evil.example");
+  assert.notEqual(bad.headers.get("access-control-allow-origin"), "https://evil.example");
+
+  // Reads are open to any origin.
+  const read = await worker.fetch(
+    new Request("https://gpncoin.ai/api/nope", { headers: { origin: "https://evil.example" } }),
+    {},
+    { waitUntil() {} },
+  );
+  assert.equal(read.headers.get("access-control-allow-origin"), "*");
+});
+
+test("rateLimit counts per key and resets after the window", async () => {
+  assert.equal(await __test.rateLimit({}, "203.0.113.99", "unit-a", 2, 60), true);
+  assert.equal(await __test.rateLimit({}, "203.0.113.99", "unit-a", 2, 60), true);
+  assert.equal(await __test.rateLimit({}, "203.0.113.99", "unit-a", 2, 60), false);
+  // A different bucket is independent.
+  assert.equal(await __test.rateLimit({}, "203.0.113.99", "unit-b", 2, 60), true);
+  // Zero-length window: every call starts a fresh slot.
+  assert.equal(await __test.rateLimit({}, "203.0.113.99", "unit-c", 0, 0), true);
+});

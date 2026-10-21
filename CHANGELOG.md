@@ -8,6 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [Unreleased]
+
+### Added
+
+- **Fleet-spread update schedule** (`gpn-agent/src/update.rs`): the auto-update
+  check no longer fires at "every 6 h from start" for the whole fleet. Each node
+  checks at its own random phase in `[0, interval)`, derived from its payout
+  account (or base path), then every `interval ± 5–10 %`; a found release is
+  downloaded after a further random `[0, GPN_UPDATE_SPREAD_SECS]` (default
+  20 min, `0` disables). A starting node never waits for either — the work stays
+  on the auto-update thread. See `docs/updates.md` → "The schedule".
+
 ## [0.2.0] - 2026-10-21
 
 _MINOR — new features, backwards compatible. No wire, consensus or p2p change:

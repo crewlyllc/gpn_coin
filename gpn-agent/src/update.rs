@@ -662,6 +662,161 @@ pub fn check_interval(hours: Option<u64>) -> Duration {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Fleet-spread scheduling (never stampede the release host)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// A fleet that installs the same release at the same time checks the same
+// manifest at the same time, and — on release day — downloads 300 MB at the same
+// time. Two independent guards, neither of which needs a server-side scheduler:
+//
+// * **Phase + jitter** spread the *checks* over the interval. A node's first
+//   check happens at `start + phase`, where `phase` is derived from a stable
+//   node identity, so a fleet of N nodes occupies N different seconds of the
+//   interval instead of one. Each subsequent wait is `interval ± jitter`
+//   (5–10 %), so the phases drift apart instead of re-converging.
+// * **Install spread** delays the *download* of an update it just found by a
+//   random 0–20 min (`GPN_UPDATE_SPREAD_SECS`), so even a fleet that checks in
+//   the same minute does not start N simultaneous 300 MB transfers.
+//
+// The schedule is wall-clock friendly and restart friendly: a restart re-rolls
+// the phase slightly (a bounded 12-bit bounce mixed into the identity hash), so
+// a crash-looping node does not hammer the host at a fixed second, while a
+// fleet that starts together still spreads over the whole interval.
+
+/// Domain separator for the phase hash.
+pub const PHASE_DOMAIN: &str = "gpn-update-phase-v1";
+/// Domain separator for the per-check jitter hash.
+pub const JITTER_DOMAIN: &str = "gpn-update-jitter-v1";
+/// Domain separator for the install-spread hash.
+pub const SPREAD_DOMAIN: &str = "gpn-update-spread-v1";
+
+/// `GPN_UPDATE_SPREAD_SECS` default: up to 20 minutes before a found update is
+/// downloaded, so N nodes never pull the same 300 MB archive at once.
+pub const DEFAULT_SPREAD_SECS: u64 = 1200;
+/// Upper clamp for the spread: a day is already absurd, and anything larger
+/// would mean an update is found but not installed for a very long time.
+pub const MAX_SPREAD_SECS: u64 = 86_400;
+/// Bits of the restart hash mixed into the phase: a restart moves the phase by
+/// at most `2^12` seconds' worth of bounce, i.e. "re-rolls lightly".
+const RESTART_BOUNCE_BITS: u64 = 0x0fff;
+/// Jitter is between 5 % and 10 % of the interval, per-mille.
+pub const JITTER_MIN_PERMILLE: u64 = 50;
+pub const JITTER_MAX_PERMILLE: u64 = 100;
+
+/// A stable per-node seed.
+///
+/// `identity` must be **stable across restarts and unique per node** — the
+/// supervisor passes the payout account (each node has its own), falling back to
+/// the base-path string when no account is configured. Never pass secret
+/// material: only a one-way hash of it is kept, but there is no reason to feed
+/// a signer URI in.
+pub fn schedule_seed(identity: &str) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(PHASE_DOMAIN.as_bytes());
+    h.update(b"\0identity\0");
+    h.update(identity.trim().as_bytes());
+    let out: [u8; 32] = h.finalize().into();
+    out
+}
+
+fn mix(domain: &str, seed: &[u8], extra: &[u8]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(domain.as_bytes());
+    h.update(b"\0");
+    h.update(seed);
+    h.update(b"\0");
+    h.update(extra);
+    h.finalize().into()
+}
+
+fn u64_at(d: &[u8], at: usize) -> u64 {
+    let mut b = [0u8; 8];
+    b.copy_from_slice(&d[at..at + 8]);
+    u64::from_le_bytes(b)
+}
+
+/// The node's **phase**: where in `[0, interval)` its checks sit.
+///
+/// `start_unix` is the process start time. It only perturbs the identity-derived
+/// phase through a 12-bit bounce, so:
+///
+/// * two nodes with different identities land at different points;
+/// * the same node with the same start time computes the same phase (restarting
+///   the *same second* is idempotent, which keeps the function pure and
+///   testable);
+/// * a genuine restart re-rolls the phase lightly rather than pinning a node to
+///   one second of the day forever.
+///
+/// The result is always strictly less than `interval`.
+pub fn check_phase(seed: &[u8], interval: Duration, start_unix: u64) -> Duration {
+    let span = interval.as_secs();
+    if span == 0 {
+        return Duration::ZERO;
+    }
+    let base = mix(PHASE_DOMAIN, seed, b"phase");
+    let bounce = mix(PHASE_DOMAIN, seed, &start_unix.to_le_bytes());
+    let base_secs = u64_at(&base, 0);
+    let bounce_secs = u64_at(&bounce, 0) & RESTART_BOUNCE_BITS;
+    Duration::from_secs((base_secs ^ bounce_secs) % span)
+}
+
+/// Per-check jitter, in seconds, in `±[5 %, 10 %]` of `interval`.
+///
+/// `counter` is the number of checks this process has already done, so successive
+/// checks of one node land at different offsets — nodes that happened to start
+/// together drift apart instead of staying locked in step.
+pub fn check_jitter(seed: &[u8], counter: u64, interval: Duration) -> i64 {
+    let span = interval.as_secs();
+    if span == 0 {
+        return 0;
+    }
+    let d = mix(JITTER_DOMAIN, seed, &counter.to_le_bytes());
+    let raw = u64_at(&d, 0);
+    let range = JITTER_MAX_PERMILLE - JITTER_MIN_PERMILLE + 1;
+    let permille = JITTER_MIN_PERMILLE + (raw % range);
+    let magnitude = span.saturating_mul(permille) / 1000;
+    // Sign from a different word of the same digest: independent of magnitude.
+    if u64_at(&d, 8) & 1 == 0 {
+        magnitude as i64
+    } else {
+        -(magnitude as i64)
+    }
+}
+
+/// `interval + jitter`, never zero.
+pub fn next_interval(interval: Duration, jitter_secs: i64) -> Duration {
+    if jitter_secs >= 0 {
+        interval + Duration::from_secs(jitter_secs as u64)
+    } else {
+        interval
+            .saturating_sub(Duration::from_secs(jitter_secs.unsigned_abs()))
+            .max(Duration::from_secs(1))
+    }
+}
+
+/// `GPN_UPDATE_SPREAD_SECS` → the maximum install delay. `0` disables it.
+pub fn spread_max(raw: Option<u64>) -> Duration {
+    Duration::from_secs(raw.unwrap_or(DEFAULT_SPREAD_SECS).min(MAX_SPREAD_SECS))
+}
+
+/// The delay to wait between "an update is available" and starting the
+/// download: uniform in `[0, spread]`, deterministic per `(node, version)`.
+///
+/// Per-version rather than per-check so a node that retries the same release
+/// (a failed download) waits the same amount instead of re-rolling forever, and
+/// two different releases do not reuse the same slot. `spread == 0` disables it
+/// and returns zero.
+pub fn spread_delay(spread: Duration, seed: &[u8], version: &str) -> Duration {
+    let span = spread.as_secs();
+    if span == 0 {
+        return Duration::ZERO;
+    }
+    let d = mix(SPREAD_DOMAIN, seed, version.trim().as_bytes());
+    // +1 so the whole closed range is reachable and every second is a slot.
+    Duration::from_secs(u64_at(&d, 0) % (span + 1))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Hashing
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1856,6 +2011,239 @@ mod tests {
         assert_eq!(check_interval(Some(0)), Duration::from_secs(3600));
         assert_eq!(check_interval(Some(12)), Duration::from_secs(12 * 3600));
         assert_eq!(check_interval(Some(99999)), Duration::from_secs(168 * 3600));
+    }
+
+    // ── fleet spread: phase, jitter, install delay ───────────────────────────
+
+    #[test]
+    fn phase_is_inside_the_interval() {
+        let interval = check_interval(None); // 6 h
+        for i in 0..500 {
+            let seed = schedule_seed(&format!("account:node-{i}"));
+            let p = check_phase(&seed, interval, 1_700_000_000 + i);
+            assert!(p < interval, "phase {p:?} must be < {interval:?}");
+        }
+        // A zero interval can never produce a nonzero phase.
+        assert_eq!(check_phase(b"seed", Duration::ZERO, 1), Duration::ZERO);
+    }
+
+    #[test]
+    fn phase_is_deterministic_per_identity() {
+        let interval = check_interval(None);
+        let a = schedule_seed("account:5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY");
+        let b = schedule_seed("account:5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty");
+        let start = 1_766_000_000u64;
+        assert_eq!(
+            check_phase(&a, interval, start),
+            check_phase(&a, interval, start),
+            "same node, same start → same phase (the function is pure)"
+        );
+        assert_ne!(
+            check_phase(&a, interval, start),
+            check_phase(&b, interval, start),
+            "different nodes must not share a phase"
+        );
+        // The seed itself is stable and identity-sensitive.
+        assert_eq!(schedule_seed("account:x"), schedule_seed(" account:x "));
+        assert_ne!(schedule_seed("account:x"), schedule_seed("account:y"));
+    }
+
+    #[test]
+    fn a_restart_moves_the_phase_only_lightly() {
+        // The bounce is a 12-bit mix, so a restart shifts the phase by at most
+        // ~68 min on a 6 h interval — never to the far side of the day.
+        let interval = check_interval(None);
+        let seed = schedule_seed("account:restarty");
+        let base = check_phase(&seed, interval, 1_766_000_000).as_secs();
+        for k in 0..50u64 {
+            let p = check_phase(&seed, interval, 1_766_000_000 + k * 3600).as_secs();
+            let drift = (p as i64 - base as i64).unsigned_abs();
+            let drift = drift.min(interval.as_secs() - drift);
+            assert!(
+                drift <= RESTART_BOUNCE_BITS,
+                "a restart must re-roll the phase lightly, drifted {drift}s"
+            );
+        }
+    }
+
+    #[test]
+    fn jitter_is_within_five_to_ten_percent() {
+        let interval = check_interval(None);
+        let seed = schedule_seed("account:jittery");
+        let lo = interval.as_secs() * JITTER_MIN_PERMILLE / 1000;
+        let hi = interval.as_secs() * JITTER_MAX_PERMILLE / 1000;
+        let mut up = 0;
+        let mut down = 0;
+        for counter in 0..200 {
+            let j = check_jitter(&seed, counter, interval);
+            assert!(
+                (lo..=hi).contains(&j.unsigned_abs()),
+                "jitter {j}s outside ±[{lo},{hi}]s at counter {counter}"
+            );
+            if j > 0 {
+                up += 1
+            } else {
+                down += 1
+            }
+        }
+        assert!(up > 40 && down > 40, "jitter must spread both ways ({up}/{down})");
+        // Deterministic per (node, counter), and counters differ.
+        assert_eq!(check_jitter(&seed, 7, interval), check_jitter(&seed, 7, interval));
+        assert_ne!(check_jitter(&seed, 7, interval), check_jitter(&seed, 8, interval));
+        assert_eq!(check_jitter(&seed, 0, Duration::ZERO), 0);
+    }
+
+    #[test]
+    fn next_interval_applies_the_jitter_and_never_reaches_zero() {
+        let interval = Duration::from_secs(21_600);
+        assert_eq!(
+            next_interval(interval, 600),
+            Duration::from_secs(22_200)
+        );
+        assert_eq!(
+            next_interval(interval, -600),
+            Duration::from_secs(21_000)
+        );
+        assert_eq!(next_interval(interval, 0), interval);
+        assert_eq!(
+            next_interval(Duration::from_secs(10), -9_999),
+            Duration::from_secs(1),
+            "a silly negative jitter must not produce a spin loop"
+        );
+    }
+
+    /// The point of the whole exercise: 100 nodes started at the same instant
+    /// must not all check at the same instant. Every node lands somewhere in the
+    /// interval, and no coarse bucket holds a stampede.
+    #[test]
+    fn a_hundred_nodes_spread_over_the_whole_interval() {
+        let interval = check_interval(None);
+        let start = 1_766_000_000u64;
+        let bucket = 60u64; // coarse 1-minute buckets
+        let buckets_total = interval.as_secs() / bucket;
+        let mut seen_second = std::collections::HashSet::new();
+        let mut hist = std::collections::BTreeMap::<u64, u32>::new();
+        let mut deciles = [0u32; 10];
+
+        for i in 0..100 {
+            let seed = schedule_seed(&format!("account:fleet-node-{i}"));
+            let p = check_phase(&seed, interval, start).as_secs();
+            assert!(p < interval.as_secs());
+            assert!(seen_second.insert(p), "two nodes check in the same second");
+            *hist.entry(p / bucket).or_default() += 1;
+            deciles[((p * 10) / interval.as_secs()) as usize] += 1;
+        }
+
+        // With 100 nodes over 360 one-minute buckets a uniform hash still
+        // collides sometimes (birthday: E[distinct] ≈ 87.5). What must not
+        // happen is the fleet clustering: >80 % of nodes in their own bucket and
+        // never more than a pair anywhere.
+        let max_in_bucket = hist.values().copied().max().unwrap_or(0);
+        eprintln!(
+            "fleet spread: {} distinct minute buckets, max {}, deciles {deciles:?}",
+            hist.len(),
+            max_in_bucket
+        );
+        assert!(
+            hist.len() >= 80,
+            "nodes must occupy their own minute buckets, got {} of 100",
+            hist.len()
+        );
+        assert!(
+            max_in_bucket <= 5,
+            "a minute bucket must never hold a crowd (<=5 % of the fleet): {hist:?}"
+        );
+        assert!(
+            hist.len() < buckets_total as usize,
+            "the fleet must not fill the interval (that would mean a degenerate hash)"
+        );
+        assert!(
+            deciles.iter().all(|n| *n > 0),
+            "coverage must reach every tenth of the interval, got {deciles:?}"
+        );
+        // A perfectly uniform set would put 10 nodes in each decile; allow the
+        // hash to be lumpy, but not clustered into one part of the day.
+        assert!(
+            deciles.iter().all(|n| *n >= 3),
+            "no decile may be nearly empty: {deciles:?}"
+        );
+    }
+
+    /// jitter keeps an already-spread fleet from re-converging over time.
+    #[test]
+    fn successive_checks_drift_apart() {
+        let interval = check_interval(None);
+        let seeds: Vec<_> = (0..10)
+            .map(|i| schedule_seed(&format!("account:drift-{i}")))
+            .collect();
+        // All ten start at the same phase (same start time) is not what happens
+        // in the fleet, but the jitter must separate them regardless.
+        let jumps: Vec<i64> = seeds
+            .iter()
+            .map(|s| check_jitter(s, 1, interval))
+            .collect();
+        let distinct: std::collections::HashSet<_> = jumps.iter().collect();
+        assert_eq!(distinct.len(), jumps.len(), "jitter must differ per node");
+    }
+
+    #[test]
+    fn spread_delay_is_bounded_and_disabled_at_zero() {
+        let spread = spread_max(None);
+        assert_eq!(spread, Duration::from_secs(1200));
+        assert_eq!(spread_max(Some(0)), Duration::ZERO);
+        assert_eq!(spread_max(Some(60)), Duration::from_secs(60));
+        assert_eq!(
+            spread_max(Some(999_999_999)),
+            Duration::from_secs(MAX_SPREAD_SECS),
+            "an absurd value is clamped, not honoured"
+        );
+
+        let seed = schedule_seed("account:spready");
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..500 {
+            let d = spread_delay(spread, &seed, &format!("0.3.{i}"));
+            assert!(d <= spread, "delay {d:?} exceeds the spread {spread:?}");
+            seen.insert(d.as_secs());
+        }
+        assert!(seen.len() > 400, "the delay must be spread, not constant");
+        assert!(*seen.iter().min().unwrap() < 60, "some node goes nearly at once");
+        assert!(*seen.iter().max().unwrap() > 1100, "some node waits most of the window");
+
+        // Per (node, version): stable on retry, different for another release.
+        assert_eq!(
+            spread_delay(spread, &seed, "0.3.0"),
+            spread_delay(spread, &seed, "0.3.0")
+        );
+        assert_ne!(
+            spread_delay(spread, &seed, "0.3.0"),
+            spread_delay(spread, &seed, "0.4.0")
+        );
+        assert_eq!(
+            spread_delay(Duration::ZERO, &seed, "0.3.0"),
+            Duration::ZERO,
+            "GPN_UPDATE_SPREAD_SECS=0 disables the delay"
+        );
+    }
+
+    /// 100 nodes that all find the same release in the same minute must not all
+    /// start downloading in the same minute.
+    #[test]
+    fn a_hundred_nodes_spread_their_downloads() {
+        let spread = spread_max(None);
+        let mut buckets = std::collections::BTreeMap::<u64, u32>::new();
+        for i in 0..100 {
+            let seed = schedule_seed(&format!("account:release-day-{i}"));
+            let d = spread_delay(spread, &seed, "0.3.0").as_secs();
+            *buckets.entry(d / 60).or_default() += 1;
+        }
+        assert!(
+            buckets.len() >= 15,
+            "downloads must occupy most of the 20 one-minute slots, got {buckets:?}"
+        );
+        assert!(
+            buckets.values().all(|n| *n <= 20),
+            "no single minute may hold the whole fleet: {buckets:?}"
+        );
     }
 
     // ── asset selection ─────────────────────────────────────────────────────
