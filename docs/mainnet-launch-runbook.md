@@ -18,6 +18,10 @@ Companion docs:
 > all-zeros placeholder** (`AccountId::new([0u8;32])`) with no private key. Every privileged
 > action listed below is done through **root/governance** (`Sudo`-only calls are replaced by a
 > governance runtime call) or the on-chain **`pallet-gpn-treasury` 13-of-25** flow. See §6.
+>
+> Runtime upgrades have their own runbook: **`docs/upgrades-governance.md`** — the
+> `gpn_gov_upgrade` pipeline (stage → propose → approve → 3-day timelock → execute → verify),
+> the 2-of-3 committee, and rollback. `gpn_upgrade_runtime` (sudo) is dev/testnet only.
 
 ---
 
@@ -191,9 +195,12 @@ Checklist:
 
 ## 6. Post-launch governance actions (first days)
 
-All of these are **root/governance** calls (mainnet has no usable sudo). Queue them as a
-governed `Sudo.sudo → <call>` or via the governance committee per
-`design/protocols/05-oracle-governance.md`.
+All of these are **root/governance** calls (mainnet has no usable sudo). They go through
+`pallet-gpn-governance`: a committee member proposes the call, a second member approves, and
+after the 3-day timelock anyone may `execute` it as Root (2-of-3, `ApprovalsRequired = 2`,
+`TimelockPeriod = 17 280` blocks). The mechanics — and the `gpn_gov_upgrade` tool that builds,
+proposes, verifies and rolls back these calls — are in **`docs/upgrades-governance.md`**.
+Oracle-operator admission additionally follows `design/protocols/05-oracle-governance.md`.
 
 1. **Set the block-reward beneficiary.** Without this, mined blocks pay **no one** (the genesis
    beneficiary is `None` — deliberate, no hardcoded dev backdoor). Set the mining pool / ops
@@ -274,8 +281,12 @@ is non-negotiable.
 
 ## 10. Open business decisions (need Jeremy)
 
-1. Rotate the mainnet sudo placeholder into a **governed** path (or leave permanently inert) —
-   see `design/protocols/05-oracle-governance.md`.
+1. ~~Rotate the mainnet sudo placeholder into a governed path~~ — **resolved**: the governed
+   path is `pallet-gpn-governance` (2-of-3 committee + 3-day timelock, `System.set_code` via
+   `execute` as Root). The sudo placeholder stays permanently inert. Runbook:
+   `docs/upgrades-governance.md`. Remaining sub-decision: whether the production committee is
+   the three `testnet_committee()` addresses or a different set — this is a **genesis** choice,
+   so settle it before cutting the mainnet genesis.
 2. Bootnode + full-node set and the decentralization plan (who runs the first nodes, where).
 3. Token listing / liquidity plan (CEX/DEX).
 4. Marketplace go-live: first paying customers + SLA / reputation policy

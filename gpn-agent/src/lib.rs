@@ -11,6 +11,7 @@ pub mod compute;
 pub mod config;
 pub mod disk;
 pub mod firstrun;
+pub mod gov;
 pub mod gpu;
 pub mod gpu_yield;
 pub mod hub_ap;

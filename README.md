@@ -75,6 +75,7 @@ projectmanager07/
 │   └── tokenomics/01-gpn-tokenomics.md
 ├── docs/            # Ops runbooks
 │   ├── mainnet-launch-runbook.md
+│   ├── upgrades-governance.md   # Mainnet runtime-upgrade pipeline (committee)
 │   └── incident-response.md
 ├── SECURITY.md      # Vulnerability disclosure policy
 └── HEARTBEAT.md
@@ -530,6 +531,10 @@ CLI: `gpn_explorer [--endpoint ws://127.0.0.1:9944] [--listen 127.0.0.1:8082] [-
 - **Mainnet launch runbook** — `docs/mainnet-launch-runbook.md` (genesis build + verification,
   bootnodes, post-launch governance: block beneficiary + oracle operators, treasury ops,
   monitoring, abort criteria).
+- **Mainnet runtime upgrades** — `docs/upgrades-governance.md` (the governance pipeline that
+  replaces sudo on mainnet: `gpn_gov_upgrade stage/propose/approve/status/execute/verify/rollback`,
+  the 2-of-3 committee + 3-day timelock, the verification and rollback rules, and what the
+  runtime still lacks).
 - **Incident response plan** — `docs/incident-response.md` (severity levels, roles,
   detection, playbooks: chain halt/fork, supply anomaly, treasury/key compromise, oracle feed,
   marketplace escrow, infra).
