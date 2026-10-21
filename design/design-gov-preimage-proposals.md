@@ -14,7 +14,7 @@ pub struct Proposal<T: Config> {
     pub approvals: BoundedVec<T::AccountId, T::MaxMembers>,
     pub created_at: BlockNumberFor<T>,
 }
-pub type Proposals<T> = StorageMap<_, Blake2_256, T::Hash, Proposal<T>, OptionSwapQuery>;
+pub type Proposals<T> = StorageMap<_, Blake2_256, T::Hash, Proposal<T>>;  // OptionQuery
 ```
 
 For a runtime upgrade this means:
@@ -33,27 +33,23 @@ paying the deposit), then referenced by hash, and enactment resolves the hash ba
 ## 2. Shape of the change
 
 Add **`pallet-preimage`** (and, for scheduled enactment, nothing else — the timelock already
-exists in `pallet-gpn-governance`), and teach `pallet-gpn-governance` to accept a
-**`ProposalKind`**:
-
-```rust
-pub enum ProposalKind<T: Config> {
-    /// Today's behaviour: the call travels inline.
-    Inline(T::RuntimeCall),
-    /// New: only the hash travels; the bytes live in `pallet-preimage`.
-    Preimage { hash: T::Hash, len: u32 },
-}
-```
-
-Proposal becomes:
+exists in `pallet-gpn-governance`), and replace the inline call with polkadot-sdk's own
+`Bounded<Call, Hashing>` wrapper, which is what `pallet-scheduler` / `pallet-democracy` use for
+exactly this reason (`frame_support::traits::Bounded`, `preimages.rs`):
 
 ```rust
 pub struct Proposal<T: Config> {
-    pub kind: ProposalKind<T>,
+    /// `Bounded::Inline(call)` behaves like today; `Bounded::Lookup { hash, len }`
+    /// carries only the hash and resolves through `pallet-preimage` at execution.
+    pub call: Bounded<T::RuntimeCall, T::Hashing>,
     pub approvals: BoundedVec<T::AccountId, T::MaxMembers>,
     pub created_at: BlockNumberFor<T>,
 }
 ```
+
+`Bounded` already gives us `hash()`, `len()`, `lookup_needed()` and, via `QueryPreimage`,
+`have()` / `peek()` / `realize()`. There is no need to invent a `ProposalKind` enum, and existing
+`Inline` proposals keep working unchanged.
 
 ### 2.1 Why not `pallet-scheduler` + `pallet-democracy`
 
@@ -108,57 +104,44 @@ used or unrequested). At mainnet prices that is negligible, and it stops free st
 ```rust
 pub trait Config: frame_system::Config {
     // ... existing ...
-    /// Resolve a noted preimage to its bytes. `None` if absent (not yet noted,
-    /// or already consumed).
-    type Preimage: PreimageProvider<Self::Hash>;
+    /// Preimage store backing hash-addressed proposals (`pallet-preimage`).
+    type Preimage: frame_support::traits::QueryPreimage<H = Self::Hashing>
+        + frame_support::traits::StorePreimage;
 }
 ```
 
-```rust
-pub trait PreimageProvider<Hash> {
-    fn get(hash: &Hash) -> Option<Vec<u8>>;
-}
-```
-
-`propose_preimage(origin, hash, len)`:
+`propose_preimage(origin, hash, len)` (`#[pallet::call_index(3)]`):
 
 - `ensure_signed` + `Members` check (identical to `propose`);
-- `ensure!(len as usize <= MaxProposalCallLen::get())` — a new constant, e.g. 5 MB, so a
-  proposal can never exceed `MaximumBlockLength`;
-- **do not** verify the preimage exists at propose time (it may be noted later), but **do**
-  verify it at `execute` time, where a missing/stale preimage is a hard error
-  (`PreimageMissing`) — the failure must be *before* `Proposals::remove`, so the committee can
-  still fix it (note the preimage, then execute);
-- store `ProposalKind::Preimage { hash, len }`; the proposal id stays
-  `blake2_256(SCALE(ProposalKind::Preimage))`, so ids are still content-addressed and two
-  different preimage hashes give two different proposals.
+- `ensure!(len <= MaxProposalCallLen::get())` — a new constant (e.g. 4 MiB, matching
+  `pallet_preimage::MAX_SIZE = 4 * 1024 * 1024`) so a proposal can never exceed
+  `MaximumBlockLength`;
+- **do not** verify the preimage exists at propose time (it may be noted later); `execute` is
+  where it must exist;
+- store `Bounded::Lookup { hash, len }` — a 36-byte payload; the proposal id stays
+  `blake2_256(SCALE(Proposal))`, so it is still content-addressed and two different preimage
+  hashes are two different proposals.
 
 `execute`:
 
 ```rust
-let call = match proposal.kind {
-    ProposalKind::Inline(c) => c,
-    ProposalKind::Preimage { hash, len } => {
-        let bytes = T::Preimage::get(&hash).ok_or(Error::<T>::PreimageMissing)?;
-        ensure!(bytes.len() as u32 == len, Error::<T>::PreimageLengthMismatch);
-        T::RuntimeCall::decode(&mut &bytes[..]).map_err(|_| Error::<T>::BadPreimage)?;
-    }
-};
-```
-
-`T::Preimage` is implemented for `pallet_preimage::Pallet<T>`:
-
-```rust
-impl<T: pallet_preimage::Config> PreimageProvider<T::Hash> for pallet_preimage::Pallet<T> {
-    fn get(hash: &T::Hash) -> Option<Vec<u8>> {
-        pallet_preimage::Pallet::<T>::get::<T::RuntimeCall>(hash)  // decode-checked
-    }
+let proposal = Proposals::<T>::get(proposal_hash).ok_or(Error::<T>::ProposalNotFound)?;
+// ... approvals + timelock checks (unchanged) ...
+if !T::Preimage::have(&proposal.call) {
+    // NOT consumed: the committee can note the preimage (same hash) and retry.
+    return Err(Error::<T>::PreimageMissing.into());
 }
+let (call, _len) = T::Preimage::peek::<T::RuntimeCall>(&proposal.call)?;  // fetch + decode
+Proposals::<T>::remove(proposal_hash);                                    // only now
+T::Preimage::realize::<T::RuntimeCall>(&proposal.call)?;                  // release the preimage/deposit
+let res = call.dispatch(frame_system::RawOrigin::<T::AccountId>::Root.into());
+res.map_err(|_| Error::<T>::ExecutionFailed)?;
 ```
 
-(`pallet_preimage::Pallet::get::<Call>` already length-checks and decodes, which is why the
-`len` field is belt-and-braces and also lets the UI show the size before the preimage is even
-noted.)
+`QueryPreimage::peek` already fetches, length-checks and SCALE-decodes (`DispatchError::Corruption`
+otherwise), and `realize` releases the preimage and returns the depositor's consideration. Note
+the ordering: `PreimageMissing` must be returned **before** `Proposals::remove` (today's code
+removes first, which would silently burn a proposal whose preimage is missing).
 
 ### 3.4 Migration
 
@@ -188,9 +171,13 @@ Run it as an `on_runtime_upgrade` hook with `#[storage_alias]` old types, and sh
    alone.
 4. `approve` / `status` / `execute` / `verify` — unchanged, except `status` resolves the
    preimage to display the code size/hash/version (it already does so for inline proposals).
-5. `execute` must be preceded by a check that the preimage still exists (it can be unrequested);
-   if missing, `execute` fails with `PreimageMissing` **without consuming the proposal** — the
-   fix is to re-note the same bytes (same hash) and execute again.
+5. `execute` must be preceded by a check that the preimage still exists (anyone may
+   `Preimage.unnote_preimage` an *unrequested* preimage, and the depositor's consideration can
+   lapse); if missing, `execute` fails with `PreimageMissing` **without consuming the
+   proposal** — the fix is to re-note the same bytes (same hash, so the proposal id is
+   unchanged) and execute again. `propose_preimage` should therefore `T::Preimage::request()`
+   the hash (`QueryPreimage::hold`) so a missing preimage is a recoverable, visible condition
+   rather than a silent one.
 
 ## 4. Test plan (must land with the implementation)
 
