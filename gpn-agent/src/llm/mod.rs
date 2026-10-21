@@ -17,5 +17,10 @@
 pub mod infer;
 pub mod store;
 
-pub use infer::{normalize_ml_task, run_inference, run_inference_with_usage, run_ml_inference, TokenUsage};
-pub use store::{get_job, merge_json_object, put_job, set_response, LlmJob, LlmStore, StoreLock};
+pub use infer::{
+    normalize_ml_task, run_inference, run_inference_with_usage, run_ml_inference, TokenUsage,
+};
+pub use store::{
+    get_job, merge_json_object, put_job, set_response, set_response_with_usage, LlmJob, LlmStore,
+    StoreLock,
+};

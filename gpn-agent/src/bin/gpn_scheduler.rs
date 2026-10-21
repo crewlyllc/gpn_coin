@@ -58,7 +58,11 @@ const PAYLOAD_PUT_BACKOFF_MS: u64 = 50;
 /// wedges until the on-chain deadline refunds it and the caller waits out a
 /// timeout. A job is therefore only advertised (lease written) once its payload
 /// is durable; a write that survives `PAYLOAD_PUT_ATTEMPTS` fails loudly instead.
-fn persist_job_payload(store: &gpn_agent::llm::LlmStore, id: u64, job: &gpn_agent::llm::LlmJob) -> bool {
+fn persist_job_payload(
+    store: &gpn_agent::llm::LlmStore,
+    id: u64,
+    job: &gpn_agent::llm::LlmJob,
+) -> bool {
     for attempt in 1..=PAYLOAD_PUT_ATTEMPTS {
         match store.put(id, job.clone()) {
             Ok(()) => return true,
@@ -476,9 +480,17 @@ where
     let predicted = alloc_predicted_job_id(next_before);
     mark_create_pending(predicted);
     match submit() {
-        Ok(()) if fast => CreateOutcome { created: true, id: predicted, err: None },
+        Ok(()) if fast => CreateOutcome {
+            created: true,
+            id: predicted,
+            err: None,
+        },
         Ok(()) => match confirm_created(rt, client, next_before, predicted) {
-            Some(id) => CreateOutcome { created: true, id, err: None },
+            Some(id) => CreateOutcome {
+                created: true,
+                id,
+                err: None,
+            },
             None => {
                 // Pool-acked but not visible yet: keep the prediction, don't rewind the
                 // allocator (the tx is still in the pool and will take that id).
@@ -486,20 +498,32 @@ where
                     "[ids] create not confirmed within {} ms — keeping predicted #{predicted}",
                     create_confirm_ms()
                 );
-                CreateOutcome { created: true, id: predicted, err: None }
+                CreateOutcome {
+                    created: true,
+                    id: predicted,
+                    err: None,
+                }
             }
         },
         Err(e) => {
             println!("[create] create_job submit rejected: {e}");
             // The create may still have landed despite a slow / un-acked pool submit.
             match confirm_created(rt, client, next_before, predicted) {
-                Some(id) => CreateOutcome { created: true, id, err: None },
+                Some(id) => CreateOutcome {
+                    created: true,
+                    id,
+                    err: None,
+                },
                 None => {
                     // Genuinely did not land: realign to the *current* tip (never to the
                     // pre-submit snapshot — the chain may have advanced meanwhile).
                     let tip = rt.block_on(client.get_next_job_id());
                     align_alloc(if tip > next_before { tip } else { next_before });
-                    CreateOutcome { created: false, id: predicted, err: Some(e.to_string()) }
+                    CreateOutcome {
+                        created: false,
+                        id: predicted,
+                        err: Some(e.to_string()),
+                    }
                 }
             }
         }
@@ -591,20 +615,8 @@ fn pull_default_latency_ms() -> u64 {
 /// AP relays these strings to the public directory: anything unrecognised is a
 /// reason to drop the address, not to pass it on.
 const P2P_PROTOCOLS: &[&str] = &[
-    "ip4",
-    "ip6",
-    "dns",
-    "dns4",
-    "dns6",
-    "tcp",
-    "udp",
-    "quic",
-    "quic-v1",
-    "p2p",
-    "tls",
-    "sni",
-    "ws",
-    "wss",
+    "ip4", "ip6", "dns", "dns4", "dns6", "tcp", "udp", "quic", "quic-v1", "p2p", "tls", "sni",
+    "ws", "wss",
 ];
 
 /// Accept only a plausible libp2p peer id (base58, ed25519 `12D3Koo…` or
@@ -752,7 +764,10 @@ fn provider_from_caps(addr: &str, v: &Value, status_url: String, latency_ms: u64
             .get("owner_cost_usd_hr")
             .and_then(|x| x.as_f64())
             .unwrap_or(0.03),
-        mem_bw_gbps: v.get("mem_bw_gbps").and_then(|x| x.as_f64()).unwrap_or(250.0),
+        mem_bw_gbps: v
+            .get("mem_bw_gbps")
+            .and_then(|x| x.as_f64())
+            .unwrap_or(250.0),
         vram_mb: v.get("vram_mb").and_then(|x| x.as_u64()).unwrap_or(0),
         ram_mb: v.get("ram_mb").and_then(|x| x.as_u64()).unwrap_or(0),
         gpu_class: v
@@ -867,12 +882,7 @@ fn merge_poll_snapshot(
     status_url: String,
     latency_ms: u64,
 ) -> Provider {
-    let mut merged = provider_from_caps(
-        &existing.address,
-        caps,
-        status_url,
-        latency_ms,
-    );
+    let mut merged = provider_from_caps(&existing.address, caps, status_url, latency_ms);
     match existing.peer_id.as_deref() {
         Some(have) if merged.peer_id.as_deref() != Some(have) => {
             log::warn!(
@@ -1884,8 +1894,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .and_then(|s| s.parse().ok())
                             .unwrap_or(0)
                             .min(25_000);
-                        let deadline = std::time::Instant::now()
-                            + std::time::Duration::from_millis(wait_ms);
+                        let deadline =
+                            std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
                         loop {
                             let leases =
                                 collect_leases(&assign_store, &provider, since, MAX_PULL_LEASES);
@@ -2261,40 +2271,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "[gpn error] could not persist the job payload; the job was not dispatched (job #{id})"
                             );
                         } else {
-                        let callback_token = new_callback_token(id);
-                        let _ = write_assignment(
-                            &assign_store,
-                            id,
-                            &provider.address,
-                            &model,
-                            needs_pull,
-                            &callback_url,
-                            &callback_token,
-                        );
-                        // #46 Phase 3: delivery is the provider's pull long-poll;
-                        // the lease row above is the only hand-off.
-                        // block until the provider finishes (OpenAI calls are synchronous)
-                        for _ in 0..1200 {
-                            if let Some(j) = gpn_agent::llm::get_job(id) {
-                                if j.status == "done" {
-                                    text = j.response.clone().unwrap_or_default();
-                                    if let (Some(p), Some(c)) =
-                                        (j.prompt_tokens, j.completion_tokens)
-                                    {
-                                        usage = Some((p, c));
+                            let callback_token = new_callback_token(id);
+                            let _ = write_assignment(
+                                &assign_store,
+                                id,
+                                &provider.address,
+                                &model,
+                                needs_pull,
+                                &callback_url,
+                                &callback_token,
+                            );
+                            // #46 Phase 3: delivery is the provider's pull long-poll;
+                            // the lease row above is the only hand-off.
+                            // block until the provider finishes (OpenAI calls are synchronous)
+                            for _ in 0..1200 {
+                                if let Some(j) = gpn_agent::llm::get_job(id) {
+                                    if j.status == "done" {
+                                        text = j.response.clone().unwrap_or_default();
+                                        if let (Some(p), Some(c)) =
+                                            (j.prompt_tokens, j.completion_tokens)
+                                        {
+                                            usage = Some((p, c));
+                                        }
+                                        break;
                                     }
-                                    break;
+                                    if j.status == "error" {
+                                        text = format!(
+                                            "[gpn error] {}",
+                                            j.error.clone().unwrap_or_default()
+                                        );
+                                        break;
+                                    }
                                 }
-                                if j.status == "error" {
-                                    text = format!(
-                                        "[gpn error] {}",
-                                        j.error.clone().unwrap_or_default()
-                                    );
-                                    break;
-                                }
+                                std::thread::sleep(Duration::from_millis(300));
                             }
-                            std::thread::sleep(Duration::from_millis(300));
-                        }
                         }
                     } else {
                         text = match &create_err {
@@ -2556,8 +2566,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 },
                             });
                             resp["usage"] = usage_json(out.usage);
-                            let r = Response::from_string(resp.to_string())
-                                .with_header(hdr.clone());
+                            let r =
+                                Response::from_string(resp.to_string()).with_header(hdr.clone());
                             let _ = req.respond(r);
                             return;
                         }
@@ -2799,7 +2809,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let start = next.saturating_sub(JOBS_LIST_WINDOW);
                             let mut jobs = vec![];
                             for id in start..next {
-                                if let Some((state, _p, _r, prov)) = rt.block_on(client.get_job_state(id)) {
+                                if let Some((state, _p, _r, prov)) =
+                                    rt.block_on(client.get_job_state(id))
+                                {
                                     jobs.push(json!({"id":id,"state":state,"provider":prov}));
                                 }
                             }
@@ -2900,6 +2912,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     let status = v.get("status").and_then(|x| x.as_str()).unwrap_or("done");
                     let store = gpn_agent::llm::LlmStore::new();
+                    // Item #53: the provider's real token counts, carried into the AP's
+                    // own record so a REMOTE provider's usage is as truthful as a
+                    // local one's. Absent ⇒ left unset (0 in the OpenAI `usage`
+                    // block), never invented. Recorded in the SAME write that marks
+                    // the job done — a separate write is a race against this AP's own
+                    // chat waiter, which reads on `status == "done"`.
+                    let pt = v.get("prompt_tokens").and_then(|x| x.as_u64());
+                    let ctk = v.get("completion_tokens").and_then(|x| x.as_u64());
+                    let usage = match (pt, ctk) {
+                        (None, None) => None,
+                        (p, c) => Some((p.unwrap_or(0) as u32, c.unwrap_or(0) as u32)),
+                    };
                     let res = if status == "error" {
                         store.set_error(
                             idn,
@@ -2917,28 +2941,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             v.get("result_hash").and_then(|x| x.as_str()).unwrap_or(""),
                         )
                     } else {
-                        store.complete(
+                        store.complete_with_usage(
                             idn,
                             v.get("response").and_then(|x| x.as_str()).unwrap_or(""),
                             v.get("result_hash").and_then(|x| x.as_str()).unwrap_or(""),
                             v.get("salt").and_then(|x| x.as_str()),
+                            usage,
                         )
                     };
                     match res {
                         Ok(_) => {
-                            // Item #53: carry the provider's real token counts into the
-                            // AP's own record, so a REMOTE provider's usage is as
-                            // truthful as a local one's. Absent ⇒ left unset (0 in the
-                            // OpenAI `usage` block), never invented.
-                            let pt = v.get("prompt_tokens").and_then(|x| x.as_u64());
-                            let ctk = v.get("completion_tokens").and_then(|x| x.as_u64());
-                            if pt.is_some() || ctk.is_some() {
-                                let _ = store.set_usage(
-                                    idn,
-                                    pt.map(|x| x as u32),
-                                    ctk.map(|x| x as u32),
-                                );
-                            }
                             println!("[result] remote provider returned #{idn} ({status})");
                             json!({"ok":true,"job_id":idn})
                         }
@@ -3130,19 +3142,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         json!({"ok": false, "job_id": idn,
                                             "error": "could not persist the job payload to the off-chain store; the job was not advertised"})
                                     } else {
-                                    let callback_token = new_callback_token(idn);
-                                    let _ = write_assignment(
-                                        &assign_store,
-                                        idn,
-                                        &p.address,
-                                        &qmodel,
-                                        pull,
-                                        &callback_url,
-                                        &callback_token,
-                                    );
-                                    // #46 Phase 3: no push — the provider's pull
-                                    // long-poll delivers the lease written above.
-                                    json!({"ok":true,"job_id":idn,"routed_to":p.address,
+                                        let callback_token = new_callback_token(idn);
+                                        let _ = write_assignment(
+                                            &assign_store,
+                                            idn,
+                                            &p.address,
+                                            &qmodel,
+                                            pull,
+                                            &callback_url,
+                                            &callback_token,
+                                        );
+                                        // #46 Phase 3: no push — the provider's pull
+                                        // long-poll delivers the lease written above.
+                                        json!({"ok":true,"job_id":idn,"routed_to":p.address,
                                        "model":qmodel,"pull":pull,
                                        "latency_ms":p.latency_ms,"load":format!("{}/{}",p.active,p.capacity)})
                                     }
@@ -3194,7 +3206,11 @@ mod tests {
         assert_eq!(unknown["total_tokens"], json!(0));
 
         let huge = usage_json(Some((u32::MAX, u32::MAX)));
-        assert_eq!(huge["total_tokens"], json!(u32::MAX), "saturates, never wraps");
+        assert_eq!(
+            huge["total_tokens"],
+            json!(u32::MAX),
+            "saturates, never wraps"
+        );
     }
 
     /// Peer-id publication: a heartbeat that publishes a peer id + public p2p
@@ -3241,7 +3257,10 @@ mod tests {
         });
         let (peer_id, mas, port) = p2p_fields(&v);
         assert!(peer_id.is_none());
-        assert!(mas.is_empty(), "an unverified id cannot vouch for an address");
+        assert!(
+            mas.is_empty(),
+            "an unverified id cannot vouch for an address"
+        );
         assert!(
             port.is_none(),
             "a p2p port is only meaningful with the peer id that owns it — publishing it 
@@ -3274,12 +3293,7 @@ mod tests {
         // The measured (first) record belongs to a box with no published id yet.
         let existing = provider_with(None, None);
         let caps = json!({ "peer_id": linux, "p2p_port": 30333, "gflops": 99 });
-        let merged = merge_poll_snapshot(
-            &existing,
-            &caps,
-            existing.status_url.clone(),
-            11,
-        );
+        let merged = merge_poll_snapshot(&existing, &caps, existing.status_url.clone(), 11);
         // With nothing measured, the snapshot is the only identity — adopt it.
         assert_eq!(merged.peer_id.as_deref(), Some(linux));
         assert_eq!(merged.p2p_port, Some(30333));
@@ -3406,12 +3420,18 @@ mod tests {
         let mut out: Vec<Provider> = vec![];
         apply_poll_caps(&mut out, &map);
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].address, ss58, "keyed by canonical ss58, not the caps body");
+        assert_eq!(
+            out[0].address, ss58,
+            "keyed by canonical ss58, not the caps body"
+        );
         assert_eq!(out[0].gflops, 2500);
         assert_eq!(out[0].vram_mb, 24000);
         assert!(out[0].can_pull);
         assert_eq!(out[0].capabilities, vec!["LLMInference".to_string()]);
-        assert!(out[0].last_seen.is_some(), "a fresh poll is a live heartbeat");
+        assert!(
+            out[0].last_seen.is_some(),
+            "a fresh poll is a live heartbeat"
+        );
         assert_eq!(out[0].status_url, format!("pull://{ss58}"));
 
         // The same box also reachable over /status: keep the endpoint + the
@@ -3474,7 +3494,11 @@ mod tests {
         std::env::set_var("GPN_CREATE_CONFIRM_MS", "12000");
         assert_eq!(create_confirm_ms(), 12_000);
         std::env::set_var("GPN_CREATE_CONFIRM_MS", "50");
-        assert_eq!(create_confirm_ms(), 45_000, "absurdly small values fall back to the default");
+        assert_eq!(
+            create_confirm_ms(),
+            45_000,
+            "absurdly small values fall back to the default"
+        );
         std::env::set_var("GPN_CREATE_CONFIRM_MS", "nonsense");
         assert_eq!(create_confirm_ms(), 45_000);
         std::env::remove_var("GPN_CREATE_CONFIRM_MS");
@@ -3489,14 +3513,22 @@ mod tests {
         // must not masquerade as pending forever).
         assert!(pending_create_is_live(Duration::from_secs(0)));
         assert!(pending_create_is_live(PENDING_CREATE_TTL));
-        assert!(!pending_create_is_live(PENDING_CREATE_TTL + Duration::from_secs(1)));
+        assert!(!pending_create_is_live(
+            PENDING_CREATE_TTL + Duration::from_secs(1)
+        ));
 
         let id = 900_001;
         assert!(!create_is_pending(id), "unknown ids stay not-found");
         mark_create_pending(id);
-        assert!(create_is_pending(id), "a submitted create reads as pending, not lost");
+        assert!(
+            create_is_pending(id),
+            "a submitted create reads as pending, not lost"
+        );
         clear_create_pending(id);
-        assert!(!create_is_pending(id), "once the chain knows the id, the marker is gone");
+        assert!(
+            !create_is_pending(id),
+            "once the chain knows the id, the marker is gone"
+        );
     }
 
     #[test]
@@ -3638,8 +3670,8 @@ mod tests {
         assert!(survives_absent_read(36, mt)); // observed create->inclusion latency
         assert!(survives_absent_read(460, mt));
         assert!(survives_absent_read(580, mt)); // stale window + grace
-        // Past the grace it is treated as gone, so a create that never lands
-        // still ages out of the tracking list (no slot leak).
+                                                // Past the grace it is treated as gone, so a create that never lands
+                                                // still ages out of the tracking list (no slot leak).
         assert!(!survives_absent_read(581, mt));
         // Same shape at the floor and the cap (no overflow, still bounded).
         assert!(survives_absent_read(239, 0));
@@ -3654,10 +3686,16 @@ mod tests {
         // result must veto it regardless of age (the chain lags behind reality
         // while our accept/start txs queue behind slow blocks).
         for status in ["done", "error"] {
-            assert!(job_has_result(status), "{status} means work already happened");
+            assert!(
+                job_has_result(status),
+                "{status} means work already happened"
+            );
         }
         for status in ["queued", "running", ""] {
-            assert!(!job_has_result(status), "{status} must still be cancellable");
+            assert!(
+                !job_has_result(status),
+                "{status} must still be cancellable"
+            );
         }
         // Composite decision: the #5534 case exactly.
         let mt = 512; // stale_secs(512) = 60 + 25*2 = 120 (the floor)
@@ -4009,7 +4047,10 @@ mod tests {
         assert!(provider_matches(ss58, hex));
         assert!(provider_matches(hex, ss58));
         assert!(provider_matches(ss58, ss58));
-        assert!(!provider_matches(ss58, "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"));
+        assert!(!provider_matches(
+            ss58,
+            "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+        ));
         assert!(!provider_matches("", ss58));
     }
 

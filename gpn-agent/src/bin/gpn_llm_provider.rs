@@ -16,7 +16,9 @@
 
 use gpn_agent::chain::signer::Sr25519Signer;
 use gpn_agent::chain::ChainClient;
-use gpn_agent::llm::{get_job, run_inference, run_inference_with_usage, set_response, LlmStore};
+use gpn_agent::llm::{
+    get_job, run_inference, run_inference_with_usage, set_response_with_usage, LlmStore,
+};
 use std::collections::HashMap;
 use std::io::Read as _;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -327,15 +329,15 @@ fn spawn_infer_server(listen: &str, chan: Option<ChannelServeCtx>) {
                 // Capability probe: the AP checks this BEFORE opening (and
                 // funding) a channel, so a provider that cannot serve channel
                 // jobs never costs the AP a locked deposit.
-                let hdr = tiny_http::Header::from_bytes(
-                    &b"Content-Type"[..],
-                    &b"application/json"[..],
-                )
-                .unwrap();
+                let hdr =
+                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                        .unwrap();
                 let body = match chan.as_ref() {
                     Some(ctx) => {
-                        let ids: Vec<u64> =
-                            load_provider_channels(&ctx.state_path).keys().copied().collect();
+                        let ids: Vec<u64> = load_provider_channels(&ctx.state_path)
+                            .keys()
+                            .copied()
+                            .collect();
                         serde_json::json!({
                             "ok": true, "channel": true,
                             "provider": ctx.me.to_hex(), "channels": ids,
@@ -343,9 +345,8 @@ fn spawn_infer_server(listen: &str, chan: Option<ChannelServeCtx>) {
                     }
                     None => serde_json::json!({"ok": false, "channel": false}),
                 };
-                let _ = req.respond(
-                    tiny_http::Response::from_string(body.to_string()).with_header(hdr),
-                );
+                let _ = req
+                    .respond(tiny_http::Response::from_string(body.to_string()).with_header(hdr));
                 continue;
             }
             if req.method() == &tiny_http::Method::Post && path == "/channel/job" {
@@ -637,7 +638,10 @@ fn settled_store_path() -> String {
 /// still accepted, and is filtered by the same tip rule. A `chain_tip` of 0
 /// (chain unreachable) drops everything — a single pass re-queries rather than
 /// risk hiding a real job, and the cache is rewritten from what we re-learn.
-fn read_settled_from_with_tip(path: &str, chain_tip: u64) -> (std::collections::HashSet<u64>, bool) {
+fn read_settled_from_with_tip(
+    path: &str,
+    chain_tip: u64,
+) -> (std::collections::HashSet<u64>, bool) {
     let mut set = std::collections::HashSet::new();
     let mut dropped = false;
     let Ok(s) = std::fs::read_to_string(path) else {
@@ -1084,10 +1088,18 @@ fn heal_attempt_allowed(id: u64, step: HealStep, account_nonce: Option<u64>) -> 
             if !heal_retry_decision(elapsed, landed, prev.ineffective) {
                 return false;
             }
-            let ineffective = if landed { prev.ineffective + 1 } else { prev.ineffective };
+            let ineffective = if landed {
+                prev.ineffective + 1
+            } else {
+                prev.ineffective
+            };
             gate.insert(
                 (id, step),
-                HealAttempt { last: now, nonce: None, ineffective },
+                HealAttempt {
+                    last: now,
+                    nonce: None,
+                    ineffective,
+                },
             );
             if landed {
                 eprintln!(
@@ -1102,7 +1114,11 @@ fn heal_attempt_allowed(id: u64, step: HealStep, account_nonce: Option<u64>) -> 
         None => {
             gate.insert(
                 (id, step),
-                HealAttempt { last: now, nonce: None, ineffective: 0 },
+                HealAttempt {
+                    last: now,
+                    nonce: None,
+                    ineffective: 0,
+                },
             );
             true
         }
@@ -1131,7 +1147,10 @@ fn heal_record_nonce(id: u64, step: HealStep, nonce: u64) {
     if let Some(prev) = gate.get(&(id, step)).copied() {
         gate.insert(
             (id, step),
-            HealAttempt { nonce: Some(nonce), ..prev },
+            HealAttempt {
+                nonce: Some(nonce),
+                ..prev
+            },
         );
     }
 }
@@ -1313,7 +1332,10 @@ async fn process_once(
                                 / 4)
                             .max(1);
                             let res = if fast_claim {
-                                client.submit_result_fast_nonce(id, bytes, toks).await.map(Some)
+                                client
+                                    .submit_result_fast_nonce(id, bytes, toks)
+                                    .await
+                                    .map(Some)
                             } else {
                                 client.submit_result(id, bytes, toks).await.map(|_| None)
                             };
@@ -1818,14 +1840,16 @@ async fn run_job(
             let salt = random_salt();
             let commit = salted_commit(&salt, &text);
             let commit_hex = format!("0x{}", hex::encode(commit));
-            let _ = set_response(id, &text, &commit_hex, Some(&salt));
-            // Item #53: persist the backend's real token counts so the AP can
-            // report a truthful OpenAI `usage` block instead of hard-coded 0s.
-            let store = LlmStore::new();
-            let _ = store.set_usage(
+            // Item #53: the backend's real token counts go into the SAME write that
+            // marks the job `done`. A separate `set_usage` left a window in which
+            // the AP's 300 ms chat poll saw `done` before the counts existed and
+            // answered `usage {0,0,0}` (the very symptom #53 removed).
+            let _ = set_response_with_usage(
                 id,
-                usage.map(|u| u.prompt_tokens),
-                usage.map(|u| u.completion_tokens),
+                &text,
+                &commit_hex,
+                Some(&salt),
+                usage.map(|u| (u.prompt_tokens, u.completion_tokens)),
             );
             // Return the result to the requesting AP (remote providers; item #14).
             return_result(id);
@@ -1926,17 +1950,15 @@ mod heal_step_tests {
 
     /// Backdate a gate entry so the cooldown is already over (tests cannot sleep
     /// 45 s). Mirrors what a real earlier attempt leaves behind.
-    fn seed_attempt(
-        id: u64,
-        step: HealStep,
-        age: Duration,
-        nonce: Option<u64>,
-        ineffective: u32,
-    ) {
+    fn seed_attempt(id: u64, step: HealStep, age: Duration, nonce: Option<u64>, ineffective: u32) {
         let mut gate = heal_gate().lock().unwrap_or_else(|e| e.into_inner());
         gate.insert(
             (id, step),
-            HealAttempt { last: Instant::now() - age, nonce, ineffective },
+            HealAttempt {
+                last: Instant::now() - age,
+                nonce,
+                ineffective,
+            },
         );
     }
 
@@ -1945,18 +1967,27 @@ mod heal_step_tests {
         // Unique ids: the gate is process-global and tests run in parallel.
         assert!(heal_attempt_allowed(9_100_001, HealStep::Accept, Some(100)));
         // No nonce evidence yet (nothing submitted): still blocked in the cooldown.
-        assert!(!heal_attempt_allowed(9_100_001, HealStep::Accept, Some(101)));
+        assert!(!heal_attempt_allowed(
+            9_100_001,
+            HealStep::Accept,
+            Some(101)
+        ));
         // A different transition is a different key — it may proceed at once.
         assert!(heal_attempt_allowed(9_100_001, HealStep::Start, Some(101)));
     }
 
     #[test]
     fn heal_gate_records_the_nonce_it_was_submitted_with() {
-        assert!(heal_attempt_allowed(9_100_002, HealStep::Complete, Some(42)));
+        assert!(heal_attempt_allowed(
+            9_100_002,
+            HealStep::Complete,
+            Some(42)
+        ));
         heal_record_nonce(9_100_002, HealStep::Complete, 77);
         let gate = heal_gate().lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(
-            gate.get(&(9_100_002, HealStep::Complete)).and_then(|a| a.nonce),
+            gate.get(&(9_100_002, HealStep::Complete))
+                .and_then(|a| a.nonce),
             Some(77)
         );
     }
@@ -1967,16 +1998,40 @@ mod heal_step_tests {
         // signed with ⇒ our tx is queued behind a full block (the dominant case:
         // the head advances every ~11 s, ours does not land). Do NOT burn a new
         // nonce on a duplicate. This is what made the head-based #33 gate a no-op.
-        seed_attempt(9_100_003, HealStep::Start, Duration::from_secs(51), Some(100), 0);
+        seed_attempt(
+            9_100_003,
+            HealStep::Start,
+            Duration::from_secs(51),
+            Some(100),
+            0,
+        );
         assert!(!heal_attempt_allowed(9_100_003, HealStep::Start, Some(100)));
         // Account nonce passed ours ⇒ the tx was applied (real inclusion evidence).
-        seed_attempt(9_100_004, HealStep::Start, Duration::from_secs(51), Some(100), 0);
+        seed_attempt(
+            9_100_004,
+            HealStep::Start,
+            Duration::from_secs(51),
+            Some(100),
+            0,
+        );
         assert!(heal_attempt_allowed(9_100_004, HealStep::Start, Some(101)));
         // Unreadable account nonce is conservative: never evidence.
-        seed_attempt(9_100_005, HealStep::Start, Duration::from_secs(51), Some(100), 0);
+        seed_attempt(
+            9_100_005,
+            HealStep::Start,
+            Duration::from_secs(51),
+            Some(100),
+            0,
+        );
         assert!(!heal_attempt_allowed(9_100_005, HealStep::Start, None));
         // Absolute floor still guarantees liveness for a genuinely dropped tx.
-        seed_attempt(9_100_006, HealStep::Start, Duration::from_secs(121), Some(100), 0);
+        seed_attempt(
+            9_100_006,
+            HealStep::Start,
+            Duration::from_secs(121),
+            Some(100),
+            0,
+        );
         assert!(heal_attempt_allowed(9_100_006, HealStep::Start, Some(100)));
     }
 
@@ -2001,15 +2056,32 @@ mod heal_step_tests {
     #[test]
     fn reverted_dispatch_backs_off_instead_of_resubmitting() {
         // One inclusion-but-reverted attempt: 51 s is no longer enough.
-        seed_attempt(9_100_007, HealStep::Accept, Duration::from_secs(51), Some(100), 1);
-        assert!(!heal_attempt_allowed(9_100_007, HealStep::Accept, Some(101)));
+        seed_attempt(
+            9_100_007,
+            HealStep::Accept,
+            Duration::from_secs(51),
+            Some(100),
+            1,
+        );
+        assert!(!heal_attempt_allowed(
+            9_100_007,
+            HealStep::Accept,
+            Some(101)
+        ));
         // After the doubled backoff it retries, and the counter escalates.
-        seed_attempt(9_100_008, HealStep::Accept, Duration::from_secs(91), Some(100), 1);
+        seed_attempt(
+            9_100_008,
+            HealStep::Accept,
+            Duration::from_secs(91),
+            Some(100),
+            1,
+        );
         assert!(heal_attempt_allowed(9_100_008, HealStep::Accept, Some(101)));
         {
             let gate = heal_gate().lock().unwrap_or_else(|e| e.into_inner());
             assert_eq!(
-                gate.get(&(9_100_008, HealStep::Accept)).map(|a| a.ineffective),
+                gate.get(&(9_100_008, HealStep::Accept))
+                    .map(|a| a.ineffective),
                 Some(2)
             );
         }
@@ -2028,7 +2100,10 @@ mod heal_step_tests {
         assert_eq!(heal_step_for_state("Pending"), HealStep::Accept);
         assert_eq!(heal_step_for_state("Accepted"), HealStep::Start);
         assert_eq!(heal_step_for_state("Running"), HealStep::SubmitResult);
-        assert_eq!(heal_step_for_state("AwaitingVerification"), HealStep::Complete);
+        assert_eq!(
+            heal_step_for_state("AwaitingVerification"),
+            HealStep::Complete
+        );
     }
 
     #[test]
@@ -2107,7 +2182,10 @@ mod settled_cache_tests {
         let (back, dropped) = read_settled_from_with_tip(&p, 4773);
         assert!(back.contains(&4772), "issued + settled id stays skipped");
         assert!(!back.contains(&4858), "future id must not be blacklisted");
-        assert!(dropped, "pruning must mark the cache dirty so the file shrinks");
+        assert!(
+            dropped,
+            "pruning must mark the cache dirty so the file shrinks"
+        );
         let _ = std::fs::remove_file(&p);
 
         // Persisting also refuses to record anything at/above the tip.

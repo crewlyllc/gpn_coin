@@ -80,7 +80,11 @@ impl StoreLock {
                     // Break a stale lock left by a crashed writer.
                     if let Ok(md) = std::fs::metadata(&dir) {
                         if let Ok(modified) = md.modified() {
-                            if modified.elapsed().map(|d| d.as_secs() > 30).unwrap_or(false) {
+                            if modified
+                                .elapsed()
+                                .map(|d| d.as_secs() > 30)
+                                .unwrap_or(false)
+                            {
                                 let _ = std::fs::remove_dir_all(&dir);
                                 continue;
                             }
@@ -434,6 +438,28 @@ impl LlmStore {
         result_hash: &str,
         salt: Option<&str>,
     ) -> std::io::Result<()> {
+        self.complete_with_usage(job_id, response, result_hash, salt, None)
+    }
+
+    /// Complete a job **and** record the backend token counts in ONE write
+    /// (item #53 residual).
+    ///
+    /// `complete` + a following `set_usage` is two separate read-modify-writes,
+    /// so `status == "done"` became visible a few hundred microseconds before the
+    /// counts did. Every waiter (`gpn_scheduler`'s 300 ms chat poll, a remote
+    /// AP's result callback) reads on `done` and would therefore report
+    /// `usage {0,0,0}` for a job whose counts were in fact known — the exact
+    /// symptom #53 was supposed to remove, still reachable via the race.
+    /// Writing both in one locked save removes the window entirely: any observer
+    /// that can see `done` can also see the counts.
+    pub fn complete_with_usage(
+        &self,
+        job_id: u64,
+        response: &str,
+        result_hash: &str,
+        salt: Option<&str>,
+        usage: Option<(u32, u32)>,
+    ) -> std::io::Result<()> {
         let _g = self.lock.lock().unwrap();
         let _x = StoreLock::acquire(&self.path)?;
         let mut map = self.load_fresh();
@@ -442,6 +468,10 @@ impl LlmStore {
             j.result_hash = Some(result_hash.to_string());
             if let Some(s) = salt {
                 j.salt = Some(s.to_string());
+            }
+            if let Some((p, c)) = usage {
+                j.prompt_tokens = Some(p);
+                j.completion_tokens = Some(c);
             }
             j.status = "done".to_string();
             self.save(&map)?;
@@ -519,6 +549,16 @@ pub fn set_response(
 ) -> std::io::Result<()> {
     LlmStore::new().complete(job_id, response, result_hash, salt)
 }
+/// Convenience: mark a job complete *with* its backend token counts in one write.
+pub fn set_response_with_usage(
+    job_id: u64,
+    response: &str,
+    result_hash: &str,
+    salt: Option<&str>,
+    usage: Option<(u32, u32)>,
+) -> std::io::Result<()> {
+    LlmStore::new().complete_with_usage(job_id, response, result_hash, salt, usage)
+}
 
 impl Default for LlmStore {
     fn default() -> Self {
@@ -547,6 +587,43 @@ mod tests {
     /// Item #53: token usage is persisted per job and an entry written before the
     /// fields existed still loads (they default to `None`, never an error).
     #[test]
+    fn completion_and_usage_land_in_one_write() {
+        // Item #53 residual: `complete()` then `set_usage()` is two writes, so a
+        // waiter that keys on `status == "done"` (the AP's 300 ms chat poll)
+        // could see the completion before the counts and report `usage {0,0,0}`.
+        // The atomic path must make every field visible at once, and reading the
+        // record straight after it must already carry the counts.
+        let dir = std::env::temp_dir().join(format!("gpn-usage-atomic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("llm_store.json");
+        let s = LlmStore::with_path(p.clone());
+        s.put(11, LlmJob::new_llm("m", "p", 0.7, 16)).unwrap();
+        s.complete_with_usage(11, "answer", "0xbeef", None, Some((36, 2)))
+            .unwrap();
+        let j = s.get(11).unwrap();
+        assert_eq!(j.status, "done");
+        assert_eq!(j.response.as_deref(), Some("answer"));
+        assert_eq!(
+            (j.prompt_tokens, j.completion_tokens),
+            (Some(36), Some(2)),
+            "counts must be visible in the same read that sees `done`"
+        );
+        // A backend that reported nothing leaves the counts unset — unknown is
+        // never invented as a real 0.
+        s.put(12, LlmJob::new_llm("m", "p", 0.7, 16)).unwrap();
+        s.complete_with_usage(12, "answer", "0xbeef", None, None)
+            .unwrap();
+        let j = s.get(12).unwrap();
+        assert_eq!(j.status, "done");
+        assert_eq!((j.prompt_tokens, j.completion_tokens), (None, None));
+        // `complete()` keeps working (delegates with no usage).
+        s.put(13, LlmJob::new_llm("m", "p", 0.7, 16)).unwrap();
+        s.complete(13, "x", "0x0", None).unwrap();
+        assert_eq!(s.get(13).unwrap().status, "done");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn usage_roundtrips_and_legacy_entries_still_load() {
         let dir = std::env::temp_dir().join(format!("gpn-usage-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -574,7 +651,8 @@ mod tests {
     }
 
     #[test]
-    fn store_lock_is_mutually_exclusive() {        let dir = std::env::temp_dir().join(format!("gpn-lock-{}", std::process::id()));
+    fn store_lock_is_mutually_exclusive() {
+        let dir = std::env::temp_dir().join(format!("gpn-lock-{}", std::process::id()));
         let target = dir.join("store.json");
         let a = StoreLock::acquire(&target).unwrap();
         // A second acquire must block until the first is dropped.
@@ -583,7 +661,10 @@ mod tests {
             drop(b);
         });
         std::thread::sleep(std::time::Duration::from_millis(50));
-        assert!(handle.is_finished() == false, "second lock acquired while held");
+        assert!(
+            handle.is_finished() == false,
+            "second lock acquired while held"
+        );
         drop(a);
         handle.join().unwrap();
     }
@@ -595,7 +676,8 @@ mod tests {
         let p = dir.join("assignments.json");
         merge_json_object(&p, "1", serde_json::json!({"a": 1})).unwrap();
         merge_json_object(&p, "2", serde_json::json!({"b": 2})).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
         assert_eq!(v["1"]["a"], 1);
         assert_eq!(v["2"]["b"], 2);
         let _ = std::fs::remove_dir_all(&dir);
