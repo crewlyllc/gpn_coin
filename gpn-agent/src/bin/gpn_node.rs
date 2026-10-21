@@ -118,7 +118,7 @@ struct FileConfig {
     autostart: Option<bool>,
     /// How often the aggregated status line is printed (seconds).
     status_secs: Option<u64>,
-    /// Opt in to automatic updates (`GPN_AUTO_UPDATE`). Default **false**.
+    /// Opt out of automatic updates with `GPN_AUTO_UPDATE=0`. Default **true**.
     auto_update: Option<bool>,
     /// Signed release manifest URL (`GPN_UPDATE_URL`).
     update_url: Option<String>,
@@ -681,10 +681,10 @@ impl Config {
             autostart: env_bool("GPN_AUTOSTART")
                 .or(file.autostart)
                 .unwrap_or(false),
-            // ── Updates: opt-in. Nothing is downloaded unless asked. ──────────
+            // ── Updates: ON by default (opt out with GPN_AUTO_UPDATE=0). ──────
             auto_update: match env_str("GPN_AUTO_UPDATE") {
                 Some(v) => update::auto_update_enabled(Some(&v)),
-                None => file.auto_update.unwrap_or(false),
+                None => file.auto_update.unwrap_or(true),
             },
             update_url: env_str("GPN_UPDATE_URL")
                 .or(file.update_url)
@@ -2542,7 +2542,7 @@ mod tests {
             bin_dir: PathBuf::from("/tmp/gpn-test-bin"),
             status_secs: 15,
             autostart: false,
-            auto_update: false,
+            auto_update: true,
             update_url: update::MANIFEST_URL.to_string(),
             update_check_hours: 6,
             update_spread_secs: 0,
@@ -2626,13 +2626,12 @@ mod tests {
         assert!(!spec.envs.iter().any(|(k, _)| k == "GPN_STANDBY"));
     }
 
-    /// The config default is opt-in (`auto_update` absent = off), while the
-    /// `GPN_AUTO_UPDATE` env helper is opt-out: an explicit `GPN_AUTO_UPDATE=0`
-    /// is the only thing that turns it off through the env path.
+    /// Both the config default and the `GPN_AUTO_UPDATE` env helper are
+    /// **opt-out**: auto-update is on unless explicitly disabled.
     #[test]
     fn auto_update_env_helper_is_opt_out() {
         let cfg = test_config();
-        assert!(!cfg.auto_update);
+        assert!(cfg.auto_update);
         assert!(update::auto_update_enabled(None));
         assert!(!update::auto_update_enabled(Some("0")));
         assert!(update::auto_update_enabled(Some("1")));
