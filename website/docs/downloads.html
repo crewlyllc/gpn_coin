@@ -46,6 +46,10 @@
     <article class="prose">
 <h1>GPN — Downloads</h1>
 <p>Every GPN build publishes a <strong>rolling GitHub Release</strong>, so there is always a stable, downloadable URL.</p>
+<p><strong>Downloads are public.</strong> The official public repository is
+<a href="https://github.com/crewlyllc/gpn_coin"><code>crewlyllc/gpn_coin</code></a> — all release assets below live there
+and download <strong>anonymously, with no GitHub account and no token</strong>. It is a one-way mirror of the
+private development repo <a href="https://github.com/jeremyzguo/gpn_coin"><code>jeremyzguo/gpn_coin</code></a>.</p>
 <h2 id="releases-rolling-latest">Releases (rolling "latest")</h2>
 <table>
 <thead>
@@ -58,43 +62,43 @@
 <tbody>
 <tr>
 <td>Windows</td>
-<td><a href="https://github.com/jeremyzguo/gpn_coin/releases/tag/windows-latest"><code>windows-latest</code></a></td>
+<td><a href="https://github.com/crewlyllc/gpn_coin/releases/tag/windows-latest"><code>windows-latest</code></a></td>
 <td><code>gpn-windows.zip</code></td>
 </tr>
 <tr>
 <td>Linux</td>
-<td><a href="https://github.com/jeremyzguo/gpn_coin/releases/tag/linux-latest"><code>linux-latest</code></a></td>
+<td><a href="https://github.com/crewlyllc/gpn_coin/releases/tag/linux-latest"><code>linux-latest</code></a></td>
 <td><code>gpn-linux.tar.gz</code></td>
 </tr>
 <tr>
 <td>macOS</td>
-<td><a href="https://github.com/jeremyzguo/gpn_coin/releases/tag/macos-latest"><code>macos-latest</code></a></td>
+<td><code>macos-latest</code> (not published yet)</td>
 <td><code>gpn-macos.tar.gz</code></td>
 </tr>
 </tbody>
 </table>
 <p>Each build <strong>replaces</strong> the asset on the same tag, so the URL never changes — it always points at the newest build.</p>
-<h2 id="private-repo-downloads-need-auth">⚠️ Private repo → downloads need auth</h2>
-<p>This repo is currently <strong>private</strong>, so release assets require a GitHub token:</p>
-<pre><code class="language-bash">curl -L -H &quot;Authorization: token &lt;YOUR_GITHUB_TOKEN&gt;&quot; \
-  -o gpn-windows.zip \
-  https://github.com/jeremyzguo/gpn_coin/releases/download/windows-latest/gpn-windows.zip
+<h2 id="no-auth-needed">No auth needed</h2>
+<pre><code class="language-bash">curl -L -o gpn-linux.tar.gz \
+  https://github.com/crewlyllc/gpn_coin/releases/download/linux-latest/gpn-linux.tar.gz
 </code></pre>
-<p><strong>Once the repo is made public, the same URLs download anonymously</strong> (no token) — that's the launch step that turns these into public download links.</p>
+<p>Release pages: <a href="https://github.com/crewlyllc/gpn_coin/releases">https://github.com/crewlyllc/gpn_coin/releases</a></p>
 <h2 id="quick-start-by-os">Quick start by OS</h2>
 <p><strong>Windows</strong> — unzip and run (see <code>docs/deploy</code> on the website):</p>
-<pre><code class="language-powershell">curl.exe -L -H &quot;Authorization: token &lt;TOKEN&gt;&quot; -o gpn-windows.zip https://github.com/jeremyzguo/gpn_coin/releases/download/windows-latest/gpn-windows.zip
+<pre><code class="language-powershell">curl.exe -L -o gpn-windows.zip https://github.com/crewlyllc/gpn_coin/releases/download/windows-latest/gpn-windows.zip
 Expand-Archive gpn-windows.zip -DestinationPath C:\gpn\bin -Force
 </code></pre>
 <p><strong>Linux / macOS</strong> — untar and use the one-command installer, or run the binary directly:</p>
-<pre><code class="language-bash">curl -L -H &quot;Authorization: token &lt;TOKEN&gt;&quot; -o gpn-linux.tar.gz https://github.com/jeremyzguo/gpn_coin/releases/download/linux-latest/gpn-linux.tar.gz
+<pre><code class="language-bash">curl -L -o gpn-linux.tar.gz https://github.com/crewlyllc/gpn_coin/releases/download/linux-latest/gpn-linux.tar.gz
 tar -xzf gpn-linux.tar.gz
 </code></pre>
 <h2 id="from-source">From source</h2>
-<pre><code class="language-bash">git clone https://github.com/jeremyzguo/gpn_coin.git
+<pre><code class="language-bash">git clone https://github.com/crewlyllc/gpn_coin.git
 cd gpn_coin &amp;&amp; ./install.sh            # node + agent
 ./install-accesspoint.sh               # just an access point
 </code></pre>
+<p>Development happens in the private <code>jeremyzguo/gpn_coin</code> repository; <code>crewlyllc/gpn_coin</code> is synced
+from it automatically (code + release assets), so the public history always matches the dev history.</p>
 <h2 id="also-available">Also available</h2>
 <ul>
 <li><strong>CI artifacts</strong> (<code>gpn-windows</code>, <code>gpn-linux</code>, …) under <strong>Actions</strong> — but these <strong>expire</strong> (retention-days) and are quota-limited; the <strong>Releases</strong> above are the durable distribution.</li>
@@ -117,7 +121,7 @@ Testnet) and <code>best_block_number</code> before trusting it. The snapshot is 
 from an <strong>archive</strong>-pruned node so it is compatible with the node's default
 <code>--state-pruning archive</code> (a legacy <code>256</code> snapshot would hard-fail).</p>
     </article>
-    <p class="doc-updated small muted">Last generated 2026-10-19 from the project documentation set.</p>
+    <p class="doc-updated small muted">Last generated 2026-10-21 from the project documentation set.</p>
   </div>
 </main>
 

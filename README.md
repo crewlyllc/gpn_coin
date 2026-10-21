@@ -2,6 +2,13 @@
 
 A decentralized blockchain where every GPU-connected node can mine, stake, and serve AI compute — auto-switching between them based on real-time profitability.
 
+> **Official public home: <https://github.com/crewlyllc/gpn_coin>**
+> Browse the code and download builds (no account or token needed) from
+> <https://github.com/crewlyllc/gpn_coin/releases>.
+> That public repository is an automatic one-way mirror (code + release assets) of this
+> private development repository, which stays the origin for development, CI and the
+> gpncoin.ai website deployment.
+
 ## Architecture
 
 ```
