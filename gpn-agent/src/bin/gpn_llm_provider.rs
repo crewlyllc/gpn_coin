@@ -932,6 +932,19 @@ const MODEL_PULL_TIMEOUT_SECS: u64 = 600;
 /// instead of once per poll pass.
 const MODEL_PREP_STUCK_AFTER: Duration = Duration::from_secs(MODEL_PULL_TIMEOUT_SECS);
 
+/// Item #57: may the model-prep kick consider this assignment at all?
+///
+/// A job the chain has already settled (Completed/Failed/Cancelled/expired) is
+/// written off in `llm-settled.json`, but it stays in `assignments.json` and in
+/// the local store with a stale `queued` status forever. Without this gate the
+/// pre-claim prep loop re-kicked `/api/tags` + `/api/pull` for it every
+/// `MODEL_PRESENCE_TTL` (measured: 24 re-fires in ~40 min for #6253/#6254 after
+/// they were cancelled on chain). Ids at/above the tip are predicted labels and
+/// are never treated as settled (#29).
+fn prep_candidate(id: u64, chain_tip: u64, settled: &std::collections::HashSet<u64>) -> bool {
+    !(id < chain_tip && settled.contains(&id))
+}
+
 enum PrepAction {
     /// No worker holds this model (or the previous one is past the stuck
     /// window) — start one.
@@ -1608,6 +1621,21 @@ async fn process_once(
     // 0. Auto-claim: if an access-point scheduler has assigned us specific jobs,
     //    claim ONLY those; otherwise (standalone) claim any claimable LLM job.
     let assigned = read_assigned(me, addr);
+    // finding #34: skip ids we've already settled so the unbounded
+    // assignments.json can't drive O(history) chain reads every poll. The set
+    // is in-memory here and persisted once per pass (below).
+    //
+    // Item #29: only trust ids the chain has actually issued (id < NextJobId);
+    // a write-off above the tip is a predicted label and must never blacklist a
+    // future real job.
+    //
+    // Item #57: loaded BEFORE the model-prep loop too — a job the chain already
+    // finished or cancelled stays in `assignments.json` with a stale `queued`
+    // store entry, so the prep kick used to re-fire for it every
+    // MODEL_PRESENCE_TTL for as long as the process lived.
+    let settled_path = settled_store_path();
+    let chain_tip = client.get_next_job_id().await;
+    let (mut settled, pruned) = read_settled_from_with_tip(&settled_path, chain_tip);
     let targets: Vec<u64> = if assigned.is_empty() {
         let attested_gflops = client
             .get_attestation_record(addr)
@@ -1628,8 +1656,15 @@ async fn process_once(
         // otherwise we spam `ollama pull` for foreign models (e.g. sd-turbo) forever.
         // Also skip finished jobs and `auto`/empty requests (nothing concrete to pull).
         for (id, model, pull) in &assigned {
+            // Item #57: never prepare a model for a job the chain has already
+            // settled (completed/cancelled/expired). Those entries linger in
+            // `assignments.json` forever with a `queued` store status, so
+            // without this the kick re-fires every MODEL_PRESENCE_TTL.
+            if !prep_candidate(*id, chain_tip, &settled) {
+                continue;
+            }
             let Some(job) = get_job(*id) else { continue };
-            if job.kind != "llm" || job.status == "done" {
+            if job.kind != "llm" || job.status == "done" || job.status == "error" {
                 continue;
             }
             if model.is_empty() || model == "auto" {
@@ -1655,16 +1690,6 @@ async fn process_once(
             .map(|(id, _, _)| *id)
             .collect()
     };
-    // finding #34: skip ids we've already settled so the unbounded
-    // assignments.json can't drive O(history) chain reads every poll. The set
-    // is in-memory here and persisted once per pass (below).
-    //
-    // Item #29: only trust ids the chain has actually issued (id < NextJobId);
-    // a write-off above the tip is a predicted label and must never blacklist a
-    // future real job.
-    let settled_path = settled_store_path();
-    let chain_tip = client.get_next_job_id().await;
-    let (mut settled, pruned) = read_settled_from_with_tip(&settled_path, chain_tip);
     let mut settled_dirty = pruned;
     // Write-offs for ids the chain has NOT issued yet (predicted labels from the
     // AP's +drift). They are skipped in memory only, never persisted: one that
@@ -2082,6 +2107,32 @@ mod model_prep_tests {
             prep_action(Some(now + Duration::from_secs(60)), now),
             PrepAction::Spawn
         ));
+    }
+}
+
+#[cfg(test)]
+mod prep_candidate_tests {
+    //! Item #57: the model-prep kick must stop re-firing for jobs the chain has
+    //! already settled (they linger in `assignments.json` with a stale store
+    //! status, so the loop used to retry them every `MODEL_PRESENCE_TTL`).
+    use super::prep_candidate;
+    use std::collections::HashSet;
+
+    #[test]
+    fn settled_jobs_are_not_prepared_again() {
+        let mut settled = HashSet::new();
+        settled.insert(6253u64);
+        settled.insert(6254u64);
+        // Cancelled on chain and written off ⇒ never prepared again.
+        assert!(!prep_candidate(6253, 6270, &settled));
+        // A live, un-settled job is still prepared.
+        assert!(prep_candidate(6261, 6270, &settled));
+        // An id at/above the tip is a predicted label: a mark against it must
+        // not hide a real job that later takes that id (#29).
+        assert!(prep_candidate(6253, 6253, &settled));
+        assert!(prep_candidate(6253, 6250, &settled));
+        // Nothing settled ⇒ everything eligible.
+        assert!(prep_candidate(6261, 6270, &HashSet::new()));
     }
 }
 
