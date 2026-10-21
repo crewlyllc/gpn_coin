@@ -1483,13 +1483,25 @@ impl ChainClient {
     }
 
     /// Read the next job id (so the demo can predict the id before accepting).
+    ///
+    /// Collapses "unreadable" to `0` for callers that use the value only as a scan
+    /// bound (providers, explorers, `/jobs` windows): `0` there means "nothing to
+    /// scan", which is benign. Anything that **allocates** an id MUST use
+    /// [`Self::try_get_next_job_id`] — a silent `0` from an unreachable node made the
+    /// access point hand out job id `0` and report an empty marketplace while ~6000
+    /// jobs existed (change-log 2026-10-20 15:1x).
     pub async fn get_next_job_id(&self) -> u64 {
-        let Some(client) = &self.client else { return 0 };
+        self.try_get_next_job_id().await.unwrap_or(0)
+    }
+
+    /// Read `ComputeMarketplace::NextJobId`, distinguishing **"the chain says 0"**
+    /// (a brand-new chain — a legitimate, if unusual, answer) from **"the read
+    /// failed"** (`None`: no client, no head, RPC down, undecodable).
+    pub async fn try_get_next_job_id(&self) -> Option<u64> {
+        let client = self.client.as_ref()?;
         let addr = subxt::dynamic::storage("ComputeMarketplace", "NextJobId", vec![]);
-        match self.storage_at_head(client, &addr).await {
-            Some(v) => v.as_u128().map(|x| x as u64).unwrap_or(0),
-            None => 0,
-        }
+        let v = self.storage_at_head(client, &addr).await?;
+        Some(v.as_u128()? as u64)
     }
 
     /// Read a job's minimum GPU-throughput requirement (`GPURequirements::
@@ -2247,6 +2259,25 @@ mod tests {
         let limbs = [0u64, 0, 0, 1u64 << 48];
         let d = target_to_difficulty(limbs);
         assert!((d - 65536.0).abs() < 1.0, "expected ~65536, got {}", d);
+    }
+
+    /// An UNREADABLE `NextJobId` must not look like `0`: the access point allocates
+    /// job ids from it, and a silent 0 made it hand out job id 0 / report an empty
+    /// marketplace while ~6000 jobs existed (change-log 2026-10-20 15:1x).
+    #[tokio::test]
+    async fn unreadable_next_job_id_is_none_not_zero() {
+        // Opt out of the readiness gate so this test does not wait 15 s on a dead port.
+        std::env::set_var("GPN_RPC_READY_GATE", "0");
+        let offline = ChainClient::new("ws://127.0.0.1:1").await.unwrap();
+        std::env::remove_var("GPN_RPC_READY_GATE");
+        assert!(offline.client.is_none(), "127.0.0.1:1 must not connect");
+        assert_eq!(
+            offline.try_get_next_job_id().await,
+            None,
+            "no client ⇒ unknown counter, never a fabricated 0"
+        );
+        // The legacy accessor keeps its old shape for scan-bound callers only.
+        assert_eq!(offline.get_next_job_id().await, 0);
     }
 
     #[test]

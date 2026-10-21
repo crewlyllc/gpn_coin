@@ -178,22 +178,28 @@ const JANITOR_ADOPT_WINDOW: u64 = 32;
 fn spawn_janitor(client: Arc<ChainClient>, rt: Arc<tokio::runtime::Runtime>) {
     // Re-adopt non-terminal jobs from the last AP epoch so the on-chain expiry can
     // still reclaim them after a restart (the in-memory list is empty then).
-    let next = rt.block_on(client.get_next_job_id());
-    let start = next.saturating_sub(JANITOR_SEED_LOOKBACK);
-    let mut seeded = 0u32;
-    for id in start..next {
-        if let Some((state, _, _, _)) = rt.block_on(client.get_job_state(id)) {
-            if !is_terminal_state(&state) {
-                record_created(id, 0);
-                seeded += 1;
+    // An unreadable counter seeds NOTHING: seeding `0..0` (or `0..32`) would claim a
+    // bogus range and, worse, silently normalise the allocator onto id 0.
+    match rt.block_on(client.try_get_next_job_id()) {
+        None => println!("[janitor] cannot read NextJobId — skipping the restart re-adopt scan"),
+        Some(next) => {
+            let start = next.saturating_sub(JANITOR_SEED_LOOKBACK);
+            let mut seeded = 0u32;
+            for id in start..next {
+                if let Some((state, _, _, _)) = rt.block_on(client.get_job_state(id)) {
+                    if !is_terminal_state(&state) {
+                        record_created(id, 0);
+                        seeded += 1;
+                    }
+                }
+            }
+            if seeded > 0 {
+                println!(
+                    "[janitor] re-adopted {seeded} non-terminal job(s) from #{start}..#{} after restart",
+                    next.saturating_sub(1)
+                );
             }
         }
-    }
-    if seeded > 0 {
-        println!(
-            "[janitor] re-adopted {seeded} non-terminal job(s) from #{start}..#{} after restart",
-            next.saturating_sub(1)
-        );
     }
     // Our own address in the same hex form `get_job_state` reports for requestor.
     let me = client.signer_address_hex();
@@ -2064,7 +2070,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // allocator so concurrent requests never predict the same job id.
                     // `_create_guard` serializes the create so exactly one is in flight.
                     let _create_guard = CREATE_LOCK.lock().unwrap();
-                    let next_before = rt.block_on(client.get_next_job_id());
+                    // NextJobId is the id the create will take. An UNREADABLE counter must
+                    // never be treated as 0: the pre-fix silent 0 allocated job id 0,
+                    // reported `next: 0` on a chain with ~6000 jobs, and mislabelled the
+                    // caller's job (change-log 2026-10-20 15:1x). Refuse instead.
+                    let next_before = match rt.block_on(client.try_get_next_job_id()) {
+                        Some(n) => n,
+                        None => {
+                            let r = Response::from_string(
+                                json!({"error": {"message": "chain unavailable: cannot read NextJobId", "type": "gpn_error"}})
+                                    .to_string(),
+                            )
+                            .with_header(hdr.clone())
+                            .with_status_code(503);
+                            let _ = req.respond(r);
+                            return;
+                        }
+                    };
                     let workload_hash = {
                         use sha2::{Digest, Sha256};
                         let mut h = Sha256::new();
@@ -2430,7 +2452,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         o[0] |= 1;
                         o
                     };
-                    let next_before = rt.block_on(client.get_next_job_id());
+                    let next_before = match rt.block_on(client.try_get_next_job_id()) {
+                        Some(n) => n,
+                        None => {
+                            // Never create against an unknown counter (see the
+                            // /v1/chat/completions guard): a silent 0 hands out id 0.
+                            let r = Response::from_string(
+                                json!({"ok":false,"error":"chain unavailable: cannot read NextJobId — refusing to create a job with an unknown id"})
+                                    .to_string(),
+                            )
+                            .with_header(hdr.clone())
+                            .with_status_code(503);
+                            let _ = req.respond(r);
+                            return;
+                        }
+                    };
                     // Job-relative pricing for generation jobs (pixels × steps), grounded
                     // in the oracle market GPU price; text jobs price per-token (ppt).
                     let price_gpn = if is_gen {
@@ -2621,15 +2657,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 (Method::Get, ["jobs"]) => {
-                    let next = rt.block_on(client.get_next_job_id());
-                    let start = next.saturating_sub(JOBS_LIST_WINDOW);
-                    let mut jobs = vec![];
-                    for id in start..next {
-                        if let Some((state, _p, _r, prov)) = rt.block_on(client.get_job_state(id)) {
-                            jobs.push(json!({"id":id,"state":state,"provider":prov}));
+                    // `next: 0` on a chain with history is the fingerprint of an RPC
+                    // outage (the counter is never reset). Say so explicitly instead of
+                    // rendering an empty marketplace as fact.
+                    match rt.block_on(client.try_get_next_job_id()) {
+                        Some(next) => {
+                            let start = next.saturating_sub(JOBS_LIST_WINDOW);
+                            let mut jobs = vec![];
+                            for id in start..next {
+                                if let Some((state, _p, _r, prov)) = rt.block_on(client.get_job_state(id)) {
+                                    jobs.push(json!({"id":id,"state":state,"provider":prov}));
+                                }
+                            }
+                            json!({"jobs":jobs, "from":start, "next":next})
                         }
+                        None => json!({
+                            "jobs": [],
+                            "from": 0,
+                            "next": 0,
+                            "chain_unavailable": true,
+                            "error": "cannot read ComputeMarketplace::NextJobId (node/RPC unavailable)"
+                        }),
                     }
-                    json!({"jobs":jobs, "from":start, "next":next})
                 }
                 (Method::Get, ["job", id]) => {
                     let idn: u64 = id.parse().unwrap_or(0);
