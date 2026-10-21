@@ -160,10 +160,26 @@ img, svg { max-width: 100%; }
   font-size: .8rem; color: var(--muted); margin-bottom: 20px; background: var(--panel);
 }
 .badge .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 4px rgba(63,185,80,.18); }
+/* Status tag used on capability cards (AI page). */
+.tag {
+  display: inline-flex; align-items: center; gap: 5px; margin-left: auto;
+  font-size: .64rem; letter-spacing: .08em; text-transform: uppercase; font-weight: 800;
+  border-radius: 999px; padding: 3px 9px; border: 1px solid var(--line);
+  color: var(--muted); background: var(--bg-2); white-space: nowrap;
+}
+.tag.live { color: var(--green); border-color: rgba(63,185,80,.45); background: rgba(63,185,80,.12); }
+.tag.live::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
+.tag.soon { color: var(--amber); border-color: rgba(240,166,58,.4); background: rgba(240,166,58,.1); }
 .hero h1 { font-size: clamp(2.05rem, 1.2rem + 4.2vw, 3.6rem); margin: 0 0 18px; }
 .hero h1 .grad { background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .hero .lede { max-width: 720px; font-size: clamp(1.02rem, .95rem + .4vw, 1.22rem); color: var(--muted); margin-bottom: 28px; }
 .hero-cta { display: flex; gap: 12px; flex-wrap: wrap; }
+.hero-note { margin: 14px 0 0; color: var(--muted); font-size: .92rem; }
+.qs-alt {
+  margin: 12px 0 0; padding: 10px 14px; border: 1px dashed var(--line);
+  border-radius: var(--radius-sm); color: var(--muted); font-size: .9rem;
+}
+.qs-alt a { white-space: nowrap; }
 
 /* ---------- Buttons ---------- */
 .btn {

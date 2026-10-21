@@ -8,6 +8,20 @@
  *   GET /seeds.txt      alias of /bootnodes.txt
  *   GET /releases.json  the SIGNED release manifest (see docs/updates.md)
  *   POST /api/join      job application from the home page (see below)
+ *   GET /api/health     proxy -> access point `GET /health`
+ *   GET /api/v1/models  proxy -> `GET /v1/models` (OpenAI model list)
+ *   GET /api/providers  proxy -> `GET /providers` (live capabilities)
+ *   GET /api/mode       proxy -> `GET /mode`
+ *   GET /api/jobs/<id>  proxy -> `GET /job/<id>`
+ *   POST /api/v1/chat/completions  proxy -> OpenAI-compatible chat
+ *
+ * The `/api/*` proxies exist because the public testnet access point speaks
+ * plain `http://` on port 8092: a page served from `https://gpncoin.ai` cannot
+ * call that (mixed content), and Workers `fetch()` refuses non-standard ports.
+ * The proxy terminates TLS at the edge and speaks raw HTTP/1.1 over
+ * `cloudflare:sockets`, the same path `/seeds.json` uses for `/providers`.
+ * `AP_JOB_URL` names the target and `AP_TOKEN` (a secret) supplies the
+ * `Authorization: Bearer` the AP requires from non-loopback callers.
  *
  * `/api/join` accepts `{name, email, role, message}` as JSON, validates it,
  * rate-limits per IP, and stores each application in the `JOIN_KV` namespace
@@ -71,6 +85,57 @@ const TTL_SECONDS = 60;
 const AP_TIMEOUT_MS = 2000;
 
 /**
+ * Timeout for the user-facing `/api/*` proxy. Chat completions are one job on
+ * the chain: the AP waits for the `create` extrinsic to be included and for a
+ * provider to run the prompt, which on this testnet is routinely 15-60 s and
+ * occasionally >90 s. A short timeout here would turn a working network into a
+ * spurious 504, so the proxy is deliberately patient.
+ */
+const AP_PROXY_TIMEOUT_MS = 110_000;
+
+/** Largest JSON request body the proxy will forward (chat prompts). */
+const AP_PROXY_MAX_BODY = 64 * 1024;
+
+/** Refuse runaway upstream bodies (a chat answer is a few KB). */
+const AP_PROXY_MAX_RESPONSE = 8 * 1024 * 1024;
+
+/** Free testnet inference is expensive (one GPU job per call): keep it modest. */
+const CHAT_RATE_MAX = 12;
+const CHAT_RATE_WINDOW_SECONDS = 600;
+/** Concurrent chat jobs this isolate will hold open. */
+const CHAT_INFLIGHT_MAX = 8;
+
+/** Cheap read endpoints (models/health/providers). */
+const READ_RATE_MAX = 120;
+const READ_RATE_WINDOW_SECONDS = 60;
+
+/**
+ * Best-effort per-IP counters. They reset with the isolate; that is acceptable
+ * for a free testnet endpoint — the point is to blunt a naive loop, not to be
+ * an accounting system. If a KV namespace is ever bound, `rateLimit` uses it.
+ * @type {Map<string, { count: number, reset: number }>}
+ */
+const apiRateMem = new Map();
+
+/** Chat jobs currently held open by this isolate. */
+let chatInflight = 0;
+
+/** Origins allowed to call the POST proxy from a browser. */
+const SITE_ORIGINS = new Set(["https://gpncoin.ai", "https://www.gpncoin.ai"]);
+
+/** @param {string} origin */
+function originAllowed(origin) {
+  if (!origin) return false;
+  if (SITE_ORIGINS.has(origin)) return true;
+  try {
+    const u = new URL(origin);
+    return u.hostname === "localhost" || u.hostname === "127.0.0.1" || u.hostname === "[::1]";
+  } catch {
+    return false;
+  }
+}
+
+/**
  * In-isolate cache. Cloudflare may run several isolates, so this is a
  * best-effort optimisation on top of the HTTP cache, not a correctness
  * requirement.
@@ -119,6 +184,10 @@ export default {
       return handleJoin(request, env);
     }
 
+    if (path === "/api" || path.startsWith("/api/")) {
+      return handleApi(request, env, path);
+    }
+
     // Static site: hand the untouched request to the assets binding.
     if (env && env.ASSETS && typeof env.ASSETS.fetch === "function") {
       return env.ASSETS.fetch(request);
@@ -146,100 +215,168 @@ async function directory(env, ctx) {
 }
 
 /**
+/**
  * Query the AP's provider registry. Returns `null` when the AP is not
  * configured or not reachable — callers must treat that as "static only".
- * @param {{ AP_URL?: string }} env
+ * @param {{ AP_URL?: string, AP_JOB_URL?: string }} env
  * @returns {Promise<Array<object> | null>}
  */
 async function fetchLiveProviders(env) {
-  const base = (env && env.AP_URL ? String(env.AP_URL) : "").trim().replace(/\/+$/, "");
-  if (!base) return null;
-
-  // Preferred path: a normal fetch. Works for an HTTPS ingress (tunnel or
-  // reverse proxy) and for the standard ports.
-  // `AP_FORCE_SOCKET=1` is a diagnostics switch (used to exercise the socket
-  // path in `wrangler dev`); it is not set in production.
-  if (!(env && env.AP_FORCE_SOCKET && String(env.AP_FORCE_SOCKET) !== "0")) {
-    const viaFetch = await providersViaFetch(base);
-    if (viaFetch) return viaFetch;
-  }
-
-  // Fallback: the AP today listens on a non-standard port (8092), which the
-  // Workers `fetch()` API refuses. Raw TCP sockets have no such limit, so a
-  // minimal HTTP/1.1 GET over `cloudflare:sockets` keeps the directory live
-  // without extra infrastructure.
-  return providersViaSocket(base);
-}
-
-/** @param {string} base */
-async function providersViaFetch(base) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), AP_TIMEOUT_MS);
+  const res = await apRequest(env, { method: "GET", path: "/providers", timeoutMs: AP_TIMEOUT_MS });
+  if (!res || res.error || res.status !== 200) return null;
   try {
-    const res = await fetch(`${base}/providers`, {
-      signal: controller.signal,
-      headers: { accept: "application/json", "user-agent": "gpn-directory/1" },
-      // The AP is authoritative for liveness; never serve a stale edge copy.
-      cf: { cacheTtl: 0, cacheEverything: false },
-    });
-    if (!res.ok) return null;
-    const doc = await res.json();
+    const doc = JSON.parse(res.body);
     return doc && Array.isArray(doc.providers) ? doc.providers : null;
   } catch {
     return null;
-  } finally {
-    clearTimeout(timer);
   }
 }
 
 /**
- * HTTP/1.1 GET over a raw Workers TCP socket. Plain `http://` only — TLS is
- * left to `fetch()`. Returns null on any failure (never throws).
- * @param {string} base
+ * The access-point base URL. `AP_JOB_URL` (the documented job/chat endpoint)
+ * wins; `AP_URL` stays as the directory fallback so an existing deployment
+ * keeps working with one var.
+ * @param {{ AP_URL?: string, AP_JOB_URL?: string }} env
  */
-async function providersViaSocket(base) {
+function apBase(env) {
+  return String((env && (env.AP_JOB_URL || env.AP_URL)) || "").trim().replace(/\/+$/, "");
+}
+
+/**
+ * Perform one request against the access point and normalise the result.
+ *
+ * `fetch()` is used when the URL is HTTPS or on a standard port. The public AP
+ * is plain HTTP on :8092, which `fetch()` refuses, so the fallback is a
+ * minimal HTTP/1.1 exchange over `cloudflare:sockets` — the same mechanism the
+ * peer directory already uses.
+ *
+ * Never throws. On failure returns `{ error: string }`; otherwise
+ * `{ status, contentType, body }` with the upstream status preserved.
+ *
+ * @param {{ AP_JOB_URL?: string, AP_URL?: string, AP_TOKEN?: string, AP_FORCE_SOCKET?: string }} env
+ * @param {{ method: string, path: string, body?: string | null, timeoutMs?: number }} opts
+ */
+async function apRequest(env, opts) {
+  const base = apBase(env);
+  if (!base) return { error: "access point is not configured (AP_JOB_URL)" };
+
   let url;
   try {
-    url = new URL(base);
+    url = new URL(base + opts.path);
   } catch {
-    return null;
+    return { error: "access point URL is malformed" };
   }
-  if (url.protocol !== "http:") return null;
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    return { error: "access point URL must be http(s)" };
+  }
+
+  const timeoutMs = opts.timeoutMs || AP_PROXY_TIMEOUT_MS;
+  const headers = {
+    accept: "application/json, text/event-stream",
+    "user-agent": "gpn-proxy/1",
+  };
+  if (opts.body != null) headers["content-type"] = "application/json";
+
+  // The AP gate requires a bearer token for non-loopback POSTs. Without the
+  // secret we still proxy: loopback callers and an AP with no token configured
+  // both work, so a missing secret must not take the page down.
+  const token = env && env.AP_TOKEN ? String(env.AP_TOKEN).trim() : "";
+  if (token) headers.authorization = `Bearer ${token}`;
+  else console.warn("[api] AP_TOKEN secret is not set; proxying without Authorization");
+
+  const forceSocket = !!(env && env.AP_FORCE_SOCKET && String(env.AP_FORCE_SOCKET) !== "0");
+  const standardPort =
+    url.protocol === "https:"
+      ? url.port === "" || url.port === "443"
+      : url.port === "" || url.port === "80";
+
+  if (!forceSocket && standardPort && typeof fetch === "function") {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url.toString(), {
+        method: opts.method,
+        headers,
+        body: opts.body == null ? undefined : opts.body,
+        signal: controller.signal,
+        // Upstream is authoritative; never serve an edge-cached answer.
+        cf: { cacheTtl: 0, cacheEverything: false },
+      });
+      const body = await res.text();
+      return {
+        status: res.status,
+        contentType: res.headers.get("content-type") || "application/json",
+        body,
+      };
+    } catch {
+      /* fall through to the socket path */
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  return socketHttpRequest(url, opts.method, headers, opts.body == null ? null : opts.body, timeoutMs);
+}
+
+/**
+ * One HTTP/1.1 request over a raw Workers TCP socket. Plain `http://` only —
+ * TLS is left to `fetch()`. Never throws.
+ *
+ * @param {URL} url
+ * @param {string} method
+ * @param {Record<string, string>} headers
+ * @param {string | null} body
+ * @param {number} timeoutMs
+ */
+async function socketHttpRequest(url, method, headers, body, timeoutMs) {
+  if (url.protocol !== "http:") return { error: "raw sockets only speak plain http" };
   const host = url.hostname.replace(/^\[|\]$/g, "");
   const port = Number(url.port || "80");
-  if (!host || !Number.isInteger(port) || port < 1 || port > 65535) return null;
+  if (!host || !Number.isInteger(port) || port < 1 || port > 65535) {
+    return { error: "access point host/port is invalid" };
+  }
 
   /** @type {{ connect?: Function }} */
   let sockets;
   try {
     sockets = await import("cloudflare:sockets");
   } catch {
-    return null; // e.g. Node test runner: no Workers runtime available
+    return { error: "cloudflare:sockets unavailable in this runtime" };
   }
-  if (!sockets || typeof sockets.connect !== "function") return null;
+  if (!sockets || typeof sockets.connect !== "function") {
+    return { error: "cloudflare:sockets unavailable in this runtime" };
+  }
 
   let socket;
   try {
     socket = sockets.connect({ hostname: host, port });
   } catch {
-    return null;
+    return { error: "could not open a socket to the access point" };
   }
 
+  let timedOut = false;
   const timer = setTimeout(() => {
+    timedOut = true;
     try {
       socket.close();
     } catch {}
-  }, AP_TIMEOUT_MS);
+  }, timeoutMs);
 
   try {
+    const bytes = new TextEncoder().encode(body == null ? "" : body);
+    let head =
+      `${method} ${url.pathname}${url.search} HTTP/1.1\r\n` +
+      `Host: ${host}:${port}\r\n` +
+      `User-Agent: ${headers["user-agent"] || "gpn-proxy/1"}\r\n` +
+      `Accept: ${headers.accept || "application/json"}\r\n` +
+      "Accept-Encoding: identity\r\n";
+    if (body != null) head += `Content-Type: ${headers["content-type"] || "application/json"}\r\n`;
+    if (headers.authorization) head += `Authorization: ${headers.authorization}\r\n`;
+    head += `Content-Length: ${bytes.byteLength}\r\nConnection: close\r\n\r\n`;
+
     const writer = socket.writable.getWriter();
-    await writer.write(
-      new TextEncoder().encode(
-        `GET /providers HTTP/1.1\r\nHost: ${host}:${port}\r\n` +
-          "User-Agent: gpn-directory/1\r\nAccept: application/json\r\n" +
-          "Accept-Encoding: identity\r\nConnection: close\r\n\r\n",
-      ),
-    );
+    await writer.write(new TextEncoder().encode(head));
+    if (bytes.byteLength) await writer.write(bytes);
     writer.releaseLock();
 
     const reader = socket.readable.getReader();
@@ -252,17 +389,25 @@ async function providersViaSocket(base) {
         chunks.push(value);
         total += value.byteLength;
         // The AP answers with a bounded JSON document; refuse runaway bodies.
-        if (total > 1_000_000) break;
+        if (total > AP_PROXY_MAX_RESPONSE) break;
       }
     }
     reader.releaseLock();
 
-    const body = parseHttpBody(concatBytes(chunks));
-    if (!body) return null;
-    const doc = JSON.parse(body);
-    return doc && Array.isArray(doc.providers) ? doc.providers : null;
+    if (timedOut) return { error: "the access point did not answer in time" };
+    const parsed = parseHttpResponse(concatBytes(chunks));
+    if (!parsed) return { error: "the access point sent a malformed response" };
+    return {
+      status: parsed.status,
+      contentType: parsed.headers["content-type"] || "application/json",
+      body: parsed.body,
+    };
   } catch {
-    return null;
+    return {
+      error: timedOut
+        ? "the access point did not answer in time"
+        : "could not complete the request to the access point",
+    };
   } finally {
     clearTimeout(timer);
     try {
@@ -284,11 +429,15 @@ function concatBytes(chunks) {
 }
 
 /**
- * Parse a raw HTTP/1.1 response body (Content-Length or chunked).
+ * Parse a raw HTTP/1.1 response (Content-Length or chunked). Returns the
+ * status, a lower-cased header map, and the decoded body, or `null` when the
+ * bytes are not an HTTP response. Status codes are preserved, not filtered:
+ * the `/api/*` proxy must pass a 400/401/451 from the AP through unchanged.
+ *
  * @param {Uint8Array} raw
- * @returns {string | null}
+ * @returns {{ status: number, headers: Record<string, string>, body: string } | null}
  */
-function parseHttpBody(raw) {
+function parseHttpResponse(raw) {
   const needle = [13, 10, 13, 10];
   let split = -1;
   for (let i = 0; i + 3 < raw.length; i++) {
@@ -299,42 +448,56 @@ function parseHttpBody(raw) {
   }
   if (split < 0) return null;
   const head = new TextDecoder().decode(raw.subarray(0, split));
-  let body = raw.subarray(split + 4);
+  const body = raw.subarray(split + 4);
   const lines = head.split("\r\n");
   const status = Number((lines.shift() || "").split(/\s+/)[1]);
-  if (!(status >= 200 && status < 300)) return null;
+  if (!Number.isFinite(status) || status < 100 || status > 599) return null;
 
-  let chunked = false;
-  let length = null;
+  /** @type {Record<string, string>} */
+  const headers = {};
   for (const line of lines) {
     const i = line.indexOf(":");
     if (i < 0) continue;
     const name = line.slice(0, i).trim().toLowerCase();
     const value = line.slice(i + 1).trim();
-    if (name === "transfer-encoding" && value.toLowerCase().includes("chunked")) chunked = true;
-    if (name === "content-length") length = Number(value);
+    headers[name] = headers[name] ? `${headers[name]}, ${value}` : value;
   }
 
+  const chunked = String(headers["transfer-encoding"] || "").toLowerCase().includes("chunked");
+  const length = headers["content-length"] != null ? Number(headers["content-length"]) : null;
   const decoder = new TextDecoder();
+
   if (!chunked) {
-    const end = length !== null && length <= body.length ? length : body.length;
-    return decoder.decode(body.subarray(0, end));
+    const end = length !== null && Number.isFinite(length) && length <= body.length ? length : body.length;
+    return { status, headers, body: decoder.decode(body.subarray(0, end)) };
   }
 
   let out = "";
   let at = 0;
   for (;;) {
     const lineEnd = indexOfCrlf(body, at);
-    if (lineEnd < 0) return out;
+    if (lineEnd < 0) return { status, headers, body: out };
     const size = parseInt(decoder.decode(body.subarray(at, lineEnd)).split(";")[0].trim(), 16);
     if (!Number.isFinite(size) || size < 0) return null;
     at = lineEnd + 2;
-    if (size === 0) return out;
+    if (size === 0) return { status, headers, body: out };
     if (at + size > body.length) return null;
     out += decoder.decode(body.subarray(at, at + size));
     at += size;
     if (body[at] === 13 && body[at + 1] === 10) at += 2;
   }
+}
+
+/**
+ * The 2xx-only body reader used by the peer directory (kept for its tests and
+ * for callers that want "usable answer or nothing").
+ * @param {Uint8Array} raw
+ * @returns {string | null}
+ */
+function parseHttpBody(raw) {
+  const parsed = parseHttpResponse(raw);
+  if (!parsed) return null;
+  return parsed.status >= 200 && parsed.status < 300 ? parsed.body : null;
 }
 
 /**
@@ -760,6 +923,297 @@ async function releaseManifest(request, env, url) {
   );
 }
 
+/* ────────────────────────── /api/* AP proxy ────────────────────────── */
+
+/**
+ * JSON response for an API route, with browser-CORS headers.
+ * @param {object} payload
+ * @param {number} status
+ * @param {string} origin
+ * @param {string} method
+ * @param {Record<string, string>} [extra]
+ */
+function apiJson(payload, status, origin, method, extra) {
+  const headers = new Headers({
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store",
+  });
+  if (extra) for (const [k, v] of Object.entries(extra)) headers.set(k, v);
+  return apiCors(new Response(JSON.stringify(payload) + "\n", { status, headers }), origin, method);
+}
+
+/**
+ * Add CORS to an API response. GET/HEAD are public (`*`); the POST chat proxy
+ * echoes the site origin only, so another page cannot quietly spend the free
+ * testnet inference from a visitor's browser.
+ * @param {Response} res
+ * @param {string} origin
+ * @param {string} method  GET | HEAD | POST
+ */
+function apiCors(res, origin, method) {
+  const headers = new Headers(res.headers);
+  if (method === "POST") {
+    if (originAllowed(origin)) {
+      headers.set("access-control-allow-origin", origin);
+      headers.set("vary", "origin");
+    }
+  } else {
+    headers.set("access-control-allow-origin", "*");
+  }
+  headers.set("access-control-allow-methods", method === "POST" ? "POST, OPTIONS" : "GET, HEAD, OPTIONS");
+  headers.set("access-control-allow-headers", "content-type, authorization");
+  headers.set("access-control-max-age", "86400");
+  headers.set("x-content-type-options", "nosniff");
+  return new Response(res.body, { status: res.status, headers });
+}
+
+/**
+ * @param {string} origin
+ * @param {boolean} [allowPost] whether the path under CORS accepts POST
+ */
+function apiPreflight(origin, allowPost) {
+  const headers = new Headers({
+    "access-control-allow-methods": allowPost ? "POST, OPTIONS" : "GET, HEAD, POST, OPTIONS",
+    "access-control-allow-headers": "content-type, authorization",
+    "access-control-max-age": "86400",
+    "access-control-allow-origin": allowPost ? (originAllowed(origin) ? origin : SITE_ORIGINS.values().next().value) : "*",
+    vary: "origin",
+  });
+  return new Response(null, { status: 204, headers });
+}
+
+/**
+ * Per-IP counter for the free endpoints. KV when bound, isolate memory
+ * otherwise. A KV failure must never reject a legitimate request, so a broken
+ * KV degrades to "allow".
+ * @param {{ API_KV?: { get: Function, put: Function } }} env
+ * @param {string} ip
+ * @param {string} bucket
+ * @param {number} max
+ * @param {number} windowSeconds
+ */
+async function rateLimit(env, ip, bucket, max, windowSeconds) {
+  const kv = env && env.API_KV && typeof env.API_KV.get === "function" ? env.API_KV : null;
+  if (kv) {
+    try {
+      const key = `rl:api:${bucket}:${ip}`;
+      const seen = Number(await kv.get(key)) || 0;
+      if (seen >= max) return false;
+      await kv.put(key, String(seen + 1), { expirationTtl: windowSeconds });
+      return true;
+    } catch {
+      /* fall through to memory */
+    }
+  }
+
+  const now = Date.now();
+  const key = `${bucket}:${ip}`;
+  const slot = apiRateMem.get(key);
+  if (!slot || slot.reset <= now) {
+    apiRateMem.set(key, { count: 1, reset: now + windowSeconds * 1000 });
+    if (apiRateMem.size > 20000) {
+      for (const [k, v] of apiRateMem) if (v.reset <= now) apiRateMem.delete(k);
+    }
+    return true;
+  }
+  if (slot.count >= max) return false;
+  slot.count += 1;
+  return true;
+}
+
+/**
+ * The `/api/*` surface: a thin, status-preserving proxy to the access point.
+ *
+ *   GET  /api/health             -> GET  /health
+ *   GET  /api/ping               -> GET  /health
+ *   GET  /api/mode               -> GET  /mode
+ *   GET  /api/providers          -> GET  /providers
+ *   GET  /api/v1/models          -> GET  /v1/models
+ *   GET  /api/jobs/<id>          -> GET  /job/<id>
+ *   POST /api/v1/chat/completions -> POST /v1/chat/completions
+ *
+ * The AP's status code and body are passed through; only transport failures
+ * become a 502 here.
+ *
+ * @param {Request} request
+ * @param {object} env
+ * @param {string} path
+ */
+async function handleApi(request, env, path) {
+  const origin = request.headers.get("origin") || "";
+  const method = request.method;
+  const route = (path.slice(4) || "/").replace(/\/+$/, "") || "/";
+  if (method === "OPTIONS") {
+    return apiPreflight(origin, route === "/v1/chat/completions" || route === "/chat/completions");
+  }
+
+  const ip = request.headers.get("cf-connecting-ip") || "unknown";
+
+  /** @type {string | null} */
+  let upstream = null;
+  let allow = "GET";
+  let cache = "no-store";
+
+  if (route === "/health" || route === "/ping") upstream = "/health";
+  else if (route === "/mode") upstream = "/mode";
+  else if (route === "/providers") {
+    upstream = "/providers";
+    cache = "public, max-age=30";
+  } else if (route === "/v1/models" || route === "/models") {
+    upstream = "/v1/models";
+    cache = "public, max-age=60";
+  } else if (route === "/v1/chat/completions" || route === "/chat/completions") {
+    upstream = "/v1/chat/completions";
+    allow = "POST";
+  } else {
+    const m = /^\/(?:jobs?)\/(\d{1,20})$/.exec(route);
+    if (m) upstream = `/job/${m[1]}`;
+  }
+
+  if (!upstream) {
+    return apiJson(
+      { error: { message: "unknown API route — see https://gpncoin.ai/ai", type: "gpn_not_found" } },
+      404,
+      origin,
+      method === "POST" ? "POST" : "GET",
+    );
+  }
+
+  const okMethod =
+    allow === "POST" ? method === "POST" : method === "GET" || method === "HEAD";
+  if (!okMethod) {
+    return apiJson(
+      { error: { message: `use ${allow} on this route`, type: "gpn_method_not_allowed" } },
+      405,
+      origin,
+      allow === "POST" ? "POST" : "GET",
+      { allow: `${allow}, OPTIONS` },
+    );
+  }
+
+  const isChat = allow === "POST";
+  const max = isChat ? CHAT_RATE_MAX : READ_RATE_MAX;
+  const windowSeconds = isChat ? CHAT_RATE_WINDOW_SECONDS : READ_RATE_WINDOW_SECONDS;
+  if (!(await rateLimit(env, ip, isChat ? "chat" : "read", max, windowSeconds))) {
+    return apiJson(
+      {
+        error: {
+          message: `rate limit reached (${max} per ${Math.round(windowSeconds / 60)} min). The testnet AP is free but each call is one GPU job — try again shortly.`,
+          type: "gpn_rate_limited",
+        },
+      },
+      429,
+      origin,
+      isChat ? "POST" : "GET",
+      { "retry-after": String(windowSeconds) },
+    );
+  }
+
+  /** @type {string | null} */
+  let body = null;
+  if (isChat) {
+    const declared = Number(request.headers.get("content-length") || 0);
+    if (declared > AP_PROXY_MAX_BODY) {
+      return apiJson(
+        { error: { message: `request body too large (max ${AP_PROXY_MAX_BODY} bytes)`, type: "gpn_body_too_large" } },
+        413,
+        origin,
+        "POST",
+      );
+    }
+    try {
+      body = await request.text();
+    } catch {
+      return apiJson({ error: { message: "could not read the request body", type: "gpn_bad_request" } }, 400, origin, "POST");
+    }
+    if (body.length > AP_PROXY_MAX_BODY) {
+      return apiJson(
+        { error: { message: `request body too large (max ${AP_PROXY_MAX_BODY} bytes)`, type: "gpn_body_too_large" } },
+        413,
+        origin,
+        "POST",
+      );
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(body || "{}");
+    } catch {
+      return apiJson({ error: { message: "expected a JSON body", type: "gpn_bad_request" } }, 400, origin, "POST");
+    }
+    // Refuse a request with no usable prompt before it becomes an on-chain job
+    // (the AP rejects it too, but a clear message here is cheaper).
+    const usable =
+      parsed &&
+      typeof parsed === "object" &&
+      !Array.isArray(parsed) &&
+      ((Array.isArray(parsed.messages) && parsed.messages.length > 0) ||
+        typeof parsed.prompt === "string" ||
+        typeof parsed.input === "string");
+    if (!usable) {
+      return apiJson(
+        {
+          error: {
+            message: "missing prompt: send messages[] (OpenAI style) or a top-level prompt/input",
+            type: "gpn_bad_request",
+          },
+        },
+        400,
+        origin,
+        "POST",
+      );
+    }
+    if (chatInflight >= CHAT_INFLIGHT_MAX) {
+      return apiJson(
+        { error: { message: "the free endpoint is busy — retry in a few seconds", type: "gpn_busy" } },
+        429,
+        origin,
+        "POST",
+        { "retry-after": "10" },
+      );
+    }
+  }
+
+  if (isChat) chatInflight += 1;
+  /** @type {any} */
+  let res;
+  try {
+    res = await apRequest(env, {
+      method: allow,
+      path: upstream,
+      body,
+      timeoutMs: AP_PROXY_TIMEOUT_MS,
+    });
+  } finally {
+    if (isChat) chatInflight -= 1;
+  }
+
+  if (!res || res.error) {
+    return apiJson(
+      {
+        error: {
+          message: `access point unavailable: ${res && res.error ? res.error : "unknown error"}`,
+          type: "gpn_proxy_error",
+        },
+      },
+      502,
+      origin,
+      isChat ? "POST" : "GET",
+    );
+  }
+
+  const headers = new Headers();
+  headers.set("content-type", res.contentType || "application/json; charset=utf-8");
+  headers.set("cache-control", cache);
+  headers.set("x-gpn-proxy", "access-point");
+  // HEAD must not carry a body.
+  const outBody = method === "HEAD" ? null : res.body;
+  return apiCors(
+    new Response(outBody, { status: res.status, headers }),
+    origin,
+    isChat ? "POST" : "GET",
+  );
+}
+
 /** Largest JSON body we will read for an application. */
 const JOIN_MAX_BODY = 8 * 1024;
 /** Applications per IP per window. */
@@ -973,5 +1427,12 @@ export const __test = {
   sanitizeMultiaddr,
   sanitizePeerId,
   parseHttpBody,
+  parseHttpResponse,
+  handleApi,
+  apRequest,
+  rateLimit,
+  originAllowed,
+  AP_PROXY_MAX_BODY,
+  CHAT_RATE_MAX,
   STATIC_BOOTNODES,
 };

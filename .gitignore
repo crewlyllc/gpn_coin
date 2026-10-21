@@ -72,3 +72,4 @@ __pycache__/
 # Wrangler / Worker build artifacts
 .wrangler/
 worker/node_modules/
+.dev.vars

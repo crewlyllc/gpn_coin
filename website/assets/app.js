@@ -51,115 +51,155 @@
     });
   }
 
-  /* ---------- "Try it" access-node widget (ai.html) ---------- */
+  /* ---------- "Try it" widget (ai.html) ----------
+     Talks only to the same-origin HTTPS proxy (/api/*), which forwards to the
+     access point. No mixed content, no CORS, no token in the page. */
   function wireTryIt() {
     var form = document.getElementById("try-form");
     if (!form) return;
 
-    var urlEl = document.getElementById("ap-url");
-    var tokenEl = document.getElementById("ap-token");
-    var modelEl = document.getElementById("ap-model");
-    var promptEl = document.getElementById("ap-prompt");
-    var out = document.getElementById("try-result");
-    var submit = document.getElementById("try-submit");
-
-    /* Optional ?ap=... / ?token=... overrides (token never persisted). */
-    try {
-      var q = new URLSearchParams(location.search);
-      if (q.get("ap") && urlEl) urlEl.value = q.get("ap");
-      if (q.get("model") && modelEl) modelEl.value = q.get("model");
-    } catch (e) {}
+    var modelEl = document.getElementById("ai-model");
+    var promptEl = document.getElementById("ai-prompt");
+    var maxEl = document.getElementById("ai-max");
+    var out = document.getElementById("ai-result");
+    var statusEl = document.getElementById("ai-status");
+    var submit = document.getElementById("ai-submit");
+    var badge = document.getElementById("net-status");
 
     function render(cls, html) {
       out.className = "result" + (cls ? " " + cls : "");
       out.innerHTML = html;
     }
-
-    function stripTrailingSlash(u) { return u.replace(/\/+$/, ""); }
-
-    function endpoint() {
-      // Accept either a bare host base ("http://host:8092") or a full path.
-      var base = stripTrailingSlash((urlEl && urlEl.value || "").trim());
-      if (!base) return "";
-      if (/\/v1\/chat\/completions$/.test(base)) return base;      // already a full endpoint
-      if (/\/v1$/.test(base)) return base + "/chat/completions";   // base + /v1
-      return base + "/v1/chat/completions";
+    function setStatus(text) {
+      if (statusEl) statusEl.textContent = text || "";
     }
 
-    function withTimeout(promise, ms) {
-      return new Promise(function (resolve, reject) {
-        var t = setTimeout(function () { reject(new Error("Timed out after " + (ms / 1000) + "s")); }, ms);
-        promise.then(function (v) { clearTimeout(t); resolve(v); },
-                     function (e) { clearTimeout(t); reject(e); });
+    function setOptions(ids) {
+      if (!modelEl || !ids.length) return;
+      var wanted = modelEl.value;
+      modelEl.innerHTML = "";
+      ids.forEach(function (id) {
+        var o = document.createElement("option");
+        o.value = id;
+        o.textContent = id;
+        modelEl.appendChild(o);
       });
+      if (ids.indexOf(wanted) >= 0) modelEl.value = wanted;
+      else if (ids.indexOf("llama3.2:1b") >= 0) modelEl.value = "llama3.2:1b";
     }
 
-    function extractText(data) {
-      if (data == null) return "";
-      if (typeof data === "string") return data;
-      // OpenAI-compatible
-      if (data.choices && data.choices[0]) {
-        var c = data.choices[0];
-        if (c.message && c.message.content != null) return c.message.content;
-        if (c.text != null) return c.text;
-      }
-      // Access-point / jobs style
-      if (data.answer && data.answer.response != null) return data.answer.response;
-      if (data.response != null) return data.response;
-      if (data.answer != null && typeof data.answer === "string") return data.answer;
-      if (data.output != null && typeof data.output === "string") return data.output;
-      return JSON.stringify(data, null, 2);
-    }
+    /* Hero badge + model picker: both from the live proxy. */
+    fetch("/api/v1/models", { headers: { accept: "application/json" } })
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
+      .then(function (doc) {
+        var ids = ((doc && doc.data) || []).map(function (m) { return m.id; }).filter(Boolean);
+        setOptions(ids);
+        if (badge) {
+          badge.textContent = ids.length
+            ? ids.length + " model" + (ids.length === 1 ? "" : "s") + " online"
+            : "testnet live";
+        }
+      })
+      .catch(function () {
+        if (badge) badge.textContent = "testnet live";
+      });
+
+    fetch("/api/health", { headers: { accept: "application/json" } })
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
+      .then(function (h) {
+        if (badge && h && Number(h.providers) > 0) {
+          var n = Number(h.providers);
+          badge.textContent = n + " provider" + (n === 1 ? "" : "s") + " online";
+        }
+      })
+      .catch(function () {});
 
     form.addEventListener("submit", function (e) {
       e.preventDefault();
-      var url = endpoint();
       var prompt = (promptEl && promptEl.value || "").trim();
-      if (!url) { render("", '<span class="err">Enter an access-point URL first.</span>'); return; }
-      if (!prompt) { render("", '<span class="err">Type a prompt first.</span>'); return; }
+      var model = (modelEl && modelEl.value || "llama3.2:1b").trim() || "llama3.2:1b";
+      if (!prompt) {
+        render("", '<span class="err">Type a prompt first.</span>');
+        return;
+      }
 
-      var model = (modelEl && modelEl.value || "auto").trim() || "auto";
       var body = {
         model: model,
         messages: [{ role: "user", content: prompt }],
         stream: false
       };
+      var maxTokens = parseInt((maxEl && maxEl.value || "").trim(), 10);
+      if (maxTokens > 0) body.max_tokens = maxTokens;
 
-      var headers = { "Content-Type": "application/json" };
-      var tok = (tokenEl && tokenEl.value || "").trim();
-      if (tok) headers["Authorization"] = "Bearer " + tok;
-
-      if (submit) { submit.disabled = true; }
-      render("empty", '<span class="spinner"></span> &nbsp;Contacting the access point&hellip;');
+      if (submit) submit.disabled = true;
+      render("empty", '<span class="spinner"></span> &nbsp;Waiting for a GPU&hellip;');
       var t0 = Date.now();
+      var tick = setInterval(function () {
+        setStatus("Waiting for a GPU… " + Math.round((Date.now() - t0) / 1000) + " s. " +
+          "A cold testnet job needs block inclusion plus model load.");
+      }, 1000);
+      setStatus("Waiting for a GPU… 0 s.");
 
-      withTimeout(fetch(url, { method: "POST", headers: headers, body: JSON.stringify(body) }), 120000)
+      var controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+      var timer = setTimeout(function () { if (controller) controller.abort(); }, 150000);
+
+      fetch("/api/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", accept: "application/json" },
+        body: JSON.stringify(body),
+        signal: controller ? controller.signal : undefined
+      })
         .then(function (res) {
           return res.text().then(function (text) {
             var data;
-            try { data = JSON.parse(text); } catch (e) { data = text; }
+            try { data = JSON.parse(text); } catch (err) { data = null; }
             if (!res.ok) {
-              var detail = typeof data === "string" ? data : JSON.stringify(data);
-              throw new Error("HTTP " + res.status + " " + res.statusText + (detail ? " — " + detail : ""));
+              var msg = (data && data.error && (data.error.message || data.error)) ||
+                        (typeof data === "string" ? data : text);
+              var e = new Error(String(msg || ("HTTP " + res.status)));
+              e.status = res.status;
+              throw e;
             }
+            if (!data) throw new Error("The access point returned a non-JSON body.");
             return data;
           });
         })
         .then(function (data) {
-          var answer = extractText(data);
-          var ms = Date.now() - t0;
-          render("", '<span class="ok">Answer</span>\n' + escapeHtml(answer) +
-                     '<span class="meter">' + ms + ' ms · ' + escapeHtml(model) + '</span>');
+          var choice = data.choices && data.choices[0];
+          var answer = (choice && choice.message && choice.message.content) ||
+                       (choice && choice.text) || data.response || "";
+          var secs = ((Date.now() - t0) / 1000).toFixed(1);
+          var usage = data.usage || {};
+          var meta = secs + " s · " + (data.model || model) + " via gpncoin.ai";
+          if (usage.total_tokens) meta += " · " + usage.total_tokens + " tokens";
+          render("", '<span class="ok">Answer</span>\n' + escapeHtml(String(answer).trim()) +
+                     '<span class="meter">' + escapeHtml(meta) + '</span>');
+          setStatus("");
         })
         .catch(function (err) {
-          render("", '<span class="err">Request failed.</span>\n' + escapeHtml(String(err.message || err)) +
-            '\n\n<p class="small muted mb-0">Things to check: (1) the access point is up ' +
-            '(try its <code>/mode</code> or <code>/health</code> endpoint); (2) you opened this page over ' +
-            '<code>http(s)://</code>, not <code>file://</code>; (3) the access point allows your origin (CORS) ' +
-            'and, for non-loopback callers, a valid token. Browser requests to a plain ' +
-            '<code>http://</code> host from an <code>https://</code> page are blocked by mixed-content rules.</p>');
+          var status = err && err.status;
+          var hint = "";
+          if (err && err.name === "AbortError") {
+            hint = "No answer within 150 s. The testnet may be busy — try again, or pick a smaller model.";
+          } else if (status === 429) {
+            hint = "Rate limit reached. The free endpoint allows 12 chats per 10 minutes per IP.";
+          } else if (status === 502) {
+            hint = "The proxy could not reach the access point. Check /api/health, then retry.";
+          } else if (status === 400) {
+            hint = "The request was rejected — check the model name against /api/v1/models.";
+          } else {
+            hint = "Check your connection and /api/health, then retry.";
+          }
+          render("", '<span class="err">Request failed.</span>\n' +
+            escapeHtml(String(err && err.message ? err.message : err)) +
+            '\n\n<p class="small muted mb-0">' + escapeHtml(hint) + '</p>');
+          setStatus("");
         })
-        .finally(function () { if (submit) { submit.disabled = false; } });
+        .finally(function () {
+          clearInterval(tick);
+          clearTimeout(timer);
+          if (submit) submit.disabled = false;
+        });
     });
   }
 

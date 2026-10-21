@@ -3,20 +3,20 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Access the AI — GPN compute, live access node</title>
-<meta name="description" content="Use the GPN AI marketplace: an OpenAI-compatible chat API plus an image/video/fine-tune job API, priced per token in GPN. Try it live against a public testnet access point." />
+<title>Use GPN for AI — OpenAI-compatible inference on a live GPU network</title>
+<meta name="description" content="Point any OpenAI client at https://gpncoin.ai/api/v1 and run chat on GPUs across the GPN testnet. Free while the testnet runs. Try it in the browser, then copy a working curl, Python or Node example." />
 <meta name="theme-color" content="#07090f" />
-<link rel="canonical" href="https://gpncoin.ai/ai.html" />
+<link rel="canonical" href="https://gpncoin.ai/ai" />
 <meta property="og:site_name" content="GPN" />
-<meta property="og:url" content="https://gpncoin.ai/ai.html" />
+<meta property="og:url" content="https://gpncoin.ai/ai" />
 <meta property="og:image" content="https://gpncoin.ai/assets/og.png" />
 <meta name="twitter:card" content="summary_large_image" />
 <meta name="twitter:image" content="https://gpncoin.ai/assets/og.png" />
-<meta property="og:title" content="Access the AI — GPN compute marketplace" />
-<meta property="og:description" content="OpenAI-compatible chat plus an image/video/fine-tune job API, routed to idle GPUs and settled in GPN." />
-<meta property="og:type" content="article" />
-<meta name="twitter:title" content="Access the AI — GPN compute marketplace" />
-<meta name="twitter:description" content="OpenAI-compatible chat plus an image/video/fine-tune job API, routed to idle GPUs and settled in GPN." />
+<meta property="og:title" content="Use GPN for AI — OpenAI-compatible inference" />
+<meta property="og:description" content="One HTTPS endpoint, many GPUs. Chat completions with an OpenAI-shaped API, free on the public testnet." />
+<meta property="og:type" content="website" />
+<meta name="twitter:title" content="Use GPN for AI — OpenAI-compatible inference" />
+<meta name="twitter:description" content="One HTTPS endpoint, many GPUs. Chat completions with an OpenAI-shaped API, free on the public testnet." />
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237c6cff'/%3E%3Ctext x='16' y='22' font-size='16' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%2307090f'%3EG%3C/text%3E%3C/svg%3E" />
 <link rel="stylesheet" href="assets/style.css" />
 </head>
@@ -45,236 +45,288 @@
 <main id="main">
   <section class="page-head first">
     <div class="wrap">
-      <span class="kicker">The AI</span>
-      <h1>Run AI on someone's GPU</h1>
-      <p>GPN's marketplace is one interface for LLM chat, image/video generation, and fine-tuning. You hit a
-        single <b>access point</b>; the network routes your job to the best idle GPU and settles it on-chain.
-        No provider addresses, no per-node wiring.</p>
+      <a class="badge" href="#try" style="text-decoration:none"><span class="live-dot" aria-hidden="true"></span> live testnet · <b id="net-status">checking the network…</b></a>
+      <span class="kicker">Use GPN for AI</span>
+      <h1>One endpoint. The network's idle GPUs.</h1>
+      <p>Point any OpenAI client at <code>https://gpncoin.ai/api/v1</code> and the access point routes your
+        prompt to a GPU on the GPN testnet. No signup, no API key, no card. Free while the testnet runs.</p>
+      <div class="hero-cta">
+        <a class="btn" href="#try">Try it in your browser</a>
+        <a class="btn ghost" href="#code">Copy a working example</a>
+      </div>
     </div>
   </section>
 
   <!-- ============ TRY IT ============ -->
   <section id="try">
     <div class="wrap">
-      <span class="kicker">Live access node</span>
-      <h2>Try it now</h2>
-      <p class="sub">This widget POSTs a chat request straight to a public testnet access point from your
-        browser. It defaults to the current network entry point — change it if you run your own.</p>
-
-      <div class="callout warn">
-        <span class="ct">On gpncoin.ai this widget will be blocked</span>
-        <p class="mb-0">The public testnet access point speaks plain <code>http://</code> on port 8092, and a
-          page served over <code>https://</code> cannot call it (mixed content). Use the
-          <a href="#curl"><code>curl</code> example</a> below from your machine, or run this site locally over
-          <code>http://</code>. An HTTPS access point is on the roadmap.</p>
-      </div>
+      <span class="kicker">Live</span>
+      <h2>Ask the network</h2>
+      <p class="sub">This form calls <code>POST /api/v1/chat/completions</code> on gpncoin.ai. The Worker
+        proxies it over HTTPS to the access point, which turns it into a real job on the testnet. First
+        calls take 20–90&nbsp;s (block inclusion + model load); later ones are faster.</p>
 
       <div class="grid cols-2">
         <form class="card" id="try-form" autocomplete="off">
-          <div class="field">
-            <label for="ap-url">Access-point URL</label>
-            <input type="url" id="ap-url" value="http://gpn-testnet.duckdns.org:8092"
-                   spellcheck="false" inputmode="url"
-                   aria-describedby="ap-url-hint" />
-            <p class="hint" id="ap-url-hint">Base URL of the access point. <code>/v1/chat/completions</code>
-              is appended if you give a bare host.</p>
-          </div>
-
           <div class="field-row">
             <div class="field">
-              <label for="ap-model">Model</label>
-              <input type="text" id="ap-model" value="llama3.2:1b" spellcheck="false"
-                     list="model-list" />
-              <datalist id="model-list">
-                <option value="auto"></option>
-                <option value="llama3.2:1b"></option>
-                <option value="qwen2.5:0.5b"></option>
-                <option value="qwen2.5:1.5b"></option>
-              </datalist>
+              <label for="ai-model">Model</label>
+              <select id="ai-model" aria-describedby="ai-model-hint">
+                <option value="llama3.2:1b">llama3.2:1b</option>
+              </select>
+              <p class="hint" id="ai-model-hint">Loaded from <code>/api/v1/models</code>.</p>
             </div>
             <div class="field">
-              <label for="ap-token">Token <span class="hint">(optional)</span></label>
-              <input type="text" id="ap-token" value="" spellcheck="false"
-                     placeholder="Bearer token for non-loopback calls"
-                     aria-describedby="ap-token-hint" />
+              <label for="ai-max">Max tokens <span class="hint">(optional)</span></label>
+              <input type="text" id="ai-max" value="128" inputmode="numeric" spellcheck="false" />
             </div>
           </div>
-          <p class="hint" id="ap-token-hint" style="margin-top:-8px">Sent as
-            <code>Authorization: Bearer …</code>. Never stored; leave blank for public/loopback access
-            points.</p>
 
           <div class="field">
-            <label for="ap-prompt">Prompt</label>
-            <textarea id="ap-prompt" spellcheck="false"
-                      placeholder="Explain a GPU compute network in two sentences.">What is the capital of Portugal? Answer in one word only.</textarea>
+            <label for="ai-prompt">Prompt</label>
+            <textarea id="ai-prompt" maxlength="4000" spellcheck="false"
+                      placeholder="Explain a GPU compute network in two sentences.">In one short paragraph, what is a GPU-native compute network?</textarea>
           </div>
 
-          <button class="btn" id="try-submit" type="submit">Ask the network</button>
-          <span class="hint" style="margin-left:10px">First calls may take 30–90&nbsp;s on testnet (model load + inference).</span>
+          <button class="btn" id="ai-submit" type="submit">Ask the network</button>
+          <p class="hint" style="margin-top:10px">Free testnet endpoint, rate-limited to a handful of
+            calls per visitor. Don't send secrets — prompts go to an untrusted public GPU.</p>
         </form>
 
         <div>
-          <div class="result empty" id="try-result" role="status" aria-live="polite">
-            Responses appear here. Try a prompt and hit <b>Ask the network</b>.
-          </div>
-          <div class="callout warn" style="margin-top:16px">
-            <span class="ct">About CORS &amp; mixed content</span>
-            <p class="mb-0">This is a browser calling an API directly. If the access point doesn't send
-              permissive <code>Access-Control-Allow-Origin</code> headers, the browser blocks the response
-              even though the server ran the job — use the <code>curl</code> example below instead. Also, a
-              page served over <code>https://</code> cannot call a plain <code>http://</code> host (mixed
-              content), and this page opened from <code>file://</code> can't make same-origin calls at all —
-              serve it over <code>http://</code>.</p>
-          </div>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- ============ API ============ -->
-  <section id="api">
-    <div class="wrap">
-      <span class="kicker">API</span>
-      <h2>Two ways to call it</h2>
-      <p class="sub">A friendly OpenAI-compatible chat endpoint, and a general job API for everything else.
-        Both are served by the same access point.</p>
-
-      <div class="grid cols-2">
-        <div class="card">
-          <h3><span class="ico" aria-hidden="true">💬</span> Chat — OpenAI-compatible</h3>
-          <p class="muted">Drop-in for OpenAI-style clients. Send <code>messages</code> and get a completion
-            back.</p>
-          <pre><code>POST /v1/chat/completions
-{
-  "model": "auto",
-  "messages": [
-    {"role": "user", "content": "Hello!"}
-  ]
-}</code></pre>
-          <button class="btn small ghost no-print" data-copy="#curl-chat" type="button">Copy curl</button>
-        </div>
-        <div class="card">
-          <h3><span class="ico" aria-hidden="true">🧰</span> Jobs — image / video / fine-tune</h3>
-          <p class="muted">Submit a job with a type and parameters; poll for the result or artifact. The
-            access point routes it and the chain escrows payment.</p>
-          <pre><code>POST /jobs
-{
-  "job_type": "ImageGeneration",
-  "model": "sd-turbo",
-  "prompt": "a cozy cabin at dusk",
-  "width": 512, "height": 512, "steps": 8,
-  "price_gpn": 5, "min_gflops": 800
-}
-GET /job/{id}/result
-GET /job/{id}/artifact   # PNG / MP4 / adapter</code></pre>
-        </div>
-      </div>
-
-      <div class="field" id="curl" style="margin-top:20px">
-        <label for="curl-chat">Copy-paste: chat with the live access point</label>
-        <pre id="curl-chat"><code>curl http://gpn-testnet.duckdns.org:8092/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "llama3.2:1b",
-    "messages": [{"role":"user","content":"What is the capital of Kenya? Answer in one word."}]
-  }'</code></pre>
-        <button class="btn small ghost no-print" data-copy="#curl-chat" type="button">Copy</button>
-      </div>
-
-      <details class="card" style="margin-top:6px">
-        <summary style="cursor:pointer;font-weight:700">Job types &amp; the escaping requestor model</summary>
-        <div style="margin-top:12px">
-          <p class="muted">Job types: <code>LLMInference</code> · <code>ImageGeneration</code> ·
-            <code>VideoGeneration</code> · <code>FineTuning</code> · <code>MLInference</code> ·
-            <code>Custom</code>.</p>
-          <p class="small muted mb-0">Escrow = rate × max_output_tokens (the cap); the charge is rate ×
-            <em>actual</em> tokens used, and the surplus auto-refunds. Priced in dollars, settled in GPN, so
-            a buyer's dollar cost is stable while the GPN amount floats.</p>
-        </div>
-      </details>
-    </div>
-  </section>
-
-  <!-- ============ MODELS ============ -->
-  <section id="models">
-    <div class="wrap">
-      <span class="kicker">Catalog</span>
-      <h2>Models</h2>
-      <p class="sub">The <code>model</code> field is passed straight to the runtime, so you can name any
-        model a provider has. Use <code>auto</code> to let the network pick any available model.</p>
-
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th scope="col">Kind</th><th scope="col">Examples</th><th scope="col">Notes</th></tr></thead>
-          <tbody>
-            <tr><td>Chat (LLM)</td><td><code>llama3.2:1b</code>, <code>qwen2.5:0.5b</code>, <code>qwen2.5:1.5b</code></td>
-              <td>The first two are guaranteed on every node (baseline pulls); <code>auto</code> = whichever is available.</td></tr>
-            <tr><td>Image</td><td><code>sd-turbo</code>, <code>sd15</code>, plus any Hugging Face text-to-image id</td>
-              <td>Diffusers runtime.</td></tr>
-            <tr><td>Video</td><td><code>ltx-video</code></td>
-              <td>Needs a large host (T5-XXL encoder is heavy) — not for small cards.</td></tr>
-            <tr><td>Fine-tune</td><td>any Hugging Face causal-LM id</td>
-              <td>LoRA; a completed tune auto-serves as <code>tuned-&lt;jobid&gt;</code>.</td></tr>
-          </tbody>
-        </table>
-      </div>
-      <p class="small muted" style="margin-top:12px">Bring your own: <code>ollama pull &lt;model&gt;</code> for
-        chat, or point <code>model</code> at a GGUF you've created. No weights, datasets, or prompts ever
-        touch the chain.</p>
-    </div>
-  </section>
-
-  <!-- ============ PRICING ============ -->
-  <section id="pricing">
-    <div class="wrap">
-      <span class="kicker">Pricing</span>
-      <h2>How GPN prices AI compute</h2>
-      <p class="sub">Rates are <b>cost-derived</b> and charged <b>per token</b> against your actual usage.</p>
-
-      <div class="grid cols-2">
-        <div class="card plain">
-          <h3>Cost-derived</h3>
-          <p class="muted mb-0">A roofline estimate of the provider's true throughput (compute- and
-            memory-bandwidth-bound) ÷ realized tokens/sec × a margin — targeting roughly half of comparable
-            market GPU-rental, and clamped at or above the provider's cost so a GPU always at least covers
-            its cost.</p>
-        </div>
-        <div class="card plain">
-          <h3>Per-token escrow</h3>
-          <p class="muted mb-0">You escrow <code>rate × max_tokens</code>; the provider meters
-            <em>actual</em> usage; you're charged <code>rate × actual</code> and the surplus auto-refunds.
-            You're never overcharged past your cap.</p>
+          <div class="result empty" id="ai-result" role="status" aria-live="polite">Responses appear here.
+            Pick a model and hit <b>Ask the network</b>.</div>
+          <p class="hint" id="ai-status" aria-live="polite" style="margin-top:10px"></p>
         </div>
       </div>
 
       <div class="callout" style="margin-top:20px">
-        <span class="ct">Testnet is free-AI</span>
-        <p class="mb-0">On the testnet, the access point can pay escrow from a hot wallet, so a client's
-          <code>price_gpn</code> is cosmetic — you spend nothing. On mainnet this mode is disabled and
-          callers sign with their own wallet.</p>
+        <span class="ct">Why a proxy?</span>
+        <p class="mb-0">The testnet access point listens on plain <code>http://…:8092</code>, which a
+          browser on an HTTPS page cannot call. <code>gpncoin.ai/api/*</code> terminates TLS at the edge,
+          rate-limits per IP, and forwards the same request — so your code only ever talks to
+          <code>https://gpncoin.ai</code>.</p>
       </div>
     </div>
   </section>
 
-  <!-- ============ HOW IT ROUTES ============ -->
-  <section>
+  <!-- ============ CODE ============ -->
+  <section id="code">
     <div class="wrap">
-      <span class="kicker">Under the hood</span>
-      <h2>What happens when you hit “send”</h2>
-      <div class="steps">
-        <div class="step"><h4>Filter by capability</h4><p>The scheduler keeps only providers that meet the
-          job's <code>min_gflops</code>/VRAM/RAM requirement and have (or can pull) the model.</p></div>
-        <div class="step"><h4>Require an idle GPU</h4><p>A node already running a job isn't available —
-          one GPU does one job at a time.</p></div>
-        <div class="step"><h4>Pick lowest latency</h4><p>Among eligible idle nodes, the least-ms provider
-          wins (with a model-aware fallback for a node that can pull the model).</p></div>
-        <div class="step"><h4>Escrow &amp; settle</h4><p>The chain escrows the payment and enforces the
-          capability gate; the provider runs it off-chain and the result is settled. With payment channels,
-          there's no per-job block delay.</p></div>
+      <span class="kicker">Copy &amp; paste</span>
+      <h2>Four working clients</h2>
+      <p class="sub">Every example below is the live endpoint. The testnet ignores the API key, but the
+        OpenAI SDK still requires one — any non-empty string works.</p>
+
+      <div class="card" style="padding:0;overflow:hidden">
+        <div class="tabs" role="tablist" aria-label="Code samples">
+          <button class="tab" type="button" id="code-tab-curl" role="tab" aria-selected="true"
+                  aria-controls="code-curl" data-os="curl">curl</button>
+          <button class="tab" type="button" id="code-tab-py" role="tab" aria-selected="false"
+                  aria-controls="code-py" data-os="python" tabindex="-1">Python · requests</button>
+          <button class="tab" type="button" id="code-tab-sdk" role="tab" aria-selected="false"
+                  aria-controls="code-sdk" data-os="openai-sdk" tabindex="-1">Python · OpenAI SDK</button>
+          <button class="tab" type="button" id="code-tab-js" role="tab" aria-selected="false"
+                  aria-controls="code-js" data-os="node" tabindex="-1">Node / JS</button>
+        </div>
+
+        <!-- curl -->
+        <div class="qs-panel" id="code-curl" role="tabpanel" aria-labelledby="code-tab-curl" tabindex="0">
+          <div class="codeblock">
+            <div class="codeblock-head"><span class="lang">bash</span>
+              <button class="copy-btn" type="button" data-copy="#src-curl" aria-label="Copy the curl example">Copy</button></div>
+            <pre><code id="src-curl">curl https://gpncoin.ai/api/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "llama3.2:1b",
+    "messages": [{"role": "user", "content": "What is the capital of Kenya? One word."}]
+  }'</code></pre>
+          </div>
+          <p class="hint">Returns an OpenAI-shaped <code>chat.completion</code> object. Add
+            <code>-m 150</code> — a cold job can take a minute.</p>
+        </div>
+
+        <!-- python requests -->
+        <div class="qs-panel" id="code-py" role="tabpanel" aria-labelledby="code-tab-py" tabindex="0" hidden>
+          <div class="codeblock">
+            <div class="codeblock-head"><span class="lang">python</span>
+              <button class="copy-btn" type="button" data-copy="#src-py" aria-label="Copy the Python requests example">Copy</button></div>
+            <pre><code id="src-py">import requests
+
+r = requests.post(
+    "https://gpncoin.ai/api/v1/chat/completions",
+    json={
+        "model": "llama3.2:1b",
+        "messages": [{"role": "user",
+                      "content": "Explain a GPU compute network in one sentence."}],
+    },
+    timeout=150,
+)
+r.raise_for_status()
+print(r.json()["choices"][0]["message"]["content"])</code></pre>
+          </div>
+          <p class="hint">No SDK, no key. <code>timeout=150</code> covers a cold testnet job.</p>
+        </div>
+
+        <!-- openai sdk -->
+        <div class="qs-panel" id="code-sdk" role="tabpanel" aria-labelledby="code-tab-sdk" tabindex="0" hidden>
+          <div class="codeblock">
+            <div class="codeblock-head"><span class="lang">python</span>
+              <button class="copy-btn" type="button" data-copy="#src-sdk" aria-label="Copy the OpenAI SDK example">Copy</button></div>
+            <pre><code id="src-sdk"># pip install openai
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://gpncoin.ai/api/v1",
+    api_key="gpn-testnet",   # required by the SDK; unused by the testnet
+    timeout=150,
+)
+
+reply = client.chat.completions.create(
+    model="llama3.2:1b",
+    messages=[{"role": "user", "content": "Say hi in five words."}],
+)
+print(reply.choices[0].message.content)</code></pre>
+          </div>
+          <p class="hint">Any OpenAI-compatible library works: <code>base_url</code> is the only change.</p>
+        </div>
+
+        <!-- node -->
+        <div class="qs-panel" id="code-js" role="tabpanel" aria-labelledby="code-tab-js" tabindex="0" hidden>
+          <div class="codeblock">
+            <div class="codeblock-head"><span class="lang">javascript</span>
+              <button class="copy-btn" type="button" data-copy="#src-js" aria-label="Copy the Node example">Copy</button></div>
+            <pre><code id="src-js">const res = await fetch("https://gpncoin.ai/api/v1/chat/completions", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    model: "llama3.2:1b",
+    messages: [{ role: "user", content: "Say hi in five words." }],
+  }),
+});
+
+if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+const data = await res.json();
+console.log(data.choices[0].message.content);</code></pre>
+          </div>
+          <p class="hint">Node 18+ (global <code>fetch</code>) or any modern browser.</p>
+        </div>
       </div>
-      <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:16px">
-        <a class="btn" href="access-points.html">Browse access points</a>
-        <a class="btn ghost" href="deploy.html#provider">Become a provider →</a>
+    </div>
+  </section>
+
+  <!-- ============ CAPABILITIES ============ -->
+  <section id="capabilities">
+    <div class="wrap">
+      <span class="kicker">Capabilities</span>
+      <h2>What you can run today</h2>
+      <p class="sub">The job API accepts every GPN work type. Only what a live provider advertises is
+        actually routable — the badges below track what is online right now, not what the protocol can
+        express.</p>
+
+      <div class="grid cols-2">
+        <div class="card">
+          <h3><span class="ico" aria-hidden="true">💬</span> Text / LLM <span class="tag live">live</span></h3>
+          <p class="muted">OpenAI-compatible chat completions on <code>llama3.2:1b</code> and
+            <code>qwen2.5</code>; the model list is whatever the online providers report.</p>
+          <pre><code>POST /api/v1/chat/completions
+{"model": "llama3.2:1b",
+ "messages": [{"role": "user", "content": "Hi"}]}
+→ {"choices": [{"message": {"role": "assistant",
+     "content": "Hi."}, "finish_reason": "stop"}],
+   "usage": {"prompt_tokens": 32, "completion_tokens": 3}}</code></pre>
+        </div>
+
+        <div class="card">
+          <h3><span class="ico" aria-hidden="true">🎨</span> Image generation <span class="tag soon">coming soon</span></h3>
+          <p class="muted">The job type and a diffusers-based provider binary exist, but no image model is
+            registered on the testnet right now, so nothing would route.</p>
+          <pre><code>POST /api/jobs
+{"job_type": "ImageGeneration", "model": "sd-turbo",
+ "prompt": "a cozy cabin at dusk",
+ "width": 512, "height": 512, "steps": 8}
+→ {"id": 1234, "state": "Queued"}</code></pre>
+        </div>
+
+        <div class="card">
+          <h3><span class="ico" aria-hidden="true">🎬</span> Video generation <span class="tag soon">coming soon</span></h3>
+          <p class="muted">Same job API, heavier host: a text-to-video pipeline needs a large GPU for the
+            encoder. No video provider is online today.</p>
+          <pre><code>POST /api/jobs
+{"job_type": "VideoGeneration", "model": "ltx-video",
+ "prompt": "waves at sunset", "seconds": 4}
+→ {"id": 1235, "state": "Queued"}</code></pre>
+        </div>
+
+        <div class="card">
+          <h3><span class="ico" aria-hidden="true">🧮</span> ML inference <span class="tag soon">coming soon</span></h3>
+          <p class="muted">Run a custom model as an <code>MLInference</code> job with a JSON input/output
+            contract. Capability is advertised by providers; no ML-only endpoint is live yet.</p>
+          <pre><code>POST /api/jobs
+{"job_type": "MLInference", "model": "resnet50",
+ "input": {"url": "https://…/cat.jpg"}}
+→ {"id": 1236, "state": "Queued"}</code></pre>
+        </div>
+
+        <div class="card">
+          <h3><span class="ico" aria-hidden="true">🎛️</span> Fine-tuning <span class="tag soon">coming soon</span></h3>
+          <p class="muted">LoRA fine-tunes are a job type; a completed tune is served back as
+            <code>tuned-&lt;jobid&gt;</code>. The testnet fine-tune worker is not running.</p>
+          <pre><code>POST /api/jobs
+{"job_type": "FineTuning", "model": "llama3.2:1b",
+ "dataset": "https://…/data.jsonl", "epochs": 1}
+→ {"id": 1237, "state": "Queued"}</code></pre>
+        </div>
+
+        <div class="card plain">
+          <h3>Bring your own GPU</h3>
+          <p class="muted">Every node is both a miner and a provider. Join the testnet and your card starts
+            serving these same endpoints — and earning GPN for the time it would otherwise idle.</p>
+          <a class="btn small" href="docs/run-a-node.html">Run a node →</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ ENDPOINTS ============ -->
+  <section id="endpoints">
+    <div class="wrap">
+      <span class="kicker">Reference</span>
+      <h2>Endpoints</h2>
+      <p class="sub">All of these are HTTPS on <code>gpncoin.ai</code> and proxy to the live access point.
+        Status codes and JSON bodies are passed through unchanged.</p>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th scope="col">Method &amp; path</th><th scope="col">What it does</th><th scope="col">Limit</th></tr></thead>
+          <tbody>
+            <tr><td><code>POST /api/v1/chat/completions</code></td><td>OpenAI-compatible chat. Accepts <code>messages[]</code> or a top-level <code>prompt</code>/<code>input</code>.</td><td>12 calls / 10 min per IP · 64 KB body</td></tr>
+            <tr><td><code>GET /api/v1/models</code></td><td>Model list in OpenAI <code>{"object":"list"}</code> shape.</td><td>120 / min per IP</td></tr>
+            <tr><td><code>GET /api/health</code></td><td>Access point liveness and provider count.</td><td>120 / min per IP</td></tr>
+            <tr><td><code>GET /api/jobs/&lt;id&gt;</code></td><td>On-chain state of a job (<code>Pending</code>, <code>Running</code>, <code>Completed</code>…).</td><td>120 / min per IP</td></tr>
+            <tr><td><code>GET /api/providers</code></td><td>Live provider registry: models, capabilities, latency.</td><td>120 / min per IP</td></tr>
+            <tr><td><code>GET /api/mode</code></td><td>Whether this AP is testnet (free AI) or mainnet (client-signed).</td><td>120 / min per IP</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="grid cols-2" style="margin-top:20px">
+        <div class="callout">
+          <span class="ct">Free, but not unmetered</span>
+          <p class="mb-0">The testnet access point pays escrow from a hot wallet, so a call costs you
+            nothing. Each call is still one GPU job — hence the per-IP cap. For volume, run your own
+            access point or provider node.</p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">Testnet caveats</span>
+          <p class="mb-0">Prompts and answers are not private (the AP and provider see them; results are
+            stored off-chain). Models are small. No uptime promise — the network is a testnet.</p>
+        </div>
+      </div>
+
+      <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:20px">
+        <a class="btn" href="docs/run-a-node.html">Run a node and serve AI</a>
+        <a class="btn ghost" href="access-points.html">Browse access points</a>
       </div>
     </div>
   </section>
@@ -284,7 +336,7 @@ GET /job/{id}/artifact   # PNG / MP4 / adapter</code></pre>
   <div class="wrap">
     <div class="foot-grid">
       <div><a class="brand" href="index.html" style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a><p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute. <em>Get paid for the GPU time you're wasting.</em></p></div>
-      <div><h4>Product</h4><a href="download.html">Download</a><a href="deploy.html">Deploy</a><a href="ai.html">Access the AI</a><a href="access-points.html">Access Points</a><a href="nodes.html">Live nodes</a></div>
+      <div><h4>Product</h4><a href="download.html">Download</a><a href="deploy.html">Deploy</a><a href="ai.html">Use GPN for AI</a><a href="access-points.html">Access Points</a><a href="nodes.html">Live nodes</a></div>
       <div><h4>Learn</h4><a href="docs/index.html">Documentation</a><a href="docs/whitepaper.html">Whitepaper</a><a href="docs/one-pager.html">One-pager</a><a href="docs/technical-overview.html">Technical overview</a></div>
       <div><h4>Project</h4><a href="https://github.com/crewlyllc/gpn_coin" rel="noopener">Source on GitHub</a><a href="docs/run-a-node.html">Run a node</a><a href="docs/downloads.html">Releases</a><a href="docs/wallet.html">Wallet</a><a href="index.html#join">Join the team</a></div>
     </div>

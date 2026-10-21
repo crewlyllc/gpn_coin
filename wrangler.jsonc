@@ -27,7 +27,15 @@
     // and falls back to a raw TCP socket for non-standard ports like :8092,
     // which the Workers `fetch()` API refuses. Either way an unreachable AP
     // yields the static seed list — never a 500.
-    "AP_URL": "http://142.129.54.88:8092"
+    "AP_URL": "http://142.129.54.88:8092",
+    // Target of the HTTPS `/api/*` proxy (chat completions, models, health,
+    // jobs). Same box/port as AP_URL today, but a separate var so the job API
+    // can move to its own ingress without touching peer discovery.
+    // Workers `fetch()` refuses a non-standard port, so the Worker speaks raw
+    // HTTP/1.1 over `cloudflare:sockets` (see socketHttpRequest in worker.js).
+    // The AP's bearer token is NOT here — it is a secret:
+    //     npx wrangler secret put AP_TOKEN
+    "AP_JOB_URL": "http://142.129.54.88:8092"
   },
   // ── Home-page job applications ("/api/join") ────────────────────────────
   // Applications are written to the JOIN_KV namespace under "app:<ISO>:<id>".
