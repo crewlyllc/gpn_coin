@@ -7,6 +7,17 @@
  *   GET /bootnodes.txt  the same dialable multiaddrs, newline separated
  *   GET /seeds.txt      alias of /bootnodes.txt
  *   GET /releases.json  the SIGNED release manifest (see docs/updates.md)
+ *   POST /api/join      job application from the home page (see below)
+ *
+ * `/api/join` accepts `{name, email, role, message}` as JSON, validates it,
+ * rate-limits per IP, and stores each application in the `JOIN_KV` namespace
+ * under `app:<ISO timestamp>:<id>`. It **always** answers 200 with JSON so the
+ * page can render one code path; `ok:false` carries a human-readable `error`.
+ * When `JOIN_KV` is not bound the route still returns 200 but sets
+ * `stored:false`, and the page offers a prefilled mailto fallback — a
+ * half-configured deploy must never look like a successful submission.
+ * Honeypot field: `website` (hidden on the page). A filled honeypot returns the
+ * normal success shape and stores nothing.
  *
  * `/releases.json` is generated and signed at release time by
  * `scripts/gen-release-manifest.py` into `website/releases.json`; this route
@@ -93,6 +104,19 @@ export default {
         return withCors(new Response("method not allowed\n", { status: 405 }));
       }
       return releaseManifest(request, env, url);
+    }
+
+    if (path === "/api/join") {
+      if (request.method === "OPTIONS") return preflight();
+      if (request.method !== "POST") {
+        return withCors(
+          new Response(JSON.stringify({ ok: false, error: "Use POST." }) + "\n", {
+            status: 405,
+            headers: { "content-type": "application/json; charset=utf-8", allow: "POST, OPTIONS" },
+          }),
+        );
+      }
+      return handleJoin(request, env);
     }
 
     // Static site: hand the untouched request to the assets binding.
@@ -736,11 +760,200 @@ async function releaseManifest(request, env, url) {
   );
 }
 
+/** Largest JSON body we will read for an application. */
+const JOIN_MAX_BODY = 8 * 1024;
+/** Applications per IP per window. */
+const JOIN_RATE_MAX = 5;
+/** Rate-limit window, in seconds (also the KV TTL). */
+const JOIN_RATE_WINDOW = 3600;
+/** Per-field caps; mirrored by `maxlength` on the page. */
+const JOIN_LIMITS = { name: 80, email: 200, role: 60, message: 4000 };
+
+/**
+ * Best-effort per-IP rate limit used when `JOIN_KV` is not bound. Resets with
+ * the isolate, which is acceptable: it only exists to blunt a naive flood.
+ * @type {Map<string, { count: number, reset: number }>}
+ */
+const joinRateMem = new Map();
+
+/** @param {string} ip @returns {boolean} */
+function joinRateOkMemory(ip) {
+  const now = Date.now();
+  const slot = joinRateMem.get(ip);
+  if (!slot || slot.reset <= now) {
+    joinRateMem.set(ip, { count: 1, reset: now + JOIN_RATE_WINDOW * 1000 });
+    if (joinRateMem.size > 10000) {
+      for (const [k, v] of joinRateMem) if (v.reset <= now) joinRateMem.delete(k);
+    }
+    return true;
+  }
+  if (slot.count >= JOIN_RATE_MAX) return false;
+  slot.count += 1;
+  return true;
+}
+
+/**
+ * @param {{ get: Function, put: Function }} kv
+ * @param {string} ip
+ */
+async function joinRateOkKv(kv, ip) {
+  const key = `rl:${ip}`;
+  const seen = Number(await kv.get(key)) || 0;
+  if (seen >= JOIN_RATE_MAX) return false;
+  await kv.put(key, String(seen + 1), { expirationTtl: JOIN_RATE_WINDOW });
+  return true;
+}
+
+/** @param {unknown} v @returns {string} */
+function joinStr(v) {
+  return typeof v === "string" ? v.trim() : "";
+}
+
+/** @param {unknown} body @returns {string | null} */
+function joinEmailError(body) {
+  const email = joinStr(body.email);
+  if (!email) return "An email address is required.";
+  if (email.length > JOIN_LIMITS.email) return "That email address is too long.";
+  if (!/^[^\s@]{1,64}@[^\s@]{1,190}\.[^\s@]{2,24}$/.test(email)) return "That email address doesn't look valid.";
+  return null;
+}
+
+/**
+ * Validate a parsed application body.
+ * @param {any} body
+ * @returns {{ ok: true, value: { name: string, email: string, role: string, message: string } } | { ok: false, error: string }}
+ */
+function validateJoin(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return { ok: false, error: "Expected a JSON object." };
+  }
+  const name = joinStr(body.name);
+  if (name.length < 2) return { ok: false, error: "A name of at least 2 characters is required." };
+  if (name.length > JOIN_LIMITS.name) return { ok: false, error: "That name is too long (80 characters max)." };
+
+  const emailErr = joinEmailError(body);
+  if (emailErr) return { ok: false, error: emailErr };
+
+  const role = joinStr(body.role).slice(0, JOIN_LIMITS.role) || "unspecified";
+  const message = joinStr(body.message);
+  if (message.length > JOIN_LIMITS.message) {
+    return { ok: false, error: "Please keep the message under 4000 characters." };
+  }
+
+  return { ok: true, value: { name, email: joinStr(body.email), role, message } };
+}
+
+/** @param {object} payload @param {number} [status] */
+function joinJson(payload, status = 200) {
+  return withCors(
+    new Response(JSON.stringify(payload) + "\n", {
+      status,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store",
+      },
+    }),
+  );
+}
+
+/**
+ * Accept a job application. Never throws, never returns non-JSON: the page
+ * relies on one shape, and a failure here must not look like a sent form.
+ *
+ * @param {Request} request
+ * @param {{ JOIN_KV?: { get: Function, put: Function } }} env
+ */
+async function handleJoin(request, env) {
+  try {
+    const declared = Number(request.headers.get("content-length") || 0);
+    if (declared > JOIN_MAX_BODY) {
+      return joinJson({ ok: false, error: "That submission is too large." });
+    }
+
+    let raw;
+    try {
+      raw = await request.text();
+    } catch {
+      return joinJson({ ok: false, error: "Could not read the request body." });
+    }
+    if (raw.length > JOIN_MAX_BODY) {
+      return joinJson({ ok: false, error: "That submission is too large." });
+    }
+
+    let body;
+    try {
+      body = JSON.parse(raw || "{}");
+    } catch {
+      return joinJson({ ok: false, error: "Expected valid JSON." });
+    }
+
+    /* Honeypot: pretend it worked so a bot gets no signal, store nothing. */
+    if (joinStr(body && body.website)) {
+      return joinJson({ ok: true, stored: false, reference: "ignored" });
+    }
+
+    const checked = validateJoin(body);
+    if (!checked.ok) return joinJson({ ok: false, error: checked.error });
+    const app = checked.value;
+
+    const ip = request.headers.get("cf-connecting-ip") || "unknown";
+    const kv = env && env.JOIN_KV && typeof env.JOIN_KV.put === "function" ? env.JOIN_KV : null;
+
+    const allowed = kv ? await joinRateOkKv(kv, ip) : joinRateOkMemory(ip);
+    if (!allowed) {
+      return joinJson({ ok: false, error: "Too many applications from this address. Try again in an hour, or email us." });
+    }
+
+    if (!kv) {
+      /* Not a success: nothing was persisted. The page turns `stored:false`
+         into a prefilled mailto draft so the application is not lost. */
+      return joinJson({
+        ok: true,
+        stored: false,
+        fallback: "email",
+        error: "Applications are not being stored on this deployment (JOIN_KV is not bound). Please email hello@gpncoin.ai.",
+      });
+    }
+
+    const now = new Date();
+    const id = `${now.getTime().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    const record = {
+      id,
+      received_at: now.toISOString(),
+      name: app.name,
+      email: app.email,
+      role: app.role,
+      message: app.message,
+      ip,
+      country: (request.cf && request.cf.country) || null,
+      user_agent: (request.headers.get("user-agent") || "").slice(0, 300),
+    };
+
+    try {
+      await kv.put(`app:${record.received_at}:${id}`, JSON.stringify(record));
+    } catch {
+      return joinJson({
+        ok: true,
+        stored: false,
+        fallback: "email",
+        error: "We couldn't save that just now. Please email hello@gpncoin.ai.",
+      });
+    }
+
+    return joinJson({ ok: true, stored: true, reference: id });
+  } catch (err) {
+    return joinJson({
+      ok: false,
+      error: "Something went wrong on our side. Please email hello@gpncoin.ai.",
+    });
+  }
+}
+
 /** @param {Response} res */
 function withCors(res) {
   const headers = new Headers(res.headers);
   headers.set("access-control-allow-origin", "*");
-  headers.set("access-control-allow-methods", "GET, HEAD, OPTIONS");
+  headers.set("access-control-allow-methods", "GET, HEAD, POST, OPTIONS");
   headers.set("access-control-allow-headers", "content-type");
   headers.set("access-control-max-age", "86400");
   return new Response(res.body, { status: res.status, headers });
@@ -750,6 +963,10 @@ function withCors(res) {
 export const __test = {
   buildDirectory,
   releaseManifest,
+  handleJoin,
+  validateJoin,
+  joinRateOkMemory,
+  JOIN_LIMITS,
   dialableMultiaddrs,
   multiaddrFromUrl,
   peerIdOf,

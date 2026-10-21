@@ -41,6 +41,7 @@
       <a href="nodes.html">Nodes</a>
       <a href="buy.html">Buy GPN</a>
       <a href="docs/index.html">Docs</a>
+      <a href="#join">Join us</a>
     </nav>
     <div class="nav-actions">
       <button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button>
@@ -62,6 +63,87 @@
       <div class="hero-cta">
         <a class="btn" href="download.html">Download &amp; run a node</a>
         <a class="btn ghost" href="docs/whitepaper.html">Read the whitepaper</a>
+      </div>
+
+      <!-- ---------- Quickstart: copy, paste, mine ---------- -->
+      <div class="quickstart" id="quickstart" aria-labelledby="qs-title">
+        <div class="qs-head">
+          <h2 class="qs-title" id="qs-title">Run a node in one paste
+            <span class="qs-badge">copy &middot; paste &middot; mine</span></h2>
+          <a class="qs-link" href="docs/run-a-node.html">Full guide &rarr;</a>
+        </div>
+
+        <div class="tabs" role="tablist" aria-label="Choose your operating system">
+          <button class="tab" type="button" id="qs-tab-windows" role="tab"
+                  aria-selected="false" aria-controls="qs-panel-windows" tabindex="-1" data-os="windows">Windows</button>
+          <button class="tab" type="button" id="qs-tab-linux" role="tab"
+                  aria-selected="true" aria-controls="qs-panel-linux" tabindex="0" data-os="linux">Linux</button>
+          <button class="tab" type="button" id="qs-tab-macos" role="tab"
+                  aria-selected="false" aria-controls="qs-panel-macos" tabindex="-1" data-os="macos">macOS <span class="tab-soon">soon</span></button>
+        </div>
+
+        <!-- Windows -->
+        <div class="qs-panel" id="qs-panel-windows" role="tabpanel" aria-labelledby="qs-tab-windows" tabindex="0" hidden>
+          <div class="codeblock">
+            <div class="codeblock-head">
+              <span class="lang">PowerShell</span>
+              <button class="copy-btn" type="button" data-copy="#qs-windows-cmd" aria-label="Copy the Windows quickstart commands">Copy</button>
+            </div>
+            <pre><code id="qs-windows-cmd">New-Item -ItemType Directory -Force C:\gpn | Out-Null
+curl.exe -L -o C:\gpn\gpn-windows.zip https://github.com/crewlyllc/gpn_coin/releases/download/windows-latest/gpn-windows.zip
+Expand-Archive C:\gpn\gpn-windows.zip -DestinationPath C:\gpn\bin -Force
+cd C:\gpn
+.\bin\gpn_node.exe --setup
+.\bin\gpn_node.exe</code></pre>
+          </div>
+          <ul class="qs-next">
+            <li><b>Paste the whole block</b> into PowerShell (no admin needed; it uses <code>C:\gpn</code>).</li>
+            <li><b>--setup</b> asks once: generate a new wallet, or import an existing one. That wallet is your node identity and payout address.</li>
+            <li>Then <b>gpn_node.exe</b> starts mining and serving AI jobs on the same GPU &mdash; leave the window open.</li>
+          </ul>
+        </div>
+
+        <!-- Linux -->
+        <div class="qs-panel" id="qs-panel-linux" role="tabpanel" aria-labelledby="qs-tab-linux" tabindex="0">
+          <div class="codeblock">
+            <div class="codeblock-head">
+              <span class="lang">bash</span>
+              <button class="copy-btn" type="button" data-copy="#qs-linux-cmd" aria-label="Copy the Linux quickstart commands">Copy</button>
+            </div>
+            <pre><code id="qs-linux-cmd">curl -L -o gpn-linux.tar.gz https://github.com/crewlyllc/gpn_coin/releases/download/linux-latest/gpn-linux.tar.gz
+mkdir -p ~/gpn &amp;&amp; tar -xzf gpn-linux.tar.gz -C ~/gpn &amp;&amp; cd ~/gpn
+./gpn_node --setup     # generate or import your wallet (asked once)
+./gpn_node</code></pre>
+          </div>
+          <ul class="qs-next">
+            <li><b>Paste the block</b> into a terminal &mdash; it downloads ~320 MB into <code>~/gpn</code> and unpacks in place.</li>
+            <li><b>--setup</b> asks once: generate a new wallet, or import an existing one. Wallet = node identity + payout address.</li>
+            <li>Then <b>./gpn_node</b> starts mining and serving AI jobs on the same GPU. Ctrl-C to stop.</li>
+          </ul>
+        </div>
+
+        <!-- macOS -->
+        <div class="qs-panel" id="qs-panel-macos" role="tabpanel" aria-labelledby="qs-tab-macos" tabindex="0" hidden>
+          <div class="callout warn" style="margin-bottom:14px">
+            <span class="ct">macOS build not published yet</span>
+            <p class="mb-0">The Apple Silicon build is still pending. There is no <code>macos-latest</code>
+              release to download today &mdash; anything that claims to be one is not ours.</p>
+          </div>
+          <ul class="qs-next">
+            <li><b>Build from source instead</b> &mdash; Rust 1.8x, <code>cargo build --release -p gpn-node</code>, then run the same <code>--setup</code> / start flow.</li>
+            <li><b>Watch the releases page</b> &mdash; the rolling tag will be <code>macos-latest</code> with <code>gpn-macos.tar.gz</code>.</li>
+            <li>On Linux or Windows today? <b>Switch tabs above</b> &mdash; both are live.</li>
+          </ul>
+          <div class="join-alt">
+            <a class="btn ghost small" href="https://github.com/crewlyllc/gpn_coin" rel="noopener">Build from source</a>
+            <a class="btn ghost small" href="docs/run-a-node.html">Read the node guide</a>
+          </div>
+        </div>
+
+        <div class="qs-foot">
+          <span>Behind a router? Enable <b>UPnP</b> or forward TCP <b>30333</b> (peer port) and <b>8092</b> (AI endpoint).</span>
+          <a href="docs/run-a-node.html">Full install guide &rarr;</a>
+        </div>
       </div>
     </div>
   </section>
@@ -180,10 +262,11 @@
 
       <div class="callout" style="margin-top:22px">
         <span class="ct">Live network today</span>
-        <p class="mb-0"><b>Three public nodes</b> — one Linux bootnode and two Windows full nodes — are
-          reachable on the testnet. Builds roll out through rolling GitHub releases
-          (<code>windows-latest</code>, <code>linux-latest</code>, <code>macos-latest</code>). The repository
-          is still <b>private</b>; ask for access to download.</p>
+        <p class="mb-0"><b>Three public nodes</b> &mdash; one Linux bootnode and two Windows full nodes &mdash;
+          are reachable on the testnet. Builds roll out through rolling GitHub releases
+          (<code>windows-latest</code>, <code>linux-latest</code>, <code>macos-latest</code>) on the public
+          mirror <a href="https://github.com/crewlyllc/gpn_coin" rel="noopener">crewlyllc/gpn_coin</a>,
+          so downloads need no account or token.</p>
       </div>
     </div>
   </section>
@@ -321,6 +404,71 @@
     </div>
   </section>
 
+  <!-- ============ JOIN THE TEAM ============ -->
+  <section id="join">
+    <div class="wrap">
+      <span class="kicker">Join the team</span>
+      <h2>Help build the network you'd want to run on</h2>
+      <p class="sub">GPN is a small, remote team building a proof-of-work chain and an AI compute
+        marketplace that share one GPU. We care about people who have shipped GPU kernels, p2p systems,
+        or ML serving &mdash; and who like working in the open. Contractors and contributors welcome.</p>
+
+      <div class="join">
+        <div class="join-card plain">
+          <h3>Who we're looking for</h3>
+          <ul class="checks">
+            <li><b>GPU / CUDA engineers</b> &mdash; Ethash-derived PoW, VRAM handoff between the miner and a model, kernels that don't waste a card.</li>
+            <li><b>Distributed-systems people</b> &mdash; libp2p, peer discovery, channel routing, scheduler/access-point work in Rust.</li>
+            <li><b>ML serving engineers</b> &mdash; ollama/llama.cpp backends, per-token pricing, batching and admission control.</li>
+          </ul>
+          <p class="muted" style="margin-top:16px">Everything we run is open source. If you'd rather show than tell,
+            a pull request or an issue with a reproducible benchmark is the fastest introduction.</p>
+          <div class="join-alt">
+            <a class="btn ghost small" href="mailto:hello@gpncoin.ai?subject=Join%20GPN">Email hello@gpncoin.ai</a>
+            <a class="btn ghost small" href="https://github.com/crewlyllc/gpn_coin" rel="noopener">Browse the public repo</a>
+          </div>
+        </div>
+
+        <form class="join-card" id="join-form" method="post" action="/api/join" novalidate>
+          <h3 style="margin-top:0">Apply</h3>
+          <div class="field-row">
+            <div class="field">
+              <label for="join-name">Name</label>
+              <input id="join-name" name="name" type="text" required maxlength="80" autocomplete="name" placeholder="Ada Lovelace" />
+            </div>
+            <div class="field">
+              <label for="join-email">Email</label>
+              <input id="join-email" name="email" type="email" required maxlength="200" autocomplete="email" placeholder="you@example.com" />
+            </div>
+          </div>
+          <div class="field">
+            <label for="join-role">What are you into?</label>
+            <select id="join-role" name="role">
+              <option value="GPU / CUDA engineering">GPU / CUDA engineering</option>
+              <option value="Distributed systems (Rust)">Distributed systems (Rust)</option>
+              <option value="ML serving / inference">ML serving / inference</option>
+              <option value="Infrastructure / SRE">Infrastructure / SRE</option>
+              <option value="Docs / design / community">Docs / design / community</option>
+              <option value="Something else">Something else</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="join-message">Anything else? <span class="hint">optional &mdash; repos, benchmarks, what you want to work on</span></label>
+            <textarea id="join-message" name="message" maxlength="4000" placeholder="Two lines is plenty."></textarea>
+          </div>
+          <!-- Honeypot: humans never see it, bots fill it in. -->
+          <div class="hp-field" aria-hidden="true">
+            <label for="join-website">Website</label>
+            <input id="join-website" name="website" type="text" tabindex="-1" autocomplete="off" />
+          </div>
+          <button class="btn" type="submit" id="join-submit">Send application</button>
+          <p class="form-note">One email, no list, no captcha. We only use your address to reply.</p>
+          <div class="result empty" id="join-result" role="status" aria-live="polite">Fill this in and we'll get back to you.</div>
+        </form>
+      </div>
+    </div>
+  </section>
+
 </main>
 
 <footer class="site-footer">
@@ -348,10 +496,11 @@
       </div>
       <div>
         <h4>Project</h4>
-        <a href="https://github.com/jeremyzguo/gpn_coin" rel="noopener">Source on GitHub</a>
+        <a href="https://github.com/crewlyllc/gpn_coin" rel="noopener">Source on GitHub</a>
         <a href="docs/run-a-node.html">Run a node</a>
         <a href="docs/downloads.html">Releases</a>
         <a href="docs/wallet.html">Wallet</a>
+        <a href="index.html#join">Join the team</a>
       </div>
     </div>
     <div class="foot-bottom">

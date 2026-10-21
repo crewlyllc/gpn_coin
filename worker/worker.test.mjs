@@ -308,7 +308,9 @@ test("the published manifest verifies against the compiled-in release key", () =
   }
   // The same constant the node ships with (gpn-agent/src/update.rs).
   const embedded = readFileSync(join(here, "..", "gpn-agent", "src", "update.rs"), "utf8")
-    .match(/RELEASE_PUBKEY_HEX: &str = "([0-9a-f]{64})"/)[1];
+    // The constant's value may be wrapped onto the next line (rustfmt), so
+    // allow whitespace before the opening quote.
+    .match(/RELEASE_PUBKEY_HEX: &str =\s*"([0-9a-f]{64})"/)[1];
   assert.equal(man.signing_key.toLowerCase(), embedded, "manifest names the embedded key");
   assert.ok(man.signature, "manifest is signed");
   assert.match(man.version, /^\d+\.\d+\.\d+/, "version is M.m.p");
@@ -404,4 +406,142 @@ test("HEAD /releases.json reports success with no body", async () => {
   assert.equal(res.status, 200);
   assert.equal(res.body, null);
   assert.equal(res.headers.get("content-type"), "application/json; charset=utf-8");
+});
+
+/* ───────────────────────── /api/join ───────────────────────── */
+
+/**
+ * Minimal KV mock: get/put/delete over a Map, recording expiry options.
+ */
+function mockKv() {
+  const store = new Map();
+  return {
+    store,
+    async get(key) { return store.has(key) ? store.get(key) : null; },
+    async put(key, value, opts) { store.set(key, String(value)); this.lastOpts = opts; },
+    async delete(key) { store.delete(key); },
+  };
+}
+
+function joinRequest(payload, { ip = "203.0.113.9", headers = {} } = {}) {
+  return new Request("https://gpncoin.ai/api/join", {
+    method: "POST",
+    headers: { "content-type": "application/json", "cf-connecting-ip": ip, ...headers },
+    body: typeof payload === "string" ? payload : JSON.stringify(payload),
+  });
+}
+
+const GOOD_APP = {
+  name: "Ada Lovelace",
+  email: "ada@example.com",
+  role: "GPU / CUDA engineering",
+  message: "I wrote a memory-hard kernel once.",
+};
+
+test("/api/join stores a valid application in JOIN_KV", async () => {
+  const kv = mockKv();
+  const res = await worker.fetch(joinRequest(GOOD_APP), { JOIN_KV: kv }, { waitUntil() {} });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "application/json; charset=utf-8");
+  const body = await res.json();
+  assert.equal(body.ok, true);
+  assert.equal(body.stored, true);
+  assert.ok(body.reference);
+
+  const keys = [...kv.store.keys()].filter((k) => k.startsWith("app:"));
+  assert.equal(keys.length, 1);
+  assert.match(keys[0], /^app:\d{4}-\d\d-\d\dT[\d:.]+Z:[a-z0-9]+$/);
+  const record = JSON.parse(kv.store.get(keys[0]));
+  assert.equal(record.email, "ada@example.com");
+  assert.equal(record.name, "Ada Lovelace");
+  assert.equal(record.ip, "203.0.113.9");
+});
+
+test("/api/join without JOIN_KV degrades: 200, stored:false, email fallback", async () => {
+  const res = await worker.fetch(joinRequest(GOOD_APP, { ip: "198.51.100.7" }), {}, { waitUntil() {} });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.ok, true);
+  assert.equal(body.stored, false);
+  assert.equal(body.fallback, "email");
+  assert.match(body.error, /JOIN_KV is not bound/);
+});
+
+test("/api/join validates fields and stays JSON even when wrong", async () => {
+  const kv = mockKv();
+  const cases = [
+    [{ ...GOOD_APP, name: "" }, /name/i],
+    [{ ...GOOD_APP, name: "x".repeat(81) }, /too long/i],
+    [{ ...GOOD_APP, email: "not-an-email" }, /email/i],
+    [{ ...GOOD_APP, email: "a@b.co" , message: "x".repeat(4001) }, /4000/],
+  ];
+  for (const [payload, re] of cases) {
+    const res = await worker.fetch(joinRequest(payload, { ip: "203.0.113.11" }), { JOIN_KV: kv }, { waitUntil() {} });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.ok, false, JSON.stringify(payload).slice(0, 60));
+    assert.match(body.error, re);
+  }
+  assert.equal([...kv.store.keys()].filter((k) => k.startsWith("app:")).length, 0);
+
+  // Malformed JSON and oversized bodies are also 200 JSON.
+  const bad = await worker.fetch(joinRequest("{not json", { ip: "203.0.113.12" }), { JOIN_KV: kv }, { waitUntil() {} });
+  assert.equal(bad.status, 200);
+  assert.equal((await bad.json()).ok, false);
+
+  const huge = await worker.fetch(
+    joinRequest("x".repeat(9000), { ip: "203.0.113.13" }),
+    { JOIN_KV: kv },
+    { waitUntil() {} },
+  );
+  assert.equal(huge.status, 200);
+  assert.equal((await huge.json()).ok, false);
+});
+
+test("/api/join honeypot is silently ignored (nothing stored)", async () => {
+  const kv = mockKv();
+  const res = await worker.fetch(
+    joinRequest({ ...GOOD_APP, website: "http://spam.example" }, { ip: "203.0.113.14" }),
+    { JOIN_KV: kv },
+    { waitUntil() {} },
+  );
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.ok, true);
+  assert.equal([...kv.store.keys()].filter((k) => k.startsWith("app:")).length, 0);
+});
+
+test("/api/join rate-limits per IP (5/hour)", async () => {
+  const kv = mockKv();
+  const ip = "203.0.113.20";
+  for (let i = 0; i < 5; i++) {
+    const res = await worker.fetch(joinRequest(GOOD_APP, { ip }), { JOIN_KV: kv }, { waitUntil() {} });
+    assert.equal((await res.json()).ok, true, `attempt ${i + 1}`);
+  }
+  const blocked = await worker.fetch(joinRequest(GOOD_APP, { ip }), { JOIN_KV: kv }, { waitUntil() {} });
+  assert.equal(blocked.status, 200);
+  const body = await blocked.json();
+  assert.equal(body.ok, false);
+  assert.match(body.error, /Too many/i);
+
+  // No rate limit is written as an application.
+  assert.equal([...kv.store.keys()].filter((k) => k.startsWith("app:")).length, 5);
+
+  // A different IP is unaffected.
+  const other = await worker.fetch(joinRequest(GOOD_APP, { ip: "203.0.113.21" }), { JOIN_KV: kv }, { waitUntil() {} });
+  assert.equal((await other.json()).ok, true);
+});
+
+test("/api/join rejects GET, answers OPTIONS preflight", async () => {
+  const get = await worker.fetch(new Request("https://gpncoin.ai/api/join"), {}, { waitUntil() {} });
+  assert.equal(get.status, 405);
+  assert.equal((await get.json()).ok, false);
+
+  const opt = await worker.fetch(
+    new Request("https://gpncoin.ai/api/join", { method: "OPTIONS" }),
+    {},
+    { waitUntil() {} },
+  );
+  assert.equal(opt.status, 204);
+  assert.match(opt.headers.get("access-control-allow-methods"), /POST/);
 });

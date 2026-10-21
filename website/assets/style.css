@@ -185,6 +185,11 @@ section.first { border-top: 0; }
 
 /* ---------- Grids ---------- */
 .grid { display: grid; gap: 18px; }
+/* Grid/flex children default to min-width:auto, so one wide <pre> inside a
+   card can push the whole page into horizontal scroll. Let them shrink and
+   scroll internally instead. */
+.grid > * { min-width: 0; }
+.card pre { max-width: 100%; }
 .grid.cols-2 { grid-template-columns: repeat(2, 1fr); }
 .grid.cols-3 { grid-template-columns: repeat(3, 1fr); }
 .grid.cols-4 { grid-template-columns: repeat(4, 1fr); }
@@ -307,7 +312,7 @@ ul.checks li b { color: var(--text); }
 /* ---------- Forms ---------- */
 label { display: block; font-size: .85rem; font-weight: 700; margin-bottom: 6px; }
 .hint { color: var(--muted-2); font-size: .8rem; font-weight: 400; }
-input[type="text"], input[type="url"], textarea, select {
+input[type="text"], input[type="email"], input[type="url"], textarea, select {
   width: 100%; background: var(--bg-2); color: var(--text);
   border: 1px solid var(--line); border-radius: 9px; padding: 11px 13px;
   font-family: inherit; font-size: .93rem;
@@ -355,6 +360,106 @@ textarea { resize: vertical; min-height: 96px; font-family: var(--font); }
 .page-head p { color: var(--muted); max-width: 760px; font-size: 1.05rem; }
 .small { font-size: .84rem; }
 .nowrap { white-space: nowrap; }
+
+/* ---------- Quickstart box (home) ---------- */
+/* The header is sticky; keep anchored sections from landing underneath it. */
+section[id], [id="join"] { scroll-margin-top: 74px; }
+.quickstart {
+  position: relative; margin-top: 34px; background: var(--card);
+  border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: var(--shadow); overflow: hidden;
+}
+.quickstart::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 3px; background: var(--grad); }
+.qs-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px 16px; flex-wrap: wrap; padding: 20px 20px 0;
+}
+.qs-title { font-size: clamp(1.05rem, .95rem + .5vw, 1.3rem); margin: 0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.qs-badge {
+  font-size: .66rem; letter-spacing: .1em; text-transform: uppercase; font-weight: 700;
+  color: var(--accent-2); border: 1px solid var(--line); border-radius: 999px; padding: 3px 9px;
+}
+.qs-head .qs-link { font-size: .85rem; white-space: nowrap; }
+.tabs {
+  display: flex; gap: 4px; flex-wrap: wrap; padding: 14px 16px 0; margin-top: 14px;
+  border-bottom: 1px solid var(--line);
+}
+.tab {
+  font: inherit; font-size: .88rem; font-weight: 700; cursor: pointer;
+  background: transparent; border: 1px solid transparent; border-bottom: 0;
+  color: var(--muted); padding: 9px 14px; border-radius: 9px 9px 0 0;
+  display: inline-flex; align-items: center; gap: 7px;
+}
+.tab:hover { color: var(--text); background: var(--panel); }
+.tab[aria-selected="true"] {
+  color: var(--text); background: var(--bg-2); border-color: var(--line);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+.tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.tab-soon {
+  font-size: .62rem; letter-spacing: .08em; text-transform: uppercase; font-weight: 700;
+  color: var(--amber); border: 1px solid rgba(240, 166, 58, .4); background: rgba(240, 166, 58, .1);
+  border-radius: 999px; padding: 1px 7px;
+}
+.qs-panel { padding: 18px 20px 20px; }
+.qs-panel[hidden] { display: none; }
+.codeblock {
+  background: var(--bg); border: 1px solid var(--line);
+  border-radius: var(--radius-sm); margin: 0 0 14px;
+}
+.codeblock-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 7px 9px 7px 14px; border-bottom: 1px solid var(--line-soft);
+}
+.codeblock-head .lang {
+  font-family: var(--mono); font-size: .72rem; letter-spacing: .08em;
+  text-transform: uppercase; color: var(--muted-2);
+}
+.codeblock pre {
+  margin: 0; padding: 14px 16px; background: transparent; border: 0; border-radius: 0;
+  font-size: .82rem; line-height: 1.7;
+}
+.codeblock pre code { background: none; border: 0; padding: 0; font-size: inherit; white-space: pre; }
+.copy-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  background: var(--bg-2); border: 1px solid var(--line); color: var(--muted);
+  border-radius: 7px; padding: 4px 10px; font-size: .74rem; font-weight: 700;
+  cursor: pointer; font-family: var(--font);
+}
+.copy-btn:hover { border-color: var(--accent); color: var(--text); }
+.copy-btn:active { transform: translateY(1px); }
+.qs-next { list-style: none; padding: 0; margin: 0; display: grid; gap: 7px; }
+.qs-next li { position: relative; padding-left: 24px; color: var(--muted); font-size: .9rem; }
+.qs-next li::before { content: "\2192"; position: absolute; left: 0; color: var(--accent-2); font-weight: 800; }
+.qs-next li b { color: var(--text); }
+.qs-foot {
+  margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line-soft);
+  display: flex; gap: 8px 16px; flex-wrap: wrap; align-items: center;
+  color: var(--muted-2); font-size: .84rem;
+}
+.qs-foot a { font-weight: 700; }
+@media (max-width: 620px) {
+  .qs-head, .qs-panel { padding-left: 14px; padding-right: 14px; }
+  .tabs { padding-left: 10px; padding-right: 10px; }
+  .tab { padding: 8px 11px; font-size: .84rem; }
+  .codeblock pre { font-size: .76rem; }
+}
+
+/* ---------- Join the team ---------- */
+.join { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: start; }
+@media (max-width: 880px) { .join { grid-template-columns: 1fr; } }
+.join-card {
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 24px; box-shadow: var(--shadow);
+}
+.join-card.plain { background: var(--panel); box-shadow: none; }
+.join-card h3 { margin-top: 0; }
+.join-alt { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 18px; }
+.hp-field {
+  position: absolute !important; left: -9999px !important; top: auto !important;
+  width: 1px; height: 1px; overflow: hidden;
+}
+.form-note { color: var(--muted-2); font-size: .8rem; margin: 10px 0 0; }
 
 /* ---------- Print ---------- */
 @media print {

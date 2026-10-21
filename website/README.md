@@ -8,8 +8,8 @@ no build step at serve time.
 
 | File | What it covers |
 |---|---|
-| `index.html` | Home — the problem, the model (every node is miner + AI provider), how it works, positioning, features, token summary. |
-| `download.html` | One-command installers, rolling release artifacts (`windows-latest` / `linux-latest` / `macos-latest`), prerequisites. Notes that the repo is private today. |
+| `index.html` | Home — the problem, the model (every node is miner + AI provider), a **copy-and-run quickstart** with OS tabs (Windows / Linux / macOS-soon), how it works, positioning, features, token summary, and the **Join the team** section with an application form (`#join`). |
+| `download.html` | One-command installers, rolling release artifacts (`windows-latest` / `linux-latest` / `macos-latest`), prerequisites. Downloads come from the public mirror `crewlyllc/gpn_coin` (no token needed). |
 | `deploy.html` | Step-by-step: run a node (mine + serve), how serving works, an access point, the Windows path, config and ports. |
 | `buy.html` | Honest status: testnet today (faucet / mining / job earnings), the mainnet listing plan, fair launch + treasury/vesting + halving, disclaimer. |
 | `ai.html` | The AI marketplace: OpenAI-compatible chat + job API, models, pricing, and a **“Try it”** widget (see the mixed-content note). |
@@ -19,7 +19,7 @@ no build step at serve time.
 | `docs/` | **Generated** static docs pages — see below. |
 | `assets/style.css` | Shared styles. Dark-first, light-friendly (theme toggle), responsive, print-friendly. |
 | `assets/docs.css` | Prose styles for the docs pages. |
-| `assets/app.js` | Theme toggle, mobile nav, footer year, copy buttons, and the AI “Try it” widget. |
+| `assets/app.js` | Theme toggle, mobile nav, footer year, copy buttons, accessible OS tabs (`role=tablist`, arrow keys, remembered in `sessionStorage`), the AI “Try it” widget, and the join form. |
 | `assets/og.png` | 1200×630 OpenGraph/Twitter card. |
 | `robots.txt`, `sitemap.xml` | Indexing metadata for the canonical domain. |
 
@@ -62,8 +62,44 @@ Serve it over `http://` (not `file://`) if you want the AI widget to make reques
   `curl` example instead. This is expected until an HTTPS access point exists.
 - **Testnet framing** is intentional and repeated (banner on `buy.html`/`access-points.html`,
   a footer note everywhere). Keep it that way.
-- **Downloads are private today.** `download.html` links to the rolling GitHub releases but
-  warns that the repository requires access.
+- **Downloads are public.** `download.html` and the home quickstart point at the anonymous mirror
+  `crewlyllc/gpn_coin` (read-only copy, code + release assets). Development happens in the private
+  `jeremyzguo/gpn_coin`.
+
+## `POST /api/join` (home-page applications)
+
+`worker/worker.js` owns this route; `/api/*` is in `assets.run_worker_first` so the request reaches
+applications before the asset layer (a POST to a path with no asset is otherwise answered with a
+bodyless 405).
+
+- Body: `{name, email, role, message}` — lengths are capped (80 / 200 / 60 / 4000), the honeypot
+  field `website` must stay empty, and the route answers **200 JSON** in every case
+  (`ok:false` + `error` for a rejected submission, so the page can render one code path).
+- Rate limit: 5 applications per IP per hour (`cf-connecting-ip`), via `JOIN_KV` when bound and an
+  in-isolate `Map` otherwise.
+- Storage: `app:<ISO timestamp>:<id>` in the **`JOIN_KV`** namespace, value = JSON record
+  (name/email/role/message/ip/country/user-agent).
+
+**One manual Cloudflare step is required before applications are stored:**
+
+```bash
+npx wrangler kv namespace create JOIN_KV
+# copy the printed id into wrangler.jsonc → "kv_namespaces"
+```
+
+The binding in `wrangler.jsonc` ships **commented out** on purpose: an id that does not exist in the
+account fails the build. Until it is set, the route returns `{ok:true, stored:false, fallback:"email"}`
+and the page swaps the success message for a prefilled `mailto:hello@gpncoin.ai` draft — a
+half-configured deploy can never look like a saved application.
+
+Read applications with:
+
+```bash
+npx wrangler kv key list --namespace-id <id> --prefix "app:"
+npx wrangler kv key get  --namespace-id <id> --key "app:<timestamp>:<id>"
+```
+
+Tests: `node --test worker/worker.test.mjs` (includes 7 `/api/join` cases with a mock KV).
 
 ## Deploy
 

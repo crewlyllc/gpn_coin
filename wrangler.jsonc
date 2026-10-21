@@ -9,7 +9,16 @@
     "not_found_handling": "404-page",
     // These paths have no file in ./website — the Worker must answer them
     // before the asset layer (otherwise they fall through to 404.html).
-    "run_worker_first": ["/seeds.json", "/seeds", "/bootnodes.txt", "/seeds.txt", "/releases.json"]
+    // /api/* is the same story: a POST to a path with no asset is answered by
+    // the asset layer with a bodyless 405 unless the Worker runs first.
+    "run_worker_first": [
+      "/seeds.json",
+      "/seeds",
+      "/bootnodes.txt",
+      "/seeds.txt",
+      "/releases.json",
+      "/api/*"
+    ]
   },
   "vars": {
     // Access point used for the live half of the directory. Leave empty for a
@@ -20,6 +29,23 @@
     // yields the static seed list — never a 500.
     "AP_URL": "http://142.129.54.88:8092"
   },
+  // ── Home-page job applications ("/api/join") ────────────────────────────
+  // Applications are written to the JOIN_KV namespace under "app:<ISO>:<id>".
+  // The binding is COMMENTED OUT on purpose: the namespace id is per-account
+  // and a binding pointing at a namespace that does not exist fails the
+  // Cloudflare build. Create it once, then uncomment:
+  //
+  //   1) npx wrangler kv namespace create JOIN_KV
+  //   2) put the printed id in the block below and uncomment it
+  //   3) redeploy, then read applications with
+  //        npx wrangler kv key list --namespace-id <id> --prefix "app:"
+  //        npx wrangler kv key get  --namespace-id <id> --key "app:<ts>:<id>"
+  //
+  // With no binding the route still answers 200 JSON with `stored: false`,
+  // and the page falls back to a prefilled mailto draft — never a silent loss.
+  // "kv_namespaces": [
+  //   { "binding": "JOIN_KV", "id": "<id from step 1>" }
+  // ],
   "routes": [
     { "pattern": "gpncoin.ai", "custom_domain": true },
     { "pattern": "www.gpncoin.ai", "custom_domain": true }

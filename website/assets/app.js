@@ -194,7 +194,138 @@
     });
   }
 
-  function init() { wireTheme(); wireNav(); wireYear(); wireTryIt(); wireCopy(); }
+  /* ---------- OS tabs (home quickstart) ---------- */
+  function wireTabs() {
+    var lists = document.querySelectorAll('[role="tablist"]');
+    if (!lists.length) return;
+    Array.prototype.forEach.call(lists, function (list) {
+      var tabs = Array.prototype.slice.call(list.querySelectorAll('[role="tab"]'));
+      if (!tabs.length) return;
+      var key = "gpn-tabs:" + (list.getAttribute("aria-label") || "tabs");
+
+      function panelOf(tab) {
+        var id = tab.getAttribute("aria-controls");
+        return id ? document.getElementById(id) : null;
+      }
+
+      function select(tab, focus) {
+        tabs.forEach(function (t) {
+          var on = t === tab;
+          t.setAttribute("aria-selected", String(on));
+          t.tabIndex = on ? 0 : -1;
+          t.classList.toggle("is-selected", on);
+          var p = panelOf(t);
+          if (p) p.hidden = !on;
+        });
+        if (focus) tab.focus();
+        try { sessionStorage.setItem(key, tab.getAttribute("data-os") || tab.id); } catch (e) {}
+      }
+
+      /* Restore the visitor's last choice, else guess the OS once. */
+      var wanted = null;
+      try { wanted = sessionStorage.getItem(key); } catch (e) {}
+      if (!wanted) {
+        var ua = (navigator.userAgent || "") + " " + (navigator.platform || "");
+        if (/Win/i.test(ua)) wanted = "windows";
+        else if (/Mac|iPhone|iPad/i.test(ua)) wanted = "macos";
+        else wanted = "linux";
+      }
+      var initial = tabs.filter(function (t) { return t.getAttribute("data-os") === wanted; })[0];
+      select(initial || tabs[0], false);
+
+      list.addEventListener("click", function (e) {
+        var tab = e.target.closest ? e.target.closest('[role="tab"]') : null;
+        if (tab && list.contains(tab)) select(tab, false);
+      });
+
+      list.addEventListener("keydown", function (e) {
+        var i = tabs.indexOf(e.target);
+        if (i < 0) return;
+        var next = null;
+        if (e.key === "ArrowRight" || e.key === "ArrowDown") next = tabs[(i + 1) % tabs.length];
+        else if (e.key === "ArrowLeft" || e.key === "ArrowUp") next = tabs[(i - 1 + tabs.length) % tabs.length];
+        else if (e.key === "Home") next = tabs[0];
+        else if (e.key === "End") next = tabs[tabs.length - 1];
+        if (next) { e.preventDefault(); select(next, true); }
+      });
+    });
+  }
+
+  /* ---------- Join-the-team application form ---------- */
+  function wireJoinForm() {
+    var form = document.getElementById("join-form");
+    if (!form) return;
+    var out = document.getElementById("join-result");
+    var submit = document.getElementById("join-submit");
+    var emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+    function render(cls, html) {
+      if (!out) return;
+      out.className = "result" + (cls ? " " + cls : "");
+      out.innerHTML = html;
+    }
+    function val(name) {
+      var el = form.elements[name];
+      return el && typeof el.value === "string" ? el.value.trim() : "";
+    }
+    function fail(msg) { render("", '<span class="err">Check that field.</span>\n' + escapeHtml(msg)); }
+
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+
+      /* Honeypot: a real person never sees this input. Stay silent, look successful. */
+      if (val("website")) { render("", '<span class="ok">Thanks \u2014 application received.</span>'); form.reset(); return; }
+
+      var name = val("name"), email = val("email"), role = val("role"), message = val("message");
+      if (name.length < 2) return fail("Please tell us your name (2\u201380 characters).");
+      if (name.length > 80) return fail("That name is too long \u2014 80 characters max.");
+      if (!emailRe.test(email) || email.length > 200) return fail("That email address doesn't look right.");
+      if (message.length > 4000) return fail("Please keep the message under 4000 characters.");
+
+      var body = { name: name, email: email, role: role || "unspecified", message: message };
+      if (submit) submit.disabled = true;
+      render("empty", '<span class="spinner"></span> &nbsp;Sending&hellip;');
+
+      fetch("/api/join", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      }).then(function (res) {
+        return res.text().then(function (text) {
+          var data;
+          try { data = JSON.parse(text); } catch (err) { data = null; }
+          if (!res.ok || !data) throw new Error("HTTP " + res.status);
+          return data;
+        });
+      }).then(function (data) {
+        if (!data.ok) {
+          render("", '<span class="err">Not sent.</span>\n' + escapeHtml(data.error || "Something went wrong."));
+          return;
+        }
+        var ref = data.reference ? '<span class="meter">reference ' + escapeHtml(data.reference) + '</span>' : "";
+        if (data.stored === false) {
+          var mail = "mailto:hello@gpncoin.ai?subject=" + encodeURIComponent("Join GPN") +
+            "&body=" + encodeURIComponent(name + " <" + email + ">\n" + (role || "") + "\n\n" + message);
+          render("", '<span class="ok">Almost \u2014 one more step.</span>\n' +
+            "Our form couldn't save your application automatically. Please send the same details by email " +
+            '(<a href="' + escapeHtml(mail) + '">open the draft</a>) and we\'ll reply.' + ref);
+          return;
+        }
+        render("", '<span class="ok">Application received \u2014 thank you.</span>\n' +
+          "We read everything and reply from hello@gpncoin.ai. If you have a repo or benchmark, " +
+          "replying to that address with a link is the fastest way to get our attention." + ref);
+        form.reset();
+      }).catch(function (err) {
+        var mail = "mailto:hello@gpncoin.ai?subject=" + encodeURIComponent("Join GPN") +
+          "&body=" + encodeURIComponent(name + " <" + email + ">\n" + (role || "") + "\n\n" + message);
+        render("", '<span class="err">Could not reach the server.</span>\n' +
+          escapeHtml(String(err.message || err)) + "\n" +
+          'Please <a href="' + escapeHtml(mail) + '">send it by email instead</a>.');
+      }).finally(function () { if (submit) submit.disabled = false; });
+    });
+  }
+
+  function init() { wireTheme(); wireNav(); wireYear(); wireTryIt(); wireCopy(); wireTabs(); wireJoinForm(); }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
   else init();
 })();
