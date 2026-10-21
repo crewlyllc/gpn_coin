@@ -1691,6 +1691,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_signer(&signer_uri),
     );
     spawn_janitor(client.clone(), rt.clone());
+    // Item #2: off-chain escrow (payment channels). One channel per provider,
+    // opened once; per-job claim+payment are signed messages (zero txs). Any
+    // failure falls back to the on-chain job path below.
+    let hub = gpn_agent::hub_ap::HubCtx::from_env(&signer_uri);
+    gpn_agent::hub_ap::spawn_settler(hub.clone(), rt.clone(), client.clone());
 
     let registry = Arc::new(Mutex::new(Vec::<Provider>::new()));
     // #46 Phase 3 step 2: capabilities delivered by providers' own pull polls.
@@ -1753,6 +1758,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let denylist = denylist.clone();
         let denylist_path = denylist_path.clone();
         let reports_path = reports_path.clone();
+        let hub = hub.clone();
         std::thread::spawn(move || {
             let url = req.url().to_string();
             let method = req.method().clone();
@@ -2511,6 +2517,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             return;
                         }
                     };
+
+                    // ── item #2: off-chain escrow (channel) fast path ────────
+                    // Route the job to the provider with signed messages only —
+                    // no `create_job`/`claim`/`complete`. Falls through to the
+                    // on-chain path on ANY failure (safe fallback), so enabling
+                    // the mode cannot make a job unservable.
+                    if hub.enabled && !is_gen {
+                        let prompt_s = prompt.clone().unwrap_or_default();
+                        let price = ppt.saturating_mul(mtok_eff as u128).max(1);
+                        if let Some(out) = gpn_agent::hub_ap::try_channel_job(
+                            &hub,
+                            &rt,
+                            &client,
+                            &provider.address,
+                            &provider.status_url,
+                            &model,
+                            &prompt_s,
+                            mtok_eff,
+                            price,
+                        ) {
+                            let mut resp = json!({
+                                "ok": true,
+                                "escrow": "channel",
+                                "channel_id": out.channel_id,
+                                "job_id": out.job_id,
+                                "routed_to": provider.address,
+                                "model": model,
+                                "pull": needs_pull,
+                                "status_url": provider.status_url,
+                                "latency_ms": provider.latency_ms,
+                                "load": format!("{}/{}", provider.active, provider.capacity),
+                                "channel_balance_provider": out.balance_provider.to_string(),
+                                "answer": {
+                                    "status": "done",
+                                    "response": out.text,
+                                    "off_chain": true,
+                                },
+                            });
+                            resp["usage"] = usage_json(out.usage);
+                            let r = Response::from_string(resp.to_string())
+                                .with_header(hdr.clone());
+                            let _ = req.respond(r);
+                            return;
+                        }
+                    }
 
                     // create the on-chain job (escrow) as the access-point signer
                     // workload hash: the marketplace rejects all-zeros, but we do NOT

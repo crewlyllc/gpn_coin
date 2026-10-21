@@ -150,10 +150,160 @@ fn should_reconcile() -> bool {
     }
 }
 
+/// State for the provider side of the AP-hub off-chain escrow protocol
+/// (item #2). The provider accepts signed assignments, runs the work, and signs
+/// the result + its half of the channel settlement — all without a tx.
+pub struct ChannelServeCtx {
+    pub signer: std::sync::Arc<Sr25519Signer>,
+    pub me: gpn_agent::hub_channel::PubKey,
+    pub state_path: std::path::PathBuf,
+    /// Chain client used to verify a channel exists/is funded on first sight.
+    pub chain: Option<gpn_agent::chain::ChainClient>,
+    /// Escape hatch for offline/dev (`GPN_CHANNEL_SKIP_CHAIN_CHECK=1`).
+    pub skip_chain_check: bool,
+}
+
+type ProviderChannels = HashMap<u64, gpn_agent::hub_channel::ProviderChannel>;
+
+fn load_provider_channels(path: &std::path::Path) -> ProviderChannels {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_provider_channels(path: &std::path::Path, chans: &ProviderChannels) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(s) = serde_json::to_string_pretty(chans) {
+        let tmp = path.with_extension("tmp");
+        if std::fs::write(&tmp, s).is_ok() {
+            let _ = std::fs::rename(&tmp, path);
+        }
+    }
+}
+
+/// `POST /channel/job` — one off-chain escrowed job.
+///
+/// Body: a signed `Assignment` (see `gpn_agent::hub_channel`). Response: a
+/// signed `JobResultMsg` (output + payment update), or `{ok:false,error}`.
+fn serve_channel_job(
+    ctx: &ChannelServeCtx,
+    rt: &tokio::runtime::Runtime,
+    body: &str,
+) -> (u16, serde_json::Value) {
+    use gpn_agent::hub_channel::{Assignment, JobResultMsg, ProviderChannel, PubKey};
+
+    let a: Assignment = match serde_json::from_str(body) {
+        Ok(a) => a,
+        Err(e) => {
+            return (
+                400,
+                serde_json::json!({"ok": false, "error": format!("bad assignment: {e}")}),
+            )
+        }
+    };
+    if a.provider != ctx.me {
+        return (
+            409,
+            serde_json::json!({"ok": false, "error": "assignment names a different provider"}),
+        );
+    }
+
+    let mut chans = load_provider_channels(&ctx.state_path);
+    let first_sight = !chans.contains_key(&a.channel_id);
+
+    if first_sight {
+        if !ctx.skip_chain_check {
+            let Some(chain) = ctx.chain.as_ref() else {
+                return (
+                    503,
+                    serde_json::json!({"ok": false, "error": "no chain client to verify the channel"}),
+                );
+            };
+            let Some(c) = rt.block_on(chain.get_channel(a.channel_id)) else {
+                return (
+                    409,
+                    serde_json::json!({"ok": false, "error": "unknown channel id"}),
+                );
+            };
+            let want_req = format!("0x{}", hex::encode(a.requestor.0));
+            if !c.is_open
+                || c.provider_hex != format!("0x{}", hex::encode(ctx.me.0))
+                || c.requestor_hex != want_req
+                || c.deposit < a.deposit
+            {
+                return (
+                    409,
+                    serde_json::json!({"ok": false, "error": "channel does not match the assignment"}),
+                );
+            }
+            chans.insert(
+                a.channel_id,
+                ProviderChannel::new(a.channel_id, c.deposit, PubKey(a.requestor.0)),
+            );
+        } else {
+            chans.insert(
+                a.channel_id,
+                ProviderChannel::new(a.channel_id, a.deposit, PubKey(a.requestor.0)),
+            );
+        }
+    }
+
+    let ch = chans.get_mut(&a.channel_id).unwrap();
+    if let Err(e) = ch.accept(&a) {
+        return (
+            409,
+            serde_json::json!({"ok": false, "error": format!("assignment rejected: {e}")}),
+        );
+    }
+    // Persist the accepted (pre-paid) state BEFORE running the work, so a crash
+    // mid-inference cannot lose the requestor's signed payment.
+    save_provider_channels(&ctx.state_path, &chans);
+
+    let model_r = resolve_model(&a.model);
+    let temp = (a.temperature_milli as f32) / 1000.0;
+    let out = rt.block_on(run_inference_with_usage(
+        &model_r,
+        &a.prompt,
+        temp,
+        a.max_tokens.max(1),
+    ));
+    let ch = chans.get_mut(&a.channel_id).unwrap();
+    let msg: JobResultMsg = match out {
+        Ok((text, _hash, usage)) => {
+            let (pt, ct) = usage
+                .map(|u| (u.prompt_tokens, u.completion_tokens))
+                .unwrap_or((0, 0));
+            ch.sign_result(&ctx.signer, a.job_id, &text, pt, ct)
+                .unwrap_or_else(|e| panic!("sign_result after accept must succeed: {e}"))
+        }
+        Err(e) => {
+            let err = e.to_string();
+            ch.sign_refund(&ctx.signer, a.job_id, &err)
+                .unwrap_or_else(|e| panic!("sign_refund after accept must succeed: {e}"))
+        }
+    };
+    let balance_provider = ch.state.balance_provider;
+    save_provider_channels(&ctx.state_path, &chans);
+    println!(
+        "[channel] job {} on channel {} {} (provider balance {})",
+        a.job_id,
+        a.channel_id,
+        if msg.ok { "served" } else { "refunded" },
+        balance_provider
+    );
+    (200, serde_json::to_value(&msg).unwrap_or_default())
+}
+
 /// Off-chain, chain-free inference endpoint ("passthrough" mode).
 /// `POST /infer {model,prompt,temperature,max_tokens}` → `{ok,text,model}`. NO
 /// chain, escrow, commitment, or billing — free/private tier. Loopback bind.
-fn spawn_infer_server(listen: &str) {
+///
+/// Also serves `POST /channel/job`: the off-chain **escrowed** path (item #2),
+/// where payment is a mutually-signed channel update instead of a tx.
+fn spawn_infer_server(listen: &str, chan: Option<ChannelServeCtx>) {
     let listen = listen.to_string();
     std::thread::spawn(move || {
         let server = match tiny_http::Server::http(&listen) {
@@ -164,12 +314,35 @@ fn spawn_infer_server(listen: &str) {
             }
         };
         println!("[infer] passthrough inference endpoint on http://{listen} (POST /infer)");
+        if chan.is_some() {
+            println!("[channel] off-chain escrow endpoint on http://{listen} (POST /channel/job)");
+        }
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("infer runtime");
         for mut req in server.incoming_requests() {
             let path = req.url().split('?').next().unwrap_or("").to_string();
+            if req.method() == &tiny_http::Method::Post && path == "/channel/job" {
+                let mut body = String::new();
+                let _ = req.as_reader().read_to_string(&mut body);
+                let hdr =
+                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                        .unwrap();
+                let (code, resp) = match chan.as_ref() {
+                    Some(ctx) => serve_channel_job(ctx, &rt, &body),
+                    None => (
+                        404,
+                        serde_json::json!({"ok": false, "error": "channel mode disabled on this provider"}),
+                    ),
+                };
+                let _ = req.respond(
+                    tiny_http::Response::from_string(resp.to_string())
+                        .with_header(hdr)
+                        .with_status_code(code),
+                );
+                continue;
+            }
             let is_infer = req.method() == &tiny_http::Method::Post && path == "/infer";
             if !is_infer {
                 let _ = req
@@ -312,7 +485,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let listen =
             std::env::var("GPN_INFER_LISTEN").unwrap_or_else(|_| "127.0.0.1:8094".to_string());
-        spawn_infer_server(&listen);
+        // Item #2: accept off-chain escrowed jobs over the same loopback server.
+        let chan = {
+            let mode = std::env::var("GPN_ESCROW_MODE")
+                .unwrap_or_else(|_| "channel".to_string())
+                .to_ascii_lowercase();
+            if mode == "onchain" || mode == "off" {
+                None
+            } else {
+                let state_path = match std::env::var("GPN_PROVIDER_CHANNEL_STATE") {
+                    Ok(p) => std::path::PathBuf::from(p),
+                    Err(_) => {
+                        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+                        std::path::PathBuf::from(format!("{home}/.gpn/provider_channels.json"))
+                    }
+                };
+                gpn_agent::hub_channel::PubKey::from_hex(&me).map(|pk| ChannelServeCtx {
+                    signer: std::sync::Arc::new(
+                        Sr25519Signer::from_uri(&signer_uri).expect("channel signer"),
+                    ),
+                    me: pk,
+                    state_path,
+                    chain: Some(client.clone()),
+                    skip_chain_check: std::env::var("GPN_CHANNEL_SKIP_CHAIN_CHECK")
+                        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                        .unwrap_or(false),
+                })
+            }
+        };
+        spawn_infer_server(&listen, chan);
     }
 
     loop {

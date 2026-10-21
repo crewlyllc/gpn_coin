@@ -17,6 +17,7 @@
 //!   gpn_channel sign        <signer_uri> <channel_id> <bal_requestor> <bal_provider> <nonce>
 //!   gpn_channel close       <endpoint> <submitter_uri> <channel_id> <bal_requestor> <bal_provider> <nonce> <sig_requestor_hex> <sig_provider_hex>
 //!   gpn_channel force-close <endpoint> <submitter_uri> <channel_id> <bal_requestor> <bal_provider> <nonce> <sig_counterparty_hex>
+//!   gpn_channel info|id    <endpoint> …            — inspect / look up a channel
 
 use gpn_agent::chain::channel::channel_settle_payload;
 use gpn_agent::chain::signer::Sr25519Signer;
@@ -45,7 +46,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("help");
 
     match cmd {
-        "open" => {
+        // `deposit` is the client-facing alias for `open`: the one on-chain tx
+        // that funds a channel; everything after it is off-chain.
+        "open" | "deposit" => {
             let endpoint = args.get(2).ok_or("missing <endpoint>")?;
             let requestor_uri = args.get(3).ok_or("missing <requestor_uri>")?;
             let provider = provider_pub(args.get(4).ok_or("missing <provider_ss58>")?)?;
@@ -67,7 +70,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("payload {}", hex::encode(payload));
             println!("sig     {}", hex::encode(sig));
         }
-        "close" => {
+        // `withdraw` is the client-facing alias for a cooperative `close`.
+        "close" | "withdraw" => {
             let endpoint = args.get(2).ok_or("missing <endpoint>")?;
             let submitter_uri = args.get(3).ok_or("missing <submitter_uri>")?;
             let channel_id: u64 = args.get(4).ok_or("missing <channel_id>")?.parse()?;
@@ -96,6 +100,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await?;
             println!("✅ force_close_channel submitted (channel {channel_id}, nonce {nonce})");
         }
+        "info" => {
+            let endpoint = args.get(2).ok_or("missing <endpoint>")?;
+            let channel_id: u64 = args.get(3).ok_or("missing <channel_id>")?.parse()?;
+            let client = ChainClient::new(endpoint).await?;
+            match client.get_channel(channel_id).await {
+                Some(c) => println!(
+                    "channel {}\n  requestor {}\n  provider  {}\n  deposit   {}\n  balances  req={} prov={}\n  nonce     {}\n  deadline  {}\n  open      {}",
+                    c.channel_id, c.requestor_hex, c.provider_hex, c.deposit,
+                    c.balance_requestor, c.balance_provider, c.nonce, c.deadline, c.is_open
+                ),
+                None => eprintln!("channel {channel_id} not found (or chain unreachable)"),
+            }
+        }
+        "id" => {
+            let endpoint = args.get(2).ok_or("missing <endpoint>")?;
+            let requestor_uri = args.get(3).ok_or("missing <requestor_uri>")?;
+            let provider = provider_pub(args.get(4).ok_or("missing <provider_ss58>")?)?;
+            let signer = Sr25519Signer::from_uri(requestor_uri)?;
+            let client = ChainClient::new(endpoint).await?;
+            match client.get_channel_id(&signer.public_key(), &provider).await {
+                Some(id) => println!("{id}"),
+                None => eprintln!("no live channel for that (requestor, provider) pair"),
+            }
+        }
         _ => {
             eprintln!(
                 "gpn_channel — off-chain escrow channel CLI\n\n\
@@ -103,7 +131,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                  gpn_channel open        <endpoint> <requestor_uri> <provider_ss58> <amount> <ttl>\n\
                  gpn_channel sign        <signer_uri> <channel_id> <bal_requestor> <bal_provider> <nonce>\n\
                  gpn_channel close       <endpoint> <submitter_uri> <channel_id> <br> <bp> <nonce> <sig_requestor_hex> <sig_provider_hex>\n\
-                 gpn_channel force-close <endpoint> <submitter_uri> <channel_id> <br> <bp> <nonce> <sig_counterparty_hex>"
+                 gpn_channel force-close <endpoint> <submitter_uri> <channel_id> <br> <bp> <nonce> <sig_counterparty_hex>\n\
+                 gpn_channel deposit     (alias of open — the once-per-channel on-chain funding tx)\n\
+                 gpn_channel withdraw    (alias of close — cooperative settle)\n\
+                 gpn_channel info        <endpoint> <channel_id>\n\
+                 gpn_channel id          <endpoint> <requestor_uri> <provider_ss58>"
             );
             std::process::exit(1);
         }
