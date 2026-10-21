@@ -107,8 +107,18 @@ EMBEDDED_PUBKEY_HEX = "78015fab541c9a6230d3fb302a89f1a9950d1b181652cdf0a65901b6f
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def canonical_text(man: dict) -> bytes:
-    """The exact bytes that are signed and verified."""
+def canonical_text(man: dict, include_layout: bool = True) -> bytes:
+    """The exact bytes that are signed and verified.
+
+    Must match `gpn-agent/src/update.rs::ReleaseManifest::canonical_text`
+    (`include_layout=True`) and `canonical_text_legacy` (`False`).
+    ` layout=` and `file=` lines are **additive**: with them absent the output is
+    byte-identical to the pre-bundle format, so old manifests keep verifying.
+
+    `include_layout=False` reproduces the rendering a **pre-bundle node**
+    computes. Publishing that is the only way an already-deployed fleet can
+    verify the manifest at all — see `--sign-layout`.
+    """
     assets = sorted(
         man.get("assets", []), key=lambda a: (a["os"], a["arch"], a["url"])
     )
@@ -120,10 +130,18 @@ def canonical_text(man: dict) -> bytes:
         f"signing_key={man.get('signing_key', '').lower()}",
     ]
     for a in assets:
-        lines.append(
+        line = (
             f"asset={a['os']}/{a['arch']} {a['url']} "
             f"{a['sha256'].lower()} {int(a.get('size', 0))}"
         )
+        layout = (a.get("layout") or "").strip().lower()
+        if include_layout and layout:
+            line += f" layout={layout}"
+        lines.append(line)
+        if include_layout:
+            files = a.get("files") or {}
+            for name in sorted(files):
+                lines.append(f"file={a['os']}/{a['arch']} {name} {files[name].lower()}")
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
@@ -235,6 +253,137 @@ def read_build_id(path: Path) -> dict:
     return {}
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Bundles: a release is an archive of ~60 binaries, not one executable
+# ─────────────────────────────────────────────────────────────────────────────
+
+BUNDLE_LAYOUT = "bundle"
+_GH_RELEASE_RE = re.compile(
+    r"^https?://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/releases/download/"
+    r"(?P<tag>[^/]+)/(?P<asset>[^/?#]+)$"
+)
+_BUNDLE_EXTS = (".tar.gz", ".tgz", ".tar", ".zip")
+
+
+def looks_like_bundle(target: str) -> bool:
+    from urllib.parse import urlparse
+
+    path = urlparse(target).path.lower() if "://" in target else target.lower()
+    return path.endswith(_BUNDLE_EXTS)
+
+
+def _github_token() -> str:
+    tok = os.environ.get("GITHUB_TOKEN") or os.environ.get("GPN_GITHUB_TOKEN") or ""
+    if tok:
+        return tok.strip()
+    for p in (
+        Path.home() / ".openclaw/credentials/github-gpn-pat.txt",
+        Path.home() / ".config/gpn/github-token",
+    ):
+        if p.is_file():
+            return p.read_text().strip()
+    return ""
+
+
+def github_asset_digest(url: str) -> tuple[str, int]:
+    """Read `(sha256, size)` for a GitHub release asset from the API.
+
+    Never guess a digest: the API's `digest` field is what GitHub computed over
+    the bytes it serves, which is exactly what a node will hash.
+    """
+    import urllib.request
+
+    m = _GH_RELEASE_RE.match(url)
+    if not m:
+        raise SystemExit(
+            f"cannot determine the digest of {url}: it is not a GitHub release "
+            "download URL. Pass --bundle-digest os/arch=SHA256:SIZE."
+        )
+    api = (
+        f"https://api.github.com/repos/{m['owner']}/{m['repo']}"
+        f"/releases/tags/{m['tag']}"
+    )
+    req = urllib.request.Request(api)
+    req.add_header("Accept", "application/vnd.github+json")
+    req.add_header("User-Agent", "gpn-release-manifest/1")
+    tok = _github_token()
+    if tok:
+        req.add_header("Authorization", f"Bearer {tok}")
+    with urllib.request.urlopen(req, timeout=30) as r:
+        rel = json.loads(r.read())
+    for a in rel.get("assets", []):
+        if a.get("name") != m["asset"]:
+            continue
+        digest = a.get("digest") or ""
+        if not digest.startswith("sha256:"):
+            raise SystemExit(
+                f"GitHub reports no sha256 digest for {m['asset']} — pass "
+                "--bundle-digest os/arch=SHA256:SIZE"
+            )
+        print(
+            f"  {m['asset']}: sha256={digest[7:]} size={a['size']} (from the GitHub API)",
+            file=sys.stderr,
+        )
+        return digest[7:].lower(), int(a["size"])
+    raise SystemExit(f"{m['asset']} is not an asset of release {m['tag']}")
+
+
+def read_bundle_stamp(path: Path) -> dict:
+    """Best-effort build stamp of a **local** bundle archive.
+
+    Streams the archive (gzip/tar or zip) and looks for the same
+    `gpn-build-v1 version=…` literal `build.rs` injects. Used only to
+    cross-check `--version`; a remote bundle cannot be introspected, so there
+    `--version` is the input.
+    """
+    name = path.name.lower()
+
+    def scan(data: bytes) -> dict:
+        text = data.decode("ascii", "ignore")
+        for m in _STAMP_RE.finditer(text):
+            if _VERSION_RE.match(m.group("version")):
+                return {
+                    "version": m.group("version"),
+                    "sha": m.group("sha"),
+                    "build_id": m.group(0),
+                }
+        return {}
+
+    import gzip as _gz
+
+    if name.endswith((".tar.gz", ".tgz", ".tar")):
+        opener = _gz.open if name.endswith((".tar.gz", ".tgz")) else open
+        with opener(path, "rb") as f:
+            while True:
+                chunk = f.read(1 << 20)
+                if not chunk:
+                    break
+                hit = scan(chunk)
+                if hit:
+                    return hit
+    elif name.endswith(".zip"):
+        import zipfile
+
+        with zipfile.ZipFile(path) as z:
+            for info in z.infolist():
+                base = Path(info.filename).name
+                if base not in ("gpn_node", "gpn_node.exe", "gpn-node", "gpn-node.exe"):
+                    continue
+                hit = scan(z.read(info))
+                if hit:
+                    return hit
+    return {}
+
+
+def dir_file_hashes(root: Path) -> dict[str, str]:
+    """Per-file sha256 of an unpacked bundle, keyed by relative posix path."""
+    out: dict[str, str] = {}
+    for p in sorted(root.rglob("*")):
+        if p.is_file():
+            out[p.relative_to(root).as_posix()] = sha256_file(p)
+    return out
+
+
 def policy_min_version(version: str) -> str:
     """The default cutoff: `<MAJOR>.<MINOR>.0` of the version being published."""
     major, minor = version.split(".")[:2]
@@ -281,10 +430,69 @@ def build_manifest(args) -> dict:
                 "size": p.stat().st_size,
             }
         )
+
+    # ── bundles: the normal shape of a GPN release ──────────────────────────
+    for spec in getattr(args, "bundle", []) or []:
+        if "=" not in spec:
+            raise SystemExit(f"--bundle must be os/arch=URL_OR_PATH, got {spec!r}")
+        platform, target = spec.split("=", 1)
+        if "/" not in platform:
+            raise SystemExit(f"--bundle platform must be os/arch, got {platform!r}")
+        osname, arch = platform.split("/", 1)
+        platform = platform.lower()
+
+        local = None if "://" in target else Path(target)
+        if local is not None:
+            if not local.is_file():
+                raise SystemExit(f"--bundle {spec}: {local} does not exist")
+            url = f"{args.url_base.rstrip('/')}/{local.name}"
+        else:
+            if not looks_like_bundle(target):
+                raise SystemExit(
+                    f"--bundle {spec}: {target} is not a .tar.gz/.tar/.zip archive"
+                )
+            url = target
+
+        override = _digest_override(args.bundle_digest, platform)
+        if override:
+            sha, size = override
+        elif local is not None:
+            sha, size = sha256_file(local), local.stat().st_size
+        else:
+            sha, size = github_asset_digest(url)
+
+        files: dict[str, str] = {}
+        files_dir = _files_dir(args.bundle_files, platform)
+        if files_dir:
+            root = Path(files_dir)
+            if not root.is_dir():
+                raise SystemExit(f"--bundle-files {platform}: {root} is not a directory")
+            files = dir_file_hashes(root)
+            if not files:
+                raise SystemExit(f"--bundle-files {platform}: {root} is empty")
+
+        if local is not None:
+            stamp = read_bundle_stamp(local)
+            if stamp:
+                stamps.append((platform, stamp))
+                print(f"  {platform}: bundle version={stamp.get('version')} sha={stamp.get('sha', '?')}")
+
+        assets.append(
+            {
+                "os": osname.lower(),
+                "arch": arch.lower(),
+                "url": url,
+                "sha256": sha.lower(),
+                "size": int(size),
+                "layout": BUNDLE_LAYOUT,
+                **({"files": files} if files else {}),
+            }
+        )
+
     if not assets and not getattr(args, "allow_empty_assets", False):
         raise SystemExit(
-            "at least one --asset is required (or --allow-empty-assets to publish "
-            "a cutoff-only manifest before any binary exists)"
+            "at least one --asset or --bundle is required (or --allow-empty-assets "
+            "to publish a cutoff-only manifest before any binary exists)"
         )
 
     version = resolve_version(args, assets, stamps)
@@ -296,6 +504,33 @@ def build_manifest(args) -> dict:
         "assets": assets,
     }
     return man
+
+
+def _digest_override(specs, platform: str):
+    for spec in specs or []:
+        if "=" not in spec:
+            raise SystemExit(f"--bundle-digest must be os/arch=SHA256:SIZE, got {spec!r}")
+        plat, val = spec.split("=", 1)
+        if plat.lower() != platform.lower():
+            continue
+        if ":" not in val:
+            raise SystemExit(f"--bundle-digest {spec}: expected SHA256:SIZE")
+        sha, size = val.split(":", 1)
+        sha = sha.strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", sha):
+            raise SystemExit(f"--bundle-digest {spec}: not a 64-hex sha256")
+        return sha, int(size.strip())
+    return None
+
+
+def _files_dir(specs, platform: str):
+    for spec in specs or []:
+        if "=" not in spec:
+            raise SystemExit(f"--bundle-files must be os/arch=DIR, got {spec!r}")
+        plat, val = spec.split("=", 1)
+        if plat.lower() == platform.lower():
+            return val
+    return ""
 
 
 def resolve_version(args, assets, stamps) -> str:
@@ -314,6 +549,14 @@ def resolve_version(args, assets, stamps) -> str:
         return declared
 
     if not stamps:
+        if getattr(args, "has_remote_bundle", False):
+            if not declared:
+                raise SystemExit(
+                    "a remote bundle cannot be introspected for its build stamp; "
+                    "pass --version X.Y.Z (an assertion — the node still proves "
+                    "the version from the extracted stamps before switching)"
+                )
+            return declared
         if getattr(args, "allow_unmarked_artifact", False):
             if not declared:
                 raise SystemExit(
@@ -332,7 +575,6 @@ def resolve_version(args, assets, stamps) -> str:
             "  Build with a current build.rs, or pass --allow-unmarked-artifact "
             "--version X.Y.Z for a legacy binary."
         )
-
     if len(built) > 1:
         detail = ", ".join(f"{p}={s.get('version')}" for p, s in stamps)
         raise SystemExit(
@@ -358,13 +600,13 @@ def resolve_version(args, assets, stamps) -> str:
     return artifact_version
 
 
-def sign(man: dict, seed: bytes) -> dict:
+def sign(man: dict, seed: bytes, include_layout: bool = True) -> dict:
     import nacl.signing  # PyNaCl
 
     sk = nacl.signing.SigningKey(seed)
     man = dict(man)
     man["signing_key"] = public_key_hex(sk)
-    sig = sk.sign(canonical_text(man)).signature
+    sig = sk.sign(canonical_text(man, include_layout)).signature
     man["signature"] = sig.hex()
     return man
 
@@ -383,9 +625,15 @@ def verify(path: Path, expect_key: str = EMBEDDED_PUBKEY_HEX) -> dict:
             f"manifest names key {key_hex}, node trusts {expect_key} — it would be rejected"
         )
     vk = nacl.signing.VerifyKey(bytes.fromhex(key_hex))
-    try:
-        vk.verify(canonical_text(man), bytes.fromhex(sig_hex))
-    except nacl.exceptions.BadSignatureError:
+    accepted = False
+    for include_layout in (True, False):
+        try:
+            vk.verify(canonical_text(man, include_layout), bytes.fromhex(sig_hex))
+            accepted = True
+            break
+        except nacl.exceptions.BadSignatureError:
+            continue
+    if not accepted:
         raise SystemExit("SIGNATURE DOES NOT VERIFY")
     # Belt and braces: the artifacts must exist and match if they are local.
     for a in man.get("assets", []):
@@ -398,6 +646,14 @@ def verify(path: Path, expect_key: str = EMBEDDED_PUBKEY_HEX) -> dict:
         f"OK: {man['version']} (min {man.get('min_version', '')}), "
         f"{len(man.get('assets', []))} asset(s), key {key_hex[:16]}…"
     )
+    for a in man.get("assets", []):
+        layout = (a.get("layout") or "single").lower()
+        nfiles = len(a.get("files") or {})
+        print(
+            f"  {a['os']}/{a['arch']}: layout={layout} size={a.get('size')} "
+            f"sha256={a['sha256'][:16]}…"
+            + (f" files={nfiles}" if nfiles else "")
+        )
     return man
 
 
@@ -448,11 +704,44 @@ def main(argv=None) -> int:
         help="artifact to publish; repeatable",
     )
     ap.add_argument(
+        "--bundle",
+        action="append",
+        default=[],
+        metavar="OS/ARCH=URL|PATH",
+        help="release BUNDLE (tar.gz/zip) to publish; the digest is computed "
+        "for a local path and read from the GitHub API for a release URL; repeatable",
+    )
+    ap.add_argument(
+        "--bundle-digest",
+        action="append",
+        default=[],
+        metavar="OS/ARCH=SHA256:SIZE",
+        help="declare a bundle's digest explicitly (non-GitHub URLs)",
+    )
+    ap.add_argument(
+        "--bundle-files",
+        action="append",
+        default=[],
+        metavar="OS/ARCH=DIR",
+        help="sign per-file sha256 for an unpacked bundle (optional; pins "
+        "individual files in addition to the build stamps)",
+    )
+    ap.add_argument(
         "--url-base",
         default="https://gpncoin.ai/dl",
         help="public base URL the artifacts are served from",
     )
-    ap.add_argument("--published-at", default="", help="ISO-8601 UTC; default now")
+    ap.add_argument(
+        "--sign-layout",
+        action="store_true",
+        help="sign the `layout` marker and per-file hashes (extended canonical "
+        "rendering). Leave OFF while the fleet still runs pre-bundle nodes "
+        "(<= 0.2.0): they compute the legacy text and would reject the manifest. "
+        "Safe from 0.3.0 on. A bundle's layout is decidable from its signed URL "
+        "either way, so OFF loses no protection against a downgrade.",
+    )
+    ap.add_argument(
+        "--published-at", default="", help="ISO-8601 UTC; default now")
     ap.add_argument("--key", default="", help=f"private key file (default {DEFAULT_KEY})")
     ap.add_argument("--out", default="website/releases.json")
     ap.add_argument(
@@ -480,6 +769,9 @@ def main(argv=None) -> int:
         help="print the signed canonical text (debugging)",
     )
     args = ap.parse_args(argv)
+    args.has_remote_bundle = any(
+        "://" in spec.split("=", 1)[-1] for spec in (getattr(args, "bundle", []) or [])
+    )
 
     if args.verify:
         verify(Path(args.verify), args.expect_key or EMBEDDED_PUBKEY_HEX)
@@ -504,10 +796,22 @@ def main(argv=None) -> int:
             f"  cutoff: nodes older than {unsigned['min_version']} will SYNC but "
             "not mine/announce"
         )
-    man = sign(unsigned, seed)
+    if not args.sign_layout and any(a.get("files") for a in unsigned["assets"]):
+        raise SystemExit(
+            "per-file hashes (--bundle-files) must be signed; add --sign-layout "
+            "(only once every deployed node is >= 0.3.0)"
+        )
+    man = sign(unsigned, seed, include_layout=args.sign_layout)
+    if not args.sign_layout and any(a.get("layout") for a in unsigned["assets"]):
+        print(
+            "  note: `layout` is published as JSON but NOT signed (legacy rendering) "
+            "so pre-bundle nodes can still verify this manifest; the signed URL "
+            "decides the layout.",
+            file=sys.stderr,
+        )
 
     if args.print_canonical:
-        sys.stderr.write(canonical_text(man).decode())
+        sys.stderr.write(canonical_text(man, args.sign_layout).decode())
 
     body = json.dumps(man, indent=2) + "\n"
     out = Path(args.out)

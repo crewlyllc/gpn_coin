@@ -993,6 +993,52 @@ fn download_asset(url: &str, timeout: Duration) -> Result<Vec<u8>, String> {
     Ok(bytes.to_vec())
 }
 
+/// Stream a download to disk instead of buffering it.
+///
+/// A release bundle is ~331 MB: holding it in RAM on top of the extraction is
+/// how a small VPS gets OOM-killed mid-update, which is exactly the situation in
+/// which a half-applied update would be unrecoverable.
+fn download_to_file(url: &str, dest: &Path, timeout: Duration) -> Result<u64, String> {
+    use std::io::{Read, Write};
+    let client = http_client(timeout)?;
+    let mut resp = client.get(url).send().map_err(|e| format!("download {url}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("download {url} -> HTTP {}", resp.status()));
+    }
+    let expected = resp.content_length().unwrap_or(0);
+    let mut f = std::fs::File::create(dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
+    let mut buf = vec![0u8; 1 << 20];
+    let mut total: u64 = 0;
+    let mut next_report: u64 = 64 << 20;
+    loop {
+        let n = resp.read(&mut buf).map_err(|e| format!("download body: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        f.write_all(&buf[..n])
+            .map_err(|e| format!("write {}: {e}", dest.display()))?;
+        total += n as u64;
+        if total >= next_report {
+            log_event(
+                "update",
+                &format!(
+                    "downloaded {}/{} MiB",
+                    total / (1 << 20),
+                    if expected > 0 {
+                        (expected / (1 << 20)).to_string()
+                    } else {
+                        "?".into()
+                    }
+                ),
+            );
+            next_report += 64 << 20;
+        }
+    }
+    f.flush().map_err(|e| format!("flush {}: {e}", dest.display()))?;
+    f.sync_all().ok();
+    Ok(total)
+}
+
 /// The loud, unmissable "this build is too old" block.
 fn log_upgrade_required(current: &str, min: &str, enforcing: bool) {
     asciieprintln!("");
@@ -1056,6 +1102,42 @@ fn startup_update_check(cfg: &mut Config) {
                 m.version,
                 m.min_version
             );
+            // Say what would actually be installed: a release is a *bundle* of
+            // ~60 binaries, not one file, and swapping one file would leave the
+            // supervisor and its children on different versions.
+            match update::select_asset(&m, update::platform_os(), update::platform_arch()) {
+                Ok(a) => {
+                    let layout = update::asset_layout(a);
+                    asciiprintln!(
+                        "  update: asset {}/{} layout={} {} bytes sha256={}",
+                        a.os,
+                        a.arch,
+                        layout,
+                        a.size,
+                        &a.sha256[..a.sha256.len().min(16)]
+                    );
+                    if layout == update::LAYOUT_BUNDLE {
+                        if update::bundle_installed(&dir, &m.version) {
+                            asciiprintln!(
+                                "  update: {} is already installed at {} — nothing to do",
+                                m.version,
+                                update::version_dir(&dir, &m.version).display()
+                            );
+                        } else {
+                            asciiprintln!(
+                                "  update: bundle {} is NOT installed here (auto-update {})",
+                                m.version,
+                                if cfg.auto_update { "ON" } else { "off" }
+                            );
+                        }
+                    }
+                }
+                Err(_) => asciiprintln!(
+                    "  update: no asset for {}/{} in this manifest",
+                    update::platform_os(),
+                    update::platform_arch()
+                ),
+            }
             min_version = m.min_version.clone();
             latest = m.version.clone();
             let staged = update::read_pending(&dir).map(|p| p.version);
@@ -1092,23 +1174,53 @@ fn startup_update_check(cfg: &mut Config) {
 }
 
 /// Download → verify in memory → stage on disk → verify on disk.
+///
+/// Two shapes:
+/// * `layout: "bundle"` (the normal case) — stream the archive to a temp file,
+///   verify its sha256, extract it into `versions/<version>.tmp-*`, prove the
+///   extracted `gpn_node`/`gpn-node` build stamps are that version, then rename
+///   the directory into `versions/<version>`.
+/// * `layout: "single"` — the historical one-binary flow.
 fn download_and_stage(
     cfg: &Config,
     m: &update::ReleaseManifest,
 ) -> Result<update::PendingUpdate, String> {
     let asset = update::select_asset(m, update::platform_os(), update::platform_arch())
         .map_err(|e| e.to_string())?;
+    let layout = update::asset_layout(asset);
     log_event(
         "update",
         &format!(
-            "downloading {} ({}/{}) sha256={} size={}",
-            m.version,
-            asset.os,
-            asset.arch,
-            asset.sha256,
-            asset.size
+            "downloading {} ({}/{}, layout={}) sha256={} size={}",
+            m.version, asset.os, asset.arch, layout, asset.sha256, asset.size
         ),
     );
+
+    if layout == update::LAYOUT_BUNDLE {
+        let dir = cfg.update_dir();
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let tmp = dir.join(format!(
+            "{}-bundle-{}.download",
+            m.version,
+            std::process::id()
+        ));
+        let staged = download_to_file(&asset.url, &tmp, Duration::from_secs(3600))
+            .and_then(|_| {
+                update::stage_bundle_file(&dir, &m.version, asset, &tmp).map_err(|e| e.to_string())
+            });
+        let _ = std::fs::remove_file(&tmp);
+        let pending = staged?;
+        log_event(
+            "update",
+            &format!(
+                "staged bundle {} at {} — archive sha256 verified, build stamps matched, \
+                 previous version kept for rollback",
+                pending.version, pending.staged
+            ),
+        );
+        return Ok(pending);
+    }
+
     let bytes = download_asset(&asset.url, Duration::from_secs(300))?;
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
     let pending = update::stage_bytes(&cfg.update_dir(), &exe, &m.version, asset, &bytes)
@@ -1254,7 +1366,7 @@ fn exec_self(exe: &Path) -> ! {
     }
 }
 
-/// Swap in a staged binary (if any) and re-exec into it.
+/// Swap in a staged update (if any) and re-exec into it.
 ///
 /// Called at startup and after an auto-update restart. Only returns when there
 /// is nothing to apply (or the swap was deferred by the OS).
@@ -1271,19 +1383,25 @@ fn apply_staged_or_reexec(cfg: &Config) {
             log_event(
                 "update",
                 &format!(
-                    "{} verified and swapped in; previous binary kept at {} (rollback: move it back \
-                     and restart); re-exec into the new build — short outage",
+                    "{} verified and switched in; previous build kept at {} (rollback: point {} at \
+                     it and restart); re-exec into {} — short outage",
                     applied.version,
-                    applied.backup.display()
+                    if applied.backup.as_os_str().is_empty() {
+                        "(none — first bundle install)".to_string()
+                    } else {
+                        applied.backup.display().to_string()
+                    },
+                    update::current_link(&cfg.update_dir()).display(),
+                    applied.exec.display()
                 ),
             );
-            exec_self(&exe);
+            exec_self(&applied.exec);
         }
         Ok(Ok(None)) => {}
         Ok(Err(deferred)) => log_event(
             "update",
             &format!(
-                "staged {} could not be swapped in while running ({}); it will be applied on the \
+                "staged {} could not be switched in while running ({}); it will be applied on the \
                  next start",
                 deferred.version, deferred.reason
             ),
@@ -2049,14 +2167,17 @@ async fn main() {
             },
             false,
         );
+        let dir = cfg.update_dir();
+        let live = update::installed_version(&dir);
         asciiprintln!(
-            "\n  result: this node ({}) {}",
+            "\n  result: this node ({}) {} — installed bundle: {}",
             env!("CARGO_PKG_VERSION"),
             if standby {
                 "is BELOW the minimum version — it would SYNC but NOT MINE"
             } else {
                 "is supported — it would mine"
-            }
+            },
+            live.as_deref().unwrap_or("(none — not installed from a bundle)")
         );
         std::process::exit(0);
     }
