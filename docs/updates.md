@@ -561,7 +561,7 @@ Then a normal restart (or a service restart) applies it.
 
 | Want | Do |
 |---|---|
-| Never auto-update | leave `auto_update` unset (default) or `GPN_AUTO_UPDATE=0` |
+| Never auto-update | set `auto_update = false` or `GPN_AUTO_UPDATE=0` |
 | Pause for a while | the same — it is checked at start, so `GPN_AUTO_UPDATE=0` disables the thread |
 | Air-gapped / no manifest access | `GPN_UPDATE_CHECK=0` — disables *all* manifest fetches. ⚠ the cutoff cannot be evaluated either, so the node trusts its ≤ last verified state |
 | Keep checking but never restart | `GPN_UPDATE_RESTART=0` |
@@ -734,7 +734,7 @@ distinguishes "below the cutoff" from "no peers", "no ollama", or a stuck miner.
 
 | Var | Default | Meaning |
 |---|---|---|
-| `GPN_AUTO_UPDATE` | `0` | `1`/`true`/`yes`/`on` = opt **in** to automatic updates |
+| `GPN_AUTO_UPDATE` | `1` | **on by default**; `0`/`false`/`no`/`off` = opt **out** (manual updates) |
 | `GPN_UPDATE_URL` | `https://gpncoin.ai/releases.json` | manifest URL |
 | `GPN_UPDATE_CHECK_HOURS` | `6` | interval, clamped to 1–168 h |
 | `GPN_UPDATE_RESTART` | `1` | `0` = stage now, apply at the next start |

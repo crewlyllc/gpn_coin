@@ -956,7 +956,12 @@ fn log_event(label: &str, msg: &str) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn user_agent() -> String {
-    format!("gpn_node/{} ({}/{})", env!("CARGO_PKG_VERSION"), update::platform_os(), update::platform_arch())
+    format!(
+        "gpn_node/{} ({}/{})",
+        env!("CARGO_PKG_VERSION"),
+        update::platform_os(),
+        update::platform_arch()
+    )
 }
 
 fn http_client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {
@@ -985,7 +990,10 @@ fn fetch_verified_manifest(cfg: &Config) -> Result<update::ReleaseManifest, Stri
 
 fn download_asset(url: &str, timeout: Duration) -> Result<Vec<u8>, String> {
     let client = http_client(timeout)?;
-    let resp = client.get(url).send().map_err(|e| format!("download {url}: {e}"))?;
+    let resp = client
+        .get(url)
+        .send()
+        .map_err(|e| format!("download {url}: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("download {url} -> HTTP {}", resp.status()));
     }
@@ -1001,17 +1009,23 @@ fn download_asset(url: &str, timeout: Duration) -> Result<Vec<u8>, String> {
 fn download_to_file(url: &str, dest: &Path, timeout: Duration) -> Result<u64, String> {
     use std::io::{Read, Write};
     let client = http_client(timeout)?;
-    let mut resp = client.get(url).send().map_err(|e| format!("download {url}: {e}"))?;
+    let mut resp = client
+        .get(url)
+        .send()
+        .map_err(|e| format!("download {url}: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("download {url} -> HTTP {}", resp.status()));
     }
     let expected = resp.content_length().unwrap_or(0);
-    let mut f = std::fs::File::create(dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
+    let mut f =
+        std::fs::File::create(dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
     let mut buf = vec![0u8; 1 << 20];
     let mut total: u64 = 0;
     let mut next_report: u64 = 64 << 20;
     loop {
-        let n = resp.read(&mut buf).map_err(|e| format!("download body: {e}"))?;
+        let n = resp
+            .read(&mut buf)
+            .map_err(|e| format!("download body: {e}"))?;
         if n == 0 {
             break;
         }
@@ -1034,7 +1048,8 @@ fn download_to_file(url: &str, dest: &Path, timeout: Duration) -> Result<u64, St
             next_report += 64 << 20;
         }
     }
-    f.flush().map_err(|e| format!("flush {}: {e}", dest.display()))?;
+    f.flush()
+        .map_err(|e| format!("flush {}: {e}", dest.display()))?;
     f.sync_all().ok();
     Ok(total)
 }
@@ -1047,7 +1062,9 @@ fn log_upgrade_required(current: &str, min: &str, enforcing: bool) {
     asciieprintln!("  ============================================================");
     if enforcing {
         asciieprintln!("  This node will SYNC (so its data stays useful) but will NOT MINE and");
-        asciieprintln!("  will NOT ANNOUNCE itself. An out-of-date node can otherwise produce blocks");
+        asciieprintln!(
+            "  will NOT ANNOUNCE itself. An out-of-date node can otherwise produce blocks"
+        );
         asciieprintln!("  the rest of the network rejects — and that looks like a chain stall.");
         asciieprintln!("  Fix: install the current release from https://gpncoin.ai/downloads");
         asciieprintln!("       (or set GPN_AUTO_UPDATE=1 and restart — it updates itself).");
@@ -1162,7 +1179,11 @@ fn startup_update_check(cfg: &mut Config) {
     if update::min_version_decision(env!("CARGO_PKG_VERSION"), &min_version)
         == update::Support::UpgradeRequired
     {
-        log_upgrade_required(env!("CARGO_PKG_VERSION"), &min_version, cfg.min_version_enforce);
+        log_upgrade_required(
+            env!("CARGO_PKG_VERSION"),
+            &min_version,
+            cfg.min_version_enforce,
+        );
         cfg.standby = cfg.min_version_enforce;
     } else if !latest.is_empty() && update::is_newer(&latest, env!("CARGO_PKG_VERSION")) {
         asciiprintln!(
@@ -1204,10 +1225,9 @@ fn download_and_stage(
             m.version,
             std::process::id()
         ));
-        let staged = download_to_file(&asset.url, &tmp, Duration::from_secs(3600))
-            .and_then(|_| {
-                update::stage_bundle_file(&dir, &m.version, asset, &tmp).map_err(|e| e.to_string())
-            });
+        let staged = download_to_file(&asset.url, &tmp, Duration::from_secs(3600)).and_then(|_| {
+            update::stage_bundle_file(&dir, &m.version, asset, &tmp).map_err(|e| e.to_string())
+        });
         let _ = std::fs::remove_file(&tmp);
         let pending = staged?;
         log_event(
@@ -1243,7 +1263,11 @@ fn update_once(cfg: &Config, restart: &AtomicBool) -> Result<(), String> {
     if update::min_version_decision(env!("CARGO_PKG_VERSION"), &m.min_version)
         == update::Support::UpgradeRequired
     {
-        log_upgrade_required(env!("CARGO_PKG_VERSION"), &m.min_version, cfg.min_version_enforce);
+        log_upgrade_required(
+            env!("CARGO_PKG_VERSION"),
+            &m.min_version,
+            cfg.min_version_enforce,
+        );
     }
 
     if !update::is_newer(&m.version, env!("CARGO_PKG_VERSION")) {
@@ -1312,9 +1336,7 @@ fn spawn_auto_updater(
             "update",
             &format!(
                 "auto-update ON — checking {} every {}h (restart_to_apply={})",
-                cfg.update_url,
-                cfg.update_check_hours,
-                cfg.update_restart
+                cfg.update_url, cfg.update_check_hours, cfg.update_restart
             ),
         );
         // First check shortly after start, then on the interval.
@@ -1374,7 +1396,10 @@ fn apply_staged_or_reexec(cfg: &Config) {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
-            log_event("update", &format!("cannot resolve own path: {e} — skipping staged swap"));
+            log_event(
+                "update",
+                &format!("cannot resolve own path: {e} — skipping staged swap"),
+            );
             return;
         }
     };
@@ -1413,9 +1438,9 @@ fn apply_staged_or_reexec(cfg: &Config) {
     }
 }
 
-/// `--setup` question: "Keep this node auto-updated? [y/N]".
+/// `--setup` question: "Keep this node auto-updated? [Y/n]".
 ///
-/// Default is **no** (opt-in). The answer is written to the config file so the
+/// Default is **yes** (opt-out). The answer is written to the config file so the
 /// next start honours it without any env var.
 fn ask_auto_update(cfg: &Config) -> Option<bool> {
     let mut stdin = std::io::stdin().lock();
@@ -1428,14 +1453,17 @@ fn ask_auto_update(cfg: &Config) -> Option<bool> {
         return None;
     }
     asciiprintln!("");
-    asciiprintln!("  Keep this node auto-updated? [y/N]");
+    asciiprintln!("  Keep this node auto-updated? [Y/n]");
     asciiprintln!("    yes: verify + install GPN releases automatically (signed manifest,");
     asciiprintln!("         ed25519), restarting briefly when one is published. Recommended:");
     asciiprintln!("         the network drops nodes that fall below the minimum version, and an");
     asciiprintln!("         old node cannot mine.");
     asciiprintln!("    no : you update manually. This node will REFUSE TO MINE once its");
     asciiprintln!("         version is below the published minimum (it keeps syncing).");
-    asciiprintln!("  Currently: {}", if cfg.auto_update { "ON" } else { "off" });
+    asciiprintln!(
+        "  Currently: {}",
+        if cfg.auto_update { "ON" } else { "off" }
+    );
     asciiprint!("  > ");
     let mut line = String::new();
     if stdin.read_line(&mut line).is_err() {
@@ -1443,7 +1471,10 @@ fn ask_auto_update(cfg: &Config) -> Option<bool> {
     }
     let ans = line.trim().to_ascii_lowercase();
     if ans.is_empty() {
-        asciiprintln!("  auto-update: unchanged ({})", if cfg.auto_update { "ON" } else { "off" });
+        asciiprintln!(
+            "  auto-update: unchanged ({})",
+            if cfg.auto_update { "ON" } else { "off" }
+        );
         return None;
     }
     let enable = matches!(ans.as_str(), "y" | "yes");
@@ -1457,7 +1488,10 @@ fn ask_auto_update(cfg: &Config) -> Option<bool> {
             Some(enable)
         }
         Err(e) => {
-            asciieprintln!("  ! could not write the config ({e}); set GPN_AUTO_UPDATE={} instead", if enable { "1" } else { "0" });
+            asciieprintln!(
+                "  ! could not write the config ({e}); set GPN_AUTO_UPDATE={} instead",
+                if enable { "1" } else { "0" }
+            );
             None
         }
     }
@@ -2018,7 +2052,11 @@ fn print_setup_summary(cfg: &Config) {
         "\n  Updates: {}. A node below the published minimum version refuses to mine\n  \
          (it keeps syncing). Auto-update is opt-in: GPN_AUTO_UPDATE=1 or the\n  \
          `auto_update = true` config key; see docs/updates.md.",
-        if cfg.auto_update { "auto-update ON" } else { "manual" }
+        if cfg.auto_update {
+            "auto-update ON"
+        } else {
+            "manual"
+        }
     );
     asciiprintln!("\n  Start the node:  {}\n", exe_hint());
 }
@@ -2146,10 +2184,18 @@ async fn main() {
     }
     asciiprintln!(
         "  updates: auto={} every {}h restart_to_apply={} manifest={}",
-        if cfg.auto_update { "ON (opt-in)" } else { "off (manual)" },
+        if cfg.auto_update {
+            "ON (opt-in)"
+        } else {
+            "off (manual)"
+        },
         cfg.update_check_hours,
         cfg.update_restart,
-        if cfg.update_check { cfg.update_url.as_str() } else { "disabled" }
+        if cfg.update_check {
+            cfg.update_url.as_str()
+        } else {
+            "disabled"
+        }
     );
 
     // ── Apply a staged update first: it must be swapped in before any child is
@@ -2177,7 +2223,8 @@ async fn main() {
             } else {
                 "is supported — it would mine"
             },
-            live.as_deref().unwrap_or("(none — not installed from a bundle)")
+            live.as_deref()
+                .unwrap_or("(none — not installed from a bundle)")
         );
         std::process::exit(0);
     }

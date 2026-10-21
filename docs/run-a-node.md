@@ -151,7 +151,7 @@ flags and no environment variables — it reads `~/.gpn/node.toml`.
 | **Peers** | `https://gpncoin.ai/seeds.json` (live directory) + compiled-in bootnodes; failing URLs are logged and ignored. | `GPN_BOOTNODES`, `GPN_BOOTNODES_URL` |
 | **Public address** | `GPN_PUBLIC_ADDR` → public-IP detection → **UPnP-IGD / NAT-PMP auto-mapping** (on by default). A successful mapping needs no configuration at all. | `GPN_PUBLIC_ADDR`, `GPN_UPNP=off`, `--no-upnp` |
 | **Ollama** | Installed/started and the baseline model pulled on `--setup` (and on a normal start if missing). | `GPN_OLLAMA`, `GPN_REQUIRE_OLLAMA=0` |
-| **Updates** | Auto-update is **off** unless you opted in at `--setup`. The minimum-version check runs either way: an outdated node syncs but does not mine. | `GPN_AUTO_UPDATE`, see [Updates](#updates-auto-update-and-the-minimum-version-cutoff) |
+| **Updates** | Auto-update is **ON by default** (answer `n` at `--setup` or set `GPN_AUTO_UPDATE=0` to opt out). The minimum-version check runs either way: an outdated node syncs but does not mine. | `GPN_AUTO_UPDATE`, see [Updates](#updates-auto-update-and-the-minimum-version-cutoff) |
 | **Config** | `~/.gpn/node.toml` written once (base path, chain, keystore path, autostart). | `--config`, `GPN_CONFIG`, `GPN_PREFIX` |
 
 ### Fallbacks (the rare cases)
@@ -928,14 +928,14 @@ Short version: **opt in and forget it, or update by hand — but a node that fal
 too far behind stops mining.** Full detail: [`docs/updates.md`](updates.md).
 
 ```bash
-# opt in (or answer `y` at --setup, which writes this to node.toml)
+# (default: on — this line is only needed to opt back in after disabling)
 GPN_AUTO_UPDATE=1 gpn_node
 
 # manual (the default): nothing is downloaded, ever
 #   ...but when a release raises min_version this node will SYNC and NOT MINE
 ```
 
-**Auto-update** (opt-in, `GPN_AUTO_UPDATE=1` / `auto_update = true`):
+**Auto-update** (**on by default**; opt out with `GPN_AUTO_UPDATE=0` / `auto_update = false`):
 
 * checks `https://gpncoin.ai/releases.json` at start and every
   `GPN_UPDATE_CHECK_HOURS` (default 6);

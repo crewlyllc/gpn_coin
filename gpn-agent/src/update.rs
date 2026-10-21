@@ -99,8 +99,8 @@
 //! * Staging writes to `<exe>.new.tmp-<pid>` and renames into place, so a
 //!   half-written binary is never visible under a name we would exec.
 //! * The previous binary is kept as `<exe>.bak` for one-step rollback.
-//! * Auto-update is **opt-in**: absent `GPN_AUTO_UPDATE=1` (or
-//!   `auto_update = true`) nothing is ever downloaded. The *cutoff* check is
+//! * Auto-update is **ON by default** (opt-out): unless `GPN_AUTO_UPDATE=0`
+//!   (or `auto_update = false`), releases are verified and installed. The *cutoff* check is
 //!   separate and still runs — a manual-updater must be told it is too old.
 
 use serde::{Deserialize, Serialize};
@@ -644,13 +644,13 @@ pub fn min_version_decision(current: &str, min_version: &str) -> Support {
 // Opt-in policy
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Is auto-update ON? **Opt-in**: anything that is not an explicit yes is a no.
+/// Is auto-update ON? **Default ON (opt-out)**: only an explicit no disables it.
 pub fn auto_update_enabled(raw: Option<&str>) -> bool {
     match raw {
-        None => false,
-        Some(v) => matches!(
+        None => true,
+        Some(v) => !matches!(
             v.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
+            "0" | "false" | "no" | "off" | "n"
         ),
     }
 }
@@ -1257,11 +1257,7 @@ pub fn stage_bundle_file(
     let root = versions_root(state_dir);
     std::fs::create_dir_all(&root)?;
     let final_dir = version_dir(state_dir, version);
-    let tmp = root.join(format!(
-        ".{}.tmp-{}",
-        version.trim(),
-        std::process::id()
-    ));
+    let tmp = root.join(format!(".{}.tmp-{}", version.trim(), std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
 
     let built = (|| -> Result<(), UpdateError> {
@@ -1816,8 +1812,7 @@ mod tests {
     #[test]
     fn package_version_is_plain_major_minor_patch() {
         let v = env!("CARGO_PKG_VERSION");
-        let parsed = parse_version(v)
-            .unwrap_or_else(|| panic!("crate version {v:?} is not M.m.p"));
+        let parsed = parse_version(v).unwrap_or_else(|| panic!("crate version {v:?} is not M.m.p"));
         assert_eq!(
             format!("{}.{}.{}", parsed.0, parsed.1, parsed.2),
             v,
@@ -1842,9 +1837,9 @@ mod tests {
     // ── opt-in ──────────────────────────────────────────────────────────────
 
     #[test]
-    fn auto_update_is_opt_in() {
-        assert!(!auto_update_enabled(None), "default must be OFF");
-        assert!(!auto_update_enabled(Some("")));
+    fn auto_update_is_opt_out() {
+        assert!(auto_update_enabled(None), "default must be ON");
+        assert!(auto_update_enabled(Some("")));
         assert!(!auto_update_enabled(Some("0")));
         assert!(!auto_update_enabled(Some("false")));
         assert!(!auto_update_enabled(Some("no")));
@@ -2024,9 +2019,7 @@ mod tests {
     fn stamped_binary(version: &str) -> Vec<u8> {
         let mut v = Vec::new();
         v.extend_from_slice(b"\x7fELF-padding-padding-padding");
-        v.extend_from_slice(
-            format!("gpn-build-v1 version=unknown sha=unknown\0").as_bytes(),
-        );
+        v.extend_from_slice(format!("gpn-build-v1 version=unknown sha=unknown\0").as_bytes());
         v.extend_from_slice(
             format!("gpn-build-v1 version={version} sha=deadbeef spec=41\0").as_bytes(),
         );
@@ -2082,7 +2075,10 @@ mod tests {
         // binary — that would stage a 331 MB tarball as the new executable.
         a.url = "https://x/gpn_node".into();
         a.layout = " BUNDLE ".into();
-        assert!(is_bundle(&a), "an explicit marker wins and is case-insensitive");
+        assert!(
+            is_bundle(&a),
+            "an explicit marker wins and is case-insensitive"
+        );
         a.url = "https://x/gpn-linux.tar.gz".into();
         a.layout = LAYOUT_SINGLE.into();
         assert!(is_bundle(&a), "the signed URL wins over an unsigned marker");
@@ -2100,9 +2096,7 @@ mod tests {
 
         let mut b = sample_manifest();
         b.assets[0].layout = LAYOUT_BUNDLE.into();
-        b.assets[0]
-            .files
-            .insert("gpn_node".into(), "ab".repeat(32));
+        b.assets[0].files.insert("gpn_node".into(), "ab".repeat(32));
         let text = String::from_utf8(b.canonical_text()).unwrap();
         assert_ne!(b.canonical_text(), b.canonical_text_legacy());
         assert!(text.contains(" layout=bundle\n"));
@@ -2171,10 +2165,7 @@ mod tests {
         let dir = td("bundle-stage");
         let state = dir.join("update");
         let bundle = make_bundle(&dir, "0.2.0");
-        let asset = bundle_asset(
-            "https://example/gpn-linux.tar.gz",
-            &read_bytes(&bundle),
-        );
+        let asset = bundle_asset("https://example/gpn-linux.tar.gz", &read_bytes(&bundle));
 
         let pending = stage_bundle_file(&state, "0.2.0", &asset, &bundle).unwrap();
         assert!(pending.is_bundle());
@@ -2196,7 +2187,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(node_bin(&vdir)).unwrap().permissions().mode();
+            let mode = std::fs::metadata(node_bin(&vdir))
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o111, 0o111, "binaries are executable");
         }
         let _ = std::fs::remove_dir_all(&dir);
@@ -2212,7 +2206,9 @@ mod tests {
 
         let err = stage_bundle_file(&state, "0.2.0", &asset, &bundle).unwrap_err();
         match err {
-            UpdateError::BadStamp { expected, actual, .. } => {
+            UpdateError::BadStamp {
+                expected, actual, ..
+            } => {
                 assert_eq!(expected, "0.2.0");
                 assert_eq!(actual, "0.1.9");
             }
