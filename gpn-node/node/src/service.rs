@@ -188,6 +188,24 @@ impl PowAlgorithm<Block> for GPNPowAlgorithm {
     }
 }
 
+/// Is a solved seal still worth submitting?
+///
+/// `sc-consensus-pow`'s `MiningHandle::submit` verifies the seal against the
+/// **current** build's `pre_hash`, not the one it was solved for. On a chain
+/// with more than one authority two miners routinely prepare a block at the
+/// same height; the loser's solution then reaches `submit()` after the winner's
+/// block has already been imported, so it fails verification and is logged as
+/// `Unable to import mined block: seal is invalid` — which reads like a broken
+/// sealer and has been mistaken for the cause of slow blocks. Such a seal can
+/// never be useful: its parent is no longer the head, so the header (and hence
+/// the hash the seal commits to) is dead. Drop it and re-read the template.
+fn seal_still_wanted(
+    solved_for: &<Block as BlockT>::Hash,
+    live_template: Option<&<Block as BlockT>::Hash>,
+) -> bool {
+    live_template == Some(solved_for)
+}
+
 /// The inherent data providers for this chain: timestamp only.
 ///
 /// Returns a closure (rather than a named fn) so the future's error type is
@@ -1259,17 +1277,40 @@ fn spawn_gpu_miner(worker: MiningWorker, author: Option<[u8; 32]>) {
 
                     match miner.mine_batch(&dag, &header, &target_le, nonce, GPU_BATCH) {
                         Ok(Some(seal)) => {
+                            let sealing_nonce = seal.nonce;
+                            // Another authority may have imported a block on this same
+                            // parent while we were solving. `submit()` verifies the seal
+                            // against the *current* template's `pre_hash`, so a solution
+                            // that lost that race comes back as "seal is invalid" — an
+                            // alarming message for a perfectly healthy miner (three debug
+                            // crons mis-attributed ~42 s block gaps to it). Drop the
+                            // doomed submission and re-read the template instead.
+                            if !seal_still_wanted(&pre_hash, worker.metadata().as_ref().map(|m| &m.pre_hash)) {
+                                log::debug!(
+                                    "superseded while solving (pre_hash={pre_hash:?}, nonce={sealing_nonce}); restarting on the current template"
+                                );
+                                last_pre_hash = None;
+                                continue;
+                            }
                             let seal_bytes = seal_with_author(seal.to_seal_bytes(), author);
-                            let nonce_found = seal.nonce;
                             let ok = futures::executor::block_on(worker.submit(seal_bytes));
                             if ok {
                                 log::info!(
-                                    "⛏  GPU sealed block: nonce={nonce_found} pre_hash={pre_hash:?}"
+                                    "⛏  GPU sealed block: nonce={sealing_nonce} pre_hash={pre_hash:?}"
+                                );
+                            } else if seal_still_wanted(
+                                &pre_hash,
+                                worker.metadata().as_ref().map(|m| &m.pre_hash),
+                            ) {
+                                log::warn!(
+                                    "GPU seal for pre_hash={pre_hash:?} (nonce={sealing_nonce}) was rejected by the node; retrying"
                                 );
                             } else {
-                                log::warn!(
-                                    "GPU seal for pre_hash={pre_hash:?} (nonce={nonce_found}) was rejected by the node; retrying"
+                                log::debug!(
+                                    "seal for pre_hash={pre_hash:?} (nonce={sealing_nonce}) arrived after the template moved on; restarting"
                                 );
+                                last_pre_hash = None;
+                                continue;
                             }
                             nonce = nonce.wrapping_add(GPU_BATCH as u64);
                         }
@@ -1327,12 +1368,27 @@ fn spawn_cpu_miner(worker: MiningWorker, author: Option<[u8; 32]>) {
                                 seal.extend_from_slice(&a);
                             }
                             let nonce_found = nonce;
+                            // Same race as the GPU path: a solution for a template a peer
+                            // already built on is reported by `submit()` as "seal is
+                            // invalid". Skip it rather than alarming the operator.
+                            if !seal_still_wanted(
+                                &pre_hash,
+                                worker.metadata().as_ref().map(|m| &m.pre_hash),
+                            ) {
+                                log::debug!(
+                                    "superseded while solving (pre_hash={pre_hash:?}, nonce={nonce_found}); restarting on the current template"
+                                );
+                                break;
+                            }
                             let ok = futures::executor::block_on(worker.submit(seal));
                             if ok {
                                 log::info!(
                                     "⛏  CPU sealed block: nonce={nonce_found} pre_hash={pre_hash:?}"
                                 );
-                            } else {
+                            } else if seal_still_wanted(
+                                &pre_hash,
+                                worker.metadata().as_ref().map(|m| &m.pre_hash),
+                            ) {
                                 log::warn!(
                                     "CPU seal for pre_hash={pre_hash:?} (nonce={nonce_found}) was rejected by the node; retrying"
                                 );
@@ -1511,6 +1567,30 @@ mod mining_gate_tests {
     #[test]
     fn full_node_does_not_run_miner() {
         assert!(!miner_should_run(Role::Full));
+    }
+
+    /// Losing a mining race must be recognised as such: a seal is submitted only
+    /// while the template it was solved for is still the live one. This is what
+    /// keeps a healthy miner from logging `seal is invalid` (and paying a doomed
+    /// verify+import) when a peer authority's block lands first.
+    #[test]
+    fn a_seal_is_only_submitted_for_the_live_template() {
+        type Hash = <Block as BlockT>::Hash;
+        let ours: Hash = [0x11u8; 32].into();
+        let theirs: Hash = [0x22u8; 32].into();
+
+        assert!(
+            seal_still_wanted(&ours, Some(&ours)),
+            "the template we solved for is still live -- submit"
+        );
+        assert!(
+            !seal_still_wanted(&ours, Some(&theirs)),
+            "a peer's block replaced the template -- the seal is dead, drop it"
+        );
+        assert!(
+            !seal_still_wanted(&ours, None),
+            "no live template (consumed by submit) -- nothing to submit against"
+        );
     }
 
     /// The minimum-version cutoff, node side: `GPN_STANDBY=1` must downgrade an
