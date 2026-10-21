@@ -6,6 +6,14 @@
  *   GET /seeds.json     canonical network directory (JSON)
  *   GET /bootnodes.txt  the same dialable multiaddrs, newline separated
  *   GET /seeds.txt      alias of /bootnodes.txt
+ *   GET /releases.json  the SIGNED release manifest (see docs/updates.md)
+ *
+ * `/releases.json` is generated and signed at release time by
+ * `scripts/gen-release-manifest.py` into `website/releases.json`; this route
+ * only fixes the headers (long-ish TTL, JSON content type, no HTML fallthrough)
+ * and answers a clean 503 JSON — never an HTML 404 — when no release has been
+ * published yet, so a node logs a readable error instead of an HTML parse
+ * failure.
  *
  * Everything else is served from the `./website` asset bundle.
  *
@@ -77,6 +85,14 @@ export default {
       const body = await directory(env, ctx);
       const isJson = path !== "/bootnodes.txt" && path !== "/seeds.txt";
       return isJson ? jsonResponse(body) : textResponse(body);
+    }
+
+    if (path === "/releases.json") {
+      if (request.method === "OPTIONS") return preflight();
+      if (request.method !== "GET" && request.method !== "HEAD") {
+        return withCors(new Response("method not allowed\n", { status: 405 }));
+      }
+      return releaseManifest(request, env, url);
     }
 
     // Static site: hand the untouched request to the assets binding.
@@ -310,6 +326,22 @@ function indexOfCrlf(buf, from) {
 
 /**
  * Merge the static seeds with the live provider list into the public shape.
+ *
+ * Two passes over the live providers, deliberately:
+ *
+ *  1. **Claim** — every *explicit* multiaddr a provider published about itself
+ *     is authoritative: it binds `peer_id -> host` and `host:port -> peer_id`.
+ *     Static seeds claim first (they are hard-coded truth).
+ *  2. **Publish** — explicit addresses are emitted as-is; a *synthesised*
+ *     address (`<host the AP reached us on>:<p2p_port>/p2p/<peer_id>`) is only
+ *     emitted when it cannot contradict those claims.
+ *
+ * That is what prevents the 2026-10-20 directory bug:
+ * `/ip4/23.241.109.255/tcp/30333/p2p/12D3KooWAFtUNxc…` = box #1's status_url
+ * host paired with the Linux node's peer id. A peer id is one node, so it may
+ * not be invented at a second host; and an `ip:port` belongs to one node, so
+ * it may not be re-used for a different peer id.
+ *
  * @param {Array<object> | null} providers
  */
 function buildDirectory(providers) {
@@ -318,14 +350,21 @@ function buildDirectory(providers) {
   const multiaddrs = [];
   const seen = new Set();
 
+  /** Claims gathered from addresses a node published about itself. */
+  const claims = { hostsByPeer: new Map(), ownerByEndpoint: new Map() };
+
   for (const ma of STATIC_BOOTNODES) {
     if (typeof ma !== "string" || !ma.startsWith("/")) continue;
+    const pid = peerIdOf(ma);
+    if (pid && sanitizePeerId(pid)) claimEndpoint(claims, pid, ma);
     if (seen.has(ma)) continue;
     seen.add(ma);
     multiaddrs.push(ma);
     nodes.push({ multiaddr: ma, peer_id: peerIdOf(ma), role: "seed", source: "compiled-in" });
   }
 
+  /** Live providers, normalised once. */
+  const records = [];
   /** Endpoints that are live but cannot be dialed as libp2p peers yet. */
   const endpoints = [];
   let live = 0;
@@ -342,38 +381,51 @@ function buildDirectory(providers) {
       const statusMa = multiaddrFromUrl(statusUrl);
       const statusPeerId = statusMa ? sanitizePeerId(peerIdOf(statusMa)) : null;
       const peerId = sanitizePeerId(p.peer_id) || statusPeerId;
-      const dialable = peerId ? dialableMultiaddrs(p, statusUrl, peerId) : [];
-
-      if (dialable.length > 0) {
-        for (const ma of dialable) {
-          if (seen.has(ma)) continue;
-          seen.add(ma);
-          multiaddrs.push(ma);
-          nodes.push({
-            multiaddr: ma,
-            peer_id: peerId,
-            role: "provider",
-            source: "ap",
-            endpoint: statusUrl,
-            address: typeof p.address === "string" ? p.address : null,
-            best: false,
-          });
-        }
-        continue;
-      }
-
-      // Not dialable: keep the endpoint visible for tooling/monitoring.
-      const ma = statusMa;
-      endpoints.push({
-        endpoint: statusUrl,
-        multiaddr: ma || null,
-        peer_id: peerId || null,
-        role: "provider",
-        source: "ap",
-        address: typeof p.address === "string" ? p.address : null,
-        best: false,
-      });
+      records.push({ p, statusUrl, statusMa, peerId });
     }
+  }
+
+  // Pass 1: explicit self-reported addresses claim their identity + endpoint.
+  for (const r of records) {
+    if (!r.peerId) continue;
+    for (const ma of explicitMultiaddrs(r.p, r.peerId)) {
+      claimEndpoint(claims, r.peerId, ma);
+    }
+  }
+
+  // Pass 2: publish.
+  for (const r of records) {
+    const { p, statusUrl, statusMa, peerId } = r;
+    const dialable = peerId ? dialableMultiaddrs(p, statusUrl, peerId, claims) : [];
+
+    if (dialable.length > 0) {
+      for (const ma of dialable) {
+        if (seen.has(ma)) continue;
+        seen.add(ma);
+        multiaddrs.push(ma);
+        nodes.push({
+          multiaddr: ma,
+          peer_id: peerId,
+          role: "provider",
+          source: "ap",
+          endpoint: statusUrl,
+          address: typeof p.address === "string" ? p.address : null,
+          best: false,
+        });
+      }
+      continue;
+    }
+
+    // Not dialable: keep the endpoint visible for tooling/monitoring.
+    endpoints.push({
+      endpoint: statusUrl,
+      multiaddr: statusMa || null,
+      peer_id: peerId || null,
+      role: "provider",
+      source: "ap",
+      address: typeof p.address === "string" ? p.address : null,
+      best: false,
+    });
   }
 
   const source = live > 0 ? "static+ap" : Array.isArray(providers) ? "static+ap-empty" : "static-fallback";
@@ -396,38 +448,109 @@ function buildDirectory(providers) {
 }
 
 /**
+ * The explicitly self-reported multiaddrs of a provider: sanitised, and only
+ * those that end in **that provider's own** peer id.
+ * @param {object} p
+ * @param {string} peerId
+ * @returns {string[]}
+ */
+function explicitMultiaddrs(p, peerId) {
+  const out = [];
+  if (!Array.isArray(p.multiaddrs)) return out;
+  for (const raw of p.multiaddrs) {
+    const ma = sanitizeMultiaddr(raw);
+    if (!ma) continue;
+    if (peerIdOf(ma) !== peerId) continue; // an address cannot vouch for another id
+    if (!out.includes(ma)) out.push(ma);
+  }
+  return out;
+}
+
+/**
+ * Record what an address claims about identity and location.
+ *
+ * `hostsByPeer`: peer id -> hosts it published for itself (a peer id is ONE
+ * node, so a second host for the same id is a conflict, not a second location).
+ * `ownerByEndpoint`: `host/tcp/port` -> peer id (an endpoint belongs to one
+ * node; never synthesise another node's id onto it).
+ * @param {{hostsByPeer: Map<string, Set<string>>, ownerByEndpoint: Map<string, string>}} claims
+ * @param {string} peerId
+ * @param {string} ma
+ */
+function claimEndpoint(claims, peerId, ma) {
+  const host = hostOfMultiaddr(ma);
+  const endpoint = endpointOfMultiaddr(ma);
+  if (host) {
+    if (!claims.hostsByPeer.has(peerId)) claims.hostsByPeer.set(peerId, new Set());
+    claims.hostsByPeer.get(peerId).add(host);
+  }
+  if (endpoint && !claims.ownerByEndpoint.has(endpoint)) {
+    claims.ownerByEndpoint.set(endpoint, peerId);
+  }
+}
+
+/** `/ip4/1.2.3.4/tcp/30333/p2p/…` -> `/ip4/1.2.3.4` (the host half only). */
+const HOST_RE = /^\/(ip4|ip6|dns|dns4|dns6)\/([^/]+)/;
+
+/** @param {string} ma @returns {string | null} */
+function hostOfMultiaddr(ma) {
+  const m = HOST_RE.exec(ma);
+  return m ? `/${m[1]}/${m[2]}` : null;
+}
+
+/** @param {string} ma @returns {string | null} */
+function endpointOfMultiaddr(ma) {
+  const m = /^(\/(?:ip4|ip6|dns|dns4|dns6)\/[^/]+\/tcp\/\d{1,5})/.exec(ma);
+  return m ? m[1] : null;
+}
+
+/**
  * Multiaddrs for a provider that published its peer id. Prefers the addresses
  * the provider's heartbeat reported; when those are absent (a box listening on
  * 0.0.0.0 cannot know its own public IP) it synthesises one from the host the
  * AP already reached it on + the advertised p2p port.
  *
- * Every returned address ends in `/p2p/<peerId>` and passed `sanitizeMultiaddr`.
+ * A synthesised address must use **this provider's own** peer id and a
+ * `p2p_port` from this same record, and it is dropped when it would
+ * contradict a claim already made (the id published at another host, or this
+ * endpoint owned by another id). Every returned address ends in
+ * `/p2p/<peerId>` and passed `sanitizeMultiaddr`.
  * @param {object} p
  * @param {string} statusUrl
  * @param {string} peerId
+ * @param {{hostsByPeer?: Map<string, Set<string>>, ownerByEndpoint?: Map<string, string>}} [claims]
  * @returns {string[]}
  */
-function dialableMultiaddrs(p, statusUrl, peerId) {
-  const out = [];
-  if (Array.isArray(p.multiaddrs)) {
-    for (const raw of p.multiaddrs) {
-      const ma = sanitizeMultiaddr(raw);
-      if (!ma) continue;
-      if (peerIdOf(ma) !== peerId) continue; // an address cannot vouch for another id
-      if (!out.includes(ma)) out.push(ma);
-    }
-  }
-  if (out.length > 0) return out;
+function dialableMultiaddrs(p, statusUrl, peerId, claims) {
+  const explicit = explicitMultiaddrs(p, peerId);
+  if (explicit.length > 0) return explicit;
 
   const port = Number.isInteger(p.p2p_port) && p.p2p_port >= 1 && p.p2p_port <= 65535 ? p.p2p_port : null;
   const base = multiaddrFromUrl(statusUrl);
   // Legacy shape: some publishers list a full multiaddr as `status_url`.
   if (base && peerIdOf(base) === peerId && sanitizeMultiaddr(base)) return [base];
-  if (!port || !base) return out;
-  const hostBase = base.replace(/\/tcp\/\d+$/, "");
-  const ma = `${hostBase}/tcp/${port}/p2p/${peerId}`;
-  if (sanitizeMultiaddr(ma)) out.push(ma);
-  return out;
+  if (!port || !base) return [];
+
+  const host = hostOfMultiaddr(base);
+  if (!host) return [];
+
+  const hostsByPeer = claims?.hostsByPeer;
+  const ownerByEndpoint = claims?.ownerByEndpoint;
+
+  // A peer id is one node. If it is already published at a different host
+  // (by a static seed, or by an address it reported about itself), do not
+  // invent a second location for it: one of the two would be a lie, and this
+  // is exactly how box #1's host got paired with the Linux node's id.
+  const known = hostsByPeer?.get(peerId);
+  if (known && known.size > 0 && !(known.size === 1 && known.has(host))) return [];
+
+  // An endpoint belongs to one node: never reuse another provider's address.
+  const endpoint = `${host}/tcp/${port}`;
+  const owner = ownerByEndpoint?.get(endpoint);
+  if (owner && owner !== peerId) return [];
+
+  const ma = `${endpoint}/p2p/${peerId}`;
+  return sanitizeMultiaddr(ma) ? [ma] : [];
 }
 
 /**
@@ -562,6 +685,57 @@ function preflight() {
   return withCors(new Response(null, { status: 204 }));
 }
 
+/**
+ * Serve `website/releases.json` with the headers a node's updater expects.
+ *
+ * The manifest is served from the asset bundle (it is produced by the release
+ * script, not by this Worker), so there is one source of truth and no chance of
+ * the Worker and the file disagreeing. A missing manifest is a 503 with
+ * `no-store` — the node treats that as "nothing published yet" and never as
+ * "you are up to date".
+ *
+ * @param {Request} request
+ * @param {{ ASSETS?: { fetch: (r: Request) => Promise<Response> } }} env
+ * @param {URL} url
+ */
+async function releaseManifest(request, env, url) {
+  const notPublished = () =>
+    withCors(
+      new Response(
+        JSON.stringify({ error: "release manifest not published" }, null, 2) + "\n",
+        {
+          status: 503,
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+            "cache-control": "no-store",
+            "retry-after": "300",
+          },
+        },
+      ),
+    );
+
+  if (!env || !env.ASSETS || typeof env.ASSETS.fetch !== "function") return notPublished();
+
+  const assetUrl = new URL("/releases.json", url);
+  const res = await env.ASSETS.fetch(new Request(assetUrl.toString(), { method: "GET" }));
+  if (!res || res.status !== 200) return notPublished();
+
+  // HEAD must not carry a body, but must still report success + headers.
+  const body = request.method === "HEAD" ? null : res.body;
+  return withCors(
+    new Response(body, {
+      status: 200,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        // 5 min: an update is not urgent to the second, and the node checks on
+        // the order of hours.
+        "cache-control": "public, max-age=300",
+        "x-gpn-manifest": "release",
+      },
+    }),
+  );
+}
+
 /** @param {Response} res */
 function withCors(res) {
   const headers = new Headers(res.headers);
@@ -575,6 +749,7 @@ function withCors(res) {
 // Exported for unit tests (`node --test`). Not used by the Worker runtime.
 export const __test = {
   buildDirectory,
+  releaseManifest,
   dialableMultiaddrs,
   multiaddrFromUrl,
   peerIdOf,

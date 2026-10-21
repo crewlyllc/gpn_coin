@@ -1906,6 +1906,7 @@ name = "gpn-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ed25519-dalek",
  "env_logger",
  "ethash",
  "ethereum-types",

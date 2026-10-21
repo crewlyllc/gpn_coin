@@ -34,6 +34,10 @@ ethereum-types = "0.8"
 
 # Crypto
 sha2 = "0.10"
+# Release-manifest signature verification (ed25519). Already in the dependency
+# graph via sp-core; pinned here as a direct dependency so the updater cannot be
+# silently re-pointed at a different verifier.
+ed25519-dalek = { version = "2.2", default-features = false, features = ["std", "fast"] }
 
 # Snapshot archive (gpn_snapshot): pure-Rust tar + gzip, no C toolchain needed
 # (so it builds on the Windows box too). `.tar.zst` uses the external `zstd`

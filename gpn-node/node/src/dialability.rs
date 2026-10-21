@@ -30,6 +30,40 @@
 //! Anything else — only loopback/private/listen-on-0.0.0.0 with no observation
 //! — is NOT dialable and fails the gate after the grace window.
 //!
+//! # Evidence model (v2.3)
+//!
+//! The gate passes on **any one** of these, in this order of strength:
+//!
+//! | evidence | meaning |
+//! |---|---|
+//! | `inbound_peer` | a peer opened a connection to us |
+//! | `configured_addr_matches_observation` | the configured `GPN_PUBLIC_ADDR` endpoint (IP literal, or an IP a `/dns4`/`/dns6` name resolves to) was reported by Identify as our external address |
+//! | `observed_public_addr` | no configured address, but peers see us at a public `ip:port` on our listen port |
+//! | `stun_mapped_addr` | an **external** STUN binding tells us the NAT maps our socket to exactly the configured endpoint |
+//! | `tcp_probe_ok` | a bounded outbound TCP connect to the configured public `ip:port` succeeded (hairpin; weakest — a router may hairpin even when the WAN forward is closed) |
+//!
+//! `stun_mapped_addr` and `tcp_probe_ok` exist because the incident of
+//! 2026-10-20 showed the *observation-only* model produces false negatives:
+//! the Linux bootnode was externally reachable (3/3 independent probes) yet no
+//! libp2p peer completed Identify against it inside the grace window, so the
+//! sole authority exited and the chain halted for ~12 minutes.
+//!
+//! # `/dns4` is a first-class public address
+//!
+//! `GPN_PUBLIC_ADDR=/dns4/gpn-testnet.duckdns.org/tcp/30333` is accepted: the
+//! name is **resolved at check time** and *every* resolved IP must classify as
+//! public. Matching against peer observations is done on the **resolved IPs**,
+//! never on the literal hostname (peers only ever report IPs).
+//!
+//! # The gate may warn but must never halt the chain
+//!
+//! [`safety_valve`] is consulted before a hard-mode exit. On a solo chain, a
+//! dev/`--alice` style chain, or a network where this node is the only
+//! authority visible (0–1 connected peers), the gate **downgrades itself to
+//! soft mode** with a prominent warning instead of exiting: a false negative
+//! costs an operator a confusing restart, but exiting the last authoring node
+//! costs the network its chain.
+//!
 //! # Behaviour (v2.2 — dialable is REQUIRED by default)
 //!
 //! A node is a **backbone node**: it announces its endpoint and accepts inbound
@@ -80,6 +114,27 @@ pub const RECOMMENDED_LAN_EXAMPLE: &str = "192.168.1.50";
 
 /// How often a running node re-checks its inbound reachability (design §5.3).
 pub const RECHECK_SECS: u64 = 600;
+
+/// How often a running node re-checks its own public address.
+pub const PUBLIC_IP_RECHECK_SECS: u64 = 300;
+
+/// Bound on the outbound TCP reachability probe (hairpin test).
+pub const TCP_PROBE_TIMEOUT_SECS: u64 = 5;
+
+/// Bound on the external STUN binding probe.
+pub const STUN_TIMEOUT_SECS: u64 = 3;
+
+/// Default STUN server (any RFC 5389 server works).
+pub const DEFAULT_STUN_SERVER: &str = "stun.l.google.com:19302";
+
+/// Default bound on the public-IP echo request.
+pub const PUBLIC_IP_TIMEOUT_SECS: u64 = 5;
+
+/// Re-resolve a `/dns4`/`/dns6` public address at most this often.
+pub const DNS_REFRESH_SECS: u64 = 30;
+
+/// Re-run the active (STUN/TCP) probes at most this often while waiting.
+const PROBE_REFRESH_SECS: u64 = 15;
 
 /// Poll cadence while waiting for the gate.
 const POLL_SECS: u64 = 5;
@@ -152,9 +207,66 @@ pub fn classify_ip(ip: &IpAddr) -> IpClass {
     }
 }
 
+/// The host half of a multiaddress endpoint: a literal IP or a DNS name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Host {
+    Ip(IpAddr),
+    Dns(String),
+}
+
+impl std::fmt::Display for Host {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Host::Ip(ip) => write!(f, "{ip}"),
+            Host::Dns(name) => f.write_str(name),
+        }
+    }
+}
+
+/// Extract `(host, port)` from a multiaddress, accepting `/ip4`, `/ip6`,
+/// `/dns`, `/dns4` and `/dns6` hosts. Trailing `/p2p/…` (and anything else)
+/// is ignored. Returns `None` unless both a host and a non-zero TCP/UDP port
+/// are present.
+pub fn host_port_of(ma: &Multiaddr) -> Option<(Host, u16)> {
+    let mut host = None;
+    let mut port = None;
+    for proto in ma.iter() {
+        match proto {
+            Protocol::Ip4(v4) => host = Some(Host::Ip(IpAddr::V4(v4))),
+            Protocol::Ip6(v6) => host = Some(Host::Ip(IpAddr::V6(v6))),
+            Protocol::Dns(n) | Protocol::Dns4(n) | Protocol::Dns6(n) => {
+                host = Some(Host::Dns(n.to_string()))
+            }
+            Protocol::Tcp(p) | Protocol::Udp(p) => port = Some(p),
+            _ => {}
+        }
+    }
+    match (host, port) {
+        (Some(h), Some(p)) if p != 0 => Some((h, p)),
+        _ => None,
+    }
+}
+
+/// Resolve a DNS name to every address the system resolver returns.
+///
+/// Blocking (`getaddrinfo`); call it from `spawn_blocking` in async code. An
+/// empty vector means "could not resolve" and is treated as *no evidence*
+/// rather than as a hard failure by itself.
+pub fn resolve_host(name: &str, port: u16) -> Vec<IpAddr> {
+    use std::net::ToSocketAddrs;
+    let mut out: Vec<IpAddr> = match (name, port).to_socket_addrs() {
+        Ok(it) => it.map(|sa| sa.ip()).collect(),
+        Err(_) => Vec::new(),
+    };
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Extract `(ip, port)` from a multiaddress, ignoring `/p2p/…` and any other
 /// trailing components. Returns `None` unless both an IP and a non-zero
-/// TCP/UDP port are present.
+/// TCP/UDP port are present. DNS hosts return `None` — use [`host_port_of`]
+/// when `/dns4`/`/dns6` must be accepted.
 pub fn endpoint_of(ma: &Multiaddr) -> Option<(IpAddr, u16)> {
     let mut ip = None;
     let mut port = None;
@@ -184,6 +296,12 @@ pub enum Evidence {
     /// No configured address, but our observed public address uses the port we
     /// listen on (port-preserving mapping / forward).
     ObservedPublicAtListenPort,
+    /// An external STUN binding reported a mapped endpoint equal to the
+    /// configured public address (the NAT really maps us there).
+    StunMappedAddr,
+    /// A bounded outbound TCP connect to the configured public endpoint worked
+    /// (hairpin). Weakest evidence: some routers hairpin a closed WAN port.
+    TcpProbeOk,
 }
 
 impl std::fmt::Display for Evidence {
@@ -193,6 +311,8 @@ impl std::fmt::Display for Evidence {
             Evidence::ConfiguredAddrObserved => "configured public address observed",
             Evidence::PublicListenAddr => "public listen address",
             Evidence::ObservedPublicAtListenPort => "observed public address on listen port",
+            Evidence::StunMappedAddr => "external STUN mapping matches the configured address",
+            Evidence::TcpProbeOk => "outbound TCP reachability probe succeeded",
         };
         f.write_str(s)
     }
@@ -236,18 +356,90 @@ pub fn inbound_peer_count(state: &NetworkState) -> usize {
         .count()
 }
 
+/// Everything the pure gate decision needs.
+///
+/// `resolved` holds the IPs the configured `/dns4`/`/dns6` name resolved to at
+/// check time (empty for an IP literal, and for a name that failed to resolve).
+/// `stun_mapped` / `tcp_probe_ok` are the *active* probes from
+/// [`probe_configured_endpoint`]; they are only meaningful when a public
+/// address was configured.
+#[derive(Debug, Clone)]
+pub struct GateInputs<'a> {
+    /// Peers that dialed us (see [`inbound_peer_count`]).
+    pub inbound_peers: usize,
+    /// Our listen addresses (`NetworkStateInfo::listen_addresses`).
+    pub listen: &'a [Multiaddr],
+    /// Addresses peers reported for us (`external_addresses`).
+    pub observed: &'a [Multiaddr],
+    /// `GPN_PUBLIC_ADDR` / `--public-addr`, if any.
+    pub configured: Option<&'a Multiaddr>,
+    /// Resolved IPs of a configured DNS name (empty when not a name).
+    pub resolved: &'a [IpAddr],
+    /// The external STUN binding reported exactly our configured endpoint.
+    pub stun_mapped: bool,
+    /// A bounded outbound TCP connect to the configured endpoint succeeded.
+    pub tcp_probe_ok: bool,
+}
+
+impl<'a> GateInputs<'a> {
+    /// Minimal inputs (no DNS resolution, no active probes).
+    pub fn new(
+        inbound_peers: usize,
+        listen: &'a [Multiaddr],
+        observed: &'a [Multiaddr],
+        configured: Option<&'a Multiaddr>,
+    ) -> Self {
+        GateInputs {
+            inbound_peers,
+            listen,
+            observed,
+            configured,
+            resolved: &[],
+            stun_mapped: false,
+            tcp_probe_ok: false,
+        }
+    }
+}
+
 /// The pure gate decision.
 ///
 /// * `inbound_peers` — peers that dialed us (see [`inbound_peer_count`]).
 /// * `listen` — the node's listen addresses (`NetworkStateInfo::listen_addresses`).
 /// * `observed` — addresses peers reported for us (`external_addresses`).
 /// * `configured` — `GPN_PUBLIC_ADDR` / `--public-addr`, if any.
+///
+/// This is the passive-only form; see [`evaluate_with`] for DNS resolution and
+/// the active probes.
 pub fn evaluate(
     inbound_peers: usize,
     listen: &[Multiaddr],
     observed: &[Multiaddr],
     configured: Option<&Multiaddr>,
 ) -> Verdict {
+    evaluate_with(&GateInputs::new(inbound_peers, listen, observed, configured))
+}
+
+/// The pure gate decision, including DNS resolution and active probes.
+pub fn evaluate_with(inputs: &GateInputs) -> Verdict {
+    let GateInputs {
+        inbound_peers,
+        listen,
+        observed,
+        configured,
+        resolved,
+        stun_mapped,
+        tcp_probe_ok,
+    } = inputs;
+    let (inbound_peers, listen, observed, resolved, stun_mapped, tcp_probe_ok) = (
+        *inbound_peers,
+        *listen,
+        *observed,
+        *resolved,
+        *stun_mapped,
+        *tcp_probe_ok,
+    );
+    let configured = *configured;
+
     if inbound_peers > 0 {
         return Verdict::pass(
             Evidence::InboundPeer,
@@ -255,47 +447,104 @@ pub fn evaluate(
         );
     }
 
-    // A configured address is authoritative: require an exact ip:port match.
+    // A configured address is authoritative: require a match on the endpoint it
+    // names — the literal IP, or (for /dns4, /dns6) any IP it resolves to.
     if let Some(cfg_ma) = configured {
-        match endpoint_of(cfg_ma) {
-            Some((ip, port)) if classify_ip(&ip).is_public() => {
-                for o in observed {
-                    if endpoint_of(o) == Some((ip, port)) {
-                        return Verdict::pass(
-                            Evidence::ConfiguredAddrObserved,
-                            format!("observed external address matches GPN_PUBLIC_ADDR ({cfg_ma})"),
-                        );
-                    }
-                }
-                for l in listen {
-                    if endpoint_of(l) == Some((ip, port)) {
-                        return Verdict::pass(
-                            Evidence::PublicListenAddr,
-                            format!("listening directly on the public address {cfg_ma}"),
-                        );
-                    }
-                }
-                return Verdict::fail(format!(
-                    "configured public address {cfg_ma} was neither observed by peers nor bound \
-                     locally — the port is probably not forwarded (observed: [{}], listening: [{}])",
-                    join(observed),
-                    join(listen)
-                ));
-            }
-            Some((ip, _)) => {
-                return Verdict::fail(format!(
-                    "GPN_PUBLIC_ADDR {cfg_ma} uses a NON-public IP {ip} ({}); a public \
-                     (globally routable) address is required",
-                    class_desc(classify_ip(&ip))
-                ));
-            }
+        let (host, port) = match host_port_of(cfg_ma) {
+            Some(hp) => hp,
             None => {
                 return Verdict::fail(format!(
-                    "GPN_PUBLIC_ADDR {cfg_ma} is not a usable /ip4|ip6/<addr>/tcp/<port> \
-                     multiaddress"
+                    "GPN_PUBLIC_ADDR {cfg_ma} is not a usable \
+                     /ip4|ip6|dns4|dns6/<host>/tcp/<port> multiaddress"
                 ));
             }
+        };
+
+        // The endpoints that would prove this address: (ip, port) pairs.
+        let endpoints: Vec<(IpAddr, u16)> = match &host {
+            Host::Ip(ip) => vec![(*ip, port)],
+            Host::Dns(name) => {
+                if resolved.is_empty() {
+                    return Verdict::fail(format!(
+                        "GPN_PUBLIC_ADDR {cfg_ma} uses DNS name '{name}', which did not \
+                         resolve to any address at check time"
+                    ));
+                }
+                resolved.iter().map(|ip| (*ip, port)).collect()
+            }
+        };
+
+        // Every resolved IP must be globally routable: an address that resolves
+        // to a private/loopback IP cannot be dialled from the internet, and a
+        // mixed answer is a misconfiguration we must not paper over.
+        if let Some((bad_ip, class)) = endpoints
+            .iter()
+            .map(|(ip, _)| (*ip, classify_ip(ip)))
+            .find(|(_, c)| !c.is_public())
+        {
+            return Verdict::fail(format!(
+                "GPN_PUBLIC_ADDR {cfg_ma} resolves to NON-public IP {bad_ip} ({}); a public \
+                 (globally routable) address is required",
+                class_desc(class)
+            ));
         }
+
+        for o in observed {
+            if let Some((ip, oport)) = endpoint_of(o) {
+                if oport == port && endpoints.iter().any(|(eip, _)| *eip == ip) {
+                    let via = match &host {
+                        Host::Dns(name) => format!(" ({name} resolves to {ip})"),
+                        Host::Ip(_) => String::new(),
+                    };
+                    return Verdict::pass(
+                        Evidence::ConfiguredAddrObserved,
+                        format!(
+                            "observed external address matches GPN_PUBLIC_ADDR ({cfg_ma}){via}"
+                        ),
+                    );
+                }
+            }
+        }
+        for l in listen {
+            if let Some((ip, lport)) = endpoint_of(l) {
+                if lport == port && endpoints.iter().any(|(eip, _)| *eip == ip) {
+                    return Verdict::pass(
+                        Evidence::PublicListenAddr,
+                        format!("listening directly on the public address {cfg_ma}"),
+                    );
+                }
+            }
+        }
+
+        // Active evidence. The external STUN mapping is much stronger than a
+        // hairpin connect, so it is reported first.
+        if stun_mapped {
+            return Verdict::pass(
+                Evidence::StunMappedAddr,
+                format!(
+                    "external STUN binding reports our mapped endpoint as {cfg_ma} \
+                     (NAT maps the public port to this node)"
+                ),
+            );
+        }
+        if tcp_probe_ok {
+            return Verdict::pass(
+                Evidence::TcpProbeOk,
+                format!(
+                    "outbound TCP connect to {cfg_ma} succeeded (hairpin reachability; \
+                     weaker than peer observation)"
+                ),
+            );
+        }
+
+        return Verdict::fail(format!(
+            "configured public address {cfg_ma} was neither observed by peers nor bound \
+             locally, and neither the STUN probe nor the TCP probe could confirm it — the \
+             port is probably not forwarded (resolved: [{}], observed: [{}], listening: [{}])",
+            join_ips(resolved),
+            join(observed),
+            join(listen)
+        ));
     }
 
     // No configured address: accept a direct public bind (VPS), or an observed
@@ -345,6 +594,16 @@ fn join(addrs: &[Multiaddr]) -> String {
         .join(", ")
 }
 
+fn join_ips(ips: &[IpAddr]) -> String {
+    if ips.is_empty() {
+        return "none".into();
+    }
+    ips.iter()
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn class_desc(c: IpClass) -> &'static str {
     match c {
         IpClass::Public => "public",
@@ -353,6 +612,305 @@ fn class_desc(c: IpClass) -> &'static str {
         IpClass::LinkLocal => "link-local",
         IpClass::Unspecified => "unspecified",
         IpClass::Multicast => "multicast",
+    }
+}
+
+// ── Active evidence: external STUN binding + bounded TCP probe ──────────
+
+/// Build an RFC 5389 Binding Request (20 bytes, no attributes).
+///
+/// Message type `0x0001`, length 0, magic cookie `0x2112A442`, and a
+/// time/pid-derived 96-bit transaction id. Pure, so the wire format is
+/// unit-testable.
+pub fn build_stun_binding_request() -> [u8; 20] {
+    let mut msg = [0u8; 20];
+    msg[0..2].copy_from_slice(&0x0001u16.to_be_bytes());
+    msg[2..4].copy_from_slice(&0u16.to_be_bytes());
+    msg[4..8].copy_from_slice(&[0x21, 0x12, 0xA4, 0x42]);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    msg[8..16].copy_from_slice(&now.to_be_bytes());
+    msg[16..20].copy_from_slice(&(std::process::id() as u32).to_be_bytes());
+    msg
+}
+
+/// Parse `XOR-MAPPED-ADDRESS` (0x0020, preferred) or the deprecated
+/// `MAPPED-ADDRESS` (0x0001) from a STUN Binding Success Response.
+///
+/// Returns `None` for anything that is not a well-formed success response, so a
+/// spoofed or garbled packet can never be mistaken for evidence.
+pub fn parse_stun_xor_mapped(msg: &[u8]) -> Option<(IpAddr, u16)> {
+    if msg.len() < 20 {
+        return None;
+    }
+    // Binding Success Response = 0x0101.
+    if u16::from_be_bytes([msg[0], msg[1]]) != 0x0101 {
+        return None;
+    }
+    if msg[4..8] != [0x21, 0x12, 0xA4, 0x42] {
+        return None;
+    }
+    let tid: [u8; 12] = msg[8..20].try_into().ok()?;
+    let attr_len = u16::from_be_bytes([msg[2], msg[3]]) as usize;
+    let body_end = (20 + attr_len).min(msg.len());
+    let body = &msg[20..body_end];
+
+    let mut at = 0usize;
+    let mut fallback: Option<(IpAddr, u16)> = None;
+    while at + 4 <= body.len() {
+        let kind = u16::from_be_bytes([body[at], body[at + 1]]);
+        let len = u16::from_be_bytes([body[at + 2], body[at + 3]]) as usize;
+        let val_start = at + 4;
+        let Some(val_end) = val_start.checked_add(len) else {
+            break;
+        };
+        if val_end > body.len() {
+            break;
+        }
+        let val = &body[val_start..val_end];
+        match kind {
+            0x0020 => {
+                if let Some(ep) = decode_stun_mapped(val, true, &tid) {
+                    return Some(ep);
+                }
+            }
+            0x0001 if fallback.is_none() => {
+                fallback = decode_stun_mapped(val, false, &tid);
+            }
+            _ => {}
+        }
+        // Attributes are padded to a 4-byte boundary.
+        at = val_start + ((len + 3) & !3);
+    }
+    fallback
+}
+
+fn decode_stun_mapped(val: &[u8], xor: bool, tid: &[u8; 12]) -> Option<(IpAddr, u16)> {
+    if val.len() < 4 {
+        return None;
+    }
+    let family = val[1];
+    let raw_port = u16::from_be_bytes([val[2], val[3]]);
+    let port = if xor { raw_port ^ 0x2112 } else { raw_port };
+    match family {
+        0x01 if val.len() >= 8 => {
+            let mut o = [val[4], val[5], val[6], val[7]];
+            if xor {
+                let cookie = [0x21u8, 0x12, 0xA4, 0x42];
+                for i in 0..4 {
+                    o[i] ^= cookie[i];
+                }
+            }
+            Some((IpAddr::V4(std::net::Ipv4Addr::from(o)), port))
+        }
+        0x02 if val.len() >= 20 => {
+            let mut o = [0u8; 16];
+            o.copy_from_slice(&val[4..20]);
+            if xor {
+                // IPv6 XORs with cookie || transaction id.
+                let mut mask = [0u8; 16];
+                mask[0..4].copy_from_slice(&[0x21, 0x12, 0xA4, 0x42]);
+                mask[4..16].copy_from_slice(tid);
+                for i in 0..16 {
+                    o[i] ^= mask[i];
+                }
+            }
+            Some((IpAddr::V6(std::net::Ipv6Addr::from(o)), port))
+        }
+        _ => None,
+    }
+}
+
+/// Bounded outbound TCP connect: "can this host reach its own public endpoint".
+///
+/// From the node itself this is a **hairpin** test. It can fail on a router
+/// without NAT loopback even when the WAN forward is open, so a failure is
+/// never proof of non-dialability — only a success is evidence.
+pub fn tcp_probe(ip: IpAddr, port: u16, timeout: Duration) -> bool {
+    use std::net::{SocketAddr, TcpStream};
+    TcpStream::connect_timeout(&SocketAddr::new(ip, port), timeout).is_ok()
+}
+
+/// External STUN binding: what endpoint does the NAT map our socket to?
+///
+/// Genuinely external evidence (a third party sees our mapped tuple), unlike a
+/// hairpin connect. Returns `None` on any error/timeout.
+pub async fn stun_probe(server: &str, timeout: Duration) -> Option<(IpAddr, u16)> {
+    let sock = tokio::net::UdpSocket::bind("0.0.0.0:0").await.ok()?;
+    sock.connect(server).await.ok()?;
+    sock.send(&build_stun_binding_request()).await.ok()?;
+    let mut buf = [0u8; 512];
+    let n = tokio::time::timeout(timeout, sock.recv(&mut buf))
+        .await
+        .ok()?
+        .ok()?;
+    parse_stun_xor_mapped(&buf[..n])
+}
+
+/// Gather active evidence for a configured public address.
+///
+/// Order of preference: external STUN first (strongest, and it proves the
+/// *forward*, not just hairpin); only when that does not already name our
+/// configured endpoint do we spend [`TCP_PROBE_TIMEOUT_SECS`] on the hairpin
+/// connect. A DNS name is resolved once per call.
+///
+/// Returns `(resolved_ips, stun_matched, tcp_probe_ok)`.
+pub async fn probe_configured_endpoint(
+    configured: &Multiaddr,
+    stun_server: Option<&str>,
+) -> (Vec<IpAddr>, bool, bool) {
+    let Some((host, port)) = host_port_of(configured) else {
+        return (Vec::new(), false, false);
+    };
+
+    let resolved = match &host {
+        Host::Ip(ip) => vec![*ip],
+        Host::Dns(name) => {
+            let name = name.clone();
+            tokio::task::spawn_blocking(move || resolve_host(&name, port))
+                .await
+                .unwrap_or_default()
+        }
+    };
+    if resolved.is_empty() {
+        return (resolved, false, false);
+    }
+
+    if let Some(server) = stun_server {
+        if let Some((ip, mapped_port)) =
+            stun_probe(server, Duration::from_secs(STUN_TIMEOUT_SECS)).await
+        {
+            if mapped_port == port && resolved.iter().any(|r| *r == ip) {
+                return (resolved, true, false);
+            }
+            log::debug!(
+                "dialability: STUN reports {ip}:{mapped_port}, which is not the configured \
+                 {configured} — trying the TCP probe"
+            );
+        }
+    }
+
+    let probe_ips = resolved.clone();
+    let ok = tokio::task::spawn_blocking(move || {
+        let timeout = Duration::from_secs(TCP_PROBE_TIMEOUT_SECS);
+        probe_ips.iter().any(|ip| tcp_probe(*ip, port, timeout))
+    })
+    .await
+    .unwrap_or(false);
+    (resolved, false, ok)
+}
+
+// ── Last-authority safety valve ────────────────────────────────────────
+
+/// What the gate knows about this node's position in the network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SafetyContext {
+    /// This node authors blocks (always true for a GPN node — `force_mining`).
+    pub is_authority: bool,
+    /// Peers we are connected to, in either direction.
+    pub connected_peers: usize,
+    /// Known authority count when the chain exposes one; `0` = unknown.
+    pub authority_count: usize,
+    /// A solochain / `--dev` / `--alice` style local chain.
+    pub dev_chain: bool,
+}
+
+/// Why the gate refused to hard-fail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SafetyReason {
+    /// Nobody else is connected: we are the whole visible network.
+    SoloChain,
+    /// Dev/solo chain (never a real deployment).
+    DevChain,
+    /// The chain says this node is the only authority.
+    OnlyAuthority,
+    /// Exactly one peer: we are half of the visible network.
+    TinyNetwork,
+}
+
+impl std::fmt::Display for SafetyReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            SafetyReason::SoloChain => "this node is the only node on the network (0 peers connected)",
+            SafetyReason::DevChain => "this is a dev/solo chain",
+            SafetyReason::OnlyAuthority => "this node is the only authority on the chain",
+            SafetyReason::TinyNetwork => "this node is one of only two nodes on the network",
+        })
+    }
+}
+
+/// Decide whether the hard gate must downgrade itself to soft mode.
+///
+/// The gate exists to keep undialable nodes *out of the mesh*, never to stop
+/// the chain. When refusing to run would take the last authoring node (or a
+/// dev chain) down, the safe action is always to keep running and warn.
+pub fn safety_valve(ctx: &SafetyContext) -> Option<SafetyReason> {
+    if !ctx.is_authority {
+        return None;
+    }
+    if ctx.dev_chain {
+        return Some(SafetyReason::DevChain);
+    }
+    if ctx.authority_count == 1 {
+        return Some(SafetyReason::OnlyAuthority);
+    }
+    if ctx.connected_peers == 0 {
+        return Some(SafetyReason::SoloChain);
+    }
+    if ctx.connected_peers == 1 {
+        return Some(SafetyReason::TinyNetwork);
+    }
+    None
+}
+
+/// The prominent warning printed instead of exiting when the valve fires.
+pub fn safety_valve_notice(reason: SafetyReason, detail: &str) -> String {
+    format!(
+        "\
+================================================================================
+  DIALABILITY GATE OVERRIDDEN - KEEPING THE CHAIN ALIVE
+================================================================================
+This node could not prove it is inbound-reachable:
+  {detail}
+
+Normally that is a hard failure (exit {EXIT_NOT_DIALABLE}). It is NOT applied here
+because {reason}.
+
+Exiting would stop block production and halt the chain - a far worse outage
+than one node running in degraded (non-discoverable) mode. This node keeps
+syncing, mining and serving jobs, and re-checks every 10 minutes.
+
+Fix the forward/firewall anyway:
+  https://gpncoin.ai/docs/run-a-node#make-your-node-dialable
+
+To force the hard failure regardless:  GPN_DIALABILITY_SAFETY=0
+================================================================================"
+    )
+}
+
+/// `GPN_DIALABILITY_SAFETY` — default ON; an explicit false-y value lets the
+/// gate exit even when it would stop the last authority.
+pub fn parse_safety_enabled(raw: Option<&str>) -> bool {
+    match raw.map(|s| s.trim().to_ascii_lowercase()) {
+        Some(v) if matches!(v.as_str(), "0" | "false" | "no" | "off") => false,
+        _ => true,
+    }
+}
+
+/// `GPN_STUN_SERVER` — `off`/`0`/`no` disables the external STUN probe.
+pub fn stun_server_from_env() -> Option<String> {
+    match std::env::var("GPN_STUN_SERVER") {
+        Ok(v) => {
+            let v = v.trim().to_string();
+            match v.to_ascii_lowercase().as_str() {
+                "" => Some(DEFAULT_STUN_SERVER.to_string()),
+                "0" | "false" | "no" | "off" => None,
+                _ => Some(v),
+            }
+        }
+        Err(_) => Some(DEFAULT_STUN_SERVER.to_string()),
     }
 }
 
@@ -376,6 +934,11 @@ pub struct GateConfig {
     pub timeout: Duration,
     /// The configured public address, if any.
     pub public_addr: Option<Multiaddr>,
+    /// External STUN server for the active probe (`GPN_STUN_SERVER`).
+    /// `None` disables the probe; the TCP hairpin probe still runs.
+    pub stun_server: Option<String>,
+    /// `GPN_DIALABILITY_SAFETY`: never let the gate stop the chain.
+    pub safety: bool,
 }
 
 impl GateConfig {
@@ -408,6 +971,8 @@ impl GateConfig {
             discoverable,
             timeout: Duration::from_secs(timeout),
             public_addr,
+            stun_server: stun_server_from_env(),
+            safety: parse_safety_enabled(std::env::var("GPN_DIALABILITY_SAFETY").ok().as_deref()),
         }
     }
 
@@ -420,6 +985,8 @@ impl GateConfig {
             discoverable: true,
             timeout,
             public_addr,
+            stun_server: None,
+            safety: true,
         }
     }
 
@@ -666,7 +1233,14 @@ pub async fn watch_dialability<N>(
         };
         let listen = network.listen_addresses();
         let observed = network.external_addresses();
-        let verdict = evaluate(inbound, &listen, &observed, cfg.public_addr.as_ref());
+        let verdict = full_verdict(
+            inbound,
+            &listen,
+            &observed,
+            cfg.public_addr.as_ref(),
+            cfg.stun_server.as_deref(),
+        )
+        .await;
         let port = listen_port(&listen).unwrap_or(DEFAULT_SEED_PORT);
 
         match edge_transition(last_dialable, verdict.dialable) {
@@ -697,11 +1271,44 @@ pub async fn watch_dialability<N>(
     }
 }
 
+/// Resolve the configured DNS name (if any), run the active probes, and
+/// evaluate.
+///
+/// Kept separate from [`evaluate_with`] so the decision stays pure and every
+/// network-touching step is explicit.
+async fn full_verdict(
+    inbound: usize,
+    listen: &[Multiaddr],
+    observed: &[Multiaddr],
+    configured: Option<&Multiaddr>,
+    stun_server: Option<&str>,
+) -> Verdict {
+    // Passive evidence is always tried FIRST and for free. Only when it fails
+    // do we pay for DNS + STUN + a TCP connect.
+    let passive = evaluate(inbound, listen, observed, configured);
+    if passive.dialable {
+        return passive;
+    }
+    let Some(cfg_ma) = configured else {
+        return passive;
+    };
+    let (resolved, stun_mapped, tcp_probe_ok) = probe_configured_endpoint(cfg_ma, stun_server).await;
+    evaluate_with(&GateInputs {
+        inbound_peers: inbound,
+        listen,
+        observed,
+        configured,
+        resolved: &resolved,
+        stun_mapped,
+        tcp_probe_ok,
+    })
+}
+
 /// Wait until the node is demonstrably dialable, or the grace window expires.
 ///
 /// Polls the live network every [`POLL_SECS`] seconds and evaluates
-/// [`evaluate`]. Returns the final verdict (never blocks longer than
-/// `cfg.timeout`).
+/// [`full_verdict`] (passive evidence first, then DNS + the active probes).
+/// Returns the final verdict (never blocks longer than `cfg.timeout`).
 pub async fn wait_for_dialability<N>(network: &N, cfg: &GateConfig) -> Verdict
 where
     N: NetworkStatusProvider + NetworkStateInfo,
@@ -710,6 +1317,10 @@ where
     let deadline = started + cfg.timeout;
     let mut last_progress = started;
     let mut verdict;
+    // Active probes are expensive (DNS + a 3 s STUN round trip + up to 5 s of
+    // TCP connect), so they are cached and retried at most every
+    // [`PROBE_REFRESH_SECS`] instead of once per 5 s poll.
+    let mut cached_probe: Option<(Instant, Vec<IpAddr>, bool, bool)> = None;
 
     loop {
         let inbound = match network.network_state().await {
@@ -718,7 +1329,35 @@ where
         };
         let listen = network.listen_addresses();
         let observed = network.external_addresses();
+
+        // Passive evidence first — free, and it needs no network traffic.
         verdict = evaluate(inbound, &listen, &observed, cfg.public_addr.as_ref());
+        if !verdict.dialable {
+            if let Some(cfg_ma) = cfg.public_addr.as_ref() {
+                let stale = cached_probe
+                    .as_ref()
+                    .map(|(at, _, _, _)| {
+                        at.elapsed() >= Duration::from_secs(PROBE_REFRESH_SECS)
+                    })
+                    .unwrap_or(true);
+                if stale {
+                    let (resolved, stun_mapped, tcp_probe_ok) =
+                        probe_configured_endpoint(cfg_ma, cfg.stun_server.as_deref()).await;
+                    cached_probe = Some((Instant::now(), resolved, stun_mapped, tcp_probe_ok));
+                }
+                if let Some((_, resolved, stun_mapped, tcp_probe_ok)) = cached_probe.as_ref() {
+                    verdict = evaluate_with(&GateInputs {
+                        inbound_peers: inbound,
+                        listen: &listen,
+                        observed: &observed,
+                        configured: cfg.public_addr.as_ref(),
+                        resolved,
+                        stun_mapped: *stun_mapped,
+                        tcp_probe_ok: *tcp_probe_ok,
+                    });
+                }
+            }
+        }
 
         if verdict.dialable || Instant::now() >= deadline {
             return verdict;
@@ -888,6 +1527,291 @@ mod tests {
         let v = evaluate(0, &[ma("/ip4/192.168.1.5/tcp/30333")], &[], Some(&cfg));
         assert!(!v.dialable);
         assert!(v.detail.contains("NON-public"), "detail: {}", v.detail);
+    }
+
+    // ── /dns4 public addresses (fix #1) ──────────────────────────────────
+
+    #[test]
+    fn host_port_of_accepts_dns_names_and_ips() {
+        assert_eq!(
+            host_port_of(&ma(
+                "/dns4/gpn-testnet.duckdns.org/tcp/30333/\
+                 p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo"
+            )),
+            Some((Host::Dns("gpn-testnet.duckdns.org".into()), 30333))
+        );
+        assert_eq!(
+            host_port_of(&ma("/dns6/node.example/tcp/30333")),
+            Some((Host::Dns("node.example".into()), 30333))
+        );
+        assert_eq!(
+            host_port_of(&ma("/ip4/1.2.3.4/tcp/30333")),
+            Some((Host::Ip("1.2.3.4".parse().unwrap()), 30333))
+        );
+        // No port / no host → not an endpoint.
+        assert_eq!(host_port_of(&ma("/ip4/1.2.3.4")), None);
+        assert_eq!(host_port_of(&ma("/dns4/example.org")), None);
+    }
+
+    #[test]
+    fn dns4_public_addr_passes_when_a_resolved_ip_is_observed() {
+        let cfg = ma("/dns4/gpn-testnet.duckdns.org/tcp/30333");
+        let resolved: Vec<IpAddr> = vec!["142.129.54.88".parse().unwrap()];
+        let observed = vec![ma("/ip4/142.129.54.88/tcp/30333")];
+        let v = evaluate_with(&GateInputs {
+            inbound_peers: 0,
+            listen: &[ma("/ip4/0.0.0.0/tcp/30333")],
+            observed: &observed,
+            configured: Some(&cfg),
+            resolved: &resolved,
+            stun_mapped: false,
+            tcp_probe_ok: false,
+        });
+        assert!(v.dialable, "detail: {}", v.detail);
+        assert_eq!(v.evidence, Some(Evidence::ConfiguredAddrObserved));
+        assert!(v.detail.contains("resolves to 142.129.54.88"), "{}", v.detail);
+    }
+
+    #[test]
+    fn dns4_is_no_longer_rejected_as_unusable() {
+        // The 2026-10-20 regression: a /dns4 GPN_PUBLIC_ADDR failed with
+        // "not a usable /ip4|ip6/<addr>/tcp/<port> multiaddress".
+        let cfg = ma("/dns4/gpn-testnet.duckdns.org/tcp/30333");
+        let resolved: Vec<IpAddr> = vec!["142.129.54.88".parse().unwrap()];
+        let v = evaluate_with(&GateInputs {
+            inbound_peers: 0,
+            listen: &[ma("/ip4/0.0.0.0/tcp/30333")],
+            observed: &[],
+            configured: Some(&cfg),
+            resolved: &resolved,
+            stun_mapped: false,
+            tcp_probe_ok: false,
+        });
+        assert!(!v.dialable);
+        assert!(
+            !v.detail.contains("not a usable"),
+            "dns4 must be accepted as a shape: {}",
+            v.detail
+        );
+        assert!(v.detail.contains("142.129.54.88"), "{}", v.detail);
+    }
+
+    #[test]
+    fn dns4_resolving_to_a_private_ip_fails() {
+        let cfg = ma("/dns4/router.lan/tcp/30333");
+        let resolved: Vec<IpAddr> = vec!["192.168.1.5".parse().unwrap()];
+        let v = evaluate_with(&GateInputs {
+            inbound_peers: 0,
+            listen: &[ma("/ip4/0.0.0.0/tcp/30333")],
+            observed: &[],
+            configured: Some(&cfg),
+            resolved: &resolved,
+            stun_mapped: true,
+            tcp_probe_ok: true,
+        });
+        assert!(!v.dialable, "a private resolution is never dialable");
+        assert!(v.detail.contains("NON-public"), "{}", v.detail);
+    }
+
+    #[test]
+    fn dns4_that_does_not_resolve_fails_with_a_clear_reason() {
+        let cfg = ma("/dns4/nonexistent.invalid/tcp/30333");
+        let v = evaluate_with(&GateInputs::new(
+            0,
+            &[ma("/ip4/0.0.0.0/tcp/30333")],
+            &[],
+            Some(&cfg),
+        ));
+        assert!(!v.dialable);
+        assert!(v.detail.contains("did not"), "{}", v.detail);
+    }
+
+    // ── active evidence: tcp probe / STUN (fix #2) ───────────────────────
+
+    #[test]
+    fn tcp_probe_ok_is_accepted_as_evidence() {
+        let cfg = ma("/ip4/142.129.54.88/tcp/30333");
+        let v = evaluate_with(&GateInputs {
+            inbound_peers: 0,
+            listen: &[ma("/ip4/0.0.0.0/tcp/30333")],
+            observed: &[],
+            configured: Some(&cfg),
+            resolved: &[],
+            stun_mapped: false,
+            tcp_probe_ok: true,
+        });
+        assert!(v.dialable, "detail: {}", v.detail);
+        assert_eq!(v.evidence, Some(Evidence::TcpProbeOk));
+    }
+
+    #[test]
+    fn stun_mapping_is_accepted_and_preferred_over_the_tcp_probe() {
+        let cfg = ma("/ip4/142.129.54.88/tcp/30333");
+        let v = evaluate_with(&GateInputs {
+            inbound_peers: 0,
+            listen: &[ma("/ip4/0.0.0.0/tcp/30333")],
+            observed: &[],
+            configured: Some(&cfg),
+            resolved: &[],
+            stun_mapped: true,
+            tcp_probe_ok: true,
+        });
+        assert!(v.dialable);
+        assert_eq!(v.evidence, Some(Evidence::StunMappedAddr));
+    }
+
+    #[test]
+    fn passive_evidence_beats_a_failed_probe_and_vice_versa() {
+        // Configured address observed, probes failed → still dialable.
+        let cfg = ma("/ip4/1.2.3.4/tcp/30333");
+        let observed = vec![ma("/ip4/1.2.3.4/tcp/30333")];
+        let v = evaluate_with(&GateInputs {
+            inbound_peers: 0,
+            listen: &[ma("/ip4/0.0.0.0/tcp/30333")],
+            observed: &observed,
+            configured: Some(&cfg),
+            resolved: &[],
+            stun_mapped: false,
+            tcp_probe_ok: false,
+        });
+        assert_eq!(v.evidence, Some(Evidence::ConfiguredAddrObserved));
+
+        // Nothing at all → fail, and the failure names every evidence source.
+        let v = evaluate_with(&GateInputs::new(
+            0,
+            &[ma("/ip4/0.0.0.0/tcp/30333")],
+            &[],
+            Some(&cfg),
+        ));
+        assert!(!v.dialable);
+        assert!(v.detail.contains("STUN"), "{}", v.detail);
+        assert!(v.detail.contains("TCP"), "{}", v.detail);
+    }
+
+    #[test]
+    fn stun_binding_request_is_well_formed() {
+        let req = build_stun_binding_request();
+        assert_eq!(req.len(), 20);
+        assert_eq!(u16::from_be_bytes([req[0], req[1]]), 0x0001);
+        assert_eq!(u16::from_be_bytes([req[2], req[3]]), 0);
+        assert_eq!(&req[4..8], &[0x21, 0x12, 0xA4, 0x42]);
+        // Two requests never share a transaction id.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert_ne!(build_stun_binding_request()[8..16], req[8..16]);
+    }
+
+    #[test]
+    fn stun_xor_mapped_address_is_parsed() {
+        let tid = [9u8; 12];
+        let mut msg = vec![0x01, 0x01, 0x00, 0x0C];
+        msg.extend_from_slice(&[0x21, 0x12, 0xA4, 0x42]);
+        msg.extend_from_slice(&tid);
+        // XOR-MAPPED-ADDRESS, 8 bytes: family IPv4 + port ^ 0x2112 + ip ^ cookie.
+        msg.extend_from_slice(&[0x00, 0x20, 0x00, 0x08, 0x00, 0x01]);
+        let port: u16 = 30333;
+        msg.extend_from_slice(&(port ^ 0x2112).to_be_bytes());
+        let ip = [142u8, 129, 54, 88];
+        let cookie = [0x21u8, 0x12, 0xA4, 0x42];
+        for i in 0..4 {
+            msg.push(ip[i] ^ cookie[i]);
+        }
+        assert_eq!(
+            parse_stun_xor_mapped(&msg),
+            Some(("142.129.54.88".parse().unwrap(), 30333))
+        );
+    }
+
+    #[test]
+    fn stun_parser_rejects_garbage_and_non_responses() {
+        assert_eq!(parse_stun_xor_mapped(&[]), None);
+        assert_eq!(parse_stun_xor_mapped(&[0u8; 20]), None);
+        // Binding *request* is not a response.
+        assert_eq!(parse_stun_xor_mapped(&build_stun_binding_request()), None);
+        // Wrong magic cookie.
+        let mut bad = vec![0x01, 0x01, 0x00, 0x00, 0, 0, 0, 0];
+        bad.extend_from_slice(&[0u8; 12]);
+        assert_eq!(parse_stun_xor_mapped(&bad), None);
+        // Truncated attribute.
+        let mut trunc = vec![0x01, 0x01, 0x00, 0x08];
+        trunc.extend_from_slice(&[0x21, 0x12, 0xA4, 0x42]);
+        trunc.extend_from_slice(&[0u8; 12]);
+        trunc.extend_from_slice(&[0x00, 0x20, 0x00, 0x08, 0x00, 0x01]);
+        assert_eq!(parse_stun_xor_mapped(&trunc), None);
+    }
+
+    // ── last-authority safety valve (fix #3) ─────────────────────────────
+
+    fn safety(is_authority: bool, peers: usize, authorities: usize, dev: bool) -> SafetyContext {
+        SafetyContext {
+            is_authority,
+            connected_peers: peers,
+            authority_count: authorities,
+            dev_chain: dev,
+        }
+    }
+
+    #[test]
+    fn safety_valve_fires_on_the_cases_that_halt_the_chain() {
+        assert_eq!(
+            safety_valve(&safety(true, 0, 0, false)),
+            Some(SafetyReason::SoloChain)
+        );
+        assert_eq!(
+            safety_valve(&safety(true, 0, 0, true)),
+            Some(SafetyReason::DevChain)
+        );
+        assert_eq!(
+            safety_valve(&safety(true, 3, 1, false)),
+            Some(SafetyReason::OnlyAuthority)
+        );
+        assert_eq!(
+            safety_valve(&safety(true, 1, 0, false)),
+            Some(SafetyReason::TinyNetwork)
+        );
+    }
+
+    #[test]
+    fn safety_valve_does_not_fire_on_a_healthy_multi_node_network() {
+        assert_eq!(safety_valve(&safety(true, 2, 0, false)), None);
+        assert_eq!(safety_valve(&safety(true, 25, 3, false)), None);
+        // A non-authority node can always be refused: it cannot halt the chain.
+        assert_eq!(safety_valve(&safety(false, 0, 0, false)), None);
+    }
+
+    #[test]
+    fn safety_valve_notice_is_prominent_and_ascii() {
+        let note = safety_valve_notice(SafetyReason::SoloChain, "no evidence");
+        assert!(note.contains("KEEPING THE CHAIN ALIVE"), "{note}");
+        assert!(note.contains("no evidence"), "{note}");
+        assert!(note.contains("only node on the network"), "{note}");
+        assert!(note.contains("GPN_DIALABILITY_SAFETY=0"), "{note}");
+        assert!(note.is_ascii(), "Windows consoles: notice must be ASCII only");
+    }
+
+    #[test]
+    fn safety_toggle_defaults_on_and_can_be_disabled() {
+        assert!(parse_safety_enabled(None));
+        assert!(parse_safety_enabled(Some("")));
+        assert!(parse_safety_enabled(Some("1")));
+        for v in ["0", "false", "FALSE", "no", "off", " 0 "] {
+            assert!(!parse_safety_enabled(Some(v)), "{v} must disable the valve");
+        }
+    }
+
+    #[test]
+    fn stun_env_defaults_to_google_and_can_be_disabled() {
+        // RAII-free: these tests own their process env keys only by convention;
+        // a wrong value here would still leave the probe harmless.
+        std::env::remove_var("GPN_STUN_SERVER");
+        assert_eq!(stun_server_from_env().as_deref(), Some(DEFAULT_STUN_SERVER));
+        std::env::set_var("GPN_STUN_SERVER", "off");
+        assert_eq!(stun_server_from_env(), None);
+        std::env::set_var("GPN_STUN_SERVER", "stun.example.org:3478");
+        assert_eq!(
+            stun_server_from_env().as_deref(),
+            Some("stun.example.org:3478")
+        );
+        std::env::remove_var("GPN_STUN_SERVER");
     }
 
     #[test]

@@ -62,6 +62,7 @@
 //!   child up/down + the node's best block (read cheaply from its RPC).
 
 use gpn_agent::ollama;
+use gpn_agent::update;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, IsTerminal};
@@ -117,6 +118,18 @@ struct FileConfig {
     autostart: Option<bool>,
     /// How often the aggregated status line is printed (seconds).
     status_secs: Option<u64>,
+    /// Opt in to automatic updates (`GPN_AUTO_UPDATE`). Default **false**.
+    auto_update: Option<bool>,
+    /// Signed release manifest URL (`GPN_UPDATE_URL`).
+    update_url: Option<String>,
+    /// Hours between auto-update checks (`GPN_UPDATE_CHECK_HOURS`).
+    update_check_hours: Option<u64>,
+    /// Restart automatically to apply a staged update (`GPN_UPDATE_RESTART`).
+    update_restart: Option<bool>,
+    /// Fetch the manifest at all (`GPN_UPDATE_CHECK=0` for air-gapped hosts).
+    update_check: Option<bool>,
+    /// Enforce `min_version` by refusing to mine/announce (`GPN_MIN_VERSION_ENFORCE`).
+    min_version_enforce: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -150,6 +163,21 @@ struct Config {
     status_secs: u64,
     /// Informational: the config asks for boot-start.
     autostart: bool,
+    /// Opt-in auto-update (never on unless the operator asked).
+    auto_update: bool,
+    /// Signed release manifest URL.
+    update_url: String,
+    /// Hours between update checks.
+    update_check_hours: u64,
+    /// Restart automatically to apply a staged update (a short outage).
+    update_restart: bool,
+    /// Whether to fetch the manifest at all (off = air-gapped).
+    update_check: bool,
+    /// Whether `min_version` is enforced (emergency escape hatch, default on).
+    min_version_enforce: bool,
+    /// Set at startup when this build is below `min_version`: sync, don't
+    /// mine, don't announce.
+    standby: bool,
     /// The config file that was read (None when defaults are in use).
     config_path: Option<PathBuf>,
 }
@@ -277,6 +305,19 @@ macro_rules! asciiprintln {
         } else {
             ::std::println!("{line}");
         }
+    }};
+}
+
+/// `asciiprint!` (no newline) that honours ASCII mode.
+macro_rules! asciiprint {
+    ($($arg:tt)*) => {{
+        let line = format!($($arg)*);
+        if crate::ascii_mode() {
+            ::std::print!("{}", crate::to_ascii_safe(&line));
+        } else {
+            ::std::print!("{line}");
+        }
+        let _ = ::std::io::Write::flush(&mut ::std::io::stdout());
     }};
 }
 
@@ -633,6 +674,27 @@ impl Config {
             autostart: env_bool("GPN_AUTOSTART")
                 .or(file.autostart)
                 .unwrap_or(false),
+            // ── Updates: opt-in. Nothing is downloaded unless asked. ──────────
+            auto_update: match env_str("GPN_AUTO_UPDATE") {
+                Some(v) => update::auto_update_enabled(Some(&v)),
+                None => file.auto_update.unwrap_or(false),
+            },
+            update_url: env_str("GPN_UPDATE_URL")
+                .or(file.update_url)
+                .unwrap_or_else(|| update::MANIFEST_URL.to_string()),
+            update_check_hours: env_u64("GPN_UPDATE_CHECK_HOURS")
+                .or(file.update_check_hours)
+                .unwrap_or(6),
+            update_restart: env_bool("GPN_UPDATE_RESTART")
+                .or(file.update_restart)
+                .unwrap_or(true),
+            update_check: env_bool("GPN_UPDATE_CHECK")
+                .or(file.update_check)
+                .unwrap_or(true),
+            min_version_enforce: env_bool("GPN_MIN_VERSION_ENFORCE")
+                .or(file.min_version_enforce)
+                .unwrap_or(true),
+            standby: false,
             config_path,
         })
     }
@@ -645,6 +707,11 @@ impl Config {
         } else {
             name.to_string()
         }
+    }
+
+    /// Where updater bookkeeping lives (staged marker, cached cutoff).
+    fn update_dir(&self) -> PathBuf {
+        self.base_path.join("update")
     }
 }
 
@@ -884,6 +951,416 @@ fn log_event(label: &str, msg: &str) {
     asciiprintln!("[supervisor {ts}] {label}: {msg}");
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Updates: signed manifest, opt-in auto-update, minimum-version cutoff
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn user_agent() -> String {
+    format!("gpn_node/{} ({}/{})", env!("CARGO_PKG_VERSION"), update::platform_os(), update::platform_arch())
+}
+
+fn http_client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .user_agent(user_agent())
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+/// Fetch the manifest and **verify the signature** before anything else is done
+/// with it. There is no unverified path: a manifest that fails verification is
+/// an error, never a "best effort".
+fn fetch_verified_manifest(cfg: &Config) -> Result<update::ReleaseManifest, String> {
+    let client = http_client(Duration::from_secs(15))?;
+    let resp = client
+        .get(&cfg.update_url)
+        .send()
+        .map_err(|e| format!("{}: {e}", cfg.update_url))?;
+    if !resp.status().is_success() {
+        return Err(format!("{} -> HTTP {}", cfg.update_url, resp.status()));
+    }
+    let body = resp.bytes().map_err(|e| e.to_string())?;
+    update::verify_manifest(&body, update::RELEASE_PUBKEY_HEX).map_err(|e| e.to_string())
+}
+
+fn download_asset(url: &str, timeout: Duration) -> Result<Vec<u8>, String> {
+    let client = http_client(timeout)?;
+    let resp = client.get(url).send().map_err(|e| format!("download {url}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("download {url} -> HTTP {}", resp.status()));
+    }
+    let bytes = resp.bytes().map_err(|e| format!("download body: {e}"))?;
+    Ok(bytes.to_vec())
+}
+
+/// The loud, unmissable "this build is too old" block.
+fn log_upgrade_required(current: &str, min: &str, enforcing: bool) {
+    asciieprintln!("");
+    asciieprintln!("  ============================================================");
+    asciieprintln!("  !! UPGRADE REQUIRED — this node is {current}, the network requires >= {min}");
+    asciieprintln!("  ============================================================");
+    if enforcing {
+        asciieprintln!("  This node will SYNC (so its data stays useful) but will NOT MINE and");
+        asciieprintln!("  will NOT ANNOUNCE itself. An out-of-date node can otherwise produce blocks");
+        asciieprintln!("  the rest of the network rejects — and that looks like a chain stall.");
+        asciieprintln!("  Fix: install the current release from https://gpncoin.ai/downloads");
+        asciieprintln!("       (or set GPN_AUTO_UPDATE=1 and restart — it updates itself).");
+    } else {
+        asciieprintln!("  GPN_MIN_VERSION_ENFORCE=0 — mining anyway. This is NOT supported:");
+        asciieprintln!("  blocks this node seals may be rejected by upgraded peers.");
+    }
+    asciieprintln!("");
+}
+
+/// One manifest check at startup.
+///
+/// Sets `cfg.standby` when this build is below the signed `min_version`. A
+/// network failure is never fatal: the last verified cutoff is cached on disk
+/// and keeps applying while offline.
+fn startup_update_check(cfg: &mut Config) {
+    let dir = cfg.update_dir();
+    if !cfg.update_check {
+        asciiprintln!(
+            "  update: manifest checks DISABLED (GPN_UPDATE_CHECK=0) — the minimum-version \
+             cutoff cannot be evaluated on this host"
+        );
+        return;
+    }
+
+    let cached = update::load_state(&dir);
+    let mut min_version = cached
+        .as_ref()
+        .map(|s| s.min_version.clone())
+        .unwrap_or_default();
+    let mut latest = cached
+        .as_ref()
+        .map(|s| s.latest_version.clone())
+        .unwrap_or_default();
+
+    match fetch_verified_manifest(cfg) {
+        Ok(m) => {
+            asciiprintln!(
+                "  update: manifest verified ({}): latest={} min={}",
+                cfg.update_url,
+                m.version,
+                m.min_version
+            );
+            min_version = m.min_version.clone();
+            latest = m.version.clone();
+            let staged = update::read_pending(&dir).map(|p| p.version);
+            let _ = update::save_state(
+                &dir,
+                &update::UpdateState {
+                    last_check: update::now_unix(),
+                    latest_version: latest.clone(),
+                    min_version: min_version.clone(),
+                    staged_version: staged,
+                },
+            );
+        }
+        Err(e) => {
+            asciieprintln!(
+                "  update: manifest check failed ({e}) — keeping the last verified cutoff \
+                 '{min_version}'"
+            );
+        }
+    }
+
+    if update::min_version_decision(env!("CARGO_PKG_VERSION"), &min_version)
+        == update::Support::UpgradeRequired
+    {
+        log_upgrade_required(env!("CARGO_PKG_VERSION"), &min_version, cfg.min_version_enforce);
+        cfg.standby = cfg.min_version_enforce;
+    } else if !latest.is_empty() && update::is_newer(&latest, env!("CARGO_PKG_VERSION")) {
+        asciiprintln!(
+            "  update: {latest} is available (this node is {}); auto-update is {}",
+            env!("CARGO_PKG_VERSION"),
+            if cfg.auto_update { "ON" } else { "off" }
+        );
+    }
+}
+
+/// Download → verify in memory → stage on disk → verify on disk.
+fn download_and_stage(
+    cfg: &Config,
+    m: &update::ReleaseManifest,
+) -> Result<update::PendingUpdate, String> {
+    let asset = update::select_asset(m, update::platform_os(), update::platform_arch())
+        .map_err(|e| e.to_string())?;
+    log_event(
+        "update",
+        &format!(
+            "downloading {} ({}/{}) sha256={} size={}",
+            m.version,
+            asset.os,
+            asset.arch,
+            asset.sha256,
+            asset.size
+        ),
+    );
+    let bytes = download_asset(&asset.url, Duration::from_secs(300))?;
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let pending = update::stage_bytes(&cfg.update_dir(), &exe, &m.version, asset, &bytes)
+        .map_err(|e| e.to_string())?;
+    log_event(
+        "update",
+        &format!(
+            "staged {} at {} — signature OK, sha256 verified twice",
+            pending.version, pending.staged
+        ),
+    );
+    Ok(pending)
+}
+
+/// One full check cycle (used at startup-with-auto-update and on a timer).
+fn update_once(cfg: &Config, restart: &AtomicBool) -> Result<(), String> {
+    let m = fetch_verified_manifest(cfg)?;
+
+    // The cutoff can tighten between checks as well as at start.
+    if update::min_version_decision(env!("CARGO_PKG_VERSION"), &m.min_version)
+        == update::Support::UpgradeRequired
+    {
+        log_upgrade_required(env!("CARGO_PKG_VERSION"), &m.min_version, cfg.min_version_enforce);
+    }
+
+    if !update::is_newer(&m.version, env!("CARGO_PKG_VERSION")) {
+        return Ok(());
+    }
+    let pending = download_and_stage(cfg, &m)?;
+
+    // Cache the staged version so a restart knows what to expect.
+    let _ = update::save_state(
+        &cfg.update_dir(),
+        &update::UpdateState {
+            last_check: update::now_unix(),
+            latest_version: m.version.clone(),
+            min_version: m.min_version.clone(),
+            staged_version: Some(pending.version.clone()),
+        },
+    );
+
+    if cfg.update_restart {
+        log_event(
+            "update",
+            &format!(
+                "restarting to apply {} — this is a SHORT OUTAGE: children stop cleanly, the \
+                 binary is swapped atomically and the node comes back up (chain sync resumes)",
+                pending.version
+            ),
+        );
+        restart.store(true, Ordering::SeqCst);
+    } else {
+        log_event(
+            "update",
+            &format!(
+                "{} is staged; it will be applied on the next restart \
+                 (GPN_UPDATE_RESTART=0)",
+                pending.version
+            ),
+        );
+    }
+    Ok(())
+}
+
+/// Sleep `total`, waking early when shutdown is requested. Returns true when
+/// the caller should stop.
+fn sleep_interruptible(total: Duration, shutdown: &AtomicBool) -> bool {
+    let mut left = total;
+    while left > Duration::ZERO {
+        if shutdown.load(Ordering::SeqCst) {
+            return true;
+        }
+        let step = Duration::from_millis(500).min(left);
+        std::thread::sleep(step);
+        left = left.saturating_sub(step);
+    }
+    shutdown.load(Ordering::SeqCst)
+}
+
+/// The auto-update thread. Only spawned when the operator opted in.
+fn spawn_auto_updater(
+    cfg: Config,
+    shutdown: Arc<AtomicBool>,
+    restart: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    let interval = update::check_interval(Some(cfg.update_check_hours));
+    std::thread::spawn(move || {
+        log_event(
+            "update",
+            &format!(
+                "auto-update ON — checking {} every {}h (restart_to_apply={})",
+                cfg.update_url,
+                cfg.update_check_hours,
+                cfg.update_restart
+            ),
+        );
+        // First check shortly after start, then on the interval.
+        if sleep_interruptible(Duration::from_secs(45), &shutdown) {
+            return;
+        }
+        loop {
+            if update::read_pending(&cfg.update_dir()).is_none() {
+                if let Err(e) = update_once(&cfg, &restart) {
+                    log_event("update", &format!("check failed: {e}"));
+                }
+            }
+            if restart.load(Ordering::SeqCst) {
+                return;
+            }
+            if sleep_interruptible(interval, &shutdown) {
+                return;
+            }
+        }
+    })
+}
+
+/// Replace this process with the freshly staged binary.
+#[cfg(unix)]
+fn exec_self(exe: &Path) -> ! {
+    use std::os::unix::process::CommandExt;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let err = std::process::Command::new(exe).args(&args).exec();
+    // `exec` only returns on failure.
+    asciieprintln!(
+        "[supervisor] ! could not re-exec {} ({err}) — continuing on the current image",
+        exe.display()
+    );
+    std::process::exit(0);
+}
+
+#[cfg(not(unix))]
+fn exec_self(exe: &Path) -> ! {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match std::process::Command::new(exe).args(&args).spawn() {
+        Ok(_) => std::process::exit(0),
+        Err(e) => {
+            asciieprintln!(
+                "[supervisor] ! could not start {} ({e}) — continuing on the current image",
+                exe.display()
+            );
+            std::process::exit(0);
+        }
+    }
+}
+
+/// Swap in a staged binary (if any) and re-exec into it.
+///
+/// Called at startup and after an auto-update restart. Only returns when there
+/// is nothing to apply (or the swap was deferred by the OS).
+fn apply_staged_or_reexec(cfg: &Config) {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            log_event("update", &format!("cannot resolve own path: {e} — skipping staged swap"));
+            return;
+        }
+    };
+    match update::apply_pending(&cfg.update_dir(), &exe) {
+        Ok(Ok(Some(applied))) => {
+            log_event(
+                "update",
+                &format!(
+                    "{} verified and swapped in; previous binary kept at {} (rollback: move it back \
+                     and restart); re-exec into the new build — short outage",
+                    applied.version,
+                    applied.backup.display()
+                ),
+            );
+            exec_self(&exe);
+        }
+        Ok(Ok(None)) => {}
+        Ok(Err(deferred)) => log_event(
+            "update",
+            &format!(
+                "staged {} could not be swapped in while running ({}); it will be applied on the \
+                 next start",
+                deferred.version, deferred.reason
+            ),
+        ),
+        Err(e) => log_event(
+            "update",
+            &format!("staged update REJECTED at swap time: {e} — staying on the current build"),
+        ),
+    }
+}
+
+/// `--setup` question: "Keep this node auto-updated? [y/N]".
+///
+/// Default is **no** (opt-in). The answer is written to the config file so the
+/// next start honours it without any env var.
+fn ask_auto_update(cfg: &Config) -> Option<bool> {
+    let mut stdin = std::io::stdin().lock();
+    if !std::io::stdin().is_terminal() {
+        asciiprintln!(
+            "  auto-update: unchanged ({}); no TTY to ask — set GPN_AUTO_UPDATE=1 or \
+             `auto_update = true` in the config",
+            if cfg.auto_update { "ON" } else { "off" }
+        );
+        return None;
+    }
+    asciiprintln!("");
+    asciiprintln!("  Keep this node auto-updated? [y/N]");
+    asciiprintln!("    yes: verify + install GPN releases automatically (signed manifest,");
+    asciiprintln!("         ed25519), restarting briefly when one is published. Recommended:");
+    asciiprintln!("         the network drops nodes that fall below the minimum version, and an");
+    asciiprintln!("         old node cannot mine.");
+    asciiprintln!("    no : you update manually. This node will REFUSE TO MINE once its");
+    asciiprintln!("         version is below the published minimum (it keeps syncing).");
+    asciiprintln!("  Currently: {}", if cfg.auto_update { "ON" } else { "off" });
+    asciiprint!("  > ");
+    let mut line = String::new();
+    if stdin.read_line(&mut line).is_err() {
+        return None;
+    }
+    let ans = line.trim().to_ascii_lowercase();
+    if ans.is_empty() {
+        asciiprintln!("  auto-update: unchanged ({})", if cfg.auto_update { "ON" } else { "off" });
+        return None;
+    }
+    let enable = matches!(ans.as_str(), "y" | "yes");
+    match persist_auto_update(cfg, enable) {
+        Ok(path) => {
+            asciiprintln!(
+                "  auto-update: {} (written to {})",
+                if enable { "ON" } else { "off" },
+                path.display()
+            );
+            Some(enable)
+        }
+        Err(e) => {
+            asciieprintln!("  ! could not write the config ({e}); set GPN_AUTO_UPDATE={} instead", if enable { "1" } else { "0" });
+            None
+        }
+    }
+}
+
+/// Write `auto_update` into the config file (creating a minimal one when none
+/// exists) so the choice survives restarts.
+fn persist_auto_update(cfg: &Config, enabled: bool) -> Result<PathBuf, String> {
+    let path = cfg.config_path.clone().unwrap_or_else(|| {
+        let prefix = expand_tilde(&env_str("GPN_PREFIX").unwrap_or_else(|| "~/.gpn".into()));
+        PathBuf::from(prefix).join("node.toml")
+    });
+    let body = if path.is_file() {
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?
+    } else {
+        let ks = gpn_agent::firstrun::default_keystore_path(&cfg.base_path);
+        gpn_agent::firstrun::config_toml(
+            &cfg.base_path,
+            &cfg.chain,
+            ks.is_file().then_some(ks.as_path()),
+        )
+    };
+    let updated = update::set_toml_bool(&body, "auto_update", enabled);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let tmp = PathBuf::from(format!("{}.tmp-{}", path.display(), std::process::id()));
+    std::fs::write(&tmp, updated).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(path)
+}
+
 fn now_hms() -> String {
     // Local-ish HH:MM:SS from the system clock (UTC is fine for log lines).
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1083,6 +1560,13 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
             argv.push("--public-addr".into());
             argv.push(pa.clone());
         }
+        // Below `min_version`: stay synced, but do not announce and (via
+        // GPN_STANDBY) do not mine. An outdated node must never be able to
+        // gossip itself as a peer or seal a block the network rejects.
+        if cfg.standby {
+            argv.push("--no-seed".into());
+            argv.push("--no-discoverable".into());
+        }
 
         // ── Sync-robustness defaults (see docs/run-a-node.md, "node connected
         //    but not syncing"). GPN has NO finality gadget (finalized head stays
@@ -1145,6 +1629,9 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
             envs.push(("GPN_PAYOUT_ACCOUNT".to_string(), cfg.account.clone()));
         }
         envs.push(("GPN_SIGNER".to_string(), cfg.signer.clone()));
+        if cfg.standby {
+            envs.push(("GPN_STANDBY".to_string(), "1".to_string()));
+        }
 
         specs.push(ChildSpec {
             label: "node",
@@ -1350,6 +1837,10 @@ fn run_setup(cfg: &Config) -> i32 {
         asciiprintln!("  models: {}", outcome.models.join(", "));
     }
 
+    // Opt-in auto-update: asked once, here, and persisted to the config file.
+    // Asked even when ollama failed — the answer is independent of it.
+    ask_auto_update(cfg);
+
     if outcome.serving {
         if outcome.model_ready {
             asciiprintln!("  [ok] {}", outcome.detail);
@@ -1393,6 +1884,12 @@ fn print_setup_summary(cfg: &Config) {
         "\n  Network reachability is automatic: configured address -> public-IP detection -> \
          UPnP/NAT-PMP port mapping (on by default). If UPnP is disabled on your router, \
          forward TCP 30333 to this machine — the node prints the exact rule if it cannot get in."
+    );
+    asciiprintln!(
+        "\n  Updates: {}. A node below the published minimum version refuses to mine\n  \
+         (it keeps syncing). Auto-update is opt-in: GPN_AUTO_UPDATE=1 or the\n  \
+         `auto_update = true` config key; see docs/updates.md.",
+        if cfg.auto_update { "auto-update ON" } else { "manual" }
     );
     asciiprintln!("\n  Start the node:  {}\n", exe_hint());
 }
@@ -1479,7 +1976,7 @@ async fn main() {
         None => {}
     }
 
-    let cfg = match Config::load() {
+    let mut cfg = match Config::load() {
         Ok(c) => c,
         Err(e) => {
             asciieprintln!("gpn_node: {e}");
@@ -1518,6 +2015,17 @@ async fn main() {
             "  autostart=true (informational — install a service unit; see docs/run-a-node.md)"
         );
     }
+    asciiprintln!(
+        "  updates: auto={} every {}h restart_to_apply={} manifest={}",
+        if cfg.auto_update { "ON (opt-in)" } else { "off (manual)" },
+        cfg.update_check_hours,
+        cfg.update_restart,
+        if cfg.update_check { cfg.update_url.as_str() } else { "disabled" }
+    );
+
+    // ── Apply a staged update first: it must be swapped in before any child is
+    //    spawned, so this process can be replaced cleanly (short outage). ─────
+    apply_staged_or_reexec(&cfg);
 
     // ── `--setup`: explicit one-shot bootstrap of the REQUIRED ollama part. ──
     // Run on a plain thread: the ollama probe/pull use reqwest's *blocking*
@@ -1529,6 +2037,11 @@ async fn main() {
             .unwrap_or(ollama::EXIT_NO_OLLAMA);
         std::process::exit(code);
     }
+
+    // ── Minimum-version cutoff: one signed-manifest check at startup. ────────
+    // Independent of the auto-update OPT-IN: a manual updater still has to be
+    // told that its build is too old to mine.
+    startup_update_check(&mut cfg);
 
     // ── Ollama is a REQUIRED first-class component (not optional): probe, try
     //    the automated bootstrap, then HARD-FAIL if it is still unreachable.
@@ -1588,9 +2101,32 @@ async fn main() {
     // Sync-stall watchdog (auto-recover a silently wedged node).
     let watchdog_handle = spawn_stall_watchdog(&cfg, shared.clone(), shutdown.clone());
 
-    // Wait for Ctrl-C or SIGTERM.
-    wait_for_signal().await;
-    asciiprintln!("\n[supervisor] shutdown requested — stopping children…");
+    // Auto-update thread — only when the operator opted in.
+    let restart = Arc::new(AtomicBool::new(false));
+    let updater_handle = if cfg.auto_update {
+        Some(spawn_auto_updater(
+            cfg.clone(),
+            shutdown.clone(),
+            restart.clone(),
+        ))
+    } else {
+        None
+    };
+
+    // Wait for Ctrl-C / SIGTERM — or for a verified update to ask for a restart.
+    let restart_wait = restart.clone();
+    tokio::select! {
+        _ = wait_for_signal() => {
+            asciiprintln!("\n[supervisor] shutdown requested — stopping children…");
+        }
+        _ = async move {
+            while !restart_wait.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        } => {
+            asciiprintln!("\n[supervisor] update: applying a staged release — stopping children…");
+        }
+    }
     shutdown.store(true, Ordering::SeqCst);
 
     for h in handles {
@@ -1598,6 +2134,20 @@ async fn main() {
     }
     let _ = status_handle.join();
     let _ = watchdog_handle.join();
+    if let Some(h) = updater_handle {
+        let _ = h.join();
+    }
+
+    // If an update asked for the restart, swap the binary and re-exec. This is
+    // the only place the live binary is ever replaced, and only after the
+    // staged file was hash-verified again.
+    if restart.load(Ordering::SeqCst) {
+        apply_staged_or_reexec(&cfg);
+        log_event(
+            "update",
+            "staged update could not be applied now — it will be applied on the next start",
+        );
+    }
     asciiprintln!("[supervisor] all children stopped — exiting");
 }
 
@@ -1642,6 +2192,106 @@ mod tests {
     }
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// A fully-populated config for tests that must not touch the real
+    /// environment (no `Config::load`, no network, no wallet).
+    fn test_config() -> Config {
+        Config {
+            chain: "dev".into(),
+            signer: "//Alice".into(),
+            account: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY".into(),
+            endpoint: "ws://127.0.0.1:9944".into(),
+            base_path: PathBuf::from("/tmp/gpn-test-base"),
+            rpc_port: 9944,
+            node_key: None,
+            bootnodes: vec![],
+            bootnodes_url: vec![],
+            public_addr: None,
+            author: None,
+            node_args: vec![],
+            provider_endpoint: None,
+            assign_token: String::new(),
+            ollama: "http://127.0.0.1:11434".into(),
+            listen: "0.0.0.0:8093".into(),
+            gflops: 0,
+            capacity: 1,
+            poll_ms: 300,
+            diffusion: false,
+            diffusion_poll_ms: 2000,
+            ml: false,
+            ml_poll_ms: 2000,
+            finetune: false,
+            finetune_poll_ms: 4000,
+            bin_dir: PathBuf::from("/tmp/gpn-test-bin"),
+            status_secs: 15,
+            autostart: false,
+            auto_update: false,
+            update_url: update::MANIFEST_URL.to_string(),
+            update_check_hours: 6,
+            update_restart: true,
+            update_check: true,
+            min_version_enforce: true,
+            standby: false,
+            config_path: None,
+        }
+    }
+
+    fn node_spec(cfg: &Config) -> ChildSpec {
+        build_children(cfg)
+            .into_iter()
+            .find(|s| s.label == "node")
+            .expect("a node child is always built")
+    }
+
+    /// The cutoff must actually change what the child is launched with: an
+    /// out-of-date node keeps syncing but never announces itself, and tells the
+    /// node binary (via `GPN_STANDBY`) not to mine.
+    #[test]
+    fn standby_node_neither_announces_nor_mines() {
+        let mut cfg = test_config();
+        cfg.standby = true;
+        let spec = node_spec(&cfg);
+        assert!(
+            spec.argv.iter().any(|a| a == "--no-seed"),
+            "standby must not advertise as a seed: {:?}",
+            spec.argv
+        );
+        assert!(
+            spec.argv.iter().any(|a| a == "--no-discoverable"),
+            "standby must not accept/publish an endpoint: {:?}",
+            spec.argv
+        );
+        assert!(
+            spec.envs
+                .iter()
+                .any(|(k, v)| k == "GPN_STANDBY" && v == "1"),
+            "the node must be told to skip the miner: {:?}",
+            spec.envs
+        );
+        // It still syncs: nothing about --sync / --chain is dropped.
+        assert!(spec.argv.iter().any(|a| a == "--sync"));
+        assert!(spec.argv.iter().any(|a| a == "dev"));
+    }
+
+    #[test]
+    fn a_supported_node_announces_and_mines() {
+        let cfg = test_config();
+        assert!(!cfg.standby);
+        let spec = node_spec(&cfg);
+        assert!(!spec.argv.iter().any(|a| a == "--no-seed"));
+        assert!(!spec.argv.iter().any(|a| a == "--no-discoverable"));
+        assert!(!spec.envs.iter().any(|(k, _)| k == "GPN_STANDBY"));
+    }
+
+    /// Auto-update is opt-in: a config that does not ask for it must produce an
+    /// updater that is never spawned.
+    #[test]
+    fn auto_update_defaults_to_off() {
+        let cfg = test_config();
+        assert!(!cfg.auto_update);
+        assert!(!update::auto_update_enabled(None));
+        assert!(update::auto_update_enabled(Some("1")));
     }
 
     #[test]

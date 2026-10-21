@@ -212,7 +212,9 @@ silently half-joined.
 At startup the node probes inbound reachability for up to **120 s**
 (`GPN_DIALABLE_TIMEOUT_SECS`), in this order:
 
-1. explicit `GPN_PUBLIC_ADDR` / `--public-addr` → verify by dial-back;
+1. explicit `GPN_PUBLIC_ADDR` / `--public-addr` → match it against what peers
+   report about us, a direct bind, an **external STUN binding**, or a bounded
+   outbound TCP reachability probe (see the evidence model below);
 2. direct public listen address, libp2p `Identify` external addresses, or an
    actual inbound peer on `:30333`;
 3. UPnP-IGD / NAT-PMP mapping attempt (~10 s) if `GPN_UPNP=auto` (the
@@ -223,6 +225,31 @@ At startup the node probes inbound reachability for up to **120 s**
 4. CGNAT/private WAN → no forward is possible (reported by the notice);
 5. not dialable: print the notice and **exit 78** (default), or continue in
    degraded mode with `--no-require-backbone`.
+
+### Evidence model
+
+The gate passes on **any one** of these (strongest first):
+
+| Evidence | Meaning |
+|---|---|
+| `inbound_peer` | a peer opened a connection to us |
+| `configured_addr_matches_observation` | our configured `GPN_PUBLIC_ADDR` endpoint was reported by peers (Identify) as our external address |
+| `observed_public_addr` | no configured address, but peers see us at a public `ip:port` on our listen port |
+| `stun_mapped_addr` | an **external** STUN binding says the NAT maps our socket to exactly the configured endpoint |
+| `tcp_probe_ok` | a bounded (5 s) outbound TCP connect to the configured public `ip:port` succeeded — hairpin, so the weakest signal |
+
+`/dns4` and `/dns6` are first-class public addresses:
+`GPN_PUBLIC_ADDR=/dns4/gpn-testnet.duckdns.org/tcp/30333` is accepted, the name
+is **resolved at check time**, every resolved IP must be globally routable, and
+the *resolved IPs* (not the hostname) are compared with what peers report.
+
+> **The gate never halts the chain.** Before refusing to start, the node checks
+> whether it is the last authoring node the network can see (0–1 connected
+> peers) or a dev/solo chain. If so it prints `DIALABILITY GATE OVERRIDDEN -
+> KEEPING THE CHAIN ALIVE`, continues in degraded mode and keeps re-checking.
+> Set `GPN_DIALABILITY_SAFETY=0` to force the hard failure anyway.
+> `GPN_STUN_SERVER=<host:port>` overrides the STUN server (default
+> `stun.l.google.com:19302`); `GPN_STUN_SERVER=off` disables that probe.
 
 A successful mapping is **not** proof of reachability on its own: the gate still
 waits for an inbound peer (or a matching `Identify` observation) before the node
@@ -248,6 +275,8 @@ Only globally routable addresses count — RFC1918 (`10/8`, `172.16/12`,
 | `--require-backbone` / `GPN_REQUIRE_BACKBONE=1` | **Default.** Exit 78 instead of degrading. | **on** |
 | `--no-require-backbone` / `GPN_REQUIRE_BACKBONE=0` | Opt out: run degraded when not dialable (re-checks every 10 min). | — |
 | `GPN_DIALABLE_TIMEOUT_SECS` | Probe grace window. | `120` |
+| `GPN_STUN_SERVER` | External STUN server for the mapping probe; `off` disables it. | `stun.l.google.com:19302` |
+| `GPN_DIALABILITY_SAFETY` | `0` lets the hard gate exit even when that would stop the last authority. | on |
 | `GPN_SEED_PORT` | Inbound port to open/probe. | `30333` |
 
 If the node is not dialable you will see this (exact text, LAN IP and port

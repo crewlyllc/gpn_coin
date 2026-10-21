@@ -73,6 +73,21 @@ fn persist_job_payload(store: &gpn_agent::llm::LlmStore, id: u64, job: &gpn_agen
     false
 }
 
+/// OpenAI-shaped `usage` block for a completed chat job (item #53).
+///
+/// The counts come from the inference backend (via the provider's store). An
+/// unknown count is reported as **0**, never invented — a client that meters or
+/// bills from `usage` must be able to tell "not reported" from a real number,
+/// and the pre-fix hard-coded zeros were indistinguishable from a genuine 0.
+fn usage_json(usage: Option<(u32, u32)>) -> serde_json::Value {
+    let (prompt_tokens, completion_tokens) = usage.unwrap_or((0, 0));
+    json!({
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens.saturating_add(completion_tokens)
+    })
+}
+
 /// Policy for how long a job may stay `Pending` before the janitor reclaims it.
 /// Scales with the requested output size (a job that asked for more tokens may
 /// legitimately take longer), clamped to `[MIN, MAX]` so tiny jobs are reclaimed
@@ -692,12 +707,19 @@ fn p2p_fields(v: &Value) -> (Option<String>, Vec<String>, Option<u16>) {
         multiaddrs.dedup();
     }
 
-    let p2p_port = v
-        .get("p2p_port")
-        .and_then(|x| x.as_u64())
-        .filter(|p| (1..=65535).contains(p))
-        .map(|p| p as u16)
-        .or_else(|| multiaddrs.iter().find_map(|m| p2p_port_of(m)));
+    // A p2p port is only meaningful **together with the peer id that owns it**:
+    // the directory synthesises `<host the AP reached>:<p2p_port>/p2p/<peer_id>`,
+    // so publishing a port without its own identity would let one node's port
+    // be combined with another node's peer id. No identity → no port.
+    let p2p_port = if peer_id.is_some() {
+        v.get("p2p_port")
+            .and_then(|x| x.as_u64())
+            .filter(|p| (1..=65535).contains(p))
+            .map(|p| p as u16)
+            .or_else(|| multiaddrs.iter().find_map(|m| p2p_port_of(m)))
+    } else {
+        None
+    };
 
     (peer_id, multiaddrs, p2p_port)
 }
@@ -814,7 +836,7 @@ fn apply_poll_caps(
                 } else {
                     pull_default_latency_ms()
                 };
-                out[i] = provider_from_caps(&addr, &caps, status_url, latency);
+                out[i] = merge_poll_snapshot(&out[i], &caps, status_url, latency);
             }
             None => out.push(provider_from_caps(
                 &addr,
@@ -824,6 +846,58 @@ fn apply_poll_caps(
             )),
         }
     }
+}
+
+/// Merge a poll-delivered capability snapshot into an existing registry entry.
+///
+/// The existing entry's `status_url` is the endpoint the access point actually
+/// measured, so **that record is authoritative for which box this is**. The p2p
+/// identity (peer id + port) belongs to exactly one node; a snapshot that names
+/// a *different* peer id for that endpoint must therefore never overwrite it.
+///
+/// Without this rule the AP would publish
+/// `/ip4/<this record's status_url host>/tcp/30333/p2p/<another node's id>` —
+/// which is precisely the mis-paired entry observed on gpncoin.ai/seeds.json
+/// (`/ip4/23.241.109.255/…/p2p/12D3KooWAFtUNxc…`, box #1's host carrying the
+/// Linux node's peer id). Two boxes sharing one ss58 address (or one of them
+/// reporting a stale id) is enough to trigger it.
+fn merge_poll_snapshot(
+    existing: &Provider,
+    caps: &Value,
+    status_url: String,
+    latency_ms: u64,
+) -> Provider {
+    let mut merged = provider_from_caps(
+        &existing.address,
+        caps,
+        status_url,
+        latency_ms,
+    );
+    match existing.peer_id.as_deref() {
+        Some(have) if merged.peer_id.as_deref() != Some(have) => {
+            log::warn!(
+                "providers: {} polled a peer_id ({}) that differs from the one measured for \
+                 this endpoint ({}); keeping the measured identity so the directory cannot \
+                 pair this host with another node's peer id",
+                merged.status_url,
+                merged.peer_id.as_deref().unwrap_or("none"),
+                have
+            );
+            merged.peer_id = existing.peer_id.clone();
+            merged.p2p_multiaddrs = existing.p2p_multiaddrs.clone();
+            merged.p2p_port = existing.p2p_port;
+        }
+        _ => {
+            // Same identity (or none measured yet): never lose information.
+            if merged.p2p_multiaddrs.is_empty() {
+                merged.p2p_multiaddrs = existing.p2p_multiaddrs.clone();
+            }
+            if merged.p2p_port.is_none() {
+                merged.p2p_port = existing.p2p_port;
+            }
+        }
+    }
+    merged
 }
 
 /// Poll every provider's /status into the shared registry.
@@ -2133,6 +2207,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     };
                     drop(_create_guard);
                     let mut text = String::new();
+                    // Item #53: the backend-reported token counts for this job. Only
+                    // ever set from what the provider actually recorded — an unknown
+                    // count stays 0 rather than being invented.
+                    let mut usage: Option<(u32, u32)> = None;
                     if passthrough {
                         // Direct provider call, no chain. Derive the off-chain infer
                         // endpoint from the provider's status_url (:8093 → :8094).
@@ -2194,6 +2272,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let Some(j) = gpn_agent::llm::get_job(id) {
                                 if j.status == "done" {
                                     text = j.response.clone().unwrap_or_default();
+                                    if let (Some(p), Some(c)) =
+                                        (j.prompt_tokens, j.completion_tokens)
+                                    {
+                                        usage = Some((p, c));
+                                    }
                                     break;
                                 }
                                 if j.status == "error" {
@@ -2234,7 +2317,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "id": format!("chatcmpl-gpn-{id}"), "object": "chat.completion", "created": now_secs(),
                         "model": model,
                         "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
-                        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+                        "usage": usage_json(usage)
                     })
                 }
                 (Method::Post, ["jobs"]) => {
@@ -2792,6 +2875,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     };
                     match res {
                         Ok(_) => {
+                            // Item #53: carry the provider's real token counts into the
+                            // AP's own record, so a REMOTE provider's usage is as
+                            // truthful as a local one's. Absent ⇒ left unset (0 in the
+                            // OpenAI `usage` block), never invented.
+                            let pt = v.get("prompt_tokens").and_then(|x| x.as_u64());
+                            let ctk = v.get("completion_tokens").and_then(|x| x.as_u64());
+                            if pt.is_some() || ctk.is_some() {
+                                let _ = store.set_usage(
+                                    idn,
+                                    pt.map(|x| x as u32),
+                                    ctk.map(|x| x as u32),
+                                );
+                            }
                             println!("[result] remote provider returned #{idn} ({status})");
                             json!({"ok":true,"job_id":idn})
                         }
@@ -3029,6 +3125,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
 
+    /// Item #53: a completed chat job reports the backend's real token counts in
+    /// the OpenAI `usage` block instead of the hard-coded zeros every client saw
+    /// before, and an unreported count stays 0 rather than being invented.
+    #[test]
+    fn chat_usage_reports_backend_tokens_and_totals_them() {
+        let reported = usage_json(Some((17, 42)));
+        assert_eq!(reported["prompt_tokens"], json!(17));
+        assert_eq!(reported["completion_tokens"], json!(42));
+        assert_eq!(reported["total_tokens"], json!(59));
+
+        // No backend numbers (artifact jobs, older provider builds) => zeros,
+        // not a guess, and not a panic on overflow-prone input.
+        let unknown = usage_json(None);
+        assert_eq!(unknown["prompt_tokens"], json!(0));
+        assert_eq!(unknown["completion_tokens"], json!(0));
+        assert_eq!(unknown["total_tokens"], json!(0));
+
+        let huge = usage_json(Some((u32::MAX, u32::MAX)));
+        assert_eq!(huge["total_tokens"], json!(u32::MAX), "saturates, never wraps");
+    }
+
     /// Peer-id publication: a heartbeat that publishes a peer id + public p2p
     /// multiaddr is relayed, but every string is validated first — the AP is a
     /// public directory and must not become a relay for arbitrary text.
@@ -3074,7 +3191,90 @@ mod tests {
         let (peer_id, mas, port) = p2p_fields(&v);
         assert!(peer_id.is_none());
         assert!(mas.is_empty(), "an unverified id cannot vouch for an address");
-        assert_eq!(port, Some(30333), "the port is still harmless metadata");
+        assert!(
+            port.is_none(),
+            "a p2p port is only meaningful with the peer id that owns it — publishing it 
+             alone lets the directory pair this port with another node's id"
+        );
+    }
+
+    /// The directory bug of 2026-10-20: box #1's status_url host ended up
+    /// published with the Linux node's peer id. A poll snapshot carrying a
+    /// different peer id for an already-measured endpoint must not replace the
+    /// measured identity.
+    fn provider_with(peer_id: Option<&str>, port: Option<u16>) -> Provider {
+        let mut p = provider_from_caps(
+            "5Abc",
+            &json!({ "gflops": 10 }),
+            "http://23.241.109.255:8093/status".into(),
+            7,
+        );
+        p.peer_id = peer_id.map(|s| s.to_string());
+        p.p2p_port = port;
+        p.p2p_multiaddrs = peer_id
+            .map(|id| vec![format!("/ip4/23.241.109.255/tcp/30333/p2p/{id}")])
+            .unwrap_or_default();
+        p
+    }
+
+    #[test]
+    fn merge_never_pair_another_nodes_peer_id_with_this_endpoint() {
+        let linux = "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo";
+        // The measured (first) record belongs to a box with no published id yet.
+        let existing = provider_with(None, None);
+        let caps = json!({ "peer_id": linux, "p2p_port": 30333, "gflops": 99 });
+        let merged = merge_poll_snapshot(
+            &existing,
+            &caps,
+            existing.status_url.clone(),
+            11,
+        );
+        // With nothing measured, the snapshot is the only identity — adopt it.
+        assert_eq!(merged.peer_id.as_deref(), Some(linux));
+        assert_eq!(merged.p2p_port, Some(30333));
+        assert_eq!(merged.status_url, existing.status_url);
+        assert_eq!(merged.gflops, 99, "measured fields are refreshed");
+        assert_eq!(merged.latency_ms, 11);
+    }
+
+    #[test]
+    fn merge_keeps_the_measured_identity_when_the_snapshot_disagrees() {
+        let own = "12D3KooW9ye8kXwMYT4vBJoJdCkM9VfRrcM7nGgqVDPq3Fy8i6xw";
+        let other = "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo";
+        let existing = provider_with(Some(own), Some(30333));
+        let caps = json!({ "peer_id": other, "p2p_port": 40444, "gflops": 5 });
+        let merged = merge_poll_snapshot(&existing, &caps, existing.status_url.clone(), 3);
+        assert_eq!(
+            merged.peer_id.as_deref(),
+            Some(own),
+            "this endpoint's own id must win"
+        );
+        assert_eq!(merged.p2p_port, Some(30333));
+        assert_eq!(merged.p2p_multiaddrs, existing.p2p_multiaddrs);
+        // Everything else still comes from the fresh snapshot.
+        assert_eq!(merged.gflops, 5);
+    }
+
+    #[test]
+    fn merge_is_idempotent_for_the_same_identity() {
+        let own = "12D3KooW9ye8kXwMYT4vBJoJdCkM9VfRrcM7nGgqVDPq3Fy8i6xw";
+        let existing = provider_with(Some(own), Some(30333));
+        let caps = json!({ "peer_id": own, "p2p_port": 30333, "gflops": 1 });
+        let merged = merge_poll_snapshot(&existing, &caps, existing.status_url.clone(), 2);
+        assert_eq!(merged.peer_id.as_deref(), Some(own));
+        assert_eq!(merged.p2p_port, Some(30333));
+        assert_eq!(merged.p2p_multiaddrs, existing.p2p_multiaddrs);
+    }
+
+    #[test]
+    fn merge_keeps_a_measured_identity_the_snapshot_omits() {
+        let own = "12D3KooW9ye8kXwMYT4vBJoJdCkM9VfRrcM7nGgqVDPq3Fy8i6xw";
+        let existing = provider_with(Some(own), Some(30333));
+        let caps = json!({ "gflops": 2 });
+        let merged = merge_poll_snapshot(&existing, &caps, existing.status_url.clone(), 1);
+        assert_eq!(merged.peer_id.as_deref(), Some(own));
+        assert_eq!(merged.p2p_port, Some(30333));
+        assert_eq!(merged.p2p_multiaddrs, existing.p2p_multiaddrs);
     }
 
     #[test]

@@ -441,6 +441,16 @@ pub(crate) fn force_mining(config: &mut sc_service::Configuration) {
     config.force_authoring = true;
 }
 
+/// True for a development/local chain (`--dev`, `--alice`-style), where the
+/// dialability gate must never be a reason to refuse to start.
+fn is_dev_chain(config: &sc_service::Configuration) -> bool {
+    use sc_chain_spec::ChainType;
+    matches!(
+        config.chain_spec.chain_type(),
+        ChainType::Development | ChainType::Local
+    ) || config.chain_spec.id().to_ascii_lowercase().contains("dev")
+}
+
 /// The **single decision** that gates the seal-producing miner.
 ///
 /// A GPN node whose role is `Authority` always mines: the block *proposer*
@@ -460,6 +470,38 @@ pub(crate) fn miner_should_run(role: sc_service::Role) -> bool {
     role.is_authority()
 }
 
+/// `GPN_STANDBY=1` — the supervisor (`gpn_node`) has established that this
+/// build is **below the network's published `min_version`**.
+///
+/// In standby the node keeps syncing (its data stays useful, and it can be
+/// upgraded in place) but it must not author or mine: an outdated node can
+/// produce blocks that the upgraded network rejects, which looks like a chain
+/// stall to everyone else. Announcing is suppressed by the supervisor with
+/// `--no-seed --no-discoverable`.
+///
+/// Deliberately an env var and not a flag: it is set by the supervisor from a
+/// *signature-verified* release manifest, never by hand-tuned CLI.
+pub(crate) fn standby_requested() -> bool {
+    matches!(
+        std::env::var("GPN_STANDBY")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// The role this process actually runs with: standby downgrades an authority
+/// to a plain full node, so neither the proposer nor the miner starts.
+pub(crate) fn effective_role(requested: sc_service::Role, standby: bool) -> sc_service::Role {
+    if standby {
+        sc_service::Role::Full
+    } else {
+        requested
+    }
+}
+
 /// Builds a new service for a full client.
 pub async fn new_full<
     N: sc_network::NetworkBackend<Block, <Block as sp_runtime::traits::Block>::Hash>,
@@ -475,7 +517,19 @@ pub async fn new_full<
     // `Role: FULL` → no mining worker, no GPU-miner lines, no rewards.
     // The flags remain *accepted* (harmless) for backward compatibility.
     let mut config = config;
-    force_mining(&mut config);
+    if standby_requested() {
+        // Below the minimum version: sync only. Logged as a hard warning so it
+        // shows up in journalctl and in the supervisor's [node] stream.
+        log::warn!(
+            "  UPGRADE REQUIRED (GPN_STANDBY=1): this node is below the network's \
+             minimum version. It will SYNC but NOT MINE and NOT AUTHOR. Install the \
+             current release (or set GPN_AUTO_UPDATE=1) and restart."
+        );
+        config.role = effective_role(config.role, true);
+        config.force_authoring = false;
+    } else {
+        force_mining(&mut config);
+    }
 
     let sc_service::PartialComponents {
         client,
@@ -685,11 +739,51 @@ pub async fn new_full<
                 }
 
                 if hard {
-                    // Default path: refuse to run a node nobody can dial.
-                    log::error!("   reason: {}", verdict.detail);
-                    // Distinct exit code so `gpn_node` can report
-                    // `node=down(not dialable)` instead of a generic crash.
-                    std::process::exit(crate::dialability::EXIT_NOT_DIALABLE);
+                    // Default path: refuse to run a node nobody can dial —
+                    // UNLESS that refusal would take down the last authoring
+                    // node (or a dev/solo chain). The gate protects the mesh;
+                    // it must never halt the chain (2026-10-20 incident).
+                    let safety_ctx = crate::dialability::SafetyContext {
+                        is_authority: config.role.is_authority(),
+                        connected_peers: network.sync_num_connected(),
+                        authority_count: 0, // PoW chain: no on-chain authority set
+                        dev_chain: is_dev_chain(&config),
+                    };
+                    let override_reason = if gate_cfg.safety {
+                        crate::dialability::safety_valve(&safety_ctx)
+                    } else {
+                        None
+                    };
+
+                    if let Some(reason) = override_reason {
+                        for line in crate::dialability::safety_valve_notice(reason, &verdict.detail)
+                            .lines()
+                        {
+                            log::warn!("{line}");
+                        }
+                        log::warn!(
+                            "dialability: continuing in degraded mode [tier: {}] — the hard \
+                             gate was overridden to keep the chain alive",
+                            gate_cfg.intended_tier(false)
+                        );
+                        let watch_cfg = gate_cfg.clone();
+                        let watch_net = network.clone();
+                        task_manager
+                            .spawn_handle()
+                            .spawn("gpn-dialability-watch", None, async move {
+                                crate::dialability::watch_dialability(
+                                    watch_net,
+                                    watch_cfg,
+                                    false,
+                                )
+                                .await;
+                            });
+                    } else {
+                        log::error!("   reason: {}", verdict.detail);
+                        // Distinct exit code so `gpn_node` can report
+                        // `node=down(not dialable)` instead of a generic crash.
+                        std::process::exit(crate::dialability::EXIT_NOT_DIALABLE);
+                    }
                 }
 
                 // Soft mode (--no-require-backbone): keep syncing/mining/serving.
@@ -1417,5 +1511,29 @@ mod mining_gate_tests {
     #[test]
     fn full_node_does_not_run_miner() {
         assert!(!miner_should_run(Role::Full));
+    }
+
+    /// The minimum-version cutoff, node side: `GPN_STANDBY=1` must downgrade an
+    /// authority to a full node so neither the proposer nor the miner starts.
+    /// The control case proves the decision is not vacuous.
+    #[test]
+    fn standby_downgrades_an_authority_to_full() {
+        assert!(
+            matches!(effective_role(Role::Authority, true), Role::Full),
+            "standby must run as a full node"
+        );
+        assert!(
+            !miner_should_run(effective_role(Role::Authority, true)),
+            "an out-of-date node must not mine"
+        );
+
+        assert!(
+            matches!(effective_role(Role::Authority, false), Role::Authority),
+            "a supported node keeps its authority role"
+        );
+        assert!(
+            miner_should_run(effective_role(Role::Authority, false)),
+            "a supported node mines exactly as before"
+        );
     }
 }

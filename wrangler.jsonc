@@ -9,7 +9,7 @@
     "not_found_handling": "404-page",
     // These paths have no file in ./website — the Worker must answer them
     // before the asset layer (otherwise they fall through to 404.html).
-    "run_worker_first": ["/seeds.json", "/seeds", "/bootnodes.txt", "/seeds.txt"]
+    "run_worker_first": ["/seeds.json", "/seeds", "/bootnodes.txt", "/seeds.txt", "/releases.json"]
   },
   "vars": {
     // Access point used for the live half of the directory. Leave empty for a
