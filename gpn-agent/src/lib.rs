@@ -13,6 +13,7 @@ pub mod disk;
 pub mod firstrun;
 pub mod gpu;
 pub mod gpu_yield;
+pub mod hub_channel;
 pub mod llm;
 pub mod mining;
 pub mod moderation;
