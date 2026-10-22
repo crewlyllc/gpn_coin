@@ -514,8 +514,8 @@ GET /job/1234/artifact → image/png</code></pre>
       <p class="hint" style="margin-top:10px">Sources: <a href="https://developers.openai.com/api/docs/pricing" rel="noopener">developers.openai.com/api/docs/pricing</a>,
         <a href="https://platform.claude.com/docs/en/about-claude/pricing" rel="noopener">platform.claude.com/docs/en/about-claude/pricing</a>,
         <a href="https://ai.google.dev/gemini-api/docs/pricing" rel="noopener">ai.google.dev/gemini-api/docs/pricing</a> —
-        standard (non-batch, short-context) tiers, read 2026-10-21. GPN's input rate is 25% of its output
-        rate (<code>GPN_INPUT_RATE_FRAC=0.25</code>). Vendors change prices; treat the hosted columns as a
+        standard (non-batch, short-context) tiers, read 2026-10-21. GPN's input rate is 15% of its output
+        rate (<code>GPN_INPUT_RATE_FRAC=0.15</code>). Vendors change prices; treat the hosted columns as a
         snapshot, and re-check the links. <code>GET /api/pricing</code> returns the live numbers.</p>
 
       <div class="callout" style="margin-top:18px">
@@ -559,7 +559,7 @@ GET /job/1234/artifact → image/png</code></pre>
 anchor_rate  = $0.10/hr            # GPN_GPU_ANCHOR_USD_HR
 k            = 0.10 / (95.2 × 3600) = $2.918e-7/token
 price_out    = k × (1 + 0.30)     # GPN_MARGIN_BPS=3000
-price_in     = price_out × 0.25   # GPN_INPUT_RATE_FRAC
+price_in     = price_out × 0.15   # GPN_INPUT_RATE_FRAC
 escrow       = prompt_tokens/4 + max_tokens   (output-equivalents)
 gpn/tok      = price_out ÷ token_price_usd</code></pre>
           <p class="hint mb-0">A provider's hourly earning is the same <code>k</code> applied to its own
@@ -578,7 +578,7 @@ gpn/tok      = price_out ÷ token_price_usd</code></pre>
 k        = 0.10 / (95.2 × 3600) = 2.918e-7
 price    = 2.918e-7 × 1.30 = 3.793e-7 / token
          → $0.379 per 1M output tokens
-         → $0.095 per 1M input tokens (25%)
+         → $0.057 per 1M input tokens (15%)
 gpn/tok  = 3.793e-7 / 0.15 = 2.53 GPN per 1M</code></pre>
           <p class="hint mb-0">Decode is memory-bound, so the 1B ceiling comes from bandwidth, not FLOPs.
             The same card on a 7B model drops to ~13.6 tok/s and earns the provider ~$0.014/hr — which is
@@ -694,7 +694,7 @@ gpn/tok  = 3.793e-7 / 0.15 = 2.53 GPN per 1M</code></pre>
           model are both "cheap", but neither reasons like <code>gpt-6-astra</code> or
           <code>Claude Fable 5.1</code>. Cost per useful answer is the only fair denominator, and this page
           does not have that data.</li>
-        <li><b>Input metering is channel-first.</b> The default off-chain channel bills input at 25% of the
+        <li><b>Input metering is channel-first.</b> The default off-chain channel bills input at 15% of the
           output rate. The on-chain pallet stores a single rate, so an on-chain job publishes a blended
           rate that is exact when the completion runs to <code>max_tokens</code> and slightly under-bills
           short completions. Exact two-rate settlement on-chain needs a pallet change; it is tracked, not
@@ -775,7 +775,7 @@ gpn/tok  = 3.793e-7 / 0.15 = 2.53 GPN per 1M</code></pre>
   var model = document.getElementById('ec-model');
   if (!model) return;
 
-  var ANCHOR_TOKS = 95.2, IN_FRAC = 0.25;
+  var ANCHOR_TOKS = 95.2, IN_FRAC = 0.15;
   // Single-stream roofline at 30,000 GFLOP/s FP32 + 272 GB/s, params in billions.
   var ROOFLINE = { 1: 95.2, 3: 31.7, 7: 13.6, 14: 6.8 };
   // Reference cards: name + memory bandwidth (GB/s). Decode is bandwidth-bound.
