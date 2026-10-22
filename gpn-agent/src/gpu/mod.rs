@@ -586,7 +586,10 @@ pub fn parse_wmic_videocontroller(out: &str) -> Vec<(String, u64)> {
         if name.is_empty() {
             continue;
         }
-        let ram_bytes: u64 = cells.get(ri).and_then(|s| parse_size_number(s)).unwrap_or(0);
+        let ram_bytes: u64 = cells
+            .get(ri)
+            .and_then(|s| parse_size_number(s))
+            .unwrap_or(0);
         rows.push((name.clone(), ram_bytes / (1024 * 1024)));
     }
     rows
@@ -737,7 +740,8 @@ pub fn choose_windows_vram(
     adapterram_mb: Option<u64>,
 ) -> VramProbe {
     let pick = |mb: Option<u64>, source: VramSource| {
-        mb.filter(|v| *v > 0).map(|total_mb| VramProbe { total_mb, source })
+        mb.filter(|v| *v > 0)
+            .map(|total_mb| VramProbe { total_mb, source })
     };
     pick(nvidia_smi_mb, VramSource::NvidiaSmi)
         .or_else(|| pick(rocm_smi_mb, VramSource::RocmSmi))
@@ -753,7 +757,8 @@ const PS_QW_MEMORY_SIZE: &str = "Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentC
 /// PowerShell: adapter names only (`AdapterRAM` deliberately not requested —
 /// classification never needs it, and the field is 32-bit capped).
 #[cfg(windows)]
-const PS_ADAPTER_NAMES: &str = "Get-CimInstance Win32_VideoController | Select-Object Name | ConvertTo-Csv -NoTypeInformation";
+const PS_ADAPTER_NAMES: &str =
+    "Get-CimInstance Win32_VideoController | Select-Object Name | ConvertTo-Csv -NoTypeInformation";
 
 #[cfg(windows)]
 fn run_powershell(script: &str) -> Option<String> {
@@ -829,8 +834,8 @@ pub fn detect_vram() -> VramProbe {
             .and_then(|o| parse_rocm_smi_vram_mb(&String::from_utf8_lossy(&o.stdout)));
         // 64-bit per-adapter value; the only trustworthy Windows source when no
         // vendor CLI is installed.
-        let reg = run_powershell(PS_QW_MEMORY_SIZE)
-            .and_then(|s| parse_registry_qwmemorysize_mb(&s));
+        let reg =
+            run_powershell(PS_QW_MEMORY_SIZE).and_then(|s| parse_registry_qwmemorysize_mb(&s));
         // Last resort: 32-bit, caps at 4095 MiB.
         let cached = run_powershell("Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM | ConvertTo-Csv -NoTypeInformation")
             .and_then(|s| {
@@ -880,7 +885,13 @@ fn win_adapter_names() -> Vec<String> {
     }
     // Fallback: the classic `wmic` CSV form (older Windows without CIM).
     let o = Command::new("wmic")
-        .args(["path", "win32_VideoController", "get", "name", "/format:csv"])
+        .args([
+            "path",
+            "win32_VideoController",
+            "get",
+            "name",
+            "/format:csv",
+        ])
         .output();
     if let Ok(o) = o {
         if o.status.success() {

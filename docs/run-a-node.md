@@ -1035,9 +1035,26 @@ estimate so the min-GPU gate (#19) and the scheduler route correctly:
 
 * Linux — `nvidia-smi`, then **`rocm-smi`** (`--showproductname`,
   `--showmeminfo vram`), then `lspci` + `/sys/class/drm`.
-* Windows — `Win32_VideoController` (`Get-CimInstance` / `wmic`) for name +
-  `AdapterRAM`. ⚠️ Windows caps `AdapterRAM` at 4 GiB, so set `--vram-mb` (or
-  `VRAM_MB`) to the real figure for big cards.
+* Windows — `nvidia-smi`, then `rocm-smi`, then the display-class registry
+  value `HardwareInformation.qwMemorySize` (**REG_QWORD, real 64-bit** figure
+  per adapter, iGPUs skipped), and only as a **last resort**
+  `Win32_VideoController.AdapterRAM`.
+
+> ⚠️ **Windows `AdapterRAM` is a uint32 and saturates at 4,294,967,295 bytes
+> = 4095 MiB.** A 12 GB or 24 GB card reads as ~4 GB from that field, which
+> used to make the VRAM model gate exclude models the box can actually run.
+> Detection now prefers `nvidia-smi`/`rocm-smi`, then the 64-bit registry
+> `qwMemorySize`, and uses `AdapterRAM` only when nothing else works. When it
+> does, the agent says so explicitly:
+>
+> ```
+> [gpu] VRAM from AdapterRAM (32-bit, capped at 4095 MiB) — value may understate the real total; models larger than 4 GB may be wrongly excluded
+> ```
+>
+> If neither vendor CLI nor the registry key is available, set `--vram-mb`
+> (or `VRAM_MB`) to the real figure. A probe that finds nothing at all now
+> warns loudly (`[gpu] VRAM detection returned 0 MiB …`) instead of silently
+> disabling the gate.
 
 Override anything with `--gpu-class`/`--tflops`/`--vram-mb` (or the `GPU_CLASS`,
 `TFLOPS`, `VRAM_MB` env vars).

@@ -153,6 +153,41 @@ Log line (once per model per process):
 [models] skipping deepseek-r1:14b: needs ~10.3 GB, node has 8.0 GB — not advertised
 ```
 
+### Where `vram_mb` comes from
+
+`gpn_agent::gpu::detect_vram()` probes in this order and takes the first
+success (largest adapter wins on a multi-GPU box):
+
+1. `nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits` — true
+   64-bit figure, any card size.
+2. `rocm-smi --showmeminfo vram` — true 64-bit figure (AMD).
+3. **Windows only:** registry
+   `HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0*`
+   → `HardwareInformation.qwMemorySize`. This is a **REG_QWORD** (64-bit), so
+   12 GiB / 24 GiB / 48 GiB cards are reported correctly; rows whose
+   `DriverDesc` is an iGPU (`Intel(R) UHD/Iris`, `AMD Radeon(TM) Graphics`,
+   `Radeon 780M`, …) are skipped, as are zero, `N/A`, non-numeric and
+   implausible (>1 TiB) values.
+4. **Windows only, last resort:** `Win32_VideoController.AdapterRAM`.
+
+⚠️ **`AdapterRAM` is a uint32 and saturates at 4,294,967,295 bytes = 4095 MiB.**
+It cannot represent a 6 GB+ card. Using it understates VRAM, which makes the
+gate *wrongly exclude* models the machine can actually serve. When — and only
+when — detection falls through to it, the agent logs, once per process:
+
+```
+[gpu] VRAM from AdapterRAM (32-bit, capped at 4095 MiB) — value may understate the real total; models larger than 4 GB may be wrongly excluded
+```
+
+A probe that finds **nothing** (no vendor CLI, no registry key, no
+`AdapterRAM`) logs instead of returning a silent `0`:
+
+```
+[gpu] VRAM detection returned 0 MiB (no nvidia-smi, rocm-smi, registry qwMemorySize or AdapterRAM value) — VRAM is NOT advertised and the VRAM model gate is disabled, so oversized models will not be blocked
+```
+
+Either way the fix is the same: pass `--vram-mb <MiB>` (or `VRAM_MB`).
+
 ### Overrides
 
 | variable | example | effect |
