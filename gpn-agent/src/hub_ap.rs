@@ -429,6 +429,7 @@ fn run_channel_job(
     // advanced the channel between our read and its `accept` — not proof that
     // the channel is unusable, so it must never be reported as a channel
     // failure on the first occurrence.
+    let is_gen = gen.is_some();
     let mut attempt: u32 = 0;
     let (job_id, resp) = loop {
     attempt += 1;
@@ -644,6 +645,9 @@ fn run_channel_job(
             result.job_id, charge, price, p, c
         ),
         Some(_) => {}
+        // A generation job has no token usage and is billed its fixed price —
+        // that is not a missing measurement, so do not cry wolf.
+        None if is_gen => {}
         None => eprintln!(
             "[hub] job {}: provider reported no usage — charged the full ceiling {}",
             result.job_id, price
