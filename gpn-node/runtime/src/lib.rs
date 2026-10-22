@@ -419,7 +419,31 @@ parameter_types! {
     pub const InitialBlockReward: Balance = 50_000_000_000_000; // 50 GPN (12 decimals)
     pub const HalvingInterval: BlockNumber = 4_204_800; // ~2 years at 15s blocks
     pub const TargetBlockTime: u64 = 15; // seconds (original concept: ~2yr halving, Bitcoin-like cadence; 4s no longer needed once AI escrow is off-chain)
-    pub const DifficultyAdjustmentWindow: BlockNumber = 10; // dev-friendly; retune every 10 blocks
+    /// Retarget the difficulty every **30 blocks** (~7.5 min at the 15 s target).
+    ///
+    /// WHY NOT 10: a window mean of `n` memoryless solves has CV = 1/√n, so a
+    /// 10-block window is ±32 % noisy while a 30-block window is ±18 %. With
+    /// n=10 the controller's *input* noise was larger than any hashrate drift it
+    /// is meant to track, and one stalled block (a 90 s gap in 10 blocks) moved
+    /// the target by ~+50 %.
+    ///
+    /// WHY NOT 45/60: the tail keeps improving with a wider window, but the time
+    /// to *track* a genuine hashrate change (one of three authorities dropping
+    /// out) grows linearly. Simulated on 2 500 real intervals
+    /// (`scripts/retarget-sim.py`, report in
+    /// `shared/artifacts/project7/analysis/retarget-sim-2026-10-22.md`):
+    ///   w10 p95 65.1 s, 2x-hashrate recovery 24 blocks
+    ///   w20 p95 59.9 s, recovery 34 blocks
+    ///   w30 p95 55.9 s, recovery 44 blocks   ← chosen
+    ///   w45 p95 52.5 s, recovery 74 blocks
+    /// 30 buys most of the tail improvement and still converges in ~11 min.
+    pub const DifficultyAdjustmentWindow: BlockNumber = 30; // ~7.5 min at 15 s
+    /// One retarget step is `clamp(actual/target, 0.5, 2.0)` — symmetric in log
+    /// space, so a 2×-too-fast window is undone by exactly one 2×-too-slow
+    /// window. The law it replaces, `2x/(1+x)`, was asymmetric (−50.6 % then
+    /// +37 % observed) and had no lower bound at all (#52).
+    pub const MinRetargetStepPercent: u32 = 50; // may at most halve the target
+    pub const MaxRetargetStepPercent: u32 = 200; // may at most double it
     pub const PowMaxWeight: u64 = 200_000;
     pub const AlgorithmVersion: u32 = 1;
     pub const MiningAttestationThreshold: u32 = 3; // blocks authored before direct payout (stake-free PoW gate)
@@ -455,6 +479,8 @@ impl pallet_gpu_pow::Config for Runtime {
     type HalvingInterval = HalvingInterval;
     type TargetBlockTime = TargetBlockTime;
     type DifficultyAdjustmentWindow = DifficultyAdjustmentWindow;
+    type MinRetargetStepPercent = MinRetargetStepPercent;
+    type MaxRetargetStepPercent = MaxRetargetStepPercent;
     type PowMaxWeight = PowMaxWeight;
     type AlgorithmVersion = AlgorithmVersion;
     // Canonical supply accounting lives in pallet-gpn-token; the single
