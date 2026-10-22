@@ -1183,7 +1183,11 @@ provider_endpoint = "http://<your-public-ip>:8093/status"   # advertised on-chai
 assign_token      = "<shared AP↔provider secret>"           # GPN_ASSIGN_TOKEN (see below)
 ollama       = "http://127.0.0.1:11434"
 listen       = "0.0.0.0:8093"                      # heartbeat bind
-gflops       = 30000
+gflops       = 30000                               # UPPER BOUND: the heartbeat advertises
+                                                   # min(this, on-chain attestation). Unset →
+                                                   # advertise the attestation. The chain is what
+                                                   # gates jobs (`accept_job`), so advertising
+                                                   # more than it holds just strands them.
 capacity     = 1
 poll_ms      = 300
 # ── optional providers: ALL ON by design; set false to opt a capability OUT ──
@@ -1250,7 +1254,9 @@ min_version_enforce = true    # false = mine below the minimum (unsupported)
 | `GPN_BASELINE_MODELS` | Comma-separated baseline model(s) to pull on first run | `llama3.2:1b` |
 | `GPN_OLLAMA_WAIT_SECS` | Grace window for `/api/tags` after `ollama serve` | `60` |
 | `GPN_LISTEN` | heartbeat bind addr | `0.0.0.0:8093` |
-| `GPN_GFLOPS` | advertised compute | `0` |
+| `GPN_GFLOPS` | upper bound on advertised compute; the heartbeat advertises `min(this, attested)` — leave it `0`/unset to advertise the on-chain attestation as-is | `0` |
+| `GPN_ATTEST_REFRESH` | `0` = never (re)attest from the provider loop | `1` |
+| `GPN_ATTEST_REFRESH_BLOCKS` | re-attest when the on-chain record is this old (half of `MaxAttestationAge` = 14 400) | `7200` |
 | `GPN_CAPACITY` | concurrent jobs | `1` |
 | `GPN_POLL_MS` | provider poll interval | `300` |
 | `GPN_DIFFUSION` | image/video provider — set `0` to OPT OUT (default ON) | `1` |
