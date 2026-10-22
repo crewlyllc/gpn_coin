@@ -632,7 +632,12 @@ impl Config {
             .or(file.account.clone())
             .unwrap_or_default();
         if account.is_empty() {
-            if let Ok(addr) = gpn_agent::firstrun::ss58_of(&signer) {
+            // Queue #65: a testnet box signs with a dev URI (`//Bob`), which
+            // `ss58_of` rejects by design — that left `account` empty, so the
+            // heartbeat was started without `--address` and could not read the
+            // on-chain attestation (it advertised gflops 0 forever). Accept URI
+            // forms here; this only *names* the configured account.
+            if let Ok(addr) = gpn_agent::firstrun::ss58_of_uri(&signer) {
                 account = addr;
             }
         }

@@ -487,6 +487,31 @@ pub fn ss58_of(secret: &str) -> Result<String, String> {
     Ok(pair.public().to_ss58check())
 }
 
+/// Like [`ss58_of`], but also accepts **dev shortcuts** (`//Bob`, `//Alice//stash`)
+/// and other SURI forms, because a testnet box is launched with `//Bob`.
+///
+/// `pair_from_secret` deliberately rejects those (a dev key must never hold real
+/// earnings), which made every *derived* use of the signer fail for such a box:
+/// `gpn_node` could not fill in its payout/account, so it started the heartbeat
+/// with **no `--address`**, the heartbeat could not read
+/// `GPUAttestation::Attestations`, and `/status` advertised `gflops: 0` on a box
+/// that had a real attestation (queue #65). Never use this to *create* a wallet —
+/// only to name an account that is already configured.
+pub fn ss58_of_uri(uri: &str) -> Result<String, String> {
+    let uri = uri.trim();
+    // `sr25519::Pair::from_string("")` is deprecated and returns a default pair
+    // rather than an error — never let an empty signer name an account.
+    if uri.is_empty() {
+        return Err("empty signer".to_string());
+    }
+    if let Ok(a) = ss58_of(uri) {
+        return Ok(a);
+    }
+    let pair = sr25519::Pair::from_string(uri, None)
+        .map_err(|e| format!("invalid signer URI: {e:?}"))?;
+    Ok(pair.public().to_ss58check())
+}
+
 /// Turn a user-supplied secret into an sr25519 pair.
 ///
 /// Accepted: a BIP-39 mnemonic (12/15/18/21/24 words) or a `0x`-prefixed
@@ -1175,8 +1200,24 @@ mod tests {
     }
 
     #[test]
+    fn a_dev_uri_names_its_account_but_never_creates_one() {
+        // The wizard must keep refusing dev shortcuts…
+        assert!(ss58_of("//Bob").is_err());
+        // …while naming an account that is already configured must work, or a
+        // testnet box cannot derive its own address (queue #65: that left the
+        // heartbeat without `--address`, so /status advertised gflops 0).
+        assert_eq!(
+            ss58_of_uri("//Bob").unwrap(),
+            "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
+        );
+        // Real secrets and plain garbage behave as before.
+        assert_eq!(ss58_of_uri(ALICE_PHRASE).unwrap(), ss58_of(ALICE_PHRASE).unwrap());
+        assert!(ss58_of_uri("not a key").is_err());
+        assert!(ss58_of_uri("").is_err());
+    }
+
+    #[test]
     fn hex_seed_import_derives_the_same_pair_as_sp_core() {
-        // A 0x seed must be accepted and derive exactly what sp-core derives.
         let raw = [7u8; 32];
         let hexseed = format!("0x{}", hex::encode(raw));
         let expected = sr25519::Pair::from_seed_slice(&raw)
