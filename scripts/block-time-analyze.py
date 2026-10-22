@@ -195,18 +195,32 @@ def main():
       % args.target)
     w("")
 
-    # ---- authored vs arrival: is the node seeing blocks late? ---------------
+    # ---- authored vs arrival ------------------------------------------------
+    # FINDING (2026-10-22): the block timestamp is stamped when the proposer
+    # BUILDS the template, before the PoW solve (inherent = from_system_time at
+    # prepare time; the miner then spends the solve time, then seals). So
+    #   ts_i ≈ arrival_{i-1} + prep     and   interval_i ≈ solve_i + propagation.
+    # Consequence 1: `ts_i - ts_{i-1}` is a ONE-BLOCK-LAGGED copy of the arrival
+    #   interval, which is why it looks shifted here (it is not a stall).
+    # Consequence 2 (this is why it matters for #52): every retarget window's
+    #   `elapsed_ms` is measured between two *preparation* timestamps, so it is
+    #   lagged by one block. At window 10 that is a ~10 % bias term; at 45, ~2 %.
     pairs = [(n, auth_iv[n], intervals[nums.index(n) - 1])
              for n in auth_iv if n in nums and nums.index(n) > 0]
     lags = [a - c for (n, a, c) in pairs if c > 0]
-    w("## Import lag (authored → observed here)")
+    w("## Timestamp semantics (measured, not assumed)")
     w("")
-    if lags:
-        w("median **%.2f s**, p95 **%.2f s**, max **%.2f s** (n=%d). "
-          "A large lag would mean blocks are produced on time but imported late (cause d)."
-          % (statistics.median(lags), pct(lags, 95), max(lags), len(lags)))
-    else:
-        w("no paired authored/arrival samples")
+    w("`pallet_timestamp` is set at **template build**, before the PoW solve, so "
+      "`ts[i] - ts[i-1]` is a one-block-lagged copy of the arrival interval "
+      "(median offset %.1f s here). This is NOT a stalled node: the timestamp "
+      "precedes the seal by that block's solve time."
+      % (statistics.median(lags) if lags else float("nan")))
+    w("")
+    w("Practical consequence for the retarget: `elapsed_ms` is measured between "
+      "two *preparation* timestamps, so it is lagged by one block — a ~10 %% bias "
+      "at a 10-block window, ~2 %% at 45. (See the `MinimumPeriod` clamp note: "
+      "intervals that read exactly 1.000 s are a lagging author's clock being "
+      "clamped to parent+1 s, not a 1 s block.)")
     w("")
 
     # ---- GPU / pool / health ------------------------------------------------
@@ -239,6 +253,41 @@ def main():
     parks = park_windows(rows)
     total_park = sum(max(0.0, b - a) for a, b, _ in parks)
 
+    # The node's own 5 s informant heartbeat ("💤 Idle (2 peers), best: #N") is
+    # the evidence for cause (d): if the node reported `best: #<prev>` throughout
+    # a gap, it was up, peering and polling and simply had NOTHING to import —
+    # the block did not exist yet (cause b). A stall shows up as silence.
+    best_samples = []
+    for ts, line in rows:
+        m = re.search(r"best: #(\d+)", line)
+        if m:
+            best_samples.append((ts, int(m.group(1))))
+    # which blocks did THIS node seal? ("⛏ GPU sealed block" immediately precedes
+    # its own "🏆 Imported #N"). A gap that ends on a locally sealed block means
+    # the local miner was the one that was slow; ending on a peer's block means
+    # the whole field was slow.
+    local_sealed = set()
+    pending_seal = False
+    for ts, line in rows:
+        if "GPU sealed block" in line:
+            pending_seal = True
+        else:
+            m = re.search(r"Imported #(\d+)", line)
+            if m and pending_seal:
+                local_sealed.add(int(m.group(1)))
+                pending_seal = False
+    beats = []
+    for i in range(1, len(arr)):
+        gap = arr[i] - arr[i - 1]
+        if gap <= args.target:
+            continue
+        g0, g1 = arr[i - 1], arr[i]
+        prev_num = nums[i - 1]
+        window = [(ts, b) for ts, b in best_samples if g0 <= ts <= g1]
+        stalled_reports = [b for ts, b in window if b > prev_num]
+        beats.append({"i": i, "g0": g0, "g1": g1, "gap": gap, "num": nums[i],
+                      "samples": len(window), "saw_new_early": len(stalled_reports)})
+
     w("## Cause split for intervals > %.0f s" % args.target)
     w("")
     w("Mining-pause windows observed: **%d**, total **%.1f s** (%.2f %% of wall clock)."
@@ -251,37 +300,53 @@ def main():
     w("")
 
     buckets = {"a_job_pause": [], "b_no_author": [], "d_stall": []}
+    explained = {"a_job_pause": 0.0, "b_no_author": 0.0, "d_stall": 0.0}
     detail = []
-    for i in range(1, len(arr)):
-        gap = arr[i] - arr[i - 1]
-        if gap <= args.target:
-            continue
-        g0, g1 = arr[i - 1], arr[i]
-        n = nums[i]
+    for bt in beats:
+        gap = bt["gap"]
+        g0, g1 = bt["g0"], bt["g1"]
+        n = bt["num"]
         aiv = auth_iv.get(n)
         hit = [(a, b, r) for (a, b, r) in parks if overlaps(g0, g1, a, b)]
-        # (d) block authored well before it was observed here
-        stalled = aiv is not None and aiv < gap * 0.5
+        # (d) the node went quiet: no heartbeat samples at all across the gap,
+        # or it reported a height above ours before we recorded the block.
+        silent = bt["samples"] == 0
         if hit:
+            # A pause only ever explains the part of the gap it covers: a 28 s
+            # park inside a 42 s gap explains 28 s, not 42 s.
+            cover = sum(min(g1, b) - max(g0, a) for (a, b, r) in hit)
+            cover = min(cover, gap)
             buckets["a_job_pause"].append(gap)
-            why = "a: parking (%s, %.1fs)" % (hit[0][2], sum(x[1] - x[0] for x in hit))
-        elif stalled:
+            explained["a_job_pause"] += cover
+            explained["b_no_author"] += gap - cover
+            why = "a: parking (%s, %.1fs of %.1fs)" % (hit[0][2], cover, gap)
+        elif silent:
             buckets["d_stall"].append(gap)
-            why = "d: authored %.1fs but arrived %.1fs" % (aiv, gap)
+            explained["d_stall"] += gap
+            why = "d: no node heartbeat during the gap"
         else:
             buckets["b_no_author"].append(gap)
-            why = "b: chain time %.1fs (nobody solved)" % (aiv if aiv else -1)
+            explained["b_no_author"] += gap
+            why = "b: node up+idle (%d beats, best stayed #%d)" % (bt["samples"], nums[bt["i"] - 1])
         detail.append((n, g0, gap, aiv, why))
 
     n_over = sum(len(v) for v in buckets.values())
-    w("| cause | count | share | seconds | longest |")
+    total_gap = sum(sum(v) for v in buckets.values())
+    # Attributable seconds are exclusive: pause-covered time belongs to (a), the
+    # remainder of a pause-overlapping gap belongs to (b), stalls to (d).
+    explained["b_no_author"] = total_gap - explained["a_job_pause"] - explained["d_stall"]
+    w("| cause | gaps | share of gaps | attributable gap time | share of gap time |")
     w("|---|---|---|---|---|")
     for k, label in (("a_job_pause", "(a) mining paused for an AI job"),
                      ("b_no_author", "(b) no authority produced in time (difficulty/variance/offline)"),
                      ("d_stall", "(d) node stalled / imported late")):
         v = buckets[k]
-        w("| %s | %d | %.1f %% | %.0f s | %.1f s |"
-          % (label, len(v), 100.0 * len(v) / max(1, n_over), sum(v), max(v) if v else 0))
+        w("| %s | %d | %.1f %% | %.0f s | %.1f %% |"
+          % (label, len(v), 100.0 * len(v) / max(1, n_over), explained[k],
+             100.0 * explained[k] / max(1, total_gap)))
+    w("")
+    w("Attributable time is exclusive: only the part of a gap actually covered by a "
+      "mining pause counts as (a); the rest of that gap is (b).")
     w("")
     w("(c) *tx pool did not include user txs* is not a block-time gap: it is measured "
       "as create-submit → inclusion delay in the AP/provider journals and is reported "
@@ -290,12 +355,24 @@ def main():
 
     w("### Worst gaps")
     w("")
-    w("| block | at | gap | authored interval | attribution |")
+    w("| block | at | gap | ts interval (lagged) | attribution |")
     w("|---|---|---|---|---|")
     for n, g0, gap, aiv, why in sorted(detail, key=lambda d: -d[2])[:15]:
         w("| #%d | %s | %.1f s | %s | %s |"
           % (n, datetime.fromtimestamp(g0).strftime("%H:%M:%S"), gap,
              ("%.1f s" % aiv) if aiv else "n/a", why))
+    w("")
+    w("### Who ended the long gaps")
+    w("")
+    long_gaps = [bt for bt in beats]
+    if long_gaps:
+        loc = sum(1 for bt in long_gaps if bt["num"] in local_sealed)
+        w("%d of %d gaps > %.0f s were ended by a block **this node** sealed; "
+          "%d by a peer. This node produced **%d of %d blocks (%.0f %%)** in the window, "
+          "so it is one of three roughly equal producers."
+          % (loc, len(long_gaps), args.target, len(long_gaps) - loc,
+             len([b for b in nums if b in local_sealed]), len(nums),
+             100.0 * len([b for b in nums if b in local_sealed]) / max(1, len(nums))))
     w("")
 
     text = "\n".join(lines)
