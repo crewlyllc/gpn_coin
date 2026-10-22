@@ -1093,29 +1093,25 @@ fn model_resolution_status(reg: &[Provider], err: &str) -> (u16, String) {
     }
 }
 
-/// Job-relative GPN price for an image/video generation job, grounded in the
-/// market GPU-hour price from the profitability oracle (mirrors the text
-/// per-token pricing). Scales linearly with output pixels × denoise steps, so a
-/// bigger image or more steps costs more. Reference: 512×512 @ 8 steps ≈ REF_SECS
-/// of GPU time (including one-time model load).
+/// Job-relative GPN price for an image/video generation job.
+///
+/// The model lives in `gpn_agent::pricing` so it shares **one** anchor with the
+/// token curve: GPU-seconds (measured: 30 s pipeline load + 0.73 s per
+/// megapixel·step on the 4060 anchor) × the anchor card's hourly rate × margin.
+/// The buyer's price is therefore GPU-independent, exactly like the token price;
+/// the legacy oracle-market formula (`market_hr` = $3/hr) is still reachable via
+/// `GPN_PRICING_MODEL=market`. `frames = 1` for an image.
 fn image_price_gpn(
+    pcfg: &PricingConfig,
     w: f64,
     h: f64,
     steps: f64,
+    frames: f64,
     token_price_usd: f64,
     market_hr: f64,
     util: f64,
 ) -> f64 {
-    const REF_SECS: f64 = 90.0;
-    const MARGIN: f64 = 0.20;
-    const REF_UNITS: f64 = 512.0 * 512.0 * 8.0;
-    let units = w.max(1.0) * h.max(1.0) * steps.max(1.0);
-    let est_secs = (units / REF_UNITS) * REF_SECS;
-    let util = util.clamp(0.05, 1.0);
-    let usd = (market_hr.max(0.001) / 3600.0) * est_secs * (1.0 + MARGIN) / util;
-    let base_units = (usd / token_price_usd.max(1e-9)) * 1e12;
-    // Return whole GPN, at least 1 base unit.
-    base_units.round().max(1.0) / 1e12
+    pcfg.diffusion_price_gpn(w, h, steps, frames, token_price_usd, market_hr, util)
 }
 
 /// Model-aware selection. Returns `(provider, needs_pull)`.
@@ -1374,6 +1370,79 @@ fn pricing_public_json(pcfg: &PricingConfig, f: FeedSnapshot) -> Value {
             (out_tok * 1e6 / f.token_price_usd.max(1e-9) * 100.0).round() / 100.0,
         "note": "Faster GPUs do not raise the buyer's price; they raise the provider's hourly earning. \
                  Provider earnings are pre-margin and before the 5% marketplace fee."
+    });
+    // ── image / video pricing (same anchor, different work unit) ───────────
+    // Diffusion is priced on GPU-seconds (pixels × steps), derived from the same
+    // 4060 anchor as the token curve: `secs/3600 × anchor_rate × (1+margin)`.
+    // The buyer's price is GPU-independent; a faster card renders in fewer
+    // seconds, so it earns the same per image but more per hour.
+    let img_jobs: Vec<Value> = [(512u32, 512u32, 8u32), (1024, 1024, 20)]
+        .iter()
+        .map(|(w, h, steps)| {
+            let secs = pcfg.diffusion_seconds(*w as f64, *h as f64, *steps as f64, 1.0);
+            let usd = pcfg.diffusion_price_usd(
+                *w as f64,
+                *h as f64,
+                *steps as f64,
+                1.0,
+                f.market_hr,
+                f.util,
+            );
+            json!({
+                "job": format!("{w}x{h}@{steps}steps"),
+                "width": w,
+                "height": h,
+                "steps": steps,
+                "estimated_seconds_on_anchor": (secs * 100.0).round() / 100.0,
+                "price_usd": (usd * 1e6).round() / 1e6,
+                "price_gpn": (usd / f.token_price_usd.max(1e-9) * 1e6).round() / 1e6
+            })
+        })
+        .collect();
+    let img_providers: Vec<Value> = pcfg
+        .earnings_table(owner_cost, 1.0)
+        .into_iter()
+        .map(|r| {
+            let secs = pcfg.diffusion_provider_seconds(512.0, 512.0, 8.0, 1.0, r.usd_hr);
+            json!({
+                "gpu": r.name,
+                "usd_per_hour": (r.usd_hr * 10_000.0).round() / 10_000.0,
+                "seconds_per_512x512_8step": (secs * 10.0).round() / 10.0,
+                "images_per_hour": if secs > 0.0 { (3600.0 / secs * 10.0).round() / 10.0 } else { 0.0 },
+                "usd_per_image_512x512_8step":
+                    (pcfg.diffusion_provider_earn_usd(512.0, 512.0, 8.0, 1.0, r.usd_hr) * 1e6).round() / 1e6
+            })
+        })
+        .collect();
+    out["image_pricing"] = json!({
+        "unit": "gpu_seconds",
+        "buyer_price_is_gpu_independent": true,
+        "formula": "seconds = base + (MPx x steps x frames) x sec_per_mpx_step ; usd = seconds/3600 x anchor_usd_per_hour x (1+margin)",
+        "calibration": {
+            "measured_on": "RTX 4060 8GB (the anchor card), sd-turbo via gpn_diffuse.py, one process per render",
+            "base_seconds": pricing::DIFF_BASE_SECS,
+            "sec_per_megapixel_step": pricing::DIFF_SEC_PER_MPX_STEP,
+            "measured": [
+                {"job": "512x512@8", "seconds": 28.88},
+                {"job": "512x512@20", "seconds": 36.54},
+                {"job": "768x768@12", "seconds": 35.68},
+                {"job": "1024x1024@20", "seconds": 44.72}
+            ]
+        },
+        "reference_jobs": img_jobs,
+        "provider_earnings_512x512_8step": img_providers,
+        "note": "Same image is the same price whichever card renders it. Provider GPU-seconds and images/hour come from the card's curve rate, not from a per-GPU price."
+    });
+    out["video_pricing"] = json!({
+        "status": "blocked",
+        "reason": "LTX-Video's T5-XXL text encoder does not fit an 8 GB card; no video job has completed on this fleet.",
+        "base_seconds": pricing::DIFF_VIDEO_BASE_SECS,
+        "sec_per_megapixel_step": pricing::DIFF_SEC_PER_MPX_STEP * pricing::DIFF_VIDEO_COMPUTE_FACTOR,
+        "estimated_seconds_256x256_16f_30steps":
+            (pcfg.diffusion_seconds(256.0, 256.0, 30.0, 16.0) * 10.0).round() / 10.0,
+        "price_if_requested_usd":
+            (pcfg.diffusion_price_usd(256.0, 256.0, 30.0, 16.0, f.market_hr, f.util) * 1e6).round() / 1e6,
+        "note": "Priced if requested, but labelled blocked — the constants are estimates, not measurements."
     });
     if pcfg.model == pricing::PricingModel::Market {
         out["market"] = json!({
@@ -2989,9 +3058,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         match v.get("price_gpn").and_then(|x| x.as_f64()) {
                             Some(p) if p > 0.0 => p, // explicit override
                             _ => image_price_gpn(
+                                &pcfg,
                                 g("width", 512) as f64,
                                 g("height", 512) as f64,
                                 g("steps", 8) as f64,
+                                // A video job's denoise cost scales with frames;
+                                // an image is one frame. `min_vram_mb`/`min_tflops`
+                                // routing already sends video to big-VRAM boxes.
+                                if jt_lc.contains("video") {
+                                    g("frames", 16).max(1) as f64
+                                } else {
+                                    1.0
+                                },
                                 token_price_usd,
                                 market_hr,
                                 util,
@@ -3013,6 +3091,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         ((price_gpn * 1e12) as u128, 0u128, 0u32)
                     };
+                    // Price preview (`"dry_run": true`): quote the created job exactly as
+                    // it would be escrowed — price, escrow and the model behind it —
+                    // and return WITHOUT creating anything on-chain and WITHOUT
+                    // routing a render. This is the only way to inspect a generation
+                    // price from the public path (a real image job costs a GPU minute).
+                    if v.get("dry_run").and_then(|x| x.as_bool()).unwrap_or(false) {
+                        let mut q = json!({
+                            "ok": true,
+                            "dry_run": true,
+                            "job_type": job_type,
+                            "is_generation": is_gen,
+                            "escrow_base_units": escrow.to_string(),
+                            "price_gpn": price_gpn,
+                            "token_price_usd": token_price_usd,
+                            "price_usd": price_gpn * token_price_usd,
+                            "pricing_model": pcfg.model.as_str()
+                        });
+                        if is_gen {
+                            let frames = if jt_lc.contains("video") {
+                                g("frames", 16).max(1) as f64
+                            } else {
+                                1.0
+                            };
+                            let secs = pcfg.diffusion_seconds(
+                                g("width", 512) as f64,
+                                g("height", 512) as f64,
+                                g("steps", 8) as f64,
+                                frames,
+                            );
+                            q["image"] = json!({
+                                "width": g("width", 512),
+                                "height": g("height", 512),
+                                "steps": g("steps", 8),
+                                "frames": frames as u32,
+                                "estimated_seconds_on_anchor": (secs * 100.0).round() / 100.0,
+                                "calibration": {
+                                    "base_seconds": pricing::DIFF_BASE_SECS,
+                                    "sec_per_megapixel_step": if frames > 1.0 {
+                                        pricing::DIFF_SEC_PER_MPX_STEP * pricing::DIFF_VIDEO_COMPUTE_FACTOR
+                                    } else {
+                                        pricing::DIFF_SEC_PER_MPX_STEP
+                                    }
+                                },
+                                "buyer_price_is_gpu_independent": true
+                            });
+                        }
+                        let _ = req.respond(
+                            Response::from_string(q.to_string()).with_header(hdr.clone()),
+                        );
+                        return;
+                    }
                     // ONE nonce authority: create through the shared fast stream (the same one
                     // the chat path + janitor use) instead of a stop-and-wait `submit_signed` that
                     // grabbed a nonce straight from chain state — the two allocators used to fight

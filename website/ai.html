@@ -407,7 +407,10 @@ print(reply.choices[0].message.content)</code></pre>
             Jobs of 512×512 <code>sd-turbo</code> have completed with the artifact hash matching the
             on-chain <code>result_hash</code> exactly. What is missing is the public path: the access point
             exposes no <code>/v1/images/generations</code> route (it answers <code>{"error":"not found"}</code>),
-            so images are only reachable through the signed job API below — not from a web page.</p>
+            so images are only reachable through the signed job API below — not from a web page.
+            <b>Price:</b> derived from the same anchor as tokens, on GPU-seconds — 512×512 @ 8 steps is
+            <b>≈0.0076 GPN</b> (≈$0.00114), 1024×1024 @ 20 steps <b>≈0.0109 GPN</b>. See
+            <a href="#economics">image pricing</a> for the measured formula.</p>
           <pre><code>POST /jobs          (signed job API, not public)
 {"job_type": "ImageGeneration", "model": "sd-turbo",
  "prompt": "a cozy cabin at dusk",
@@ -421,7 +424,9 @@ GET /job/1234/artifact → image/png</code></pre>
           <p class="muted">The same provider path knows how to run <code>VideoGeneration</code>
             (LTX-Video through <code>gpn_diffuse.py</code>, with <code>frames</code>/<code>fps</code>
             parameters), but no video job has ever completed end-to-end: the T5-XXL text encoder needs
-            more VRAM than the 8&nbsp;GB cards on the testnet have. Treat video as unproven.</p>
+            more VRAM than the 8&nbsp;GB cards on the testnet have. Treat video as unproven — it is priced
+            if requested (≈0.044 GPN for 256×256, 16 frames, 30 steps) but the constants are estimates.
+            <b>BLOCKED</b> until a box with &gt;8&nbsp;GB actually renders one.</p>
           <pre><code>POST /jobs          (signed job API, not public)
 {"job_type": "VideoGeneration", "model": "Lightricks/LTX-Video",
  "prompt": "waves at sunset", "width": 256, "height": 256,
@@ -546,6 +551,41 @@ GET /job/1234/artifact → image/png</code></pre>
       <p class="hint" style="margin-top:10px">A card whose modelled earning falls below its operator's
         declared cost is flagged at startup and on <code>/api/pricing</code> — a provider that cannot cover
         its electricity is a provider that will leave.</p>
+
+      <h3 style="margin-top:26px">Image pricing — the same anchor, a different work unit</h3>
+      <p class="sub">A diffusion job has no token count, so it is priced on <b>GPU-seconds</b>: the cost of a
+        render is pixels × denoise steps, plus a fixed per-job pipeline load. The two constants below are
+        <b>measured</b> on the same 4060-class anchor card that sets the token price (sd-turbo through
+        <code>gpn_diffuse.py</code>, one process per render — the model load is part of every job):</p>
+<pre><code>seconds = 30.0 + (MPx × steps × frames) × 0.73     # measured, sd-turbo on the anchor 4060
+
+measured:  512²  @  8 = 28.9 s      512²  @ 20 = 36.5 s
+           768²  @ 12 = 35.7 s     1024²  @ 20 = 44.7 s
+
+usd = seconds / 3600 × $0.10/hr × (1 + 30% margin)   # the same anchor rate as tokens
+gpn = usd ÷ token_price</code></pre>
+      <div class="table-wrap" style="margin-top:12px">
+        <table>
+          <thead><tr><th scope="col">Job</th><th scope="col">GPU-seconds (anchor)</th><th scope="col">Price</th><th scope="col">GPN @ $0.15</th><th scope="col">GPU</th></tr></thead>
+          <tbody>
+            <tr><td><code>sd-turbo</code> 512×512, 8 steps</td><td>31.5 s</td><td><b>$0.00114</b></td><td><b>≈0.0076</b></td><td>any — price does not depend on the card</td></tr>
+            <tr><td><code>sd-turbo</code> 1024×1024, 20 steps</td><td>45.3 s</td><td><b>$0.00164</b></td><td><b>≈0.0109</b></td><td>any — price does not depend on the card</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="hint" style="margin-top:10px">Roughly <b>1/120th</b> of what the old oracle-market anchor charged
+        for the same 512²/8 image ($0.1385 at the $3.00/hr fallback) — because that anchor priced a consumer
+        card at cloud-A100 rental rates. One curve now sets both tokens and images: a 4060 is assumed to earn
+        $0.10/hr whether it is decoding or denoising.</p>
+      <div class="callout" style="margin-top:14px">
+        <span class="ct">Provider side: same fee per image, more images per hour</span>
+        <p class="mb-0">Every card is paid the same pre-margin fee for the same image (~$0.00088), but a faster
+          card finishes sooner: a 4060 needs 31.5 s (~114 images/hr, $0.10/hr), a 4090 8.5 s (~423/hr,
+          $0.371/hr), an H100 2.6 s (~1,406/hr, $1.232/hr). GPU-seconds are interpolated by the card's own
+          curve rate — only the 4060 is measured. <b>Video</b> uses the same formula with a frames term and a
+          bigger model load, but is marked <b>blocked</b>: LTX-Video's T5 text encoder does not fit an 8 GB
+          card, so its constants are estimates, not measurements.</p>
+      </div>
 
       <div class="grid cols-2" style="margin-top:22px">
         <div>
