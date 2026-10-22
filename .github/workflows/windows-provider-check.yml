@@ -27,8 +27,15 @@ jobs:
             if ($names -contains 'llama3.2:1b') { Say "llama3.2:1b: PRESENT" } else { Say "llama3.2:1b: MISSING" }
           } catch { Say "Ollama NOT reachable at 127.0.0.1:11434 ($($_.Exception.Message))" }
 
-          Say "== running gpn processes =="
-          Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match 'gpn' } | ForEach-Object { Say "  $($_.ProcessName) PID=$($_.Id) started=$($_.StartTime)" }
+          Say "== running gpn processes (with command lines) =="
+          Get-CimInstance Win32_Process -Filter "Name LIKE 'gpn_%'" | ForEach-Object {
+            Say "  $($_.Name) PID=$($_.ProcessId) started=$($_.CreationDate)"
+            Say "    cmd: $($_.CommandLine)"
+          }
+          Say "== supervisor script (C:\gpn\run-provider.ps1) =="
+          if (Test-Path 'C:\gpn\run-provider.ps1') {
+            Get-Content 'C:\gpn\run-provider.ps1' | Select-String -Pattern 'env:|gflops|AP_URL|SIGNER|bin\\' | ForEach-Object { Say "  $_" }
+          } else { Say "  (absent)" }
 
           Say "== C:\gpn\bin =="
           if (Test-Path 'C:\gpn\bin') {
@@ -91,10 +98,17 @@ jobs:
           if (Test-Path 'C:\gpn\provider.log') {
             $fi = Get-Item 'C:\gpn\provider.log'
             Say "  size=$($fi.Length) mtime=$($fi.LastWriteTime)"
-            $raw = [IO.File]::ReadAllBytes('C:\gpn\provider.log')
-            [IO.File]::WriteAllText("$env:RUNNER_TEMP\provider.hex", ([BitConverter]::ToString($raw) -replace '-',''))
-            Say "  RAW_BASE64_BEGIN"
-            Say ([Convert]::ToBase64String($raw))
+            # Cap the raw dump: the log is append-only and grows past several MB,
+            # and dumping all of it as base64 made THIS job hang until cancelled
+            # (2026-10-22). The tail is what a diagnosis needs.
+            $fs = [IO.File]::OpenRead('C:\gpn\provider.log')
+            $take = [Math]::Min(65536, $fi.Length)
+            $fs.Seek(-$take, [IO.SeekOrigin]::End) | Out-Null
+            $buf = New-Object byte[] $take
+            $fs.Read($buf, 0, $take) | Out-Null
+            $fs.Close()
+            Say "  RAW_BASE64_BEGIN (last $take bytes)"
+            Say ([Convert]::ToBase64String($buf))
             Say "  RAW_BASE64_END"
             Get-Content 'C:\gpn\provider.log' -Tail 80 -ErrorAction SilentlyContinue | ForEach-Object { Say "  $_" }
           } else { Say "  (no C:\gpn\provider.log)" }
