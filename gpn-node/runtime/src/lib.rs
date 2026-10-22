@@ -123,7 +123,7 @@ pub const VERSION: sp_version::RuntimeVersion = sp_version::RuntimeVersion {
     spec_name: create_runtime_str!("gpn"),
     impl_name: create_runtime_str!("gpn"),
     authoring_version: 1,
-    spec_version: 41,
+    spec_version: 42,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 1,
@@ -283,21 +283,91 @@ impl pallet_sudo::Config for Runtime {
 pub const DAYS: BlockNumber = 5_760;
 
 // ###########################################################################
-// Governance: GpnGovernance (Option D) — committee-3 2-of-3 + timelock → Root.
+// Governance: GpnGovernance (Option D, hardened) — committee-5 3-of-5
+// + 3-day timelock + 14-day proposal expiry + hash-addressed preimages → Root.
 // ###########################################################################
 
+/// The committee, in `governance-keys.txt` order (`committee-1` … `committee-5`).
+///
+/// These are the **same** addresses the genesis chain spec seeds for testnet
+/// (`testnet_committee()` is the first three of them); the `Members` storage
+/// migration seeds all five. Kept as raw 32-byte keys so the runtime never does
+/// an SS58 decode at upgrade time — `runtime/tests/gov_upgrade_rehearsal.rs`
+/// pins each value back to its SS58 string.
+pub fn governance_committee_seed() -> Vec<AccountId> {
+    vec![
+        // committee-1  5HTWBtWro5ARwrghSmbkcbhVKk8o7xxYirdR7J8T3PJRteWN
+        AccountId::new(hex_literal(
+            b"ee908810749e31b6ff2e985338cb1a074bf8a037552b7ea0c55d210ef89a6a7b",
+        )),
+        // committee-2  5Cd5NiY2qkGzVuQufh844DwKj2k4ExxwyzyrDU4pGUvEX3Dx
+        AccountId::new(hex_literal(
+            b"18b04a0ad130a4d5976e794ac8098ac39e3ed13c3dd1c76584500c8c1386f10a",
+        )),
+        // committee-3  5HeUVTK6zd9ii8nXoXBbRU5Q2zdE1Moc9zd1E9GW5JqYej5h
+        AccountId::new(hex_literal(
+            b"f6ee849158fefa24842e93f7088e08972b5e9dbcd1c2949aeac0f45028a24d59",
+        )),
+        // committee-4  5DjziBJUZnD1ZVzLh2mGEW3DNA4bThyGSVCY6e5jMzqnJ1TC
+        AccountId::new(hex_literal(
+            b"4a3389de546e97b79ddb875bed52152af73e320a6ffcf50c46a744a2af0d703f",
+        )),
+        // committee-5  5DPBfcDbf9knHdu77aNsyZ2cvFPPn8vKRupLZTDewUi43FtM
+        AccountId::new(hex_literal(
+            b"3a5443e24ecb2a8b2e4cb3cb089aac217aff985750a151a08631603c00e1b00c",
+        )),
+    ]
+}
+
+/// Decode exactly 64 ASCII hex digits into 32 bytes (compile-time-friendly and
+/// panic-free for the const inputs above; the test pins the mapping).
+fn hex_literal(src: &[u8; 64]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    let mut i = 0;
+    while i < 32 {
+        out[i] = (hex_nibble(src[2 * i]) << 4) | hex_nibble(src[2 * i + 1]);
+        i += 1;
+    }
+    out
+}
+
+fn hex_nibble(b: u8) -> u8 {
+    match b {
+        b'0'..=b'9' => b - b'0',
+        b'a'..=b'f' => b - b'a' + 10,
+        b'A'..=b'F' => b - b'A' + 10,
+        _ => panic!("invalid hex digit in committee seed"),
+    }
+}
+
 parameter_types! {
-    pub const GovernanceApprovalsRequired: u32 = 2;
-    pub const GovernanceTimelockPeriod: BlockNumber = 3 * DAYS; // 3 days at 15s
+    /// 3 distinct members must approve (and 3 must approve a cancel).
+    pub const GovernanceApprovalsRequired: u32 = 3;
+    /// 3 days at 15 s blocks — unchanged by the hardening upgrade.
+    pub const GovernanceTimelockPeriod: BlockNumber = 3 * DAYS;
+    /// A proposal older than 14 days can no longer be executed and is pruned.
+    pub const GovernanceProposalExpiry: BlockNumber = 14 * DAYS;
     pub const GovernanceMaxMembers: u32 = 8;
+    /// Bounds both `propose` and `propose_preimage`; matches
+    /// `pallet_preimage::MAX_SIZE`, and keeps a single proposal well under the
+    /// 5 MiB block length.
+    pub const GovernanceMaxProposalCallLen: u32 = 4 * 1024 * 1024;
+    /// Open proposals at once. Bounds the prune scan in `on_initialize`.
+    pub const GovernanceMaxOpenProposals: u32 = 64;
+    /// Members seeded by the v0 → v1 storage migration (union with existing).
+    pub GovernanceMigrationMembers: Vec<AccountId> = governance_committee_seed();
 }
 
 impl pallet_gpn_governance::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type ApprovalsRequired = GovernanceApprovalsRequired;
     type TimelockPeriod = GovernanceTimelockPeriod;
+    type ProposalExpiry = GovernanceProposalExpiry;
     type MaxMembers = GovernanceMaxMembers;
-    type WeightInfo = ();
+    type MaxProposalCallLen = GovernanceMaxProposalCallLen;
+    type MaxOpenProposals = GovernanceMaxOpenProposals;
+    type MigrationMembers = GovernanceMigrationMembers;
+    type WeightInfo = pallet_gpn_governance::weights::GpnWeight<Runtime>;
 }
 
 // ###########################################################################

@@ -92,10 +92,17 @@ fn version_line_shape_is_sane() {
     let (ok, stdout, _, home) = run(&["--version"]);
     assert!(ok);
     let line = stdout.trim_end_matches(['\r', '\n']);
-    assert!(line.starts_with(concat!("gpn_node ", env!("CARGO_PKG_VERSION"))), "{line:?}");
+    assert!(
+        line.starts_with(concat!("gpn_node ", env!("CARGO_PKG_VERSION"))),
+        "{line:?}"
+    );
     assert!(line.is_ascii(), "{line:?}");
     assert!(!line.contains("unknown"), "{line:?}");
-    assert_eq!(line.matches('(').count(), line.matches(')').count(), "{line:?}");
+    assert_eq!(
+        line.matches('(').count(),
+        line.matches(')').count(),
+        "{line:?}"
+    );
     assert_untouched(&home);
 }
 

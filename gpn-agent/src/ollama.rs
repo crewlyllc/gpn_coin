@@ -361,10 +361,7 @@ pub fn ensure_with<H: Hooks>(opts: &SetupOpts, hooks: &mut H) -> SetupOutcome {
 
     if !probe.serving() {
         return SetupOutcome::refused(
-            format!(
-                "ollama is not reachable at {endpoint} ({})",
-                probe.detail()
-            ),
+            format!("ollama is not reachable at {endpoint} ({})", probe.detail()),
             attempted_install,
         );
     }
@@ -621,7 +618,9 @@ impl Hooks for SystemHooks {
                 std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
             );
             let _ = std::fs::create_dir_all(
-                std::path::Path::new(&log).parent().unwrap_or(std::path::Path::new("/tmp")),
+                std::path::Path::new(&log)
+                    .parent()
+                    .unwrap_or(std::path::Path::new("/tmp")),
             );
             let sh = format!(
                 "nohup {bin} serve >> {log} 2>&1 & echo $!",

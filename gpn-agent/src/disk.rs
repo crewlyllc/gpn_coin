@@ -44,7 +44,10 @@ pub fn disk_space(path: &str) -> DiskSpace {
 
 fn unix_disk_space(path: &str) -> DiskSpace {
     // `-P` = POSIX output (one line per fs, never wrapped), `-k` = 1024-byte blocks.
-    let out = std::process::Command::new("df").arg("-Pk").arg(path).output();
+    let out = std::process::Command::new("df")
+        .arg("-Pk")
+        .arg(path)
+        .output();
     match out {
         Ok(o) if o.status.success() => {
             parse_df_output(&String::from_utf8_lossy(&o.stdout)).unwrap_or_default()

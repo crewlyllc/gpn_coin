@@ -4,6 +4,14 @@
 verifying an upgrade happened correctly. **Status:** tool + runbook implemented and rehearsed;
 no runtime change has been applied by this work.
 
+> **Spec 42 — "governance hardening" is STAGED, not applied.** A separately built spec-42
+> artifact (committee 5 / 3 approvals, 14-day proposal expiry, 3-of-5 cancel, hash-addressed
+> preimages, hand-set weights, storage migration v0→v1) exists at
+> `wasm/gpn_runtime_spec42_gov_hardening.compact.compressed.wasm`. The plan, review checklist
+> and exact commands are in `shared/artifacts/project7/staged/gov-hardening-v1.md`. Everything
+> below describes **both** the live (spec 41) behaviour and, where marked *spec 42*, the staged
+> behaviour. Until the upgrade enacts, the live chain is still 2-of-3 with no cancel/expiry.
+
 Companion docs:
 
 - `docs/mainnet-launch-runbook.md` — the launch itself, and the post-launch governance actions
@@ -37,18 +45,25 @@ gpn-agent/target/debug/gpn_gov_upgrade surface --endpoint ws://<node>:9944
 
 ### 2.1 What exists
 
-| Piece | Value on mainnet | Where it comes from |
-|---|---|---|
-| Pallet | `GpnGovernance` (`pallet-gpn-governance`) | `gpn-node/runtime/src/lib.rs` |
-| Members | the **committee-3** (`testnet_committee()`), seeded at genesis | `node/src/chain_spec.rs` |
-| Approvals required | **2** (`ApprovalsRequired`) | `GovernanceApprovalsRequired` |
-| Timelock | **17 280 blocks** ≈ 3 days at 15 s (`TimelockPeriod`) | `GovernanceTimelockPeriod = 3 * DAYS` (`DAYS = 5 760`) |
-| Max members | 8 (`MaxMembers`) | `GovernanceMaxMembers` |
-| Proposal id | `blake2_256(SCALE(RuntimeCall))` | `T::Hashing::hash_of(call)` |
-| Executor | **anyone** (`execute` takes a signed origin, not a member origin) | pallet call 2 |
-| Root dispatch | `call.dispatch(RawOrigin::Root)` | pallet call 2 |
+| Piece | Live (spec 41) | Staged (spec 42) | Where it comes from |
+|---|---|---|---|
+| Pallet | `GpnGovernance` (`pallet-gpn-governance`) | same | `gpn-node/runtime/src/lib.rs` |
+| Members | **3** (`testnet_committee()`), genesis-seeded | **5** (committee-1…5), seeded by the storage migration and replaceable by `set_members` | `node/src/chain_spec.rs`, `GovernanceMigrationMembers` |
+| Approvals required | **2** | **3** | `GovernanceApprovalsRequired` |
+| Timelock | **17 280 blocks** ≈ 3 days at 15 s | unchanged | `GovernanceTimelockPeriod = 3 * DAYS` |
+| Proposal expiry | **none** | **80 640 blocks** (14 days); `execute` → `ProposalExpired`, pruned in `on_initialize` | `GovernanceProposalExpiry` |
+| Cancel / veto | **none** | `cancel(hash)` requires **3 of 5** approvals | pallet call 3 |
+| Proposal encoding | whole call inline | `ProposalCall::{Inline, Preimage}`; `propose_preimage(hash, bytes)` stores bytes once under `blake2_256` | pallet calls 0 and 5/6 |
+| Max members | 8 (`MaxMembers`) | 8 | `GovernanceMaxMembers` |
+| Max call/preimage | — | 4 MiB (`MaxProposalCallLen`) | `GovernanceMaxProposalCallLen` |
+| Open proposals | unbounded | 64 (`MaxOpenProposals`, index + prune bound) | `GovernanceMaxOpenProposals` |
+| Proposal id | `blake2_256(SCALE(RuntimeCall))` | same for inline; `blake2_256("gpn/gov/preimage/v1" ++ hash ++ len)` for preimage | `T::Hashing::hash_of`, `preimage_proposal_id` |
+| Executor | anyone (signed, not member-gated) | unchanged | pallet call 2 |
+| Root dispatch | `call.dispatch(RawOrigin::Root)` | unchanged | pallet call 2 |
+| Weights | `WeightInfo = ()` (**zero**) | hand-set, conservative (`weights::GpnWeight`) | `pallets/gpn-governance/src/weights.rs` |
+| Storage version | 0 | 1 (migration `on_runtime_upgrade`) | `STORAGE_VERSION` |
 
-Live check (testnet, 2026-10-21):
+Live check (testnet, 2026-10-21, before the upgrade):
 
 ```
 committee  3 member(s), 2 approval(s) required, max 8
@@ -56,43 +71,49 @@ members    5HeUVTK6zd9...5JqYej5h  5Cd5NiY2qkG...pGUvEX3Dx  5HTWBtWro5A...3PJRte
 timelock   17280 blocks (~3d 0h at 15 s/block)
 ```
 
+After spec 42: `committee 5 member(s), 3 approval(s) required, max 8`, expiry
+`80640 blocks (~14d)`, and the committee addresses are exactly those in
+`governance-keys.txt` / `governance-addrs.txt` (committee-1 … committee-5).
+
 The 25-address roster with the **13-of-25** threshold is `pallet-gpn-treasury`. It governs
 *spending*, **not** consensus. A treasury majority cannot change the runtime, and the committee
 cannot spend treasury funds.
 
 ### 2.2 What does **not** exist (and therefore cannot be used)
 
-The runtime contains **no** `pallet-democracy`, `pallet-collective`, `pallet-preimage`,
-`pallet-scheduler`, or FRAME `pallet-treasury`. Consequences, stated plainly:
+The runtime contains **no** `pallet-democracy`, `pallet-collective`, `pallet-preimage`, or
+`pallet-scheduler` (spec 42 keeps the local `Preimages` map instead of adding
+`pallet-preimage`, so no new pallet index or deposit machinery is introduced). Consequences:
 
 - **No referenda, no conviction voting, no tracks.** There is no stake-weighted vote and no
-  "aye/nay" phase. The committee decides; the chain only enforces the 2-of-N + timelock rule.
+  "aye/nay" phase. The committee decides; the chain only enforces the 3-of-N + timelock rule.
 - **No technical-committee fast-track** and **no emergency track**. The timelock is a runtime
   constant; it cannot be shortened by any call, including a root call, without a runtime
   upgrade (chicken and egg).
-- **No preimage indirection.** `propose(call: Box<RuntimeCall>)` stores the **whole call
-  inline** in `GpnGovernance::Proposals`, so a `set_code` proposal puts the **full WASM in the
-  `propose` extrinsic** and keeps ~500 KB (compressed artifact) of state until execution. See §7
-  for the staged fix.
-- **No veto / cancel.** There is no extrinsic that removes a pending proposal. It disappears
-  only when `execute` succeeds (removed *before* dispatch, so a failing dispatch also consumes
-  it) or by a root `System.set_storage`/`kill_storage` intervention — which itself needs
-  governance. Operationally: **approve deliberately, because you cannot take it back** beyond
-  refusing to reach 2 approvals for 3 days and watching the timelock.
-- **No proposal expiry.** An approval-less proposal sits in state forever (state bloat; cleanup
-  needs a runtime change).
+- **Preimage indirection exists from spec 42** (`propose_preimage`, `note_preimage`,
+  `Pallet::peek`). Before it, `propose(call: Box<RuntimeCall>)` stored the whole call inline, so
+  a `set_code` proposal put the full WASM in the `propose` extrinsic and kept ~500 KB of state
+  until execution. `--mode preimage` refuses to run against a runtime without
+  `propose_preimage` in its metadata (exit 4).
+- **Veto/cancel exists from spec 42** and is deliberately *symmetric* with execution: it needs
+  the same 3 approvals, so one member can neither veto nor unblock alone. Expiry (14 days) is
+  the backstop that keeps abandoned proposals from leaking state.
 
 ### 2.3 The upgrade origin, in one line
 
 > `GpnGovernance.execute(hash)` → `RawOrigin::Root` → `System.set_code { code }`.
-> 2 distinct committee approvals + 17 280 blocks of public notice, and no single key can act.
+> 3 distinct committee approvals (of 5) + 17 280 blocks of public notice, and no single key can
+> act.
 
 ## 3. Security invariants (non-negotiable)
 
-1. **Never a raw WASM in a public call.** With today's runtime this invariant *cannot* be
-   satisfied for `set_code` (no preimage pallet, §7) — so it is enforced socially: the committee
-   **must** verify the artifact hash out-of-band and compare it with `stage`'s output before
-   proposing. `stage` prints `sha256` (release identity) and `blake2_256` (the code hash).
+1. **Never a raw WASM in a public call.** From spec 42 this is enforced *by the chain*: use
+   `propose --mode preimage`, which submits `propose_preimage(hash, bytes)` — the proposal
+   carries `{ hash, len }` (36 bytes) and anyone can read `GpnGovernance.Preimages[hash]` and
+   re-hash it before the timelock elapses. On a spec-41 chain the invariant cannot be satisfied
+   for `set_code`, so it is enforced socially: the committee **must** verify the artifact hash
+   out-of-band and compare it with `stage`'s output before proposing. `stage` prints `sha256`
+   (release identity) and `blake2_256` (the code hash).
 2. **Always the code hash.** Every step is keyed by hashes, never by "the file we think we
    built": plan → `code_hash`, proposal → `proposal hash`, verification → `:code` hash.
 3. **Always verify both `specVersion` *and* `:code`.** A version bump alone can come from a
@@ -116,16 +137,19 @@ The runtime contains **no** `pallet-democracy`, `pallet-collective`, `pallet-pre
 | Step | Who | Signed by |
 |---|---|---|
 | build + stage the artifact | release engineer | nobody (offline) |
-| `propose` | committee member A | A's key (proposer self-approves → 1/2) |
-| `approve` | committee member B | B's key (→ 2/2) |
+| `propose` | committee member A | A's key (proposer self-approves → 1/3) |
+| `approve` | committee members B and C | B's and C's keys (→ 3/3) |
 | wait | everybody | — (public timelock, 17 280 blocks) |
 | `execute` | **anyone** (an ops bot is fine) | any funded key (execution is permissionless) |
 | `verify` | whoever executed + a second, independent operator | — |
-| rollback decision | committee (2 of 3) | A + B again |
+| `cancel` (spec 42) | any member **after 3 approvals** | that member's key |
+| rollback decision | committee (3 of 5) | A + B + C again |
 
-Nothing here requires the members to be online at the same time except that both must sign
-before the timelock-starting proposal is useful (the clock starts at `propose`, not at 2/2 —
-so **secure approval 2 promptly**, otherwise the 3-day window is partly wasted).
+Nothing here requires the members to be online at the same time except that all three must sign
+before the timelock-starting proposal is useful (the clock starts at `propose`, not at 3/3 —
+so **secure the remaining approvals promptly**, otherwise the 3-day window is partly wasted).
+After spec 42 an unexecuted proposal also dies on its own after **14 days**; re-propose rather
+than letting a stale approval set linger.
 
 ## 5. The runbook
 
@@ -138,15 +162,24 @@ Build the runtime **alone** (never the canonical bundled artifact):
 
 ```bash
 cd gpn-node
-cargo build -p gpn-runtime --release --features std
+# build.rs embeds the committed canonical WASM when it is present, so the
+# convenience script moves it aside for the duration of the build and restores
+# it hash-verified afterwards (it never regenerates or overwrites the canonical
+# genesis artifact).
+bash scripts/build-spec42-wasm.sh
+# -> target/release/wbuild/gpn-runtime/gpn_runtime.compact.compressed.wasm
+# -> prints size + sha256, and re-prints the canonical hash to prove it is intact
 cp target/release/wbuild/gpn-runtime/gpn_runtime.compact.compressed.wasm \
-   ../wasm/gpn_runtime_spec42.compact.compressed.wasm
-sha256sum ../wasm/gpn_runtime_spec42.compact.compressed.wasm
+   ../wasm/gpn_runtime_spec42_gov_hardening.compact.compressed.wasm
 ```
 
-`build.rs` embeds the committed canonical WASM when it is present. To produce a **new** runtime
-you must build in a tree without it (or with `GPN_WASM_BUILD=1`-style override in a scratch
-copy). Verify what you built, not what you intended:
+The staged spec-42 artifact is already built and checked in:
+`wasm/gpn_runtime_spec42_gov_hardening.compact.compressed.wasm`
+(**512 888 bytes**, `sha256 7694f7f6c547df93b7c22d53863acae5b83532721a28c10375d2a233333d30f1`,
+code hash `0xf0c6a5ea7891836c15364ac9a029a05821d69aef2b38a36130472de414245e48`,
+`spec_version = 42`). Any rebuild must reproduce these numbers or the plan must be re-staged.
+
+Verify what you built, not what you intended:
 
 ```bash
 gpn_gov_upgrade stage ../wasm/gpn_runtime_spec42.compact.compressed.wasm --endpoint $E
@@ -162,20 +195,35 @@ own copy and compares `sha256`, `code hash` and `spec_version` before approving 
 
 ### 5.2 T-3d — propose (member A)
 
+**On spec 42+ (recommended):** hash-addressed, so the public call carries 36 bytes, not 500 KB.
+
 ```bash
-gpn_gov_upgrade propose --plan .state/gov-upgrade/spec42_staged<…>.plan.json --signer <A-uri>
+gpn_gov_upgrade propose --mode preimage \
+    --plan .state/gov-upgrade/spec42_staged<…>.plan.json --signer <A-uri>
 ```
 
-Prints the **proposal hash** = `blake2_256(SCALE(System.set_code{code}))`. That hash is the id
+**On spec 41 (the only path until the upgrade enacts):** the call carries the raw WASM inline.
+
+```bash
+gpn_gov_upgrade propose --mode inline \
+    --plan .state/gov-upgrade/spec42_staged<…>.plan.json --signer <A-uri>
+```
+
+Both print a **proposal hash**: `blake2_256(SCALE(System.set_code{code}))` for inline, and
+`blake2_256("gpn/gov/preimage/v1" ++ code_hash ++ len_le)` for preimage. That hash is the id
 everything else uses; publish it (with `sha256` and `code hash`) on the ops channel.
+
+`--mode preimage` exits **4** if the runtime metadata has no `GpnGovernance.propose_preimage`,
+so it cannot be used by accident against the pre-hardening pallet.
 
 Re-running `propose` with identical bytes is a **no-op** (the pallet rejects duplicates; the
 tool detects the existing entry and exits 0) — safe to retry after a failed submission.
 
-### 5.3 T-3d — approve (member B)
+### 5.3 T-3d — approve (members B and C)
 
 ```bash
 gpn_gov_upgrade approve 0x<proposal-hash> --signer <B-uri>
+gpn_gov_upgrade approve 0x<proposal-hash> --signer <C-uri>
 ```
 
 Before signing, B checks the **`status`** output:
@@ -192,11 +240,13 @@ bytes.
 
 17 280 blocks. `status` prints the exact executable block and an ETA. Watch for:
 
-- a competing proposal that reaches 2/2 first (it would upgrade first — `verify` detects the
+- a competing proposal that reaches 3/5 first (it would upgrade first — `verify` detects the
   code-hash mismatch and tells you to re-stage against the new version);
-- any sign that members' keys are compromised (there is **no cancel**; the only defense is not
-  reaching the threshold, then re-proposing after rotating the committee via a *separate*
-  governed upgrade).
+- any sign that members' keys are compromised. On spec 41 there is **no cancel**: the only
+  defense is not reaching the threshold, then re-proposing after rotating the committee via a
+  *separate* governed upgrade. On spec 42, `cancel` (3 of 5) removes the proposal, and an
+  unexecuted proposal expires on its own after 14 days (that includes one whose approvals were
+  collected during a key-compromise scare).
 
 ### 5.5 T-0 — execute (anyone)
 
@@ -238,7 +288,10 @@ curl -s -H 'Content-Type: application/json' \
 |---|---|---|
 | `execute` → `NotEnoughApprovals` | threshold not reached | get the missing approval |
 | `execute` → `TimelockNotElapsed` | too early | wait; proposal is intact (a failed check does not consume it) |
-| `execute` → `ExecutionFailed` | Root call reverted (bad WASM, `SpecVersionNeedsToIncrease`) | proposal is **consumed**; fix the artifact and re-propose |
+| `execute` → `ProposalExpired` (spec 42) | older than `created_at + 14 d` | re-propose; `on_initialize` will prune the stale entry |
+| `execute` → `PreimageMissing` (spec 42) | the bytes behind a hash-addressed proposal are gone | re-note the same bytes with `note_preimage` (same hash ⇒ same proposal id) and execute again — the proposal and its approvals survive |
+| `cancel` → `NotEnoughApprovals` | fewer than 3 approvals | collect the missing approvals; there is no single-member veto |
+| `execute` → `ExecutionFailed` | Root call reverted (bad WASM, `SpecVersionNeedsToIncrease`) | spec 41 consumes the proposal; **spec 42 keeps it** (removal happens only after a successful dispatch), so the artifact can be fixed and the same proposal retried while its approvals are still valid |
 | `verify` exit 3 `CodeMismatch` | a different upgrade landed first | re-stage against the new `specVersion` |
 | `verify` exit 3 `VersionMismatch` | `:code` matches but the version did not move | the artifact's version section is wrong — rebuild |
 | `verify` exit 2, head stalled | runtime upgrade broke block production | incident response; committee rollback (§6) |
@@ -267,23 +320,35 @@ bypasses the only automatic sanity check the chain has, and a wrong blob bricks 
 it only when `verify` says the chain is broken and the committee has jointly checked the
 artifact hash out-of-band.
 
-**What you cannot do:** cancel a pending proposal, shorten the timelock, or "undo" an execution.
-Everything else is a new governance action.
+**What you cannot do:** shorten the timelock or "undo" an execution. On spec 41 you also cannot
+cancel a pending proposal; from spec 42 `cancel` (3 of 5) removes it, and expiry removes it after
+14 days. Everything else is a new governance action.
 
-## 7. What is still missing for mainnet (staged, not applied)
+## 7. Spec 42 — governance hardening (staged, not applied)
 
-1. **Hash-addressed proposals (`pallet-preimage`).** Today `set_code` cannot be proposed by code
-   hash, so ~500 KB of WASM sits in a public extrinsic and in state. Design + exact wiring:
-   `design/design-gov-preimage-proposals.md`. Requires a spec-42 build and a vote — *do not*
-   hand-apply it.
-2. **A veto/cancel path and proposal expiry** in `pallet-gpn-governance` (today a proposal can
-   only disappear by executing it). Same staged design.
-3. **`WeightInfo` for the governance pallet is `()` (all weights are zero)** — `propose` with a
-   500 KB call is unmetered. Acceptable on a PoW solochain with no block-weight PoV, but it
-   should be benchmarked before the committee gets busy.
-4. **Committee composition.** Mainnet inherits `testnet_committee()` — three ss58 addresses.
-   Decide whether the production committee differs (that is itself a genesis decision, so
-   settle it **before** the genesis is cut).
+Built, tested and staged; **not** enacted. Full plan, review checklist and rollback path:
+`shared/artifacts/project7/staged/gov-hardening-v1.md`.
+
+| Change | Effect |
+|---|---|
+| Committee 3 → 5, approvals 2 → 3 | `GovernanceApprovalsRequired = 3`; `Members` seeded to committee-1…5 by the storage migration (union with any existing member, so nobody is silently dropped) |
+| `set_members(Vec<AccountId>)` | Root-only (i.e. only through propose → 3/5 → timelock → execute); bounded by `MaxMembers = 8`, rejects empty/oversized/duplicate sets |
+| `ProposalExpiry = 14 days` | `execute` → `ProposalExpired` past `created_at + expiry`; `on_initialize` prunes expired entries (bounded by `MaxOpenProposals = 64`) |
+| `cancel(hash)` | same threshold as execute (3 of 5) — no single-member veto, no single-member block |
+| `propose_preimage(hash, bytes)` + `note_preimage(hash, bytes)` + `Pallet::peek` | the proposal carries `{ hash, len }`; the bytes live in `Preimages` under `blake2_256`; `execute` verifies hash/length/SCALE-decode before dispatch |
+| Hand-set weights | `WeightInfo = GpnWeight<Runtime>`; `propose` is metered per byte (500 KB ≈ 5 ms ref-time), `propose_preimage` likewise; TODO(bench) to replace with `frame-omni-bencher` output |
+| Storage migration v0 → v1 | `Proposals` values re-encoded from the old struct into `ProposalCall::Inline(..)`, ids and approvals preserved; `ProposalIds` index rebuilt; `Members` seeded; `MemberCount` recomputed; `StorageVersion` 0 → 1 |
+
+### 7.1 Still missing after spec 42
+
+1. **Benchmarked weights.** The numbers in `weights.rs` are documented bounds, not measurements.
+2. **Genesis committee.** Mainnet genesis still seeds `testnet_committee()` (three addresses).
+   The five committee accounts must be in the genesis chain spec **before** mainnet is cut —
+   that is a genesis decision and is *not* part of this staged upgrade (the migration only fixes
+   a chain that is already running).
+3. **Committee key custody.** committee-4 and committee-5 were generated 2026-10-21 and stored
+   in `governance-keys.txt` (mode 600) on the Linux box. **Move them to cold storage before
+   mainnet.**
 
 ## 8. Rehearsal (what was actually run)
 
@@ -293,8 +358,11 @@ Two halves, because the timelock is a runtime constant:
 # (a) live chain: stage → propose → approve → status → execute-refused → verify-pending
 bash scripts/gov-upgrade-rehearsal.sh
 
-# (b) enactment: propose → approve → timelock → execute(Root) → :code + CodeUpdated
-cd gpn-node && cargo test -p gpn-runtime --test gov_upgrade_rehearsal
+# (b) enactment on the real Runtime (spec 42):
+#     propose → approve → timelock → execute(Root) → :code + CodeUpdated,
+#     plus expiry, cancel, preimage enactment and the v0→v1 migration.
+cd gpn-node && cargo test -p gpn-runtime --test gov_upgrade_rehearsal     # 10 tests
+cd gpn-node && cargo test -p pallet-gpn-governance                        # 22 tests (incl. weights)
 ```
 
 (a) runs on a throwaway `--chain dev` node (own base path/ports, genesis hash unrelated to
@@ -303,10 +371,20 @@ pending, `execute` refused, `verify` reporting the on-chain `:code` hash (spec 6
 with a diagnosis.
 
 (b) runs the real `Runtime` in test externalities and fast-forwards the block number to the
-exact timelock boundary: at `created_at + 17 279` execution is refused and the proposal
-survives; at `+ 17 280` any account's `execute` writes `:code == proposed bytes` and emits
-`System::CodeUpdated { hash: blake2_256(:code) }`; a second proposal replaces the first (the
-rollback mechanism).
+exact boundaries. Spec 42 coverage:
+
+- 3 of 5 approvals; at `created_at + 17 279` execution is refused and the proposal survives; at
+  `+ 17 280` any account's `execute` writes `:code == proposed bytes` and emits
+  `System::CodeUpdated { hash: blake2_256(:code) }`;
+- expiry: execution succeeds at exactly `created_at + 14 d` and fails with `ProposalExpired` one
+  block later, then `on_initialize` prunes the entry;
+- `cancel` refuses at 2 approvals, succeeds at 3, and keeps `ProposalIds` in sync;
+- preimage: a real ~512 KB `set_code` call is noted by hash, `peek` returns the exact bytes
+  before the timelock, and execution installs that artifact; a missing preimage is recoverable
+  (`PreimageMissing`, proposal intact, re-note + execute);
+- migration: a hand-written v0 proposal is preserved across `on_runtime_upgrade` with its
+  approvals, the `ProposalIds` index is rebuilt, membership becomes 5, and a second run is a
+  no-op.
 
 Why not on a live chain end-to-end? `TimelockPeriod` is 3 days of **real** blocks and cannot be
 shortened without a runtime build. Faking `System.Number` via `System.set_storage` trips

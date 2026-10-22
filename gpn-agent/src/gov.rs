@@ -721,23 +721,37 @@ pub fn format_duration(blocks: u64, seconds_per_block: u64) -> String {
 // Proposal storage decoding
 // ###########################################################################
 
+/// How a proposal carries its call (matches the runtime's `ProposalCall` enum).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProposalKind {
+    /// `ProposalCall::Inline` — the SCALE-encoded call is stored in the entry.
+    Inline,
+    /// `ProposalCall::Preimage` — only `blake2_256(bytes)` and the byte length
+    /// are stored; the bytes live in `GpnGovernance.Preimages`.
+    Preimage,
+}
+
 /// A decoded `GpnGovernance::Proposal`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProposalEntry {
-    /// `System` pallet index (0 today).
+    /// How the call is stored.
+    pub kind: ProposalKind,
+    /// `System` pallet index (0 today). `0` for preimage entries.
     pub pallet_index: u8,
-    /// Call index within the pallet.
+    /// Call index within the pallet. `0` for preimage entries.
     pub call_index: u8,
     /// `"System.set_code"`, `"System.set_code_without_checks"`, `"System.*"`…
     pub call_name: String,
     /// The WASM bytes the proposal would install (for `set_code*`).
     pub code: Option<Vec<u8>>,
+    /// `(preimage hash, byte length)` for `ProposalKind::Preimage`.
+    pub preimage: Option<([u8; 32], u32)>,
     /// Number of distinct approvals recorded.
     pub approvals: u32,
     /// Block the proposal was created at.
     pub created_at: u32,
     /// Length of the encoded `RuntimeCall` prefix of the entry (`blake2_256`
-    /// of exactly these bytes is the proposal id).
+    /// of exactly these bytes is the proposal id, for inline proposals).
     pub call_len: usize,
 }
 
@@ -750,16 +764,71 @@ impl ProposalEntry {
 
 /// Decode a raw `Proposals[hash]` entry.
 ///
-/// Layout: `RuntimeCall` (pallet u8, call u8, args…) ++ `Vec<AccountId32>`
-/// (compact len + 32·n) ++ `created_at: u32`. Only system calls whose args we
-/// can bound are decoded; anything else returns an error so the caller can
-/// fall back to showing the raw length instead of guessing.
+/// Layout (storage version 1):
+/// `ProposalCall` (variant byte `0x00` inline / `0x01` preimage)
+///  * inline:    `RuntimeCall` (pallet u8, call u8, args…)
+///  * preimage:  `hash: [u8;32]` ++ `len: u32 (LE)`
+/// ++ `approvals: Vec<AccountId32>` (compact len + 32·n) ++ `created_at: u32`.
+///
+/// Version 0 (pre-hardening) had no variant byte; those entries are rejected
+/// with a clear message — after the spec-42 migration they are re-encoded.
+/// Only system calls whose args we can bound are decoded; anything else returns
+/// an error so the caller can fall back to showing the raw length.
 pub fn parse_proposal_entry(b: &[u8]) -> Result<ProposalEntry, String> {
-    if b.len() < 2 {
+    if b.is_empty() {
+        return Err("proposal entry empty".into());
+    }
+    match b[0] {
+        0 => parse_inline_entry(b),
+        1 => parse_preimage_entry(b),
+        other => Err(format!(
+            "unknown ProposalCall variant 0x{other:02x} (expected 0x00 inline or 0x01 preimage)"
+        )),
+    }
+}
+
+fn parse_preimage_entry(b: &[u8]) -> Result<ProposalEntry, String> {
+    // variant + hash + len + at least one approvals byte + created_at
+    if b.len() < 1 + 32 + 4 + 1 + 4 {
+        return Err("preimage proposal entry too short".into());
+    }
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&b[1..33]);
+    let len = u32::from_le_bytes([b[33], b[34], b[35], b[36]]);
+
+    let mut i = 37usize;
+    let approvals = decode_compact_u32(b, &mut i)?;
+    let accounts_len = (approvals as usize)
+        .checked_mul(32)
+        .ok_or("approvals overflow")?;
+    if i + accounts_len + 4 != b.len() {
+        return Err(format!(
+            "preimage proposal layout not understood (approvals={approvals}, {} trailing bytes)",
+            b.len().saturating_sub(i + accounts_len)
+        ));
+    }
+    i += accounts_len;
+    let created_at = read_u32(b, &mut i)?;
+
+    Ok(ProposalEntry {
+        kind: ProposalKind::Preimage,
+        pallet_index: 0,
+        call_index: 0,
+        call_name: "preimage".to_string(),
+        code: None,
+        preimage: Some((hash, len)),
+        approvals,
+        created_at,
+        call_len: 0,
+    })
+}
+
+fn parse_inline_entry(b: &[u8]) -> Result<ProposalEntry, String> {
+    if b.len() < 3 {
         return Err("proposal entry too short".into());
     }
-    let pallet_index = b[0];
-    let call_index = b[1];
+    let pallet_index = b[1];
+    let call_index = b[2];
     if pallet_index != 0 {
         return Err(format!(
             "proposal dispatches pallet #{pallet_index}, call #{call_index} — only System calls \
@@ -771,7 +840,7 @@ pub fn parse_proposal_entry(b: &[u8]) -> Result<ProposalEntry, String> {
         SYSTEM_SET_CODE_WITHOUT_CHECKS_INDEX => "System.set_code_without_checks",
         _ => "System.<other>",
     };
-    let mut i = 2usize;
+    let mut i = 3usize;
     let code = if matches!(
         call_index,
         SYSTEM_SET_CODE_INDEX | SYSTEM_SET_CODE_WITHOUT_CHECKS_INDEX
@@ -787,7 +856,9 @@ pub fn parse_proposal_entry(b: &[u8]) -> Result<ProposalEntry, String> {
         None
     };
 
-    let call_len = i;
+    // `call_len` excludes the leading variant byte: the proposal id is
+    // `blake2_256(SCALE(RuntimeCall))`.
+    let call_len = i - 1;
     if i >= b.len() {
         return Err("proposal approvals missing".into());
     }
@@ -804,14 +875,30 @@ pub fn parse_proposal_entry(b: &[u8]) -> Result<ProposalEntry, String> {
     i += accounts_len;
     let created_at = read_u32(b, &mut i)?;
     Ok(ProposalEntry {
+        kind: ProposalKind::Inline,
         pallet_index,
         call_index,
         call_name: call_name.to_string(),
         code,
+        preimage: None,
         approvals,
         created_at,
         call_len,
     })
+}
+
+/// Domain separator for hash-addressed proposal ids. Must match
+/// `pallet_gpn_governance::PREIMAGE_PROPOSAL_TAG`.
+pub const PREIMAGE_PROPOSAL_TAG: &[u8] = b"gpn/gov/preimage/v1";
+
+/// `id = blake2_256(b"gpn/gov/preimage/v1" ++ hash ++ len_le)` — identical to
+/// `GpnGovernance::preimage_proposal_id` in the runtime.
+pub fn preimage_proposal_id(hash: [u8; 32], len: u32) -> [u8; 32] {
+    let mut buf = Vec::with_capacity(PREIMAGE_PROPOSAL_TAG.len() + 36);
+    buf.extend_from_slice(PREIMAGE_PROPOSAL_TAG);
+    buf.extend_from_slice(&hash);
+    buf.extend_from_slice(&len.to_le_bytes());
+    blake2_256(&buf)
 }
 
 /// The proposal id of a raw `Proposals` entry: `blake2_256(encoded_call)`.
@@ -821,7 +908,14 @@ pub fn parse_proposal_entry(b: &[u8]) -> Result<ProposalEntry, String> {
 /// from the stored call bytes.
 pub fn proposal_hash_from_entry(raw: &[u8]) -> Result<[u8; 32], String> {
     let e = parse_proposal_entry(raw)?;
-    Ok(blake2_256(&raw[..e.call_len]))
+    Ok(match e.kind {
+        // `raw[0]` is the ProposalCall variant byte.
+        ProposalKind::Inline => blake2_256(&raw[1..1 + e.call_len]),
+        ProposalKind::Preimage => {
+            let (hash, len) = e.preimage.expect("preimage entries carry hash+len; qed");
+            preimage_proposal_id(hash, len)
+        }
+    })
 }
 
 // ###########################################################################
@@ -1218,7 +1312,8 @@ mod tests {
     }
 
     fn proposal_bytes(code: &[u8], approvals: u32, created_at: u32) -> Vec<u8> {
-        let mut b = vec![0u8, SYSTEM_SET_CODE_INDEX];
+        // ProposalCall::Inline tag, then the RuntimeCall.
+        let mut b = vec![0u8, 0u8, SYSTEM_SET_CODE_INDEX];
         // compact-encode the length (these fixtures are < 64 bytes)
         assert!(code.len() < 64);
         b.push((code.len() as u8) << 2);
@@ -1240,9 +1335,10 @@ mod tests {
         assert_eq!(p.approvals, 2);
         assert_eq!(p.created_at, 1234);
         assert_eq!(p.call_len, 2 + 1 + code.len());
+        assert_eq!(p.kind, ProposalKind::Inline);
         assert_eq!(
             proposal_hash_from_entry(&b).unwrap(),
-            blake2_256(&b[..p.call_len])
+            blake2_256(&b[1..1 + p.call_len])
         );
     }
 
@@ -1250,16 +1346,58 @@ mod tests {
     fn proposal_entry_parses_without_checks_variant() {
         let code = b"\0asm\x01\0\0\0";
         let mut b = proposal_bytes(code, 1, 7);
-        b[1] = SYSTEM_SET_CODE_WITHOUT_CHECKS_INDEX;
+        b[2] = SYSTEM_SET_CODE_WITHOUT_CHECKS_INDEX;
         let p = parse_proposal_entry(&b).unwrap();
         assert_eq!(p.call_name, "System.set_code_without_checks");
         assert_eq!(p.approvals, 1);
     }
 
+    fn preimage_bytes(hash: [u8; 32], len: u32, approvals: u32, created_at: u32) -> Vec<u8> {
+        let mut b = vec![1u8];
+        b.extend_from_slice(&hash);
+        b.extend_from_slice(&len.to_le_bytes());
+        b.push((approvals as u8) << 2);
+        b.extend(std::iter::repeat(7u8).take(32 * approvals as usize));
+        b.extend_from_slice(&created_at.to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn proposal_entry_parses_hash_addressed_preimage() {
+        let hash = [0x11u8; 32];
+        let b = preimage_bytes(hash, 481_002, 3, 99);
+        let p = parse_proposal_entry(&b).unwrap();
+        assert_eq!(p.kind, ProposalKind::Preimage);
+        assert_eq!(p.preimage, Some((hash, 481_002)));
+        assert_eq!(p.approvals, 3);
+        assert_eq!(p.created_at, 99);
+        assert!(p.code.is_none());
+        // The id is the tagged hash, not blake2 of the entry bytes.
+        assert_eq!(
+            proposal_hash_from_entry(&b).unwrap(),
+            preimage_proposal_id(hash, 481_002)
+        );
+        assert_ne!(proposal_hash_from_entry(&b).unwrap(), blake2_256(&b[..]));
+    }
+
+    #[test]
+    fn preimage_proposal_id_is_length_sensitive() {
+        let h = [0x22u8; 32];
+        assert_eq!(preimage_proposal_id(h, 10), preimage_proposal_id(h, 10));
+        assert_ne!(preimage_proposal_id(h, 10), preimage_proposal_id(h, 11));
+    }
+
+    #[test]
+    fn unknown_proposal_variant_is_rejected() {
+        assert!(parse_proposal_entry(&[2u8; 64])
+            .unwrap_err()
+            .contains("unknown ProposalCall variant"));
+    }
+
     #[test]
     fn proposal_entry_rejects_foreign_pallets_and_shapes() {
         let mut b = proposal_bytes(b"\0asm\x01\0\0\0", 2, 1);
-        b[0] = 5; // e.g. GpnGovernance itself
+        b[1] = 5; // e.g. GpnGovernance itself
         assert!(parse_proposal_entry(&b).unwrap_err().contains("pallet #5"));
         let mut b = proposal_bytes(b"\0asm\x01\0\0\0", 2, 1);
         b.push(0); // trailing junk

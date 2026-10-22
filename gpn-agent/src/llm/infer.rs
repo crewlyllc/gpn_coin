@@ -226,7 +226,8 @@ pub async fn run_inference(
     temperature: f32,
     max_tokens: u32,
 ) -> Result<(String, String), Box<dyn std::error::Error>> {
-    let (text, hash, _usage) = run_inference_with_usage(model, prompt, temperature, max_tokens).await?;
+    let (text, hash, _usage) =
+        run_inference_with_usage(model, prompt, temperature, max_tokens).await?;
     Ok((text, hash))
 }
 
@@ -258,9 +259,9 @@ pub async fn run_inference_with_usage(
         return Err(format!("ollama error {}: {}", status, &text[..text.len().min(300)]).into());
     }
     let parsed: ChatResponse = resp.json().await?;
-    let usage = parsed.usage.map(|u| {
-        TokenUsage::new(u.prompt_tokens, u.completion_tokens, u.total_tokens)
-    });
+    let usage = parsed
+        .usage
+        .map(|u| TokenUsage::new(u.prompt_tokens, u.completion_tokens, u.total_tokens));
     let text = parsed
         .choices
         .into_iter()
@@ -381,7 +382,10 @@ mod tests {
     #[test]
     fn usage_total_is_derived_when_the_backend_omits_it() {
         let u = TokenUsage::new(12, 30, 42);
-        assert_eq!((u.prompt_tokens, u.completion_tokens, u.total_tokens), (12, 30, 42));
+        assert_eq!(
+            (u.prompt_tokens, u.completion_tokens, u.total_tokens),
+            (12, 30, 42)
+        );
         // A proxy in front of ollama may drop `total_tokens`; derive it.
         let u = TokenUsage::new(12, 30, 0);
         assert_eq!(u.total_tokens, 42);
@@ -412,18 +416,34 @@ mod tests {
             ttl
         ));
         // A clock that appears to move backwards must read as fresh, never panic.
-        assert!(cache_is_fresh(now, now - std::time::Duration::from_secs(5), ttl));
+        assert!(cache_is_fresh(
+            now,
+            now - std::time::Duration::from_secs(5),
+            ttl
+        ));
     }
 
     #[test]
     fn model_presence_is_cached_so_repeat_passes_cost_no_http() {
         let model = "unit-test-cached-model:1b";
-        assert_eq!(model_presence_cached(model), None, "unknown before any look");
+        assert_eq!(
+            model_presence_cached(model),
+            None,
+            "unknown before any look"
+        );
         remember_model_presence(model, true);
-        assert_eq!(model_presence_cached(model), Some(true), "a present model is reused");
+        assert_eq!(
+            model_presence_cached(model),
+            Some(true),
+            "a present model is reused"
+        );
         // A retained answer for a *different* model must not leak across keys.
         assert_eq!(model_presence_cached("unit-test-other-model:1b"), None);
         forget_model_presence(model);
-        assert_eq!(model_presence_cached(model), None, "forget re-opens the probe");
+        assert_eq!(
+            model_presence_cached(model),
+            None,
+            "forget re-opens the probe"
+        );
     }
 }

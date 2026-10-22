@@ -1,8 +1,15 @@
 # Design (STAGED — not implemented, not applied): hash-addressed governance proposals
 
-**Status:** design only. **Nothing in this document is in the runtime.** No patch is applied, no
-artifact is built, and `gpn_gov_upgrade --mode preimage` refuses to run until this ships as a
-reviewed spec-42 upgrade in its own right.
+**Status (2026-10-21): IMPLEMENTED IN THE STAGED SPEC-42 ARTIFACT — NOT APPLIED.**
+The behaviour below shipped, with one deliberate deviation: instead of adding
+`pallet-preimage` + `Bounded<Call, Hashing>`, `pallet-gpn-governance` keeps a **local
+`Preimages` map** and a `ProposalCall::{Inline, Preimage}` enum. Same invariant (the enacted
+code is verifiable by hash before the timelock elapses), no new pallet index, no dependency
+change. `gpn_gov_upgrade --mode preimage` now submits `GpnGovernance.propose_preimage` and
+still refuses (exit 4) against a runtime whose metadata lacks it.
+Staged artifact: `wasm/gpn_runtime_spec42_gov_hardening.compact.compressed.wasm`.
+Plan + review checklist: `shared/artifacts/project7/staged/gov-hardening-v1.md`.
+The rest of this document is the original design and remains accurate about *why*.
 
 ## 1. Problem
 

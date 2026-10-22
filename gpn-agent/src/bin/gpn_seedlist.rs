@@ -148,7 +148,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             n.uptime_bps,
             n.reachable,
             n.last_confirmed_window,
-            if n.endpoint.is_empty() { "-" } else { &n.endpoint }
+            if n.endpoint.is_empty() {
+                "-"
+            } else {
+                &n.endpoint
+            }
         );
     }
 
@@ -174,6 +178,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tmp = format!("{out_path}.tmp");
     std::fs::write(&tmp, format!("{body}\n"))?;
     std::fs::rename(&tmp, &out_path)?;
-    println!("  wrote {out_path} ({} multiaddrs, ttl {ttl}s)", entries.len());
+    println!(
+        "  wrote {out_path} ({} multiaddrs, ttl {ttl}s)",
+        entries.len()
+    );
     Ok(())
 }

@@ -633,24 +633,25 @@ async fn cmd_propose(
     rpc: &Rpc,
     client: &OnlineClient<GpnConfig>,
 ) -> Result<i32, String> {
-    // Preimage mode needs pallets this runtime does not have. Fail loudly with
-    // the exact reason instead of encoding a call that can never dispatch.
+    // `preimage` mode submits `GpnGovernance.propose_preimage(hash, bytes)`:
+    // the call bytes are stored under their blake2_256 hash and the proposal
+    // carries only `{ hash, len }`. Requires the spec-42 (hardened) runtime.
     if opts.mode == "preimage" {
-        eprintln!("❌ --mode preimage is not available on this runtime:");
-        if has_pallet(client, "Preimage") {
-            eprintln!("   pallet-preimage IS present in metadata but this tool has no");
-            eprintln!("   verified encoding path for it — extend the tool + add a test first.");
-        } else {
-            eprintln!("   pallet-preimage is not in the runtime metadata.");
-            eprintln!("   The proposal therefore has to carry the raw WASM inline (mode=inline),");
-            eprintln!("   which means the WASM is visible in the `propose` extrinsic and stored");
-            eprintln!("   in GpnGovernance::Proposals until execution.");
-            eprintln!("   A hash-addressed flow needs the staged patch in");
-            eprintln!("   design/design-gov-preimage-proposals.md (staged; see docs/upgrades-governance.md §7).");
+        let has_call = client
+            .metadata()
+            .pallet_by_name(PALLET)
+            .map(|p| p.call_hash("propose_preimage").is_some())
+            .unwrap_or(false);
+        if !has_call {
+            eprintln!("❌ --mode preimage is not available on this runtime:");
+            eprintln!("   {PALLET}.propose_preimage is not in the runtime metadata.");
+            eprintln!("   The chain is running the pre-hardening governance pallet.");
+            eprintln!("   Use --mode inline (the proposal then carries the raw WASM), or");
+            eprintln!("   apply the staged gov-hardening upgrade first");
+            eprintln!("   (shared/artifacts/project7/staged/gov-hardening-v1.md).");
+            return Ok(4);
         }
-        return Ok(4);
-    }
-    if opts.mode != "inline" {
+    } else if opts.mode != "inline" {
         return Err(format!("unknown --mode '{}'", opts.mode));
     }
 
@@ -705,17 +706,41 @@ async fn cmd_propose(
         .tx()
         .call_data(&inner)
         .map_err(|e| format!("cannot encode {} call: {e}", opts.call))?;
-    let hash = gov::proposal_hash(&call_bytes);
-    let hash_hex = gov::hex0x(&hash);
-    println!(
-        "proposal hash: {hash_hex}  (blake2_256 of the {} call, {} bytes)",
-        opts.call,
-        call_bytes.len()
-    );
+    // Inline: the proposal id *is* blake2_256(call). Preimage: the bytes are
+    // stored under blake2_256(call) and the proposal id is the domain-tagged
+    // hash of (code_hash, len) — identical to
+    // `GpnGovernance::preimage_proposal_id` on chain.
+    let code_hash = gov::proposal_hash(&call_bytes);
+    let preimage = opts.mode == "preimage";
+    let proposal_id = if preimage {
+        gov::preimage_proposal_id(code_hash, call_bytes.len() as u32)
+    } else {
+        code_hash
+    };
+    let hash_hex = gov::hex0x(&proposal_id);
+    if preimage {
+        println!(
+            "preimage hash: {}  (blake2_256 of the {} call, {} bytes)",
+            gov::hex0x(&code_hash),
+            opts.call,
+            call_bytes.len()
+        );
+        println!("proposal hash: {hash_hex}  (tagged hash of preimage + length)");
+    } else {
+        println!(
+            "proposal hash: {hash_hex}  (blake2_256 of the {} call, {} bytes)",
+            opts.call,
+            call_bytes.len()
+        );
+    }
     println!("track: {track}");
 
     let existing = rpc
-        .storage(&gov::storage_key_map_blake2_256(PALLET, "Proposals", &hash))
+        .storage(&gov::storage_key_map_blake2_256(
+            PALLET,
+            "Proposals",
+            &proposal_id,
+        ))
         .await?;
     if existing.is_some() {
         println!("\nℹ️  this proposal already exists on chain (identical bytes) — nothing to do.");
@@ -724,11 +749,20 @@ async fn cmd_propose(
     }
     if opts.dry_run {
         println!("\n--dry-run: not submitting.");
-        println!(
-            "would submit: {PALLET}.propose(System.{} {{ code: <{} bytes> }})",
-            opts.call,
-            bytes.len()
-        );
+        if preimage {
+            println!(
+                "would submit: {PALLET}.propose_preimage({{ hash: {}, len: {} }}, <{} bytes>)",
+                gov::hex0x(&code_hash),
+                call_bytes.len(),
+                call_bytes.len()
+            );
+        } else {
+            println!(
+                "would submit: {PALLET}.propose(System.{} {{ code: <{} bytes> }})",
+                opts.call,
+                bytes.len()
+            );
+        }
         return Ok(0);
     }
 
@@ -747,9 +781,27 @@ async fn cmd_propose(
         surface.approvals_required
     );
 
-    let outer = subxt::dynamic::tx(PALLET, "propose", vec![set_code_value(opts, &bytes)?]);
+    let outer = if preimage {
+        subxt::dynamic::tx(
+            PALLET,
+            "propose_preimage",
+            vec![
+                Value::from_bytes(&code_hash),
+                Value::from_bytes(&call_bytes),
+            ],
+        )
+    } else {
+        subxt::dynamic::tx(PALLET, "propose", vec![set_code_value(opts, &bytes)?])
+    };
     let nonce = signer::current_nonce(client, &opts.endpoint, &sg.account_id()).await;
-    println!("submitting {PALLET}.propose [nonce {nonce}]…");
+    println!(
+        "submitting {PALLET}.{} [nonce {nonce}]…",
+        if preimage {
+            "propose_preimage"
+        } else {
+            "propose"
+        }
+    );
     signer::submit_signed(client, &outer, &sg, nonce)
         .await
         .map_err(|e| e.to_string())?;

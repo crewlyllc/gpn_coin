@@ -499,12 +499,62 @@ pub fn parse_rocm_smi_vram_mb(out: &str) -> Option<u64> {
     None
 }
 
+/// Split one CSV line into fields, honouring double-quoted fields (so a
+/// `DriverDesc` containing a comma stays one cell) and `""` escapes.
+fn split_csv_fields(line: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut in_quotes = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if in_quotes => {
+                if chars.peek() == Some(&'"') {
+                    cur.push('"');
+                    chars.next();
+                } else {
+                    in_quotes = false;
+                }
+            }
+            '"' => in_quotes = true,
+            ',' if !in_quotes => {
+                out.push(cur.trim().to_string());
+                cur.clear();
+            }
+            _ => cur.push(c),
+        }
+    }
+    out.push(cur.trim().to_string());
+    out
+}
+
+/// Parse a byte/second count that may be written as a plain integer or, for a
+/// few Windows drivers, in float/exponent form (`8.589934592E+09`). Returns
+/// `None` for `N/A`, empty, non-numeric or non-positive values.
+fn parse_size_number(s: &str) -> Option<u64> {
+    let s = s.trim().trim_matches('"').trim();
+    if s.is_empty() || s.eq_ignore_ascii_case("n/a") || s.eq_ignore_ascii_case("null") {
+        return None;
+    }
+    if let Ok(v) = s.parse::<u64>() {
+        return (v > 0).then_some(v);
+    }
+    let f: f64 = s.parse().ok()?;
+    if !f.is_finite() || f <= 0.0 {
+        return None;
+    }
+    let v = f as u64;
+    (v > 0).then_some(v)
+}
+
 /// Parse `wmic path win32_VideoController get name,AdapterRAM /format:csv`
 /// output (or the equivalent `Get-CimInstance … | ConvertTo-Csv` form) into
 /// `(name, vram_mb)` pairs. Header-order agnostic (CSV columns are located by
-/// name). **Caveat:** Windows exposes `AdapterRAM` as a 32-bit field, so cards
-/// with >4 GiB report a capped/wrapped value here — the Linux `rocm-smi` path
-/// (or a `--vram-mb` override) gives the true figure.
+/// name). **Caveat:** Windows exposes `AdapterRAM` as a **uint32**, so it
+/// saturates at 4,294,967,295 bytes = **4095 MiB**: a 12 GB or 24 GB card
+/// reports ~4 GB here. This is a *last-resort* source only — prefer
+/// `nvidia-smi`/`rocm-smi` ([`parse_nvidia_smi_vram_mb`]) or the registry
+/// `HardwareInformation.qwMemorySize` ([`parse_registry_qwmemorysize_mb`]).
 pub fn parse_wmic_videocontroller(out: &str) -> Vec<(String, u64)> {
     let mut rows: Vec<(String, u64)> = Vec::new();
     let mut name_idx: Option<usize> = None;
@@ -514,10 +564,7 @@ pub fn parse_wmic_videocontroller(out: &str) -> Vec<(String, u64)> {
         if line.is_empty() {
             continue;
         }
-        let cells: Vec<String> = line
-            .split(',')
-            .map(|c| c.trim().trim_matches('"').trim().to_string())
-            .collect();
+        let cells = split_csv_fields(line);
         if name_idx.is_none() {
             // Header row: locate the columns by name.
             for (i, c) in cells.iter().enumerate() {
@@ -539,10 +586,185 @@ pub fn parse_wmic_videocontroller(out: &str) -> Vec<(String, u64)> {
         if name.is_empty() {
             continue;
         }
-        let ram_bytes: u64 = cells.get(ri).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let ram_bytes: u64 = cells.get(ri).and_then(|s| parse_size_number(s)).unwrap_or(0);
         rows.push((name.clone(), ram_bytes / (1024 * 1024)));
     }
     rows
+}
+
+/// Largest plausible single-GPU VRAM, in MiB (1 TiB). Anything above this is a
+/// wrapped/garbage registry value, not a real card.
+const VRAM_SANITY_MAX_MB: u64 = 1024 * 1024;
+
+/// Parse `nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits`
+/// (or the ROCm `rocm-smi --showmeminfo vram` view, via
+/// [`parse_rocm_smi_vram_mb`]) into the **largest** GPU's total VRAM in MiB.
+/// The value is a true 64-bit figure — no 4 GiB cap. `N/A`, empty and
+/// non-numeric lines (a driver that cannot report) are skipped.
+pub fn parse_nvidia_smi_vram_mb(out: &str) -> Option<u64> {
+    let mut best: Option<u64> = None;
+    for line in out.lines() {
+        // One row per GPU; take the biggest (a box may mix sizes).
+        let Some(mb) = parse_size_number(line) else {
+            continue;
+        };
+        if mb > VRAM_SANITY_MAX_MB {
+            continue;
+        }
+        best = Some(best.map_or(mb, |b: u64| b.max(mb)));
+    }
+    best
+}
+
+/// Parse the PowerShell CSV for the display-class registry key
+/// `…\Control\Class\{4d36e968-…}\0*` with columns
+/// `DriverDesc, HardwareInformation.qwMemorySize` into the largest **discrete**
+/// adapter's VRAM in MiB.
+///
+/// `qwMemorySize` is a **REG_QWORD** (64-bit), so unlike `AdapterRAM` it reports
+/// 12 GiB / 24 GiB / 48 GiB cards correctly. Rows whose `DriverDesc`
+/// classifies as integrated (APU/iGPU share system RAM and report a bogus small
+/// value) are dropped, as are zero, `N/A` and implausible (>1 TiB) values.
+pub fn parse_registry_qwmemorysize_mb(out: &str) -> Option<u64> {
+    let mut desc_idx: Option<usize> = None;
+    let mut size_idx: Option<usize> = None;
+    let mut best: Option<u64> = None;
+    for line in out.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let cells = split_csv_fields(line);
+        if size_idx.is_none() {
+            for (i, c) in cells.iter().enumerate() {
+                let cl = c.to_ascii_lowercase();
+                if cl == "driverdesc" {
+                    desc_idx = Some(i);
+                } else if cl.contains("qwmemorysize") {
+                    size_idx = Some(i);
+                }
+            }
+            if size_idx.is_some() {
+                continue; // header consumed
+            }
+        }
+        let Some(si) = size_idx else { continue };
+        let Some(bytes) = cells.get(si).and_then(|s| parse_size_number(s)) else {
+            continue;
+        };
+        let mb = bytes / (1024 * 1024);
+        if mb == 0 || mb > VRAM_SANITY_MAX_MB {
+            continue;
+        }
+        // Ignore iGPUs: they report a BIOS-reserved slice, not real VRAM.
+        if let Some(di) = desc_idx {
+            if let Some(desc) = cells.get(di) {
+                if classify_gpu_name(desc) == "integrated" {
+                    continue;
+                }
+            }
+        }
+        best = Some(best.map_or(mb, |b: u64| b.max(mb)));
+    }
+    best
+}
+
+/// Where a Windows VRAM figure came from. Ordered by trustworthiness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VramSource {
+    /// `nvidia-smi --query-gpu=memory.total` — true 64-bit value.
+    NvidiaSmi,
+    /// `rocm-smi --showmeminfo vram` — true 64-bit value.
+    RocmSmi,
+    /// Registry `HardwareInformation.qwMemorySize` — 64-bit, per adapter.
+    Registry,
+    /// `Win32_VideoController.AdapterRAM` — **uint32, caps at 4095 MiB**.
+    AdapterRam,
+    /// Nothing usable was found.
+    None,
+}
+
+/// Result of a VRAM probe: the figure plus where it came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VramProbe {
+    pub total_mb: u64,
+    pub source: VramSource,
+}
+
+/// Message emitted when only the 32-bit `AdapterRAM` field was usable.
+pub const ADAPTERRAM_CAP_WARNING: &str = "[gpu] VRAM from AdapterRAM (32-bit, capped at 4095 MiB) — value may understate the real total; models larger than 4 GB may be wrongly excluded";
+
+/// Message emitted when nothing at all could be detected.
+pub const VRAM_ZERO_WARNING: &str = "[gpu] VRAM detection returned 0 MiB (no nvidia-smi, rocm-smi, registry qwMemorySize or AdapterRAM value) — VRAM is NOT advertised and the VRAM model gate is disabled, so oversized models will not be blocked";
+
+impl VramProbe {
+    pub fn unknown() -> Self {
+        Self {
+            total_mb: 0,
+            source: VramSource::None,
+        }
+    }
+
+    /// True when the figure came from the capped 32-bit field.
+    pub fn is_capped(&self) -> bool {
+        self.total_mb > 0 && self.source == VramSource::AdapterRam
+    }
+
+    /// Emit the operator-facing warning for a degraded probe (capped or zero).
+    /// Deduped per process so a heartbeat loop does not spam the log.
+    pub fn warn_if_degraded(&self) {
+        use std::sync::Once;
+        static CAPPED: Once = Once::new();
+        static ZERO: Once = Once::new();
+        if self.is_capped() {
+            CAPPED.call_once(|| log::warn!("{}", ADAPTERRAM_CAP_WARNING));
+        } else if self.total_mb == 0 {
+            ZERO.call_once(|| log::warn!("{}", VRAM_ZERO_WARNING));
+        }
+    }
+}
+
+/// Windows detection order, first success wins: `nvidia-smi` → `rocm-smi` →
+/// registry `qwMemorySize` → `AdapterRAM`. Each input is the *already
+/// validated* (`> 0`) figure from that source for the **largest** adapter.
+///
+/// Split out as a pure function so the ordering is unit-testable on Linux CI,
+/// where the `cfg(windows)` probes cannot run.
+pub fn choose_windows_vram(
+    nvidia_smi_mb: Option<u64>,
+    rocm_smi_mb: Option<u64>,
+    registry_mb: Option<u64>,
+    adapterram_mb: Option<u64>,
+) -> VramProbe {
+    let pick = |mb: Option<u64>, source: VramSource| {
+        mb.filter(|v| *v > 0).map(|total_mb| VramProbe { total_mb, source })
+    };
+    pick(nvidia_smi_mb, VramSource::NvidiaSmi)
+        .or_else(|| pick(rocm_smi_mb, VramSource::RocmSmi))
+        .or_else(|| pick(registry_mb, VramSource::Registry))
+        .or_else(|| pick(adapterram_mb, VramSource::AdapterRam))
+        .unwrap_or_else(VramProbe::unknown)
+}
+
+/// PowerShell: per-adapter 64-bit VRAM from the display driver class key.
+#[cfg(windows)]
+const PS_QW_MEMORY_SIZE: &str = "Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}\\0*' -ErrorAction SilentlyContinue | Where-Object { $_.'HardwareInformation.qwMemorySize' -ne $null } | Select-Object DriverDesc, 'HardwareInformation.qwMemorySize' | ConvertTo-Csv -NoTypeInformation";
+
+/// PowerShell: adapter names only (`AdapterRAM` deliberately not requested —
+/// classification never needs it, and the field is 32-bit capped).
+#[cfg(windows)]
+const PS_ADAPTER_NAMES: &str = "Get-CimInstance Win32_VideoController | Select-Object Name | ConvertTo-Csv -NoTypeInformation";
+
+#[cfg(windows)]
+fn run_powershell(script: &str) -> Option<String> {
+    let o = Command::new("powershell")
+        .args(["-NoProfile", "-Command", script])
+        .output()
+        .ok()?;
+    if !o.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&o.stdout).to_string())
 }
 
 /// The value after the final `:` on a line, with surrounding quotes/commas
@@ -562,98 +784,127 @@ fn last_colon_value(line: &str) -> Option<String> {
     }
 }
 
-/// Best-effort total VRAM (MiB) of the local discrete GPU, vendor-agnostic.
-/// NVIDIA via `nvidia-smi`; AMD via `rocm-smi`; Windows via `Win32_VideoController`
-/// (4 GiB-capped). `0` = unknown (caller decides; the heartbeat treats 0 as
-/// "not advertised").
-pub fn detect_vram_mb() -> u64 {
+/// Best-effort total VRAM (MiB) of the local GPU, vendor-agnostic, plus the
+/// source it came from. Detection order (first success wins, largest GPU wins):
+///
+/// 1. `nvidia-smi --query-gpu=memory.total` — true 64-bit value.
+/// 2. `rocm-smi --showmeminfo vram` — true 64-bit value (AMD).
+/// 3. Windows only: registry `HardwareInformation.qwMemorySize` (REG_QWORD,
+///    64-bit) per display adapter, iGPUs skipped.
+/// 4. Windows only: `Win32_VideoController.AdapterRAM` — **uint32, caps at
+///    4095 MiB**, used only as a last resort and always flagged as capped.
+///
+/// `total_mb == 0` means nothing could be detected (the heartbeat then treats
+/// VRAM as "not advertised"). Degraded probes are logged, never silent.
+pub fn detect_vram() -> VramProbe {
     #[cfg(not(windows))]
-    {
-        if let Ok(o) = Command::new("nvidia-smi")
+    let probe = {
+        let nv = Command::new("nvidia-smi")
             .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
             .output()
-        {
-            if o.status.success() {
-                if let Some(l) = String::from_utf8_lossy(&o.stdout).lines().next() {
-                    if let Ok(mb) = l.trim().parse::<u64>() {
-                        if mb > 0 {
-                            return mb;
-                        }
-                    }
-                }
-            }
-        }
-        if let Ok(o) = Command::new("rocm-smi")
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| parse_nvidia_smi_vram_mb(&String::from_utf8_lossy(&o.stdout)));
+        let amd = Command::new("rocm-smi")
             .args(["--showmeminfo", "vram"])
             .output()
-        {
-            if o.status.success() {
-                if let Some(mb) = parse_rocm_smi_vram_mb(&String::from_utf8_lossy(&o.stdout)) {
-                    if mb > 0 {
-                        return mb;
-                    }
-                }
-            }
-        }
-    }
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| parse_rocm_smi_vram_mb(&String::from_utf8_lossy(&o.stdout)));
+        choose_windows_vram(nv, amd, None, None)
+    };
     #[cfg(windows)]
-    {
-        if let Ok(o) = Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                "Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM | ConvertTo-Csv -NoTypeInformation",
-            ])
+    let probe = {
+        let nv = Command::new("nvidia-smi")
+            .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
             .output()
-        {
-            if o.status.success() {
-                return parse_wmic_videocontroller(&String::from_utf8_lossy(&o.stdout))
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| parse_nvidia_smi_vram_mb(&String::from_utf8_lossy(&o.stdout)));
+        let amd = Command::new("rocm-smi")
+            .args(["--showmeminfo", "vram"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| parse_rocm_smi_vram_mb(&String::from_utf8_lossy(&o.stdout)));
+        // 64-bit per-adapter value; the only trustworthy Windows source when no
+        // vendor CLI is installed.
+        let reg = run_powershell(PS_QW_MEMORY_SIZE)
+            .and_then(|s| parse_registry_qwmemorysize_mb(&s));
+        // Last resort: 32-bit, caps at 4095 MiB.
+        let cached = run_powershell("Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM | ConvertTo-Csv -NoTypeInformation")
+            .and_then(|s| {
+                parse_wmic_videocontroller(&s)
                     .into_iter()
                     .map(|(_, mb)| mb)
+                    .filter(|mb| *mb > 0)
                     .max()
-                    .unwrap_or(0);
+            });
+        choose_windows_vram(nv, amd, reg, cached)
+    };
+    probe.warn_if_degraded();
+    probe
+}
+
+/// Best-effort total VRAM in MiB. See [`detect_vram`] for the detection order;
+/// `0` means unknown (the heartbeat treats 0 as "not advertised").
+pub fn detect_vram_mb() -> u64 {
+    detect_vram().total_mb
+}
+
+/// Adapter names reported by Windows (`Win32_VideoController`), used only for
+/// class/TFLOPS classification. Deliberately **does not** request `AdapterRAM`:
+/// that field is 32-bit capped and must never be paired with a name as if it
+/// were the card's real VRAM.
+#[cfg(windows)]
+fn win_adapter_names() -> Vec<String> {
+    if let Some(s) = run_powershell(PS_ADAPTER_NAMES) {
+        let rows: Vec<String> = parse_wmic_videocontroller(&s)
+            .into_iter()
+            .map(|(n, _)| n)
+            .filter(|n| !n.is_empty())
+            .collect();
+        if !rows.is_empty() {
+            return rows;
+        }
+        // CIM name-only CSV has no AdapterRAM column, so parse the plain CSV.
+        let names: Vec<String> = s
+            .lines()
+            .skip(1)
+            .filter_map(|l| split_csv_fields(l).into_iter().next())
+            .filter(|n| !n.is_empty() && !n.eq_ignore_ascii_case("name"))
+            .collect();
+        if !names.is_empty() {
+            return names;
+        }
+    }
+    // Fallback: the classic `wmic` CSV form (older Windows without CIM).
+    let o = Command::new("wmic")
+        .args(["path", "win32_VideoController", "get", "name", "/format:csv"])
+        .output();
+    if let Ok(o) = o {
+        if o.status.success() {
+            let names: Vec<String> = String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter_map(|l| split_csv_fields(l).into_iter().last())
+                .filter(|n| !n.is_empty() && !n.eq_ignore_ascii_case("Name"))
+                .collect();
+            if !names.is_empty() {
+                return names;
             }
         }
     }
-    0
+    Vec::new()
 }
 
 #[cfg(windows)]
 fn win_detect() -> (String, f64) {
-    // `Win32_VideoController` lists every video adapter (dGPU + iGPU); request
-    // Name + AdapterRAM as CSV so we can also read the (4 GiB-capped) VRAM.
-    let out = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            "Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM | ConvertTo-Csv -NoTypeInformation",
-        ])
-        .output();
-    if let Ok(o) = out {
-        if o.status.success() {
-            let v = parse_wmic_videocontroller(&String::from_utf8_lossy(&o.stdout));
-            if !v.is_empty() {
-                return scan_names(v.iter().map(|(n, _)| n.as_str()));
-            }
-        }
-    }
-    // Fallback: the classic `wmic` CSV form (older Windows without CIM).
-    let out = Command::new("wmic")
-        .args([
-            "path",
-            "win32_VideoController",
-            "get",
-            "name,AdapterRAM",
-            "/format:csv",
-        ])
-        .output();
-    if let Ok(o) = out {
-        if o.status.success() {
-            let v = parse_wmic_videocontroller(&String::from_utf8_lossy(&o.stdout));
-            if !v.is_empty() {
-                return scan_names(v.iter().map(|(n, _)| n.as_str()));
-            }
-        }
+    // `Win32_VideoController` lists every video adapter (dGPU + iGPU). Only the
+    // names are needed here — the VRAM figure comes from `detect_vram()`, which
+    // does not rely on the 32-bit-capped `AdapterRAM` field.
+    let names = win_adapter_names();
+    if !names.is_empty() {
+        return scan_names(names.iter().map(|n| n.as_str()));
     }
     ("unknown".to_string(), 0.0)
 }
@@ -909,6 +1160,119 @@ DESKTOP-ABC,2147483648,AMD Radeon(TM) Graphics\n";
         assert_eq!(v, vec![("NVIDIA GeForce RTX 4060".to_string(), 8192)]);
         // Empty / header-only input yields no rows.
         assert!(parse_wmic_videocontroller("Node,AdapterRAM,Name\n").is_empty());
+    }
+
+    // ── Windows VRAM detection order (4095 MiB AdapterRAM cap fix) ───────────
+
+    #[test]
+    fn nvidia_smi_vram_parses_true_values_above_4gb() {
+        // The whole point: 32-bit-era 4095 is NOT a ceiling here.
+        for (out, want) in [
+            ("4096\n", 4096u64),
+            ("8192\n", 8192),
+            ("12288\n", 12288),
+            ("24576\n", 24576),
+            (" 24576 \r\n", 24576),
+        ] {
+            assert_eq!(parse_nvidia_smi_vram_mb(out), Some(want), "{out:?}");
+        }
+        // Multi-GPU: the largest card wins.
+        assert_eq!(parse_nvidia_smi_vram_mb("8192\n24576\n"), Some(24576));
+        assert_eq!(parse_nvidia_smi_vram_mb("24576\n8192\n"), Some(24576));
+    }
+
+    #[test]
+    fn nvidia_smi_vram_ignores_garbage_and_zeros() {
+        assert_eq!(parse_nvidia_smi_vram_mb(""), None);
+        assert_eq!(parse_nvidia_smi_vram_mb("N/A\n"), None);
+        assert_eq!(parse_nvidia_smi_vram_mb("[N/A]\n"), None);
+        assert_eq!(parse_nvidia_smi_vram_mb("0\n"), None);
+        assert_eq!(parse_nvidia_smi_vram_mb("unknown\n\n  \n"), None);
+        // A mixed stream keeps only the usable rows.
+        assert_eq!(parse_nvidia_smi_vram_mb("N/A\n12288\n"), Some(12288));
+    }
+
+    #[test]
+    fn registry_qwmemorysize_handles_12gb_and_24gb() {
+        // PowerShell `Select-Object DriverDesc,'HardwareInformation.qwMemorySize'`
+        // piped through ConvertTo-Csv.
+        let csv = "\"DriverDesc\",\"HardwareInformation.qwMemorySize\"\n\
+\"NVIDIA GeForce RTX 3060\",\"12884901888\"\n\
+\"Intel(R) UHD Graphics 630\",\"134217728\"\n";
+        // 12884901888 B = 12288 MiB (12 GiB) — impossible via AdapterRAM.
+        assert_eq!(parse_registry_qwmemorysize_mb(csv), Some(12288));
+
+        let csv24 = "\"DriverDesc\",\"HardwareInformation.qwMemorySize\"\n\
+\"NVIDIA GeForce RTX 4090\",\"25769803776\"\n";
+        // 25769803776 B = 24576 MiB (24 GiB).
+        assert_eq!(parse_registry_qwmemorysize_mb(csv24), Some(24576));
+    }
+
+    #[test]
+    fn registry_qwmemorysize_skips_igpus_zeros_and_garbage() {
+        // iGPU-only values must not be reported for the box.
+        let igpu = "\"DriverDesc\",\"HardwareInformation.qwMemorySize\"\n\
+\"Intel(R) Iris Xe Graphics\",\"1073741824\"\n\
+\"AMD Radeon(TM) Graphics\",\"536870912\"\n";
+        assert_eq!(parse_registry_qwmemorysize_mb(igpu), None);
+        // dGPU + iGPU → the dGPU wins.
+        let mixed = "\"DriverDesc\",\"HardwareInformation.qwMemorySize\"\n\
+\"Intel(R) UHD Graphics 630\",\"134217728\"\n\
+\"AMD Radeon RX 7800 XT\",\"17179869184\"\n";
+        assert_eq!(parse_registry_qwmemorysize_mb(mixed), Some(16384));
+        // Zero / N/A / empty / non-numeric rows are ignored.
+        let junk = "\"DriverDesc\",\"HardwareInformation.qwMemorySize\"\n\
+\"Microsoft Basic Display Adapter\",\"0\"\n\
+\"NVIDIA GeForce RTX 4060\",\"N/A\"\n\
+\"Some Adapter\",\"\"\n\
+\"Other Adapter\",\"not-a-number\"\n";
+        assert_eq!(parse_registry_qwmemorysize_mb(junk), None);
+        // No header at all → nothing parsed (fail closed, no blind guess).
+        assert_eq!(parse_registry_qwmemorysize_mb("garbage line"), None);
+        // Comma inside DriverDesc must not shift the numeric column.
+        let comma = "\"DriverDesc\",\"HardwareInformation.qwMemorySize\"\n\
+\"NVIDIA GeForce RTX 4090, OEM\",\"25769803776\"\n";
+        assert_eq!(parse_registry_qwmemorysize_mb(comma), Some(24576));
+    }
+
+    #[test]
+    fn adapterram_is_flagged_capped_and_is_last_resort() {
+        let csv = "\"Name\",\"AdapterRAM\"\n\"NVIDIA GeForce RTX 4090\",\"4294967295\"\n";
+        let rows = parse_wmic_videocontroller(csv);
+        let mb = rows.iter().map(|(_, m)| *m).max();
+        let probe = choose_windows_vram(None, None, None, mb);
+        assert_eq!(probe.total_mb, 4095);
+        assert_eq!(probe.source, VramSource::AdapterRam);
+        assert!(probe.is_capped(), "AdapterRAM-sourced VRAM must be flagged");
+        // Sanity: the exact operator-facing line.
+        assert_eq!(
+            ADAPTERRAM_CAP_WARNING,
+            "[gpu] VRAM from AdapterRAM (32-bit, capped at 4095 MiB) — value may understate the real total; models larger than 4 GB may be wrongly excluded"
+        );
+    }
+
+    #[test]
+    fn detection_order_prefers_nvidia_smi_then_registry_then_adapterram() {
+        // nvidia-smi beats everything (true 24 GB, not the capped 4095).
+        let p = choose_windows_vram(Some(24576), Some(12288), Some(24576), Some(4095));
+        assert_eq!((p.total_mb, p.source), (24576, VramSource::NvidiaSmi));
+        assert!(!p.is_capped());
+        // rocm-smi beats the Windows-only paths.
+        let p = choose_windows_vram(None, Some(16384), Some(24576), Some(4095));
+        assert_eq!((p.total_mb, p.source), (16384, VramSource::RocmSmi));
+        // No vendor CLI → registry (64-bit) beats AdapterRAM.
+        let p = choose_windows_vram(None, None, Some(12288), Some(4095));
+        assert_eq!((p.total_mb, p.source), (12288, VramSource::Registry));
+        assert!(!p.is_capped());
+        // Nothing else → AdapterRAM, capped.
+        let p = choose_windows_vram(None, None, None, Some(2048));
+        assert_eq!((p.total_mb, p.source), (2048, VramSource::AdapterRam));
+        assert!(p.is_capped());
+        // Zero is never a "success" — it must not mask a missing probe.
+        let p = choose_windows_vram(None, None, Some(0), Some(0));
+        assert_eq!(p, VramProbe::unknown());
+        assert_eq!(p.source, VramSource::None);
+        assert_eq!(p.total_mb, 0);
     }
 
     #[test]

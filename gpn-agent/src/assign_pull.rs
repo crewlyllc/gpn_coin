@@ -706,8 +706,7 @@ mod tests {
         assert_eq!(seed_cursor_from_store(&store), 0, "absent store seeds at 0");
         std::fs::write(
             &store,
-            serde_json::json!({"12": {"provider": "5P"}, "90": {"provider": "5P"}})
-                .to_string(),
+            serde_json::json!({"12": {"provider": "5P"}, "90": {"provider": "5P"}}).to_string(),
         )
         .unwrap();
         assert_eq!(seed_cursor_from_store(&store), 90);
