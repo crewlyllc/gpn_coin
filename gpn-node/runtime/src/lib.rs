@@ -419,31 +419,29 @@ parameter_types! {
     pub const InitialBlockReward: Balance = 50_000_000_000_000; // 50 GPN (12 decimals)
     pub const HalvingInterval: BlockNumber = 4_204_800; // ~2 years at 15s blocks
     pub const TargetBlockTime: u64 = 15; // seconds (original concept: ~2yr halving, Bitcoin-like cadence; 4s no longer needed once AI escrow is off-chain)
-    /// Retarget the difficulty every **30 blocks** (~7.5 min at the 15 s target).
+    /// Retarget the difficulty every **45 blocks** (~11 min at the 15 s target).
     ///
-    /// WHY NOT 10: a window mean of `n` memoryless solves has CV = 1/√n, so a
-    /// 10-block window is ±32 % noisy while a 30-block window is ±18 %. With
+    /// WHY NOT 10: a window mean of `n` memoryless solves has CV = 1/sqrt(n), so a
+    /// 10-block window is +/-32 % noisy while a 45-block window is +/-15 %. With
     /// n=10 the controller's *input* noise was larger than any hashrate drift it
     /// is meant to track, and one stalled block (a 90 s gap in 10 blocks) moved
     /// the target by ~+50 %.
     ///
-    /// WHY NOT 45/60: the tail keeps improving with a wider window, but the time
-    /// to *track* a genuine hashrate change (one of three authorities dropping
-    /// out) grows linearly. Simulated on 2 500 real intervals
-    /// (`scripts/retarget-sim.py`, report in
-    /// `shared/artifacts/project7/analysis/retarget-sim-2026-10-22.md`):
-    ///   w10 p95 65.1 s, 2x-hashrate recovery 24 blocks
-    ///   w20 p95 59.9 s, recovery 34 blocks
-    ///   w30 p95 55.9 s, recovery 44 blocks   ← chosen
-    ///   w45 p95 52.5 s, recovery 74 blocks
-    /// 30 buys most of the tail improvement and still converges in ~11 min.
-    pub const DifficultyAdjustmentWindow: BlockNumber = 30; // ~7.5 min at 15 s
-    /// One retarget step is `clamp(actual/target, 0.5, 2.0)` — symmetric in log
-    /// space, so a 2×-too-fast window is undone by exactly one 2×-too-slow
-    /// window. The law it replaces, `2x/(1+x)`, was asymmetric (−50.6 % then
-    /// +37 % observed) and had no lower bound at all (#52).
-    pub const MinRetargetStepPercent: u32 = 50; // may at most halve the target
-    pub const MaxRetargetStepPercent: u32 = 200; // may at most double it
+    /// WHY NOT 5 (the shortest window evaluated): measured in
+    /// `scripts/retarget-sim.py` a short window is worse on every axis -- real
+    /// noise p95 66.8 s vs 52.5 s, burst p95 180 s vs 25 s, and a third of its
+    /// retargets hit the clamp (i.e. it tracks noise, not hashrate). The 5/10/20/
+    /// 30/45/60 sweep gives p95 66.8 / 65.1 / 59.9 / 55.9 / 52.5 / 52.0 s and
+    /// 2x-hashrate recovery 19 / 24 / 34 / 44 / 74 / 74 blocks. A shorter window
+    /// is more responsive in principle; at this solve-noise level it is simply
+    /// more wrong. Report: shared/artifacts/project7/analysis/retarget-sim-2026-10-22.md
+    pub const DifficultyAdjustmentWindow: BlockNumber = 45; // ~11 min at 15 s
+    /// One retarget step is `clamp(actual/target, 100/133, 133/100)` -- x4/3 up,
+    /// x3/4 down, EXACT reciprocals, so the loop cannot ratchet: whatever one
+    /// window does, one window with the reciprocal error undoes it. The law this
+    /// replaces, `2x/(1+x)`, was asymmetric (-50.6 % then +37 % observed) and had
+    /// no lower bound at all (#52). 100 would pin the target (kill switch).
+    pub const MaxRetargetStepPercent: u32 = 133;
     pub const PowMaxWeight: u64 = 200_000;
     pub const AlgorithmVersion: u32 = 1;
     pub const MiningAttestationThreshold: u32 = 3; // blocks authored before direct payout (stake-free PoW gate)
@@ -479,7 +477,6 @@ impl pallet_gpu_pow::Config for Runtime {
     type HalvingInterval = HalvingInterval;
     type TargetBlockTime = TargetBlockTime;
     type DifficultyAdjustmentWindow = DifficultyAdjustmentWindow;
-    type MinRetargetStepPercent = MinRetargetStepPercent;
     type MaxRetargetStepPercent = MaxRetargetStepPercent;
     type PowMaxWeight = PowMaxWeight;
     type AlgorithmVersion = AlgorithmVersion;
@@ -602,6 +599,13 @@ parameter_types! {
     // deadline, so a provider holding a co-signed (off-chain) claim always has a
     // race-free chance to `force_close_channel` first. 300 blocks ~ 75 min @15s.
     pub const ChannelRefundDelay: BlockNumber = 300;
+    // Optimistic claim (item #8): how long a provider may pre-book the next job
+    // id before the create it is waiting for has to land. 10 blocks ≈ 2.5 min at
+    // the 15 s target — comfortably longer than a create tx's pool-to-inclusion
+    // wait (measured p95 ≈ 1–2 blocks), short enough that a claim taken by a
+    // dead provider is gone within minutes. 0 disables the feature.
+    pub const MaxOptimisticClaimTtl: BlockNumber = 10;
+    pub const MaxOptimisticClaimsPerBlock: u32 = 20;
 }
 
 impl pallet_compute_marketplace::Config for Runtime {
@@ -615,6 +619,8 @@ impl pallet_compute_marketplace::Config for Runtime {
     type MaxJobDuration = MaxJobDuration;
     type MaxExpirySweepPerBlock = MaxExpirySweepPerBlock;
     type ChannelRefundDelay = ChannelRefundDelay;
+    type MaxOptimisticClaimTtl = MaxOptimisticClaimTtl;
+    type MaxOptimisticClaimsPerBlock = MaxOptimisticClaimsPerBlock;
     // Cross-pallet read of attested GPU throughput (proof-of-compute gate).
     type GPUAttestation = GPUAttestation;
     // Route marketplace fees into the GPN token pallet account so the fee

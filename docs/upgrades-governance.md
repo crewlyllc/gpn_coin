@@ -11,6 +11,12 @@ no runtime change has been applied by this work.
 > and exact commands are in `shared/artifacts/project7/staged/gov-hardening-v1.md`. Everything
 > below describes **both** the live (spec 41) behaviour and, where marked *spec 42*, the staged
 > behaviour. Until the upgrade enacts, the live chain is still 2-of-3 with no cancel/expiry.
+>
+> **Spec 43 — "symmetric retarget + optimistic claim" is STAGED, not applied.** Built on top of
+> the spec-42 source: `wasm/gpn_runtime_spec43_retarget_clamp.compact.compressed.wasm`
+> (519 286 B, `sha256 5604f140…d10cd`, code hash `0x43b6777f…8361c`, `spec_version = 43`).
+> Plan, evidence and rollback: `shared/artifacts/project7/staged/retarget-clamp-v1.md`;
+> simulation: `shared/artifacts/project7/analysis/retarget-sim-2026-10-22.md`. See §7.2.
 
 Companion docs:
 
@@ -349,6 +355,43 @@ Built, tested and staged; **not** enacted. Full plan, review checklist and rollb
 3. **Committee key custody.** committee-4 and committee-5 were generated 2026-10-21 and stored
    in `governance-keys.txt` (mode 600) on the Linux box. **Move them to cold storage before
    mainnet.**
+
+## 7.2 Spec 43 — symmetric difficulty retarget + pallet-side optimistic claim (staged, not applied)
+
+Built, tested and staged on top of the spec-42 source; **not** enacted. Plan, review checklist,
+rollback and the exact propose → approve → execute commands:
+`shared/artifacts/project7/staged/retarget-clamp-v1.md`. Evidence:
+`shared/artifacts/project7/analysis/retarget-sim-2026-10-22.md` (replay of 2 500 real blocks
+through the old and the new controller, plus adversarial burst/pause/hashrate-step patterns).
+
+| Change | Effect |
+|---|---|
+| Retarget law `2·actual/(actual+target)` → `clamp(actual/target, 100/133, 133/100)` | the old law was **asymmetric** (could relax <2× per window but tighten without bound), so a fast burst collapsed the target (−50.6 % measured) and recovery took several windows (+37 % each). The new bounds are exact reciprocals: one reciprocal window undoes one window of error. |
+| `DifficultyAdjustmentWindow` 10 → 45 blocks | window mean noise CV = 1/√n: 32 % → 15 %; a single 90 s stall moves the target 1.11× instead of ~1.5× |
+| `Config::MaxRetargetStepPercent = 133` | one constant controls the slew limit; `100` pins the target (a clean stop-retargeting rollback) |
+| `apply_difficulty_ratio` saturates on limb overflow | previously wrapped to a *smaller* target — an accidental hardening the max-bound check could not catch |
+| `compute-marketplace::reserve_optimistic_claim` / `release_optimistic_claim` (call 15/16), `OptimisticClaims` storage, `claim_reap` in `on_initialize` | a provider that sees a create in the pool pre-books `NextJobId`; `create_job` attaches it in the **inclusion block**, removing one full block wait. `ttl` ≤ `MaxOptimisticClaimTtl` (10), reaped every block, double-claim rejected, eligibility re-checked at inclusion, and a claim never fails or delays a create |
+| `submit_result` accepts `Accepted` (assigned provider only) | an attached job needs no separate `start_job`; a third party still cannot deliver and the requestor still cannot fail a `Running` job (red-team #12) |
+| `spec_version = 43` | required by `set_code` |
+
+Artifact: `wasm/gpn_runtime_spec43_retarget_clamp.compact.compressed.wasm` — 519 286 B,
+`sha256 5604f140a935c3758c0a4d56a754deae2c255661468a66002f7161d74d3d10cd`,
+code hash `0x43b6777f7b31988827493b8ea6813f7b938ef3c52b2918c0bcadf2dd3ae8361c`,
+`spec_version = 43`, built twice byte-identically. Rebuild: `cd gpn-node && bash
+scripts/build-retarget-clamp-wasm.sh` (refuses to run unless the canonical genesis WASM is
+`76f37b23…16fa97`, and restores it hash-verified).
+
+**Honest SLO.** Measured block time with the current controller: p50 11.4 s, p95 51.7 s, p99
+90.7 s, max 154 s. Simulated with the proposed controller: p50 9.6 s, p95 51.8 s, p99 97.9 s,
+max 239 s under the same draws — and the *floor* (target pinned perfectly) is p95 48 s. A
+create still pays one block wait, so the achievable e2e p50 is ~12–15 s. **5 s e2e is not
+reachable at a 15 s target**; it needs a shorter target block time and/or more sealer capacity.
+
+**Ordering vs spec 42.** This artifact contains the spec-42 code, so enacting it delivers both.
+Before spec 42 enacts, `propose --mode inline` is the only path (the preimage path does not
+exist on the live runtime). If the committee prefers one change at a time, enact spec 42 first
+and rebuild this artifact afterwards with `spec_version = 44` — never circulate two artifacts
+claiming the same `spec_version`.
 
 ## 8. Rehearsal (what was actually run)
 

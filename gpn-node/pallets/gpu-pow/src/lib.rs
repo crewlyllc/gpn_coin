@@ -73,30 +73,33 @@ pub mod pallet {
         type TargetBlockTime: Get<u64>;
         #[pallet::constant]
         type DifficultyAdjustmentWindow: Get<BlockNumberFor<Self>>;
-        /// Upper bound on one retarget step, as a percent of the current target
-        /// (200 ⇒ the target may at most **double** in one window, i.e. the
-        /// window mean was ≥ 2× the target block time).
+        /// Slew limit on one retarget step, as a percent of the current target:
+        /// `133` ⇒ a step may at most multiply the target by `133/100`, and at
+        /// most divide it by the same factor (`100/133`). **Exactly reciprocal**,
+        /// so the controller cannot ratchet in either direction.
         ///
-        /// See `MinRetargetStepPercent` for why the step is clamped at all.
+        /// The law is `new_target = old_target × clamp(actual/target, 100/133,
+        /// 133/100)` — i.e. `clamp(x, 0.75, 1.33)`, a symmetric ±33 % (log-space)
+        /// band around the symmetric error signal `x = actual/target`.
+        ///
+        /// WHY NOT the raw `actual/target` (or `clamp(x, 0.5, 2.0)`): a window
+        /// mean of a memoryless solve is noisy (CV = 1/√n ≈ 15 % at n=45), so an
+        /// unbounded — or merely wide — step converts sampling noise into cadence
+        /// swings. Simulated on 2 500 real intervals (`scripts/retarget-sim.py`,
+        /// report `shared/artifacts/project7/analysis/retarget-sim-2026-10-22.md`),
+        /// under a sustained burst→slow pattern the p95 block time was 25–77 s at
+        /// ±33 % versus 61–180 s at ±2×; on real noise 51.8 s versus 52.5 s. The
+        /// cost is tracking speed: a genuine 2× hashrate change converges in ~3
+        /// windows (~150 blocks) instead of 1–2.
+        ///
+        /// WHY NOT `12` (±12 %, the low-pass variant): ±12 % damps noise slightly
+        /// better but needs ~209 blocks (~50 min) to recover from a 2× hashrate
+        /// drop — during which block time runs ~17 % above target. ±33 % keeps
+        /// most of the damping and recovers in ~74 blocks.
+        ///
+        /// `100` pins the target (a no-op loop). Values below 100 are floored.
         #[pallet::constant]
         type MaxRetargetStepPercent: Get<u32>;
-        /// Lower bound on one retarget step, as a percent of the current target
-        /// (50 ⇒ the target may at most **halve** in one window).
-        ///
-        /// The retarget law is `new_target = old_target × clamp(actual/target,
-        /// min_pct, max_pct)`. `actual/target` is the *symmetric* control law:
-        /// 2× too slow doubles the target, 2× too fast halves it, and
-        /// `min × max == 100 × 100` makes the clamp symmetric in log space, so
-        /// the controller cannot ratchet tighter or looser than it can recover.
-        ///
-        /// The law this replaces was `2x/(1+x)`, which is asymmetric
-        /// (`x = 2 ⇒ +33 %`, `x = 0.5 ⇒ −33 %`, and `x → 0 ⇒ r → 0` with no
-        /// floor). Measured on this chain it collapsed the target by 50.6 % in
-        /// one 10-block window (85.51B → 42.27B) and then needed a whole window
-        /// to recover only +37 % — easy to tighten, slow to relax, which is
-        /// exactly what put 86–96 s blocks behind a 15 s target (#52).
-        #[pallet::constant]
-        type MinRetargetStepPercent: Get<u32>;
         #[pallet::constant]
         type PowMaxWeight: Get<u64>;
         #[pallet::constant]
@@ -474,7 +477,7 @@ pub mod pallet {
                 return parent_difficulty;
             }
             // `Difficulty` is a *target* (hash < target = valid, higher = EASIER).
-            // Ratio = actual/target, clamped to [min_pct, max_pct]:
+            // Ratio = actual/target, clamped to `[100/p, p/100]`:
             //   - blocks too slow (actual > target) -> ratio > 1 -> target up (easier)
             //   - blocks too fast (actual < target) -> ratio < 1 -> target down (harder)
             //   - on time (actual == target)       -> ratio == 1 -> unchanged
@@ -487,7 +490,6 @@ pub mod pallet {
             let (ratio_numer, ratio_denom) = Self::clamp_retarget_ratio(
                 actual_time_ms,
                 target_time_ms,
-                T::MinRetargetStepPercent::get(),
                 T::MaxRetargetStepPercent::get(),
             );
             let new_diff =
@@ -558,42 +560,33 @@ pub mod pallet {
             Self::u256_lt(&h, difficulty)
         }
 
-        /// Bound one retarget step to `[min_pct, max_pct]` percent of the current
-        /// target, returning `(numer, denom)` for `apply_difficulty_ratio`.
+        /// Bound one retarget step to `[100/p, p/100]` of the current target and
+        /// return the `(numer, denom)` pair for `apply_difficulty_ratio`.
         ///
-        /// Inside the band the raw ratio is returned untouched (no rounding and
-        /// no re-quantisation, so the controller is continuous at the boundary);
-        /// outside it the step is exactly the bound. `max_pct` is floored at 100
-        /// (never harder than "hold") and `min_pct` is capped at `max_pct`, so a
-        /// mis-set config degrades to "pin the target", never to an inverted or
-        /// zero-length step (a zero denominator would be a divide-by-zero in
+        /// Inside the band the raw pair is returned untouched (no rounding and no
+        /// re-quantisation, so the controller is continuous at the boundary)
+        /// outside it the step is exactly the bound. `p` is floored at 100, so a
+        /// mis-set config (or 0) degrades to "pin the target" — never to an
+        /// inverted step or a zero denominator (which would be a divide-by-zero in
         /// `apply_difficulty_ratio`).
         ///
-        /// Why a clamp at all: a window mean of a memoryless PoW solve is noisy
-        /// (CV = 1/√n), and with a short window that noise is larger than any
-        /// real hashrate drift the loop is meant to track. Unbounded, the
-        /// controller converts sampling noise into multi-minute block times; the
-        /// clamp is what keeps a burst from becoming a cadence swing.
-        pub(crate) fn clamp_retarget_ratio(
-            numer: u64,
-            denom: u64,
-            min_pct: u32,
-            max_pct: u32,
-        ) -> (u64, u64) {
-            let hi = max_pct.max(100) as u128;
-            let lo = (min_pct as u128).min(hi).max(1);
+        /// The two bounds are exact reciprocals (`p/100` and `100/p`), which is
+        /// what makes the loop ratchet-free: whatever one window does, one window
+        /// with the reciprocal error undoes it exactly.
+        pub(crate) fn clamp_retarget_ratio(numer: u64, denom: u64, pct: u32) -> (u64, u64) {
             if denom == 0 {
                 return (numer, denom);
             }
+            let p = pct.max(100) as u128;
             let n = numer as u128;
             let d = denom as u128;
-            // n/d < lo/100 ⇒ the window was faster than the clamp allows.
-            if n.saturating_mul(100) < d.saturating_mul(lo) {
-                return (lo as u64, 100);
+            // n/d > p/100 ⇒ the window was slower than the slew limit allows.
+            if n.saturating_mul(100) > d.saturating_mul(p) {
+                return (p as u64, 100);
             }
-            // n/d > hi/100 ⇒ the window was slower than the clamp allows.
-            if n.saturating_mul(100) > d.saturating_mul(hi) {
-                return (hi as u64, 100);
+            // n/d < 100/p ⇒ the window was faster than the slew limit allows.
+            if n.saturating_mul(p) < d.saturating_mul(100) {
+                return (100, p as u64);
             }
             (numer, denom)
         }
@@ -757,9 +750,8 @@ mod tests {
         pub const TestInitialReward: Balance = 50_000_000_000_000; // 50 GPN
         pub const TestHalvingInterval: u64 = 100;
         pub const TestTargetBlockTime: u64 = 15;
-        pub const TestDifficultyWindow: u64 = 30;
-        pub const TestMinRetargetStepPercent: u32 = 50;
-        pub const TestMaxRetargetStepPercent: u32 = 200;
+        pub const TestDifficultyWindow: u64 = 45;
+        pub const TestMaxRetargetStepPercent: u32 = 133;
         pub const TestPowMaxWeight: u64 = 200_000;
         pub const TestAlgoVersion: u32 = 1;
         pub const TestMiningAttestationThreshold: u32 = 3;
@@ -799,7 +791,6 @@ mod tests {
         type HalvingInterval = TestHalvingInterval;
         type TargetBlockTime = TestTargetBlockTime;
         type DifficultyAdjustmentWindow = TestDifficultyWindow;
-        type MinRetargetStepPercent = TestMinRetargetStepPercent;
         type MaxRetargetStepPercent = TestMaxRetargetStepPercent;
         type PowMaxWeight = TestPowMaxWeight;
         type AlgorithmVersion = TestAlgoVersion;
@@ -920,9 +911,9 @@ mod tests {
     #[test]
     fn test_on_initialize_tunes_difficulty_windowed() {
         new_test_ext().execute_with(|| {
-            // Window = 30. Start from an easy target (above MinDifficulty) so
+            // Window = 45. Start from an easy target (above MinDifficulty) so
             // hardening is observable. Timestamps are in MILLISECONDS.
-            // Blocks 2-31 are fast (avg 5s < target 15s) -> the target falls.
+            // Blocks 2-46 are fast (avg 5s < target 15s) -> the target falls.
             Difficulty::<Test>::put([0, 0, 0, 0x1000_0000_0000]); // 2^236, easy
             let before = Difficulty::<Test>::get();
             assert!(GpuPowPallet::u256_gt(&before, &TestMinDifficulty::get()));
@@ -931,9 +922,9 @@ mod tests {
             System::set_block_number(1);
             GpuPowPallet::on_initialize(1); // seeds window start, no change
 
-            // 5s (5000ms) per block for blocks 2..=31; the window completes at
-            // block 31: 30 blocks over 150s = 5s avg -> harder (clamped to 0.5x).
-            for b in 2..=31 {
+            // 5s (5000ms) per block for blocks 2..=46; the window completes at
+            // block 46: 45 blocks over 225s = 5s avg -> harder.
+            for b in 2..=46 {
                 pallet_timestamp::Pallet::<Test>::set_timestamp(1_000_000_000 + (b as u64) * 5000);
                 System::set_block_number(b);
                 GpuPowPallet::on_initialize(b);
@@ -956,8 +947,8 @@ mod tests {
             System::set_block_number(1);
             GpuPowPallet::on_initialize(1); // seed window start
 
-            // 500ms per block for blocks 2..=31 (avg 0.5s << target 15s).
-            for b in 2..=31 {
+            // 500ms per block for blocks 2..=46 (avg 0.5s << target 15s).
+            for b in 2..=46 {
                 pallet_timestamp::Pallet::<Test>::set_timestamp(1_000_000_000 + (b as u64) * 500);
                 System::set_block_number(b);
                 GpuPowPallet::on_initialize(b);
@@ -972,14 +963,15 @@ mod tests {
 
     // ---- symmetric retarget (item #52) --------------------------------------
     //
-    // Law: `new_target = old_target × clamp(actual/target, min_pct, max_pct)`.
+    // Law: `new_target = old_target × clamp(actual/target, 100/p, p/100)` with
+    // p = `MaxRetargetStepPercent` (133 ⇒ ×4/3 up, ×3/4 down — exact reciprocals).
     // What must hold:
     //   * inside the band the raw ratio is applied EXACTLY (no rounding shim)
     //   * exactly at a bound it passes through unchanged (`<` / `>`, not `<=`),
     //     so the controller is continuous at the boundary
     //   * outside the band the step is exactly the bound
-    //   * the clamp is symmetric in log space: clamp(x) × clamp(1/x) == 1, so a
-    //     too-fast window is undone by one equally-too-slow window (no ratchet)
+    //   * the bounds are exact reciprocals: a too-fast window is undone by one
+    //     equally-too-slow window (no ratchet, unlike `2x/(1+x)`)
     //   * min/max difficulty bounds still apply AFTER the step clamp
     //   * window boundaries: no adjustment before the window completes
 
@@ -1002,80 +994,81 @@ mod tests {
     fn test_clamp_passes_through_on_time_ratio() {
         // x = 1 ⇒ hold the target.
         assert_eq!(
-            GpuPowPallet::clamp_retarget_ratio(15_000, 15_000, 50, 200),
+            GpuPowPallet::clamp_retarget_ratio(15_000, 15_000, 133),
             (15_000, 15_000)
         );
     }
 
     #[test]
     fn test_clamp_preserves_ratio_inside_band() {
-        // x = 1.2 and x = 0.8 are inside [0.5, 2.0] ⇒ untouched, not rescaled.
+        // 1.2x and 0.8x are inside [0.75, 1.33] ⇒ untouched, not rescaled.
         assert_eq!(
-            GpuPowPallet::clamp_retarget_ratio(18_000, 15_000, 50, 200),
+            GpuPowPallet::clamp_retarget_ratio(18_000, 15_000, 133),
             (18_000, 15_000)
         );
         assert_eq!(
-            GpuPowPallet::clamp_retarget_ratio(12_000, 15_000, 50, 200),
+            GpuPowPallet::clamp_retarget_ratio(12_000, 15_000, 133),
             (12_000, 15_000)
+        );
+        // 1.33x and 0.7519x (the exact reciprocal) also pass through
+        assert_eq!(
+            GpuPowPallet::clamp_retarget_ratio(19_950, 15_000, 133),
+            (19_950, 15_000)
+        );
+        assert_eq!(
+            GpuPowPallet::clamp_retarget_ratio(11_279, 15_000, 133),
+            (11_279, 15_000)
         );
     }
 
     #[test]
     fn test_clamp_boundaries_are_exact_and_inclusive() {
-        // Exactly 0.5× and exactly 2× must pass through as the SAME fraction
-        // (not be rewritten to 50/100 or 200/100): the step is identical, but a
-        // rewrite would mean the controller is discontinuous at the bound.
+        // Exactly at each bound: unchanged (identical step, but no rewrite, so
+        // the controller is continuous).
         assert_eq!(
-            GpuPowPallet::clamp_retarget_ratio(7_500, 15_000, 50, 200),
-            (7_500, 15_000)
+            GpuPowPallet::clamp_retarget_ratio(19_950, 15_000, 133),
+            (19_950, 15_000)
         );
         assert_eq!(
-            GpuPowPallet::clamp_retarget_ratio(30_000, 15_000, 50, 200),
-            (30_000, 15_000)
+            GpuPowPallet::clamp_retarget_ratio(100, 133, 133),
+            (100, 133)
         );
-        // One part in 100_000 outside each bound is clamped.
+        // One unit outside each bound is clamped.
         assert_eq!(
-            GpuPowPallet::clamp_retarget_ratio(29_999, 15_000, 50, 200),
-            (29_999, 15_000)
+            GpuPowPallet::clamp_retarget_ratio(19_951, 15_000, 133),
+            (133, 100)
         );
-        assert_eq!(
-            GpuPowPallet::clamp_retarget_ratio(30_001, 15_000, 50, 200),
-            (200, 100)
-        );
-        assert_eq!(
-            GpuPowPallet::clamp_retarget_ratio(7_499, 15_000, 50, 200),
-            (50, 100)
-        );
+        assert_eq!(GpuPowPallet::clamp_retarget_ratio(99, 133, 133), (100, 133));
     }
 
     #[test]
     fn test_clamp_beyond_both_bounds() {
         // Absurdly fast (x → 0) and absurdly slow (x = 100): exactly the bounds.
         assert_eq!(
-            GpuPowPallet::clamp_retarget_ratio(1, 15_000, 50, 200),
-            (50, 100)
+            GpuPowPallet::clamp_retarget_ratio(1, 15_000, 133),
+            (100, 133)
         );
         assert_eq!(
-            GpuPowPallet::clamp_retarget_ratio(1_500_000, 15_000, 50, 200),
-            (200, 100)
+            GpuPowPallet::clamp_retarget_ratio(1_500_000, 15_000, 133),
+            (133, 100)
         );
     }
 
-    /// The whole point of the fix: the clamp must be symmetric in log space, so
-    /// an error in one direction costs exactly one window in the other. The old
-    /// `2x/(1+x)` law violated this (x=4 ⇒ +60 %, x=0.25 ⇒ −40 %), which is the
-    /// ratchet that produced 86–96 s block tails (#52).
+    /// The whole point of the fix: the bounds must be exact reciprocals, so an
+    /// error in one direction costs exactly the same number of windows in the
+    /// other. The old `2x/(1+x)` law violated this (x=4 ⇒ +60 %, x=0.25 ⇒ −40 %):
+    /// that is the ratchet that produced 86–96 s block tails (#52).
     #[test]
     fn test_clamp_is_log_symmetric_no_ratchet() {
         for x_pct in [1u64, 10, 25, 49, 51, 500, 4_000, 100_000] {
-            let (n_hi, d_hi) = GpuPowPallet::clamp_retarget_ratio(x_pct, 100, 50, 200);
-            // the reciprocal error: x' = 1/x
-            let (n_lo, d_lo) = GpuPowPallet::clamp_retarget_ratio(100, x_pct.max(1), 50, 200);
+            let (n_hi, d_hi) = GpuPowPallet::clamp_retarget_ratio(x_pct, 100, 133);
+            // the reciprocal error: x' = 1/x  (as percent: 10_000/x_pct)
+            let (n_lo, d_lo) = GpuPowPallet::clamp_retarget_ratio(100, x_pct, 133);
             let hi = n_hi as f64 / d_hi as f64;
             let lo = n_lo as f64 / d_lo as f64;
             assert!(
-                (hi * lo - 1.0).abs() < 1e-9,
-                "x={}% : step up {:.4} × step down {:.4} = {:.4} (must be 1.0)",
+                (hi * lo - 1.0).abs() < 1e-12,
+                "x={}% : step up {:.6} × step down {:.6} = {:.6} (must be 1.0)",
                 x_pct,
                 hi,
                 lo,
@@ -1086,32 +1079,31 @@ mod tests {
 
     #[test]
     fn test_clamp_misconfig_degrades_to_pin_not_division_by_zero() {
-        // max < 100 is floored at 100 (never "harden when told to hold"), and
-        // min > max is capped at max, so the result is always a valid fraction
-        // with a non-zero denominator.
-        let (n, d) = GpuPowPallet::clamp_retarget_ratio(300, 100, 10, 90);
-        assert_eq!((n, d), (100, 100));
-        let (n, d) = GpuPowPallet::clamp_retarget_ratio(300, 100, 400, 200);
-        assert_eq!((n, d), (200, 100));
-        let (n, d) = GpuPowPallet::clamp_retarget_ratio(0, 100, 0, 0);
-        assert_eq!((n, d), (100, 100));
+        // p < 100 (including 0) is floored at 100 ⇒ the loop becomes a no-op,
+        // never an inverted step or a zero denominator.
+        assert_eq!(GpuPowPallet::clamp_retarget_ratio(300, 100, 0), (100, 100));
+        assert_eq!(GpuPowPallet::clamp_retarget_ratio(10, 100, 90), (100, 100));
         // a zero denominator is inert, never a divide-by-zero
-        assert_eq!(GpuPowPallet::clamp_retarget_ratio(7, 0, 50, 200), (7, 0));
+        assert_eq!(GpuPowPallet::clamp_retarget_ratio(7, 0, 133), (7, 0));
     }
 
     #[test]
     fn test_adjust_difficulty_is_exactly_symmetric() {
         new_test_ext().execute_with(|| {
             let parent = [0, 0, 0, 0x1000_0000_0000_0000];
-            // 60 s vs a 15 s target = 4× too slow ⇒ clamped at 2×.
+            // 60 s vs a 15 s target = 4× too slow ⇒ clamped to 133/100.
             let slower = GpuPowPallet::adjust_difficulty(parent, 60_000);
-            assert_eq!(slower, [0, 0, 0, 0x2000_0000_0000_0000], "must double");
-            // 3.75 s = 4× too fast ⇒ clamped at 0.5× — the exact inverse.
+            let up = 2f64.powf(log2_of(slower) - log2_of(parent));
+            assert!((up - 1.33).abs() < 1e-9, "expected +33 %, got {:.6}", up);
+            // 3.75 s = 4× too fast ⇒ the exact reciprocal step.
             let faster = GpuPowPallet::adjust_difficulty(parent, 3_750);
-            assert_eq!(faster, [0, 0, 0, 0x0800_0000_0000_0000], "must halve");
-            // and one round trip through both returns to the parent exactly
-            let round = GpuPowPallet::adjust_difficulty(slower, 3_750);
-            assert_eq!(round, parent, "one 4x-fast window must undo one 4x-slow");
+            let down = 2f64.powf(log2_of(faster) - log2_of(parent));
+            assert!(
+                (down * up - 1.0).abs() < 1e-9,
+                "up {:.6} × down {:.6} must be 1.0",
+                up,
+                down
+            );
         });
     }
 
@@ -1119,19 +1111,14 @@ mod tests {
     fn test_adjust_difficulty_inside_band_proportional() {
         new_test_ext().execute_with(|| {
             let parent = [0, 0, 0, 0x1000_0000_0000_0000];
-            // 30 s = 2× target ⇒ exactly 2× (the bound, not "2x/(1+x)" = 1.33)
-            assert_eq!(
-                GpuPowPallet::adjust_difficulty(parent, 30_000),
-                [0, 0, 0, 0x2000_0000_0000_0000]
-            );
-            // 7.5 s = 0.5× target ⇒ exactly half
-            assert_eq!(
-                GpuPowPallet::adjust_difficulty(parent, 7_500),
-                [0, 0, 0, 0x0800_0000_0000_0000]
-            );
-            // 22.5 s = 1.5× ⇒ 1.5× (interior of the band, no clamp)
-            let l = log2_of(GpuPowPallet::adjust_difficulty(parent, 22_500)) - log2_of(parent);
-            assert!((l - 1.5f64.log2()).abs() < 1e-9, "interior step not 1.5x");
+            // 18 s = 1.2× target ⇒ exactly 1.2× (interior: no clamp, no 2x/(1+x))
+            let f = 2f64
+                .powf(log2_of(GpuPowPallet::adjust_difficulty(parent, 18_000)) - log2_of(parent));
+            assert!((f - 1.2).abs() < 1e-12, "interior step not 1.2x: {}", f);
+            // 12 s = 0.8× target ⇒ exactly 0.8×
+            let f = 2f64
+                .powf(log2_of(GpuPowPallet::adjust_difficulty(parent, 12_000)) - log2_of(parent));
+            assert!((f - 0.8).abs() < 1e-12, "interior step not 0.8x: {}", f);
         });
     }
 
@@ -1140,35 +1127,64 @@ mod tests {
         new_test_ext().execute_with(|| {
             let parent = [0, 0, 0, 0x1000_0000_0000_0000];
             let before = log2_of(parent);
-            for actual_ms in [1u64, 200, 1_000, 5_000, 14_000, 15_000, 16_000, 45_000,
-                              90_000, 300_000, 3_600_000, u64::MAX / 2_000] {
+            for actual_ms in [
+                1u64,
+                200,
+                1_000,
+                5_000,
+                14_000,
+                15_000,
+                16_000,
+                45_000,
+                90_000,
+                300_000,
+                3_600_000,
+                u64::MAX / 2_000,
+            ] {
                 let after = GpuPowPallet::adjust_difficulty(parent, actual_ms);
                 let factor = 2f64.powf(log2_of(after) - before);
                 assert!(
-                    factor >= 0.5 - 1e-9 && factor <= 2.0 + 1e-9,
-                    "actual_ms={} moved the target {:.4}x (outside [0.5, 2.0])",
-                    actual_ms, factor
+                    factor >= 100.0 / 133.0 - 1e-9 && factor <= 1.33 + 1e-9,
+                    "actual_ms={} moved the target {:.4}x (outside [0.7519, 1.33])",
+                    actual_ms,
+                    factor
                 );
             }
         });
     }
 
-    /// Recovery speed, the metric #52 is about: ONE too-fast window (10× fast,
-    /// would be −90 % unclamped) must be undone by ONE equally-too-slow window.
-    /// Under the old law this took three windows and never fully returned.
+    /// Recovery speed, the metric #52 is about: a 10×-too-fast window must be
+    /// undone by exactly as many too-slow windows as it took (here 3 and 3,
+    /// because 0.7519³ × 1.33³ = 1). The old law took more windows to recover
+    /// than to over-tighten, which is what made the tail persistent.
     #[test]
-    fn test_recovery_is_one_window() {
+    fn test_recovery_takes_the_same_number_of_windows_both_ways() {
         new_test_ext().execute_with(|| {
             let parent = [0, 0, 0, 0x1000_0000_0000_0000];
-            let dipped = GpuPowPallet::adjust_difficulty(parent, 1_500); // 10x fast
-            let back = GpuPowPallet::adjust_difficulty(dipped, 150_000); // 10x slow
-            assert_eq!(back, parent, "did not fully recover in one window");
-            // The old law's arithmetic, kept here as the regression witness:
-            // 2*0.1/1.1 = 0.1818 then 2*10/11 = 1.818 ⇒ 0.33 of the original.
-            let old_fast = 2.0 * 0.1 / 1.1;
-            let old_slow = 2.0 * 10.0 / 11.0;
+            let mut t = parent;
+            for _ in 0..3 {
+                t = GpuPowPallet::adjust_difficulty(t, 1_500); // 10x too fast
+            }
+            let dipped = 2f64.powf(log2_of(t) - log2_of(parent));
+            for _ in 0..3 {
+                t = GpuPowPallet::adjust_difficulty(t, 150_000); // 10x too slow
+            }
+            let back = 2f64.powf(log2_of(t) - log2_of(parent));
             assert!(
-                old_fast * old_slow < 0.34,
+                (back - 1.0).abs() < 1e-9,
+                "3 fast windows ({:.4}x) then 3 reciprocal slow windows left {:.4}x, must be 1.0",
+                dipped,
+                back
+            );
+            // integer arithmetic truncates the 100/133 step, so allow a
+            // relative error of a few ulps rather than bit-exactness
+            let err = (log2_of(t) - log2_of(parent)).abs();
+            assert!(err < 1e-9, "returned {:.3e} bits off the start", err);
+            // The old law's arithmetic, kept as the regression witness.
+            let old_fast = (2.0 * 0.1 / 1.1f64).powi(3);
+            let old_slow = (2.0 * 10.0 / 11.0f64).powi(3);
+            assert!(
+                old_fast * old_slow < 0.04,
                 "old-law witness changed; re-derive before deleting this test"
             );
         });
@@ -1221,8 +1237,8 @@ mod tests {
             pallet_timestamp::Pallet::<Test>::set_timestamp(1_000_000_000);
             System::set_block_number(1);
             GpuPowPallet::on_initialize(1); // seeds the window at block 1
-            // window = 30 ⇒ the retarget fires at block 31, not before.
-            for b in 2..=30 {
+                                            // window = 45 ⇒ the retarget fires at block 46, not before.
+            for b in 2..=45 {
                 pallet_timestamp::Pallet::<Test>::set_timestamp(1_000_000_000 + (b as u64) * 5_000);
                 System::set_block_number(b);
                 GpuPowPallet::on_initialize(b);
@@ -1231,9 +1247,10 @@ mod tests {
         });
     }
 
-    /// One stalled block must not move the cadence. At window = 30 a single 90 s
-    /// gap is one of 30 intervals: mean = (29×15 + 90)/30 = 17.5 s ⇒ +16.7 %.
-    /// The old 10-block window made the same event +50 %.
+    /// One stalled block must not move the cadence. At window = 45 a single 90 s
+    /// gap is one of 45 intervals: mean = (44×15 + 90)/45 = 16.67 s ⇒ +11 %.
+    /// The old 10-block window made the same event +50 %, and the old law turned
+    /// it into an even bigger step.
     #[test]
     fn test_window_dilutes_a_single_stalled_block() {
         new_test_ext().execute_with(|| {
@@ -1243,16 +1260,16 @@ mod tests {
             System::set_block_number(1);
             GpuPowPallet::on_initialize(1);
             let mut ts = 1_000_000_000u64;
-            for b in 2..=31 {
-                ts += if b == 31 { 90_000 } else { 15_000 };
+            for b in 2..=46 {
+                ts += if b == 46 { 90_000 } else { 15_000 };
                 pallet_timestamp::Pallet::<Test>::set_timestamp(ts);
                 System::set_block_number(b);
                 GpuPowPallet::on_initialize(b);
             }
             let factor = 2f64.powf(log2_of(Difficulty::<Test>::get()) - before);
             assert!(
-                (factor - 17.5 / 15.0).abs() < 0.01,
-                "single stall moved the target {:.4}x, expected 1.1667x",
+                (factor - 16.6667 / 15.0).abs() < 0.01,
+                "single stall moved the target {:.4}x, expected 1.1111x",
                 factor
             );
         });

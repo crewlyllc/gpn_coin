@@ -44,6 +44,21 @@ impl Default for GPURequirements {
     }
 }
 
+/// A provider's pre-booking of the *next* job id (item #8, pallet-side
+/// optimistic claim).
+///
+/// `expiry` is an absolute block number: the claim is live while
+/// `now <= expiry`, and is removed — by the `on_initialize` reaper, or lazily
+/// when the create lands — once past it. There is deliberately no renewal call:
+/// a provider that still wants the id after expiry simply claims again.
+#[derive(
+    Clone, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, PartialEq, Eq, Debug, TypeInfo,
+)]
+pub struct OptimisticClaim<AccountId, BlockNumber> {
+    pub provider: AccountId,
+    pub expiry: BlockNumber,
+}
+
 #[derive(
     Clone, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, PartialEq, Eq, Debug, TypeInfo,
 )]
@@ -210,6 +225,22 @@ pub mod pallet {
         /// immediate-refund behaviour (not recommended).
         #[pallet::constant]
         type ChannelRefundDelay: Get<BlockNumberFor<Self>>;
+        /// Maximum lifetime of an **optimistic claim** (item #8): how many blocks
+        /// a provider may pre-book the *next* job id before the create it is
+        /// waiting for has to land. Bounds the claim so it can never dangle.
+        ///
+        /// An optimistic claim lets a provider start GPU work on a `create_job`
+        /// it has seen in the pool but which is not yet on chain: it reserves the
+        /// next job id, and `create_job` attaches it in the very block the create
+        /// lands. That removes one full block of request latency (the provider no
+        /// longer waits for create-inclusion and then for a separate accept to be
+        /// included). Reverting the feature is `MaxOptimisticClaimTtl = 0`.
+        #[pallet::constant]
+        type MaxOptimisticClaimTtl: Get<BlockNumberFor<Self>>;
+        /// Upper bound on how many claim rows the `on_initialize` reaper may
+        /// visit per block (keeps the hook O(1)).
+        #[pallet::constant]
+        type MaxOptimisticClaimsPerBlock: Get<u32>;
         /// Read-only access to providers' attested GPU compute credentials.
         /// Used to enforce that a provider accepting a job actually meets the
         /// job's `min_gflops` requirement (proof-of-compute gate at match time).
@@ -233,6 +264,22 @@ pub mod pallet {
     // Storage
     #[pallet::storage]
     pub type NextJobId<T: Config> = StorageValue<_, u64, ValueQuery>;
+    /// Optimistic claims (item #8): job id → provider pre-booking.
+    ///
+    /// A claim is taken against `NextJobId` (the id the *next* `create_job` will
+    /// mint) before that create is included. `create_job` consumes it in the
+    /// inclusion block, so the job is born `Accepted` for the waiting provider,
+    /// already working, and the second block wait disappears. Every claim carries an `expiry`; a claim
+    /// whose create never lands is removed by the `on_initialize` reaper, so it
+    /// can never dangle and never blocks an id.
+    #[pallet::storage]
+    pub type OptimisticClaims<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        u64,
+        OptimisticClaim<T::AccountId, BlockNumberFor<T>>,
+        OptionQuery,
+    >;
     #[pallet::storage]
     pub type Jobs<T: Config> = StorageMap<_, Blake2_128Concat, u64, ComputeJob, OptionQuery>;
     #[pallet::storage]
@@ -369,6 +416,38 @@ pub mod pallet {
             requestor: T::AccountId,
             amount: u128,
         },
+        /// A provider pre-booked the next job id (item #8). Live until `expiry`.
+        JobClaimReserved {
+            job_id: u64,
+            provider: T::AccountId,
+            expiry: BlockNumberFor<T>,
+        },
+        /// The pending create landed and the waiting provider was attached in the
+        /// same block, so the job was born `Accepted` — already assigned and
+        /// already working (no second block wait).
+        JobClaimConsumed {
+            job_id: u64,
+            provider: T::AccountId,
+        },
+        /// A claim was consumed but the provider was no longer eligible at
+        /// inclusion (unregistered, at capacity, or short of the attested
+        /// compute the job demands). The job stays `Pending` for normal
+        /// `accept_job` — a claim never blocks or fails a create.
+        JobClaimDropped {
+            job_id: u64,
+            provider: T::AccountId,
+        },
+        /// A claim expired without its create landing (redeemed by the reaper or
+        /// discovered stale at consumption). Freed for other providers.
+        JobClaimExpired {
+            job_id: u64,
+            provider: T::AccountId,
+        },
+        /// A provider gave its own live claim back early.
+        JobClaimReleased {
+            job_id: u64,
+            provider: T::AccountId,
+        },
     }
 
     // Errors
@@ -421,6 +500,20 @@ pub mod pallet {
         /// `ChannelRefundDelay` blocks after the deadline to force-close its
         /// latest co-signed state first.
         ChannelWithinDisputePeriod,
+        /// `reserve_optimistic_claim` was called with `ttl == 0` or a ttl above
+        /// `MaxOptimisticClaimTtl` — a claim must be bounded, never open-ended.
+        ClaimTtlInvalid,
+        /// Optimistic claims can only target the **next** job id (the one the next
+        /// `create_job` will mint). Anything else is not a pending create.
+        ClaimNotNextJob,
+        /// That job id is already on chain: use `accept_job`, not a claim.
+        ClaimJobExists,
+        /// Another provider already holds a live claim on this job id
+        /// (double-claim is rejected, not merged or overwritten).
+        ClaimAlreadyReserved,
+        /// `release_optimistic_claim` was called for an id this account does not
+        /// hold a claim on (never claimed, already consumed, or expired).
+        ClaimNotHeld,
     }
 
     // Hooks
@@ -437,7 +530,7 @@ pub mod pallet {
         /// provider that dies can no longer hold a global `ActiveJobCount` slot
         /// (or a per-requestor slot) forever. The work is bounded O(1) per block.
         fn on_initialize(now: BlockNumberFor<T>) -> Weight {
-            Self::expiry_sweep(now)
+            Self::expiry_sweep(now).saturating_add(Self::claim_reap(now))
         }
 
         /// One-time capacity cleanup. Before the `complete_job` fix, finished jobs
@@ -884,6 +977,14 @@ pub mod pallet {
             <RequestorJobs<T>>::insert(&requestor, jobs);
             <ActiveJobCount<T>>::mutate(|c| *c += 1);
 
+            // Item #8: if a provider optimistically pre-booked this id, attach it
+            // NOW — in the create's own inclusion block. The provider started
+            // GPU work when it saw the tx in the pool, so the job is born
+            // `Accepted` and its result can ride the very next block instead of
+            // waiting for a second accept/claim block. Best-effort by design: a
+            // stale or ineligible claim must never fail (or delay) the create.
+            Self::try_attach_optimistic_claim(job_id);
+
             Self::deposit_event(Event::<T>::JobCreated {
                 job_id,
                 requestor: who,
@@ -968,7 +1069,15 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             let mut job = <Jobs<T>>::get(job_id).ok_or(Error::<T>::JobNotFound)?;
-            ensure!(job.state == JobState::Running, Error::<T>::JobNotRunning);
+            // `Accepted` is allowed for the *assigned* provider: a job attached
+            // from an optimistic claim (item #8) is born Accepted with the
+            // provider already working, so requiring a separate `start_job` tx
+            // would only add a block of latency. The provider check below is what
+            // keeps this safe (a third party still cannot deliver).
+            ensure!(
+                matches!(job.state, JobState::Accepted | JobState::Running),
+                Error::<T>::JobNotRunning
+            );
             let assigned_provider =
                 <JobProvider<T>>::get(job_id).ok_or(Error::<T>::NotJobProvider)?;
             ensure!(assigned_provider == who, Error::<T>::NotJobProvider);
@@ -1212,6 +1321,90 @@ pub mod pallet {
             Self::apply_expiry(job_id, &requestor);
             Ok(())
         }
+
+        /// `reserve_optimistic_claim(job_id, ttl)` — pre-book the **next** job id
+        /// (item #8, pallet-side optimistic claim).
+        ///
+        /// Why: a create tx can only be acted on after inclusion, and a provider
+        /// that waits for inclusion and *then* accepts burns a second block. In
+        /// inference terms that second block is 100 % of the added latency (the
+        /// model itself answers in ~1 s), and on this chain a block tail is tens
+        /// of seconds. A provider that has already seen the create in the pool
+        /// can instead reserve `NextJobId`; `create_job` attaches it in the
+        /// inclusion block, so the provider's `submit_result` — mined in the next
+        /// block — is the only remaining wait.
+        ///
+        /// Safety properties:
+        ///  * **bounded**: `ttl` must be in `1..=MaxOptimisticClaimTtl`; the claim
+        ///    carries an absolute `expiry` and the `on_initialize` reaper removes
+        ///    it, so a claim can never dangle.
+        ///  * **no double claim**: one claim per job id; a second provider gets
+        ///    `ClaimAlreadyReserved`. The winner is not displaced by a later,
+        ///    cheaper claim.
+        ///  * **cannot block a create**: consumption is best-effort. If the
+        ///    provider unregistered, filled its capacity, or the job demands more
+        ///    attested compute than it has, the claim is dropped and the job stays
+        ///    `Pending` — exactly the pre-upgrade behaviour.
+        ///  * **cannot outlive a cancelled create**: if the create never lands,
+        ///    the claim expires; if it lands and is then cancelled/failed, normal
+        ///    `cancel_job`/`fail_job` clears `JobProvider` and the provider list.
+        #[pallet::call_index(15)]
+        #[pallet::weight(T::DbWeight::get().reads_writes(4, 2))]
+        pub fn reserve_optimistic_claim(
+            origin: OriginFor<T>,
+            job_id: u64,
+            ttl: BlockNumberFor<T>,
+        ) -> DispatchResult {
+            let provider = ensure_signed(origin)?;
+            ensure!(
+                <RegisteredProviders<T>>::contains_key(&provider),
+                Error::<T>::ProviderNotRegistered
+            );
+            let max_ttl = T::MaxOptimisticClaimTtl::get();
+            ensure!(
+                !ttl.is_zero() && ttl <= max_ttl,
+                Error::<T>::ClaimTtlInvalid
+            );
+            ensure!(!<Jobs<T>>::contains_key(job_id), Error::<T>::ClaimJobExists);
+            ensure!(job_id == <NextJobId<T>>::get(), Error::<T>::ClaimNotNextJob);
+            ensure!(
+                !<OptimisticClaims<T>>::contains_key(job_id),
+                Error::<T>::ClaimAlreadyReserved
+            );
+
+            let now = frame_system::Pallet::<T>::block_number();
+            let expiry = now.saturating_add(ttl);
+            <OptimisticClaims<T>>::insert(
+                job_id,
+                OptimisticClaim {
+                    provider: provider.clone(),
+                    expiry,
+                },
+            );
+            Self::deposit_event(Event::<T>::JobClaimReserved {
+                job_id,
+                provider,
+                expiry,
+            });
+            Ok(())
+        }
+
+        /// `release_optimistic_claim(job_id)` — give a live claim back early
+        /// (e.g. the provider saw the create revert in the pool and no longer
+        /// wants to hold the id). Only the holder may release it.
+        #[pallet::call_index(16)]
+        #[pallet::weight(T::DbWeight::get().reads_writes(2, 2))]
+        pub fn release_optimistic_claim(origin: OriginFor<T>, job_id: u64) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            let claim = <OptimisticClaims<T>>::get(job_id).ok_or(Error::<T>::ClaimNotHeld)?;
+            ensure!(claim.provider == who, Error::<T>::ClaimNotHeld);
+            <OptimisticClaims<T>>::remove(job_id);
+            Self::deposit_event(Event::<T>::JobClaimReleased {
+                job_id,
+                provider: who,
+            });
+            Ok(())
+        }
     }
 
     // Public helpers
@@ -1397,6 +1590,94 @@ pub mod pallet {
         /// block and wraps at `NextJobId`, so every id is eventually examined
         /// regardless of when jobs were created or cancelled. `MaxExpirySweepPerBlock
         /// = 0` disables the sweep entirely.
+        /// Remove expired optimistic claims (item #8). Bounded by
+        /// `MaxOptimisticClaimsPerBlock`. Claims are only ever taken against
+        /// `NextJobId`, so there is at most ONE live claim at any time — the map
+        /// cannot grow without bound, and this reaper is what guarantees that a
+        /// claim whose create never lands disappears instead of dangling.
+        fn claim_reap(now: BlockNumberFor<T>) -> Weight {
+            let limit = T::MaxOptimisticClaimsPerBlock::get() as usize;
+            if limit == 0 {
+                return T::DbWeight::get().reads(1);
+            }
+            let stale: Vec<(u64, OptimisticClaim<T::AccountId, BlockNumberFor<T>>)> =
+                <OptimisticClaims<T>>::iter()
+                    .filter(|(_, c)| c.expiry < now)
+                    .take(limit)
+                    .collect();
+            let mut weight = T::DbWeight::get().reads(stale.len() as u64 + 1);
+            for (job_id, claim) in stale {
+                <OptimisticClaims<T>>::remove(job_id);
+                Self::deposit_event(Event::<T>::JobClaimExpired {
+                    job_id,
+                    provider: claim.provider,
+                });
+                weight = weight.saturating_add(T::DbWeight::get().writes(1));
+            }
+            weight
+        }
+
+        /// Attach a waiting provider to a freshly-created job. Called only from
+        /// `create_job`, after the job row exists. Never returns an error: a claim
+        /// must not be able to fail a create.
+        pub(crate) fn try_attach_optimistic_claim(job_id: u64) {
+            let Some(claim) = <OptimisticClaims<T>>::take(job_id) else {
+                return;
+            };
+            let now = frame_system::Pallet::<T>::block_number();
+            // `take` above already released the id — a claim is one-shot either
+            // way, so a stale one can never be matched to a later create.
+            if claim.expiry < now {
+                Self::deposit_event(Event::<T>::JobClaimExpired {
+                    job_id,
+                    provider: claim.provider,
+                });
+                return;
+            }
+            let Some(mut job) = <Jobs<T>>::get(job_id) else {
+                return;
+            };
+            let provider = claim.provider;
+            // Re-check eligibility at inclusion time, not at claim time: the
+            // provider may have unregistered or filled up in between, and the
+            // job's own requirements are only known now.
+            let eligible = <RegisteredProviders<T>>::contains_key(&provider)
+                && (<ProviderJobs<T>>::get(&provider).len() as u32) < T::MaxJobsPerProvider::get()
+                && T::GPUAttestation::attested_gflops(&provider) >= job.gpu_requirements.min_gflops;
+            if !eligible {
+                Self::deposit_event(Event::<T>::JobClaimDropped { job_id, provider });
+                return;
+            }
+            // Born `Accepted` (not `Running`), with `started_at` already set:
+            //  * `submit_result` is allowed from `Accepted` for the assigned
+            //    provider, so the result still rides the very next block — no
+            //    accept→start round trip;
+            //  * `fail_job` by the requestor is still legal from `Accepted`
+            //    (red-team finding #12 forbids it only once the job is `Running`
+            //    /`AwaitingVerification`), so a dead provider cannot pin the
+            //    escrow for a whole `max_duration`.
+            job.state = JobState::Accepted;
+            job.started_at = Some(
+                frame_system::Pallet::<T>::block_number()
+                    .try_into()
+                    .unwrap_or(0),
+            );
+            <Jobs<T>>::insert(job_id, job);
+            <JobProvider<T>>::insert(job_id, provider.clone());
+            let mut jobs = <ProviderJobs<T>>::get(&provider);
+            jobs.push(job_id);
+            <ProviderJobs<T>>::insert(&provider, jobs);
+            Self::deposit_event(Event::<T>::JobClaimConsumed { job_id, provider });
+        }
+
+        /// Read-only view for the access point: the live optimistic claim on
+        /// `job_id`, if any.
+        pub fn optimistic_claim(
+            job_id: u64,
+        ) -> Option<OptimisticClaim<T::AccountId, BlockNumberFor<T>>> {
+            <OptimisticClaims<T>>::get(job_id)
+        }
+
         fn expiry_sweep(now: BlockNumberFor<T>) -> Weight {
             let limit = T::MaxExpirySweepPerBlock::get();
             let next_id = <NextJobId<T>>::get();
@@ -1619,6 +1900,8 @@ mod tests {
         pub const TestMaxJobDuration: u64 = 10_000;
         pub const TestMaxExpirySweepPerBlock: u32 = 25;
         pub const TestChannelRefundDelay: u64 = 50;
+        pub const TestMaxOptimisticClaimTtl: u64 = 10;
+        pub const TestMaxOptimisticClaimsPerBlock: u32 = 20;
     }
 
     // Test-only mock of the gpu-attestation provider: returns a configurable
@@ -1652,6 +1935,8 @@ mod tests {
         type MaxJobDuration = TestMaxJobDuration;
         type MaxExpirySweepPerBlock = TestMaxExpirySweepPerBlock;
         type ChannelRefundDelay = TestChannelRefundDelay;
+        type MaxOptimisticClaimTtl = TestMaxOptimisticClaimTtl;
+        type MaxOptimisticClaimsPerBlock = TestMaxOptimisticClaimsPerBlock;
         type GPUAttestation = MockAttestation;
         // Test fee sink: a dedicated account (99) that collects marketplace fees.
         type FeeSink = MockFeeSink;
@@ -1743,6 +2028,10 @@ mod tests {
 
     fn register_provider(who: u64) {
         MarketPallet::register_provider(RuntimeOrigin::signed(who), default_reqs()).unwrap();
+    }
+
+    fn provider_jobs_has(who: u64, job_id: u64) -> bool {
+        MarketPallet::provider_active_jobs(&who).contains(&job_id)
     }
 
     fn create_job(who: u64) -> u64 {
@@ -2837,6 +3126,334 @@ mod tests {
             let res = MarketPallet::refund_expired_channel(RuntimeOrigin::signed(CAROL), ch);
             assert_eq!(res, Err(Error::<Test>::NotJobRequestor.into()));
             assert_eq!(ChannelEscrow::<Test>::get(ch), Some(5_000));
+        });
+    }
+
+    // ---- item #8: pallet-side optimistic claim ------------------------------
+    //
+    // A provider that has seen a create in the pool reserves `NextJobId`; the
+    // create attaches it in the inclusion block. What must hold:
+    //   * the job is born `Accepted` with that provider (no second block wait)
+    //   * double-claim is rejected (one winner, no displacement)
+    //   * a claim is always bounded and can never dangle (ttl cap + reaper)
+    //   * a stale/expired claim never attaches and never fails a create
+    //   * a claim can never outlive a cancelled/never-landed create
+    //   * an ineligible provider at inclusion does not block or fail the create
+
+    fn claim(who: u64, job_id: u64, ttl: u64) -> frame_support::dispatch::DispatchResult {
+        MarketPallet::reserve_optimistic_claim(RuntimeOrigin::signed(who), job_id, ttl)
+    }
+
+    #[test]
+    fn test_optimistic_claim_attaches_provider_in_create_block() {
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            let next = NextJobId::<Test>::get();
+            claim(BOB, next, 5).unwrap();
+            assert_eq!(
+                MarketPallet::optimistic_claim(next).map(|c| c.provider),
+                Some(BOB)
+            );
+
+            // The create lands. Same block: job exists, is already assigned to
+            // BOB (and clocked), and the claim is gone (one-shot).
+            let job_id = create_job(ALICE);
+            assert_eq!(job_id, next);
+            let j = Jobs::<Test>::get(job_id).unwrap();
+            assert_eq!(j.state, JobState::Accepted);
+            assert_eq!(j.started_at, Some(System::block_number() as u32));
+            assert_eq!(JobProvider::<Test>::get(job_id), Some(BOB));
+            assert_eq!(MarketPallet::optimistic_claim(job_id), None);
+            assert!(provider_jobs_has(BOB, job_id));
+            // …and the provider's result can ride the very next block.
+            System::set_block_number(System::block_number() + 1);
+            MarketPallet::submit_result(RuntimeOrigin::signed(BOB), job_id, [7u8; 32], 10).unwrap();
+            assert_eq!(
+                Jobs::<Test>::get(job_id).unwrap().state,
+                JobState::AwaitingVerification
+            );
+        });
+    }
+
+    #[test]
+    fn test_optimistic_claim_double_claim_rejected() {
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            register_provider(CAROL);
+            let next = NextJobId::<Test>::get();
+            claim(BOB, next, 5).unwrap();
+            // Same id, different provider: rejected, and BOB keeps the claim.
+            assert_eq!(
+                claim(CAROL, next, 5),
+                Err(Error::<Test>::ClaimAlreadyReserved.into())
+            );
+            // Same provider re-claiming is also rejected (a refresh call would
+            // make the expiry extendable, defeating the bound).
+            assert_eq!(
+                claim(BOB, next, 9),
+                Err(Error::<Test>::ClaimAlreadyReserved.into())
+            );
+            let id = create_job(ALICE);
+            assert_eq!(JobProvider::<Test>::get(id), Some(BOB));
+        });
+    }
+
+    #[test]
+    fn test_optimistic_claim_ttl_is_bounded() {
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            let next = NextJobId::<Test>::get();
+            // unbounded is not an option: 0 and > MaxOptimisticClaimTtl rejected
+            assert_eq!(
+                claim(BOB, next, 0),
+                Err(Error::<Test>::ClaimTtlInvalid.into())
+            );
+            assert_eq!(
+                claim(BOB, next, TestMaxOptimisticClaimTtl::get() + 1),
+                Err(Error::<Test>::ClaimTtlInvalid.into())
+            );
+            claim(BOB, next, TestMaxOptimisticClaimTtl::get()).unwrap();
+            assert_eq!(
+                MarketPallet::optimistic_claim(next).unwrap().expiry,
+                System::block_number() + TestMaxOptimisticClaimTtl::get()
+            );
+        });
+    }
+
+    #[test]
+    fn test_optimistic_claim_only_targets_the_next_id() {
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            let next = NextJobId::<Test>::get();
+            // A future id (no create in flight for it yet) is not claimable…
+            assert_eq!(
+                claim(BOB, next + 3, 5),
+                Err(Error::<Test>::ClaimNotNextJob.into())
+            );
+            // …and an id that already exists must go through accept_job.
+            let id = create_job(ALICE);
+            assert_eq!(claim(BOB, id, 5), Err(Error::<Test>::ClaimJobExists.into()));
+        });
+    }
+
+    #[test]
+    fn test_optimistic_claim_requires_a_registered_provider() {
+        new_test_ext().execute_with(|| {
+            let next = NextJobId::<Test>::get();
+            assert_eq!(
+                claim(CAROL, next, 5),
+                Err(Error::<Test>::ProviderNotRegistered.into())
+            );
+        });
+    }
+
+    #[test]
+    fn test_optimistic_claim_expires_and_is_reaped() {
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            let next = NextJobId::<Test>::get();
+            claim(BOB, next, 3).unwrap();
+            let expiry = MarketPallet::optimistic_claim(next).unwrap().expiry;
+
+            // Still live on the expiry block (inclusive)…
+            System::set_block_number(expiry);
+            MarketPallet::on_initialize(expiry);
+            assert!(MarketPallet::optimistic_claim(next).is_some());
+
+            // …gone the block after, without any create ever landing.
+            System::set_block_number(expiry + 1);
+            MarketPallet::on_initialize(expiry + 1);
+            assert_eq!(MarketPallet::optimistic_claim(next), None);
+            // The id is still free for a normal create, which stays Pending.
+            let id = create_job(ALICE);
+            assert_eq!(Jobs::<Test>::get(id).unwrap().state, JobState::Pending);
+            assert_eq!(JobProvider::<Test>::get(id), None);
+        });
+    }
+
+    /// The reaper is not guaranteed to have run in the same block the create
+    /// lands (hooks are ordered, and an authority could reorg). Consumption must
+    /// therefore check the expiry ITSELF, and must fail safe: no attach, no
+    /// failure of the create, no dangling row.
+    #[test]
+    fn test_optimistic_claim_expired_before_consumption_never_attaches() {
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            let next = NextJobId::<Test>::get();
+            claim(BOB, next, 2).unwrap();
+            let expiry = MarketPallet::optimistic_claim(next).unwrap().expiry;
+            // Jump past the expiry WITHOUT running the hook.
+            System::set_block_number(expiry + 5);
+            let id = create_job(ALICE);
+            assert_eq!(id, next, "a stale claim must not consume or shift the id");
+            assert_eq!(Jobs::<Test>::get(id).unwrap().state, JobState::Pending);
+            assert_eq!(JobProvider::<Test>::get(id), None);
+            assert_eq!(
+                MarketPallet::optimistic_claim(id),
+                None,
+                "a stale claim must be taken (not left dangling) when seen"
+            );
+            // The job is still claimable by the normal path.
+            MarketPallet::accept_job(RuntimeOrigin::signed(BOB), id).unwrap();
+        });
+    }
+
+    /// A create that never lands (rejected in the pool, or its escrow fails) must
+    /// leave nothing behind: the claim expires on schedule and the job id is
+    /// still usable.
+    #[test]
+    fn test_optimistic_claim_survives_a_failed_create_then_expires() {
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            let next = NextJobId::<Test>::get();
+            claim(BOB, next, 2).unwrap();
+            // Unfunded requestor ⇒ create fails, id not consumed.
+            let poor = 12_345u64;
+            let res = MarketPallet::create_job(
+                RuntimeOrigin::signed(poor),
+                default_reqs(),
+                JobType::LLMInference,
+                JobTier::Spot,
+                1_000,
+                0,
+                0,
+                100,
+                workload(),
+            );
+            assert!(res.is_err());
+            assert_eq!(NextJobId::<Test>::get(), next);
+            // Claim is still valid for the id that is still pending…
+            assert!(MarketPallet::optimistic_claim(next).is_some());
+            // …and expires if the retry never comes.
+            let expiry = MarketPallet::optimistic_claim(next).unwrap().expiry;
+            System::set_block_number(expiry + 1);
+            MarketPallet::on_initialize(expiry + 1);
+            assert_eq!(MarketPallet::optimistic_claim(next), None);
+            let id = create_job(ALICE);
+            assert_eq!(Jobs::<Test>::get(id).unwrap().state, JobState::Pending);
+        });
+    }
+
+    /// If the create lands and is then torn down, the provider must not keep a
+    /// phantom job in `ProviderJobs` (that would leak a `MaxJobsPerProvider`
+    /// slot — the failure mode the capacity migration exists for).
+    #[test]
+    fn test_optimistic_claim_job_failure_frees_provider_slot() {
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            let next = NextJobId::<Test>::get();
+            claim(BOB, next, 5).unwrap();
+            let id = create_job(ALICE);
+            assert!(provider_jobs_has(BOB, id));
+            // An attached job cannot be cancelled (cancel requires Pending); the
+            // requestor's escape hatch is fail_job from Accepted, which must
+            // clean up after itself.
+            assert_eq!(
+                MarketPallet::cancel_job(RuntimeOrigin::signed(ALICE), id),
+                Err(Error::<Test>::JobNotPending.into())
+            );
+            MarketPallet::fail_job(RuntimeOrigin::signed(ALICE), id, 1).unwrap();
+            assert!(!provider_jobs_has(BOB, id), "provider slot leaked");
+            assert_eq!(JobProvider::<Test>::get(id), None);
+        });
+    }
+
+    #[test]
+    fn test_optimistic_claim_released_early() {
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            let next = NextJobId::<Test>::get();
+            claim(BOB, next, 5).unwrap();
+            // Only the holder may release.
+            assert_eq!(
+                MarketPallet::release_optimistic_claim(RuntimeOrigin::signed(CAROL), next),
+                Err(Error::<Test>::ClaimNotHeld.into())
+            );
+            MarketPallet::release_optimistic_claim(RuntimeOrigin::signed(BOB), next).unwrap();
+            assert_eq!(MarketPallet::optimistic_claim(next), None);
+            // Released ⇒ the create is completely unaffected…
+            let id = create_job(ALICE);
+            assert_eq!(Jobs::<Test>::get(id).unwrap().state, JobState::Pending);
+            // …and a second release has nothing to release.
+            assert_eq!(
+                MarketPallet::release_optimistic_claim(RuntimeOrigin::signed(BOB), next),
+                Err(Error::<Test>::ClaimNotHeld.into())
+            );
+        });
+    }
+
+    #[test]
+    fn test_optimistic_claim_dropped_when_provider_unregistered() {
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            let next = NextJobId::<Test>::get();
+            claim(BOB, next, 5).unwrap();
+            // Provider leaves between claim and inclusion.
+            MarketPallet::unregister_provider(RuntimeOrigin::signed(BOB)).unwrap();
+            let id = create_job(ALICE);
+            assert_eq!(
+                Jobs::<Test>::get(id).unwrap().state,
+                JobState::Pending,
+                "a dropped claim must leave the job Pending, not fail the create"
+            );
+            assert_eq!(JobProvider::<Test>::get(id), None);
+            assert_eq!(MarketPallet::optimistic_claim(id), None);
+        });
+    }
+
+    #[test]
+    fn test_optimistic_claim_dropped_when_compute_requirement_unmet() {
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            let next = NextJobId::<Test>::get();
+            claim(BOB, next, 5).unwrap();
+            // The provider's attested throughput drops below what the job wants
+            // (re-attestation / hardware change) — the claim must not smuggle it
+            // past the proof-of-compute gate.
+            MOCK_GFLOPS.with(|c| c.set(10));
+            let id = create_job(ALICE); // default_reqs() needs 1_000 GFLOPS
+            assert_eq!(Jobs::<Test>::get(id).unwrap().state, JobState::Pending);
+            assert_eq!(JobProvider::<Test>::get(id), None);
+            // And the normal accept path still enforces the same gate.
+            assert_eq!(
+                MarketPallet::accept_job(RuntimeOrigin::signed(BOB), id),
+                Err(Error::<Test>::ProviderComputeInsufficient.into())
+            );
+        });
+    }
+
+    #[test]
+    fn test_optimistic_claim_dropped_when_provider_at_capacity() {
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            // Fill BOB to `MaxJobsPerProvider`.
+            for _ in 0..TestMaxJobsPerProvider::get() {
+                let id = create_job(ALICE);
+                MarketPallet::accept_job(RuntimeOrigin::signed(BOB), id).unwrap();
+            }
+            let next = NextJobId::<Test>::get();
+            claim(BOB, next, 5).unwrap();
+            let id = create_job(ALICE);
+            assert_eq!(Jobs::<Test>::get(id).unwrap().state, JobState::Pending);
+            assert_eq!(JobProvider::<Test>::get(id), None);
+        });
+    }
+
+    /// Two claims in a row (the legitimate case: claim id N, create N lands, then
+    /// claim N+1) must both work — the map must not leak the consumed row.
+    #[test]
+    fn test_optimistic_claim_can_be_repeated_for_successive_ids() {
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            for _ in 0..3 {
+                let next = NextJobId::<Test>::get();
+                claim(BOB, next, 5).unwrap();
+                let id = create_job(ALICE);
+                assert_eq!(id, next);
+                assert_eq!(JobProvider::<Test>::get(id), Some(BOB));
+                assert_eq!(MarketPallet::optimistic_claim(id), None);
+            }
+            assert_eq!(crate::pallet::OptimisticClaims::<Test>::iter().count(), 0);
         });
     }
 }
