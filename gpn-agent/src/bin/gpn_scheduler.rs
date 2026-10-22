@@ -573,7 +573,7 @@ where
 }
 
 /// A known provider endpoint + its last-seen health.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Provider {
     status_url: String,
     address: String,
@@ -1145,35 +1145,317 @@ fn image_price_gpn(
     pcfg.diffusion_price_gpn(w, h, steps, frames, token_price_usd, market_hr, util)
 }
 
-/// **Generation is a capability, not a model.** A diffusion model (`sd-turbo`)
-/// is never in the heartbeat's Ollama model list, so `pick()` — which matches on
-/// `models[]` — can never choose the box that can actually render. This selector
-/// filters on the advertised `capabilities[]` instead, prefers a box that is not
-/// already running a job (one GPU = one job), then the lowest latency.
-fn pick_gen_provider(registry: &[Provider], rtt: &RttOverrides) -> Option<Provider> {
+// ── unified routing (queue item #70) ─────────────────────────────────────────
+//
+// Every AI request takes the SAME steps as a chat request: find the first
+// available provider that can run it, and if that one cannot *take* the work,
+// try the next. Before this, text routing used `pick()` (model-aware) while
+// image/video generation used `pick_gen_provider()` (capability-aware), and
+// both were single-shot — a wrong, down or incapable first choice failed the
+// request instead of moving on.
+
+/// What kind of AI work a request is. One variant per advertised capability so
+/// the filter is a single table lookup, not a per-job-type special case.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum JobKind {
+    Text,
+    Image,
+    Video,
+    Ml,
+    Finetune,
+}
+
+impl JobKind {
+    /// The `capabilities[]` entry a provider must advertise to serve this work.
+    fn capability(self) -> &'static str {
+        match self {
+            JobKind::Text => "LLMInference",
+            JobKind::Image => "ImageGeneration",
+            JobKind::Video => "VideoGeneration",
+            JobKind::Ml => "MLInference",
+            JobKind::Finetune => "FineTuning",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            JobKind::Text => "text",
+            JobKind::Image => "image",
+            JobKind::Video => "video",
+            JobKind::Ml => "ml-inference",
+            JobKind::Finetune => "fine-tune",
+        }
+    }
+
+    /// Generation is routed purely by CAPABILITY: a diffusion/video model
+    /// (`sd-turbo`, `ltx-video`) is never in the heartbeat's Ollama `models[]`,
+    /// so matching on it can never pick the box that can actually render.
+    fn is_generation(self) -> bool {
+        matches!(self, JobKind::Image | JobKind::Video)
+    }
+
+    /// Text, ML and fine-tune jobs still name a model, and it must be servable
+    /// (or pullable) — routing a job for a model nobody has only creates an
+    /// orphaned `Pending` job that burns a global `MaxActiveJobs` slot.
+    fn gates_on_model(self) -> bool {
+        !self.is_generation()
+    }
+
+    /// Classify a native `POST /jobs` body (`job_type` + `model`). Mirrors the
+    /// legacy `is_gen` sniffing so existing callers keep working.
+    fn from_job_type(job_type: &str, model: &str) -> JobKind {
+        let jt = job_type.to_ascii_lowercase();
+        let m = model.to_ascii_lowercase();
+        if jt.contains("video") || m.contains("ltx") {
+            JobKind::Video
+        } else if jt.contains("image")
+            || m.contains("sd-")
+            || m.contains("stable-diffusion")
+            || m.contains("sdxl")
+            || m.contains("flux")
+        {
+            JobKind::Image
+        } else if jt.contains("finetun") || jt.contains("fine-tun") {
+            JobKind::Finetune
+        } else if jt.contains("ml") {
+            JobKind::Ml
+        } else {
+            JobKind::Text
+        }
+    }
+}
+
+/// Everything a request needs from a provider. `Default` = text routing with no
+/// hardware floor (the `/v1/chat/completions` case).
+#[derive(Clone, Debug, Default)]
+struct RouteNeeds {
+    /// Requested model; empty/`auto` = any model the provider has.
+    model: String,
+    min_gflops: u64,
+    min_vram_mb: u64,
+    min_ram_mb: u64,
+    min_tflops: f64,
+    /// Cost of a cold pull, used only to rank pullers against ready boxes.
+    pull_penalty_ms: u64,
+}
+
+/// One ordered routing candidate. `needs_pull` means the box must download the
+/// model before it can run the job.
+#[derive(Clone, Debug)]
+struct RouteCandidate {
+    provider: Provider,
+    needs_pull: bool,
+}
+
+/// Penalty added to a busy provider's score so every idle box outranks it.
+const BUSY_PENALTY_MS: u64 = 10_000;
+
+/// How many providers one request may try before giving up (item #70).
+const MAX_ROUTE_ATTEMPTS: usize = 3;
+
+/// **The one way any AI request finds providers** (queue item #70).
+///
+/// Shared by `/v1/chat/completions`, `POST /jobs` (text, image, video, ML and
+/// fine-tune), `/v1/images/generations` and `POST /route/{id}`. Pure: no I/O, no
+/// globals, so it is unit-testable and the ordering is reproducible.
+///
+/// Filters (a provider must clear ALL of them):
+///   • `last_seen` present — the 5 s `/status` poll refreshes it, and a failed
+///     poll rewrites the entry with `last_seen: None`, so this IS the health +
+///     freshness test;
+///   • `pulled_seen` within [`POLL_CAPS_TTL_SECS`] — delivery is the provider's
+///     own pull poll (#46 Phase 3), so a box that never polls cannot be fed;
+///   • advertises the capability for this [`JobKind`];
+///   • model present in `models[]` (text only; a puller is still eligible);
+///   • `p.gflops >= min_gflops` when a floor is requested;
+///   • `vram_mb`/`ram_mb` clear `min_vram_mb`/`min_ram_mb` when requested, and
+///     the model's weights fit the advertised VRAM;
+///   • `min_tflops` floor when requested (fail closed: unknown TFLOPS needs a
+///     self-declared discrete card);
+///   • free capacity (`active < capacity`) — but when *no* candidate has any,
+///     busy boxes are kept as last-resort candidates so the job QUEUES instead
+///     of being refused (the long-standing behaviour).
+///
+/// Ordering: idle before busy, and within a tier by RTT-aware latency (the
+/// caller's own measurement wins over the AP's), with `pull_penalty_ms` added
+/// to a puller's score so a cold download only wins when it is genuinely faster.
+fn route_candidates(
+    registry: &[Provider],
+    kind: JobKind,
+    needs: &RouteNeeds,
+    rtt: &RttOverrides,
+) -> Vec<RouteCandidate> {
+    let cap = kind.capability();
+    let has_cap = |p: &Provider| p.capabilities.iter().any(|c| c.eq_ignore_ascii_case(cap));
     let deliverable = |p: &Provider| {
         p.pulled_seen
             .map(|t| t.elapsed().as_secs() <= POLL_CAPS_TTL_SECS)
             .unwrap_or(false)
     };
-    let mut candidates: Vec<&Provider> = registry
+    let hw_ok = |p: &Provider| {
+        (needs.min_vram_mb == 0 || p.vram_mb >= needs.min_vram_mb)
+            && (needs.min_ram_mb == 0 || p.ram_mb >= needs.min_ram_mb)
+    };
+    let gpu_ok = |p: &Provider| {
+        if needs.min_tflops <= 0.0 {
+            return true;
+        }
+        if p.tflops > 0.0 {
+            return p.tflops >= needs.min_tflops;
+        }
+        p.gpu_class == "discrete"
+    };
+    let has_free = |p: &Provider| p.capacity == 0 || p.active < p.capacity;
+
+    let eligible: Vec<&Provider> = registry
         .iter()
         .filter(|p| {
             p.last_seen.is_some()
                 && deliverable(p)
-                && p.capabilities
-                    .iter()
-                    .any(|c| c.eq_ignore_ascii_case("ImageGeneration"))
+                && has_cap(p)
+                && p.gflops >= needs.min_gflops
+                && hw_ok(p)
+                && gpu_ok(p)
+                // Model gate (text/ML/fine-tune): the box must already have the
+                // model or be able to pull it. Generation ignores the model name.
+                && (!kind.gates_on_model()
+                    || has_model(p, &needs.model)
+                    || p.can_pull)
+                && gpn_agent::models::model_fits_vram(&needs.model, p.vram_mb)
         })
         .collect();
-    candidates.sort_by_key(|p| {
-        let latency = routing::effective_latency_ms(
+
+    // Free capacity is a filter when anything has it; otherwise queue on the
+    // least-loaded boxes rather than turning a busy fleet into a 503.
+    let any_free = eligible.iter().any(|p| has_free(p));
+    let live: Vec<&Provider> = eligible
+        .into_iter()
+        .filter(|p| !any_free || has_free(p))
+        .collect();
+
+    let eff = |p: &Provider| {
+        routing::effective_latency_ms(
             p.latency_ms,
             routing::lookup_override(rtt, &p.address, &p.status_url),
-        );
-        (p.active.min(1) * 10_000) + latency
-    });
-    candidates.first().map(|p| (*p).clone())
+        )
+    };
+
+    // Score = busy tier + latency (+ pull cost). Lower is better.
+    let mut scored: Vec<(u64, bool, Provider)> = live
+        .into_iter()
+        .map(|p| {
+            let ready = !kind.gates_on_model() || has_model(p, &needs.model);
+            // A puller (text only) pays the download penalty; without a model
+            // gate there is nothing to pull.
+            let pull = kind.gates_on_model() && !ready;
+            let score = if p.active == 0 { 0 } else { BUSY_PENALTY_MS }
+                + p.active.min(9) * 100
+                + eff(p)
+                + if pull { needs.pull_penalty_ms } else { 0 };
+            (score, pull, (*p).clone())
+        })
+        .collect();
+    // Stable tie-break on address so two otherwise-identical boxes always
+    // produce the same order (reproducible tests, no route flapping).
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.address.cmp(&b.2.address)));
+    scored
+        .into_iter()
+        .map(|(_, needs_pull, provider)| RouteCandidate {
+            provider,
+            needs_pull,
+        })
+        .collect()
+}
+
+/// Outcome of walking the candidate list.
+#[derive(Debug)]
+enum Failover<T> {
+    /// A provider took the work and (for channel jobs) finished it.
+    Served {
+        value: T,
+        provider: Provider,
+        /// Whether the SERVING provider must pull the model first.
+        needs_pull: bool,
+        attempted: usize,
+    },
+    /// The last attempt may have been accepted — STOP. Retrying could charge
+    /// the caller twice, which is worse than an honest 502.
+    Ambiguous { reason: String, attempted: usize },
+    /// Every candidate refused *before* doing any work (and nothing was paid).
+    Exhausted { reasons: Vec<String> },
+}
+
+/// Walk `candidates` in order, stopping at the first provider that serves the
+/// request (queue item #70).
+///
+/// `attempt` returns `Err(ChannelFail::NotAttempted)` for refusals that provably
+/// moved no value (hub disabled for that provider, connect error, 4xx at accept,
+/// provider-signed refund, rejection before the work started) — those log a
+/// reason and move to the NEXT candidate. An `Ambiguous` failure (5xx, an
+/// unverifiable 200) stops immediately: the provider may hold a pre-signed
+/// settle, so a second attempt risks a double charge.
+fn failover<T, F>(label: &str, candidates: &[RouteCandidate], mut attempt: F) -> Failover<T>
+where
+    F: FnMut(&Provider) -> Result<T, gpn_agent::hub_ap::ChannelFail>,
+{
+    use gpn_agent::hub_ap::ChannelFail;
+    let mut reasons: Vec<String> = Vec::new();
+    for (i, cand) in candidates.iter().take(MAX_ROUTE_ATTEMPTS).enumerate() {
+        match attempt(&cand.provider) {
+            Ok(value) => {
+                if i > 0 {
+                    eprintln!(
+                        "[route] {label}: served by candidate #{} ({}) after {} refusal(s)",
+                        i + 1,
+                        cand.provider.address,
+                        i
+                    );
+                }
+                return Failover::Served {
+                    value,
+                    provider: cand.provider.clone(),
+                    needs_pull: cand.needs_pull,
+                    attempted: i + 1,
+                };
+            }
+            Err(ChannelFail::NotAttempted(why)) => {
+                eprintln!(
+                    "[route] {label}: candidate #{} ({}) not attempted: {why} — trying the next provider",
+                    i + 1,
+                    cand.provider.address
+                );
+                reasons.push(format!("{}: {why}", cand.provider.address));
+            }
+            Err(ChannelFail::Ambiguous(why)) => {
+                eprintln!(
+                    "[route] {label}: candidate #{} ({}) FAILED AMBIGUOUSLY: {why} — stopping (no retry, to avoid a double charge)",
+                    i + 1,
+                    cand.provider.address
+                );
+                return Failover::Ambiguous {
+                    reason: why,
+                    attempted: i + 1,
+                };
+            }
+        }
+    }
+    Failover::Exhausted { reasons }
+}
+
+/// All candidates refused and nothing was paid: 503 whose body lists the reason
+/// for EACH candidate, so an operator can see why nobody served the request.
+fn exhaustion_json(kind: JobKind, reasons: &[String]) -> Value {
+    json!({
+        "error": {
+            "message": format!(
+                "no {} provider could take the request after {} attempt(s)",
+                kind.label(),
+                reasons.len()
+            ),
+            "type": "gpn_unavailable",
+            "candidates": reasons,
+        }
+    })
 }
 
 /// Estimated render cost in seconds for one image request (`n` sequential
@@ -1524,6 +1806,13 @@ fn pricing_public_json(pcfg: &PricingConfig, f: FeedSnapshot) -> Value {
     out
 }
 
+/// Legacy single-shot selector. Thin wrapper over [`route_candidates`] so the
+/// chat, generation and native-job paths all share ONE filter/ordering rule
+/// (queue item #70). Returns `(provider, needs_pull)` for the best candidate.
+///
+/// Kept (rather than deleted) because it is the most direct expression of "text
+/// routing" and the existing routing tests are written against it.
+#[allow(dead_code)]
 fn pick(
     registry: &[Provider],
     min_gflops: u64,
@@ -1534,114 +1823,30 @@ fn pick(
     pull_penalty_ms: u64,
     rtt: &RttOverrides,
 ) -> Option<(Provider, bool)> {
-    // Hardware-capability gate (item 14): a job declaring a VRAM/RAM floor (e.g.
-    // video needs a big-VRAM box) routes only to a provider that advertises AT
-    // LEAST that much. This is a HARD requirement, so it FAILS CLOSED: a provider
-    // that advertises less, or nothing (0 = unknown, e.g. an old heartbeat), is
-    // EXCLUDED when a floor is set — the safe choice, since the alternative is
-    // routing an OOM-prone job to a box that cannot run it. When no floor is set
-    // (min_* = 0, the default) the gate is inert and routing is unchanged.
-    let hw_ok = |p: &Provider| {
-        (min_vram_mb == 0 || p.vram_mb >= min_vram_mb)
-            && (min_ram_mb == 0 || p.ram_mb >= min_ram_mb)
+    let needs = RouteNeeds {
+        model: model.to_string(),
+        min_gflops,
+        min_vram_mb,
+        min_ram_mb,
+        min_tflops,
+        pull_penalty_ms,
     };
-    // Minimum-GPU-capability gate (item 19): a real (discrete) GPU OR an
-    // advertised FP32 TFLOPS figure that clears `min_tflops`. A CPU/APU
-    // **integrated** GPU must not earn unless it clears the objective floor.
-    // The TFLOPS floor is authoritative; "discrete" is only a *supporting*
-    // flag for a box that hasn't reported a number yet. Fail-closed only when a
-    // floor is set (min_tflops <= 0 ⇒ inert, routing unchanged):
-    //   • known tflops      → must be ≥ the floor (discrete or not);
-    //   • unknown tflops(0) → only a self-declared *discrete* card is trusted.
-    let gpu_ok = |p: &Provider| {
-        if min_tflops <= 0.0 {
-            return true;
-        }
-        if p.tflops > 0.0 {
-            return p.tflops >= min_tflops;
-        }
-        p.gpu_class == "discrete"
-    };
-    // Delivery gate (item #55): since #46 Phase 3 deleted the `POST /assign`
-    // push, a provider's own `GET /assignments` poll is the ONLY way work
-    // reaches it. A push-era build (or one pointed at a different access point)
-    // still answers `/status`, so it looks healthy and is selectable — but no
-    // lease can ever reach it, so the job sits `Pending` until the janitor
-    // cancels it (live: #6237 was leased to the Windows box at 14:46 and
-    // cancelled at 14:48:46 while THIS host's provider was idle the whole time).
-    // Fail closed: only a provider that has polled recently can be given work.
-    let deliverable = |p: &Provider| {
-        p.pulled_seen
-            .map(|t| t.elapsed().as_secs() <= POLL_CAPS_TTL_SECS)
-            .unwrap_or(false)
-    };
-    let live: Vec<&Provider> = registry
-        .iter()
-        .filter(|p| {
-            p.last_seen.is_some()
-                && p.gflops >= min_gflops
-                && hw_ok(p)
-                && gpu_ok(p)
-                && deliverable(p)
-                // Item 3 (model side of the item-14 hardware gate): the model's
-                // weights must fit the provider's VRAM. A provider that claims
-                // `qwen2.5:7b` on a 4 GB card either OOMs or silently swaps to
-                // CPU; either way the caller waited for a wrong answer. Unknown
-                // model size or unadvertised VRAM (0) does not gate.
-                && gpn_agent::models::model_fits_vram(model, p.vram_mb)
-        })
-        .collect();
+    route_candidates(registry, JobKind::Text, &needs, rtt)
+        .into_iter()
+        .next()
+        .map(|c| (c.provider, c.needs_pull))
+}
 
-    // Effective latency for the *user's* path: a client-measured (user→provider)
-    // RTT wins over the access-point-measured value when the caller supplied one
-    // (item 3 — client-side RTT). Falls back to `latency_ms` otherwise.
-    let eff = |p: &Provider| {
-        routing::effective_latency_ms(
-            p.latency_ms,
-            routing::lookup_override(rtt, &p.address, &p.status_url),
-        )
-    };
-
-    // Availability: a node currently running an AI job is NOT available (one GPU does one
-    // job at a time). Prefer idle nodes, chosen by LOWEST LATENCY (least-ms), not by load.
-    let idle: Vec<&Provider> = live.iter().copied().filter(|p| p.active == 0).collect();
-
-    // 1. Idle nodes that already HAVE the model -> lowest latency wins.
-    let mut ready: Vec<&Provider> = idle
-        .iter()
-        .copied()
-        .filter(|p| has_model(p, model))
-        .collect();
-    ready.sort_by_key(|p| eff(p));
-
-    // 2. Idle nodes that CAN pull the model -> lowest latency.
-    let mut pullers: Vec<&Provider> = idle.iter().copied().filter(|p| p.can_pull).collect();
-    pullers.sort_by_key(|p| eff(p));
-
-    match (ready.first().copied(), pullers.first().copied()) {
-        // Both exist: a puller wins only if it beats the ready idle node end-to-end
-        // (downloading on a fast/idle node still finishes sooner than waiting on a slow one).
-        (Some(r), Some(p)) => {
-            if eff(p) + pull_penalty_ms < eff(r) {
-                Some((p.clone(), true))
-            } else {
-                Some((r.clone(), false))
-            }
-        }
-        (Some(r), None) => Some((r.clone(), false)),
-        (None, Some(p)) => Some((p.clone(), true)),
-        (None, None) => {
-            // Every compatible node is busy: no idle node exists. Fall back to queuing on the
-            // least-loaded, then lowest-latency node (the job waits; it is not run concurrently).
-            let mut busy: Vec<&Provider> = live
-                .iter()
-                .copied()
-                .filter(|p| has_model(p, model))
-                .collect();
-            busy.sort_by_key(|p| p.active * 1000 + eff(p) / 10);
-            busy.first().map(|p| ((*p).clone(), false))
-        }
-    }
+/// One provider an image request may be rendered on, in routing order (item
+/// #70): the first that accepts the render serves it, and a provider that
+/// refuses before doing any work is skipped for the next one.
+#[derive(Clone, Debug)]
+struct ImageRoute {
+    provider_addr: String,
+    status_url: String,
+    /// Diffusion channel endpoint (port 8095 by default); `None` = derive as
+    /// `status_url + 1` (the LLM provider's own convention).
+    channel_endpoint: Option<String>,
 }
 
 /// Everything a background render needs. Cloned into the worker thread so the
@@ -1651,11 +1856,8 @@ struct ImageCtx {
     hub: Arc<gpn_agent::hub_ap::HubCtx>,
     rt: Arc<tokio::runtime::Runtime>,
     client: Arc<ChainClient>,
-    provider_addr: String,
-    status_url: String,
-    /// Diffusion channel endpoint (port 8095 by default); `None` = derive as
-    /// `status_url + 1` (the LLM provider's own convention).
-    channel_endpoint: Option<String>,
+    /// Ordered candidates (max [`MAX_ROUTE_ATTEMPTS`] are tried).
+    routes: Vec<ImageRoute>,
 }
 
 /// Resolve the diffusion channel endpoint for a provider.
@@ -1695,17 +1897,17 @@ fn image_channel_endpoint(status_url: &str) -> Option<String> {
 /// that answers with garbage therefore fails the job instead of getting a
 /// corrupt "image" published under a public URL.
 fn fetch_and_store_artifact(
-    ctx: &ImageCtx,
+    route: &ImageRoute,
     rec_id: &str,
     index: u32,
     channel_id: u64,
     job_id: u64,
     meta: &Value,
 ) -> Result<ImageArtifact, String> {
-    let endpoint = ctx
+    let endpoint = route
         .channel_endpoint
         .clone()
-        .or_else(|| image_channel_endpoint(&ctx.status_url))
+        .or_else(|| image_channel_endpoint(&route.status_url))
         .ok_or_else(|| "no channel endpoint for the artifact".to_string())?;
     let base = endpoint
         .strip_suffix("/channel/job")
@@ -1798,130 +2000,157 @@ fn run_image_record(ctx: &ImageCtx, rec: &ImageJob, index: u32, units: u128) -> 
         fps: 1,
         n: 1,
     };
-    match gpn_agent::hub_ap::try_channel_gen_job(
-        &ctx.hub,
-        &ctx.rt,
-        Some(&ctx.client),
-        &ctx.provider_addr,
-        &ctx.status_url,
-        ctx.channel_endpoint.clone(),
-        &rec.model,
-        &rec.prompt,
-        "ImageGeneration",
-        gen,
-        units.max(1),
-    ) {
-        Ok(out) => {
-            let parsed: Value = serde_json::from_str(&out.text).unwrap_or(json!({}));
-            let empty = vec![];
-            let metas = parsed
-                .get("artifacts")
-                .and_then(|a| a.as_array())
-                .unwrap_or(&empty);
-            let mut data = Vec::new();
-            for (i, meta) in metas.iter().enumerate() {
-                // The provider numbers the artifacts of THIS job from 0; the
-                // caller's slot is `index` (n sequential jobs for n images).
-                let slot = index + i as u32;
-                match fetch_and_store_artifact(
-                    ctx,
-                    &rec.id,
-                    slot,
-                    out.channel_id,
-                    out.job_id,
-                    meta,
-                ) {
-                    Ok(a) => data.push(a),
-                    Err(e) => {
-                        eprintln!("[images] {}: artifact {slot} rejected: {e}", rec.id);
-                        image_jobs::update(&rec.id, |j| {
-                            j.status = "failed".into();
-                            j.payment = "channel".into();
-                            j.channel_id = Some(out.channel_id);
-                            j.job_id = Some(out.job_id);
-                            j.error = Some(format!(
-                                "render completed but the artifact was unusable: {e}"
-                            ));
-                        });
-                        return ImageFailure::Failed;
+    // Item #70: walk the candidate list. A provider that refuses BEFORE doing any
+    // work (`NotAttempted` — no channel endpoint, connect error, 4xx at accept,
+    // provider-signed refund) is skipped for the next one; the request only fails
+    // once every candidate has refused. An `Ambiguous` failure stops the walk: the
+    // provider may hold the AP's pre-signed settle, so a second render could
+    // charge the caller twice.
+    let mut refusals: Vec<String> = Vec::new();
+    let limit = ctx.routes.len().min(MAX_ROUTE_ATTEMPTS);
+    for (attempt, route) in ctx.routes.iter().take(MAX_ROUTE_ATTEMPTS).enumerate() {
+        match gpn_agent::hub_ap::try_channel_gen_job(
+            &ctx.hub,
+            &ctx.rt,
+            Some(&ctx.client),
+            &route.provider_addr,
+            &route.status_url,
+            route.channel_endpoint.clone(),
+            &rec.model,
+            &rec.prompt,
+            "ImageGeneration",
+            gen.clone(),
+            units.max(1),
+        ) {
+            Ok(out) => {
+                let parsed: Value = serde_json::from_str(&out.text).unwrap_or(json!({}));
+                let empty = vec![];
+                let metas = parsed
+                    .get("artifacts")
+                    .and_then(|a| a.as_array())
+                    .unwrap_or(&empty);
+                let mut data = Vec::new();
+                for (i, meta) in metas.iter().enumerate() {
+                    // The provider numbers the artifacts of THIS job from 0; the
+                    // caller's slot is `index` (n sequential jobs for n images).
+                    let slot = index + i as u32;
+                    match fetch_and_store_artifact(
+                        route,
+                        &rec.id,
+                        slot,
+                        out.channel_id,
+                        out.job_id,
+                        meta,
+                    ) {
+                        Ok(a) => data.push(a),
+                        Err(e) => {
+                            eprintln!("[images] {}: artifact {slot} rejected: {e}", rec.id);
+                            image_jobs::update(&rec.id, |j| {
+                                j.status = "failed".into();
+                                j.payment = "channel".into();
+                                j.channel_id = Some(out.channel_id);
+                                j.job_id = Some(out.job_id);
+                                j.error = Some(format!(
+                                    "render completed but the artifact was unusable: {e}"
+                                ));
+                            });
+                            return ImageFailure::Failed;
+                        }
                     }
                 }
-            }
-            if data.is_empty() {
+                if data.is_empty() {
+                    image_jobs::update(&rec.id, |j| {
+                        j.status = "failed".into();
+                        j.payment = "channel".into();
+                        j.error = Some("provider returned no artifacts".into());
+                    });
+                    return ImageFailure::Failed;
+                }
+                println!(
+                    "[images] {} settled on channel {} (job {}) — {} image(s) on {}",
+                    rec.id,
+                    out.channel_id,
+                    out.job_id,
+                    data.len(),
+                    route.provider_addr
+                );
                 image_jobs::update(&rec.id, |j| {
-                    j.status = "failed".into();
                     j.payment = "channel".into();
-                    j.error = Some("provider returned no artifacts".into());
+                    j.channel_id = Some(out.channel_id);
+                    j.job_id = Some(out.job_id);
+                    for a in data {
+                        j.data.retain(|x| x.index != a.index);
+                        j.data.push(a);
+                    }
+                    j.data.sort_by_key(|a| a.index);
+                    if j.data.len() as u32 >= j.n {
+                        j.status = "completed".into();
+                        j.error = None;
+                    }
                 });
                 return ImageFailure::Failed;
             }
-            println!(
-                "[images] {} settled on channel {} (job {}) — {} image(s)",
-                rec.id,
-                out.channel_id,
-                out.job_id,
-                data.len()
-            );
-            image_jobs::update(&rec.id, |j| {
-                j.payment = "channel".into();
-                j.channel_id = Some(out.channel_id);
-                j.job_id = Some(out.job_id);
-                for a in data {
-                    j.data.retain(|x| x.index != a.index);
-                    j.data.push(a);
-                }
-                j.data.sort_by_key(|a| a.index);
-                if j.data.len() as u32 >= j.n {
-                    j.status = "completed".into();
-                    j.error = None;
-                }
-            });
-            ImageFailure::Failed
-        }
-        Err(e) if e.fallback_ok() => {
-            // Nothing was charged (no value moved off-chain, and there is no
-            // on-chain path for images any more — see the doc comment). Say the
-            // service is unavailable instead of inventing a render failure.
-            let refused = e.reason().contains("refunded");
-            eprintln!(
-                "[images] {}: channel unavailable ({}), {} ",
-                rec.id,
-                e.reason(),
-                if refused {
-                    "refused by the provider"
-                } else {
-                    "no charge made; tell the caller to retry"
-                }
-            );
-            image_jobs::update(&rec.id, |j| {
-                j.status = "failed".into();
-                j.payment = "not_charged".into();
-                j.error = Some(format!(
-                    "image generation is temporarily unavailable: {}",
+            Err(e) if e.fallback_ok() => {
+                // Nothing was charged: no value moved off-chain, and images have
+                // no on-chain path (see the doc comment above). Try the next
+                // candidate (item #70) before telling the caller anything.
+                let refused = e.reason().contains("refunded");
+                eprintln!(
+                    "[images] {}: candidate #{} ({}) refused the render ({}: {}){}",
+                    rec.id,
+                    attempt + 1,
+                    route.provider_addr,
+                    if refused { "provider-signed refund" } else { "not attempted" },
+                    e.reason(),
+                    if attempt + 1 < limit {
+                        " — trying the next provider"
+                    } else {
+                        ""
+                    }
+                );
+                refusals.push(format!("{}: {}", route.provider_addr, e.reason()));
+            }
+            Err(e) => {
+                // The provider may hold the AP's pre-signed settle: the assignment
+                // may have been accepted, so this is not a plain "unavailable".
+                eprintln!(
+                    "[images] {}: ambiguous channel failure on {}: {}",
+                    rec.id,
+                    route.provider_addr,
                     e.reason()
-                ));
-            });
-            if refused {
-                ImageFailure::Failed
-            } else {
-                ImageFailure::Unavailable
+                );
+                image_jobs::update(&rec.id, |j| {
+                    j.status = "failed".into();
+                    j.payment = "pending".into();
+                    j.error = Some(format!(
+                        "channel settlement failed ambiguously: {}; not retrying to avoid a double charge",
+                        e.reason()
+                    ));
+                });
+                return ImageFailure::Unavailable;
             }
         }
-        Err(e) => {
-            // The provider may hold the AP's pre-signed settle: the assignment
-            // may have been accepted, so this is not a plain "unavailable".
-            eprintln!("[images] {}: ambiguous channel failure: {}", rec.id, e.reason());
-            image_jobs::update(&rec.id, |j| {
-                j.status = "failed".into();
-                j.payment = "pending".into();
-                j.error = Some(format!(
-                    "channel settlement failed ambiguously: {}; not retrying to avoid a double charge",
-                    e.reason()
-                ));
-            });
-            ImageFailure::Unavailable
-        }
     }
+    // Every candidate refused and nothing was paid.
+    let detail = if refusals.is_empty() {
+        "no provider was routable".to_string()
+    } else {
+        refusals.join("; ")
+    };
+    eprintln!(
+        "[images] {}: no candidate could take the render ({} attempt(s)): {}",
+        rec.id,
+        refusals.len(),
+        detail
+    );
+    image_jobs::update(&rec.id, |j| {
+        j.status = "failed".into();
+        j.payment = "not_charged".into();
+        j.error = Some(format!(
+            "image generation is temporarily unavailable: every candidate refused ({detail})"
+        ));
+    });
+    ImageFailure::Unavailable
 }
 
 /// Read one stored image, if it exists.
@@ -2824,18 +3053,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             return;
                         }
                     };
-                    let chosen = pick(
-                        &reg,
-                        0,
-                        0,
-                        0,
-                        0.0,
-                        &model,
+                    // One shared candidate pipeline for every AI request (item
+                    // #70); the first entry is what the on-chain/passthrough path
+                    // uses, the whole list feeds the channel failover below.
+                    let needs = RouteNeeds {
+                        model: model.clone(),
                         pull_penalty_ms,
-                        &rtt_overrides(&v),
-                    );
-                    let (provider, needs_pull) = match chosen {
-                        Some(x) => x,
+                        ..Default::default()
+                    };
+                    let candidates =
+                        route_candidates(&reg, JobKind::Text, &needs, &rtt_overrides(&v));
+                    let (provider, needs_pull) = match candidates.first() {
+                        Some(c) => (c.provider.clone(), c.needs_pull),
                         None => {
                             let r = Response::from_string(json!({
                             "error": {"message": "no compatible provider online", "type": "gpn_error"}
@@ -2942,24 +3171,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             out_rate: chat_price_per_token,
                         };
                         let _t0 = std::time::Instant::now();
-                        match gpn_agent::hub_ap::try_channel_job_billed_ex(
-                            &hub,
-                            &rt,
-                            Some(&client),
-                            &provider.address,
-                            &provider.status_url,
-                            &model,
-                            &prompt,
-                            chat_max_tokens,
-                            price,
-                            Some(billing),
-                        ) {
-                            Ok(out) => {
+                        let outcome = failover("chat", &candidates, |cand| {
+                            gpn_agent::hub_ap::try_channel_job_billed_ex(
+                                &hub,
+                                &rt,
+                                Some(&client),
+                                &cand.address,
+                                &cand.status_url,
+                                &model,
+                                &prompt,
+                                chat_max_tokens,
+                                price,
+                                Some(billing),
+                            )
+                        });
+                        match outcome {
+                            Failover::Served { value: out, attempted, .. } => {
                                 println!(
-                                    "[chat] channel settle: job {} on channel {} in {} ms",
+                                    "[chat] channel settle: job {} on channel {} in {} ms (attempt {})",
                                     out.job_id,
                                     out.channel_id,
-                                    _t0.elapsed().as_millis()
+                                    _t0.elapsed().as_millis(),
+                                    attempted
                                 );
                                 text = out.text;
                                 usage = out.usage;
@@ -2971,17 +3204,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     price,
                                 ));
                             }
-                            Err(e) if e.fallback_ok() => {
+                            Failover::Exhausted { reasons } => {
+                                // Every candidate refused before doing any work,
+                                // so nothing was paid. Same fallback as before:
+                                // the on-chain escrow path (which routes to the
+                                // first candidate) is still a valid attempt.
                                 eprintln!(
-                                    "[chat] channel path unavailable ({}) — falling back to on-chain escrow",
-                                    e.reason()
+                                    "[chat] every channel candidate refused ({}); falling back to on-chain escrow: {}",
+                                    reasons.len(),
+                                    reasons.join("; ")
                                 );
                             }
-                            Err(e) => {
+                            Failover::Ambiguous { reason, attempted } => {
                                 let r = Response::from_string(
                                     json!({
                                         "error": {
-                                            "message": format!("channel settlement failed ambiguously: {}; not retrying on-chain to avoid a double charge", e.reason()),
+                                            "message": format!("channel settlement failed ambiguously after {attempted} attempt(s): {reason}; not retrying on-chain to avoid a double charge"),
                                             "type": "gpn_error"
                                         }
                                     })
@@ -3301,9 +3539,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             return;
                         }
                     }
-                    // Route to a box that advertises ImageGeneration.
+                    // Route to a box that advertises ImageGeneration, using the
+                    // SAME candidate pipeline as a chat request (item #70).
                     let reg = registry.lock().unwrap().clone();
-                    let Some(provider) = pick_gen_provider(&reg, &rtt_overrides(&v)) else {
+                    let needs = RouteNeeds {
+                        model: model.clone(),
+                        ..Default::default()
+                    };
+                    let candidates = route_candidates(
+                        &reg,
+                        JobKind::Image,
+                        &needs,
+                        &rtt_overrides(&v),
+                    );
+                    if candidates.is_empty() {
                         let empty = reg.iter().all(|p| p.last_seen.is_none());
                         let mut r = Response::from_string(json!({
                             "error": {
@@ -3322,37 +3571,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         let _ = req.respond(r);
                         return;
-                    };
-                    let feed = feed_now();
-                    // The render itself only happens over the hub channel. Check
-                    // that the box actually serves it *before* accepting the
-                    // request, so a caller gets an immediate, honest 503 instead
-                    // of a `202` that silently dies 30 s later.
-                    let channel_endpoint = image_channel_endpoint(&provider.status_url);
-                    match channel_endpoint.as_deref() {
-                        Some(ep) if gpn_agent::hub_ap::probe_channel_endpoint(ep) => {}
-                        _ => {
-                            let ep = channel_endpoint
+                    }
+                    // The render itself only happens over the hub channel. Probe
+                    // each candidate's render endpoint BEFORE accepting the
+                    // request and queue on the first box that answers: a caller
+                    // gets an immediate, honest 503 (listing why every candidate
+                    // was skipped) instead of a `202` that silently dies 30 s later.
+                    let mut skipped: Vec<String> = Vec::new();
+                    let mut routes: Vec<ImageRoute> = Vec::new();
+                    for cand in candidates.iter().take(MAX_ROUTE_ATTEMPTS) {
+                        let endpoint = image_channel_endpoint(&cand.provider.status_url);
+                        let reachable = endpoint
+                            .as_deref()
+                            .map(gpn_agent::hub_ap::probe_channel_endpoint)
+                            .unwrap_or(false);
+                        if reachable {
+                            routes.push(ImageRoute {
+                                provider_addr: cand.provider.address.clone(),
+                                status_url: cand.provider.status_url.clone(),
+                                channel_endpoint: endpoint,
+                            });
+                        } else {
+                            let ep = endpoint
                                 .clone()
                                 .unwrap_or_else(|| "<unresolved>".to_string());
-                            let msg = format!(
-                                "image service unavailable: the provider at {} does not serve the \
-                                 channel render endpoint ({ep}). No image was queued and nothing \
-                                 was charged; retry when a diffusion provider is online.",
-                                provider.address
+                            eprintln!(
+                                "[images] candidate {} does not serve the channel render \
+                                 endpoint ({ep}) — trying the next provider",
+                                cand.provider.address
                             );
-                            eprintln!("[images] refusing generation request: {msg}");
-                            let _ = req.respond(
-                                Response::from_string(json!({
-                                    "error": {"message": msg, "type": "gpn_unavailable"}
-                                }).to_string())
-                                .with_header(hdr.clone())
-                                .with_header(retry_after_header())
-                                .with_status_code(503),
-                            );
-                            return;
+                            skipped.push(format!(
+                                "{}: no channel render endpoint at {ep}",
+                                cand.provider.address
+                            ));
                         }
                     }
+                    if routes.is_empty() {
+                        let msg = format!(
+                            "image service unavailable: no diffusion provider serves the channel \
+                             render endpoint. No image was queued and nothing was charged; retry \
+                             when a diffusion provider is online. Candidates: {}",
+                            skipped.join("; ")
+                        );
+                        eprintln!("[images] refusing generation request: {msg}");
+                        let _ = req.respond(
+                            Response::from_string(json!({
+                                "error": {
+                                    "message": msg,
+                                    "type": "gpn_unavailable",
+                                    "candidates": skipped
+                                }
+                            }).to_string())
+                            .with_header(hdr.clone())
+                            .with_header(retry_after_header())
+                            .with_status_code(503),
+                        );
+                        return;
+                    }
+                    let feed = feed_now();
                     let price_gpn = image_price_gpn(
                         &pcfg,
                         width as f64,
@@ -3390,9 +3666,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         hub: hub.clone(),
                         rt: rt.clone(),
                         client: client.clone(),
-                        provider_addr: provider.address.clone(),
-                        status_url: provider.status_url.clone(),
-                        channel_endpoint: channel_endpoint.clone(),
+                        routes,
                     };
                     // Per-image price: `n` renders are `n` sequential channel
                     // jobs (one GPU, one job at a time), each priced exactly
@@ -3677,11 +3951,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         )
                     };
 
-                    // choose the best provider (model-aware). Generation jobs
-                    // (image/video) are served by the diffusion provider, which
-                    // self-claims from chain — the LLM model registry doesn't list
-                    // gen models, so DON'T validate them here. Reject unknown models
-                    // only for LLM/text jobs (prevents orphaned Pending jobs).
+                    // choose the best provider (item #70: ONE shared pipeline for
+                    // every job type). Generation jobs (image/video) are served by
+                    // the diffusion provider and ML/fine-tune jobs by a box that
+                    // advertises that capability — the LLM model registry doesn't
+                    // list their models, so DON'T validate them here. Reject
+                    // unknown models only for LLM/text jobs (prevents orphaned
+                    // Pending jobs).
                     let jt_lc = job_type.to_ascii_lowercase();
                     let model_lc = model.to_ascii_lowercase();
                     let is_gen = jt_lc.contains("image")
@@ -3691,8 +3967,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         || model_lc.contains("sdxl")
                         || model_lc.contains("flux")
                         || model_lc.contains("ltx");
+                    // The ONE classification used for routing: text/ML/fine-tune
+                    // gate on the model, generation on the advertised capability.
+                    let kind = JobKind::from_job_type(job_type, &model);
                     let reg = registry.lock().unwrap().clone();
-                    let model = if is_gen {
+                    let model = if kind.is_generation() {
                         model
                     } else {
                         match resolve_requested_model(&reg, &model) {
@@ -3714,17 +3993,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     };
-                    let (provider, needs_pull) = match pick(
-                        &reg,
+                    // One shared candidate pipeline for every job type (item
+                    // #70): text gates on the model, generation/ML/fine-tune gate
+                    // on the advertised capability (`JobKind::from_job_type`).
+                    let needs = RouteNeeds {
+                        model: model.clone(),
                         min_gflops,
                         min_vram_mb,
                         min_ram_mb,
                         min_tflops,
-                        &model,
                         pull_penalty_ms,
-                        &rtt_overrides(&v),
-                    ) {
-                        Some(x) => x,
+                    };
+                    let candidates =
+                        route_candidates(&reg, kind, &needs, &rtt_overrides(&v));
+                    let (provider, needs_pull) = match candidates.first() {
+                        Some(c) => (c.provider.clone(), c.needs_pull),
                         None => {
                             let r = Response::from_string(
                                 json!({"ok":false,"error":"no compatible provider available"})
@@ -3752,30 +4035,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             in_rate: ppt,
                             out_rate: ppt,
                         });
-                        match gpn_agent::hub_ap::try_channel_job_billed_ex(
-                            &hub,
-                            &rt,
-                            Some(&client),
-                            &provider.address,
-                            &provider.status_url,
-                            &model,
-                            &prompt_s,
-                            mtok_eff,
-                            price,
-                            billing,
-                        ) {
-                            Ok(out) => {
+                        match failover("jobs", &candidates, |cand| {
+                            gpn_agent::hub_ap::try_channel_job_billed_ex(
+                                &hub,
+                                &rt,
+                                Some(&client),
+                                &cand.address,
+                                &cand.status_url,
+                                &model,
+                                &prompt_s,
+                                mtok_eff,
+                                price,
+                                billing,
+                            )
+                        }) {
+                            Failover::Served { value: out, provider: served, needs_pull: served_pull, attempted } => {
                                 let mut resp = json!({
                                     "ok": true,
                                     "escrow": "channel",
                                     "channel_id": out.channel_id,
                                     "job_id": out.job_id,
-                                    "routed_to": provider.address,
+                                    "routed_to": served.address,
                                     "model": model,
-                                    "pull": needs_pull,
-                                    "status_url": provider.status_url,
-                                    "latency_ms": provider.latency_ms,
-                                    "load": format!("{}/{}", provider.active, provider.capacity),
+                                    "pull": served_pull,
+                                    "status_url": served.status_url,
+                                    "latency_ms": served.latency_ms,
+                                    "load": format!("{}/{}", served.active, served.capacity),
+                                    "attempts": attempted,
                                     "channel_balance_provider": out.balance_provider.to_string(),
                                     "channel_charge": out.charge.to_string(),
                                     "channel_charge_ceiling": price.to_string(),
@@ -3791,19 +4077,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let _ = req.respond(r);
                                 return;
                             }
-                            Err(e) if e.fallback_ok() => {
+                            Failover::Exhausted { reasons } => {
+                                // Nothing was paid by any candidate: the on-chain
+                                // escrow path (first candidate) is still valid.
                                 eprintln!(
-                                    "[jobs] channel path unavailable ({}) — falling back to on-chain escrow",
-                                    e.reason()
+                                    "[jobs] every channel candidate refused ({}); falling back to on-chain escrow: {}",
+                                    reasons.len(),
+                                    reasons.join("; ")
                                 );
                             }
-                            Err(e) => {
+                            Failover::Ambiguous { reason, attempted } => {
                                 // The assignment may have been accepted: paying
                                 // on-chain too would charge the caller twice.
                                 let r = Response::from_string(
                                     json!({
                                         "ok": false,
-                                        "error": format!("channel settlement failed ambiguously: {}; not retrying on-chain to avoid a double charge", e.reason())
+                                        "error": format!("channel settlement failed ambiguously after {attempted} attempt(s): {reason}; not retrying on-chain to avoid a double charge")
                                     })
                                     .to_string(),
                                 )
@@ -4403,17 +4692,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let (_, msg) = model_resolution_status(&reg, &e);
                                 json!({"ok":false,"error":msg})
                             }
-                            Ok(qmodel) => match pick(
-                                &reg,
-                                0,
-                                0,
-                                0,
-                                0.0,
-                                &qmodel,
-                                pull_penalty_ms,
-                                &rtt_overrides(&route_body),
-                            ) {
-                                Some((p, pull)) => {
+                            Ok(qmodel) => {
+                                // Same shared candidate pipeline as every other AI
+                                // request (item #70).
+                                let needs = RouteNeeds {
+                                    model: qmodel.clone(),
+                                    pull_penalty_ms,
+                                    ..Default::default()
+                                };
+                                let cands = route_candidates(
+                                    &reg,
+                                    JobKind::Text,
+                                    &needs,
+                                    &rtt_overrides(&route_body),
+                                );
+                                match cands.first() {
+                                Some(c) => {
+                                    let p = c.provider.clone();
+                                    let pull = c.needs_pull;
                                     // Client-signed path: the prompt lives only in the
                                     // caller's body. If they included the off-chain job
                                     // (item #14) persist + push it, so a REMOTE provider
@@ -4472,6 +4768,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 None => {
                                     json!({"ok":false,"error":"no compatible provider available"})
+                                }
                                 }
                             },
                         }
@@ -5485,5 +5782,343 @@ mod tests {
         // A missing store is empty, never fatal.
         assert!(collect_leases("/nonexistent/assignments.json", "5Me", 0, 20).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── unified routing + failover (queue item #70) ───────────────────────────
+
+    fn prov_caps(addr: &str, url: &str, latency_ms: u64, model: &str, caps: &[&str]) -> Provider {
+        let mut p = prov(addr, url, latency_ms, model);
+        p.capabilities = caps.iter().map(|c| c.to_string()).collect();
+        p
+    }
+
+    /// A text request and an image request go through the SAME function, and it
+    /// filters on capability per kind: an LLM box is not an image candidate and a
+    /// diffusion box is not a text candidate.
+    #[test]
+    fn every_job_kind_shares_one_candidate_pipeline() {
+        let llm = prov_caps("llm", "http://llm", 10, "llama3.2:1b", &["LLMInference"]);
+        let diff = prov_caps("diff", "http://diff", 10, "", &["ImageGeneration"]);
+        let video = prov_caps("vid", "http://vid", 10, "", &["VideoGeneration"]);
+        let ml = prov_caps("ml", "http://ml", 10, "resnet50", &["MLInference"]);
+        let ft = prov_caps("ft", "http://ft", 10, "llama3.2:1b", &["FineTuning"]);
+        let reg = vec![llm, diff, video, ml, ft];
+
+        let text = route_candidates(
+            &reg,
+            JobKind::Text,
+            &RouteNeeds {
+                model: "llama3.2:1b".into(),
+                ..Default::default()
+            },
+            &RttOverrides::new(),
+        );
+        assert_eq!(text.len(), 1);
+        assert_eq!(text[0].provider.address, "llm");
+        assert!(!text[0].needs_pull);
+
+        for (kind, want, model) in [
+            (JobKind::Image, "diff", "sd-turbo"),
+            (JobKind::Video, "vid", "ltx-video"),
+            (JobKind::Ml, "ml", "resnet50"),
+            (JobKind::Finetune, "ft", "llama3.2:1b"),
+        ] {
+            let needs = RouteNeeds {
+                // Generation ignores the model (it is not in `models[]`); ML and
+                // fine-tune DO match on it, exactly like text.
+                model: if kind.is_generation() { "sd-turbo".into() } else { model.into() },
+                ..Default::default()
+            };
+            let got = route_candidates(&reg, kind, &needs, &RttOverrides::new());
+            assert_eq!(got.len(), 1, "{kind:?} must match exactly one box");
+            assert_eq!(got[0].provider.address, want, "{kind:?} routed to the wrong kind");
+            assert!(!got[0].needs_pull, "generation never needs an Ollama pull");
+        }
+        // An ML job for a model nobody serves is NOT routable (no orphaned
+        // Pending job), even though every box advertises MLInference.
+        let missing = RouteNeeds {
+            model: "resnet152".into(),
+            ..Default::default()
+        };
+        assert!(route_candidates(&reg, JobKind::Ml, &missing, &RttOverrides::new()).is_empty());
+    }
+
+    /// `job_type` + model classification: the native `POST /jobs` path must pick
+    /// the same kind the chat/image facades do.
+    #[test]
+    fn job_type_and_model_classify_to_the_same_kinds() {
+        assert_eq!(JobKind::from_job_type("LLMInference", "llama3.2:1b"), JobKind::Text);
+        assert_eq!(JobKind::from_job_type("ImageGeneration", "sd-turbo"), JobKind::Image);
+        assert_eq!(JobKind::from_job_type("LLMInference", "sd-turbo"), JobKind::Image);
+        assert_eq!(JobKind::from_job_type("VideoGeneration", "ltx-video"), JobKind::Video);
+        assert_eq!(JobKind::from_job_type("LLMInference", "ltx-video"), JobKind::Video);
+        assert_eq!(JobKind::from_job_type("MLInference", "resnet50"), JobKind::Ml);
+        assert_eq!(JobKind::from_job_type("FineTuning", "llama3.2:1b"), JobKind::Finetune);
+    }
+
+    /// Ordering: idle before busy, then RTT-aware latency (the client's own
+    /// measurement wins over the AP-measured value).
+    #[test]
+    fn candidates_are_ordered_idle_first_then_by_client_rtt() {
+        let mut a = prov_caps("a", "http://a", 10, "m", &["LLMInference"]);
+        let mut b = prov_caps("b", "http://b", 50, "m", &["LLMInference"]);
+        let busy = {
+            let mut p = prov_caps("busy", "http://busy", 1, "m", &["LLMInference"]);
+            p.active = 1;
+            p
+        };
+        a.models = vec!["m".into()];
+        b.models = vec!["m".into()];
+        let reg = vec![busy, b.clone(), a.clone()];
+        let needs = RouteNeeds {
+            model: "m".into(),
+            ..Default::default()
+        };
+        let got = route_candidates(&reg, JobKind::Text, &needs, &RttOverrides::new());
+        assert_eq!(
+            got.iter().map(|c| c.provider.address.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b", "busy"],
+            "idle boxes first (by latency), the busy one last"
+        );
+        // The client measured a fast path to `b`: it now outranks `a`.
+        let mut rtt = RttOverrides::new();
+        rtt.insert("b".to_string(), 1);
+        let got2 = route_candidates(&reg, JobKind::Text, &needs, &rtt);
+        assert_eq!(got2[0].provider.address, "b");
+    }
+
+    /// A cold puller is ranked against a ready box by latency + pull cost: on a
+    /// slow link the ready box wins, on a fast one the puller can win.
+    #[test]
+    fn a_puller_only_wins_when_the_download_still_finishes_sooner() {
+        let ready = prov_caps("ready", "http://ready", 100, "m", &["LLMInference"]);
+        let mut puller = prov_caps("puller", "http://puller", 5, "other", &["LLMInference"]);
+        puller.can_pull = true;
+        let reg = vec![ready, puller];
+        let needs = |penalty| RouteNeeds {
+            model: "m".into(),
+            pull_penalty_ms: penalty,
+            ..Default::default()
+        };
+        let cheap = route_candidates(&reg, JobKind::Text, &needs(10), &RttOverrides::new());
+        assert_eq!(cheap[0].provider.address, "puller");
+        assert!(cheap[0].needs_pull);
+        let expensive =
+            route_candidates(&reg, JobKind::Text, &needs(120_000), &RttOverrides::new());
+        assert_eq!(expensive[0].provider.address, "ready");
+        assert!(!expensive[0].needs_pull);
+    }
+
+    /// Hardware gates: VRAM floor, model-fits-VRAM, and gflops — all applied to
+    /// EVERY kind, not just text.
+    #[test]
+    fn every_kind_honours_the_vram_and_gflops_gates() {
+        let mut small = prov_caps("small", "http://s", 1, "ltx-video", &["VideoGeneration"]);
+        small.vram_mb = 8188;
+        let mut big = prov_caps("big", "http://b", 90, "ltx-video", &["VideoGeneration"]);
+        big.vram_mb = 24576;
+        let reg = vec![small, big];
+        let needs = RouteNeeds {
+            model: "ltx-video".into(),
+            min_vram_mb: 16000,
+            ..Default::default()
+        };
+        let got = route_candidates(&reg, JobKind::Video, &needs, &RttOverrides::new());
+        assert_eq!(got.len(), 1, "the 8 GB box must be excluded for a video job");
+        assert_eq!(got[0].provider.address, "big");
+
+        // min_gflops is a floor, applied per kind.
+        let weak = prov_caps("weak", "http://w", 1, "", &["ImageGeneration"]);
+        let mut weak = weak;
+        weak.gflops = 10_000;
+        let strong = prov_caps("strong", "http://st", 99, "", &["ImageGeneration"]);
+        let reg2 = vec![weak, strong];
+        let needs2 = RouteNeeds {
+            min_gflops: 20_000,
+            ..Default::default()
+        };
+        let got2 = route_candidates(&reg2, JobKind::Image, &needs2, &RttOverrides::new());
+        assert_eq!(got2.len(), 1);
+        assert_eq!(got2[0].provider.address, "strong");
+    }
+
+    /// A provider that cannot receive work (stale pull poll) or that is not
+    /// healthy (`last_seen` cleared by a failed /status poll) is not a candidate.
+    #[test]
+    fn unhealthy_and_undeliverable_providers_are_not_candidates() {
+        let mut stale_pull = prov_caps("stale-pull", "http://sp", 1, "m", &["LLMInference"]);
+        stale_pull.pulled_seen = Some(Instant::now() - Duration::from_secs(POLL_CAPS_TTL_SECS + 1));
+        let mut never_pulled = prov_caps("never-pull", "http://np", 1, "m", &["LLMInference"]);
+        never_pulled.pulled_seen = None;
+        let mut dead = prov_caps("dead", "http://d", 1, "m", &["LLMInference"]);
+        dead.last_seen = None;
+        let reg = vec![stale_pull, never_pulled, dead];
+        let needs = RouteNeeds {
+            model: "m".into(),
+            ..Default::default()
+        };
+        assert!(route_candidates(&reg, JobKind::Text, &needs, &RttOverrides::new()).is_empty());
+    }
+
+    /// Free capacity is preferred; when NO box has any, busy boxes are still
+    /// returned so the job queues instead of being refused.
+    #[test]
+    fn free_capacity_is_preferred_but_a_busy_fleet_still_queues() {
+        let mut busy = prov_caps("busy", "http://busy", 1, "m", &["LLMInference"]);
+        busy.active = 1;
+        busy.capacity = 1; // one GPU = one job: a running job means no free slot
+        let idle = prov_caps("idle", "http://idle", 300, "m", &["LLMInference"]);
+        let needs = RouteNeeds {
+            model: "m".into(),
+            ..Default::default()
+        };
+        let got = route_candidates(&[busy.clone(), idle], JobKind::Text, &needs, &RttOverrides::new());
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].provider.address, "idle");
+        let only_busy = route_candidates(&[busy], JobKind::Text, &needs, &RttOverrides::new());
+        assert_eq!(only_busy.len(), 1, "a busy fleet queues, it does not 503");
+    }
+
+    /// Item #70 failover: a `NotAttempted` refusal moves to the NEXT provider —
+    /// here an image is served by the second box after the first refuses
+    /// (no diffusion endpoint / provider-signed refund).
+    #[test]
+    fn a_refusal_moves_to_the_next_candidate_and_the_second_provider_serves() {
+        use gpn_agent::hub_ap::ChannelFail;
+        let first = prov_caps("first", "http://first", 1, "sd-turbo", &["ImageGeneration"]);
+        let second = prov_caps("second", "http://second", 50, "sd-turbo", &["ImageGeneration"]);
+        let cands = route_candidates(
+            &[first, second],
+            JobKind::Image,
+            &RouteNeeds {
+                model: "sd-turbo".into(),
+                ..Default::default()
+            },
+            &RttOverrides::new(),
+        );
+        assert_eq!(cands[0].provider.address, "first");
+        let mut tried = Vec::new();
+        let out = failover("test-image", &cands, |p| {
+            tried.push(p.address.clone());
+            if p.address == "first" {
+                Err(ChannelFail::NotAttempted(
+                    "provider refunded the assignment".into(),
+                ))
+            } else {
+                Ok(p.address.clone())
+            }
+        });
+        match out {
+            Failover::Served { value, provider, attempted, .. } => {
+                assert_eq!(value, "second");
+                assert_eq!(provider.address, "second");
+                assert_eq!(attempted, 2);
+            }
+            other => panic!("expected the second provider to serve, got {other:?}"),
+        }
+        assert_eq!(tried, vec!["first", "second"]);
+    }
+
+    /// An `Ambiguous` failure (5xx / unverifiable 200) STOPS the walk: the
+    /// provider may hold a pre-signed settle, so a retry could double-charge.
+    #[test]
+    fn an_ambiguous_failure_never_fails_over() {
+        use gpn_agent::hub_ap::ChannelFail;
+        let a = prov_caps("a", "http://a", 1, "m", &["LLMInference"]);
+        let b = prov_caps("b", "http://b", 2, "m", &["LLMInference"]);
+        let cands = route_candidates(
+            &[a, b],
+            JobKind::Text,
+            &RouteNeeds {
+                model: "m".into(),
+                ..Default::default()
+            },
+            &RttOverrides::new(),
+        );
+        let mut tried = Vec::new();
+        let out: Failover<String> = failover("test-text", &cands, |p| {
+            tried.push(p.address.clone());
+            Err(ChannelFail::Ambiguous("500 after the assignment was signed".into()))
+        });
+        assert_eq!(tried, vec!["a"], "must not touch the second provider");
+        match out {
+            Failover::Ambiguous { reason, attempted } => {
+                assert_eq!(attempted, 1);
+                assert!(reason.contains("500"));
+            }
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+    }
+
+    /// Exhaustion is a 503 that names a reason for EVERY candidate, and the walk
+    /// stops after `MAX_ROUTE_ATTEMPTS` (never an unbounded retry storm).
+    #[test]
+    fn exhaustion_reports_every_candidate_reason_and_caps_attempts() {
+        use gpn_agent::hub_ap::ChannelFail;
+        let reg: Vec<Provider> = (0..5)
+            .map(|i| prov_caps(&format!("p{i}"), &format!("http://p{i}"), i as u64, "m", &["LLMInference"]))
+            .collect();
+        let cands = route_candidates(
+            &reg,
+            JobKind::Text,
+            &RouteNeeds {
+                model: "m".into(),
+                ..Default::default()
+            },
+            &RttOverrides::new(),
+        );
+        assert_eq!(cands.len(), 5);
+        let mut tried = 0;
+        let out: Failover<String> = failover("test-exhaust", &cands, |p| {
+            tried += 1;
+            Err(ChannelFail::NotAttempted(format!("{} is down", p.address)))
+        });
+        assert_eq!(tried, MAX_ROUTE_ATTEMPTS, "at most {MAX_ROUTE_ATTEMPTS} attempts");
+        let reasons = match out {
+            Failover::Exhausted { reasons } => reasons,
+            other => panic!("expected Exhausted, got {other:?}"),
+        };
+        assert_eq!(reasons.len(), MAX_ROUTE_ATTEMPTS);
+        assert!(reasons[0].starts_with("p0: "));
+        assert!(reasons[1].starts_with("p1: "));
+        let body = exhaustion_json(JobKind::Image, &reasons);
+        assert_eq!(body["error"]["type"], "gpn_unavailable");
+        assert_eq!(body["error"]["candidates"].as_array().unwrap().len(), MAX_ROUTE_ATTEMPTS);
+        assert!(body["error"]["message"].as_str().unwrap().contains("image"));
+    }
+
+    /// The text facade and the image facade use the same `route_candidates`, so
+    /// the ordering rules cannot drift apart again.
+    #[test]
+    fn text_and_image_share_the_same_pipeline() {
+        let mut llm = prov_caps("llm", "http://llm", 5, "llama3.2:1b", &["LLMInference"]);
+        llm.models = vec!["llama3.2:1b".into()];
+        let diff = prov_caps("diff", "http://diff", 5, "", &["ImageGeneration"]);
+        let reg = vec![llm, diff];
+        let text = pick(&reg, 0, 0, 0, 0.0, "llama3.2:1b", 0, &RttOverrides::new());
+        let img = route_candidates(
+            &reg,
+            JobKind::Image,
+            &RouteNeeds {
+                model: "sd-turbo".into(),
+                ..Default::default()
+            },
+            &RttOverrides::new(),
+        );
+        assert_eq!(text.unwrap().0.address, "llm");
+        assert_eq!(img[0].provider.address, "diff");
+        // Same filter set: strip the diffusion capability and nothing is left.
+        let mut no_cap = reg.clone();
+        no_cap[1].capabilities.clear();
+        assert!(route_candidates(
+            &no_cap,
+            JobKind::Image,
+            &RouteNeeds {
+                model: "sd-turbo".into(),
+                ..Default::default()
+            },
+            &RttOverrides::new()
+        )
+        .is_empty());
     }
 }
