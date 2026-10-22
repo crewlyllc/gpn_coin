@@ -753,6 +753,10 @@ pub struct ProposalEntry {
     /// Length of the encoded `RuntimeCall` prefix of the entry (`blake2_256`
     /// of exactly these bytes is the proposal id, for inline proposals).
     pub call_len: usize,
+    /// True when the entry was stored by the pre-spec-42 runtime (storage
+    /// version 0), which had no leading `ProposalCall` variant byte. The call
+    /// then starts at offset 0 and `blake2_256(raw[0..call_len])` is the id.
+    pub legacy: bool,
 }
 
 impl ProposalEntry {
@@ -770,20 +774,33 @@ impl ProposalEntry {
 ///  * preimage:  `hash: [u8;32]` ++ `len: u32 (LE)`
 /// ++ `approvals: Vec<AccountId32>` (compact len + 32·n) ++ `created_at: u32`.
 ///
-/// Version 0 (pre-hardening) had no variant byte; those entries are rejected
-/// with a clear message — after the spec-42 migration they are re-encoded.
+/// Version 0 (pre-spec-42, i.e. everything up to and including the live
+/// spec-41 chain) had **no** variant byte: the entry starts directly with the
+/// `RuntimeCall`, and the proposal id is `blake2_256(raw[0..call_len])`. Since
+/// a v0 entry whose call is `System.set_code` starts with `0x00 0x02`, a v1
+/// parse of those bytes lands on pallet `#2` (garbage). So: try v1 first, and
+/// fall back to v0 when the v1 reading is not a `System` call. That keeps the
+/// first governed upgrade (which must run *on* the v0 chain) verifiable.
+///
 /// Only system calls whose args we can bound are decoded; anything else returns
 /// an error so the caller can fall back to showing the raw length.
 pub fn parse_proposal_entry(b: &[u8]) -> Result<ProposalEntry, String> {
     if b.is_empty() {
         return Err("proposal entry empty".into());
     }
-    match b[0] {
-        0 => parse_inline_entry(b),
+    let v1 = match b[0] {
+        0 => parse_inline_entry(b, 1, false),
         1 => parse_preimage_entry(b),
         other => Err(format!(
             "unknown ProposalCall variant 0x{other:02x} (expected 0x00 inline or 0x01 preimage)"
         )),
+    };
+    match v1 {
+        Ok(e) if e.kind == ProposalKind::Preimage || e.pallet_index == 0 => Ok(e),
+        Ok(_) => parse_inline_entry(b, 0, true)
+            .map_err(|e| format!("not a spec-42 inline entry, and not a spec-41 (v0) entry: {e}")),
+        Err(v1err) => parse_inline_entry(b, 0, true)
+            .map_err(|e| format!("{v1err} (nor a spec-41/v0 entry: {e})")),
     }
 }
 
@@ -820,15 +837,18 @@ fn parse_preimage_entry(b: &[u8]) -> Result<ProposalEntry, String> {
         approvals,
         created_at,
         call_len: 0,
+        legacy: false,
     })
 }
 
-fn parse_inline_entry(b: &[u8]) -> Result<ProposalEntry, String> {
-    if b.len() < 3 {
+/// `skip` is 1 for storage version 1 (one `ProposalCall` variant byte) and 0
+/// for the pre-spec-42 layout (call at offset 0).
+fn parse_inline_entry(b: &[u8], skip: usize, legacy: bool) -> Result<ProposalEntry, String> {
+    if b.len() < skip + 2 {
         return Err("proposal entry too short".into());
     }
-    let pallet_index = b[1];
-    let call_index = b[2];
+    let pallet_index = b[skip];
+    let call_index = b[skip + 1];
     if pallet_index != 0 {
         return Err(format!(
             "proposal dispatches pallet #{pallet_index}, call #{call_index} — only System calls \
@@ -840,7 +860,7 @@ fn parse_inline_entry(b: &[u8]) -> Result<ProposalEntry, String> {
         SYSTEM_SET_CODE_WITHOUT_CHECKS_INDEX => "System.set_code_without_checks",
         _ => "System.<other>",
     };
-    let mut i = 3usize;
+    let mut i = skip + 2;
     let code = if matches!(
         call_index,
         SYSTEM_SET_CODE_INDEX | SYSTEM_SET_CODE_WITHOUT_CHECKS_INDEX
@@ -856,9 +876,9 @@ fn parse_inline_entry(b: &[u8]) -> Result<ProposalEntry, String> {
         None
     };
 
-    // `call_len` excludes the leading variant byte: the proposal id is
-    // `blake2_256(SCALE(RuntimeCall))`.
-    let call_len = i - 1;
+    // `call_len` is the length of the encoded `RuntimeCall` alone (no variant
+    // byte): the proposal id is `blake2_256(SCALE(RuntimeCall))`.
+    let call_len = i - skip;
     if i >= b.len() {
         return Err("proposal approvals missing".into());
     }
@@ -884,6 +904,7 @@ fn parse_inline_entry(b: &[u8]) -> Result<ProposalEntry, String> {
         approvals,
         created_at,
         call_len,
+        legacy,
     })
 }
 
@@ -909,8 +930,12 @@ pub fn preimage_proposal_id(hash: [u8; 32], len: u32) -> [u8; 32] {
 pub fn proposal_hash_from_entry(raw: &[u8]) -> Result<[u8; 32], String> {
     let e = parse_proposal_entry(raw)?;
     Ok(match e.kind {
-        // `raw[0]` is the ProposalCall variant byte.
-        ProposalKind::Inline => blake2_256(&raw[1..1 + e.call_len]),
+        // v1: `raw[0]` is the ProposalCall variant byte, the call follows it.
+        // v0 (spec 41 and earlier): there is no variant byte; the call is raw[0..].
+        ProposalKind::Inline => {
+            let start = if e.legacy { 0 } else { 1 };
+            blake2_256(&raw[start..start + e.call_len])
+        }
         ProposalKind::Preimage => {
             let (hash, len) = e.preimage.expect("preimage entries carry hash+len; qed");
             preimage_proposal_id(hash, len)
@@ -1350,6 +1375,53 @@ mod tests {
         let p = parse_proposal_entry(&b).unwrap();
         assert_eq!(p.call_name, "System.set_code_without_checks");
         assert_eq!(p.approvals, 1);
+    }
+
+    /// Storage version 0 (everything up to and including the live spec-41
+    /// chain): `RuntimeCall` ++ `approvals` ++ `created_at`, **no** variant
+    /// byte. This is the shape the first governed upgrade must decode.
+    fn legacy_proposal_bytes(code: &[u8], approvals: u32, created_at: u32) -> Vec<u8> {
+        let mut b = vec![0u8, SYSTEM_SET_CODE_INDEX];
+        assert!(code.len() < 64);
+        b.push((code.len() as u8) << 2);
+        b.extend_from_slice(code);
+        b.push((approvals as u8) << 2);
+        b.extend(std::iter::repeat(3u8).take(32 * approvals as usize));
+        b.extend_from_slice(&created_at.to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn proposal_entry_parses_pre_spec42_legacy_layout() {
+        let code = b"\0asm\x01\0\0\0-legacy";
+        let b = legacy_proposal_bytes(code, 2, 175_172);
+        let p = parse_proposal_entry(&b).unwrap();
+        assert!(p.legacy, "v0 entry must be flagged legacy");
+        assert_eq!(p.call_name, "System.set_code");
+        assert_eq!(p.code.as_deref(), Some(&code[..]));
+        assert_eq!(p.code_hash(), Some(blake2_256(code)));
+        assert_eq!(p.approvals, 2);
+        assert_eq!(p.created_at, 175_172);
+        assert_eq!(p.call_len, 2 + 1 + code.len());
+        // The id is blake2_256 of the call alone, which starts at offset 0.
+        assert_eq!(
+            proposal_hash_from_entry(&b).unwrap(),
+            blake2_256(&b[..p.call_len])
+        );
+    }
+
+    #[test]
+    fn proposal_entry_prefers_v1_when_both_could_parse() {
+        // A v1 inline entry: 0x00 tag, System.set_code, code, approvals, at.
+        let code = b"\0asm\x01\0\0\0";
+        let v1 = proposal_bytes(code, 1, 10);
+        let p = parse_proposal_entry(&v1).unwrap();
+        assert!(!p.legacy);
+        assert_eq!(p.created_at, 10);
+        assert_eq!(
+            proposal_hash_from_entry(&v1).unwrap(),
+            blake2_256(&v1[1..1 + p.call_len])
+        );
     }
 
     fn preimage_bytes(hash: [u8; 32], len: u32, approvals: u32, created_at: u32) -> Vec<u8> {
