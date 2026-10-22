@@ -83,6 +83,7 @@ struct ChannelStore {
     artifacts: BTreeMap<u64, StoredArtifact>,
 }
 
+#[derive(Clone)]
 struct ChannelCtx {
     me: PubKey,
     me_hex: String,
@@ -143,17 +144,22 @@ fn render_image(
     let script = diffuse_script();
     let timeout = diffuse_timeout("image");
     let req_file2 = req_file.clone();
-    let res = {
-        // One GPU = one job: the co-located miner fully stops while the flag is
-        // held, and resumes the instant it drops.
-        let _yield = gpn_agent::gpu_yield::GpuYieldGuard::acquire();
-        let mut cmd = std::process::Command::new("python3");
-        cmd.arg(&script).arg(&req_file2);
-        run_with_watchdog(cmd, timeout, &format!("channel job {job_id}"))
-            .and_then(|(stdout, _)| {
-                serde_json::from_str(&stdout)
-                    .map_err(|e| format!("bad helper output: {e} ({stdout})"))
-            })
+    let res = match gpn_agent::gpu_yield::GpuYieldGuard::acquire() {
+        Err(e) => Err(e.to_string()),
+        Ok(_yield) => {
+            // One GPU = one job: the co-located miner fully stops while the
+            // flag is held, and resumes the instant it drops. `acquire` is a
+            // real cross-process lock, so a chat job in
+            // gpn_llm_provider makes this render WAIT instead of fighting it
+            // for VRAM.
+            let mut cmd = std::process::Command::new("python3");
+            cmd.arg(&script).arg(&req_file2);
+            run_with_watchdog(cmd, timeout, &format!("channel job {job_id}"))
+                .and_then(|(stdout, _)| {
+                    serde_json::from_str(&stdout)
+                        .map_err(|e| format!("bad helper output: {e} ({stdout})"))
+                })
+        }
     };
     let _ = std::fs::remove_file(&req_file);
     res
@@ -335,6 +341,13 @@ fn serve_artifact(ctx: &ChannelCtx, job_id: u64, token: &str) -> Option<(Vec<u8>
 }
 
 /// Tiny HTTP server for the provider half of the channel protocol.
+///
+/// One thread per request: a render (and, since the cross-process GPU lock, a
+/// *wait* for another provider using the GPU) must never make
+/// `GET /channel/status` — the AP's liveness probe — or an artifact download
+/// time out. Before this, a 30-60 s render made the box look offline, so the AP
+/// refused new image jobs with "no diffusion provider serves the channel render
+/// endpoint" instead of letting them queue.
 fn spawn_channel_server(listen: &str, ctx: ChannelCtx) {
     let listen = listen.to_string();
     std::thread::spawn(move || {
@@ -348,89 +361,89 @@ fn spawn_channel_server(listen: &str, ctx: ChannelCtx) {
         println!(
             "[channel] diffusion channel endpoint on http://{listen} (POST /channel/job, GET /channel/artifact/{{id}})"
         );
-        let json_hdr =
-            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
-        for mut req in server.incoming_requests() {
-            // Loopback only: the AP submits signed assignments from this box.
-            // A public bind would need the on-chain channel check the LLM
-            // provider does before accepting a first-sight channel id.
-            let loopback = req
-                .remote_addr()
-                .map(|a| a.ip().is_loopback())
-                .unwrap_or(false);
-            if !loopback {
-                let _ = req.respond(
-                    tiny_http::Response::from_string(
-                        json!({"ok": false, "error": "loopback only"}).to_string(),
-                    )
-                    .with_header(json_hdr.clone())
-                    .with_status_code(403),
-                );
-                continue;
-            }
-            let url = req.url().to_string();
-            let path = url.split('?').next().unwrap_or("").to_string();
-            if req.method() == &tiny_http::Method::Get && path == "/channel/status" {
-                let store = load_channels(&ctx.state_path);
-                let ids: Vec<u64> = store.channels.keys().copied().collect();
-                let body = json!({
-                    "ok": true,
-                    "channel": true,
-                    "kinds": ["image"],
-                    "provider": ctx.me_hex,
-                    "channels": ids,
-                });
-                let _ = req.respond(
-                    tiny_http::Response::from_string(body.to_string()).with_header(json_hdr.clone()),
-                );
-                continue;
-            }
-            if req.method() == &tiny_http::Method::Post && path == "/channel/job" {
-                let mut body = String::new();
-                let _ = req.as_reader().read_to_string(&mut body);
-                let (code, resp) = serve_channel_job(&ctx, &body);
-                let _ = req.respond(
-                    tiny_http::Response::from_string(resp.to_string())
-                        .with_header(json_hdr.clone())
-                        .with_status_code(code),
-                );
-                continue;
-            }
-            if req.method() == &tiny_http::Method::Get && path.starts_with("/channel/artifact/") {
-                let id = path.trim_start_matches("/channel/artifact/");
-                let job_id: u64 = id.parse().unwrap_or(0);
-                let token = url
-                    .split_once('?')
-                    .and_then(|(_, q)| {
-                        q.split('&')
-                            .find_map(|kv| kv.strip_prefix("t=").map(|v| v.to_string()))
-                    })
-                    .unwrap_or_default();
-                match serve_artifact(&ctx, job_id, &token) {
-                    Some((bytes, mt)) => {
-                        let ct = tiny_http::Header::from_bytes(&b"Content-Type"[..], mt.as_bytes())
-                            .unwrap_or(json_hdr.clone());
-                        let _ = req.respond(
-                            tiny_http::Response::from_data(bytes).with_header(ct),
-                        );
-                    }
-                    None => {
-                        let _ = req.respond(
-                            tiny_http::Response::from_string(
-                                json!({"ok": false, "error": "no such artifact"}).to_string(),
-                            )
-                            .with_header(json_hdr.clone())
-                            .with_status_code(404),
-                        );
-                    }
-                }
-                continue;
-            }
-            let _ = req.respond(
-                tiny_http::Response::from_string("not found").with_status_code(404),
-            );
+        for req in server.incoming_requests() {
+            let ctx = ctx.clone();
+            std::thread::spawn(move || handle_channel_request(req, &ctx));
         }
     });
+}
+
+fn handle_channel_request(mut req: tiny_http::Request, ctx: &ChannelCtx) {
+    let json_hdr = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
+    // Loopback only: the AP submits signed assignments from this box.
+    // A public bind would need the on-chain channel check the LLM
+    // provider does before accepting a first-sight channel id.
+    let loopback = req
+        .remote_addr()
+        .map(|a| a.ip().is_loopback())
+        .unwrap_or(false);
+    if !loopback {
+        let _ = req.respond(
+            tiny_http::Response::from_string(
+                json!({"ok": false, "error": "loopback only"}).to_string(),
+            )
+            .with_header(json_hdr)
+            .with_status_code(403),
+        );
+        return;
+    }
+    let url = req.url().to_string();
+    let path = url.split('?').next().unwrap_or("").to_string();
+    if req.method() == &tiny_http::Method::Get && path == "/channel/status" {
+        let store = load_channels(&ctx.state_path);
+        let ids: Vec<u64> = store.channels.keys().copied().collect();
+        let body = json!({
+            "ok": true,
+            "channel": true,
+            "kinds": ["image"],
+            "provider": ctx.me_hex,
+            "channels": ids,
+        });
+        let _ = req.respond(
+            tiny_http::Response::from_string(body.to_string()).with_header(json_hdr),
+        );
+        return;
+    }
+    if req.method() == &tiny_http::Method::Post && path == "/channel/job" {
+        let mut body = String::new();
+        let _ = req.as_reader().read_to_string(&mut body);
+        let (code, resp) = serve_channel_job(ctx, &body);
+        let _ = req.respond(
+            tiny_http::Response::from_string(resp.to_string())
+                .with_header(json_hdr)
+                .with_status_code(code),
+        );
+        return;
+    }
+    if req.method() == &tiny_http::Method::Get && path.starts_with("/channel/artifact/") {
+        let id = path.trim_start_matches("/channel/artifact/");
+        let job_id: u64 = id.parse().unwrap_or(0);
+        let token = url
+            .split_once('?')
+            .and_then(|(_, q)| {
+                q.split('&')
+                    .find_map(|kv| kv.strip_prefix("t=").map(|v| v.to_string()))
+            })
+            .unwrap_or_default();
+        match serve_artifact(ctx, job_id, &token) {
+            Some((bytes, mt)) => {
+                let ct = tiny_http::Header::from_bytes(&b"Content-Type"[..], mt.as_bytes())
+                    .unwrap_or(json_hdr);
+                let _ = req.respond(tiny_http::Response::from_data(bytes).with_header(ct));
+            }
+            None => {
+                let _ = req.respond(
+                    tiny_http::Response::from_string(
+                        json!({"ok": false, "error": "no such artifact"}).to_string(),
+                    )
+                    .with_header(json_hdr)
+                    .with_status_code(404),
+                );
+            }
+        }
+        return;
+    }
+    let _ = req.respond(tiny_http::Response::from_string("not found").with_status_code(404));
 }
 
 #[tokio::main]
@@ -1080,8 +1093,11 @@ async fn run_job(
     let timeout = diffuse_timeout(&job.kind);
     let req_file2 = req_file.clone();
     let out_res = {
-        let _yield = gpn_agent::gpu_yield::GpuYieldGuard::acquire();
+        // Acquire INSIDE the blocking task: the wait can be long (up to
+        // GPN_GPU_LOCK_TIMEOUT_SECS) and must not park an async worker.
         tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+            let _yield = gpn_agent::gpu_yield::GpuYieldGuard::acquire()
+                .map_err(|e| e.to_string())?;
             let mut cmd = std::process::Command::new("python3");
             cmd.arg(&script).arg(&req_file2);
             let (stdout, _stderr) = run_with_watchdog(cmd, timeout, &format!("job {id}"))?;

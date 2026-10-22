@@ -408,11 +408,21 @@ fn spawn_infer_server(listen: &str, chan: Option<ChannelServeCtx>) {
             let temp = v.get("temperature").and_then(|x| x.as_f64()).unwrap_or(0.7) as f32;
             let max_tokens = v.get("max_tokens").and_then(|x| x.as_u64()).unwrap_or(256) as u32;
             let model_r = resolve_model(model);
-            let resp = match rt.block_on(run_inference(&model_r, prompt, temp, max_tokens)) {
-                Ok((text, _hash)) => {
-                    serde_json::json!({"ok": true, "text": text, "model": model_r})
-                }
+            // One GPU = one job, on this path too: the passthrough `/infer`
+            // endpoint drives the same GPU as the chain/channel lanes and as
+            // gpn_diffusion_provider, so it must take the same cross-process
+            // lock. (It did NOT before 2026-10-22 — a direct /infer call during
+            // a render collided in VRAM just like chat did.)
+            let resp = match gpn_agent::gpu_yield::GpuYieldGuard::acquire() {
                 Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}),
+                Ok(_yield) => {
+                    match rt.block_on(run_inference(&model_r, prompt, temp, max_tokens)) {
+                        Ok((text, _hash)) => {
+                            serde_json::json!({"ok": true, "text": text, "model": model_r})
+                        }
+                        Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}),
+                    }
+                }
             };
             let hdr = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
                 .unwrap();
@@ -2331,8 +2341,43 @@ async fn run_job(
     // would starve block production on a single-authority chain and deadlock the
     // provider (chain halt). No GPU is used during settlement, so releasing here
     // loses nothing.
+    // Take the cross-process GPU lock BEFORE touching the model. This is a
+    // real mutex since 2026-10-22: a concurrent image render in
+    // gpn_diffusion_provider (same box, different process) now makes us WAIT
+    // for the GPU instead of colliding with it in VRAM. The blocking acquire
+    // runs off the async runtime so a long wait cannot stall other tasks.
+    let gpu = match tokio::task::spawn_blocking(gpn_agent::gpu_yield::GpuYieldGuard::acquire)
+        .await
+    {
+        Ok(Ok(g)) => g,
+        Ok(Err(e)) => {
+            // Timed out waiting: fail the job loudly so the requestor is
+            // refunded and the capacity slot frees. Never run concurrently.
+            let msg = e.to_string();
+            eprintln!("[job {id}] {msg}");
+            let _ = LlmStore::new().set_error(id, &msg);
+            return_result(id);
+            let r = if fast {
+                client.fail_job_fast(id, 1).await
+            } else {
+                client.fail_job(id, 1).await
+            };
+            match r {
+                Ok(()) => println!("[job {id}] failed on-chain — GPU busy, escrow refunded"),
+                Err(er) => eprintln!("[job {id}] fail_job (gpu busy) failed: {er}"),
+            }
+            return Ok(());
+        }
+        Err(join_err) => {
+            let msg = format!("GPU lock task failed: {join_err}");
+            eprintln!("[job {id}] {msg}");
+            let _ = LlmStore::new().set_error(id, &msg);
+            return_result(id);
+            return Ok(());
+        }
+    };
     let result = {
-        let _yield = gpn_agent::gpu_yield::GpuYieldGuard::acquire();
+        let _yield = gpu;
         run_inference_with_usage(&model, &job.prompt, job.temperature, job.max_tokens).await
     };
     match result {
