@@ -718,6 +718,114 @@ mod tests {
         assert!((units as f64 - 2.529e6).abs() < 2_000.0, "units {units}");
     }
 
+    // ── diffusion (image/video) pricing ────────────────────────────────────
+
+    fn img(cfg: &PricingConfig, w: f64, h: f64, steps: f64) -> f64 {
+        cfg.diffusion_price_usd(w, h, steps, 1.0, 3.0, 0.65)
+    }
+
+    #[test]
+    fn diffusion_seconds_reproduce_the_measured_renders() {
+        let c = throughput();
+        // The four timings the constants were fitted to (±3.5 s = fit residual).
+        let pts = [
+            (512.0, 8.0, 28.88),
+            (512.0, 20.0, 36.54),
+            (768.0, 12.0, 35.68),
+            (1024.0, 20.0, 44.72),
+        ];
+        for (px, steps, measured) in pts {
+            let est = c.diffusion_seconds(px, px, steps, 1.0);
+            assert!(
+                (est - measured).abs() < 3.5,
+                "{px}²×{steps}: fitted {est:.2}s vs measured {measured}s"
+            );
+        }
+        // Video pays the bigger load and the per-frame factor.
+        let vid = c.diffusion_seconds(512.0, 512.0, 30.0, 16.0);
+        assert!(vid > 400.0 && vid < 500.0, "video estimate {vid}");
+        assert!(vid > c.diffusion_seconds(512.0, 512.0, 30.0, 1.0) * 10.0);
+    }
+
+    #[test]
+    fn image_price_at_the_two_reference_points() {
+        let c = throughput();
+        // 512²/8: 31.53 s × $0.10/hr × 1.30 / 3600 = $0.001139
+        let p512 = img(&c, 512.0, 512.0, 8.0);
+        assert!((p512 - 0.001139).abs() < 2e-6, "512²/8 = ${p512}");
+        // 1024²/20: 45.31 s → $0.001636
+        let p1024 = img(&c, 1024.0, 1024.0, 20.0);
+        assert!((p1024 - 0.001636).abs() < 2e-6, "1024²/20 = ${p1024}");
+        // ~1/122 of the legacy $0.1385 the old market model charged — the point
+        // of the change: one curve, not two anchors.
+        let legacy = c.legacy_image_price_usd(512.0, 512.0, 8.0, 1.0, 3.0, 0.65);
+        assert!((legacy - 0.1385).abs() < 1e-3, "legacy ${legacy}");
+        assert!(p512 < legacy / 100.0);
+    }
+
+    #[test]
+    fn image_price_is_gpu_independent() {
+        // The buyer's price is computed from the ANCHOR card, so it cannot move
+        // with the serving card. Assert on the provider side too: the per-job
+        // USD a card earns is the same for every card, while $/hour is not.
+        let c = throughput();
+        let buyer = img(&c, 512.0, 512.0, 8.0);
+        for g in reference_gpus() {
+            let rate = c.provider_rate_hr(g.gflops, g.mem_bw_gbps, 1.0);
+            let earn = c.diffusion_provider_earn_usd(512.0, 512.0, 8.0, 1.0, rate);
+            assert!((earn - buyer / (1.0 + c.margin_frac())).abs() < 1e-12, "{} earns {earn}", g.name);
+            // Faster card ⇒ fewer GPU-seconds for the same job (never more).
+            let secs = c.diffusion_provider_seconds(512.0, 512.0, 8.0, 1.0, rate);
+            assert!(secs > 0.0 && secs <= c.diffusion_seconds(512.0, 512.0, 8.0, 1.0) + 1e-9);
+        }
+        // Hourly earning still separates the cards.
+        let r4060 = c.provider_rate_hr(15_000.0, 272.0, 1.0);
+        let r4090 = c.provider_rate_hr(82_600.0, 1008.0, 1.0);
+        assert!(r4090 > r4060 * 3.0);
+    }
+
+    #[test]
+    fn image_price_moves_with_anchor_and_token_price() {
+        let cheap = PricingConfig::new(PricingModel::Throughput, 0.05, 3000);
+        let rich = PricingConfig::new(PricingModel::Throughput, 0.10, 3000);
+        assert!((img(&rich, 512.0, 512.0, 8.0) - 2.0 * img(&cheap, 512.0, 512.0, 8.0)).abs() < 1e-12);
+        // GPN amount is the USD price ÷ token price, so a 2× token price halves it.
+        let g1 = rich.diffusion_price_gpn(512.0, 512.0, 8.0, 1.0, 0.15, 3.0, 0.65);
+        let g2 = rich.diffusion_price_gpn(512.0, 512.0, 8.0, 1.0, 0.30, 3.0, 0.65);
+        assert!((g1 - 2.0 * g2).abs() < 1e-9, "{g1} vs {g2}");
+        assert!(g1 > 0.0);
+    }
+
+    #[test]
+    fn more_steps_never_costs_less() {
+        let c = throughput();
+        let mut prev = 0.0;
+        for steps in [1.0, 2.0, 4.0, 8.0, 12.0, 20.0, 50.0] {
+            let p = img(&c, 512.0, 512.0, steps);
+            assert!(p > prev, "steps {steps}: {p} <= {prev}");
+            prev = p;
+        }
+        // And bigger images cost more than smaller ones at equal steps.
+        assert!(img(&c, 1024.0, 1024.0, 8.0) > img(&c, 512.0, 512.0, 8.0));
+    }
+
+    #[test]
+    fn market_model_reproduces_the_legacy_image_price() {
+        let m = PricingConfig::new(PricingModel::Market, 0.10, 3000);
+        // Same number the old `image_price_gpn()` produced: 90 s at 512²/8,
+        // $3.00/hr oracle market, util 0.65, +20% margin → $0.13846.
+        let p = m.diffusion_price_usd(512.0, 512.0, 8.0, 1.0, 3.0, 0.65);
+        assert!((p - 0.138462).abs() < 1e-5, "legacy market image price ${p}");
+        // Throughput ignores the market inputs entirely.
+        let t = throughput();
+        assert!(
+            (t.diffusion_price_usd(512.0, 512.0, 8.0, 1.0, 999.0, 0.05)
+                - img(&t, 512.0, 512.0, 8.0))
+                .abs()
+                < 1e-15
+        );
+    }
+
     #[test]
     fn prompt_estimate_and_param_parsing() {
         assert_eq!(estimate_prompt_tokens(""), 1);
