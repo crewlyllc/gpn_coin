@@ -525,11 +525,29 @@ pub struct EarningRow {
     pub below_owner_cost: bool,
 }
 
+/// Chat-template tokens the provider's tokenizer counts but the raw prompt
+/// text does not contain (role framing, `<|start_header_id|>` markers, ...).
+///
+/// Measured against `llama3.2:1b` on this box: `"Hi"` (1 text token by the
+/// 4-chars/token rule) is reported by the backend as **31** prompt tokens, and
+/// `"Say hello."` (3) as **32** — i.e. ~30 tokens of framing. 32 leaves a
+/// little headroom.
+///
+/// This matters for **escrow sizing only**. The ceiling used to be computed
+/// from the raw text, so a `max_tokens=8` request pre-authorised ~9
+/// output-equivalents while the real prompt was 31 tokens — the charge then hit
+/// the ceiling and the caller was capped at the *estimate* rather than its
+/// usage. The ceiling is a cap, not a bill, so sizing it correctly costs the
+/// caller nothing.
+pub const CHAT_TEMPLATE_TOKENS: u32 = 32;
+
 /// Rough prompt-token estimate used to size the input part of escrow (the
-/// provider's real count replaces it at settlement). ~4 chars/token.
+/// provider's real count replaces it at settlement). ~4 chars/token, plus the
+/// chat template the provider will wrap it in.
 pub fn estimate_prompt_tokens(prompt: &str) -> u32 {
     let chars = prompt.chars().count();
-    ((chars + 3) / 4).max(1).min(u32::MAX as usize) as u32
+    let text = ((chars + 3) / 4).max(1) as u64;
+    (text + CHAT_TEMPLATE_TOKENS as u64).min(u32::MAX as u64) as u32
 }
 
 /// Parse a parameter count in billions from a model name ("llama3.2:1b" → 1.0).
@@ -842,9 +860,18 @@ mod tests {
 
     #[test]
     fn prompt_estimate_and_param_parsing() {
-        assert_eq!(estimate_prompt_tokens(""), 1);
-        assert_eq!(estimate_prompt_tokens("abcd"), 1);
-        assert_eq!(estimate_prompt_tokens(&"a".repeat(400)), 100);
+        // The estimate is the ~4-chars/token text estimate PLUS the chat-template
+        // allowance the provider's tokenizer will add.
+        assert_eq!(estimate_prompt_tokens(""), CHAT_TEMPLATE_TOKENS + 1);
+        assert_eq!(estimate_prompt_tokens("abcd"), CHAT_TEMPLATE_TOKENS + 1);
+        assert_eq!(
+            estimate_prompt_tokens(&"a".repeat(400)),
+            CHAT_TEMPLATE_TOKENS + 100
+        );
+        // A real prompt measured on this box: `"Say hello."` is 3 text tokens
+        // and 32 template-inclusive tokens, so the estimate must not be short of
+        // the backend's report (that is what used to clamp short jobs).
+        assert!(estimate_prompt_tokens("Say hello.") >= 32 - 4);
         assert_eq!(params_b_for("llama3.2:1b"), 1.0);
         assert_eq!(params_b_for("qwen2.5:7b"), 7.0);
         assert_eq!(params_b_for("deepseek-r1:14b"), 14.0);

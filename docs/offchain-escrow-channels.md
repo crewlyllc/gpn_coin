@@ -85,6 +85,14 @@ provider's internal 512 default — a ~58× over-charge. After the fix the same
 answer costs its actual tokens and `max_tokens=8` / `64` / `256` produce three
 different charges.
 
+The escrow ceiling is sized from an **estimate** of the prompt (`4 chars/token`
+plus `pricing::CHAT_TEMPLATE_TOKENS = 32` for the role/marker framing the
+provider's tokenizer adds), because the provider's real count is only known
+after it runs. Getting that estimate too low does not over-charge anyone, but it
+does *cap* a short job at the estimate — measured live with `max_tokens=8`: a
+42-token prompt was estimated at 15, so the charge was clamped to the ceiling
+instead of reaching its usage. Hence the template allowance.
+
 How the channel does it (`hub_channel::BillingRates`):
 
 * The AP puts `in_rate` / `out_rate` (base units per token) in the assignment;
