@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Use GPN for AI — OpenAI-compatible inference on a live GPU network</title>
-<meta name="description" content="Point any OpenAI client at https://gpncoin.ai/api/v1 and run chat on GPUs across the GPN testnet. Free while the testnet runs. Try it in the browser, then copy a working curl, Python or Node example." />
+<meta name="description" content="Point any OpenAI client at https://gpncoin.ai/api/v1 and run chat and image generation on GPUs across the GPN testnet. Free while the testnet runs. Try it in the browser, then copy a working curl, Python or Node example." />
 <meta name="theme-color" content="#07090f" />
 <link rel="canonical" href="https://gpncoin.ai/ai" />
 <meta property="og:site_name" content="GPN" />
@@ -179,6 +179,24 @@ $r.choices[0].message.content</code></pre>
               need it inline on 5.1, escape as <code>-d '{\"model\":\"llama3.2:1b\"}'</code>; PowerShell
               7.3+ passes arguments verbatim instead, so those backslashes must be dropped there. The stdin
               form above behaves the same on both.</p>
+            <div class="codeblock">
+              <div class="codeblock-head"><span class="lang">powershell · image generation (submit → poll → download)</span>
+                <button class="copy-btn" type="button" data-copy="#src-win-img" aria-label="Copy the PowerShell image example">Copy</button></div>
+              <pre><code id="src-win-img">$API = "https://gpncoin.ai/api/v1"   # or http://142.129.54.88:8092 before the Worker deploy
+
+$job = @{ model="sd-turbo"; prompt="a cozy cabin at dusk, warm windows"; size="512x512"; steps=8 } |
+  ConvertTo-Json -Compress |
+  curl.exe -sS -X POST "$API/images/generations" -H "Content-Type: application/json" --data-binary "@-" |
+  ConvertFrom-Json
+
+while ($job.status -eq "pending") {
+  Start-Sleep -Seconds 2
+  $job = curl.exe -sS "$API/images/generations/$($job.id)" | ConvertFrom-Json
+}
+
+curl.exe -sS "$API/images/$($job.id)" -o cabin.png
+Get-Item cabin.png | Select-Object Name, Length</code></pre>
+            </div>
           </div>
 
           <div class="qs-panel sub" id="win-irm" role="tabpanel" aria-labelledby="win-tab-irm" tabindex="0" hidden>
@@ -234,6 +252,27 @@ $r.choices[0].message.content</code></pre>
           </div>
           <p class="hint mb-0"><code>--max-time 150</code> covers a cold job (block inclusion + model load).
             Single quotes are literal in bash/zsh, so the JSON is passed through untouched.</p>
+          <div class="codeblock">
+            <div class="codeblock-head"><span class="lang">bash · image generation (submit → poll → download)</span>
+              <button class="copy-btn" type="button" data-copy="#src-curl-img" aria-label="Copy the image example">Copy</button></div>
+            <pre><code id="src-curl-img">API=https://gpncoin.ai/api/v1   # or http://142.129.54.88:8092 until the Worker deploy
+
+id=$(curl -sS -X POST $API/images/generations \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"sd-turbo","prompt":"a cozy cabin at dusk, warm windows","size":"512x512","steps":8}' \
+  | jq -r .id)
+echo "job $id"
+
+# the render takes ~30 s; poll every 2 s
+while [ "$(curl -sS $API/images/generations/$id | jq -r .status)" = pending ]; do sleep 2; done
+
+curl -sS "$API/images/$id" -o cabin.png
+file cabin.png   # PNG image data, 512 x 512</code></pre>
+          </div>
+          <p class="hint mb-0">Submit answers <code>202</code> immediately with an id; polling costs nothing
+            and returns <code>status</code>, then <code>data[].url</code> once completed. Add <code>"sync":true</code>
+            to hold the connection instead — allowed only when the estimate is under 60 s
+            (512×512 @ 8 steps ≈ 31 s yes; 1024×1024 @ 50 steps ≈ 68 s is refused with the estimate).</p>
         </div>
 
         <!-- ===== macOS ===== -->
@@ -259,6 +298,22 @@ curl -sS --max-time 150 https://gpncoin.ai/api/v1/chat/completions \
           <p class="hint mb-0">The <code>python3 -c</code> tail pulls out the answer without jq — Python 3 is
             always present on macOS. Everything else is identical to Linux: backslash continuations,
             single-quoted JSON.</p>
+          <div class="codeblock">
+            <div class="codeblock-head"><span class="lang">zsh · image generation (submit → poll → download)</span>
+              <button class="copy-btn" type="button" data-copy="#src-mac-img" aria-label="Copy the macOS image example">Copy</button></div>
+            <pre><code id="src-mac-img">API=https://gpncoin.ai/api/v1   # or http://142.129.54.88:8092 before the Worker deploy
+
+id=$(curl -sS -X POST $API/images/generations \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"sd-turbo","prompt":"a cozy cabin at dusk","size":"512x512","steps":8}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+while [ "$(curl -sS $API/images/generations/$id | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')" = pending ]; do
+  sleep 2
+done
+
+curl -sS "$API/images/$id" -o cabin.png && file cabin.png</code></pre>
+          </div>
         </div>
 
         <!-- ===== Python ===== -->
@@ -295,6 +350,38 @@ print(r.json()["choices"][0]["message"]["content"])</code></pre>
             </div>
             <p class="hint mb-0"><code>pip install requests</code>. No SDK, no key.
               <code>timeout=150</code> covers a cold testnet job; raise it if the network is busy.</p>
+            <div class="codeblock">
+              <div class="codeblock-head"><span class="lang">python · image generation (submit → poll → download)</span>
+                <button class="copy-btn" type="button" data-copy="#src-py-img" aria-label="Copy the Python image example">Copy</button></div>
+              <pre><code id="src-py-img">import time
+import requests
+
+API = "https://gpncoin.ai/api/v1"   # or http://142.129.54.88:8092 before the Worker deploy
+
+job = requests.post(
+    f"{API}/images/generations",
+    json={"model": "sd-turbo",
+          "prompt": "a cozy cabin at dusk, warm windows",
+          "size": "512x512", "steps": 8},
+    timeout=60,
+).json()
+print(job["id"], job["status"])          # 202: pending + poll_url
+
+while job["status"] == "pending":
+    time.sleep(2)
+    job = requests.get(job["poll_url"], timeout=30).json()
+
+if job["status"] != "completed":
+    raise SystemExit(f"render failed: {job.get('error')}")
+
+png = requests.get(job["data"][0]["url"], timeout=60)
+png.raise_for_status()
+open("cabin.png", "wb").write(png.content)
+print("saved cabin.png", len(png.content), "bytes", job["gpn"])</code></pre>
+            </div>
+            <p class="hint mb-0">The result carries <code>gpn.payment</code> = <code>"channel"</code> for the
+              off-chain fast path (<code>"onchain"</code> only when the channel was unreachable — never both).
+              Images expire after 24 h; <code>expires_at</code> says when.</p>
           </div>
 
           <div class="qs-panel sub" id="py-sdk" role="tabpanel" aria-labelledby="py-tab-sdk" tabindex="0" hidden>
@@ -352,6 +439,35 @@ print(reply.choices[0].message.content)</code></pre>
           </div>
           <p class="hint mb-0">Save as <code>chat.js</code> and <code>node chat.js</code>. The IIFE means it
             runs as CommonJS or ESM; <code>AbortSignal.timeout</code> is what stops a hung cold job.</p>
+          <div class="codeblock">
+            <div class="codeblock-head"><span class="lang">javascript · image generation (submit → poll → download)</span>
+              <button class="copy-btn" type="button" data-copy="#src-js-img" aria-label="Copy the Node image example">Copy</button></div>
+            <pre><code id="src-js-img">// node 18+: global fetch. Writes cabin.png with no dependencies.
+import { writeFile } from "node:fs/promises";
+
+const API = "https://gpncoin.ai/api/v1"; // or http://142.129.54.88:8092 pre-deploy
+
+let job = await (await fetch(`${API}/images/generations`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    model: "sd-turbo",
+    prompt: "a cozy cabin at dusk, warm windows",
+    size: "512x512",
+    steps: 8,
+  }),
+})).json();
+
+while (job.status === "pending") {
+  await new Promise((r) =&gt; setTimeout(r, 2000));
+  job = await (await fetch(job.poll_url)).json();
+}
+if (job.status !== "completed") throw new Error(job.error);
+
+const png = Buffer.from(await (await fetch(job.data[0].url)).arrayBuffer());
+await writeFile("cabin.png", png);
+console.log(job.gpn.payment, png.length, "bytes");</code></pre>
+          </div>
         </div>
       </div>
 
@@ -401,22 +517,21 @@ print(reply.choices[0].message.content)</code></pre>
         </div>
 
         <div class="card">
-          <h3><span class="ico" aria-hidden="true">🎨</span> Image generation <span class="tag wip">shipped · not wired</span></h3>
-          <p class="muted">Real, and proven: <code>gpn_diffusion_provider</code> (diffusers) renders the PNG,
-            commits its sha256 on-chain and serves the artifact from <code>/job/&lt;id&gt;/artifact</code>.
-            Jobs of 512×512 <code>sd-turbo</code> have completed with the artifact hash matching the
-            on-chain <code>result_hash</code> exactly. What is missing is the public path: the access point
-            exposes no <code>/v1/images/generations</code> route (it answers <code>{"error":"not found"}</code>),
-            so images are only reachable through the signed job API below — not from a web page.
-            <b>Price:</b> derived from the same anchor as tokens, on GPU-seconds — 512×512 @ 8 steps is
-            <b>≈0.0076 GPN</b> (≈$0.00114), 1024×1024 @ 20 steps <b>≈0.0109 GPN</b>. See
-            <a href="#economics">image pricing</a> for the measured formula.</p>
-          <pre><code>POST /jobs          (signed job API, not public)
-{"job_type": "ImageGeneration", "model": "sd-turbo",
- "prompt": "a cozy cabin at dusk",
- "width": 512, "height": 512, "steps": 8, "seed": 7}
-→ {"id": 1234, "state": "Queued"}
-GET /job/1234/artifact → image/png</code></pre>
+          <h3><span class="ico" aria-hidden="true">🎨</span> Image generation <span class="tag wip">AP live · public route pending deploy</span></h3>
+          <p class="muted"><b>Channel-settled, measured 2026-10-22.</b> <code>POST /v1/images/generations</code>
+            on the access point returns <code>202</code> in milliseconds, renders 512×512 <code>sd-turbo</code> in
+            <b>~30 s</b> on the testnet 4060, and settles over the <b>same signed-payment channel as text</b>
+            (<code>"gpn": {"payment": "channel"}</code>) — one channel update, zero transactions. The poll
+            returns a stable PNG URL whose sha256 matches the bytes the provider signed (verified: 512×512,
+            447 KB, valid PNG header). The HTTPS route <code>https://gpncoin.ai/api/v1/images/generations</code>
+            goes live with the Worker deploy that ships this page; Cloudflare credentials are not on the node,
+            so until then the identical call works against the access point directly on
+            <code>http://142.129.54.88:8092</code>. Renders are priced from the same anchor as tokens:
+            <b>≈0.0076 GPN</b> for 512×512 @ 8 steps (≈$0.0011), <b>≈0.0109 GPN</b> for 1024×1024 @ 20 steps.
+            See <a href="#economics">image pricing</a>.</p>
+          <pre><code>POST /v1/images/generations        → 202 {"id":"…","status":"pending","poll_url":"…"}
+GET  /v1/images/generations/{id}   → {"status":"completed","data":[{"url":"…png"}]}
+GET  /v1/images/{id}               → image/png</code></pre>
         </div>
 
         <div class="card">

@@ -257,6 +257,7 @@ function apBase(env) {
  * @param {{ method: string, path: string, body?: string | null, timeoutMs?: number }} opts
  */
 async function apRequest(env, opts) {
+  const binary = !!(opts && opts.binary);
   const base = apBase(env);
   if (!base) return { error: "access point is not configured (AP_JOB_URL)" };
 
@@ -302,6 +303,15 @@ async function apRequest(env, opts) {
         // Upstream is authoritative; never serve an edge-cached answer.
         cf: { cacheTtl: 0, cacheEverything: false },
       });
+      if (binary) {
+        const buf = new Uint8Array(await res.arrayBuffer());
+        return {
+          status: res.status,
+          contentType: res.headers.get("content-type") || "application/octet-stream",
+          body: buf,
+          binary: true,
+        };
+      }
       const body = await res.text();
       return {
         status: res.status,
@@ -315,7 +325,14 @@ async function apRequest(env, opts) {
     }
   }
 
-  return socketHttpRequest(url, opts.method, headers, opts.body == null ? null : opts.body, timeoutMs);
+  return socketHttpRequest(
+    url,
+    opts.method,
+    headers,
+    opts.body == null ? null : opts.body,
+    timeoutMs,
+    binary,
+  );
 }
 
 /**
@@ -328,7 +345,7 @@ async function apRequest(env, opts) {
  * @param {string | null} body
  * @param {number} timeoutMs
  */
-async function socketHttpRequest(url, method, headers, body, timeoutMs) {
+async function socketHttpRequest(url, method, headers, body, timeoutMs, binary = false) {
   if (url.protocol !== "http:") return { error: "raw sockets only speak plain http" };
   const host = url.hostname.replace(/^\[|\]$/g, "");
   const port = Number(url.port || "80");
@@ -395,12 +412,13 @@ async function socketHttpRequest(url, method, headers, body, timeoutMs) {
     reader.releaseLock();
 
     if (timedOut) return { error: "the access point did not answer in time" };
-    const parsed = parseHttpResponse(concatBytes(chunks));
+    const parsed = parseHttpResponse(concatBytes(chunks), binary);
     if (!parsed) return { error: "the access point sent a malformed response" };
     return {
       status: parsed.status,
       contentType: parsed.headers["content-type"] || "application/json",
       body: parsed.body,
+      binary: parsed.binary || false,
     };
   } catch {
     return {
@@ -437,7 +455,7 @@ function concatBytes(chunks) {
  * @param {Uint8Array} raw
  * @returns {{ status: number, headers: Record<string, string>, body: string } | null}
  */
-function parseHttpResponse(raw) {
+function parseHttpResponse(raw, binary = false) {
   const needle = [13, 10, 13, 10];
   let split = -1;
   for (let i = 0; i + 3 < raw.length; i++) {
@@ -467,25 +485,55 @@ function parseHttpResponse(raw) {
   const length = headers["content-length"] != null ? Number(headers["content-length"]) : null;
   const decoder = new TextDecoder();
 
-  if (!chunked) {
-    const end = length !== null && Number.isFinite(length) && length <= body.length ? length : body.length;
-    return { status, headers, body: decoder.decode(body.subarray(0, end)) };
+  if (!binary) {
+    if (!chunked) {
+      const end = length !== null && Number.isFinite(length) && length <= body.length ? length : body.length;
+      return { status, headers, body: decoder.decode(body.subarray(0, end)) };
+    }
+    let out = "";
+    let at = 0;
+    for (;;) {
+      const lineEnd = indexOfCrlf(body, at);
+      if (lineEnd < 0) return { status, headers, body: out };
+      const size = parseInt(decoder.decode(body.subarray(at, lineEnd)).split(";")[0].trim(), 16);
+      if (!Number.isFinite(size) || size < 0) return null;
+      at = lineEnd + 2;
+      if (size === 0) return { status, headers, body: out };
+      if (at + size > body.length) return null;
+      out += decoder.decode(body.subarray(at, at + size));
+      at += size;
+      if (body[at] === 13 && body[at + 1] === 10) at += 2;
+    }
   }
 
-  let out = "";
+  // Binary (image artifacts): keep the bytes, never decode them as UTF-8.
+  if (!chunked) {
+    const end = length !== null && Number.isFinite(length) && length <= body.length ? length : body.length;
+    return { status, headers, body: body.subarray(0, end), binary: true };
+  }
+  const parts = [];
+  let total = 0;
   let at = 0;
   for (;;) {
     const lineEnd = indexOfCrlf(body, at);
-    if (lineEnd < 0) return { status, headers, body: out };
+    if (lineEnd < 0) return null;
     const size = parseInt(decoder.decode(body.subarray(at, lineEnd)).split(";")[0].trim(), 16);
     if (!Number.isFinite(size) || size < 0) return null;
     at = lineEnd + 2;
-    if (size === 0) return { status, headers, body: out };
+    if (size === 0) break;
     if (at + size > body.length) return null;
-    out += decoder.decode(body.subarray(at, at + size));
+    parts.push(body.subarray(at, at + size));
+    total += size;
     at += size;
     if (body[at] === 13 && body[at + 1] === 10) at += 2;
   }
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const p of parts) {
+    out.set(p, off);
+    off += p.byteLength;
+  }
+  return { status, headers, body: out, binary: true };
 }
 
 /**
@@ -1044,7 +1092,11 @@ async function handleApi(request, env, path) {
   const method = request.method;
   const route = (path.slice(4) || "/").replace(/\/+$/, "") || "/";
   if (method === "OPTIONS") {
-    return apiPreflight(origin, route === "/v1/chat/completions" || route === "/chat/completions");
+    const postRoute =
+      route === "/v1/chat/completions" ||
+      route === "/chat/completions" ||
+      route === "/v1/images/generations";
+    return apiPreflight(origin, postRoute);
   }
 
   const ip = request.headers.get("cf-connecting-ip") || "unknown";
@@ -1053,6 +1105,7 @@ async function handleApi(request, env, path) {
   let upstream = null;
   let allow = "GET";
   let cache = "no-store";
+  let binary = false;
 
   if (route === "/health" || route === "/ping") upstream = "/health";
   else if (route === "/mode") upstream = "/mode";
@@ -1065,6 +1118,18 @@ async function handleApi(request, env, path) {
   } else if (route === "/v1/chat/completions" || route === "/chat/completions") {
     upstream = "/v1/chat/completions";
     allow = "POST";
+  } else if (route === "/v1/images/generations") {
+    // OpenAI-compatible image generation: 202 + poll. The AP returns in
+    // milliseconds; the render happens in the background.
+    upstream = "/v1/images/generations";
+    allow = "POST";
+  } else if (/^\/v1\/images\/generations\/[0-9a-f]{32}$/.test(route)) {
+    upstream = route; // poll: pending -> completed
+  } else if (/^\/v1\/images\/[0-9a-f]{32}(\/\d{1,2})?$/.test(route)) {
+    // The finished PNG. Binary: never decode/rewrite it as text.
+    upstream = route;
+    binary = true;
+    cache = "public, max-age=86400";
   } else {
     const m = /^\/(?:jobs?)\/(\d{1,20})$/.exec(route);
     if (m) upstream = `/job/${m[1]}`;
@@ -1181,6 +1246,7 @@ async function handleApi(request, env, path) {
       method: allow,
       path: upstream,
       body,
+      binary,
       timeoutMs: AP_PROXY_TIMEOUT_MS,
     });
   } finally {
@@ -1222,7 +1288,10 @@ async function handleApi(request, env, path) {
   }
 
   const headers = new Headers();
-  headers.set("content-type", res.contentType || "application/json; charset=utf-8");
+  headers.set(
+    "content-type",
+    res.contentType || (binary ? "image/png" : "application/json; charset=utf-8"),
+  );
   headers.set("cache-control", cache);
   headers.set("x-gpn-proxy", "access-point");
   // HEAD must not carry a body.
