@@ -27,6 +27,9 @@ on:
       ap_url:
         description: "access point this provider PULLS assignments from (required since #46 deleted the push path)"
         default: "http://gpn-testnet.duckdns.org:8092"
+      account:
+        description: "payout/provider account (ss58). Empty = derive from the signer; a dev-URI signer needs this until the build carries ss58_of_uri (#65)"
+        default: "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
 
 jobs:
   start:
@@ -65,6 +68,10 @@ jobs:
           # ever leased to it, and the AP's delivery gate (#55) correctly excludes
           # it — so the box looks healthy in /status and is still unroutable.
           $env:GPN_AP_URL            = '__APURL__'
+          # The heartbeat reads GPUAttestation::Attestations for THIS account to
+          # advertise the chain's attested GFLOPS (#65). GPN_SIGNER is a dev URI
+          # here, which ss58_of() rejects — older builds then passed no --address.
+          $env:GPN_ACCOUNT           = '__ACCOUNT__'
           $env:GPN_LISTEN            = '0.0.0.0:8093'
           function Log($m) { "$(Get-Date -Format o) $m" | Out-File -FilePath $log -Append -Encoding utf8 }
           Log "supervisor starting (rpc=$rpc signer=$signer pub=$pub)"
@@ -87,6 +94,7 @@ jobs:
           $script = $script.Replace('__GFLOPS__', '${{ inputs.gflops }}')
           $script = $script.Replace('__ASSIGNTOK__', '${{ secrets.GPN_ASSIGN_TOKEN }}')
           $script = $script.Replace('__APURL__',  '${{ inputs.ap_url }}')
+          $script = $script.Replace('__ACCOUNT__', '${{ inputs.account }}')
           Set-Content -Path 'C:\gpn\run-provider.ps1' -Value $script -Encoding utf8
           Write-Host "wrote C:\gpn\run-provider.ps1"
 
