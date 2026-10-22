@@ -160,6 +160,7 @@ pub fn probe_channel_support(status_url: &str) -> bool {
     }
 }
 
+#[derive(Debug)]
 pub struct ChannelJobOut {
     pub channel_id: u64,
     pub job_id: u64,
@@ -168,32 +169,76 @@ pub struct ChannelJobOut {
     pub balance_provider: u128,
 }
 
-/// Route one job through the hub channel. `None` = channel path unavailable or
-/// failed; the caller must fall back to the on-chain escrow path (no state was
-/// left half-applied: a failed request only leaves a pending entry, which the
-/// next sweep expires).
+/// Why a channel job did not complete.
+///
+/// The distinction is a **money-safety** one, not a cosmetic one:
+///
+/// * [`ChannelFail::NotAttempted`] — no value moved. The assignment never
+///   reached a provider (hub disabled, no channel capacity, provider does not
+///   speak the protocol, connect error) or the provider explicitly rejected it
+///   at accept-time (HTTP 4xx), or it refunded the job after failing mid-run.
+///   The caller **must** fall back to the on-chain path.
+/// * [`ChannelFail::Ambiguous`] — the assignment was delivered and may have
+///   been accepted. The provider holds the AP's pre-signed `sig_settle`, so it
+///   can force-close and collect even if we never saw the result. Falling back
+///   to on-chain here would charge the caller **twice**. The caller must
+///   surface an error and leave the pending entry to expire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChannelFail {
+    /// Nothing was paid; safe to use the on-chain escrow path instead.
+    NotAttempted(String),
+    /// Possibly accepted by the provider; do NOT pay a second time.
+    Ambiguous(String),
+}
+
+impl ChannelFail {
+    /// True when the caller may safely fall back to the on-chain path.
+    pub fn fallback_ok(&self) -> bool {
+        matches!(self, ChannelFail::NotAttempted(_))
+    }
+    pub fn reason(&self) -> &str {
+        match self {
+            ChannelFail::NotAttempted(s) | ChannelFail::Ambiguous(s) => s,
+        }
+    }
+}
+
+/// Route one job through the hub channel, reporting *why* it failed.
+///
+/// `client` may be `None` when a live channel already exists in the registry
+/// (no chain call is needed for a per-job settle); tests use that to exercise
+/// the wire path with no node.
 #[allow(clippy::too_many_arguments)]
-pub fn try_channel_job(
+pub fn try_channel_job_ex(
     hub: &HubCtx,
     rt: &tokio::runtime::Runtime,
-    client: &ChainClient,
+    client: Option<&ChainClient>,
     provider_addr_hex: &str,
     status_url: &str,
     model: &str,
     prompt: &str,
     max_tokens: u32,
     price: u128,
-) -> Option<ChannelJobOut> {
-    if !hub.enabled || price == 0 {
-        return None;
+) -> Result<ChannelJobOut, ChannelFail> {
+    let no = |m: &str| Err(ChannelFail::NotAttempted(m.to_string()));
+    if !hub.enabled {
+        return no("hub disabled (GPN_ESCROW_MODE=onchain/off)");
     }
-    let provider_pub = PubKey::parse(provider_addr_hex)?;
+    if price == 0 {
+        return no("channel price is zero");
+    }
+    let Some(provider_pub) = PubKey::parse(provider_addr_hex) else {
+        return no("provider address is not a valid sr25519 key");
+    };
     if hub.is_unsupported(provider_addr_hex) {
-        return None;
+        return no("provider does not speak /channel (recently refused)");
     }
-    let endpoint = channel_endpoint(status_url)?;
+    let Some(endpoint) = channel_endpoint(status_url) else {
+        return no("cannot derive the provider's channel endpoint from its status URL");
+    };
     // Only pay for a channel open when the provider actually speaks the
-    // protocol. Existing channels skip the probe (they already worked).
+    // protocol. Existing channels skip the probe (they already worked), which is
+    // the normal case after the first job.
     let have_channel = {
         let reg = hub.registry.lock().unwrap();
         reg.channels
@@ -202,20 +247,26 @@ pub fn try_channel_job(
             .unwrap_or(false)
     };
     if !have_channel && !probe_channel_support(status_url) {
-        eprintln!(
-            "[hub] provider {provider_addr_hex} does not serve /channel/status — staying on-chain (no channel opened)"
+        let msg = format!(
+            "provider {provider_addr_hex} does not serve /channel/status — staying on-chain (no channel opened)"
         );
+        eprintln!("[hub] {msg}");
         hub.mark_unsupported(provider_addr_hex);
-        return None;
+        return Err(ChannelFail::NotAttempted(msg));
     }
-    let channel_id = ensure_hub_channel(hub, rt, client, provider_addr_hex, &provider_pub)?;
+    let channel_id = match ensure_hub_channel(hub, rt, client, provider_addr_hex, &provider_pub) {
+        Some(id) => id,
+        None => return no("no usable channel (open/funding failed or channel settled on chain)"),
+    };
 
     // Price the job under the registry lock, then release it for the HTTP call.
     let assignment: Assignment = {
         let mut reg = hub.registry.lock().unwrap();
-        let ch = reg.channels.get_mut(provider_addr_hex)?;
+        let Some(ch) = reg.channels.get_mut(provider_addr_hex) else {
+            return no("channel disappeared from the registry");
+        };
         if ch.channel_id != channel_id {
-            return None;
+            return no("channel id changed under us");
         }
         let job_id = next_job_id();
         let deadline = now_ms().saturating_add(hub.job_deadline_ms);
@@ -236,52 +287,77 @@ pub fn try_channel_job(
             }
             Err(e) => {
                 eprintln!("[hub] cannot price job on channel {channel_id}: {e}");
-                return None;
+                return Err(ChannelFail::NotAttempted(format!(
+                    "cannot price job on channel {channel_id}: {e}"
+                )));
             }
         }
     };
+    let job_id = assignment.job_id;
 
-    let body = serde_json::to_string(&assignment).ok()?;
+    let body = match serde_json::to_string(&assignment) {
+        Ok(b) => b,
+        Err(e) => {
+            expire_pending(hub, provider_addr_hex, job_id);
+            return no(&format!("assignment serialization failed: {e}"));
+        }
+    };
     let http = match reqwest::blocking::Client::builder()
         .timeout(Duration::from_millis(hub.job_deadline_ms.max(5_000)))
         .build()
     {
         Ok(c) => c,
-        Err(_) => return None,
+        Err(e) => {
+            abort_pending(hub, provider_addr_hex, job_id);
+            return no(&format!("http client: {e}"));
+        }
     };
     let resp = match http.post(&endpoint).body(body).send() {
         Ok(r) if r.status().is_success() => r,
         Ok(r) => {
-            eprintln!(
-                "[hub] provider {provider_addr_hex} /channel/job -> HTTP {} — falling back",
-                r.status()
-            );
+            let code = r.status().as_u16();
+            let msg = format!("provider {provider_addr_hex} /channel/job -> HTTP {code}");
+            eprintln!("[hub] {msg}");
             hub.mark_unsupported(provider_addr_hex);
-            expire_pending(hub, provider_addr_hex, assignment.job_id);
-            return None;
+            if (400..500).contains(&code) {
+                // Accept-time rejection: `ProviderChannel::accept` refused the
+                // assignment, so the provider committed nothing.
+                abort_pending(hub, provider_addr_hex, job_id);
+                return Err(ChannelFail::NotAttempted(msg));
+            }
+            // 5xx: the provider may have accepted and then crashed mid-run.
+            // Keep the pending entry; do NOT let the caller pay again.
+            return Err(ChannelFail::Ambiguous(format!(
+                "{msg} (work may have started; not falling back)"
+            )));
         }
         Err(e) => {
-            eprintln!(
-                "[hub] provider {provider_addr_hex} /channel/job unreachable: {e} — falling back"
-            );
+            let msg = format!("provider {provider_addr_hex} /channel/job unreachable: {e}");
+            eprintln!("[hub] {msg} — falling back");
             hub.mark_unsupported(provider_addr_hex);
-            expire_pending(hub, provider_addr_hex, assignment.job_id);
-            return None;
+            abort_pending(hub, provider_addr_hex, job_id);
+            return Err(ChannelFail::NotAttempted(msg));
         }
     };
     let result: JobResultMsg = match resp.json() {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("[hub] provider {provider_addr_hex} returned an unparsable result: {e}");
+            // The provider answered 200 and we cannot read it: it may have run
+            // the work and committed the state. Ambiguous by construction.
+            let msg = format!("provider {provider_addr_hex} returned an unparsable result: {e}");
+            eprintln!("[hub] {msg}");
             hub.mark_unsupported(provider_addr_hex);
-            expire_pending(hub, provider_addr_hex, assignment.job_id);
-            return None;
+            return Err(ChannelFail::Ambiguous(format!(
+                "{msg} (job {job_id} left pending; it will expire)"
+            )));
         }
     };
 
     let mut reg = hub.registry.lock().unwrap();
     let applied = {
-        let ch = reg.channels.get_mut(provider_addr_hex)?;
+        let Some(ch) = reg.channels.get_mut(provider_addr_hex) else {
+            return Err(ChannelFail::Ambiguous("channel vanished before apply".into()));
+        };
         match ch.complete_job(&result) {
             Ok(()) => Some((ch.channel_id, ch.state.nonce, ch.state.balance_provider)),
             Err(e) => {
@@ -292,10 +368,16 @@ pub fn try_channel_job(
                 None
             }
         }
-    }?;
+    };
+    let Some((channel_id, nonce, balance_provider)) = applied else {
+        // We received a signed result we cannot apply. The provider may already
+        // have advanced its own state, so the caller must not pay again.
+        return Err(ChannelFail::Ambiguous(format!(
+            "provider result for job {job_id} rejected; channel state not advanced"
+        )));
+    };
     let _ = reg.save(&hub.path);
     drop(reg);
-    let (channel_id, nonce, balance_provider) = applied;
     let usage = if result.prompt_tokens > 0 || result.completion_tokens > 0 {
         Some((result.prompt_tokens, result.completion_tokens))
     } else {
@@ -306,9 +388,14 @@ pub fn try_channel_job(
         result.job_id, channel_id, nonce, balance_provider
     );
     if !result.ok {
-        return None; // refunded: let the caller surface the error / retry
+        // The provider signed a *refund*: balances reverted, nonce advanced.
+        // No value moved, so the caller may safely try the on-chain path.
+        return Err(ChannelFail::NotAttempted(format!(
+            "provider refunded job {}: {}",
+            result.job_id, result.output
+        )));
     }
-    Some(ChannelJobOut {
+    Ok(ChannelJobOut {
         channel_id,
         job_id: result.job_id,
         text: result.output,
@@ -317,10 +404,50 @@ pub fn try_channel_job(
     })
 }
 
+/// Route one job through the hub channel. `None` = channel path unavailable or
+/// failed; see [`try_channel_job_ex`] when the caller needs to know whether
+/// falling back is safe (i.e. whether any money could have moved).
+#[allow(clippy::too_many_arguments)]
+pub fn try_channel_job(
+    hub: &HubCtx,
+    rt: &tokio::runtime::Runtime,
+    client: &ChainClient,
+    provider_addr_hex: &str,
+    status_url: &str,
+    model: &str,
+    prompt: &str,
+    max_tokens: u32,
+    price: u128,
+) -> Option<ChannelJobOut> {
+    try_channel_job_ex(
+        hub,
+        rt,
+        Some(client),
+        provider_addr_hex,
+        status_url,
+        model,
+        prompt,
+        max_tokens,
+        price,
+    )
+    .ok()
+}
+
+
 fn expire_pending(hub: &HubCtx, provider: &str, job_id: u64) {
     let mut reg = hub.registry.lock().unwrap();
     if let Some(ch) = reg.channels.get_mut(provider) {
         let _ = ch.expire_pending(job_id);
+        let _ = reg.save(&hub.path);
+    }
+}
+
+/// Drop a pending entry whose assignment provably never reached a provider.
+fn abort_pending(hub: &HubCtx, provider: &str, job_id: u64) {
+    let mut reg = hub.registry.lock().unwrap();
+    if let Some(ch) = reg.channels.get_mut(provider) {
+        ch.abort_pending(job_id);
+        let _ = reg.save(&hub.path);
     }
 }
 
@@ -347,7 +474,7 @@ fn next_job_id() -> u64 {
 fn ensure_hub_channel(
     hub: &HubCtx,
     rt: &tokio::runtime::Runtime,
-    client: &ChainClient,
+    client: Option<&ChainClient>,
     provider_hex: &str,
     provider_pub: &PubKey,
 ) -> Option<u64> {
@@ -360,6 +487,9 @@ fn ensure_hub_channel(
         }
     }
 
+    // A channel that is not in the registry needs a chain read (and possibly an
+    // `open_channel`). Without a chain client there is nothing safe to do.
+    let client = client?;
     let ap_pub = hub.signer.public_key();
     let mut id = rt.block_on(client.get_channel_id(&ap_pub, &provider_pub.0));
     if id.is_none() {

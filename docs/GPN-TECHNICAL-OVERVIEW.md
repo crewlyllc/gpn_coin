@@ -36,7 +36,7 @@ It is designed to **auto-switch** on a USD/hr comparison of the modes (~5% hyste
 ## Public AI API (LIVE)
 - **`https://gpncoin.ai/api/v1/*`** — an OpenAI-compatible surface (chat completions, model list, providers, job lookup) over **HTTPS** via a **Cloudflare Worker** that proxies to the access point on a raw socket (the AP speaks plain HTTP on :8092, which a browser page cannot call). Bearer-token auth is injected by the Worker.
 - **Rate-limited** at the edge: chat **12 requests / 10 min / IP**, reads 120/min, with a typed `gpn_rate_limited` error.
-- **Testnet inference is free.** Measured end-to-end latency is dominated by the **create-inclusion wait** (tens of seconds at the current cadence), not by inference (~1 s).
+- **Testnet inference is free.** Latency depends on the payment mode: `channel` (the default) settles against an off-chain escrow channel and measures **p50 ≈ 70 ms** AP-local; `settle` pays the per-request on-chain cycle and is dominated by the **create-inclusion wait** (p50 ≈ 38 s, p95 ≈ 90 s at the current cadence), not by inference (~1 s). See `docs/offchain-escrow-channels.md`.
 
 ## Model catalogue (LIVE, VRAM-gated)
 Three independent gates, one shared implementation (`gpn_agent::models`):

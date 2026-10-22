@@ -64,8 +64,9 @@
       <span class="kicker">Live</span>
       <h2>Ask the network</h2>
       <p class="sub">This form calls <code>POST /api/v1/chat/completions</code> on gpncoin.ai. The Worker
-        proxies it over HTTPS to the access point, which turns it into a real job on the testnet. First
-        calls take 20–90&nbsp;s (block inclusion + model load); later ones are faster.</p>
+        proxies it over HTTPS to the access point, which settles the request against an off-chain
+        escrow channel — typically well under a second. (Set <code>"mode":"settle"</code> to pay
+        per request on-chain instead: that path adds a block-inclusion wait of tens of seconds.)</p>
 
       <div class="grid cols-2">
         <form class="card" id="try-form" autocomplete="off">

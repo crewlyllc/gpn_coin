@@ -594,6 +594,20 @@ impl HubChannel {
         }
     }
 
+    /// Drop a pending job that **provably never ran**: the assignment was never
+    /// delivered, or the provider rejected it at accept-time. Returns true if it
+    /// was pending.
+    ///
+    /// This is deliberately *not* [`Self::expire_pending`] (which waits for the
+    /// deadline): a caller that is about to retry on-chain needs the slot gone
+    /// immediately, or the next sweep would still see a phantom in-flight job.
+    /// Only call it when no value moved — an assignment that may have been
+    /// accepted must keep its pending entry, because the provider holds the
+    /// AP's pre-signed `sig_settle` and could force-close with it.
+    pub fn abort_pending(&mut self, job_id: u64) -> bool {
+        self.pending.remove(&job_id).is_some()
+    }
+
     pub fn pending_len(&self) -> usize {
         self.pending.len()
     }
@@ -1130,6 +1144,58 @@ mod tests {
             &cm.state.settle_payload(7),
             &cm.sig_provider
         ));
+    }
+
+    #[test]
+    fn double_settle_of_the_same_job_is_rejected() {
+        // The channel path and the on-chain path must never both pay for one
+        // job. The guard is that `complete_job` consumes the pending entry:
+        // replaying the *exact* provider-signed result is a no-op refusal and
+        // the channel state does not move a second time.
+        let (ap, prov, mut ch, mut pch) = setup(1_000);
+        let a = ch
+            .begin_job_for(&ap, PubKey(prov.public_key()), 1, "m", "p", 8, 0, 100, 0)
+            .unwrap();
+        pch.accept(&a).unwrap();
+        let r = pch.sign_result(&prov, 1, "out", 1, 1).unwrap();
+        ch.complete_job(&r).unwrap();
+        assert_eq!(ch.state.balance_provider, 100);
+        assert_eq!(ch.state.nonce, 1);
+        // Plain replay and a re-signed copy both fail: the job id is settled.
+        assert_eq!(ch.complete_job(&r), Err(HubError::UnknownJob));
+        let mut again = r.clone();
+        again.sig_provider = Signature64(prov.sign_raw(&result_payload(&again)));
+        assert_eq!(ch.complete_job(&again), Err(HubError::UnknownJob));
+        assert_eq!(ch.state.balance_provider, 100, "no second payment");
+        assert_eq!(ch.state.nonce, 1);
+        // ...and the provider cannot re-sign it either (it dropped the entry).
+        assert_eq!(
+            pch.sign_result(&prov, 1, "out", 1, 1).err(),
+            Some(HubError::UnknownJob)
+        );
+    }
+
+    #[test]
+    fn pending_entry_can_be_aborted_only_by_the_ap() {
+        // `abort_pending` exists for the "assignment provably never ran" case
+        // (connect error / 4xx accept-time rejection). It must remove the slot
+        // without moving value, so the retry does not collide with a phantom.
+        let (ap, prov, mut ch, _pch) = setup(1_000);
+        let a = ch
+            .begin_job_for(&ap, PubKey(prov.public_key()), 1, "m", "p", 8, 0, 100, 0)
+            .unwrap();
+        assert_eq!(ch.pending_len(), 1);
+        assert!(ch.abort_pending(a.job_id));
+        assert_eq!(ch.pending_len(), 0);
+        assert_eq!(ch.state.nonce, 0, "abort moves no value");
+        assert!(!ch.abort_pending(a.job_id), "idempotent");
+        // A fresh job reuses the (unchanged) state; the provider's copy of the
+        // aborted assignment is worth the same amount, so no double charge is
+        // possible even if it force-closes with it.
+        let b = ch
+            .begin_job_for(&ap, PubKey(prov.public_key()), 2, "m", "p", 8, 0, 100, 0)
+            .unwrap();
+        assert_eq!(b.state_after, a.state_after);
     }
 
     #[test]

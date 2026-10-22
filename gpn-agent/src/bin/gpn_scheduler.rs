@@ -405,6 +405,17 @@ fn fast_ap_enabled() -> bool {
         .unwrap_or(true)
 }
 
+// ── chat-mode economics ─────────────────────────────────────────────────────
+//
+// `/v1/chat/completions` uses ONE price table no matter how the job is paid, so
+// switching modes can never become a way to pay less (or be charged more):
+// the on-chain path escrows `PRICE_PER_TOKEN × MAX_TOKENS` and the channel path
+// pre-authorises exactly the same amount against the hub channel.
+/// Max output tokens requested for a chat completion.
+const CHAT_MAX_TOKENS: u32 = 512;
+/// Base units of GPN charged per token on the chat facade.
+const CHAT_PRICE_PER_TOKEN: u128 = 1_000_000_000;
+
 /// How long a create may take to appear on-chain before we give up on it. GPN blocks are
 /// PoW-mined on a 15 s target with observed gaps of 2–30 s, so the old fixed 2 s window was
 /// shorter than a single block: a create that landed normally was treated as "did not land",
@@ -2151,46 +2162,76 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             return;
                         }
                     };
-                    // Passthrough mode (`"mode":"passthrough"`): run inference
-                    // directly on the provider with NO on-chain job, escrow, commitment,
-                    // or billing. Answer returned; nothing recorded. Default = settle.
+                    // ── payment mode ───────────────────────────────────────
+                    // `channel` (default) settles off-chain with signed messages
+                    // (no create_job, no block-inclusion wait); `settle`/`onchain`
+                    // forces the per-request on-chain escrow cycle; `passthrough`
+                    // is the free/unbilled direct-inference tier.
                     let mode = v
                         .get("mode")
                         .and_then(|x| x.as_str())
-                        .unwrap_or("settle")
+                        .unwrap_or("channel")
                         .to_ascii_lowercase();
                     let passthrough = mode == "passthrough";
-                    // create + route (hot wallet pays). Id comes from a process-local
-                    // allocator so concurrent requests never predict the same job id.
-                    // `_create_guard` serializes the create so exactly one is in flight.
-                    let _create_guard = CREATE_LOCK.lock().unwrap();
-                    // NextJobId is the id the create will take. An UNREADABLE counter must
-                    // never be treated as 0: the pre-fix silent 0 allocated job id 0,
-                    // reported `next: 0` on a chain with ~6000 jobs, and mislabelled the
-                    // caller's job (change-log 2026-10-20 15:1x). Refuse instead.
-                    let next_before = match rt.block_on(client.try_get_next_job_id()) {
-                        Some(n) => n,
-                        None => {
-                            let r = Response::from_string(
-                                json!({"error": {"message": "chain unavailable: cannot read NextJobId", "type": "gpn_error"}})
+                    let mut text = String::new();
+                    let mut usage: Option<(u32, u32)> = None;
+                    let mut channel_meta: Option<(u64, u64, u128)> = None;
+                    // ── off-chain escrow (channel) fast path ───────────────
+                    // The AP signs a channel state update, the provider runs the
+                    // job and returns a signed result; zero extrinsics and zero
+                    // block waits. Falls through to the on-chain path ONLY when
+                    // nothing could have been paid (`NotAttempted`); an
+                    // ambiguous failure (assignment possibly accepted) must not
+                    // retry on-chain or the caller would pay twice.
+                    if !passthrough && mode != "settle" && mode != "onchain" {
+                        let price = CHAT_PRICE_PER_TOKEN.saturating_mul(CHAT_MAX_TOKENS as u128);
+                        let _t0 = std::time::Instant::now();
+                        match gpn_agent::hub_ap::try_channel_job_ex(
+                            &hub,
+                            &rt,
+                            Some(&client),
+                            &provider.address,
+                            &provider.status_url,
+                            &model,
+                            &prompt,
+                            CHAT_MAX_TOKENS,
+                            price,
+                        ) {
+                            Ok(out) => {
+                                println!(
+                                    "[chat] channel settle: job {} on channel {} in {} ms",
+                                    out.job_id,
+                                    out.channel_id,
+                                    _t0.elapsed().as_millis()
+                                );
+                                text = out.text;
+                                usage = out.usage;
+                                channel_meta = Some((out.channel_id, out.job_id, out.balance_provider));
+                            }
+                            Err(e) if e.fallback_ok() => {
+                                eprintln!(
+                                    "[chat] channel path unavailable ({}) — falling back to on-chain escrow",
+                                    e.reason()
+                                );
+                            }
+                            Err(e) => {
+                                let r = Response::from_string(
+                                    json!({
+                                        "error": {
+                                            "message": format!("channel settlement failed ambiguously: {}; not retrying on-chain to avoid a double charge", e.reason()),
+                                            "type": "gpn_error"
+                                        }
+                                    })
                                     .to_string(),
-                            )
-                            .with_header(hdr.clone())
-                            .with_status_code(503);
-                            let _ = req.respond(r);
-                            return;
+                                )
+                                .with_header(hdr.clone())
+                                .with_status_code(502);
+                                let _ = req.respond(r);
+                                return;
+                            }
                         }
-                    };
-                    let workload_hash = {
-                        use sha2::{Digest, Sha256};
-                        let mut h = Sha256::new();
-                        h.update(now_secs().to_le_bytes());
-                        h.update(prompt.as_bytes());
-                        let mut o = [0u8; 32];
-                        o.copy_from_slice(&h.finalize());
-                        o[0] |= 1;
-                        o
-                    };
+                    }
+                    let channel_done = channel_meta.is_some();
                     // Fast AP path (GPN_FAST_AP, default ON): report the predicted id as soon
                     // as the pool accepts (no block wait). With the flag off we still submit
                     // through the same stream (one nonce authority) but wait for inclusion and
@@ -2198,9 +2239,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let fast_ap = fast_ap_enabled();
                     // Preserve the create failure reason instead of discarding it.
                     let mut create_err: Option<String> = None;
-                    let (created, id) = if passthrough {
-                        (false, 0u64)
+                    let (created, id) = if passthrough || channel_done {
+                        (false, channel_meta.map(|c| c.1).unwrap_or(0u64))
                     } else {
+                        // create + route (hot wallet pays). Id comes from a process-local
+                        // allocator so concurrent requests never predict the same job id.
+                        // `_create_guard` serializes the create so exactly one is in flight.
+                        let _create_guard = CREATE_LOCK.lock().unwrap();
+                        // NextJobId is the id the create will take. An UNREADABLE counter must
+                        // never be treated as 0: the pre-fix silent 0 allocated job id 0,
+                        // reported `next: 0` on a chain with ~6000 jobs, and mislabelled the
+                        // caller's job (change-log 2026-10-20 15:1x). Refuse instead.
+                        let next_before = match rt.block_on(client.try_get_next_job_id()) {
+                            Some(n) => n,
+                            None => {
+                                let r = Response::from_string(
+                                    json!({"error": {"message": "chain unavailable: cannot read NextJobId", "type": "gpn_error"}})
+                                        .to_string(),
+                                )
+                                .with_header(hdr.clone())
+                                .with_status_code(503);
+                                let _ = req.respond(r);
+                                return;
+                            }
+                        };
+                        let workload_hash = {
+                            use sha2::{Digest, Sha256};
+                            let mut h = Sha256::new();
+                            h.update(now_secs().to_le_bytes());
+                            h.update(prompt.as_bytes());
+                            let mut o = [0u8; 32];
+                            o.copy_from_slice(&h.finalize());
+                            o[0] |= 1;
+                            o
+                        };
                         // Serialized by `_create_guard`: exactly ONE create is in flight at a
                         // time, so the process-local prediction IS the real on-chain id (the AP
                         // is the sole creator; the chain assigns ids in submit order).
@@ -2213,9 +2285,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 150u64,
                                 "LLMInference",
                                 "Spot",
-                                (1_000_000_000u128 * 512) as u128,
-                                1_000_000_000u128,
-                                512u32,
+                                CHAT_PRICE_PER_TOKEN * CHAT_MAX_TOKENS as u128,
+                                CHAT_PRICE_PER_TOKEN,
+                                CHAT_MAX_TOKENS,
                                 1000,
                                 workload_hash,
                             ))
@@ -2225,13 +2297,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         (outcome.created, outcome.id)
                     };
-                    drop(_create_guard);
-                    let mut text = String::new();
-                    // Item #53: the backend-reported token counts for this job. Only
-                    // ever set from what the provider actually recorded — an unknown
-                    // count stays 0 rather than being invented.
-                    let mut usage: Option<(u32, u32)> = None;
-                    if passthrough {
+                    if channel_done {
+                        // Answer, usage and the off-chain job id were produced by
+                        // the channel path above — nothing left to settle here.
+                    } else if passthrough {
                         // Direct provider call, no chain. Derive the off-chain infer
                         // endpoint from the provider's status_url (:8093 → :8094).
                         let infer_url = format!(
@@ -2337,7 +2406,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "id": format!("chatcmpl-gpn-{id}"), "object": "chat.completion", "created": now_secs(),
                         "model": model,
                         "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
-                        "usage": usage_json(usage)
+                        "usage": usage_json(usage),
+                        // How this request was paid. `channel` = off-chain signed
+                        // settlement (no tx); `onchain` = per-request escrow cycle;
+                        // `passthrough` = unbilled. Clients may pin `"mode"`.
+                        "gpn": match channel_meta {
+                            Some((channel_id, job_id, balance)) => json!({
+                                "payment": "channel",
+                                "channel_id": channel_id,
+                                "job_id": job_id.to_string(),
+                                "channel_balance_provider": balance.to_string(),
+                            }),
+                            None if passthrough => json!({"payment": "passthrough"}),
+                            None => json!({"payment": "onchain", "job_id": id.to_string()}),
+                        }
                     })
                 }
                 (Method::Post, ["jobs"]) => {
@@ -2537,13 +2619,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // no `create_job`/`claim`/`complete`. Falls through to the
                     // on-chain path on ANY failure (safe fallback), so enabling
                     // the mode cannot make a job unservable.
-                    if hub.enabled && !is_gen {
+                    if !is_gen {
                         let prompt_s = prompt.clone().unwrap_or_default();
                         let price = ppt.saturating_mul(mtok_eff as u128).max(1);
-                        if let Some(out) = gpn_agent::hub_ap::try_channel_job(
+                        match gpn_agent::hub_ap::try_channel_job_ex(
                             &hub,
                             &rt,
-                            &client,
+                            Some(&client),
                             &provider.address,
                             &provider.status_url,
                             &model,
@@ -2551,29 +2633,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             mtok_eff,
                             price,
                         ) {
-                            let mut resp = json!({
-                                "ok": true,
-                                "escrow": "channel",
-                                "channel_id": out.channel_id,
-                                "job_id": out.job_id,
-                                "routed_to": provider.address,
-                                "model": model,
-                                "pull": needs_pull,
-                                "status_url": provider.status_url,
-                                "latency_ms": provider.latency_ms,
-                                "load": format!("{}/{}", provider.active, provider.capacity),
-                                "channel_balance_provider": out.balance_provider.to_string(),
-                                "answer": {
-                                    "status": "done",
-                                    "response": out.text,
-                                    "off_chain": true,
-                                },
-                            });
-                            resp["usage"] = usage_json(out.usage);
-                            let r =
-                                Response::from_string(resp.to_string()).with_header(hdr.clone());
-                            let _ = req.respond(r);
-                            return;
+                            Ok(out) => {
+                                let mut resp = json!({
+                                    "ok": true,
+                                    "escrow": "channel",
+                                    "channel_id": out.channel_id,
+                                    "job_id": out.job_id,
+                                    "routed_to": provider.address,
+                                    "model": model,
+                                    "pull": needs_pull,
+                                    "status_url": provider.status_url,
+                                    "latency_ms": provider.latency_ms,
+                                    "load": format!("{}/{}", provider.active, provider.capacity),
+                                    "channel_balance_provider": out.balance_provider.to_string(),
+                                    "answer": {
+                                        "status": "done",
+                                        "response": out.text,
+                                        "off_chain": true,
+                                    },
+                                });
+                                resp["usage"] = usage_json(out.usage);
+                                let r = Response::from_string(resp.to_string())
+                                    .with_header(hdr.clone());
+                                let _ = req.respond(r);
+                                return;
+                            }
+                            Err(e) if e.fallback_ok() => {
+                                eprintln!(
+                                    "[jobs] channel path unavailable ({}) — falling back to on-chain escrow",
+                                    e.reason()
+                                );
+                            }
+                            Err(e) => {
+                                // The assignment may have been accepted: paying
+                                // on-chain too would charge the caller twice.
+                                let r = Response::from_string(
+                                    json!({
+                                        "ok": false,
+                                        "error": format!("channel settlement failed ambiguously: {}; not retrying on-chain to avoid a double charge", e.reason())
+                                    })
+                                    .to_string(),
+                                )
+                                .with_header(hdr.clone())
+                                .with_status_code(502);
+                                let _ = req.respond(r);
+                                return;
+                            }
                         }
                     }
 
