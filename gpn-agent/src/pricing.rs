@@ -40,7 +40,7 @@ pub const ANCHOR_PARAMS_B: f64 = 1.0;
 pub const DEFAULT_ANCHOR_RATE_USD_HR: f64 = 0.10;
 pub const DEFAULT_MARGIN_BPS: u32 = 3000;
 /// Input tokens are billed at this fraction of the output rate.
-pub const DEFAULT_INPUT_RATE_FRAC: f64 = 0.25;
+pub const DEFAULT_INPUT_RATE_FRAC: f64 = 0.15;
 
 /// Sane band for the published buyer price (USD per 1M output tokens).
 pub const PRICE_FLOOR_USD_PER_M: f64 = 0.05;
