@@ -22,8 +22,11 @@ on:
         description: "public /status URL advertised on-chain"
         default: "http://23.241.109.255:8093/status"
       gflops:
-        description: "advertised GFLOPS"
-        default: "2500"
+        description: "upper bound on advertised GFLOPS (the heartbeat advertises min(this, on-chain attestation); 0 = advertise the attestation)"
+        default: "0"
+      ap_url:
+        description: "access point this provider PULLS assignments from (required since #46 deleted the push path)"
+        default: "http://gpn-testnet.duckdns.org:8092"
 
 jobs:
   start:
@@ -56,6 +59,12 @@ jobs:
           $env:GPN_PROVIDER_ENDPOINT = $pub
           $env:GPN_OLLAMA            = $ollama
           $env:GPN_GFLOPS            = "$gflops"
+          # A provider receives work ONLY by polling the access point (#46 Phase 3
+          # deleted the `/assign` push). Without GPN_AP_URL the box's provider
+          # log says "pull without GPN_AP_URL — degrading to push", nothing is
+          # ever leased to it, and the AP's delivery gate (#55) correctly excludes
+          # it — so the box looks healthy in /status and is still unroutable.
+          $env:GPN_AP_URL            = '__APURL__'
           $env:GPN_LISTEN            = '0.0.0.0:8093'
           function Log($m) { "$(Get-Date -Format o) $m" | Out-File -FilePath $log -Append -Encoding utf8 }
           Log "supervisor starting (rpc=$rpc signer=$signer pub=$pub)"
@@ -77,6 +86,7 @@ jobs:
           $script = $script.Replace('__PUB__',    '${{ inputs.public_status_url }}')
           $script = $script.Replace('__GFLOPS__', '${{ inputs.gflops }}')
           $script = $script.Replace('__ASSIGNTOK__', '${{ secrets.GPN_ASSIGN_TOKEN }}')
+          $script = $script.Replace('__APURL__',  '${{ inputs.ap_url }}')
           Set-Content -Path 'C:\gpn\run-provider.ps1' -Value $script -Encoding utf8
           Write-Host "wrote C:\gpn\run-provider.ps1"
 
