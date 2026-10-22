@@ -458,6 +458,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         gpn_agent::llm::infer::default_ollama_url()
     );
 
+    // Item #61: do not start serving on an unreadable chain. `gpn-provider` came
+    // up 15 s before the RPC after the 04:40 full-stack restart, read `NextJobId`
+    // as 0, and replayed eight completed jobs as "not on chain yet". Wait
+    // (bounded) for a real answer; if it never comes, start DEGRADED — the pass
+    // gate then refuses to claim until the chain answers (see
+    // `warn_chain_unreadable_once`).
+    {
+        let (tries, delay_ms) = startup_ready_budget_from_env();
+        match wait_for_chain_ready(&client, tries, delay_ms).await {
+            Some(tip) => println!("[provider] chain ready: NextJobId={tip}"),
+            None => eprintln!(
+                "[provider] chain still unreadable after {}ms — starting in DEGRADED mode \
+                 (nothing will be claimed or replayed until NextJobId reads back)",
+                tries as u64 * delay_ms
+            ),
+        }
+    }
+
     // #46 Phase 1 — provider-PULL assignments. The AP can only push to us if our
     // heartbeat port is inbound-reachable; behind NAT/CGNAT it never is. The pull
     // loop asks the AP for our own assignments instead and writes them into the
@@ -1406,6 +1424,76 @@ fn heal_step_for_state(state: &str) -> HealStep {
     }
 }
 
+// ── Item #61: chain-readiness before we replay anything ───────────────────
+//
+// A restart can bring us up before the node's RPC answers (the 04:40:00
+// full-stack restart did: `gpn-provider` came up 15 s early). `NextJobId` then
+// reads `0`, which is indistinguishable from a genesis chain, so the settled-set
+// tip filter below keeps **nothing** and every historical assignment in
+// `assignments.json` looks adoptable again — the log filled with
+// `not on chain yet (create in flight)` replays of #3998/#5629/#6253-#6258.
+// Item #51 taught the AP the difference between "the chain says 0" and "the read
+// failed"; this is the provider half: wait a bounded while for a readable tip at
+// startup, and if it is still unreadable, skip the pass instead of trusting a 0.
+const STARTUP_READY_TRIES: u32 = 20;
+const STARTUP_READY_DELAY_MS: u64 = 1_000;
+
+/// `(tries, delay_ms)` for the startup readiness wait, floored/capped so a typo
+/// can neither skip it (0 tries) nor hang startup for hours.
+fn startup_ready_budget(tries: Option<u64>, delay_ms: Option<u64>) -> (u32, u64) {
+    let tries = tries.unwrap_or(STARTUP_READY_TRIES as u64).clamp(1, 600) as u32;
+    let delay = delay_ms
+        .unwrap_or(STARTUP_READY_DELAY_MS)
+        .clamp(50, 5_000);
+    (tries, delay)
+}
+
+fn startup_ready_budget_from_env() -> (u32, u64) {
+    let num = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<u64>().ok());
+    startup_ready_budget(
+        num("GPN_STARTUP_READY_TRIES"),
+        num("GPN_STARTUP_READY_MS"),
+    )
+}
+
+/// A pass may only run when the tip is **readable**. `Some(0)` is legitimate (a
+/// brand-new chain); `None` means every chain read failed, and proceeding would
+/// treat the empty settled set as authoritative.
+fn chain_tip_readable(tip: Option<u64>) -> bool {
+    tip.is_some()
+}
+
+/// Item #61: one WARN per process when the tip cannot be read at all. Repeating
+/// it every 500 ms pass would bury the signal (and the log) it is meant to be.
+fn warn_chain_unreadable_once() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "[provider] cannot read NextJobId — chain reads are failing. Skipping claim/\
+             reconcile passes (no job claimed, no historical assignment replayed) until \
+             the chain answers again."
+        );
+    }
+}
+
+/// Bounded startup wait for a readable `NextJobId`.
+async fn wait_for_chain_ready(
+    client: &ChainClient,
+    tries: u32,
+    delay_ms: u64,
+) -> Option<u64> {
+    for attempt in 0..tries.max(1) {
+        if let Some(tip) = client.try_get_next_job_id().await {
+            return Some(tip);
+        }
+        if attempt + 1 < tries.max(1) {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        }
+    }
+    None
+}
+
 async fn process_once(
     client: &ChainClient,
     me: &str,
@@ -1422,7 +1510,12 @@ async fn process_once(
     // reclaimed. Kind-agnostic so it also clears zombies with no off-chain
     // payload entry.
     if should_reconcile() {
-        let next = client.get_next_job_id().await;
+        // Item #61: no tip ⇒ nothing to reconcile *and* no evidence the chain is
+        // empty. Skip the pass rather than scanning a bogus `0..0` window.
+        let Some(next) = client.try_get_next_job_id().await else {
+            warn_chain_unreadable_once();
+            return Ok(());
+        };
         // Item #49: the reconcile pass used to fail completely silently (a `0`
         // from `get_next_job_id`, or a `None` state for every id) so a stranded
         // job looked like "nothing to do". `GPN_RECONCILE_DEBUG=1` prints one
@@ -1696,8 +1789,19 @@ async fn process_once(
     // finished or cancelled stays in `assignments.json` with a stale `queued`
     // store entry, so the prep kick used to re-fire for it every
     // MODEL_PRESENCE_TTL for as long as the process lived.
+    //
+    // Item #61: the tip must be READABLE. With an unreadable tip this used to be
+    // `0`, the tip filter discarded the whole settled set, and every historical
+    // assignment was replayed — so a start during a chain-down window turned
+    // completed jobs into permanent "waiting for inclusion" noise.
     let settled_path = settled_store_path();
-    let chain_tip = client.get_next_job_id().await;
+    let chain_tip = match client.try_get_next_job_id().await {
+        Some(tip) if chain_tip_readable(Some(tip)) => tip,
+        _ => {
+            warn_chain_unreadable_once();
+            return Ok(());
+        }
+    };
     let (mut settled, pruned) = read_settled_from_with_tip(&settled_path, chain_tip);
     let targets: Vec<u64> = if assigned.is_empty() {
         let attested_gflops = client
@@ -2520,5 +2624,30 @@ mod settled_cache_tests {
         settled.insert(42u64);
         assert!(settled.contains(&42), "resolved id must be skipped");
         assert!(!settled.contains(&43), "fresh id must still be claimed");
+    }
+
+    #[test]
+    fn an_unreadable_tip_never_passes_for_an_empty_chain() {
+        // Item #61 regression. `get_next_job_id()` answers 0 for every failure, so
+        // a start during a chain-down window looked like a genesis chain: the
+        // settled tip filter kept nothing and old assignments were replayed.
+        assert!(!chain_tip_readable(None), "a failed read is not evidence");
+        assert!(
+            chain_tip_readable(Some(0)),
+            "a brand-new chain legitimately reads 0"
+        );
+        assert!(chain_tip_readable(Some(6_400)));
+    }
+
+    #[test]
+    fn startup_ready_budget_is_bounded_and_typofriendly() {
+        // Defaults: 20 x 1 s — long enough for a co-started node, short enough
+        // that a genuinely dead chain does not hold serving hostage.
+        assert_eq!(startup_ready_budget(None, None), (20, 1_000));
+        // Garbage/absurd values are clamped, never a zero-attempt "wait".
+        assert_eq!(startup_ready_budget(Some(0), Some(0)), (1, 50));
+        assert_eq!(startup_ready_budget(Some(10_000), Some(10_000_000)), (600, 5_000));
+        // Honest values pass through untouched.
+        assert_eq!(startup_ready_budget(Some(5), Some(250)), (5, 250));
     }
 }
