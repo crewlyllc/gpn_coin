@@ -484,6 +484,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // loop asks the AP for our own assignments instead and writes them into the
     // same stores the claim loop already reads (push stays on unless
     // GPN_ASSIGN_SOURCE=pull).
+    //
+    // Queue #65: nothing in a modern node ever attests, so the on-chain
+    // `compute_gflops` is frozen at whatever a legacy `gpn-agent` run measured
+    // (box1: 188, taken before the GFLOPS-unit fix) and eventually goes stale —
+    // a capable node then routes as a weak one forever. Measure and (re)attest
+    // here, once, before the claim loop starts: this process has not submitted a
+    // single nonce yet, so it cannot race the claim lane (the #31 class).
+    maybe_refresh_attestation(&client, &addr).await;
     if let Some(cfg) = gpn_agent::assign_pull::PullConfig::from_env(&me) {
         gpn_agent::assign_pull::spawn(cfg);
     }
@@ -1464,6 +1472,170 @@ fn startup_ready_budget_from_env() -> (u32, u64) {
 /// treat the empty settled set as authoritative.
 fn chain_tip_readable(tip: Option<u64>) -> bool {
     tip.is_some()
+}
+
+// ─── Queue #65: keep this node's on-chain attestation real ──────────────────
+
+/// What to do about the on-chain attestation, decided from
+/// `(compute_gflops, submitted_at block)` — the exact two fields the pallet
+/// keeps and the two that matter:
+///
+/// * no record at all          → attest (the node was never attested at all)
+/// * `compute_gflops == 0`     → attest (a zero record is a broken measurement
+///                               someone wrote: box1's whole complaint)
+/// * older than `refresh_blocks` → attest (age = block number; `MaxAttestationAge`
+///                               is 14 400, so the default lands mid-window)
+/// * otherwise                 → keep it (re-attesting costs a tx and a GEMM run)
+///
+/// `head == 0` (unreadable) never counts as "old": without a head there is no
+/// evidence of staleness, and a spurious attestation on every start is noise.
+#[derive(Debug, PartialEq, Eq)]
+enum AttestPlan {
+    Attest,
+    Skip,
+}
+
+fn attest_plan(rec: Option<(u64, u64)>, head: u64, refresh_blocks: u64) -> AttestPlan {
+    match rec {
+        None => AttestPlan::Attest,
+        Some((0, _)) => AttestPlan::Attest,
+        Some((_, at)) if head > at && head.saturating_sub(at) > refresh_blocks => AttestPlan::Attest,
+        Some(_) => AttestPlan::Skip,
+    }
+}
+
+fn attest_refresh_blocks_from_env() -> u64 {
+    std::env::var("GPN_ATTEST_REFRESH_BLOCKS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(7_200) // half of `MaxAttestationAge` (14 400 blocks ≈ 60 h)
+}
+
+/// `GPUAttestation::MinEligibilityGflops` (runtime constant, spec 41 = 3 000).
+/// A submission below it is rejected on-chain with `BelowEligibilityFloor`, so
+/// there is no point paying a tx for one.
+const ELIGIBILITY_FLOOR_GFLOPS: u64 = 3_000;
+
+/// Should a fresh measurement replace the on-chain record?
+///
+/// The GEMM benchmark is **not** a stable instrument: it runs against a GPU that
+/// may be busy mining, and the same card reads anywhere from a few hundred to
+/// tens of thousands of GFLOPS depending on load and driver path. So a
+/// measurement is only ever allowed to *improve* the record — a suspicious low
+/// reading must never downgrade a working attestation (and, below the runtime
+/// eligibility floor, the chain rejects it anyway).
+///
+/// * below the eligibility floor        → keep (the chain would refuse it)
+/// * not better than the on-chain value → keep (nothing to gain, one tx saved)
+/// * otherwise                          → attest the measurement
+fn attest_measurement_useful(measured: u64, on_chain: Option<u64>) -> bool {
+    measured >= ELIGIBILITY_FLOOR_GFLOPS && measured > on_chain.unwrap_or(0)
+}
+
+/// Measure this box's real GPU throughput and submit a fresh attestation when
+/// the on-chain record is missing, zeroed or stale. Never fatal: a node must
+/// still mine and serve if the chain/RPC/GPU probe misbehaves. **Never attests
+/// 0** — a failed measurement must not downgrade a good record (item #5).
+async fn maybe_refresh_attestation(client: &ChainClient, addr: &str) {
+    if std::env::var("GPN_ATTEST_REFRESH")
+        .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+        .unwrap_or(false)
+    {
+        println!("[attest] GPN_ATTEST_REFRESH=0 — leaving the on-chain attestation alone");
+        return;
+    }
+    let head = client.head_block_number().await.unwrap_or(0);
+    let rec = client
+        .get_attestation_meta(addr)
+        .await
+        .map(|(_gpus, gflops, at)| (gflops, at));
+    let refresh = attest_refresh_blocks_from_env();
+    match attest_plan(rec, head, refresh) {
+        AttestPlan::Skip => {
+            let (gflops, at) = rec.unwrap_or((0, 0));
+            println!(
+                "[attest] on-chain attestation is current: {gflops} GFLOPS at block {at} \
+                 (head {head}, refresh every {refresh} blocks) — not re-attesting"
+            );
+        }
+        AttestPlan::Attest => {
+            let why = match rec {
+                None => "no attestation on chain".to_string(),
+                Some((0, at)) => format!("on-chain compute_gflops is 0 (written at block {at})"),
+                Some((gflops, at)) => {
+                    format!("{gflops} GFLOPS attested at block {at}, older than {refresh} blocks")
+                }
+            };
+            println!("[attest] re-attesting: {why}");
+            let device: usize = std::env::var("GPN_GPU_INDEX")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            let measured = tokio::task::spawn_blocking(move || {
+                gpn_agent::gpu::measure_gflops(device)
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("measurement task failed: {e}")));
+            let gflops = match measured {
+                Ok(g) if g > 0 => g,
+                Ok(_) => {
+                    eprintln!(
+                        "[attest] ⚠ measured 0 GFLOPS — NOT attesting 0 (that would downgrade the \
+                         record and make this node unroutable). Fix the OpenCL/CUDA device or set \
+                         GPN_GFLOPS and pass it to the heartbeat."
+                    );
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("[attest] ⚠ GPU compute measurement failed ({e}) — not attesting");
+                    return;
+                }
+            };
+            let on_chain = rec.map(|(g, _)| g).filter(|g| *g > 0);
+            if !attest_measurement_useful(gflops, on_chain) {
+                println!(
+                    "[attest] measured {gflops} GFLOPS vs {} on chain (floor {ELIGIBILITY_FLOOR_GFLOPS}) \
+                     — keeping the existing record, not re-attesting",
+                    on_chain
+                        .map(|g| g.to_string())
+                        .unwrap_or_else(|| "none".to_string())
+                );
+                return;
+            }
+            println!("[attest] measured {gflops} GFLOPS — submitting a fresh attestation");
+            let challenge = client.get_attestation_challenge().await.unwrap_or([0u8; 32]);
+            let (model, _tflops) = gpn_agent::gpu::detect_gpu_capability();
+            let info = gpn_agent::gpu::GPUInfo {
+                model_name: model,
+                driver_version: String::new(),
+                vram_total_bytes: gpn_agent::gpu::detect_vram_mb() * 1024 * 1024,
+                vram_used_mb: 0,
+                temperature_celsius: 0.0,
+                gpu_utilization_percent: 0,
+                current_hashrate_mhs: 0.0,
+                compute_capability: String::new(),
+                cuda_version: None,
+                gpu_count: 1,
+            };
+            let gpu_hash = gpn_agent::gpu::hash_gpu_info(&info);
+            // Bounded: `submit_attestation` waits for inclusion (up to its 300 s
+            // timeout). Startup must not hang on a stalled chain.
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(90),
+                client.submit_attestation(challenge, gpu_hash, 1, gflops),
+            )
+            .await
+            {
+                Ok(Ok(())) => println!("[attest] attested {gflops} GFLOPS on chain"),
+                Ok(Err(e)) => eprintln!("[attest] submit_attestation failed: {e}"),
+                Err(_) => eprintln!(
+                    "[attest] submit_attestation timed out after 90s (chain stalled?) — \
+                     continuing; the claim lane re-reads the chain anyway"
+                ),
+            }
+        }
+    }
 }
 
 /// Item #61: one WARN per process when the tip cannot be read at all. Repeating
@@ -2652,5 +2824,48 @@ mod settled_cache_tests {
         assert_eq!(startup_ready_budget(Some(10_000), Some(10_000_000)), (600, 5_000));
         // Honest values pass through untouched.
         assert_eq!(startup_ready_budget(Some(5), Some(250)), (5, 250));
+    }
+
+    // ── Queue #65: the node keeps its own attestation real ──────────────
+
+    #[test]
+    fn attestation_is_refreshed_only_when_missing_zeroed_or_stale() {
+        // Never attested (box1's genesis case for a fresh box).
+        assert_eq!(attest_plan(None, 175_000, 7_200), AttestPlan::Attest);
+        // A zeroed record is a measurement that failed somewhere — repair it
+        // even if it was written a minute ago (item #5's whole point).
+        assert_eq!(attest_plan(Some((0, 175_000)), 175_001, 7_200), AttestPlan::Attest);
+        // Current record: re-attesting would burn a tx and a GEMM run for
+        // nothing. This is the steady state — startups must be quiet.
+        assert_eq!(attest_plan(Some((30_000, 170_000)), 175_000, 7_200), AttestPlan::Skip);
+        // At exactly the refresh age, still current (strictly older re-attests).
+        assert_eq!(attest_plan(Some((30_000, 167_800)), 175_000, 7_200), AttestPlan::Skip);
+        // One block past it: stale.
+        assert_eq!(attest_plan(Some((30_000, 167_799)), 175_000, 7_200), AttestPlan::Attest);
+        // box1's live record: 188 GFLOPS written at block 51 on a 175k chain.
+        assert_eq!(attest_plan(Some((188, 51)), 175_000, 7_200), AttestPlan::Attest);
+        // Unreadable head (0) is NOT evidence of staleness — no spurious tx on
+        // a cold start, and a record dated in the future never "ages".
+        assert_eq!(attest_plan(Some((30_000, 51)), 0, 7_200), AttestPlan::Skip);
+        assert_eq!(attest_plan(Some((30_000, 999_999)), 175_000, 7_200), AttestPlan::Skip);
+    }
+
+    #[test]
+    fn a_measurement_only_ever_improves_the_on_chain_record() {
+        // Below the runtime eligibility floor: the chain rejects it
+        // (`BelowEligibilityFloor`), so never pay for that tx.
+        assert!(!attest_measurement_useful(0, None));
+        assert!(!attest_measurement_useful(2_999, None));
+        assert!(!attest_measurement_useful(2_999, Some(188)));
+        // At the floor it is eligible...
+        assert!(attest_measurement_useful(3_000, None));
+        // ...but it must still beat the record. This host measures ~2 500 on a
+        // busy GPU while the chain holds 30 000: keep the 30 000.
+        assert!(!attest_measurement_useful(3_000, Some(30_000)));
+        assert!(!attest_measurement_useful(30_000, Some(30_000)));
+        // box1: an old 188 record, and a real 5070 Ti measurement beats it.
+        assert!(attest_measurement_useful(30_000, Some(188)));
+        // A zeroed record is always repaired by any eligible reading.
+        assert!(attest_measurement_useful(3_000, Some(0)));
     }
 }

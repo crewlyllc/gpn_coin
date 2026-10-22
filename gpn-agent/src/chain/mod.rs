@@ -667,6 +667,30 @@ impl ChainClient {
         Some((gpus, gflops, tier))
     }
 
+    /// Read the provider's attestation **with its age**: `(gpu_count,
+    /// compute_gflops, submitted_at)` where `submitted_at` is the block the
+    /// record was written. Returns None when the provider has never attested
+    /// (or the record is unreadable).
+    ///
+    /// Queue #65: a node must be able to tell "never attested" and "attested
+    /// long ago" apart from "attested correctly" — the third case is the only
+    /// one where re-attesting is pointless work.
+    pub async fn get_attestation_meta(&self, address: &str) -> Option<(u8, u64, u64)> {
+        let client = self.client.as_ref()?;
+        let addr32 = address.parse::<subxt::utils::AccountId32>().ok()?;
+        let key = (addr32.as_ref() as &[u8; 32]).to_vec();
+        let att = subxt::dynamic::storage(
+            "GPUAttestation",
+            "Attestations",
+            vec![Value::from_bytes(key)],
+        );
+        let v = self.storage_at_head(client, &att).await?;
+        let gpus = get_u8_field(&v, "gpu_count")?;
+        let gflops = get_u64_field(&v, "compute_gflops")?;
+        let submitted_at = get_u64_field(&v, "submitted_at").unwrap_or(0);
+        Some((gpus, gflops, submitted_at))
+    }
+
     pub async fn get_attestation_challenge(&self) -> Result<[u8; 32], Box<dyn std::error::Error>> {
         // Read `GPUAttestation::AttestationChallenge` from the chain via a
         // dynamic storage query. Falls back to a placeholder only if the

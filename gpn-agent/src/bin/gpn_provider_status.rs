@@ -142,6 +142,110 @@ fn rpc_call(endpoint: &str, method: &str, params: Value) -> Option<Value> {
     v.get("result").cloned()
 }
 
+// ─── Attested compute (queue #65) ───────────────────────────────────────────
+//
+// `/status.gflops` is what an access point routes on (`min_gflops`), while the
+// CHAIN enforces `attested_gflops >= min_gflops` when a provider accepts a job.
+// Those two numbers used to be independent: the heartbeat advertised a
+// hand-typed `--gflops` (default **0**) that nothing reconciled with the
+// attestation. So box1 advertised 0 GFLOPS — unroutable for any gated job —
+// while the chain held a real attestation for it; and the reverse (advertising
+// more than was ever attested) only shows up later as an `accept_job` rejection
+// that strands the job.
+//
+// Resolve it from the chain instead, and never advertise more than the chain
+// will accept: `min(operator, attested)` when both are known.
+
+/// How long a chain-read attestation stays authoritative in `/status`.
+const ATTEST_TTL: Duration = Duration::from_secs(60);
+/// Retry sooner when the last read failed (chain down / RPC busy).
+const ATTEST_RETRY_TTL: Duration = Duration::from_secs(30);
+
+fn attest_cache() -> &'static std::sync::Mutex<Option<(Option<u64>, Instant)>> {
+    static C: std::sync::OnceLock<std::sync::Mutex<Option<(Option<u64>, Instant)>>> =
+        std::sync::OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// ss58 or `0x`-hex → 32-byte account id.
+fn account_pubkey(address: &str) -> Option<[u8; 32]> {
+    use sp_core::crypto::Ss58Codec;
+    let a = address.trim();
+    if let Some(hexpart) = a.strip_prefix("0x") {
+        let bytes = hex::decode(hexpart).ok()?;
+        return bytes.as_slice().try_into().ok();
+    }
+    let id = sp_core::crypto::AccountId32::from_ss58check(a).ok()?;
+    Some(id.into())
+}
+
+/// Storage key for `GPUAttestation::Attestations[who]`.
+fn attestation_key(pubkey: &[u8; 32]) -> String {
+    let mut k = Vec::with_capacity(64);
+    k.extend_from_slice(&sp_core::hashing::twox_128(b"GPUAttestation"));
+    k.extend_from_slice(&sp_core::hashing::twox_128(b"Attestations"));
+    k.extend_from_slice(&sp_core::hashing::blake2_128(pubkey));
+    k.extend_from_slice(pubkey); // `blake2_128_concat` = hash ++ key
+    format!("0x{}", hex::encode(k))
+}
+
+/// `AttestationRecord` → `compute_gflops`.
+///
+/// Fixed-width SCALE prefix, so the offset is stable:
+/// `submitted_at u32 (0..4)` · `gpu_info_hash [u8;32] (4..36)` ·
+/// `challenge_response [u8;32] (36..68)` · `gpu_count u8 (68)` ·
+/// `compute_gflops u64 (69..77)`.
+fn decode_attested_gflops(bytes: &[u8]) -> Option<u64> {
+    if bytes.len() < 77 {
+        return None;
+    }
+    let mut b = [0u8; 8];
+    b.copy_from_slice(&bytes[69..77]);
+    Some(u64::from_le_bytes(b))
+}
+
+/// The provider's on-chain attested GFLOPS (None = unreadable / never attested).
+/// Cached briefly: `/status` is polled every 5 s by the access point, and the
+/// chain value only changes when the provider re-attests.
+fn attested_gflops(endpoint: &str, address: &str) -> Option<u64> {
+    if let Ok(guard) = attest_cache().lock() {
+        if let Some((v, at)) = guard.as_ref() {
+            let ttl = if v.is_some() {
+                ATTEST_TTL
+            } else {
+                ATTEST_RETRY_TTL
+            };
+            if at.elapsed() < ttl {
+                return *v;
+            }
+        }
+    }
+    let answer = account_pubkey(address).and_then(|pk| {
+        rpc_call(
+            endpoint,
+            "state_getStorage",
+            json!([attestation_key(&pk)]),
+        )
+        .and_then(|v| v.as_str().and_then(|s| hex::decode(s.trim_start_matches("0x")).ok()))
+        .and_then(|b| decode_attested_gflops(&b))
+    });
+    if let Ok(mut guard) = attest_cache().lock() {
+        *guard = Some((answer, Instant::now()));
+    }
+    answer
+}
+
+/// What to advertise: never more than the chain will accept, and never nothing
+/// when either source knows a real number.
+fn resolve_advertised_gflops(operator: u64, attested: Option<u64>) -> (u64, &'static str) {
+    match (operator > 0, attested.filter(|g| *g > 0)) {
+        (true, Some(a)) => (operator.min(a), "chain attestation (min with --gflops)"),
+        (false, Some(a)) => (a, "chain attestation"),
+        (true, None) => (operator, "--gflops (chain attestation unreadable)"),
+        (false, None) => (0, "none"),
+    }
+}
+
 /// Accept only a plausible libp2p peer id (base58-ish, ed25519 `12D3Koo…` or
 /// legacy multihash `Qm…`). Anything else is dropped rather than relayed.
 fn normalize_peer_id(raw: &str) -> Option<String> {
@@ -844,7 +948,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let address = opt(&args, "--address")
         .or_else(|| std::env::var("ADDRESS").ok())
         .unwrap_or_default();
-    let gflops: u64 = opt(&args, "--gflops")
+    let operator_gflops: u64 = opt(&args, "--gflops")
         .or_else(|| std::env::var("GFLOPS").ok())
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
@@ -932,17 +1036,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
 
     let server = Server::http(&listen).map_err(|e| format!("cannot bind {listen}: {e}"))?;
-    println!("GPN provider heartbeat on http://{listen} — address={address} gflops={gflops} models={:?} active={active}/{capacity} capabilities={:?}", models, capabilities);
+    // #65: `gflops` is what the access point routes on, so advertise the CHAIN's
+    // attested value (capped by `--gflops`) instead of a hand-typed number.
+    let (gflops, gflops_source) = resolve_advertised_gflops(
+        operator_gflops,
+        if address.is_empty() {
+            None
+        } else {
+            attested_gflops(&endpoint, &address)
+        },
+    );
+    println!("GPN provider heartbeat on http://{listen} — address={address} gflops={gflops} ({gflops_source}) models={:?} active={active}/{capacity} capabilities={:?}", models, capabilities);
     if gflops == 0 {
         // Item 5: a 0 here reaches the marketplace as "no compute". Say so at
         // boot instead of letting a silent 0 look like a healthy heartbeat.
         eprintln!(
             "⚠ gflops=0: this heartbeat advertises NO compute throughput. The access point's \
              min_gflops filter will only route jobs that require none, and the on-chain \
-             attestation tier is Bronze-0. Measure it (`gpn_agent --attest` prints the measured \
-             FP32 GFLOPS) and pass it with --gflops/GFLOPS, or set GPN_GFLOPS. If the measurement \
-             itself returns 0, the OpenCL/CUDA device could not be opened — check the provider log \
-             for 'measure_gflops failed'."
+             attestation tier is Bronze-0. Either let the provider attest (it measures and \
+             submits on startup when the record is missing/stale) or measure it yourself \
+             (`gpn_agent --attest` prints the measured FP32 GFLOPS) and pass it with \
+             --gflops/GFLOPS, or set GPN_GFLOPS. If the measurement itself returns 0, the \
+             OpenCL/CUDA device could not be opened — check the provider log for \
+             'measure_gflops failed'."
         );
     }
     if !models.is_empty() {
@@ -988,8 +1104,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .or_else(|_| std::env::var("HOME"))
                         .unwrap_or_else(|_| ".".into()),
                 );
+                // #65: re-resolve per request (60 s cache) so a provider that
+                // re-attests while this heartbeat runs is picked up without a
+                // restart; the value never exceeds what the chain will accept.
+                let (gflops_now, _) = resolve_advertised_gflops(
+                    operator_gflops,
+                    if address.is_empty() {
+                        None
+                    } else {
+                        attested_gflops(&endpoint, &address)
+                    },
+                );
                 let mut body = json!({
-                    "address": address, "gflops": gflops, "models": models_now,
+                    "address": address, "gflops": gflops_now, "models": models_now,
                     "can_pull": can_pull, "active": active, "capacity": capacity.max(1),
                     "capabilities": capabilities,
                     "tok_per_s": tok_per_s, "owner_cost_usd_hr": owner_cost_usd_hr,
@@ -1385,5 +1512,67 @@ mod tests {
         );
         // Unknown VRAM (0) filters nothing — never block on ignorance.
         assert_eq!(vram_filter_logged(&models, 0).len(), 3);
+    }
+
+    // ── Queue #65: advertise what the chain will actually accept ──────────
+
+    /// A real `AttestationRecord` read off the live chain for the local
+    /// provider (30 000 GFLOPS, Bronze) — the exact bytes `/status` must decode.
+    fn live_record(gflops: u64) -> Vec<u8> {
+        let mut b = vec![0u8; 82];
+        b[0] = 0x33; // submitted_at = 51
+        b[68] = 1; // gpu_count
+        b[69..77].copy_from_slice(&gflops.to_le_bytes());
+        b[77] = 1; // tier = Bronze
+        b
+    }
+
+    #[test]
+    fn the_attestation_record_decodes_to_its_gflops() {
+        assert_eq!(decode_attested_gflops(&live_record(30_000)), Some(30_000));
+        assert_eq!(decode_attested_gflops(&live_record(188)), Some(188));
+        assert_eq!(decode_attested_gflops(&live_record(0)), Some(0));
+        // A short/garbage read is "unknown", never a fabricated 0.
+        assert_eq!(decode_attested_gflops(&[]), None);
+        assert_eq!(decode_attested_gflops(&[0u8; 76]), None);
+    }
+
+    #[test]
+    fn the_storage_key_is_the_attestations_map_entry_for_the_account() {
+        // ss58 and 0x-hex are the same account → the same key; a different
+        // account gets a different one (otherwise every box would advertise
+        // the first provider's attestation).
+        let a = account_pubkey("5ENqSp5Q65bxfgryZExQDRnV1rEW1qb2UBztvswLamkoUrqj").unwrap();
+        let b = account_pubkey(
+            "0x664c6e12d0eff26c646b764f733f0468d44deea02f856ab9f1b629af06993d01",
+        )
+        .unwrap();
+        assert_eq!(a, b);
+        assert_eq!(attestation_key(&a), attestation_key(&b));
+        let c = account_pubkey("5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty").unwrap();
+        assert_ne!(attestation_key(&a), attestation_key(&c));
+        assert!(attestation_key(&a).starts_with("0x"));
+        assert_eq!(attestation_key(&a).len(), 2 + 80 * 2); // twox128 + twox128 + blake2_128_concat
+        assert!(account_pubkey("not-an-address").is_none());
+    }
+
+    #[test]
+    fn advertised_gflops_never_exceeds_what_the_chain_accepts() {
+        // box1's actual shape: the operator never passed a number.
+        assert_eq!(resolve_advertised_gflops(0, Some(188)).0, 188);
+        // Operator over-advertised (2500 typed, 188 attested): the chain gate
+        // would reject the job at accept_job, so advertise the chain's number.
+        assert_eq!(resolve_advertised_gflops(2500, Some(188)).0, 188);
+        // Operator deliberately advertises less than attested: keep it.
+        assert_eq!(resolve_advertised_gflops(100, Some(30_000)).0, 100);
+        // Both real and equal: unchanged.
+        assert_eq!(resolve_advertised_gflops(30_000, Some(30_000)).0, 30_000);
+        // Chain unreadable / never attested: fall back to the operator value
+        // (never silently to 0 when the operator knows a number).
+        assert_eq!(resolve_advertised_gflops(2500, None).0, 2500);
+        assert_eq!(resolve_advertised_gflops(2500, Some(0)).0, 2500);
+        // Nothing known anywhere: 0, and the boot warning fires.
+        assert_eq!(resolve_advertised_gflops(0, None).0, 0);
+        assert_eq!(resolve_advertised_gflops(0, Some(0)).0, 0);
     }
 }
