@@ -46,6 +46,40 @@ pub const DEFAULT_INPUT_RATE_FRAC: f64 = 0.25;
 pub const PRICE_FLOOR_USD_PER_M: f64 = 0.05;
 pub const PRICE_CEIL_USD_PER_M: f64 = 5.00;
 
+// ── diffusion (image / video) calibration ──────────────────────────────────
+//
+// Diffusion has no token count. Its cost is **denoising work**: pixels × steps
+// (× frames for video), plus a fixed per-job pipeline load. The two constants
+// below were measured on the anchor card (RTX 4060 8 GB, this host) by timing
+// `gpn_diffuse.py` end-to-end, which is the real shape of a job: the provider
+// shells out a fresh python process per job, so the model load is *in* every
+// job and belongs in the price.
+//
+// Measured (4 points, sd-turbo, one process per render):
+//   512² ×  8 steps =  2.10 Mpx·step → 28.88 s
+//   512² × 20 steps =  5.24 Mpx·step → 36.54 s
+//   768² × 12 steps =  7.08 Mpx·step → 35.68 s
+//  1024² × 20 steps = 20.97 Mpx·step → 44.72 s
+// Least-squares fit: seconds = 30.0 + 0.73 × Mpx·step  (residual < 3 s).
+/// Fixed per-job cost of a diffusion job (pipeline load), measured.
+pub const DIFF_BASE_SECS: f64 = 30.0;
+/// Marginal cost of one megapixel × one denoise step, measured.
+pub const DIFF_SEC_PER_MPX_STEP: f64 = 0.73;
+/// Video pays its own (larger) model load: LTX-Video also brings up the T5
+/// text encoder. NOT measured — no video job has ever completed here (needs
+/// > 8 GB), so this is an estimate and is labelled as such everywhere it shows.
+pub const DIFF_VIDEO_BASE_SECS: f64 = 90.0;
+/// Per-frame denoise of a video transformer costs this much more than an image
+/// step. NOT measured (same reason); 4× is the usual SDXL-class vs LTX-class
+/// per-latent-frame ratio.
+pub const DIFF_VIDEO_COMPUTE_FACTOR: f64 = 4.0;
+
+/// Legacy image pricing used a flat "512² @ 8 steps ≈ 90 s of GPU time" with no
+/// per-job base and a 20% margin. Kept verbatim for `GPN_PRICING_MODEL=market`
+/// revert parity.
+pub const LEGACY_IMAGE_REF_SECS: f64 = 90.0;
+pub const LEGACY_IMAGE_MARGIN_FRAC: f64 = 0.20;
+
 /// Legacy market-model fallbacks (used when the oracle feed is absent).
 pub const LEGACY_MARKET_HR_FALLBACK: f64 = 3.0;
 pub const LEGACY_UTIL_FALLBACK: f64 = 0.65;
@@ -277,6 +311,127 @@ impl PricingConfig {
         }
         let rate = gpn_per_out_token.saturating_mul(blended_bps) / full_bps;
         (rate.max(1), cap)
+    }
+
+    // ── diffusion (image / video) ──────────────────────────────────────────
+
+    /// GPU-seconds one generation job is expected to occupy on the **anchor**
+    /// card. `frames = 1` for an image; video multiplies the denoise term and
+    /// pays the bigger pipeline load.
+    pub fn diffusion_seconds(&self, width: f64, height: f64, steps: f64, frames: f64) -> f64 {
+        let video = frames > 1.0;
+        let base = if video {
+            DIFF_VIDEO_BASE_SECS
+        } else {
+            DIFF_BASE_SECS
+        };
+        let per_step = if video {
+            DIFF_SEC_PER_MPX_STEP * DIFF_VIDEO_COMPUTE_FACTOR
+        } else {
+            DIFF_SEC_PER_MPX_STEP
+        };
+        let mpx_step = (width.max(1.0) * height.max(1.0) * steps.max(1.0) * frames.max(1.0)) / 1e6;
+        base + mpx_step * per_step
+    }
+
+    /// Buyer price of one generation job, in USD.
+    ///
+    /// **Which card: the anchor, not the routed one.** This is the same design
+    /// rule the text curve follows (see the module docs): the buyer pays the
+    /// same for a 512²/8-step image whether a 4060 or an H100 renders it, so a
+    /// heterogeneous spot market has one price and the cheapest card is not the
+    /// only one ever picked. `provider_rate_hr` therefore does *not* appear
+    /// here; it appears in `diffusion_provider_seconds`/`_earn_usd`, where the
+    /// faster card converts the same fee into more money per hour.
+    ///
+    /// Because the seconds above were measured *on* the anchor card, the anchor
+    /// GPU-hour rate is the correct divisor — no cross-card interpolation is
+    /// involved in the buyer's price at all.
+    pub fn diffusion_price_usd(
+        &self,
+        width: f64,
+        height: f64,
+        steps: f64,
+        frames: f64,
+        market_hr: f64,
+        util: f64,
+    ) -> f64 {
+        match self.model {
+            PricingModel::Throughput => {
+                (self.diffusion_seconds(width, height, steps, frames) / 3600.0)
+                    * self.anchor_rate_usd_hr
+                    * (1.0 + self.margin_frac())
+            }
+            PricingModel::Market => self.legacy_image_price_usd(width, height, steps, frames, market_hr, util),
+        }
+    }
+
+    /// Legacy (`GPN_PRICING_MODEL=market`) image price: flat 90 s at 512²/8,
+    /// oracle market GPU-hour, 20% margin, divided by utilisation.
+    pub fn legacy_image_price_usd(
+        &self,
+        width: f64,
+        height: f64,
+        steps: f64,
+        frames: f64,
+        market_hr: f64,
+        util: f64,
+    ) -> f64 {
+        const REF_UNITS: f64 = 512.0 * 512.0 * 8.0;
+        let units = width.max(1.0) * height.max(1.0) * steps.max(1.0) * frames.max(1.0);
+        let est_secs = (units / REF_UNITS) * LEGACY_IMAGE_REF_SECS;
+        let util = util.clamp(0.05, 1.0);
+        (market_hr.max(0.001) / 3600.0) * est_secs * (1.0 + LEGACY_IMAGE_MARGIN_FRAC) / util
+    }
+
+    /// Buyer price of one generation job, in GPN (whole tokens, ≥ 1 base unit).
+    pub fn diffusion_price_gpn(
+        &self,
+        width: f64,
+        height: f64,
+        steps: f64,
+        frames: f64,
+        token_price_usd: f64,
+        market_hr: f64,
+        util: f64,
+    ) -> f64 {
+        let usd = self.diffusion_price_usd(width, height, steps, frames, market_hr, util);
+        (self.gpn_per_token(usd, token_price_usd) as f64) / BASE_UNITS_PER_GPN
+    }
+
+    /// GPU-seconds the job occupies a **serving** card, per the pricing curve.
+    ///
+    /// Only the anchor card is measured. A faster card is interpolated by the
+    /// curve's own hourly-rate ratio (`anchor_rate / provider_rate`), which keeps
+    /// one coherence knob: the same effective-throughput term that decides an
+    /// LLM provider's $/hr. With this choice the provider's USD income for a job
+    /// is card-independent (`provider_seconds × provider_rate = measured ×
+    /// anchor_rate`), while its income *per hour* scales with the curve — which
+    /// is exactly the stated design ("faster GPUs earn proportionally more").
+    pub fn diffusion_provider_seconds(
+        &self,
+        width: f64,
+        height: f64,
+        steps: f64,
+        frames: f64,
+        provider_rate_hr: f64,
+    ) -> f64 {
+        let anchor_secs = self.diffusion_seconds(width, height, steps, frames);
+        anchor_secs * (self.anchor_rate_usd_hr / provider_rate_hr.max(1e-9))
+    }
+
+    /// What a card earns for one generation job (pre-margin, pre-5%-fee) — the
+    /// literal form of the task's formula, with the seconds scaled to that card.
+    pub fn diffusion_provider_earn_usd(
+        &self,
+        width: f64,
+        height: f64,
+        steps: f64,
+        frames: f64,
+        provider_rate_hr: f64,
+    ) -> f64 {
+        (self.diffusion_provider_seconds(width, height, steps, frames, provider_rate_hr) / 3600.0)
+            * provider_rate_hr
     }
 
     /// Legacy market-model output price for the given fleet conditions.

@@ -1060,6 +1060,39 @@ fn resolve_requested_model(reg: &[Provider], requested: &str) -> Result<String, 
     }
 }
 
+/// `Retry-After` we hand back while the registry is still warming up.
+const REGISTRY_WARMING_RETRY_AFTER: &str = "5";
+
+/// The `Retry-After` header for a warming-up registry (tiny_http wants a built
+/// `Header`, and these bytes are static so the parse cannot fail).
+fn retry_after_header() -> Header {
+    Header::from_bytes(&b"Retry-After"[..], REGISTRY_WARMING_RETRY_AFTER.as_bytes())
+        .expect("static header")
+}
+
+/// Classify a failed model resolution: `(http_status, client_message)`.
+///
+/// An **empty** registry does not mean "unknown model" — it means nothing has
+/// been polled yet. The AP binds its listener before the first `refresh()` pass
+/// completes, so for the first few seconds after a restart (plus the on-chain
+/// `list_provider_endpoints` RPC) every text request used to be told
+/// `unknown model 'llama3.2:1b'; available: []` with **400** — a terminal-looking
+/// answer for a transient condition (measured 2026-10-22 11:36: 8.5 s and 41.8 s
+/// probes succeeded either side of it). So: empty ⇒ **503** + `Retry-After`;
+/// non-empty ⇒ keep the hard **400**, because rejecting a model no provider can
+/// serve is what stops orphaned `Pending` jobs saturating `MaxActiveJobs`.
+fn model_resolution_status(reg: &[Provider], err: &str) -> (u16, String) {
+    if reg.is_empty() {
+        (
+            503,
+            "provider registry is warming up (no providers polled yet); retry shortly"
+                .to_string(),
+        )
+    } else {
+        (400, err.to_string())
+    }
+}
+
 /// Job-relative GPN price for an image/video generation job, grounded in the
 /// market GPU-hour price from the profitability oracle (mirrors the text
 /// per-token pricing). Scales linearly with output pixels × denoise steps, so a
@@ -2277,14 +2310,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let model = match resolve_requested_model(&reg, &model) {
                         Ok(m) => m,
                         Err(e) => {
-                            let r = Response::from_string(
-                                json!({
-                                    "error": {"message": e, "type": "gpn_error"}
-                                })
-                                .to_string(),
+                            // Empty registry = starting up, not "bad model name".
+                            let (code, msg) = model_resolution_status(&reg, &e);
+                            let kind = if code == 503 {
+                                "gpn_unavailable"
+                            } else {
+                                "gpn_error"
+                            };
+                            let mut r = Response::from_string(
+                                json!({"error": {"message": msg, "type": kind}}).to_string(),
                             )
                             .with_header(hdr.clone())
-                            .with_status_code(400);
+                            .with_status_code(code);
+                            if code == 503 {
+                                r = r.with_header(retry_after_header());
+                            }
                             let _ = req.respond(r);
                             return;
                         }
@@ -2798,11 +2838,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         match resolve_requested_model(&reg, &model) {
                             Ok(m) => m,
                             Err(e) => {
-                                let r = Response::from_string(
-                                    json!({"ok":false,"error":e}).to_string(),
+                                // Same startup race as the chat facade: 503 while no
+                                // provider has polled yet, 400 once the registry is real.
+                                let (code, msg) = model_resolution_status(&reg, &e);
+                                let mut r = Response::from_string(
+                                    json!({"ok":false,"error":msg}).to_string(),
                                 )
                                 .with_header(hdr.clone())
-                                .with_status_code(400);
+                                .with_status_code(code);
+                                if code == 503 {
+                                    r = r.with_header(retry_after_header());
+                                }
                                 let _ = req.respond(r);
                                 return;
                             }
@@ -3421,7 +3467,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         let reg = registry.lock().unwrap().clone();
                         match resolve_requested_model(&reg, &qmodel) {
-                            Err(e) => json!({"ok":false,"error":e}),
+                            Err(e) => {
+                                // Route path keeps its `ok:false` shape but must not
+                                // claim "unknown model" when nobody has polled yet.
+                                let (_, msg) = model_resolution_status(&reg, &e);
+                                json!({"ok":false,"error":msg})
+                            }
                             Ok(qmodel) => match pick(
                                 &reg,
                                 0,
@@ -4415,6 +4466,26 @@ mod tests {
         assert_eq!(back.model, "qwen2.5:7b");
         assert_eq!(back.prompt, "hello world");
         assert_eq!(back.status, "queued");
+    }
+
+    #[test]
+    fn an_empty_registry_is_warming_up_not_an_unknown_model() {
+        // The AP binds :8092 before its first refresh pass, so a request in that
+        // window sees an empty registry. That must read as "retry shortly" (503),
+        // never as "your model name is wrong" (400) — the 2026-10-22 11:36 probe.
+        let empty: Vec<Provider> = Vec::new();
+        let err = "unknown model 'llama3.2:1b'; available: []";
+        let (code, msg) = model_resolution_status(&empty, err);
+        assert_eq!(code, 503);
+        assert!(msg.contains("warming up"), "{msg}");
+        assert!(!msg.contains("unknown model"), "{msg}");
+
+        // With a live provider the rejection stays a hard 400 and keeps the reason:
+        // an unservable model would otherwise orphan a Pending job forever.
+        let reg = vec![prov("5Me", "http://127.0.0.1:8093/status", 5, "llama3.2:1b")];
+        let (code, msg) = model_resolution_status(&reg, err);
+        assert_eq!(code, 400);
+        assert_eq!(msg, err);
     }
 
     #[test]
