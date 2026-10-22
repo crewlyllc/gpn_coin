@@ -1,5 +1,16 @@
 # GPN change-log
 
+## 2026-10-22 12:2x PT — **pricing switched to a throughput-calibrated curve — $8.75 → $0.379 per 1M output tokens**
+**WHY (agreed with Jeremy):** the old card was `target_hr = clamp(0.5 × market_hr, owner_cost, market_hr)` with `market_hr = $3.00` hardcoded (oracle absent). That anchors a consumer card at cloud-A100 rental rates: a 4060 worth ~$0.10–0.15/hr was billed at $1.50/hr → **$8.75/1M output**, ~22× `gpt-5-nano`'s $0.40. FP32 GFLOPs were also the wrong metric (a 4090 would price above an H100); decode is memory-bandwidth-bound, so throughput is the right quantity.
+**WHAT (new `gpn-agent/src/pricing.rs`, 11 pure-function tests):**
+* `anchor_tok_s = roofline(30,000 GF/s, 272 GB/s, 1B) = 95.2`; `k = GPN_GPU_ANCHOR_USD_HR/(anchor_tok_s×3600)` ($0.10/hr → 2.918e-7); `price_out = k×(1+margin)` → **$0.3793/1M**; `price_in = price_out×GPN_INPUT_RATE_FRAC` (0.25) → **$0.0948/1M**; `provider_rate_hr = roofline(gflops,bw,params)×3600×k` → 4060 **$0.100**, 4090 **$0.371**, A100 **$0.750**, H100 **$1.232**.
+* **Buyer price is GPU-independent by design** (one global token price; faster hardware earns the provider more per hour). Legacy path retained as `GPN_PRICING_MODEL=market` — boots without extra flags and reproduces **$8.7535/1M** exactly at the $3.00 fallback.
+* Chat + `/jobs` text pricing rewired to `pcfg`; `CHAT_PRICE_PER_TOKEN` deleted. Input metering: channel escrow = `prompt_tokens/4 + max_tokens`; on-chain publishes a **blended** rate over `prompt+max` (exact at full completion) because the pallet stores a single rate — documented as a pallet limitation, not hidden.
+* `GET /pricing` (public, 60 s cacheable): anchor, `k`, per-token rates, reference-GPU earnings table, `below_owner_cost` flags.
+* Guardrails: refuse to publish outside **[$0.05, $5.00]/1M** unless `GPN_PRICING_UNSAFE=1`; log anchor+price at boot; warn (once per provider) when modelled earning < declared `owner_cost_usd_hr`.
+* Docs + `website/ai.html` economics rewritten to the new derivation (incl. the provider-earnings table and the GPU-independence rationale).
+**VERIFIED LIVE (:8092):** `/pricing` → `throughput`, $0.3793/1M, 2.53 GPN/1M, earnings table as above; channel chat 75–82 ms; on-chain (`mode:"settle"`) job **#6488 → Completed** with a 1,298,532,760-base-unit escrow (below the 1 GPN ED — create/settle both succeed). Tests: `cargo test --lib` 347 passed, `cargo test --bin gpn_scheduler` 40 passed.
+
 ## 2026-10-22 12:1x PT — **`/v1/chat/completions` settles off-chain by default — 37.6 s p50 → 73 ms p50** (channel settlement wired into the public chat path)
 **WHY (measured, same box/model/prompt):** `mode:"passthrough"` 0.12 s vs default `settle` 37.49 s. The whole difference was the per-request `create_job` → block inclusion → claim → settle cycle. The hub was already enabled and channel 5 already working (277 ms–1.5 s) for `POST /jobs`, but the OpenAI facade still created an on-chain job per request.
 **WHAT:**
