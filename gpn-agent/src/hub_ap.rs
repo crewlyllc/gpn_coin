@@ -40,7 +40,20 @@ pub struct HubCtx {
     pub job_deadline_ms: u64,
     /// Providers whose `/channel/job` endpoint refused/failed, with a retry-after.
     pub unsupported: Mutex<HashMap<String, Instant>>,
+    /// One submission gate per channel (keyed by provider address).
+    ///
+    /// `HubChannel::begin_job` prices the next state off `self.state`, which
+    /// only advances when a *result* is applied — so two overlapping jobs would
+    /// both sign `state_before = S(n)` and the provider would reject the second
+    /// with `StaleStateBefore` (observed live as HTTP 409 on concurrent image
+    /// submissions). Holding this gate across price → POST → apply makes
+    /// concurrent jobs take turns instead of racing for the same nonce.
+    pub submit_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
+
+/// How many times a submission may be re-priced after the provider rejects it
+/// with a stale pre-state before the job is declared unservable.
+const STALE_STATE_ATTEMPTS: u32 = 3;
 
 impl HubCtx {
     pub fn from_env(signer_uri: &str) -> Arc<Self> {
@@ -96,7 +109,17 @@ impl HubCtx {
             close_nonce,
             job_deadline_ms,
             unsupported: Mutex::new(HashMap::new()),
+            submit_locks: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// The submission gate for one channel (provider address). Cloned out of
+    /// the map so the caller holds an `Arc` and never the map lock itself.
+    pub fn submission_gate(&self, provider_hex: &str) -> Arc<Mutex<()>> {
+        let mut m = self.submit_locks.lock().unwrap_or_else(|e| e.into_inner());
+        m.entry(provider_hex.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     fn mark_unsupported(&self, provider: &str) {
@@ -137,10 +160,9 @@ pub fn channel_endpoint(status_url: &str) -> Option<String> {
 /// Ask the provider whether it serves the channel protocol, **before** the AP
 /// opens (and funds) a channel. A provider on an older build 404s here, so no
 /// deposit is ever locked against a peer that cannot use it.
-pub fn probe_channel_support(status_url: &str) -> bool {
-    let Some(job_url) = channel_endpoint(status_url) else {
-        return false;
-    };
+/// Ask `GET {base}/channel/status` whether this endpoint speaks the channel
+/// protocol before the AP opens and funds anything.
+pub fn probe_channel_endpoint(job_url: &str) -> bool {
     let Some(base) = job_url.strip_suffix("/channel/job") else {
         return false;
     };
@@ -160,6 +182,13 @@ pub fn probe_channel_support(status_url: &str) -> bool {
     }
 }
 
+pub fn probe_channel_support(status_url: &str) -> bool {
+    let Some(job_url) = channel_endpoint(status_url) else {
+        return false;
+    };
+    probe_channel_endpoint(&job_url)
+}
+
 #[derive(Debug)]
 pub struct ChannelJobOut {
     pub channel_id: u64,
@@ -167,6 +196,9 @@ pub struct ChannelJobOut {
     pub text: String,
     pub usage: Option<(u32, u32)>,
     pub balance_provider: u128,
+    /// What the provider actually charged for this job (item #63). Equals
+    /// `ceiling` for a legacy provider or an unmeasured job.
+    pub charge: u128,
 }
 
 /// Why a channel job did not complete.
@@ -203,6 +235,25 @@ impl ChannelFail {
     }
 }
 
+/// One channel job on the wire: text (legacy) or a diffusion render.
+struct ChannelJobReq<'a> {
+    provider_addr_hex: &'a str,
+    status_url: &'a str,
+    model: &'a str,
+    prompt: &'a str,
+    max_tokens: u32,
+    price: u128,
+    /// Per-token rates for actual-usage settlement; `None` = ceiling billing.
+    billing: Option<crate::hub_channel::BillingRates>,
+    /// Empty = text. `ImageGeneration`/`VideoGeneration` = render job.
+    job_kind: &'a str,
+    gen: Option<crate::hub_channel::GenParams>,
+    /// Full `/channel/job` URL when the provider serves its generation endpoint
+    /// on a different port than `status_url + 1` (the diffusion provider does:
+    /// LLM channel = 8094, diffusion channel = 8095).
+    endpoint: Option<String>,
+}
+
 /// Route one job through the hub channel, reporting *why* it failed.
 ///
 /// `client` may be `None` when a live channel already exists in the registry
@@ -220,6 +271,112 @@ pub fn try_channel_job_ex(
     max_tokens: u32,
     price: u128,
 ) -> Result<ChannelJobOut, ChannelFail> {
+    try_channel_job_billed_ex(
+        hub,
+        rt,
+        client,
+        provider_addr_hex,
+        status_url,
+        model,
+        prompt,
+        max_tokens,
+        price,
+        None,
+    )
+}
+
+/// [`try_channel_job_ex`] with per-token rates, so the provider settles at
+/// `min(actual usage, price)` and the requestor is refunded the difference in
+/// the same signed state update (item #63).
+#[allow(clippy::too_many_arguments)]
+pub fn try_channel_job_billed_ex(
+    hub: &HubCtx,
+    rt: &tokio::runtime::Runtime,
+    client: Option<&ChainClient>,
+    provider_addr_hex: &str,
+    status_url: &str,
+    model: &str,
+    prompt: &str,
+    max_tokens: u32,
+    price: u128,
+    billing: Option<crate::hub_channel::BillingRates>,
+) -> Result<ChannelJobOut, ChannelFail> {
+    run_channel_job(
+        hub,
+        rt,
+        client,
+        ChannelJobReq {
+            provider_addr_hex,
+            status_url,
+            model,
+            prompt,
+            max_tokens,
+            price,
+            billing,
+            job_kind: "",
+            gen: None,
+            endpoint: None,
+        },
+    )
+}
+
+/// Route one **generation** job through the hub channel.
+///
+/// Identical money semantics to [`try_channel_job_ex`] — same signed
+/// assignment, same `NotAttempted` vs `Ambiguous` split — but the assignment
+/// carries the render parameters, and `endpoint` lets the caller address a
+/// provider whose diffusion channel port differs from `status_url + 1`.
+#[allow(clippy::too_many_arguments)]
+pub fn try_channel_gen_job(
+    hub: &HubCtx,
+    rt: &tokio::runtime::Runtime,
+    client: Option<&ChainClient>,
+    provider_addr_hex: &str,
+    status_url: &str,
+    endpoint: Option<String>,
+    model: &str,
+    prompt: &str,
+    job_kind: &str,
+    gen: crate::hub_channel::GenParams,
+    price: u128,
+) -> Result<ChannelJobOut, ChannelFail> {
+    run_channel_job(
+        hub,
+        rt,
+        client,
+        ChannelJobReq {
+            provider_addr_hex,
+            status_url,
+            model,
+            prompt,
+            max_tokens: 0,
+            price,
+            billing: None,
+            job_kind,
+            gen: Some(gen),
+            endpoint,
+        },
+    )
+}
+
+fn run_channel_job(
+    hub: &HubCtx,
+    rt: &tokio::runtime::Runtime,
+    client: Option<&ChainClient>,
+    req: ChannelJobReq<'_>,
+) -> Result<ChannelJobOut, ChannelFail> {
+    let ChannelJobReq {
+        provider_addr_hex,
+        status_url,
+        model,
+        prompt,
+        max_tokens,
+        price,
+        billing,
+        job_kind,
+        gen,
+        endpoint,
+    } = req;
     let no = |m: &str| Err(ChannelFail::NotAttempted(m.to_string()));
     if !hub.enabled {
         return no("hub disabled (GPN_ESCROW_MODE=onchain/off)");
@@ -233,7 +390,7 @@ pub fn try_channel_job_ex(
     if hub.is_unsupported(provider_addr_hex) {
         return no("provider does not speak /channel (recently refused)");
     }
-    let Some(endpoint) = channel_endpoint(status_url) else {
+    let Some(endpoint) = endpoint.or_else(|| channel_endpoint(status_url)) else {
         return no("cannot derive the provider's channel endpoint from its status URL");
     };
     // Only pay for a channel open when the provider actually speaks the
@@ -246,7 +403,7 @@ pub fn try_channel_job_ex(
             .map(|c| c.state.balance_requestor > 0)
             .unwrap_or(false)
     };
-    if !have_channel && !probe_channel_support(status_url) {
+    if !have_channel && !probe_channel_endpoint(&endpoint) {
         let msg = format!(
             "provider {provider_addr_hex} does not serve /channel/status — staying on-chain (no channel opened)"
         );
@@ -254,10 +411,27 @@ pub fn try_channel_job_ex(
         hub.mark_unsupported(provider_addr_hex);
         return Err(ChannelFail::NotAttempted(msg));
     }
+    // Serialize this channel: the next state is priced off the channel's
+    // current state, which only advances when a result is applied, so two
+    // concurrent jobs would otherwise sign the same `state_before` and one of
+    // them would be rejected `StaleStateBefore`. The gate is per channel (i.e.
+    // per provider account), so different providers still run in parallel.
+    let gate = hub.submission_gate(provider_addr_hex);
+    let _gate = gate.lock().unwrap_or_else(|e| e.into_inner());
+
     let channel_id = match ensure_hub_channel(hub, rt, client, provider_addr_hex, &provider_pub) {
         Some(id) => id,
         None => return no("no usable channel (open/funding failed or channel settled on chain)"),
     };
+
+    // Price → sign → submit. Re-priced (bounded) when the provider answers with
+    // a stale pre-state: that is a *transient* condition — some other update
+    // advanced the channel between our read and its `accept` — not proof that
+    // the channel is unusable, so it must never be reported as a channel
+    // failure on the first occurrence.
+    let mut attempt: u32 = 0;
+    let (job_id, resp) = loop {
+    attempt += 1;
 
     // Price the job under the registry lock, then release it for the HTTP call.
     let assignment: Assignment = {
@@ -270,26 +444,66 @@ pub fn try_channel_job_ex(
         }
         let job_id = next_job_id();
         let deadline = now_ms().saturating_add(hub.job_deadline_ms);
-        match ch.begin_job_for(
-            &hub.signer,
-            provider_pub,
-            job_id,
-            model,
-            prompt,
-            max_tokens,
-            700,
-            price,
-            deadline,
-        ) {
-            Ok(a) => {
-                let _ = reg.save(&hub.path);
-                a
+        if let Some(g) = gen.clone() {
+            match ch.begin_job_gen_for(
+                &hub.signer,
+                provider_pub,
+                job_id,
+                model,
+                prompt,
+                job_kind,
+                g,
+                price,
+                deadline,
+            ) {
+                Ok(a) => {
+                    let _ = reg.save(&hub.path);
+                    a
+                }
+                Err(e) => {
+                    eprintln!("[hub] cannot price gen job on channel {channel_id}: {e}");
+                    return Err(ChannelFail::NotAttempted(format!(
+                        "cannot price gen job on channel {channel_id}: {e}"
+                    )));
+                }
             }
-            Err(e) => {
-                eprintln!("[hub] cannot price job on channel {channel_id}: {e}");
-                return Err(ChannelFail::NotAttempted(format!(
-                    "cannot price job on channel {channel_id}: {e}"
-                )));
+        } else {
+            let begun = match billing {
+                Some(rates) => ch.begin_job_billed_for(
+                    &hub.signer,
+                    provider_pub,
+                    job_id,
+                    model,
+                    prompt,
+                    max_tokens,
+                    rates,
+                    700,
+                    price,
+                    deadline,
+                ),
+                None => ch.begin_job_for(
+                    &hub.signer,
+                    provider_pub,
+                    job_id,
+                    model,
+                    prompt,
+                    max_tokens,
+                    700,
+                    price,
+                    deadline,
+                ),
+            };
+            match begun {
+                Ok(a) => {
+                    let _ = reg.save(&hub.path);
+                    a
+                }
+                Err(e) => {
+                    eprintln!("[hub] cannot price job on channel {channel_id}: {e}");
+                    return Err(ChannelFail::NotAttempted(format!(
+                        "cannot price job on channel {channel_id}: {e}"
+                    )));
+                }
             }
         }
     };
@@ -316,14 +530,45 @@ pub fn try_channel_job_ex(
         Ok(r) if r.status().is_success() => r,
         Ok(r) => {
             let code = r.status().as_u16();
+            let detail = r.text().unwrap_or_default();
             let msg = format!("provider {provider_addr_hex} /channel/job -> HTTP {code}");
             eprintln!("[hub] {msg}");
-            hub.mark_unsupported(provider_addr_hex);
+            // `StaleStateBefore`: the provider's channel moved between our read
+            // and its `accept`. Nothing was committed (it refuses before it
+            // charges), so drop the pending entry and re-price against the
+            // fresh state instead of declaring the channel dead.
+            let stale = code == 409
+                && (detail.contains("state_before") || detail.contains("StaleStateBefore"));
+            if stale {
+                abort_pending(hub, provider_addr_hex, job_id);
+                if attempt >= STALE_STATE_ATTEMPTS {
+                    eprintln!(
+                        "[hub] job {job_id}: channel state still stale after {attempt} attempt(s) — \
+                         not retrying further (nothing was charged)"
+                    );
+                    return Err(ChannelFail::NotAttempted(format!(
+                        "{msg}: channel state stayed stale after {attempt} attempts ({detail})"
+                    )));
+                }
+                let backoff_ms = 50u64 << (attempt - 1);
+                eprintln!(
+                    "[hub] job {job_id}: stale channel state (attempt {attempt}/{STALE_STATE_ATTEMPTS}) \
+                     — re-pricing against the fresh state in {backoff_ms} ms"
+                );
+                std::thread::sleep(Duration::from_millis(backoff_ms));
+                continue;
+            }
             if (400..500).contains(&code) {
                 // Accept-time rejection: `ProviderChannel::accept` refused the
-                // assignment, so the provider committed nothing.
+                // assignment, so the provider committed nothing. Only an absent
+                // endpoint (404/405/501) is evidence the provider does not
+                // speak the protocol; a 4xx on a real endpoint is a per-job
+                // rejection and must not poison the provider for 60 s.
+                if matches!(code, 404 | 405 | 501) {
+                    hub.mark_unsupported(provider_addr_hex);
+                }
                 abort_pending(hub, provider_addr_hex, job_id);
-                return Err(ChannelFail::NotAttempted(msg));
+                return Err(ChannelFail::NotAttempted(format!("{msg} ({detail})")));
             }
             // 5xx: the provider may have accepted and then crashed mid-run.
             // Keep the pending entry; do NOT let the caller pay again.
@@ -338,6 +583,8 @@ pub fn try_channel_job_ex(
             abort_pending(hub, provider_addr_hex, job_id);
             return Err(ChannelFail::NotAttempted(msg));
         }
+    };
+    break (job_id, resp);
     };
     let result: JobResultMsg = match resp.json() {
         Ok(v) => v,
@@ -358,8 +605,14 @@ pub fn try_channel_job_ex(
         let Some(ch) = reg.channels.get_mut(provider_addr_hex) else {
             return Err(ChannelFail::Ambiguous("channel vanished before apply".into()));
         };
+        let provider_before = ch.state.balance_provider;
         match ch.complete_job(&result) {
-            Ok(()) => Some((ch.channel_id, ch.state.nonce, ch.state.balance_provider)),
+            Ok(()) => Some((
+                ch.channel_id,
+                ch.state.nonce,
+                ch.state.balance_provider,
+                ch.state.balance_provider.saturating_sub(provider_before),
+            )),
             Err(e) => {
                 eprintln!(
                     "[hub] rejected provider result for job {}: {e}",
@@ -369,7 +622,7 @@ pub fn try_channel_job_ex(
             }
         }
     };
-    let Some((channel_id, nonce, balance_provider)) = applied else {
+    let Some((channel_id, nonce, balance_provider, charge)) = applied else {
         // We received a signed result we cannot apply. The provider may already
         // have advanced its own state, so the caller must not pay again.
         return Err(ChannelFail::Ambiguous(format!(
@@ -383,6 +636,19 @@ pub fn try_channel_job_ex(
     } else {
         None
     };
+    // Billing observability (item #63): a short answer must be visibly cheaper
+    // than the ceiling, and an unmeasured one must be visibly at the ceiling.
+    match usage {
+        Some((p, c)) if charge < price => println!(
+            "[hub] job {} billed {} of the {} ceiling ({} prompt + {} completion tokens)",
+            result.job_id, charge, price, p, c
+        ),
+        Some(_) => {}
+        None => eprintln!(
+            "[hub] job {}: provider reported no usage — charged the full ceiling {}",
+            result.job_id, price
+        ),
+    }
     println!(
         "[hub] job {} served off-chain on channel {} (nonce {}, provider balance {})",
         result.job_id, channel_id, nonce, balance_provider
@@ -401,6 +667,7 @@ pub fn try_channel_job_ex(
         text: result.output,
         usage,
         balance_provider,
+        charge,
     })
 }
 

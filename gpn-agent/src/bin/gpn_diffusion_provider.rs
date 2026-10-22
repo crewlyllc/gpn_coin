@@ -12,11 +12,12 @@
 //! Env: ENDPOINT, SIGNER_URI, POLL_MS, GPN_DIFFUSE_SCRIPT (path to gpn_diffuse.py)
 
 use gpn_agent::chain::ChainClient;
+use gpn_agent::hub_channel::{Assignment, GenParams, JobResultMsg, ProviderChannel, PubKey};
 use gpn_agent::llm::{get_job, LlmStore};
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Job ids this process has already declared a **wedge** (helper hung past its
@@ -36,12 +37,400 @@ fn is_wedged(id: u64) -> bool {
     wedged_set().lock().unwrap().contains(&id)
 }
 
+/// `--flag value` lookup (the binary does not use a CLI parser).
+fn opt_str(args: &[String], flag: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .filter(|s| !s.is_empty())
+}
+
 fn diffuse_script() -> PathBuf {
     if let Ok(p) = std::env::var("GPN_DIFFUSE_SCRIPT") {
         return PathBuf::from(p);
     }
     // Default: alongside this crate (repo gpn-agent dir).
     PathBuf::from("gpn_diffuse.py")
+}
+
+// ── channel-settled generation (off-chain escrow) ───────────────────────────
+//
+// The LLM provider serves `POST /channel/job` on `status_port + 1` (8094). The
+// diffusion provider is a **separate process** on the same box and the same
+// signer account, so it serves the same protocol on its own port (8095 by
+// default) and the AP addresses it explicitly for render jobs. Payment is the
+// same mutually-signed channel update: accept → run → `sign_result` /
+// `sign_refund`. No chain call, no block wait, no escrow per render.
+
+/// One artifact this provider produced for a channel job.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct StoredArtifact {
+    channel_id: u64,
+    path: String,
+    media_type: String,
+    sha256: String,
+    width: u32,
+    height: u32,
+    bytes: u64,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+struct ChannelStore {
+    #[serde(default)]
+    channels: BTreeMap<u64, ProviderChannel>,
+    #[serde(default)]
+    artifacts: BTreeMap<u64, StoredArtifact>,
+}
+
+struct ChannelCtx {
+    me: PubKey,
+    me_hex: String,
+    signer: Arc<gpn_agent::chain::signer::Sr25519Signer>,
+    state_path: PathBuf,
+    vram_mb: u64,
+}
+
+fn load_channels(path: &PathBuf) -> ChannelStore {
+    std::fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn save_channels(path: &PathBuf, store: &ChannelStore) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(s) = serde_json::to_vec_pretty(store) {
+        let tmp = path.with_extension("tmp");
+        if std::fs::write(&tmp, s).is_ok() {
+            let _ = std::fs::rename(&tmp, path);
+        }
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(bytes);
+    hex::encode(h.finalize())
+}
+
+/// Render one image with `gpn_diffuse.py` under the GPU yield guard.
+fn render_image(
+    job_id: u64,
+    model: &str,
+    prompt: &str,
+    gen: &GenParams,
+    out_path: &str,
+) -> Result<serde_json::Value, String> {
+    let req_json = json!({
+        "kind": "image",
+        "model": model,
+        "prompt": prompt,
+        "width": gen.width,
+        "height": gen.height,
+        "steps": gen.steps,
+        "seed": gen.seed,
+        "frames": 1,
+        "fps": 1,
+        "output": out_path,
+    });
+    let req_file = gpn_agent::utils::temp_path(&format!("gpn_diffuse_chan_{job_id}.json"));
+    std::fs::write(&req_file, serde_json::to_vec(&req_json).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("cannot write request: {e}"))?;
+    let script = diffuse_script();
+    let timeout = diffuse_timeout("image");
+    let req_file2 = req_file.clone();
+    let res = {
+        // One GPU = one job: the co-located miner fully stops while the flag is
+        // held, and resumes the instant it drops.
+        let _yield = gpn_agent::gpu_yield::GpuYieldGuard::acquire();
+        let mut cmd = std::process::Command::new("python3");
+        cmd.arg(&script).arg(&req_file2);
+        run_with_watchdog(cmd, timeout, &format!("channel job {job_id}"))
+            .and_then(|(stdout, _)| {
+                serde_json::from_str(&stdout)
+                    .map_err(|e| format!("bad helper output: {e} ({stdout})"))
+            })
+    };
+    let _ = std::fs::remove_file(&req_file);
+    res
+}
+
+fn serve_channel_job(ctx: &ChannelCtx, body: &str) -> (u16, serde_json::Value) {
+    let a: Assignment = match serde_json::from_str(body) {
+        Ok(a) => a,
+        Err(e) => return (400, json!({"ok": false, "error": format!("bad assignment: {e}")})),
+    };
+    if a.provider != ctx.me {
+        return (
+            409,
+            json!({"ok": false, "error": "assignment names a different provider"}),
+        );
+    }
+    let Some(gen) = a.gen.clone() else {
+        return (
+            409,
+            json!({"ok": false, "error": "this provider only serves generation assignments"}),
+        );
+    };
+    let mut store = load_channels(&ctx.state_path);
+    if !store.channels.contains_key(&a.channel_id) {
+        // First sight of this channel: adopt the state the AP signed for this
+        // job. Two providers (LLM on 8094, diffusion on 8095) share ONE channel
+        // per requestor, so a fresh mirror must NOT assume the channel is in its
+        // deposit-split starting state — after any LLM job it is not, and
+        // `accept` would reject with `StaleStateBefore` (observed: HTTP 409 on
+        // the first channel-settled image). `state_before` is inside the AP's
+        // signature, so it is authoritative and tamper-evident.
+        let mut ch =
+            ProviderChannel::new(a.channel_id, a.deposit, PubKey(a.requestor.0));
+        ch.sync_to_assignment(&a);
+        println!(
+            "[channel] adopting channel {} at nonce {} (requestor balance {})",
+            a.channel_id, ch.state.nonce, ch.state.balance_requestor
+        );
+        store.channels.insert(a.channel_id, ch);
+    }
+    {
+        let ch = store.channels.get_mut(&a.channel_id).unwrap();
+        // Two provider processes share this account's channel: follow the AP's
+        // signed pre-state whenever our mirror is behind (see `sync_to_assignment`).
+        ch.sync_to_assignment(&a);
+        if let Err(e) = ch.accept(&a) {
+            eprintln!("[channel] job {} rejected: {e}", a.job_id);
+            return (
+                409,
+                json!({"ok": false, "error": format!("assignment rejected: {e}")}),
+            );
+        }
+    }
+    // Persist the pre-paid state BEFORE the render: a crash mid-run must not
+    // lose the AP's signed payment.
+    save_channels(&ctx.state_path, &store);
+
+    let decision = gpn_agent::image_channel::serve_decision(
+        !gpn_agent::idle::claims_allowed(),
+        &a.model,
+        ctx.vram_mb,
+        gen.width,
+        gen.height,
+    );
+    let outcome = match decision {
+        gpn_agent::image_channel::ServeDecision::Refund(reason) => Err(reason),
+        gpn_agent::image_channel::ServeDecision::Run => {
+            let out_dir = std::env::var("GPN_ARTIFACTS").unwrap_or_else(|_| {
+                gpn_agent::utils::temp_dir()
+                    .join("gpn_artifacts")
+                    .to_string_lossy()
+                    .to_string()
+            });
+            let _ = std::fs::create_dir_all(&out_dir);
+            let out_path = format!("{out_dir}/chan_{}_.png", a.job_id);
+            let started = Instant::now();
+            match render_image(a.job_id, &a.model, &a.prompt, &gen, &out_path) {
+                Ok(v) if v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) => {
+                    let path = v["artifact"].as_str().unwrap_or(&out_path).to_string();
+                    let media_type = v["media_type"]
+                        .as_str()
+                        .unwrap_or("image/png")
+                        .to_string();
+                    let sha256 = v["sha256"].as_str().unwrap_or("").to_string();
+                    let bytes = std::fs::read(&path).map(|b| b.len() as u64).unwrap_or(0);
+                    if bytes == 0 {
+                        return refund(ctx, a.channel_id, a.job_id, "render produced no bytes");
+                    }
+                    store.artifacts.insert(
+                        a.job_id,
+                        StoredArtifact {
+                            channel_id: a.channel_id,
+                            path: path.clone(),
+                            media_type: media_type.clone(),
+                            sha256: sha256.clone(),
+                            width: gen.width,
+                            height: gen.height,
+                            bytes,
+                        },
+                    );
+                    Ok(json!({
+                        "artifacts": [{
+                            "index": 0,
+                            "sha256": sha256,
+                            "media_type": media_type,
+                            "width": gen.width,
+                            "height": gen.height,
+                            "bytes": bytes,
+                        }],
+                        "render_seconds": started.elapsed().as_secs_f64().round(),
+                    }))
+                }
+                Ok(v) => Err(v["error"].as_str().unwrap_or("generation failed").to_string()),
+                Err(e) => {
+                    if e.contains("WEDGE") {
+                        mark_wedged(a.job_id);
+                    }
+                    Err(e)
+                }
+            }
+        }
+    };
+
+    match outcome {
+        Ok(output) => {
+            let text = serde_json::to_string(&output).unwrap_or_default();
+            let msg = store
+                .channels
+                .get_mut(&a.channel_id)
+                .unwrap()
+                .sign_result(&ctx.signer, a.job_id, &text, 0, 0)
+                .expect("sign_result after accept must succeed");
+            save_channels(&ctx.state_path, &store);
+            println!(
+                "[channel] job {} on channel {} served ({} bytes)",
+                a.job_id, a.channel_id, output["artifacts"][0]["bytes"]
+            );
+            (200, serde_json::to_value(&msg).unwrap_or_default())
+        }
+        Err(reason) => {
+            eprintln!("[channel] job {} refunded: {reason}", a.job_id);
+            refund(ctx, a.channel_id, a.job_id, &reason)
+        }
+    }
+}
+
+/// Sign a refund (reverts the pre-authorised payment; the requestor pays
+/// nothing) and return the signed message to the AP.
+fn refund(ctx: &ChannelCtx, channel_id: u64, job_id: u64, reason: &str) -> (u16, serde_json::Value) {
+    let mut store = load_channels(&ctx.state_path);
+    let Some(ch) = store.channels.get_mut(&channel_id) else {
+        return (
+            409,
+            json!({"ok": false, "error": "unknown channel for refund"}),
+        );
+    };
+    let msg: JobResultMsg = match ch.sign_refund(&ctx.signer, job_id, reason) {
+        Ok(m) => m,
+        Err(e) => {
+            return (
+                409,
+                json!({"ok": false, "error": format!("cannot refund job {job_id}: {e}")}),
+            )
+        }
+    };
+    save_channels(&ctx.state_path, &store);
+    (200, serde_json::to_value(&msg).unwrap_or_default())
+}
+
+fn serve_artifact(ctx: &ChannelCtx, job_id: u64, token: &str) -> Option<(Vec<u8>, String)> {
+    let store = load_channels(&ctx.state_path);
+    let a = store.artifacts.get(&job_id)?;
+    let want = gpn_agent::image_channel::artifact_token(a.channel_id, job_id);
+    if !gpn_agent::image_channel::token_matches(&want, token) {
+        return None;
+    }
+    let bytes = std::fs::read(&a.path).ok()?;
+    Some((bytes, a.media_type.clone()))
+}
+
+/// Tiny HTTP server for the provider half of the channel protocol.
+fn spawn_channel_server(listen: &str, ctx: ChannelCtx) {
+    let listen = listen.to_string();
+    std::thread::spawn(move || {
+        let server = match tiny_http::Server::http(&listen) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[channel] bind {listen} failed: {e}");
+                return;
+            }
+        };
+        println!(
+            "[channel] diffusion channel endpoint on http://{listen} (POST /channel/job, GET /channel/artifact/{{id}})"
+        );
+        let json_hdr =
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
+        for mut req in server.incoming_requests() {
+            // Loopback only: the AP submits signed assignments from this box.
+            // A public bind would need the on-chain channel check the LLM
+            // provider does before accepting a first-sight channel id.
+            let loopback = req
+                .remote_addr()
+                .map(|a| a.ip().is_loopback())
+                .unwrap_or(false);
+            if !loopback {
+                let _ = req.respond(
+                    tiny_http::Response::from_string(
+                        json!({"ok": false, "error": "loopback only"}).to_string(),
+                    )
+                    .with_header(json_hdr.clone())
+                    .with_status_code(403),
+                );
+                continue;
+            }
+            let url = req.url().to_string();
+            let path = url.split('?').next().unwrap_or("").to_string();
+            if req.method() == &tiny_http::Method::Get && path == "/channel/status" {
+                let store = load_channels(&ctx.state_path);
+                let ids: Vec<u64> = store.channels.keys().copied().collect();
+                let body = json!({
+                    "ok": true,
+                    "channel": true,
+                    "kinds": ["image"],
+                    "provider": ctx.me_hex,
+                    "channels": ids,
+                });
+                let _ = req.respond(
+                    tiny_http::Response::from_string(body.to_string()).with_header(json_hdr.clone()),
+                );
+                continue;
+            }
+            if req.method() == &tiny_http::Method::Post && path == "/channel/job" {
+                let mut body = String::new();
+                let _ = req.as_reader().read_to_string(&mut body);
+                let (code, resp) = serve_channel_job(&ctx, &body);
+                let _ = req.respond(
+                    tiny_http::Response::from_string(resp.to_string())
+                        .with_header(json_hdr.clone())
+                        .with_status_code(code),
+                );
+                continue;
+            }
+            if req.method() == &tiny_http::Method::Get && path.starts_with("/channel/artifact/") {
+                let id = path.trim_start_matches("/channel/artifact/");
+                let job_id: u64 = id.parse().unwrap_or(0);
+                let token = url
+                    .split_once('?')
+                    .and_then(|(_, q)| {
+                        q.split('&')
+                            .find_map(|kv| kv.strip_prefix("t=").map(|v| v.to_string()))
+                    })
+                    .unwrap_or_default();
+                match serve_artifact(&ctx, job_id, &token) {
+                    Some((bytes, mt)) => {
+                        let ct = tiny_http::Header::from_bytes(&b"Content-Type"[..], mt.as_bytes())
+                            .unwrap_or(json_hdr.clone());
+                        let _ = req.respond(
+                            tiny_http::Response::from_data(bytes).with_header(ct),
+                        );
+                    }
+                    None => {
+                        let _ = req.respond(
+                            tiny_http::Response::from_string(
+                                json!({"ok": false, "error": "no such artifact"}).to_string(),
+                            )
+                            .with_header(json_hdr.clone())
+                            .with_status_code(404),
+                        );
+                    }
+                }
+                continue;
+            }
+            let _ = req.respond(
+                tiny_http::Response::from_string("not found").with_status_code(404),
+            );
+        }
+    });
 }
 
 #[tokio::main]
@@ -80,6 +469,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         poll_ms,
         diffuse_script().display()
     );
+
+    // Channel-settled renders (the public `/v1/images/generations` fast path).
+    // Off unless the operator turns it on: the AP must know the same port.
+    let channel_listen = opt_str(&args, "--channel-listen")
+        .or_else(|| std::env::var("GPN_CHANNEL_LISTEN").ok())
+        .unwrap_or_else(|| "127.0.0.1:8095".to_string());
+    if channel_listen != "off" {
+        let signer = Arc::new(gpn_agent::chain::signer::Sr25519Signer::from_uri(&signer_uri)?);
+        let state_path = std::env::var("GPN_DIFFUSION_CHANNEL_STORE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+                PathBuf::from(home).join(".gpn").join("diffusion_channels.json")
+            });
+        let vram_mb = std::env::var("GPN_VRAM_MB")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or_else(gpn_agent::gpu::detect_vram_mb);
+        spawn_channel_server(
+            &channel_listen,
+            ChannelCtx {
+                me: PubKey(signer.public_key()),
+                me_hex: me.clone(),
+                signer,
+                state_path,
+                vram_mb,
+            },
+        );
+    }
 
     // #46 Phase 1 — pull assignments from the AP (works behind NAT; see
     // gpn_agent::assign_pull). Push remains active unless GPN_ASSIGN_SOURCE=pull.

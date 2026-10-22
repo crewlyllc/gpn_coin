@@ -19,6 +19,8 @@ pub mod gui;
 pub mod hub_ap;
 pub mod hub_channel;
 pub mod idle;
+pub mod image_channel;
+pub mod image_jobs;
 pub mod llm;
 pub mod mining;
 pub mod models;

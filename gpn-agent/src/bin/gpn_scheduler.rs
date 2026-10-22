@@ -20,6 +20,8 @@
 //! Env: LISTEN, SIGNER_URI, ENDPOINT, PROVIDERS, GPN_ASSIGN_STORE
 
 use gpn_agent::chain::ChainClient;
+use gpn_agent::hub_channel::GenParams;
+use gpn_agent::image_jobs::{self, ImageArtifact, ImageJob};
 use gpn_agent::pricing::{self, params_b_for, roofline_tok_per_s, PricingConfig};
 use gpn_agent::routing::{self, RttOverrides};
 use serde_json::{json, Value};
@@ -413,8 +415,29 @@ fn fast_ap_enabled() -> bool {
 // pay less (or be charged more): both the on-chain and channel paths price the
 // same `prompt_tokens×input_frac + max_tokens` output-equivalents. The buyer
 // price is GPU-independent; a faster card earns the provider more per hour.
-/// Max output tokens requested for a chat completion.
-const CHAT_MAX_TOKENS: u32 = 512;
+/// Default max output tokens for a chat completion when the request omits
+/// `max_tokens`/`max_completion_tokens`.
+const DEFAULT_CHAT_MAX_TOKENS: u32 = 256;
+/// Hard ceiling on a caller-supplied `max_tokens`. It bounds the escrow
+/// commitment (and therefore the channel price) so one request cannot lock an
+/// absurd amount of the AP's channel balance.
+const MAX_CHAT_MAX_TOKENS: u32 = 4096;
+
+/// Resolve the caller's output-token allowance.
+///
+/// Item #63: the AP used to ignore this entirely and bill/commit a hard-coded
+/// 512 for every request, so a 4-token answer cost the same as a 512-token one
+/// (~58x over-charge measured live). The caller's value now drives the inference
+/// cap, the escrow commitment and the channel price ceiling.
+fn chat_max_tokens(v: &serde_json::Value) -> u32 {
+    let asked = v
+        .get("max_tokens")
+        .and_then(|x| x.as_u64())
+        .or_else(|| v.get("max_completion_tokens").and_then(|x| x.as_u64()))
+        .filter(|x| *x > 0)
+        .unwrap_or(DEFAULT_CHAT_MAX_TOKENS as u64);
+    asked.min(MAX_CHAT_MAX_TOKENS as u64) as u32
+}
 
 /// How long a create may take to appear on-chain before we give up on it. GPN blocks are
 /// PoW-mined on a 15 s target with observed gaps of 2–30 s, so the old fixed 2 s window was
@@ -1114,6 +1137,43 @@ fn image_price_gpn(
     pcfg.diffusion_price_gpn(w, h, steps, frames, token_price_usd, market_hr, util)
 }
 
+/// **Generation is a capability, not a model.** A diffusion model (`sd-turbo`)
+/// is never in the heartbeat's Ollama model list, so `pick()` — which matches on
+/// `models[]` — can never choose the box that can actually render. This selector
+/// filters on the advertised `capabilities[]` instead, prefers a box that is not
+/// already running a job (one GPU = one job), then the lowest latency.
+fn pick_gen_provider(registry: &[Provider], rtt: &RttOverrides) -> Option<Provider> {
+    let deliverable = |p: &Provider| {
+        p.pulled_seen
+            .map(|t| t.elapsed().as_secs() <= POLL_CAPS_TTL_SECS)
+            .unwrap_or(false)
+    };
+    let mut candidates: Vec<&Provider> = registry
+        .iter()
+        .filter(|p| {
+            p.last_seen.is_some()
+                && deliverable(p)
+                && p.capabilities
+                    .iter()
+                    .any(|c| c.eq_ignore_ascii_case("ImageGeneration"))
+        })
+        .collect();
+    candidates.sort_by_key(|p| {
+        let latency = routing::effective_latency_ms(
+            p.latency_ms,
+            routing::lookup_override(rtt, &p.address, &p.status_url),
+        );
+        (p.active.min(1) * 10_000) + latency
+    });
+    candidates.first().map(|p| (*p).clone())
+}
+
+/// Estimated render cost in seconds for one image request (`n` sequential
+/// renders on one GPU). Shared by the sync-mode gate and the job record.
+fn image_estimate_seconds(pcfg: &PricingConfig, w: u32, h: u32, steps: u32, n: u32) -> f64 {
+    pcfg.diffusion_seconds(w as f64, h as f64, steps as f64, 1.0) * n.max(1) as f64
+}
+
 /// Model-aware selection. Returns `(provider, needs_pull)`.
 ///
 /// 1. A provider that already HAS the model (or, if none was requested, any provider
@@ -1576,6 +1636,307 @@ fn pick(
     }
 }
 
+/// Everything a background render needs. Cloned into the worker thread so the
+/// HTTP handler returns immediately.
+#[derive(Clone)]
+struct ImageCtx {
+    hub: Arc<gpn_agent::hub_ap::HubCtx>,
+    rt: Arc<tokio::runtime::Runtime>,
+    client: Arc<ChainClient>,
+    provider_addr: String,
+    status_url: String,
+    /// Diffusion channel endpoint (port 8095 by default); `None` = derive as
+    /// `status_url + 1` (the LLM provider's own convention).
+    channel_endpoint: Option<String>,
+}
+
+/// Resolve the diffusion channel endpoint for a provider.
+///
+/// Precedence: an explicit `GPN_IMAGE_CHANNEL_URL` (whole endpoint), then
+/// `<host of status_url>:<GPN_IMAGE_CHANNEL_PORT>` (default 8095), then `None`
+/// (meaning "derive `status_url + 1`", which is right when LLM and diffusion
+/// share a process — not the case here).
+fn image_channel_endpoint(status_url: &str) -> Option<String> {
+    if let Ok(u) = std::env::var("GPN_IMAGE_CHANNEL_URL") {
+        if !u.trim().is_empty() {
+            return Some(u);
+        }
+    }
+    if std::env::var("GPN_IMAGE_CHANNEL_DERIVE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let port: u16 = std::env::var("GPN_IMAGE_CHANNEL_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8095);
+    let u = status_url.trim_end_matches('/');
+    let u = u.strip_suffix("/status").unwrap_or(u);
+    let (scheme, rest) = u.split_once("://")?;
+    let hostport = rest.split('/').next()?;
+    let (host, _) = hostport.rsplit_once(':')?;
+    Some(format!("{scheme}://{host}:{port}/channel/job"))
+}
+
+/// Fetch one finished artifact from the provider and store it locally.
+///
+/// Everything is verified: the sha256 the provider signed into its result must
+/// match the bytes, and the bytes must start with the PNG signature. A provider
+/// that answers with garbage therefore fails the job instead of getting a
+/// corrupt "image" published under a public URL.
+fn fetch_and_store_artifact(
+    ctx: &ImageCtx,
+    rec_id: &str,
+    index: u32,
+    channel_id: u64,
+    job_id: u64,
+    meta: &Value,
+) -> Result<ImageArtifact, String> {
+    let endpoint = ctx
+        .channel_endpoint
+        .clone()
+        .or_else(|| image_channel_endpoint(&ctx.status_url))
+        .ok_or_else(|| "no channel endpoint for the artifact".to_string())?;
+    let base = endpoint
+        .strip_suffix("/channel/job")
+        .ok_or_else(|| "channel endpoint is not a /channel/job URL".to_string())?;
+    let token = gpn_agent::image_channel::artifact_token(channel_id, job_id);
+    let url = format!("{base}/channel/artifact/{job_id}?t={token}");
+    let resp = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("http client: {e}"))?
+        .get(&url)
+        .send()
+        .map_err(|e| format!("artifact fetch failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("artifact fetch -> HTTP {}", resp.status().as_u16()));
+    }
+    const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+    let bytes = resp
+        .bytes()
+        .map_err(|e| format!("artifact body: {e}"))?
+        .to_vec();
+    if bytes.is_empty() || bytes.len() > MAX_IMAGE_BYTES {
+        return Err(format!("artifact size {} is out of bounds", bytes.len()));
+    }
+    if !image_jobs::is_png(&bytes) {
+        return Err("provider returned bytes that are not a PNG".to_string());
+    }
+    let want = meta
+        .get("sha256")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default();
+    let got = {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(&bytes);
+        hex::encode(h.finalize())
+    };
+    if !want.is_empty() && !want.eq_ignore_ascii_case(&got) {
+        return Err(format!(
+            "artifact sha256 mismatch: provider said {want}, bytes hash to {got}"
+        ));
+    }
+    image_jobs::put_artifact(rec_id, index, &bytes).map_err(|e| format!("store artifact: {e}"))?;
+    Ok(ImageArtifact {
+        index,
+        media_type: meta
+            .get("media_type")
+            .and_then(|x| x.as_str())
+            .unwrap_or("image/png")
+            .to_string(),
+        sha256: got,
+        bytes: bytes.len() as u64,
+        width: meta.get("width").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+        height: meta.get("height").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+    })
+}
+
+/// Why an image record did not produce bytes.
+///
+/// The distinction is what the caller is told: `Unavailable` means the render
+/// service could not be reached or had no capacity — a **503 with a retry
+/// hint**, not a phantom "failed render".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImageFailure {
+    /// Nothing is wrong with the request; the service is down/busy. No charge.
+    Unavailable,
+    /// The request itself could not be rendered (refused, bad artifact, ...).
+    Failed,
+}
+
+/// Run one image record to completion over the hub channel.
+///
+/// There is deliberately **no on-chain fallback**. Images used to fall back to
+/// a loopback `POST /jobs` on the same access point, which (a) ignored the
+/// `ok`/`error` of that response — so a 503 "no compatible provider" surfaced
+/// as `"on-chain render did not produce an artifact (status: )"`, a phantom
+/// failure that looked like a broken render — and (b) could never help: the
+/// on-chain job is claimed by the *same* diffusion provider, on the *same*
+/// single GPU, so a channel failure caused by staleness or capacity was
+/// guaranteed to fail there too, after up to 420 s of blocking wait. The
+/// honest answer is a 503 that says the image service is unavailable.
+fn run_image_record(ctx: &ImageCtx, rec: &ImageJob, index: u32, units: u128) -> ImageFailure {
+    let gen = GenParams {
+        kind: "image".to_string(),
+        width: rec.width,
+        height: rec.height,
+        steps: rec.steps,
+        seed: rec.seed,
+        frames: 1,
+        fps: 1,
+        n: 1,
+    };
+    match gpn_agent::hub_ap::try_channel_gen_job(
+        &ctx.hub,
+        &ctx.rt,
+        Some(&ctx.client),
+        &ctx.provider_addr,
+        &ctx.status_url,
+        ctx.channel_endpoint.clone(),
+        &rec.model,
+        &rec.prompt,
+        "ImageGeneration",
+        gen,
+        units.max(1),
+    ) {
+        Ok(out) => {
+            let parsed: Value = serde_json::from_str(&out.text).unwrap_or(json!({}));
+            let empty = vec![];
+            let metas = parsed
+                .get("artifacts")
+                .and_then(|a| a.as_array())
+                .unwrap_or(&empty);
+            let mut data = Vec::new();
+            for (i, meta) in metas.iter().enumerate() {
+                // The provider numbers the artifacts of THIS job from 0; the
+                // caller's slot is `index` (n sequential jobs for n images).
+                let slot = index + i as u32;
+                match fetch_and_store_artifact(
+                    ctx,
+                    &rec.id,
+                    slot,
+                    out.channel_id,
+                    out.job_id,
+                    meta,
+                ) {
+                    Ok(a) => data.push(a),
+                    Err(e) => {
+                        eprintln!("[images] {}: artifact {slot} rejected: {e}", rec.id);
+                        image_jobs::update(&rec.id, |j| {
+                            j.status = "failed".into();
+                            j.payment = "channel".into();
+                            j.channel_id = Some(out.channel_id);
+                            j.job_id = Some(out.job_id);
+                            j.error = Some(format!(
+                                "render completed but the artifact was unusable: {e}"
+                            ));
+                        });
+                        return ImageFailure::Failed;
+                    }
+                }
+            }
+            if data.is_empty() {
+                image_jobs::update(&rec.id, |j| {
+                    j.status = "failed".into();
+                    j.payment = "channel".into();
+                    j.error = Some("provider returned no artifacts".into());
+                });
+                return ImageFailure::Failed;
+            }
+            println!(
+                "[images] {} settled on channel {} (job {}) — {} image(s)",
+                rec.id,
+                out.channel_id,
+                out.job_id,
+                data.len()
+            );
+            image_jobs::update(&rec.id, |j| {
+                j.payment = "channel".into();
+                j.channel_id = Some(out.channel_id);
+                j.job_id = Some(out.job_id);
+                for a in data {
+                    j.data.retain(|x| x.index != a.index);
+                    j.data.push(a);
+                }
+                j.data.sort_by_key(|a| a.index);
+                if j.data.len() as u32 >= j.n {
+                    j.status = "completed".into();
+                    j.error = None;
+                }
+            });
+            ImageFailure::Failed
+        }
+        Err(e) if e.fallback_ok() => {
+            // Nothing was charged (no value moved off-chain, and there is no
+            // on-chain path for images any more — see the doc comment). Say the
+            // service is unavailable instead of inventing a render failure.
+            let refused = e.reason().contains("refunded");
+            eprintln!(
+                "[images] {}: channel unavailable ({}), {} ",
+                rec.id,
+                e.reason(),
+                if refused {
+                    "refused by the provider"
+                } else {
+                    "no charge made; tell the caller to retry"
+                }
+            );
+            image_jobs::update(&rec.id, |j| {
+                j.status = "failed".into();
+                j.payment = "not_charged".into();
+                j.error = Some(format!(
+                    "image generation is temporarily unavailable: {}",
+                    e.reason()
+                ));
+            });
+            if refused {
+                ImageFailure::Failed
+            } else {
+                ImageFailure::Unavailable
+            }
+        }
+        Err(e) => {
+            // The provider may hold the AP's pre-signed settle: the assignment
+            // may have been accepted, so this is not a plain "unavailable".
+            eprintln!("[images] {}: ambiguous channel failure: {}", rec.id, e.reason());
+            image_jobs::update(&rec.id, |j| {
+                j.status = "failed".into();
+                j.payment = "pending".into();
+                j.error = Some(format!(
+                    "channel settlement failed ambiguously: {}; not retrying to avoid a double charge",
+                    e.reason()
+                ));
+            });
+            ImageFailure::Unavailable
+        }
+    }
+}
+
+/// Read one stored image, if it exists.
+fn image_bytes(id: &str, index: u32) -> Option<Vec<u8>> {
+    if !image_jobs::valid_id(id) {
+        return None;
+    }
+    std::fs::read(image_jobs::artifact_path(id, index)).ok()
+}
+
+/// Send one stored image with its real content type.
+fn respond_image(mut req: tiny_http::Request, id: &str, index: u32) -> bool {
+    let Some(bytes) = image_bytes(id, index) else {
+        return false;
+    };
+    let ct = Header::from_bytes(&b"Content-Type"[..], &b"image/png"[..]).unwrap();
+    let cache =
+        Header::from_bytes(&b"Cache-Control"[..], &b"public, max-age=86400"[..]).unwrap();
+    let _ = req
+        .respond(Response::from_data(bytes).with_header(ct).with_header(cache));
+    true
+}
+
 /// Client-side RTT hints from a request body: `{"rtt": {"<addr-or-url>": <ms>}}`.
 ///
 /// The client measures its OWN round-trip to the provider endpoints (from
@@ -1933,6 +2294,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_signer(&signer_uri),
     );
     spawn_janitor(client.clone(), rt.clone());
+    // Image records expire (24 h by default); sweep at boot and hourly. A box
+    // that restarts rarely would otherwise accumulate PNGs forever.
+    {
+        let (r, f) = image_jobs::gc();
+        println!("[images] gc at boot: {r} expired record(s), {f} artifact file(s) removed");
+        std::thread::spawn(|| loop {
+            std::thread::sleep(Duration::from_secs(3600));
+            let (r, f) = image_jobs::gc();
+            if r > 0 || f > 0 {
+                println!("[images] gc: {r} expired record(s), {f} artifact file(s) removed");
+            }
+        });
+    }
     // Item #2: off-chain escrow (payment channels). One channel per provider,
     // opened once; per-job claim+payment are signed messages (zero txs). Any
     // failure falls back to the on-chain job path below.
@@ -2338,6 +2712,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .unwrap_or("auto")
                         .to_string();
                     let stream = v.get("stream").and_then(|x| x.as_bool()).unwrap_or(false);
+                    // Item #63: honour the caller's output allowance instead of a
+                    // hard-coded 512 (which also capped the model, not just the bill).
+                    let chat_max_tokens = chat_max_tokens(&v);
                     // Item #37: resolve the prompt from OpenAI `messages[]`/`system` **or** a
                     // top-level `prompt`/`input` (llama.cpp / Ollama-style clients pointed at
                     // this facade send those), and refuse a body with no usable prompt BEFORE
@@ -2431,7 +2808,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let passthrough = mode == "passthrough";
                     let mut text = String::new();
                     let mut usage: Option<(u32, u32)> = None;
-                    let mut channel_meta: Option<(u64, u64, u128)> = None;
+                    let mut channel_meta: Option<(u64, u64, u128, u128, u128)> = None;
                     // ── rate card for this request ─────────────────────────
                     // Throughput model: ONE global buyer price per token, converted
                     // from USD at the cached GPN price. Market model (legacy): the
@@ -2472,13 +2849,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let chat_price_per_token =
                         pcfg.gpn_per_token(usd_per_token_out, feed.token_price_usd);
                     let escrow_units =
-                        pcfg.escrow_token_units(prompt_tokens, CHAT_MAX_TOKENS);
+                        pcfg.escrow_token_units(prompt_tokens, chat_max_tokens);
                     // Single-rate pallet approximation for the on-chain path; the
                     // channel path carries the ceiling as an exact amount.
                     let (onchain_rate, onchain_cap) = pcfg.onchain_rate_and_cap(
                         chat_price_per_token,
                         prompt_tokens,
-                        CHAT_MAX_TOKENS,
+                        chat_max_tokens,
                     );
                     // ── off-chain escrow (channel) fast path ───────────────
                     // The AP signs a channel state update, the provider runs the
@@ -2489,8 +2866,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // retry on-chain or the caller would pay twice.
                     if !passthrough && mode != "settle" && mode != "onchain" {
                         let price = chat_price_per_token.saturating_mul(escrow_units as u128);
+                        // Item #63: hand the provider the per-token rates so it
+                        // settles at `min(actual usage, price)` and the unused
+                        // ceiling is never charged. `price` stays the hard cap.
+                        let billing = gpn_agent::hub_channel::BillingRates {
+                            in_rate: (chat_price_per_token as f64
+                                * pcfg.input_rate_frac.clamp(0.0, 1.0))
+                                .round() as u128,
+                            out_rate: chat_price_per_token,
+                        };
                         let _t0 = std::time::Instant::now();
-                        match gpn_agent::hub_ap::try_channel_job_ex(
+                        match gpn_agent::hub_ap::try_channel_job_billed_ex(
                             &hub,
                             &rt,
                             Some(&client),
@@ -2498,8 +2884,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &provider.status_url,
                             &model,
                             &prompt,
-                            CHAT_MAX_TOKENS,
+                            chat_max_tokens,
                             price,
+                            Some(billing),
                         ) {
                             Ok(out) => {
                                 println!(
@@ -2510,7 +2897,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 );
                                 text = out.text;
                                 usage = out.usage;
-                                channel_meta = Some((out.channel_id, out.job_id, out.balance_provider));
+                                channel_meta = Some((
+                                    out.channel_id,
+                                    out.job_id,
+                                    out.balance_provider,
+                                    out.charge,
+                                    price,
+                                ));
                             }
                             Err(e) if e.fallback_ok() => {
                                 eprintln!(
@@ -2611,7 +3004,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "{}/infer",
                             provider.status_url.replacen(":8093", ":8094", 1)
                         );
-                        let body = json!({"model": model, "prompt": prompt, "temperature": 0.7, "max_tokens": 512});
+                        let body = json!({"model": model, "prompt": prompt, "temperature": 0.7, "max_tokens": chat_max_tokens});
                         text = match reqwest::blocking::Client::new()
                             .post(&infer_url)
                             .json(&body)
@@ -2632,8 +3025,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Err(e) => format!("[gpn error] {e}"),
                         };
                     } else if created {
-                        record_created(id, 512);
-                        let job = gpn_agent::llm::LlmJob::new_llm(&model, &prompt, 0.7, 512);
+                        record_created(id, chat_max_tokens as u64);
+                        let job =
+                            gpn_agent::llm::LlmJob::new_llm(&model, &prompt, 0.7, chat_max_tokens);
                         let store = gpn_agent::llm::LlmStore::new();
                         if !persist_job_payload(&store, id, &job) {
                             // Same rule as POST /jobs: never advertise a job whose payload
@@ -2715,16 +3109,347 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // settlement (no tx); `onchain` = per-request escrow cycle;
                         // `passthrough` = unbilled. Clients may pin `"mode"`.
                         "gpn": match channel_meta {
-                            Some((channel_id, job_id, balance)) => json!({
+                            Some((channel_id, job_id, balance, charge, ceiling)) => json!({
                                 "payment": "channel",
                                 "channel_id": channel_id,
                                 "job_id": job_id.to_string(),
                                 "channel_balance_provider": balance.to_string(),
+                                // Item #63: what this job actually cost, which is
+                                // `<= channel_charge_ceiling` when the provider
+                                // reports usage.
+                                "channel_charge": charge.to_string(),
+                                "channel_charge_ceiling": ceiling.to_string(),
                             }),
                             None if passthrough => json!({"payment": "passthrough"}),
                             None => json!({"payment": "onchain", "job_id": id.to_string()}),
                         }
                     })
+                }
+                // ── public image generation (OpenAI-compatible) ─────────────────
+                // `POST /v1/images/generations` answers immediately with 202 and
+                // a poll URL. A render is 29–45 s today and grows with size and
+                // steps, so holding the connection would collide with the
+                // Worker's 110 s upstream limit; `"sync": true` is allowed only
+                // when the estimate fits a 60 s budget.
+                (Method::Post, ["v1", "images", "generations"]) => {
+                    if let Some(ip) = req.remote_addr().map(|a| a.ip().to_string()) {
+                        if denylist.lock().unwrap().is_ip_banned(&ip) {
+                            let _ = req.respond(
+                                Response::from_string(json!({
+                                    "error": {"message": "service refused (operator denylist)", "type": "gpn_policy_violation"}
+                                }).to_string())
+                                .with_header(hdr.clone())
+                                .with_status_code(403),
+                            );
+                            return;
+                        }
+                    }
+                    if !allow_hot_wallet {
+                        let _ = req.respond(
+                            Response::from_string(json!({
+                                "error": {"message": "public generation is disabled on this access point (mainnet)", "type": "gpn_error"}
+                            }).to_string())
+                            .with_header(hdr.clone())
+                            .with_status_code(403),
+                        );
+                        return;
+                    }
+                    let v: Value = serde_json::from_str(&body).unwrap_or(json!({}));
+                    let prompt = match v.get("prompt").and_then(|x| x.as_str()) {
+                        Some(p) if !p.trim().is_empty() => p.trim().to_string(),
+                        _ => {
+                            let _ = req.respond(
+                                Response::from_string(json!({
+                                    "error": {"message": "missing prompt: send {\"prompt\": \"...\"}", "type": "gpn_bad_request"}
+                                }).to_string())
+                                .with_header(hdr.clone())
+                                .with_status_code(400),
+                            );
+                            return;
+                        }
+                    };
+                    if let Some(cat) = moderation_block(&prompt) {
+                        let _ = req.respond(
+                            Response::from_string(json!({
+                                "error": {"message": cat.reason(), "type": "gpn_policy_violation", "category": cat.id()}
+                            }).to_string())
+                            .with_header(hdr.clone())
+                            .with_status_code(451),
+                        );
+                        return;
+                    }
+                    let model = v
+                        .get("model")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("sd-turbo")
+                        .to_string();
+                    let size = v
+                        .get("size")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("512x512")
+                        .to_string();
+                    let (width, height) = match image_jobs::parse_size(&size) {
+                        Ok(wh) => wh,
+                        Err(e) => {
+                            let _ = req.respond(
+                                Response::from_string(json!({
+                                    "error": {"message": e, "type": "gpn_bad_request"}
+                                }).to_string())
+                                .with_header(hdr.clone())
+                                .with_status_code(400),
+                            );
+                            return;
+                        }
+                    };
+                    let steps = v
+                        .get("steps")
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(8)
+                        .clamp(1, 50) as u32;
+                    let n = v
+                        .get("n")
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(1)
+                        .clamp(1, 4) as u32;
+                    let seed = v.get("seed").and_then(|x| x.as_i64()).unwrap_or(0);
+                    let b64 = v
+                        .get("response_format")
+                        .and_then(|x| x.as_str())
+                        .map(|f| f.eq_ignore_ascii_case("b64_json"))
+                        .unwrap_or(false);
+                    let sync = v.get("sync").and_then(|x| x.as_bool()).unwrap_or(false);
+                    let est = image_estimate_seconds(&pcfg, width, height, steps, n);
+                    if sync {
+                        if let Some(msg) = image_jobs::sync_refusal(est) {
+                            let _ = req.respond(
+                                Response::from_string(json!({
+                                    "error": {
+                                        "message": msg,
+                                        "type": "gpn_sync_too_slow",
+                                        "estimated_seconds": (est * 100.0).round() / 100.0
+                                    }
+                                }).to_string())
+                                .with_header(hdr.clone())
+                                .with_status_code(400),
+                            );
+                            return;
+                        }
+                    }
+                    // Route to a box that advertises ImageGeneration.
+                    let reg = registry.lock().unwrap().clone();
+                    let Some(provider) = pick_gen_provider(&reg, &rtt_overrides(&v)) else {
+                        let empty = reg.iter().all(|p| p.last_seen.is_none());
+                        let mut r = Response::from_string(json!({
+                            "error": {
+                                "message": if empty {
+                                    "provider registry is warming up (no providers polled yet); retry shortly".to_string()
+                                } else {
+                                    "no provider with the ImageGeneration capability is online".to_string()
+                                },
+                                "type": "gpn_unavailable"
+                            }
+                        }).to_string())
+                        .with_header(hdr.clone())
+                        .with_status_code(503);
+                        if empty {
+                            r = r.with_header(retry_after_header());
+                        }
+                        let _ = req.respond(r);
+                        return;
+                    };
+                    let feed = feed_now();
+                    // The render itself only happens over the hub channel. Check
+                    // that the box actually serves it *before* accepting the
+                    // request, so a caller gets an immediate, honest 503 instead
+                    // of a `202` that silently dies 30 s later.
+                    let channel_endpoint = image_channel_endpoint(&provider.status_url);
+                    match channel_endpoint.as_deref() {
+                        Some(ep) if gpn_agent::hub_ap::probe_channel_endpoint(ep) => {}
+                        _ => {
+                            let ep = channel_endpoint
+                                .clone()
+                                .unwrap_or_else(|| "<unresolved>".to_string());
+                            let msg = format!(
+                                "image service unavailable: the provider at {} does not serve the \
+                                 channel render endpoint ({ep}). No image was queued and nothing \
+                                 was charged; retry when a diffusion provider is online.",
+                                provider.address
+                            );
+                            eprintln!("[images] refusing generation request: {msg}");
+                            let _ = req.respond(
+                                Response::from_string(json!({
+                                    "error": {"message": msg, "type": "gpn_unavailable"}
+                                }).to_string())
+                                .with_header(hdr.clone())
+                                .with_header(retry_after_header())
+                                .with_status_code(503),
+                            );
+                            return;
+                        }
+                    }
+                    let price_gpn = image_price_gpn(
+                        &pcfg,
+                        width as f64,
+                        height as f64,
+                        steps as f64,
+                        1.0,
+                        feed.token_price_usd,
+                        feed.market_hr,
+                        feed.util,
+                    ) * n as f64;
+                    let id = image_jobs::new_id(&prompt);
+                    let rec = ImageJob::new(
+                        id.clone(),
+                        &prompt,
+                        &model,
+                        width,
+                        height,
+                        steps,
+                        seed,
+                        n,
+                        est,
+                        price_gpn,
+                    );
+                    if let Err(e) = image_jobs::save(&rec) {
+                        let _ = req.respond(
+                            Response::from_string(json!({
+                                "error": {"message": format!("cannot persist the job: {e}"), "type": "gpn_error"}
+                            }).to_string())
+                            .with_header(hdr.clone())
+                            .with_status_code(500),
+                        );
+                        return;
+                    }
+                    let ctx = ImageCtx {
+                        hub: hub.clone(),
+                        rt: rt.clone(),
+                        client: client.clone(),
+                        provider_addr: provider.address.clone(),
+                        status_url: provider.status_url.clone(),
+                        channel_endpoint: channel_endpoint.clone(),
+                    };
+                    // Per-image price: `n` renders are `n` sequential channel
+                    // jobs (one GPU, one job at a time), each priced exactly
+                    // like a single image.
+                    let per_image_units =
+                        (price_gpn / n as f64 * pricing::BASE_UNITS_PER_GPN) as u128;
+                    if sync {
+                        let started = Instant::now();
+                        let mut failure = ImageFailure::Failed;
+                        for i in 0..n {
+                            failure = run_image_record(&ctx, &rec, i, per_image_units.max(1));
+                            if image_jobs::get(&id).map(|j| j.status == "failed").unwrap_or(false)
+                            {
+                                break;
+                            }
+                        }
+                        let done = image_jobs::get(&id).unwrap_or(rec);
+                        println!(
+                            "[images] {} sync request finished in {} ms (status {})",
+                            id,
+                            started.elapsed().as_millis(),
+                            done.status
+                        );
+                        let code = if done.status == "completed" {
+                            200
+                        } else if failure == ImageFailure::Unavailable {
+                            // Nothing was charged — say the service is down.
+                            503
+                        } else {
+                            502
+                        };
+                        let mut r = Response::from_string(done.public_json(b64).to_string())
+                            .with_header(hdr.clone())
+                            .with_status_code(code);
+                        if code == 503 {
+                            r = r.with_header(retry_after_header());
+                        }
+                        let _ = req.respond(r);
+                        return;
+                    }
+                    let rec_worker = rec.clone();
+                    std::thread::spawn(move || {
+                        for i in 0..n {
+                            let _ = run_image_record(&ctx, &rec_worker, i, per_image_units.max(1));
+                            if image_jobs::get(&id).map(|j| j.status == "failed").unwrap_or(false)
+                            {
+                                break;
+                            }
+                        }
+                    });
+                    let mut pending = rec.pending_shape();
+                    pending["payment_hint"] = json!("channel");
+                    pending["n"] = json!(n);
+                    pending["gpn"]["price_total_gpn"] = json!(price_gpn);
+                    let _ = req.respond(
+                        Response::from_string(pending.to_string())
+                            .with_header(hdr.clone())
+                            .with_status_code(202),
+                    );
+                    return;
+                }
+                (Method::Get, ["v1", "images", "generations", id]) => {
+                    let want_b64 = url.contains("format=b64_json") || url.contains("b64=true");
+                    match image_jobs::get(id) {
+                        Some(j) => {
+                            // A render that never ran (service unavailable) is a
+                            // 503, not a silent 200 "failed": the caller must be
+                            // able to tell "your image failed" from "we are down".
+                            let unavailable = j.status == "failed" && j.payment == "not_charged";
+                            let mut r = Response::from_string(j.public_json(want_b64).to_string())
+                                .with_header(hdr.clone());
+                            if unavailable {
+                                r = r
+                                    .with_header(retry_after_header())
+                                    .with_status_code(503);
+                            }
+                            let _ = req.respond(r);
+                        }
+                        None => {
+                            let _ = req.respond(
+                                Response::from_string(json!({
+                                    "error": {"message": "unknown or expired image job id", "type": "gpn_not_found"}
+                                }).to_string())
+                                .with_header(hdr.clone())
+                                .with_status_code(404),
+                            );
+                        }
+                    }
+                    return;
+                }
+                // The finished bytes. `GET /v1/images/{id}` is the URL every
+                // completed job advertises; `/{id}/{n}` addresses the 2nd+ image
+                // of an `n>1` request.
+                (Method::Get, ["v1", "images", id]) => {
+                    if image_bytes(id, 0).is_none() {
+                        let _ = req.respond(
+                        Response::from_string(
+                            json!({"error": {"message": "no such image (unknown id, not finished, or expired)", "type": "gpn_not_found"}})
+                                .to_string(),
+                        )
+                        .with_header(hdr.clone())
+                        .with_status_code(404),
+                        );
+                        return;
+                    }
+                    respond_image(req, id, 0);
+                    return;
+                }
+                (Method::Get, ["v1", "images", id, idx]) => {
+                    let i: u32 = idx.parse().unwrap_or(0);
+                    if image_bytes(id, i).is_none() {
+                        let _ = req.respond(
+                        Response::from_string(
+                            json!({"error": {"message": "no such image", "type": "gpn_not_found"}})
+                                .to_string(),
+                        )
+                        .with_header(hdr.clone())
+                        .with_status_code(404),
+                        );
+                        return;
+                    }
+                    respond_image(req, id, i);
+                    return;
                 }
                 (Method::Post, ["jobs"]) => {
                     // Item #22 build-order step 4: refuse a banned client IP (per-AP
@@ -2954,7 +3679,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if !is_gen {
                         let prompt_s = prompt.clone().unwrap_or_default();
                         let price = ppt.saturating_mul(mtok_eff as u128).max(1);
-                        match gpn_agent::hub_ap::try_channel_job_ex(
+                        // Item #63: the caller's own rate card, so a provider
+                        // settles at actual usage instead of the ceiling. Only
+                        // meaningful when the caller actually priced per token.
+                        let billing = (ppt > 0).then_some(gpn_agent::hub_channel::BillingRates {
+                            in_rate: ppt,
+                            out_rate: ppt,
+                        });
+                        match gpn_agent::hub_ap::try_channel_job_billed_ex(
                             &hub,
                             &rt,
                             Some(&client),
@@ -2964,6 +3696,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &prompt_s,
                             mtok_eff,
                             price,
+                            billing,
                         ) {
                             Ok(out) => {
                                 let mut resp = json!({
@@ -2978,6 +3711,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     "latency_ms": provider.latency_ms,
                                     "load": format!("{}/{}", provider.active, provider.capacity),
                                     "channel_balance_provider": out.balance_provider.to_string(),
+                                    "channel_charge": out.charge.to_string(),
+                                    "channel_charge_ceiling": price.to_string(),
                                     "answer": {
                                         "status": "done",
                                         "response": out.text,
@@ -3222,7 +3957,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         256,
                                     )
                                 } else {
-                                    gpn_agent::llm::LlmJob::new_llm(&model, p, 0.7, 256)
+                                    gpn_agent::llm::LlmJob::new_llm(&model, p, 0.7, mtok_eff)
                                 };
                                 let store = gpn_agent::llm::LlmStore::new();
                                 if !persist_job_payload(&store, id, &job) {
