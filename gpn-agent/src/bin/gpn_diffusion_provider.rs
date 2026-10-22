@@ -92,6 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // throttled independently of the cheap local passes.
     let mut last_claim_scan: Option<Instant> = None;
     let mut last_reconcile: Option<Instant> = None;
+    let mut job_kinds_cache: JobKinds = None;
 
     loop {
         // IDLE gate: while the operator idles the node we take no new job.
@@ -107,6 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &addr,
             &mut last_claim_scan,
             &mut last_reconcile,
+            &mut job_kinds_cache,
         )
         .await
         {
@@ -147,6 +149,36 @@ const RECONCILE_WINDOW: u64 = 128;
 const DEFAULT_CLAIM_SCAN_MS: u64 = 30_000;
 const DEFAULT_RECONCILE_MS: u64 = 30_000;
 const DEFAULT_CLAIM_SCAN_WINDOW: u64 = 512;
+/// Bound for the "is any of my generation jobs Running?" sweep (local store
+/// reads, one per id — see the comment at its call site).
+const RUNNING_SCAN_WINDOW: u64 = 512;
+/// How long the set of image/video job ids is trusted before the ledger is
+/// re-read. A generation job is created once and runs for minutes, so a few
+/// seconds of staleness costs nothing; without a TTL every pass re-parsed the
+/// whole shared ledger (see `gen_id_set`).
+const DEFAULT_GEN_ID_CACHE_MS: u64 = 5_000;
+
+/// Which ids in the shared ledger are image/video jobs (`gen`), which are known
+/// jobs of another kind (`other`), and when that split was read.
+type JobKinds = Option<(Instant, HashSet<u64>, HashSet<u64>)>;
+
+/// Cached "is this id a generation job?" view of the ledger (item #59).
+///
+/// One ledger pass per refresh answers both questions the pass needs: which ids
+/// we may claim/run, and which ids are known *not* to be ours (so the reconcile
+/// kind-gate does not have to read the ledger per id).
+fn job_kinds(cache: &mut JobKinds, ttl_ms: u64) -> (HashSet<u64>, HashSet<u64>) {
+    if !due(cache.as_ref().map(|(t, _, _)| *t), Instant::now(), ttl_ms) {
+        if let Some((_, gen, other)) = cache.as_ref() {
+            return (gen.clone(), other.clone());
+        }
+    }
+    let (gen, other) = LlmStore::new().ids_partitioned(is_gen);
+    let gen: HashSet<u64> = gen.into_iter().collect();
+    let other: HashSet<u64> = other.into_iter().collect();
+    *cache = Some((Instant::now(), gen.clone(), other.clone()));
+    (gen, other)
+}
 
 /// Read a millisecond interval from `name`, ignoring garbage/zero.
 fn env_millis(name: &str, default: u64) -> u64 {
@@ -356,6 +388,7 @@ async fn process_once(
     addr: &str,
     last_claim_scan: &mut Option<Instant>,
     last_reconcile: &mut Option<Instant>,
+    job_kinds_cache: &mut JobKinds,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // -1. Reconcile: finalize any of our jobs left in `AwaitingVerification`.
     // `complete_job` is the provider's own finalization call (state
@@ -367,6 +400,13 @@ async fn process_once(
     // reclaimed. Kind-agnostic so it also clears zombies with no off-chain
     // payload entry.
     let next = client.get_next_job_id().await;
+    // Item #59: ONE ledger pass per refresh answers both "which ids may we
+    // claim/run" and "which ids are known not to be ours", so neither the
+    // reconcile kind-gate nor the claim filters read the ledger per id.
+    let (gen_ids, other_ids) = job_kinds(
+        job_kinds_cache,
+        env_millis("GPN_GEN_ID_CACHE_MS", DEFAULT_GEN_ID_CACHE_MS),
+    );
     let reconcile_ms = env_millis("GPN_RECONCILE_MS", DEFAULT_RECONCILE_MS);
     if due(*last_reconcile, Instant::now(), reconcile_ms) {
         *last_reconcile = Some(Instant::now());
@@ -379,7 +419,7 @@ async fn process_once(
                 // Kind-gate: skip jobs owned by the other provider (shared
                 // signer account means `provider == me` is true for both kinds).
                 // Unknown kinds are still reconciled so orphan zombies get freed.
-                if !get_job(id).map(|j| is_gen(&j)).unwrap_or(true) {
+                if other_ids.contains(&id) {
                     continue;
                 }
                 match client.complete_job(id).await {
@@ -391,7 +431,7 @@ async fn process_once(
                     }
                     Err(e) => eprintln!("[provider] reconcile #{id} (complete) failed: {e}"),
                 }
-            } else if state == "Accepted" && get_job(id).map(|j| is_gen(&j)).unwrap_or(false) {
+            } else if state == "Accepted" && gen_ids.contains(&id) {
                 // Capacity reclaim: an `Accepted` gen job we own that was never
                 // started is a zombie holding a `MaxJobsPerProvider` slot. Our
                 // claim loop only starts `Pending` jobs, so it can never advance
@@ -415,12 +455,20 @@ async fn process_once(
     // 0. Auto-claim: if the scheduler assigned us specific jobs, claim ONLY those
     //    (pulling any missing model first); otherwise claim any Pending gen job.
     let assigned = read_assigned(me, addr);
+    // Item #59: ONE ledger pass per refresh instead of a `get_job` per id.
+    // `get_job` is cheap only while the mtime cache holds; the LLM provider
+    // rewrites this shared ~5 MB ledger several times a second, so a per-id
+    // sweep re-parsed the whole file repeatedly (~19 MB/s of reads, ~55 % of a
+    // core) just to answer "is this id an image/video job?".
     let assigned_ids: Vec<u64> = if assigned.is_empty() {
         vec![]
     } else {
         for (id, model, pull) in &assigned {
+            if !gen_ids.contains(id) {
+                continue;
+            }
             let Some(job) = get_job(*id) else { continue };
-            if !is_gen(&job) || job.status == "done" {
+            if job.status == "done" {
                 continue;
             }
             if model.is_empty() || model == "auto" {
@@ -436,7 +484,7 @@ async fn process_once(
         }
         assigned
             .iter()
-            .filter(|(id, _, _)| get_job(*id).map(|j| is_gen(&j)).unwrap_or(false))
+            .filter(|(id, _, _)| gen_ids.contains(id))
             .map(|(id, _, _)| *id)
             .collect()
     };
@@ -462,7 +510,7 @@ async fn process_once(
         if !assigned_ids.is_empty() && !assigned_ids.contains(&job_id) {
             continue;
         }
-        if !get_job(job_id).map(|j| is_gen(&j)).unwrap_or(false) {
+        if !gen_ids.contains(&job_id) {
             continue;
         }
         println!("[provider] claiming generation job #{job_id} (min_gflops={min_gflops})");
@@ -485,8 +533,20 @@ async fn process_once(
     }
 
     // 1. Run any Running generation job assigned to this signer.
+    //
+    // Item #59: bounded to the newest ids, same reasoning as the claim scan.
+    // `get_job` is local, but it is called once per id and the store is a ~5 MB
+    // ledger shared with the LLM provider (any write to it invalidates the
+    // mtime cache, so a full 0..next sweep pays for a full re-parse). A
+    // generation job we must act on is by construction recent: anything older
+    // than RUNNING_SCAN_WINDOW ids has already hit its on-chain deadline, and
+    // the expiry sweep — not a re-render — is what reclaims it.
     let next = client.get_next_job_id().await;
-    for id in 0..next {
+    let (run_from, run_to) = claim_scan_range(next, RUNNING_SCAN_WINDOW.max(claim_window));
+    for id in run_from..run_to {
+        if !gen_ids.contains(&id) {
+            continue;
+        }
         let job = match get_job(id) {
             Some(j) if is_gen(&j) => j,
             _ => continue,

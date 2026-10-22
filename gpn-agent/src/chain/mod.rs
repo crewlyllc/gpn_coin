@@ -82,6 +82,18 @@ pub struct ChainClient {
     /// pipeline marketplace lifecycle txs (accept→start→submit_result→complete)
     /// without waiting on block time. See [`signer::NonceStream`].
     fast: std::sync::Arc<tokio::sync::Mutex<Option<signer::NonceStream>>>,
+    /// Reused HTTP client for the plain JSON-RPC helpers (`head_block_hash`,
+    /// `head_block_number`, `get_effective_feed`).
+    ///
+    /// Item #59: those helpers used to call `reqwest::Client::new()` **per
+    /// request**, and every fresh client re-reads and re-parses the whole CA
+    /// bundle (~215 KB under `/etc/ssl/certs`) and opens a new TCP connection.
+    /// With one `chain_getBlockHash` per storage read that is a
+    /// connection-per-read firehose — measured at ~77 new connections/second
+    /// and ~20 MB/s of reads on an idle provider's main thread, i.e. the CPU
+    /// cost of a poll loop scaled with the *number of reads*, not with any work
+    /// done. One long-lived client per `ChainClient` removes it.
+    http: reqwest::Client,
 }
 
 /// A dropped/closed RPC socket, not a chain-level rejection. jsonrpsee reports a
@@ -179,11 +191,18 @@ impl ChainClient {
                 ready.is_syncing
             );
         }
+        // One client for the JSON-RPC helpers, reused for the process lifetime
+        // (see the `http` field comment — a per-call client was the #59 burn).
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_default();
         Ok(Self {
             endpoint: endpoint.to_string(),
             client,
             signer_uri: None,
             fast: Default::default(),
+            http,
         })
     }
 
@@ -215,7 +234,8 @@ impl ChainClient {
             "method": "chain_getBlockHash",
             "params": []
         });
-        let resp: serde_json::Value = reqwest::Client::new()
+        let resp: serde_json::Value = self
+            .http
             .post(&http_url)
             .json(&body)
             .send()
@@ -283,7 +303,8 @@ impl ChainClient {
             "method": "chain_getHeader",
             "params": []
         });
-        let resp: serde_json::Value = reqwest::Client::new()
+        let resp: serde_json::Value = self
+            .http
             .post(&http_url)
             .json(&body)
             .send()
@@ -413,7 +434,8 @@ impl ChainClient {
             "method": "gpn_effectiveFeed",
             "params": []
         });
-        let resp: serde_json::Value = reqwest::Client::new()
+        let resp: serde_json::Value = self
+            .http
             .post(&http_url)
             .json(&body)
             .send()

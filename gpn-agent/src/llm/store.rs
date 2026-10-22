@@ -419,6 +419,41 @@ impl LlmStore {
         self.load().get(&job_id).cloned()
     }
 
+    /// Split the ledger's ids into (matching `pred`, not matching) in ONE pass.
+    ///
+    /// Item #59: a caller that loops `for id in 0..next { get_job(id) }` pays a
+    /// full ledger parse whenever another process (the LLM provider) has written
+    /// the shared store since the last call — with a ~5 MB ledger written a few
+    /// times a second, that is a per-id re-parse, not a per-id lookup. Ask for
+    /// the two sets you need instead: one parse, then iterate `HashSet`s.
+    pub fn ids_partitioned<F: Fn(&LlmJob) -> bool>(&self, pred: F) -> (Vec<u64>, Vec<u64>) {
+        fn split<F: Fn(&LlmJob) -> bool>(
+            map: &HashMap<u64, LlmJob>,
+            pred: F,
+        ) -> (Vec<u64>, Vec<u64>) {
+            let (mut yes, mut no) = (Vec::new(), Vec::new());
+            for (id, j) in map.iter() {
+                if pred(j) {
+                    yes.push(*id);
+                } else {
+                    no.push(*id);
+                }
+            }
+            (yes, no)
+        }
+        let _g = self.lock.lock().unwrap();
+        let mtime = file_mtime_ns(&self.path);
+        {
+            let cache = store_cache().lock().unwrap();
+            if let Some((m, map)) = cache.get(&self.path) {
+                if *m == mtime && !(mtime == 0 && map.is_empty()) {
+                    return split(map, pred);
+                }
+            }
+        }
+        split(&self.load(), pred)
+    }
+
     pub fn set_status(&self, job_id: u64, status: &str) -> std::io::Result<()> {
         let _g = self.lock.lock().unwrap();
         let _x = StoreLock::acquire(&self.path)?;
