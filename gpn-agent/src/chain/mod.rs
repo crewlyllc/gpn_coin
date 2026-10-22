@@ -1646,13 +1646,31 @@ impl ChainClient {
     /// `attested_gflops` = the provider's on-chain attested compute throughput;
     /// a job with min_gflops=0 is always claimable (open market).
     pub async fn list_claimable_jobs(&self, attested_gflops: u64) -> Vec<(u64, u64)> {
+        let next = self.get_next_job_id().await;
+        self.list_claimable_jobs_window(0, next, attested_gflops)
+            .await
+    }
+
+    /// Same scan, bounded to the half-open id range `[from, to)`.
+    ///
+    /// Item #59: the scan costs **one `state_getStorage` RPC per job id**, so a
+    /// caller that polls it in a tight loop re-reads the entire job history on
+    /// every cycle (`0..next` was 6 371 ids ⇒ ~6 371 RPCs per 2 s poll for one
+    /// provider that could never claim any of them). Callers that only care
+    /// about recent work pass a bounded window; `list_claimable_jobs` keeps the
+    /// full-history behaviour for callers that genuinely need it.
+    pub async fn list_claimable_jobs_window(
+        &self,
+        from: u64,
+        to: u64,
+        attested_gflops: u64,
+    ) -> Vec<(u64, u64)> {
         let Some(client) = &self.client else {
             return vec![];
         };
-        let next = self.get_next_job_id().await;
         let mut out = Vec::new();
         let mut gated = 0usize;
-        for id in 0..next {
+        for id in from..to {
             let addr = subxt::dynamic::storage(
                 "ComputeMarketplace",
                 "Jobs",

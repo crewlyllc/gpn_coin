@@ -17,7 +17,7 @@ use serde_json::json;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Job ids this process has already declared a **wedge** (helper hung past its
 /// budget). Re-running one would just wedge again in a tight loop, burning the
@@ -87,6 +87,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         gpn_agent::assign_pull::spawn(cfg);
     }
 
+    // Item #59: the claimable-job scan and the reconcile sweep are chain-heavy
+    // (one storage RPC per job id) and used to run on EVERY poll. They are now
+    // throttled independently of the cheap local passes.
+    let mut last_claim_scan: Option<Instant> = None;
+    let mut last_reconcile: Option<Instant> = None;
+
     loop {
         // IDLE gate: while the operator idles the node we take no new job.
         // The pass below claims and runs in one go, so a job already started
@@ -95,7 +101,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tokio::time::sleep(Duration::from_millis(poll_ms.max(1000))).await;
             continue;
         }
-        if let Err(e) = process_once(&client, &me, &addr).await {
+        if let Err(e) = process_once(
+            &client,
+            &me,
+            &addr,
+            &mut last_claim_scan,
+            &mut last_reconcile,
+        )
+        .await
+        {
             eprintln!("[provider] cycle error: {e}");
         }
         tokio::time::sleep(Duration::from_millis(poll_ms)).await;
@@ -117,6 +131,47 @@ fn is_benign_state_err(s: &str) -> bool {
 /// How many of the most recent job ids the reconcile pass scans per cycle
 /// (was `0..next` = every historical job, one RPC each, on EVERY poll).
 const RECONCILE_WINDOW: u64 = 128;
+
+// ---- item #59: bound the chain-heavy passes ----------------------------
+//
+// `list_claimable_jobs` costs ONE `state_getStorage` RPC per job id, and this
+// provider called it unconditionally on every 2 s poll. With `NextJobId` at
+// 6 371 that is ~6 371 sequential RPCs per cycle — measured at ~95 % of a core
+// for 10 h straight — and the result was thrown away every time, because every
+// job on this network is an `llm` job and `is_gen()` rejects all of them. The
+// same process also re-read 128 ids for the reconcile sweep each cycle.
+//
+// Both passes are now (a) rate-limited and (b) bounded to recent ids. Neither
+// changes what this provider can claim: gen jobs only ever live in the newest
+// ids, and anything older than the window would have expired on chain anyway.
+const DEFAULT_CLAIM_SCAN_MS: u64 = 30_000;
+const DEFAULT_RECONCILE_MS: u64 = 30_000;
+const DEFAULT_CLAIM_SCAN_WINDOW: u64 = 512;
+
+/// Read a millisecond interval from `name`, ignoring garbage/zero.
+fn env_millis(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(default)
+}
+
+/// Half-open id range for a bounded claim scan: the newest `window` ids below
+/// `next` (a tiny chain still scans `0..next`).
+fn claim_scan_range(next: u64, window: u64) -> (u64, u64) {
+    (next.saturating_sub(window.max(1)), next)
+}
+
+/// True when `interval_ms` has elapsed since `last`; `None` (never run) is due.
+/// Saturating, so a backwards clock jump cannot produce a huge elapsed value and
+/// spin the pass; a stamp in the future simply waits (it never panics).
+fn due(last: Option<Instant>, now: Instant, interval_ms: u64) -> bool {
+    match last {
+        None => true,
+        Some(t) => now.saturating_duration_since(t) >= Duration::from_millis(interval_ms),
+    }
+}
 
 /// Hard time budget for one generation. Beyond this the helper is considered
 /// **wedged** (GPU contention, a stalled HF download, a CUDA hang) and is
@@ -299,6 +354,8 @@ async fn process_once(
     client: &ChainClient,
     me: &str,
     addr: &str,
+    last_claim_scan: &mut Option<Instant>,
+    last_reconcile: &mut Option<Instant>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // -1. Reconcile: finalize any of our jobs left in `AwaitingVerification`.
     // `complete_job` is the provider's own finalization call (state
@@ -310,7 +367,10 @@ async fn process_once(
     // reclaimed. Kind-agnostic so it also clears zombies with no off-chain
     // payload entry.
     let next = client.get_next_job_id().await;
-    for id in next.saturating_sub(RECONCILE_WINDOW)..next {
+    let reconcile_ms = env_millis("GPN_RECONCILE_MS", DEFAULT_RECONCILE_MS);
+    if due(*last_reconcile, Instant::now(), reconcile_ms) {
+        *last_reconcile = Some(Instant::now());
+        for id in next.saturating_sub(RECONCILE_WINDOW)..next {
         if let Some((state, _price, _req, provider)) = client.get_job_state(id).await {
             if provider.as_deref() != Some(me) {
                 continue;
@@ -349,6 +409,7 @@ async fn process_once(
                 }
             }
         }
+        }
     }
 
     // 0. Auto-claim: if the scheduler assigned us specific jobs, claim ONLY those
@@ -385,7 +446,19 @@ async fn process_once(
         .await
         .map(|(_, f, _)| f)
         .unwrap_or(0);
-    for (job_id, min_gflops) in client.list_claimable_jobs(attested_gflops).await {
+    // Item #59: bounded + throttled scan (was: full history, every poll).
+    let claim_scan_ms = env_millis("GPN_CLAIM_SCAN_MS", DEFAULT_CLAIM_SCAN_MS);
+    let claim_window = env_millis("GPN_CLAIM_SCAN_WINDOW", DEFAULT_CLAIM_SCAN_WINDOW);
+    let claimable = if !assigned_ids.is_empty() || due(*last_claim_scan, Instant::now(), claim_scan_ms) {
+        *last_claim_scan = Some(Instant::now());
+        let (from, to) = claim_scan_range(next, claim_window);
+        client
+            .list_claimable_jobs_window(from, to, attested_gflops)
+            .await
+    } else {
+        Vec::new()
+    };
+    for (job_id, min_gflops) in claimable {
         if !assigned_ids.is_empty() && !assigned_ids.contains(&job_id) {
             continue;
         }
@@ -635,5 +708,37 @@ mod tests {
         assert!(!is_wedged(424242));
         mark_wedged(424242);
         assert!(is_wedged(424242));
+    }
+
+    // ---- item #59: the claim scan must stay bounded and rate-limited ----
+
+    #[test]
+    fn claim_scan_only_reads_the_newest_window() {
+        // The whole point of #59: 6 371 ids must not become 6 371 RPCs.
+        assert_eq!(claim_scan_range(6371, 512), (5859, 6371));
+        assert_eq!(claim_scan_range(6371, 512).1 - claim_scan_range(6371, 512).0, 512);
+        // A young chain scans everything from zero (no negative/undersized start).
+        assert_eq!(claim_scan_range(7, 512), (0, 7));
+        assert_eq!(claim_scan_range(0, 512), (0, 0));
+        // A degenerate window still scans exactly one id, never `from > to`.
+        assert_eq!(claim_scan_range(10, 0), (9, 10));
+    }
+
+    #[test]
+    fn heavy_passes_are_rate_limited_but_never_starve() {
+        let now = Instant::now();
+        // Never run before => due.
+        assert!(due(None, now, 30_000));
+        // Just ran => not due (this is what stops the per-2 s RPC storm).
+        assert!(!due(Some(now), now, 30_000));
+        // Interval elapsed => due again.
+        assert!(due(
+            Some(now - Duration::from_millis(30_001)),
+            now,
+            30_000
+        ));
+        // A stamp in the future (clock jumped backwards) must not panic, and must
+        // not be read as "a huge elapsed time" either — it simply waits.
+        assert!(!due(Some(now + Duration::from_secs(3600)), now, 30_000));
     }
 }
