@@ -1,5 +1,13 @@
 # GPN change-log
 
+## 2026-10-21 19:0x PT — PM07 queue driver (cron d496e0b0) — verification-only (no TODO/IN-PROGRESS row; no code change)
+**Read-first:** canonical queue `shared_workspace/artifacts/project7/GPN-TASKS.md` + master-ref. All rows are DONE or owner-gated BLOCKED (#12, #13, #16 finding #17, #17, #26, #46, #52) ⇒ rule 1 selects nothing; per rule 4 there is nothing to advance, so the run did the rule-5a health pass only.
+**Live:** spec **41**, head **#171,296 → #171,299**, advancing; `gpn-fleet`/`gpn-accesspoint`/`gpn-provider`/`gpn-provider-heartbeat` active; root FS **169 G free (60 %)**.
+**e2e:** `POST :8092/v1/chat/completions` (llama3.2:1b, `messages[]`) → HTTP 200 `chatcmpl-gpn-6313`, `usage {36,2,38}` (#37 prompt fix + #53 token accounting holding). `GET /job/6313` = `Pending` with the result already delivered = documented #49 create-inclusion lag.
+**Latency 114 s** vs 37–62 s in recent runs — the #52 cadence oscillation (three authorities, 10-block ADJUST windows). Already BLOCKED on Jeremy's clamp/window decision; no driver patch applies.
+**Regressions:** none. 30-min journals: 0 ERROR/panic/`dispatch reverted`/`seal is invalid`/`cancelled stale Pending`/`adopted untracked`; #55/#57/#58 all holding.
+**Not touched:** the spec-42 governance WIP (17 modified + 3 untracked) stays uncommitted — concurrent author, and a runtime upgrade is gated on Jeremy. Canonical genesis WASM `76f37b23…` intact; no `set_code`.
+
 ## 2026-10-21 15:3x PT — **provider addresses are actually publishable, models are VRAM-gated, `/v1/models` is a real catalogue** (`gpn_provider_status`, `gpn_scheduler`, `gpn_llm_provider`, `gpn_node`, `gpn-agent::models`)
 **WHY (four live symptoms):** (1) box2's `/status` published `listen_addrs: ["/ip4/127.0.0.1/tcp/30333/p2p/12D3…/p2p/12D3…", …]` and `multiaddrs: []` — the node RPC now returns listen addresses *already* carrying `/p2p/<id>` and litep2p sometimes doubles it; the heartbeat relayed that verbatim and the access point's sanitizer (correctly: exactly one `/p2p/<id>`, last, matching `peer_id`) rejected every entry, so the box was unroutable. (2) With no `GPN_PUBLIC_ADDR`, a NATed box published nothing and said nothing. (3) a provider advertised/claimed models its VRAM cannot hold (a 4 GB card offering `qwen2.5:7b`). (4) `/v1/models` listed `stories260K` and `tuned-…` fine-tune artifacts. (5) box2 reports `gflops: 0` with no explanation, and `list_claimable_jobs`'s `min_gflops` filter then silently hides every gated job.
 **WHAT:**
