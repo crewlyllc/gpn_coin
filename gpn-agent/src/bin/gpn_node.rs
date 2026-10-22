@@ -50,6 +50,14 @@
 //! Secrets (the assign token, the signer/seed) are read from env / the file and
 //! are **never** written anywhere by this supervisor.
 //!
+//! ## Idle mode + local dashboard
+//! `--gui` / `GPN_GUI=1` serves a loopback-only control panel on
+//! `127.0.0.1:8099` (embedded HTML, no build step): status, a big **Go idle**
+//! button (30 m … 6 h) and **Resume now**. Idle pauses mining **and** new AI
+//! job claims while the node keeps syncing/peering/serving the chain, and
+//! resumes automatically at the deadline. `gpn_node idle <minutes>` and
+//! `gpn_node resume` do the same from a shell. See docs/node-gui-and-idle.md.
+//!
 //! ## Supervise / shutdown / status
 //! - Each child runs in its own supervisor thread; its stdout/stderr is
 //!   forwarded with a `[node]`/`[heartbeat]`/`[provider]`/`[diffuse]`/`[ml]`/
@@ -138,6 +146,12 @@ struct FileConfig {
     update_check: Option<bool>,
     /// Enforce `min_version` by refusing to mine/announce (`GPN_MIN_VERSION_ENFORCE`).
     min_version_enforce: Option<bool>,
+    /// Serve the local dashboard (`--gui` / `GPN_GUI=1`). Loopback only.
+    gui: Option<bool>,
+    /// Dashboard bind address (`--gui-listen` / `GPN_GUI_LISTEN`).
+    gui_listen: Option<String>,
+    /// Bypass the sole-authority idle valve (`--force-idle` / `GPN_IDLE_FORCE=1`).
+    force_idle: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -193,8 +207,15 @@ struct Config {
     standby: bool,
     /// The config file that was read (None when defaults are in use).
     config_path: Option<PathBuf>,
+    /// `--gui` / `GPN_GUI=1`: serve the local dashboard (loopback only).
+    gui: bool,
+    /// `--gui-listen` / `GPN_GUI_LISTEN` (must be loopback).
+    gui_listen: String,
+    /// `--force-idle` / `GPN_IDLE_FORCE=1`: bypass the sole-authority valve.
+    force_idle: bool,
 }
 
+/// Split a comma/space separated list (bootnodes / node args).
 fn env_str(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|s| !s.trim().is_empty())
 }
@@ -212,6 +233,16 @@ fn env_bool(k: &str) -> Option<bool> {
         )
     })
 }
+/// Value of `--flag <value>` or `--flag=<value>` in argv, if present.
+fn flag_value(argv: &[String], flag: &str) -> Option<String> {
+    if let Some(i) = argv.iter().position(|a| a == flag) {
+        return argv.get(i + 1).cloned();
+    }
+    let prefix = format!("{flag}=");
+    argv.iter()
+        .find_map(|a| a.strip_prefix(&prefix).map(str::to_string))
+}
+
 /// Split a comma/space separated list (bootnodes / node args).
 fn split_list(s: &str) -> Vec<String> {
     s.split(|c: char| c == ',' || c == ';' || c.is_whitespace())
@@ -685,6 +716,17 @@ impl Config {
             status_secs: env_u64("GPN_STATUS_SECS")
                 .or(file.status_secs)
                 .unwrap_or(15),
+            // ── Local dashboard (opt-in, loopback only) ─────────────────────
+            gui: env_bool("GPN_GUI").unwrap_or(false)
+                || argv.iter().any(|a| a == "--gui")
+                || file.gui.unwrap_or(false),
+            gui_listen: env_str("GPN_GUI_LISTEN")
+                .or_else(|| flag_value(&argv, "--gui-listen"))
+                .or(file.gui_listen)
+                .unwrap_or_else(|| gpn_agent::gui::DEFAULT_LISTEN.to_string()),
+            force_idle: env_bool("GPN_IDLE_FORCE").unwrap_or(false)
+                || argv.iter().any(|a| a == "--force-idle")
+                || file.force_idle.unwrap_or(false),
             autostart: env_bool("GPN_AUTOSTART")
                 .or(file.autostart)
                 .unwrap_or(false),
@@ -1670,6 +1712,12 @@ fn best_block(rpc_port: u16) -> Option<u64> {
 
 /// Cheaply read the node's connected-peer count from its own HTTP JSON-RPC.
 fn peer_count(rpc_port: u16) -> Option<u64> {
+    health(rpc_port).map(|(peers, _)| peers)
+}
+
+/// `system_health` → (peers, is_syncing). `None` when the RPC is unreachable
+/// (node starting, crashed, or bound to another port).
+fn health(rpc_port: u16) -> Option<(u64, bool)> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_millis(1200))
         .build()
@@ -1682,7 +1730,13 @@ fn peer_count(rpc_port: u16) -> Option<u64> {
         .ok()?
         .json()
         .ok()?;
-    resp.get("result")?.get("peers")?.as_u64()
+    let r = resp.get("result")?;
+    let peers = r.get("peers")?.as_u64()?;
+    let syncing = r
+        .get("isSyncing")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Some((peers, syncing))
 }
 
 /// Sleep `ms` in small steps so shutdown stays prompt (returns early if set).
@@ -1791,6 +1845,211 @@ fn status_line(cfg: &Config, shared: &Shared) -> String {
         None => line.push_str(" best=?"),
     }
     line
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Local dashboard (--gui) + idle control verbs
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// GPU name + VRAM as one-line strings for the dashboard.
+///
+/// `GPUMonitor` falls back to a placeholder when no tool answers, so an
+/// "Unknown GPU" is reported as *not detected* rather than as hardware.
+fn gpu_summary() -> (String, String) {
+    let Ok(mon) = gpn_agent::gpu::GPUMonitor::new() else {
+        return ("not detected".into(), String::new());
+    };
+    match mon.get_gpu_info() {
+        Ok(info) if info.model_name != "Unknown GPU" => {
+            let used = info.vram_used_mb;
+            let total = info.vram_total_bytes / (1024 * 1024);
+            (
+                info.model_name,
+                format!("VRAM {used}/{total} MiB · {}% util · {}C", info.gpu_utilization_percent, info.temperature_celsius as u32),
+            )
+        }
+        _ => ("not detected".into(), String::new()),
+    }
+}
+
+/// Models the local ollama reports as present (best effort, short timeout —
+/// the dashboard must never hang on a slow engine).
+fn ollama_models(ollama_url: &str) -> Vec<String> {
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(700))
+        .build()
+    else {
+        return Vec::new();
+    };
+    let url = format!("{}/api/tags", ollama_url.trim_end_matches('/'));
+    let Ok(resp) = client.get(url).send() else {
+        return Vec::new();
+    };
+    let Ok(v) = resp.json::<serde_json::Value>() else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = v
+        .get("models")
+        .and_then(|m| m.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort();
+    out.truncate(12);
+    out
+}
+
+/// The JSON document behind `GET /api/status`.
+fn status_doc(cfg: &Config, shared: &Shared) -> serde_json::Value {
+    use serde_json::json;
+
+    let children: Vec<serde_json::Value> = {
+        let m = shared.lock().unwrap();
+        let order = ["node", "heartbeat", "provider", "diffuse", "ml", "finetune"];
+        order
+            .iter()
+            .filter_map(|label| m.get(label).map(|st| (label, st)))
+            .map(|(label, st)| {
+                json!({
+                    "label": label,
+                    "up": st.up,
+                    "pid": st.pid,
+                    "restarts": st.restarts,
+                    "detail": if st.up { String::new() } else {
+                        match st.last_exit {
+                            Some(NODE_EXIT_NOT_DIALABLE) => "not dialable (restarting)".to_string(),
+                            Some(c) => format!("exit {c} · restarts {}", st.restarts),
+                            None => format!("restarts {}", st.restarts),
+                        }
+                    },
+                })
+            })
+            .collect()
+    };
+
+    let node_up = {
+        let m = shared.lock().unwrap();
+        m.get("node").map(|s| s.up).unwrap_or(false)
+    };
+    let (peers, syncing) = match health(cfg.rpc_port) {
+        Some((p, s)) => (Some(p), s),
+        None => (None, false),
+    };
+    let best = best_block(cfg.rpc_port);
+    let idle = gpn_agent::idle::current();
+    let idle_active = idle.is_some();
+    // Mining is on when the node is up, not idle, and not in version standby.
+    let mining = node_up && !idle_active && !cfg.standby;
+    let (gpu, vram) = gpu_summary();
+    // One GPU, one job: the provider holds this flag for a job's whole duration.
+    let job_running = gpn_agent::gpu_yield::yield_flag_path().exists();
+    let job = if job_running {
+        json!({"kind": "ai job", "id": null, "model": ""})
+    } else {
+        serde_json::Value::Null
+    };
+
+    json!({
+        "node": if node_up { "up" } else { "down" },
+        "peers": peers,
+        "syncing": syncing,
+        "best": best,
+        "mining": mining,
+        "standby": cfg.standby,
+        "gpu": gpu,
+        "vram": vram,
+        "current_job": job,
+        "models": ollama_models(&cfg.ollama),
+        "children": children,
+        "chain": cfg.chain,
+        "rpc_port": cfg.rpc_port,
+        "account": cfg.account,
+        // Not tracked off-chain (would need per-block reward accounting).
+        // Reported as null so the dashboard shows "—" instead of a guess.
+        "earnings_today": serde_json::Value::Null,
+        "earnings_note": "not tracked locally — see the explorer",
+        "spec": env!("CARGO_PKG_VERSION"),
+    })
+}
+
+/// Print the dashboard hint (always one line, so operators discover `--gui`).
+fn print_dashboard_hint(cfg: &Config) {
+    if cfg.gui {
+        asciiprintln!(
+            "  dashboard: starting on http://{} (loopback only)",
+            cfg.gui_listen
+        );
+    } else {
+        asciiprintln!("{}", gpn_agent::gui::startup_hint("gpn_node"));
+    }
+}
+
+/// `gpn_node idle <minutes>` / `gpn_node resume` — one-shot operator verbs.
+///
+/// Returns `Some(exit_code)` when a verb was handled (the caller exits), `None`
+/// for a normal start. These run **before** the ollama/update gates: pausing the
+/// machine must never depend on the network or on a GPU probe.
+fn run_control_verb(cfg: &Config, argv: &[String]) -> Option<i32> {
+    let pos = argv.iter().position(|a| a == "idle" || a == "resume")?;
+    let verb = argv[pos].as_str();
+    let path = gpn_agent::idle::idle_path();
+
+    match verb {
+        "resume" => {
+            let was = gpn_agent::idle::clear_at(&path);
+            asciiprintln!(
+                "idle: {}",
+                if was {
+                    "cleared — mining and job claiming resume (the node applies this within a second)"
+                } else {
+                    "node was already active"
+                }
+            );
+            Some(0)
+        }
+        "idle" => {
+            let minutes: u64 = match argv.get(pos + 1).map(|s| s.parse()) {
+                Some(Ok(m)) => m,
+                _ => {
+                    asciieprintln!(
+                        "usage: gpn_node idle <minutes>   (1 … {} = 6 h)",
+                        gpn_agent::idle::MAX_IDLE_MINUTES
+                    );
+                    return Some(2);
+                }
+            };
+            if let Err(e) = gpn_agent::idle::validate_minutes(minutes) {
+                asciieprintln!("idle: {e}");
+                return Some(2);
+            }
+            // Safety valve: never idle the only block producer.
+            let peers = peer_count(cfg.rpc_port);
+            if let Some(why) = gpn_agent::idle::refusal_reason(peers, cfg.force_idle) {
+                asciieprintln!("idle: REFUSED — {why}");
+                return Some(3);
+            }
+            match gpn_agent::idle::start_at(&path, minutes, "cli", gpn_agent::idle::now_unix()) {
+                Ok(st) => {
+                    asciiprintln!(
+                        "idle: mining + job claiming paused for {} min (until {}, unix).\n  \
+                         the node keeps syncing and serving the chain.\n  \
+                         resume with: gpn_node resume   (or the dashboard button)",
+                        minutes,
+                        st.until
+                    );
+                    Some(0)
+                }
+                Err(e) => {
+                    asciieprintln!("idle: {e}");
+                    Some(2)
+                }
+            }
+        }
+        _ => None,
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2332,6 +2591,22 @@ async fn main() {
         }
     );
 
+    // ── Operator control verbs: `idle <minutes>` / `resume` (one-shot). ─────
+    // Answered before the update/ollama gates on purpose: pausing the machine
+    // for a game must never depend on a network probe or a GPU check.
+    // Run on a plain thread: `peer_count` uses reqwest's *blocking* client, which
+    // must not be created/dropped inside the tokio runtime.
+    let verb_code = {
+        let cfg = cfg.clone();
+        let argv = argv.clone();
+        on_plain_thread(move || run_control_verb(&cfg, &argv), None)
+    };
+    if let Some(code) = verb_code {
+        std::process::exit(code);
+    }
+
+    print_dashboard_hint(&cfg);
+
     // ── Apply a staged update first: it must be swapped in before any child is
     //    spawned, so this process can be replaced cleanly (short outage). ─────
     apply_staged_or_reexec(&cfg);
@@ -2410,6 +2685,20 @@ async fn main() {
     let labels: Vec<&'static str> = specs.iter().map(|s| s.label).collect();
     asciiprintln!("  children: {}", labels.join(", "));
 
+    // ── Idle state survives a restart: report it once at startup. ────────────
+    // (The miner and the providers read the same file themselves; this is the
+    // operator-visible line, and it tells them the countdown is still running.)
+    if let Some(st) = gpn_agent::idle::current() {
+        let left = st.until.saturating_sub(gpn_agent::idle::now_unix());
+        asciiprintln!(
+            "  IDLE: resuming in {}m {:02}s (until {}) — mining + job claiming are paused; \
+             the node still syncs and serves the chain",
+            left / 60,
+            left % 60,
+            st.until
+        );
+    }
+
     let shared: Shared = Arc::new(Mutex::new(BTreeMap::new()));
     let shutdown = Arc::new(AtomicBool::new(false));
 
@@ -2444,6 +2733,35 @@ async fn main() {
         }
     });
 
+    // Local dashboard (opt-in). A dashboard failure must never take the node
+    // down: bind errors are a warning, and the supervisor keeps supervising.
+    let gui_handle = if cfg.gui {
+        let opts = gpn_agent::gui::GuiOptions {
+            listen: cfg.gui_listen.clone(),
+            force_idle: cfg.force_idle,
+            idle_path: None,
+        };
+        let src_cfg = cfg.clone();
+        let src_shared = shared.clone();
+        let source: Arc<dyn gpn_agent::gui::StatusSource> =
+            Arc::new(move || status_doc(&src_cfg, &src_shared));
+        match gpn_agent::gui::spawn(opts, source) {
+            Ok(h) => {
+                asciiprintln!("  dashboard: {} (loopback only — open it in a browser)", h.url());
+                Some(h)
+            }
+            Err(e) => {
+                asciieprintln!(
+                    "[gpn_node] dashboard not started: {e} (the node keeps running; \
+                     fix --gui-listen or set GPN_GUI=0)"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Sync-stall watchdog (auto-recover a silently wedged node).
     let watchdog_handle = spawn_stall_watchdog(&cfg, shared.clone(), shutdown.clone());
 
@@ -2477,6 +2795,9 @@ async fn main() {
 
     for h in handles {
         let _ = h.join();
+    }
+    if let Some(h) = gui_handle {
+        h.stop();
     }
     let _ = status_handle.join();
     let _ = watchdog_handle.join();
@@ -2542,7 +2863,7 @@ mod tests {
 
     /// A fully-populated config for tests that must not touch the real
     /// environment (no `Config::load`, no network, no wallet).
-    fn test_config() -> Config {
+    pub(super) fn test_config() -> Config {
         Config {
             chain: "dev".into(),
             signer: "//Alice".into(),
@@ -2582,6 +2903,9 @@ mod tests {
             min_version_enforce: true,
             standby: false,
             config_path: None,
+            gui: false,
+            gui_listen: gpn_agent::gui::DEFAULT_LISTEN.to_string(),
+            force_idle: false,
         }
     }
 
@@ -2772,5 +3096,95 @@ mod tests {
     fn ascii_safe_output_is_always_ascii() {
         let s = "\u{26a0}\u{fe0f} \u{1f680} \u{2705} \u{2014} \u{2026} \u{2022}";
         assert!(to_ascii_safe(s).is_ascii());
+    }
+}
+
+#[cfg(test)]
+mod idle_cli_tests {
+    use super::*;
+
+    /// Point the idle state at a per-test file so the CLI verbs under test can
+    /// never touch the operator's real `~/.gpn/idle.json`.
+    fn isolate(tag: &str) -> PathBuf {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let p = std::env::temp_dir().join(format!("gpn-node-cli-{tag}-{n}.json"));
+        std::env::set_var("GPN_IDLE_FILE", &p);
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    /// A port nothing listens on: `peer_count` returns `None`, which is the
+    /// "cannot prove another authority exists" case.
+    fn dead_port_cfg(tag: &str, force_idle: bool) -> Config {
+        let mut c = super::tests::test_config();
+        c.rpc_port = 1; // nothing listens on :1
+        c.force_idle = force_idle;
+        c.config_path = Some(PathBuf::from(format!("/nonexistent/{tag}")));
+        c
+    }
+
+    #[test]
+    fn idle_verb_refuses_an_over_long_window() {
+        let p = isolate("toolong");
+        let cfg = dead_port_cfg("toolong", true);
+        let argv = vec![
+            "gpn_node".to_string(),
+            "idle".to_string(),
+            "600".to_string(),
+        ];
+        assert_eq!(run_control_verb(&cfg, &argv), Some(2));
+        assert!(!p.exists(), "a rejected request must not write a state file");
+
+        let argv0 = vec!["gpn_node".to_string(), "idle".to_string(), "0".to_string()];
+        assert_eq!(run_control_verb(&cfg, &argv0), Some(2));
+    }
+
+    #[test]
+    fn idle_verb_refuses_when_the_node_is_the_only_authority() {
+        let p = isolate("sole");
+        let cfg = dead_port_cfg("sole", false);
+        let argv = vec![
+            "gpn_node".to_string(),
+            "idle".to_string(),
+            "60".to_string(),
+        ];
+        // Exit 3 = refused by the safety valve; nothing is written.
+        assert_eq!(run_control_verb(&cfg, &argv), Some(3));
+        assert!(!p.exists(), "a refused idle must not write a state file");
+    }
+
+    #[test]
+    fn idle_verb_writes_state_and_resume_clears_it_with_force() {
+        let p = isolate("force");
+        let cfg = dead_port_cfg("force", true);
+        let argv = vec![
+            "gpn_node".to_string(),
+            "idle".to_string(),
+            "45".to_string(),
+        ];
+        assert_eq!(run_control_verb(&cfg, &argv), Some(0));
+        let st = gpn_agent::idle::read_state_at(&p).expect("state written");
+        assert_eq!(st.reason, "cli");
+        assert!(st.until > gpn_agent::idle::now_unix());
+        assert!(!gpn_agent::idle::claims_allowed());
+
+        let resume = vec!["gpn_node".to_string(), "resume".to_string()];
+        assert_eq!(run_control_verb(&cfg, &resume), Some(0));
+        assert!(!p.exists());
+        assert!(gpn_agent::idle::claims_allowed());
+
+        // Resuming an active node is a no-op success, not an error.
+        assert_eq!(run_control_verb(&cfg, &resume), Some(0));
+    }
+
+    #[test]
+    fn a_normal_start_runs_no_control_verb() {
+        let _ = isolate("normal");
+        let cfg = dead_port_cfg("normal", false);
+        let argv = vec!["gpn_node".to_string(), "--gui".to_string()];
+        assert_eq!(run_control_verb(&cfg, &argv), None);
     }
 }

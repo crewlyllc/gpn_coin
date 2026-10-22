@@ -88,6 +88,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     loop {
+        // IDLE gate: while the operator idles the node we take no new job.
+        // The pass below claims and runs in one go, so a job already started
+        // finishes normally; what stops is the *next* claim.
+        if !gpn_agent::idle::claims_allowed() {
+            tokio::time::sleep(Duration::from_millis(poll_ms.max(1000))).await;
+            continue;
+        }
         if let Err(e) = process_once(&client, &me, &addr).await {
             eprintln!("[provider] cycle error: {e}");
         }

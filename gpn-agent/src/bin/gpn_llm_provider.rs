@@ -135,6 +135,28 @@ fn hex32(s: &str) -> Option<[u8; 32]> {
 /// Rate-limit the reconcile pass. Reconcile scans the last `RECONCILE_WINDOW`
 /// (128) jobs on-chain — expensive. With the poll at 300ms it would run ~3×/s
 /// and peg the CPU; gate it to ~once per 10s.
+/// One-line, once-per-transition logging for idle mode. The claim loop runs at
+/// 300 ms, so an unthrottled notice would flood the log (the same lesson as the
+/// reconcile pass).
+fn idle_notice_once() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static IDLE: AtomicBool = AtomicBool::new(false);
+    if !IDLE.swap(true, Ordering::Relaxed) {
+        println!(
+            "[provider] idle mode: mining + new job claims are PAUSED (node keeps syncing); \
+             resumes automatically at the deadline or on `gpn_node resume`"
+        );
+    }
+}
+
+fn idle_clear_notice() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static IDLE: AtomicBool = AtomicBool::new(false);
+    if IDLE.swap(false, Ordering::Relaxed) {
+        println!("[provider] idle ended, resuming job claims");
+    }
+}
+
 fn should_reconcile() -> bool {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1642,6 +1664,22 @@ async fn process_once(
             }
         }
     } // end reconcile gate
+
+    // ── IDLE gate (the whole point of "go play a game") ──────────────────
+    //
+    // While the operator idles the node we take **no new job**: we do not poll
+    // the AP, do not accept, do not start. Mining is parked by the node itself
+    // (service.rs) from the same file flag.
+    //
+    // Reconcile above already ran, so anything we owned is either finished or
+    // healed to a terminal/payable state — we never leave a job wedged. Jobs
+    // are claimed and executed inside a single pass, so no work is cut in half
+    // here: the pass either claims or it does not.
+    if !gpn_agent::idle::claims_allowed() {
+        idle_notice_once();
+        return Ok(());
+    }
+    idle_clear_notice();
 
     // 0. Auto-claim: if an access-point scheduler has assigned us specific jobs,
     //    claim ONLY those; otherwise (standalone) claim any claimable LLM job.

@@ -1180,6 +1180,18 @@ pub async fn new_full<
                 "⛏  Mining enabled (role={role}): starting seal-producing miner 
                  (no --force-authoring required)"
             );
+            // Idle survives a restart: the miner thread still starts (it is what
+            // resumes at the deadline) but parks immediately and says so loudly,
+            // so "why is my node not sealed for an hour?" is answered in the log.
+            let idled = idle_requested();
+            if !mining_allowed(role, idled) {
+                log::warn!(
+                    "⏸  IDLE MODE is in force ({}) — the miner starts PARKED: no nonce search. \
+                     The node keeps syncing/peering and will resume mining automatically at the \
+                     deadline (or on `gpn_node resume`).",
+                    idle_file_path().display()
+                );
+            }
             spawn_miner(worker, author);
         }
     }
@@ -1210,6 +1222,117 @@ fn gpu_yield_requested() -> bool {
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     std::path::Path::new(&format!("{home}/.gpn/gpu-yield")).exists()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Idle mode (the miner half)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Idle is the operator's "let me play a game" switch: **mining and AI job
+// claiming pause, the node keeps syncing/peering/serving the chain**. The
+// supervisor (`gpn_node`) and the providers are separate processes, so the
+// contract is a file — `$GPN_IDLE_FILE`, else `~/.gpn/idle.json`, written by the
+// GUI / `gpn_node idle` and read here on every miner iteration (the same
+// mechanism as the GPU-yield flag above).
+//
+// Semantics fixed by the file format: `{"until": <unix>, "reason": ...,
+// "started": <unix>}`. A file whose `until` is in the past is **expired** — it
+// must read as "active", never as "idle forever", so a node that was off past
+// the deadline starts mining again.
+
+/// Path of the idle state file (env-aware, matching `gpn_agent::idle`).
+fn idle_file_path() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("GPN_IDLE_FILE") {
+        if !p.trim().is_empty() {
+            return std::path::PathBuf::from(p);
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    std::path::Path::new(&home).join(".gpn").join("idle.json")
+}
+
+/// Pure deadline test — `until > now` means idle is in force.
+///
+/// The boundary is inclusive of the deadline: **at** `until` the node is active
+/// again ("resume at 18:00" means 18:00 is mining).
+pub(crate) fn idle_active(until: Option<u64>, now: u64) -> bool {
+    matches!(until, Some(u) if now < u)
+}
+
+/// Unix seconds now (0 before the epoch — never panic in a miner loop).
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// A missing/corrupt/half-written state file must never park the miner, so any
+/// parse problem is treated as "active".
+fn read_idle_until(path: &std::path::Path) -> Option<u64> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    v.get("until")?.as_u64()
+}
+
+/// True while the operator has the node idled.
+fn idle_requested() -> bool {
+    let path = idle_file_path();
+    idle_active(read_idle_until(&path), now_unix())
+}
+
+/// Why the miner is parked this iteration (`None` = mine).
+///
+/// One GPU = one thing at a time: an AI job (yield flag) and an operator idle
+/// window both mean "search no nonces", but they are reported separately so the
+/// log says which one it is.
+fn park_reason() -> Option<&'static str> {
+    if idle_requested() {
+        Some("idle")
+    } else if gpu_yield_requested() {
+        Some("ai-job")
+    } else {
+        None
+    }
+}
+
+/// The miner's gate: role **and** the runtime idle state.
+///
+/// [`miner_should_run`] stays a pure role predicate because the miner thread must
+/// be spawned even when the node starts idle (that thread is what resumes at the
+/// deadline); this is the "may we search nonces right now" question.
+pub(crate) fn mining_allowed(role: sc_service::Role, idle: bool) -> bool {
+    miner_should_run(role) && !idle
+}
+
+/// Emits one log line per parking transition (never one per 500 ms poll).
+struct ParkLog {
+    state: Option<&'static str>,
+}
+
+impl ParkLog {
+    fn new() -> Self {
+        Self { state: None }
+    }
+
+    /// Returns the line to log for this transition, if any.
+    fn update(&mut self, reason: Option<&'static str>) -> Option<String> {
+        if reason == self.state {
+            return None;
+        }
+        let previous = self.state;
+        self.state = reason;
+        Some(match (previous, reason) {
+            (Some("idle"), None) => "idle ended, resuming mining".to_string(),
+            (Some("idle"), Some(_)) => {
+                "idle ended, resuming — the GPU goes to an ai-job first".to_string()
+            }
+            (_, Some("idle")) => "\u{23f8}  idle mode: miner parked (no nonce search); the node keeps syncing, peering and serving the chain".to_string(),
+            (_, Some("ai-job")) => "miner parked: GPU yielded to an AI job".to_string(),
+            (_, None) => "miner resuming: GPU is free again".to_string(),
+            (_, Some(_)) => "miner parked: GPU unavailable".to_string(),
+        })
+    }
 }
 
 /// Spawn a dedicated miner thread: poll `worker.metadata()`, run real Ethash
@@ -1312,14 +1435,19 @@ fn spawn_gpu_miner(worker: MiningWorker, author: Option<[u8; 32]>) {
 
             let mut last_pre_hash: Option<<Block as BlockT>::Hash> = None;
             let mut nonce: u64 = 0;
+            let mut park = ParkLog::new();
             loop {
-                // AI-compute full stop: while a local inference job runs the
-                // provider holds a flag; we do NOT search any nonces at all so the
-                // GPU is dedicated to the job, then resume the instant the flag
-                // clears. The miner thread stays alive (we only park here), so
-                // mining resumes immediately with no process/thread restart.
-                // One GPU = one job: mining and inference never contend.
-                if gpu_yield_requested() {
+                // Full stop when the GPU belongs to something else: an AI job
+                // (the provider holds the yield flag) or an operator idle window
+                // (idle.json — mining AND job claiming paused, the node still
+                // syncs/peers/serves). No nonce search in either case; the thread
+                // stays alive and parked, so resume is immediate with no
+                // process/thread restart. One GPU = one thing at a time.
+                let reason = park_reason();
+                if let Some(line) = park.update(reason) {
+                    log::info!("{line}");
+                }
+                if reason.is_some() {
                     std::thread::sleep(Duration::from_millis(GPU_YIELD_SLEEP_MS));
                     continue;
                 }
@@ -1403,11 +1531,16 @@ fn spawn_cpu_miner(worker: MiningWorker, author: Option<[u8; 32]>) {
             let full_size = ethash_full_size();
             log::info!("CPU light-cache miner online (epoch {DEV_EPOCH}); no GPU backend");
             let mut nonce: u64 = 0;
+            let mut park = ParkLog::new();
             loop {
-                // AI-compute full stop (same contract as the GPU miner): while a
-                // provider holds the yield flag we search no nonces at all, then
-                // resume the instant it clears. Thread stays alive throughout.
-                if gpu_yield_requested() {
+                // Full stop (same contract as the GPU miner): an AI job's yield
+                // flag or an operator idle window means we search no nonces at
+                // all, then resume the instant it clears. Thread stays alive.
+                let reason = park_reason();
+                if let Some(line) = park.update(reason) {
+                    log::info!("{line}");
+                }
+                if reason.is_some() {
                     std::thread::sleep(Duration::from_millis(GPU_YIELD_SLEEP_MS));
                     continue;
                 }
@@ -1678,5 +1811,88 @@ mod mining_gate_tests {
             miner_should_run(effective_role(Role::Authority, false)),
             "a supported node mines exactly as before"
         );
+    }
+}
+
+#[cfg(test)]
+mod idle_mode_tests {
+    use super::*;
+    use sc_service::Role;
+
+    /// The deadline boundary is the whole contract: just-before is idle, **at**
+    /// the deadline the node is active again, after it stays active.
+    #[test]
+    fn idle_boundary_is_inclusive_of_the_deadline() {
+        assert!(idle_active(Some(1_000), 999), "one second before → idle");
+        assert!(!idle_active(Some(1_000), 1_000), "at the deadline → active");
+        assert!(!idle_active(Some(1_000), 1_001), "after → active");
+        assert!(!idle_active(None, 1_000), "no state file → active");
+    }
+
+    /// A restart with an expired file must **mine**, not stay parked: the node
+    /// cannot know the process was down, it only sees `until` in the past.
+    #[test]
+    fn expired_state_file_means_mining_resumes() {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("gpn-node-idle-{n}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("idle.json");
+
+        // Written by the GUI/an operator; deadline already passed.
+        std::fs::write(&p, r#"{"until":1000,"reason":"gaming","started":400}"#).unwrap();
+        assert!(!idle_active(read_idle_until(&p), 2_000));
+
+        // A live one parks the miner.
+        std::fs::write(&p, r#"{"until":99999,"reason":"gaming","started":1000}"#).unwrap();
+        assert!(idle_active(read_idle_until(&p), 2_000));
+
+        // Corrupt / half-written / missing must never park the miner.
+        std::fs::write(&p, b"{not json").unwrap();
+        assert!(!idle_active(read_idle_until(&p), 2_000));
+        std::fs::write(&p, b"{}").unwrap();
+        assert!(!idle_active(read_idle_until(&p), 2_000));
+        assert!(!idle_active(read_idle_until(&dir.join("absent.json")), 2_000));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Idle must respect the existing role gate — it only ever *removes*
+    /// permission to mine, never grants it (a full node stays a full node).
+    #[test]
+    fn the_miner_gate_respects_idle_and_the_role() {
+        assert!(mining_allowed(Role::Authority, false));
+        assert!(!mining_allowed(Role::Authority, true), "idle parks an authority");
+        assert!(!mining_allowed(Role::Full, false));
+        assert!(!mining_allowed(Role::Full, true));
+    }
+
+    /// One log line per transition, never one per poll (the loop runs at 500 ms).
+    #[test]
+    fn parking_logs_only_on_transitions() {
+        let mut log = ParkLog::new();
+        // Entering idle: one line.
+        assert!(log
+            .update(Some("idle"))
+            .expect("entering idle must log")
+            .contains("idle mode"));
+        // Still idle a million polls later: silent.
+        assert_eq!(log.update(Some("idle")), None);
+        // Resume: says so explicitly.
+        let line = log.update(None).expect("leaving idle must log");
+        assert!(line.contains("idle ended, resuming mining"), "{line}");
+        assert_eq!(log.update(None), None);
+        // A job taking the GPU is reported as such, not as idle.
+        assert!(log
+            .update(Some("ai-job"))
+            .expect("yield must log")
+            .contains("AI job"));
+        // Idle ending *into* a job must not claim mining resumed.
+        let mut log2 = ParkLog::new();
+        log2.update(Some("idle"));
+        let line = log2.update(Some("ai-job")).unwrap();
+        assert!(line.contains("ai-job"), "{line}");
+        assert!(!line.contains("resuming mining"), "{line}");
     }
 }

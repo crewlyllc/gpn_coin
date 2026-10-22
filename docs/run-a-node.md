@@ -1309,6 +1309,49 @@ again. Nothing warned beforehand.
   the port. Without `--require-backbone`, a non-dialable node stays `up` and
   simply runs degraded.
 
+## Local dashboard + Idle mode ("let me play a game")
+
+A node belongs on a gaming PC, so it has a switch for when the PC is being used
+for games: **idle mode** pauses mining and AI job claims for up to **6 hours**,
+keeps the node syncing/peering/serving the chain the whole time, and resumes
+automatically at the end (or on a *Resume now* click).
+
+```bash
+# serve the dashboard (loopback only, no auth needed — it is not on the network)
+gpn_node --gui            # http://127.0.0.1:8099
+GPN_GUI=1 gpn_node        # same, via env
+
+# idle / resume from a shell (works against a running node, no restart)
+gpn_node idle 120         # 2 hours (max 360 = 6 h; longer is refused)
+gpn_node resume
+```
+
+Without `--gui` the node prints one hint line at startup:
+`dashboard: off — add --gui to serve the local control panel on 127.0.0.1:8099`.
+
+**What idle does:** the miner thread parks (no nonces searched, GPU free), and
+every provider stops claiming new jobs at its claim boundary. **What it does
+not do:** it does not stop the node — syncing, peering, RPC, the heartbeat on
+`:8093`, discovery and your on-chain identity all keep working. A job already
+running finishes normally; idle never strands one.
+
+State is one file, `~/.gpn/idle.json` (`{"until": …, "reason": …, "started": …}`,
+0600, override with `GPN_IDLE_FILE`), read by the miner and every provider — so
+idle survives a restart. An expired file reads as *active*, so a box that was
+off past the deadline simply starts mining again.
+
+**Safety valve.** If the node has **no peers** (it may be the only block
+producer) or its RPC is unreachable, idle is **refused** — idling the last
+authority would halt the chain. The dashboard answers `409` and the CLI exits
+`3`, both explaining why. Override for a single-box dev chain with
+`--force-idle` / `GPN_IDLE_FORCE=1`.
+
+Windows: `gpn-agent/windows/gpn-dashboard.cmd` starts the supervisor with
+`--gui` and opens the page — put a shortcut to it on the desktop.
+
+Full details (endpoints, semantics table, screenshots-in-words, tests):
+[`node-gui-and-idle.md`](node-gui-and-idle.md).
+
 ## Linux
 
 ```bash

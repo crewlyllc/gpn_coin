@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GPN node — local dashboard</title>
+<style>
+  :root{
+    --bg:#07090f; --panel:#0f1521; --card:#121a28; --line:#23303f; --line-soft:#1a2430;
+    --text:#e9eef5; --muted:#9aa7b8; --accent:#7c6cff; --green:#3fb950; --amber:#f0a63a;
+    --red:#f0616d; --grad:linear-gradient(92deg,#7c6cff 0%,#22d3ee 100%);
+    --radius:14px; --radius-sm:9px;
+    --font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:var(--bg); color:var(--text); font-family:var(--font);
+    font-size:16px; line-height:1.5; -webkit-font-smoothing:antialiased;
+    padding:20px 16px 56px;
+  }
+  .wrap{max-width:1120px;margin:0 auto}
+  header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;margin-bottom:22px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:.2px}
+  .dot{width:10px;height:10px;border-radius:50%;background:var(--accent);box-shadow:0 0 12px var(--accent)}
+  .brand small{color:var(--muted);font-weight:500;font-size:13px}
+  h1{font-size:20px;margin:0}
+  h2{font-size:14px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:0 0 12px}
+
+  .pill{
+    display:inline-flex;align-items:center;gap:8px;border-radius:999px;padding:6px 14px;
+    border:1px solid var(--line);background:var(--panel);font-size:14px;font-weight:600;
+  }
+  .pill .dot{width:8px;height:8px;background:var(--green);box-shadow:0 0 10px var(--green)}
+  .pill.idle{border-color:rgba(240,166,58,.5);background:rgba(240,166,58,.10);color:var(--amber)}
+  .pill.idle .dot{background:var(--amber);box-shadow:0 0 10px var(--amber)}
+  .pill.down{border-color:rgba(240,97,109,.5);color:var(--red)}
+  .pill.down .dot{background:var(--red);box-shadow:0 0 10px var(--red)}
+
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}
+  .card{background:var(--card);border:1px solid var(--line-soft);border-radius:var(--radius);padding:14px 16px}
+  .card .k{font-size:12px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
+  .card .v{font-size:19px;font-weight:650;margin-top:6px;word-break:break-word}
+  .card .v.mono{font-family:var(--mono);font-size:16px}
+  .card .s{font-size:12px;color:var(--muted);margin-top:4px}
+
+  section{margin-top:26px}
+  .idlebox{
+    background:linear-gradient(180deg,rgba(124,108,255,.10),rgba(18,26,40,1) 70%);
+    border:1px solid var(--line);border-radius:var(--radius);padding:18px 18px 20px;
+  }
+  .idlebox.idle{background:linear-gradient(180deg,rgba(240,166,58,.12),rgba(18,26,40,1) 70%)}
+  .idlehead{display:flex;flex-wrap:wrap;gap:10px;align-items:baseline;justify-content:space-between}
+  .idlehead h2{margin:0;color:var(--text);text-transform:none;letter-spacing:0;font-size:17px}
+  .explain{color:var(--muted);font-size:13.5px;margin:6px 0 16px;max-width:70ch}
+
+  fieldset{border:0;padding:0;margin:0 0 16px}
+  legend{font-size:13px;color:var(--muted);padding:0;margin-bottom:8px}
+  .durs{display:flex;flex-wrap:wrap;gap:8px}
+  .dur input{position:absolute;opacity:0;width:1px;height:1px}
+  .dur label{
+    display:inline-flex;align-items:center;justify-content:center;min-width:74px;
+    padding:10px 14px;border-radius:var(--radius-sm);border:1px solid var(--line);
+    background:var(--panel);color:var(--text);font-weight:600;font-size:14px;cursor:pointer;
+    transition:border-color .12s,background .12s,transform .06s;
+  }
+  .dur label:hover{border-color:var(--accent)}
+  .dur input:checked + label{border-color:var(--accent);background:rgba(124,108,255,.16);box-shadow:0 0 0 1px var(--accent) inset}
+  .dur input:focus-visible + label{outline:2px solid #22d3ee;outline-offset:2px}
+
+  .actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+  button{
+    font:inherit;font-weight:700;border-radius:var(--radius-sm);cursor:pointer;
+    padding:14px 24px;border:1px solid transparent;transition:transform .06s,filter .12s;
+  }
+  button:active{transform:translateY(1px)}
+  button:focus-visible{outline:2px solid #22d3ee;outline-offset:2px}
+  #idleBtn{background:var(--grad);color:#0b0e16;min-width:190px;font-size:16px}
+  #idleBtn:disabled{filter:grayscale(.6) brightness(.7);cursor:not-allowed}
+  #resumeBtn{background:var(--panel);color:var(--text);border-color:var(--line)}
+  #resumeBtn:disabled{color:var(--muted);cursor:not-allowed;border-color:var(--line-soft)}
+  #resumeBtn.urgent{border-color:var(--green);color:var(--green)}
+
+  #msg{margin-top:14px;font-size:14px;min-height:1.4em;color:var(--muted)}
+  #msg.err{color:var(--red)}
+  #msg.ok{color:var(--green)}
+
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th,td{text-align:left;padding:9px 6px;border-bottom:1px solid var(--line-soft)}
+  th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.06em}
+  td.mono{font-family:var(--mono);font-size:13px}
+  footer{margin-top:30px;color:var(--muted);font-size:12.5px}
+
+  @media (max-width:520px){
+    body{padding:14px 12px 40px;font-size:15px}
+    h1{font-size:18px}
+    .card{padding:12px 13px}
+    .card .v{font-size:17px}
+    #idleBtn{min-width:100%;font-size:17px;padding:16px}
+    #resumeBtn{width:100%}
+    .dur label{min-width:62px;padding:10px 11px}
+  }
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand"><span class="dot" aria-hidden="true"></span>
+      <h1>GPN node</h1><small id="ver"></small>
+    </div>
+    <div class="pill" id="statePill" role="status" aria-live="polite">
+      <span class="dot" aria-hidden="true"></span><span id="stateText">connecting…</span>
+    </div>
+  </header>
+
+  <section aria-labelledby="statusH">
+    <h2 id="statusH">Status</h2>
+    <div class="grid">
+      <div class="card"><div class="k">Mode</div><div class="v" id="mode">—</div><div class="s" id="modeSub">&nbsp;</div></div>
+      <div class="card"><div class="k">Peers</div><div class="v" id="peers">—</div><div class="s" id="peersSub">&nbsp;</div></div>
+      <div class="card"><div class="k">Block height</div><div class="v mono" id="best">—</div><div class="s" id="bestSub">&nbsp;</div></div>
+      <div class="card"><div class="k">Mining</div><div class="v" id="mining">—</div><div class="s" id="miningSub">&nbsp;</div></div>
+      <div class="card"><div class="k">GPU</div><div class="v" id="gpu">—</div><div class="s" id="gpuSub">&nbsp;</div></div>
+      <div class="card"><div class="k">Current job</div><div class="v" id="job">—</div><div class="s" id="jobSub">&nbsp;</div></div>
+      <div class="card"><div class="k">Models served</div><div class="v" id="models">—</div><div class="s" id="modelsSub">&nbsp;</div></div>
+      <div class="card"><div class="k">Earnings today</div><div class="v" id="earnings">—</div><div class="s" id="earningsSub">&nbsp;</div></div>
+    </div>
+  </section>
+
+  <section class="idlebox" id="idleBox" aria-labelledby="idleH">
+    <div class="idlehead">
+      <h2 id="idleH">Idle mode</h2>
+      <span class="pill" id="idlePill" hidden><span class="dot" aria-hidden="true"></span><span id="idleText"></span></span>
+    </div>
+    <p class="explain">
+      Pauses <strong>mining</strong> and <strong>AI job claims</strong> so games get the GPU — the node
+      keeps syncing, peering and serving the chain. It resumes by itself when the timer ends,
+      or press Resume now.
+    </p>
+
+    <fieldset>
+      <legend>How long?</legend>
+      <div class="durs" id="durs" role="radiogroup" aria-label="Idle duration">
+        <div class="dur"><input type="radio" name="dur" id="d30" value="30"><label for="d30">30 min</label></div>
+        <div class="dur"><input type="radio" name="dur" id="d60" value="60" checked><label for="d60">1 hour</label></div>
+        <div class="dur"><input type="radio" name="dur" id="d120" value="120"><label for="d120">2 hours</label></div>
+        <div class="dur"><input type="radio" name="dur" id="d240" value="240"><label for="d240">4 hours</label></div>
+        <div class="dur"><input type="radio" name="dur" id="d360" value="360"><label for="d360">6 hours</label></div>
+      </div>
+    </fieldset>
+
+    <div class="actions">
+      <button id="idleBtn" type="button">Go idle</button>
+      <button id="resumeBtn" type="button" disabled>Resume now</button>
+    </div>
+    <p id="msg" role="status" aria-live="polite"></p>
+  </section>
+
+  <section aria-labelledby="procH">
+    <h2 id="procH">Processes</h2>
+    <table>
+      <thead><tr><th scope="col">Component</th><th scope="col">State</th><th scope="col">Detail</th></tr></thead>
+      <tbody id="children"><tr><td colspan="3">—</td></tr></tbody>
+    </table>
+  </section>
+
+  <footer>
+    Local dashboard, loopback only (127.0.0.1). Nothing here leaves this machine.
+    <span id="stamp"></span>
+  </footer>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+  var remaining = 0;          // seconds left, ticked locally between polls
+  var lastStatus = null;
+
+  function text(el, v) { if (el && el.textContent !== String(v)) el.textContent = String(v); }
+
+  function fmtDur(s) {
+    s = Math.max(0, Math.floor(s));
+    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    if (h > 0) return h + "h " + (m < 10 ? "0" + m : m) + "m";
+    if (m > 0) return m + "m " + (sec < 10 ? "0" + sec : sec) + "s";
+    return sec + "s";
+  }
+
+  function msg(t, kind) {
+    var el = $("msg");
+    el.textContent = t || "";
+    el.className = kind || "";
+  }
+
+  function render(s) {
+    lastStatus = s;
+    var idle = s.idle || {};
+    var idleOn = !!idle.active;
+    remaining = idle.remaining_secs || 0;
+
+    // Header state pill
+    var nodeUp = (s.node === "up");
+    var pill = $("statePill");
+    pill.className = "pill" + (idleOn ? " idle" : (nodeUp ? "" : " down"));
+    text($("stateText"), idleOn ? ("idle · " + fmtDur(remaining)) : (nodeUp ? "active" : "node down"));
+
+    // Idle box
+    $("idleBox").className = "idlebox" + (idleOn ? " idle" : "");
+    $("idlePill").hidden = !idleOn;
+    text($("idleText"), idleOn ? ("resuming in " + fmtDur(remaining)) : "");
+    $("idleBtn").disabled = idleOn;
+    $("resumeBtn").disabled = !idleOn;
+    $("resumeBtn").className = idleOn ? "urgent" : "";
+
+    // Status cards
+    text($("mode"), idleOn ? "Idle" : (nodeUp ? "Active" : "Down"));
+    text($("modeSub"), idleOn ? "not mining, not claiming" : (nodeUp ? "mining + serving" : "check the node log"));
+    text($("peers"), (s.peers === null || s.peers === undefined) ? "—" : s.peers);
+    text($("peersSub"), s.peers === 0 ? "no peers — idle is blocked" : "p2p connections");
+    text($("best"), (s.best === null || s.best === undefined) ? "—" : ("#" + s.best));
+    text($("bestSub"), s.syncing ? "syncing…" : "synced");
+    text($("mining"), s.mining === true ? "on" : "off");
+    text($("miningSub"), idleOn ? "paused by idle" : (s.mining ? "sealing blocks" : "idle"));
+    text($("gpu"), s.gpu || "—");
+    text($("gpuSub"), s.vram || "");
+    var job = s.current_job;
+    text($("job"), job ? (job.kind || "job") + " #" + job.id : "none");
+    text($("jobSub"), job ? (job.model || "") : "");
+    var models = s.models || [];
+    text($("models"), models.length ? models.length : "0");
+    text($("modelsSub"), models.length ? models.slice(0, 3).join(", ") : "none loaded");
+    text($("earnings"), s.earnings_today === null || s.earnings_today === undefined ? "—" : s.earnings_today);
+    text($("earningsSub"), s.earnings_note || "from chain");
+
+    // Child process table
+    var tb = $("children");
+    var kids = s.children || [];
+    tb.textContent = "";
+    if (!kids.length) {
+      var tr0 = document.createElement("tr");
+      var td0 = document.createElement("td");
+      td0.colSpan = 3; td0.textContent = "no child processes reported";
+      tr0.appendChild(td0); tb.appendChild(tr0);
+    } else {
+      kids.forEach(function (c) {
+        var tr = document.createElement("tr");
+        var a = document.createElement("td"); a.textContent = c.label;
+        var b = document.createElement("td"); b.textContent = c.up ? "up" : "down";
+        b.style.color = c.up ? "var(--green)" : "var(--red)";
+        var d = document.createElement("td"); d.className = "mono";
+        d.textContent = c.up ? ("pid " + c.pid) : (c.detail || "restarting");
+        tr.appendChild(a); tr.appendChild(b); tr.appendChild(d); tb.appendChild(tr);
+      });
+    }
+
+    text($("ver"), s.version ? ("v" + s.version) : "");
+    text($("stamp"), s.now ? ("· now " + new Date(s.now * 1000).toLocaleTimeString()) : "");
+  }
+
+  function poll() {
+    fetch("/api/status", { cache: "no-store" })
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(render)
+      .catch(function (e) {
+        var pill = $("statePill");
+        pill.className = "pill down";
+        text($("stateText"), "dashboard offline");
+        msg("Cannot reach the node dashboard: " + e.message + " (is gpn_node running?)", "err");
+      });
+  }
+
+  function post(path, body) {
+    return fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: body ? JSON.stringify(body) : "{}"
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (j) {
+        return { ok: r.ok, code: r.status, body: j };
+      });
+    });
+  }
+
+  $("idleBtn").addEventListener("click", function () {
+    var sel = document.querySelector('input[name="dur"]:checked');
+    var minutes = sel ? parseInt(sel.value, 10) : 60;
+    $("idleBtn").disabled = true;
+    msg("Going idle for " + fmtDur(minutes * 60) + "…");
+    post("/api/idle", { minutes: minutes, reason: "dashboard" })
+      .then(function (r) {
+        if (r.ok) {
+          msg("Idle until " + new Date(r.body.until * 1000).toLocaleTimeString() +
+              " — the node keeps syncing.", "ok");
+          poll();
+        } else {
+          msg((r.body && r.body.error) || ("request failed (HTTP " + r.code + ")"), "err");
+          $("idleBtn").disabled = false;
+          poll();
+        }
+      })
+      .catch(function (e) { msg("Request failed: " + e.message, "err"); $("idleBtn").disabled = false; });
+  });
+
+  $("resumeBtn").addEventListener("click", function () {
+    $("resumeBtn").disabled = true;
+    msg("Resuming…");
+    post("/api/resume")
+      .then(function (r) {
+        if (r.ok) { msg("Active again — mining and job claiming resumed.", "ok"); }
+        else { msg((r.body && r.body.error) || ("request failed (HTTP " + r.code + ")"), "err"); }
+        poll();
+      })
+      .catch(function (e) { msg("Request failed: " + e.message, "err"); });
+  });
+
+  // Local countdown between polls (the server is still the source of truth).
+  setInterval(function () {
+    if (!remaining) return;
+    remaining = Math.max(0, remaining - 1);
+    var idleOn = remaining > 0;
+    text($("stateText"), idleOn ? ("idle · " + fmtDur(remaining)) : "active");
+    if (idleOn) text($("idleText"), "resuming in " + fmtDur(remaining));
+    if (!idleOn) poll();
+  }, 1000);
+
+  poll();
+  setInterval(poll, 3000);
+})();
+</script>
+</body>
+</html>
