@@ -276,6 +276,9 @@ fn serve_channel_job(
     }
 
     let ch = chans.get_mut(&a.channel_id).unwrap();
+    // The diffusion provider shares this account's channel; the AP's signed
+    // `state_before` is canonical, so follow it whenever our mirror lags.
+    ch.sync_to_assignment(&a);
     if let Err(e) = ch.accept(&a) {
         return (
             409,

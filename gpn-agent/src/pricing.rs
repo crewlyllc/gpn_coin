@@ -591,7 +591,15 @@ mod tests {
         assert!((per_m - 0.3793).abs() < 1e-3, "got ${per_m}/1M");
         // k is the pre-margin unit price; margin is exactly 30% on top.
         assert!(close(c.price_per_token_out(), c.k_usd_per_token() * 1.3, 1e-12));
-        assert!(close(c.price_per_token_in(), c.price_per_token_out() * 0.25, 1e-12));
+        // Input is billed at `GPN_INPUT_RATE_FRAC` (0.15 today) of the output
+        // rate. Derive it from the config so a deliberate change to the frac
+        // does not leave a stale assertion behind (this test failed for exactly
+        // that reason after 0.25 -> 0.15).
+        assert!(close(
+            c.price_per_token_in(),
+            c.price_per_token_out() * c.input_rate_frac,
+            1e-12
+        ));
     }
 
     #[test]
@@ -635,14 +643,18 @@ mod tests {
     }
 
     #[test]
-    fn input_tokens_bill_at_a_quarter_of_output() {
+    fn input_tokens_bill_at_the_configured_fraction_of_output() {
         let c = throughput();
-        // 1000 input + 500 output = 250 output-equivalents + 500 = 750.
+        // 1000 input + 500 output, with input at `input_rate_frac` (0.15 today).
+        let units = (1000.0 * c.input_rate_frac).round() + 500.0;
         let cost = c.job_cost_usd(1000, 500);
-        assert!(close(cost, 750.0 * c.price_per_token_out(), 1e-9));
-        assert_eq!(c.escrow_token_units(1000, 500), 750);
+        assert!(close(cost, units * c.price_per_token_out(), 1e-9));
+        assert_eq!(c.escrow_token_units(1000, 500), units as u32);
         // The escrow ceiling always covers the worst case (full completion).
-        assert_eq!(c.escrow_token_units(12, 512), 515);
+        assert_eq!(
+            c.escrow_token_units(12, 512),
+            (12.0 * c.input_rate_frac).round() as u32 + 512
+        );
         assert_eq!(c.escrow_token_units(0, 512), 512);
         // Zero frac is legal (output-only billing, the legacy shape).
         let mut m = c.clone();
@@ -656,11 +668,13 @@ mod tests {
         let out_rate = c.gpn_per_token(c.price_per_token_out(), 0.15);
         let (rate, cap) = c.onchain_rate_and_cap(out_rate, 1000, 500);
         assert_eq!(cap, 1500);
-        // rate = out × (250 + 500) / 1500 = 0.5 × out
-        assert!(rate >= out_rate / 2 - 1 && rate <= out_rate / 2 + 1, "rate {rate} vs {out_rate}");
+        // rate = out × (1000×frac_bps + 500×10000) / (1500×10000)
+        let frac_bps = (c.input_rate_frac.clamp(0.0, 1.0) * 10_000.0).round() as u128;
+        let want = out_rate * (1000 * frac_bps + 500 * 10_000) / (1500 * 10_000);
+        assert!(rate >= want - 1 && rate <= want + 1, "rate {rate} vs {want}");
         // Charged = rate × (P + C) with a full 500-token completion.
         let charged = rate * 1500;
-        let exact = out_rate * 750;
+        let exact = out_rate * ((1000.0 * c.input_rate_frac).round() as u128 + 500);
         assert!(
             (charged as i128 - exact as i128).abs() <= 1500,
             "blended charge {charged} vs exact {exact}"

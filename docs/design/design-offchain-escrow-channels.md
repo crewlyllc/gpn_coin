@@ -145,7 +145,7 @@ cannot change a signature).
 
 | Message | Direction | Signed by | Binds |
 |---|---|---|---|
-| `Assignment` | AP → provider | AP (`sig_requestor` over `gpn/hub-assign-v1`) **+** `sig_settle` over the post-state | channel id, job id, requestor, provider, deposit, `state_before`, `state_after`, model, prompt, max_tokens, temperature, price, deadline, request_nonce |
+| `Assignment` | AP → provider | AP (`sig_requestor` over `gpn/hub-assign-v1`) **+** `sig_settle` over the post-state | channel id, job id, requestor, provider, deposit, `state_before`, `state_after`, model, prompt, max_tokens, temperature, price, deadline, request_nonce (+ optional `billing` rates, item #63) |
 | `JobResultMsg` | provider → AP | provider (`sig_provider` over `gpn/hub-result-v1`) **+** `sig_settle` over the result state | channel id, job id, provider, `ok`, output, `result_hash`, prompt/completion tokens, `state_after` |
 
 `Assignment` (abridged):
@@ -187,15 +187,16 @@ AP                                                              provider
 ──                                                              ────────
 pick provider (existing routing)
 ensure channel (open ONCE on-chain, or adopt via ChannelIndex)
-price = per-token price × max_tokens
-Assignment{state_before, state_after=before+price, sig_requestor, sig_settle}
+price = per-token price × (prompt×input_frac + max_tokens)   # ceiling
+Assignment{state_before, state_after=before+price, billing{in,out}, sig_requestor, sig_settle}
       ─────────────── POST /channel/job ───────────────────────►
                                         verify both sigs, nonce, price,
                                         deadline; commit state_after; persist
                                         run inference (off-chain)
-                                        sign result + refund-or-charge state
+                                        sign result at min(actual, ceiling)
       ◄──────────────── 200 JobResultMsg ───────────────────────
-verify provider sig over result, result_hash, state_after == promised
+verify provider sig over result, result_hash, state_after == before + charge,
+  charge <= promised ceiling
 advance local state, keep provider's sig_settle for the close
 reply to the caller (OpenAI shape + usage)
 ```

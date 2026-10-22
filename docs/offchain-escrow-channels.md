@@ -56,18 +56,62 @@ Responses say which path paid for the request:
   "payment": "channel",
   "channel_id": 5,
   "job_id": "1792695433200",
-  "channel_balance_provider": "2663953986048"
+  "channel_balance_provider": "2663953986048",
+  "channel_charge": "2119018",
+  "channel_charge_ceiling": "2663953986048"
 }
 ```
 
-`payment` is `channel`, `onchain`, or `passthrough`.
+`payment` is `channel`, `onchain`, or `passthrough`. `channel_charge` is what the
+job actually cost and `channel_charge_ceiling` is the maximum the AP committed
+to it (see §2.1).
+
+### 2.1 Billing: actual usage, capped by the committed ceiling
+
+One price card is used by all paid modes (`gpn_agent::pricing`): the caller's
+`max_tokens` (default **256**, clamped to 4096) sets the *output allowance* and
+the escrow commitment is `prompt_tokens × GPN_INPUT_RATE_FRAC + max_tokens`
+output-equivalents (input default 0.15 × the output rate).
+
+| | Commitment (ceiling) | Charge |
+|---|---|---|
+| on-chain (`settle`) | `rate × max_tokens` locked in `create_job` | `rate × min(actual_tokens, cap)`; the pallet refunds the difference on settle |
+| channel (default) | `price` in the AP-signed `Assignment` | provider signs `min(in_rate·prompt + out_rate·completion, price)`; the unused ceiling stays with the requestor in that same state |
+
+So **the ceiling is a cap, never the bill.** Measured before the fix: a 4-token
+answer was billed 1 297 268 757 units (0.001297 GPN ≈ 512 output tokens) for
+*any* `max_tokens`, because the AP ignored the request and committed the
+provider's internal 512 default — a ~58× over-charge. After the fix the same
+answer costs its actual tokens and `max_tokens=8` / `64` / `256` produce three
+different charges.
+
+How the channel does it (`hub_channel::BillingRates`):
+
+* The AP puts `in_rate` / `out_rate` (base units per token) in the assignment;
+  they are inside the signed pre-image, so neither side can swap the rate after
+  the price is agreed.
+* The provider reports `prompt_tokens` + `completion_tokens` — already inside the
+  signed `JobResultMsg` payload — and settles to `state_before + charge` on the
+  **same nonce** the ceiling state would have used. No extra round-trip, no new
+  channel update, no extra nonce.
+* `min(actual, ceiling)` is safe with **no new trust assumption**: under-reporting
+  only costs the provider (it is paid for what it reports) and over-reporting is
+  bounded by the ceiling the requestor pre-signed. It is strictly better than
+  charging the ceiling.
+* If the backend reports **no usage**, the provider falls back to the ceiling and
+  logs it (`backend reported no usage — billing the ceiling`); the AP logs
+  `provider reported no usage — charged the full ceiling`. A missing measurement
+  is never a silent free job.
+* A pre-fix provider (one that does not understand the rates extension) hashes
+  the assignment differently and rejects it at accept-time with HTTP 4xx — a
+  `NotAttempted` fallback to on-chain escrow, never a silent over-charge.
 
 ### Pricing is identical in both paid modes
 
-`CHAT_PRICE_PER_TOKEN = 1e9` base units and `CHAT_MAX_TOKENS = 512` are shared
-constants, so the channel **pre-authorises exactly the amount the on-chain path
-escrows** (`price = per_token × max_tokens`). Switching modes can never be a way
-to pay less.
+Both paid paths use the same price card, so switching modes can never become a
+way to pay less (or be charged more): the ceiling is
+`per_token × (prompt_tokens × input_frac + max_tokens)` and both paths settle at
+the provider's reported usage bounded by that number.
 
 ---
 
@@ -78,7 +122,7 @@ to pay less.
 | **Escrow before work** | The AP signs `Assignment{state_before, state_after = before + price, sig_settle}` *before* the provider runs anything. The provider `accept()`s (verifying both signatures, the exact price, the deposit conservation and nonce monotonicity) and **persists that state before inference**. The AP's `sig_settle` over the post-job state is the provider's liveness proof: if the AP goes dark, the provider force-closes after the channel deadline and still gets paid. |
 | **Result binding** | `JobResultMsg.result_hash` = `sha256(output)`; the AP recomputes it and refuses a mismatch. |
 | **Replay guard** | Two independent counters: per-channel `request_nonce` (strictly increasing, provider rejects `<=` its last) **and** a unique `job_id`; every state update advances the channel `nonce` (the pallet rejects `nonce <= on-chain nonce`). Settled job ids are remembered, so `complete_job` on an already-settled job returns `UnknownJob`. |
-| **No AP clawback** | `state_after` must be exactly `state_before + price`; `balance_provider` can never decrease. |
+| **No AP clawback** | A settlement state is either exactly `state_before + price` (the ceiling) or `state_before + charge` with `charge ≤ price` on the same nonce — the latter is only ever signed by the *provider* (billing itself less), so the AP still cannot lower the provider's balance. `balance_provider` can therefore never decrease without the provider's signature. |
 | **No double settlement** | A channel job never gets an on-chain id (channel job ids are AP-local millisecond values and are never passed to `create_job`), so there is nothing for the on-chain path to settle. Within the channel, `complete_job` consumes the pending entry — a replay is refused. |
 
 ### Failure semantics — what the caller sees

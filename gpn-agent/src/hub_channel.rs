@@ -206,6 +206,17 @@ fn push_state(buf: &mut Vec<u8>, s: &ChannelState) {
     buf.extend_from_slice(&s.nonce.to_le_bytes());
 }
 
+fn push_gen(buf: &mut Vec<u8>, g: &GenParams) {
+    push_str(buf, &g.kind);
+    buf.extend_from_slice(&g.width.to_le_bytes());
+    buf.extend_from_slice(&g.height.to_le_bytes());
+    buf.extend_from_slice(&g.steps.to_le_bytes());
+    buf.extend_from_slice(&g.seed.to_le_bytes());
+    buf.extend_from_slice(&g.frames.to_le_bytes());
+    buf.extend_from_slice(&g.fps.to_le_bytes());
+    buf.extend_from_slice(&g.n.to_le_bytes());
+}
+
 /// Canonical hash the AP signs to authorise one job.
 #[allow(clippy::too_many_arguments)]
 pub fn assignment_payload(a: &Assignment) -> [u8; 32] {
@@ -225,6 +236,35 @@ pub fn assignment_payload(a: &Assignment) -> [u8; 32] {
     b.extend_from_slice(&a.price.to_le_bytes());
     b.extend_from_slice(&a.deadline_ms.to_le_bytes());
     b.extend_from_slice(&a.request_nonce.to_le_bytes());
+    // Generation jobs bind their render parameters into the signature. When
+    // `job_kind` is empty (every text/LLM job) the payload is bit-identical to
+    // the pre-image-jobs format, so a provider on an older build keeps
+    // verifying text assignments. A provider that does NOT understand these
+    // fields computes the base hash and therefore **rejects** an image
+    // assignment (4xx at accept) — which is a safe `NotAttempted` fallback, not
+    // a silent misrender.
+    if !a.job_kind.is_empty() {
+        b.extend_from_slice(HUB_ASSIGN_GEN_DOMAIN);
+        push_str(&mut b, &a.job_kind);
+        match &a.gen {
+            Some(g) => {
+                b.push(1);
+                push_gen(&mut b, g);
+            }
+            None => b.push(0),
+        }
+    }
+    // Per-token billing rates (item #63). Same compatibility rule as the gen
+    // block: an assignment WITHOUT rates hashes exactly as before, so a provider
+    // on an older build keeps verifying legacy (ceiling-billed) text jobs. An
+    // assignment WITH rates is a *different* hash, so an old provider rejects it
+    // at accept-time — a safe `NotAttempted` (HTTP 4xx) fallback, never a silent
+    // wrong charge.
+    if let Some(rates) = &a.billing {
+        b.extend_from_slice(HUB_ASSIGN_BILL_DOMAIN);
+        b.extend_from_slice(&rates.in_rate.to_le_bytes());
+        b.extend_from_slice(&rates.out_rate.to_le_bytes());
+    }
     sp_core::blake2_256(&b)
 }
 
@@ -254,6 +294,60 @@ pub fn verify_sig(pubkey: &PubKey, payload: &[u8; 32], sig: &Signature64) -> boo
 
 // ── wire messages ───────────────────────────────────────────────────────────
 
+/// Domain tag appended to [`assignment_payload`] for generation assignments.
+const HUB_ASSIGN_GEN_DOMAIN: &[u8] = b"GPN-HUB-ASSIGN-GEN-v1";
+/// Domain tag appended to [`assignment_payload`] when per-token billing rates
+/// are present (item #63: settle at actual usage, not the ceiling).
+const HUB_ASSIGN_BILL_DOMAIN: &[u8] = b"GPN-HUB-ASSIGN-BILL-v1";
+
+/// Per-token rates for the off-chain path, in base units per token.
+///
+/// `Assignment::price` stays the **ceiling** (the hard cap the AP commits to
+/// and pre-signs). When rates are present the provider bills
+/// `in_rate·prompt_tokens + out_rate·completion_tokens`, clamped to `price`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BillingRates {
+    /// Base units per *prompt* token (input already discounted by the AP).
+    pub in_rate: u128,
+    /// Base units per *completion* token.
+    pub out_rate: u128,
+}
+
+impl BillingRates {
+    /// Charge for a usage report, in base units, never above `ceiling`.
+    ///
+    /// `None` when the provider could not measure usage — the caller then bills
+    /// the ceiling (see the reasoning in [`ProviderChannel::sign_result`]).
+    pub fn charge(&self, prompt_tokens: u32, completion_tokens: u32, ceiling: u128) -> u128 {
+        let raw = self
+            .in_rate
+            .saturating_mul(prompt_tokens as u128)
+            .saturating_add(self.out_rate.saturating_mul(completion_tokens as u128));
+        raw.min(ceiling)
+    }
+}
+
+/// Render parameters for a diffusion job (image or video). Integer-only so the
+/// signed payload is deterministic; `seed` is i64 because the helper accepts 0
+/// for "random".
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GenParams {
+    /// `"image"` or `"video"`.
+    pub kind: String,
+    pub width: u32,
+    pub height: u32,
+    pub steps: u32,
+    #[serde(default)]
+    pub seed: i64,
+    #[serde(default)]
+    pub frames: u32,
+    #[serde(default)]
+    pub fps: u32,
+    /// Images per job (the AP renders them sequentially on one GPU).
+    #[serde(default)]
+    pub n: u32,
+}
+
 /// AP → provider: one job, fully pre-authorised.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Assignment {
@@ -270,8 +364,19 @@ pub struct Assignment {
     pub model: String,
     pub prompt: String,
     pub max_tokens: u32,
+    /// Per-token rates (item #63). `None` = legacy ceiling billing.
+    #[serde(default)]
+    pub billing: Option<BillingRates>,
     /// Temperature × 1000 (integer, so signing is deterministic).
     pub temperature_milli: u32,
+    /// Job type. Empty/`"LLMInference"` = a text job (legacy wire format).
+    /// `"ImageGeneration"` / `"VideoGeneration"` carry [`GenParams`] and are
+    /// signed with the extended payload.
+    #[serde(default)]
+    pub job_kind: String,
+    /// Render parameters; present only for generation jobs.
+    #[serde(default)]
+    pub gen: Option<GenParams>,
     pub price: u128,
     /// Wall-clock deadline (unix ms) after which the provider must not start.
     pub deadline_ms: u64,
@@ -468,7 +573,10 @@ impl HubChannel {
             model: model.to_string(),
             prompt: prompt.to_string(),
             max_tokens,
+            billing: None,
             temperature_milli,
+            job_kind: String::new(),
+            gen: None,
             price,
             deadline_ms,
             request_nonce,
@@ -522,6 +630,65 @@ impl HubChannel {
         Ok(a)
     }
 
+    /// [`Self::begin_job_for`] carrying per-token rates: the provider will settle
+    /// at `min(actual usage, price)` and the requestor gets the difference back
+    /// in the same state update (item #63).
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_job_billed_for(
+        &mut self,
+        signer: &Sr25519Signer,
+        provider: PubKey,
+        job_id: u64,
+        model: &str,
+        prompt: &str,
+        max_tokens: u32,
+        billing: BillingRates,
+        temperature_milli: u32,
+        price: u128,
+        deadline_ms: u64,
+    ) -> Result<Assignment, HubError> {
+        let mut a = self.begin_job(
+            signer,
+            job_id,
+            model,
+            prompt,
+            max_tokens,
+            temperature_milli,
+            price,
+            deadline_ms,
+        )?;
+        a.provider = provider;
+        a.billing = Some(billing);
+        a.sig_requestor = Signature64(signer.sign_raw(&assignment_payload(&a)));
+        Ok(a)
+    }
+
+    /// [`Self::begin_job_for`] for a generation (diffusion) job: the render
+    /// parameters are bound into the AP's signature, so neither side can swap
+    /// the size/steps/model after the price was agreed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_job_gen_for(
+        &mut self,
+        signer: &Sr25519Signer,
+        provider: PubKey,
+        job_id: u64,
+        model: &str,
+        prompt: &str,
+        job_kind: &str,
+        gen: GenParams,
+        price: u128,
+        deadline_ms: u64,
+    ) -> Result<Assignment, HubError> {
+        let mut a = self.begin_job(
+            signer, job_id, model, prompt, 0, 0, price, deadline_ms,
+        )?;
+        a.provider = provider;
+        a.job_kind = job_kind.to_string();
+        a.gen = Some(gen);
+        a.sig_requestor = Signature64(signer.sign_raw(&assignment_payload(&a)));
+        Ok(a)
+    }
+
     /// Apply a completed result. Verifies the provider's signature, the result
     /// hash, and the exact expected post-state; advances the channel.
     pub fn complete_job(&mut self, r: &JobResultMsg) -> Result<(), HubError> {
@@ -548,6 +715,28 @@ impl HubChannel {
         if r.state_after == p.after {
             if !r.ok {
                 return Err(HubError::UnexpectedRefund);
+            }
+        } else if r.ok {
+            // Partial settlement: the provider billed `min(actual usage, price)`
+            // instead of the ceiling, so the post-state is `before + charge` on
+            // the SAME nonce the ceiling state would have used. Only the
+            // provider can sign a lower provider balance away (the AP cannot
+            // force one — see `ProviderBalanceDecreased`), so this is a refund
+            // with no new trust assumption. The ceiling stays the hard cap.
+            let charged = match r
+                .state_after
+                .balance_provider
+                .checked_sub(p.before.balance_provider)
+            {
+                Some(c) => c,
+                None => return Err(HubError::PaymentNotExact),
+            };
+            if charged > p.price
+                || r.state_after.nonce != p.after.nonce
+                || r.state_after.balance_requestor
+                    != p.before.balance_requestor.saturating_sub(charged)
+            {
+                return Err(HubError::PaymentNotExact);
             }
         } else if !r.ok {
             // A refund must revert to the pre-job balances with a fresh nonce.
@@ -640,6 +829,9 @@ pub struct AcceptedJob {
     pub after: ChannelState,
     pub price: u128,
     pub deadline_ms: u64,
+    /// Rates the AP put in the assignment; `None` = bill the full `price`.
+    #[serde(default)]
+    pub billing: Option<BillingRates>,
 }
 
 /// The provider's view of one hub channel (provider = provider).
@@ -662,6 +854,28 @@ impl ProviderChannel {
             state: ChannelState::new(deposit),
             last_request_nonce: 0,
             accepted: Default::default(),
+        }
+    }
+
+    /// Adopt the AP-signed pre-state when our mirror is **behind**.
+    ///
+    /// One on-chain channel is keyed by (requestor, provider account). When two
+    /// provider processes share one account — the LLM provider on 8094 and the
+    /// diffusion provider on 8095 do — each keeps its own mirror of the channel,
+    /// and each only sees its own jobs. The AP is the sole initiator and its
+    /// registry applies EVERY job, so its signed `state_before` is the canonical
+    /// next state; a mirror that lags would reject the assignment with
+    /// `StaleStateBefore` (observed live: the first channel-settled image got
+    /// HTTP 409 because 44 text jobs had advanced the channel).
+    ///
+    /// Monotonic on purpose: a replayed *older* assignment (lower nonce) never
+    /// rolls the mirror back — `accept` then rejects it as `StaleStateBefore`.
+    pub fn sync_to_assignment(&mut self, a: &Assignment) {
+        if a.state_before.nonce > self.state.nonce {
+            self.state = a.state_before;
+        }
+        if a.request_nonce > 0 && a.request_nonce - 1 > self.last_request_nonce {
+            self.last_request_nonce = a.request_nonce - 1;
         }
     }
 
@@ -714,6 +928,7 @@ impl ProviderChannel {
             after: a.state_after,
             price: a.price,
             deadline_ms: a.deadline_ms,
+            billing: a.billing,
         };
         self.state = a.state_after;
         self.last_request_nonce = a.request_nonce;
@@ -725,7 +940,23 @@ impl ProviderChannel {
         Signature64(signer.sign_raw(&state.settle_payload(self.channel_id)))
     }
 
-    /// Sign the delivered result. Charges the pre-authorised price.
+    /// Sign the delivered result, charging **actual usage** bounded by the
+    /// pre-authorised ceiling.
+    ///
+    /// Why `min(actual, ceiling)` and not the ceiling itself:
+    /// * **Under-reporting can only hurt the provider** — it is paid for the
+    ///   tokens it reports, so it has no incentive to under-report.
+    /// * **Over-reporting is bounded by `price`** — the AP's pre-signed ceiling
+    ///   is the maximum any state can move, so a provider cannot inflate past
+    ///   it. The clamp is the same hard cap the requestor agreed to.
+    ///
+    /// So `min(actual, ceiling)` is *strictly* safer than always charging the
+    /// ceiling (it removes an over-charge for short answers) and introduces **no
+    /// new trust assumption**: the only party that can lose from a low report is
+    /// the party making it.
+    ///
+    /// If the backend did not report usage we fall back to the ceiling and say
+    /// so loudly — an unmeasured job must never settle at 0.
     pub fn sign_result(
         &mut self,
         signer: &Sr25519Signer,
@@ -739,6 +970,31 @@ impl ProviderChannel {
             .get(&job_id)
             .ok_or(HubError::UnknownJob)?
             .clone();
+        let measured = prompt_tokens > 0 || completion_tokens > 0;
+        let charge = match (job.billing, measured) {
+            (Some(rates), true) => rates.charge(prompt_tokens, completion_tokens, job.price),
+            (Some(_), false) => {
+                eprintln!(
+                    "[channel] job {job_id}: backend reported no usage — billing the ceiling {} (no silent zero)",
+                    job.price
+                );
+                job.price
+            }
+            // Legacy assignment (no rates) keeps the old exact-ceiling semantics.
+            (None, _) => job.price,
+        };
+        // `charge <= price` by construction, so the requestor balance cannot
+        // underflow and the state stays conserved. The nonce is the SAME one the
+        // AP pre-signed: a cheaper settlement is not a second update.
+        let state_after = if charge == job.price {
+            job.after
+        } else {
+            ChannelState {
+                balance_requestor: job.before.balance_requestor - charge,
+                balance_provider: job.before.balance_provider + charge,
+                nonce: job.after.nonce,
+            }
+        };
         let mut r = JobResultMsg {
             channel_id: self.channel_id,
             job_id,
@@ -748,11 +1004,12 @@ impl ProviderChannel {
             result_hash: Hash32::of(output.as_bytes()),
             prompt_tokens,
             completion_tokens,
-            state_after: job.after,
+            state_after,
             sig_provider: Signature64([0u8; 64]),
-            sig_settle: self.settle_sig(signer, &job.after),
+            sig_settle: self.settle_sig(signer, &state_after),
         };
         r.sig_provider = Signature64(signer.sign_raw(&result_payload(&r)));
+        self.state = state_after;
         self.accepted.remove(&job_id);
         Ok(r)
     }
@@ -1231,5 +1488,328 @@ mod tests {
         assert_eq!(c.request_nonce, 1);
         assert_eq!(c.pending_len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn gen(width: u32) -> GenParams {
+        GenParams {
+            kind: "image".into(),
+            width,
+            height: 512,
+            steps: 8,
+            seed: 7,
+            frames: 1,
+            fps: 1,
+            n: 1,
+        }
+    }
+
+    #[test]
+    fn a_generation_assignment_binds_its_render_parameters() {
+        let (ap, prov, mut ch, _pch) = setup(1_000);
+        let a = ch
+            .begin_job_gen_for(
+                &ap,
+                PubKey(prov.public_key()),
+                1,
+                "sd-turbo",
+                "a cabin",
+                "ImageGeneration",
+                gen(512),
+                100,
+                0,
+            )
+            .unwrap();
+        assert_eq!(a.job_kind, "ImageGeneration");
+        assert!(verify_sig(
+            &a.requestor,
+            &assignment_payload(&a),
+            &a.sig_requestor
+        ));
+        // Swap the size after signing: the signature must no longer verify, so
+        // a provider can never be tricked into rendering (and being paid for)
+        // something other than the priced job.
+        let mut tampered = a.clone();
+        tampered.gen = Some(gen(1024));
+        assert!(!verify_sig(
+            &tampered.requestor,
+            &assignment_payload(&tampered),
+            &tampered.sig_requestor
+        ));
+        // Text assignments keep the legacy payload: changing job_kind from ""
+        // (which text jobs always carry) is what alters it.
+        let text = ch
+            .begin_job_for(&ap, PubKey(prov.public_key()), 2, "m", "p", 8, 0, 5, 0)
+            .unwrap();
+        assert_eq!(text.job_kind, "");
+        assert!(verify_sig(
+            &text.requestor,
+            &assignment_payload(&text),
+            &text.sig_requestor
+        ));
+    }
+
+    #[test]
+    fn a_provider_mirror_follows_the_ap_but_never_rolls_back() {
+        let (ap, prov, mut ch, mut pch) = setup(1_000);
+        // The AP serves three text jobs on this channel before an image arrives:
+        // the diffusion provider's mirror is still at nonce 0.
+        for i in 1..=3u64 {
+            let a = ch
+                .begin_job_for(&ap, PubKey(prov.public_key()), i, "m", "p", 8, 0, 10, 0)
+                .unwrap();
+            pch.accept(&a).unwrap();
+            let r = pch.sign_result(&prov, i, "ok", 1, 1).unwrap();
+            ch.complete_job(&r).unwrap();
+        }
+        assert_eq!(ch.state.nonce, 3);
+        assert_eq!(pch.state.nonce, 3, "mirror advanced with its own jobs");
+        // A fresh mirror (the diffusion provider) starts at the deposit split.
+        let mut other = ProviderChannel::new(7, 1_000, PubKey(ap.public_key()));
+        let a4 = ch
+            .begin_job_gen_for(
+                &ap,
+                PubKey(prov.public_key()),
+                4,
+                "sd-turbo",
+                "p",
+                "ImageGeneration",
+                gen(512),
+                10,
+                0,
+            )
+            .unwrap();
+        other.sync_to_assignment(&a4);
+        other.accept(&a4).expect("adopting the AP's pre-state must work");
+        assert_eq!(other.state.nonce, 4);
+        // A replayed OLD assignment must not roll the mirror back.
+        let stale = ch
+            .begin_job_for(&ap, PubKey(prov.public_key()), 9, "m", "p", 8, 0, 10, 0)
+            .unwrap();
+        let before = other.state;
+        other.sync_to_assignment(&stale);
+        assert_eq!(other.state, before);
+    }
+
+    // ── item #63: settle at actual usage, bounded by the ceiling ────────────
+
+    /// Build a channel with a deposit comfortably above `price` and accept one
+    /// billed assignment. Returns the deposit too, so assertions stay explicit.
+    fn billed(
+        rates: BillingRates,
+        max_tokens: u32,
+        price: u128,
+    ) -> (u128, Sr25519Signer, Sr25519Signer, HubChannel, ProviderChannel) {
+        let deposit = price.saturating_mul(2).max(10_000);
+        let (ap, prov, mut ch, mut pch) = setup(deposit);
+        let a = ch
+            .begin_job_billed_for(
+                &ap,
+                PubKey(prov.public_key()),
+                1,
+                "llama3.2:1b",
+                "hello",
+                max_tokens,
+                rates,
+                700,
+                price,
+                0,
+            )
+            .unwrap();
+        pch.accept(&a).unwrap();
+        (deposit, ap, prov, ch, pch)
+    }
+
+    #[test]
+    fn a_short_answer_is_charged_its_actual_usage_not_the_ceiling() {
+        // Ceiling for 512 output tokens at 100/10 per token; the answer is 4
+        // tokens + 6 prompt tokens, so the charge must be tiny — the exact bug
+        // this item fixes (a 4-token answer billed as 512).
+        let rates = BillingRates {
+            in_rate: 10,
+            out_rate: 100,
+        };
+        let (deposit, _ap, prov, mut ch, mut pch) = billed(rates, 512, 51_200);
+        let r = pch.sign_result(&prov, 1, "hi there", 6, 4).unwrap();
+        assert_eq!(
+            pch.state.balance_provider, 460,
+            "charge == 6*10 + 4*100, not the ceiling"
+        );
+        ch.complete_job(&r).unwrap();
+        assert_eq!(ch.state.balance_provider, 460);
+        assert_eq!(ch.state.balance_requestor, deposit - 460);
+        assert!(ch.state.is_conserved(deposit));
+        assert_eq!(ch.state.nonce, 1);
+    }
+
+    #[test]
+    fn usage_above_the_ceiling_is_clamped_to_the_ceiling() {
+        let rates = BillingRates {
+            in_rate: 10,
+            out_rate: 100,
+        };
+        let (deposit, _ap, prov, mut ch, mut pch) = billed(rates, 8, 1_000);
+        // The model ignored max_tokens and produced 40 tokens: 6*10 + 40*100 =
+        // 4_060, clamped to the 1_000 ceiling. Escrow can never be overrun.
+        let r = pch.sign_result(&prov, 1, "a long answer", 6, 40).unwrap();
+        assert_eq!(pch.state.balance_provider, 1_000);
+        ch.complete_job(&r).unwrap();
+        assert_eq!(ch.state.balance_provider, 1_000);
+        assert!(ch.state.is_conserved(deposit));
+    }
+
+    #[test]
+    fn missing_usage_bills_the_ceiling_rather_than_nothing() {
+        let rates = BillingRates {
+            in_rate: 10,
+            out_rate: 100,
+        };
+        let (_deposit, _ap, prov, mut ch, mut pch) = billed(rates, 16, 2_000);
+        let r = pch.sign_result(&prov, 1, "unmeasured", 0, 0).unwrap();
+        assert_eq!(pch.state.balance_provider, 2_000, "never a silent zero");
+        ch.complete_job(&r).unwrap();
+        assert_eq!(ch.state.balance_provider, 2_000);
+    }
+
+    #[test]
+    fn a_legacy_assignment_without_rates_still_bills_the_ceiling() {
+        let (ap, prov, mut ch, mut pch) = setup(1_000);
+        let a = ch
+            .begin_job_for(&ap, PubKey(prov.public_key()), 1, "m", "p", 8, 0, 100, 0)
+            .unwrap();
+        assert!(a.billing.is_none());
+        pch.accept(&a).unwrap();
+        let r = pch.sign_result(&prov, 1, "out", 1, 1).unwrap();
+        assert_eq!(r.state_after.balance_provider, 100);
+    }
+
+    #[test]
+    fn the_channel_balance_equals_the_sum_of_actual_charges() {
+        // Three jobs at different lengths: the running provider balance must be
+        // exactly the sum of the per-job actual charges, and every intermediate
+        // state must stay conserved.
+        let rates = BillingRates {
+            in_rate: 5,
+            out_rate: 20,
+        };
+        let (ap, prov, mut ch, mut pch) = setup(10_000);
+        let mut expect = 0u128;
+        for (id, pt, ct) in [(1u64, 10u32, 4u32), (2, 10, 40), (3, 7, 1)] {
+            let a = ch
+                .begin_job_billed_for(
+                    &ap,
+                    PubKey(prov.public_key()),
+                    id,
+                    "m",
+                    "p",
+                    512,
+                    rates,
+                    0,
+                    1_000,
+                    0,
+                )
+                .unwrap();
+            pch.accept(&a).unwrap();
+            let r = pch.sign_result(&prov, id, "out", pt, ct).unwrap();
+            let charged = (5 * pt as u128 + 20 * ct as u128).min(1_000);
+            expect += charged;
+            assert_eq!(r.state_after.balance_provider, expect);
+            ch.complete_job(&r).unwrap();
+            assert_eq!(ch.state.balance_provider, expect);
+            assert!(ch.state.is_conserved(10_000));
+        }
+        assert_eq!(ch.state.nonce, 3);
+        assert_eq!(expect, 130 + 850 + 55);
+    }
+
+    #[test]
+    fn a_partial_settlement_cannot_forge_its_nonce_or_exceed_the_ceiling() {
+        let rates = BillingRates {
+            in_rate: 1,
+            out_rate: 1,
+        };
+        let (_deposit, _ap, prov, mut ch, mut pch) = billed(rates, 8, 100);
+        let good = pch.sign_result(&prov, 1, "out", 1, 1).unwrap();
+        assert_eq!(good.state_after.balance_provider, 2);
+
+        // (a) a partial state that skips a nonce is not the pre-signed update.
+        let mut skip = good.clone();
+        skip.state_after.nonce += 1;
+        skip.sig_provider = Signature64(prov.sign_raw(&result_payload(&skip)));
+        skip.sig_settle =
+            Signature64(prov.sign_raw(&skip.state_after.settle_payload(skip.channel_id)));
+        assert_eq!(ch.complete_job(&skip), Err(HubError::PaymentNotExact));
+
+        // (b) a "partial" state that pays MORE than the ceiling is refused even
+        //     with a valid provider signature (the cap is the AP's commitment).
+        let mut over = good.clone();
+        over.state_after = ChannelState {
+            balance_requestor: 800,
+            balance_provider: 200,
+            nonce: 1,
+        };
+        over.sig_provider = Signature64(prov.sign_raw(&result_payload(&over)));
+        over.sig_settle =
+            Signature64(prov.sign_raw(&over.state_after.settle_payload(over.channel_id)));
+        assert_eq!(ch.complete_job(&over), Err(HubError::PaymentNotExact));
+
+        // (c) the honest partial settlement still applies afterwards.
+        ch.complete_job(&good).unwrap();
+        assert_eq!(ch.state.balance_provider, 2);
+        // (d) ...and replaying it cannot charge twice.
+        assert_eq!(ch.complete_job(&good), Err(HubError::UnknownJob));
+        assert_eq!(ch.state.balance_provider, 2);
+    }
+
+    #[test]
+    fn a_billed_assignment_hashes_differently_from_a_legacy_one() {
+        // The rates are inside the signed pre-image: neither side can swap the
+        // rate after the AP committed to a price.
+        let (ap, prov, mut ch, mut pch) = setup(1_000);
+        let a = ch
+            .begin_job_billed_for(
+                &ap,
+                PubKey(prov.public_key()),
+                1,
+                "m",
+                "p",
+                8,
+                BillingRates {
+                    in_rate: 1,
+                    out_rate: 10,
+                },
+                0,
+                100,
+                0,
+            )
+            .unwrap();
+        let mut tampered = a.clone();
+        tampered.billing = Some(BillingRates {
+            in_rate: 1_000,
+            out_rate: 1_000,
+        });
+        assert!(!verify_sig(
+            &a.requestor,
+            &assignment_payload(&tampered),
+            &a.sig_requestor
+        ));
+        assert_eq!(pch.accept(&tampered), Err(HubError::InvalidRequestorSignature));
+        assert!(pch.accept(&a).is_ok());
+    }
+
+    #[test]
+    fn a_refund_after_a_billed_job_still_reverts_to_the_pre_job_state() {
+        // Failure split stays intact: a refund reverts to `before` and advances
+        // the nonce — it never interacts with the partial-charge path.
+        let rates = BillingRates {
+            in_rate: 1,
+            out_rate: 1,
+        };
+        let (deposit, _ap, prov, mut ch, mut pch) = billed(rates, 16, 500);
+        let r = pch.sign_refund(&prov, 1, "cuda oom").unwrap();
+        assert_eq!(r.state_after.balance_provider, 0);
+        assert_eq!(r.state_after.nonce, 2);
+        ch.complete_job(&r).unwrap();
+        assert_eq!(ch.state.balance_provider, 0);
+        assert_eq!(ch.state.balance_requestor, deposit);
     }
 }
