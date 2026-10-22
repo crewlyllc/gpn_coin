@@ -974,6 +974,13 @@ fn model_prep() -> &'static Mutex<HashMap<String, Instant>> {
     BOOK.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Pure: did `ensure_model` actually PULL, or did it find the model present?
+/// Only a real pull may produce the operator-facing "was not installed"
+/// notice — a cold presence cache is "unknown", never "absent" (item #58).
+pub fn pull_happened(note: &str) -> bool {
+    note.starts_with("pulled ")
+}
+
 /// Item #56: start (or find already running) a BACKGROUND probe+pull for
 /// `model`, and return immediately.
 ///
@@ -988,7 +995,7 @@ fn model_prep() -> &'static Mutex<HashMap<String, Instant>> {
 /// be claimed and run this pass — `resolve_model` already falls back to an
 /// installed model when the requested one is absent — so a cold pull costs
 /// model fidelity for a few jobs, never availability for all of them.
-fn kick_model_prep(model: &str) -> PrepAction {
+fn kick_model_prep(model: &str, job_id: Option<u64>) -> PrepAction {
     if model.is_empty() || model == "auto" {
         return PrepAction::Busy; // nothing concrete to prepare
     }
@@ -1008,7 +1015,25 @@ fn kick_model_prep(model: &str) -> PrepAction {
     let owned = model.to_string();
     std::thread::spawn(move || {
         match ensure_model(&owned) {
-            Ok(note) => println!("[provider] model prep: {note}"),
+            Ok(note) => {
+                // Item #58: the "not installed — pulling" notice belongs HERE,
+                // not at the call site. `kick_model_prep` only knows the
+                // presence CACHE (`None` on a cold cache = unknown, not
+                // "absent"), so the caller used to announce a pull for models
+                // that were already on disk and never got pulled (measured:
+                // 7 notices / 6 claims in 40 min with 0 `POST /api/pull`).
+                // `ensure_model` is the only place that knows, so it decides.
+                if let Some(id) = job_id {
+                    if pull_happened(&note) {
+                        println!(
+                            "[provider] job #{id}: model {owned} was not installed — pulled in \
+                             the background (this job ran on the installed fallback meanwhile, so \
+                             other jobs were NOT held up)"
+                        );
+                    }
+                }
+                println!("[provider] model prep: {note}");
+            }
             Err(e) => {
                 if !is_ollama_unavailable(&e) {
                     eprintln!("[provider] model prep {owned}: {e}");
@@ -1671,13 +1696,9 @@ async fn process_once(
                 continue;
             }
             let _ = pull;
-            if let PrepAction::Spawn = kick_model_prep(model) {
-                println!(
-                    "[provider] job #{id}: model {model} not installed — pulling in the \
-                     background (this job runs on the installed fallback meanwhile, so other \
-                     jobs are NOT held up)"
-                );
-            }
+            // No notice here: the background worker prints one only when a pull
+            // actually happens (item #58).
+            let _ = kick_model_prep(model, Some(*id));
         }
         assigned
             .iter()
@@ -2069,7 +2090,7 @@ async fn run_job(
 
 #[cfg(test)]
 mod model_prep_tests {
-    use super::{prep_action, PrepAction, MODEL_PREP_STUCK_AFTER};
+    use super::{prep_action, pull_happened, PrepAction, MODEL_PREP_STUCK_AFTER};
     use std::time::{Duration, Instant};
 
     /// Item #56: a cold-model pull must never park the claim lane. The book
@@ -2107,6 +2128,22 @@ mod model_prep_tests {
             prep_action(Some(now + Duration::from_secs(60)), now),
             PrepAction::Spawn
         ));
+    }
+
+    /// Item #58: the "was not installed — pulled in the background" notice is
+    /// emitted only for a real pull. `kick_model_prep` fires on a COLD presence
+    /// cache (`None` = unknown), which is not evidence the model is absent, so
+    /// announcing a pull there produced a misleading journal line for models
+    /// that were already on disk (7 notices / 6 claims, 0 `POST /api/pull`).
+    #[test]
+    fn only_a_real_pull_announces_a_pull() {
+        // What `ensure_model` returns when it found the model locally.
+        assert!(!pull_happened("model llama3.2:1b already present"));
+        // What it returns after actually pulling.
+        assert!(pull_happened("pulled model qwen2.5:7b on demand"));
+        // Defensive: an empty/other note is never an announcement.
+        assert!(!pull_happened(""));
+        assert!(!pull_happened("no specific model requested"));
     }
 }
 
