@@ -423,8 +423,23 @@ physically cannot be forwarded (CGNAT) and must still run.</p>
 <td>Inbound port to open/probe.</td>
 <td><code>30333</code></td>
 </tr>
+<tr>
+<td><code>GPN_DIALABILITY_STATE</code></td>
+<td>Where the gate writes its verdict for the provider heartbeat (<code>public_endpoint</code>, evidence).</td>
+<td><code>~/.gpn/dialability.json</code></td>
+</tr>
+<tr>
+<td><code>GPN_NODE_KEY_FILE</code></td>
+<td>Per-machine libp2p key file; preferred over a literal <code>--node-key</code> (a copied key = a duplicated <code>peer_id</code>).</td>
+<td>unset</td>
+</tr>
 </tbody>
 </table>
+<blockquote>
+<p>The provider side of this — what the heartbeat publishes (<code>multiaddrs</code>,
+<code>listen_addrs</code>), the VRAM model gate and the public <code>/v1/models</code> catalogue —
+is documented in <a href="provider-address-and-models.html">provider-address-and-models.md</a>.</p>
+</blockquote>
 <p>If the node is not dialable you will see this (exact text, LAN IP and port
 filled in) and, by default, the process exits:</p>
 <pre><code>================================================================================
@@ -808,8 +823,26 @@ transactions</strong>. Design and guarantees:
 <p>It is on by default and <strong>falls back per request</strong> to the on-chain path if
 anything is unavailable (provider doesn't serve <code>/channel/job</code>, the channel
 can't be opened, a signature fails), so enabling it can never lose a job.</p>
+<p><strong>Default policy since 2026-10-22 — value-based routing.</strong> Expensive jobs
+settle <strong>per-job on chain</strong> (a real receipt each), cheap high-frequency jobs
+batch over a channel:</p>
+<pre><code>explicit &quot;mode&quot; in the request      → honour it
+job value &gt;= GPN_SETTLE_MIN_GPN     → per-job on-chain settle
+provider speaks channels            → channel (batched)
+otherwise                           → per-job on-chain settle
+</code></pre>
+<p>The threshold is derived, not guessed: the measured <code>create_job</code> +
+<code>complete_job</code> fee on this chain is <strong>216 314 315 base units</strong> (0.000216 GPN,
+read from <code>TransactionPayment::TransactionFeePaid</code>), so the default is
+<strong>2 163 143 150 base units (0.00216 GPN) = 10× that cost</strong>. On this testnet a
+<code>max_tokens: 8</code> chat quotes ~3.2e7 (→ channel) and a <code>max_tokens: 2000</code> chat
+~5.07e9 (→ on chain).</p>
+<p>A channel is between <strong>this AP and one provider</strong> — not between a user and the
+AP. The operator decides to batch; users never hold channels and there are no
+per-user tiers.</p>
 <h3 id="access-point">Access point</h3>
-<pre><code class="language-bash"># defaults: GPN_ESCROW_MODE=channel, deposit 100 GPN, TTL 25 920 blocks
+<pre><code class="language-bash"># defaults: settle threshold 0.00216 GPN, 50 GPN per (AP, provider) channel,
+# 24 h settle interval, 9000-block TTL
 gpn_scheduler --listen 0.0.0.0:8092 --signer-uri &lt;ap-seed&gt; --allow-hot-wallet
 </code></pre>
 <h4 id="auth-token-generated-on-the-first-boot">Auth token — generated on the first boot</h4>
@@ -857,42 +890,62 @@ multi-instance hosts).</p>
 <tbody>
 <tr>
 <td><code>GPN_ESCROW_MODE</code></td>
-<td><code>channel</code></td>
-<td><code>onchain</code> = always use per-job escrow (the old behaviour)</td>
+<td><code>settle</code></td>
+<td><code>settle</code> = value-based routing (see above); <code>channel</code> = batch everything (opt-in for volume); <code>onchain</code>/<code>off</code> = always per-job escrow</td>
+</tr>
+<tr>
+<td><code>GPN_SETTLE_MIN_GPN</code></td>
+<td><code>2163143150</code></td>
+<td>value threshold in base units (10× the measured settle fee)</td>
 </tr>
 <tr>
 <td><code>GPN_HUB_CHANNEL_DEPOSIT</code></td>
-<td><code>1e14</code> (100 GPN)</td>
-<td>locked once per provider; <code>0</code> disables channel mode</td>
+<td><code>5e13</code> (50 GPN)</td>
+<td>locked <strong>per (AP, provider) pair</strong>; <code>0</code> disables channel mode. Users share the channel, so this does not scale with users</td>
 </tr>
 <tr>
-<td><code>GPN_HUB_CHANNEL_TTL</code></td>
-<td><code>25920</code> blocks</td>
-<td>the channel deadline (force-close window)</td>
+<td><code>GPN_HUB_SETTLE_SECS</code></td>
+<td><code>86400</code> (24 h)</td>
+<td>scheduled cooperative settlement interval</td>
 </tr>
 <tr>
 <td><code>GPN_HUB_CLOSE_AT</code></td>
-<td><code>deposit/2</code></td>
-<td>cooperative settle threshold (provider balance)</td>
+<td><code>2.5e13</code> (25 GPN = deposit/2)</td>
+<td>early settle once the provider's credit reaches this</td>
 </tr>
 <tr>
 <td><code>GPN_HUB_CLOSE_NONCE</code></td>
-<td><code>500</code></td>
-<td>...or this many off-chain updates</td>
+<td><code>50000</code></td>
+<td>...or this many off-chain updates (flood valve)</td>
+</tr>
+<tr>
+<td><code>GPN_HUB_CHANNEL_TTL</code></td>
+<td><code>9000</code> blocks (~30 h @ 12 s median)</td>
+<td>the channel deadline (force-close window). Must exceed <code>GPN_HUB_SETTLE_SECS</code>; block times vary 3–90 s so wall-clock TTL drifts</td>
 </tr>
 <tr>
 <td><code>GPN_HUB_STATE</code></td>
 <td><code>~/.gpn/hub_channels.json</code></td>
 <td>channel registry (restart-safe)</td>
 </tr>
+<tr>
+<td><code>GPN_PENDING_WARN</code></td>
+<td><code>12</code></td>
+<td>warn when this many extrinsics sit in the pool</td>
+</tr>
 </tbody>
 </table>
+<p><strong>Capital:</strong> total float = (providers with an open channel) × 50 GPN. One
+provider → 50 GPN, three → 150 GPN, ten → 500 GPN. At 1 000 providers this
+would lock 50 000 GPN, so the documented next step at that scale is a 10 GPN
+deposit with a 5 GPN early trigger (or user-signed escrow).</p>
 <p>Watch it work:</p>
-<pre><code>[hub] opening channel → 5ENq… (deposit=100000000000000 ttl=25920 blocks, once)
-[hub] channel 2 ready for 5ENq… (deposit 100000000000000)
-[hub] job 1792609125307 served off-chain on channel 2 (nonce 2, provider balance 6026365344)
-[hub] settling channel 2 (nonce 2, provider 6026365344)
-[hub] channel 2 settled on chain
+<pre><code>[pricing] settle threshold=2163143150 base units (0.00216314315 GPN) = 10x measured per-job settle cost (216314315 base units); mode=settle, channel=on
+[hub] capital: 1 channel(s) × 50 GPN = 50 GPN locked (per AP-provider pair; users share these)
+[hub] off-chain escrow ENABLED (mode=settle, deposit=50000000000000, ttl=9000 blocks, settle_every=86400s, close_at=25000000000000, ...)
+[hub] job 1792706257296 served off-chain on channel 7 (nonce 1, provider balance 39954841)
+[hub] channel 7 due for scheduled settlement (86400s interval)
+[hub] channel 7 settled on chain
 </code></pre>
 <p><code>POST /jobs</code> responses gain <code>"escrow":"channel"</code>, <code>channel_id</code>, and the
 off-chain <code>job_id</code> (a local id, <strong>not</strong> a chain job id). The channel's on-chain
@@ -916,7 +969,8 @@ the AP falls back). <code>GPN_CHANNEL_SKIP_CHAIN_CHECK=1</code> skips the one-ti
 on-chain channel verification — <strong>dev only</strong>.</p>
 <h3 id="client-deposit-and-withdraw">Client: deposit and withdraw</h3>
 <pre><code class="language-bash"># once per provider — this is the only funding tx
-gpn_channel deposit ws://127.0.0.1:9944 //Charlie 5ENq…Sp5Q 100000000000000 25920
+# (50 GPN deposit, 9000-block TTL)
+gpn_channel deposit ws://127.0.0.1:9944 //Charlie 5ENq…Sp5Q 50000000000000 9000
 gpn_channel id      ws://127.0.0.1:9944 //Charlie 5ENq…Sp5Q
 gpn_channel info    ws://127.0.0.1:9944 1
 # settle back
@@ -1162,10 +1216,24 @@ estimate so the min-GPU gate (#19) and the scheduler route correctly:</p>
 <ul>
 <li>Linux — <code>nvidia-smi</code>, then <strong><code>rocm-smi</code></strong> (<code>--showproductname</code>,
   <code>--showmeminfo vram</code>), then <code>lspci</code> + <code>/sys/class/drm</code>.</li>
-<li>Windows — <code>Win32_VideoController</code> (<code>Get-CimInstance</code> / <code>wmic</code>) for name +
-  <code>AdapterRAM</code>. ⚠️ Windows caps <code>AdapterRAM</code> at 4 GiB, so set <code>--vram-mb</code> (or
-  <code>VRAM_MB</code>) to the real figure for big cards.</li>
+<li>Windows — <code>nvidia-smi</code>, then <code>rocm-smi</code>, then the display-class registry
+  value <code>HardwareInformation.qwMemorySize</code> (<strong>REG_QWORD, real 64-bit</strong> figure
+  per adapter, iGPUs skipped), and only as a <strong>last resort</strong>
+  <code>Win32_VideoController.AdapterRAM</code>.</li>
 </ul>
+<blockquote>
+<p>⚠️ <strong>Windows <code>AdapterRAM</code> is a uint32 and saturates at 4,294,967,295 bytes
+= 4095 MiB.</strong> A 12 GB or 24 GB card reads as ~4 GB from that field, which
+used to make the VRAM model gate exclude models the box can actually run.
+Detection now prefers <code>nvidia-smi</code>/<code>rocm-smi</code>, then the 64-bit registry
+<code>qwMemorySize</code>, and uses <code>AdapterRAM</code> only when nothing else works. When it
+does, the agent says so explicitly:</p>
+<p><code>[gpu] VRAM from AdapterRAM (32-bit, capped at 4095 MiB) — value may understate the real total; models larger than 4 GB may be wrongly excluded</code></p>
+<p>If neither vendor CLI nor the registry key is available, set <code>--vram-mb</code>
+(or <code>VRAM_MB</code>) to the real figure. A probe that finds nothing at all now
+warns loudly (<code>[gpu] VRAM detection returned 0 MiB …</code>) instead of silently
+disabling the gate.</p>
+</blockquote>
 <p>Override anything with <code>--gpu-class</code>/<code>--tflops</code>/<code>--vram-mb</code> (or the <code>GPU_CLASS</code>,
 <code>TFLOPS</code>, <code>VRAM_MB</code> env vars).</p>
 <h3 id="serving-llms-on-amd-linux-rocm">Serving LLMs on AMD (Linux — ROCm)</h3>
@@ -1696,6 +1764,39 @@ again. Nothing warned beforehand.</p>
   78), with an actionable hint in the log — set <code>GPN_PUBLIC_ADDR</code> and forward
   the port. Without <code>--require-backbone</code>, a non-dialable node stays <code>up</code> and
   simply runs degraded.</p>
+<h2 id="local-dashboard-idle-mode-let-me-play-a-game">Local dashboard + Idle mode ("let me play a game")</h2>
+<p>A node belongs on a gaming PC, so it has a switch for when the PC is being used
+for games: <strong>idle mode</strong> pauses mining and AI job claims for up to <strong>6 hours</strong>,
+keeps the node syncing/peering/serving the chain the whole time, and resumes
+automatically at the end (or on a <em>Resume now</em> click).</p>
+<pre><code class="language-bash"># serve the dashboard (loopback only, no auth needed — it is not on the network)
+gpn_node --gui            # http://127.0.0.1:8099
+GPN_GUI=1 gpn_node        # same, via env
+
+# idle / resume from a shell (works against a running node, no restart)
+gpn_node idle 120         # 2 hours (max 360 = 6 h; longer is refused)
+gpn_node resume
+</code></pre>
+<p>Without <code>--gui</code> the node prints one hint line at startup:
+<code>dashboard: off — add --gui to serve the local control panel on 127.0.0.1:8099</code>.</p>
+<p><strong>What idle does:</strong> the miner thread parks (no nonces searched, GPU free), and
+every provider stops claiming new jobs at its claim boundary. <strong>What it does
+not do:</strong> it does not stop the node — syncing, peering, RPC, the heartbeat on
+<code>:8093</code>, discovery and your on-chain identity all keep working. A job already
+running finishes normally; idle never strands one.</p>
+<p>State is one file, <code>~/.gpn/idle.json</code> (<code>{"until": …, "reason": …, "started": …}</code>,
+0600, override with <code>GPN_IDLE_FILE</code>), read by the miner and every provider — so
+idle survives a restart. An expired file reads as <em>active</em>, so a box that was
+off past the deadline simply starts mining again.</p>
+<p><strong>Safety valve.</strong> If the node has <strong>no peers</strong> (it may be the only block
+producer) or its RPC is unreachable, idle is <strong>refused</strong> — idling the last
+authority would halt the chain. The dashboard answers <code>409</code> and the CLI exits
+<code>3</code>, both explaining why. Override for a single-box dev chain with
+<code>--force-idle</code> / <code>GPN_IDLE_FORCE=1</code>.</p>
+<p>Windows: <code>gpn-agent/windows/gpn-dashboard.cmd</code> starts the supervisor with
+<code>--gui</code> and opens the page — put a shortcut to it on the desktop.</p>
+<p>Full details (endpoints, semantics table, screenshots-in-words, tests):
+<a href="node-gui-and-idle.html"><code>node-gui-and-idle.md</code></a>.</p>
 <h2 id="linux">Linux</h2>
 <pre><code class="language-bash"># foreground (Ctrl-C stops everything) — always miner + provider
 GPN_SIGNER=//Alice \
@@ -1892,7 +1993,7 @@ crash, an OOM in the AI stack, or a wedged inference never takes the chain node
 down — the supervisor restarts just that child. Folding everything into one
 binary is tracked separately (task #26, deferred).</p>
     </article>
-    <p class="doc-updated small muted">Last generated 2026-10-21 from the project documentation set.</p>
+    <p class="doc-updated small muted">Last generated 2026-10-22 from the project documentation set.</p>
   </div>
 </main>
 

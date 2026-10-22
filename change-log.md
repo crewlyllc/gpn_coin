@@ -1,5 +1,34 @@
 # GPN change-log
 
+## 2026-10-22 15:0x PT — **default settlement is per-job on-chain; channels are for cheap volume (value-based routing)**
+**WHY (Jeremy's call):** the AP should not guess who is calling — it should look at what the job is worth. Expensive jobs get a real per-job on-chain receipt; cheap high-frequency traffic batches over a channel. Measured fee, not an invented number, decides where the line is.
+
+**MEASURED (live chain, blocks 175411/175413, `TransactionPayment::TransactionFeePaid`):** `create_job` **108 157 199** + `complete_job` **108 157 116** = **216 314 315 base units (0.000216 GPN)** per-job settlement cost for the AP (the provider spends a similar 3× on accept/start/submit). Threshold = **10×** that = **2 163 143 150 base units (0.00216 GPN)**. Live quotes straddle it cleanly: `max_tokens: 8` ≈ 3.2e7 → channel; `max_tokens: 2000` ≈ 5.07e9 → on-chain.
+
+**WHAT:**
+* New `gpn-agent/src/settle_policy.rs` (pure, 13 tests): `EscrowMode {Settle, Channel, Off}`, `Route`, `Reason`, and
+  ```
+  explicit "mode"  → honour it
+  value >= min     → on-chain settle
+  channel-capable  → channel
+  otherwise        → on-chain settle
+  ```
+  An explicit `channel` still cannot override the operator's kill switch (`GPN_ESCROW_MODE=off`).
+* `HubCtx` carries the policy + the derived threshold; the chat handler now prices the request **before** choosing a path (the quote is the only honest "job value" at decision time).
+* `GPN_ESCROW_MODE` default `channel` → **`settle`**; `GPN_SETTLE_MIN_GPN` overrides the derived threshold.
+* **Channel economics re-tuned:** deposit **50 GPN** (was 100), settlement **time-driven every 24 h** (`GPN_HUB_SETTLE_SECS=86400`) with two earlier triggers — 25 GPN unredeemed credit (`GPN_HUB_CLOSE_AT`, half the deposit; this is the load-driven one) or 50 000 signed updates (`GPN_HUB_CLOSE_NONCE`). TTL **9000 blocks** (~30 h at the 12 s median, ~37 h at 15 s) so a channel never expires before its scheduled settle. `HubChannel` gained a persisted `opened_at_ms`; `due_for_periodic_settle()` drives the settler.
+* **Backpressure:** `ChainClient::pending_extrinsics()` + a 30 s watch thread; past `GPN_PENDING_WARN` (12) it logs `[settle] WARNING: N extrinsics pending … consider GPN_ESCROW_MODE=channel for volume`. With settle as default each chat is 2–3 AP extrinsics — fine at current volume (pool observed 0 waiting).
+* **Startup logs:** `[pricing] settle threshold=… = 10x measured per-job settle cost (…)` and `[hub] capital: N channel(s) × 50 GPN = X GPN locked (per AP-provider pair; users share these)`.
+* **Capital semantics made explicit in code + docs:** the deposit is per **(AP, provider)** pair, not per user. 1 provider = 50 GPN, 3 = 150, 10 = 500; at 1 000 providers this config locks 50 000 GPN → documented next step is 10 GPN deposit / 5 GPN trigger, or user-signed escrow.
+* `/health` now reports the whole settlement config (mode, threshold, ttl, settle interval, deposit, close_at).
+
+**TESTS:** 564 passed / 0 failed / 10 ignored (`cargo test`, whole crate incl. integration). New: routing decision table (expensive→settle, cheap→channel, boundary, explicit wins, unknown mode, channel-capable vs not, operator channel/off modes, zero threshold), threshold = 10× mocked/measured fee, env parsing + defaults for TTL/close_at/settle_secs/deposit, time-based vs early-trigger settle (small deposit), nonce valve, plus the existing channel/on-chain behaviour suites.
+
+**LIVE (deployed, `.bak` taken):** cheap `max_tokens: 8` → `payment: channel`, **87 ms warm** (193 ms in the earlier run; 12.5 s when it had to open a fresh 50 GPN channel — the `open_channel` tx), channel balance +20 862 497 base units, nonce +1, **no chain job**. Expensive `max_tokens: 2000` → `payment: onchain`, job **#6492**, **10.1 s**, channel balance unchanged, `NextJobId` +1 exactly, job reached `Completed`. Scheduled settlement proven live by temporarily setting `GPN_HUB_SETTLE_SECS=1`: `[hub] channel 6 due for scheduled settlement (1s interval)` → closed on chain → removed from the registry; the next cheap request opened channel 7 with exactly `50000000000000` locked.
+
+**NOTE FOR JEREMY:** the on-chain path is not *free* of latency yet — the provider refuses to claim a job that is not yet included (`no optimistic claim`, item #49), so the answer waits on `create_job` inclusion: measured 10.1 s vs 87 ms on a warm channel. That is one block, not the five-extrinsic settlement; making it truly zero-delay needs the provider to accept a predicted id (or an AP-signed job the provider can verify off-chain), which is a separate change.
+
+
 ## 2026-10-22 12:2x PT — **pricing switched to a throughput-calibrated curve — $8.75 → $0.379 per 1M output tokens**
 **WHY (agreed with Jeremy):** the old card was `target_hr = clamp(0.5 × market_hr, owner_cost, market_hr)` with `market_hr = $3.00` hardcoded (oracle absent). That anchors a consumer card at cloud-A100 rental rates: a 4060 worth ~$0.10–0.15/hr was billed at $1.50/hr → **$8.75/1M output**, ~22× `gpt-5-nano`'s $0.40. FP32 GFLOPs were also the wrong metric (a 4090 would price above an H100); decode is memory-bandwidth-bound, so throughput is the right quantity.
 **WHAT (new `gpn-agent/src/pricing.rs`, 11 pure-function tests):**

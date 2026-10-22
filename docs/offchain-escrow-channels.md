@@ -1,7 +1,9 @@
 # Off-chain escrow channels — operator & API guide
 
-**Status:** LIVE on the testnet access point (`:8092`), default payment mode for
-`/v1/chat/completions`.
+**Status:** LIVE on the testnet access point (`:8092`). Since 2026-10-22 the
+**default policy is per-job on-chain settlement**, with channels used for
+cheap/high-frequency traffic (see §3b). Channels are **per (AP, provider)
+pair**, never per end user.
 **Design:** [`docs/design/design-offchain-escrow-channels.md`](design/design-offchain-escrow-channels.md)
 **Code:** `gpn-agent/src/hub_channel.rs` (wire format + both state machines),
 `gpn-agent/src/hub_ap.rs` (AP side), `gpn-agent/src/bin/gpn_llm_provider.rs`
@@ -38,11 +40,14 @@ locks a deposit on chain, then each job is a pair of signatures
 
 ## 2. The three modes
 
-`POST /v1/chat/completions` accepts `"mode"` in the body:
+`POST /v1/chat/completions` accepts an optional `"mode"` in the body. **An
+explicit `mode` always wins.** Without one, the AP applies its value-based
+policy (§3b).
 
 | `mode` | What it does | Money | Use it when |
 |---|---|---|---|
-| `"channel"` *(default)* | Off-chain signed settlement against a hub channel. No `create_job`, no block wait. | Escrow locked in the channel; per-job transfer is two signatures. | Normal API traffic. |
+| *(omitted)* | **Value-based routing**: expensive jobs settle on chain, cheap ones use a channel. | Per-job escrow or batched channel. | Normal API traffic. |
+| `"channel"` | Off-chain signed settlement against a hub channel. No `create_job`, no block wait. | Escrow locked in the channel; per-job transfer is two signatures. | A client/AP that explicitly wants batching. |
 | `"settle"` / `"onchain"` | Classic per-request on-chain escrow (`create_job` → claim → settle). | Escrow + settlement on chain, per job. | Auditing, debugging, or when you *want* a per-job on-chain receipt. |
 | `"passthrough"` | Direct provider `/infer` call. | **Nothing** — free/unbilled, nothing recorded. | Latency probes and the free tier. Not a market: no payment, no receipt. |
 
@@ -154,6 +159,52 @@ the latest mutually-signed state is closeable on chain at any time.
 
 ---
 
+## 3b. Value-based routing (default since 2026-10-22)
+
+The AP does **not** guess who is calling. It looks at what the job is worth:
+
+```
+if the request carries an explicit "mode"        → honour it
+else if job value >= GPN_SETTLE_MIN_GPN          → per-job on-chain settle
+else if the provider speaks channels             → channel (batched)
+else                                             → per-job on-chain settle
+```
+
+`job value` is the escrow ceiling the request would lock (the final charge is
+unknown until the model finishes). The threshold is **measured, not invented**:
+
+| quantity | base units | GPN |
+|---|---|---|
+| `create_job` fee (AP) | 108 157 199 | 0.000108 |
+| `complete_job` fee (AP) | 108 157 116 | 0.000108 |
+| **measured per-job settle cost** | **216 314 315** | **0.000216** |
+| `GPN_SETTLE_MIN_GPN` (10×) | **2 163 143 150** | **0.00216** |
+
+Fees were read from `TransactionPayment::TransactionFeePaid` on the live chain
+(blocks 175411 / 175413). 10× keeps the settlement fee below ~10 % of the value
+transferred; below that, paying five extrinsics to move a rounding error is just
+donating fees to the validator set.
+
+Live quotes on this testnet straddle the threshold the way we want:
+
+* `max_tokens: 8`, short prompt → ~3.2e7 base units → **channel**
+* `max_tokens: 2000` → ~5.07e9 base units → **on-chain settle**
+
+The decision is logged per request with `GPN_ROUTING_DEBUG=1`, and once at
+startup:
+
+```
+[pricing] settle threshold=2163143150 base units (0.00216314315 GPN) = 10x measured per-job settle cost (216314315 base units); mode=settle, channel=on
+[hub] capital: 1 channel(s) × 50 GPN = 50 GPN locked (per AP-provider pair; users share these)
+```
+
+**Who decides to batch?** The AP operator — *not* the end user. A channel is
+between an AP and a provider; users never hold a channel and there are no
+per-user tiers. `GPN_ESCROW_MODE=channel` is the explicit "batch my volume"
+switch for an operator who wants it.
+
+---
+
 ## 4. Lifecycle & operations
 
 **Open** — once per `(AP, provider)` pair, on the first job that needs it:
@@ -162,25 +213,43 @@ the latest mutually-signed state is closeable on chain at any time.
 
 **Per job** — no extrinsics at all.
 
-**Close** — a background settler thread closes cooperatively when the provider's
-off-chain balance reaches `GPN_HUB_CLOSE_AT` (default deposit/2) or the update
-count reaches `GPN_HUB_CLOSE_NONCE` (default 500). The next job opens a fresh
-channel. A channel whose provider never returns a result simply ages out; the
-deposit stays on chain and is recoverable.
+**Close** — settlement is **time-driven**: a background settler thread closes
+cooperatively after `GPN_HUB_SETTLE_SECS` (default 24 h). Two triggers can fire
+*earlier* (whichever comes first):
+
+* `GPN_HUB_CLOSE_AT` — the provider's unredeemed credit reaches **25 GPN**
+  (half the 50 GPN deposit). This is the load-driven trigger; it is what
+  self-limits a busy AP.
+* `GPN_HUB_CLOSE_NONCE` — 50 000 signed updates (a flood valve; never reached
+  in normal traffic).
+
+The next job opens a fresh channel. A channel whose provider never returns a
+result simply ages out; the deposit stays on chain and is recoverable.
 
 ### Environment
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `GPN_ESCROW_MODE` | `channel` | `channel` = enable; `onchain`/`off` = disable the module entirely (AP and provider). |
-| `GPN_HUB_CHANNEL_DEPOSIT` | `100 GPN` | Deposit locked per channel open. |
-| `GPN_HUB_CHANNEL_TTL` | `25920` blocks (~4.5 d) | Channel lifetime. |
-| `GPN_HUB_CLOSE_AT` | deposit/2 | Settle on chain once the provider's balance reaches this. |
-| `GPN_HUB_CLOSE_NONCE` | 500 | …or after this many off-chain updates. |
+| `GPN_ESCROW_MODE` | `settle` | `settle` = value-based routing; `channel` = batch everything (opt-in for volume); `onchain`/`off` = disable the module entirely. |
+| `GPN_SETTLE_MIN_GPN` | `2163143150` (base units) | Value threshold: jobs at/above it settle per-job on chain. Derived as 10× the measured `create_job`+`complete_job` fee (216,314,315 base units). |
+| `GPN_HUB_CHANNEL_DEPOSIT` | `50 GPN` | Deposit locked **per (AP, provider) pair**. |
+| `GPN_HUB_SETTLE_SECS` | `86400` (24 h) | Scheduled cooperative settlement interval. |
+| `GPN_HUB_CLOSE_AT` | `25 GPN` (deposit/2) | Early settle once the provider's credit reaches this. |
+| `GPN_HUB_CLOSE_NONCE` | `50000` | …or after this many off-chain updates. |
+| `GPN_HUB_CHANNEL_TTL` | `9000` blocks (~30 h @ 12 s) | Channel lifetime — must exceed `GPN_HUB_SETTLE_SECS`. |
 | `GPN_HUB_JOB_DEADLINE_MS` | 180000 | Per-job deadline (also the HTTP timeout for `/channel/job`). |
 | `GPN_HUB_STATE` | `~/.gpn/hub_channels.json` | AP-side channel registry. |
 | `GPN_PROVIDER_CHANNEL_STATE` | `~/.gpn/provider_channels.json` | Provider-side channel state. |
+| `GPN_PENDING_WARN` | `12` | Warn when this many extrinsics are stuck in the pool (settlement backpressure). |
+| `GPN_ROUTING_DEBUG` | off | Log the per-request routing decision. |
 | `GPN_CHANNEL_SKIP_CHAIN_CHECK` | off | Dev only: accept a channel without verifying it on chain. |
+
+**TTL vs settle interval.** The pallet enforces `expires_at` in **blocks**, and
+this testnet's block time varies from ~3 s to ~90 s (median ≈ 12 s). 9000 blocks
+is ~30 h at the median and ~37 h at a 15 s target — enough margin over the 24 h
+settle interval that a channel never expires before its scheduled close. If the
+median block time on a future network is much slower, raise the block count, not
+the wall-clock assumption.
 
 **Provider requirement:** the provider must serve `POST /channel/job` and
 `GET /channel/status` on `heartbeat_port + 1` (8093 → 8094). The AP probes
@@ -204,6 +273,17 @@ entry is either in flight or waiting to expire.
 
 ## 5. Known limits
 
+* **Capital is per (AP, provider) pair, not per user.** The AP aggregates every
+  user onto one channel per provider, so *user* concurrency does not multiply
+  the locked float. Total float = (providers with an open channel) × deposit.
+  At 50 GPN per pair: **1 provider = 50 GPN, 3 = 150 GPN, 10 = 500 GPN**. At
+  1 000 providers this config would lock **50 000 GPN**, which is why the
+  documented next step at that scale is a **10 GPN deposit with a 5 GPN early
+  trigger** (or user-signed escrow, which moves the float to the users).
+* **Counterparty/FX exposure:** with a 24 h settle cadence the provider carries
+  up to 24 h of unredeemed credit. That is accepted deliberately — it is the
+  price of zero per-job transactions — and can be shortened at any time by the
+  25 GPN early trigger, the nonce valve, or an operator-initiated close.
 * **The AP is trusted for liveness, not for correctness.** It pre-signs the
   post-job state, so a provider can always collect for work it did; but a
   provider that goes dark after `accept` holds a payment it never earned until
@@ -214,6 +294,10 @@ entry is either in flight or waiting to expire.
   falls back on-chain — automatically and logged.
 * **One GPU, one job:** the provider serialises jobs, so channel latency under
   concurrency is bounded by inference, not by the channel.
+* **On-chain settlement is 2 extrinsics for the AP (3 more for the provider).**
+  At a handful of chats a minute that is nothing; if the node's pending pool
+  starts to grow, the AP logs `[settle] WARNING: N extrinsics pending…` — that
+  is the signal to switch volume to `GPN_ESCROW_MODE=channel`.
 * **Rolling back** is a config change, not a data change: `GPN_ESCROW_MODE=onchain`
-  on both sides returns every request to per-job on-chain escrow. The on-chain
-  channel remains open and can be closed cooperatively at any time.
+  (or `off`) on both sides returns every request to per-job on-chain escrow. The
+  on-chain channel remains open and can be closed cooperatively at any time.

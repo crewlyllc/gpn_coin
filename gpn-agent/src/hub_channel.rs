@@ -496,6 +496,13 @@ pub struct HubChannel {
     pub deposit: u128,
     pub state: ChannelState,
     pub request_nonce: u64,
+    /// When this channel was opened (wall clock, ms). Drives the periodic
+    /// (time-based) settlement: the provider carries up to one settlement
+    /// interval of unredeemed credit. Defaults to "now" when a state file
+    /// predates the field, so a restart never force-closes an old channel by
+    /// surprise — it just starts a fresh interval.
+    #[serde(default = "now_ms")]
+    pub opened_at_ms: u64,
     /// Latest provider-signed state (the cheapest cooperative close).
     pub latest_provider_sig: Option<Signature64>,
     pending: std::collections::BTreeMap<u64, Pending>,
@@ -509,6 +516,7 @@ impl HubChannel {
             deposit,
             state: ChannelState::new(deposit),
             request_nonce: 0,
+            opened_at_ms: now_ms(),
             latest_provider_sig: None,
             pending: Default::default(),
             settled_jobs: Default::default(),
@@ -805,6 +813,13 @@ impl HubChannel {
     pub fn should_close(&self, max_unsettled: u128, max_nonce_gap: u64) -> bool {
         (max_unsettled > 0 && self.state.balance_provider >= max_unsettled)
             || (max_nonce_gap > 0 && self.state.nonce >= max_nonce_gap)
+    }
+
+    /// Has this channel been open long enough for its scheduled (time-based)
+    /// settlement? `settle_secs == 0` disables periodic settlement.
+    pub fn due_for_periodic_settle(&self, settle_secs: u64) -> bool {
+        settle_secs > 0
+            && now_ms().saturating_sub(self.opened_at_ms) >= settle_secs.saturating_mul(1000)
     }
 
     /// Build the cooperative-close material for the *latest signed* state.

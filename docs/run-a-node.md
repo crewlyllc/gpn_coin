@@ -697,10 +697,33 @@ It is on by default and **falls back per request** to the on-chain path if
 anything is unavailable (provider doesn't serve `/channel/job`, the channel
 can't be opened, a signature fails), so enabling it can never lose a job.
 
+**Default policy since 2026-10-22 — value-based routing.** Expensive jobs
+settle **per-job on chain** (a real receipt each), cheap high-frequency jobs
+batch over a channel:
+
+```
+explicit "mode" in the request      → honour it
+job value >= GPN_SETTLE_MIN_GPN     → per-job on-chain settle
+provider speaks channels            → channel (batched)
+otherwise                           → per-job on-chain settle
+```
+
+The threshold is derived, not guessed: the measured `create_job` +
+`complete_job` fee on this chain is **216 314 315 base units** (0.000216 GPN,
+read from `TransactionPayment::TransactionFeePaid`), so the default is
+**2 163 143 150 base units (0.00216 GPN) = 10× that cost**. On this testnet a
+`max_tokens: 8` chat quotes ~3.2e7 (→ channel) and a `max_tokens: 2000` chat
+~5.07e9 (→ on chain).
+
+A channel is between **this AP and one provider** — not between a user and the
+AP. The operator decides to batch; users never hold channels and there are no
+per-user tiers.
+
 ### Access point
 
 ```bash
-# defaults: GPN_ESCROW_MODE=channel, deposit 100 GPN, TTL 25 920 blocks
+# defaults: settle threshold 0.00216 GPN, 50 GPN per (AP, provider) channel,
+# 24 h settle interval, 9000-block TTL
 gpn_scheduler --listen 0.0.0.0:8092 --signer-uri <ap-seed> --allow-hot-wallet
 ```
 
@@ -747,21 +770,30 @@ multi-instance hosts).
 
 | Env | Default | Meaning |
 |---|---|---|
-| `GPN_ESCROW_MODE` | `channel` | `onchain` = always use per-job escrow (the old behaviour) |
-| `GPN_HUB_CHANNEL_DEPOSIT` | `1e14` (100 GPN) | locked once per provider; `0` disables channel mode |
-| `GPN_HUB_CHANNEL_TTL` | `25920` blocks | the channel deadline (force-close window) |
-| `GPN_HUB_CLOSE_AT` | `deposit/2` | cooperative settle threshold (provider balance) |
-| `GPN_HUB_CLOSE_NONCE` | `500` | ...or this many off-chain updates |
+| `GPN_ESCROW_MODE` | `settle` | `settle` = value-based routing (see above); `channel` = batch everything (opt-in for volume); `onchain`/`off` = always per-job escrow |
+| `GPN_SETTLE_MIN_GPN` | `2163143150` | value threshold in base units (10× the measured settle fee) |
+| `GPN_HUB_CHANNEL_DEPOSIT` | `5e13` (50 GPN) | locked **per (AP, provider) pair**; `0` disables channel mode. Users share the channel, so this does not scale with users |
+| `GPN_HUB_SETTLE_SECS` | `86400` (24 h) | scheduled cooperative settlement interval |
+| `GPN_HUB_CLOSE_AT` | `2.5e13` (25 GPN = deposit/2) | early settle once the provider's credit reaches this |
+| `GPN_HUB_CLOSE_NONCE` | `50000` | ...or this many off-chain updates (flood valve) |
+| `GPN_HUB_CHANNEL_TTL` | `9000` blocks (~30 h @ 12 s median) | the channel deadline (force-close window). Must exceed `GPN_HUB_SETTLE_SECS`; block times vary 3–90 s so wall-clock TTL drifts |
 | `GPN_HUB_STATE` | `~/.gpn/hub_channels.json` | channel registry (restart-safe) |
+| `GPN_PENDING_WARN` | `12` | warn when this many extrinsics sit in the pool |
+
+**Capital:** total float = (providers with an open channel) × 50 GPN. One
+provider → 50 GPN, three → 150 GPN, ten → 500 GPN. At 1 000 providers this
+would lock 50 000 GPN, so the documented next step at that scale is a 10 GPN
+deposit with a 5 GPN early trigger (or user-signed escrow).
 
 Watch it work:
 
 ```
-[hub] opening channel → 5ENq… (deposit=100000000000000 ttl=25920 blocks, once)
-[hub] channel 2 ready for 5ENq… (deposit 100000000000000)
-[hub] job 1792609125307 served off-chain on channel 2 (nonce 2, provider balance 6026365344)
-[hub] settling channel 2 (nonce 2, provider 6026365344)
-[hub] channel 2 settled on chain
+[pricing] settle threshold=2163143150 base units (0.00216314315 GPN) = 10x measured per-job settle cost (216314315 base units); mode=settle, channel=on
+[hub] capital: 1 channel(s) × 50 GPN = 50 GPN locked (per AP-provider pair; users share these)
+[hub] off-chain escrow ENABLED (mode=settle, deposit=50000000000000, ttl=9000 blocks, settle_every=86400s, close_at=25000000000000, ...)
+[hub] job 1792706257296 served off-chain on channel 7 (nonce 1, provider balance 39954841)
+[hub] channel 7 due for scheduled settlement (86400s interval)
+[hub] channel 7 settled on chain
 ```
 
 `POST /jobs` responses gain `"escrow":"channel"`, `channel_id`, and the
@@ -791,7 +823,8 @@ on-chain channel verification — **dev only**.
 
 ```bash
 # once per provider — this is the only funding tx
-gpn_channel deposit ws://127.0.0.1:9944 //Charlie 5ENq…Sp5Q 100000000000000 25920
+# (50 GPN deposit, 9000-block TTL)
+gpn_channel deposit ws://127.0.0.1:9944 //Charlie 5ENq…Sp5Q 50000000000000 9000
 gpn_channel id      ws://127.0.0.1:9944 //Charlie 5ENq…Sp5Q
 gpn_channel info    ws://127.0.0.1:9944 1
 # settle back

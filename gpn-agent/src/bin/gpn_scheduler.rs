@@ -408,6 +408,14 @@ fn fast_ap_enabled() -> bool {
         .unwrap_or(true)
 }
 
+/// Per-request settlement-routing log. Off by default (one line per request is
+/// noisy); `GPN_ROUTING_DEBUG=1` turns it on for a debugging session.
+fn routing_debug() -> bool {
+    std::env::var("GPN_ROUTING_DEBUG")
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(false)
+}
+
 // ── chat-mode economics ─────────────────────────────────────────────────────
 //
 // `/v1/chat/completions` derives ONE price card per request (see
@@ -2312,6 +2320,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // failure falls back to the on-chain job path below.
     let hub = gpn_agent::hub_ap::HubCtx::from_env(&signer_uri);
     gpn_agent::hub_ap::spawn_settler(hub.clone(), rt.clone(), client.clone());
+    // Settlement backpressure watch (see `ChainClient::pending_extrinsics`): with
+    // on-chain settle as the default every chat is 2–3 AP extrinsics, so a pool
+    // that keeps growing is the first sign that settlement has become the
+    // bottleneck. Warn only — never shed load on a guess.
+    {
+        let rt = rt.clone();
+        let client = client.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            let warn_at: usize = std::env::var("GPN_PENDING_WARN")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(12);
+            if let Some(n) = rt.block_on(client.pending_extrinsics()) {
+                if n >= warn_at {
+                    eprintln!(
+                        "[settle] WARNING: {n} extrinsics pending in the pool (threshold {warn_at}) — \
+                         on-chain settlement is falling behind; consider GPN_ESCROW_MODE=channel for volume"
+                    );
+                }
+            }
+        });
+    }
 
     let registry = Arc::new(Mutex::new(Vec::<Provider>::new()));
     // #46 Phase 3 step 2: capabilities delivered by providers' own pull polls.
@@ -2540,7 +2571,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return;
                 }
                 (Method::Get, ["health"]) => {
-                    json!({"status":"ok","providers": registry.lock().unwrap().len()})
+                    json!({"status":"ok","providers": registry.lock().unwrap().len(),
+                        // Settlement policy, so an operator can verify the env
+                        // actually took effect without reading the logs.
+                        "settlement": {
+                            "mode": hub.policy.mode.as_str(),
+                            "channel_enabled": hub.enabled,
+                            "settle_min_gpn_base_units": hub.policy.min_gpn.to_string(),
+                            "settle_min_gpn": hub.policy.min_gpn as f64
+                                / gpn_agent::settle_policy::GPN_UNITS as f64,
+                            "channel_ttl_blocks": hub.ttl,
+                            "channel_settle_secs": hub.settle_secs,
+                            "channel_deposit_base_units": hub.deposit.to_string(),
+                            "channel_deposit_gpn": hub.deposit as f64
+                                / gpn_agent::settle_policy::GPN_UNITS as f64,
+                            "channel_close_at_base_units": hub.close_at.to_string(),
+                            "channel_close_at_gpn": hub.close_at as f64
+                                / gpn_agent::settle_policy::GPN_UNITS as f64,
+                        }
+                    })
                 }
                 // Cheap, unauthenticated RTT probe. A client times this GET to measure
                 // its OWN round-trip to this access point — used to pick the nearest AP
@@ -2795,17 +2844,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             return;
                         }
                     };
-                    // ── payment mode ───────────────────────────────────────
-                    // `channel` (default) settles off-chain with signed messages
-                    // (no create_job, no block-inclusion wait); `settle`/`onchain`
-                    // forces the per-request on-chain escrow cycle; `passthrough`
-                    // is the free/unbilled direct-inference tier.
-                    let mode = v
+                    // ── payment policy ─────────────────────────────────────
+                    // The *client* may name a mode (`channel` / `settle` /
+                    // `onchain` / `passthrough`); otherwise the AP's value-based
+                    // policy decides once the price is known (below). Channels
+                    // exist between this AP and one provider, so batching is the
+                    // AP operator's call, not the end user's.
+                    let explicit_mode = v
                         .get("mode")
                         .and_then(|x| x.as_str())
-                        .unwrap_or("channel")
-                        .to_ascii_lowercase();
-                    let passthrough = mode == "passthrough";
+                        .map(|s| s.to_ascii_lowercase());
                     let mut text = String::new();
                     let mut usage: Option<(u32, u32)> = None;
                     let mut channel_meta: Option<(u64, u64, u128, u128, u128)> = None;
@@ -2857,6 +2905,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         prompt_tokens,
                         chat_max_tokens,
                     );
+                    // ── value-based routing ────────────────────────────────────
+                    // Job value = the escrow ceiling the request would lock: the
+                    // thing we are about to be paid for. (The final charge is
+                    // unknown until the model finishes, so the quote is the only
+                    // honest input at decision time.)
+                    let price = chat_price_per_token.saturating_mul(escrow_units as u128);
+                    let (route, why) = hub.policy.decide(explicit_mode.as_deref(), price);
+                    if routing_debug() {
+                        eprintln!(
+                            "[routing] {} (value={} base units, threshold={}, mode={}, channel={}) → {}",
+                            why.as_str(),
+                            price,
+                            hub.policy.min_gpn,
+                            hub.policy.mode.as_str(),
+                            if hub.enabled { "yes" } else { "no" },
+                            route.as_str()
+                        );
+                    }
+                    let passthrough = route == gpn_agent::settle_policy::Route::Passthrough;
                     // ── off-chain escrow (channel) fast path ───────────────
                     // The AP signs a channel state update, the provider runs the
                     // job and returns a signed result; zero extrinsics and zero
@@ -2864,8 +2931,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // nothing could have been paid (`NotAttempted`); an
                     // ambiguous failure (assignment possibly accepted) must not
                     // retry on-chain or the caller would pay twice.
-                    if !passthrough && mode != "settle" && mode != "onchain" {
-                        let price = chat_price_per_token.saturating_mul(escrow_units as u128);
+                    if route == gpn_agent::settle_policy::Route::Channel {
                         // Item #63: hand the provider the per-token rates so it
                         // settles at `min(actual usage, price)` and the unused
                         // ceiling is never charged. `price` stays the hard cap.

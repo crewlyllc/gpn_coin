@@ -28,12 +28,14 @@ pub mod moderation;
 pub mod modes;
 pub mod net;
 pub mod network_registry;
+pub mod nodestatus;
 pub mod ollama;
 pub mod pricing;
 pub mod profitability;
 pub mod provider_policy;
 pub mod routing;
 pub mod seedlist;
+pub mod settle_policy;
 pub mod update;
 pub mod utils;
 

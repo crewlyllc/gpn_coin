@@ -64,9 +64,10 @@
       <span class="kicker">Live</span>
       <h2>Ask the network</h2>
       <p class="sub">This form calls <code>POST /api/v1/chat/completions</code> on gpncoin.ai. The Worker
-        proxies it over HTTPS to the access point, which settles the request against an off-chain
-        escrow channel — typically well under a second. (Set <code>"mode":"settle"</code> to pay
-        per request on-chain instead: that path adds a block-inclusion wait of tens of seconds.)</p>
+        proxies it over HTTPS to the access point. The access point routes by <b>job value</b>: a short
+        answer is cheap enough to settle on an off-chain escrow <b>channel</b> (batched, well under a
+        second), while an expensive request settles <b>per job on chain</b> and leaves its own receipt.
+        Send <code>"mode": "settle"</code> or <code>"mode": "channel"</code> to pin a path.</p>
 
       <div class="grid cols-2">
         <form class="card" id="try-form" autocomplete="off">
@@ -379,9 +380,10 @@ png.raise_for_status()
 open("cabin.png", "wb").write(png.content)
 print("saved cabin.png", len(png.content), "bytes", job["gpn"])</code></pre>
             </div>
-            <p class="hint mb-0">The result carries <code>gpn.payment</code> = <code>"channel"</code> for the
-              off-chain fast path (<code>"onchain"</code> only when the channel was unreachable — never both).
-              Images expire after 24 h; <code>expires_at</code> says when.</p>
+            <p class="hint mb-0">The result carries <code>gpn.payment</code> = <code>"channel"</code> when the
+              request was batched off-chain or <code>"onchain"</code> when it settled per job on chain
+              (with its own <code>job_id</code> receipt) — never both. Images expire after 24 h;
+              <code>expires_at</code> says when.</p>
           </div>
 
           <div class="qs-panel sub" id="py-sdk" role="tabpanel" aria-labelledby="py-tab-sdk" tabindex="0" hidden>
@@ -849,11 +851,11 @@ gpn/tok  = 3.793e-7 / 0.15 = 2.53 GPN per 1M</code></pre>
           model are both "cheap", but neither reasons like <code>gpt-6-astra</code> or
           <code>Claude Fable 5.1</code>. Cost per useful answer is the only fair denominator, and this page
           does not have that data.</li>
-        <li><b>Input metering is channel-first.</b> The default off-chain channel bills input at 15% of the
-          output rate. The on-chain pallet stores a single rate, so an on-chain job publishes a blended
-          rate that is exact when the completion runs to <code>max_tokens</code> and slightly under-bills
-          short completions. Exact two-rate settlement on-chain needs a pallet change; it is tracked, not
-          claimed.</li>
+        <li><b>Input metering is channel-first.</b> A cheap request that batches over a channel bills input
+          at 15% of the output rate. An expensive request settles per job on chain, and the pallet stores a
+          single rate, so that path publishes a blended rate that is exact when the completion runs to
+          <code>max_tokens</code> and slightly under-bills short completions. Exact two-rate settlement
+          on chain needs a pallet change; it is tracked, not claimed.</li>
         <li><b>No cache pricing, no batch discount, no SLA</b> on the testnet.</li>
       </ul>
 

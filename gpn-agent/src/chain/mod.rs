@@ -318,6 +318,38 @@ impl ChainClient {
         u64::from_str_radix(number_hex.trim_start_matches("0x"), 16).ok()
     }
 
+    /// How many extrinsics are sitting in the node's transaction pool.
+    ///
+    /// With per-job on-chain settlement as the default, every chat costs the AP
+    /// 2–3 extrinsics and the provider 3 more. That is fine at this testnet's
+    /// volume (a handful of chats a minute) but it is the first thing that will
+    /// break under load: a pool that never drains means settlement — not
+    /// inference — has become the bottleneck. The scheduler polls this and warns
+    /// past a threshold so we hear about it from the logs, not from a stuck UI.
+    pub async fn pending_extrinsics(&self) -> Option<usize> {
+        let http_url = self
+            .endpoint
+            .replace("ws://", "http://")
+            .replace("wss://", "https://");
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "author_pendingExtrinsics",
+            "params": []
+        });
+        let resp: serde_json::Value = self
+            .http
+            .post(&http_url)
+            .json(&body)
+            .send()
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        resp.get("result")?.as_array().map(|a| a.len())
+    }
+
     /// Public access to the parsed on-chain profitability feed (dollars /
     /// fraction / percent forms + `updated_at_block`). Returns `None` if the
     /// chain is unreachable or the feed has not been set by an operator yet.

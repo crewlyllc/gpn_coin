@@ -177,11 +177,13 @@ fn fixture(behaviour: Behaviour, enabled: bool) -> Fixture {
 
     let hub = Arc::new(HubCtx {
         enabled,
+        policy: gpn_agent::settle_policy::SettlePolicy::default(),
         signer: Arc::new(ap),
         registry: Mutex::new(HubRegistry::load(&state_path)),
         path: state_path.clone(),
         deposit: DEPOSIT,
         ttl: 100,
+        settle_secs: 86_400,
         close_at: DEPOSIT / 2,
         close_nonce: 500,
         job_deadline_ms: 10_000,

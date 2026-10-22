@@ -270,18 +270,20 @@ provider, the provider's inference, one HTTP response. **No block wait.**
 
 The steady-state number is the claim: **two orders of magnitude**, with the
 block time removed from the path. `open_channel` is amortized (one per provider
-per channel lifetime, TTL default 25 920 blocks ≈ 4.5 days) and `close_channel`
-happens once per settlement batch.
+per channel lifetime, 9000 blocks ≈ 30 h) and `close_channel` happens once per
+settlement batch — daily by default, early at 25 GPN of unredeemed credit.
 
 ## 17. Operating modes (safe fallback)
 
 | Env | Default | Meaning |
 |---|---|---|
-| `GPN_ESCROW_MODE` | `channel` | `channel` = try the off-chain path first; `onchain` = never use channels |
-| `GPN_HUB_CHANNEL_DEPOSIT` | `100 GPN` (1e14) | deposit locked when a hub channel is opened; `0` disables the AP hub entirely |
-| `GPN_HUB_CHANNEL_TTL` | `25920` blocks | channel deadline (the force-close window) |
-| `GPN_HUB_CLOSE_AT` | `deposit/2` | settle on chain when the provider balance reaches this |
-| `GPN_HUB_CLOSE_NONCE` | `500` | ...or after this many off-chain updates |
+| `GPN_ESCROW_MODE` | `settle` | `settle` = value-based routing (on-chain above the measured-fee threshold, channel below); `channel` = batch everything; `onchain`/`off` = never use channels |
+| `GPN_SETTLE_MIN_GPN` | `2163143150` base units | value threshold = 10× the measured create+complete fee (216 314 315) |
+| `GPN_HUB_CHANNEL_DEPOSIT` | `50 GPN` (5e13) | deposit locked **per (AP, provider) pair**; `0` disables the AP hub entirely |
+| `GPN_HUB_SETTLE_SECS` | `86400` | scheduled (time-based) cooperative settlement interval |
+| `GPN_HUB_CHANNEL_TTL` | `9000` blocks | channel deadline (the force-close window); must exceed `GPN_HUB_SETTLE_SECS` |
+| `GPN_HUB_CLOSE_AT` | `25 GPN` (deposit/2) | settle early when the provider balance reaches this |
+| `GPN_HUB_CLOSE_NONCE` | `50000` | ...or after this many off-chain updates |
 | `GPN_HUB_STATE` | `~/.gpn/hub_channels.json` | AP channel registry (survives restarts) |
 | `GPN_HUB_JOB_DEADLINE_MS` | `180000` | per-job deadline (inference + return) |
 | `GPN_PROVIDER_CHANNEL_STATE` | `~/.gpn/provider_channels.json` | provider channel state (persisted before inference runs) |

@@ -25,16 +25,29 @@ use std::time::{Duration, Instant};
 /// Everything the handler needs to route a job off-chain.
 pub struct HubCtx {
     pub enabled: bool,
+    /// Value-based settlement policy (`settle` by default: expensive jobs go
+    /// on chain, cheap ones batch over a channel).
+    pub policy: crate::settle_policy::SettlePolicy,
     pub signer: Arc<Sr25519Signer>,
     pub registry: Mutex<HubRegistry>,
     pub path: std::path::PathBuf,
     /// Deposit locked when a new hub channel is opened (base units).
+    ///
+    /// This is **per (AP, provider) pair**, NOT per user: the AP aggregates every
+    /// user onto one channel per provider, so peak *user* concurrency needs no
+    /// extra capital. Total locked = (providers we hold a channel with) × this.
     pub deposit: u128,
     /// Channel TTL in blocks.
     pub ttl: u32,
+    /// Scheduled (time-based) cooperative settlement interval, in seconds.
+    /// The provider carries up to this much unredeemed credit — that is the
+    /// accepted counterparty/FX exposure, shortened by the safety valves below
+    /// or by an operator-initiated close.
+    pub settle_secs: u64,
     /// Cooperative close when the provider's off-chain balance reaches this.
+    /// A **safety valve** that can fire earlier than `settle_secs`.
     pub close_at: u128,
-    /// ...or when this many off-chain updates have accumulated.
+    /// ...or when this many off-chain updates have accumulated (safety valve).
     pub close_nonce: u64,
     /// Per-job wall-clock deadline for the provider (inference + return).
     pub job_deadline_ms: u64,
@@ -58,25 +71,46 @@ const STALE_STATE_ATTEMPTS: u32 = 3;
 impl HubCtx {
     pub fn from_env(signer_uri: &str) -> Arc<Self> {
         let mode = std::env::var("GPN_ESCROW_MODE")
-            .unwrap_or_else(|_| "channel".to_string())
+            .unwrap_or_else(|_| "settle".to_string())
             .to_ascii_lowercase();
         let deposit: u128 = std::env::var("GPN_HUB_CHANNEL_DEPOSIT")
             .ok()
             .and_then(|s| s.parse().ok())
-            // 100 GPN — an AP-sized working balance, not a whale channel.
-            .unwrap_or(100_000_000_000_000);
+            // 50 GPN per (AP, provider) pair. The AP aggregates ALL users onto
+            // one channel per provider, so this is the capital cost of serving
+            // one provider — not of serving one user.
+            .unwrap_or(50_000_000_000_000);
+        // TTL must comfortably exceed the settlement interval, or a channel
+        // would expire (on-chain `expires_at`) before its scheduled settle:
+        // 9000 blocks ≈ 30 h at the observed ~12 s median (~37 h at a 15 s
+        // target), against a 24 h settle cadence. Blocks vary 3–90 s on this
+        // testnet, so wall-clock TTL drifts — the block count is what the
+        // pallet enforces.
         let ttl: u32 = std::env::var("GPN_HUB_CHANNEL_TTL")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(25_920); // ~4.5 days at 15 s blocks
+            .unwrap_or(9000);
+        // Settlement is TIME-driven (24 h by default). `close_at`/`close_nonce`
+        // remain as safety valves that may fire earlier.
+        let settle_secs: u64 = std::env::var("GPN_HUB_SETTLE_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(86_400);
+        // Settlement fires on whichever comes FIRST:
+        //   * `close_at` — half the deposit (25 GPN of a 50 GPN channel). This
+        //     is the load-driven trigger: under volume the channel tops out and
+        //     settles early instead of carrying a big unredeemed balance.
+        //   * `settle_secs` — the 24 h floor, for idle/low-volume channels.
+        //   * `close_nonce` — a very high valve against a flood of tiny updates.
         let close_at: u128 = std::env::var("GPN_HUB_CLOSE_AT")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(deposit / 2);
+            // Half the 50 GPN deposit.
+            .unwrap_or(25_000_000_000_000);
         let close_nonce: u64 = std::env::var("GPN_HUB_CLOSE_NONCE")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(500);
+            .unwrap_or(50_000);
         let job_deadline_ms: u64 = std::env::var("GPN_HUB_JOB_DEADLINE_MS")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -89,10 +123,32 @@ impl HubCtx {
             }
         };
         let signer = Sr25519Signer::from_uri(signer_uri).expect("hub signer");
-        let enabled = mode != "onchain" && mode != "off" && deposit > 0;
+        // Channel capability is a *fact*, not a policy: it exists when the
+        // operator has not turned the module off and there is a deposit.
+        let mut policy = crate::settle_policy::SettlePolicy::from_env(true);
+        let enabled = policy.mode != crate::settle_policy::EscrowMode::Off && deposit > 0;
+        policy.channel_available = enabled;
+        println!("{}", policy.banner());
+        let registry = HubRegistry::load(&path);
+        // Capital is per (AP, provider) pair — users share the channel — so the
+        // total float is the sum of the *live channels'* deposits, not anything
+        // multiplied by user count.
+        let live = registry.channels.len();
+        let locked: u128 = registry.channels.values().map(|c| c.deposit).sum();
+        println!(
+            "[hub] capital: {} channel(s) × {} GPN = {} GPN locked (per AP-provider pair; users share these)",
+            live,
+            deposit as f64 / crate::settle_policy::GPN_UNITS as f64,
+            locked as f64 / crate::settle_policy::GPN_UNITS as f64,
+        );
         if enabled {
             println!(
-                "[hub] off-chain escrow ENABLED (channel/{mode}, deposit={deposit}, ttl={ttl} blocks, state={})",
+                "[hub] off-chain escrow ENABLED (mode={}, deposit={}, ttl={} blocks, settle_every={}s, close_at={}, state={})",
+                mode,
+                deposit,
+                ttl,
+                settle_secs,
+                close_at,
                 path.display()
             );
         } else {
@@ -100,11 +156,13 @@ impl HubCtx {
         }
         Arc::new(Self {
             enabled,
+            policy,
             signer: Arc::new(signer),
-            registry: Mutex::new(HubRegistry::load(&path)),
+            registry: Mutex::new(registry),
             path,
             deposit,
             ttl,
+            settle_secs,
             close_at,
             close_nonce,
             job_deadline_ms,
@@ -835,7 +893,28 @@ pub fn spawn_settler(hub: Arc<HubCtx>, rt: Arc<tokio::runtime::Runtime>, client:
             reg.channels
                 .iter()
                 .filter(|(_, ch)| {
-                    ch.pending_len() == 0 && ch.should_close(hub.close_at, hub.close_nonce)
+                    // Scheduled settlement is TIME-driven (default 24 h).
+                    // `should_close` is only a safety valve: fire early if the
+                    // provider has accumulated a large balance or a huge number
+                    // of off-chain updates.
+                    let timed = ch.due_for_periodic_settle(hub.settle_secs);
+                    let valve = ch.should_close(hub.close_at, hub.close_nonce);
+                    if ch.pending_len() == 0 && (timed || valve) {
+                        if timed {
+                            println!(
+                                "[hub] channel {} due for scheduled settlement ({}s interval)",
+                                ch.channel_id, hub.settle_secs
+                            );
+                        } else {
+                            println!(
+                                "[hub] channel {} closing early (safety valve: balance={}, nonce={})",
+                                ch.channel_id, ch.state.balance_provider, ch.state.nonce
+                            );
+                        }
+                        true
+                    } else {
+                        false
+                    }
                 })
                 .filter_map(|(k, ch)| ch.close_material(&hub.signer).ok().map(|m| (k.clone(), m)))
                 .collect()
@@ -894,5 +973,102 @@ mod tests {
         let a = next_job_id();
         let b = next_job_id();
         assert!(b > a);
+    }
+
+    /// TTL / close_at / policy come from the environment and the defaults are
+    /// the ones the runbook documents (300 blocks ≈ 60 min, 5 GPN).
+    /// The early trigger fires when the provider's unredeemed credit reaches
+    /// half the deposit. Tested with a tiny deposit — the rule is "half the
+    /// deposit", so no 25 GPN of traffic is needed to prove it; the production
+    /// numbers (50 GPN deposit / 25 GPN trigger) are asserted below.
+    #[test]
+    fn early_settle_fires_at_half_the_deposit() {
+        let deposit = 1_000u128;
+        let trigger = deposit / 2;
+        let mut ch = crate::hub_channel::HubChannel::new(9, deposit);
+        assert!(!ch.should_close(trigger, 50_000), "starts at zero credit");
+        ch.state.balance_provider = trigger - 1;
+        assert!(!ch.should_close(trigger, 50_000), "below half the deposit");
+        ch.state.balance_provider = trigger;
+        assert!(ch.should_close(trigger, 50_000), "credit reached half the deposit");
+    }
+
+    /// The `close_nonce` flood valve still works on its own.
+    #[test]
+    fn nonce_valve_is_independent() {
+        let mut ch = crate::hub_channel::HubChannel::new(10, 1_000_000);
+        ch.state.nonce = 49_999;
+        assert!(!ch.should_close(0, 50_000));
+        ch.state.nonce = 50_000;
+        assert!(ch.should_close(0, 50_000));
+    }
+
+    #[test]
+    fn hub_env_defaults_and_overrides() {
+        static ENV_LOCK: Mutex<()> = Mutex::new(());;
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for k in [
+            "GPN_ESCROW_MODE",
+            "GPN_HUB_CHANNEL_TTL",
+            "GPN_HUB_CLOSE_AT",
+            "GPN_HUB_CHANNEL_DEPOSIT",
+            "GPN_HUB_SETTLE_SECS",
+            "GPN_SETTLE_MIN_GPN",
+        ] {
+            std::env::remove_var(k);
+        }
+        let d = HubCtx::from_env("//Alice");
+        assert_eq!(d.ttl, 9000, "≈30 h at 12 s blocks, > 24 h settle interval");
+        assert_eq!(d.deposit, 50_000_000_000_000, "50 GPN per (AP, provider)");
+        assert_eq!(d.settle_secs, 86_400, "settle every 24 h");
+        assert_eq!(d.close_at, 25_000_000_000_000, "25 GPN = half of a 50 GPN deposit");
+        assert_eq!(d.close_at * 2, d.deposit);
+        assert_eq!(d.close_nonce, 50_000);
+        assert!(
+            d.ttl as u64 * 12 >= d.settle_secs,
+            "TTL at 12 s blocks must exceed the settle interval"
+        );
+        assert!(d.enabled);
+        assert_eq!(d.policy.mode, crate::settle_policy::EscrowMode::Settle);
+        assert_eq!(d.policy.min_gpn, crate::settle_policy::DEFAULT_SETTLE_MIN_GPN);
+        drop(d);
+
+        std::env::set_var("GPN_HUB_CHANNEL_TTL", "720");
+        std::env::set_var("GPN_HUB_CLOSE_AT", "1000000000000");
+        std::env::set_var("GPN_HUB_SETTLE_SECS", "3600");
+        std::env::set_var("GPN_HUB_CHANNEL_DEPOSIT", "7000000000000");
+        std::env::set_var("GPN_ESCROW_MODE", "onchain");
+        let o = HubCtx::from_env("//Alice");
+        assert_eq!(o.ttl, 720);
+        assert_eq!(o.close_at, 1_000_000_000_000);
+        assert_eq!(o.settle_secs, 3_600);
+        assert_eq!(o.deposit, 7_000_000_000_000);
+        assert!(!o.enabled);
+        assert!(!o.policy.channel_available);
+        drop(o);
+
+        for k in [
+            "GPN_ESCROW_MODE",
+            "GPN_HUB_CHANNEL_TTL",
+            "GPN_HUB_CLOSE_AT",
+            "GPN_HUB_SETTLE_SECS",
+            "GPN_HUB_CHANNEL_DEPOSIT",
+        ] {
+            std::env::remove_var(k);
+        }
+    }
+
+    /// The periodic settle must not fire before its interval, and must fire
+    /// after it — with `0` meaning "disabled".
+    #[test]
+    fn periodic_settlement_is_time_based() {
+        let mut ch = crate::hub_channel::HubChannel::new(7, 50_000_000_000_000);
+        ch.opened_at_ms = crate::hub_channel::now_ms().saturating_sub(3_600_000);
+        assert!(!ch.due_for_periodic_settle(86_400));
+        assert!(ch.due_for_periodic_settle(3_600));
+        assert!(!ch.due_for_periodic_settle(0));
+        // A fresh channel is never immediately due.
+        let fresh = crate::hub_channel::HubChannel::new(8, 1);
+        assert!(!fresh.due_for_periodic_settle(1));
     }
 }
