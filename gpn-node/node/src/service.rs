@@ -1305,6 +1305,94 @@ pub(crate) fn mining_allowed(role: sc_service::Role, idle: bool) -> bool {
     miner_should_run(role) && !idle
 }
 
+/// How long the consensus worker may hand the miner **no template** before we
+/// say so out loud.
+///
+/// `worker.metadata()` is `None` while `sc-consensus-pow` has no fresh proposal
+/// for us — normal for a few hundred ms after every import. A *long* spell of it
+/// was the one authoring stall the miner loop reported **nothing** about: it just
+/// slept 100 ms and retried. That made a 97 s gap unattributable in the journal —
+/// no seal line (we were not solving), no park line (we were not idled) and no
+/// warning either, so the debug crons could only *infer* a cause (see #52/#54).
+/// 30 s is comfortably above a normal inter-block gap at the 15 s target and well
+/// below the 60 s+ tail that clients feel.
+const TEMPLATE_GAP_WARN_MS: u128 = 30_000;
+
+/// One line to emit about a template gap: `true` = warn (a stall), `false` = info
+/// (it recovered).
+struct GapLine {
+    warn: bool,
+    text: String,
+}
+
+/// Edge-triggered template-gap tracker: one WARN when the miner has had no work
+/// for `TEMPLATE_GAP_WARN_MS`, one INFO when a template arrives again, silent in
+/// between (the loop runs many times a second).
+struct TemplateGap {
+    /// Millisecond timestamp of the first iteration without a template.
+    since_ms: Option<u128>,
+    warned: bool,
+}
+
+impl TemplateGap {
+    fn new() -> Self {
+        Self {
+            since_ms: None,
+            warned: false,
+        }
+    }
+
+    /// Feed one loop iteration.
+    ///
+    /// `has_template` is `worker.metadata().is_some()`; `now_ms` is milliseconds
+    /// since the miner thread started (monotonic, so a backwards wall clock can
+    /// never fabricate a gap).
+    fn update(&mut self, has_template: bool, now_ms: u128) -> Option<GapLine> {
+        if has_template {
+            let started = self.since_ms.take()?;
+            if !self.warned {
+                // A short wait between blocks is normal — say nothing.
+                return None;
+            }
+            self.warned = false;
+            let secs = now_ms.saturating_sub(started) as f64 / 1000.0;
+            return Some(GapLine {
+                warn: false,
+                text: format!(
+                    "miner: consensus template available again after {secs:.1}s without work"
+                ),
+            });
+        }
+
+        let started = *self.since_ms.get_or_insert(now_ms);
+        if self.warned {
+            return None;
+        }
+        let waited = now_ms.saturating_sub(started);
+        if waited < TEMPLATE_GAP_WARN_MS {
+            return None;
+        }
+        self.warned = true;
+        let secs = waited as f64 / 1000.0;
+        Some(GapLine {
+            warn: true,
+            text: format!(
+                "miner has had NO consensus template for {secs:.1}s (not parked, not solving): \
+                 the authoring gap is on the proposer/consensus side, not the sealer"
+            ),
+        })
+    }
+}
+
+/// Emit a [`GapLine`] at the level it asks for.
+fn log_gap_line(line: GapLine) {
+    if line.warn {
+        log::warn!("{}", line.text);
+    } else {
+        log::info!("{}", line.text);
+    }
+}
+
 /// Emits one log line per parking transition (never one per 500 ms poll).
 struct ParkLog {
     state: Option<&'static str>,
@@ -1436,6 +1524,8 @@ fn spawn_gpu_miner(worker: MiningWorker, author: Option<[u8; 32]>) {
             let mut last_pre_hash: Option<<Block as BlockT>::Hash> = None;
             let mut nonce: u64 = 0;
             let mut park = ParkLog::new();
+            let started_at = std::time::Instant::now();
+            let mut gap = TemplateGap::new();
             loop {
                 // Full stop when the GPU belongs to something else: an AI job
                 // (the provider holds the yield flag) or an operator idle window
@@ -1451,7 +1541,13 @@ fn spawn_gpu_miner(worker: MiningWorker, author: Option<[u8; 32]>) {
                     std::thread::sleep(Duration::from_millis(GPU_YIELD_SLEEP_MS));
                     continue;
                 }
-                if let Some(metadata) = worker.metadata() {
+                // Attribute a long absence of work instead of leaving it silent.
+                let metadata = worker.metadata();
+                if let Some(line) = gap.update(metadata.is_some(), started_at.elapsed().as_millis())
+                {
+                    log_gap_line(line);
+                }
+                if let Some(metadata) = metadata {
                     let pre_hash = metadata.pre_hash;
                     let target = metadata.difficulty;
 
@@ -1532,6 +1628,8 @@ fn spawn_cpu_miner(worker: MiningWorker, author: Option<[u8; 32]>) {
             log::info!("CPU light-cache miner online (epoch {DEV_EPOCH}); no GPU backend");
             let mut nonce: u64 = 0;
             let mut park = ParkLog::new();
+            let started_at = std::time::Instant::now();
+            let mut gap = TemplateGap::new();
             loop {
                 // Full stop (same contract as the GPU miner): an AI job's yield
                 // flag or an operator idle window means we search no nonces at
@@ -1544,7 +1642,13 @@ fn spawn_cpu_miner(worker: MiningWorker, author: Option<[u8; 32]>) {
                     std::thread::sleep(Duration::from_millis(GPU_YIELD_SLEEP_MS));
                     continue;
                 }
-                if let Some(metadata) = worker.metadata() {
+                // Same gap attribution as the GPU path.
+                let metadata = worker.metadata();
+                if let Some(line) = gap.update(metadata.is_some(), started_at.elapsed().as_millis())
+                {
+                    log_gap_line(line);
+                }
+                if let Some(metadata) = metadata {
                     let pre_hash = metadata.pre_hash;
                     let target = metadata.difficulty;
                     let header_hash = ethereum_types::H256::from_slice(pre_hash.as_ref());
@@ -1894,5 +1998,48 @@ mod idle_mode_tests {
         let line = log2.update(Some("ai-job")).unwrap();
         assert!(line.contains("ai-job"), "{line}");
         assert!(!line.contains("resuming mining"), "{line}");
+    }
+
+    /// The one authoring stall that used to leave **no** trace: the miner had no
+    /// work for 97 s and the journal said nothing at all. One warning at the
+    /// threshold, no nagging while it lasts, one line when it recovers.
+    #[test]
+    fn a_long_template_gap_is_warned_once_and_its_recovery_is_reported() {
+        let mut gap = TemplateGap::new();
+        // Gap begins: normal inter-block waiting says nothing.
+        assert!(gap.update(false, 0).is_none());
+        assert!(gap.update(false, 5_000).is_none());
+        // Threshold crossed: exactly one warning, carrying the elapsed time.
+        let line = gap.update(false, TEMPLATE_GAP_WARN_MS).expect("warn at 30 s");
+        assert!(line.warn, "a stall must be a warning");
+        assert!(line.text.contains("30.0s"), "{}", line.text);
+        assert!(line.text.contains("NO consensus template"), "{}", line.text);
+        // Thousands of iterations later: silent, never per-iteration.
+        for t in [31_000u128, 60_000, 90_000, 96_000] {
+            assert!(gap.update(false, t).is_none(), "must not nag at {t}ms");
+        }
+        // Recovery is reported with the total gap.
+        let line = gap.update(true, 97_500).expect("recovery must log");
+        assert!(!line.warn, "recovery is informational");
+        assert!(line.text.contains("97.5s"), "{}", line.text);
+        // …and then quiet again.
+        assert!(gap.update(true, 98_000).is_none());
+    }
+
+    /// A short wait between blocks (and a clock that never moves) is silent, and
+    /// a backwards jump can never manufacture a stall.
+    #[test]
+    fn short_or_clamped_template_gaps_stay_silent() {
+        let mut gap = TemplateGap::new();
+        for t in [0u128, 200, 1_000, 12_000, 29_999] {
+            assert!(gap.update(false, t).is_none(), "{t}ms is normal");
+        }
+        // Template arrives under the threshold: nothing at all is logged.
+        assert!(gap.update(true, 29_999).is_none());
+        // A clock that appears to run backwards cannot fabricate a gap.
+        let mut back = TemplateGap::new();
+        assert!(back.update(false, 50_000).is_none());
+        assert!(back.update(false, 1_000).is_none());
+        assert!(back.update(true, 2_000).is_none(), "no warning ⇒ no recovery line");
     }
 }
