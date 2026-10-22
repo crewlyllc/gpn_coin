@@ -41,6 +41,25 @@ Open that URL in any browser. There is no build step and no CDN: the page is
 compiled into the binary (`gpn-agent/src/gui/index.html`, `include_str!`), so it
 works offline and on a fresh machine.
 
+### Fleet-supervised nodes (`gpn_fleet`)
+
+The same dashboard is available when the node is supervised by `gpn_fleet`
+(the fleet/seed deployments) — same flags, same port, same page:
+
+```bash
+# locally
+gpn_fleet --gui
+# or in the unit / run-fleet.sh
+export GPN_GUI=1
+```
+
+Idle needs no extra wiring there: it is **one file** (`~/.gpn/idle.json`) read by
+the node's miner (`gpn-node`, every 500 ms) and by every provider's claim gate,
+so a file written by the dashboard parks the miner and stops new claims no
+matter which supervisor launched the processes. `gpn_fleet` adds the node
+child's state to `GET /api/status` (the provider services are separate systemd
+units, so they are not listed as children).
+
 ### Loopback only, by design
 
 The dashboard can stop the miner, which makes it a control surface. It therefore
