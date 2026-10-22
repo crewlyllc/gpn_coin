@@ -1,23 +1,28 @@
 # GPN — One-Pager
 
-**What it is.** GPN is a **GPU-native network** where every node is **both a miner and an AI provider**. One install, one card: mining runs whenever the GPU is free, and an AI job pre-empts it, runs on the whole GPU, then hands it back.
+*Last updated: 2026-10-22*
+
+**What it is.** GPN is a **GPU-native network** where every GPU **mines _or_ serves AI compute — auto-switching** to whichever pays more. Same card, one install, no manual re-listing.
 
 **The problem.** A GPU owner has two ways to earn — mine a coin, or rent the card for AI work — and must **pick one**. Mine and the coin dips → you lose. Rent and nobody books you → $0. The card can't move to where the money is.
 
-**The fix.** GPN removes the choice: the node mines by default and **yields the GPU to each AI job**, so the same card earns from both markets. The chain does coordination + escrow + settlement; the heavy compute runs off-chain.
+**The fix.** GPN watches both markets continuously and **moves the GPU automatically**. The chain does coordination + escrow + settlement; the heavy compute runs off-chain.
 
 ---
 
 **How it works**
 
 - **Mining** — GPU proof-of-work; the node that produces a block **keeps that block's reward** (Bitcoin-style).
-- **Serving AI** — LLM inference, image/video generation, ML inference, fine-tuning — priced **per token** against real cost, escrowed trust-minimally.
-- **The switch** — per job, not per market cycle: an incoming job pauses mining, frees VRAM, runs on the whole GPU, then mining resumes. One GPU runs exactly one job at a time.
-- **Routing** — buyers hit one endpoint; the network picks the **lowest-latency, least-loaded** verified GPU. Providers are discovered **on-chain**.
+- **Serving AI** — LLM inference, image/video generation, ML inference, fine-tuning — priced **per token** against GPU-rental cost, escrowed trust-minimally.
+- **The switch** — designed to compare mining vs compute revenue in **USD/hr** and flip on a >5% margin. **Live today:** mining is the default and **stops completely** while an AI job runs, then resumes — the oracle-driven economic switch is **not yet wired**.
+- **Routing** — buyers hit one public endpoint (`https://gpncoin.ai/api/v1/*`, OpenAI-compatible, rate-limited); the network picks the **lowest-latency idle** verified GPU. Providers are discovered **on-chain**, and jobs are **pulled** by the provider, so a NAT'd box still serves.
+- **Models** — a **curated, VRAM-gated** catalogue: assistant-grade models only (fine-tune artifacts, sub-0.3B toys and anything that cannot fit the card's VRAM are never advertised).
+- **Runs on a gaming PC** — a local dashboard (`127.0.0.1:8099`) with an **Idle** switch: hand the GPU back for up to 6 h while the node keeps syncing, peering and serving the chain, then resumes on its own.
+- **Stays current by itself** — signed (ed25519) bundles from `https://gpncoin.ai/releases.json`, **on by default**, installed with a per-node randomized schedule so the fleet never stampedes a release.
 
 **Why it's different**
 
-- **Both markets, one machine** — no incumbent (NiceHash, Vast, RunPod, Render, Akash, io.net) is both a native PoW miner and an AI marketplace on the same card.
+- **Both markets, one machine** — no incumbent (NiceHash, Vast, RunPod, Render, Akash, io.net) lets a GPU mine *and* serve with an automatic switch.
 - **Trust-minimal** — on-chain escrow, optional **payment channels** (no per-job block delay), opaque/private on-chain values.
 - **GPU-only, verifiably** — proof-of-work + hardware attestation + a compute challenge; a CPU/iGPU can't earn.
 
@@ -31,8 +36,17 @@
 
 **Privacy.** A shielded pool supports private transfers and withdrawals (zero-knowledge spends; nullifier-based double-spend protection).
 
-**Where it is.** Live on a public testnet: PoW chain, per-node rewards, the full AI marketplace (LLM/image/video/ML/fine-tune), payment channels, shielded spends, on-chain provider discovery, peer discovery, committee governance. Next: the public CRS ceremony, mainnet, and a cross-chain bridge.
+**Where it is (2026-10-22, testnet — labelled honestly)**
+
+- **LIVE** — PoW chain with Bitcoin-style per-node rewards (spec 41, 15 s); **text/LLM inference** over the public HTTPS API; per-token escrow + payment channels; on-chain provider discovery; shielded spends; peer discovery; node GUI + Idle; signed auto-update; **free** testnet inference.
+- **WORKS INTERNALLY** — image generation (`job_type=ImageGeneration`, sd-turbo) completes via on-chain `POST /jobs`; it is **not** wired to a public `/v1` route. Fine-tune + ML providers ship but are not routed publicly.
+- **BLOCKED** — video (LTX) is implemented but has never completed: the T5-XXL encoder exceeds 8 GB of VRAM.
+- **STAGED, NOT APPLIED** — governance hardening (spec 42): 5-member committee, 3-of-5 approvals, proposal expiry, `cancel()`, hash-addressed preimages, real weights. **On chain today it is still 3 members, 2-of-3, 3-day timelock, no cancel/expiry, zero weights.**
+- **GAP** — the on-chain GPU-hour price oracle feed is absent (the scheduler runs on hardcoded fallbacks), and input tokens are not metered.
+- **Next** — the public CRS ceremony, mainnet, and a cross-chain bridge.
+
+**On price (no overclaim).** GPN is a **GPU-rental market**; token price follows what a GPU-hour clears at. At $0.30/GPU-hr (idle hardware) a 1B model is ≈$0.88/1M output tokens — below hosted small models. At the $3.00 fallback it is ≈$8.75/1M, ~22× `gpt-5-nano`'s $0.40. Break-even ≈$0.137/GPU-hr. We do not claim to be cheaper than OpenAI in general.
 
 **One line:** *A GPU should not have to choose.*
 
-`gpncoin.ai` · whitepaper + docs at https://gpncoin.ai/docs/
+`gpn.network` · whitepaper + docs in the project corpus

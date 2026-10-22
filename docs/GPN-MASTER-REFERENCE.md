@@ -1,7 +1,7 @@
 # GPN — MASTER REFERENCE (single-document review)
 
 **Project:** Project 7 — GPN, a GPU-native crypto + AI-compute network
-**Last updated:** 2026-10-08 · **Owner:** main / PM07
+**Last updated:** 2026-10-22 · **Owner:** main / PM07
 **Purpose:** One place to review *everything* decided about GPN — vision, goals, architecture,
 tokenomics, mining, attestation, marketplace, governance, infra, current state, and open items.
 Synthesized from the full `shared/artifacts/project7/` corpus + session history (see §17 doc index).
@@ -9,6 +9,23 @@ Synthesized from the full `shared/artifacts/project7/` corpus + session history 
 
 > ⚠️ **Why this exists:** too many design details were spread across dozens of artifacts, and some
 > goals got forgotten mid-design. This is the canonical "read me first" for GPN.
+
+---
+
+## 0. Delta since 2026-10-20 (read this first if you read the doc before)
+
+Status labels used throughout: **LIVE** · **STAGED (not applied)** · **WORKS-INTERNALLY** · **BLOCKED** · **GAP**.
+
+| Change | Status | Where |
+|---|---|---|
+| **Auto-update now ON by default** (opt out: `GPN_AUTO_UPDATE=0` / `auto_update=false`); signed manifest, bundle installs, per-node randomized schedule, install stagger | **LIVE** (shipped in 0.2.0; not yet on every box) | §9.1 |
+| **AP auth token self-generates on first boot** (24 random bytes → 48 hex, `~/.gpn/accesspoint.env` 0600; env > file > generated) | **LIVE** | §6.4 |
+| **Public AI API over HTTPS** (`https://gpncoin.ai/api/v1/*`, Cloudflare Worker → AP raw socket, rate-limited, free on testnet) | **LIVE** | §6.4 |
+| **Curated + VRAM-gated model catalogue** (4 served on an 8 GB node; `tuned-*`/toy/oversized never advertised) | **LIVE** | §6.4 |
+| **Provider address publication fixed** (doubled `/p2p/<id>/p2p/<id>` normalized; 4-rung dialability ladder; empty publication logged) | **LIVE** | §6.4 |
+| **Node GUI + Idle mode** (`127.0.0.1:8099`, up to 6 h, auto-resume, sole-authority valve) | **LIVE** | §9.2 |
+| **Derived GPU-hour pricing** in the scheduler + a public economics page | **LIVE formula, GAP inputs** (no oracle feed, no input metering) | §7.1 |
+| **Governance hardening (spec 42)** — 5-member/3-of-5, expiry, cancel, preimages, weights, migration | **STAGED, NOT APPLIED** — chain is still 3/2-of-3/3-day/no-expiry/zero weights | §11.2 |
 
 ---
 
@@ -43,9 +60,6 @@ node is a **miner AND an AI worker**. Mining-only is half the machine.
 **Guidelines (architecture):**
 - Chain = coordination + escrow. **Never move AI compute on-chain.**
 - **One GPU does one job at a time.** An AI job yields mining; a machine never mines *and* infers.
-  **One job at a time = MUTUAL EXCLUSION — NOT a limit on job types.** Every node is equipped by
-  design to serve **every** job type (LLM · image · video · ML inference · fine-tune) and advertises
-  all of them; a constrained box can opt a capability out, but the default is everything ON.
 - Privacy: on-chain values salted/opaque.
 - **Reward and block time are coupled:** `emission_rate = block_reward / target_block_time`.
 
@@ -60,43 +74,71 @@ node is a **miner AND an AI worker**. Mining-only is half the machine.
   `profitability-oracle` (token price / GPU-hour price / utilization / APR feed),
   `gpn-treasury` (vested treasury), `gpn-liveness` (full-node/bootnode layer), `gpn-shield`
   (privacy/shielded, WIP).
-- **Off-chain agents (`gpn-agent`):** provider (`gpn_llm_provider`, `gpn_diffusion_provider`),
-  miner (`gpn_external_miner`), access-point/scheduler (`gpn_scheduler`), ops tools
-  (`gpn_upgrade_runtime`, `gpn_send`, `gpn_attest`, etc.).
+- **Off-chain agents (`gpn-agent`):** provider (`gpn_llm_provider`, `gpn_diffusion_provider`,
+  `gpn_ml_provider`, `gpn_finetune_provider`), miner (`gpn_external_miner`), access-point/scheduler
+  (`gpn_scheduler`, which also generates its own auth token — `ap_token.rs`), the supervisor
+  (`gpn_node`: auto-update, GUI, idle), ops tools (`gpn_upgrade_runtime`, `gpn_gov_upgrade`,
+  `gpn_send`, `gpn_attest`, `gpn_seedlist`, …).
+- **Shared provider policy modules:** `gpn_agent::models` (VRAM fit + public catalogue) and
+  `gpn_agent::seedlist::clean_published_multiaddr` (one multiaddr sanitizer used by both the
+  heartbeat and the AP) — the two places where what a provider advertises and what the AP accepts
+  must agree.
 - **Split:** on-chain = jobs, escrow, attestations/capabilities, payouts (source of truth).
   Off-chain = latency, live load, endpoint discovery, the actual AI compute.
+- **Membership (decision 2026-10-19, v2 — `design-network-membership-bootstrap.md`):** **every node is
+  a backbone node / seed BY DEFAULT** (opt-OUT, not opt-in) — a node announces its endpoint, is
+  discoverable and accepts inbound `30333` unless the operator passes `--no-seed` / `--no-discoverable`
+  (`GPN_DISCOVERABLE=0`). Dialability is **never a gate on joining**: sync, mine and serve AI jobs work
+  behind NAT. If the node cannot become dialable it **auto-degrades to a non-discoverable participant
+  with a one-time, actionable warning** (port-forward instructions, CGNAT explanation) — it never exits.
+  Startup tries explicit `GPN_PUBLIC_ADDR` → inbound probe → **UPnP-IGD/NAT-PMP (`GPN_UPNP=auto`)**, and
+  only then degrades. `--require-backbone` retains the old exit-78 behavior for operators who must
+  guarantee it. Rewards: non-discoverable = base block/job pay only; backbone = base + `gpn-liveness`
+  credit → Silver/Gold staking multiplier; seed = backbone + routing tie-break (badges are derived from
+  peer witnesses, never self-reported). Consequence: the AP **never dials a provider**; jobs are
+  **pulled** (`GET /assignments` long-poll + lease) and results are pushed out (`POST /result/{id}`,
+  unchanged). **Bootstrap ships TWO sources in every build:** (A) a hardcoded list of **≤5 seed node IP
+  addresses** (`network.json` → `bootstrap_seeds[]`, compiled in — the no-DNS/no-HTTP/no-chain floor,
+  each entry `ip4` + fixed `peer_id` + optional `dns4` alias) and (B) a **DDNS/bootstrap list** of URLs
+  and DNS records (`bootstrap_urls[]` → `https://seeds.gpn.network/seeds.json` + `seeds2.gpn.network`,
+  plus `_gpn-seeds._tcp.gpn.network` TXT) giving the **current** live node list so it can change without
+  a client release. Also unioned: on-chain registry + local `peer-store` (existing `discovery.rs`).
+  `seeds.json` is published from liveness rankings by `gpn_seedlist`; the hardcoded 5 are a separate,
+  deliberately stable, reviewed set (see `GPN-TASKS` #46).
 
-### 3.1 A node runs ONE mode at a time — the auto-switch (Mining ⇄ Compute)
+### 3.1 A node is ALWAYS both — mine by default, yield to a job (one GPU, one job)
 
-A GPN node does **not** mine and serve AI simultaneously — the one GPU does one thing. The node is
-in **one of three modes**:
+**A GPN node is ONE entity: a miner AND an AI provider, always** — there is **no role/opt-in**. (The
+supervisor `gpn_node` starts the chain node + the provider heartbeat + the provider loop together;
+mining is **structural** — the node forces `Role: AUTHORITY` so a plain `gpn-node`/`gpn_node` mines
+with **no** `--force-authoring` flag.)
 
-> **⚑ "One GPU, one job" = MUTUAL EXCLUSION, not a restriction on job types.** The GPU runs exactly
-> **one job at a time** (never two concurrent), but **every node is equipped by design to serve every
-> job type** — LLM · image · video · ML inference · fine-tune — and advertises all of them. All
-> capabilities are ON by default (per-capability opt-out exists for constrained boxes).
-- **Mining** — hashing GPN blocks (GPU-PoW) → newly-minted GPN.
-- **Compute** — serving AI jobs (LLM / image / video / fine-tune) → GPN from job escrow.
-- **Staking** — *(Phase C, not live at launch)* → staking APR.
+**⚑ “One GPU, one job” = MUTUAL EXCLUSION, not a restriction on job types.**
+> The single GPU runs **exactly ONE job at a time** — never two concurrent — so it never
+> over-subscribes its compute/VRAM. It does **NOT** mean only some job types exist: **every node is
+> equipped by design to serve EVERY job type** — LLM chat · image · video · ML inference ·
+> fine-tune — and **advertises all of them**. The scheduler routes each incoming job to a node that
+> can serve it; that node runs that **one** job to completion (mining paused) before accepting
+> another. All capabilities are available on all nodes by default (per-capability opt-out exists for
+> constrained boxes, but the default is “everything available”).
 
-At launch the practical switch is **Mining ⇄ Compute**.
+**The one-GPU rule — the GPU does one thing at an instant:**
+- **Mining is the default.**
+- When a node **accepts an AI job, mining FULLY STOPS** for the job's duration (the provider holds a
+  `~/.gpn/gpu-yield` flag; the miner's loop does **zero** nonce-search while it's set) and **resumes the
+  instant the job completes**.
+- **One job at a time per machine** — provider **capacity = 1** (the scheduler excludes a node already
+  running a job).
+- Modes: **Mining · Compute** (Staking = Phase C).
 
-**When the switch fires** (`profitability::decide_switch` in `gpn-agent`): every cycle the node
-estimates each mode's revenue in **USD/hr** (from the profitability-oracle feed: token price,
-GPU-hour price, utilization, staking APR) and switches **only when the other mode beats the current
-one by the hysteresis buffer (~5%)**. That buffer is the anti-flapping rule — small crossings don't
-move the GPU; only a real gap does. Verified: a scripted demand-spike flips Mining → Compute →
-Mining (`gpn_simulate_autoswitch`).
+**Current mechanism = a yield/preempt, NOT economic switching.** What's live is *“mine until a job →
+stop → resume.”* The **profitability auto-switch** — `ModeManager::switch_to` + `decide_switch` over the
+oracle feed (USD/hr per mode, ~5% hysteresis, real GPU stop/start) — is **designed but NOT wired** for
+the node's internal miner; it's the deferred “no profitability math yet” step (Jeremy 2026-10-13).
+Verified live: mining stops while a job runs and resumes after; capacity=1.
 
-**What a switch does** (`ModeManager`): `switch_to(Mining)` starts the stoppable GPU mining engine;
-`switch_to(Compute)` **stops the miner, releasing the DAG from VRAM**, then runs the AI job. So the
-switch is a real start/stop of GPU work, not just a flag.
-
-**Reality / gap (2026-10-06):** the clean switch is the **agent `ModeManager`** path (external miner
-+ compute agent). On the current live testnet the boxes run the **node's internal miner**
-(`--force-authoring`) *and* a separate provider process, which **contend** for the GPU instead of
-switching cleanly. Wiring the node-internal miner into the same switch is part of the
-"every node is miner + AI-worker" work (§15).
+*(Historical note: earlier drafts said the miner “yields but still mines once per cycle” — that
+confirmed a duty-cycle, now replaced by a **full stop** (#24).)*
 
 **⚑ Design intent — a node IS a provider (don't split them):** a GPN node is **one entity** — a GPU
 that mines **OR** serves AI, under **one identity/wallet**, auto-switching between the two. The
@@ -174,6 +216,15 @@ orphan rate is high, raise `TargetBlockTime`/difficulty. *Persistent* desync com
   14,400 blocks (~60h); max 3 misses → 10% stake slashed/BURNED.
 - **Full-node gating (spec, `gpn-liveness`):** Silver/Gold additionally require being an **active,
   publicly-reachable full node** with uptime (≥90% Silver / ≥95% Gold). Bronze stays open.
+- **Membership is NOT gated (2026-10-19, v2):** Bronze is full participation, not a consolation tier —
+  a NAT'd, outbound-only node syncs, mines and serves AI jobs with no inbound port. **Backbone/seed is
+  the DEFAULT posture** (opt-out): the node tries to be dialable — explicit addr, inbound probe,
+  UPnP/NAT-PMP — and only becomes non-discoverable if it can't be, printing a clear warning rather
+  than failing. Backbone (dialable + witnessed uptime) unlocks Silver/Gold gating, seed-list
+  eligibility and a routing tie-break; it is never a requirement to join. The old
+  `GPN_REQUIRE_DIALABLE` hard gate (queue #45) is demoted to `--require-backbone`;
+  `--no-seed`/`GPN_DISCOVERABLE=0` opt out of discoverability. See
+  `design-network-membership-bootstrap.md` §2, §5.
 - **Miss-slash evasion — FIXED + STAGED (red-team finding #23, 2026-10-09; spec 31).**
   `submit_attestation` used to reset `missed_count = 0` and clear `LastMissBlock` on **every** call,
   and the open (Bronze) attestation's `challenge_response` is not verified on-chain — so an idle
@@ -233,6 +284,23 @@ design (the tier multiplier), which was **designed but never implemented** (stub
 
 Flow: `customer → access point (gpn_scheduler, e.g. :8092) → scheduler picks ONE provider →
 writes an assignment → that provider claims + runs it`. The chain stays the escrow/capability layer.
+
+> **Decision 2026-10-19 — transport is PULL (design: `design-network-membership-bootstrap.md`).**
+> The AP must **not** need to reach the provider. Step 6 below (`POST /assign` PUSH to the provider's
+> `:8093`) is replaced by: the provider long-polls `GET /assignments?provider=…&since=…`, receives a
+> **lease** (`lease_id`, full job payload, `callback` + `callback_token`, deadline), claims on-chain
+> (`accept_job`), and pushes the result **out** to `POST /result/{id}` (unchanged). The AP's
+> load/latency view moves from polling `:8093/status` into `caps` carried by the poll itself
+> (RTT is provider→AP), so `ProviderEndpoints`/`endpoint` becomes **optional backbone metadata** and
+> must never be required to route. `POST /assign` survives only as a best-effort **wake hint**, and
+> `dispatch_assignment` failing is no longer a lost job. The existing first-claim fallback below is
+> kept — it is already a pull path and makes mixed fleets safe. Migration is flag-gated
+> (`GPN_JOB_TRANSPORT=push|pull|both`, `GPN_ASSIGN_SOURCE=push|pull|both`).
+>
+> **Bootstrap note (v2):** routing must also survive an empty/slow seed layer. Every build ships the
+> hardcoded ≤5-seed IP list (`network.json:bootstrap_seeds`, no DNS needed) **and** the DDNS/HTTP list
+> (`bootstrap_urls` + `_gpn-seeds._tcp` TXT) telling it the **current** node set; both are best-effort
+> and non-fatal, and a returned list is dialed in full (shuffled), never first-only.
 
 **Selection (`gpn_scheduler::pick`), in order (updated 2026-10-06):**
 1. **Capability filter** — keep providers with a **fresh heartbeat**, `gflops ≥ job.min_gflops`, **and**
@@ -326,14 +394,57 @@ into a registry each cycle.
 ### 6.3 Known ops facts (2026-10-06)
 - AP requires **`Authorization: Bearer <GPN_AP_TOKEN>`** (or `X-Api-Key`) on **non-loopback**
   POSTs; loopback is exempt. Token lives in `~/.gpn/accesspoint.env`. (Value is a secret — read
-  from that file, don't hardcode.) Since 2026-10-21 the AP **generates** it on first boot
-  (24 CSPRNG bytes → 48 lowercase hex, mode 0600, atomic write, other env vars preserved) and
-  prints it exactly once; later boots print only the first 8 chars. Precedence:
-  env var > env file > generated — an explicitly supplied token is never overwritten.
-  Retrieve later: `grep GPN_AP_TOKEN ~/.gpn/accesspoint.env`.
+  from that file, don't hardcode.)
 - Image gen end-to-end works after restarting a **wedged** provider (`systemctl --user restart
   gpn-diffusion`); a stale provider instance can sit idle (its `list_claimable_jobs` returns nothing
   if its attestation/state is stale) and jobs get reaped by the janitor.
+
+### 6.4 Public API, model catalogue, address publication (2026-10-21)
+
+**AP token — generated, not hand-rolled (`gpn_agent::ap_token`).** The AP always *required* a token,
+but nothing produced one; an install that skipped the step ran a public job API with an empty token
+and the non-loopback gate silently off. `gpn_scheduler` now resolves it at boot: **env var > env file
+(`$GPN_AP_TOKEN_FILE`, default `~/.gpn/accesspoint.env`) > generated**. Generation = 24 `getrandom`
+bytes → 48 lowercase hex, persisted atomically (temp + rename) at 0600 with the file's other
+variables preserved, `~/.gpn` created 0700. The full value is printed **once** (with the instruction
+to set the Worker's `AP_TOKEN`); later boots print `AP token loaded from <file> (first8…)`. An
+explicitly supplied token is never overwritten. A corrupt file is **quarantined**
+(`.corrupt.<epoch>`), not shredded; an unwritable path degrades to an ephemeral token with a loud
+warning — startup never fails on this. 18 tests.
+
+**Public HTTPS API (`worker/`) — LIVE.** `https://gpncoin.ai/api/v1/*` proxies to the AP
+(`GET /v1/models`, `POST /v1/chat/completions`, `/api/v1/models`, `/api/providers`, `/api/mode`,
+`/api/jobs/<id>`, `/api/health`). It exists because the AP speaks plain HTTP on 8092 (mixed content)
+and Workers `fetch()` refuses non-standard ports — the Worker terminates TLS and speaks raw HTTP/1.1
+over `cloudflare:sockets`, adding the Bearer token. Rate limits at the edge: **chat 12 / 10 min / IP**,
+reads 120/min, typed `gpn_rate_limited` errors. **Testnet inference is free.** Measured e2e is tens of
+seconds (34.7 s on 2026-10-22), dominated by the on-chain create-inclusion wait (#49/#52), ~1 s of
+which is inference.
+
+**Model catalogue — curated + VRAM-gated (`gpn_agent::models`) — LIVE.** Three gates: (1) **VRAM fit**
+from a weight table with 1.15× headroom, applied at advertisement (`/status models[]`), at claim
+(`resolve_model`), and at AP routing (`pick()`); (2) **public allowlist** of 16 assistant-grade
+families (prefix-matched) for `/v1/models`; (3) **hard exclusions** even under `GPN_PUBLIC_MODELS=all`:
+`tuned-*`, sub-0.3B toys (`stories260K` = 0.00026 B), `*embed*`/`*rerank*`. Excluded ≠ unusable — a
+model named explicitly is still served; the catalogue is a shop window, not a permission system.
+**On the 8 GB reference node this yields 4 served models** (`llama3.2:1b`, `qwen2.5:0.5b`,
+`qwen2.5:7b`, `deepseek-r1:7b`); `deepseek-r1:14b` (~10.3 GB) is dropped. Overrides:
+`GPN_PUBLIC_MODELS`, `GPN_MODEL_VRAM_HEADROOM`, `GPN_MODEL_VRAM_OVERRIDE` (`model`, `model=GB`, `all`).
+
+**Address publication — fixed 2026-10-21.** The node RPC (`system_localListenAddresses`) returns
+addresses already carrying `/p2p/<id>` and litep2p sometimes **doubles** it; the heartbeat relayed
+that verbatim and the AP's sanitizer (correctly) rejected every entry, so a box published
+`multiaddrs: []` and was unroutable. The heartbeat now strips identity and appends `/p2p/<peer_id>`
+exactly once, using the **same** `clean_published_multiaddr` the AP gate uses. Ladder:
+`GPN_PUBLIC_ADDR` → node-written `~/.gpn/dialability.json` → public listen address → STUN mapping on
+the listen port; loopback/RFC1918/link-local/CGNAT/ULA never published; when all rungs fail the log
+enumerates each rejection plus the fix. Empty publication is **not an error** (pull transport).
+New `address_source` field reports which rung won.
+
+**Deployment reality check (2026-10-22):** the live AP process on this host is still the **pre-fix**
+build — `/v1/models` still lists `stories260K:latest`, `tuned-1184:latest`, `deepseek-r1:14b`. The
+code is fixed and tested; the process needs a restart/redeploy before the public catalogue matches
+this section. Do not describe the *live endpoint* as curated until that restart happens.
 
 ---
 
@@ -346,7 +457,7 @@ into a registry each cycle.
   vestigial 10%→1% inflation curve was removed 2026-09-16.
 - **Block reward / block time coupled:** `emission_rate = reward / target_block_time`. Current:
   **50 GPN / 15 s ≈ 3.33 GPN/s**. `TargetBlockTime` is the shared runtime const → mainnet uses the
-  same 15 s cadence. **(D1 RESOLVED 2026-10-08: reverted 4→15 s. The ~520.5 M hard supply cap is a
+  same 15 s cadence. **(D1 RESOLVED 2026-10-08: reverted 4→15 s. The ~520.5 M hard cap is a
   reward × interval fact — see below — not a cadence issue.)**
 - **Supply split:** **hard supply cap ≈ 520.5 M GPN** — **420.48 M emitted** over the halving
   schedule (2 × 50 GPN × 4,204,800) plus **100 M allocated to the treasury**. Emission converges at
@@ -362,6 +473,34 @@ into a registry each cycle.
   demand**, not mining economics.
 - **Open:** resolve burn wiring (share logged, not actually removed); implement staking-reward &
   oracle-reward distributions; decide capped vs disinflationary.
+
+### 7.1 Derived pricing — what the code actually computes (2026-10-21)
+
+The scheduler prices jobs from the **GPU-hour rental market**, not from a competitor's price list:
+
+```
+market  = oracle avg_gpu_hour_price        # per GPU class; fallback $3.00
+rental  = clamp(0.50 × market, owner_cost, market)   # GPN_RENTAL_FRACTION_BPS=5000
+tok/s   = fleet-average roofline min(compute, memory BW) throughput
+usd/tok = rental / (tok_s × 3600 × 0.65) × 1.30      # util 0.65, GPN_MARGIN_BPS=3000
+gpn/tok = usd/tok ÷ token_price_usd                  # fallback $0.15
+```
+
+Worked (published) example — 30,000 GFLOP/s, 272 GB/s, `llama3.2:1b`: decode is **memory-bound** at
+~95 tok/s; at a $3.00 market, rental = $1.50 → **$8.75/1M output tokens** (~58 GPN) — about **22×**
+`gpt-5-nano`'s $0.40. At a **$0.30** market (idle consumer hardware) the same model is **≈$0.88/1M**,
+cheaper than hosted small models. **Break-even vs nano ≈ $0.137/GPU-hr.** A 7B model on the same card
+falls to ~13.6 tok/s (~$61/M) — the network's small models are its sweet spot.
+
+**Two GAPS, both real:**
+1. **No on-chain price oracle feed.** `get_feed()` fails and the scheduler silently uses hardcoded
+   `(token $0.15, market $3.00, util 0.65)`. The formula is implemented; its inputs are placeholders.
+2. **Input tokens are not metered.** Only output tokens are billed, so long prompts are underpriced
+   and prefill is absorbed by the provider.
+
+**Framing rule:** GPN is a **GPU-rental market** whose token price is downstream of the GPU-hour
+clearing price. Never claim blanket "cheaper than OpenAI" — true only in the idle-hardware case, and
+false at the fallback rate.
 
 ---
 
@@ -386,6 +525,53 @@ into a registry each cycle.
 - Canonical registry (`network.json`): `{chain_id, genesis_hash, spec_version, bootnodes[],
   latest_version}`, embedded; node reports MATCH / DIFFERENT NETWORK / OUTDATED.
 - **Value starves forks** — no listings/liquidity ⇒ fork token worthless.
+
+### 9.1 Release channel, auto-update, minimum-version cutoff (`docs/updates.md`)
+
+- **Auto-update is ON by default (opt out)** — `GPN_AUTO_UPDATE=0` or `auto_update = false`. The old
+  "opt-in, off unless asked" text is superseded: the CLI help, the config default
+  (`file.auto_update.unwrap_or(true)`) and the env helper (`auto_update_enabled(None) == true`) agree.
+- **Manifest:** `https://gpncoin.ai/releases.json`, **ed25519** over a canonical line-oriented text
+  blob (**not** the JSON) covering `version`, `min_version`, every asset URL/size/sha256. The public
+  key is compiled in (`update.rs::RELEASE_PUBKEY_HEX`); a forged manifest is rejected **before**
+  anything is downloaded. Private key offline at `~/.openclaw/credentials/gpn-release-key.txt`
+  (0600); rotation requires a node release.
+- **Bundle-aware installs:** a release is ~60 executables, so replacing only the supervisor would
+  leave the children on other versions. Staged into `versions/<v>/`, identity proven from the
+  **compile-time build stamp** (`gpn-build-v1`) plus per-file hashes, then an atomic `current` flip
+  (symlink; junction on Windows), with `current.previous` as a one-step rollback. Only `gpn_node`
+  carries the stamp (`build.rs` is in `gpn-agent`); other stamps in the tree must merely agree.
+- **No stampede:** per-node **phase** = `sha256("gpn-update-phase-v1" NUL identity)` over the
+  interval (+12 bits of restart bounce), **±5–10% jitter** per check, and an **install spread**
+  `GPN_UPDATE_SPREAD_SECS` (default 1200 s, deterministic per node+version). 100-node simulation:
+  87 distinct minute buckets, ≤5% of the fleet in any minute.
+- **Cutoff:** below `min_version` → `UPGRADE REQUIRED` banner, node launched with `--no-seed
+  --no-discoverable` + `GPN_STANDBY=1`, role Authority→Full → it **syncs but does not mine or
+  announce**. Cached in `update-state.json` so the cutoff survives being offline. Escape hatch
+  `GPN_MIN_VERSION_ENFORCE=0` (unsupported).
+- **Peer layer (policy, staged):** bump the libp2p protocol id on consensus/wire-breaking releases
+  so incompatible peers drop naturally. On-chain `MinNodeVersion` is **STAGED, NOT APPLIED**
+  (`docs/design/design-min-node-version.md`).
+- **Doc trap:** `docs/updates.md` still shows the `--setup` prompt defaulting to `off` and its intro
+  table says "opt-in"; the **code** is opt-out. Trust the code and §9.1.
+
+### 9.2 Node dashboard + Idle mode (`docs/node-gui-and-idle.md`) — LIVE
+
+- `gpn_node --gui` / `GPN_GUI=1` serves **`http://127.0.0.1:8099`** from the supervisor (embedded
+  `include_str!` page, no CDN/build). **Loopback only**: any non-127.0.0.1 bind is refused at startup
+  (the panel can stop the miner); no auth because no exposure. `GPN_GUI_LISTEN` moves the port.
+- **Idle** = stop **mining + AI job claims** for up to **6 h** (360 min), keep syncing/peering/serving,
+  auto-resume at the deadline. State is one file `~/.gpn/idle.json` (0600, absolute `until`) →
+  survives restart/crash/reboot; expired/corrupt/missing reads as **active**. CLI: `gpn_node idle 30`
+  (exit 2 over-long), `gpn_node resume`. HTTP: `POST /api/idle`, `POST /api/resume`, `GET /api/status`.
+- Miner **parks** (thread alive, 0% GPU, 500 ms check) so resume needs no restart/DAG rebuild;
+  `park_reason()` = idle → ai-job → none; one log line per transition.
+- A running job **always finishes**; the LLM gate sits after the reconcile pass so an
+  `AwaitingVerification` job still reaches terminal — idle never wedges escrow.
+- **Sole-authority valve:** peers = 0 (or RPC unreachable) → **409 / exit 3** refusal; `--force-idle` /
+  `GPN_IDLE_FORCE=1` overrides for a single-box dev chain.
+- 40 new tests (idle 14, gui 12, idle_mode 6, service 4, CLI 4). `earnings_today` is `null` on purpose
+  (no off-chain reward indexer — the panel shows "—" rather than inventing a number).
 
 ---
 
@@ -416,6 +602,34 @@ relayer/committee). Not yet built; see the artifact for the full design.
   median fallback, since Phase-A operators don't feed the on-chain bonded median); D4 10% slash
   BURNED; D5 fresh offline sudo key (testnet) + separate hot faucet key.
 
+### 11.1 Live governance parameters (spec 41 — DO NOT MIX WITH §11.2)
+
+On chain **today**: **3-member** committee · **2-of-3** approvals (`ApprovalsRequired = 2`) ·
+**3-day** timelock (`3 * DAYS` @ 15 s) · **no `cancel`** · **no proposal expiry** · **no preimage
+proposals** (call data inline in the extrinsic) · **zero weights** (`WeightInfo = ()`). Proposals are
+removed before the Root dispatch, so there is no replay. Mainnet sudo is all-zeros/inert.
+
+### 11.2 Governance hardening — STAGED, NOT APPLIED (spec 42)
+
+Artifact: `wasm/gpn_runtime_spec42_gov_hardening.compact.compressed.wasm`, **512,888 bytes**,
+sha256 `7694f7f6c547df93b7c22d53863acae5b83532721a28c10375d2a233333d30f1`, `spec_version 42`.
+Plan + checklist + exact enactment sequence: `staged/gov-hardening-v1.md`.
+
+| Live (spec 41) | Staged (spec 42) |
+|---|---|
+| 3 members | **5 members**, `set_members` (Root-only); migration seeds 2 new |
+| 2-of-3 | **3-of-5** |
+| proposals never expire | **`ProposalExpiry = 14 days`** + `on_initialize` pruning, bounded 64 open |
+| no withdrawal | **`cancel(hash)`** at 3-of-5 |
+| inline call (500 KB WASM in the extrinsic) | **`propose_preimage`/`note_preimage`/`peek`** via a local `Preimages` map (deviation from the design's `pallet-preimage`; no deposits, member-gated, 4 MiB cap) |
+| `WeightInfo = ()` (unmetered) | **`GpnWeight<Runtime>`** hand-set per-byte weights (benchmark TODO) |
+| — | **v0→v1 storage migration** (`ProposalCall::{Inline,Preimage}`, `ProposalIds` index) |
+
+Tests: 22 pallet + 10 runtime-rehearsal (incl. enacting the real 512 KB artifact) + 22 `gov` decoding.
+**No `set_code` submitted, no key used, genesis WASM untouched (`76f37b23…16fa97`).** Known
+limitations are documented (approvals survive a membership change; no preimage deposits; O(64) prune
+scan). Rollback requires a *new* spec — v1 storage is not readable by spec-41 code.
+
 ---
 
 ## 12. Infrastructure & operations (current)
@@ -425,13 +639,19 @@ relayer/committee). Not yet built; see the artifact for the full design.
 - **Services (systemd user units):** `gpn-fleet` (node via `run-fleet.sh`), `gpn-accesspoint`
   (`gpn_scheduler` :8092), `gpn-provider`/`gpn-diffusion`/`gpn-provider-heartbeat` (:8093),
   `gpn-explorer`, `gpn-faucet`, `gpn-ap-topup.timer`.
-- **Ports:** p2p **30333**, RPC **9944**, AP **8092**, provider heartbeat **8093**.
+- **Ports:** p2p **30333**, RPC **9944**, AP **8092**, provider heartbeat **8093**, `/infer` **8094**,
+  node dashboard **8099** (loopback only, `--gui`); the website Worker proxies
+  `https://gpncoin.ai/api/*` → AP.
 - **Bootnode:** peer id `12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo`;
   `/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooW…`.
-- **Chain:** on-chain **spec 38** (2026-10-09). History: **spec 13** = channels +
+- **Node #2 (Windows full node):** peer `12D3KooWRWv4yVdJGiVg7xRgdUJY9G57EeutB596gWVpAwGC9qQ2`;
+  `/ip4/142.129.54.88/tcp/30334/p2p/12D3KooW…` (p2p forwarded 30334→30333). Runs the **`gpn_node`
+  supervisor** (mine + serve). Both nodes registered in `network.json` + the website.
+- **Chain:** on-chain **spec 41** (2026-10-14 — sudo-key-leak incident → rotated, spec-41 runtime).
+  History: **spec 13** = channels +
   capacity challenge + per-requestor cap + expiry sweep + root-only distributions · **spec 14** =
   block target 4→15 s + reward restored to 50 GPN · **spec 15** = shielded **spend** path (VK + `spend`
-  + root history) · **spec 16–38** = the red-team sweep (min-GPU floor + ~31 findings: escrow theft-of-service, unvalidated governance/threshold writes, `submit_solution` PoW bypass, shielded pool drain/fee stranding, channel refund window, fork-choice, …).
+  + root history) · **spec 16–38** = the red-team sweep (min-GPU floor + ~31 findings: escrow theft-of-service, unvalidated governance/threshold writes, `submit_solution` PoW bypass, shielded pool drain/fee stranding, channel refund window, fork-choice, …) · **spec 39–41** = red-team batch apply + the key-leak rotation.
   genesis `0xb8e4636a…` (canonical). **All applies authorized** (Jeremy green-lit the work; MAIN
   executed per REVIEW-PROTOCOL). Node rebuilt + restarted so its native runtime matches.
   **Ongoing:** the red-team keeps finding → latest staged artifact applied each time (`wasm/README-pending-upgrade.md` is the canonical pointer).
@@ -440,12 +660,14 @@ relayer/committee). Not yet built; see the artifact for the full design.
   `~/.openclaw/credentials/github-gpn-pat.txt` (git credential store configured).
 - **Keys:** `governance-keys.txt` (sudo, faucet, committee-1..3, reward-wallet);
   `~/.gpn/accesspoint.env` (`AP_SEED`, `GPN_AP_TOKEN`); `~/.gpn/node-key`.
-- **Nodes/payouts:** Linux node → **Alice** `5GrwvaE…` (attested, mining). Windows box → **Bob**
-  `5FHneW46…` — as of 2026-10-08 it runs as an **AI provider** (LLM; port **8093** forwarded) rather
-  than mining; it's on-chain-discoverable (`ProviderEndpoints`). Beneficiary = reward wallet `5D1sq…`.
-- **Windows run:**
-  `.\gpn-node.exe --chain C:\gpn\testnet-spec.json --bob --force-authoring --node-key 8f9e… --rpc-port 9944 --bootnodes $BN`
-  (needs the **chain-spec file**, not `--chain testnet`; `--force-authoring` to mine; §13).
+- **Nodes/payouts:** Linux node #1 → **Alice** `5GrwvaE…` (attested). Windows box **#2** → its own account;
+  as of **2026-10-13** it runs the **`gpn_node` supervisor** — a **mining full node** (peer
+  `12D3KooWRWv4…`, p2p `30334`) **AND** an AI provider (on-chain-discoverable via `ProviderEndpoints`).
+  *(Both nodes mine + serve.)* Beneficiary = reward wallet `5D1sq…`.
+- **Windows run (current):** `\bin\gpn_node.exe` — **no flags** (always mine + serve; mining is the
+  default, no `--force-authoring`; §13). Legacy single-node: `gpn-node.exe --chain
+  C:\gpn\testnet-spec.json [--bob] --node-key 8f9e… --rpc-port 9945 --bootnodes $BN` (uses the
+  **chain-spec file**, not `--chain testnet`).
 
 ---
 
@@ -477,43 +699,46 @@ relayer/committee). Not yet built; see the artifact for the full design.
 
 ---
 
-## 14. Current state (2026-10-08)
+## 14. Current state (2026-10-22)
 
-- **LIVE:** PoW chain at **spec 14**; **15 s cadence**, **50 GPN/block**; two miners historically
-  (Linux→Alice; the Windows box now **serves AI** rather than mining) each keeping their own rewards
-  (Bitcoin-style, verified). Stake-free, PoW-verified GPU-only mining gate (spec 11). LLM + image +
-  ML + fine-tune job pipelines functional; AP with token auth + janitor + **on-chain provider
-  discovery** + **HTTP assignment dispatch** + **VRAM/RAM capability gate**; liveness pallet;
-  channels + capacity challenge + per-requestor cap + expiry sweep + **root-only** distributions live
-  (spec 13).
-- **Windows box:** runs as an **AI provider** (LLM via ollama; **8093 forwarded**; on-chain-discoverable).
-  Video + auto-switch pending; remote-assignment end-to-end verify pending.
-- **Monitors:** silenced when healthy (§16). **Queue-driver cron** (`d496e0b0`) advancing `GPN-TASKS.md`.
-- **Open:** shield **spend** path (#15, building); video on the Windows box (#5b); remote-provider
-  end-to-end; the 15 s cadence transition (difficulty retargets automatically).
+- **Chain:** PoW at **on-chain spec 41**, **15 s cadence**, **50 GPN/block**; hardened by the **red-team sweep** (~31 findings fixed). Public full nodes on the canonical chain — the Linux bootnode (`…:30333`) and a Windows box — registered in `network.json` + the website.
+- **Node model (locked):** a node is **always miner + provider**. The **`gpn_node` supervisor** (one command) runs node + heartbeat + provider; the node **mines by default** (role forced to authority); **capacity = 1**; an accepted job **fully stops mining** then resumes (the GPU-yield). AMD support in progress (#27).
+- **Marketplace:** LLM **LIVE**; image **works via on-chain `POST /jobs`** (no public `/v1` route); video (LTX) **BLOCKED** (T5-XXL encoder > 8 GB VRAM); fine-tune + ML **shipped, not publicly routed**. Routing = capability → has-model → fastest-idle (busy excluded), transport **pull** (`GET /assignments` lease + `POST /result`); on-chain provider discovery; VRAM/RAM + min-GPU gates; payment channels; shielded spend; liveness layer; Bitcoin-style peer discovery.
+- **Public surface:** `https://gpncoin.ai/api/v1/*` (HTTPS, Worker-proxied, rate-limited, free on testnet). Live e2e is tens of seconds — create-inclusion bound (#49/#52), not inference.
+- **Node ops:** dashboard + Idle (§9.2); signed auto-update **on by default** with staggered fleet rollout (§9.1); AP token self-generated (§6.4).
+- **Distribution:** every build publishes a rolling **GitHub Release** (`windows-latest` / `linux-latest` / `macos-latest`) on the public mirror `crewlyllc/gpn_coin`; the signed bundle manifest is served at `https://gpncoin.ai/releases.json`.
+- **Ops:** `GPN-TASKS.md` queue + a 30-min **queue-driver cron**; monitors silent when healthy (§16).
+- **Deployment lag, stated honestly:** the AP process running on this host is still the pre-2026-10-21 build (uncurated `/v1/models`, no VRAM gate at the endpoint). Code fixed and tested; restart/redeploy pending.
+- **Open / next:** #27 AMD · #26 single-binary (back burner) · the **deferred profitability auto-switch** · #4/#5b Windows-provider + video verify · #12 mainnet · #13 bridge · #17 ceremony · #22 safety guardrails · **apply governance hardening (spec 42)** · **oracle price feed** · **input-token metering**.
+
+- **Chain:** PoW at **on-chain spec 38**, **15 s cadence**, **50 GPN/block**; hardened by the **red-team sweep** (~31 findings fixed). **Two public full nodes** on the canonical chain — the Linux bootnode (`…:30333`) and **Windows box #2** (`142.129.54.88:30334`) — both at the tip, registered in `network.json` + the website.
+- **Node model (locked):** a node is **always miner + provider**. The **`gpn_node` supervisor** (one command) runs node + heartbeat + provider; the node **mines by default** (role forced to authority — no `--force-authoring`); **capacity = 1**; an accepted job **fully stops mining** then resumes (the GPU-yield). AMD support in progress (#27).
+- **Marketplace:** LLM + image + video + ML + fine-tune; **routing = capability → has-model → fastest-idle** (busy excluded); **on-chain provider discovery** + **HTTP assignment dispatch**; **VRAM/RAM** + **min-GPU** gates; **payment channels**; **shielded spend** (spec 15); liveness layer; **Bitcoin-style peer discovery**.
+- **Distribution:** every build publishes a rolling **GitHub Release** (`windows-latest` / `linux-latest` / `macos-latest`); the Windows CI **deploys directly** to `C:\gpn\bin` on the runner box.
+- **Ops:** `GPN-TASKS.md` queue + a 30-min **queue-driver cron**; monitors silent when healthy (§16).
+- **Open / next:** #27 AMD · #26 single-binary (back burner) · the **deferred profitability auto-switch** · #4/#5b Windows-provider verify + video · #12 mainnet · #13 bridge · #17 ceremony · #22 safety guardrails.
 
 ---
 
-## 15. Roadmap / open items (status as of 2026-10-08)
+## 15. Roadmap / open items (status 2026-10-22)
 
-**✅ DONE:** #1 on-chain provider discovery · #3 client-side RTT · #5a fine-tune provider · #5c
-MLInference executor · #6 staking-weight + capacity challenge (applied) · #7 ms retarget (applied) ·
-#8 clock/NTP warning · #9a submit auto-recover · #9b janitor→`expire_job` · #9c RPC-readiness gate ·
-#9d per-requestor cap (applied) · #9e on-chain expiry sweep (applied) · #10 diffusion wedge watchdog ·
-#11 root-only distributions (applied) · #14 VRAM/RAM capability gate.
+**✅ DONE (highlights):** #1 on-chain provider discovery · #3 client RTT · #5a/b/c AI methods (fine-tune,
+video, ML) · #6 staking-weight + capacity challenge · #7 ms retarget · #8 clock warning · #9a–e
+job-lifecycle hardening · #10 diffusion wedge watchdog · #11 root-only distributions · #14 VRAM/RAM gate ·
+#15 shielded spend (spec 15) · #16 red-team (~31 findings fixed) · #18 Bitcoin-style peer discovery ·
+#19 min-GPU gate · #20 snapshot + airdrop tooling · #21 node-free wallet · #23 fast-onboard snapshot ·
+#24 mine→stop→resume + capacity 1 · #25 node supervisor · **signed auto-update (on by default)** ·
+**AP token self-generation** · **public HTTPS API** · **curated/VRAM-gated catalogue** ·
+**provider address publication** · **node GUI + Idle** · **derived pricing + economics page**.
 
-**⏳ IN PROGRESS / BLOCKED:**
-- **#2 off-chain escrow (channels)** — on-chain primitives + agent manager done + applied (spec 13);
-  remaining = the **AP hub routing** (route jobs via channels so AI skips per-job block txs). Design:
-  `design-offchain-escrow-channels.md`.
-- **#4 Windows AI provider** — binaries + staging + dispatch fix done; remaining = redeploy the box's
-  binaries, restart the provider, and **verify a job routes + completes + pays** end-to-end.
-- **#5b video** — code fixed; needs the Windows box (running the test).
-- **#15 shielded SPEND path** — building (sub-agent): on-chain note-spend VK + `spend` dispatchable +
-  root history; runtime `set_code` staged for go-ahead.
-- **#12 mainnet** — owner decisions **done** (D1 15 s + docs, D2–D6 accepted); remaining = genesis cut
-  + launch (a later explicit go).
-- **#13 bridge** — code complete agent-side; **post-mainnet** (Eth/Hyperlane deploy + liquidity).
+**⏳ IN PROGRESS / OPEN:** #27 AMD support (building) · #4 Windows-provider end-to-end verify · #5b video
+on the Windows box · #2 channels hub routing · #22 abuse/safety guardrails (design done) · the
+**profitability auto-switch** (deferred) · **on-chain oracle feed** · **input-token metering**.
+**🟡 STAGED (built + tested, not applied):** governance hardening spec 42 (§11.2) · on-chain
+`MinNodeVersion` cutoff.
+**🔒 BLOCKED (need Jeremy/external):** #16/#17 the **CRS ceremony** (public multi-party) · #12 mainnet
+(genesis/launch) · #13 bridge (post-mainnet) · video until a >8 GB VRAM node is in the fleet.
+**🧊 BACK BURNER:** #26 single-binary node.
 
 ---
 
@@ -545,9 +770,17 @@ MLInference executor · #6 staking-weight + capacity challenge (applied) · #7 m
 **Ops/runbooks:** `testnet-public-runbook.md` · `testnet-status.md` · `operator-onboarding.md` ·
 `USE-GPN.md` · `production-readiness-checklist.md` · `production-readiness-workplan.md` ·
 `linux-install-guide.md` · `windows-client-test.md` · `REVIEW-PROTOCOL.md` ·
+`docs/updates.md` (auto-update, manifest, cutoff, rollback) · `docs/node-gui-and-idle.md` ·
+`docs/provider-address-and-models.md` · `docs/upgrades-governance.md` ·
+`staged/gov-hardening-v1.md` (spec-42 plan) ·
 `competitive-landscape-review-2026-10-03.md` · `gpn-differentiation-and-advantage-2026-10-03.md`.
 **Logs:** `change-log.md` (running ops changelog) · `cycle*-*.md` (historical cycle logs).
 **Live ops/tracking:** `GPN-MASTER-REFERENCE.md` (this doc) · `GPN-TASKS.md` (the cron-driven task
 queue) · `mainnet-open-decisions-memo.md` · `design-offchain-escrow-channels.md` ·
 `access-point-install-guide.md` · `wasm/` (staged spec-N upgrade artifacts).
 **Marketing:** `marketing/` (brand, content, GTM, listings) + `marketing-plan.md`.
+**Publications (2026-10):** `GPN-WHITEPAPER.md` (+ `.html`), `GPN-ONE-PAGER.md`,
+`GPN-TECHNICAL-OVERVIEW.md`; repo `docs/` (`downloads.md`, `run-a-node.md`, `fast-sync.md`,
+`peer-discovery.md`) + `website/` (6 pages) + `kickstarter/` + `fundraising/` (juicebox, gitcoin).
+**Node/run tooling:** `docs/run-a-node.md` + `gpn-node.example.toml`; scripts `install.sh`,
+`install-accesspoint.sh`, `scripts/gpn-snapshot.{sh,ps1}`, `scripts/install-ollama.{sh,ps1}`.

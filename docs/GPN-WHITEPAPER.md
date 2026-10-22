@@ -1,6 +1,6 @@
 # GPN — A GPU-Native Network for Mining and AI Compute
 
-**Whitepaper v0.9 (draft)** · GPN Network · 2026-10-09
+**Whitepaper v0.96 (draft)** · GPN Network · **last updated 2026-10-22**
 
 ---
 
@@ -43,7 +43,9 @@ A GPN node is **one entity** — one identity, one wallet, one GPU — that oper
 
 At launch the practical switch is **Mining ⇄ Compute**.
 
-**The switch is a decision, not a guess.** Every cycle the node estimates each mode's revenue in **USD/hr** — using an on-chain oracle feed of token price, GPU-hour rental price, utilization, and staking APR — and switches **only when the other mode beats the current one by a hysteresis margin (~5%)**, so the GPU doesn't thrash on tiny price crossings. A switch is a real **stop/start of GPU work**: entering Compute stops the miner and frees VRAM before the model loads.
+**The switch is a decision, not a guess.** *By design*, every cycle the node estimates each mode's revenue in **USD/hr** — using an on-chain oracle feed of token price, GPU-hour rental price, utilization, and staking APR — and switches **only when the other mode beats the current one by a hysteresis margin (~5%)**, so the GPU doesn't thrash on tiny price crossings. A switch would be a real **stop/start of GPU work**: entering Compute stops the miner and frees VRAM before the model loads.
+
+**What runs today is a yield, not that switch.** Mining is the default; when a node accepts an AI job, mining **stops completely** for the job's duration and resumes when it completes. The economic decision (and the oracle feed that would drive it) is **not yet wired** — see §6.1 and §12.
 
 **The chain is thin and trust-minimal.** It holds the job lifecycle, escrow, and payouts, enforces capability and eligibility gates, and settles rewards. The compute — inference, generation, training — **never touches the chain**.
 
@@ -81,14 +83,12 @@ A requestor submits a job; the chain runs it through a lifecycle:
 Payment is **per token**: the requestor escrows `rate × max_output_tokens` (a cap), the provider meters **actual** usage, the charge is `rate × actual`, and the **surplus auto-refunds**. Priced in dollars, settled in GPN, so a buyer's *dollar* cost is stable while the GPN amount floats.
 
 ### 5.2 Pricing
-Rates are **cost-derived** — a roofline estimate of the provider's true throughput (compute- and memory-bandwidth-bound), divided by realized tokens/sec, times a margin — targeting roughly half of comparable market GPU-rental, and clamped at or above the provider's cost so **a GPU always at least covers its cost**.
+Rates are **cost-derived** — a roofline estimate of the provider's true throughput (compute- and memory-bandwidth-bound), divided by realized tokens/sec, times a margin — taken as **half of the comparable market GPU-rental rate**, and clamped between the provider's cost and the market so **a GPU always at least covers its cost**. The full formula, its worked example and its two missing inputs (no oracle feed, no input-token metering) are in §6.1.
 
 ### 5.3 Routing: who runs a job
 A buyer hits a single **access point** (`gpn_scheduler`) and never needs a provider's address. The scheduler:
 1. **Filters** by capability (GFLOPS, VRAM/RAM, model availability).
 2. **Requires availability** — a node currently running a job is not available (one GPU, one job).
-   ("One job" = mutual exclusion — the GPU does one job *at a time*; it is **not** a limit on job
-   *types*. Every node serves every job type — LLM · image · video · ML · fine-tune — by design.)
 3. **Picks the lowest-latency (least-ms)** eligible provider, with a model-aware fallback (a provider that *can pull* a model wins only if downloading still finishes sooner).
 4. **Dispatches** the assignment (pushed over HTTP to the provider) and the chain escrows + enforces the capability gate.
 
@@ -99,6 +99,20 @@ The block-bound part of a job is the *coordination* (create/escrow → accept �
 
 ### 5.5 Job lifecycle safety
 Jobs that stall are reclaimable: a **permissionless `expire_job`** (after `created_at + max_duration`), a **per-job failure refund** (`fail_job`), a **bounded on-chain expiry sweep**, and a **per-requestor active-job cap** — so a single actor can't deny service by exhausting slots. Providers are paid only for work actually delivered: once work has started, only the assigned provider (or the permissionless expiry) can finalize a job.
+
+### 5.6 The public API and the model catalogue
+
+**One HTTPS endpoint.** `https://gpncoin.ai/api/v1/*` exposes the marketplace as an **OpenAI-compatible** surface — chat completions, model list, provider list, job lookup. A **Cloudflare Worker** terminates TLS and proxies to the access point over a raw socket, injecting the access point's bearer token; this exists because the public access point speaks plain HTTP on :8092, which a browser page cannot call directly (mixed content). The edge also applies **rate limits** — 12 chat requests per 10 minutes per IP, 120 reads per minute — and returns a typed `gpn_rate_limited` error rather than an opaque failure. **Inference on the testnet is free.**
+
+A measured caveat, stated plainly: end-to-end latency on the public route is dominated by the **create-inclusion wait** (the job's on-chain create must land in a block before a provider may claim it — tens of seconds at the current cadence), not by inference itself, which is on the order of one second.
+
+**A curated, VRAM-gated catalogue.** The network does not advertise everything a provider happens to have installed:
+
+- **A model must fit.** A weight-size table plus a 1.15× headroom factor (KV cache, CUDA context, tokenizer buffers) decides whether a model can be held by a given card. The gate is applied at **three** points: what the provider advertises, what it will claim, and what the scheduler will route. A `deepseek-r1:14b` (~10.3 GB) is unusable on an 8 GB node and is therefore never offered.
+- **The public list is a shop window.** `/v1/models` lists assistant-grade chat models only — sixteen families by default, prefix-matched so quantisation tags resolve. **Hard-excluded** even when an operator asks for everything: per-job fine-tune artifacts (`tuned-*`), toy models below ~0.3 B parameters (`stories260K` is 0.00026 B), and embedding/reranker models.
+- **Excluded is not unusable.** A caller who names a model explicitly still gets served. The catalogue governs advertising, not permission.
+
+On the reference 8 GB node this yields four served models: `llama3.2:1b`, `qwen2.5:0.5b`, `qwen2.5:7b`, `deepseek-r1:7b` — a deliberate floor of *assistant-grade* models rather than an inventory dump. *(Shipping status, 2026-10-22: the code is live in the 0.2.0 line; the public endpoint is still served by a pre-fix AP process, so the curated list appears once that process is restarted.)*
 
 ---
 
@@ -111,6 +125,31 @@ Jobs that stall are reclaimable: a **permissionless `expire_job`** (after `creat
 - **Treasury:** 100 M GPN held by a keyless pallet account — 70 M unlocked at genesis and 30 M vesting over 10 years — spendable only by a **13-of-25** governance roster.
 - **Fees:** a 5% marketplace fee is split **40% staking rewards · 30% treasury · 20% burn · 10% oracle operators**.
 - **Value anchor:** an oracle supplies a GPN/USD price (seeded at $0.15 for the testnet); the token's long-run value is intended to derive from **real AI-marketplace demand**, not mining inflation.
+
+### 6.1 Derived pricing: the token price is downstream of the GPU-hour
+
+GPN does not price tokens off a competitor's price list. It prices them off the **rental market for the GPU-hour**, then converts:
+
+```
+market  = oracle avg_gpu_hour_price            # USD/hr, per GPU class
+target  = clamp(0.50 × market, owner_cost, market)
+$/token = target / (tok_s × 3600 × 0.65) × 1.30
+gpn/tok = $/token ÷ token_price_usd
+```
+
+The scheduler takes **half** of the market GPU-hour rate — never below the owner's electricity/hardware cost, never above the market — divides by measured throughput (a roofline of compute and memory bandwidth; decode of a 1 B model is **memory-bound** at roughly 95 tok/s on a 30 TFLOP / 272 GB/s card), and adds a 30% margin. The `0.65` factor is the assumed duty cycle of the card.
+
+The consequence is worth stating rather than hiding: **the same model on the same GPU has two very different prices depending only on what a GPU-hour clears at.**
+
+| GPU-hour market clears at | 1 B model, $/1M output tokens |
+|---|---|
+| **$0.30** — idle consumer hardware near its electricity cost | **≈ $0.88**, below hosted small models |
+| **$1.50** | ≈ $4.38 |
+| **$3.00** — today's hardcoded fallback | **≈ $8.75**, roughly **22×** `gpt-5-nano`'s $0.40 |
+
+Break-even against `gpt-5-nano` is **≈ $0.137 per GPU-hour**. So GPN is best understood as a **GPU-rental market** whose token price is a *consequence* of GPU-hour clearing — not as an inference provider that undercuts frontier APIs. Claiming blanket "cheaper than OpenAI" would be false at the fallback rate and true only in the idle-hardware case.
+
+**Two limitations we are not papering over.** (1) The **on-chain oracle feed is absent** — the scheduler runs on hardcoded fallbacks ($0.15/GPN, $3.00/GPU-hr, 0.65 utilisation), so the formula is honest but its inputs are placeholders until operators publish. (2) **Input tokens are not metered** — only output is billed, so long prompts are effectively underpriced and prefill cost is absorbed by the provider. Both are tracked as gaps, not features.
 
 ---
 
@@ -127,9 +166,27 @@ GPN includes a **shielded pool** with Sapling-style note commitments and nullifi
 
 ## 8. Governance and Upgrades
 
+### 8.1 What is live on chain today — spec 41
+
 - **Committee governance.** A committee proposes and executes **root** calls (e.g., fee splits, parameters) after a timelock — **no single key acts alone**. The mainnet sudo key is **inert**; governance is the committee.
+- **Current parameters, stated exactly:** a **3-member** committee, **2-of-3** approvals, a **3-day** timelock, no `cancel`, no proposal expiry, no preimage proposals, and **zero weights** (`WeightInfo = ()`, so proposal weight is unmetered).
 - **Forkless upgrades.** The runtime upgrades **in place** via `set_code` with a separately-built WASM; the genesis — chain-spec, difficulty, supply, and the canonical runtime WASM — is **immutable**. A change that would reset the chain requires explicit sign-off.
 - **Review-first.** Every change is logged (what/why/risk/rollback) and reviewed before it lands.
+
+### 8.2 What is staged — spec 42, built and tested, **not applied**
+
+A hardening upgrade exists as an artifact (**512,888 bytes**, sha256 `7694f7f6…d30f1`, `spec_version 42`) with 22 pallet tests, 10 runtime-rehearsal tests and a storage migration. It would change:
+
+| Today (live) | Staged (spec 42) |
+|---|---|
+| 3-member committee | **5 members**, seedable and replaceable (`set_members`, Root-only) |
+| 2-of-3 approvals | **3-of-5** |
+| proposals live forever | **14-day expiry** + pruning, bounded at 64 open proposals |
+| cannot withdraw a proposal | **`cancel(hash)`** at the same 3-of-5 threshold |
+| call data inline (a 500 KB WASM in a public extrinsic) | **preimage proposals** — approve a `blake2_256` code hash, verify before the timelock elapses |
+| `WeightInfo = ()` (zero weight) | **hand-set per-byte weights** (benchmarked weights remain a TODO) |
+
+**None of it is on chain.** No `set_code` has been submitted, no committee key has been used, and the canonical genesis WASM is untouched. A reader must not conflate the two columns: the live chain is the left one. The artifact, its review checklist and its exact enactment sequence live in `staged/gov-hardening-v1.md`.
 
 ---
 
@@ -138,6 +195,23 @@ GPN includes a **shielded pool** with Sapling-style note commitments and nullifi
 - **Access points** are permissionless and redundant — anyone can run one; a buyer hits the nearest, and the scheduler routes network-wide.
 - **Peer discovery** follows the Bitcoin pattern: a **persistent peer store**, **DNS seeds**, and **published seed lists**, plus **on-chain discovery** from the network's own node registry — with the compiled-in bootnode as a hardcoded fallback.
 - **On-chain node registry** (liveness + provider endpoints) lets the network find its own reachable nodes without a central index.
+- **Address publication is best-effort, never a gate.** A provider publishes a dialable address by walking an evidence ladder: an operator-declared `GPN_PUBLIC_ADDR` → the state file the node writes when it has proof (an inbound peer observed, or UPnP/NAT-PMP mapped) → a public listen address → a STUN mapping on the listen port. Loopback, RFC1918, link-local, CGNAT and ULA ranges are never published. When no rung qualifies, the published list is empty **and the log enumerates which rungs were rejected and the exact fix** — an empty list is not an error, because routing is **pull-based** and works over the provider's outbound poll.
+
+### 9.1 Node operations: dashboard, Idle mode, and self-updating
+
+GPN is meant to run on a **gaming PC**, which imposes two requirements a datacenter design would never notice: the owner must be able to take the GPU back, and the node must not need babysitting.
+
+**Local dashboard.** `gpn_node --gui` (or `GPN_GUI=1`) serves `http://127.0.0.1:8099` from the supervisor process — mode, peers, block height, GPU/VRAM, current job, child-process health and the idle panel, refreshed every three seconds from a page compiled into the binary (no CDN, no build step, works offline). It is **loopback-only by design**: the panel can stop the miner, so binding it to `0.0.0.0` or a LAN address is refused at startup with an explanatory error. There is no authentication because there is no network exposure; remote access is an SSH tunnel.
+
+**Idle mode.** A single switch that stops the two things competing for the GPU — **Ethash mining and AI job claims** — for up to **six hours**, while the node keeps **syncing, peering and serving the chain to everyone else**. Nothing is stopped, uninstalled or de-registered. At the deadline the node resumes on its own; a *Resume now* button (`POST /api/resume`) or `gpn_node resume` ends it early. The whole state is one file (`~/.gpn/idle.json`, mode 0600, absolute deadline), so idle **survives a restart, a crash or a reboot**, and an expired or corrupt file always reads as *active* — there is no way to accidentally leave a box parked forever. A job already running **finishes normally**, because a half-run job would wedge escrow; a job is claimed and executed inside a single provider pass, so nothing is ever cut in half. One safety valve: if the node has **zero peers** it may be the **only block producer**, so an idle request is **refused** (HTTP 409) rather than halting the chain for everyone — `--force-idle` overrides on a single-box dev chain.
+
+**Auto-update — on by default, opt-out.** A node is a consensus participant, so running a stale binary is not a neutral choice: it can seal blocks its peers reject, or serve jobs under a schema nobody else speaks. GPN therefore ships a signed update channel at `https://gpncoin.ai/releases.json`: an **ed25519 signature** over a canonical, line-oriented text blob (not the JSON, so signer and verifier cannot disagree about formatting) covering the version, the **minimum-version cutoff**, every asset URL, size and sha256. The public key is compiled into the node, so a compromised web host can serve a forged manifest but cannot sign it.
+
+Installs are **bundle-aware**, because a GPN release is ~60 executables, not one binary — replacing only the supervisor would leave it and its children on different versions. The updater extracts a complete tree into `versions/<v>/`, proves identity from the **build stamp baked in at compile time** (a bundle that says 0.1.9 while the manifest says 0.2.0 is refused), and flips a `current` symlink (a junction on Windows) in one atomic rename. The previous tree stays reachable via `current.previous`, so rollback is a single link flip.
+
+The fleet is not allowed to stampede. Each node derives a **stable phase** from its payout account and start time, checks within that window each interval, and applies **±5–10% jitter** after every check; finding a new release still waits a deterministically-random **install spread** (`GPN_UPDATE_SPREAD_SECS`, default 1200 s) before downloading. In simulation, 100 nodes occupy 87 distinct one-minute buckets of a 6-hour interval with no minute holding more than 5% of the fleet — versus all 100 in one second.
+
+Operators who prefer to update by hand may: a node whose version falls below `min_version` prints **`UPGRADE REQUIRED`**, keeps **syncing**, and stops **mining and announcing** until it is upgraded. It is not banned and not slashed; it is simply not allowed to produce blocks that would have to be reorged out. Opting out is `GPN_AUTO_UPDATE=0` / `auto_update = false`.
 
 ---
 
@@ -153,12 +227,31 @@ GPN includes a **shielded pool** with Sapling-style note commitments and nullifi
 
 ## 11. Roadmap
 
-- **Shipped on testnet:** PoW chain with Bitcoin-style per-node rewards; GPU-only, stake-free, work-verified eligibility; the AI marketplace (LLM, image, video, ML, fine-tuning) with per-token escrow, pricing, least-ms routing, on-chain provider discovery, and VRAM/RAM gates; payment channels; shielded spends; the liveness layer; peer discovery; committee governance.
-- **Next:** the public **CRS ceremony**; **client-side RTT** (user→nearest node); folding a node's own miner into the **auto-switch**; **mainnet** genesis and launch; a **cross-chain bridge** (post-mainnet).
+- **Shipped and live on testnet:** PoW chain (spec 41, 15 s, 50 GPN/block) with Bitcoin-style per-node rewards; GPU-only, stake-free, work-verified eligibility; per-token escrow, cost-derived pricing, least-ms routing to idle providers, on-chain provider discovery, VRAM/RAM gates; payment channels; shielded spends; the liveness layer; peer discovery; the **public HTTPS AI API** (with a curated, VRAM-gated catalogue in the 0.2.0 line); the **node dashboard, Idle mode and signed auto-update**.
+- **Shipped but not publicly routed:** image generation (on-chain jobs) and the fine-tune/ML providers.
+- **Blocked:** video (LTX) — the encoder exceeds 8 GB of VRAM.
+- **Staged, not applied:** the spec-42 governance hardening (§8.2).
+- **Next:** the public **CRS ceremony**; applying governance hardening; the on-chain **GPU-hour oracle feed** and **input-token metering**; **client-side RTT** (user→nearest node); folding a node's own miner into the **economic auto-switch**; **mainnet** genesis and launch; a **cross-chain bridge** (post-mainnet).
+
+## 12. Current status and honest limitations
+
+| Capability | Status | What that means |
+|---|---|---|
+| Text / LLM inference | **LIVE** | Public HTTPS, OpenAI-compatible, free on testnet |
+| Image generation | **WORKS INTERNALLY** | Completes via on-chain `POST /jobs` (`ImageGeneration`, sd-turbo); **no public `/v1` route** |
+| Video (LTX) | **BLOCKED** | Implemented, never completed — T5-XXL encoder exceeds 8 GB VRAM |
+| Fine-tune / ML | **WORKS INTERNALLY** | Providers ship and are claimable on chain; not publicly routed |
+| GPU-hour price oracle | **GAP** | Feed absent; scheduler runs on hardcoded fallbacks |
+| Input-token metering | **GAP** | Output only |
+| Governance hardening | **STAGED** | Chain is still 3-member / 2-of-3 / no expiry / zero weights |
+| Economic auto-switch | **GAP** | Live behaviour is a mine→stop→resume yield, not oracle-driven switching |
+| Fork choice | **GAP** | Longest-chain by height, not most-work (bounded, non-zero risk) |
+
+The honest summary: **the chain, the LLM marketplace, the public API, and the node tooling are real and running.** The multi-modal marketplace is real in code and narrow in exposure. Two economic inputs are placeholders. And the network is a **testnet**: one to three authorities, free inference, a $0.15 placeholder token price, and a trusted setup that is not yet the production ceremony. Nothing here is a claim about mainnet readiness.
 
 ---
 
-## 12. Conclusion
+## 13. Conclusion
 
 The GPU is the most abundant and most under-used source of compute in the world. Mining monopolized it; AI rental markets fight over it; neither lets the hardware move to where the money is. **GPN makes a GPU earn from both markets at once** — mining when that pays, serving AI when that pays — coordinated by a trust-minimal chain, priced against real cost, and settled without a middleman. The token is a fair-launch proof-of-work coin whose durable value comes from the AI compute it enables.
 
@@ -167,4 +260,4 @@ The GPU is the most abundant and most under-used source of compute in the world.
 ---
 
 ### References (project corpus)
-Design synthesis and full technical detail live in the GPN project artifacts: `goals-and-guidelines.md`, `design-tokenomics-spec.md`, `design-pricing-model.md`, `design-access-points-scheduler.md`, `design-offchain-escrow-channels.md`, `design-verifiable-gpu-proof-2026-10-06.md`, `design-liveness-selforg-fullnode-tiers.md`, `design-ceremony.md`, `design-crosschain-bridge.md`, `GPN-MASTER-REFERENCE.md`, and the security report `redteam-2026-10-08/REPORT.md`.
+Design synthesis and full technical detail live in the GPN project artifacts: `goals-and-guidelines.md`, `design-tokenomics-spec.md`, `design-pricing-model.md`, `design-access-points-scheduler.md`, `design-offchain-escrow-channels.md`, `design-verifiable-gpu-proof-2026-10-06.md`, `design-liveness-selforg-fullnode-tiers.md`, `design-ceremony.md`, `design-crosschain-bridge.md`, `staged/gov-hardening-v1.md`, `GPN-MASTER-REFERENCE.md`, and the security report `redteam-2026-10-08/REPORT.md`. Operator references in the repo: `docs/updates.md`, `docs/node-gui-and-idle.md`, `docs/provider-address-and-models.md`, `docs/upgrades-governance.md`.
