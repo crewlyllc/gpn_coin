@@ -47,24 +47,45 @@ Three independent gates, one shared implementation (`gpn_agent::models`):
 On the current 8 GB node this yields four served models: `llama3.2:1b`, `qwen2.5:0.5b`, `qwen2.5:7b`, `deepseek-r1:7b`. Overrides: `GPN_PUBLIC_MODELS`, `GPN_MODEL_VRAM_HEADROOM`, `GPN_MODEL_VRAM_OVERRIDE`.
 
 ## Economics (derived, with honest limits)
-GPN does not price tokens off a competitor's price list; it prices them off the **GPU-hour rental market**:
+GPN does not price tokens off a competitor's price list, nor off a GPU-rental market. It prices them off
+**throughput**: one anchor constant (what a 4060-class card earns per hour) divided by the token rate that
+card reaches on a 1B model.
 
 ```
-market  = oracle avg_gpu_hour_price         # USD/hr per GPU class
-target  = clamp(0.50 × market, owner_cost, market)
-$/token = target / (tok_s × 3600 × 0.65) × 1.30
-gpn/tok = $/token ÷ token_price_usd
+anchor_tok_s = roofline(30,000 GFLOP/s, 272 GB/s, 1B) = 95.2 tok/s
+anchor_rate  = $0.10/hr                    # GPN_GPU_ANCHOR_USD_HR
+k            = anchor_rate / (anchor_tok_s × 3600) = $2.918e-7 / output token
+price_out    = k × (1 + GPN_MARGIN_BPS/10000)        # 3000 bps → $0.379/1M
+price_in     = price_out × GPN_INPUT_RATE_FRAC       # 0.25   → $0.095/1M
+provider_hr  = roofline(gflops, bw, params_b) × 3600 × k
 ```
 
-`0.65` is the assumed card duty cycle, `1.30` the margin. Throughput is a roofline: decode on a 1B model is **memory-bandwidth-bound** (~95 tok/s on a 30 TFLOP / 272 GB/s card), not FLOP-bound.
+**The buyer price is GPU-independent by design**: the same $0.379/1M output is charged whichever card
+serves the job, so a spot market of heterogeneous hardware can exist at all. Faster hardware earns more
+per hour instead of costing the buyer more. Throughput (not FP32 GFLOPs) is the metric because decode of
+a small model is memory-bandwidth-bound — a FLOP-based price would rank a 4090 above an H100.
 
-| GPU-hour **market** clears at | 1B model, $/1M output tokens |
-|---|---|
-| **$0.30** (idle consumer hardware) | **≈ $0.88** — below hosted small models |
-| **$1.50** | ≈ $4.38 |
-| **$3.00** (today's feed fallback) | **≈ $8.75** — ~22× `gpt-5-nano`'s $0.40 |
+| GPU (1B stream) | Memory bandwidth | Throughput | Provider earns |
+|---|---|---|---|
+| RTX 4060 8GB (anchor) | 272 GB/s | 95.2 tok/s | **$0.100/hr** |
+| RTX 4090 24GB | 1008 GB/s | 352.8 tok/s | **$0.371/hr** |
+| A100 80GB | 2039 GB/s | 713.7 tok/s | **$0.750/hr** |
+| H100 80GB | 3350 GB/s | 1172.5 tok/s | **$1.232/hr** |
 
-Break-even against `gpt-5-nano` is **≈ $0.137/GPU-hr**. Two real gaps: the **on-chain price oracle feed is absent** (the scheduler runs on hardcoded `$0.15/GPN`, `$3.00/GPU-hr`, `0.65`), and **input tokens are not metered** — only output is billed, so long prompts are underpriced. GPN is therefore a **GPU-rental market whose token price is downstream of the GPU-hour clearing price** — not a blanket "cheaper than OpenAI".
+At $0.379/1M output the 1B tier now sits next to `gpt-5-nano`'s $0.40 rather than 22× above it. `GET /pricing`
+on a live access point returns these numbers plus the current anchor.
+
+Guardrails: a derived price outside **[$0.05, $5.00] per 1M** refuses to publish unless
+`GPN_PRICING_UNSAFE=1`; the effective anchor and price are logged at startup; a provider whose modelled
+earning is below its own declared `owner_cost_usd_hr` is logged as losing money instead of being hidden.
+
+**Two limits we do not paper over.** (1) **Input metering is channel-first.** The off-chain channel bills
+input at 25% of the output rate and escrows `prompt_tokens/4 + max_tokens`. The on-chain pallet stores a
+single `(price_per_token, max_tokens, actual_tokens)`, so an on-chain job publishes a *blended* rate that
+is exact when the completion runs to `max_tokens` and slightly under-bills short completions; exact
+two-rate settlement on-chain requires a pallet change. (2) **The oracle feed is still absent** — the GPN
+price used for the USD→GPN conversion falls back to $0.15 and the legacy market model (selectable with
+`GPN_PRICING_MODEL=market`) keeps its $3.00 GPU-hour fallback.
 
 ## Node operations: dashboard, Idle, updates
 - **Local dashboard** — `gpn_node --gui` / `GPN_GUI=1` serves `http://127.0.0.1:8099` from the supervisor: mode, peers, height, GPU/VRAM, current job, child processes, and the idle panel. **Loopback only, by design** (it can stop the miner); any non-`127.0.0.1` bind is refused at startup. No auth because there is no network exposure.

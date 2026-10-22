@@ -474,33 +474,47 @@ this section. Do not describe the *live endpoint* as curated until that restart 
 - **Open:** resolve burn wiring (share logged, not actually removed); implement staking-reward &
   oracle-reward distributions; decide capped vs disinflationary.
 
-### 7.1 Derived pricing — what the code actually computes (2026-10-21)
+### 7.1 Derived pricing — what the code actually computes (2026-10-22)
 
-The scheduler prices jobs from the **GPU-hour rental market**, not from a competitor's price list:
+The scheduler prices jobs from **throughput**, not from a competitor's price list or a GPU-rental market:
 
 ```
-market  = oracle avg_gpu_hour_price        # per GPU class; fallback $3.00
-rental  = clamp(0.50 × market, owner_cost, market)   # GPN_RENTAL_FRACTION_BPS=5000
-tok/s   = fleet-average roofline min(compute, memory BW) throughput
-usd/tok = rental / (tok_s × 3600 × 0.65) × 1.30      # util 0.65, GPN_MARGIN_BPS=3000
-gpn/tok = usd/tok ÷ token_price_usd                  # fallback $0.15
+anchor_tok_s = roofline(30,000 GFLOP/s, 272 GB/s, 1B) = 95.2 tok/s
+anchor_rate  = $0.10/hr                    # GPN_GPU_ANCHOR_USD_HR
+k            = anchor_rate / (anchor_tok_s × 3600)   # $2.918e-7 / output token
+price_out    = k × (1 + GPN_MARGIN_BPS/10000)        # 3000 → $0.379/1M
+price_in     = price_out × GPN_INPUT_RATE_FRAC       # 0.25 → $0.095/1M
+provider_hr  = roofline(gflops, bw, params_b) × 3600 × k
+escrow       = prompt_tokens/4 + max_tokens          # output-equivalents
 ```
 
-Worked (published) example — 30,000 GFLOP/s, 272 GB/s, `llama3.2:1b`: decode is **memory-bound** at
-~95 tok/s; at a $3.00 market, rental = $1.50 → **$8.75/1M output tokens** (~58 GPN) — about **22×**
-`gpt-5-nano`'s $0.40. At a **$0.30** market (idle consumer hardware) the same model is **≈$0.88/1M**,
-cheaper than hosted small models. **Break-even vs nano ≈ $0.137/GPU-hr.** A 7B model on the same card
-falls to ~13.6 tok/s (~$61/M) — the network's small models are its sweet spot.
+`gpn_scheduler` implements this in `gpn-agent/src/pricing.rs` (`PricingConfig::price_per_token_out`,
+`provider_rate_hr`). The legacy market model is still selectable with `GPN_PRICING_MODEL=market`
+(`GPN_RENTAL_FRACTION_BPS=5000`, $3.00 GPU-hour fallback, util 0.65) so the two can be A/B'd and reverted.
 
-**Two GAPS, both real:**
-1. **No on-chain price oracle feed.** `get_feed()` fails and the scheduler silently uses hardcoded
-   `(token $0.15, market $3.00, util 0.65)`. The formula is implemented; its inputs are placeholders.
-2. **Input tokens are not metered.** Only output tokens are billed, so long prompts are underpriced
-   and prefill is absorbed by the provider.
+| GPU (1B stream) | Bandwidth | Throughput | Provider earns |
+|---|---|---|---|
+| RTX 4060 8GB (anchor) | 272 GB/s | 95.2 tok/s | **$0.100/hr** |
+| RTX 4090 24GB | 1008 GB/s | 352.8 tok/s | **$0.371/hr** |
+| A100 80GB | 2039 GB/s | 713.7 tok/s | **$0.750/hr** |
+| H100 80GB | 3350 GB/s | 1172.5 tok/s | **$1.232/hr** |
 
-**Framing rule:** GPN is a **GPU-rental market** whose token price is downstream of the GPU-hour
-clearing price. Never claim blanket "cheaper than OpenAI" — true only in the idle-hardware case, and
-false at the fallback rate.
+Buyer price is **GPU-independent by design** ($0.379/1M output, $0.095/1M input); faster cards earn more
+per hour. Throughput rather than FP32 GFLOPs is the metric because decode is memory-bandwidth-bound.
+A worked 4060/1B example: `k = 0.10/(95.2×3600) = 2.918e-7`; ×1.30 → **$0.379/1M** (2.53 GPN at a
+$0.15/GPN feed). The old `$3.00` market anchor gave **$8.75/1M** — ~22× `gpt-5-nano`. A derived price
+outside **[$0.05, $5.00]/1M** refuses to publish unless `GPN_PRICING_UNSAFE=1`; the anchor and price are
+logged at boot; a provider earning below its declared `owner_cost_usd_hr` is logged as losing money.
+`GET /pricing` publishes anchor, `k`, both rates and this earnings table (60 s cacheable).
+
+**Limits, both real:**
+1. **Input metering is channel-first.** The channel path bills input at 25% of output and escrows
+   `prompt/4 + max_tokens`. The pallet stores ONE `(price_per_token, max_tokens, actual_tokens)`, so
+   on-chain jobs publish a blended rate — exact at full completion, slightly under-billing short ones.
+   Exact two-rate on-chain settlement needs a pallet change (second rate in `JobBilling`).
+2. **No on-chain price oracle feed.** The USD→GPN conversion falls back to `$0.15/GPN` (the legacy market
+   model keeps its `$3.00` GPU-hour fallback). Batching raises provider earnings without changing the
+   buyer's price.
 
 ---
 

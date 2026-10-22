@@ -165,39 +165,32 @@ Payment is <strong>per token</strong>: the requestor escrows <code>rate × max_o
 <li><strong>Fees:</strong> a 5% marketplace fee is split <strong>40% staking rewards · 30% treasury · 20% burn · 10% oracle operators</strong>.</li>
 <li><strong>Value anchor:</strong> an oracle supplies a GPN/USD price (seeded at $0.15 for the testnet); the token's long-run value is intended to derive from <strong>real AI-marketplace demand</strong>, not mining inflation.</li>
 </ul>
-<h3 id="61-derived-pricing-the-token-price-is-downstream-of-the-gpu-hour">6.1 Derived pricing: the token price is downstream of the GPU-hour</h3>
-<p>GPN does not price tokens off a competitor's price list. It prices them off the <strong>rental market for the GPU-hour</strong>, then converts:</p>
-<pre><code>market  = oracle avg_gpu_hour_price            # USD/hr, per GPU class
-target  = clamp(0.50 × market, owner_cost, market)
-$/token = target / (tok_s × 3600 × 0.65) × 1.30
-gpn/tok = $/token ÷ token_price_usd
+<h3 id="61-derived-pricing-throughput-not-a-rental-market">6.1 Derived pricing: throughput, not a rental market</h3>
+<p>GPN does not price tokens off a competitor's price list, nor off a GPU-rental market. It prices them off <strong>throughput</strong>:</p>
+<pre><code>anchor_tok_s = roofline(30,000 GFLOP/s, 272 GB/s, 1B) = 95.2 tok/s
+anchor_rate  = $0.10/hr                               # GPN_GPU_ANCHOR_USD_HR
+k            = anchor_rate / (anchor_tok_s × 3600)    # USD per output token
+price_out    = k × (1 + GPN_MARGIN_BPS/10000)         # 3000 → $0.379/1M
+price_in     = price_out × GPN_INPUT_RATE_FRAC        # 0.25 → $0.095/1M
+provider_hr  = roofline(gflops, bw, params_b) × 3600 × k
+escrow       = prompt_tokens/4 + max_tokens           # output-equivalents
 </code></pre>
-<p>The scheduler takes <strong>half</strong> of the market GPU-hour rate — never below the owner's electricity/hardware cost, never above the market — divides by measured throughput (a roofline of compute and memory bandwidth; decode of a 1 B model is <strong>memory-bound</strong> at roughly 95 tok/s on a 30 TFLOP / 272 GB/s card), and adds a 30% margin. The <code>0.65</code> factor is the assumed duty cycle of the card.</p>
-<p>The consequence is worth stating rather than hiding: <strong>the same model on the same GPU has two very different prices depending only on what a GPU-hour clears at.</strong></p>
+<p>The anchor is a single tunable constant: what a 4060-class consumer card earns per hour. Dividing it by the token rate that card achieves on a 1 B model gives <code>k</code>, the pre-margin price of one output token; margin is added on the buyer side, and the GPN amount is the dollar price converted at the on-chain token price.</p>
+<p>Two properties are deliberate. <strong>The buyer price is GPU-independent</strong> — every request costs the same per token whichever card serves it, so a market of heterogeneous hardware can clear at all; a per-GPU price would make the cheapest card the only one ever selected. Faster hardware earns the <em>provider</em> more per hour instead:</p>
 <table>
 <thead>
-<tr>
-<th>GPU-hour market clears at</th>
-<th>1 B model, $/1M output tokens</th>
-</tr>
+<tr><th>GPU (1 B stream)</th><th>Memory bandwidth</th><th>Throughput</th><th>Provider earns</th></tr>
 </thead>
 <tbody>
-<tr>
-<td><strong>$0.30</strong> — idle consumer hardware near its electricity cost</td>
-<td><strong>≈ $0.88</strong>, below hosted small models</td>
-</tr>
-<tr>
-<td><strong>$1.50</strong></td>
-<td>≈ $4.38</td>
-</tr>
-<tr>
-<td><strong>$3.00</strong> — today's hardcoded fallback</td>
-<td><strong>≈ $8.75</strong>, roughly <strong>22×</strong> <code>gpt-5-nano</code>'s $0.40</td>
-</tr>
+<tr><td>RTX 4060 8GB (anchor)</td><td>272 GB/s</td><td>95.2 tok/s</td><td><strong>$0.100/hr</strong></td></tr>
+<tr><td>RTX 4090 24GB</td><td>1008 GB/s</td><td>352.8 tok/s</td><td><strong>$0.371/hr</strong></td></tr>
+<tr><td>A100 80GB</td><td>2039 GB/s</td><td>713.7 tok/s</td><td><strong>$0.750/hr</strong></td></tr>
+<tr><td>H100 80GB</td><td>3350 GB/s</td><td>1172.5 tok/s</td><td><strong>$1.232/hr</strong></td></tr>
 </tbody>
 </table>
-<p>Break-even against <code>gpt-5-nano</code> is <strong>≈ $0.137 per GPU-hour</strong>. So GPN is best understood as a <strong>GPU-rental market</strong> whose token price is a <em>consequence</em> of GPU-hour clearing — not as an inference provider that undercuts frontier APIs. Claiming blanket "cheaper than OpenAI" would be false at the fallback rate and true only in the idle-hardware case.</p>
-<p><strong>Two limitations we are not papering over.</strong> (1) The <strong>on-chain oracle feed is absent</strong> — the scheduler runs on hardcoded fallbacks ($0.15/GPN, $3.00/GPU-hr, 0.65 utilisation), so the formula is honest but its inputs are placeholders until operators publish. (2) <strong>Input tokens are not metered</strong> — only output is billed, so long prompts are effectively underpriced and prefill cost is absorbed by the provider. Both are tracked as gaps, not features.</p>
+<p>And <strong>throughput, not FP32 GFLOPs, is the metric</strong>: decode of a small model is memory-bandwidth-bound, so a FLOP-based price would rank a 4090 above an H100.</p>
+<p>The result is <strong>$0.379 per 1M output tokens</strong> and <strong>$0.095 per 1M input tokens</strong> — next to <code>gpt-5-nano</code>'s $0.40, rather than the ~$8.75 (22×) that the old <code>$3.00 GPU-hour</code> anchor produced. A derived price outside <strong>[$0.05, $5.00] per 1M</strong> refuses to publish unless <code>GPN_PRICING_UNSAFE=1</code>, and a provider whose modelled earning falls below its own declared cost is logged as such rather than hidden.</p>
+<p><strong>Two limitations we are not papering over.</strong> (1) <strong>Input metering is channel-first.</strong> The off-chain channel bills input at 25% of the output rate; the on-chain pallet stores one <code>(price_per_token, max_tokens, actual_tokens)</code> and charges a single rate, so an on-chain job publishes a <em>blended</em> rate over <code>prompt+max</code> — exact when the completion runs to <code>max_tokens</code>, slightly under-billing short completions. Exact two-rate settlement on-chain needs a pallet change (a second rate in <code>JobBilling</code>). (2) <strong>The oracle feed is absent</strong> — the USD→GPN conversion falls back to $0.15/GPN; the legacy market model, still available as <code>GPN_PRICING_MODEL=market</code>, keeps its $3.00 GPU-hour fallback.</p>
 <hr />
 <h2 id="7-privacy-shielded-pool">7. Privacy: Shielded Pool</h2>
 <p>GPN includes a <strong>shielded pool</strong> with Sapling-style note commitments and nullifiers:</p>

@@ -45,7 +45,7 @@
 - **GAP** — the on-chain GPU-hour price oracle feed is absent (the scheduler runs on hardcoded fallbacks), and input tokens are not metered.
 - **Next** — the public CRS ceremony, mainnet, and a cross-chain bridge.
 
-**On price (no overclaim).** GPN is a **GPU-rental market**; token price follows what a GPU-hour clears at. At $0.30/GPU-hr (idle hardware) a 1B model is ≈$0.88/1M output tokens — below hosted small models. At the $3.00 fallback it is ≈$8.75/1M, ~22× `gpt-5-nano`'s $0.40. Break-even ≈$0.137/GPU-hr. We do not claim to be cheaper than OpenAI in general.
+**On price (no overclaim).** GPN prices tokens off **throughput**: an anchor constant (a 4060-class card earns ≈$0.10/hr) divided by the token rate that card reaches on a 1B model, plus a 30% margin. That is **$0.379/1M output** ($0.095/1M input) regardless of which GPU serves the job — a faster card earns the provider more per hour ($0.371 on a 4090, $1.232 on an H100) rather than costing the buyer more. That sits next to `gpt-5-nano`'s $0.40, not 22× above it. The old market-anchored model ($3.00 GPU-hour → $8.75/1M) remains selectable with `GPN_PRICING_MODEL=market` for comparison.
 
 **One line:** *A GPU should not have to choose.*
 

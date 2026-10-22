@@ -463,12 +463,12 @@ GET /job/1234/artifact → image/png</code></pre>
     <div class="wrap">
       <span class="kicker">Economics</span>
       <h2>What a token costs, and why</h2>
-      <p class="sub">GPN does not price tokens off a competitor's price list. It prices them off the
-        <b>rental market for the GPU-hour</b> that produced them, then converts to GPN at the on-chain token
-        price. The formula below is the one running in <code>gpn_scheduler</code> today — including its
-        default constants — so you can check the arithmetic. <b>Read the caveats before the table:</b> today's
-        testnet inference is free, the models are small, and the number that comes out of the formula depends
-        on what a GPU-hour clears at.</p>
+      <p class="sub">GPN does not price tokens off a competitor's price list, and it does not price them
+        off a GPU-rental market either. It prices them off <b>throughput</b>: one anchor constant — what a
+        4060-class card earns per hour — divided by the token rate that card actually achieves on a 1B
+        model. The formula below is the one running in <code>gpn_scheduler</code> today, default constants
+        included, so you can check the arithmetic. <b>Read the caveats before the table:</b> today's testnet
+        inference is free and the models are small.</p>
 
       <div class="callout warn">
         <span class="ct">The comparison this is <em>not</em></span>
@@ -490,16 +490,12 @@ GET /job/1234/artifact → image/png</code></pre>
           <thead><tr><th scope="col">Model</th><th scope="col">Class / scale</th><th scope="col">$/1M input</th><th scope="col">$/1M output</th><th scope="col">GPN / 1M output</th></tr></thead>
           <tbody>
             <tr>
-              <td><b>GPN</b> · <code>llama3.2:1b</code><br><span class="hint">GPU-hour at $0.30 (idle-hardware market), 95 tok/s</span></td>
-              <td>1B, 1 consumer GPU, single stream</td><td>not priced*</td><td><b>≈$0.88</b> <span class="hint">illustrative</span></td><td><b>≈5.8</b></td>
+              <td><b>GPN</b> · <code>llama3.2:1b</code><br><span class="hint">throughput curve · 95.2 tok/s anchor</span></td>
+              <td>1B, any provider GPU, single stream</td><td><b>$0.095</b></td><td><b>≈$0.38</b> <span class="hint">illustrative</span></td><td><b>≈2.53</b></td>
             </tr>
             <tr>
-              <td><b>GPN</b> · <code>llama3.2:1b</code><br><span class="hint">GPU-hour at $3.00 (today's feed fallback), 95 tok/s</span></td>
-              <td>1B, 1 consumer GPU, single stream</td><td>not priced*</td><td><b>≈$8.75</b> <span class="hint">illustrative</span></td><td><b>≈58.4</b></td>
-            </tr>
-            <tr>
-              <td><b>GPN</b> · <code>qwen2.5:7b</code><br><span class="hint">GPU-hour at $3.00, 13.6 tok/s</span></td>
-              <td>7B, 1 consumer GPU, single stream</td><td>not priced*</td><td>≈$61.27 <span class="hint">illustrative</span></td><td>≈409</td>
+              <td><b>GPN</b> · <code>qwen2.5:7b</code><br><span class="hint">same buyer price by design</span></td>
+              <td>7B, any provider GPU, single stream</td><td><b>$0.095</b></td><td><b>≈$0.38</b> <span class="hint">illustrative</span></td><td><b>≈2.53</b></td>
             </tr>
             <tr><td>OpenAI <code>gpt-5-nano</code></td><td>small, hosted</td><td>$0.05</td><td>$0.40</td><td>—</td></tr>
             <tr><td>OpenAI <code>gpt-6-luna</code></td><td>small, hosted</td><td>$0.10</td><td>$0.50</td><td>—</td></tr>
@@ -518,56 +514,76 @@ GET /job/1234/artifact → image/png</code></pre>
       <p class="hint" style="margin-top:10px">Sources: <a href="https://developers.openai.com/api/docs/pricing" rel="noopener">developers.openai.com/api/docs/pricing</a>,
         <a href="https://platform.claude.com/docs/en/about-claude/pricing" rel="noopener">platform.claude.com/docs/en/about-claude/pricing</a>,
         <a href="https://ai.google.dev/gemini-api/docs/pricing" rel="noopener">ai.google.dev/gemini-api/docs/pricing</a> —
-        standard (non-batch, short-context) tiers, read 2026-10-21. *GPN's scheduler prices <b>output</b>
-        tokens only: prefill is not separately metered, so long prompts are effectively underpriced today.
-        Vendors change prices; treat the hosted columns as a snapshot, and re-check the links.</p>
+        standard (non-batch, short-context) tiers, read 2026-10-21. GPN's input rate is 25% of its output
+        rate (<code>GPN_INPUT_RATE_FRAC=0.25</code>). Vendors change prices; treat the hosted columns as a
+        snapshot, and re-check the links. <code>GET /api/pricing</code> returns the live numbers.</p>
 
       <div class="callout" style="margin-top:18px">
-        <span class="ct">Read the two GPN rows together — that is the whole story</span>
-        <p class="mb-0">The same model on the same GPU is <b>$0.88/M</b> or <b>$8.75/M</b> depending only on
-          what a GPU-hour rents for. GPN is a <em>GPU rental market</em>, and the token price is a
-          consequence of that market, not a marketing number. On idle consumer hardware priced near its
-          electricity cost, a small model lands below every hosted small model. On a $3/hour market it is
-          <b>more expensive per token</b> than <code>gpt-5-nano</code> — because one 1B stream uses a small
-          fraction of the card you are paying for. Both statements are true; which one you get depends on
-          supply, concurrency and the oracle feed.</p>
+        <span class="ct">The buyer's price does not depend on the GPU — on purpose</span>
+        <p class="mb-0">GPN publishes <b>one</b> global price per token. A 4060 and an H100 charge the
+          buyer the same $0.38 per million output tokens; the difference is what the <em>provider</em> earns
+          per hour ($0.10 vs $1.23). That is a deliberate design choice: a per-GPU price would make the
+          cheapest card the only one ever selected, and no spot market of heterogeneous hardware can run
+          that way. It is also why FP32 TFLOPs are the wrong metric — decode of a small model is
+          memory-bandwidth-bound, so pricing on FLOPs would rank a 4090 above an H100. The curve is built on
+          measured throughput instead.</p>
       </div>
+
+      <h3 style="margin-top:26px">What a provider's card earns</h3>
+      <p class="hint" style="margin-bottom:12px">Pre-margin, before the 5% marketplace fee, on a single
+        1B stream. The buyer's price is identical in every row.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th scope="col">GPU</th><th scope="col">Memory bandwidth</th><th scope="col">1B throughput</th><th scope="col">Earns / hour</th></tr></thead>
+          <tbody>
+            <tr><td>RTX 4060 8GB <span class="hint">anchor</span></td><td>272 GB/s</td><td>95.2 tok/s</td><td><b>$0.10</b></td></tr>
+            <tr><td>RTX 4090 24GB</td><td>1008 GB/s</td><td>352.8 tok/s</td><td><b>$0.371</b></td></tr>
+            <tr><td>A100 80GB</td><td>2039 GB/s</td><td>713.7 tok/s</td><td><b>$0.750</b></td></tr>
+            <tr><td>H100 80GB</td><td>3350 GB/s</td><td>1172.5 tok/s</td><td><b>$1.232</b></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="hint" style="margin-top:10px">A card whose modelled earning falls below its operator's
+        declared cost is flagged at startup and on <code>/api/pricing</code> — a provider that cannot cover
+        its electricity is a provider that will leave.</p>
 
       <div class="grid cols-2" style="margin-top:22px">
         <div>
           <h3>How the number is derived</h3>
-          <p class="muted">Straight from the access-point scheduler. The oracle publishes an average
-            GPU-hour rental price per GPU class; the scheduler takes a fraction of that as the compute
-            charge (never below the owner's cost, never above the market), divides by measured throughput,
-            then adds margin and converts to GPN.</p>
-<pre><code>market  = oracle avg_gpu_hour_price   # USD/hr, per GPU class
-rental  = clamp(0.50 × market, owner_cost, market)
-tok/s   = fleet-average measured throughput
-          (roofline: min(compute, memory bandwidth))
-usd/tok = rental / (tok/s × 3600 × 0.65) × 1.30
-gpn/tok = usd/tok / token_price_usd</code></pre>
-          <p class="hint mb-0">Defaults in code: <code>GPN_RENTAL_FRACTION_BPS=5000</code> (50% of market
-            rental), <code>GPN_MARGIN_BPS=3000</code> (30% margin), utilisation <code>0.65</code>, token
-            price from the on-chain feed (fallback <code>$0.15</code> when the feed is empty — which is the
-            case on today's testnet). The <code>0.65</code> utilisation factor is the assumed duty cycle of
-            the card; the <code>1.30</code> is the margin on top of compute cost.</p>
+          <p class="muted">Straight from the access-point scheduler. One tunable constant — the hourly
+            earning of a 4060-class card — is divided by the token rate that card reaches on a 1B model,
+            giving <code>k</code>, the pre-margin price of one output token. Margin is added on top, and the
+            GPN amount is the dollar price converted at the on-chain token price.</p>
+<pre><code>anchor_tok_s = roofline(30,000 GFLOP/s, 272 GB/s, 1B)
+             = min(6000 compute, 95.2 memory) = 95.2 tok/s
+anchor_rate  = $0.10/hr            # GPN_GPU_ANCHOR_USD_HR
+k            = 0.10 / (95.2 × 3600) = $2.918e-7/token
+price_out    = k × (1 + 0.30)     # GPN_MARGIN_BPS=3000
+price_in     = price_out × 0.25   # GPN_INPUT_RATE_FRAC
+escrow       = prompt_tokens/4 + max_tokens   (output-equivalents)
+gpn/tok      = price_out ÷ token_price_usd</code></pre>
+          <p class="hint mb-0">A provider's hourly earning is the same <code>k</code> applied to its own
+            roofline throughput: <code>roofline(gflops, bandwidth, params) × 3600 × k</code>. Margin does not
+            touch <code>k</code> — it is the buyer-side spread. The legacy oracle-market model is still
+            selectable with <code>GPN_PRICING_MODEL=market</code> for A/B comparison.</p>
         </div>
         <div>
           <h3>Worked example</h3>
-          <p class="muted">One live testnet provider: 30,000 GFLOP/s FP32, 272 GB/s memory bandwidth, one
+          <p class="muted">The 4060-class anchor: 30,000 GFLOP/s FP32, 272 GB/s memory bandwidth, one
             <code>llama3.2:1b</code> stream.</p>
 <pre><code>roofline(1B) = min(30000e9×0.40 / (2×1e9),   # compute
                    272e9×0.70    / (2×1e9))  # memory
              = min(6000, 95.2) = 95.2 tok/s
 
-rental  = clamp(0.50 × $3.00, 0.03, 3.00) = $1.50/hr
-usd/tok = 1.50 / (95.2 × 3600 × 0.65) × 1.30
-        = $8.75e-6
-        → $8.75 per 1M output tokens
-gpn/tok = 8.75e-6 / 0.15 = 58.4 GPN per 1M</code></pre>
-          <p class="hint mb-0">Decode is memory-bound: the 1B ceiling comes from memory bandwidth, not
-            FLOPs. That is why a 7B model on the same card collapses to ~13.6 tok/s (~$61/M) — and why the
-            network's small models are its sweet spot.</p>
+k        = 0.10 / (95.2 × 3600) = 2.918e-7
+price    = 2.918e-7 × 1.30 = 3.793e-7 / token
+         → $0.379 per 1M output tokens
+         → $0.095 per 1M input tokens (25%)
+gpn/tok  = 3.793e-7 / 0.15 = 2.53 GPN per 1M</code></pre>
+          <p class="hint mb-0">Decode is memory-bound, so the 1B ceiling comes from bandwidth, not FLOPs.
+            The same card on a 7B model drops to ~13.6 tok/s and earns the provider ~$0.014/hr — which is
+            exactly the case the below-cost warning exists to surface. Model size changes the provider's
+            economics, not the buyer's price.</p>
         </div>
       </div>
 
@@ -576,9 +592,10 @@ gpn/tok = 8.75e-6 / 0.15 = 58.4 GPN per 1M</code></pre>
         <div class="card plain">
           <h3><span class="ico" aria-hidden="true">🖥️</span> Provider</h3>
           <p class="muted mb-0"><b>95%</b> of the job charge. The marketplace takes
-            <code>MarketplaceFeeBps = 500</code> (5%) at settlement; per-token billing charges
-            <code>price_per_token × actual_tokens</code> and refunds unused escrow. The provider is the one
-            who ran the GPU — that is the whole point of the design.</p>
+            <code>MarketplaceFeeBps = 500</code> (5%) at settlement. Escrow covers
+            <code>prompt_tokens/4 + max_tokens</code> output-equivalents and the unused remainder is refunded;
+            the charge is the blended token rate × actual tokens. The provider is the one who ran the GPU —
+            that is the whole point of the design.</p>
         </div>
         <div class="card plain">
           <h3><span class="ico" aria-hidden="true">🏦</span> Protocol fee</h3>
@@ -594,9 +611,9 @@ gpn/tok = 8.75e-6 / 0.15 = 58.4 GPN per 1M</code></pre>
             recycle GPN, they do not mint it.</p>
         </div>
       </div>
-      <p class="hint" style="margin-top:12px">Scale check: at 58 GPN per million tokens, one day of emission
-        (288,000 GPN) buys ≈4.9&nbsp;billion output tokens — about 600 consumer GPUs running flat out for a
-        day. That is the size of the inference economy the current parameters can subsidise.</p>
+      <p class="hint" style="margin-top:12px">Scale check: at 2.53 GPN per million tokens, one day of
+        emission (288,000 GPN) buys ≈114&nbsp;billion output tokens — about 13,000 consumer GPUs running flat
+        out for a day. That is the size of the inference economy the current parameters can subsidise.</p>
 
       <h3 id="estimator" style="margin-top:30px">Cost estimator</h3>
       <p class="hint" style="margin-bottom:14px">Every input is adjustable, and every price is <b>as of
@@ -623,14 +640,14 @@ gpn/tok = 8.75e-6 / 0.15 = 58.4 GPN per 1M</code></pre>
           </div>
           <div class="field-row">
             <div class="field">
-              <label for="ec-market">GPU-hour rent</label>
-              <input type="text" id="ec-market" value="3.00" inputmode="decimal" spellcheck="false" />
-              <p class="hint">USD/hr · $0.30 idle hardware, $3.00 fallback</p>
+              <label for="ec-anchor">Anchor earning (4060-class)</label>
+              <input type="text" id="ec-anchor" value="0.10" inputmode="decimal" spellcheck="false" />
+              <p class="hint">USD/hr · <code>GPN_GPU_ANCHOR_USD_HR</code></p>
             </div>
             <div class="field">
-              <label for="ec-toks">Throughput</label>
-              <input type="text" id="ec-toks" value="95.2" inputmode="decimal" spellcheck="false" />
-              <p class="hint">aggregate output tok/s per GPU-hour</p>
+              <label for="ec-margin">Margin</label>
+              <input type="text" id="ec-margin" value="30" inputmode="decimal" spellcheck="false" />
+              <p class="hint">percent · <code>GPN_MARGIN_BPS=3000</code></p>
             </div>
           </div>
           <div class="field">
@@ -638,9 +655,8 @@ gpn/tok = 8.75e-6 / 0.15 = 58.4 GPN per 1M</code></pre>
             <input type="text" id="ec-token" value="0.15" inputmode="decimal" spellcheck="false" />
             <p class="hint">Only used to render a dollar figure. The testnet token has no market price.</p>
           </div>
-          <p class="hint mb-0" id="ec-note">Throughput is the assumption that moves the answer most — it is the
-            single-stream roofline for the selected model at 30,000 GFLOP/s and 272 GB/s; raise it to model
-            batching several sequences on one card.</p>
+  <p class="hint mb-0" id="ec-note">The buyer's price is the same for every model and every GPU — only
+            the provider's hourly earning changes with throughput.</p>
         </div>
 
         <div>
@@ -669,16 +685,21 @@ gpn/tok = 8.75e-6 / 0.15 = 58.4 GPN per 1M</code></pre>
           <em>illustrative</em> conversion at $0.15/GPN; the GPN-denominated numbers are the real ones.
           When the on-chain oracle feed is empty (it is today), <code>token_price_usd</code> also falls back
           to $0.15 — so a change in the feed changes both sides of the ratio.</li>
-        <li><b>Throughput is measured, not promised.</b> <code>tok/s</code> is the fleet average over
-          whatever boxes are online, recomputed per job. Add a 4090 and the price falls; a mostly-idle
-          network of integrated GPUs prices badly. The estimator's throughput field is the honest place to
-          model that.</li>
-        <li><b>Small models are not frontier models.</b> A $0.40/M hosted nano model and a $0.88/M GPN 1B
+        <li><b>Throughput is measured, not promised.</b> The anchor assumes a 4060-class card reaching
+          95 tok/s on a 1B model; a slower card earns less per hour, and a card earning below its
+          operator's declared cost is flagged rather than quietly subcontracted. Batching several
+          sequences on one card raises the provider's earning per hour <em>without</em> changing the buyer's
+          price.</li>
+        <li><b>Small models are not frontier models.</b> A $0.40/M hosted nano model and a $0.38/M GPN 1B
           model are both "cheap", but neither reasons like <code>gpt-6-astra</code> or
           <code>Claude Fable 5.1</code>. Cost per useful answer is the only fair denominator, and this page
           does not have that data.</li>
-        <li><b>Output tokens only.</b> Prompt/prefill is not separately metered, and there is no cache
-          pricing, no batch discount, and no SLA on the testnet.</li>
+        <li><b>Input metering is channel-first.</b> The default off-chain channel bills input at 25% of the
+          output rate. The on-chain pallet stores a single rate, so an on-chain job publishes a blended
+          rate that is exact when the completion runs to <code>max_tokens</code> and slightly under-bills
+          short completions. Exact two-rate settlement on-chain needs a pallet change; it is tracked, not
+          claimed.</li>
+        <li><b>No cache pricing, no batch discount, no SLA</b> on the testnet.</li>
       </ul>
 
       <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:20px">
@@ -706,6 +727,7 @@ gpn/tok = 8.75e-6 / 0.15 = 58.4 GPN per 1M</code></pre>
             <tr><td><code>GET /api/jobs/&lt;id&gt;</code></td><td>On-chain state of a job (<code>Pending</code>, <code>Running</code>, <code>Completed</code>…).</td><td>120 / min per IP</td></tr>
             <tr><td><code>GET /api/providers</code></td><td>Live provider registry: models, capabilities, latency.</td><td>120 / min per IP</td></tr>
             <tr><td><code>GET /api/mode</code></td><td>Whether this AP is testnet (free AI) or mainnet (client-signed).</td><td>120 / min per IP</td></tr>
+            <tr><td><code>GET /api/pricing</code></td><td>The live rate card: anchor, <code>k</code>, input/output price per token, and the provider-earnings table for reference GPUs.</td><td>cacheable 60 s</td></tr>
           </tbody>
         </table>
       </div>
@@ -753,9 +775,11 @@ gpn/tok = 8.75e-6 / 0.15 = 58.4 GPN per 1M</code></pre>
   var model = document.getElementById('ec-model');
   if (!model) return;
 
-  var UTIL = 0.65, MARGIN = 0.30, FRAC = 0.50, OWNER = 0.03;
+  var ANCHOR_TOKS = 95.2, IN_FRAC = 0.25;
   // Single-stream roofline at 30,000 GFLOP/s FP32 + 272 GB/s, params in billions.
   var ROOFLINE = { 1: 95.2, 3: 31.7, 7: 13.6, 14: 6.8 };
+  // Reference cards: name + memory bandwidth (GB/s). Decode is bandwidth-bound.
+  var GPUS = [['RTX 4060', 272], ['RTX 4090', 1008], ['A100', 2039], ['H100', 3350]];
   var HOSTED = [
     ['OpenAI gpt-5-nano', 0.40],
     ['OpenAI gpt-6-luna', 0.50],
@@ -766,8 +790,8 @@ gpn/tok = 8.75e-6 / 0.15 = 58.4 GPN per 1M</code></pre>
   ];
   var el = {
     vol: document.getElementById('ec-vol'),
-    market: document.getElementById('ec-market'),
-    toks: document.getElementById('ec-toks'),
+    anchor: document.getElementById('ec-anchor'),
+    margin: document.getElementById('ec-margin'),
     token: document.getElementById('ec-token'),
     gpnM: document.getElementById('ec-gpn-m'),
     usdM: document.getElementById('ec-usd-m'),
@@ -803,12 +827,13 @@ gpn/tok = 8.75e-6 / 0.15 = 58.4 GPN per 1M</code></pre>
   function render() {
     var params = parseFloat(model.value) || 1;
     var volM = val(el.vol, 10);
-    var market = val(el.market, 3) || 0.001;
-    var toks = val(el.toks, 0) || 1;
+    var anchor = val(el.anchor, 0.10) || 0.10;
+    var margin = val(el.margin, 30) / 100;
     var tokenUsd = val(el.token, 0.15) || 0.15;
 
-    var rental = Math.min(Math.max(FRAC * market, OWNER), market);
-    var usdPerTok = (rental / (toks * 3600 * UTIL)) * (1 + MARGIN);
+    // k is the pre-margin unit price; margin is the buyer-side spread.
+    var k = anchor / (ANCHOR_TOKS * 3600);
+    var usdPerTok = k * (1 + margin);
     var usdPerM = usdPerTok * 1e6;
     var gpnPerM = usdPerM / tokenUsd;
     var mTokens = volM * 1e6;
@@ -834,27 +859,29 @@ gpn/tok = 8.75e-6 / 0.15 = 58.4 GPN per 1M</code></pre>
       qty(gpnTotal) + ' GPN)</span></td></tr>');
     el.cmp.innerHTML = rows.join('');
 
-    // GPU-hour price at which GPN ties the cheapest hosted small model.
-    var breakEven = (cheapest[1] * 1e-6) * (toks * 3600 * UTIL) / (1 + MARGIN) / FRAC;
+    // Provider earnings at this anchor on the selected model.
+    var modelToks = ROOFLINE[params] || 95.2;
+    var earns = GPUS.map(function (g) {
+      // Scale the model roofline by bandwidth relative to the anchor card.
+      var t = modelToks * (g[1] / 272);
+      return g[0] + ' ' + money(t * 3600 * k) + '/hr';
+    }).join(' · ');
     var ratioText;
     if (usdPerM <= cheapest[1]) {
-      ratioText = 'At these inputs GPN is cheaper per token than ' + cheapest[0] +
-        ' — but it is serving a small open model, so compare it to that tier, not to a frontier model.';
+      ratioText = 'At these inputs GPN is cheaper per output token than ' + cheapest[0] +
+        ' — while serving a small open model, so compare it to that tier, not to a frontier model.';
     } else {
       ratioText = 'At these inputs GPN is ' + (usdPerM / cheapest[1]).toFixed(1) + '× ' + cheapest[0] +
-        ' per output token. It ties that price at a GPU-hour rent of ' + money(breakEven) + '/hr.';
+        ' per output token.';
     }
     el.verdict.textContent = ratioText;
-    el.note.textContent = 'Throughput is the assumption that moves the answer most — ' + toks.toFixed(1) +
-      ' tok/s is ' + (toks / (ROOFLINE[params] || 1)).toFixed(1) + '× the single-stream roofline for this model.';
+    el.note.textContent = 'Provider earning at this anchor, ' + modelToks.toFixed(1) +
+      ' tok/s on a 1B model: ' + earns + '. The buyer pays ' + money(usdPerM) +
+      '/1M output regardless of which of those cards serves the request.';
   }
 
-  model.addEventListener('change', function () {
-    var params = parseFloat(model.value) || 1;
-    el.toks.value = (ROOFLINE[params] || 95.2).toFixed(1);
-    render();
-  });
-  [el.vol, el.market, el.toks, el.token].forEach(function (i) {
+  model.addEventListener('change', function () { render(); });
+  [el.vol, el.anchor, el.margin, el.token].forEach(function (i) {
     i.addEventListener('input', render);
     i.addEventListener('change', render);
   });

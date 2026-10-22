@@ -27,6 +27,7 @@ pub mod modes;
 pub mod net;
 pub mod network_registry;
 pub mod ollama;
+pub mod pricing;
 pub mod profitability;
 pub mod provider_policy;
 pub mod routing;

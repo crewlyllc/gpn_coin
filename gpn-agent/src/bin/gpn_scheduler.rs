@@ -20,6 +20,7 @@
 //! Env: LISTEN, SIGNER_URI, ENDPOINT, PROVIDERS, GPN_ASSIGN_STORE
 
 use gpn_agent::chain::ChainClient;
+use gpn_agent::pricing::{self, params_b_for, roofline_tok_per_s, PricingConfig};
 use gpn_agent::routing::{self, RttOverrides};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -407,14 +408,13 @@ fn fast_ap_enabled() -> bool {
 
 // ── chat-mode economics ─────────────────────────────────────────────────────
 //
-// `/v1/chat/completions` uses ONE price table no matter how the job is paid, so
-// switching modes can never become a way to pay less (or be charged more):
-// the on-chain path escrows `PRICE_PER_TOKEN × MAX_TOKENS` and the channel path
-// pre-authorises exactly the same amount against the hub channel.
+// `/v1/chat/completions` derives ONE price card per request (see
+// `gpn_agent::pricing`), so switching payment modes can never become a way to
+// pay less (or be charged more): both the on-chain and channel paths price the
+// same `prompt_tokens×input_frac + max_tokens` output-equivalents. The buyer
+// price is GPU-independent; a faster card earns the provider more per hour.
 /// Max output tokens requested for a chat completion.
 const CHAT_MAX_TOKENS: u32 = 512;
-/// Base units of GPN charged per token on the chat facade.
-const CHAT_PRICE_PER_TOKEN: u128 = 1_000_000_000;
 
 /// How long a create may take to appear on-chain before we give up on it. GPN blocks are
 /// PoW-mined on a 15 s target with observed gaps of 2–30 s, so the old fixed 2 s window was
@@ -1185,41 +1185,100 @@ fn moderation_block(prompt: &str) -> Option<gpn_agent::moderation::Category> {
     }
 }
 
-/// Parse a rough parameter count (in billions) from a model name, e.g.
-/// "llama3.2:1b" -> 1.0, "qwen2.5:0.5b" -> 0.5, "llama3:70b" -> 70.0.
-fn params_b_for(model: &str) -> f64 {
-    let m = model.to_ascii_lowercase();
-    if let Some(idx) = m.find('b') {
-        let pre = &m[..idx];
-        let num: String = pre
-            .chars()
-            .rev()
-            .take_while(|c| c.is_ascii_digit() || *c == '.')
-            .collect::<String>()
-            .chars()
-            .rev()
-            .collect();
-        if let Ok(v) = num.parse::<f64>() {
-            if v > 0.0 {
-                return v;
-            }
-        }
-    }
-    1.0
+// `params_b_for` and `roofline_tok_per_s` live in `gpn_agent::pricing` (shared
+// with the provider-earnings table and the pure-function test suite).
+
+// ── price feed cache ────────────────────────────────────────────────────────
+//
+// Both the chat facade and `POST /jobs` need the on-chain GPN price (to convert
+// a USD rate into GPN base units) plus, under `GPN_PRICING_MODEL=market`, the
+// oracle's GPU-hour price. Fetching that per request would put a chain RPC on
+// the fast chat path; instead a background refresher keeps a snapshot warm and
+// request handlers read it lock-and-copy.
+#[derive(Clone, Copy, Debug)]
+struct FeedSnapshot {
+    token_price_usd: f64,
+    market_hr: f64,
+    util: f64,
 }
 
-/// Roofline estimate of output tokens/sec for `params_b` on a GPU with
-/// `gflops` GFLOP/s and `mem_bw_gbps` GB/s of memory bandwidth:
-///   compute-bound:  gflops·1e9·eff_c / (2 FLOPs per param per token)
-///   memory-bound:   bw·1e9·eff_m    / (2 bytes per fp16 weight per token)
-/// Decode is usually memory-bound; prefill/train is compute-bound. We take the min.
-fn roofline_tok_per_s(gflops: f64, mem_bw_gbps: f64, params_b: f64) -> f64 {
-    const EFF_COMPUTE: f64 = 0.40;
-    const EFF_MEM: f64 = 0.70;
-    let p = params_b.max(0.05) * 1e9;
-    let compute = gflops.max(1.0) * 1e9 * EFF_COMPUTE / (2.0 * p);
-    let memory = mem_bw_gbps.max(1.0) * 1e9 * EFF_MEM / (p * 2.0);
-    compute.min(memory).max(1.0)
+fn feed_snapshot() -> &'static Mutex<FeedSnapshot> {
+    static F: OnceLock<Mutex<FeedSnapshot>> = OnceLock::new();
+    F.get_or_init(|| {
+        Mutex::new(FeedSnapshot {
+            // Same fallbacks the request path used when `get_feed()` failed.
+            token_price_usd: 0.15,
+            market_hr: 3.0,
+            util: 0.65,
+        })
+    })
+}
+
+fn feed_now() -> FeedSnapshot {
+    *feed_snapshot().lock().unwrap()
+}
+
+/// Refresh the cached feed every `secs` seconds. A failed read keeps the last
+/// good values (never zeroes a price).
+///
+/// The same tick surfaces any provider whose modelled earning is **below its own
+/// declared `owner_cost_usd_hr`**: at the published card it is losing money, and
+/// silently hiding that would just relocate the failure to the operator's exit.
+fn spawn_feed_refresh(
+    client: Arc<ChainClient>,
+    rt: Arc<tokio::runtime::Runtime>,
+    registry: Arc<Mutex<Vec<Provider>>>,
+    pcfg: PricingConfig,
+    secs: u64,
+) {
+    std::thread::spawn(move || loop {
+        if let Some(f) = rt.block_on(client.get_feed()) {
+            let mut g = feed_snapshot().lock().unwrap();
+            if f.token_price_usd > 0.0 {
+                g.token_price_usd = f.token_price_usd;
+            }
+            if f.avg_gpu_hour_price_usd > 0.0 {
+                g.market_hr = f.avg_gpu_hour_price_usd;
+            }
+            if f.utilization > 0.0 {
+                g.util = f.utilization.clamp(0.05, 1.0);
+            }
+        }
+        if pcfg.model == pricing::PricingModel::Throughput {
+            let reg = registry.lock().unwrap().clone();
+            for p in reg.iter().filter(|p| p.last_seen.is_some()) {
+                // `gflops == 0` means the card has not attested its capability —
+                // unmeasured, not slow. Only judge boxes that report real numbers.
+                if p.owner_cost_usd_hr <= 0.0 || p.gflops == 0 || p.mem_bw_gbps <= 0.0 {
+                    continue;
+                }
+                let tok_s = roofline_tok_per_s(p.gflops as f64, p.mem_bw_gbps, 1.0);
+                let rate = tok_s * 3600.0 * pcfg.k_usd_per_token();
+                if rate < p.owner_cost_usd_hr && warn_once(&p.address) {
+                    eprintln!(
+                        "[pricing] WARNING provider {} earns ${:.4}/hr ({:.1} tok/s on a 1B model at \
+                         {} GFLOP/s / {} GB/s) but declares ${:.4}/hr owner cost — it is losing money",
+                        p.address,
+                        rate,
+                        tok_s,
+                        p.gflops,
+                        p.mem_bw_gbps,
+                        p.owner_cost_usd_hr
+                    );
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_secs(secs.max(5)));
+    });
+}
+
+/// One warning per provider address per process (the refresher ticks every 30 s).
+fn warn_once(addr: &str) -> bool {
+    static SEEN: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    SEEN.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+        .lock()
+        .unwrap()
+        .insert(addr.to_string())
 }
 
 fn now_secs() -> u64 {
@@ -1229,32 +1288,68 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Target USD cost per output token for a model (the *stable* anchor). Uses a
-/// ~1B reference at $2e-6/token, scaled by roughly the parameter count parsed
-/// from the model name (0.5b/1b/8b/70b…). This is what keeps a job's *dollar*
-/// cost stable while the GPN amount floats with the token price.
-fn usd_per_token_for(model: &str) -> f64 {
-    let base = 2.0e-6;
-    let m = model.to_ascii_lowercase();
-    let mut params_b = 1.0f64;
-    if let Some(idx) = m.find('b') {
-        // find the numeric run immediately before the 'b'
-        let pre = &m[..idx];
-        let num: String = pre
-            .chars()
-            .rev()
-            .take_while(|c| c.is_ascii_digit() || *c == '.')
-            .collect::<String>()
-            .chars()
-            .rev()
-            .collect();
-        if let Ok(v) = num.parse::<f64>() {
-            if v > 0.0 {
-                params_b = v;
-            }
-        }
+/// Public rate card served at `GET /pricing`. Derived from the immutable config
+/// plus the cached GPN price; contains no secrets and no per-provider identity.
+fn pricing_public_json(pcfg: &PricingConfig, f: FeedSnapshot) -> Value {
+    let owner_cost = std::env::var("GPN_OWNER_COST_USD_HR")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.05);
+    let rows: Vec<Value> = pcfg
+        .earnings_table(owner_cost, 1.0)
+        .into_iter()
+        .map(|r| {
+            json!({
+                "gpu": r.name,
+                "fp32_gflops": r.gflops,
+                "mem_bw_gbps": r.mem_bw_gbps,
+                "tok_s_1b": (r.tok_s * 10.0).round() / 10.0,
+                "usd_per_hour": (r.usd_hr * 10_000.0).round() / 10_000.0,
+                "below_owner_cost": r.below_owner_cost
+            })
+        })
+        .collect();
+    let mut out = json!({
+        "pricing_model": pcfg.model.as_str(),
+        "currency": "USD",
+        "buyer_price_is_gpu_independent": true,
+        "anchor": {
+            "description": "4060-class reference card, 1B model, decode is memory-bound",
+            "fp32_gflops": pricing::ANCHOR_GFLOPS,
+            "mem_bw_gbps": pricing::ANCHOR_MEM_BW_GBPS,
+            "params_b": pricing::ANCHOR_PARAMS_B,
+            "tok_s": (pcfg.anchor_tok_s() * 10.0).round() / 10.0,
+            "usd_per_hour": pcfg.anchor_rate_usd_hr
+        },
+        "k_usd_per_token": pcfg.k_usd_per_token(),
+        "margin_bps": pcfg.margin_bps,
+        "input_rate_fraction": pcfg.input_rate_frac,
+        "price_per_token": {
+            "input": pcfg.price_per_token_in(),
+            "output": pcfg.price_per_token_out()
+        },
+        "price_per_million_tokens": {
+            "input": (pcfg.price_per_token_in() * 1e6 * 10_000.0).round() / 10_000.0,
+            "output": (pcfg.price_per_million_out() * 10_000.0).round() / 10_000.0
+        },
+        "provider_earnings_usd_per_hour": rows,
+        "owner_cost_usd_per_hour": owner_cost,
+        "gpn_price_usd": f.token_price_usd,
+        "gpn_per_million_output_tokens":
+            (pcfg.price_per_million_out() / f.token_price_usd.max(1e-9) * 100.0).round() / 100.0,
+        "note": "Faster GPUs do not raise the buyer's price; they raise the provider's hourly earning. \
+                 Provider earnings are pre-margin and before the 5% marketplace fee."
+    });
+    if pcfg.model == pricing::PricingModel::Market {
+        out["market"] = json!({
+            "avg_gpu_hour_price_usd": f.market_hr,
+            "utilization": f.util,
+            "rental_fraction": pcfg.rental_frac,
+            "legacy_price_per_million_output":
+                pcfg.legacy_price_per_token_out(f.market_hr, pcfg.anchor_tok_s(), f.util) * 1e6
+        });
     }
-    base * params_b.max(0.5)
+    out
 }
 
 fn pick(
@@ -1696,6 +1791,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .filter(|s| !s.is_empty())
         .collect();
 
+    // ── pricing (throughput-calibrated by default; market = legacy) ────────
+    // Built once: every request reads the same immutable card. The guardrail runs
+    // here so a mis-set anchor (an extra zero, say) stops the AP at boot instead
+    // of publishing a price nobody intended.
+    let pcfg = PricingConfig::from_env((margin * 10_000.0).round() as u32, rental_frac);
+    let published = pcfg.validate_publishable().map_err(|e| {
+        format!("pricing refused: {e} (set GPN_PRICING_UNSAFE=1 to override)")
+    })?;
+    println!(
+        "[pricing] model={} anchor=${:.4}/hr anchor_tok_s={:.1} k={:.4e} margin={}bps in_frac={} -> ${:.4}/1M output (${:.4}/1M input) gpn/tok@$0.15={}",
+        pcfg.model.as_str(),
+        pcfg.anchor_rate_usd_hr,
+        pcfg.anchor_tok_s(),
+        pcfg.k_usd_per_token(),
+        pcfg.margin_bps,
+        pcfg.input_rate_frac,
+        published,
+        pcfg.price_per_token_in() * 1e6,
+        pcfg.gpn_per_token(pcfg.price_per_token_out(), 0.15),
+    );
+
     // Build the chain client (synchronous runtime for tiny_http handler).
     let rt = Arc::new(tokio::runtime::Runtime::new()?);
     let client = Arc::new(
@@ -1715,6 +1831,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `/status` rebuild, and it is keyed by canonical address.
     let poll_caps: Arc<Mutex<std::collections::HashMap<String, (Instant, Value)>>> =
         Arc::new(Mutex::new(std::collections::HashMap::new()));
+    // Warm the GPN-price snapshot (chat//jobs convert USD → GPN base units) and
+    // keep an eye on providers earning below their own declared cost.
+    spawn_feed_refresh(client.clone(), rt.clone(), registry.clone(), pcfg.clone(), 30);
     refresh(
         &registry,
         &Arc::new(urls.clone()),
@@ -1772,6 +1891,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let denylist_path = denylist_path.clone();
         let reports_path = reports_path.clone();
         let hub = hub.clone();
+        let pcfg = pcfg.clone();
         std::thread::spawn(move || {
             let url = req.url().to_string();
             let method = req.method().clone();
@@ -1914,9 +2034,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
+                // GET /pricing — the public rate card. Deliberately no secrets and
+                // no chain RPC: it is derived entirely from the immutable config.
+                // Cacheable for 60 s so the website can proxy it cheaply.
+                (Method::Get, ["pricing"]) => {
+                    let f = feed_now();
+                    let body = pricing_public_json(&pcfg, f);
+                    let cache =
+                        Header::from_bytes(&b"Cache-Control"[..], &b"public, max-age=60"[..])
+                            .unwrap();
+                    let _ = req.respond(
+                        Response::from_string(body.to_string())
+                            .with_header(hdr.clone())
+                            .with_header(cache)
+                            .with_status_code(200),
+                    );
+                    return;
+                }
                 (Method::Get, ["health"]) => {
-                    let head = rt.block_on(async { 0 });
-                    let _ = head;
                     json!({"status":"ok","providers": registry.lock().unwrap().len()})
                 }
                 // Cheap, unauthenticated RTT probe. A client times this GET to measure
@@ -2176,6 +2311,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let mut text = String::new();
                     let mut usage: Option<(u32, u32)> = None;
                     let mut channel_meta: Option<(u64, u64, u128)> = None;
+                    // ── rate card for this request ─────────────────────────
+                    // Throughput model: ONE global buyer price per token, converted
+                    // from USD at the cached GPN price. Market model (legacy): the
+                    // old fleet-average market rental. Input is billed at
+                    // `GPN_INPUT_RATE_FRAC` × the output rate, and escrow covers
+                    // `prompt_tokens×frac + max_tokens` output-equivalents.
+                    let feed = feed_now();
+                    let prompt_tokens =
+                        gpn_agent::pricing::estimate_prompt_tokens(&prompt);
+                    let usd_per_token_out = match pcfg.model {
+                        pricing::PricingModel::Throughput => pcfg.price_per_token_out(),
+                        pricing::PricingModel::Market => {
+                            let params_b = params_b_for(&model);
+                            let reg = registry.lock().unwrap().clone();
+                            let live: Vec<&Provider> =
+                                reg.iter().filter(|p| p.last_seen.is_some()).collect();
+                            let tok_per_s = if live.is_empty() {
+                                roofline_tok_per_s(165.0, 250.0, params_b)
+                            } else {
+                                live.iter()
+                                    .map(|p| {
+                                        roofline_tok_per_s(
+                                            p.gflops as f64,
+                                            p.mem_bw_gbps,
+                                            params_b,
+                                        )
+                                    })
+                                    .sum::<f64>()
+                                    / live.len() as f64
+                            };
+                            pcfg.legacy_price_per_token_out(
+                                feed.market_hr,
+                                tok_per_s,
+                                feed.util,
+                            )
+                        }
+                    };
+                    let chat_price_per_token =
+                        pcfg.gpn_per_token(usd_per_token_out, feed.token_price_usd);
+                    let escrow_units =
+                        pcfg.escrow_token_units(prompt_tokens, CHAT_MAX_TOKENS);
+                    // Single-rate pallet approximation for the on-chain path; the
+                    // channel path carries the ceiling as an exact amount.
+                    let (onchain_rate, onchain_cap) = pcfg.onchain_rate_and_cap(
+                        chat_price_per_token,
+                        prompt_tokens,
+                        CHAT_MAX_TOKENS,
+                    );
                     // ── off-chain escrow (channel) fast path ───────────────
                     // The AP signs a channel state update, the provider runs the
                     // job and returns a signed result; zero extrinsics and zero
@@ -2184,7 +2367,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // ambiguous failure (assignment possibly accepted) must not
                     // retry on-chain or the caller would pay twice.
                     if !passthrough && mode != "settle" && mode != "onchain" {
-                        let price = CHAT_PRICE_PER_TOKEN.saturating_mul(CHAT_MAX_TOKENS as u128);
+                        let price = chat_price_per_token.saturating_mul(escrow_units as u128);
                         let _t0 = std::time::Instant::now();
                         match gpn_agent::hub_ap::try_channel_job_ex(
                             &hub,
@@ -2285,9 +2468,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 150u64,
                                 "LLMInference",
                                 "Spot",
-                                CHAT_PRICE_PER_TOKEN * CHAT_MAX_TOKENS as u128,
-                                CHAT_PRICE_PER_TOKEN,
-                                CHAT_MAX_TOKENS,
+                                onchain_rate.saturating_mul(onchain_cap as u128),
+                                onchain_rate,
+                                onchain_cap,
                                 1000,
                                 workload_hash,
                             ))
@@ -2466,12 +2649,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     //   tok/s   = fleet-average measured throughput
                     //   $/token = target_hr / (tok/s × 3600 × util) × (1 + margin)
                     //   gpn/tok = $/token ÷ token_price_usd
-                    let (token_price_usd, market_hr, util) = rt
-                        .block_on(client.get_feed())
-                        .map(|f| (f.token_price_usd, f.avg_gpu_hour_price_usd, f.utilization))
-                        .unwrap_or((0.15, 3.0, 0.65));
+                    let feed = feed_now();
+                    let (token_price_usd, market_hr, util) =
+                        (feed.token_price_usd, feed.market_hr, feed.util);
                     let params_b = params_b_for(&model);
-                    let (tok_per_s, owner_hr) = {
+                    let (tok_per_s, _owner_hr) = {
                         let reg = registry.lock().unwrap().clone();
                         let live: Vec<&Provider> =
                             reg.iter().filter(|p| p.last_seen.is_some()).collect();
@@ -2492,14 +2674,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             (t.max(1.0), o.max(0.001))
                         }
                     };
-                    let market_hr = market_hr.max(0.001);
-                    let util = util.clamp(0.05, 1.0);
-                    let target_hr = (rental_frac * market_hr).clamp(owner_hr, market_hr);
-                    let usd_per_token = (target_hr / (tok_per_s * 3600.0 * util)) * (1.0 + margin);
-                    let oracle_ppt: u128 =
-                        ((usd_per_token / token_price_usd.max(1e-9)) * 1e12).max(1.0) as u128;
+                    // Throughput model (default): one global buyer price, converted to
+                    // GPN at the cached token price. Market model: the legacy
+                    // fleet-average rental anchored on the oracle.
+                    let usd_per_token = match pcfg.model {
+                        pricing::PricingModel::Throughput => pcfg.price_per_token_out(),
+                        pricing::PricingModel::Market => {
+                            pcfg.legacy_price_per_token_out(market_hr, tok_per_s, util)
+                        }
+                    };
+                    let oracle_ppt: u128 = pcfg.gpn_per_token(usd_per_token, token_price_usd);
                     let ppt: u128 = if ppt_in > 0 { ppt_in } else { oracle_ppt };
                     let mtok_eff: u32 = if mtok > 0 { mtok } else { 256 };
+                    // `text_rate`/`text_cap` (the on-chain single-rate approximation of
+                    // two-rate billing) are computed after `prompt` is resolved, below.
                     let min_gflops = g("min_gflops", 150);
                     // Hardware floor for this job (item 14): default 0 = no VRAM/RAM
                     // requirement; a video/gen job sends e.g. min_vram_mb=16000 so the
@@ -2559,6 +2747,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let _ = req.respond(r);
                         return;
                     }
+
+                    // Input metering: the on-chain pallet stores ONE rate, so publish a
+                    // blended rate over `prompt+max` that reproduces two-rate billing at
+                    // full completion (see `PricingConfig::onchain_rate_and_cap`). A
+                    // caller-supplied `price_per_token` keeps its old semantics.
+                    let (text_rate, text_cap) = if ppt_in > 0 {
+                        (ppt, mtok_eff)
+                    } else {
+                        pcfg.onchain_rate_and_cap(
+                            ppt,
+                            prompt
+                                .as_deref()
+                                .map(gpn_agent::pricing::estimate_prompt_tokens)
+                                .unwrap_or(1),
+                            mtok_eff,
+                        )
+                    };
 
                     // choose the best provider (model-aware). Generation jobs
                     // (image/video) are served by the diffusion provider, which
@@ -2741,8 +2946,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // (price_gpn from pixels×steps); text jobs use per-token billing.
                     let (escrow, job_ppt, job_mtok): (u128, u128, u32) = if is_gen {
                         ((price_gpn * 1e12) as u128, 0u128, 0u32)
-                    } else if ppt > 0 && mtok_eff > 0 {
-                        (ppt.saturating_mul(mtok_eff as u128), ppt, mtok_eff)
+                    } else if text_rate > 0 && text_cap > 0 {
+                        (
+                            text_rate.saturating_mul(text_cap as u128),
+                            text_rate,
+                            text_cap,
+                        )
                     } else {
                         ((price_gpn * 1e12) as u128, 0u128, 0u32)
                     };
