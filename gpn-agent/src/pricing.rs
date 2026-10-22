@@ -296,17 +296,30 @@ impl PricingConfig {
         }
     }
 
-    /// Published buyer price for 1M output tokens.
+    /// Published buyer price for 1M output tokens (throughput card).
     pub fn price_per_million_out(&self) -> f64 {
         self.price_per_token_out() * 1e6
     }
 
-    /// Guardrail: refuse to publish a price outside the sane band unless
-    /// `GPN_PRICING_UNSAFE=1`. Returns the price in USD/1M on success.
-    pub fn validate_publishable(&self) -> Result<f64, String> {
-        let p = self.price_per_million_out();
+    /// Published price (USD/1M output tokens) under the selected model. The
+    /// throughput card ignores the fleet arguments by design.
+    pub fn price_per_million_out_for(&self, market_hr: f64, tok_per_s: f64, util: f64) -> f64 {
+        self.price_out(market_hr, tok_per_s, util) * 1e6
+    }
+
+    /// Guardrail on an explicit published price.
+    ///
+    /// The band exists to catch a **mis-set anchor** on the calibrated card (an
+    /// extra zero turns $0.38 into $3.80). The legacy market model's price is
+    /// derived from the oracle, not from our constant, and `market` is an
+    /// explicit opt-in — so it is only checked for sanity, not for band, keeping
+    /// the `GPN_PRICING_MODEL=market` A/B-revert a single env var.
+    pub fn check_price_usd_per_m(&self, p: f64) -> Result<f64, String> {
         if !p.is_finite() || p <= 0.0 {
             return Err(format!("derived price is not a positive number: {p}"));
+        }
+        if self.model == PricingModel::Market {
+            return Ok(p);
         }
         if !self.unsafe_publish && !(PRICE_FLOOR_USD_PER_M..=PRICE_CEIL_USD_PER_M).contains(&p) {
             return Err(format!(
@@ -316,6 +329,12 @@ impl PricingConfig {
             ));
         }
         Ok(p)
+    }
+
+    /// Guardrail: refuse to publish a price outside the sane band unless
+    /// `GPN_PRICING_UNSAFE=1`. Returns the price in USD/1M on success.
+    pub fn validate_publishable(&self) -> Result<f64, String> {
+        self.check_price_usd_per_m(self.price_per_million_out())
     }
 
     /// The hourly earning table an operator can read off the `/pricing` endpoint.
@@ -526,6 +545,13 @@ mod tests {
         ));
         // And the two models differ by the expected factor at the old fallback.
         assert!((usd / t.price_per_token_out() - 23.07).abs() < 0.1);
+        // The guardrail can be pointed at the legacy number too: `market` is an
+        // explicit opt-in, so it is sanity-checked but not band-checked.
+        let legacy_pm = c.price_per_million_out_for(3.0, 95.2, 0.65);
+        assert!((legacy_pm - 8.75).abs() < 1e-2, "legacy guardrail input {legacy_pm}");
+        assert!(c.check_price_usd_per_m(legacy_pm).is_ok());
+        // While the same number on the calibrated card is refused.
+        assert!(throughput().check_price_usd_per_m(legacy_pm).is_err());
     }
 
     #[test]

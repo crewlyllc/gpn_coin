@@ -1309,6 +1309,8 @@ fn pricing_public_json(pcfg: &PricingConfig, f: FeedSnapshot) -> Value {
             })
         })
         .collect();
+    let out_tok = pcfg.price_out(f.market_hr, pcfg.anchor_tok_s(), f.util);
+    let in_tok = out_tok * pcfg.input_rate_frac;
     let mut out = json!({
         "pricing_model": pcfg.model.as_str(),
         "currency": "USD",
@@ -1325,18 +1327,18 @@ fn pricing_public_json(pcfg: &PricingConfig, f: FeedSnapshot) -> Value {
         "margin_bps": pcfg.margin_bps,
         "input_rate_fraction": pcfg.input_rate_frac,
         "price_per_token": {
-            "input": pcfg.price_per_token_in(),
-            "output": pcfg.price_per_token_out()
+            "input": in_tok,
+            "output": out_tok
         },
         "price_per_million_tokens": {
-            "input": (pcfg.price_per_token_in() * 1e6 * 10_000.0).round() / 10_000.0,
-            "output": (pcfg.price_per_million_out() * 10_000.0).round() / 10_000.0
+            "input": (in_tok * 1e6 * 10_000.0).round() / 10_000.0,
+            "output": (out_tok * 1e6 * 10_000.0).round() / 10_000.0
         },
         "provider_earnings_usd_per_hour": rows,
         "owner_cost_usd_per_hour": owner_cost,
         "gpn_price_usd": f.token_price_usd,
         "gpn_per_million_output_tokens":
-            (pcfg.price_per_million_out() / f.token_price_usd.max(1e-9) * 100.0).round() / 100.0,
+            (out_tok * 1e6 / f.token_price_usd.max(1e-9) * 100.0).round() / 100.0,
         "note": "Faster GPUs do not raise the buyer's price; they raise the provider's hourly earning. \
                  Provider earnings are pre-margin and before the 5% marketplace fee."
     });
@@ -1796,20 +1798,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // here so a mis-set anchor (an extra zero, say) stops the AP at boot instead
     // of publishing a price nobody intended.
     let pcfg = PricingConfig::from_env((margin * 10_000.0).round() as u32, rental_frac);
-    let published = pcfg.validate_publishable().map_err(|e| {
-        format!("pricing refused: {e} (set GPN_PRICING_UNSAFE=1 to override)")
-    })?;
+    // Validate the price the AP will actually publish: the throughput card, or the
+    // legacy market price at the feed's fallback conditions.
+    let published_price_pm = match pcfg.model {
+        pricing::PricingModel::Throughput => pcfg.price_per_million_out(),
+        pricing::PricingModel::Market => pcfg.price_per_million_out_for(
+            pcfg.market_hr_fallback,
+            pcfg.anchor_tok_s(),
+            pcfg.util_fallback,
+        ),
+    };
+    let published = pcfg
+        .check_price_usd_per_m(published_price_pm)
+        .map_err(|e| format!("pricing refused: {e} (set GPN_PRICING_UNSAFE=1 to override)"))?;
     println!(
-        "[pricing] model={} anchor=${:.4}/hr anchor_tok_s={:.1} k={:.4e} margin={}bps in_frac={} -> ${:.4}/1M output (${:.4}/1M input) gpn/tok@$0.15={}",
+        "[pricing] model={} published=${:.4}/1M output anchor=${:.4}/hr anchor_tok_s={:.1} k={:.4e} margin={}bps in_frac={} -> input ${:.4}/1M gpn/tok@$0.15={}",
         pcfg.model.as_str(),
+        published,
         pcfg.anchor_rate_usd_hr,
         pcfg.anchor_tok_s(),
         pcfg.k_usd_per_token(),
         pcfg.margin_bps,
         pcfg.input_rate_frac,
-        published,
-        pcfg.price_per_token_in() * 1e6,
-        pcfg.gpn_per_token(pcfg.price_per_token_out(), 0.15),
+        published * pcfg.input_rate_frac,
+        pcfg.gpn_per_token(published / 1e6, 0.15),
     );
 
     // Build the chain client (synchronous runtime for tiny_http handler).
