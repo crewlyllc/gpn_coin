@@ -1,5 +1,45 @@
 # GPN change-log
 
+## 2026-10-22 17:1x PT — PM07 #66 **STAGED, NOT APPLIED**: two-rate (input vs output) billing, spec 44; no set_code, no genesis change, no restart
+
+**WHY:** a job's price was one blended rate `(price_per_token, max_tokens, actual_tokens)`, so the
+access point had to charge `prompt + max_tokens` at a single price. Every completion token costs the
+provider far more GPU time than a prompt token — one rate over-bills short answers and under-pays
+long ones, and the single cap mixes "billable output" with "escrow sizing".
+
+**WHAT (additive; no existing signature changed):**
+* new `JobBillingV2: TwoRateBilling{ input_price_per_token, output_price_per_token,
+  max_output_tokens, actual_output_tokens, actual_input_tokens }` — `OptionQuery`, absent ⇒ legacy ⇒
+  **no migration**;
+* `create_job_v2` (**call 17**) — same validation path as `create_job`; rejects an output rate with
+  `max_output_tokens == 0` (that combination would settle at zero and pay the provider nothing);
+* `submit_result_v2` (**call 18**) — real input/output token split; on a *legacy* job it collapses
+  the split into `actual_tokens` instead of writing a v2 record, so a mismatched call can never zero
+  a payout;
+* `settle_escrow` — `in_rate×input_tokens + out_rate×min(output_tokens, max_output_tokens)`, still
+  `min(raw, escrow)`; legacy jobs keep `rate × actual_tokens`.
+* weights: `create_job_v2` = measured `create_job` weight + 1 DB write; `submit_result_v2` = measured
+  `submit_result` weight (no hand-invented numbers).
+
+**TESTS:** `cargo test --release -p pallet-compute-marketplace` **66 passed / 0 failed** (was 63):
+charge math + refund, output-cap + escrow-cap clipping, `submit_result_v2` on a legacy job.
+`cargo check -p gpn-runtime` clean.
+
+**ARTIFACT:** `wasm/gpn_runtime_spec44_two_rate_billing.compact.compressed.wasm` — 520 931 B,
+`sha256 7b02c911d616bbc12f973ec552006dc1e5f19cd4c08c1de030ff8e92e2f69a61`, `spec_version = 44`
+(decoded from the `runtime_version` custom section), on-chain spec is 41. Canonical genesis WASM
+`76f37b23…16fa97` moved aside for the build and **restored hash-verified**; tree back at
+`spec_version: 42`. No `set_code`, no key used, no node/service restart.
+
+**ORDERING:** built from the current tree, so the artifact also carries spec 42 (governance) and
+spec 43 (retarget clamp + optimistic claim). Enact 44 **last**, or drop the 43 proposal — executing
+43 afterwards would rewind the billing calls. The AP switch-over to `create_job_v2` /
+`submit_result_v2` is a **separate post-enact step** in one maintenance window (else creates fail at
+the txpool with an unknown call variant).
+
+**NOTE:** `staged/two-rate-billing-v1.md`. Commit `d17a802`. Live fleet verified healthy afterwards
+(4 units active, e2e HTTP 200, chain spec 41).
+
 ## 2026-10-22 15:0x PT — **default settlement is per-job on-chain; channels are for cheap volume (value-based routing)**
 **WHY (Jeremy's call):** the AP should not guess who is calling — it should look at what the job is worth. Expensive jobs get a real per-job on-chain receipt; cheap high-frequency traffic batches over a channel. Measured fee, not an invented number, decides where the line is.
 
