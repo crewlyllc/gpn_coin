@@ -117,8 +117,13 @@ jobs:
 
       - name: Show toolchain
         run: |
-          rustup toolchain install ${{ env.RUST_TOOLCHAIN }} --profile minimal --component rustfmt clippy
-          rustup default ${{ env.RUST_TOOLCHAIN }}
+          # Repeated --component: rustup 1.29 rejects a space-separated component
+          # list ("invalid toolchain name: 'clippy'"). The runner already carries
+          # the pinned toolchain, so an install failure is non-fatal — the version
+          # assert below is what actually gates.
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal \
+            --component rustfmt --component clippy || true
+          rustup default "$RUST_TOOLCHAIN"
           rustc --version && cargo fmt --version && cargo clippy --version
 
       - name: Assert Cargo.lock is committed (reproducible builds)
@@ -162,8 +167,8 @@ jobs:
 
       - name: Show toolchain
         run: |
-          rustup toolchain install ${{ env.RUST_TOOLCHAIN }} --profile minimal
-          rustup default ${{ env.RUST_TOOLCHAIN }}
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal || true
+          rustup default "$RUST_TOOLCHAIN"
           rustup target add wasm32-unknown-unknown
           rustc --version
           cmake --version || true
@@ -230,8 +235,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install ${{ env.RUST_TOOLCHAIN }} --profile minimal
-          rustup default ${{ env.RUST_TOOLCHAIN }}
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal || true
+          rustup default "$RUST_TOOLCHAIN"
           rustup target add wasm32-unknown-unknown
           rustc --version
 
@@ -297,8 +302,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install ${{ env.RUST_TOOLCHAIN }} --profile minimal
-          rustup default ${{ env.RUST_TOOLCHAIN }}
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal || true
+          rustup default "$RUST_TOOLCHAIN"
 
       - name: Build gpn-node (release, GPU miner included)
         working-directory: gpn-node
