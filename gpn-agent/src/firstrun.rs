@@ -159,6 +159,9 @@ pub fn help_text() -> String {
         "                         the node keeps syncing/peering; auto-resumes\n",
         "  gpn_node resume        end an idle window now\n",
         "  gpn_node --setup       one-time bootstrap: wallet + ollama (interactive)\n",
+        "  gpn_node --ensure-wallet  headless: create this machine's wallet if\n",
+        "                         missing, print the payout address, exit (used\n",
+        "                         by the service/launcher on every start)\n",
         "  gpn_node --check-updates  is this build still allowed to mine? (read-only)\n",
         "  gpn_node --version     print the version and exit\n",
         "  gpn_node --help        print this help and exit\n",
@@ -512,6 +515,33 @@ pub fn ss58_of_uri(uri: &str) -> Result<String, String> {
     Ok(pair.public().to_ss58check())
 }
 
+/// Validate a **public** account identifier and return it as SS58.
+///
+/// Accepts an SS58 address (any network prefix) or a `0x`-prefixed 32-byte
+/// public key. Deliberately rejects mnemonics/seeds and `//Dev` URIs: this is
+/// used for `GPN_ACCOUNT`, which names where earnings go, not how to sign.
+pub fn ss58_of_account(account: &str) -> Result<String, String> {
+    let a = account.trim();
+    if a.is_empty() {
+        return Err("empty account".to_string());
+    }
+    if let Some(hexpart) = a.strip_prefix("0x").or_else(|| a.strip_prefix("0X")) {
+        let bytes = hex::decode(hexpart).map_err(|e| format!("invalid hex account: {e}"))?;
+        if bytes.len() != 32 {
+            return Err(format!(
+                "account pubkey must be 32 bytes (64 hex chars), got {}",
+                bytes.len()
+            ));
+        }
+        let mut raw = [0u8; 32];
+        raw.copy_from_slice(&bytes);
+        return Ok(sr25519::Public::from_raw(raw).to_ss58check());
+    }
+    let public = sr25519::Public::from_ss58check(a)
+        .map_err(|e| format!("'{a}' is not a valid SS58 account: {e:?}"))?;
+    Ok(public.to_ss58check())
+}
+
 /// Turn a user-supplied secret into an sr25519 pair.
 ///
 /// Accepted: a BIP-39 mnemonic (12/15/18/21/24 words) or a `0x`-prefixed
@@ -661,6 +691,121 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     f.flush().ok();
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Headless (non-interactive) provisioning — queue #96
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// A service (systemd, a Windows Scheduled Task, a container) has no TTY, so the
+// wizard cannot run and the node would refuse to start on a fresh box. The
+// launcher therefore calls `gpn_node --ensure-wallet` once before the real
+// start. It must be safe to run on **every** start:
+//
+// * an existing keystore is **reused, never rewritten** (rewriting it would
+//   change the payout address and orphan the earnings already mined to it);
+// * an **unusable** keystore is a hard error — generating a replacement would
+//   silently move the node's money to a new account;
+// * `GPN_SIGNER` / `GPN_ACCOUNT` supplied by an operator (or a fleet install)
+//   **override** the local keystore, and that is logged as such.
+
+/// How (and whether) a node's money identity was resolved by
+/// [`provision_wallet`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WalletProvision {
+    /// `GPN_SIGNER` and/or `GPN_ACCOUNT` was set explicitly: the local keystore
+    /// is ignored (operator override / fleet install).
+    Override { address: String },
+    /// An existing keystore was validated and left untouched.
+    Existing { address: String, path: PathBuf },
+    /// A brand-new keystore was generated on this machine.
+    Created { address: String, path: PathBuf },
+}
+
+impl WalletProvision {
+    /// The SS58 address this node mines for and is paid to.
+    pub fn address(&self) -> &str {
+        match self {
+            WalletProvision::Override { address }
+            | WalletProvision::Existing { address, .. }
+            | WalletProvision::Created { address, .. } => address,
+        }
+    }
+
+    /// True when the identity came from `GPN_SIGNER`/`GPN_ACCOUNT` rather than
+    /// from this machine's keystore.
+    pub fn is_override(&self) -> bool {
+        matches!(self, WalletProvision::Override { .. })
+    }
+
+    /// True when a keystore file was just created (first run).
+    pub fn was_created(&self) -> bool {
+        matches!(self, WalletProvision::Created { .. })
+    }
+
+    /// The keystore path involved, if any.
+    pub fn keystore_path(&self) -> Option<&Path> {
+        match self {
+            WalletProvision::Existing { path, .. } | WalletProvision::Created { path, .. } => {
+                Some(path)
+            }
+            WalletProvision::Override { .. } => None,
+        }
+    }
+}
+
+/// Resolve this machine's money identity, creating a keystore only when there
+/// is none. This is the non-interactive sibling of [`wallet_wizard`].
+///
+/// * `keystore` — where the keystore lives (`<base>/keystore.json` by default)
+/// * `explicit_signer` — `GPN_SIGNER` / config `signer` (override)
+/// * `explicit_account` — `GPN_ACCOUNT` / config `account` (override)
+///
+/// Errors (never "falls through" to a new wallet):
+/// * the keystore exists but is unreadable/inconsistent → `Err`;
+/// * an explicit signer/account is malformed → `Err`;
+/// * the keystore cannot be written → `Err`.
+pub fn provision_wallet(
+    keystore: &Path,
+    explicit_signer: Option<&str>,
+    explicit_account: Option<&str>,
+) -> Result<WalletProvision, String> {
+    let signer = explicit_signer.map(str::trim).filter(|s| !s.is_empty());
+    let account = explicit_account.map(str::trim).filter(|s| !s.is_empty());
+
+    if signer.is_some() || account.is_some() {
+        // Precedence: an explicit payout account wins over one derived from the
+        // signer (an operator may sign with a hot key and pay out elsewhere).
+        let address = match account {
+            // An account is a *public* identifier: accept SS58, or a 0x public
+            // key. (A mnemonic here would be a secret in an env var — reject it.)
+            Some(a) => ss58_of_account(a)?,
+            None => ss58_of_uri(signer.expect("signer checked above"))?,
+        };
+        return Ok(WalletProvision::Override { address });
+    }
+
+    if keystore.exists() {
+        let ks = read_keystore(keystore).map_err(|e| {
+            format!(
+                "keystore '{}' is unusable: {e} — REFUSING to generate a replacement, \
+                 because that would silently change this node's payout address. Restore it \
+                 from backup, or delete it deliberately to mine for a new account.",
+                keystore.display()
+            )
+        })?;
+        return Ok(WalletProvision::Existing {
+            address: ks.address,
+            path: keystore.to_path_buf(),
+        });
+    }
+
+    let ks = generate_keystore();
+    write_keystore(keystore, &ks)?;
+    Ok(WalletProvision::Created {
+        address: ks.address,
+        path: keystore.to_path_buf(),
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1385,6 +1530,142 @@ mod tests {
         assert_eq!(p, PathBuf::from(r"C:\gpn\data"));
         #[cfg(not(windows))]
         assert!(p.to_string_lossy().ends_with("/.gpn/node"));
+    }
+
+    // ── Headless provisioning (queue #96: the money identity is per machine) ──
+
+    /// `gw` = the known SS58 of the dev URI `//Bob` — the value the Windows
+    /// launcher used to ship to every install. It must never be *created* as a
+    /// local identity, and must not appear in the generated launcher.
+    const BOB_SS58: &str = "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty";
+
+    #[test]
+    fn provision_creates_once_then_preserves_the_same_account() {
+        let b = td("prov-create");
+        let ks_path = b.join(KEYSTORE_FILE);
+
+        let first = provision_wallet(&ks_path, None, None).unwrap();
+        assert!(first.was_created(), "first call must generate");
+        assert!(!first.is_override());
+        assert!(ks_path.is_file());
+        let address = first.address().to_string();
+        assert_ne!(address, BOB_SS58, "never mint a dev identity");
+        // The address is derived from the secret (not just copied).
+        let ks = read_keystore(&ks_path).unwrap();
+        assert_eq!(ss58_of(ks.secret()).unwrap(), address);
+
+        let before = std::fs::read(&ks_path).unwrap();
+        let mtime = std::fs::metadata(&ks_path).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        let second = provision_wallet(&ks_path, None, None).unwrap();
+        assert_eq!(
+            second,
+            WalletProvision::Existing {
+                address: address.clone(),
+                path: ks_path.clone()
+            }
+        );
+        // Not rewritten: same bytes, same mtime, same payout address.
+        assert_eq!(std::fs::read(&ks_path).unwrap(), before);
+        assert_eq!(
+            std::fs::metadata(&ks_path).unwrap().modified().unwrap(),
+            mtime
+        );
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn provision_aborts_loudly_on_a_corrupt_keystore_and_never_replaces_it() {
+        let b = td("prov-corrupt");
+        let ks_path = b.join(KEYSTORE_FILE);
+        // A truncated/garbled keystore: keep the bytes to prove they survive.
+        std::fs::write(&ks_path, "{\"address\":\"5FHne\"").unwrap();
+        let before = std::fs::read(&ks_path).unwrap();
+
+        let err = provision_wallet(&ks_path, None, None).unwrap_err();
+        assert!(err.contains("REFUSING"), "error must say it refuses: {err}");
+        assert!(err.contains("payout address"), "{err}");
+        // The old file is untouched — no silent identity change.
+        assert_eq!(std::fs::read(&ks_path).unwrap(), before);
+        assert_eq!(
+            std::fs::metadata(&ks_path).unwrap().len(),
+            before.len() as u64
+        );
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn provision_aborts_on_a_keystore_whose_address_does_not_match_its_secret() {
+        let b = td("prov-mismatch");
+        let ks_path = b.join(KEYSTORE_FILE);
+        let ks = Keystore {
+            address: "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty".to_string(),
+            crypto: "sr25519".to_string(),
+            mnemonic: ALICE_PHRASE.to_string(),
+        };
+        write_keystore(&ks_path, &ks).unwrap();
+        let err = provision_wallet(&ks_path, None, None).unwrap_err();
+        assert!(err.contains("REFUSING"), "{err}");
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn provision_honours_an_explicit_signer_and_creates_no_keystore() {
+        let b = td("prov-signer");
+        let ks_path = b.join(KEYSTORE_FILE);
+        let p = provision_wallet(&ks_path, Some("//Bob"), None).unwrap();
+        assert_eq!(
+            p,
+            WalletProvision::Override {
+                address: BOB_SS58.to_string()
+            }
+        );
+        assert!(p.is_override() && p.keystore_path().is_none());
+        assert!(!ks_path.exists(), "an override must not create a keystore");
+
+        // A mnemonic works too and derives its real address.
+        let p = provision_wallet(&ks_path, Some(ALICE_PHRASE), None).unwrap();
+        assert_eq!(p.address(), ss58_of(ALICE_PHRASE).unwrap());
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn provision_explicit_account_beats_the_signer_derivation() {
+        let b = td("prov-acct");
+        let ks_path = b.join(KEYSTORE_FILE);
+        let alice = ss58_of(ALICE_PHRASE).unwrap();
+        let p = provision_wallet(&ks_path, Some("//Bob"), Some(&alice)).unwrap();
+        assert_eq!(p.address(), alice);
+        assert!(p.is_override());
+        // A hex pubkey is accepted as an account and normalised to SS58.
+        let raw = pair_from_secret(ALICE_PHRASE).unwrap().public().0;
+        let p = provision_wallet(&ks_path, None, Some(&format!("0x{}", hex::encode(raw)))).unwrap();
+        assert_eq!(p.address(), alice);
+        // A mnemonic in GPN_ACCOUNT is a secret in an env var: refused.
+        assert!(provision_wallet(&ks_path, None, Some(ALICE_PHRASE)).is_err());
+        assert!(provision_wallet(&ks_path, None, Some("5not-an-address")).is_err());
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn provision_keystore_is_owner_only_on_unix() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let b = td("prov-mode");
+            let ks_path = b.join(KEYSTORE_FILE);
+            provision_wallet(&ks_path, None, None).unwrap();
+            let mode = std::fs::metadata(&ks_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "keystore must be owner-only, got {mode:04o}");
+            let _ = std::fs::remove_dir_all(&b);
+        }
+    }
+
+    #[test]
+    fn help_text_documents_ensure_wallet() {
+        let h = help_text();
+        assert!(h.contains("--ensure-wallet"), "{h}");
     }
 
     #[test]

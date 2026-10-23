@@ -140,14 +140,52 @@ One command starts the miner, the heartbeat and every AI provider, supervised
 as one node with one log stream and one status line. The second run needs no
 flags and no environment variables — it reads `~/.gpn/node.toml`.
 
+### Your node has two identities — never copy either from another node
+
+Every GPN node owns **two** machine-generated identities, and neither is a
+password you set: they are keys created **on this machine**, on first run.
+
+| Identity | What it is | Where it lives | What happens if two nodes share it |
+|---|---|---|---|
+| **Network identity** (peer id) | the libp2p key that names this box on the p2p network | `~/.gpn/node-key` (`%USERPROFILE%\.gpn\node-key` on Windows) | both boxes announce the same peer id, the directory treats them as one node and they cannot peer with each other |
+| **Money identity** (account) | the sr25519 account this box signs with and is **paid** to | `<base>/keystore.json`, mode `0600` / user-only ACL | two boxes with the same account **split and steal each other's rewards** — and whoever else knows the key can take the funds |
+
+Both are generated per machine and are **never** shipped in the bundle: no
+dev URI (`//Alice`, `//Bob`), no seed, no fixed payout address. The Windows
+launcher runs `gpn_node --ensure-wallet` on every start, which
+
+* **creates** the wallet on first run and prints
+  `this node mines and is paid to 5XXXX… — back up the keystore at …` (once, in
+the console and again at startup as `payout account: 5XXXX…`);
+* **reuses** an existing keystore unchanged — it is never rewritten, because
+  that would change the payout address and orphan the earnings already mined
+to it;
+* **refuses to start** if the keystore is corrupt, rather than silently
+  generating a new one (the node would quietly mine to a new account);
+* honours `GPN_SIGNER` / `GPN_ACCOUNT` when an operator (or a fleet install)
+sets them explicitly, and logs that they **override** the local keystore.
+
+> **Fleet installs are the one deliberate exception.** A fleet script passes
+> `--signer-uri <seed>` (or `GPN_SIGNER=<seed>`) on purpose: one operator, many
+> boxes, one treasury account. That is an *override*, and every log line says so.
+> A **public bundle install** (the Windows launcher, `install.sh`) must never
+> ship a signer — a stranger's box must never mine for somebody else's account.
+
+Back up `keystore.json` (and its 12-word phrase) offline. It is the only copy of
+the key; losing it loses the earnings, and copying it to a second node makes the
+two fight over the same rewards.
+
+The dashboard (`gpn_node --gui`, <http://127.0.0.1:8099>) shows the payout
+account as **Payout account** — check it is yours after an install.
+
 ### What happens automatically
 
 | Item | Automatic behaviour | Override |
 |---|---|---|
 | **Data folder** | `~/.gpn/node` (Unix) / `C:\gpn\data` (Windows), created on first run. Holds the chain DB **and** the wallet. | `GPN_BASE_PATH` |
 | **Chain spec** | If no `GPN_CHAIN` and no `<base>/testnet-spec.json`, it is downloaded once from `http://gpn-testnet.duckdns.org:8092/genesis-spec`, validated (`genesis` field required) and pinned in the base dir. One log line, no prompt. | `GPN_CHAIN`, `GPN_SPEC_URL` |
-| **Wallet** | Generated or imported by the wizard; SS58 address printed once. Later runs read the keystore silently. | `GPN_SIGNER`, `GPN_SIGNER_FILE` |
-| **Payout account** | Derived from the wallet, so earnings can never go to a placeholder. | `GPN_ACCOUNT` |
+| **Wallet** | Generated (headless: `gpn_node --ensure-wallet`) or imported by the wizard; SS58 address printed once and on every start as `payout account:`. Later runs read the keystore silently and never rewrite it. | `GPN_SIGNER`, `GPN_SIGNER_FILE` |
+| **Payout account** | Derived from the wallet, so earnings can never go to a placeholder. A corrupt keystore aborts the start instead of inventing a new account. | `GPN_ACCOUNT` |
 | **Peers** | `https://gpncoin.ai/seeds.json` (live directory) + compiled-in bootnodes; failing URLs are logged and ignored. | `GPN_BOOTNODES`, `GPN_BOOTNODES_URL` |
 | **Public address** | `GPN_PUBLIC_ADDR` → public-IP detection → **UPnP-IGD / NAT-PMP auto-mapping** (on by default). A successful mapping needs no configuration at all. | `GPN_PUBLIC_ADDR`, `GPN_UPNP=off`, `--no-upnp` |
 | **Ollama** | Installed/started and the baseline model pulled on `--setup` (and on a normal start if missing). | `GPN_OLLAMA`, `GPN_REQUIRE_OLLAMA=0` |
@@ -168,7 +206,8 @@ flags and no environment variables — it reads `~/.gpn/node.toml`.
   `--no-require-backbone` (degraded mode).
 * **systemd / container / CI (no TTY)** — the wizard never hangs: with no wallet
   configured it exits `2` and tells you to run `gpn_node --setup` once
-  interactively. After that the service starts with no prompts.
+  interactively (or `gpn_node --ensure-wallet`, which needs no terminal at all).
+  After that the service starts with no prompts.
 * **Different data disk** — set `GPN_BASE_PATH` (or `base_path` in the config)
   before the first run.
 
@@ -1166,8 +1205,9 @@ Example (`~/.gpn/node.toml`, also see `gpn-node.example.toml`):
 
 ```toml
 chain        = "/home/you/.gpn/node/testnet-spec.json"   # testnet | mainnet | dev | <path to chain-spec.json>
-signer       = "//Alice"                           # sr25519 URI or seed (provider identity / authoring key)
-signer_file  = "/home/you/.gpn/node/keystore.json" # owner-only keystore; alternative to `signer`
+# signer     = "<seed/mnemonic>"                     # leave OUT to use this machine's wallet;
+#                                                    # setting it OVERRIDES the keystore (fleet only)
+signer_file  = "/home/you/.gpn/node/keystore.json" # owner-only keystore; the normal choice
 account      = "5ENqSp5Q…"                         # payout / advertised ss58 address (auto-derived from the wallet)
 endpoint     = "ws://127.0.0.1:9944"               # chain RPC used by the provider loop
 base_path    = "~/.gpn/node"                      # or set GPN_BASE_PATH; default: C:\gpn\data (Win) / ~/.gpn/node (Unix)
@@ -1212,11 +1252,11 @@ min_version_enforce = true    # false = mine below the minimum (unsupported)
 | Env var | Meaning | Default |
 |---------|---------|---------|
 | `GPN_CHAIN` | chain spec (`testnet`/`mainnet`/`dev`/path) | auto: `<base>/testnet-spec.json`, fetched if missing |
-| `GPN_SIGNER` | signer URI / seed / mnemonic | _(none — first-run wizard, else `//Alice` on `dev`)_ |
+| `GPN_SIGNER` | signer URI / seed / mnemonic — **overrides** the local keystore and is logged as an override (fleet/operator use only) | _(none — the wallet on this machine, else the first-run wizard)_ |
 | `GPN_SIGNER_FILE` | path to an sr25519 JSON keystore (owner-only) | `<base>/keystore.json` when it exists |
 | `GPN_SPEC_URL` | where to fetch the chain spec from | `http://gpn-testnet.duckdns.org:8092/genesis-spec` |
 | `GPN_AUTOSTART` | informational: operator intends to install a service unit | `false` |
-| `GPN_ACCOUNT` | payout / advertised address | _(empty)_ |
+| `GPN_ACCOUNT` | payout / advertised address — **overrides** the address derived from the wallet (operator use only) | _(empty → derived from the wallet)_ |
 | `GPN_ENDPOINT` | chain RPC (ws) for the provider loop | `ws://127.0.0.1:9944` |
 | `GPN_BASE_PATH` | node data dir (**database + wallet**) | `~/.gpn/node` (Unix) / `C:\gpn\data` (Windows) |
 | `GPN_RPC_PORT` | node RPC port | `9944` |
@@ -1464,7 +1504,9 @@ Full details (endpoints, semantics table, screenshots-in-words, tests):
 
 ```bash
 # foreground (Ctrl-C stops everything) — always miner + provider
-GPN_SIGNER=//Alice \
+# No GPN_SIGNER: the node uses the wallet on THIS machine (run
+# `gpn_node --ensure-wallet` once if there is none). Setting GPN_SIGNER is an
+# operator/fleet override and the node logs it as such.
 GPN_PROVIDER_ENDPOINT=http://<public-ip>:8093/status \
 GPN_ASSIGN_TOKEN=$GPN_ASSIGN_TOKEN \
 gpn_node
@@ -1508,6 +1550,11 @@ key file between machines.**
   `gpn-node.exe key generate-node-key --file …` and exports it as
   `GPN_NODE_KEY_FILE`. If that generation fails the launcher **aborts** rather
   than starting a node with a default/shared identity.
+* **Windows money identity:** the same launcher calls
+  `gpn_node.exe --ensure-wallet` before starting anything, which creates
+  `C:\gpn\data\keystore.json` on first run (owner-only ACL), reuses it forever
+  afterwards, and prints `payout account: 5XXXX…`. If the keystore is corrupt
+  the **launcher aborts** instead of mining to a new account.
 * **Linux / macOS:** if you set neither `GPN_NODE_KEY` nor `GPN_NODE_KEY_FILE`,
   `gpn-node` creates and persists its network secret under
   `<base-path>/chains/<chain>/network/secret_ed25519` on first start. To keep an
@@ -1524,13 +1571,22 @@ key file between machines.**
 hand-managed box; never bake it into an installer, an image, or a fleet
 checkout — that is how every machine ends up with the same identity.
 
+**The other identity — the one that holds the money — follows the same rule.**
+The peer id names the box on the network; the **account** (money identity) is
+what signs and receives earnings, and it is a separate key in
+`<base>/keystore.json` (created by `gpn_node --ensure-wallet` / `--setup`).
+Never copy it between machines and never pin one in a bundle: two nodes sharing
+an account split and steal each other's rewards, and a dev URI (`//Alice`,
+`//Bob`) is derivable by anyone. See
+[Your node has two identities](#your-node-has-two-identities--never-copy-either-from-another-node).
+
 ## Windows
 
 `gpn_node.exe` is the same binary. From the release bundle (`.\bin\`):
 
 ```powershell
 # everything supervised under one console window (miner + provider)
-$env:GPN_SIGNER           = "//Alice"          # or your seed
+$env:GPN_SIGNER           = "<your seed/mnemonic>"   # OPTIONAL override; leave unset to use this machine's keystore
 $env:GPN_CHAIN            = "testnet"
 $env:GPN_PROVIDER_ENDPOINT= "http://<public-ip>:8093/status"
 $env:GPN_ASSIGN_TOKEN     = "<shared secret>"

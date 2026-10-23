@@ -23,8 +23,16 @@
     * Your provider's PUBLIC /status URL port-forwarded (default 8093).
 
   Usage:
-    .\run-windows-provider.ps1 -Signer "//Alice" `
+    .\run-windows-provider.ps1 -Signer "<your own seed or mnemonic>" `
         -PublicStatusUrl "http://<your-public-ip>:8093/status" -Gflops 2500
+
+  IDENTITY (queue #96): -Signer is REQUIRED and has no default. This box must
+  sign and be paid with an account that belongs to whoever runs it — a dev URI
+  such as //Alice or //Bob is public knowledge, so shipping it as a default
+  would make every install mine for the same account. Omit -Signer and the
+  script stops and tells you how to create/attach a wallet on this machine.
+  Explicitly passing -Signer (or GPN_SIGNER) is an operator/fleet OVERRIDE: it
+  takes precedence over the local keystore, and the node logs it as such.
 #>
 param(
   [string]$Chain           = "testnet",                # testnet | mainnet | dev | path to chain-spec.json
@@ -33,7 +41,7 @@ param(
   # $Rpc — a seed node — so /status published the SEED's peer id in our
   # multiaddr (2026-10-23) and every peer failed to dial us.
   [string]$NodeRpc         = "ws://127.0.0.1:9944",
-  [string]$Signer          = "//Alice",
+  [string]$Signer          = "",                       # REQUIRED: this box's own seed/mnemonic/dev URI (no default — see header)
   [string]$Address         = "",                     # ss58 payout/identity address (optional; shown if given)
   [string]$PublicStatusUrl = "",                     # e.g. http://1.2.3.4:8093/status  (enables on-chain discovery)
   [int]$ListenPort         = 8093,
@@ -49,6 +57,17 @@ function Need($exe) {
   $p = Join-Path $bin $exe
   if (-not (Test-Path $p)) { throw "missing $p — unpack the gpn-windows artifact into .\bin\" }
   return $p
+}
+
+# 0. Money identity (queue #96). No default signer: a shared dev URI in a
+#    shipped script means every install mines and is paid as the same account.
+if ([string]::IsNullOrWhiteSpace($Signer)) {
+  Write-Host "[!] -Signer is empty: refusing to start a node without a money identity." -ForegroundColor Red
+  Write-Host "    Option A (recommended): create/attach this machine's own wallet, then run the node:" -ForegroundColor Yellow
+  Write-Host "        gpn_node.exe --ensure-wallet      # prints: payout account: 5XXXX..." -ForegroundColor Yellow
+  Write-Host "        gpn_node.exe" -ForegroundColor Yellow
+  Write-Host "    Option B: pass this box's own account:  -Signer '<your seed/mnemonic>'" -ForegroundColor Yellow
+  exit 2
 }
 
 # 1. Ollama must be up — it is the inference backend. Make it a first-class,
@@ -103,6 +122,7 @@ $env:GPN_ENDPOINT = $Rpc
 # Peer identity is read from THIS box's node, never from the (remote) chain RPC.
 $env:GPN_NODE_ENDPOINT = $NodeRpc
 $env:GPN_SIGNER  = $Signer
+Write-Host "      signer: explicit -Signer OVERRIDES the local keystore (fleet/operator override)" -ForegroundColor Yellow
 $env:GPN_OLLAMA  = $Ollama
 $env:GPN_GFLOPS  = "$Gflops"
 $env:GPN_LISTEN  = "0.0.0.0:$ListenPort"

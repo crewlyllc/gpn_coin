@@ -201,6 +201,19 @@ jobs:
           CARGO_TARGET_DIR: /home/jeremyg/.ci-cache/gpn-agent-target
         run: nice -n 19 cargo test --release
 
+      # Launcher/identity gates (queue #96). Offline, cheap, and they are what
+      # stops a shared dev key from being shipped again: the launcher check
+      # parses the here-string that release-windows.yml publishes
+      # (run-windows/YAML only — no Windows needed), and the wallet check runs
+      # the real binaries against a temp base dir.
+      - name: Launcher identity self-check (+ negative control)
+        run: bash scripts/tests/test-launcher-identity.sh
+
+      - name: Wallet provisioning (per-machine money identity)
+        run: |
+          bash scripts/tests/test-wallet-provision.sh \
+            /home/jeremyg/.ci-cache/gpn-agent-target/release
+
   # ---------------------------------------------------------------------------
   # Desktop matrix — EXPERIMENTAL and MANUAL ONLY. macOS/Windows need paid
   # GitHub-hosted minutes which this account cannot use, so a normal push no

@@ -453,6 +453,108 @@ fn resolve_effective_base(explicit: Option<PathBuf>) -> PathBuf {
     resolve_effective_base_with(explicit, os_default_node_dir())
 }
 
+/// `gpn_node --ensure-wallet` — provision the **money identity** (queue #96).
+///
+/// Runs before `Config::load()`, so it touches nothing but the filesystem: no
+/// chain spec fetch, no ollama probe, no interactive wizard. Safe on every
+/// start:
+///
+/// * keystore exists → validated and reused, byte-for-byte unchanged;
+/// * keystore missing → a fresh sr25519 keystore is written owner-only;
+/// * keystore unusable → **exit 3** without touching it (replacing it would
+///   silently change the payout address);
+/// * `GPN_SIGNER`/`GPN_ACCOUNT` set → honoured, logged as an override, and no
+///   keystore is created.
+///
+/// Exit codes: `0` ok · `3` wallet could not be provisioned · `4` cannot
+/// create the base directory.
+fn run_ensure_wallet() -> i32 {
+    let base_path =
+        resolve_effective_base(env_str("GPN_BASE_PATH").map(|s| PathBuf::from(expand_tilde(&s))));
+    if let Err(e) = std::fs::create_dir_all(&base_path) {
+        asciieprintln!(
+            "[gpn_node] FATAL: cannot create base path {}: {e}",
+            base_path.display()
+        );
+        return 4;
+    }
+    let keystore = env_str("GPN_SIGNER_FILE")
+        .map(|s| PathBuf::from(expand_tilde(&s)))
+        .unwrap_or_else(|| gpn_agent::firstrun::default_keystore_path(&base_path));
+
+    // A box that already has a chain DB but no keystore was started by an older
+    // bundle that pinned a shared account (queue #96: `GPN_SIGNER=//Bob`). It is
+    // about to start mining to a brand-new address — say so, loudly, once.
+    let had_db_first = db_exists_at(&base_path) && !keystore.exists();
+
+    let provisioned = match gpn_agent::firstrun::provision_wallet(
+        &keystore,
+        env_str("GPN_SIGNER").as_deref(),
+        env_str("GPN_ACCOUNT").as_deref(),
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            asciieprintln!("[gpn_node] FATAL: {e}");
+            asciieprintln!(
+                "[gpn_node] refusing to start: a node that cannot name its payout account must not mine."
+            );
+            return 3;
+        }
+    };
+    let address = provisioned.address().to_string();
+
+    // Always one stable, machine-readable line — install scripts parse it.
+    asciiprintln!(
+        "[gpn_node] payout account: {address} ({})",
+        if provisioned.was_created() {
+            "new keystore created on this machine"
+        } else if provisioned.is_override() {
+            "GPN_SIGNER/GPN_ACCOUNT override"
+        } else {
+            "existing keystore, preserved"
+        }
+    );
+
+    if provisioned.was_created() {
+        let bar = "=".repeat(72);
+        asciiprintln!("\n{bar}");
+        asciiprintln!("  WALLET CREATED — this is this machine's money identity");
+        asciiprintln!("  this node mines and is paid to {address}");
+        asciiprintln!(
+            "  back up the keystore at {} — it holds the ONLY copy of the key",
+            keystore.display()
+        );
+        asciiprintln!("  never copy it (or its phrase) to another node");
+        if had_db_first {
+            asciiprintln!("");
+            asciiprintln!(
+                "  NOTE: this data folder already held a chain database but no wallet, so an\n  \
+                 older bundle mined here with a SHARED test account. From now on this box\n  \
+                 mines to the address above. To keep the old account instead, restore its\n  \
+                 key as {} or set GPN_SIGNER/GPN_ACCOUNT.",
+                keystore.display()
+            );
+        }
+        asciiprintln!("{bar}\n");
+    } else if provisioned.is_override() {
+        asciiprintln!(
+            "[gpn_node] GPN_SIGNER/GPN_ACCOUNT OVERRIDES the local keystore{} — \
+             this install signs/pays as the operator-supplied account, not the one on disk",
+            if keystore.is_file() {
+                format!(" {}", keystore.display())
+            } else {
+                "".to_string()
+            }
+        );
+    } else {
+        asciiprintln!(
+            "[gpn_node] keystore: {} (owner-only; unchanged — never overwritten)",
+            keystore.display()
+        );
+    }
+    0
+}
+
 /// Testable core of [`resolve_effective_base`].
 fn resolve_effective_base_with(explicit: Option<PathBuf>, legacy: Option<PathBuf>) -> PathBuf {
     let pinned = explicit.unwrap_or_else(default_base_path);
@@ -602,12 +704,28 @@ impl Config {
         let configured_keystore = env_str("GPN_SIGNER_FILE")
             .or(file.signer_file.clone())
             .map(|s| PathBuf::from(expand_tilde(&s)));
-        let signer = if let Some(uri) = env_str("GPN_SIGNER").or(file.signer.clone()) {
-            uri
-        } else if let Some(path) = configured_keystore
+        let local_keystore = configured_keystore
             .clone()
-            .or_else(|| keystore_path.is_file().then(|| keystore_path.clone()))
-        {
+            .or_else(|| keystore_path.is_file().then(|| keystore_path.clone()));
+        let signer_from_env = env_str("GPN_SIGNER");
+        let signer = if let Some(uri) = signer_from_env.clone().or(file.signer.clone()) {
+            // An explicit signer is an operator/fleet override (queue #96). It is
+            // legitimate — a fleet install passes `--signer-uri <seed>` — but it
+            // must be visible: the local keystore is then NOT what signs.
+            if let Some(p) = local_keystore.as_ref().filter(|p| p.is_file()) {
+                asciiprintln!(
+                    "[gpn_node] GPN_SIGNER is set ({}) — it OVERRIDES the local keystore {} \
+                     (that keystore will not sign and is not paid)",
+                    if signer_from_env.is_some() {
+                        "environment"
+                    } else {
+                        "config file"
+                    },
+                    p.display()
+                );
+            }
+            uri
+        } else if let Some(path) = local_keystore.clone() {
             gpn_agent::firstrun::secret_from_keystore(&path)?
         } else if chain == "dev" || chain == "local" || chain.is_empty() {
             // Dev chains are throwaway: the well-known dev key is the default
@@ -2542,6 +2660,17 @@ async fn main() {
             std::process::exit(0);
         }
         None => {}
+    }
+
+    // ── `--ensure-wallet` (queue #96): headless money-identity provisioning. ─
+    // A service has no TTY, so the wizard cannot run. The launcher calls this
+    // before the real start on EVERY start: it reuses an existing keystore,
+    // creates one on first run, and refuses (loudly) to replace a corrupt one.
+    // Answered before `Config::load()`: no network, no chain spec, no ollama.
+    if argv.iter().any(|a| a == "--ensure-wallet")
+        || env_str("GPN_ENSURE_WALLET").as_deref() == Some("1")
+    {
+        std::process::exit(run_ensure_wallet());
     }
 
     let mut cfg = match Config::load() {

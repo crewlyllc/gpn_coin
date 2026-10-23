@@ -18,8 +18,12 @@
 chain     = "testnet"                    # testnet | mainnet | dev | <path to chain-spec.json>
                                         # Unset + no <base>/testnet-spec.json → fetched
                                         # automatically from the public access point.
-signer    = "//Alice"                    # sr25519 URI or seed (authoring key + provider identity)
-# signer_file = "~/.gpn/node/keystore.json"  # preferred: owner-only keystore written by --setup
+# Money identity. PREFERRED: leave `signer` unset and point at the keystore this
+# machine created (`gpn_node --ensure-wallet`). Setting `signer` OVERRIDES it and
+# is for a fleet/operator install only — a shared signer means every box mines
+# and is paid as the same account.
+# signer    = "<your seed or mnemonic>"   # OVERRIDE: ignores the local keystore
+signer_file = "~/.gpn/node/keystore.json"  # owner-only keystore written by --setup / --ensure-wallet
                                         # (and read silently on every later start)
 account   = ""                           # payout / advertised ss58 address (auto-derived
                                         # from the wallet when left empty)

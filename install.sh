@@ -126,12 +126,29 @@ done
 # scripts/install-ollama.ps1 (Windows).
 install_ollama
 
-# 5 ── Wallet ────────────────────────────────────────────────────────────────
-if [ ! -f "$PREFIX/wallet" ]; then
-  log "generating wallet…"
-  "$BIN_DIR/gpn-node" key generate > "$PREFIX/wallet"
+# 5 ── Wallet (the MONEY identity) ──────────────────────────────────────────
+# One wallet per machine, in the node's own keystore (`<base>/keystore.json`,
+# 0600). `gpn_node --ensure-wallet` creates it once and reuses it forever; it
+# never ships a key. Two nodes with the same account split/steal each other's
+# rewards, so there is deliberately NO pinned signer here (a fleet script may
+# pass `--signer-uri` / GPN_SIGNER on purpose — that is an explicit override).
+GPN_BASE_PATH="$PREFIX/node"
+WALLET=""
+if GPN_BASE_PATH="$GPN_BASE_PATH" "$BIN_DIR/gpn_node" --ensure-wallet > "$PREFIX/wallet.setup" 2>&1; then
+  WALLET="$(sed -n 's/.*payout account: \([1-9A-HJ-NP-Za-km-z]\{47,48\}\).*/\1/p' "$PREFIX/wallet.setup" | head -1)"
+else
+  cat "$PREFIX/wallet.setup" >&2
+  warn "could not set up this machine's wallet — fix it before starting the node"
 fi
-WALLET="$(grep -oE 'SS58 Address:[[:space:]]*[A-Za-z0-9]+' "$PREFIX/wallet" | awk '{print $3}')"
+# `$PREFIX/wallet` used to hold a randomly generated keypair that nothing read
+# (gpn_node never used it — it kept a second wallet in the base dir). Keep the
+# path as a NON-SECRET pointer so old instructions still lead somewhere.
+{
+  echo "This node's payout (money) identity, created on this machine."
+  echo "payout account: ${WALLET:-unknown}"
+  echo "keystore:       $GPN_BASE_PATH/keystore.json   (secret; owner-only 0600)"
+  echo "back it up offline. Never copy it to another node."
+} > "$PREFIX/wallet"
 chmod 600 "$PREFIX/wallet"
 
 # 6 ── Config ────────────────────────────────────────────────────────────────
@@ -140,7 +157,8 @@ cat > "$PREFIX/gpn.env" <<EOF
 # GPN miner config
 GPN_NETWORK=$NETWORK
 GPN_ENDPOINT=wss://testnet.gpn.example:9944   # TODO: replace with the real public endpoint
-GPN_WALLET=$WALLET
+GPN_BASE_PATH=$GPN_BASE_PATH
+GPN_SIGNER_FILE=$GPN_BASE_PATH/keystore.json
 GPN_DATA=$PREFIX/data
 
 # ollama (AI-compute) — user-local, sandboxed under $PREFIX
@@ -149,15 +167,15 @@ OLLAMA_MODELS=$PREFIX/models
 EOF
 
 # 7 ── Done ──────────────────────────────────────────────────────────────────
-log "installed. wallet: $WALLET"
+log "installed. payout account: ${WALLET:-<see $PREFIX/wallet.setup>}"
 echo
 echo "Start earning — three steps, one question:"
-echo "  gpn_node --setup     # generate a new wallet, or import the one above"
+echo "  gpn_node --setup     # generate a new wallet, or import an existing one"
 echo "  gpn_node             # one command: miner + AI providers, supervised"
 echo "  (a GPN node always mines AND serves AI — no role option; config + env reference: docs/run-a-node.md)"
 echo ""
 echo "The chain spec, data folder, payout address, peers and public address are automatic."
-echo "Wallet generated above (if any): $PREFIX/wallet — import it with --setup to keep it."
+echo "Wallet: $GPN_BASE_PATH/keystore.json (secret, 0600) — back it up; never copy it to another node."
 echo
 echo "Or run just the chain node/miner directly (mines by default):"
 echo "  gpn-node --chain $NETWORK --base-path \"$PREFIX/data\""
@@ -175,4 +193,4 @@ echo "AI-compute models (requires ollama; see above):"
 echo "  gpn_pull_model pull llama3.2:1b"
 echo "  gpn_pull_model gguf TheBloke/Llama-2-7B-GGUF llama-2-7b.Q4_K_M.gguf"
 echo
-echo "Config/env: $PREFIX/gpn.env   ·   wallet (secret): $PREFIX/wallet"
+echo "Config/env: $PREFIX/gpn.env   ·   keystore (secret): $GPN_BASE_PATH/keystore.json"

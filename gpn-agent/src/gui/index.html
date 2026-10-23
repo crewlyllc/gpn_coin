@@ -144,6 +144,7 @@
       <div class="card"><div class="k">Current job</div><div class="v" id="job">—</div><div class="s" id="jobSub">&nbsp;</div></div>
       <div class="card"><div class="k">Models served</div><div class="v" id="models">—</div><div class="s" id="modelsSub">&nbsp;</div></div>
       <div class="card"><div class="k">Earnings today</div><div class="v" id="earnings">—</div><div class="s" id="earningsSub">&nbsp;</div></div>
+      <div class="card"><div class="k">Payout account</div><div class="v mono" id="account">—</div><div class="s" id="accountSub">&nbsp;</div></div>
     </div>
   </section>
 
@@ -304,6 +305,11 @@
     text($("modelsSub"), models.length ? models.slice(0, 3).join(", ") : "none loaded");
     text($("earnings"), s.earnings_today === null || s.earnings_today === undefined ? "—" : s.earnings_today);
     text($("earningsSub"), s.earnings_note || "from chain");
+    // The money identity this node mines and is paid for (queue #96). Empty when
+    // the payout account could not be resolved — never a placeholder address.
+    var acct = s.account || "";
+    text($("account"), acct || "unset");
+    text($("accountSub"), acct ? "all mining + job earnings go here" : "no payout account — see the node log");
 
     // Child process table
     var tb = $("children");

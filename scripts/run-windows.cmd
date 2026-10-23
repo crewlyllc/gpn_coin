@@ -12,8 +12,11 @@ REM  The one GPU is auto-yielded to an AI job while it runs (mining fully stops
 REM  for the job, then resumes — task #24).
 REM
 REM  Configure via env / a config file (see docs/run-a-node.md). Set:
-REM    GPN_CHAIN, GPN_SIGNER, GPN_ACCOUNT, GPN_PROVIDER_ENDPOINT, GPN_OLLAMA,
-REM    GPN_GFLOPS, GPN_ASSIGN_TOKEN, GPN_NODE_KEY_FILE, GPN_BOOTNODES
+REM    GPN_CHAIN, GPN_PROVIDER_ENDPOINT, GPN_OLLAMA, GPN_GFLOPS,
+REM    GPN_ASSIGN_TOKEN, GPN_NODE_KEY_FILE, GPN_BOOTNODES
+REM  Money identity (GPN_SIGNER_FILE -> keystore.json) is created on this
+REM  machine on first run; only set GPN_SIGNER/GPN_ACCOUNT to OVERRIDE it
+REM  (operator override / fleet install).
 REM  Rewards go to the node's own (or the configured payout) account.
 REM
 REM  Ollama is REQUIRED to serve LLM jobs (mining works without it). If it is
@@ -28,6 +31,23 @@ REM ============================================================================
 
 REM --- Node: miner + AI provider, supervised together --------------------------
 set "GPN_CHAIN=testnet"
+REM Money identity (queue #96). NEVER hard-code a signer or payout account here:
+REM every install would then mine, sign and be PAID as the same account — and a
+REM dev URI (a well-known test key) is derivable by anyone. The wallet is
+REM generated once on this machine and reused forever; GPN_SIGNER/GPN_ACCOUNT
+REM left empty on purpose (setting them OVERRIDES the local keystore).
+set "GPN_BASE_PATH=C:\gpn\data"
+if not exist "%GPN_BASE_PATH%" mkdir "%GPN_BASE_PATH%" >nul 2>&1
+set "GPN_SIGNER="
+set "GPN_ACCOUNT="
+set "GPN_SIGNER_FILE=%GPN_BASE_PATH%\keystore.json"
+"%~dp0..\gpn-agent\target\release\gpn_node.exe" --ensure-wallet
+if errorlevel 1 (
+  echo [gpn] ERROR: could not set up this machine's wallet - refusing to start.
+  echo [gpn] ERROR: fix the keystore at %GPN_SIGNER_FILE%, or delete it on purpose to mine for a new account.
+  pause
+  exit /b 1
+)
 REM Per-machine identity. Never hard-code a key here: a shared key gives every
 REM install the same peer id, so the boxes collide instead of peering.
 set "GPN_NODE_KEY="
@@ -57,8 +77,7 @@ if errorlevel 1 (
   echo [gpn] Ollama found - ensuring it is running...
   powershell -NoProfile -Command "try { Invoke-RestMethod 'http://127.0.0.1:11434/api/tags' -TimeoutSec 2 | Out-Null } catch { Write-Host '[gpn] starting Ollama...'; Start-Process ollama -ArgumentList 'serve' -WindowStyle Hidden }"
 )
-REM  Provider side (AI serving) — set to match this box:
-REM set "GPN_SIGNER=//Alice"
+REM  Provider side (AI serving) -- set to match this box:
 REM set "GPN_PROVIDER_ENDPOINT=http://<your-public-ip>:8093/status"
 REM set "GPN_ASSIGN_TOKEN=<shared AP-provider secret>"
 start "gpn-node" "C:\actions-runner\_work\gpn_coin\gpn_coin\gpn-agent\target\release\gpn_node.exe"

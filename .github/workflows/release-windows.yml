@@ -174,16 +174,34 @@ jobs:
           set "GPN_CHAIN=__CHAIN__"
           set "GPN_RPC_PORT=9944"
           set "GPN_ENDPOINT=ws://gpn-testnet.duckdns.org:9944"
-          set "GPN_SIGNER=//Bob"
-          set "GPN_AUTHOR=bob"
-          set "GPN_ACCOUNT=5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
-          set "GPN_OLLAMA=http://127.0.0.1:11434"
-          set "GPN_LISTEN=0.0.0.0:8093"
-          set "GPN_BIN=C:\gpn\bin"
           REM Pin the node base path so gpn_node's DB/pruning guard and the node's
           REM --base-path agree. (A legacy DB at %LOCALAPPDATA%\gpn-node.exe\data
           REM is still auto-detected by gpn_node for backward-compat.)
           set "GPN_BASE_PATH=C:\gpn\data"
+          if not exist "%GPN_BASE_PATH%" mkdir "%GPN_BASE_PATH%" >nul 2>&1
+          REM ── Money identity (queue #96) ─────────────────────────────────────
+          REM NEVER bake a signer, a dev URI (a well-known test key anyone can
+          REM derive) or a payout address into this file: every install would
+          REM then mine, sign and be PAID as the same account. The wallet is
+          REM created on THIS machine at first start (below) and reused forever.
+          REM GPN_SIGNER / GPN_ACCOUNT are deliberately left empty: setting them
+          REM OVERRIDES the local keystore (operator / fleet install only).
+          set "GPN_SIGNER="
+          set "GPN_ACCOUNT="
+          set "GPN_SIGNER_FILE=%GPN_BASE_PATH%\keystore.json"
+          set "GPN_OLLAMA=http://127.0.0.1:11434"
+          set "GPN_LISTEN=0.0.0.0:8093"
+          set "GPN_BIN=C:\gpn\bin"
+          REM ── Money identity: create once, then NEVER replace ──────────────
+          REM Fails loudly (and the node does not start) if the keystore is
+          REM corrupt: silently generating a new one would move this node's
+          REM earnings to a new account. Prints "payout account: <ss58>".
+          "%GPN_BIN%\gpn_node.exe" --ensure-wallet
+          if errorlevel 1 (
+            echo [gpn] ERROR: could not set up this machine's wallet - the node will NOT start.
+            echo [gpn] ERROR: fix the keystore at %GPN_SIGNER_FILE%, or delete it on purpose to mine for a new account.
+            exit /b 1
+          )
           REM ── Node identity ──────────────────────────────────────────────────
           REM NEVER put a literal key here. A key baked into the bundle gives
           REM EVERY install the same peer id: the boxes collide in the directory
@@ -215,22 +233,66 @@ jobs:
           # ── self-check BEFORE publishing the launcher: it must use the
           #    per-machine key FILE and must not contain a baked-in 64-hex
           #    secret. Shipping a literal key gives every install one peer id.
-          if ($script -notmatch 'GPN_NODE_KEY_FILE=') {
-            throw 'start-node.cmd lost GPN_NODE_KEY_FILE - refusing to publish a launcher with no per-machine identity'
+          #    Then the money-identity gate (#96): no dev URI, no GPN_AUTHOR,
+          #    no hard-coded payout account — every install must provision its
+          #    own wallet via `gpn_node --ensure-wallet`. The SAME rules are
+          #    asserted offline in scripts/tests/test-launcher-identity.sh.
+          function Assert-LauncherSafe([string]$Text, [string]$What) {
+            $problems = @()
+            if ($Text -notmatch 'GPN_NODE_KEY_FILE=') {
+              $problems += 'lost GPN_NODE_KEY_FILE - no per-machine node identity'
+            }
+            $hex = [regex]::Matches($Text, '(?i)\b[0-9a-f]{64}\b')
+            if ($hex.Count -gt 0) {
+              $problems += ("literal 64-hex key (starts {0})" -f $hex[0].Value.Substring(0,12))
+            }
+            if ($Text -match 'GPN_NODE_KEY=[0-9a-fA-F]') { $problems += 'assigns a value to GPN_NODE_KEY' }
+            # — money identity —
+            if ($Text -match '(?i)//(alice|bob|charlie|dave|eve|ferdie)') {
+              $problems += 'contains a dev URI (//Alice, //Bob, ...) - a shared, publicly derivable key'
+            }
+            if ($Text -match '(?i)\bGPN_AUTHOR\b') {
+              $problems += 'sets GPN_AUTHOR (authoring key is derived from the signer; a hard-coded author forks the chain)'
+            }
+            if ($Text -match '(?i)GPN_SIGNER\s*=\s*[^\s"]') {
+              $problems += 'assigns GPN_SIGNER - the launcher must use the on-machine keystore, not a pinned key'
+            }
+            $acct = [regex]::Matches($Text, '\b5[1-9A-HJ-NP-Za-km-z]{47}\b')
+            if ($acct.Count -gt 0) {
+              $problems += ("hard-coded SS58 account {0}" -f $acct[0].Value)
+            }
+            if ($Text -notmatch '--ensure-wallet') {
+              $problems += 'does not call `gpn_node --ensure-wallet` - first run would have no money identity'
+            }
+            if ($Text -notmatch 'GPN_SIGNER_FILE=') {
+              $problems += 'does not point GPN_SIGNER_FILE at the on-disk keystore'
+            }
+            if ($problems.Count -gt 0) {
+              throw ("LAUNCHER SELF-CHECK FAILED ({0}): {1}" -f $What, ($problems -join '; '))
+            }
           }
-          $hex = [regex]::Matches($script, '(?i)\b[0-9a-f]{64}\b')
-          if ($hex.Count -gt 0) {
-            throw ("start-node.cmd contains a literal 64-hex key (starts {0}) - never ship a shared node identity" -f $hex[0].Value.Substring(0,12))
-          }
-          if ($script -match 'GPN_NODE_KEY=[0-9a-fA-F]') {
-            throw 'start-node.cmd still assigns a value to GPN_NODE_KEY'
+
+          Assert-LauncherSafe -Text $script -What 'generated start-node.cmd'
+
+          # Negative control: the checker MUST reject the pre-#96 template. If it
+          # passes this, the check is broken and the gate above is worthless.
+          $legacyLauncher = @'
+          set "GPN_SIGNER=//Bob"
+          set "GPN_AUTHOR=bob"
+          set "GPN_ACCOUNT=5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
+          set "GPN_NODE_KEY_FILE=%USERPROFILE%\.gpn\node-key"
+          '@
+          $controlFailed = $false
+          try { Assert-LauncherSafe -Text $legacyLauncher -What 'negative control' }
+          catch { $controlFailed = $true; Write-Host "negative control rejected as expected: $($_.Exception.Message)" }
+          if (-not $controlFailed) {
+            throw 'LAUNCHER SELF-CHECK IS BROKEN: the pre-#96 template (//Bob + GPN_AUTHOR + pinned account) PASSED the check'
           }
 
           Set-Content -Path 'C:\gpn\start-node.cmd' -Value $script -Encoding ascii
           $onDisk = Get-Content -Raw -Path 'C:\gpn\start-node.cmd'
-          if ($onDisk -notmatch 'GPN_NODE_KEY_FILE=') { throw 'on-disk start-node.cmd is missing GPN_NODE_KEY_FILE' }
-          if ([regex]::IsMatch($onDisk, '(?i)\b[0-9a-f]{64}\b')) { throw 'on-disk start-node.cmd contains a 64-hex literal' }
-          Write-Host "wrote C:\gpn\start-node.cmd (chain=$chain)  self-check OK: per-machine key file, no literal key"
+          Assert-LauncherSafe -Text $onDisk -What 'on-disk start-node.cmd'
+          Write-Host "wrote C:\gpn\start-node.cmd (chain=$chain)  self-check OK: per-machine node key + per-machine wallet, no dev URI, no pinned account"
 
           # ── 1. STOP: end the supervisor task(s) + kill every gpn* process so
           #      the .exe files are not locked. The legacy GPNProvider task +
