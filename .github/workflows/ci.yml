@@ -1,5 +1,23 @@
 name: CI
 
+# ---------------------------------------------------------------------------
+# Runner policy (2026-10-22, item #69)
+#
+# GitHub-HOSTED runners are unavailable on this account (billing/spend limit):
+# every hosted job comes back with `steps=0` and a failure conclusion, which is
+# not a code signal. Essential gates therefore run on the SELF-HOSTED Linux GPU
+# runner registered on the dev box (`[self-hosted, linux, gpu]`, labels also
+# match `Linux`/`X64`), pinned to low CPU priority so the live node/provider on
+# that box are never starved:
+#   * every cargo invocation runs under `nice -n 19` with CARGO_BUILD_JOBS=2
+#   * CARGO_TARGET_DIR points at a persistent per-repo cache, so re-runs are
+#     incremental instead of rebuilding from scratch (and never touch the
+#     developer's own target/ dirs)
+# The paid macOS/Windows matrix and the dependency audit are manual-only now
+# (workflow_dispatch / weekly schedule) so a blocked hosted runner can never
+# make `main` red again. A red run from here on means the code is red.
+# ---------------------------------------------------------------------------
+
 on:
   push:
     branches: [main, master]
@@ -7,16 +25,25 @@ on:
   # Weekly dependency audit (RustSec advisories + licence/ban checks).
   schedule:
     - cron: "0 6 * * 1"
-  # The two-node GPU testnet is manual-only: it needs a physical GPU, so it runs
-  # on a self-hosted runner tagged with the `gpu` label (e.g. the RTX 4060 dev
-  # box). Register that host as a runner and trigger it here.
+  # Manual trigger: desktop (macOS/Windows) matrix, dependency audit, and the
+  # two-node GPU testnet (needs a physical GPU on a self-hosted runner).
   workflow_dispatch:
+
+# One run per ref: a second push must not stack another heavyweight build on
+# the box that also serves the network.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
   # The workspace builds on stable (verified locally: rustc 1.97.x). Also pinned
   # in rust-toolchain.toml so local + CI agree.
   RUST_TOOLCHAIN: stable
+  # Leave the live provider/node headroom on the shared box.
+  CARGO_BUILD_JOBS: "2"
+  # (CARGO_TARGET_DIR is set per job: incremental, persistent, and outside both
+  # the repo and the developer's own target/ dirs.)
   # ---------------------------------------------------------------------------
   # Clippy allow-list (documented).
   #
@@ -71,7 +98,8 @@ jobs:
   # ---------------------------------------------------------------------------
   secret-scan:
     name: secret-scan
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, gpu]
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Scan tracked files for committed secrets
@@ -82,11 +110,12 @@ jobs:
   # ---------------------------------------------------------------------------
   lint:
     name: fmt + clippy
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, gpu]
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain (rustfmt + clippy)
+      - name: Show toolchain
         run: |
           rustup toolchain install ${{ env.RUST_TOOLCHAIN }} --profile minimal --component rustfmt clippy
           rustup default ${{ env.RUST_TOOLCHAIN }}
@@ -98,64 +127,94 @@ jobs:
           git ls-files --error-unmatch gpn-agent/Cargo.lock
 
       - name: rustfmt (check)
-        run: cargo fmt --all -- --check
+        run: nice -n 19 cargo fmt --all -- --check
         working-directory: gpn-node
 
       - name: rustfmt (check, agent)
-        run: cargo fmt --all -- --check
+        run: nice -n 19 cargo fmt --all -- --check
         working-directory: gpn-agent
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            gpn-node/target
-            gpn-agent/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('gpn-node/Cargo.lock','gpn-agent/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
 
       - name: Clippy — gpn-node (warnings as errors)
         working-directory: gpn-node
-        run: cargo clippy --workspace --all-targets -- ${{ env.CLIPPY_ALLOWS }} -D warnings
+        env:
+          CARGO_TARGET_DIR: /home/jeremyg/.ci-cache/gpn-node-target
+        # --release on purpose: one profile per repo keeps the persistent cache
+        # roughly half the size and lets the build-and-test job reuse it.
+        run: nice -n 19 cargo clippy --release --workspace --all-targets -- ${{ env.CLIPPY_ALLOWS }} -D warnings
 
       - name: Clippy — gpn-agent (warnings as errors)
         working-directory: gpn-agent
-        run: cargo clippy --all-targets -- ${{ env.CLIPPY_ALLOWS }} -D warnings
+        env:
+          CARGO_TARGET_DIR: /home/jeremyg/.ci-cache/gpn-agent-target
+        run: nice -n 19 cargo clippy --release --all-targets -- ${{ env.CLIPPY_ALLOWS }} -D warnings
 
   # ---------------------------------------------------------------------------
-  # Build + test across the three desktop platforms.
-  # Linux is the supported release target and is required. macOS/Windows are
-  # built best-effort (experimental) until their runner toolchains are fully
-  # validated — a red mac/win run is a signal to investigate, not a blocker.
+  # Build + unit tests on the supported (Linux) target. Runs after lint so the
+  # box never hosts two heavyweight cargo builds at once.
   # ---------------------------------------------------------------------------
   build-and-test:
+    name: Build + unit tests (linux)
+    runs-on: [self-hosted, linux, gpu]
+    needs: [lint]
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          rustup toolchain install ${{ env.RUST_TOOLCHAIN }} --profile minimal
+          rustup default ${{ env.RUST_TOOLCHAIN }}
+          rustup target add wasm32-unknown-unknown
+          rustc --version
+          cmake --version || true
+
+      # gpn-node: Substrate workspace (pallets + gpn-shield + runtime + node).
+      # GPU tests are #[ignore]d, so this runs fully on CPU.
+      - name: Build gpn-node (release)
+        working-directory: gpn-node
+        env:
+          CARGO_TARGET_DIR: /home/jeremyg/.ci-cache/gpn-node-target
+        run: nice -n 19 cargo build --release --workspace
+
+      - name: Test gpn-node (non-GPU)
+        working-directory: gpn-node
+        env:
+          CARGO_TARGET_DIR: /home/jeremyg/.ci-cache/gpn-node-target
+        run: nice -n 19 cargo test --release --workspace
+
+      # gpn-agent: GPU node agent (mining / compute / auto-switch). GPU-gated
+      # tests are #[ignore]d; pure decision logic + ChainClient tests run on CPU.
+      - name: Build gpn-agent (release)
+        working-directory: gpn-agent
+        env:
+          CARGO_TARGET_DIR: /home/jeremyg/.ci-cache/gpn-agent-target
+        run: nice -n 19 cargo build --release
+
+      - name: Test gpn-agent (non-GPU)
+        working-directory: gpn-agent
+        env:
+          CARGO_TARGET_DIR: /home/jeremyg/.ci-cache/gpn-agent-target
+        run: nice -n 19 cargo test --release
+
+  # ---------------------------------------------------------------------------
+  # Desktop matrix — EXPERIMENTAL and MANUAL ONLY. macOS/Windows need paid
+  # GitHub-hosted minutes which this account cannot use, so a normal push no
+  # longer depends on them. Trigger with `workflow_dispatch` when touching
+  # platform-specific code (a red run is a signal to investigate, not a blocker).
+  # ---------------------------------------------------------------------------
+  build-desktop:
     name: Build + unit tests (${{ matrix.os }})
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.experimental }}
+    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            experimental: false
           - os: macos-latest
-            experimental: true
           - os: windows-latest
-            experimental: true
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install system deps (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential clang cmake pkg-config \
-            libssl-dev libclang-dev protobuf-compiler \
-            ocl-icd-opencl-dev
-          cmake --version
 
       - name: Install system deps (macOS)
         if: runner.os == 'macOS'
@@ -176,36 +235,13 @@ jobs:
           rustup target add wasm32-unknown-unknown
           rustc --version
 
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            gpn-node/target
-            gpn-agent/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('gpn-node/Cargo.lock','gpn-agent/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
-
-      # gpn-node: Substrate workspace (pallets + gpn-shield + runtime + node).
-      # GPU tests are #[ignore]d, so this runs fully on a CPU runner.
-      - name: Build gpn-node (release)
+      - name: Build + test gpn-node (release)
         working-directory: gpn-node
-        run: cargo build --release --workspace
+        run: cargo build --release --workspace && cargo test --release --workspace
 
-      - name: Test gpn-node (non-GPU)
-        working-directory: gpn-node
-        run: cargo test --release --workspace
-
-      # gpn-agent: GPU node agent (mining / compute / auto-switch). GPU-gated
-      # tests are #[ignore]d; pure decision logic + ChainClient tests run on CPU.
-      - name: Build gpn-agent (release)
+      - name: Build + test gpn-agent (release)
         working-directory: gpn-agent
-        run: cargo build --release
-
-      - name: Test gpn-agent (non-GPU)
-        working-directory: gpn-agent
-        run: cargo test --release
+        run: cargo build --release && cargo test --release
 
   # ---------------------------------------------------------------------------
   # Supply-chain audit: RustSec advisories (cargo-audit) + licences/bans/sources
@@ -215,8 +251,9 @@ jobs:
   audit:
     name: Dependency audit (cargo-audit / cargo-deny)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, gpu]
     continue-on-error: true
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -232,19 +269,19 @@ jobs:
 
       - name: cargo-audit (gpn-node)
         working-directory: gpn-node
-        run: cargo audit
+        run: nice -n 19 cargo audit
 
       - name: cargo-audit (gpn-agent)
         working-directory: gpn-agent
-        run: cargo audit
+        run: nice -n 19 cargo audit
 
       - name: cargo-deny (gpn-node)
         working-directory: gpn-node
-        run: cargo deny --config ../deny.toml check advisories bans licenses sources
+        run: nice -n 19 cargo deny --config ../deny.toml check advisories bans licenses sources
 
       - name: cargo-deny (gpn-agent)
         working-directory: gpn-agent
-        run: cargo deny --config ../deny.toml check advisories bans licenses sources
+        run: nice -n 19 cargo deny --config ../deny.toml check advisories bans licenses sources
 
   # Two-node GPU p2p testnet — integration test from
   # gpn-node/scripts/gpn_two_node_testnet.sh. Requires real GPU + NVIDIA OpenCL
@@ -254,6 +291,7 @@ jobs:
     runs-on: [self-hosted, linux, gpu]
     # Manual trigger only, so a missing GPU runner never blocks normal CI.
     if: github.event_name == 'workflow_dispatch'
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -264,13 +302,15 @@ jobs:
 
       - name: Build gpn-node (release, GPU miner included)
         working-directory: gpn-node
-        run: cargo build --release --workspace
+        env:
+          CARGO_TARGET_DIR: /home/jeremyg/.ci-cache/gpn-node-target
+        run: nice -n 19 cargo build --release --workspace
 
       - name: Confirm GPU is visible
         run: |
           nvidia-smi --query-gpu=name --format=csv,noheader || echo "no nvidia-smi"
-          ls /dev/dri
+          ls /dev/dri || true
 
       - name: Run two-node GPU p2p testnet
         working-directory: gpn-node
-        run: bash scripts/gpn_two_node_testnet.sh --binary target/release/gpn-node
+        run: bash scripts/gpn_two_node_testnet.sh --binary /home/jeremyg/.ci-cache/gpn-node-target/release/gpn-node
