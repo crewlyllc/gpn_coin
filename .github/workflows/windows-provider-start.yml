@@ -9,6 +9,14 @@ name: Windows provider start
 #
 # This is what deploys rely on so a running node's locked .exe can be
 # replaced (stop -> copy -> task restart) instead of failing the copy.
+#
+# IDENTITY (queue #96): this is an OPERATOR/FLEET workflow for one named box,
+# so `signer` and `account` are defaults for THAT box — passing them is an
+# explicit override of the machine's own wallet and the node logs it as such.
+# It must never be the install path for the public bundle: the release launcher
+# (release-windows.yml -> C:\gpn\start-node.cmd) provisions a wallet per machine
+# and carries no signer at all. Before reusing these defaults on a new box,
+# change `signer`/`account` to that box's own account.
 on:
   workflow_dispatch:
     inputs:
