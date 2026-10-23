@@ -1589,6 +1589,45 @@ co-located miner parked forever. The flag is only meaningful while a GPU lock
 holder exists, so startup takes the lock briefly (1 s): if it succeeds the flag
 is stale and is removed; if not, another provider is genuinely mid-job.
 
+## Image/video lane — a cold model is refused, then warmed in the background
+
+A channel (pre-paid) render carries the AP's wall-clock deadline — **180 s** by
+default (`GPN_HUB_JOB_DEADLINE_MS`). A cold HuggingFace pull is ~13 GB, i.e.
+20–45 minutes, so accepting that job means the caller waits out its own timeout,
+gets `every candidate refused`, and the download restarts from scratch on the
+next attempt (this is what wedged the image lane on 2026-10-23).
+
+`gpn_diffusion_provider` now decides **before** it accepts anything:
+
+| model state | remaining deadline | result |
+|---|---|---|
+| on disk (warm) | any | served normally |
+| recorded unloadable on this host | any | refused instantly, never re-pulled |
+| cold | ≥ `GPN_COLD_PULL_BUDGET_MS` (default **900000** = 15 min) | pulled in-band, then rendered |
+| cold | < the budget | **refused in ~50 ms** with `HTTP 425`, a background pull starts |
+
+The refusal is a **4xx on purpose**: the AP treats it as *not attempted*, so
+failover moves to the next provider, and nothing is charged (`payment:
+not_charged`). The caller sees an actionable reason instead of a timeout:
+
+```
+model stabilityai/sdxl-turbo is not warm on this host (15 min download) and the
+request leaves 179s — downloading it now in the background; retry when warm
+```
+
+One background pull per model per process (a retry storm cannot spawn more), and
+a permanent failure (401/403/404 — removed or gated repo) is recorded in
+`~/.gpn/diffusion_unloadable.json`, so later requests refuse instantly with
+`… is unloadable on this host (recorded)` instead of downloading again.
+
+Knobs: `GPN_COLD_PULL_BUDGET_MS` (how long a cold pull may take before we refuse
+instead of accepting the job), `GPN_DIFFUSE_TIMEOUT_SECS` (the render budget —
+now progress-aware, extended while the helper keeps reading bytes).
+
+**Operator advice:** for a model you plan to serve, warm it before announcing the
+capability — a first request for an uncached large model will be refused by
+design rather than making the customer wait 20 minutes.
+
 ## Troubleshooting — node connected but not syncing
 
 **Symptom.** The node shows peers at the p2p layer — `system_peers` lists them as

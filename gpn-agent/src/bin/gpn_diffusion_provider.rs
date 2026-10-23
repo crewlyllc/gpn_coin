@@ -387,6 +387,40 @@ fn serve_channel_job(ctx: &ChannelCtx, body: &str) -> (u16, serde_json::Value) {
         );
     };
     let mut store = load_channels(&ctx.state_path);
+
+    // ---- item #81: deadline-aware cold-model admission -----------------------
+    // Decide BEFORE `accept`: a refusal here charges nothing, so the AP's
+    // failover can try another provider, and a 4xx is not "ambiguous" (a 5xx
+    // would tell the AP work may have started and must never be retried).
+    {
+        let now = gpn_agent::hub_channel::now_ms();
+        let remaining = a.deadline_ms.saturating_sub(now);
+        let repo = resolve_model_alias(&a.model);
+        let unloadable = is_unloadable(&repo);
+        if let Some(reason) = cold_refusal(
+            &a.model,
+            hf_cache_present(&a.model),
+            unloadable,
+            remaining,
+            cold_pull_budget_ms(),
+        ) {
+            eprintln!("[channel] job {} refused: {reason}", a.job_id);
+            if !unloadable {
+                warm_in_background(&a.model);
+            }
+            return (
+                425, // Too Early — 4xx so the AP fails over; nothing was charged
+                json!({
+                    "ok": false,
+                    "cold": true,
+                    "warming": true,
+                    "retry_after_s": cold_pull_budget_ms() / 1000,
+                    "error": reason,
+                }),
+            );
+        }
+    }
+
     if let std::collections::btree_map::Entry::Vacant(e) = store.channels.entry(a.channel_id) {
         // First sight of this channel: adopt the state the AP signed for this
         // job. Two providers (LLM on 8094, diffusion on 8095) share ONE channel
@@ -1142,6 +1176,113 @@ snapshot_download(repo, **kw)
 /// Ensure a diffusion model is present; download from HuggingFace if missing.
 /// `model` is an HF repo id (e.g. `stabilityai/stable-diffusion-2-1`) or a local
 /// path. Empty/`auto` = use whatever the helper defaults to.
+/// Is this HF repo already on disk? (cache marker only — no network, no load)
+fn hf_cache_present(model: &str) -> bool {
+    if model.is_empty() || model == "auto" {
+        return true;
+    }
+    if model.starts_with('/') || model.starts_with('.') {
+        // A local path is as warm as it gets; `ensure_model` never pulls these.
+        return true;
+    }
+    let model = resolve_model_alias(model);
+    // HF cache marker: ~/.cache/huggingface/hub/models--<org>--<name>
+    let repo_dir = format!("models--{}", model.replace('/', "--"));
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let hub = std::env::var("HF_HOME")
+        .map(|h| format!("{h}/hub"))
+        .unwrap_or_else(|_| format!("{home}/.cache/huggingface/hub"));
+    std::path::Path::new(&format!("{hub}/{repo_dir}")).exists()
+}
+
+/// How long an in-request cold pull may take before we refuse the job instead
+/// (`GPN_COLD_PULL_BUDGET_MS`). A channel job carries the AP's wall-clock
+/// deadline, so accepting a model that cannot be downloaded inside it means the
+/// caller waits out its own timeout and then gets a 503 while we keep pulling —
+/// the 2026-10-23 03:30 image-lane wedge. Default 15 min.
+fn cold_pull_budget_ms() -> u64 {
+    std::env::var("GPN_COLD_PULL_BUDGET_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(900_000)
+}
+
+/// Models already being downloaded by a background thread this process started,
+/// so a burst of retries cannot spawn one pull per request.
+fn warming_set() -> &'static Mutex<HashSet<String>> {
+    static WARMING: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    WARMING.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Start (or join) a background download for `model` and return immediately.
+/// The next request for the same model is then either in-budget or warm.
+fn warm_in_background(model: &str) {
+    let repo = resolve_model_alias(model).to_string();
+    {
+        let mut set = warming_set().lock().unwrap();
+        if !set.insert(repo.clone()) {
+            return; // already pulling
+        }
+    }
+    let pull_model = model.to_string();
+    std::thread::spawn(move || {
+        println!("[warm] starting background pull for {pull_model}");
+        match ensure_model(&pull_model) {
+            Ok(msg) => println!("[warm] {msg}"),
+            Err(e) => {
+                eprintln!("[warm] pull for {pull_model} failed: {}", e.message);
+                // A permanent failure (401/403/404, removed or gated repo) will
+                // fail identically on every retry: record it, so the next
+                // request is refused instantly as unloadable instead of
+                // spawning another download thread (#78's rule, warm path).
+                if e.permanent {
+                    mark_unloadable(&resolve_model_alias(&pull_model));
+                }
+            }
+        }
+        warming_set()
+            .lock()
+            .unwrap()
+            .remove(&resolve_model_alias(&pull_model).to_string());
+    });
+}
+
+/// Deadline-aware cold-model admission for a **channel** job (queue item #81).
+///
+/// Returns `Some(reason)` when the job must be refused *before* it is accepted
+/// (nothing charged, the AP can fail over to another candidate), or `None` when
+/// this box can serve it inside the caller's deadline.
+///
+/// Pure, so the decision matrix is unit-testable.
+fn cold_refusal(
+    model: &str,
+    cached: bool,
+    unloadable: bool,
+    remaining_ms: u64,
+    budget_ms: u64,
+) -> Option<String> {
+    if unloadable {
+        return Some(format!(
+            "model {} is unloadable on this host (recorded)",
+            resolve_model_alias(model)
+        ));
+    }
+    if cached {
+        return None;
+    }
+    if remaining_ms >= budget_ms {
+        // The caller's deadline is long enough to download it in-band.
+        return None;
+    }
+    let eta_min = budget_ms.div_ceil(60_000).max(1);
+    Some(format!(
+        "model {} is not warm on this host ({eta_min} min download) and the request \
+         leaves {}s — downloading it now in the background; retry when warm",
+        resolve_model_alias(model),
+        remaining_ms / 1000
+    ))
+}
+
 fn ensure_model(model: &str) -> Result<String, PullError> {
     if model.is_empty() || model == "auto" {
         return Ok("no specific model requested".into());
@@ -1153,13 +1294,7 @@ fn ensure_model(model: &str) -> Result<String, PullError> {
     // otherwise ensure_model would try to pull a non-existent repo (e.g. "sd-turbo")
     // and 401/404 every poll cycle.
     let model = resolve_model_alias(model);
-    // HF cache marker: ~/.cache/huggingface/hub/models--<org>--<name>
-    let repo_dir = format!("models--{}", model.replace('/', "--"));
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    let hub = std::env::var("HF_HOME")
-        .map(|h| format!("{h}/hub"))
-        .unwrap_or_else(|_| format!("{home}/.cache/huggingface/hub"));
-    if std::path::Path::new(&format!("{hub}/{repo_dir}")).exists() {
+    if hf_cache_present(&model) {
         return Ok(format!("model {model} already cached"));
     }
     println!("[provider] diffusion model {model} missing — pulling from HuggingFace…");
@@ -1769,6 +1904,70 @@ mod tests {
         // A success payload is not an error reason, and noise is ignored.
         assert!(json_reason(r#"{"ok": true, "artifact": "/tmp/a.png"}"#).is_none());
         assert!(json_reason("Traceback (most recent call last):").is_none());
+    }
+
+    #[test]
+    fn a_cold_model_is_refused_when_the_request_is_shorter_than_the_download() {
+        // Item #81: the caller's deadline is the budget. A cold model that cannot
+        // finish downloading inside it must be refused BEFORE `accept`, so the AP
+        // can fail over instead of waiting out its own timeout.
+        let budget = 900_000; // 15 min
+                              // Warm → serve, whatever the deadline.
+        assert!(cold_refusal("sd-turbo", true, false, 1_000, budget).is_none());
+        // Cold but a long deadline → an in-band pull is legitimate.
+        assert!(cold_refusal("sd-turbo", false, false, budget, budget).is_none());
+        assert!(cold_refusal("sd-turbo", false, false, budget + 60_000, budget).is_none());
+        // Cold and a short deadline (the live default is 180 s) → refuse.
+        let why = cold_refusal("sd-turbo", false, false, 180_000, budget)
+            .expect("a 3-minute request cannot download 13 GB");
+        assert!(why.contains("not warm"), "reason was: {why}");
+        assert!(
+            why.contains("15 min"),
+            "reason should name the download: {why}"
+        );
+        assert!(
+            why.contains("180s"),
+            "reason should name the deadline: {why}"
+        );
+        // No deadline at all (already expired) is the same refusal, not a panic.
+        assert!(cold_refusal("sd-turbo", false, false, 0, budget).is_some());
+    }
+
+    #[test]
+    fn a_recorded_unloadable_model_is_refused_at_any_deadline() {
+        // #78 + #81: a model this host proved it cannot load is never served and
+        // never re-pulled, even if the caller would have waited long enough.
+        let why = cold_refusal("sdxl-turbo", true, true, 86_400_000, 900_000)
+            .expect("unloadable must refuse");
+        assert!(why.contains("unloadable"), "reason was: {why}");
+        assert!(
+            why.contains("stabilityai/sdxl-turbo"),
+            "alias must resolve: {why}"
+        );
+    }
+
+    #[test]
+    fn the_cold_pull_budget_honours_env_and_has_a_default() {
+        let key = "GPN_COLD_PULL_BUDGET_MS";
+        let prev = std::env::var(key).ok();
+        std::env::remove_var(key);
+        assert_eq!(cold_pull_budget_ms(), 900_000);
+        std::env::set_var(key, "120000");
+        assert_eq!(cold_pull_budget_ms(), 120_000);
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    #[test]
+    fn a_local_path_and_an_auto_model_count_as_warm() {
+        // `ensure_model` never pulls these, so the admission gate must not refuse
+        // them for being "cold".
+        assert!(hf_cache_present(""));
+        assert!(hf_cache_present("auto"));
+        assert!(hf_cache_present("/models/local-sd"));
+        assert!(hf_cache_present("./relative-model"));
     }
 
     #[test]
