@@ -1257,6 +1257,37 @@ min_version_enforce = true    # false = mine below the minimum (unsupported)
 | `GPN_GFLOPS` | upper bound on advertised compute; the heartbeat advertises `min(this, attested)` — leave it `0`/unset to advertise the on-chain attestation as-is | `0` |
 | `GPN_ATTEST_REFRESH` | `0` = never (re)attest from the provider loop | `1` |
 | `GPN_ATTEST_REFRESH_BLOCKS` | re-attest when the on-chain record is this old (half of `MaxAttestationAge` = 14 400) | `7200` |
+
+### What `compute_gflops` actually measures
+
+The attested number is the throughput of GPN's own FP32 GEMM benchmark
+(`gpu::measure_gflops`: one warm-up run, then **best of five**, with the miner's
+yield flag held so the reading is not deflated by the co-located Ethash miner).
+It is a **relative capability score, not spec-sheet TFLOPS**:
+
+| device | measured |
+|---|---|
+| RTX 4060 (24 CU, ~15 TFLOPS peak) | 900–1 300 GFLOPS |
+| integrated GPU | an order of magnitude lower |
+
+Measurement rules that matter when you compare two boxes:
+
+* the **discrete** card is measured (device 0 is ordered discrete-first, so the
+  benchmark and the miner always use the same GPU — before 2026-10-23 they did
+  not, and a Windows box attested an iGPU-class 188 GFLOPS for a 16 GB card);
+* never compare a reading taken while the GPU is busy — that is contention, not
+  capability;
+* a record that is **physically impossible** for the card (above 1.5x its
+  estimated FP32 peak, e.g. an old pre-units-fix `30000` on a 15 TFLOPS card)
+  may be corrected downward; a plausible record is never downgraded.
+
+`MinEligibilityGflops` (runtime, spec 41 = **3 000**) is still expressed on the
+*hardware-TFLOPS* scale, so with this benchmark (≈8 % of peak) a mid-range
+discrete card measures below it and a fresh attestation is refused by the chain.
+Until that constant is recalibrated (a gated runtime change), a new box keeps
+whatever record it has: the provider logs `measured N GFLOPS vs M on chain
+(floor 3000 …) — keeping the existing record` and does not pay for a rejected tx.
+
 | `GPN_CAPACITY` | concurrent jobs | `1` |
 | `GPN_POLL_MS` | provider poll interval | `300` |
 | `GPN_DIFFUSION` | image/video provider — set `0` to OPT OUT (default ON) | `1` |

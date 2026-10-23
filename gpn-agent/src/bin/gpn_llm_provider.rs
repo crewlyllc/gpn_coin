@@ -1868,18 +1868,40 @@ const ELIGIBILITY_FLOOR_GFLOPS: u64 = 3_000;
 
 /// Should a fresh measurement replace the on-chain record?
 ///
-/// The GEMM benchmark is **not** a stable instrument: it runs against a GPU that
-/// may be busy mining, and the same card reads anywhere from a few hundred to
-/// tens of thousands of GFLOPS depending on load and driver path. So a
-/// measurement is only ever allowed to *improve* the record — a suspicious low
-/// reading must never downgrade a working attestation (and, below the runtime
-/// eligibility floor, the chain rejects it anyway).
+/// A measurement may always **improve** the record. It must not casually
+/// downgrade one — but a record that is *physically impossible* for the card in
+/// the box is not a working attestation, it is a stale artefact, and it must be
+/// correctable, otherwise the box is stuck with it forever (item #87).
 ///
-/// * below the eligibility floor        → keep (the chain would refuse it)
-/// * not better than the on-chain value → keep (nothing to gain, one tx saved)
-/// * otherwise                          → attest the measurement
-fn attest_measurement_useful(measured: u64, on_chain: Option<u64>) -> bool {
-    measured >= ELIGIBILITY_FLOOR_GFLOPS && measured > on_chain.unwrap_or(0)
+/// That is exactly box1's and this host's history: before the
+/// raw-FLOP/s → GFLOPS fix, `compute_gflops` was written in raw units
+/// (≈ GFLOPS×1e9), so this 15.1 TFLOPS card carries **30 000** GFLOPS on chain —
+/// twice its FP32 peak, which no GEMM can reach. `attest_measurement_useful`
+/// used to require `measured > on_chain`, so an honest measurement could never
+/// replace it: the record was permanent by construction.
+///
+/// * below the eligibility floor                    → keep (chain refuses it)
+/// * better than the record                         → attest
+/// * record above 1.5× the card's estimated FP32 peak → attest (legacy units:
+///   a value above peak is not this card's capability under any measurement)
+/// * otherwise                                      → keep (one tx saved)
+///
+/// `peak_gflops` comes from the model-name estimate (`detect_gpu_capability`);
+/// 0 means "unknown device", in which case no downward correction is attempted.
+fn attest_measurement_useful(measured: u64, on_chain: Option<u64>, peak_gflops: u64) -> bool {
+    if measured < ELIGIBILITY_FLOOR_GFLOPS {
+        return false;
+    }
+    let record = on_chain.unwrap_or(0);
+    if record == 0 {
+        return true;
+    }
+    if measured > record {
+        return true;
+    }
+    let implausible =
+        peak_gflops >= ELIGIBILITY_FLOOR_GFLOPS && record > peak_gflops.saturating_mul(3) / 2;
+    implausible
 }
 
 /// Measure this box's real GPU throughput and submit a fresh attestation when
@@ -1941,15 +1963,28 @@ async fn maybe_refresh_attestation(client: &ChainClient, addr: &str) {
                 }
             };
             let on_chain = rec.map(|(g, _)| g).filter(|g| *g > 0);
-            if !attest_measurement_useful(gflops, on_chain) {
+            // The card's *estimated* FP32 peak (model-name table) is only used
+            // to recognise an impossible record, never to invent a number.
+            let (_model_name, peak_tflops) = gpn_agent::gpu::detect_gpu_capability();
+            let peak_gflops = (peak_tflops * 1000.0).round().max(0.0) as u64;
+            if !attest_measurement_useful(gflops, on_chain, peak_gflops) {
                 println!(
-                    "[attest] measured {gflops} GFLOPS vs {} on chain (floor {ELIGIBILITY_FLOOR_GFLOPS}) \
-                     — keeping the existing record, not re-attesting",
+                    "[attest] measured {gflops} GFLOPS vs {} on chain (floor {ELIGIBILITY_FLOOR_GFLOPS}, \
+                     estimated FP32 peak {peak_gflops}) — keeping the existing record, not re-attesting",
                     on_chain
                         .map(|g| g.to_string())
                         .unwrap_or_else(|| "none".to_string())
                 );
                 return;
+            }
+            if let Some(rec) = on_chain {
+                if gflops <= rec {
+                    println!(
+                        "[attest] on-chain {rec} GFLOPS exceeds this card's estimated FP32 peak \
+                         ({peak_gflops} GFLOPS) — a legacy-unit record; correcting it to the \
+                         measured {gflops} GFLOPS"
+                    );
+                }
             }
             println!("[attest] measured {gflops} GFLOPS — submitting a fresh attestation");
             let challenge = client
@@ -3879,21 +3914,30 @@ mod settled_cache_tests {
 
     #[test]
     fn a_measurement_only_ever_improves_the_on_chain_record() {
+        // 15.1 TFLOPS card → 15 100 GFLOPS estimated peak.
+        const PEAK: u64 = 15_100;
         // Below the runtime eligibility floor: the chain rejects it
         // (`BelowEligibilityFloor`), so never pay for that tx.
-        assert!(!attest_measurement_useful(0, None));
-        assert!(!attest_measurement_useful(2_999, None));
-        assert!(!attest_measurement_useful(2_999, Some(188)));
+        assert!(!attest_measurement_useful(0, None, PEAK));
+        assert!(!attest_measurement_useful(2_999, None, PEAK));
+        assert!(!attest_measurement_useful(2_999, Some(188), PEAK));
         // At the floor it is eligible...
-        assert!(attest_measurement_useful(3_000, None));
-        // ...but it must still beat the record. This host measures ~2 500 on a
-        // busy GPU while the chain holds 30 000: keep the 30 000.
-        assert!(!attest_measurement_useful(3_000, Some(30_000)));
-        assert!(!attest_measurement_useful(30_000, Some(30_000)));
+        assert!(attest_measurement_useful(3_000, None, PEAK));
+        // ...but a *plausible* record is never downgraded by a weaker reading.
+        assert!(!attest_measurement_useful(3_000, Some(12_000), PEAK));
+        assert!(!attest_measurement_useful(12_000, Some(12_000), PEAK));
         // box1: an old 188 record, and a real 5070 Ti measurement beats it.
-        assert!(attest_measurement_useful(30_000, Some(188)));
+        assert!(attest_measurement_useful(30_000, Some(188), 44_000));
         // A zeroed record is always repaired by any eligible reading.
-        assert!(attest_measurement_useful(3_000, Some(0)));
+        assert!(attest_measurement_useful(3_000, Some(0), PEAK));
+        // A record ABOVE the card's FP32 peak is a legacy-unit artefact (this
+        // host: 30 000 on a 15.1 TFLOPS card) and an honest measurement may
+        // replace it — otherwise the bad record is permanent by construction.
+        assert!(attest_measurement_useful(11_500, Some(30_000), PEAK));
+        // Just-inside-plausible records keep the never-downgrade protection.
+        assert!(!attest_measurement_useful(11_500, Some(15_000), PEAK));
+        // Unknown device (peak 0) → never attempt a downward correction.
+        assert!(!attest_measurement_useful(11_500, Some(30_000), 0));
     }
 }
 

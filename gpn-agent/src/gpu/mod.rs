@@ -157,17 +157,44 @@ impl GPUMonitor {
 /// benchmark on the given OpenCL device. This is the number submitted on-chain
 /// as the **attestable compute metric** (`AttestationRecord::compute_gflops`),
 /// tying the AI-compute leg to the marketplace's `min_gflops` requirement.
+///
+/// What this number is, and is not (queue item #87):
+/// * It is a **reproducible relative capability score**, not FP32 peak. Measured
+///   on this host (24-CU RTX 4060): ~1 300 GFLOPS best-of-5 with the miner held
+///   off — about 8 % of the card's ~15 TFLOPS peak, because the shipped 16x16
+///   tile is shared-memory bound. Register-blocked variants measured 200–430,
+///   i.e. worse; see the kernel header. An integrated GPU lands ~100x lower, so
+///   the metric separates device classes, which is what routing needs.
+/// * It is only comparable when the device is right, the GPU is not contended
+///   and the sample is not a cold first launch. All three are handled here:
+///   device order from [`matmul::enumerate_gpus`] (discrete cards first, so
+///   index 0 is the card that also mines and serves), one warm-up run, best of
+///   five, and the miner's yield flag held for the duration.
+/// * Before those fixes a Windows box attested **188 GFLOPS for a 16 GB RTX
+///   5070 Ti** (iGPU-class) while this host's chain carried **30 000 GFLOPS for
+///   a 15.1 TFLOPS card** (2x its own hardware peak — an artefact of the
+///   pre-2026-10 units bug). Either kind of record makes `min_gflops` routing
+///   meaningless, and neither could be replaced: `attest_measurement_useful`
+///   only ever accepted an upward move.
 pub fn measure_gflops(device_index: usize) -> Result<u64, String> {
+    // Ask the co-located miner to stand down for the measurement (best-effort:
+    // a contended reading is still a reading, and must not fail the call).
+    let _yield =
+        crate::gpu_yield::GpuYieldGuard::acquire_with_timeout(std::time::Duration::from_secs(10))
+            .ok();
     let mut mm =
         matmul::GpuMatmul::new(device_index, 1024).map_err(|e| format!("open GPU matmul: {e}"))?;
-    // 4 measured iters (1024³ GEMM ≈ 2.1 GFLOP each); warms up the kernel too.
-    let (_elapsed, flops) = mm.run_many(4).map_err(|e| format!("GEMM benchmark: {e}"))?;
-    // `run_many` returns raw FLOP/s (total_flops / elapsed, no /1e9). Convert to
-    // true GFLOPS so the on-chain `compute_gflops` is in GFLOPS — matching the
-    // attestation tier thresholds (Bronze≥100 / Silver≥1000 / Gold≥5000 GFLOPS)
-    // and the marketplace `min_gflops` gate. (Previously this leaked raw FLOP/s
-    // ≈ GFLOPS×1e9 on-chain, silently breaking the `min_gflops` match.)
-    Ok((flops / 1_000_000_000.0).round() as u64)
+    let best_flops = mm
+        .run_bench(5)
+        .map_err(|e| format!("GEMM benchmark: {e}"))?;
+    let gflops = (best_flops / 1_000_000_000.0).round() as u64;
+    // Name the device the number belongs to: an attestation that cannot be
+    // matched to a card is not verifiable (the #87 confusion in one line).
+    log::info!(
+        "GPU benchmark: {gflops} GFLOPS (FP32 GEMM, best of 5) on device {device_index}: {}",
+        mm.device_name()
+    );
+    Ok(gflops)
 }
 
 pub fn hash_gpu_info(info: &GPUInfo) -> [u8; 32] {
