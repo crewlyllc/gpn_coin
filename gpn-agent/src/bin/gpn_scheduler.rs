@@ -6260,10 +6260,12 @@ mod tests {
         assert!(claim_in_flight(Some(0)));
         assert!(claim_in_flight(Some(CLAIM_IN_FLIGHT_SECS - 1)));
         assert!(!claim_in_flight(Some(CLAIM_IN_FLIGHT_SECS)));
-        assert!(
-            CLAIM_IN_FLIGHT_SECS >= 120,
-            "one accept + one start at the observed 60-120 s/inclusion"
-        );
+        const {
+            assert!(
+                CLAIM_IN_FLIGHT_SECS >= 120,
+                "one accept + one start at the observed 60-120 s/inclusion"
+            )
+        };
         // No stamp at all (never delivered, e.g. an adopted orphan) is not a claim.
         assert!(!claim_in_flight(None));
 

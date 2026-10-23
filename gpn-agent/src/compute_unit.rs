@@ -179,7 +179,9 @@ mod tests {
             "floor must stay 25-35% of the reference card, got {pct}"
         );
         // The reference card itself always clears its own derived floor.
-        assert!(REFERENCE_MEASURED_GFLOPS > MIN_ELIGIBLE_GFLOPS);
+        // `const {}` so clippy's assertions_on_constants sees a compile-time
+        // check instead of a runtime no-op.
+        const { assert!(REFERENCE_MEASURED_GFLOPS > MIN_ELIGIBLE_GFLOPS) };
         assert!(floor_derivation().contains("250 GFLOPS"));
     }
 
@@ -189,7 +191,7 @@ mod tests {
     fn floor_separates_integrated_from_discrete() {
         let igpu_upper = 110;
         assert!(MIN_ELIGIBLE_GFLOPS > igpu_upper);
-        assert!(REFERENCE_MEASURED_GFLOPS >= 3 * MIN_ELIGIBLE_GFLOPS);
+        const { assert!(REFERENCE_MEASURED_GFLOPS >= 3 * MIN_ELIGIBLE_GFLOPS) };
     }
 
     /// A legacy 30000 record on a 15.1 TFLOPS card is not a measurement of it.

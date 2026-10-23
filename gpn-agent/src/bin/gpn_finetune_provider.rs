@@ -353,6 +353,51 @@ async fn run_job(
     Ok(())
 }
 
+/// Spawn gpn_servemodel.py (detached) to register the tuned adapter as an
+/// ollama model named `tuned-<job_id>`. Uses the same training template so the
+/// served model answers in the format it was fine-tuned on.
+fn spawn_servemodel(job_id: u64, base_model: &str, adapter_dir: &str) {
+    let script =
+        std::env::var("GPN_SERVEMODEL_SCRIPT").unwrap_or_else(|_| "gpn_servemodel.py".to_string());
+    let req = json!({
+        "base_model": base_model,
+        "adapter_dir": adapter_dir,
+        "name": format!("tuned-{}", job_id),
+    });
+    let req_file = gpn_agent::utils::temp_path(&format!("gpn_serve_req_{}.json", job_id));
+    if let Ok(js) = serde_json::to_string(&req) {
+        if let Err(e) = std::fs::write(&req_file, js) {
+            eprintln!("[job {job_id}] servemodel: cannot write req: {e}");
+            return;
+        }
+    } else {
+        eprintln!("[job {job_id}] servemodel: serialization failed");
+        return;
+    }
+    let script2 = script.clone();
+    let req_file2 = req_file.clone();
+    let name = format!("tuned-{job_id}");
+    std::thread::spawn(move || {
+        let out = std::process::Command::new("python3")
+            .arg(&script2)
+            .arg(&req_file2)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn();
+        match out {
+            Ok(mut child) => {
+                // Detach: wait briefly; if still running, leave it (it will finish on its own).
+                let _ = child.wait();
+                println!(
+                    "[job {job_id}] servemodel registration finished — model {name} (if ok:true)"
+                );
+            }
+            Err(e) => eprintln!("[job {job_id}] servemodel spawn failed: {e}"),
+        }
+        let _ = std::fs::remove_file(&req_file2);
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,49 +477,4 @@ mod tests {
         assert_eq!(bump_attempt(4242), 1);
         clear_attempts(4242);
     }
-}
-
-/// Spawn gpn_servemodel.py (detached) to register the tuned adapter as an
-/// ollama model named `tuned-<job_id>`. Uses the same training template so the
-/// served model answers in the format it was fine-tuned on.
-fn spawn_servemodel(job_id: u64, base_model: &str, adapter_dir: &str) {
-    let script =
-        std::env::var("GPN_SERVEMODEL_SCRIPT").unwrap_or_else(|_| "gpn_servemodel.py".to_string());
-    let req = json!({
-        "base_model": base_model,
-        "adapter_dir": adapter_dir,
-        "name": format!("tuned-{}", job_id),
-    });
-    let req_file = gpn_agent::utils::temp_path(&format!("gpn_serve_req_{}.json", job_id));
-    if let Ok(js) = serde_json::to_string(&req) {
-        if let Err(e) = std::fs::write(&req_file, js) {
-            eprintln!("[job {job_id}] servemodel: cannot write req: {e}");
-            return;
-        }
-    } else {
-        eprintln!("[job {job_id}] servemodel: serialization failed");
-        return;
-    }
-    let script2 = script.clone();
-    let req_file2 = req_file.clone();
-    let name = format!("tuned-{job_id}");
-    std::thread::spawn(move || {
-        let out = std::process::Command::new("python3")
-            .arg(&script2)
-            .arg(&req_file2)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .spawn();
-        match out {
-            Ok(mut child) => {
-                // Detach: wait briefly; if still running, leave it (it will finish on its own).
-                let _ = child.wait();
-                println!(
-                    "[job {job_id}] servemodel registration finished — model {name} (if ok:true)"
-                );
-            }
-            Err(e) => eprintln!("[job {job_id}] servemodel spawn failed: {e}"),
-        }
-        let _ = std::fs::remove_file(&req_file2);
-    });
 }
