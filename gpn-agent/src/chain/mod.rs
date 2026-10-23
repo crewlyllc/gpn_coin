@@ -74,7 +74,19 @@ pub struct AccountInfo {
 pub struct ChainClient {
     endpoint: String,
     /// Live subxt client; `None` if we failed to connect (or never tried).
-    client: Option<OnlineClient<SubstrateConfig>>,
+    ///
+    /// Item #80: this used to be an immutable `Option`, so a client whose
+    /// websocket background task died (jsonrpsee `RestartNeeded`, a node
+    /// restart mid-read, a dropped TCP connection) stayed dead for the whole
+    /// process lifetime — every storage read returned `None` "forever" while
+    /// the node's RPC was perfectly healthy, and only a full restart recovered
+    /// it (documented strands: 2026-10-22 15:02, and the same class twice more).
+    /// It is now replaceable so a connection-level failure can heal in place.
+    client: std::sync::Arc<std::sync::Mutex<Option<OnlineClient<SubstrateConfig>>>>,
+    /// Rate-limits [`ChainClient::heal_client`] so a down RPC cannot turn every
+    /// read into a fresh connect attempt (one reconnect per interval, max).
+    /// Shared with every clone so one heal is visible process-wide.
+    last_heal: std::sync::Arc<std::sync::Mutex<std::time::Instant>>,
     /// Signer URI (e.g. `//Alice`) used for submitting signed extrinsics.
     /// `None` = read-only (no signed writes possible).
     signer_uri: Option<String>,
@@ -96,6 +108,11 @@ pub struct ChainClient {
     http: reqwest::Client,
 }
 
+/// Minimum spacing between subxt client rebuilds (item #80). One reconnect per
+/// interval is plenty: a node restart takes seconds, and a storm of connects is
+/// worse than reading `None` a few times.
+const HEAL_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// A dropped/closed RPC socket, not a chain-level rejection. jsonrpsee reports a
 /// dead background task as `RestartNeeded` ("The background task closed ...;
 /// restart required"); other variants say the connection closed / is not
@@ -104,6 +121,8 @@ pub struct ChainClient {
 fn is_connection_lost(msg: &str) -> bool {
     let m = msg.to_lowercase();
     m.contains("restart required")
+        || m.contains("restartneeded")
+        || m.contains("restart needed")
         || m.contains("background task closed")
         || m.contains("connection closed")
         || m.contains("connection reset")
@@ -199,7 +218,10 @@ impl ChainClient {
             .unwrap_or_default();
         Ok(Self {
             endpoint: endpoint.to_string(),
-            client,
+            client: std::sync::Arc::new(std::sync::Mutex::new(client)),
+            last_heal: std::sync::Arc::new(std::sync::Mutex::new(
+                std::time::Instant::now() - HEAL_MIN_INTERVAL,
+            )),
             signer_uri: None,
             fast: Default::default(),
             http,
@@ -254,37 +276,109 @@ impl ChainClient {
         Some(arr.into())
     }
 
-    /// Read a storage value at the current best head block (or fall back to
-    /// finalized via `at_latest` if the head hash can't be resolved).
-    async fn storage_at_head<Addr>(
-        &self,
+    /// Snapshot of the live subxt client, if we have one. Cheap: `OnlineClient`
+    /// is an `Arc` internally, so this is a clone of a handle, not a connection.
+    fn current_client(&self) -> Option<OnlineClient<SubstrateConfig>> {
+        self.client
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Rebuild the subxt client after a connection-level failure, rate-limited
+    /// to one attempt per [`HEAL_MIN_INTERVAL`] so a down RPC cannot turn every
+    /// read into a connect storm. Returns the (possibly already-fresh) client.
+    ///
+    /// The caller has already observed a *connection-level* error, i.e. the
+    /// node was reachable when the read started but the socket/task driving it
+    /// died — so reconnecting is the correct repair, not a blind restart (the
+    /// agent's own rule).
+    async fn heal_client(&self) -> Option<OnlineClient<SubstrateConfig>> {
+        {
+            let mut last = self.last_heal.lock().unwrap_or_else(|e| e.into_inner());
+            if last.elapsed() < HEAL_MIN_INTERVAL {
+                return self.current_client();
+            }
+            *last = std::time::Instant::now();
+        }
+        match signer::connect_robust::<SubstrateConfig>(&self.endpoint).await {
+            Ok(c) => {
+                *self.client.lock().unwrap_or_else(|e| e.into_inner()) = Some(c.clone());
+                log::warn!(
+                    "chain RPC connection was lost — rebuilt the subxt client for {}",
+                    self.endpoint
+                );
+                Some(c)
+            }
+            Err(e) => {
+                log::warn!(
+                    "chain RPC connection lost and reconnect to {} failed: {e}",
+                    self.endpoint
+                );
+                None
+            }
+        }
+    }
+
+    /// One storage fetch against a specific client, surfacing the error text so
+    /// the caller can tell a dead socket apart from a chain-level `None`.
+    async fn fetch_with<Addr>(
         client: &OnlineClient<SubstrateConfig>,
         addr: &Addr,
-    ) -> Option<subxt::dynamic::Value>
+        head: Option<subxt::utils::H256>,
+    ) -> Result<Option<subxt::dynamic::Value>, String>
     where
         Addr: subxt::storage::Address<
             Target = subxt::dynamic::DecodedValueThunk,
             IsFetchable = subxt::utils::Yes,
         >,
     {
+        let fetched = match head {
+            Some(hash) => client.storage().at(hash).fetch(addr).await,
+            None => match client.storage().at_latest().await {
+                Ok(at) => at.fetch(addr).await,
+                Err(e) => return Err(e.to_string()),
+            },
+        };
+        match fetched {
+            Ok(Some(t)) => Ok(t.to_value().ok().map(|v| v.remove_context())),
+            Ok(None) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// Read a storage value at the current best head block (or fall back to
+    /// finalized via `at_latest` if the head hash can't be resolved).
+    ///
+    /// Item #80: a **connection-level** failure heals the shared client once and
+    /// retries, so a stale websocket no longer makes every read in this process
+    /// read as "job not found" until someone restarts it.
+    async fn storage_at_head<Addr>(&self, addr: &Addr) -> Option<subxt::dynamic::Value>
+    where
+        Addr: subxt::storage::Address<
+            Target = subxt::dynamic::DecodedValueThunk,
+            IsFetchable = subxt::utils::Yes,
+        >,
+    {
+        let client = self.current_client()?;
         let head = self.head_block_hash().await;
-        match head {
-            Some(hash) => client
-                .storage()
-                .at(hash)
-                .fetch(addr)
-                .await
-                .ok()?
-                .and_then(|t| t.to_value().ok().map(|v| v.remove_context())),
-            None => client
-                .storage()
-                .at_latest()
-                .await
-                .ok()?
-                .fetch(addr)
-                .await
-                .ok()?
-                .and_then(|t| t.to_value().ok().map(|v| v.remove_context())),
+        match Self::fetch_with(&client, addr, head).await {
+            Ok(v) => v,
+            Err(e) if is_connection_lost(&e) => {
+                let fresh = self.heal_client().await?;
+                let head = self.head_block_hash().await;
+                match Self::fetch_with(&fresh, addr, head).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        log::debug!("storage read failed after reconnect: {e}");
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                log::debug!("storage read failed: {e}");
+                None
+            }
         }
     }
 
@@ -360,9 +454,8 @@ impl ChainClient {
     /// Read the on-chain profitability feed. Returns `None` if the chain is
     /// unreachable or the feed has not been set by an oracle operator yet.
     async fn fetch_feed(&self) -> Option<OnChainFeed> {
-        let client = self.client.as_ref()?;
         let addr = subxt::dynamic::storage("ProfitabilityOracle", "CurrentFeed", vec![]);
-        let fields = self.storage_at_head(client, &addr).await?;
+        let fields = self.storage_at_head(&addr).await?;
         parse_feed_value(&fields)
     }
 
@@ -376,9 +469,8 @@ impl ChainClient {
     /// median) so one outlier operator cannot unilaterally move the effective
     /// feed.
     pub async fn get_operator_feeds(&self) -> Vec<(String, OnChainFeed)> {
-        let client = match self.client.as_ref() {
-            Some(c) => c,
-            None => return Vec::new(),
+        let Some(client) = self.current_client() else {
+            return Vec::new();
         };
         let addr = subxt::dynamic::storage("ProfitabilityOracle", "OperatorFeeds", vec![]);
         let mut out = Vec::new();
@@ -405,13 +497,12 @@ impl ChainClient {
     /// §6 gap #5) from `ProfitabilityOracle::StakedOperators`. Returns `None`
     /// if the account is not bonded or the chain is unreachable.
     pub async fn get_staked_bond(&self, account: &[u8; 32]) -> Option<u128> {
-        let client = self.client.as_ref()?;
         let addr = subxt::dynamic::storage(
             "ProfitabilityOracle",
             "StakedOperators",
             vec![Value::from_bytes(account)],
         );
-        self.storage_at_head(client, &addr).await?.as_u128()
+        self.storage_at_head(&addr).await?.as_u128()
     }
 
     /// Enumerate every **bonded** (permissionless, Phase-C) oracle operator's
@@ -423,9 +514,8 @@ impl ChainClient {
     /// tiny-bond operator (even an outlier) cannot move it. Returns an empty
     /// vec if the chain is unreachable or no operator has bonded.
     pub async fn get_staked_bonds(&self) -> Vec<(String, u128)> {
-        let client = match self.client.as_ref() {
-            Some(c) => c,
-            None => return Vec::new(),
+        let Some(client) = self.current_client() else {
+            return Vec::new();
         };
         let addr = subxt::dynamic::storage("ProfitabilityOracle", "StakedOperators", vec![]);
         let mut out = Vec::new();
@@ -495,9 +585,8 @@ impl ChainClient {
     /// convert to a classic difficulty metric `2^256 / target`. Falls back to
     /// the placeholder difficulty on any error.
     async fn fetch_difficulty(&self) -> Option<f64> {
-        let client = self.client.as_ref()?;
         let addr = subxt::dynamic::storage("GPUPoW", "Difficulty", vec![]);
-        let limbs = self.storage_at_head(client, &addr).await?;
+        let limbs = self.storage_at_head(&addr).await?;
         // Pallet stores `[u64; 4]` little-endian limbs.
         let limbs_arr = composite_limbs(&limbs);
         Some(target_to_difficulty(limbs_arr))
@@ -509,14 +598,14 @@ impl ChainClient {
     ) -> Result<AccountInfo, Box<dyn std::error::Error>> {
         // Best-effort: read System::Account balance if connected, else 0.
         let mut balance = 0.0f64;
-        if let Some(client) = &self.client {
+        if self.current_client().is_some() {
             if let Ok(addr32) = address.parse::<subxt::utils::AccountId32>() {
                 let storage_addr = subxt::dynamic::storage(
                     "System",
                     "Account",
                     vec![Value::from_bytes(addr32.as_ref() as &[u8; 32])],
                 );
-                if let Some(val) = self.storage_at_head(client, &storage_addr).await {
+                if let Some(val) = self.storage_at_head(&storage_addr).await {
                     if let Some(data) = get_field(&val, "data") {
                         if let Some(free) = get_u128_field(data, "free") {
                             balance = free as f64 / 1_000_000_000_000.0;
@@ -589,7 +678,9 @@ impl ChainClient {
     /// head-block nonce, a second+ signed tx from the same account is rejected
     /// as `Transaction is outdated`.
     pub async fn get_account_nonce(&self, address: &str) -> u64 {
-        let Some(client) = &self.client else { return 0 };
+        if self.current_client().is_none() {
+            return 0;
+        }
         let Ok(addr32) = address.parse::<subxt::utils::AccountId32>() else {
             return 0;
         };
@@ -598,7 +689,7 @@ impl ChainClient {
             "Account",
             vec![Value::from_bytes(addr32.as_ref() as &[u8; 32])],
         );
-        match self.storage_at_head(client, &storage_addr).await {
+        match self.storage_at_head(&storage_addr).await {
             Some(v) => get_u32_field(&v, "nonce").unwrap_or(0) as u64,
             None => 0,
         }
@@ -607,9 +698,9 @@ impl ChainClient {
     /// Read whether the account has staked (has a `ProviderStake` entry) and
     /// whether it has an active attestation record, straight from storage.
     pub async fn get_provider_state(&self, address: &str) -> (bool, bool) {
-        let Some(client) = &self.client else {
+        if self.current_client().is_none() {
             return (false, false);
-        };
+        }
         let Ok(addr32) = address.parse::<subxt::utils::AccountId32>() else {
             return (false, false);
         };
@@ -624,15 +715,14 @@ impl ChainClient {
             "Attestations",
             vec![Value::from_bytes(key)],
         );
-        let has_stake = self.storage_at_head(client, &stake).await.is_some();
-        let has_att = self.storage_at_head(client, &att).await.is_some();
+        let has_stake = self.storage_at_head(&stake).await.is_some();
+        let has_att = self.storage_at_head(&att).await.is_some();
         (has_stake, has_att)
     }
 
     /// Read the provider's attestation record: (gpu_count, compute_gflops,
     /// tier). Returns None if not attested / record unreadable.
     pub async fn get_attestation_record(&self, address: &str) -> Option<(u8, u64, String)> {
-        let client = self.client.as_ref()?;
         let addr32 = address.parse::<subxt::utils::AccountId32>().ok()?;
         let key = (addr32.as_ref() as &[u8; 32]).to_vec();
         let att = subxt::dynamic::storage(
@@ -640,7 +730,7 @@ impl ChainClient {
             "Attestations",
             vec![Value::from_bytes(key)],
         );
-        let v = self.storage_at_head(client, &att).await?;
+        let v = self.storage_at_head(&att).await?;
         let gpus = get_u8_field(&v, "gpu_count")?;
         let gflops = get_u64_field(&v, "compute_gflops")?;
         let tier = get_field(&v, "tier")
@@ -676,7 +766,6 @@ impl ChainClient {
     /// long ago" apart from "attested correctly" — the third case is the only
     /// one where re-attesting is pointless work.
     pub async fn get_attestation_meta(&self, address: &str) -> Option<(u8, u64, u64)> {
-        let client = self.client.as_ref()?;
         let addr32 = address.parse::<subxt::utils::AccountId32>().ok()?;
         let key = (addr32.as_ref() as &[u8; 32]).to_vec();
         let att = subxt::dynamic::storage(
@@ -684,7 +773,7 @@ impl ChainClient {
             "Attestations",
             vec![Value::from_bytes(key)],
         );
-        let v = self.storage_at_head(client, &att).await?;
+        let v = self.storage_at_head(&att).await?;
         let gpus = get_u8_field(&v, "gpu_count")?;
         let gflops = get_u64_field(&v, "compute_gflops")?;
         let submitted_at = get_u64_field(&v, "submitted_at").unwrap_or(0);
@@ -695,11 +784,11 @@ impl ChainClient {
         // Read `GPUAttestation::AttestationChallenge` from the chain via a
         // dynamic storage query. Falls back to a placeholder only if the
         // chain is unreachable.
-        let Some(client) = &self.client else {
+        if self.current_client().is_none() {
             return Ok([0u8; 32]);
-        };
+        }
         let addr = subxt::dynamic::storage("GPUAttestation", "AttestationChallenge", vec![]);
-        match self.storage_at_head(client, &addr).await {
+        match self.storage_at_head(&addr).await {
             Some(v) => Ok(composite_to_bytes(&v, 32)),
             None => Ok([0u8; 32]),
         }
@@ -976,7 +1065,6 @@ impl ChainClient {
     /// (`ComputeMarketplace::ChannelIndex`). Returns `None` when no channel is
     /// open or the chain is unreachable.
     pub async fn get_channel_id(&self, requestor: &[u8; 32], provider: &[u8; 32]) -> Option<u64> {
-        let client = self.client.as_ref()?;
         let addr = subxt::dynamic::storage(
             "ComputeMarketplace",
             "ChannelIndex",
@@ -985,7 +1073,7 @@ impl ChainClient {
                 Value::from_bytes(provider.as_slice()),
             ])],
         );
-        if let Some(v) = self.storage_at_head(client, &addr).await {
+        if let Some(v) = self.storage_at_head(&addr).await {
             if let Some(n) = v.as_u128() {
                 return Some(n as u64);
             }
@@ -1014,21 +1102,19 @@ impl ChainClient {
 
     /// `ComputeMarketplace::NextChannelId` (the next id to be assigned).
     pub async fn get_next_channel_id(&self) -> Option<u64> {
-        let client = self.client.as_ref()?;
         let addr = subxt::dynamic::storage("ComputeMarketplace", "NextChannelId", vec![]);
-        let v = self.storage_at_head(client, &addr).await?;
+        let v = self.storage_at_head(&addr).await?;
         v.as_u128().map(|n| n as u64)
     }
 
     /// Read an on-chain channel record + its locked escrow.
     pub async fn get_channel(&self, channel_id: u64) -> Option<OnChainChannel> {
-        let client = self.client.as_ref()?;
         let addr = subxt::dynamic::storage(
             "ComputeMarketplace",
             "Channels",
             vec![Value::u128(channel_id as u128)],
         );
-        let v = self.storage_at_head(client, &addr).await?;
+        let v = self.storage_at_head(&addr).await?;
         let state = get_field(&v, "state")
             .map(|t| {
                 use subxt::ext::scale_value::ValueDef;
@@ -1044,7 +1130,7 @@ impl ChainClient {
                 "ChannelEscrow",
                 vec![Value::u128(channel_id as u128)],
             );
-            self.storage_at_head(client, &e)
+            self.storage_at_head(&e)
                 .await
                 .and_then(|x| x.as_u128())
                 .unwrap_or(0)
@@ -1462,14 +1548,13 @@ impl ChainClient {
     /// preserves the distinction — the heal gate must never mistake an
     /// unreadable nonce for evidence that a tx was included.
     pub async fn account_nonce_at_head(&self, address: &str) -> Option<u64> {
-        let client = self.client.as_ref()?;
         let addr32 = address.parse::<subxt::utils::AccountId32>().ok()?;
         let storage_addr = subxt::dynamic::storage(
             "System",
             "Account",
             vec![Value::from_bytes(addr32.as_ref() as &[u8; 32])],
         );
-        let v = self.storage_at_head(client, &storage_addr).await?;
+        let v = self.storage_at_head(&storage_addr).await?;
         get_u32_field(&v, "nonce").map(|n| n as u64)
     }
 
@@ -1565,13 +1650,12 @@ impl ChainClient {
     /// The reclaim deadline is `created_at + max_duration`. `None` if the job
     /// doesn't exist / the chain is unreachable.
     pub async fn get_job_timing(&self, job_id: u64) -> Option<(u32, u32)> {
-        let client = self.client.as_ref()?;
         let addr = subxt::dynamic::storage(
             "ComputeMarketplace",
             "Jobs",
             vec![Value::u128(job_id as u128)],
         );
-        let v = self.storage_at_head(client, &addr).await?;
+        let v = self.storage_at_head(&addr).await?;
         Some((
             get_u32_field(&v, "created_at")?,
             get_u32_field(&v, "max_duration")?,
@@ -1584,13 +1668,12 @@ impl ChainClient {
         &self,
         job_id: u64,
     ) -> Option<(String, u128, Option<String>, Option<String>)> {
-        let client = self.client.as_ref()?;
         let addr = subxt::dynamic::storage(
             "ComputeMarketplace",
             "Jobs",
             vec![Value::u128(job_id as u128)],
         );
-        let v = self.storage_at_head(client, &addr).await?;
+        let v = self.storage_at_head(&addr).await?;
         let state = get_field(&v, "state")
             .and_then(|t| {
                 use subxt::ext::scale_value::ValueDef;
@@ -1613,11 +1696,11 @@ impl ChainClient {
             vec![Value::u128(job_id as u128)],
         );
         let requestor = self
-            .storage_at_head(client, &req_addr)
+            .storage_at_head(&req_addr)
             .await
             .map(|x| account_id_to_string(&x));
         let provider = self
-            .storage_at_head(client, &prov_addr)
+            .storage_at_head(&prov_addr)
             .await
             .map(|x| account_id_to_string(&x));
         Some((state, price, requestor, provider))
@@ -1625,9 +1708,9 @@ impl ChainClient {
 
     /// Read whether the account is a registered provider.
     pub async fn is_provider_registered(&self, address: &str) -> bool {
-        let Some(client) = &self.client else {
+        if self.current_client().is_none() {
             return false;
-        };
+        }
         let Ok(addr32) = address.parse::<subxt::utils::AccountId32>() else {
             return false;
         };
@@ -1637,7 +1720,7 @@ impl ChainClient {
             "RegisteredProviders",
             vec![Value::from_bytes(key)],
         );
-        self.storage_at_head(client, &addr).await.is_some()
+        self.storage_at_head(&addr).await.is_some()
     }
 
     /// Enumerate every provider's **on-chain advertised endpoint** from
@@ -1651,7 +1734,7 @@ impl ChainClient {
     /// heartbeat. Returns an empty vec if the chain is unreachable or no provider
     /// has advertised an endpoint yet.
     pub async fn list_provider_endpoints(&self) -> Vec<(String, String)> {
-        let Some(client) = self.client.as_ref() else {
+        let Some(client) = self.current_client() else {
             return Vec::new();
         };
         let addr = subxt::dynamic::storage("ComputeMarketplace", "ProviderEndpoints", vec![]);
@@ -1694,9 +1777,8 @@ impl ChainClient {
     /// (a brand-new chain — a legitimate, if unusual, answer) from **"the read
     /// failed"** (`None`: no client, no head, RPC down, undecodable).
     pub async fn try_get_next_job_id(&self) -> Option<u64> {
-        let client = self.client.as_ref()?;
         let addr = subxt::dynamic::storage("ComputeMarketplace", "NextJobId", vec![]);
-        let v = self.storage_at_head(client, &addr).await?;
+        let v = self.storage_at_head(&addr).await?;
         Some(v.as_u128()? as u64)
     }
 
@@ -1704,13 +1786,12 @@ impl ChainClient {
     /// min_gflops`). 0 = no throughput gate. Returns None if the job doesn't
     /// exist / chain unreachable.
     pub async fn get_job_min_gflops(&self, job_id: u64) -> Option<u64> {
-        let client = self.client.as_ref()?;
         let addr = subxt::dynamic::storage(
             "ComputeMarketplace",
             "Jobs",
             vec![Value::u128(job_id as u128)],
         );
-        let v = self.storage_at_head(client, &addr).await?;
+        let v = self.storage_at_head(&addr).await?;
         // Jobs.gpu_requirements.min_gflops — nested named composite.
         let req = get_field(&v, "gpu_requirements")?;
         get_u64_field(req, "min_gflops")
@@ -1743,9 +1824,9 @@ impl ChainClient {
         to: u64,
         attested_gflops: u64,
     ) -> Vec<(u64, u64)> {
-        let Some(client) = &self.client else {
+        if self.current_client().is_none() {
             return vec![];
-        };
+        }
         let mut out = Vec::new();
         let mut gated = 0usize;
         for id in from..to {
@@ -1754,7 +1835,7 @@ impl ChainClient {
                 "Jobs",
                 vec![Value::u128(id as u128)],
             );
-            let Some(v) = self.storage_at_head(client, &addr).await else {
+            let Some(v) = self.storage_at_head(&addr).await else {
                 continue;
             };
             // Only Pending jobs are claimable (skip Accepted/Running/etc).
@@ -1920,11 +2001,10 @@ impl ChainClient {
     /// Read this node's liveness record: (active, missed_count, last_window,
     /// uptime_bps). None if not registered. Reads via dynamic storage.
     pub async fn get_fullnode_status(&self, address: &str) -> Option<(bool, u32, u64, u32)> {
-        let client = self.client.as_ref()?;
         let addr32 = address.parse::<subxt::utils::AccountId32>().ok()?;
         let key = (addr32.as_ref() as &[u8; 32]).to_vec();
         let rec = subxt::dynamic::storage("Liveness", "FullNodes", vec![Value::from_bytes(key)]);
-        let v = self.storage_at_head(client, &rec).await?;
+        let v = self.storage_at_head(&rec).await?;
         let active = get_field(&v, "active")
             .and_then(|x| x.as_bool())
             .unwrap_or(false);
@@ -1940,7 +2020,7 @@ impl ChainClient {
     /// Falls back to the runtime defaults (14_400 blocks, 10 windows) when the
     /// constants are unreadable, so the exporter never invents an uptime.
     pub async fn liveness_constants(&self) -> (u64, u32) {
-        let Some(client) = self.client.as_ref() else {
+        let Some(client) = self.current_client() else {
             return (14_400, 10);
         };
         let window = client
@@ -1974,7 +2054,7 @@ impl ChainClient {
     /// early in every window.
     pub async fn list_liveness_nodes(&self) -> Vec<crate::seedlist::NodeLiveness> {
         use std::collections::HashMap;
-        let Some(client) = self.client.as_ref() else {
+        let Some(client) = self.current_client() else {
             return Vec::new();
         };
         let Some(hash) = self.head_block_hash().await else {
@@ -2037,7 +2117,7 @@ impl ChainClient {
                     Value::from_bytes(account_bytes.as_slice()),
                 ];
                 let wc = subxt::dynamic::storage("Liveness", "WitnessCounts", key);
-                if let Some(val) = self.storage_at_head(client, &wc).await {
+                if let Some(val) = self.storage_at_head(&wc).await {
                     reachable = reachable.max(val.as_u128().unwrap_or(0) as u32);
                 }
             }
@@ -2077,7 +2157,6 @@ impl ChainClient {
 
     /// Treasury pallet account free balance (base units, 12 decimals).
     pub async fn treasury_balance(&self) -> Option<u128> {
-        let client = self.client.as_ref()?;
         let acct = self.treasury_account();
         let addr32 = acct.parse::<subxt::utils::AccountId32>().ok()?;
         let storage_addr = subxt::dynamic::storage(
@@ -2085,39 +2164,35 @@ impl ChainClient {
             "Account",
             vec![Value::from_bytes(addr32.as_ref() as &[u8; 32])],
         );
-        let v = self.storage_at_head(client, &storage_addr).await?;
+        let v = self.storage_at_head(&storage_addr).await?;
         get_field(&v, "data").and_then(|d| get_u128_field(d, "free"))
     }
 
     /// The governance approval threshold (e.g. 13).
     pub async fn treasury_threshold(&self) -> Option<u32> {
-        let client = self.client.as_ref()?;
         let addr = subxt::dynamic::storage("GPNTreasury", "Threshold", Vec::<Value>::new());
-        let v = self.storage_at_head(client, &addr).await?;
+        let v = self.storage_at_head(&addr).await?;
         Some(v.as_u128()? as u32)
     }
 
     /// Total GPN already released from the treasury (base units).
     pub async fn treasury_total_released(&self) -> Option<u128> {
-        let client = self.client.as_ref()?;
         let addr = subxt::dynamic::storage("GPNTreasury", "TotalReleased", Vec::<Value>::new());
-        let v = self.storage_at_head(client, &addr).await?;
+        let v = self.storage_at_head(&addr).await?;
         v.as_u128()
     }
 
     /// Roster size (number of governance addresses).
     pub async fn treasury_roster_len(&self) -> Option<usize> {
-        let client = self.client.as_ref()?;
         let addr = subxt::dynamic::storage("GPNTreasury", "Roster", Vec::<Value>::new());
-        let v = self.storage_at_head(client, &addr).await?;
+        let v = self.storage_at_head(&addr).await?;
         Some(bounded_vec_len(&v))
     }
 
     /// The vesting schedule as `(unlock_block, amount_base)` pairs.
     pub async fn treasury_schedule(&self) -> Option<Vec<(u64, u128)>> {
-        let client = self.client.as_ref()?;
         let addr = subxt::dynamic::storage("GPNTreasury", "Schedule", Vec::<Value>::new());
-        let v = self.storage_at_head(client, &addr).await?;
+        let v = self.storage_at_head(&addr).await?;
         Some(parse_tranche_seq(&v))
     }
 
@@ -2525,6 +2600,58 @@ fn collect_account_bytes(value: &subxt::dynamic::Value, out: &mut Vec<u8>) {
 mod tests {
     use super::*;
 
+    /// Item #80: the read path must heal a dead *socket*, but must never retry a
+    /// chain-level rejection (a retried call would be a second write/read with
+    /// different meaning). This pins the classification the heal decision rides
+    /// on — the exact jsonrpsee/subxt strings seen in the documented strands
+    /// (2026-10-22 15:02: `The background task closed … restart required`).
+    #[test]
+    fn dead_sockets_are_recognised_but_chain_errors_are_not() {
+        for dead in [
+            "RPC error: The background task closed connection closed; restart required",
+            "RestartNeeded",
+            "connection closed",
+            "Connection reset by peer",
+            "broken pipe",
+            "client is not connected",
+            "disconnected from node",
+        ] {
+            assert!(
+                is_connection_lost(dead),
+                "should be treated as a dead socket: {dead}"
+            );
+        }
+        for real in [
+            "1010 Transaction is outdated",
+            "1014 Priority is too low",
+            "ModuleError(ComputeMarketplace::JobNotPending)",
+            "storage not found",
+            "invalid metadata",
+        ] {
+            assert!(!is_connection_lost(real), "must NOT reconnect on: {real}");
+        }
+    }
+
+    /// Every clone of a `ChainClient` must share the *same* replaceable client
+    /// handle and reconnect clock: a heal performed by the AP's reader is only
+    /// useful if the other clones (janitor, channel lane) observe it too.
+    #[test]
+    fn clones_share_the_healable_client() {
+        let mk = || ChainClient {
+            endpoint: "ws://127.0.0.1:1".to_string(),
+            client: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            last_heal: std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now())),
+            signer_uri: None,
+            fast: Default::default(),
+            http: reqwest::Client::new(),
+        };
+        let a = mk();
+        let b = a.clone();
+        assert!(std::sync::Arc::ptr_eq(&a.client, &b.client));
+        assert!(std::sync::Arc::ptr_eq(&a.last_heal, &b.last_heal));
+        assert!(a.current_client().is_none());
+    }
+
     #[test]
     fn target_to_difficulty_matches_classic_formula() {
         // limbs little-endian: 2^244 = limb[3] = 2^(244-192) = 2^52
@@ -2547,7 +2674,10 @@ mod tests {
         std::env::set_var("GPN_RPC_READY_GATE", "0");
         let offline = ChainClient::new("ws://127.0.0.1:1").await.unwrap();
         std::env::remove_var("GPN_RPC_READY_GATE");
-        assert!(offline.client.is_none(), "127.0.0.1:1 must not connect");
+        assert!(
+            offline.current_client().is_none(),
+            "127.0.0.1:1 must not connect"
+        );
         assert_eq!(
             offline.try_get_next_job_id().await,
             None,
@@ -2887,7 +3017,10 @@ mod tests {
     #[ignore]
     async fn live_reads_on_chain_feed() {
         let client = ChainClient::new("ws://127.0.0.1:9944").await.unwrap();
-        assert!(client.client.is_some(), "expected a live subxt client");
+        assert!(
+            client.current_client().is_some(),
+            "expected a live subxt client"
+        );
 
         let difficulty = client.get_difficulty().await.unwrap();
         assert!(
