@@ -1190,15 +1190,21 @@ impl JobKind {
     /// Generation is routed purely by CAPABILITY: a diffusion/video model
     /// (`sd-turbo`, `ltx-video`) is never in the heartbeat's Ollama `models[]`,
     /// so matching on it can never pick the box that can actually render.
+    /// Fine-tuning shares that property (an HF base-model id is not an Ollama
+    /// tag) — see `gates_on_model`.
     fn is_generation(self) -> bool {
         matches!(self, JobKind::Image | JobKind::Video)
     }
 
-    /// Text, ML and fine-tune jobs still name a model, and it must be servable
-    /// (or pullable) — routing a job for a model nobody has only creates an
-    /// orphaned `Pending` job that burns a global `MaxActiveJobs` slot.
+    /// Text and ML jobs name a model that an Ollama box must already serve (or
+    /// be able to pull) — routing a job for a model nobody has only creates an
+    /// orphaned `Pending` job that burns a global `MaxActiveJobs` slot. A
+    /// fine-tune names a **HuggingFace base model** the executor downloads and
+    /// trains, not an Ollama tag it serves (item #67), so it gates on capability
+    /// only — exactly like generation. (Gating it on `models[]` made every
+    /// `HuggingFaceTB/SmolLM2-135M` tune unroutable: 400/503 with no candidate.)
     fn gates_on_model(self) -> bool {
-        !self.is_generation()
+        matches!(self, JobKind::Text | JobKind::Ml)
     }
 
     /// Classify a native `POST /jobs` body (`job_type` + `model`). Mirrors the
@@ -1522,6 +1528,116 @@ fn resolve_job_prompt(v: &Value) -> Option<String> {
         return Some(messages_to_prompt(v));
     }
     None
+}
+
+// ── public fine-tuning (queue item #67) ─────────────────────────────────────
+//
+// A tune used to be reachable only through the legacy `gpn_api` bin: the modern
+// access point could not create a `FineTuning` job at all, so a fine-tune on
+// testnet could only be produced by hand. These routes give fine-tuning the same
+// public shape as images: submit → `202` + a poll URL, then poll for the tuned
+// model name (`tuned-<job>`) the provider registers when it finishes.
+
+/// Hard cap on dataset size: a fine-tune is minutes of GPU on the ONLY GPU this
+/// box has, and the dataset travels inside one JSON payload in the off-chain
+/// store. 200 pairs is plenty for a LoRA demo and keeps the request bounded.
+const MAX_FINETUNE_EXAMPLES: usize = 200;
+
+/// Validate a public fine-tune request.
+///
+/// Returns `(base_model, dataset_json, lora_r, epochs)` where `dataset_json` is
+/// the normalized JSON array string the provider expects. Pure, so the accept /
+/// reject matrix is unit-tested without touching a chain or an HTTP socket.
+fn parse_finetune_request(v: &Value) -> Result<(String, String, u32, u32), String> {
+    let model = v
+        .get("model")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if model.is_empty() {
+        return Err(
+            "missing model: send the base model to fine-tune, e.g. {\"model\": \"llama3.2:1b\"}"
+                .into(),
+        );
+    }
+    let raw = v.get("dataset").ok_or_else(|| {
+        "missing dataset: send an array of {\"prompt\": ..., \"completion\": ...} pairs".to_string()
+    })?;
+    // Accept the array itself or a pre-encoded string (some clients serialize
+    // form fields as JSON text). Both normalize to the same payload.
+    let arr = match raw {
+        Value::Array(a) => a.clone(),
+        Value::String(s) => serde_json::from_str::<Value>(s)
+            .ok()
+            .and_then(|x| x.as_array().cloned())
+            .ok_or_else(|| {
+                "dataset must be a JSON array of {\"prompt\": ..., \"completion\": ...} pairs"
+                    .to_string()
+            })?,
+        _ => {
+            return Err(
+                "dataset must be a JSON array of {\"prompt\": ..., \"completion\": ...} pairs"
+                    .into(),
+            )
+        }
+    };
+    if arr.is_empty() {
+        return Err("dataset is empty: at least one {\"prompt\", \"completion\"} pair is required".into());
+    }
+    if arr.len() > MAX_FINETUNE_EXAMPLES {
+        return Err(format!(
+            "dataset too large: {} pairs (max {MAX_FINETUNE_EXAMPLES})",
+            arr.len()
+        ));
+    }
+    let mut clean: Vec<Value> = Vec::with_capacity(arr.len());
+    for (i, ex) in arr.iter().enumerate() {
+        let p = ex.get("prompt").and_then(|x| x.as_str()).unwrap_or("").trim();
+        let c = ex
+            .get("completion")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim();
+        if p.is_empty() || c.is_empty() {
+            return Err(format!(
+                "dataset[{i}] needs a non-empty \"prompt\" and \"completion\""
+            ));
+        }
+        clean.push(json!({"prompt": p, "completion": c}));
+    }
+    let lora_r = v
+        .get("lora_r")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(16)
+        .clamp(1, 128) as u32;
+    let epochs = v
+        .get("epochs")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(2)
+        .clamp(1, 10) as u32;
+    Ok((model, Value::Array(clean).to_string(), lora_r, epochs))
+}
+
+/// Public status for a fine-tune: the off-chain record is authoritative while the
+/// job runs, the chain is authoritative for terminal states (a provider can die
+/// after writing `done` but before `complete_job`, and the expiry sweep then
+/// fails the job — reporting `succeeded` there would be a lie).
+fn finetune_public_status(offchain: Option<&str>, chain_state: Option<&str>) -> &'static str {
+    match chain_state {
+        Some("Completed") => return "succeeded",
+        Some("Failed") | Some("Cancelled") => return "failed",
+        _ => {}
+    }
+    match offchain {
+        Some("done") => "succeeded",
+        Some("error") => "failed",
+        Some("running") => "running",
+        _ => match chain_state {
+            Some("Accepted") | Some("Running") | Some("AwaitingVerification") => "running",
+            _ => "queued",
+        },
+    }
 }
 
 /// Abuse & safety guardrail (item #22): moderate a job prompt at the access
@@ -2597,7 +2713,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  providers: {} ({})", urls.len(), urls.join(", "));
     println!("  assign store: {assign_store}");
     println!(
-        "  endpoints: /health /ping /providers /jobs /job/{{id}} /mode | POST /jobs /route/{{id}}"
+        "  endpoints: /health /ping /providers /jobs /job/{{id}} /mode | POST /jobs /v1/finetunes /route/{{id}} | GET /v1/finetunes/{{id}}"
     );
     println!(
         "  abuse: denylist={} ({} bans) reports={}",
@@ -3789,6 +3905,302 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         return;
                     }
                     respond_image(req, id, i);
+                    return;
+                }
+                // ── public fine-tuning (queue item #67): submit ──────────────────
+                // `POST /v1/finetunes` answers 202 + a poll URL, because a LoRA
+                // tune is minutes of GPU (the Worker upstream limit is 110 s).
+                (Method::Post, ["v1", "finetunes"]) => {
+                    if let Some(ip) = req.remote_addr().map(|a| a.ip().to_string()) {
+                        if denylist.lock().unwrap().is_ip_banned(&ip) {
+                            let _ = req.respond(
+                                Response::from_string(
+                                    json!({"error": {"message": "service refused (operator denylist)", "type": "gpn_policy_violation"}})
+                                        .to_string(),
+                                )
+                                .with_header(hdr.clone())
+                                .with_status_code(403),
+                            );
+                            return;
+                        }
+                    }
+                    if !allow_hot_wallet {
+                        let _ = req.respond(
+                            Response::from_string(
+                                json!({"error": {"message": "public fine-tuning is disabled on this access point (mainnet)", "type": "gpn_error"}})
+                                    .to_string(),
+                            )
+                            .with_header(hdr.clone())
+                            .with_status_code(403),
+                        );
+                        return;
+                    }
+                    let v: Value = serde_json::from_str(&body).unwrap_or(json!({}));
+                    let (model, dataset_json, lora_r, epochs) = match parse_finetune_request(&v) {
+                        Ok(x) => x,
+                        Err(e) => {
+                            let _ = req.respond(
+                                Response::from_string(
+                                    json!({"error": {"message": e, "type": "gpn_bad_request"}})
+                                        .to_string(),
+                                )
+                                .with_header(hdr.clone())
+                                .with_status_code(400),
+                            );
+                            return;
+                        }
+                    };
+                    // Same guardrail as every other job entry point: the dataset
+                    // text is user content, so it is moderated BEFORE any escrow.
+                    if let Some(cat) = moderation_block(&dataset_json) {
+                        let _ = req.respond(
+                            Response::from_string(
+                                json!({"error": {"message": cat.reason(), "type": "gpn_policy_violation", "category": cat.id()}})
+                                    .to_string(),
+                            )
+                            .with_header(hdr.clone())
+                            .with_status_code(451),
+                        );
+                        return;
+                    }
+                    // A fine-tune must land on a box that advertises the FineTuning
+                    // capability and can serve the base model (item #70's one pipeline).
+                    let reg = registry.lock().unwrap().clone();
+                    let needs = RouteNeeds {
+                        model: model.clone(),
+                        ..Default::default()
+                    };
+                    let candidates = route_candidates(&reg, JobKind::Finetune, &needs, &rtt_overrides(&v));
+                    let provider = match candidates.first() {
+                        Some(c) => c.provider.clone(),
+                        None => {
+                            let empty = reg.iter().all(|p| p.last_seen.is_none());
+                            let mut r = Response::from_string(
+                                json!({"error": {
+                                    "message": if empty {
+                                        "provider registry is warming up (no providers polled yet); retry shortly".to_string()
+                                    } else {
+                                        format!("no provider with the FineTuning capability can serve model '{model}' (or pull it)")
+                                    },
+                                    "type": "gpn_unavailable"
+                                }})
+                                .to_string(),
+                            )
+                            .with_header(hdr.clone())
+                            .with_status_code(503);
+                            if empty {
+                                r = r.with_header(retry_after_header());
+                            }
+                            let _ = req.respond(r);
+                            return;
+                        }
+                    };
+                    // Flat job price (a tune is GPU-minutes, not tokens). The
+                    // on-chain single-rate fields stay 0: the executor reports 0
+                    // tokens, so the escrow is returned after completion.
+                    let price_gpn = v
+                        .get("price_gpn")
+                        .and_then(|x| x.as_f64())
+                        .filter(|p| *p > 0.0)
+                        .unwrap_or(50.0);
+                    let next_before = match rt.block_on(client.try_get_next_job_id()) {
+                        Some(n) => n,
+                        None => {
+                            let _ = req.respond(
+                                Response::from_string(
+                                    json!({"error": {"message": "chain unavailable: cannot read NextJobId — refusing to create a job with an unknown id", "type": "gpn_error"}})
+                                        .to_string(),
+                                )
+                                .with_header(hdr.clone())
+                                .with_status_code(503),
+                            );
+                            return;
+                        }
+                    };
+                    // Opaque workload hash (never the dataset — privacy).
+                    let workload_hash = {
+                        use sha2::{Digest, Sha256};
+                        let mut h = Sha256::new();
+                        h.update(dataset_json.as_bytes());
+                        h.update(std::process::id().to_le_bytes());
+                        h.update(
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_nanos())
+                                .unwrap_or(0)
+                                .to_le_bytes(),
+                        );
+                        let mut o = [0u8; 32];
+                        o.copy_from_slice(&h.finalize());
+                        o[0] |= 1;
+                        o
+                    };
+                    let escrow = (price_gpn * 1e12) as u128;
+                    let fast_ap = fast_ap_enabled();
+                    let _create_guard = CREATE_LOCK.lock().unwrap();
+                    let outcome = submit_create(&rt, &client, next_before, fast_ap, || {
+                        rt.block_on(client.create_job_fast(
+                            0,
+                            75,
+                            1,
+                            0,
+                            150,
+                            "FineTuning",
+                            "Spot",
+                            escrow,
+                            0,
+                            0,
+                            1000,
+                            workload_hash,
+                        ))
+                    });
+                    drop(_create_guard);
+                    if !outcome.created {
+                        let msg = outcome
+                            .err
+                            .map(|e| e.to_string())
+                            .unwrap_or_else(|| "could not create job".to_string());
+                        let _ = req.respond(
+                            Response::from_string(
+                                json!({"error": {"message": msg, "type": "gpn_error"}}).to_string(),
+                            )
+                            .with_header(hdr.clone())
+                            .with_status_code(502),
+                        );
+                        return;
+                    }
+                    let id = outcome.id;
+                    let job = gpn_agent::llm::LlmJob::new_finetune(&model, &dataset_json, lora_r, epochs);
+                    let store = gpn_agent::llm::LlmStore::new();
+                    if !persist_job_payload(&store, id, &job) {
+                        // Same rule as every other create: never advertise an
+                        // unrunnable job — refund and say so.
+                        let refunded = rt.block_on(client.fail_job_fast(id, 0)).is_ok();
+                        eprintln!(
+                            "[store] finetune #{id}: payload not persisted — not dispatched ({})",
+                            if refunded { "escrow refunded" } else { "refund pending; on-chain expiry will reclaim it" }
+                        );
+                        let _ = req.respond(
+                            Response::from_string(
+                                json!({
+                                    "error": {"message": "could not persist the job payload to the off-chain store; the job was not dispatched", "type": "gpn_error"},
+                                    "job_id": id,
+                                    "refunded": refunded
+                                })
+                                .to_string(),
+                            )
+                            .with_header(hdr.clone())
+                            .with_status_code(500),
+                        );
+                        return;
+                    }
+                    record_created(id, 0);
+                    let callback_token = new_callback_token(id);
+                    let _ = write_assignment(
+                        &assign_store,
+                        id,
+                        &provider.address,
+                        &model,
+                        false,
+                        &callback_url,
+                        &callback_token,
+                    );
+                    let _ = req.respond(
+                        Response::from_string(
+                            json!({
+                                "id": id.to_string(),
+                                "object": "finetune",
+                                "status": "queued",
+                                "created": now_secs(),
+                                "model": model,
+                                "tuned_model": format!("tuned-{id}"),
+                                "lora_r": lora_r,
+                                "epochs": epochs,
+                                "examples": serde_json::from_str::<Value>(&dataset_json)
+                                    .ok()
+                                    .and_then(|x| x.as_array().map(|a| a.len()))
+                                    .unwrap_or(0),
+                                "routed_to": provider.address,
+                                "price_gpn": price_gpn,
+                                "poll_url": format!("/v1/finetunes/{id}")
+                            })
+                            .to_string(),
+                        )
+                        .with_header(hdr.clone())
+                        .with_status_code(202),
+                    );
+                    return;
+                }
+                // ── public fine-tuning (queue item #67): poll ───────────────────
+                (Method::Get, ["v1", "finetunes", id]) => {
+                    let idn: u64 = match id.parse() {
+                        Ok(n) => n,
+                        Err(_) => {
+                            let _ = req.respond(
+                                Response::from_string(
+                                    json!({"error": {"message": "invalid fine-tune id", "type": "gpn_bad_request"}})
+                                        .to_string(),
+                                )
+                                .with_header(hdr.clone())
+                                .with_status_code(400),
+                            );
+                            return;
+                        }
+                    };
+                    let off = gpn_agent::llm::get_job(idn)
+                        .filter(|j| j.kind == "finetune");
+                    let chain = rt.block_on(client.get_job_state(idn));
+                    let chain_state = chain.as_ref().map(|(s, _, _, _)| s.clone());
+                    if off.is_none() && chain.is_none() {
+                        if create_is_pending(idn) {
+                            let _ = req.respond(
+                                Response::from_string(
+                                    json!({"id": idn.to_string(), "object": "finetune", "status": "queued", "pending_inclusion": true})
+                                        .to_string(),
+                                )
+                                .with_header(hdr.clone())
+                                .with_status_code(202),
+                            );
+                            return;
+                        }
+                        let _ = req.respond(
+                            Response::from_string(
+                                json!({"error": {"message": "unknown fine-tune id", "type": "gpn_not_found"}})
+                                    .to_string(),
+                            )
+                            .with_header(hdr.clone())
+                            .with_status_code(404),
+                        );
+                        return;
+                    }
+                    let status = finetune_public_status(
+                        off.as_ref().map(|j| j.status.as_str()),
+                        chain_state.as_deref(),
+                    );
+                    let provider = chain.as_ref().and_then(|(_, _, _, p)| p.clone());
+                    let mut out = json!({
+                        "id": idn.to_string(),
+                        "object": "finetune",
+                        "status": status,
+                        "model": off.as_ref().map(|j| j.model.clone()).unwrap_or_default(),
+                        "chain_state": chain_state,
+                        "provider": provider
+                    });
+                    if let Some(j) = off {
+                        out["lora_r"] = json!(j.lora_r);
+                        out["epochs"] = json!(j.epochs);
+                        out["result_hash"] = json!(j.result_hash);
+                        out["artifact_path"] = json!(j.artifact_path);
+                        out["artifact_media_type"] = json!(j.artifact_media_type);
+                        out["error"] = json!(j.error);
+                    }
+                    if status == "succeeded" {
+                        // What the provider registers on completion
+                        // (`spawn_servemodel`), so a caller can immediately use it
+                        // as any other model in `/v1/chat/completions`.
+                        out["tuned_model"] = json!(format!("tuned-{idn}"));
+                    }
+                    let _ = req.respond(Response::from_string(out.to_string()).with_header(hdr.clone()));
                     return;
                 }
                 (Method::Post, ["jobs"]) => {
@@ -5824,8 +6236,10 @@ mod tests {
             (JobKind::Finetune, "ft", "llama3.2:1b"),
         ] {
             let needs = RouteNeeds {
-                // Generation ignores the model (it is not in `models[]`); ML and
-                // fine-tune DO match on it, exactly like text.
+                // Generation ignores the model (it is not in `models[]`); ML DOES
+                // match on it, exactly like text. Fine-tune also ignores it — its
+                // base model is an HF id, not an Ollama tag — see the assertion
+                // below.
                 model: if kind.is_generation() { "sd-turbo".into() } else { model.into() },
                 ..Default::default()
             };
@@ -5841,6 +6255,17 @@ mod tests {
             ..Default::default()
         };
         assert!(route_candidates(&reg, JobKind::Ml, &missing, &RttOverrides::new()).is_empty());
+
+        // A fine-tune's base model is a HuggingFace id (`HuggingFaceTB/…`), which
+        // no box lists in `models[]`; the FineTuning capability alone must make it
+        // routable (item #67).
+        let hf = RouteNeeds {
+            model: "HuggingFaceTB/SmolLM2-135M-Instruct".into(),
+            ..Default::default()
+        };
+        let ft_only = route_candidates(&reg, JobKind::Finetune, &hf, &RttOverrides::new());
+        assert_eq!(ft_only.len(), 1);
+        assert_eq!(ft_only[0].provider.address, "ft");
     }
 
     /// `job_type` + model classification: the native `POST /jobs` path must pick
@@ -5854,6 +6279,64 @@ mod tests {
         assert_eq!(JobKind::from_job_type("LLMInference", "ltx-video"), JobKind::Video);
         assert_eq!(JobKind::from_job_type("MLInference", "resnet50"), JobKind::Ml);
         assert_eq!(JobKind::from_job_type("FineTuning", "llama3.2:1b"), JobKind::Finetune);
+    }
+
+    // ── public fine-tuning (queue item #67) ──────────────────────────────────
+
+    #[test]
+    fn a_public_finetune_request_is_validated_before_any_escrow() {
+        let ok = json!({
+            "model": "llama3.2:1b",
+            "dataset": [
+                {"prompt": "2+2?", "completion": "4"},
+                {"prompt": "hi", "completion": "hello"}
+            ],
+            "lora_r": 32,
+            "epochs": 3
+        });
+        let (model, dataset, lora_r, epochs) = parse_finetune_request(&ok).unwrap();
+        assert_eq!(model, "llama3.2:1b");
+        assert_eq!((lora_r, epochs), (32, 3));
+        let parsed: Value = serde_json::from_str(&dataset).unwrap();
+        assert_eq!(parsed.as_array().unwrap().len(), 2);
+        assert_eq!(parsed[1]["completion"], "hello");
+
+        // A pre-encoded JSON string is normalized to the same array payload.
+        let as_text = json!({"model": "m", "dataset": "[{\"prompt\":\"a\",\"completion\":\"b\"}]"});
+        let (_, d2, _, _) = parse_finetune_request(&as_text).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&d2).unwrap().as_array().unwrap().len(), 1);
+
+        // Hyperparameters are clamped into a sane band, never trusted raw.
+        let clamped = json!({"model": "m", "dataset": [{"prompt": "a", "completion": "b"}], "lora_r": 9999, "epochs": 0});
+        let (_, _, r, e) = parse_finetune_request(&clamped).unwrap();
+        assert_eq!((r, e), (128, 1));
+
+        // Rejections: no base model, no dataset, empty dataset, a missing half
+        // of a pair, and an oversized dataset (a tune is minutes of GPU).
+        assert!(parse_finetune_request(&json!({"dataset": [{"prompt": "a", "completion": "b"}]})).is_err());
+        assert!(parse_finetune_request(&json!({"model": "m"})).is_err());
+        assert!(parse_finetune_request(&json!({"model": "m", "dataset": []})).is_err());
+        assert!(parse_finetune_request(&json!({"model": "m", "dataset": [{"prompt": "a"}]})).is_err());
+        let big: Vec<Value> = (0..MAX_FINETUNE_EXAMPLES + 1)
+            .map(|i| json!({"prompt": format!("p{i}"), "completion": "c"}))
+            .collect();
+        assert!(parse_finetune_request(&json!({"model": "m", "dataset": big})).is_err());
+    }
+
+    /// A provider can die after writing `done` but before `complete_job`; the
+    /// expiry sweep then fails the job. The chain must win for terminal states,
+    /// so a poll never reports `succeeded` for a job that was refunded.
+    #[test]
+    fn finetune_status_prefers_the_chain_for_terminal_states() {
+        assert_eq!(finetune_public_status(None, Some("Pending")), "queued");
+        assert_eq!(finetune_public_status(Some("queued"), Some("Accepted")), "running");
+        assert_eq!(finetune_public_status(Some("running"), Some("Running")), "running");
+        assert_eq!(finetune_public_status(Some("done"), Some("AwaitingVerification")), "succeeded");
+        assert_eq!(finetune_public_status(Some("done"), Some("Completed")), "succeeded");
+        assert_eq!(finetune_public_status(Some("done"), Some("Failed")), "failed");
+        assert_eq!(finetune_public_status(Some("error"), Some("Cancelled")), "failed");
+        assert_eq!(finetune_public_status(Some("error"), Some("Running")), "failed");
+        assert_eq!(finetune_public_status(None, None), "queued");
     }
 
     /// Ordering: idle before busy, then RTT-aware latency (the client's own
