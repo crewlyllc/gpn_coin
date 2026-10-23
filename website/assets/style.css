@@ -418,6 +418,11 @@ section[id], [id="join"] { scroll-margin-top: 74px; }
   color: var(--amber); border: 1px solid rgba(240, 166, 58, .4); background: rgba(240, 166, 58, .1);
   border-radius: 999px; padding: 1px 7px;
 }
+.tab-live {
+  font-size: .62rem; letter-spacing: .08em; text-transform: uppercase; font-weight: 700;
+  color: var(--green); border: 1px solid rgba(63, 185, 80, .45); background: rgba(63, 185, 80, .12);
+  border-radius: 999px; padding: 1px 7px;
+}
 .qs-panel { padding: 18px 20px 20px; }
 .qs-panel[hidden] { display: none; }
 .qs-panel.sub { padding: 0; }

@@ -109,6 +109,9 @@ const CHAT_INFLIGHT_MAX = 8;
 const FINETUNE_RATE_MAX = 4;
 /** Rate-limit window for fine-tune submissions, in seconds. */
 const FINETUNE_RATE_WINDOW_SECONDS = 3600;
+/** A fine-tune body carries up to 200 prompt/completion pairs, so it gets a
+ * larger cap than chat (64 KB) — but still a bounded one. */
+const FINETUNE_MAX_BODY = 256 * 1024;
 
 /** Cheap read endpoints (models/health/providers). */
 const READ_RATE_MAX = 120;
@@ -1218,10 +1221,11 @@ async function handleApi(request, env, path) {
   /** @type {string | null} */
   let body = null;
   if (isChat) {
+    const bodyCap = finetune ? FINETUNE_MAX_BODY : AP_PROXY_MAX_BODY;
     const declared = Number(request.headers.get("content-length") || 0);
-    if (declared > AP_PROXY_MAX_BODY) {
+    if (declared > bodyCap) {
       return apiJson(
-        { error: { message: `request body too large (max ${AP_PROXY_MAX_BODY} bytes)`, type: "gpn_body_too_large" } },
+        { error: { message: `request body too large (max ${bodyCap} bytes)`, type: "gpn_body_too_large" } },
         413,
         origin,
         "POST",
@@ -1232,9 +1236,9 @@ async function handleApi(request, env, path) {
     } catch {
       return apiJson({ error: { message: "could not read the request body", type: "gpn_bad_request" } }, 400, origin, "POST");
     }
-    if (body.length > AP_PROXY_MAX_BODY) {
+    if (body.length > bodyCap) {
       return apiJson(
-        { error: { message: `request body too large (max ${AP_PROXY_MAX_BODY} bytes)`, type: "gpn_body_too_large" } },
+        { error: { message: `request body too large (max ${bodyCap} bytes)`, type: "gpn_body_too_large" } },
         413,
         origin,
         "POST",
@@ -1372,8 +1376,7 @@ async function handleApi(request, env, path) {
 }
 
 /** Largest JSON body we will read for an application. */
-const JOIN_MAX_BODY = 8 * 1024;
-/** Applications per IP per window. */
+const JOIN_MAX_BODY = 8 * 1024;/** Applications per IP per window. */
 const JOIN_RATE_MAX = 5;
 /** Rate-limit window, in seconds (also the KV TTL). */
 const JOIN_RATE_WINDOW = 3600;
@@ -1593,5 +1596,6 @@ export const __test = {
   CHAT_RATE_MAX,
   FINETUNE_RATE_MAX,
   FINETUNE_RATE_WINDOW_SECONDS,
+  FINETUNE_MAX_BODY,
   STATIC_BOOTNODES,
 };

@@ -846,3 +846,30 @@ test("finetune: submissions are rate-limited (4/hour per IP)", async () => {
   // A different IP is unaffected.
   assert.equal((await post("203.0.113.50")).status, 202);
 });
+
+test("finetune: a dataset body over the chat cap is accepted, past 256 KB is not", async () => {
+  const submit = (body, ip) =>
+    worker.fetch(
+      new Request("https://gpncoin.ai/api/v1/finetunes", {
+        method: "POST",
+        headers: { "content-type": "application/json", "cf-connecting-ip": ip },
+        body,
+      }),
+      { __test_ap_transport: stubAp(jsonReply(202, { id: "7", status: "queued" })) },
+      { waitUntil() {} },
+    );
+
+  // ~100 KB of prompt/completion text: over AP_PROXY_MAX_BODY (64 KB) on
+  // purpose — 200 pairs are allowed, so the chat cap must not apply here.
+  const pair = { prompt: "p".repeat(450), completion: "c".repeat(450) };
+  const many = JSON.stringify({ model: "llama3.2:1b", dataset: new Array(110).fill(pair) });
+  assert.ok(many.length > __test.AP_PROXY_MAX_BODY);
+  assert.ok(many.length < __test.FINETUNE_MAX_BODY);
+  assert.equal((await submit(many, "203.0.113.51")).status, 202);
+
+  const huge = JSON.stringify({
+    model: "llama3.2:1b",
+    dataset: [{ prompt: "x".repeat(__test.FINETUNE_MAX_BODY), completion: "y" }],
+  });
+  assert.equal((await submit(huge, "203.0.113.52")).status, 413);
+});

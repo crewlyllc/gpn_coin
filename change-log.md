@@ -4929,3 +4929,52 @@ Window sweep (the requested "shorter window" check) on real noise: p95 **66.8 / 
 **EVIDENCE:** `gpn-provider` PID 1529486 → `~/.local/bin/gpn_llm_provider` mtime **06:20**, but `git log --since=06:20` shows `dd4d4e1` (**06:22**, `gpn-agent/src/chain/mod.rs`, +227/-94) — #80, the fix that makes a dead jsonrpsee socket heal in place instead of reading `None` for the whole process lifetime (documented strands 10-22 15:02, twice more). The diffusion lane *was* rebuilt (07:36, #81/#82) and both neighbour fixes are diffusion-only, so this lane was the only one left behind — the same deploy-gap class as the 05:52 entry, and it makes the next RPC-socket death a permanent strand again. No live symptom (no error, no orphan) — found by comparing binary mtime against `git log`, not by an incident.
 **FIX (one, no source edit):** `cargo build --release --bin gpn_llm_provider` at HEAD (20.9 s, 1 pre-existing warning) → backup `~/.local/bin/gpn_llm_provider.bak.pre-chainheal` → install (sha256 `05a5ca57…`) → `systemctl --user restart gpn-provider`. Env flags untouched (`GPN_FAST_CLAIM=1`/`GPN_FAST_AP=1` still ON).
 **VERIFIED:** PID 2008703 runs the installed path, hash matches target; `fast claim path: ON`, watchdog armed, reconcile `0 non-terminal`; `[assign] pull transport active`. Startup logged `set_provider_endpoint … timed out after 15s (chain stalled?)` — benign on this box (the oracle/chain write path is slow at boot; the on-chain record still holds the same URL) and the new #80 heal handles a genuinely dead socket now. Channel job `1792772885178` served (infer 0.8 s); chat e2e **0.90 s** (~0.9 s wall, 300 max_tokens); chain advancing `0x2bcee → 0x2bcef`; `author_pendingExtrinsics` empty; `/jobs` 256-window **250 Completed / 3 Cancelled / 3 Failed, 0 Pending/Running ⇒ no orphans**; exactly 1 claim per request.
+
+## 2026-10-23 12:45 PT — PM07 **fine-tuning is public**: Worker proxies /api/v1/finetunes; card flipped to `live`
+
+**WHY:** the AP has answered `POST /v1/finetunes` (202 + poll URL) since queue item #67, but the
+Worker only proxied text and image routes — `https://gpncoin.ai/api/v1/finetunes` returned
+`404 unknown API route`, so the site card honestly said `shipped · not wired`. Verified before the
+fix: AP `POST /v1/finetunes` → **400** (route exists, empty body), public → **404**.
+
+**WHAT (`worker/worker.js`):** three routes mirroring the image proxy exactly (same
+`socketHttpRequest` transport, same `AP_TOKEN` bearer, same timeout, same CORS/status passthrough):
+* `POST /api/v1/finetunes` → `POST /v1/finetunes` (202 + id + `poll_url`); pre-flight validation of
+  `model` + non-empty `dataset[]`, so a malformed body never becomes an on-chain job;
+* `GET /api/v1/finetunes/<id>` → the AP poll (queued → running → succeeded/failed; 404 for unknown
+  ids passes through);
+* `GET /api/v1/finetunes/<id>/artifact` → `GET /artifact/<id>` as **binary** (the LoRA adapter zip).
+Body cap: 256 KB for a tune (200 prompt/completion pairs legitimately exceed the 64 KB chat cap);
+rate limit: its own bucket, 4 submissions/hour/IP. Unknown-id/AP errors are passed through unchanged.
+
+**LIVE EVIDENCE (public, from a client outside the AP):**
+```
+POST https://gpncoin.ai/api/v1/finetunes  → 202 {"id":"6528","status":"queued","tuned_model":"tuned-6528","price_gpn":50.0}
+GET  https://gpncoin.ai/api/v1/finetunes/6528 → queued → running → succeeded (~3.5 min; chain Completed)
+GET  https://gpncoin.ai/api/v1/finetunes/6528/artifact → 200 application/zip, 1 560 096 B
+     (adapter_model.safetensors 245 768 B + tokenizer + ckpt), unzip -t clean
+POST https://gpncoin.ai/api/v1/chat/completions {"model":"tuned-6527"} → 200 "Hi! Nice to meet you."
+GET  https://gpncoin.ai/api/v1/finetunes/99999999 → 404 gpn_not_found
+```
+Jobs used to prove it were deliberately tiny — `HuggingFaceTB/SmolLM2-135M-Instruct`, 1 pair,
+`lora_r` 1, 1 epoch, ~60 s of GPU each (6527/6528/6529/6530). Nothing large was left running; all
+four reached `Completed`/`AwaitingVerification` and their adapters are on disk.
+
+**SITE (`website/ai.html`):** Fine-tuning card `shipped · not wired` → **live**, with the measured
+202/poll/artifact/chat path and the real limits (200 pairs, `lora_r` 1–128, `epochs` 1–10,
+50 GPN flat, 4/hour). New purpose tab **🎛️ Fine-tuning** with submit → poll → download → chat for
+bash/curl, macOS, Python (stdlib) and Node. Endpoints table gains the three routes.
+
+**GOTCHAS FOUND WHILE VERIFYING (both now in the snippets):**
+* `Python-urllib/3.x` gets **403** from the CDN in front of gpncoin.ai; `python-requests`, curl and
+  an empty UA get 200. The Python snippet sets a `User-Agent`.
+* `result_hash` is the provider's on-chain **commitment**, not the zip's sha256 — don't advertise it
+  as a download checksum.
+* `curl` nested inside `-d "{\"model\": \"$(… | jq -r .model)\"}"` hands jq a quoted JSON *string*
+  (jq: `Cannot index string with "tuned_model"`). Compute `MODEL=$(…)` first.
+
+**TESTS:** `node --test worker/worker.test.mjs` **42 passed / 0 failed** (was 35). New cases: 202
+passthrough + upstream path/method/body, pre-flight rejects (no model / no dataset / empty dataset)
+without an upstream call, GET-on-submit → 405, poll 200 and 404 passthrough, binary artifact
+(`/artifact/<id>`), CORS preflight for the POST route, 4/hour rate limit + `retry-after`, and the
+256 KB fine-tune body cap (a 100 KB dataset passes, >256 KB is 413).
