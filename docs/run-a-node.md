@@ -1545,6 +1545,50 @@ the default-phase budget, `GPN_PROVIDER_TICK` moves the tick file. Check the
 state with `cat ~/.gpn/provider-tick.json` (a healthy provider's `loops` grows
 about three times a second at the default 300 ms poll).
 
+## Provider restart — stale `Running`/`Accepted` jobs are adopted at startup
+
+A restart in the middle of work used to leave the job in limbo: the claim and
+reconcile loops only ever look at the **last 128 chain ids**, so a job claimed by
+the previous process was re-run only if a later tick happened to land on it
+(`Running` #97), and an `Accepted` job whose next step never came (`#105`) sat
+there until its on-chain deadline. Nothing enumerated "the jobs I actually own".
+
+Every provider start now runs one **adoption sweep** before the claim loop takes
+its first nonce, over the ids in its own assignment store, and decides once per
+id:
+
+| chain state | payload we hold | action |
+|---|---|---|
+| `Pending` | any | left to the claim loop, which **waits for create inclusion** (no optimistic accept) |
+| `Accepted` / `Running` | queued | **resume inference** → submit result → complete |
+| `Accepted` / `Running` | stored result | **resume settlement** → submit result → complete |
+| `AwaitingVerification` | any | `complete_job` (frees the capacity slot) |
+| `Accepted` / `Running` | none, or not runnable here | `fail_job` → escrow refunded **now**, slot freed |
+
+A job we hold a live (`queued`/`running`) payload for is examined regardless of
+age; ids without one are only examined within 512 of the tip (the store grows
+forever — an O(history) startup scan is the finding-#34 trap, and an older id
+cannot still be in flight). Every id that needs action gets one log line naming
+the state, the payload shape and the action, and the sweep always ends with a
+summary — a quiet start is now provably "nothing to adopt":
+
+```
+[reconcile] startup adopt #6503 state=Running payload=queued model=llama3.2:1b action=resume-inference
+[reconcile] startup adopt #6504 state=Running payload=none model=- action=fail
+[reconcile] startup adopt #6504: failed on-chain (reason 4: no off-chain payload (cannot ever run it)) — escrow refunded, slot freed
+[reconcile] startup adoption: examined 506 assigned id(s) below tip 6505 (2358 older than 512 ids without a live payload, left to the expiry sweep); 1 non-terminal → 0 resumed, 0 settled, 0 completed, 1 failed
+```
+
+`fail_job` reasons used by the sweep: **4** = no off-chain payload, **5** = the
+payload cannot run here (foreign/diffusion model, or the per-job attempt cap).
+`GPN_STARTUP_ADOPT=0` disables the sweep.
+
+The same start also clears a **stale miner-yield flag**: a `SIGKILL`ed provider
+never runs `GpuYieldGuard`'s `Drop`, so `~/.gpn/gpu-yield` survived and kept the
+co-located miner parked forever. The flag is only meaningful while a GPU lock
+holder exists, so startup takes the lock briefly (1 s): if it succeeds the flag
+is stale and is removed; if not, another provider is genuinely mid-job.
+
 ## Troubleshooting — node connected but not syncing
 
 **Symptom.** The node shows peers at the p2p layer — `system_peers` lists them as

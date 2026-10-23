@@ -630,6 +630,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         eprintln!("[watchdog] DISABLED (GPN_PROVIDER_WATCHDOG=0) — a wedged loop will not restart");
     }
+
+    // Item #73: adopt what we already own BEFORE the loop starts. A job claimed
+    // by the previous process (and possibly outside the reconcile window) is
+    // either resumed now or moved to a terminal state now — never left to the
+    // chance of a later tick. Nothing has taken a nonce yet, so this cannot race
+    // the claim lane.
+    clear_stale_gpu_yield();
+    startup_adopt(&client, &me, &addr, fast_claim, &progress).await;
     set_phase(&progress, "idle");
 
     loop {
@@ -1254,6 +1262,17 @@ fn is_benign_state_err(s: &str) -> bool {
 /// trailing window suffices and keeps the poll loop tight.
 const RECONCILE_WINDOW: u64 = 128;
 
+/// How far back from the tip the startup adoption sweep (item #73) reads chain
+/// state for ids it holds no live payload for. The assignment store grows
+/// forever (2865 ids and counting), and one `get_job_state` per historical id
+/// would stall startup for minutes — the same O(history) trap finding #34 hit.
+/// An id older than this with no local payload cannot be resumed anyway (the
+/// work is gone), and it cannot still be `Accepted`/`Running`: it would have
+/// outlived `max_duration` and been reclaimed by the on-chain expiry sweep. Ids
+/// with a *live* local payload (queued/running) are always examined regardless
+/// of age — that is exactly the #97/#105 case.
+const ADOPT_WINDOW: u64 = 512;
+
 /// How long to wait before re-submitting the SAME heal transition for the same
 /// job. `submit_fast` is pool-ack only, so a caller cannot tell whether the tx
 /// it just broadcast will be included; at ~15–18 s block times a retry inside
@@ -1717,6 +1736,346 @@ async fn wait_for_chain_ready(client: &ChainClient, tries: u32, delay_ms: u64) -
 }
 
 type ProgressCell = std::sync::Arc<std::sync::Mutex<gpn_agent::provider_watchdog::Progress>>;
+
+// ── Queue #73: deterministic startup adoption of the jobs we already own ─────
+//
+// The claim/reconcile loops only ever look at the trailing `RECONCILE_WINDOW`
+// chain ids, so a job claimed *before* a restart and then left behind by the
+// window was never revisited deterministically: `Running` #97 was re-run only
+// because a reconcile tick happened to land on it, and `Accepted` #105 (its
+// requestor momentarily rate-limited) sat there until the on-chain deadline.
+// The assignment store, unlike the chain window, is the durable record of what
+// this provider owns — so startup enumerates THAT and decides once, per id.
+
+/// Shape of the off-chain payload we hold for one of our assigned jobs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PayloadShape {
+    /// No local `LlmJob` at all — we can never run it (item #41's shape).
+    Missing,
+    /// Stored with a finished answer + on-chain commitment: only settlement is
+    /// outstanding (the inference already happened before the restart).
+    Result,
+    /// Stored and still queued/running: inference can be (re)run.
+    Queued,
+    /// Stored but marked errored (policy refusal, failed attempt).
+    Errored,
+}
+
+/// What the startup sweep does for one assigned id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Adopt {
+    /// Terminal, unknown, or another provider's job — leave it alone.
+    Skip,
+    /// `Pending`: the claim loop owns it, and must wait for create inclusion
+    /// before accepting (item #49 — never claim optimistically).
+    LeavePending,
+    /// `Accepted`/`Running` with a queued payload: run it now.
+    ResumeRun,
+    /// `Accepted`/`Running` with a stored result: re-submit the result + complete.
+    ResumeSettle,
+    /// `AwaitingVerification`: the result landed, only completion is outstanding.
+    Complete,
+    /// Provably unrunnable by this provider: fail it so the escrow refunds now
+    /// and the capacity slot frees instead of burning the on-chain deadline.
+    Fail(u8),
+}
+
+/// `fail_job` reason: the provider never held a payload for this job.
+const FAIL_NO_PAYLOAD: u8 = 4;
+/// `fail_job` reason: the payload cannot be run here (wrong kind of model, or
+/// the per-job attempt cap is already exhausted).
+const FAIL_CANNOT_RUN: u8 = 5;
+
+/// Pure adoption decision for one `(chain state, our payload)` pair.
+fn adopt_action(
+    state: &str,
+    provider_is_me: bool,
+    kind_is_ours: bool,
+    payload: PayloadShape,
+    runnable: bool,
+) -> Adopt {
+    // The diffusion provider shares this signer account, so `provider == me` is
+    // true for image/video jobs too. Never touch the other kind's work.
+    if !kind_is_ours {
+        return Adopt::Skip;
+    }
+    // `Pending` belongs to the claim loop (item #49). Terminal states need
+    // nothing, and an unrecognised state (a newer pallet variant) must never be
+    // acted on blindly either.
+    match state {
+        "Pending" => return Adopt::LeavePending,
+        "Accepted" | "Running" | "AwaitingVerification" => {}
+        _ => return Adopt::Skip,
+    }
+    if !provider_is_me {
+        return Adopt::Skip;
+    }
+    if state == "AwaitingVerification" {
+        return Adopt::Complete;
+    }
+    match payload {
+        PayloadShape::Missing => Adopt::Fail(FAIL_NO_PAYLOAD),
+        PayloadShape::Errored => Adopt::Fail(FAIL_CANNOT_RUN),
+        PayloadShape::Result => Adopt::ResumeSettle,
+        PayloadShape::Queued if runnable => Adopt::ResumeRun,
+        PayloadShape::Queued => Adopt::Fail(FAIL_CANNOT_RUN),
+    }
+}
+
+/// Is the requested model on this box? `None` = the probe could not answer
+/// (ollama down / no tags), which is NOT evidence of absence.
+fn model_local_state(model: &str, models: &[String]) -> Option<bool> {
+    if model.is_empty() || model == "auto" {
+        return None; // nothing concrete requested: anything this box serves
+    }
+    if models.is_empty() {
+        return None;
+    }
+    Some(gpn_agent::ollama::model_present(models, model))
+}
+
+/// Crash recovery for the miner-yield flag (part of item #73).
+///
+/// A provider killed with SIGKILL never runs `GpuYieldGuard`'s `Drop`, so
+/// `~/.gpn/gpu-yield` survives and the co-located miner stays parked forever —
+/// the flag has no owner, pid or timestamp, and nothing else ever clears it.
+/// The flag is only meaningful while a GPU lock *holder* exists, so prove that:
+/// take the lock briefly. If we get it there is no mid-job provider and the
+/// leftover flag is stale (our own `Drop` then clears it); if we cannot, another
+/// process genuinely owns the GPU and its flag must stay.
+fn clear_stale_gpu_yield() {
+    let flag = gpn_agent::gpu_yield::yield_flag_path();
+    if !flag.exists() {
+        return;
+    }
+    match gpn_agent::gpu_yield::GpuYieldGuard::acquire_with_timeout(Duration::from_millis(1_000)) {
+        Ok(guard) => {
+            drop(guard);
+            println!(
+                "[provider] cleared a stale GPU yield flag (no lock holder) — the miner is no \
+                 longer parked by a killed process"
+            );
+        }
+        Err(_) => println!(
+            "[provider] GPU yield flag present and the GPU lock is held — another provider is \
+             mid-job, leaving it alone"
+        ),
+    }
+}
+
+/// Enumerate the ids assigned to us and settle each one deterministically.
+///
+/// Runs ONCE at startup, before the claim loop takes its first nonce, so it can
+/// never race the claim lane (item #31's class). Every id produces one log line
+/// naming the state, the payload shape and the action taken — a stranded job
+/// must never be silent again.
+async fn startup_adopt(
+    client: &ChainClient,
+    me: &str,
+    addr: &str,
+    fast: bool,
+    progress: &ProgressCell,
+) {
+    if std::env::var("GPN_STARTUP_ADOPT")
+        .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+        .unwrap_or(false)
+    {
+        eprintln!("[reconcile] startup adoption DISABLED (GPN_STARTUP_ADOPT=0)");
+        return;
+    }
+    let mut assigned = read_assigned(me, addr);
+    if assigned.is_empty() {
+        return; // standalone provider: nothing was ever assigned off-chain
+    }
+    set_phase(progress, "adopt");
+    // No tip ⇒ no evidence about any id, and acting on `None` reads would fail
+    // jobs that are perfectly healthy (item #61). Skip; the loops retry later.
+    let Some(tip) = client.try_get_next_job_id().await else {
+        warn_chain_unreadable_once();
+        return;
+    };
+    assigned.sort_unstable_by_key(|(id, _, _)| *id);
+    let models = gpn_agent::nodestatus::ollama_models(&gpn_agent::llm::infer::default_ollama_url());
+    let (mut resumed, mut settled, mut completed, mut failed) = (0u32, 0u32, 0u32, 0u32);
+    let (mut examined, mut live) = (0u32, 0u32);
+    let mut skipped_old = 0u32;
+    for (id, _model, _pull) in assigned {
+        // Ids at/above the tip were never issued by the chain (an AP label
+        // drift): they are not jobs, so nothing to adopt (item #29's rule).
+        if id >= tip {
+            continue;
+        }
+        // Bound the sweep: only recent ids, plus anything we still hold a live
+        // payload for (see ADOPT_WINDOW).
+        let local_status = get_job(id).map(|j| j.status);
+        let live_payload = matches!(local_status.as_deref(), Some("queued") | Some("running"));
+        if !live_payload && id.saturating_add(ADOPT_WINDOW) < tip {
+            skipped_old += 1;
+            continue;
+        }
+        examined += 1;
+        let Some((state, _price, _req, provider)) = client.get_job_state(id).await else {
+            continue; // not on chain (create still pooled) or unreadable: leave it
+        };
+        let job = get_job(id);
+        let payload = match &job {
+            None => PayloadShape::Missing,
+            Some(j) if j.status == "done" && j.result_hash.as_deref().and_then(hex32).is_some() => {
+                PayloadShape::Result
+            }
+            Some(j) if j.status == "error" => PayloadShape::Errored,
+            Some(_) => PayloadShape::Queued,
+        };
+        let runnable = job
+            .as_ref()
+            .map(|j| should_attempt(id, &j.model))
+            .unwrap_or(false);
+        let action = adopt_action(
+            &state,
+            provider.as_deref() == Some(me),
+            job_kind_is_ours(id),
+            payload,
+            runnable,
+        );
+        let action_name = match action {
+            Adopt::Skip => {
+                continue;
+            }
+            Adopt::LeavePending => {
+                live += 1;
+                println!(
+                    "[reconcile] startup adopt #{id} state={state}: left to the claim loop \
+                     (create inclusion is awaited — no optimistic claim)"
+                );
+                continue;
+            }
+            Adopt::ResumeRun => "resume-inference",
+            Adopt::ResumeSettle => "resume-settlement",
+            Adopt::Complete => "complete",
+            Adopt::Fail(_) => "fail",
+        };
+        live += 1;
+        println!(
+            "[reconcile] startup adopt #{id} state={state} payload={} model={} action={action_name}",
+            match payload {
+                PayloadShape::Missing => "none",
+                PayloadShape::Result => "result",
+                PayloadShape::Queued => "queued",
+                PayloadShape::Errored => "errored",
+            },
+            job.as_ref().map(|j| j.model.as_str()).unwrap_or("-")
+        );
+        match action {
+            Adopt::ResumeRun => {
+                let j = job.as_ref().expect("ResumeRun implies a payload");
+                // An explicit model this box does not hold is NOT terminal: the
+                // background prep worker pulls it (item #56, never blocking) and
+                // the ordinary run loop resumes the job once it lands.
+                if model_local_state(&j.model, &models) == Some(false) {
+                    println!(
+                        "[reconcile] startup adopt #{id}: model {} is not installed — queued a \
+                         background pull; the run loop will resume it",
+                        j.model
+                    );
+                    let _ = kick_model_prep(&j.model, Some(id));
+                    continue;
+                }
+                match run_job(client, id, j, fast, progress).await {
+                    Ok(()) => {
+                        resumed += 1;
+                        println!("[reconcile] startup adopt #{id}: inference resumed and settled");
+                    }
+                    Err(e) => eprintln!("[reconcile] startup adopt #{id}: resume failed: {e}"),
+                }
+            }
+            Adopt::ResumeSettle => {
+                let j = job.as_ref().expect("ResumeSettle implies a payload");
+                let bytes = j.result_hash.as_deref().and_then(hex32).unwrap();
+                let toks =
+                    ((j.response.as_deref().unwrap_or("").chars().count() as u32) / 4).max(1);
+                let sub = if fast {
+                    client.submit_result_fast(id, bytes, toks).await
+                } else {
+                    client.submit_result(id, bytes, toks).await
+                };
+                match sub {
+                    Ok(()) => {
+                        let done = if fast {
+                            client.complete_job_fast(id).await
+                        } else {
+                            client.complete_job(id).await
+                        };
+                        match done {
+                            Ok(()) => {
+                                settled += 1;
+                                println!(
+                                    "[reconcile] startup adopt #{id}: result re-submitted and completed"
+                                );
+                            }
+                            Err(e) if is_benign_state_err(&e.to_string()) => settled += 1,
+                            Err(e) => {
+                                eprintln!("[reconcile] startup adopt #{id}: complete failed: {e}")
+                            }
+                        }
+                    }
+                    Err(e) if is_benign_state_err(&e.to_string()) => {}
+                    Err(e) => {
+                        eprintln!("[reconcile] startup adopt #{id}: submit_result failed: {e}")
+                    }
+                }
+            }
+            Adopt::Complete => {
+                let res = if fast {
+                    client.complete_job_fast(id).await
+                } else {
+                    client.complete_job(id).await
+                };
+                match res {
+                    Ok(()) => {
+                        completed += 1;
+                        println!("[reconcile] startup adopt #{id}: completed (slot freed)");
+                    }
+                    Err(e) if is_benign_state_err(&e.to_string()) => {}
+                    Err(e) => eprintln!("[reconcile] startup adopt #{id}: complete failed: {e}"),
+                }
+            }
+            Adopt::Fail(reason) => {
+                let res = if fast {
+                    client.fail_job_fast(id, reason).await
+                } else {
+                    client.fail_job(id, reason).await
+                };
+                match res {
+                    Ok(()) => {
+                        failed += 1;
+                        let why = if reason == FAIL_NO_PAYLOAD {
+                            "no off-chain payload (cannot ever run it)"
+                        } else {
+                            "payload is not runnable here (model/attempts)"
+                        };
+                        println!(
+                            "[reconcile] startup adopt #{id}: failed on-chain (reason {reason}: \
+                             {why}) — escrow refunded, slot freed"
+                        );
+                    }
+                    Err(e) if is_benign_state_err(&e.to_string()) => {}
+                    Err(e) => eprintln!("[reconcile] startup adopt #{id}: fail_job failed: {e}"),
+                }
+            }
+            Adopt::Skip | Adopt::LeavePending => {}
+        }
+    }
+    // Always say what the sweep saw: "examined 2865 assigned ids, 0 were
+    // non-terminal" is the difference between a quiet healthy start and the
+    // silent no-op this item was opened for.
+    println!(
+        "[reconcile] startup adoption: examined {examined} assigned id(s) below tip {tip} \
+         ({skipped_old} older than {ADOPT_WINDOW} ids without a live payload, left to the expiry \
+         sweep); {live} non-terminal → {resumed} resumed, {settled} settled, {completed} completed, \
+         {failed} failed"
+    );
+    set_phase(progress, "idle");
+}
 
 async fn process_once(
     client: &ChainClient,
@@ -2980,5 +3339,104 @@ mod settled_cache_tests {
         assert!(attest_measurement_useful(30_000, Some(188)));
         // A zeroed record is always repaired by any eligible reading.
         assert!(attest_measurement_useful(3_000, Some(0)));
+    }
+}
+
+// ── Queue #73: startup adoption of jobs we already own ──────────────────────
+
+#[cfg(test)]
+mod startup_adoption_tests {
+    use super::*;
+
+    #[test]
+    fn adoption_resumes_or_settles_stale_jobs_instead_of_leaving_them() {
+        // The two live symptoms the item was opened for. #97 was `Running` with
+        // the payload still queued (the restart killed inference) ⇒ re-run it.
+        assert_eq!(
+            adopt_action("Running", true, true, PayloadShape::Queued, true),
+            Adopt::ResumeRun
+        );
+        // #105 was `Accepted` with a queued payload ⇒ re-run it too (the old
+        // code only ever started+completed result-less zombies, refunding work
+        // it could still have done).
+        assert_eq!(
+            adopt_action("Accepted", true, true, PayloadShape::Queued, true),
+            Adopt::ResumeRun
+        );
+        // Inference finished before the restart, only settlement is missing.
+        assert_eq!(
+            adopt_action("Running", true, true, PayloadShape::Result, false),
+            Adopt::ResumeSettle
+        );
+        // Result already on chain: completion alone frees the capacity slot.
+        assert_eq!(
+            adopt_action(
+                "AwaitingVerification",
+                true,
+                true,
+                PayloadShape::Result,
+                false
+            ),
+            Adopt::Complete
+        );
+    }
+
+    #[test]
+    fn adoption_fails_only_what_it_can_never_run() {
+        // Item #41's shape: accepted/running with no off-chain payload at all.
+        assert_eq!(
+            adopt_action("Running", true, true, PayloadShape::Missing, false),
+            Adopt::Fail(FAIL_NO_PAYLOAD)
+        );
+        // A payload the operator cannot run (foreign model, attempt cap hit).
+        assert_eq!(
+            adopt_action("Running", true, true, PayloadShape::Queued, false),
+            Adopt::Fail(FAIL_CANNOT_RUN)
+        );
+        // Already errored off-chain (policy refusal / failed attempts).
+        assert_eq!(
+            adopt_action("Accepted", true, true, PayloadShape::Errored, true),
+            Adopt::Fail(FAIL_CANNOT_RUN)
+        );
+    }
+
+    #[test]
+    fn adoption_never_claims_pending_or_touches_foreign_work() {
+        // Item #49: `Pending` belongs to the claim loop, which waits for the
+        // create to be included. Adopting it here would accept optimistically.
+        assert_eq!(
+            adopt_action("Pending", true, true, PayloadShape::Queued, true),
+            Adopt::LeavePending
+        );
+        // Same signer, other kind (image/video): not our job.
+        assert_eq!(
+            adopt_action("Running", true, false, PayloadShape::Missing, false),
+            Adopt::Skip
+        );
+        // Accepted by a different provider — never fail someone else's job.
+        assert_eq!(
+            adopt_action("Running", false, true, PayloadShape::Missing, false),
+            Adopt::Skip
+        );
+        // Terminal and unknown states are left alone.
+        for s in ["Completed", "Failed", "Cancelled", "?}"] {
+            assert_eq!(
+                adopt_action(s, true, true, PayloadShape::Queued, true),
+                Adopt::Skip,
+                "state {s} must not be adopted"
+            );
+        }
+    }
+
+    #[test]
+    fn a_model_probe_that_cannot_answer_is_not_evidence_of_absence() {
+        let have = vec!["llama3.2:1b".to_string()];
+        assert_eq!(model_local_state("llama3.2:1b", &have), Some(true));
+        assert_eq!(model_local_state("qwen2.5:7b", &have), Some(false));
+        // ollama down / no tags ⇒ unknown, which must never fail a job.
+        assert_eq!(model_local_state("qwen2.5:7b", &[]), None);
+        // `auto`/empty requests are always servable here.
+        assert_eq!(model_local_state("auto", &have), None);
+        assert_eq!(model_local_state("", &have), None);
     }
 }
