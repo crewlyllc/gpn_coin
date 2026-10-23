@@ -870,6 +870,61 @@ impl ProviderChannel {
         }
     }
 
+    /// Item #75: rewind accepts that were persisted before a crash and never
+    /// answered.
+    ///
+    /// [`Self::accept`] commits the AP's pre-authorised payment to our mirror and
+    /// the caller persists that state **before** the work runs (deliberate: a
+    /// crash must not lose the requestor's payment). If we then die before
+    /// `sign_result` — a SIGKILL, the #72 watchdog's exit 75, or a panic in the
+    /// serving lane — the AP never learns about it: at the deadline it drops its
+    /// pending entry without adopting `after`, so our mirror sits one nonce
+    /// **ahead** of the AP's forever and every later assignment is rejected
+    /// `StaleStateBefore`. The channel lane is then wedged (work silently falls
+    /// back to on-chain escrow) until someone hand-edits `provider_channels.json`
+    /// — observed live on 2026-10-23 after such a crash.
+    ///
+    /// Rewinding an expired, unanswered accept restores exactly the state the AP
+    /// believes in. It is safe whichever side turns out to be canonical: if the
+    /// AP really did adopt `after`, the next assignment's `state_before` is
+    /// ahead of ours and [`Self::sync_to_assignment`] adopts it again. Live
+    /// accepts (deadline not yet passed) are never touched — their result may
+    /// still be on its way.
+    ///
+    /// Returns the number of rewinds.
+    pub fn reconcile_stale_accepts(&mut self, now_ms: u64) -> usize {
+        let stale: Vec<(u64, ChannelState)> = self
+            .accepted
+            .iter()
+            .filter(|(_, j)| j.deadline_ms < now_ms)
+            .map(|(id, j)| (*id, j.before))
+            .collect();
+        if stale.is_empty() {
+            return 0;
+        }
+        // The mirror goes back to the NEWEST pre-state we still hold that is
+        // below it. That is the acceptance the AP abandoned *last*, and the AP
+        // has meanwhile advanced past every earlier one with jobs it did
+        // acknowledge — rewinding to the oldest would throw away months of
+        // agreed payments (observed: nonce 84 → 23 instead of → 83).
+        let target = stale
+            .iter()
+            .map(|(_, b)| *b)
+            .filter(|b| b.nonce < self.state.nonce)
+            .max_by_key(|b| b.nonce);
+        let removed = stale.len();
+        for (id, _) in &stale {
+            self.accepted.remove(id);
+        }
+        match target {
+            Some(t) => {
+                self.state = t;
+                removed
+            }
+            None => 0,
+        }
+    }
+
     /// Adopt the AP-signed pre-state when our mirror is **behind**.
     ///
     /// One on-chain channel is keyed by (requestor, provider account). When two
@@ -1603,6 +1658,119 @@ mod tests {
         let before = other.state;
         other.sync_to_assignment(&stale);
         assert_eq!(other.state, before);
+    }
+
+    // ── item #75: a crash mid-job must not wedge the channel lane ───────────
+
+    /// The live shape: `accept()` persisted nonce N+1, the process died before
+    /// returning a result, the AP dropped its pending entry at the deadline and
+    /// stayed at nonce N. Without a rewind every later assignment is rejected
+    /// `StaleStateBefore` — a wedged lane that needed a hand-edited JSON file.
+    #[test]
+    fn an_expired_unanswered_accept_is_rewound_to_the_ap_state() {
+        let (ap, prov, mut ch, mut pch) = setup(1_000);
+        let a = ch
+            .begin_job_for(
+                &ap,
+                PubKey(prov.public_key()),
+                1,
+                "m",
+                "hello",
+                32,
+                700,
+                100,
+                0,
+            )
+            .unwrap();
+        let ap_state_before = ch.state;
+        pch.accept(&a).unwrap();
+        assert_eq!(pch.state.nonce, ap_state_before.nonce + 1);
+
+        // Still inside the deadline: the result may be on its way — leave it.
+        assert_eq!(pch.reconcile_stale_accepts(a.deadline_ms), 0);
+        assert_eq!(pch.state.nonce, ap_state_before.nonce + 1);
+
+        // Past the deadline the AP has given up on the job, so the mirror must
+        // go back to the state the AP actually holds.
+        assert_eq!(pch.reconcile_stale_accepts(a.deadline_ms + 1), 1);
+        assert_eq!(pch.state, ap_state_before);
+        // And the AP's next assignment is accepted again (the lane works).
+        let b = ch
+            .begin_job_for(
+                &ap,
+                PubKey(prov.public_key()),
+                2,
+                "m",
+                "hello again",
+                32,
+                700,
+                100,
+                0,
+            )
+            .unwrap();
+        pch.sync_to_assignment(&b);
+        pch.accept(&b)
+            .expect("the lane must be usable after a rewind");
+    }
+
+    /// Two unacknowledged accepts at different nonces: the replay must land on
+    /// the NEWEST pre-state, not the oldest — the AP advanced past the earlier
+    /// one with jobs it did acknowledge (live 2026-10-23: 84 must rewind to 83,
+    /// not to 23).
+    #[test]
+    fn a_rewind_lands_on_the_newest_unacknowledged_state() {
+        let (ap, prov, mut ch, mut pch) = setup(100_000);
+        // Job 1 is accepted and answered by the AP (state advances to 1).
+        let a1 = ch
+            .begin_job_for(&ap, PubKey(prov.public_key()), 1, "m", "a", 8, 0, 9_999, 0)
+            .unwrap();
+        pch.accept(&a1).unwrap();
+        let r1 = pch.sign_result(&prov, 1, "r", 1, 1).unwrap();
+        ch.complete_job(&r1).unwrap();
+        // Job 2 is accepted at nonce 2 and never answered (crash).
+        let a2 = ch
+            .begin_job_for(&ap, PubKey(prov.public_key()), 2, "m", "b", 8, 0, 9_999, 0)
+            .unwrap();
+        pch.accept(&a2).unwrap();
+        assert_eq!(pch.state.nonce, 2);
+        // Job 3: the AP abandons job 2's payment, so its own state stays at 1...
+        // but a second unacknowledged accept also expires (job 4 at nonce 2).
+        assert_eq!(pch.reconcile_stale_accepts(a2.deadline_ms + 1), 1);
+        assert_eq!(pch.state.nonce, 1, "must rewind to the newest pre-state");
+        // The lane accepts the AP's next assignment again.
+        let a3 = ch
+            .begin_job_for(&ap, PubKey(prov.public_key()), 5, "m", "c", 8, 0, 9_999, 0)
+            .unwrap();
+        pch.sync_to_assignment(&a3);
+        pch.accept(&a3).expect("lane usable after rewind");
+    }
+
+    /// Rewinding must never touch a job that was answered (its payment is real)
+    /// and must be idempotent — the loader runs on every request.
+    #[test]
+    fn a_rewind_is_idempotent_and_spares_answered_jobs() {
+        let (ap, prov, mut ch, mut pch) = setup(1_000);
+        let a = ch
+            .begin_job_for(
+                &ap,
+                PubKey(prov.public_key()),
+                1,
+                "m",
+                "hello",
+                32,
+                700,
+                100,
+                0,
+            )
+            .unwrap();
+        pch.accept(&a).unwrap();
+        let r = pch.sign_result(&prov, 1, "world", 3, 4).unwrap();
+        ch.complete_job(&r).unwrap();
+        let settled = pch.state;
+        // Answered and satisfied: nothing to rewind, ever.
+        assert_eq!(pch.reconcile_stale_accepts(u64::MAX), 0);
+        assert_eq!(pch.state, settled);
+        assert_eq!(pch.reconcile_stale_accepts(u64::MAX), 0);
     }
 
     // ── item #63: settle at actual usage, bounded by the ceiling ────────────

@@ -377,10 +377,32 @@ pub struct ChannelServeCtx {
 type ProviderChannels = HashMap<u64, gpn_agent::hub_channel::ProviderChannel>;
 
 fn load_provider_channels(path: &std::path::Path) -> ProviderChannels {
-    std::fs::read_to_string(path)
+    let mut chans: ProviderChannels = std::fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // Item #75: a process that died between "persist the pre-paid accept" and
+    // "return the signed result" leaves our mirror one nonce ahead of the AP's,
+    // which wedges the whole channel lane (every later assignment is rejected
+    // `StaleStateBefore`). Rewind those expired, unanswered accepts here — at
+    // load, i.e. before any new assignment is considered.
+    let now = gpn_agent::hub_channel::now_ms();
+    let mut rewound = 0;
+    for ch in chans.values_mut() {
+        let n = ch.reconcile_stale_accepts(now);
+        if n > 0 {
+            println!(
+                "[channel] channel {}: rewound {n} expired unanswered accept(s) to nonce {} — \
+                 the AP never acknowledged them (previous process died mid-job)",
+                ch.channel_id, ch.state.nonce
+            );
+        }
+        rewound += n;
+    }
+    if rewound > 0 {
+        save_provider_channels(path, &chans);
+    }
+    chans
 }
 
 fn save_provider_channels(path: &std::path::Path, chans: &ProviderChannels) {
@@ -478,12 +500,39 @@ fn serve_channel_job(
 
     let model_r = resolve_model(&a.model);
     let temp = (a.temperature_milli as f32) / 1000.0;
-    let out = rt.block_on(run_inference_with_usage(
-        &model_r,
-        &a.prompt,
-        temp,
-        a.max_tokens.max(1),
-    ));
+    // Item #75: this lane is the DOMINANT path (an off-chain escrowed chat is
+    // served here, not through the chain claim loop) and it ran inference with
+    // NO GPU lease at all — so "one GPU = one job" and "mining fully stops for
+    // the job's duration" (#24) were both silently false for most traffic. The
+    // payment state is already persisted above, so the lease is now held from
+    // accept through completion: a concurrent image render either waits its
+    // turn or gets a crisp "GPU busy" instead of a VRAM collision.
+    let job_started = Instant::now();
+    // `spawn_blocking` must be *called* inside a runtime context, so the spawn
+    // happens when this async block is polled — not before `block_on`.
+    let acquired = rt.block_on(async {
+        tokio::task::spawn_blocking(gpn_agent::gpu_yield::GpuYieldGuard::acquire).await
+    });
+    let gpu_wait = job_started.elapsed();
+    let gpu = match acquired {
+        Ok(Ok(g)) => Ok(g),
+        Ok(Err(e)) => Err(format!("GPU busy: {e}")),
+        Err(join) => Err(format!("GPU lock task failed: {join}")),
+    };
+    let infer_started = Instant::now();
+    let out = match &gpu {
+        Ok(_) => rt.block_on(run_inference_with_usage(
+            &model_r,
+            &a.prompt,
+            temp,
+            a.max_tokens.max(1),
+        )),
+        Err(msg) => {
+            eprintln!("[channel] job {} not run: {msg}", a.job_id);
+            Err(msg.clone().into())
+        }
+    };
+    let infer_took = infer_started.elapsed();
     let ch = chans.get_mut(&a.channel_id).unwrap();
     let msg: JobResultMsg = match out {
         Ok((text, _hash, usage)) => {
@@ -502,12 +551,18 @@ fn serve_channel_job(
     let balance_provider = ch.state.balance_provider;
     save_provider_channels(&ctx.state_path, &chans);
     println!(
-        "[channel] job {} on channel {} {} (provider balance {})",
+        "[channel] job {} on channel {} {} (provider balance {}) timing: gpu-wait={} infer={} accept\u{2192}done={}",
         a.job_id,
         a.channel_id,
         if msg.ok { "served" } else { "refunded" },
-        balance_provider
+        balance_provider,
+        fmt_dur(Some(gpu_wait)),
+        fmt_dur(Some(infer_took)),
+        fmt_dur(Some(job_started.elapsed()))
     );
+    // The lease is released here, i.e. after the signed result and the channel
+    // state are persisted — the whole job, not just the inference call.
+    drop(gpu);
     (200, serde_json::to_value(&msg).unwrap_or_default())
 }
 
@@ -2021,6 +2076,143 @@ fn model_local_state(model: &str, models: &[String]) -> Option<bool> {
     Some(gpn_agent::ollama::model_present(models, model))
 }
 
+// ---------------------------------------------------------------------------
+// Item #75 — per-job latency attribution.
+//
+// "Claim→start is the long pole" was an inference made from the *outside* (slow
+// e2e throughput vs the card's raw tok/s); the provider itself never timed its
+// own legs, so nobody could say whether the time went to the AP's create
+// inclusion, the claim, the GPU wait, the inference or the settlement. These
+// three clocks are cheap (one hash-map entry per in-flight job, removed on
+// completion) and every job now prints one line naming the dominant leg.
+// ---------------------------------------------------------------------------
+
+/// When we first saw a job's id, when we submitted the claim, and when inference
+/// actually started. All optional: a job adopted at startup (#73) has no claim
+/// of ours, so those legs are reported as `n/a` rather than as a fake zero.
+#[derive(Default, Clone, Copy)]
+struct JobClock {
+    first_seen: Option<Instant>,
+    claimed: Option<Instant>,
+    infer_start: Option<Instant>,
+}
+
+fn job_clocks() -> &'static Mutex<HashMap<u64, JobClock>> {
+    static CLOCKS: OnceLock<Mutex<HashMap<u64, JobClock>>> = OnceLock::new();
+    CLOCKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Record the first time this process laid eyes on the job id (the assignment
+/// arriving is the closest thing the provider has to "the client asked").
+fn mark_first_seen(id: u64) {
+    if let Ok(mut m) = job_clocks().lock() {
+        let e = m.entry(id).or_default();
+        if e.first_seen.is_none() {
+            e.first_seen = Some(Instant::now());
+        }
+    }
+}
+
+fn mark_claimed(id: u64) {
+    if let Ok(mut m) = job_clocks().lock() {
+        m.entry(id).or_default().claimed = Some(Instant::now());
+    }
+}
+
+fn mark_infer_start(id: u64) {
+    if let Ok(mut m) = job_clocks().lock() {
+        m.entry(id).or_default().infer_start = Some(Instant::now());
+    }
+}
+
+fn take_clock(id: u64) -> JobClock {
+    job_clocks()
+        .lock()
+        .ok()
+        .and_then(|mut m| m.remove(&id))
+        .unwrap_or_default()
+}
+
+/// `n/a` (unknown), `0.9s` (sub-minute) or `2m03s`. Minutes matter: the create
+/// inclusion wait is routinely longer than a minute, and a raw seconds count
+/// makes a 57 s wait and a 570 s wait look alike at a glance.
+fn fmt_dur(d: Option<Duration>) -> String {
+    match d {
+        None => "n/a".to_string(),
+        Some(d) if d.as_secs() >= 60 => {
+            format!("{}m{:02}s", d.as_secs() / 60, d.as_secs() % 60)
+        }
+        Some(d) => format!("{:.1}s", d.as_secs_f64()),
+    }
+}
+
+/// The single line an operator (or the next debugging run) can read instead of
+/// re-deriving the latency from four unrelated journal entries.
+fn timing_line(
+    id: u64,
+    clock: JobClock,
+    infer: Option<Duration>,
+    settle: Option<Duration>,
+    now: Instant,
+) -> String {
+    let assign_to_claim = match (clock.first_seen, clock.claimed) {
+        (Some(f), Some(c)) => c.checked_duration_since(f),
+        _ => None,
+    };
+    let claim_to_infer = match (clock.claimed, clock.infer_start) {
+        (Some(c), Some(i)) => i.checked_duration_since(c),
+        _ => None,
+    };
+    let claim_to_done = clock.claimed.map(|c| now.saturating_duration_since(c));
+    format!(
+        "[job {id}] timing: assign\u{2192}claim={} claim\u{2192}infer={} infer={} settle={} claim\u{2192}done={}",
+        fmt_dur(assign_to_claim),
+        fmt_dur(claim_to_infer),
+        fmt_dur(infer),
+        fmt_dur(settle),
+        fmt_dur(claim_to_done)
+    )
+}
+
+/// Prints the timing line on EVERY exit path (RAII) — an early `return` or a
+/// `?` inside settlement must not hide the job's leg breakdown.
+struct JobTiming {
+    id: u64,
+    started: Instant,
+    infer: Option<Duration>,
+    settle: Option<Duration>,
+}
+
+impl JobTiming {
+    fn new(id: u64) -> Self {
+        Self {
+            id,
+            started: Instant::now(),
+            infer: None,
+            settle: None,
+        }
+    }
+}
+
+impl Drop for JobTiming {
+    fn drop(&mut self) {
+        // `run=` is the total time this process spent inside `run_job`; it
+        // differs from `claim→done` for a job adopted at startup (#73), where
+        // the claim happened in a previous process.
+        println!(
+            "{} run={}",
+            timing_line(
+                self.id,
+                take_clock(self.id),
+                self.infer,
+                self.settle,
+                Instant::now()
+            ),
+            fmt_dur(Some(self.started.elapsed()))
+        );
+    }
+}
+
 /// Crash recovery for the miner-yield flag (part of item #73).
 ///
 /// A provider killed with SIGKILL never runs `GpuYieldGuard`'s `Drop`, so
@@ -2659,6 +2851,10 @@ async fn process_once(
                 continue;
             }
         }
+        // Item #75: start this job's clock the first time we consider it, so
+        // `assign→claim` measures the create-inclusion wait the #49 gate
+        // imposes (that is where the e2e time actually goes).
+        mark_first_seen(job_id);
         // Only claim a job the chain actually has in `Pending`. A job that is
         // absent (AP create still in the pool) is WAITED for, not claimed
         // optimistically — an early accept always reverts (item #49) — but the
@@ -2749,6 +2945,9 @@ async fn process_once(
             match client.claim_job_pipelined(job_id).await {
                 Ok(()) => {
                     accept_retry_clear(job_id);
+                    // Item #75: the claim is submitted — this is the instant the
+                    // `claim→infer` leg is measured from.
+                    mark_claimed(job_id);
                     // The claim's own `accept` is now in the pool: stop the
                     // reconcile pass from re-driving it (item #49).
                     heal_mark_attempt(job_id, HealStep::Accept);
@@ -2772,6 +2971,7 @@ async fn process_once(
             continue;
         }
         accept_retry_clear(job_id);
+        mark_claimed(job_id);
         if let Err(e) = client.start_job(job_id).await {
             eprintln!("[provider] start #{job_id} failed: {e}");
         }
@@ -2879,6 +3079,8 @@ async fn run_job(
     progress: &ProgressCell,
 ) -> Result<(), Box<dyn std::error::Error>> {
     set_phase(progress, &format!("run #{id}"));
+    // Item #75: the timing report prints on every exit path from here on.
+    let mut timing = JobTiming::new(id);
     let job = job.clone();
     // Item #22 build-order step 3: the provider-side policy hook. Re-check the
     // assigned job BEFORE spending any GPU cycles — refuse hard-harm categories
@@ -2936,19 +3138,13 @@ async fn run_job(
     );
 
     let _ = LlmStore::new().set_status(id, "running");
-    // Yield the GPU to this job for its GPU-contending inference (one GPU = one
-    // job): the co-located node miner FULLY STOPS while the flag is held and
-    // resumes the instant the guard drops. The guard is scoped to `run_inference`
-    // ONLY and released BEFORE the on-chain settlement below — settlement needs
-    // fresh blocks, and holding the flag across a block-waiting `submit_result`
-    // would starve block production on a single-authority chain and deadlock the
-    // provider (chain halt). No GPU is used during settlement, so releasing here
-    // loses nothing.
     // Take the cross-process GPU lock BEFORE touching the model. This is a
     // real mutex since 2026-10-22: a concurrent image render in
     // gpn_diffusion_provider (same box, different process) now makes us WAIT
     // for the GPU instead of colliding with it in VRAM. The blocking acquire
     // runs off the async runtime so a long wait cannot stall other tasks.
+    // While the lock is held the co-located node miner is also told to stop
+    // (`~/.gpn/gpu-yield`); item #75 widened that window to the whole job.
     set_phase(progress, "gpu-wait");
     let gpu = match tokio::task::spawn_blocking(gpn_agent::gpu_yield::GpuYieldGuard::acquire).await
     {
@@ -2979,12 +3175,30 @@ async fn run_job(
             return Ok(());
         }
     };
+    // Item #75: the lease is held from the claim through COMPLETION, not just
+    // for the `run_inference` call — item #24's intent ("mining fully stops for
+    // the job's duration") was narrowed to the inference call as a single-
+    // authority safety measure, which left the miner resuming between the claim
+    // and the first token (and again during settlement).
+    //
+    // One deliberate exception is kept from #24: on the SLOW path
+    // `submit_result`/`complete_job` wait for block inclusion (bounded at
+    // 300 s). Parking this box's sealer across that wait would halt the chain if
+    // it were the only authority, so the lease is dropped before settlement
+    // there. The fast path (`*_fast`) is pool-ack only — no block wait — so the
+    // lease is held to the very end.
+    let mut gpu_lease = Some(gpu);
     set_phase(progress, "infer");
-    let result = {
-        let _yield = gpu;
-        run_inference_with_usage(&model, &job.prompt, job.temperature, job.max_tokens).await
-    };
+    mark_infer_start(id);
+    let infer_started = Instant::now();
+    let result =
+        run_inference_with_usage(&model, &job.prompt, job.temperature, job.max_tokens).await;
+    timing.infer = Some(infer_started.elapsed());
     set_phase(progress, "settle");
+    if !fast {
+        gpu_lease = None;
+    }
+    let settle_started = Instant::now();
     match result {
         Ok((text, hash, usage)) => {
             // Salted commitment: on-chain value = sha256(salt ‖ answer). The salt is
@@ -3051,7 +3265,11 @@ async fn run_job(
                 "[job {id}] inference failed (attempt {n}/{MAX_INFER_ATTEMPTS}), giving up after cap: {e}"
             );
         }
-    }
+    };
+    timing.settle = Some(settle_started.elapsed());
+    // Release the GPU only now (fast path) — the timing line prints from
+    // `timing`'s Drop, i.e. on every path including the `?` returns above.
+    drop(gpu_lease);
     Ok(())
 }
 
@@ -3721,5 +3939,90 @@ mod startup_adoption_tests {
         // `auto`/empty requests are always servable here.
         assert_eq!(model_local_state("auto", &have), None);
         assert_eq!(model_local_state("", &have), None);
+    }
+}
+
+#[cfg(test)]
+mod job_timing_tests {
+    use super::{fmt_dur, mark_claimed, mark_first_seen, take_clock, timing_line, JobClock};
+    use std::time::{Duration, Instant};
+
+    /// Item #75: the point of the instrumentation is that ONE line says which leg
+    /// consumed the wall clock. The live shape this was written for: the AP's
+    /// create takes ~1 min to be included, the claim is instant, inference is a
+    /// few seconds — i.e. `assign→claim` dominates and `claim→infer` does not,
+    /// which is exactly the opposite of the pre-fix assumption.
+    #[test]
+    fn timing_line_names_the_leg_that_consumed_the_wall_clock() {
+        let now = Instant::now();
+        let clock = JobClock {
+            first_seen: now.checked_sub(Duration::from_secs(59)),
+            claimed: now.checked_sub(Duration::from_secs(2)),
+            infer_start: now.checked_sub(Duration::from_millis(1700)),
+        };
+        let line = timing_line(
+            6505,
+            clock,
+            Some(Duration::from_millis(1500)),
+            Some(Duration::from_millis(200)),
+            now,
+        );
+        assert!(line.starts_with("[job 6505] timing:"), "{line}");
+        assert!(line.contains("assign\u{2192}claim=57.0s"), "{line}");
+        assert!(line.contains("claim\u{2192}infer=0.3s"), "{line}");
+        assert!(line.contains("infer=1.5s"), "{line}");
+        assert!(line.contains("settle=0.2s"), "{line}");
+        assert!(line.contains("claim\u{2192}done=2.0s"), "{line}");
+    }
+
+    /// A job adopted at startup (#73) was claimed by a *previous* process, so the
+    /// provider genuinely does not know the earlier legs — `n/a`, never a fake
+    /// zero that would flatter the routing path.
+    #[test]
+    fn a_resumed_job_reports_unknown_legs_instead_of_zeros() {
+        let now = Instant::now();
+        let line = timing_line(
+            6503,
+            JobClock::default(),
+            Some(Duration::from_secs(3)),
+            None,
+            now,
+        );
+        assert!(line.contains("assign\u{2192}claim=n/a"), "{line}");
+        assert!(line.contains("claim\u{2192}infer=n/a"), "{line}");
+        assert!(line.contains("claim\u{2192}done=n/a"), "{line}");
+        assert!(line.contains("infer=3.0s"), "{line}");
+    }
+
+    #[test]
+    fn durations_read_as_seconds_below_a_minute_and_minutes_above_it() {
+        assert_eq!(fmt_dur(None), "n/a");
+        assert_eq!(fmt_dur(Some(Duration::from_millis(0))), "0.0s");
+        assert_eq!(fmt_dur(Some(Duration::from_millis(950))), "0.9s");
+        assert_eq!(fmt_dur(Some(Duration::from_secs(59))), "59.0s");
+        // 57 s and 570 s must not look alike at a glance.
+        assert_eq!(fmt_dur(Some(Duration::from_secs(60))), "1m00s");
+        assert_eq!(fmt_dur(Some(Duration::from_secs(570))), "9m30s");
+    }
+
+    /// The static clock map is keyed by job id and must not leak: the entry is
+    /// removed when the job reports, and a re-claim starts a fresh clock.
+    #[test]
+    fn a_job_clock_is_recorded_once_and_released_on_report() {
+        mark_first_seen(9_001);
+        mark_first_seen(9_001);
+        let first = take_clock(9_001);
+        let seen = first.first_seen.expect("first sighting recorded");
+        assert!(first.claimed.is_none(), "no claim yet");
+        // Released: a second report for the same id has nothing to say.
+        let second = take_clock(9_001);
+        assert!(second.first_seen.is_none() && second.claimed.is_none());
+
+        mark_first_seen(9_002);
+        mark_claimed(9_002);
+        let claimed = take_clock(9_002);
+        assert!(claimed.claimed >= claimed.first_seen, "seen before claim");
+        // `seen` is only used to prove the first clock really recorded a time.
+        let _ = seen;
     }
 }
