@@ -20,6 +20,7 @@ pub mod gui;
 pub mod hub_ap;
 pub mod hub_channel;
 pub mod idle;
+pub mod idle_auto;
 pub mod image_channel;
 pub mod image_jobs;
 pub mod jobkind;

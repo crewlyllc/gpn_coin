@@ -1,5 +1,45 @@
 # GPN change-log
 
+## 2026-10-23 14:30 PT — PM07 #94 **auto-idle**: the node steps aside for *foreign* GPU load (opt-in)
+
+**WHY:** `gpu_yield.rs` only coordinates GPN's own providers with each other. It cannot see the
+operator's game, other local models, or a renderer — so the node kept mining/serving while the
+owner's workload starved, which is exactly the case Idle was built for. The only remedy was a
+manual click.
+
+**WHAT:**
+* New `gpn-agent/src/idle_auto.rs`: a debounced, injectable state machine + sampler thread.
+  *Foreign load* = `nvidia-smi` util ≥ 40 % **and** GPN's GPU lock is free **and** ≥ 512 MiB of VRAM
+  is held by non-GPN PIDs (falls back to "nothing of ours owns VRAM" when per-PID attribution is
+  empty). The `nvidia-smi` process table (graphics **and** compute) is parsed and each PID is
+  classified by `/proc/<pid>/{comm,cmdline,exe}` (`gpn-*`, `/.gpn/` — so the bundled `llama-server`
+  counts as ours). Desktop Xorg+compositor (~275 MiB) sits below the threshold.
+* Opt-in: `GPN_IDLE_AUTO=1` or the dashboard toggle (persisted in `~/.gpn/idle-auto.json`).
+  Default **off**. 3 busy samples @5 s to enter (~15 s), 3 quiet @20 s to leave (~60 s), 30-min
+  window (clamped to the 6 h ceiling), 10-min cooldown after a **manual** resume.
+* It writes the **same** `idle.json` the manual path writes, so the miner parks and every provider
+  stops claiming through the existing gates. A manual idle is never auto-resumed; the
+  sole-authority valve still applies (refuses, logs once).
+* `gpu_yield::lock_is_held()`: read-only flock probe (never writes the yield flag, so asking
+  cannot park the miner).
+* Dashboard: `idle.reason` is shown as "Why idle: … (auto — foreign GPU work detected | manual)",
+  `idle.auto`, an `auto_idle` status block with live evidence, `POST /api/idle/auto`, and a toggle
+  in the Idle panel. Wired into both `gpn_node` and `gpn_fleet`.
+* Tests: 23 unit (`idle_auto.rs`) + 5 integration with a fake probe + 1 GUI routing test.
+* Docs: `docs/node-gui-and-idle.md` § "Auto-idle — step aside for your other GPU work".
+
+**LIVE (this box, RTX 4060, real `gpn_fleet`):**
+```
+[idle-auto] idle: foreign GPU load (100% util): util 100%, VRAM 3725/8188 MiB,
+  989 MiB non-GPN (3 foreign PIDs), GPU lock free — stepping aside for 30 min (until 1792792695)
+2026-10-23 14:28:07 miner resuming: GPU is free again
+[idle-auto] resume: foreign load gone for 3 samples (util 0%, VRAM 3004/8188 MiB,
+  275 MiB non-GPN (2 foreign PIDs), GPU lock free) — mining and job claiming resume
+2026-10-23 14:30:05 idle ended, resuming mining
+```
+A `/usr/bin/python3` torch matmul (~1 GiB VRAM) was the synthetic foreign load; the baseline
+(our miner + bundled llama-server + Xorg) correctly did **not** trigger it.
+
 ## 2026-10-23 13:5x PT — PM07 #90 **installer identity fix**: every Windows install now generates its OWN node key; legacy `GPNProvider` task retired unconditionally; duplicate-instance guard
 
 **WHY (proven defect, today's box1 incident):** `.github/workflows/release-windows.yml` wrote

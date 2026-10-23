@@ -2741,6 +2741,38 @@ async fn main() {
         }
     });
 
+    // Auto-idle sampler (#94): steps aside when *foreign* GPU work appears
+    // (a game, another model, a renderer). Opt-in via `GPN_IDLE_AUTO=1` or the
+    // dashboard toggle; the thread always runs so the toggle can turn it on at
+    // runtime. It reads the same idle.json the manual path writes, so the
+    // miner and every provider react identically.
+    let auto_cfg = gpn_agent::idle_auto::AutoIdleConfig::from_env();
+    let auto_enabled = gpn_agent::idle_auto::initial_enabled();
+    let auto_shared = std::sync::Arc::new(gpn_agent::idle_auto::AutoIdleShared::new(
+        auto_cfg.clone(),
+        auto_enabled,
+        gpn_agent::idle_auto::toggle_path(),
+    ));
+    let auto_idle_shared = auto_shared.clone();
+    let auto_peers_port = cfg.rpc_port;
+    let auto_idle_handle = gpn_agent::idle_auto::spawn(gpn_agent::idle_auto::RunOptions {
+        idle_path: gpn_agent::idle::idle_path(),
+        force: cfg.force_idle,
+        peers: std::sync::Arc::new(move || health(auto_peers_port).map(|(p, _)| p)),
+        probe: Box::new(gpn_agent::idle_auto::NvidiaProbe::new(0)),
+        tick_secs: auto_cfg.busy_sample_secs,
+        stop: shutdown.clone(),
+        shared: auto_idle_shared,
+    });
+    asciiprintln!(
+        "  auto-idle: {} — steps aside for non-GPN GPU work when util ≥ {}% for {} samples \
+         ({}-min window; manual idle always wins)",
+        if auto_enabled { "ON" } else { "off" },
+        auto_cfg.util_percent,
+        auto_cfg.busy_samples,
+        auto_cfg.minutes
+    );
+
     // Local dashboard (opt-in). A dashboard failure must never take the node
     // down: bind errors are a warning, and the supervisor keeps supervising.
     let gui_handle = if cfg.gui {
@@ -2748,6 +2780,7 @@ async fn main() {
             listen: cfg.gui_listen.clone(),
             force_idle: cfg.force_idle,
             idle_path: None,
+            auto_idle: Some(auto_shared.clone()),
         };
         let src_cfg = cfg.clone();
         let src_shared = shared.clone();
@@ -2810,6 +2843,7 @@ async fn main() {
     if let Some(h) = gui_handle {
         h.stop();
     }
+    let _ = auto_idle_handle.join();
     let _ = status_handle.join();
     let _ = watchdog_handle.join();
     if let Some(h) = updater_handle {

@@ -19,6 +19,7 @@
 //! can be tested without a socket; [`spawn`] only does I/O.
 
 use crate::idle;
+use crate::idle_auto::{AutoIdleShared, AUTO_REASON_PREFIX};
 use serde_json::{json, Value};
 use std::io::Read;
 use std::net::SocketAddr;
@@ -62,6 +63,9 @@ pub struct GuiOptions {
     pub force_idle: bool,
     /// Idle state file. `None` → [`idle::idle_path`] (`$GPN_IDLE_FILE`/`~/.gpn`).
     pub idle_path: Option<PathBuf>,
+    /// Auto-idle toggle + last reading, when the sampler thread is running.
+    /// `None` in tests and in supervisors without the sampler.
+    pub auto_idle: Option<Arc<AutoIdleShared>>,
 }
 
 impl Default for GuiOptions {
@@ -70,6 +74,7 @@ impl Default for GuiOptions {
             listen: DEFAULT_LISTEN.to_string(),
             force_idle: force_idle_env(),
             idle_path: None,
+            auto_idle: None,
         }
     }
 }
@@ -149,6 +154,7 @@ fn idle_json(path: &std::path::Path, now: u64) -> Value {
             "until": st.until,
             "started": st.started,
             "reason": st.reason,
+            "auto": st.reason.starts_with(AUTO_REASON_PREFIX),
             "remaining_secs": st.until.saturating_sub(now),
         }),
         None => json!({
@@ -156,6 +162,7 @@ fn idle_json(path: &std::path::Path, now: u64) -> Value {
             "until": Value::Null,
             "started": Value::Null,
             "reason": "",
+            "auto": false,
             "remaining_secs": 0,
         }),
     }
@@ -191,8 +198,50 @@ pub fn handle(
                     "dashboard".into(),
                     json!({"listen": opts.listen, "loopback": true}),
                 );
+                // Auto-idle: on/off + why it is engaged. Present whenever the
+                // sampler thread runs (which is always, in gpn_node).
+                if let Some(auto) = &opts.auto_idle {
+                    obj.insert("auto_idle".into(), auto.status_json(now));
+                }
             }
             Reply::json(200, status)
+        }
+
+        // POST /api/idle/auto {"enabled": true|false} — the dashboard toggle.
+        ("POST", "/api/idle/auto") => {
+            let Some(auto) = &opts.auto_idle else {
+                return Reply::error(
+                    409,
+                    "auto-idle is not running in this process (start gpn_node with --gui)",
+                );
+            };
+            let parsed: Value = match serde_json::from_str(if body.trim().is_empty() {
+                "{}"
+            } else {
+                body
+            }) {
+                Ok(v) => v,
+                Err(e) => return Reply::error(400, format!("invalid JSON body: {e}")),
+            };
+            let Some(on) = parsed.get("enabled").and_then(Value::as_bool) else {
+                return Reply::error(400, "missing boolean \"enabled\"");
+            };
+            auto.set_enabled(on);
+            println!(
+                "[gui] auto-idle {} — {} (threshold {}% util, window {} min)",
+                if on { "ON" } else { "OFF" },
+                if on {
+                    "will step aside when the GPU is busy with non-GPN work"
+                } else {
+                    "never idles on its own; manual idle still works"
+                },
+                auto.cfg.util_percent,
+                auto.cfg.minutes
+            );
+            Reply::json(
+                200,
+                json!({"ok": true, "auto_idle": auto.status_json(now)}),
+            )
         }
 
         ("POST", "/api/idle") => {
@@ -385,6 +434,7 @@ mod tests {
             listen: DEFAULT_LISTEN.into(),
             force_idle: false,
             idle_path: Some(dir.join("idle.json")),
+            auto_idle: None,
         }
     }
 
@@ -563,6 +613,91 @@ mod tests {
             1_000,
         );
         assert_eq!(r.code, 200, "{}", r.body);
+    }
+
+    #[test]
+    fn auto_idle_block_and_toggle_endpoint() {
+        use crate::idle_auto::{AutoIdleConfig, AutoIdleShared};
+        let o = opts("auto");
+        let dir = o.idle_path.as_ref().unwrap().parent().unwrap().to_path_buf();
+        let shared = Arc::new(AutoIdleShared::new(
+            AutoIdleConfig::default(),
+            false,
+            dir.join("idle-auto.json"),
+        ));
+        let o = GuiOptions {
+            auto_idle: Some(shared.clone()),
+            ..o
+        };
+
+        // Status advertises the toggle (off by default).
+        let s: Value = serde_json::from_str(
+            &handle("GET", "/api/status", "", &source(Some(2)), &o, 1_000).body,
+        )
+        .unwrap();
+        assert_eq!(s["auto_idle"]["enabled"], false);
+        assert_eq!(s["auto_idle"]["threshold_pct"], 40);
+        assert_eq!(s["auto_idle"]["minutes"], 30);
+
+        // Toggle on → persisted + visible.
+        let r = handle(
+            "POST",
+            "/api/idle/auto",
+            r#"{"enabled":true}"#,
+            &source(Some(2)),
+            &o,
+            1_000,
+        );
+        assert_eq!(r.code, 200, "{}", r.body);
+        let v: Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(v["auto_idle"]["enabled"], true);
+        assert!(shared.enabled());
+
+        // Bad body → 400, unchanged.
+        let r = handle("POST", "/api/idle/auto", r#"{}"#, &source(Some(2)), &o, 1_000);
+        assert_eq!(r.code, 400);
+        assert!(shared.enabled());
+
+        // Toggle off.
+        let r = handle(
+            "POST",
+            "/api/idle/auto",
+            r#"{"enabled":false}"#,
+            &source(Some(2)),
+            &o,
+            1_000,
+        );
+        assert_eq!(r.code, 200);
+        assert!(!shared.enabled());
+
+        // A dashboard-written auto window reports its reason.
+        let _ = handle(
+            "POST",
+            "/api/idle",
+            r#"{"minutes":5,"reason":"auto: foreign GPU load 87%"}"#,
+            &source(Some(2)),
+            &o,
+            1_000,
+        );
+        let s: Value = serde_json::from_str(
+            &handle("GET", "/api/status", "", &source(Some(2)), &o, 1_100).body,
+        )
+        .unwrap();
+        assert_eq!(s["idle"]["active"], true);
+        assert_eq!(s["idle"]["auto"], true);
+        assert!(s["idle"]["reason"].as_str().unwrap().contains("foreign GPU load"));
+
+        // Without a sampler (tests, fleet-less runs) the toggle is a 409.
+        let plain = opts("auto-none");
+        let r = handle(
+            "POST",
+            "/api/idle/auto",
+            r#"{"enabled":true}"#,
+            &source(Some(2)),
+            &plain,
+            1_000,
+        );
+        assert_eq!(r.code, 409);
     }
 
     #[test]

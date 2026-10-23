@@ -248,6 +248,35 @@ fn now_ms() -> u128 {
         .unwrap_or(0)
 }
 
+/// Is somebody else holding the GPU lock right now?
+///
+/// Used by auto-idle (`idle_auto.rs`): a job of *ours* is expected load, not
+/// foreign load. This is a **read-only probe** — unlike [`GpuYieldGuard::acquire`]
+/// it never writes the yield flag, so asking the question cannot park the
+/// miner. The lock we take here (when free) is released immediately by dropping
+/// the handle.
+pub fn lock_is_held() -> bool {
+    let path = lock_path();
+    let Ok(f) = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+    else {
+        // No lock file means nothing holds it (and no provider could either).
+        return false;
+    };
+    match try_lock_exclusive(&f) {
+        // Free: we took it for an instant; the drop of `f` releases it.
+        Ok(true) => false,
+        // Held by a provider (same or another process).
+        Ok(false) => true,
+        // Unknown I/O state: do not claim a job is running.
+        Err(_) => false,
+    }
+}
+
 /// Read the holder line written by the lock owner (diagnostics only).
 fn read_holder(path: &Path) -> Option<String> {
     let mut s = String::new();

@@ -187,6 +187,28 @@ fn main() {
             opts.listen = listen;
         }
         opts.force_idle = force_idle;
+        // Auto-idle (#94): same sampler as gpn_node — opt-in, dashboard-toggleable.
+        let auto_cfg = gpn_agent::idle_auto::AutoIdleConfig::from_env();
+        let auto_shared = Arc::new(gpn_agent::idle_auto::AutoIdleShared::new(
+            auto_cfg.clone(),
+            gpn_agent::idle_auto::initial_enabled(),
+            gpn_agent::idle_auto::toggle_path(),
+        ));
+        {
+            let peers_port = rpc_port;
+            gpn_agent::idle_auto::spawn(gpn_agent::idle_auto::RunOptions {
+                idle_path: gpn_agent::idle::idle_path(),
+                force: force_idle,
+                peers: Arc::new(move || {
+                    gpn_agent::nodestatus::health(peers_port).map(|(p, _)| p)
+                }),
+                probe: Box::new(gpn_agent::idle_auto::NvidiaProbe::new(0)),
+                tick_secs: auto_cfg.busy_sample_secs,
+                stop: Arc::new(AtomicBool::new(false)),
+                shared: auto_shared.clone(),
+            });
+        }
+        opts.auto_idle = Some(auto_shared);
         // Keep the handle ALIVE for the process lifetime: dropping it stops the
         // accept loop (the supervisor owns the dashboard thread).
         match gpn_agent::gui::spawn(opts, source) {

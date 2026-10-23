@@ -40,6 +40,7 @@ fn opts(path: PathBuf, force: bool) -> GuiOptions {
         listen: "127.0.0.1:0".into(),
         force_idle: force,
         idle_path: Some(path),
+        auto_idle: None,
     }
 }
 
@@ -245,6 +246,7 @@ fn dashboard_refuses_non_loopback_binds() {
             listen: bad.into(),
             force_idle: false,
             idle_path: Some(p.clone()),
+            auto_idle: None,
         };
         assert!(
             gui::spawn(o, src(Some(1))).is_err(),

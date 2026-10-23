@@ -76,6 +76,24 @@
   }
   button:active{transform:translateY(1px)}
   button:focus-visible{outline:2px solid #22d3ee;outline-offset:2px}
+  .autoidle{margin-top:16px;padding-top:14px;border-top:1px solid var(--line-soft)}
+  .switch{display:flex;align-items:center;gap:10px;cursor:pointer;font-size:14px;font-weight:600}
+  .switch input{position:absolute;opacity:0;width:0;height:0}
+  .switch .track{
+    width:44px;height:24px;border-radius:999px;background:var(--card);
+    border:1px solid var(--line);position:relative;flex:0 0 auto;transition:background .15s,border-color .15s;
+  }
+  .switch .track::after{
+    content:"";position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;
+    background:var(--muted);transition:transform .15s,background .15s;
+  }
+  .switch input:checked + .track{background:rgba(63,185,80,.18);border-color:rgba(63,185,80,.55)}
+  .switch input:checked + .track::after{transform:translateX(20px);background:var(--green)}
+  .switch input:focus-visible + .track{outline:2px solid var(--accent);outline-offset:2px}
+  .switch input:disabled + .track{opacity:.5}
+  .hint{color:var(--muted);font-size:12.5px;margin:6px 0 0 54px}
+  #idleReason{font-size:13.5px;margin:12px 0 0;color:var(--amber)}
+  #idleReason b{color:var(--text)}
   #idleBtn{background:var(--grad);color:#0b0e16;min-width:190px;font-size:16px}
   #idleBtn:disabled{filter:grayscale(.6) brightness(.7);cursor:not-allowed}
   #resumeBtn{background:var(--panel);color:var(--text);border-color:var(--line)}
@@ -155,6 +173,17 @@
       <button id="idleBtn" type="button">Go idle</button>
       <button id="resumeBtn" type="button" disabled>Resume now</button>
     </div>
+
+    <div class="autoidle">
+      <label class="switch" for="autoIdleToggle">
+        <input type="checkbox" id="autoIdleToggle">
+        <span class="track" aria-hidden="true"></span>
+        <span>Step aside automatically when my other GPU work runs</span>
+      </label>
+      <p class="hint" id="autoIdleHint">Off — the node only idles when you ask it to.</p>
+    </div>
+
+    <p id="idleReason" hidden></p>
     <p id="msg" role="status" aria-live="polite"></p>
   </section>
 
@@ -214,6 +243,47 @@
     $("idleBtn").disabled = idleOn;
     $("resumeBtn").disabled = !idleOn;
     $("resumeBtn").className = idleOn ? "urgent" : "";
+
+    // Why is it idle? A manual click and a foreign-load step-aside look the
+    // same on the cards, so say which one it is.
+    var why = $("idleReason");
+    if (idleOn) {
+      why.hidden = false;
+      var kind = idle.auto ? "auto — foreign GPU work detected" : "manual";
+      why.innerHTML = "";
+      why.appendChild(document.createTextNode("Why idle: "));
+      var b = document.createElement("b");
+      b.textContent = (idle.reason || "not stated") + " (" + kind + ")";
+      why.appendChild(b);
+    } else {
+      why.hidden = true;
+    }
+
+    // Auto-idle toggle + live evidence.
+    var auto = s.auto_idle || null;
+    var tog = $("autoIdleToggle");
+    if (!auto) {
+      tog.disabled = true;
+      tog.checked = false;
+      text($("autoIdleHint"), "Auto-idle is not running in this node process.");
+    } else {
+      tog.disabled = false;
+      tog.checked = !!auto.enabled;
+      var ev = "";
+      if (auto.util_percent !== null && auto.util_percent !== undefined) {
+        ev = " GPU now: " + auto.util_percent + "% util" +
+             (auto.foreign_vram_mb ? ", " + auto.foreign_vram_mb + " MiB non-GPN" : "") + ".";
+      }
+      if (auto.engaged) {
+        ev += " Idle because of foreign load; resumes when it stops.";
+      } else if (auto.cooldown_secs > 0) {
+        ev += " Cooling down " + fmtDur(auto.cooldown_secs) + " after your resume.";
+      }
+      text($("autoIdleHint"), auto.enabled
+        ? ("On — steps aside when util ≥ " + auto.threshold_pct + "% is non-GPN work (" +
+           auto.minutes + "-min window, then back automatically)." + ev)
+        : ("Off — the node only idles when you ask it to." + ev));
+    }
 
     // Status cards
     text($("mode"), idleOn ? "Idle" : (nodeUp ? "Active" : "Down"));
@@ -302,6 +372,26 @@
         }
       })
       .catch(function (e) { msg("Request failed: " + e.message, "err"); $("idleBtn").disabled = false; });
+  });
+
+  $("autoIdleToggle").addEventListener("change", function () {
+    var on = $("autoIdleToggle").checked;
+    $("autoIdleToggle").disabled = true;
+    post("/api/idle/auto", { enabled: on })
+      .then(function (r) {
+        if (r.ok) {
+          msg(on ? "Auto-idle on — it will step aside for your other GPU work."
+                 : "Auto-idle off — only a manual idle stops the node now.", "ok");
+        } else {
+          msg((r.body && r.body.error) || ("request failed (HTTP " + r.code + ")"), "err");
+        }
+        $("autoIdleToggle").disabled = false;
+        poll();
+      })
+      .catch(function (e) {
+        msg("Request failed: " + e.message, "err");
+        $("autoIdleToggle").disabled = false;
+      });
   });
 
   $("resumeBtn").addEventListener("click", function () {

@@ -99,6 +99,8 @@ Right-click → *Send to* → *Desktop (create shortcut)* and rename it "GPN Nod
 │  │ keeps syncing, peering and serving the chain.                       │  │
 │  │ How long?  [30 min] [1 hour] [2 hours] [4 hours] [6 hours]          │  │
 │  │ [ Go idle ]  [ Resume now ]                                         │  │
+│  │ ── Step aside automatically when my other GPU work runs  [ on ]     │  │
+│  │ Why idle: gaming (manual)                                           │  │
 │  └─────────────────────────────────────────────────────────────────────┘  │
 │                                                                          │
 │  PROCESSES   node up · heartbeat up · provider up · diffuse up · …        │
@@ -179,6 +181,78 @@ until the deadline either way).
 - **CLI:** `gpn_node resume` — takes effect within a second, no restart.
 - **File:** deleting `~/.gpn/idle.json` works too (documented, not recommended).
 
+### Auto-idle — step aside for *your other* GPU work
+
+Idle was built for "I want the GPU now". Auto-idle removes the click: when
+something that is **not GPN** starts using the card, the node steps aside, and
+when that work stops it comes back by itself.
+
+> Auto-idle steps aside for your other GPU work; it is **opt-in** and **never
+> overrides you**.
+
+Enable it once, either way:
+
+```bash
+GPN_IDLE_AUTO=1 gpn_node --gui      # for this run
+```
+
+or flip **“Step aside automatically when my other GPU work runs”** in the Idle
+panel — that toggle is persisted in `~/.gpn/idle-auto.json`, so it survives a
+restart. Default is **off**.
+
+**What counts as foreign load.** All three must hold:
+
+1. `nvidia-smi` utilisation ≥ **40 %** (`GPN_IDLE_AUTO_UTIL_PCT`), **and**
+2. GPN's own GPU lock is **free** — a job of ours is expected load, not foreign, **and**
+3. at least **512 MiB** of VRAM (`GPN_IDLE_AUTO_MIN_FOREIGN_VRAM_MB`) is held by
+   processes that are not ours. "Ours" means `gpn-*` and anything under
+   `~/.gpn/` (including the bundled `llama-server`). Failing that, only when no
+   GPN process holds GPU memory at all.
+
+Rule 3 is what stops the desktop from triggering it: Xorg + the compositor sit
+at ~275 MiB permanently, below the threshold. A game or a second model loads
+gigabytes.
+
+**Debouncing.** One sample is never enough:
+
+| What | Samples | Spacing | Total |
+|---|---|---|---|
+| enter idle | `GPN_IDLE_AUTO_BUSY_SAMPLES` = 3 | `GPN_IDLE_AUTO_BUSY_SAMPLE_SECS` = 5 s | ~15 s |
+| resume | `GPN_IDLE_AUTO_QUIET_SAMPLES` = 3 | `GPN_IDLE_AUTO_QUIET_SAMPLE_SECS` = 20 s | ~60 s |
+
+The window is `GPN_IDLE_AUTO_MINUTES` (default **30**, clamped to the same 6 h
+ceiling as a manual idle). Auto-idle resumes on whichever comes first: quiet for
+the debounce, or the deadline.
+
+**It never fights you.**
+
+- A **manual** idle (any reason not starting with `auto:`) is **never** auto-resumed.
+- If you click *Resume now* while auto-idle is active, auto-idle stays disarmed
+  for `GPN_IDLE_AUTO_COOLDOWN_SECS` (default **600 s**) — no immediate
+  re-engagement while you are still at the keyboard.
+- The **sole-authority** valve applies: if this node has no peers (or its RPC is
+  unreadable) it will not auto-idle, even under full load. It logs one line per
+  load episode instead.
+- Your other idle choices are untouched: choosing 2 hours by hand behaves
+  exactly as before.
+
+**Why it is idle** is shown in the panel (`Why idle: auto: foreign GPU load
+87% (auto — foreign GPU work detected)` vs `… gaming (manual)`), and
+`idle.reason` in `/api/status` carries the same string. The toggle's hint line
+shows the live evidence (`GPU now: 87% util, 2304 MiB non-GPN`).
+
+Log lines, with the evidence attached:
+
+```
+[idle-auto] idle: foreign GPU load (87% util): util 87%, VRAM 6000/8188 MiB,
+  2304 MiB non-GPN (2 foreign PIDs), GPU lock free — stepping aside for 30 min (until 1760003600)
+[idle-auto] resume: foreign load gone for 3 samples (util 3%, VRAM 1200/8188 MiB,
+  80 MiB non-GPN (1 foreign PIDs), GPU lock free) — mining and job claiming resume
+[idle-auto] manual resume seen — auto-idle disarmed for 600s (the operator is in charge)
+[idle-auto] NOT stepping aside despite …: this node has no peers, so it may be the
+  only block producer — idling would stop the chain.
+```
+
 ---
 
 ## 3. Safety valve — never idle the last block producer
@@ -226,6 +300,7 @@ All JSON, same-origin (no CORS needed), `Cache-Control: no-store`.
 | `GET` | `/api/status` | — | `200` status document |
 | `POST` | `/api/idle` | `{"minutes": 60, "reason": "gaming"}` | `200` `{ok, minutes, until, started, reason, idle}` · `400` bad body/duration · `409` sole-authority refusal · `500` cannot write the file |
 | `POST` | `/api/resume` | — | `200` `{ok, resumed: <bool>, idle}` (`resumed:false` = was already active) |
+| `POST` | `/api/idle/auto` | `{"enabled": true}` | `200` `{ok, auto_idle}` (persists the toggle) · `400` non-boolean · `409` sampler not running |
 
 `GET /api/status` (trimmed):
 
@@ -249,7 +324,11 @@ All JSON, same-origin (no CORS needed), `Cache-Control: no-store`.
   "earnings_note": "not tracked locally — see the explorer",
   "spec": "0.2.0",
   "idle": {"active": true, "until": 1760003600, "started": 1760000000,
-           "reason": "gaming", "remaining_secs": 3517},
+           "reason": "auto: foreign GPU load 87%", "auto": true,
+           "remaining_secs": 3517},
+  "auto_idle": {"enabled": true, "engaged": true, "foreign": true,
+                "util_percent": 87, "foreign_vram_mb": 2304, "threshold_pct": 40,
+                "min_foreign_vram_mb": 512, "minutes": 30, "cooldown_secs": 0},
   "now": 1760000083,
   "max_idle_minutes": 360,
   "durations": [30, 60, 120, 240, 360],
@@ -302,6 +381,16 @@ Exit codes: `0` done, `2` bad duration/usage, `3` refused by the safety valve.
 | `GPN_GUI_LISTEN` | `--gui-listen` | `gui_listen = "127.0.0.1:8099"` | `127.0.0.1:8099` (loopback only) |
 | `GPN_IDLE_FORCE=1` | `--force-idle` | `force_idle = true` | off |
 | `GPN_IDLE_FILE` | — | — | `~/.gpn/idle.json` |
+| `GPN_IDLE_AUTO=1` | — | — | **off** (also flipped by the dashboard toggle) |
+| `GPN_IDLE_AUTO_FILE` | — | — | `~/.gpn/idle-auto.json` (persisted toggle) |
+| `GPN_IDLE_AUTO_UTIL_PCT` | — | — | `40` (clamped 10…100) |
+| `GPN_IDLE_AUTO_MIN_FOREIGN_VRAM_MB` | — | — | `512` |
+| `GPN_IDLE_AUTO_BUSY_SAMPLES` | — | — | `3` (clamped 1…20) |
+| `GPN_IDLE_AUTO_QUIET_SAMPLES` | — | — | `3` (clamped 1…20) |
+| `GPN_IDLE_AUTO_BUSY_SAMPLE_SECS` | — | — | `5` |
+| `GPN_IDLE_AUTO_QUIET_SAMPLE_SECS` | — | — | `20` |
+| `GPN_IDLE_AUTO_MINUTES` | — | — | `30` (clamped to the 6 h ceiling) |
+| `GPN_IDLE_AUTO_COOLDOWN_SECS` | — | — | `600` (after a manual resume) |
 
 Typical `~/.gpn/node.toml` for a home gaming box:
 
@@ -337,10 +426,20 @@ All of this is unit/integration tested without a chain, GPU or ollama:
   zero/over-long rejection with the ceiling in the message, config clamping,
   deadline boundary (just-before/at/after), restart with an expired file starts
   active, corrupt/missing file ⇒ active, clear semantics, `claims_allowed()`.
-- `gpn-agent/src/gui.rs` (12): routing (`/`, `/api/status`, `/api/idle`,
-  `/api/resume`), 200/400/404/405/409 shapes, over-long refusal text, loopback
+- `gpn-agent/src/gui.rs` (13): routing (`/`, `/api/status`, `/api/idle`,
+  `/api/resume`, `/api/idle/auto`), 200/400/404/405/409 shapes, over-long refusal text, loopback
   enforcement (`0.0.0.0`, LAN IPs, hostnames refused), a real socket round-trip
   including `POST` + stop, and no external asset in the page.
+- `gpn-agent/src/idle_auto.rs` (23): foreign-load classification (our own job,
+  the desktop baseline, the VRAM threshold, unreadable probe), debounce
+  (one spike vs 3 spaced samples, samples inside the spacing window), auto-resume
+  after M quiet samples, deadline expiry vs manual resume (cooldown), manual idle
+  wins and is never resumed, restart adopting a live auto window, sole-authority
+  refusal, clamped env config, default-off, and the `nvidia-smi` table parser.
+- `gpn-agent/tests/idle_auto.rs` (5): the real sampler thread with a fake probe —
+  sustained load writes an `auto:` `idle.json` and quiet removes it; a single
+  spike never writes one; the dashboard toggle gates it; a manual idle is left
+  untouched; a manual resume wins and cools down.
 - `gpn-agent/tests/idle_mode.rs` (6): public-API state machine, claim gate,
   HTTP endpoints end-to-end, lone-authority 409 and its force override,
   non-loopback bind refusal.
