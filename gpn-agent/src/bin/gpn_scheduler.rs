@@ -715,6 +715,11 @@ struct Provider {
     status_url: String,
     address: String,
     gflops: u64,
+    /// Where `gflops` came from, as published by the heartbeat (item #93):
+    /// `"attested-idle"` means this box measured the value on an idle GPU with
+    /// the canonical `compute_unit` method. **Anything else is unverified** and
+    /// may not be used to gate a `min_gflops` route (item #97).
+    gflops_source: String,
     models: Vec<String>,
     can_pull: bool,
     tok_per_s: f64,
@@ -891,6 +896,11 @@ fn provider_from_caps(addr: &str, v: &Value, status_url: String, latency_ms: u64
         status_url,
         address: addr.to_string(),
         gflops: v.get("gflops").and_then(|x| x.as_u64()).unwrap_or(0),
+        gflops_source: v
+            .get("gflops_source")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
         models: arr_of("models"),
         can_pull: v.get("can_pull").and_then(|x| x.as_bool()).unwrap_or(false),
         tok_per_s: v.get("tok_per_s").and_then(|x| x.as_f64()).unwrap_or(40.0),
@@ -1106,6 +1116,7 @@ fn refresh(
                     status_url: u.clone(),
                     address: String::new(),
                     gflops: 0,
+                    gflops_source: String::new(),
                     models: vec![],
                     can_pull: false,
                     tok_per_s: 40.0,
@@ -1359,6 +1370,11 @@ struct RouteNeeds {
 struct RouteCandidate {
     provider: Provider,
     needs_pull: bool,
+    /// True when this box was admitted to a `min_gflops > 0` route **without** an
+    /// `attested-idle` measurement — i.e. as a documented last resort because no
+    /// verified candidate existed. The chain still enforces `attested_gflops`
+    /// at `accept_job`; this flag exists so the caller/log can say so.
+    gflops_unverified: bool,
 }
 
 /// Penalty added to a busy provider's score so every idle box outranks it.
@@ -1370,8 +1386,9 @@ const MAX_ROUTE_ATTEMPTS: usize = 3;
 /// **The one way any AI request finds providers** (queue item #70).
 ///
 /// Shared by `/v1/chat/completions`, `POST /jobs` (text, image, video, ML and
-/// fine-tune), `/v1/images/generations` and `POST /route/{id}`. Pure: no I/O, no
-/// globals, so it is unit-testable and the ordering is reproducible.
+/// fine-tune), `/v1/images/generations` and `POST /route/{id}`. It performs no
+/// I/O and reads no globals (`note_unverified_gflops` only writes a log line),
+/// so it is unit-testable and the ordering is reproducible.
 ///
 /// Filters (a provider must clear ALL of them):
 ///   • `last_seen` present — the 5 s `/status` poll refreshes it, and a failed
@@ -1381,7 +1398,13 @@ const MAX_ROUTE_ATTEMPTS: usize = 3;
 ///     own pull poll (#46 Phase 3), so a box that never polls cannot be fed;
 ///   • advertises the capability for this [`JobKind`];
 ///   • model present in `models[]` (text only; a puller is still eligible);
-///   • `p.gflops >= min_gflops` when a floor is requested;
+///   • `p.gflops >= min_gflops` when a floor is requested — **and only from a
+///     value this box measured on an idle GPU** (`gflops_source ==
+///     "attested-idle"`). A hand-typed `--gflops`, an unattested chain record or
+///     a contended sample is treated as *unknown*, never as evidence: it may not
+///     exclude a capable box or admit an incapable one (item #97). When no
+///     verified candidate exists at all, unknown-source boxes are appended as a
+///     last resort, flagged with [`RouteCandidate::gflops_unverified`];
 ///   • `vram_mb`/`ram_mb` clear `min_vram_mb`/`min_ram_mb` when requested, and
 ///     the model's weights fit the advertised VRAM;
 ///   • `min_tflops` floor when requested (fail closed: unknown TFLOPS needs a
@@ -1421,30 +1444,62 @@ fn route_candidates(
     };
     let has_free = |p: &Provider| p.capacity == 0 || p.active < p.capacity;
 
-    let eligible: Vec<&Provider> = registry
+    // Item #97: is this provider's `gflops` usable evidence for a floor?
+    //   Some(true)  — measured on an idle GPU and above the floor (or no floor)
+    //   Some(false) — measured on an idle GPU and below the floor
+    //   None        — UNVERIFIED source: treat as unknown, not as a number
+    let gflops_evidence = |p: &Provider| -> Option<bool> {
+        if needs.min_gflops == 0 {
+            return Some(true);
+        }
+        let idle = p.gflops_source.eq_ignore_ascii_case("attested-idle");
+        if idle {
+            Some(p.gflops >= needs.min_gflops)
+        } else {
+            None
+        }
+    };
+    let base_ok = |p: &Provider| {
+        p.last_seen.is_some()
+            && deliverable(p)
+            && has_cap(p)
+            && hw_ok(p)
+            && gpu_ok(p)
+            // Model gate (text/ML/fine-tune): the box must already have the
+            // model or be able to pull it. Generation ignores the model name.
+            && (!kind.gates_on_model()
+                || has_model(p, &needs.model)
+                || p.can_pull)
+            && gpn_agent::models::model_fits_vram(&needs.model, p.vram_mb)
+    };
+
+    let mut eligible: Vec<(&Provider, bool)> = registry
         .iter()
-        .filter(|p| {
-            p.last_seen.is_some()
-                && deliverable(p)
-                && has_cap(p)
-                && p.gflops >= needs.min_gflops
-                && hw_ok(p)
-                && gpu_ok(p)
-                // Model gate (text/ML/fine-tune): the box must already have the
-                // model or be able to pull it. Generation ignores the model name.
-                && (!kind.gates_on_model()
-                    || has_model(p, &needs.model)
-                    || p.can_pull)
-                && gpn_agent::models::model_fits_vram(&needs.model, p.vram_mb)
-        })
+        .filter(|p| base_ok(p) && gflops_evidence(p) == Some(true))
+        .map(|p| (p, false))
         .collect();
+
+    // Never let an unverified NUMBER decide a route — but never let a missing
+    // one silently strand a capable box either. If no verified candidate clears
+    // the floor, unknown-source boxes are appended last, explicitly flagged.
+    if needs.min_gflops > 0 && eligible.is_empty() {
+        for p in registry.iter().filter(|p| base_ok(p) && gflops_evidence(p).is_none()) {
+            note_unverified_gflops(p, needs.min_gflops, true);
+            eligible.push((p, true));
+        }
+    } else if needs.min_gflops > 0 {
+        // Say it once per box: its number was not used to exclude it either.
+        for p in registry.iter().filter(|p| base_ok(p) && gflops_evidence(p).is_none()) {
+            note_unverified_gflops(p, needs.min_gflops, false);
+        }
+    }
 
     // Free capacity is a filter when anything has it; otherwise queue on the
     // least-loaded boxes rather than turning a busy fleet into a 503.
-    let any_free = eligible.iter().any(|p| has_free(p));
-    let live: Vec<&Provider> = eligible
+    let any_free = eligible.iter().any(|(p, _)| has_free(p));
+    let live: Vec<(&Provider, bool)> = eligible
         .into_iter()
-        .filter(|p| !any_free || has_free(p))
+        .filter(|(p, _)| !any_free || has_free(p))
         .collect();
 
     let eff = |p: &Provider| {
@@ -1454,31 +1509,70 @@ fn route_candidates(
         )
     };
 
-    // Score = busy tier + latency (+ pull cost). Lower is better.
-    let mut scored: Vec<(u64, bool, Provider)> = live
+    // Score = busy tier + latency (+ pull cost). Lower is better. Verified
+    // candidates always outrank unverified ones (the flag is part of the score,
+    // so an unverified box can never displace a measured one).
+    let mut scored: Vec<(u64, bool, Provider, bool)> = live
         .into_iter()
-        .map(|p| {
+        .map(|(p, unverified)| {
             let ready = !kind.gates_on_model() || has_model(p, &needs.model);
             // A puller (text only) pays the download penalty; without a model
             // gate there is nothing to pull.
             let pull = kind.gates_on_model() && !ready;
-            let score = if p.active == 0 { 0 } else { BUSY_PENALTY_MS }
+            let score = if unverified { 1_000_000 } else { 0 }
+                + if p.active == 0 { 0 } else { BUSY_PENALTY_MS }
                 + p.active.min(9) * 100
                 + eff(p)
                 + if pull { needs.pull_penalty_ms } else { 0 };
-            (score, pull, (*p).clone())
+            (score, pull, (*p).clone(), unverified)
         })
         .collect();
     // Stable tie-break on address so two otherwise-identical boxes always
     // produce the same order (reproducible tests, no route flapping).
-    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.address.cmp(&b.2.address)));
+    scored.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.2.address.cmp(&b.2.address))
+    });
     scored
         .into_iter()
-        .map(|(_, needs_pull, provider)| RouteCandidate {
+        .map(|(_, needs_pull, provider, gflops_unverified)| RouteCandidate {
             provider,
             needs_pull,
+            gflops_unverified,
         })
         .collect()
+}
+
+/// Log (once per box+floor) that a provider was admitted to / withheld from a
+/// `min_gflops` route on an **unverified** number. Item #97: this decision must
+/// never be silent, in either direction.
+fn note_unverified_gflops(p: &Provider, min_gflops: u64, admitted: bool) {
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    let key = format!("{}|{}|{}", p.address, p.gflops_source, min_gflops);
+    let fresh = SEEN
+        .get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+        .lock()
+        .map(|mut s| s.insert(key))
+        .unwrap_or(false);
+    if !fresh {
+        return;
+    }
+    if admitted {
+        eprintln!(
+            "[route] ⚠ no provider with an attested-idle GFLOPS measurement clears min_gflops={} — \
+             admitting {} ({} GFLOPS, source {:?}) as a LAST RESORT. The chain still rejects \
+             accept_job if its attestation is short; the router fails over to the next candidate.",
+            min_gflops, p.address, p.gflops, p.gflops_source
+        );
+    } else {
+        eprintln!(
+            "[route] provider {} advertises {} GFLOPS from source {:?} (not \"attested-idle\"), so that \
+             number was NOT used to filter it for min_gflops={} (verified candidate preferred). It is \
+             routed to ungated jobs only until it re-attests on an idle GPU.",
+            p.address, p.gflops, p.gflops_source, min_gflops
+        );
+    }
 }
 
 /// Outcome of walking the candidate list.
@@ -2966,6 +3060,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let server = Server::http(&listen).map_err(|e| format!("cannot bind {listen}: {e}"))?;
     println!("GPN access point (scheduler) listening on http://{listen}");
+    // Deploy marker + the routing rule it implements (item #97). A plain literal
+    // (no format args) so `strings` finds it verbatim.
+    println!("[route] gflops-unit-v97-ap: min_gflops is gated only on gflops_source=attested-idle");
     println!("  chain: {endpoint}");
     println!("  providers: {} ({})", urls.len(), urls.join(", "));
     println!("  assign store: {assign_store}");
@@ -3203,7 +3300,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (Method::Get, ["providers"]) => {
                     let reg = registry.lock().unwrap();
                     json!({ "providers": reg.iter().map(|p| json!({
-                    "status_url": p.status_url, "address": p.address, "gflops": p.gflops, "models": p.models,
+                    "status_url": p.status_url, "address": p.address, "gflops": p.gflops,
+                    "gflops_source": p.gflops_source,
+                    "gflops_verified": p.gflops_source.eq_ignore_ascii_case("attested-idle"),
+                    "models": p.models,
                     "active": p.active, "capacity": p.capacity, "latency_ms": p.latency_ms,
                     "vram_mb": p.vram_mb, "ram_mb": p.ram_mb,
                     "gpu_class": p.gpu_class, "tflops": p.tflops,
@@ -5829,6 +5929,7 @@ mod tests {
             status_url: url.to_string(),
             address: addr.to_string(),
             gflops: 30000,
+            gflops_source: "attested-idle".to_string(),
             models: vec![model.to_string()],
             can_pull: false,
             tok_per_s: 40.0,
@@ -6957,6 +7058,81 @@ mod tests {
         let got2 = route_candidates(&reg2, JobKind::Image, &needs2, &RttOverrides::new());
         assert_eq!(got2.len(), 1);
         assert_eq!(got2[0].provider.address, "strong");
+    }
+
+    /// Item #97: a `min_gflops` route may only be decided by a number this box
+    /// measured on an idle GPU. Everything else is *unknown*, never evidence.
+    #[test]
+    fn min_gflops_gates_only_on_an_attested_idle_measurement() {
+        let needs = RouteNeeds {
+            min_gflops: 500,
+            ..Default::default()
+        };
+        let rtt = RttOverrides::new();
+
+        // Verified and strong enough: routed, flagged verified.
+        let mut good = prov_caps("good", "http://good", 5, "", &["ImageGeneration"]);
+        good.gflops = 823;
+        let got = route_candidates(&[good.clone()], JobKind::Image, &needs, &rtt);
+        assert_eq!(got.len(), 1);
+        assert!(!got[0].gflops_unverified);
+
+        // Same number, unverified source (a hand-typed --gflops or a stale chain
+        // record): it may NOT be used to admit OR exclude the box. With a
+        // verified candidate present it is withheld; with nothing else it is a
+        // flagged last resort.
+        let mut hand_typed = good.clone();
+        hand_typed.address = "typed".into();
+        hand_typed.gflops = 30_000;
+        hand_typed.gflops_source = "--gflops (chain attestation unreadable)".into();
+        let got = route_candidates(
+            &[good.clone(), hand_typed.clone()],
+            JobKind::Image,
+            &needs,
+            &rtt,
+        );
+        assert_eq!(got.len(), 1, "the unverified box is not a normal candidate");
+        assert_eq!(got[0].provider.address, "good");
+
+        let only = route_candidates(&[hand_typed.clone()], JobKind::Image, &needs, &rtt);
+        assert_eq!(only.len(), 1, "never silently exclude a capable box");
+        assert!(
+            only[0].gflops_unverified,
+            "admitted only as a flagged last resort"
+        );
+
+        // An idle measurement BELOW the floor is evidence, and it excludes —
+        // even when it is the only candidate.
+        let mut weak = good.clone();
+        weak.address = "weak".into();
+        weak.gflops = 300;
+        assert!(route_candidates(&[weak], JobKind::Image, &needs, &rtt).is_empty());
+
+        // Ungated jobs (`min_gflops: 0`) never care about the source at all.
+        let open = route_candidates(
+            &[hand_typed],
+            JobKind::Image,
+            &RouteNeeds::default(),
+            &rtt,
+        );
+        assert_eq!(open.len(), 1);
+        assert!(!open[0].gflops_unverified);
+    }
+
+    /// Text routing (`/v1/chat/completions`) requests no floor, so the stricter
+    /// gflops provenance rule must not change its behaviour.
+    #[test]
+    fn text_routing_without_a_floor_is_unaffected_by_gflops_provenance() {
+        let mut p = prov_caps("p", "http://p", 5, "llama3.2:1b", &["LLMInference"]);
+        p.gflops = 0;
+        p.gflops_source = String::new();
+        let needs = RouteNeeds {
+            model: "llama3.2:1b".into(),
+            ..Default::default()
+        };
+        let got = route_candidates(&[p], JobKind::Text, &needs, &RttOverrides::new());
+        assert_eq!(got.len(), 1);
+        assert!(!got[0].gflops_unverified);
     }
 
     /// A provider that cannot receive work (stale pull poll) or that is not

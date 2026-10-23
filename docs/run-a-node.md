@@ -1223,11 +1223,14 @@ provider_endpoint = "http://<your-public-ip>:8093/status"   # advertised on-chai
 assign_token      = "<shared AP↔provider secret>"           # GPN_ASSIGN_TOKEN (see below)
 ollama       = "http://127.0.0.1:11434"
 listen       = "0.0.0.0:8093"                      # heartbeat bind
-gflops       = 30000                               # UPPER BOUND: the heartbeat advertises
-                                                   # min(this, on-chain attestation). Unset →
-                                                   # advertise the attestation. The chain is what
-                                                   # gates jobs (`accept_job`), so advertising
-                                                   # more than it holds just strands them.
+gflops       = 0                                   # UPPER BOUND, in the measured unit
+                                                   # (GPN-GEMM-F32-1024: ~823 on an RTX 4060).
+                                                   # The heartbeat advertises min(this, on-chain
+                                                   # attestation). Leave 0/unset: the attestation
+                                                   # is measured, and any hand-typed value above
+                                                   # 1.5x this box's own measurement is rejected
+                                                   # and replaced (item #97). 30000 here is a unit
+                                                   # bug, not a faster card.
 capacity     = 1
 poll_ms      = 300
 # ── optional providers: ALL ON by design; set false to opt a capability OUT ──
@@ -1306,15 +1309,34 @@ min_version_enforce = true    # false = mine below the minimum (unsupported)
 
 ### What `compute_gflops` actually measures
 
-The attested number is the throughput of GPN's own FP32 GEMM benchmark
-(`gpu::measure_gflops`: one warm-up run, then **best of five**, with the miner's
-yield flag held so the reading is not deflated by the co-located Ethash miner).
-It is a **relative capability score, not spec-sheet TFLOPS**:
+The attested number is the throughput of GPN's own FP32 GEMM benchmark — the
+canonical unit **`GPN-GEMM-F32-1024`** (`gpn_agent::compute_unit`):
 
-| device | measured |
-|---|---|
-| RTX 4060 (24 CU, ~15 TFLOPS peak) | 900–1 300 GFLOPS |
-| integrated GPU | an order of magnitude lower |
+```
+dtype      f32 (OpenCL float)          matrix   N = 1024, C = A·B
+flops/run  2·N³ = 2.147 GFLOP          value    best of 3 timed runs (1 warm-up)
+conditions GPU idle: GPU lock held, miner yielded, util ≤ 10 %, VRAM < 50 %
+```
+
+It is real FP32 GFLOP/s, but **not the card's spec-sheet peak**: the shipped
+16×16 shared-memory tile reaches only ~5–7 % of peak. Expect ±12 % between power
+states on the same card, and ~1 % across repeats in one state. That is plenty to
+separate device classes — which is all routing needs — but it means a floor must
+be written in *this* unit, never in TFLOPS.
+
+| device | published FP32 peak | measured (`GPN-GEMM-F32-1024`) |
+|---|---|---|
+| RTX 4060 8 GB | 15.1 TFLOPS | **823–912** (822/825/825 attested) |
+| RTX 5070 Ti 16 GB | 44.0 TFLOPS | ~2 300–2 650 (estimate — not measured idle) |
+| integrated GPU (Iris Xe / Vega 8 class) | 1.5–2 TFLOPS | ~50–110 (estimate) |
+
+**Why the old numbers were wrong.** Three defects, all fixed: the field was once
+written from raw FLOP/s, leaving `30000` on a 15 TFLOPS card (above its own
+hardware peak); box1 attested `188` from a sample taken while another workload
+held the card; and only an *upward* re-attestation was ever accepted, so neither
+record could be replaced. `30000` is not a fast card — it is a unit bug, and it
+is now replaced automatically (a record above 1.5× the card's estimated FP32 peak
+is treated as a legacy artefact, not a capability claim).
 
 Measurement rules that matter when you compare two boxes:
 
@@ -1332,22 +1354,34 @@ Measurement rules that matter when you compare two boxes:
   is logged: a >20 % spread is contention or thermal throttling, so the highest
   sample is used, and `/status` publishes `gflops_samples`,
   `gflops_spread_pct`, `gflops_conditions` and (when the advertised value is
-  this box's own idle measurement) `gflops_source: "attested-idle"`. A record
-  that disagrees with the idle measurement by more than 30 % is named in a loud
-  warning (`gflops_stale_warning` too);
+  this box's own idle measurement that was actually submitted)
+  `gflops_source: "attested-idle"`. A record that disagrees with the idle
+  measurement by more than 30 % is named in a loud warning
+  (`gflops_stale_warning` too);
 * the **discrete** card is measured (device 0 is ordered discrete-first, so the
   benchmark and the miner always use the same GPU — before 2026-10-23 they did
   not, and a Windows box attested an iGPU-class 188 GFLOPS for a 16 GB card);
-* a record that is **physically impossible** for the card (above 1.5x its
-  estimated FP32 peak, e.g. an old pre-units-fix `30000` on a 15 TFLOPS card)
-  may be corrected downward; a plausible record is never downgraded.
+* **only `gflops_source: "attested-idle"` is usable evidence.** The access point
+  will not route a `min_gflops > 0` job to a box whose number came from a
+  hand-typed `--gflops`, an older chain record or a contended sample: that value
+  is treated as *unknown* (logged, never silent) and the box serves ungated jobs
+  until it re-attests on an idle GPU. Never set `--gflops`/`GPN_GFLOPS` unless
+  you are deliberately advertising a *lower* bound than the measurement.
 
-`MinEligibilityGflops` (runtime, spec 41 = **3 000**) is still expressed on the
-*hardware-TFLOPS* scale, so with this benchmark (≈8 % of peak) a mid-range
-discrete card measures below it and a fresh attestation is refused by the chain.
-Until that constant is recalibrated (a gated runtime change), a new box keeps
-whatever record it has: the provider logs `measured N GFLOPS vs M on chain
-(floor 3000 …) — keeping the existing record` and does not pay for a rejected tx.
+**The eligibility floor is 250 GFLOPS** (`MinEligibilityGflops`, also in this
+unit): 30 % of the reference card's lowest idle measurement (823 on an RTX 4060
+8 GB), which admits any discrete 8 GB card and excludes every integrated GPU. It
+used to be `3000` on the spec-sheet scale, which no consumer card could reach —
+so a new box could not attest at all and kept whatever record it had.
+
+> **Runtime status:** the constant is changed in source and **staged** as part of
+the next runtime upgrade (`shared/artifacts/project7/staged/gflops-floor-v1.md`).
+> Until it enacts, the chain still answers `BelowEligibilityFloor` for values
+> below 3 000: the provider logs that once and stops retrying (it does **not**
+> submit a fabricated number). A restart after the upgrade re-attests
+> automatically; `GPN_ATTEST_FORCE=1` forces a re-measure on the next start for a
+> record that is wrong but not provably impossible.
+
 
 | `GPN_CAPACITY` | concurrent jobs | `1` |
 | `GPN_POLL_MS` | provider poll interval | `300` |

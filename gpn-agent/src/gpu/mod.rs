@@ -158,13 +158,15 @@ impl GPUMonitor {
 /// as the **attestable compute metric** (`AttestationRecord::compute_gflops`),
 /// tying the AI-compute leg to the marketplace's `min_gflops` requirement.
 ///
-/// What this number is, and is not (queue item #87):
-/// * It is a **reproducible relative capability score**, not FP32 peak. Measured
-///   on this host (24-CU RTX 4060): ~1 300 GFLOPS best-of-5 with the miner held
-///   off — about 8 % of the card's ~15 TFLOPS peak, because the shipped 16x16
-///   tile is shared-memory bound. Register-blocked variants measured 200–430,
-///   i.e. worse; see the kernel header. An integrated GPU lands ~100x lower, so
-///   the metric separates device classes, which is what routing needs.
+/// What this number is, and is not — see [`crate::compute_unit`] for the
+/// canonical definition (queue items #87 and #97):
+/// * It is real FP32 GFLOP/s but **not FP32 peak**: the shipped 16x16 tile is
+///   shared-memory bound, so it reaches ~5–7 % of a discrete card's peak.
+///   Measured on this host (24-CU RTX 4060, 15.1 TFLOPS peak): 822–912 GFLOPS
+///   across power states, best-of-N idle. Register-blocked variants measured
+///   200–430, i.e. worse; see the kernel header. An integrated GPU lands at
+///   ~50–110, so the metric separates device classes, which is what routing
+///   needs.
 /// * It is only comparable when the device is right, the GPU is not contended
 ///   and the sample is not a cold first launch. All three are handled here:
 ///   device order from [`matmul::enumerate_gpus`] (discrete cards first, so
@@ -175,7 +177,9 @@ impl GPUMonitor {
 ///   a 15.1 TFLOPS card** (2x its own hardware peak — an artefact of the
 ///   pre-2026-10 units bug). Either kind of record makes `min_gflops` routing
 ///   meaningless, and neither could be replaced: `attest_measurement_useful`
-///   only ever accepted an upward move.
+///   only ever accepted an upward move. Both are now treated as unverified by
+///   the AP and replaced by an idle measurement (`GPN_ATTEST_FORCE=1` for a
+///   wrong-but-plausible record).
 pub fn measure_gflops(device_index: usize) -> Result<u64, String> {
     // Ask the co-located miner to stand down for the measurement (best-effort:
     // a contended reading is still a reading, and must not fail the call).

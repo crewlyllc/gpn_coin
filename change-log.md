@@ -1,5 +1,55 @@
 # GPN change-log
 
+## 2026-10-23 15:00 PT — PM07 #97 **GFLOPS units + eligibility floor**: stop gating routes on invented numbers
+
+**WHY (measured, idle, best-of-3 on this box):** the chain carried `compute_gflops: 30000` for an
+RTX 4060 that measures **822/823/824** (and 827/911/911/912 at higher clocks) and whose FP32 peak is
+15.1 TFLOPS; box1 carried `188` on a 44 TFLOPS RTX 5070 Ti from one contended sample. The runtime
+floor `MinEligibilityGflops = 3000` was written on the *spec-sheet-TFLOPS* scale while the field
+stores the **measured** `GPN-GEMM-F32-1024` value (~5.5 % of peak), so no honest attestation could
+ever clear it and neither bad record could be replaced. The AP gated `min_gflops` on those numbers.
+
+**WHAT:**
+* **One canonical unit** — new `gpn-agent/src/compute_unit.rs` (`GPN-GEMM-F32-1024`): dense FP32
+  GEMM, N=1024, `2·N³` FLOPs/run, best-of-3 idle runs, ±12 % across power states. Documents what the
+  number is (real FP32 GFLOP/s, **not** peak), how to reproduce it, and why the old values were wrong.
+* **Floor 3000 → 250** in the unit the chain actually stores: 30 % of the weakest supported card's
+  lowest idle measurement (823 on a 4060 8 GB). ~3x above the strongest iGPU (~50–110), ~3.3x below
+  the reference card, so every discrete 8 GB card clears it and no iGPU does. `ELIGIBILITY_FLOOR_GFLOPS`
+  in the provider now mirrors it.
+* **AP refuses to gate on unattested values** (`gpn_scheduler`): a `min_gflops` route is decided only
+  by `gflops_source: "attested-idle"`. A hand-typed `--gflops`, a stale chain record or a contended
+  sample is **unknown** — it can neither admit nor exclude a box. With a verified candidate present
+  it serves ungated jobs only; with none it is appended as a flagged last resort
+  (`RouteCandidate::gflops_unverified`) and the chain still rejects `accept_job`. Every decision logs
+  once per box+floor; `/providers` now exposes `gflops_source`/`gflops_verified`.
+* **Heartbeat** (`gpn_provider_status`): an implausible operator bound **and** an implausible chain
+  record are no longer republished (this box stops advertising 30000 and advertises its 824
+  measurement, source `local idle measurement (chain record implausible or absent)`). Boot prints the
+  unit + floor.
+* **Migration**: implausible records (>1.5x the card's estimated FP32 peak) are re-attested
+  regardless of freshness; `GPN_ATTEST_FORCE=1` is the explicit path for a wrong-but-plausible record
+  (box1's 188). A chain `BelowEligibilityFloor` now prints the staged-change pointer and stops
+  retrying for the process lifetime instead of burning a tx per hour.
+* **Tests**: 5 unit (`compute_unit`: geometry pinning, floor derivation, iGPU separation, legacy
+  plausibility, peak estimate) + 3 scheduler (`min_gflops` provenance, unverified last resort,
+  ungated text unaffected) + 3 provider (floor acceptance, legacy replacement not conversion, honest
+  low-end measurement) + 2 heartbeat (operator/chain clamp). All suites green
+  (lib 5, scheduler 60, llm_provider 33, provider_status 27).
+* **Docs**: `docs/run-a-node.md` "What `compute_gflops` actually measures" rewritten (unit, method,
+  why the old numbers were wrong, floor, runtime status) + master reference routing/pricing notes.
+* **Deployed** via `scripts/deploy-bin.sh` in the one lane with markers
+  `gflops-unit-v97-status|ap|provider`; live check: `/status` → `gflops: 824,
+  gflops_source: local idle measurement (chain record implausible or absent)`, `/providers` →
+  `gflops_verified: false` (correct until a fresh attestation is accepted).
+
+**STAGED, NOT APPLIED — a runtime change is required:**
+`shared/artifacts/project7/staged/gflops-floor-v1.md` — `MinEligibilityGflops 3_000 → 250` (runtime
+const) and `AttestationTier::{Silver,Gold} 1_000/5_000 → 800/3_200` (pallet; the old tiers were
+unreachable in the measured unit — Gold needed a ~90 TFLOPS card). **spec 44** — spec 43 is already
+built, hashed and timelocked, so its artifact must not be rebuilt. Until it enacts, the chain still
+answers `BelowEligibilityFloor` for 824: the provider logs it once and keeps the old record.
+
 ## 2026-10-23 14:30 PT — PM07 #94 **auto-idle**: the node steps aside for *foreign* GPU load (opt-in)
 
 **WHY:** `gpu_yield.rs` only coordinates GPN's own providers with each other. It cannot see the

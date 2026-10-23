@@ -303,11 +303,26 @@ writes an assignment → that provider claims + runs it`. The chain stays the es
 > and non-fatal, and a returned list is dialed in full (shuffled), never first-only.
 
 **Selection (`gpn_scheduler::pick`), in order (updated 2026-10-06):**
-1. **Capability filter** — keep providers with a **fresh heartbeat**, `gflops ≥ job.min_gflops`, **and**
+1. **Capability filter** — keep providers with a **fresh heartbeat**, a **verified** `gflops ≥ job.min_gflops`, **and**
    (if the job sets a hardware floor) enough **VRAM/RAM**: a fail-closed `min_vram_mb`/`min_ram_mb` gate
    (#14, 2026-10-08) excludes providers advertising less — or nothing. (Scheduler reads all this from the
    off-chain `/status` heartbeat; the **chain** enforces `min_gflops` at `accept_job` — the on-chain
    VRAM gate is a carry-forward for a later `set_code`.)
+
+   **What `gflops` means (item #97):** the canonical unit **`GPN-GEMM-F32-1024`** — measured dense FP32
+   GEMM throughput (N = 1024, `2·N³` FLOPs per run, best of 3 idle runs), *not* spec-sheet TFLOPS. It
+   reaches ~5–7 % of a card's FP32 peak: an RTX 4060 (15.1 TFLOPS peak) measures 823–912, an RTX 5070 Ti
+   ~2 300–2 650 (estimate). The eligibility floor is **250 GFLOPS** (30 % of the weakest supported card's
+   measurement), replacing the old `3000` that was written on the peak scale and which no consumer card
+   could ever clear. `30000` on a 15 TFLOPS card is a pre-2026-10 unit bug, not a fast GPU.
+
+   **Only `gflops_source: "attested-idle"` counts.** A hand-typed `--gflops`, an older chain record or a
+   contended sample is **unknown**, never evidence: the AP will not admit *or* exclude a box on it. With
+   a verified candidate present, unknown-source boxes serve ungated jobs only; with none, they are
+   appended as flagged last resorts (`gflops_unverified`) and the chain still rejects `accept_job` if
+   their attestation is short. Every such decision is logged, never silent. A record above 1.5× the
+   card's estimated FP32 peak is replaced by a fresh measurement regardless of age; `GPN_ATTEST_FORCE=1`
+   forces a re-measure for a wrong-but-plausible record.
 2. **Availability** — a node **currently running an AI job** (`active > 0`) is **NOT available**
    (one GPU does one job at a time). Only **idle** nodes are candidates.
 3. **Model match** — among idle nodes: *ready* = has the requested model (or any model if none
@@ -338,8 +353,8 @@ same on-chain state, so no single AP is required (redundancy + geo-latency).
   `/status` heartbeat URLs — it does **not yet auto-discover** providers from the chain. So today it
   tracks exactly the endpoints it's given. No protocol cap, but an operational limit; multi-access
   point + on-chain provider discovery is a design item (`design-access-points-scheduler.md`), not built.
-  (Note: the scheduler filters capacity using the heartbeat's **advertised** gflops; the **chain** is
-  what actually enforces `attested_gflops ≥ min_gflops` at `accept_job`.)
+  (Note: the scheduler filters capacity using the heartbeat's **advertised**, `attested-idle`-sourced
+  gflops; the **chain** is what actually enforces `attested_gflops ≥ min_gflops` at `accept_job`.)
   — Per the design, these **are** the same nodes (a node is a provider, §3.1); the separate provider
   list is transitional.
 - **On-chain caps that DO bound throughput:** `MaxActiveJobs = 100` (global concurrent unfinished jobs
@@ -491,6 +506,15 @@ escrow       = prompt_tokens/4 + max_tokens          # output-equivalents
 `gpn_scheduler` implements this in `gpn-agent/src/pricing.rs` (`PricingConfig::price_per_token_out`,
 `provider_rate_hr`). The legacy market model is still selectable with `GPN_PRICING_MODEL=market`
 (`GPN_RENTAL_FRACTION_BPS=5000`, $3.00 GPU-hour fallback, util 0.65) so the two can be A/B'd and reverted.
+
+> **Unit note (#97):** the `30,000 GFLOP/s` anchor and the reference table are on the **spec-sheet
+> peak** scale, while an attested `gflops` is the measured `GPN-GEMM-F32-1024` value (~5.5 % of peak).
+> It does not move prices today because decode of a 1B-model is **memory-bound**: the roofline takes
+> `min(compute, bandwidth)` and the bandwidth term wins at every attested value (823 GFLOP/s still
+> gives ≥164 tok/s of compute head-room vs 95 tok/s of bandwidth). The provider's *share* is therefore
+> set by `mem_bw_gbps`, and the measured value only matters for models big enough to be
+> compute-bound — where the anchor should be compared as `measured / 0.055`. Treat the two numbers as
+> different scales, never as the same quantity.
 
 | GPU (1B stream) | Bandwidth | Throughput | Provider earns |
 |---|---|---|---|

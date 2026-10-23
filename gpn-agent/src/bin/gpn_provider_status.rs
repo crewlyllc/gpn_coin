@@ -448,6 +448,90 @@ fn resolve_advertised_gflops(operator: u64, attested: Option<u64>) -> (u64, &'st
     }
 }
 
+/// Item #97: a hand-typed `--gflops` is an **upper bound**, not a measurement.
+/// If it is implausible against what this box actually measured on an idle GPU
+/// (more than 1.5x), it is a number in the wrong unit or for a different box —
+/// advertise the measurement instead and say so. `--gflops 30000` on a 15 TFLOPS
+/// card is exactly the fiction that made the AP route this box as a 30 000
+/// GFLOPS machine.
+///
+/// When there is no local measurement, the operator value is left alone (it may
+/// be a legitimate bound on a box that has not re-attested yet), but it is
+/// published under its own `gflops_source`, which the AP treats as unverified.
+fn clamp_operator_gflops(
+    operator: u64,
+    measured: Option<u64>,
+    card: &str,
+    source: &'static str,
+) -> (u64, &'static str) {
+    let Some(m) = measured.filter(|m| *m > 0) else {
+        return (operator, source);
+    };
+    let ceiling = m.saturating_mul(3) / 2;
+    if operator > ceiling {
+        eprintln!(
+            "[status] ⚠ --gflops {operator} is implausible for {card}: this box measured {m} GFLOPS \
+             on an idle GPU with the {unit} method (ceiling {ceiling} = 1.5x). Advertising the \
+             measurement instead. A hand-typed number in the right ballpark is 800-1000 for this \
+             class of card, not 30000.",
+            unit = gpn_agent::compute_unit::UNIT_NAME
+        );
+        return (m, "local idle measurement (--gflops implausible)");
+    }
+    (operator, source)
+}
+
+/// The advertised value, with the operator bound **and the chain record**
+/// sanity-checked against this box's own idle measurement (item #97).
+///
+/// A chain record that is implausible for this card (this host: `30000` on a
+/// 15.1 TFLOPS card) is a pre-units-fix artefact. Republishing it is what made
+/// the AP route a 4060 as a 30 000 GFLOPS machine, so the heartbeat advertises
+/// the **measurement** instead and says why. The value is deliberately not
+/// labelled `attested-idle`: it has not been accepted on chain yet, so the AP
+/// keeps treating it as unverified.
+fn advertised_gflops(operator: u64, attested: Option<u64>) -> (u64, &'static str) {
+    let measured = gpn_agent::attest_idle::read_state().map(|s| s.measured_gflops);
+    let (op, _src) = clamp_operator_gflops(operator, measured, "this box", "operator bound");
+    let (attested, implausible) = clamp_chain_record(attested, measured);
+    if implausible {
+        eprintln!(
+            "[status] ⚠ on-chain attestation disagrees with this box's idle measurement — the \
+             record is a legacy/contended artefact. Advertising the measurement; the AP will not \
+             route gated jobs here until a fresh attestation is accepted."
+        );
+    }
+    if attested.is_none() && op == 0 {
+        if let Some(m) = measured.filter(|m| *m > 0) {
+            return (m, "local idle measurement (chain record implausible or absent)");
+        }
+    }
+    resolve_advertised_gflops(op, attested)
+}
+
+/// Drop a chain record that is more than 1.5x this box's own idle measurement:
+/// a value no measurement of this card could produce (this host: 30 000 for a
+/// 825 GFLOPS reading). Returns `(record, dropped)`.
+fn clamp_chain_record(attested: Option<u64>, measured: Option<u64>) -> (Option<u64>, bool) {
+    match (attested.filter(|a| *a > 0), measured.filter(|m| *m > 0)) {
+        (Some(a), Some(m)) if a > m.saturating_mul(3) / 2 => (None, true),
+        (a, _) => (a, false),
+    }
+}
+
+/// `compute_gflops` unit banner. Printed at boot so an operator (and the deploy
+/// script's `--expect-marker`) can see which unit this build speaks.
+fn print_compute_unit() {
+    // Plain literals (no format args) so `strings`/the deploy marker finds them.
+    println!("[status] gflops-unit-v97-status: gflops_source is earned, not typed");
+    println!("[status] {}", gpn_agent::compute_unit::describe());
+    println!(
+        "[status] eligibility floor {} — {}",
+        gpn_agent::compute_unit::MIN_ELIGIBLE_GFLOPS,
+        gpn_agent::compute_unit::floor_derivation()
+    );
+}
+
 /// Item #93: attach the *conditions* of the last attestation measurement, so an
 /// operator can tell a number this box measured on an idle GPU from a stale or
 /// contention-contaminated one. Adds nothing when no state file exists (a fresh
@@ -1347,7 +1431,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         attested_gflops(&endpoint, &address)
     };
     let (gflops, gflops_source) =
-        resolve_advertised_gflops(operator_gflops, boot_chain_gflops);
+        advertised_gflops(operator_gflops, boot_chain_gflops);
     // #93: prefer "attested-idle" when the value is one this box measured on an
     // idle GPU (state file written by the provider at attestation time).
     let gflops_source = {
@@ -1359,6 +1443,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .to_string()
     };
     println!("GPN provider heartbeat on http://{listen} — address={address} gflops={gflops} ({gflops_source}) models={:?} active={active}/{capacity} capabilities={:?}", models, capabilities);
+    print_compute_unit();
     println!(
         "[status] hardware: vram_mb={} ram_mb={} gpu_class={} tflops={} mem_bw_gbps={} (re-measured every {}s)",
         boot_hw.vram_mb,
@@ -1459,7 +1544,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     attested_gflops(&endpoint, &address)
                 };
-                let (gflops_now, _) = resolve_advertised_gflops(operator_gflops, chain_now);
+                let (gflops_now, _) = advertised_gflops(operator_gflops, chain_now);
                 let mut body = json!({
                     "address": address, "gflops": gflops_now, "models": models_now,
                     "can_pull": can_pull, "active": active, "capacity": capacity.max(1),
@@ -1477,7 +1562,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &mut body,
                     gflops_now,
                     chain_now,
-                    resolve_advertised_gflops(operator_gflops, chain_now).1,
+                    advertised_gflops(operator_gflops, chain_now).1,
                 );
                 // Peer-id publication: always read live from THIS box's node.
                 // On failure the fields are published empty (null / []) — never
@@ -2116,5 +2201,50 @@ mod tests {
         // Nothing known anywhere: 0, and the boot warning fires.
         assert_eq!(resolve_advertised_gflops(0, None).0, 0);
         assert_eq!(resolve_advertised_gflops(0, Some(0)).0, 0);
+    }
+
+    /// Item #97: `--gflops 30000` on a card that measures 825 is a number from
+    /// another unit (or another box). It must be replaced by the measurement,
+    /// not published to the AP, and the operator must be told why.
+    #[test]
+    fn an_implausible_operator_bound_is_replaced_by_the_local_measurement() {
+        let (v, src) = clamp_operator_gflops(30_000, Some(825), "RTX 4060", "--gflops");
+        assert_eq!(v, 825);
+        assert!(src.contains("local idle measurement"), "{src}");
+
+        // A plausible bound is left exactly as the operator set it (it is an
+        // upper bound and may be deliberately below the measurement).
+        let (v, src) = clamp_operator_gflops(800, Some(825), "RTX 4060", "--gflops");
+        assert_eq!(v, 800);
+        assert_eq!(src, "--gflops");
+
+        // 1.5x headroom absorbs the power-state band (823 vs 912).
+        let (v, _) = clamp_operator_gflops(1_200, Some(825), "RTX 4060", "--gflops");
+        assert_eq!(v, 1_200);
+        let (v, _) = clamp_operator_gflops(1_300, Some(825), "RTX 4060", "--gflops");
+        assert_eq!(v, 825);
+
+        // No local measurement: nothing to contradict the operator, so keep it
+        // (the AP treats that source as unverified anyway).
+        let (v, _) = clamp_operator_gflops(30_000, None, "RTX 4060", "--gflops");
+        assert_eq!(v, 30_000);
+        let (v, _) = clamp_operator_gflops(30_000, Some(0), "RTX 4060", "--gflops");
+        assert_eq!(v, 30_000);
+    }
+
+    /// Item #97: the *chain record* can be the fiction too. `30000` must not be
+    /// republished by a box that measures 825 — the AP would route on it.
+    #[test]
+    fn an_implausible_chain_record_is_not_republished() {
+        assert_eq!(clamp_chain_record(Some(30_000), Some(825)), (None, true));
+        // A plausible record (including the power-state band) is kept: it is what
+        // the chain will enforce at accept_job.
+        assert_eq!(clamp_chain_record(Some(825), Some(825)), (Some(825), false));
+        assert_eq!(clamp_chain_record(Some(1_200), Some(825)), (Some(1_200), false));
+        assert_eq!(clamp_chain_record(Some(188), Some(825)), (Some(188), false));
+        // No measurement → no basis to call anything implausible.
+        assert_eq!(clamp_chain_record(Some(30_000), None), (Some(30_000), false));
+        assert_eq!(clamp_chain_record(None, Some(825)), (None, false));
+        assert_eq!(clamp_chain_record(Some(0), Some(825)), (None, false));
     }
 }

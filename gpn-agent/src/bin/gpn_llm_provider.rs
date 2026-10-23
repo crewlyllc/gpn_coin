@@ -712,6 +712,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         poll_ms,
         gpn_agent::llm::infer::default_ollama_url()
     );
+    // Item #97: name the unit the attested number is in, once, at boot.
+    println!("[attest] gflops-unit-v97-provider: only an idle measurement is submitted");
+    println!("[attest] {}", gpn_agent::compute_unit::describe());
+    println!(
+        "[attest] eligibility floor {} GFLOPS — {}",
+        gpn_agent::compute_unit::MIN_ELIGIBLE_GFLOPS,
+        gpn_agent::compute_unit::floor_derivation()
+    );
 
     // Item #61: do not start serving on an unreadable chain. `gpn-provider` came
     // up 15 s before the RPC after the 04:40 full-stack restart, read `NextJobId`
@@ -1905,10 +1913,35 @@ fn attest_refresh_blocks_from_env() -> u64 {
         .unwrap_or(7_200) // half of `MaxAttestationAge` (14 400 blocks ≈ 60 h)
 }
 
-/// `GPUAttestation::MinEligibilityGflops` (runtime constant, spec 41 = 3 000).
-/// A submission below it is rejected on-chain with `BelowEligibilityFloor`, so
-/// there is no point paying a tx for one.
-const ELIGIBILITY_FLOOR_GFLOPS: u64 = 3_000;
+/// `GPN_ATTEST_FORCE=1` — attest at the next opportunity even though the record
+/// is young. **This is the explicit re-attest path** for a record that is wrong
+/// but not provably impossible (e.g. box1's contended `188` on a 44 TFLOPS
+/// card): freshness alone would otherwise keep it for up to 7 200 blocks.
+fn attest_force_from_env() -> bool {
+    std::env::var("GPN_ATTEST_FORCE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Set once the chain has answered a submission with `BelowEligibilityFloor`.
+///
+/// The runtime constant and this binary can disagree while a staged upgrade is
+/// pending. Retrying a rejected submission every hour would be tx spam for a
+/// condition only a governed runtime change can fix; a restart (after the
+/// upgrade enacts) clears the flag and retries. Nothing is worked around: the
+/// honest measurement simply is not submittable yet.
+static FLOOR_REJECTED_BY_CHAIN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// `GPUAttestation::MinEligibilityGflops` in the **canonical measurement unit**
+/// (`gpn_agent::compute_unit`). This is 250 GFLOPS, not 3 000: the old constant
+/// was written on the spec-sheet-TFLOPS scale while the benchmark reports the
+/// tiled GEMM throughput (~5.5 % of peak), so an honest 823 GFLOPS reading on a
+/// 15 TFLOPS card was refused. The runtime constant is being changed to match
+/// (staged; see `shared/artifacts/project7/staged/gflops-floor-v1.md`) — until
+/// that upgrade enacts, a submission below the OLD floor is rejected on-chain
+/// and reported as such instead of retried in a loop.
+const ELIGIBILITY_FLOOR_GFLOPS: u64 = gpn_agent::compute_unit::MIN_ELIGIBLE_GFLOPS;
 
 /// Should a fresh measurement replace the on-chain record?
 ///
@@ -1943,9 +1976,9 @@ fn attest_measurement_useful(measured: u64, on_chain: Option<u64>, peak_gflops: 
     if measured > record {
         return true;
     }
-    let implausible =
-        peak_gflops >= ELIGIBILITY_FLOOR_GFLOPS && record > peak_gflops.saturating_mul(3) / 2;
-    implausible
+    // A record that cannot be this card's measurement is a legacy artefact, not
+    // a capability claim: correcting it downward is the whole point (#97).
+    gpn_agent::compute_unit::record_implausible(record, peak_gflops)
 }
 
 /// What a single attestation attempt did. The caller uses this to decide
@@ -1994,13 +2027,37 @@ async fn maybe_refresh_attestation(client: &ChainClient, addr: &str) -> AttestOu
         println!("[attest] GPN_ATTEST_REFRESH=0 — leaving the on-chain attestation alone");
         return AttestOutcome::Disabled;
     }
+    if FLOOR_REJECTED_BY_CHAIN.load(std::sync::atomic::Ordering::Relaxed) {
+        println!(
+            "[attest] the chain rejected the last measurement with BelowEligibilityFloor — not \
+             retrying until this process restarts (the fix is the staged runtime change, not a \
+             different number)"
+        );
+        return AttestOutcome::UpToDate;
+    }
     let head = client.head_block_number().await.unwrap_or(0);
     let rec = client
         .get_attestation_meta(addr)
         .await
         .map(|(_gpus, gflops, at)| (gflops, at));
     let refresh = attest_refresh_blocks_from_env();
-    match attest_plan(rec, head, refresh) {
+    // Item #97: a legacy/unit-bug record must not be shielded by the freshness
+    // window — that is how `30000` survived on a 15 TFLOPS card for months.
+    let peak_gflops = {
+        let (_m, tflops) = gpn_agent::gpu::detect_gpu_capability();
+        (tflops * 1000.0).round().max(0.0) as u64
+    };
+    let legacy_record = rec
+        .map(|(g, _)| gpn_agent::compute_unit::record_implausible(g, peak_gflops))
+        .unwrap_or(false);
+    let forced = attest_force_from_env();
+    let planned = attest_plan(rec, head, refresh);
+    let plan = if forced || (planned == AttestPlan::Skip && legacy_record) {
+        AttestPlan::Attest
+    } else {
+        planned
+    };
+    match plan {
         AttestPlan::Skip => {
             let (gflops, at) = rec.unwrap_or((0, 0));
             println!(
@@ -2013,6 +2070,13 @@ async fn maybe_refresh_attestation(client: &ChainClient, addr: &str) -> AttestOu
             let why = match rec {
                 None => "no attestation on chain".to_string(),
                 Some((0, at)) => format!("on-chain compute_gflops is 0 (written at block {at})"),
+                Some((gflops, at)) if forced => format!(
+                    "GPN_ATTEST_FORCE=1 — re-attesting by operator request ({gflops} GFLOPS at block {at})"
+                ),
+                Some((gflops, at)) if legacy_record => format!(
+                    "on-chain {gflops} GFLOPS at block {at} is above this card's estimated FP32 peak \
+                     ({peak_gflops} GFLOPS) — a legacy/unit-bug record; replacing it with a measurement"
+                ),
                 Some((gflops, at)) => {
                     format!("{gflops} GFLOPS attested at block {at}, older than {refresh} blocks")
                 }
@@ -2122,10 +2186,9 @@ async fn maybe_refresh_attestation(client: &ChainClient, addr: &str) -> AttestOu
                 on_chain_before: on_chain,
             };
             gpn_agent::attest_idle::write_state(&state);
-            // The card's *estimated* FP32 peak (model-name table) is only used
-            // to recognise an impossible record, never to invent a number.
-            let (_model_name, peak_tflops) = gpn_agent::gpu::detect_gpu_capability();
-            let peak_gflops = (peak_tflops * 1000.0).round().max(0.0) as u64;
+            // `peak_gflops` (the model-name estimate, computed before the plan)
+            // is only used to recognise an impossible record, never to invent a
+            // number.
             if !attest_measurement_useful(gflops, on_chain, peak_gflops) {
                 println!(
                     "[attest] measured {gflops} GFLOPS vs {} on chain (floor {ELIGIBILITY_FLOOR_GFLOPS}, \
@@ -2137,8 +2200,9 @@ async fn maybe_refresh_attestation(client: &ChainClient, addr: &str) -> AttestOu
                 if gflops < ELIGIBILITY_FLOOR_GFLOPS && on_chain.is_some() {
                     eprintln!(
                         "[attest] ⚠ the chain will refuse a record below {ELIGIBILITY_FLOOR_GFLOPS} \
-                         GFLOPS, so the existing {} GFLOPS record cannot be replaced yet. This is a \
-                         floor/scale problem (see docs/run-a-node.md \"What compute_gflops actually \
+                         GFLOPS, so the existing {} GFLOPS record cannot be replaced yet. If the \
+                         chain still carries the OLD 3000 floor, this is the staged runtime change \
+                         `MinEligibilityGflops` (see docs/run-a-node.md \"What compute_gflops actually \
                          measures\"), not a reason to submit a bad number.",
                         on_chain.unwrap_or(0)
                     );
@@ -2175,6 +2239,7 @@ async fn maybe_refresh_attestation(client: &ChainClient, addr: &str) -> AttestOu
             let gpu_hash = gpn_agent::gpu::hash_gpu_info(&info);
             // Bounded: `submit_attestation` waits for inclusion (up to its 300 s
             // timeout). Startup must not hang on a stalled chain.
+            let mut floor_rejected = false;
             let submitted = match tokio::time::timeout(
                 std::time::Duration::from_secs(90),
                 client.submit_attestation(challenge, gpu_hash, 1, gflops),
@@ -2186,7 +2251,20 @@ async fn maybe_refresh_attestation(client: &ChainClient, addr: &str) -> AttestOu
                     true
                 }
                 Ok(Err(e)) => {
-                    eprintln!("[attest] submit_attestation failed: {e}");
+                    let msg = e.to_string();
+                    if msg.contains("BelowEligibilityFloor") {
+                        floor_rejected = true;
+                        FLOOR_REJECTED_BY_CHAIN.store(true, std::sync::atomic::Ordering::Relaxed);
+                        eprintln!(
+                            "[attest] the chain rejected {gflops} GFLOPS with BelowEligibilityFloor: the \
+                             runtime still carries the OLD floor (3000 GFLOPS, spec-sheet scale). The fix is \
+                             the staged `MinEligibilityGflops = 250` runtime change \
+                             (shared/artifacts/project7/staged/gflops-floor-v1.md) — it cannot be worked \
+                             around off-chain, and submitting a fabricated number is not an option. \
+                             This box keeps its current record and is routed to ungated jobs only."
+                        );
+                    }
+                    eprintln!("[attest] submit_attestation failed: {msg}");
                     false
                 }
                 Err(_) => {
@@ -2201,6 +2279,10 @@ async fn maybe_refresh_attestation(client: &ChainClient, addr: &str) -> AttestOu
                 state.submitted = true;
                 gpn_agent::attest_idle::write_state(&state);
                 AttestOutcome::Attested
+            } else if floor_rejected {
+                // Not a retryable failure: only a runtime change can fix it, and
+                // `maybe_refresh_attestation` refuses to try again this process.
+                AttestOutcome::NotUseful
             } else {
                 AttestOutcome::Failed
             }
@@ -4098,30 +4180,61 @@ mod settled_cache_tests {
 
     #[test]
     fn a_measurement_only_ever_improves_the_on_chain_record() {
-        // 15.1 TFLOPS card → 15 100 GFLOPS estimated peak.
+        // 15.1 TFLOPS card → 15 100 GFLOPS estimated peak; it measures ~823 in
+        // the canonical unit (item #97).
         const PEAK: u64 = 15_100;
-        // Below the runtime eligibility floor: the chain rejects it
-        // (`BelowEligibilityFloor`), so never pay for that tx.
+        // Below the eligibility floor (250 in the MEASURED unit): the chain
+        // rejects it (`BelowEligibilityFloor`), so never pay for that tx.
         assert!(!attest_measurement_useful(0, None, PEAK));
-        assert!(!attest_measurement_useful(2_999, None, PEAK));
-        assert!(!attest_measurement_useful(2_999, Some(188), PEAK));
+        assert!(!attest_measurement_useful(249, None, PEAK));
+        assert!(!attest_measurement_useful(249, Some(188), PEAK));
         // At the floor it is eligible...
-        assert!(attest_measurement_useful(3_000, None, PEAK));
+        assert!(attest_measurement_useful(250, None, PEAK));
         // ...but a *plausible* record is never downgraded by a weaker reading.
-        assert!(!attest_measurement_useful(3_000, Some(12_000), PEAK));
-        assert!(!attest_measurement_useful(12_000, Some(12_000), PEAK));
-        // box1: an old 188 record, and a real 5070 Ti measurement beats it.
-        assert!(attest_measurement_useful(30_000, Some(188), 44_000));
+        assert!(!attest_measurement_useful(250, Some(800), PEAK));
+        assert!(!attest_measurement_useful(800, Some(800), PEAK));
+        // box1: an old contended 188 record, and a real idle measurement of the
+        // 5070 Ti (~2 400 estimated) beats it.
+        assert!(attest_measurement_useful(2_400, Some(188), 44_000));
         // A zeroed record is always repaired by any eligible reading.
-        assert!(attest_measurement_useful(3_000, Some(0), PEAK));
+        assert!(attest_measurement_useful(250, Some(0), PEAK));
         // A record ABOVE the card's FP32 peak is a legacy-unit artefact (this
         // host: 30 000 on a 15.1 TFLOPS card) and an honest measurement may
         // replace it — otherwise the bad record is permanent by construction.
-        assert!(attest_measurement_useful(11_500, Some(30_000), PEAK));
-        // Just-inside-plausible records keep the never-downgrade protection.
-        assert!(!attest_measurement_useful(11_500, Some(15_000), PEAK));
+        assert!(attest_measurement_useful(823, Some(30_000), PEAK));
+        // Just-inside-plausible records keep the never-downgrade protection
+        // (15 100 × 1.5 = 22 650).
+        assert!(!attest_measurement_useful(823, Some(22_000), PEAK));
+        assert!(attest_measurement_useful(823, Some(22_700), PEAK));
         // Unknown device (peak 0) → never attempt a downward correction.
-        assert!(!attest_measurement_useful(11_500, Some(30_000), 0));
+        assert!(!attest_measurement_useful(823, Some(30_000), 0));
+    }
+
+    /// Item #97 migration: a legacy record is **replaced**, never reinterpreted.
+    /// 30 000 is not "30 000 in peak units ⇒ 1 650 measured" — it is garbage, and
+    /// the measured value simply overwrites it. This test pins that decision.
+    #[test]
+    fn a_legacy_record_is_replaced_by_a_measurement_not_converted() {
+        const PEAK: u64 = 15_100;
+        assert!(attest_measurement_useful(823, Some(30_000), PEAK));
+        // The same measurement against the *converted* interpretation would be
+        // a different number and must NOT be what gets submitted.
+        assert_ne!(823, (30_000.0 * gpn_agent::compute_unit::MEASURED_FRACTION_OF_PEAK) as u64);
+        // An already-correct record is left alone (no tx churn).
+        assert!(!attest_measurement_useful(823, Some(825), PEAK));
+    }
+
+    /// A *low-end but honest* measurement must be accepted once the floor is in
+    /// the measured unit (item #97). A 2.9 TFLOPS-peak card measures ~160 and
+    /// still fails; the weakest supported 8 GB card measures ~340+ and passes.
+    #[test]
+    fn an_honest_measurement_at_the_recalibrated_floor_is_accepted() {
+        assert_eq!(ELIGIBILITY_FLOOR_GFLOPS, 250);
+        assert!(!attest_measurement_useful(249, None, 0));
+        assert!(attest_measurement_useful(250, None, 0));
+        assert!(attest_measurement_useful(340, None, 6_500));
+        // The reference card's real reading is comfortably inside.
+        assert!(attest_measurement_useful(823, None, 15_100));
     }
 }
 

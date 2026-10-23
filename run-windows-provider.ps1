@@ -24,7 +24,7 @@
 
   Usage:
     .\run-windows-provider.ps1 -Signer "<your own seed or mnemonic>" `
-        -PublicStatusUrl "http://<your-public-ip>:8093/status" -Gflops 2500
+        -PublicStatusUrl "http://<your-public-ip>:8093/status"
 
   IDENTITY (queue #96): -Signer is REQUIRED and has no default. This box must
   sign and be paid with an account that belongs to whoever runs it — a dev URI
@@ -45,7 +45,8 @@ param(
   [string]$Address         = "",                     # ss58 payout/identity address (optional; shown if given)
   [string]$PublicStatusUrl = "",                     # e.g. http://1.2.3.4:8093/status  (enables on-chain discovery)
   [int]$ListenPort         = 8093,
-  [int]$Gflops             = 2500,
+  [int]$Gflops             = 0,          # upper bound in the MEASURED unit (~825 on an RTX 4060);
+                                           # 0 = advertise the on-chain attestation (recommended)
   [string]$Ollama          = "http://127.0.0.1:11434",
   [string]$BaselineModel   = "llama3.2:1b",           # pulled if Ollama has no models
   [switch]$InstallOllama                              # auto-install/start Ollama if missing
