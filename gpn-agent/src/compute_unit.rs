@@ -134,8 +134,8 @@ pub fn record_plausible(record: u64, peak_gflops: u64) -> bool {
     if peak_gflops < MIN_TRUSTWORTHY_PEAK_GFLOPS || record == 0 {
         return true;
     }
-    record <= peak_gflops.saturating_mul(IMPLAUSIBLE_RECORD_FACTOR_NUM)
-        / IMPLAUSIBLE_RECORD_FACTOR_DEN
+    record
+        <= peak_gflops.saturating_mul(IMPLAUSIBLE_RECORD_FACTOR_NUM) / IMPLAUSIBLE_RECORD_FACTOR_DEN
 }
 
 /// Below this estimated FP32 peak (2 TFLOPS) the model-name table is not
@@ -197,7 +197,10 @@ mod tests {
     fn a_record_above_peak_is_implausible() {
         assert!(!record_plausible(30_000, REFERENCE_PEAK_GFLOPS));
         assert!(record_implausible(30_000, REFERENCE_PEAK_GFLOPS));
-        assert!(record_plausible(REFERENCE_MEASURED_GFLOPS, REFERENCE_PEAK_GFLOPS));
+        assert!(record_plausible(
+            REFERENCE_MEASURED_GFLOPS,
+            REFERENCE_PEAK_GFLOPS
+        ));
         // Unknown device: no evidence, so never "implausible".
         assert!(record_plausible(30_000, 0));
         assert!(!record_implausible(30_000, 0));

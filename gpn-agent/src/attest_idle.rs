@@ -309,7 +309,11 @@ pub fn record_divergence(
         on_chain,
         measured,
         diff_pct,
-        direction: if on_chain > measured { "above" } else { "below" },
+        direction: if on_chain > measured {
+            "above"
+        } else {
+            "below"
+        },
     })
 }
 
@@ -772,7 +776,10 @@ mod tests {
         }
         // The measurement must never have been run: a contended sample is not
         // a capability figure.
-        assert!(p.measured_runs.borrow().is_empty(), "benchmark ran while busy");
+        assert!(
+            p.measured_runs.borrow().is_empty(),
+            "benchmark ran while busy"
+        );
         // No settle sleep either — we know immediately.
         assert_eq!(p.settled.get(), 0);
         // begin() failed, so there is nothing to release.
@@ -858,7 +865,11 @@ mod tests {
         let mut p = FakeProbe::ok(idle_load(), vec![1_300, 1_320, 1_280]);
         match run(&mut p, 3) {
             IdleMeasurement::Measured { set, .. } => {
-                assert!(!set.unstable, "spread {:.1}% should be stable", set.spread_pct);
+                assert!(
+                    !set.unstable,
+                    "spread {:.1}% should be stable",
+                    set.spread_pct
+                );
                 assert_eq!(set.chosen(), 1_300, "median of 1280/1300/1320");
                 assert_eq!(set.best, 1_320);
             }
@@ -873,7 +884,11 @@ mod tests {
         let mut p = FakeProbe::ok(idle_load(), vec![900, 1_100, 1_300]);
         match run(&mut p, 3) {
             IdleMeasurement::Measured { set, .. } => {
-                assert!(set.unstable, "spread {:.1}% should be unstable", set.spread_pct);
+                assert!(
+                    set.unstable,
+                    "spread {:.1}% should be unstable",
+                    set.spread_pct
+                );
                 assert_eq!(set.chosen(), 1_300, "best sample wins when spread is high");
                 assert!((set.spread_pct - 36.36).abs() < 0.1, "{}", set.spread_pct);
                 assert!(set.describe().contains("unstable"));
@@ -1064,7 +1079,10 @@ mod tests {
             parse_nvidia_smi_load("7, 512, 16303\n"),
             Some((7, 512, 16_303))
         );
-        assert_eq!(parse_nvidia_smi_load("  0, 3 , 24564 "), Some((0, 3, 24_564)));
+        assert_eq!(
+            parse_nvidia_smi_load("  0, 3 , 24564 "),
+            Some((0, 3, 24_564))
+        );
         assert_eq!(parse_nvidia_smi_load(""), None);
         assert_eq!(parse_nvidia_smi_load("N/A, 3, 4"), None);
     }
@@ -1077,14 +1095,24 @@ mod tests {
             vram_total_mb: Some(8_188),
             ..Default::default()
         };
-        let line = busy_summary(&load, "utilization 97% > 10%", true, Duration::from_millis(2_000));
+        let line = busy_summary(
+            &load,
+            "utilization 97% > 10%",
+            true,
+            Duration::from_millis(2_000),
+        );
         assert!(line.contains("[attest] skipping: GPU busy"), "{line}");
         assert!(line.contains("util 97%"), "{line}");
         assert!(line.contains("3004/8188 MiB VRAM"), "{line}");
         assert!(line.contains("NO measurement submitted"), "{line}");
         assert!(line.contains("2000ms settle"), "{line}");
         // Lock-busy (no settle yet): no misleading settle note.
-        let line = busy_summary(&GpuLoad::default(), "another job holds the GPU lock", false, Duration::ZERO);
+        let line = busy_summary(
+            &GpuLoad::default(),
+            "another job holds the GPU lock",
+            false,
+            Duration::ZERO,
+        );
         assert!(line.contains("util unknown"), "{line}");
         assert!(!line.contains("settle"), "{line}");
     }

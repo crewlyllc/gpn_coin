@@ -199,9 +199,7 @@ fn main() {
             gpn_agent::idle_auto::spawn(gpn_agent::idle_auto::RunOptions {
                 idle_path: gpn_agent::idle::idle_path(),
                 force: force_idle,
-                peers: Arc::new(move || {
-                    gpn_agent::nodestatus::health(peers_port).map(|(p, _)| p)
-                }),
+                peers: Arc::new(move || gpn_agent::nodestatus::health(peers_port).map(|(p, _)| p)),
                 probe: Box::new(gpn_agent::idle_auto::NvidiaProbe::new(0)),
                 tick_secs: auto_cfg.busy_sample_secs,
                 stop: Arc::new(AtomicBool::new(false)),

@@ -928,7 +928,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         eprintln!("[attest] retry did not complete — next try in {delay}s");
                     }
-                    attest_at = Some(std::time::Instant::now() + std::time::Duration::from_secs(delay));
+                    attest_at =
+                        Some(std::time::Instant::now() + std::time::Duration::from_secs(delay));
                 } else {
                     attest_retry.reset();
                     attest_at = None;
@@ -2114,12 +2115,7 @@ async fn maybe_refresh_attestation(client: &ChainClient, addr: &str) -> AttestOu
                     // names the cause, and it says nothing was submitted.
                     eprintln!(
                         "{}",
-                        gpn_agent::attest_idle::busy_summary(
-                            &load,
-                            &reason,
-                            after_settle,
-                            settle
-                        )
+                        gpn_agent::attest_idle::busy_summary(&load, &reason, after_settle, settle)
                     );
                     return AttestOutcome::SkippedBusy(reason);
                 }
@@ -2141,7 +2137,11 @@ async fn maybe_refresh_attestation(client: &ChainClient, addr: &str) -> AttestOu
                     gflops
                 );
             } else {
-                println!("[attest] idle measurement: {} — taking {} GFLOPS", set.describe(), gflops);
+                println!(
+                    "[attest] idle measurement: {} — taking {} GFLOPS",
+                    set.describe(),
+                    gflops
+                );
             }
             if set.zero_samples > 0 {
                 eprintln!(
@@ -2218,7 +2218,9 @@ async fn maybe_refresh_attestation(client: &ChainClient, addr: &str) -> AttestOu
                     );
                 }
             }
-            println!("[attest] measured {gflops} GFLOPS on an idle GPU — submitting a fresh attestation");
+            println!(
+                "[attest] measured {gflops} GFLOPS on an idle GPU — submitting a fresh attestation"
+            );
             let challenge = client
                 .get_attestation_challenge()
                 .await
@@ -4219,7 +4221,10 @@ mod settled_cache_tests {
         assert!(attest_measurement_useful(823, Some(30_000), PEAK));
         // The same measurement against the *converted* interpretation would be
         // a different number and must NOT be what gets submitted.
-        assert_ne!(823, (30_000.0 * gpn_agent::compute_unit::MEASURED_FRACTION_OF_PEAK) as u64);
+        assert_ne!(
+            823,
+            (30_000.0 * gpn_agent::compute_unit::MEASURED_FRACTION_OF_PEAK) as u64
+        );
         // An already-correct record is left alone (no tx churn).
         assert!(!attest_measurement_useful(823, Some(825), PEAK));
     }

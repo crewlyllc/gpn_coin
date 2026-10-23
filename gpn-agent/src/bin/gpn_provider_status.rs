@@ -503,7 +503,10 @@ fn advertised_gflops(operator: u64, attested: Option<u64>) -> (u64, &'static str
     }
     if attested.is_none() && op == 0 {
         if let Some(m) = measured.filter(|m| *m > 0) {
-            return (m, "local idle measurement (chain record implausible or absent)");
+            return (
+                m,
+                "local idle measurement (chain record implausible or absent)",
+            );
         }
     }
     resolve_advertised_gflops(op, attested)
@@ -538,7 +541,7 @@ fn print_compute_unit() {
 /// box, or one that never attested).
 ///
 /// Fields: `gflops_source` becomes `"attested-idle"` when the advertised value
-/// is exactly what we measured and submitted; `gflops_samples` / 
+/// is exactly what we measured and submitted; `gflops_samples` /
 /// `gflops_spread_pct` / `gflops_measured_at` / `gflops_conditions` describe the
 /// measurement; `gflops_stale_warning` names a record that disagrees with it.
 fn attach_attest_conditions(
@@ -548,12 +551,13 @@ fn attach_attest_conditions(
     source: &'static str,
 ) {
     let state = gpn_agent::attest_idle::read_state();
-    let (idle_source, warning) = gpn_agent::attest_idle::status_gflops_source(
-        advertised,
-        chain,
-        state.as_ref(),
-    );
-    body["gflops_source"] = json!(if idle_source.is_empty() { source } else { idle_source });
+    let (idle_source, warning) =
+        gpn_agent::attest_idle::status_gflops_source(advertised, chain, state.as_ref());
+    body["gflops_source"] = json!(if idle_source.is_empty() {
+        source
+    } else {
+        idle_source
+    });
     if let Some(st) = state {
         body["gflops_measured"] = json!(st.measured_gflops);
         body["gflops_samples"] = json!(st.samples);
@@ -1430,8 +1434,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         attested_gflops(&endpoint, &address)
     };
-    let (gflops, gflops_source) =
-        advertised_gflops(operator_gflops, boot_chain_gflops);
+    let (gflops, gflops_source) = advertised_gflops(operator_gflops, boot_chain_gflops);
     // #93: prefer "attested-idle" when the value is one this box measured on an
     // idle GPU (state file written by the provider at attestation time).
     let gflops_source = {
@@ -2240,10 +2243,16 @@ mod tests {
         // A plausible record (including the power-state band) is kept: it is what
         // the chain will enforce at accept_job.
         assert_eq!(clamp_chain_record(Some(825), Some(825)), (Some(825), false));
-        assert_eq!(clamp_chain_record(Some(1_200), Some(825)), (Some(1_200), false));
+        assert_eq!(
+            clamp_chain_record(Some(1_200), Some(825)),
+            (Some(1_200), false)
+        );
         assert_eq!(clamp_chain_record(Some(188), Some(825)), (Some(188), false));
         // No measurement → no basis to call anything implausible.
-        assert_eq!(clamp_chain_record(Some(30_000), None), (Some(30_000), false));
+        assert_eq!(
+            clamp_chain_record(Some(30_000), None),
+            (Some(30_000), false)
+        );
         assert_eq!(clamp_chain_record(None, Some(825)), (None, false));
         assert_eq!(clamp_chain_record(Some(0), Some(825)), (None, false));
     }

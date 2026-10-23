@@ -15,9 +15,16 @@
 #      name (e.g. leftovers from an earlier `git add`), telling you how to fix it.
 #   5. Commits.
 #
+#   6. Runs the same `cargo fmt --all -- --check` gate CI runs, for every crate
+#      you are committing into, and ABORTS if one of YOUR paths is unformatted
+#      (another session's unformatted file only warns). Why: 2026-10-23, item
+#      #98 — #93/#94/#96/#97 were pushed without `cargo fmt`, so CI's first
+#      gate (`rustfmt (check, agent)`) went red on main and no test ever ran.
+#
 # Usage:
 #   scripts/commit-paths.sh -m "message" <path> [<path> ...]
 #   scripts/commit-paths.sh -m "message" --dry-run <path> ...
+#   scripts/commit-paths.sh -m "message" --skip-fmt <path> ...
 #
 # Optional: install as a pre-commit hook (defence in depth; the hook only sees
 # the index, so it cannot know your intent — it just refuses bulk-looking sets):
@@ -32,6 +39,7 @@ cd "$REPO"
 
 MSG=""
 DRY=0
+SKIP_FMT=0
 PATHS=()
 START_EPOCH="$(date +%s)"
 
@@ -39,7 +47,8 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -m|--message) MSG="${2:?$1 needs a message}"; shift 2 ;;
     --dry-run)    DRY=1; shift ;;
-    -h|--help)    sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --skip-fmt)   SKIP_FMT=1; shift ;;
+    -h|--help)    sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -A|--all|.)   echo "REFUSED: '$1' stages the whole tree. Name the paths explicitly." >&2; exit 2 ;;
     -*)           echo "REFUSED: unknown option '$1'" >&2; exit 2 ;;
     *)            PATHS+=("$1"); shift ;;
@@ -92,6 +101,52 @@ warn_other_sessions() {
 }
 
 warn_other_sessions
+
+# ------------------------------------------------------------- fmt gate ----
+# CI's very first gate is `cargo fmt --all -- --check` per crate. A commit that
+# fails it turns main red before a single test runs (item #98). Check only the
+# crates you are committing into, and only block on YOUR files.
+fmt_gate() {
+  [ "$SKIP_FMT" = 1 ] && { echo "(fmt gate skipped by --skip-fmt)" >&2; return 0; }
+  local crates=() c crate
+  for p in "${PATHS[@]}"; do
+    for c in $(find . -maxdepth 2 -name Cargo.toml -printf '%h\n' 2>/dev/null); do
+      c=${c#./}   # `find .` yields ./gpn-agent; named paths are repo-relative
+      case "$p" in
+        "$c"/*) case " ${crates[*]-} " in *" $c "*) ;; *) crates+=("$c") ;; esac ;;
+      esac
+    done
+  done
+  [ "${#crates[@]}" -gt 0 ] || return 0
+
+  local mine="" theirs="" out offenders f named
+  for crate in "${crates[@]}"; do
+    out=$( cd "$crate" && cargo fmt --all -- --check 2>&1 || true )
+    offenders=$(printf '%s\n' "$out" | sed -n 's/^Diff in \(.*\):[0-9]*:$/\1/p' | sort -u)
+    [ -n "$offenders" ] || continue
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      f=${f#./}
+      f=${f#"$REPO"/}   # rustfmt prints absolute paths; named paths are repo-relative
+      named=0
+      for p in "${PATHS[@]}"; do [ "$f" = "$p" ] && { named=1; break; }; done
+      if [ "$named" = 1 ]; then mine="$mine $f"; else theirs="$theirs $f"; fi
+    done <<< "$offenders"
+  done
+
+  if [ -n "$theirs" ]; then
+    printf '\033[33mWARNING: unformatted files NOT in this commit (another session?):%s\033[0m\n' "$theirs" >&2
+    printf '  leave them alone; they will fail CI when committed.\n' >&2
+  fi
+  if [ -n "$mine" ]; then
+    echo "REFUSED: these paths you are committing are not rustfmt-clean:$mine" >&2
+    echo "CI runs 'cargo fmt --all -- --check' first, so this would turn main red." >&2
+    echo "Fix: cd gpn-agent && cargo fmt --all   (then re-run this script)" >&2
+    exit 4
+  fi
+}
+
+fmt_gate
 
 # --------------------------------------------------------------- staging ----
 echo "staging ${#PATHS[@]} path(s): ${PATHS[*]}"

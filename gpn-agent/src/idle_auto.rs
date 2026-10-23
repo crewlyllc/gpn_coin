@@ -137,17 +137,16 @@ impl AutoIdleConfig {
     pub fn from_env() -> Self {
         let d = Self::default();
         Self {
-            util_percent: env_u64("GPN_IDLE_AUTO_UTIL_PCT", d.util_percent as u64)
-                .clamp(10, 100) as u32,
-            busy_samples: env_u64("GPN_IDLE_AUTO_BUSY_SAMPLES", d.busy_samples as u64)
-                .clamp(1, 20) as u32,
+            util_percent: env_u64("GPN_IDLE_AUTO_UTIL_PCT", d.util_percent as u64).clamp(10, 100)
+                as u32,
+            busy_samples: env_u64("GPN_IDLE_AUTO_BUSY_SAMPLES", d.busy_samples as u64).clamp(1, 20)
+                as u32,
             quiet_samples: env_u64("GPN_IDLE_AUTO_QUIET_SAMPLES", d.quiet_samples as u64)
                 .clamp(1, 20) as u32,
             // Config, not an operator instruction: clamp to the 6 h ceiling.
             minutes: idle::clamp_minutes(env_u64("GPN_IDLE_AUTO_MINUTES", d.minutes)),
             cooldown_secs: env_u64("GPN_IDLE_AUTO_COOLDOWN_SECS", d.cooldown_secs),
-            busy_sample_secs: env_u64("GPN_IDLE_AUTO_BUSY_SAMPLE_SECS", d.busy_sample_secs)
-                .max(1),
+            busy_sample_secs: env_u64("GPN_IDLE_AUTO_BUSY_SAMPLE_SECS", d.busy_sample_secs).max(1),
             quiet_sample_secs: env_u64("GPN_IDLE_AUTO_QUIET_SAMPLE_SECS", d.quiet_sample_secs)
                 .max(1),
             min_foreign_vram_mb: env_u64(
@@ -306,11 +305,7 @@ pub fn parse_nvidia_smi_processes(s: &str) -> Vec<GpuProcess> {
         let Ok(used_mb) = mem.trim().replace(',', "").parse::<u64>() else {
             continue;
         };
-        out.push(GpuProcess {
-            pid,
-            kind,
-            used_mb,
-        });
+        out.push(GpuProcess { pid, kind, used_mb });
     }
     out
 }
@@ -371,7 +366,9 @@ pub enum Action {
         evidence: String,
     },
     /// Leave idle, with a human-readable why.
-    Exit { why: String },
+    Exit {
+        why: String,
+    },
 }
 
 /// The debounced state machine. Pure: no clock, no files, no GPU.
@@ -594,7 +591,10 @@ impl AutoIdle {
 
     fn count_quiet(&mut self, now: u64) {
         if self.quiet == 0
-            || now >= self.last_quiet_at.saturating_add(self.cfg.quiet_sample_secs)
+            || now
+                >= self
+                    .last_quiet_at
+                    .saturating_add(self.cfg.quiet_sample_secs)
         {
             self.quiet += 1;
             self.last_quiet_at = now;
@@ -658,8 +658,10 @@ impl AutoIdleShared {
         self.cooldown_until.store(cooldown_until, Ordering::SeqCst);
         match reading {
             Some(r) => {
-                self.util
-                    .store(r.util_percent.map(|u| u as i64).unwrap_or(-1), Ordering::SeqCst);
+                self.util.store(
+                    r.util_percent.map(|u| u as i64).unwrap_or(-1),
+                    Ordering::SeqCst,
+                );
                 self.foreign_vram_mb
                     .store(r.foreign_vram_mb, Ordering::SeqCst);
                 self.foreign
@@ -771,34 +773,30 @@ pub fn spawn(mut opts: RunOptions) -> std::thread::JoinHandle<()> {
                             minutes,
                             reason,
                             evidence,
-                        } => {
-                            match idle::start_at(&opts.idle_path, minutes, &reason, now) {
-                                Ok(st) => {
-                                    println!(
-                                        "[idle-auto] idle: foreign GPU load ({}% util): {evidence} \
+                        } => match idle::start_at(&opts.idle_path, minutes, &reason, now) {
+                            Ok(st) => {
+                                println!(
+                                    "[idle-auto] idle: foreign GPU load ({}% util): {evidence} \
                                          — stepping aside for {minutes} min (until {})",
-                                        reading
-                                            .as_ref()
-                                            .and_then(|r| r.util_percent)
-                                            .unwrap_or(0),
-                                        st.until
-                                    );
-                                }
-                                Err(e) => {
-                                    machine.abort_enter(now);
-                                    eprintln!("[idle-auto] cannot enter idle: {e}");
-                                }
+                                    reading.as_ref().and_then(|r| r.util_percent).unwrap_or(0),
+                                    st.until
+                                );
                             }
-                        }
+                            Err(e) => {
+                                machine.abort_enter(now);
+                                eprintln!("[idle-auto] cannot enter idle: {e}");
+                            }
+                        },
                         Action::Exit { why } => {
                             idle::clear_at(&opts.idle_path);
-                            println!(
-                                "[idle-auto] resume: {why} — mining and job claiming resume"
-                            );
+                            println!("[idle-auto] resume: {why} — mining and job claiming resume");
                         }
                     }
-                    opts.shared
-                        .publish(reading.as_ref(), machine.engaged(), machine.cooldown_until());
+                    opts.shared.publish(
+                        reading.as_ref(),
+                        machine.engaged(),
+                        machine.cooldown_until(),
+                    );
                 } else {
                     sleep_step(&opts.stop, 1);
                     continue;
@@ -986,8 +984,14 @@ mod tests {
         assert!(m.engaged());
 
         let st = idle_state("auto: foreign GPU load 87%", 1_810);
-        assert_eq!(m.step(Some(&quiet()), 15, Some(&st), Some(2), false), Action::None);
-        assert_eq!(m.step(Some(&quiet()), 35, Some(&st), Some(2), false), Action::None);
+        assert_eq!(
+            m.step(Some(&quiet()), 15, Some(&st), Some(2), false),
+            Action::None
+        );
+        assert_eq!(
+            m.step(Some(&quiet()), 35, Some(&st), Some(2), false),
+            Action::None
+        );
         match m.step(Some(&quiet()), 55, Some(&st), Some(2), false) {
             Action::Exit { why } => assert!(why.contains("gone for 3 samples"), "{why}"),
             other => panic!("expected Exit, got {other:?}"),
@@ -1040,7 +1044,10 @@ mod tests {
         let mut m = AutoIdle::new(cfg());
         let st = idle_state("gaming", 9_999);
         for t in [0, 100, 200] {
-            assert_eq!(m.step(Some(&quiet()), t, Some(&st), Some(2), false), Action::None);
+            assert_eq!(
+                m.step(Some(&quiet()), t, Some(&st), Some(2), false),
+                Action::None
+            );
         }
         assert!(!m.engaged());
     }
@@ -1050,10 +1057,16 @@ mod tests {
         let mut m = AutoIdle::new(cfg());
         m.adopt(&idle_state("auto: foreign GPU load 87%", 5_000));
         let st = idle_state("dashboard", 9_000);
-        assert_eq!(m.step(Some(&quiet()), 100, Some(&st), Some(2), false), Action::None);
+        assert_eq!(
+            m.step(Some(&quiet()), 100, Some(&st), Some(2), false),
+            Action::None
+        );
         assert!(!m.engaged());
         // And when their window ends, we do not auto-resume it.
-        assert_eq!(m.step(Some(&quiet()), 9_000, None, Some(2), false), Action::None);
+        assert_eq!(
+            m.step(Some(&quiet()), 9_000, None, Some(2), false),
+            Action::None
+        );
         assert_eq!(m.cooldown_until(), 0);
     }
 
@@ -1095,7 +1108,10 @@ mod tests {
     fn restart_adopts_a_live_auto_window() {
         let mut m = AutoIdle::new(cfg());
         let st = idle_state("auto: foreign GPU load 87%", 5_000);
-        assert_eq!(m.step(Some(&quiet()), 100, Some(&st), Some(2), false), Action::None);
+        assert_eq!(
+            m.step(Some(&quiet()), 100, Some(&st), Some(2), false),
+            Action::None
+        );
         assert!(m.engaged(), "a restart must keep the window it wrote");
         // ...and still auto-resumes after M quiet samples.
         let mut last = Action::None;
@@ -1114,7 +1130,10 @@ mod tests {
         let st = idle_state("auto: foreign GPU load 87%", 5_000);
         m.adopt(&st);
         for t in [100, 200, 300] {
-            assert_eq!(m.step(Some(&busy()), t, Some(&st), Some(2), false), Action::None);
+            assert_eq!(
+                m.step(Some(&busy()), t, Some(&st), Some(2), false),
+                Action::None
+            );
         }
         assert!(m.engaged());
     }
@@ -1190,7 +1209,14 @@ mod tests {
 +-----------------------------------------------------------------------------------------+";
         let p = parse_nvidia_smi_processes(table);
         assert_eq!(p.len(), 3);
-        assert_eq!(p[0], GpuProcess { pid: 1191, kind: 'G', used_mb: 225 });
+        assert_eq!(
+            p[0],
+            GpuProcess {
+                pid: 1191,
+                kind: 'G',
+                used_mb: 225
+            }
+        );
         assert_eq!(p[1].used_mb, 1120);
         assert_eq!(p[2].used_mb, 1558, "thousands separators are stripped");
     }

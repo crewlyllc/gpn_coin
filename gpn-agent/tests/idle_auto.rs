@@ -78,7 +78,11 @@ impl Harness {
             quiet_sample_secs: 1,
             min_foreign_vram_mb: 512,
         };
-        let shared = Arc::new(AutoIdleShared::new(cfg.clone(), true, tmp(&format!("{tag}-toggle"))));
+        let shared = Arc::new(AutoIdleShared::new(
+            cfg.clone(),
+            true,
+            tmp(&format!("{tag}-toggle")),
+        ));
         let stop = Arc::new(AtomicBool::new(false));
         let handle = idle_auto::spawn(RunOptions {
             idle_path: idle_path.clone(),
@@ -150,7 +154,9 @@ fn sustained_foreign_load_idles_and_quiet_resumes() {
     );
     assert!(st.reason.contains("foreign GPU load 91%"), "{}", st.reason);
     assert!(!h.claims(), "providers must not claim");
-    assert!(h.shared.status_json(idle::now_unix())["engaged"].as_bool().unwrap());
+    assert!(h.shared.status_json(idle::now_unix())["engaged"]
+        .as_bool()
+        .unwrap());
 
     // The operator's game exits: the node resumes by itself.
     h.set(quiet());
@@ -158,11 +164,10 @@ fn sustained_foreign_load_idles_and_quiet_resumes() {
         wait_until(Duration::from_secs(10), || h.state().is_none()),
         "quiet GPU must auto-resume (idle.json removed)"
     );
-    assert!(
-        h.claims(),
-        "providers may claim again"
-    );
-    assert!(!h.shared.status_json(idle::now_unix())["engaged"].as_bool().unwrap());
+    assert!(h.claims(), "providers may claim again");
+    assert!(!h.shared.status_json(idle::now_unix())["engaged"]
+        .as_bool()
+        .unwrap());
 }
 
 /// A single busy sample (a shader compile, a compositor blip) must not park

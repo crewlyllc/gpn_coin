@@ -215,14 +215,11 @@ pub fn handle(
                     "auto-idle is not running in this process (start gpn_node with --gui)",
                 );
             };
-            let parsed: Value = match serde_json::from_str(if body.trim().is_empty() {
-                "{}"
-            } else {
-                body
-            }) {
-                Ok(v) => v,
-                Err(e) => return Reply::error(400, format!("invalid JSON body: {e}")),
-            };
+            let parsed: Value =
+                match serde_json::from_str(if body.trim().is_empty() { "{}" } else { body }) {
+                    Ok(v) => v,
+                    Err(e) => return Reply::error(400, format!("invalid JSON body: {e}")),
+                };
             let Some(on) = parsed.get("enabled").and_then(Value::as_bool) else {
                 return Reply::error(400, "missing boolean \"enabled\"");
             };
@@ -238,10 +235,7 @@ pub fn handle(
                 auto.cfg.util_percent,
                 auto.cfg.minutes
             );
-            Reply::json(
-                200,
-                json!({"ok": true, "auto_idle": auto.status_json(now)}),
-            )
+            Reply::json(200, json!({"ok": true, "auto_idle": auto.status_json(now)}))
         }
 
         ("POST", "/api/idle") => {
@@ -619,7 +613,13 @@ mod tests {
     fn auto_idle_block_and_toggle_endpoint() {
         use crate::idle_auto::{AutoIdleConfig, AutoIdleShared};
         let o = opts("auto");
-        let dir = o.idle_path.as_ref().unwrap().parent().unwrap().to_path_buf();
+        let dir = o
+            .idle_path
+            .as_ref()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
         let shared = Arc::new(AutoIdleShared::new(
             AutoIdleConfig::default(),
             false,
@@ -654,7 +654,14 @@ mod tests {
         assert!(shared.enabled());
 
         // Bad body → 400, unchanged.
-        let r = handle("POST", "/api/idle/auto", r#"{}"#, &source(Some(2)), &o, 1_000);
+        let r = handle(
+            "POST",
+            "/api/idle/auto",
+            r#"{}"#,
+            &source(Some(2)),
+            &o,
+            1_000,
+        );
         assert_eq!(r.code, 400);
         assert!(shared.enabled());
 
@@ -685,7 +692,10 @@ mod tests {
         .unwrap();
         assert_eq!(s["idle"]["active"], true);
         assert_eq!(s["idle"]["auto"], true);
-        assert!(s["idle"]["reason"].as_str().unwrap().contains("foreign GPU load"));
+        assert!(s["idle"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("foreign GPU load"));
 
         // Without a sampler (tests, fleet-less runs) the toggle is a 409.
         let plain = opts("auto-none");

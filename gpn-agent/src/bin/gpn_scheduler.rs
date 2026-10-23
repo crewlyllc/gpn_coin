@@ -1483,13 +1483,19 @@ fn route_candidates(
     // one silently strand a capable box either. If no verified candidate clears
     // the floor, unknown-source boxes are appended last, explicitly flagged.
     if needs.min_gflops > 0 && eligible.is_empty() {
-        for p in registry.iter().filter(|p| base_ok(p) && gflops_evidence(p).is_none()) {
+        for p in registry
+            .iter()
+            .filter(|p| base_ok(p) && gflops_evidence(p).is_none())
+        {
             note_unverified_gflops(p, needs.min_gflops, true);
             eligible.push((p, true));
         }
     } else if needs.min_gflops > 0 {
         // Say it once per box: its number was not used to exclude it either.
-        for p in registry.iter().filter(|p| base_ok(p) && gflops_evidence(p).is_none()) {
+        for p in registry
+            .iter()
+            .filter(|p| base_ok(p) && gflops_evidence(p).is_none())
+        {
             note_unverified_gflops(p, needs.min_gflops, false);
         }
     }
@@ -1529,17 +1535,16 @@ fn route_candidates(
         .collect();
     // Stable tie-break on address so two otherwise-identical boxes always
     // produce the same order (reproducible tests, no route flapping).
-    scored.sort_by(|a, b| {
-        a.0.cmp(&b.0)
-            .then_with(|| a.2.address.cmp(&b.2.address))
-    });
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.address.cmp(&b.2.address)));
     scored
         .into_iter()
-        .map(|(_, needs_pull, provider, gflops_unverified)| RouteCandidate {
-            provider,
-            needs_pull,
-            gflops_unverified,
-        })
+        .map(
+            |(_, needs_pull, provider, gflops_unverified)| RouteCandidate {
+                provider,
+                needs_pull,
+                gflops_unverified,
+            },
+        )
         .collect()
 }
 
@@ -7109,12 +7114,7 @@ mod tests {
         assert!(route_candidates(&[weak], JobKind::Image, &needs, &rtt).is_empty());
 
         // Ungated jobs (`min_gflops: 0`) never care about the source at all.
-        let open = route_candidates(
-            &[hand_typed],
-            JobKind::Image,
-            &RouteNeeds::default(),
-            &rtt,
-        );
+        let open = route_candidates(&[hand_typed], JobKind::Image, &RouteNeeds::default(), &rtt);
         assert_eq!(open.len(), 1);
         assert!(!open[0].gflops_unverified);
     }
