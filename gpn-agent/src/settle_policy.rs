@@ -187,9 +187,7 @@ impl SettlePolicy {
         if let Some(m) = explicit.map(|s| s.trim().to_ascii_lowercase()) {
             match m.as_str() {
                 "passthrough" => return (Route::Passthrough, Reason::Passthrough),
-                "settle" | "onchain" | "on-chain" => {
-                    return (Route::OnChain, Reason::ExplicitMode)
-                }
+                "settle" | "onchain" | "on-chain" => return (Route::OnChain, Reason::ExplicitMode),
                 "channel" | "offchain" | "off-chain" => {
                     // An explicit channel request is a client preference, not an
                     // override of the operator's kill switch.
@@ -261,13 +259,19 @@ mod tests {
     #[test]
     fn expensive_job_settles_on_chain() {
         // max_tokens: 2000 quotes ~5.07e9 base units on the live testnet.
-        assert_eq!(pol().decide(None, 5_072_750_734), (Route::OnChain, Reason::AboveThreshold));
+        assert_eq!(
+            pol().decide(None, 5_072_750_734),
+            (Route::OnChain, Reason::AboveThreshold)
+        );
     }
 
     #[test]
     fn cheap_job_batches_over_channel() {
         // max_tokens: 8 quotes ~3.2e7 base units.
-        assert_eq!(pol().decide(None, 32_010_000), (Route::Channel, Reason::BelowThreshold));
+        assert_eq!(
+            pol().decide(None, 32_010_000),
+            (Route::Channel, Reason::BelowThreshold)
+        );
     }
 
     #[test]
@@ -309,7 +313,10 @@ mod tests {
         p.channel_available = false;
         assert_eq!(p.decide(None, 1), (Route::OnChain, Reason::NoChannel));
         // An explicit channel request cannot be honoured either.
-        assert_eq!(p.decide(Some("channel"), 1), (Route::OnChain, Reason::NoChannel));
+        assert_eq!(
+            p.decide(Some("channel"), 1),
+            (Route::OnChain, Reason::NoChannel)
+        );
     }
 
     #[test]

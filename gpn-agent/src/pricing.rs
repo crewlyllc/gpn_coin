@@ -362,7 +362,9 @@ impl PricingConfig {
                     * self.anchor_rate_usd_hr
                     * (1.0 + self.margin_frac())
             }
-            PricingModel::Market => self.legacy_image_price_usd(width, height, steps, frames, market_hr, util),
+            PricingModel::Market => {
+                self.legacy_image_price_usd(width, height, steps, frames, market_hr, util)
+            }
         }
     }
 
@@ -608,7 +610,11 @@ mod tests {
         let per_m = c.price_per_million_out();
         assert!((per_m - 0.3793).abs() < 1e-3, "got ${per_m}/1M");
         // k is the pre-margin unit price; margin is exactly 30% on top.
-        assert!(close(c.price_per_token_out(), c.k_usd_per_token() * 1.3, 1e-12));
+        assert!(close(
+            c.price_per_token_out(),
+            c.k_usd_per_token() * 1.3,
+            1e-12
+        ));
         // Input is billed at `GPN_INPUT_RATE_FRAC` (0.15 today) of the output
         // rate. Derive it from the config so a deliberate change to the frac
         // does not leave a stale assertion behind (this test failed for exactly
@@ -689,7 +695,10 @@ mod tests {
         // rate = out × (1000×frac_bps + 500×10000) / (1500×10000)
         let frac_bps = (c.input_rate_frac.clamp(0.0, 1.0) * 10_000.0).round() as u128;
         let want = out_rate * (1000 * frac_bps + 500 * 10_000) / (1500 * 10_000);
-        assert!(rate >= want - 1 && rate <= want + 1, "rate {rate} vs {want}");
+        assert!(
+            rate >= want - 1 && rate <= want + 1,
+            "rate {rate} vs {want}"
+        );
         // Charged = rate × (P + C) with a full 500-token completion.
         let charged = rate * 1500;
         let exact = out_rate * ((1000.0 * c.input_rate_frac).round() as u128 + 500);
@@ -722,7 +731,11 @@ mod tests {
         let c = PricingConfig::new(PricingModel::Market, 0.10, 3000);
         let usd = c.price_out(3.0, 95.2, 0.65);
         // rental = 1.50; usd/tok = 1.50/(95.2×3600×0.65)×1.30 = 8.75e-6
-        assert!((usd * 1e6 - 8.75).abs() < 1e-2, "legacy $/1M = {}", usd * 1e6);
+        assert!(
+            (usd * 1e6 - 8.75).abs() < 1e-2,
+            "legacy $/1M = {}",
+            usd * 1e6
+        );
         // Throughput ignores the market inputs even if they are absurd.
         let t = throughput();
         assert!(close(
@@ -735,7 +748,10 @@ mod tests {
         // The guardrail can be pointed at the legacy number too: `market` is an
         // explicit opt-in, so it is sanity-checked but not band-checked.
         let legacy_pm = c.price_per_million_out_for(3.0, 95.2, 0.65);
-        assert!((legacy_pm - 8.75).abs() < 1e-2, "legacy guardrail input {legacy_pm}");
+        assert!(
+            (legacy_pm - 8.75).abs() < 1e-2,
+            "legacy guardrail input {legacy_pm}"
+        );
         assert!(c.check_price_usd_per_m(legacy_pm).is_ok());
         // While the same number on the calibrated card is refused.
         assert!(throughput().check_price_usd_per_m(legacy_pm).is_err());
@@ -805,7 +821,11 @@ mod tests {
         for g in reference_gpus() {
             let rate = c.provider_rate_hr(g.gflops, g.mem_bw_gbps, 1.0);
             let earn = c.diffusion_provider_earn_usd(512.0, 512.0, 8.0, 1.0, rate);
-            assert!((earn - buyer / (1.0 + c.margin_frac())).abs() < 1e-12, "{} earns {earn}", g.name);
+            assert!(
+                (earn - buyer / (1.0 + c.margin_frac())).abs() < 1e-12,
+                "{} earns {earn}",
+                g.name
+            );
             // Faster card ⇒ fewer GPU-seconds for the same job (never more).
             let secs = c.diffusion_provider_seconds(512.0, 512.0, 8.0, 1.0, rate);
             assert!(secs > 0.0 && secs <= c.diffusion_seconds(512.0, 512.0, 8.0, 1.0) + 1e-9);
@@ -820,7 +840,9 @@ mod tests {
     fn image_price_moves_with_anchor_and_token_price() {
         let cheap = PricingConfig::new(PricingModel::Throughput, 0.05, 3000);
         let rich = PricingConfig::new(PricingModel::Throughput, 0.10, 3000);
-        assert!((img(&rich, 512.0, 512.0, 8.0) - 2.0 * img(&cheap, 512.0, 512.0, 8.0)).abs() < 1e-12);
+        assert!(
+            (img(&rich, 512.0, 512.0, 8.0) - 2.0 * img(&cheap, 512.0, 512.0, 8.0)).abs() < 1e-12
+        );
         // GPN amount is the USD price ÷ token price, so a 2× token price halves it.
         let g1 = rich.diffusion_price_gpn(512.0, 512.0, 8.0, 1.0, 0.15, 3.0, 0.65);
         let g2 = rich.diffusion_price_gpn(512.0, 512.0, 8.0, 1.0, 0.30, 3.0, 0.65);
@@ -847,13 +869,16 @@ mod tests {
         // Same number the old `image_price_gpn()` produced: 90 s at 512²/8,
         // $3.00/hr oracle market, util 0.65, +20% margin → $0.13846.
         let p = m.diffusion_price_usd(512.0, 512.0, 8.0, 1.0, 3.0, 0.65);
-        assert!((p - 0.138462).abs() < 1e-5, "legacy market image price ${p}");
+        assert!(
+            (p - 0.138462).abs() < 1e-5,
+            "legacy market image price ${p}"
+        );
         // Throughput ignores the market inputs entirely.
         let t = throughput();
         assert!(
             (t.diffusion_price_usd(512.0, 512.0, 8.0, 1.0, 999.0, 0.05)
                 - img(&t, 512.0, 512.0, 8.0))
-                .abs()
+            .abs()
                 < 1e-15
         );
     }

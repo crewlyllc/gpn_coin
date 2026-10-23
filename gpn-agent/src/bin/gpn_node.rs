@@ -1870,7 +1870,10 @@ fn gpu_summary() -> (String, String) {
             let total = info.vram_total_bytes / (1024 * 1024);
             (
                 info.model_name,
-                format!("VRAM {used}/{total} MiB · {}% util · {}C", info.gpu_utilization_percent, info.temperature_celsius as u32),
+                format!(
+                    "VRAM {used}/{total} MiB · {}% util · {}C",
+                    info.gpu_utilization_percent, info.temperature_celsius as u32
+                ),
             )
         }
         _ => ("not detected".into(), String::new()),
@@ -2752,7 +2755,10 @@ async fn main() {
             Arc::new(move || status_doc(&src_cfg, &src_shared));
         match gpn_agent::gui::spawn(opts, source) {
             Ok(h) => {
-                asciiprintln!("  dashboard: {} (loopback only — open it in a browser)", h.url());
+                asciiprintln!(
+                    "  dashboard: {} (loopback only — open it in a browser)",
+                    h.url()
+                );
                 Some(h)
             }
             Err(e) => {
@@ -3141,7 +3147,10 @@ mod idle_cli_tests {
             "600".to_string(),
         ];
         assert_eq!(run_control_verb(&cfg, &argv), Some(2));
-        assert!(!p.exists(), "a rejected request must not write a state file");
+        assert!(
+            !p.exists(),
+            "a rejected request must not write a state file"
+        );
 
         let argv0 = vec!["gpn_node".to_string(), "idle".to_string(), "0".to_string()];
         assert_eq!(run_control_verb(&cfg, &argv0), Some(2));
@@ -3151,11 +3160,7 @@ mod idle_cli_tests {
     fn idle_verb_refuses_when_the_node_is_the_only_authority() {
         let p = isolate("sole");
         let cfg = dead_port_cfg("sole", false);
-        let argv = vec![
-            "gpn_node".to_string(),
-            "idle".to_string(),
-            "60".to_string(),
-        ];
+        let argv = vec!["gpn_node".to_string(), "idle".to_string(), "60".to_string()];
         // Exit 3 = refused by the safety valve; nothing is written.
         assert_eq!(run_control_verb(&cfg, &argv), Some(3));
         assert!(!p.exists(), "a refused idle must not write a state file");
@@ -3165,11 +3170,7 @@ mod idle_cli_tests {
     fn idle_verb_writes_state_and_resume_clears_it_with_force() {
         let p = isolate("force");
         let cfg = dead_port_cfg("force", true);
-        let argv = vec![
-            "gpn_node".to_string(),
-            "idle".to_string(),
-            "45".to_string(),
-        ];
+        let argv = vec!["gpn_node".to_string(), "idle".to_string(), "45".to_string()];
         assert_eq!(run_control_verb(&cfg, &argv), Some(0));
         let st = gpn_agent::idle::read_state_at(&p).expect("state written");
         assert_eq!(st.reason, "cli");

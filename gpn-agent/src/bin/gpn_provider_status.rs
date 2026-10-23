@@ -221,13 +221,12 @@ fn attested_gflops(endpoint: &str, address: &str) -> Option<u64> {
         }
     }
     let answer = account_pubkey(address).and_then(|pk| {
-        rpc_call(
-            endpoint,
-            "state_getStorage",
-            json!([attestation_key(&pk)]),
-        )
-        .and_then(|v| v.as_str().and_then(|s| hex::decode(s.trim_start_matches("0x")).ok()))
-        .and_then(|b| decode_attested_gflops(&b))
+        rpc_call(endpoint, "state_getStorage", json!([attestation_key(&pk)]))
+            .and_then(|v| {
+                v.as_str()
+                    .and_then(|s| hex::decode(s.trim_start_matches("0x")).ok())
+            })
+            .and_then(|b| decode_attested_gflops(&b))
     });
     if let Ok(mut guard) = attest_cache().lock() {
         *guard = Some((answer, Instant::now()));
@@ -1543,10 +1542,9 @@ mod tests {
         // account gets a different one (otherwise every box would advertise
         // the first provider's attestation).
         let a = account_pubkey("5ENqSp5Q65bxfgryZExQDRnV1rEW1qb2UBztvswLamkoUrqj").unwrap();
-        let b = account_pubkey(
-            "0x664c6e12d0eff26c646b764f733f0468d44deea02f856ab9f1b629af06993d01",
-        )
-        .unwrap();
+        let b =
+            account_pubkey("0x664c6e12d0eff26c646b764f733f0468d44deea02f856ab9f1b629af06993d01")
+                .unwrap();
         assert_eq!(a, b);
         assert_eq!(attestation_key(&a), attestation_key(&b));
         let c = account_pubkey("5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty").unwrap();

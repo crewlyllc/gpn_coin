@@ -490,160 +490,160 @@ fn run_channel_job(
     let is_gen = gen.is_some();
     let mut attempt: u32 = 0;
     let (job_id, resp) = loop {
-    attempt += 1;
+        attempt += 1;
 
-    // Price the job under the registry lock, then release it for the HTTP call.
-    let assignment: Assignment = {
-        let mut reg = hub.registry.lock().unwrap();
-        let Some(ch) = reg.channels.get_mut(provider_addr_hex) else {
-            return no("channel disappeared from the registry");
-        };
-        if ch.channel_id != channel_id {
-            return no("channel id changed under us");
-        }
-        let job_id = next_job_id();
-        let deadline = now_ms().saturating_add(hub.job_deadline_ms);
-        if let Some(g) = gen.clone() {
-            match ch.begin_job_gen_for(
-                &hub.signer,
-                provider_pub,
-                job_id,
-                model,
-                prompt,
-                job_kind,
-                g,
-                price,
-                deadline,
-            ) {
-                Ok(a) => {
-                    let _ = reg.save(&hub.path);
-                    a
-                }
-                Err(e) => {
-                    eprintln!("[hub] cannot price gen job on channel {channel_id}: {e}");
-                    return Err(ChannelFail::NotAttempted(format!(
-                        "cannot price gen job on channel {channel_id}: {e}"
-                    )));
-                }
-            }
-        } else {
-            let begun = match billing {
-                Some(rates) => ch.begin_job_billed_for(
-                    &hub.signer,
-                    provider_pub,
-                    job_id,
-                    model,
-                    prompt,
-                    max_tokens,
-                    rates,
-                    700,
-                    price,
-                    deadline,
-                ),
-                None => ch.begin_job_for(
-                    &hub.signer,
-                    provider_pub,
-                    job_id,
-                    model,
-                    prompt,
-                    max_tokens,
-                    700,
-                    price,
-                    deadline,
-                ),
+        // Price the job under the registry lock, then release it for the HTTP call.
+        let assignment: Assignment = {
+            let mut reg = hub.registry.lock().unwrap();
+            let Some(ch) = reg.channels.get_mut(provider_addr_hex) else {
+                return no("channel disappeared from the registry");
             };
-            match begun {
-                Ok(a) => {
-                    let _ = reg.save(&hub.path);
-                    a
+            if ch.channel_id != channel_id {
+                return no("channel id changed under us");
+            }
+            let job_id = next_job_id();
+            let deadline = now_ms().saturating_add(hub.job_deadline_ms);
+            if let Some(g) = gen.clone() {
+                match ch.begin_job_gen_for(
+                    &hub.signer,
+                    provider_pub,
+                    job_id,
+                    model,
+                    prompt,
+                    job_kind,
+                    g,
+                    price,
+                    deadline,
+                ) {
+                    Ok(a) => {
+                        let _ = reg.save(&hub.path);
+                        a
+                    }
+                    Err(e) => {
+                        eprintln!("[hub] cannot price gen job on channel {channel_id}: {e}");
+                        return Err(ChannelFail::NotAttempted(format!(
+                            "cannot price gen job on channel {channel_id}: {e}"
+                        )));
+                    }
                 }
-                Err(e) => {
-                    eprintln!("[hub] cannot price job on channel {channel_id}: {e}");
-                    return Err(ChannelFail::NotAttempted(format!(
-                        "cannot price job on channel {channel_id}: {e}"
-                    )));
+            } else {
+                let begun = match billing {
+                    Some(rates) => ch.begin_job_billed_for(
+                        &hub.signer,
+                        provider_pub,
+                        job_id,
+                        model,
+                        prompt,
+                        max_tokens,
+                        rates,
+                        700,
+                        price,
+                        deadline,
+                    ),
+                    None => ch.begin_job_for(
+                        &hub.signer,
+                        provider_pub,
+                        job_id,
+                        model,
+                        prompt,
+                        max_tokens,
+                        700,
+                        price,
+                        deadline,
+                    ),
+                };
+                match begun {
+                    Ok(a) => {
+                        let _ = reg.save(&hub.path);
+                        a
+                    }
+                    Err(e) => {
+                        eprintln!("[hub] cannot price job on channel {channel_id}: {e}");
+                        return Err(ChannelFail::NotAttempted(format!(
+                            "cannot price job on channel {channel_id}: {e}"
+                        )));
+                    }
                 }
             }
-        }
-    };
-    let job_id = assignment.job_id;
+        };
+        let job_id = assignment.job_id;
 
-    let body = match serde_json::to_string(&assignment) {
-        Ok(b) => b,
-        Err(e) => {
-            expire_pending(hub, provider_addr_hex, job_id);
-            return no(&format!("assignment serialization failed: {e}"));
-        }
-    };
-    let http = match reqwest::blocking::Client::builder()
-        .timeout(Duration::from_millis(hub.job_deadline_ms.max(5_000)))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            abort_pending(hub, provider_addr_hex, job_id);
-            return no(&format!("http client: {e}"));
-        }
-    };
-    let resp = match http.post(&endpoint).body(body).send() {
-        Ok(r) if r.status().is_success() => r,
-        Ok(r) => {
-            let code = r.status().as_u16();
-            let detail = r.text().unwrap_or_default();
-            let msg = format!("provider {provider_addr_hex} /channel/job -> HTTP {code}");
-            eprintln!("[hub] {msg}");
-            // `StaleStateBefore`: the provider's channel moved between our read
-            // and its `accept`. Nothing was committed (it refuses before it
-            // charges), so drop the pending entry and re-price against the
-            // fresh state instead of declaring the channel dead.
-            let stale = code == 409
-                && (detail.contains("state_before") || detail.contains("StaleStateBefore"));
-            if stale {
+        let body = match serde_json::to_string(&assignment) {
+            Ok(b) => b,
+            Err(e) => {
+                expire_pending(hub, provider_addr_hex, job_id);
+                return no(&format!("assignment serialization failed: {e}"));
+            }
+        };
+        let http = match reqwest::blocking::Client::builder()
+            .timeout(Duration::from_millis(hub.job_deadline_ms.max(5_000)))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
                 abort_pending(hub, provider_addr_hex, job_id);
-                if attempt >= STALE_STATE_ATTEMPTS {
-                    eprintln!(
+                return no(&format!("http client: {e}"));
+            }
+        };
+        let resp = match http.post(&endpoint).body(body).send() {
+            Ok(r) if r.status().is_success() => r,
+            Ok(r) => {
+                let code = r.status().as_u16();
+                let detail = r.text().unwrap_or_default();
+                let msg = format!("provider {provider_addr_hex} /channel/job -> HTTP {code}");
+                eprintln!("[hub] {msg}");
+                // `StaleStateBefore`: the provider's channel moved between our read
+                // and its `accept`. Nothing was committed (it refuses before it
+                // charges), so drop the pending entry and re-price against the
+                // fresh state instead of declaring the channel dead.
+                let stale = code == 409
+                    && (detail.contains("state_before") || detail.contains("StaleStateBefore"));
+                if stale {
+                    abort_pending(hub, provider_addr_hex, job_id);
+                    if attempt >= STALE_STATE_ATTEMPTS {
+                        eprintln!(
                         "[hub] job {job_id}: channel state still stale after {attempt} attempt(s) — \
                          not retrying further (nothing was charged)"
                     );
-                    return Err(ChannelFail::NotAttempted(format!(
-                        "{msg}: channel state stayed stale after {attempt} attempts ({detail})"
-                    )));
-                }
-                let backoff_ms = 50u64 << (attempt - 1);
-                eprintln!(
+                        return Err(ChannelFail::NotAttempted(format!(
+                            "{msg}: channel state stayed stale after {attempt} attempts ({detail})"
+                        )));
+                    }
+                    let backoff_ms = 50u64 << (attempt - 1);
+                    eprintln!(
                     "[hub] job {job_id}: stale channel state (attempt {attempt}/{STALE_STATE_ATTEMPTS}) \
                      — re-pricing against the fresh state in {backoff_ms} ms"
                 );
-                std::thread::sleep(Duration::from_millis(backoff_ms));
-                continue;
-            }
-            if (400..500).contains(&code) {
-                // Accept-time rejection: `ProviderChannel::accept` refused the
-                // assignment, so the provider committed nothing. Only an absent
-                // endpoint (404/405/501) is evidence the provider does not
-                // speak the protocol; a 4xx on a real endpoint is a per-job
-                // rejection and must not poison the provider for 60 s.
-                if matches!(code, 404 | 405 | 501) {
-                    hub.mark_unsupported(provider_addr_hex);
+                    std::thread::sleep(Duration::from_millis(backoff_ms));
+                    continue;
                 }
-                abort_pending(hub, provider_addr_hex, job_id);
-                return Err(ChannelFail::NotAttempted(format!("{msg} ({detail})")));
+                if (400..500).contains(&code) {
+                    // Accept-time rejection: `ProviderChannel::accept` refused the
+                    // assignment, so the provider committed nothing. Only an absent
+                    // endpoint (404/405/501) is evidence the provider does not
+                    // speak the protocol; a 4xx on a real endpoint is a per-job
+                    // rejection and must not poison the provider for 60 s.
+                    if matches!(code, 404 | 405 | 501) {
+                        hub.mark_unsupported(provider_addr_hex);
+                    }
+                    abort_pending(hub, provider_addr_hex, job_id);
+                    return Err(ChannelFail::NotAttempted(format!("{msg} ({detail})")));
+                }
+                // 5xx: the provider may have accepted and then crashed mid-run.
+                // Keep the pending entry; do NOT let the caller pay again.
+                return Err(ChannelFail::Ambiguous(format!(
+                    "{msg} (work may have started; not falling back)"
+                )));
             }
-            // 5xx: the provider may have accepted and then crashed mid-run.
-            // Keep the pending entry; do NOT let the caller pay again.
-            return Err(ChannelFail::Ambiguous(format!(
-                "{msg} (work may have started; not falling back)"
-            )));
-        }
-        Err(e) => {
-            let msg = format!("provider {provider_addr_hex} /channel/job unreachable: {e}");
-            eprintln!("[hub] {msg} — falling back");
-            hub.mark_unsupported(provider_addr_hex);
-            abort_pending(hub, provider_addr_hex, job_id);
-            return Err(ChannelFail::NotAttempted(msg));
-        }
-    };
-    break (job_id, resp);
+            Err(e) => {
+                let msg = format!("provider {provider_addr_hex} /channel/job unreachable: {e}");
+                eprintln!("[hub] {msg} — falling back");
+                hub.mark_unsupported(provider_addr_hex);
+                abort_pending(hub, provider_addr_hex, job_id);
+                return Err(ChannelFail::NotAttempted(msg));
+            }
+        };
+        break (job_id, resp);
     };
     let result: JobResultMsg = match resp.json() {
         Ok(v) => v,
@@ -662,7 +662,9 @@ fn run_channel_job(
     let mut reg = hub.registry.lock().unwrap();
     let applied = {
         let Some(ch) = reg.channels.get_mut(provider_addr_hex) else {
-            return Err(ChannelFail::Ambiguous("channel vanished before apply".into()));
+            return Err(ChannelFail::Ambiguous(
+                "channel vanished before apply".into(),
+            ));
         };
         let provider_before = ch.state.balance_provider;
         match ch.complete_job(&result) {
@@ -761,7 +763,6 @@ pub fn try_channel_job(
     )
     .ok()
 }
-
 
 fn expire_pending(hub: &HubCtx, provider: &str, job_id: u64) {
     let mut reg = hub.registry.lock().unwrap();
@@ -990,7 +991,10 @@ mod tests {
         ch.state.balance_provider = trigger - 1;
         assert!(!ch.should_close(trigger, 50_000), "below half the deposit");
         ch.state.balance_provider = trigger;
-        assert!(ch.should_close(trigger, 50_000), "credit reached half the deposit");
+        assert!(
+            ch.should_close(trigger, 50_000),
+            "credit reached half the deposit"
+        );
     }
 
     /// The `close_nonce` flood valve still works on its own.
@@ -1021,7 +1025,10 @@ mod tests {
         assert_eq!(d.ttl, 9000, "≈30 h at 12 s blocks, > 24 h settle interval");
         assert_eq!(d.deposit, 50_000_000_000_000, "50 GPN per (AP, provider)");
         assert_eq!(d.settle_secs, 86_400, "settle every 24 h");
-        assert_eq!(d.close_at, 25_000_000_000_000, "25 GPN = half of a 50 GPN deposit");
+        assert_eq!(
+            d.close_at, 25_000_000_000_000,
+            "25 GPN = half of a 50 GPN deposit"
+        );
         assert_eq!(d.close_at * 2, d.deposit);
         assert_eq!(d.close_nonce, 50_000);
         assert!(
@@ -1030,7 +1037,10 @@ mod tests {
         );
         assert!(d.enabled);
         assert_eq!(d.policy.mode, crate::settle_policy::EscrowMode::Settle);
-        assert_eq!(d.policy.min_gpn, crate::settle_policy::DEFAULT_SETTLE_MIN_GPN);
+        assert_eq!(
+            d.policy.min_gpn,
+            crate::settle_policy::DEFAULT_SETTLE_MIN_GPN
+        );
         drop(d);
 
         std::env::set_var("GPN_HUB_CHANNEL_TTL", "720");

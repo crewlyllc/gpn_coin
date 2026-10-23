@@ -416,7 +416,12 @@ pub fn evaluate(
     observed: &[Multiaddr],
     configured: Option<&Multiaddr>,
 ) -> Verdict {
-    evaluate_with(&GateInputs::new(inbound_peers, listen, observed, configured))
+    evaluate_with(&GateInputs::new(
+        inbound_peers,
+        listen,
+        observed,
+        configured,
+    ))
 }
 
 /// The pure gate decision, including DNS resolution and active probes.
@@ -833,7 +838,9 @@ pub enum SafetyReason {
 impl std::fmt::Display for SafetyReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            SafetyReason::SoloChain => "this node is the only node on the network (0 peers connected)",
+            SafetyReason::SoloChain => {
+                "this node is the only node on the network (0 peers connected)"
+            }
             SafetyReason::DevChain => "this is a dev/solo chain",
             SafetyReason::OnlyAuthority => "this node is the only authority on the chain",
             SafetyReason::TinyNetwork => "this node is one of only two nodes on the network",
@@ -1292,7 +1299,8 @@ async fn full_verdict(
     let Some(cfg_ma) = configured else {
         return passive;
     };
-    let (resolved, stun_mapped, tcp_probe_ok) = probe_configured_endpoint(cfg_ma, stun_server).await;
+    let (resolved, stun_mapped, tcp_probe_ok) =
+        probe_configured_endpoint(cfg_ma, stun_server).await;
     evaluate_with(&GateInputs {
         inbound_peers: inbound,
         listen,
@@ -1336,9 +1344,7 @@ where
             if let Some(cfg_ma) = cfg.public_addr.as_ref() {
                 let stale = cached_probe
                     .as_ref()
-                    .map(|(at, _, _, _)| {
-                        at.elapsed() >= Duration::from_secs(PROBE_REFRESH_SECS)
-                    })
+                    .map(|(at, _, _, _)| at.elapsed() >= Duration::from_secs(PROBE_REFRESH_SECS))
                     .unwrap_or(true);
                 if stale {
                     let (resolved, stun_mapped, tcp_probe_ok) =
@@ -1534,10 +1540,8 @@ mod tests {
     #[test]
     fn host_port_of_accepts_dns_names_and_ips() {
         assert_eq!(
-            host_port_of(&ma(
-                "/dns4/gpn-testnet.duckdns.org/tcp/30333/\
-                 p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo"
-            )),
+            host_port_of(&ma("/dns4/gpn-testnet.duckdns.org/tcp/30333/\
+                 p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo")),
             Some((Host::Dns("gpn-testnet.duckdns.org".into()), 30333))
         );
         assert_eq!(
@@ -1569,7 +1573,11 @@ mod tests {
         });
         assert!(v.dialable, "detail: {}", v.detail);
         assert_eq!(v.evidence, Some(Evidence::ConfiguredAddrObserved));
-        assert!(v.detail.contains("resolves to 142.129.54.88"), "{}", v.detail);
+        assert!(
+            v.detail.contains("resolves to 142.129.54.88"),
+            "{}",
+            v.detail
+        );
     }
 
     #[test]
@@ -1785,7 +1793,10 @@ mod tests {
         assert!(note.contains("no evidence"), "{note}");
         assert!(note.contains("only node on the network"), "{note}");
         assert!(note.contains("GPN_DIALABILITY_SAFETY=0"), "{note}");
-        assert!(note.is_ascii(), "Windows consoles: notice must be ASCII only");
+        assert!(
+            note.is_ascii(),
+            "Windows consoles: notice must be ASCII only"
+        );
     }
 
     #[test]

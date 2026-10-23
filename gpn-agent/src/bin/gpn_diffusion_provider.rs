@@ -139,8 +139,11 @@ fn render_image(
         "output": out_path,
     });
     let req_file = gpn_agent::utils::temp_path(&format!("gpn_diffuse_chan_{job_id}.json"));
-    std::fs::write(&req_file, serde_json::to_vec(&req_json).map_err(|e| e.to_string())?)
-        .map_err(|e| format!("cannot write request: {e}"))?;
+    std::fs::write(
+        &req_file,
+        serde_json::to_vec(&req_json).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("cannot write request: {e}"))?;
     let script = diffuse_script();
     let timeout = diffuse_timeout("image");
     let req_file2 = req_file.clone();
@@ -154,11 +157,12 @@ fn render_image(
             // for VRAM.
             let mut cmd = std::process::Command::new("python3");
             cmd.arg(&script).arg(&req_file2);
-            run_with_watchdog(cmd, timeout, &format!("channel job {job_id}"))
-                .and_then(|(stdout, _)| {
+            run_with_watchdog(cmd, timeout, &format!("channel job {job_id}")).and_then(
+                |(stdout, _)| {
                     serde_json::from_str(&stdout)
                         .map_err(|e| format!("bad helper output: {e} ({stdout})"))
-                })
+                },
+            )
         }
     };
     let _ = std::fs::remove_file(&req_file);
@@ -168,7 +172,12 @@ fn render_image(
 fn serve_channel_job(ctx: &ChannelCtx, body: &str) -> (u16, serde_json::Value) {
     let a: Assignment = match serde_json::from_str(body) {
         Ok(a) => a,
-        Err(e) => return (400, json!({"ok": false, "error": format!("bad assignment: {e}")})),
+        Err(e) => {
+            return (
+                400,
+                json!({"ok": false, "error": format!("bad assignment: {e}")}),
+            )
+        }
     };
     if a.provider != ctx.me {
         return (
@@ -191,8 +200,7 @@ fn serve_channel_job(ctx: &ChannelCtx, body: &str) -> (u16, serde_json::Value) {
         // `accept` would reject with `StaleStateBefore` (observed: HTTP 409 on
         // the first channel-settled image). `state_before` is inside the AP's
         // signature, so it is authoritative and tamper-evident.
-        let mut ch =
-            ProviderChannel::new(a.channel_id, a.deposit, PubKey(a.requestor.0));
+        let mut ch = ProviderChannel::new(a.channel_id, a.deposit, PubKey(a.requestor.0));
         ch.sync_to_assignment(&a);
         println!(
             "[channel] adopting channel {} at nonce {} (requestor balance {})",
@@ -239,10 +247,7 @@ fn serve_channel_job(ctx: &ChannelCtx, body: &str) -> (u16, serde_json::Value) {
             match render_image(a.job_id, &a.model, &a.prompt, &gen, &out_path) {
                 Ok(v) if v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) => {
                     let path = v["artifact"].as_str().unwrap_or(&out_path).to_string();
-                    let media_type = v["media_type"]
-                        .as_str()
-                        .unwrap_or("image/png")
-                        .to_string();
+                    let media_type = v["media_type"].as_str().unwrap_or("image/png").to_string();
                     let sha256 = v["sha256"].as_str().unwrap_or("").to_string();
                     let bytes = std::fs::read(&path).map(|b| b.len() as u64).unwrap_or(0);
                     if bytes == 0 {
@@ -272,7 +277,10 @@ fn serve_channel_job(ctx: &ChannelCtx, body: &str) -> (u16, serde_json::Value) {
                         "render_seconds": started.elapsed().as_secs_f64().round(),
                     }))
                 }
-                Ok(v) => Err(v["error"].as_str().unwrap_or("generation failed").to_string()),
+                Ok(v) => Err(v["error"]
+                    .as_str()
+                    .unwrap_or("generation failed")
+                    .to_string()),
                 Err(e) => {
                     if e.contains("WEDGE") {
                         mark_wedged(a.job_id);
@@ -308,7 +316,12 @@ fn serve_channel_job(ctx: &ChannelCtx, body: &str) -> (u16, serde_json::Value) {
 
 /// Sign a refund (reverts the pre-authorised payment; the requestor pays
 /// nothing) and return the signed message to the AP.
-fn refund(ctx: &ChannelCtx, channel_id: u64, job_id: u64, reason: &str) -> (u16, serde_json::Value) {
+fn refund(
+    ctx: &ChannelCtx,
+    channel_id: u64,
+    job_id: u64,
+    reason: &str,
+) -> (u16, serde_json::Value) {
     let mut store = load_channels(&ctx.state_path);
     let Some(ch) = store.channels.get_mut(&channel_id) else {
         return (
@@ -369,7 +382,8 @@ fn spawn_channel_server(listen: &str, ctx: ChannelCtx) {
 }
 
 fn handle_channel_request(mut req: tiny_http::Request, ctx: &ChannelCtx) {
-    let json_hdr = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
+    let json_hdr =
+        tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
     // Loopback only: the AP submits signed assignments from this box.
     // A public bind would need the on-chain channel check the LLM
     // provider does before accepting a first-sight channel id.
@@ -399,9 +413,8 @@ fn handle_channel_request(mut req: tiny_http::Request, ctx: &ChannelCtx) {
             "provider": ctx.me_hex,
             "channels": ids,
         });
-        let _ = req.respond(
-            tiny_http::Response::from_string(body.to_string()).with_header(json_hdr),
-        );
+        let _ =
+            req.respond(tiny_http::Response::from_string(body.to_string()).with_header(json_hdr));
         return;
     }
     if req.method() == &tiny_http::Method::Post && path == "/channel/job" {
@@ -489,12 +502,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|| std::env::var("GPN_CHANNEL_LISTEN").ok())
         .unwrap_or_else(|| "127.0.0.1:8095".to_string());
     if channel_listen != "off" {
-        let signer = Arc::new(gpn_agent::chain::signer::Sr25519Signer::from_uri(&signer_uri)?);
+        let signer = Arc::new(gpn_agent::chain::signer::Sr25519Signer::from_uri(
+            &signer_uri,
+        )?);
         let state_path = std::env::var("GPN_DIFFUSION_CHANNEL_STORE")
             .map(PathBuf::from)
             .unwrap_or_else(|_| {
                 let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-                PathBuf::from(home).join(".gpn").join("diffusion_channels.json")
+                PathBuf::from(home)
+                    .join(".gpn")
+                    .join("diffusion_channels.json")
             });
         let vram_mb = std::env::var("GPN_VRAM_MB")
             .ok()
@@ -843,44 +860,44 @@ async fn process_once(
     if due(*last_reconcile, Instant::now(), reconcile_ms) {
         *last_reconcile = Some(Instant::now());
         for id in next.saturating_sub(RECONCILE_WINDOW)..next {
-        if let Some((state, _price, _req, provider)) = client.get_job_state(id).await {
-            if provider.as_deref() != Some(me) {
-                continue;
-            }
-            if state == "AwaitingVerification" {
-                // Kind-gate: skip jobs owned by the other provider (shared
-                // signer account means `provider == me` is true for both kinds).
-                // Unknown kinds are still reconciled so orphan zombies get freed.
-                if other_ids.contains(&id) {
+            if let Some((state, _price, _req, provider)) = client.get_job_state(id).await {
+                if provider.as_deref() != Some(me) {
                     continue;
                 }
-                match client.complete_job(id).await {
-                    Ok(()) => {
-                        println!("[provider] reconciled #{id} AwaitingVerification → Completed")
+                if state == "AwaitingVerification" {
+                    // Kind-gate: skip jobs owned by the other provider (shared
+                    // signer account means `provider == me` is true for both kinds).
+                    // Unknown kinds are still reconciled so orphan zombies get freed.
+                    if other_ids.contains(&id) {
+                        continue;
                     }
-                    Err(e) if is_benign_state_err(&e.to_string()) => {
-                        // Already finalized elsewhere — quiet, not an error.
+                    match client.complete_job(id).await {
+                        Ok(()) => {
+                            println!("[provider] reconciled #{id} AwaitingVerification → Completed")
+                        }
+                        Err(e) if is_benign_state_err(&e.to_string()) => {
+                            // Already finalized elsewhere — quiet, not an error.
+                        }
+                        Err(e) => eprintln!("[provider] reconcile #{id} (complete) failed: {e}"),
                     }
-                    Err(e) => eprintln!("[provider] reconcile #{id} (complete) failed: {e}"),
-                }
-            } else if state == "Accepted" && gen_ids.contains(&id) {
-                // Capacity reclaim: an `Accepted` gen job we own that was never
-                // started is a zombie holding a `MaxJobsPerProvider` slot. Our
-                // claim loop only starts `Pending` jobs, so it can never advance
-                // on its own — drive it Accepted → Running → Completed to free
-                // the slot (escrow is refunded by `complete_job`).
-                if let Err(e) = client.start_job(id).await {
-                    eprintln!("[provider] reconcile #{id} (start) failed: {e}");
-                    continue;
-                }
-                match client.complete_job(id).await {
-                    Ok(()) => println!(
-                        "[provider] reconciled #{id} Accepted → Completed (capacity freed)"
-                    ),
-                    Err(e) => eprintln!("[provider] reconcile #{id} (complete) failed: {e}"),
+                } else if state == "Accepted" && gen_ids.contains(&id) {
+                    // Capacity reclaim: an `Accepted` gen job we own that was never
+                    // started is a zombie holding a `MaxJobsPerProvider` slot. Our
+                    // claim loop only starts `Pending` jobs, so it can never advance
+                    // on its own — drive it Accepted → Running → Completed to free
+                    // the slot (escrow is refunded by `complete_job`).
+                    if let Err(e) = client.start_job(id).await {
+                        eprintln!("[provider] reconcile #{id} (start) failed: {e}");
+                        continue;
+                    }
+                    match client.complete_job(id).await {
+                        Ok(()) => println!(
+                            "[provider] reconciled #{id} Accepted → Completed (capacity freed)"
+                        ),
+                        Err(e) => eprintln!("[provider] reconcile #{id} (complete) failed: {e}"),
+                    }
                 }
             }
-        }
         }
     }
 
@@ -929,15 +946,16 @@ async fn process_once(
     // Item #59: bounded + throttled scan (was: full history, every poll).
     let claim_scan_ms = env_millis("GPN_CLAIM_SCAN_MS", DEFAULT_CLAIM_SCAN_MS);
     let claim_window = env_millis("GPN_CLAIM_SCAN_WINDOW", DEFAULT_CLAIM_SCAN_WINDOW);
-    let claimable = if !assigned_ids.is_empty() || due(*last_claim_scan, Instant::now(), claim_scan_ms) {
-        *last_claim_scan = Some(Instant::now());
-        let (from, to) = claim_scan_range(next, claim_window);
-        client
-            .list_claimable_jobs_window(from, to, attested_gflops)
-            .await
-    } else {
-        Vec::new()
-    };
+    let claimable =
+        if !assigned_ids.is_empty() || due(*last_claim_scan, Instant::now(), claim_scan_ms) {
+            *last_claim_scan = Some(Instant::now());
+            let (from, to) = claim_scan_range(next, claim_window);
+            client
+                .list_claimable_jobs_window(from, to, attested_gflops)
+                .await
+        } else {
+            Vec::new()
+        };
     for (job_id, min_gflops) in claimable {
         if !assigned_ids.is_empty() && !assigned_ids.contains(&job_id) {
             continue;
@@ -1096,8 +1114,8 @@ async fn run_job(
         // Acquire INSIDE the blocking task: the wait can be long (up to
         // GPN_GPU_LOCK_TIMEOUT_SECS) and must not park an async worker.
         tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
-            let _yield = gpn_agent::gpu_yield::GpuYieldGuard::acquire()
-                .map_err(|e| e.to_string())?;
+            let _yield =
+                gpn_agent::gpu_yield::GpuYieldGuard::acquire().map_err(|e| e.to_string())?;
             let mut cmd = std::process::Command::new("python3");
             cmd.arg(&script).arg(&req_file2);
             let (stdout, _stderr) = run_with_watchdog(cmd, timeout, &format!("job {id}"))?;
@@ -1211,7 +1229,10 @@ mod tests {
     fn claim_scan_only_reads_the_newest_window() {
         // The whole point of #59: 6 371 ids must not become 6 371 RPCs.
         assert_eq!(claim_scan_range(6371, 512), (5859, 6371));
-        assert_eq!(claim_scan_range(6371, 512).1 - claim_scan_range(6371, 512).0, 512);
+        assert_eq!(
+            claim_scan_range(6371, 512).1 - claim_scan_range(6371, 512).0,
+            512
+        );
         // A young chain scans everything from zero (no negative/undersized start).
         assert_eq!(claim_scan_range(7, 512), (0, 7));
         assert_eq!(claim_scan_range(0, 512), (0, 0));
@@ -1227,11 +1248,7 @@ mod tests {
         // Just ran => not due (this is what stops the per-2 s RPC storm).
         assert!(!due(Some(now), now, 30_000));
         // Interval elapsed => due again.
-        assert!(due(
-            Some(now - Duration::from_millis(30_001)),
-            now,
-            30_000
-        ));
+        assert!(due(Some(now - Duration::from_millis(30_001)), now, 30_000));
         // A stamp in the future (clock jumped backwards) must not panic, and must
         // not be read as "a huge elapsed time" either — it simply waits.
         assert!(!due(Some(now + Duration::from_secs(3600)), now, 30_000));

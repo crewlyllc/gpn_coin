@@ -95,11 +95,17 @@ fn idle_state_survives_reads_and_expires_to_active() {
     let st = idle::start_at(&p, 60, "gaming", now).unwrap();
     assert_eq!(st.until, now + 3_600);
     assert_eq!(idle::current().map(|s| s.until), Some(st.until));
-    assert!(!idle::claims_allowed(), "providers must not claim while idle");
+    assert!(
+        !idle::claims_allowed(),
+        "providers must not claim while idle"
+    );
     assert!(!idle::refusal_reason(Some(4), false).is_some());
 
     // Restarting the process does not lose it: the file is the state.
-    assert_eq!(idle::current().map(|s| s.reason), Some("gaming".to_string()));
+    assert_eq!(
+        idle::current().map(|s| s.reason),
+        Some("gaming".to_string())
+    );
 
     // A file that expired while the node was down reads as ACTIVE and is pruned.
     idle::write_state(
@@ -111,7 +117,10 @@ fn idle_state_survives_reads_and_expires_to_active() {
         },
     )
     .unwrap();
-    assert!(idle::current().is_none(), "expired file must read as active");
+    assert!(
+        idle::current().is_none(),
+        "expired file must read as active"
+    );
     assert!(idle::claims_allowed());
     assert!(!p.exists(), "expired file is pruned on read");
 
@@ -153,7 +162,10 @@ fn dashboard_endpoints_over_http() {
     // GET / — the page itself (embedded, no external asset).
     let (code, body) = http(addr, "GET", "/", "");
     assert_eq!(code, 200);
-    assert!(body.contains("Idle mode"), "page must render the idle panel");
+    assert!(
+        body.contains("Idle mode"),
+        "page must render the idle panel"
+    );
     assert!(!body.contains("https://cdn"), "no CDN assets allowed");
 
     // GET /api/status — 200 with the status document + idle block.
@@ -177,7 +189,11 @@ fn dashboard_endpoints_over_http() {
     assert!(sv["idle"]["remaining_secs"].as_u64().unwrap() > 7_000);
 
     // POST /api/idle with a bad body — 400, state untouched.
-    for bad in [r#"{"minutes":0}"#, r#"{"minutes":999}"#, r#"{"minutes":"1h"}"#] {
+    for bad in [
+        r#"{"minutes":0}"#,
+        r#"{"minutes":999}"#,
+        r#"{"minutes":"1h"}"#,
+    ] {
         let (code, body) = http(addr, "POST", "/api/idle", bad);
         assert_eq!(code, 400, "{bad} → {code} {body}");
         assert!(body.contains("\"ok\":false"));
@@ -230,6 +246,9 @@ fn dashboard_refuses_non_loopback_binds() {
             force_idle: false,
             idle_path: Some(p.clone()),
         };
-        assert!(gui::spawn(o, src(Some(1))).is_err(), "{bad} must be refused");
+        assert!(
+            gui::spawn(o, src(Some(1))).is_err(),
+            "{bad} must be refused"
+        );
     }
 }

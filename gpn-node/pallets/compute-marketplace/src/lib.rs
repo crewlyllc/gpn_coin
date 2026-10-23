@@ -1612,9 +1612,8 @@ pub mod pallet {
             // `price_per_token × actual_tokens`. No rate at all => flat price.
             let charge: BalanceOf<T> = {
                 let cap: u128 = escrow.try_into().unwrap_or(u128::MAX);
-                let converted = |raw: u128| -> BalanceOf<T> {
-                    raw.min(cap).try_into().unwrap_or(escrow)
-                };
+                let converted =
+                    |raw: u128| -> BalanceOf<T> { raw.min(cap).try_into().unwrap_or(escrow) };
                 match <JobBillingV2<T>>::get(job_id) {
                     Some(bill) => {
                         if bill.input_price_per_token > 0 || bill.output_price_per_token > 0 {
@@ -2634,14 +2633,8 @@ mod tests {
 
             MarketPallet::accept_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
             MarketPallet::start_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
-            MarketPallet::submit_result_v2(
-                RuntimeOrigin::signed(BOB),
-                job_id,
-                [7u8; 32],
-                100,
-                20,
-            )
-            .unwrap();
+            MarketPallet::submit_result_v2(RuntimeOrigin::signed(BOB), job_id, [7u8; 32], 100, 20)
+                .unwrap();
 
             let alice_before = pallet_balances::Pallet::<Test>::free_balance(ALICE);
             let bob_before = pallet_balances::Pallet::<Test>::free_balance(BOB);
@@ -2688,14 +2681,8 @@ mod tests {
             MarketPallet::start_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
             // 50 prompt + 500 output tokens reported; output bills as 10.
             // raw = 1 * 50 + 10 * 10 = 150, well inside the 1_000 escrow.
-            MarketPallet::submit_result_v2(
-                RuntimeOrigin::signed(BOB),
-                job_id,
-                [7u8; 32],
-                50,
-                500,
-            )
-            .unwrap();
+            MarketPallet::submit_result_v2(RuntimeOrigin::signed(BOB), job_id, [7u8; 32], 50, 500)
+                .unwrap();
             let bob_before = pallet_balances::Pallet::<Test>::free_balance(BOB);
             MarketPallet::complete_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
             // charge 150 -> fee 1 (1% floors) -> provider 149.
@@ -2764,14 +2751,8 @@ mod tests {
             let job_id = NextJobId::<Test>::get() - 1;
             MarketPallet::accept_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
             MarketPallet::start_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
-            MarketPallet::submit_result_v2(
-                RuntimeOrigin::signed(BOB),
-                job_id,
-                [7u8; 32],
-                30,
-                20,
-            )
-            .unwrap();
+            MarketPallet::submit_result_v2(RuntimeOrigin::signed(BOB), job_id, [7u8; 32], 30, 20)
+                .unwrap();
             assert_eq!(JobBilling::<Test>::get(job_id), (2, 100, 50));
             assert!(JobBillingV2::<Test>::get(job_id).is_none());
 

@@ -687,9 +687,7 @@ impl HubChannel {
         price: u128,
         deadline_ms: u64,
     ) -> Result<Assignment, HubError> {
-        let mut a = self.begin_job(
-            signer, job_id, model, prompt, 0, 0, price, deadline_ms,
-        )?;
+        let mut a = self.begin_job(signer, job_id, model, prompt, 0, 0, price, deadline_ms)?;
         a.provider = provider;
         a.job_kind = job_kind.to_string();
         a.gen = Some(gen);
@@ -1594,7 +1592,9 @@ mod tests {
             )
             .unwrap();
         other.sync_to_assignment(&a4);
-        other.accept(&a4).expect("adopting the AP's pre-state must work");
+        other
+            .accept(&a4)
+            .expect("adopting the AP's pre-state must work");
         assert_eq!(other.state.nonce, 4);
         // A replayed OLD assignment must not roll the mirror back.
         let stale = ch
@@ -1613,7 +1613,13 @@ mod tests {
         rates: BillingRates,
         max_tokens: u32,
         price: u128,
-    ) -> (u128, Sr25519Signer, Sr25519Signer, HubChannel, ProviderChannel) {
+    ) -> (
+        u128,
+        Sr25519Signer,
+        Sr25519Signer,
+        HubChannel,
+        ProviderChannel,
+    ) {
         let deposit = price.saturating_mul(2).max(10_000);
         let (ap, prov, mut ch, mut pch) = setup(deposit);
         let a = ch
@@ -1807,7 +1813,10 @@ mod tests {
             &assignment_payload(&tampered),
             &a.sig_requestor
         ));
-        assert_eq!(pch.accept(&tampered), Err(HubError::InvalidRequestorSignature));
+        assert_eq!(
+            pch.accept(&tampered),
+            Err(HubError::InvalidRequestorSignature)
+        );
         assert!(pch.accept(&a).is_ok());
     }
 

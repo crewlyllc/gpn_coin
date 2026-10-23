@@ -196,14 +196,11 @@ pub fn handle(
         }
 
         ("POST", "/api/idle") => {
-            let parsed: Value = match serde_json::from_str(if body.trim().is_empty() {
-                "{}"
-            } else {
-                body
-            }) {
-                Ok(v) => v,
-                Err(e) => return Reply::error(400, format!("invalid JSON body: {e}")),
-            };
+            let parsed: Value =
+                match serde_json::from_str(if body.trim().is_empty() { "{}" } else { body }) {
+                    Ok(v) => v,
+                    Err(e) => return Reply::error(400, format!("invalid JSON body: {e}")),
+                };
             let Some(minutes) = parsed.get("minutes").and_then(Value::as_u64) else {
                 return Reply::error(
                     400,
@@ -290,10 +287,7 @@ pub fn handle(
 ///
 /// The returned handle owns the accept loop; set the `AtomicBool` to stop it
 /// (tests do this; the supervisor just leaks it for the process lifetime).
-pub fn spawn(
-    opts: GuiOptions,
-    source: Arc<dyn StatusSource>,
-) -> Result<GuiHandle, String> {
+pub fn spawn(opts: GuiOptions, source: Arc<dyn StatusSource>) -> Result<GuiHandle, String> {
     let listen = check_loopback(&opts.listen)?;
     let server = Server::http(&listen).map_err(|e| format!("cannot bind {listen}: {e}"))?;
     let addr = server
@@ -425,7 +419,14 @@ mod tests {
     #[test]
     fn idle_then_resume_is_a_200_round_trip() {
         let o = opts("roundtrip");
-        let r = handle("POST", "/api/idle", r#"{"minutes":60}"#, &source(Some(3)), &o, 1_000);
+        let r = handle(
+            "POST",
+            "/api/idle",
+            r#"{"minutes":60}"#,
+            &source(Some(3)),
+            &o,
+            1_000,
+        );
         assert_eq!(r.code, 200, "{}", r.body);
         let v: Value = serde_json::from_str(&r.body).unwrap();
         assert_eq!(v["ok"], true);
@@ -433,9 +434,10 @@ mod tests {
         assert_eq!(v["idle"]["active"], true);
 
         // Status now reports the countdown.
-        let s: Value =
-            serde_json::from_str(&handle("GET", "/api/status", "", &source(Some(3)), &o, 1_500).body)
-                .unwrap();
+        let s: Value = serde_json::from_str(
+            &handle("GET", "/api/status", "", &source(Some(3)), &o, 1_500).body,
+        )
+        .unwrap();
         assert_eq!(s["idle"]["active"], true);
         assert_eq!(s["idle"]["remaining_secs"], 3_100);
 
@@ -447,26 +449,36 @@ mod tests {
         assert_eq!(v["idle"]["active"], false);
 
         // Resume again is idempotent (200, resumed=false).
-        let v: Value =
-            serde_json::from_str(&handle("POST", "/api/resume", "", &source(Some(3)), &o, 1_700).body)
-                .unwrap();
+        let v: Value = serde_json::from_str(
+            &handle("POST", "/api/resume", "", &source(Some(3)), &o, 1_700).body,
+        )
+        .unwrap();
         assert_eq!(v["resumed"], false);
     }
 
     #[test]
     fn auto_resume_at_the_deadline_is_visible_in_status() {
         let o = opts("deadline");
-        handle("POST", "/api/idle", r#"{"minutes":1}"#, &source(Some(1)), &o, 10_000);
+        handle(
+            "POST",
+            "/api/idle",
+            r#"{"minutes":1}"#,
+            &source(Some(1)),
+            &o,
+            10_000,
+        );
         // Just before: idle.
-        let s: Value =
-            serde_json::from_str(&handle("GET", "/api/status", "", &source(Some(1)), &o, 10_059).body)
-                .unwrap();
+        let s: Value = serde_json::from_str(
+            &handle("GET", "/api/status", "", &source(Some(1)), &o, 10_059).body,
+        )
+        .unwrap();
         assert_eq!(s["idle"]["active"], true);
         assert_eq!(s["idle"]["remaining_secs"], 1);
         // At the boundary: active, and the file is gone.
-        let s: Value =
-            serde_json::from_str(&handle("GET", "/api/status", "", &source(Some(1)), &o, 10_060).body)
-                .unwrap();
+        let s: Value = serde_json::from_str(
+            &handle("GET", "/api/status", "", &source(Some(1)), &o, 10_060).body,
+        )
+        .unwrap();
         assert_eq!(s["idle"]["active"], false);
         assert!(!o.idle_path.as_ref().unwrap().exists());
     }
@@ -483,15 +495,29 @@ mod tests {
             r#"not json"#,
         ] {
             let r = handle("POST", "/api/idle", body, &source(Some(2)), &o, 1_000);
-            assert_eq!(r.code, 400, "body {body} must be a 400, got {} {}", r.code, r.body);
-            assert!(!o.idle_path.as_ref().unwrap().exists(), "a 400 must not write state");
+            assert_eq!(
+                r.code, 400,
+                "body {body} must be a 400, got {} {}",
+                r.code, r.body
+            );
+            assert!(
+                !o.idle_path.as_ref().unwrap().exists(),
+                "a 400 must not write state"
+            );
         }
     }
 
     #[test]
     fn over_long_idle_names_the_maximum() {
         let o = opts("toolong");
-        let r = handle("POST", "/api/idle", r#"{"minutes":600}"#, &source(Some(2)), &o, 1_000);
+        let r = handle(
+            "POST",
+            "/api/idle",
+            r#"{"minutes":600}"#,
+            &source(Some(2)),
+            &o,
+            1_000,
+        );
         assert_eq!(r.code, 400);
         assert!(r.body.contains("360"), "{}", r.body);
     }
@@ -499,14 +525,28 @@ mod tests {
     #[test]
     fn a_lone_node_is_refused_with_409_and_can_be_forced() {
         let o = opts("sole");
-        let r = handle("POST", "/api/idle", r#"{"minutes":60}"#, &source(Some(0)), &o, 1_000);
+        let r = handle(
+            "POST",
+            "/api/idle",
+            r#"{"minutes":60}"#,
+            &source(Some(0)),
+            &o,
+            1_000,
+        );
         assert_eq!(r.code, 409, "{}", r.body);
         let v: Value = serde_json::from_str(&r.body).unwrap();
         assert_eq!(v["refused"], "sole-authority");
         assert!(!o.idle_path.as_ref().unwrap().exists());
 
         // Unreadable peer count (node starting / RPC down) is refused too.
-        let r = handle("POST", "/api/idle", r#"{"minutes":60}"#, &source(None), &o, 1_000);
+        let r = handle(
+            "POST",
+            "/api/idle",
+            r#"{"minutes":60}"#,
+            &source(None),
+            &o,
+            1_000,
+        );
         assert_eq!(r.code, 409);
 
         // Force override.
@@ -514,22 +554,41 @@ mod tests {
             force_idle: true,
             ..o.clone()
         };
-        let r = handle("POST", "/api/idle", r#"{"minutes":60}"#, &source(Some(0)), &forced, 1_000);
+        let r = handle(
+            "POST",
+            "/api/idle",
+            r#"{"minutes":60}"#,
+            &source(Some(0)),
+            &forced,
+            1_000,
+        );
         assert_eq!(r.code, 200, "{}", r.body);
     }
 
     #[test]
     fn unknown_routes_are_404_and_other_methods_405() {
         let o = opts("routes");
-        assert_eq!(handle("GET", "/nope", "", &source(Some(1)), &o, 1).code, 404);
-        assert_eq!(handle("POST", "/api/status", "", &source(Some(1)), &o, 1).code, 404);
-        assert_eq!(handle("DELETE", "/api/idle", "", &source(Some(1)), &o, 1).code, 405);
+        assert_eq!(
+            handle("GET", "/nope", "", &source(Some(1)), &o, 1).code,
+            404
+        );
+        assert_eq!(
+            handle("POST", "/api/status", "", &source(Some(1)), &o, 1).code,
+            404
+        );
+        assert_eq!(
+            handle("DELETE", "/api/idle", "", &source(Some(1)), &o, 1).code,
+            405
+        );
     }
 
     #[test]
     fn query_strings_do_not_break_routes() {
         let o = opts("query");
-        assert_eq!(handle("GET", "/api/status?x=1", "", &source(Some(1)), &o, 1).code, 200);
+        assert_eq!(
+            handle("GET", "/api/status?x=1", "", &source(Some(1)), &o, 1).code,
+            200
+        );
     }
 
     #[test]
@@ -538,7 +597,12 @@ mod tests {
         assert!(check_loopback("127.0.0.1:0").is_ok());
         assert_eq!(check_loopback("localhost:8099").unwrap(), "127.0.0.1:8099");
         assert!(check_loopback("[::1]:8099").is_ok());
-        for bad in ["0.0.0.0:8099", "192.168.1.10:8099", "10.0.0.5:8099", "example.com:8099"] {
+        for bad in [
+            "0.0.0.0:8099",
+            "192.168.1.10:8099",
+            "10.0.0.5:8099",
+            "example.com:8099",
+        ] {
             assert!(check_loopback(bad).is_err(), "{bad} must be refused");
         }
         assert!(check_loopback("nonsense").is_err());

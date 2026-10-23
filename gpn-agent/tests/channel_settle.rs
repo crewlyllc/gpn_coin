@@ -62,9 +62,8 @@ fn start_stub(
                 continue;
             }
             if req.method() != &tiny_http::Method::Post || path != "/channel/job" {
-                let _ = req.respond(
-                    tiny_http::Response::from_string("not found").with_status_code(404),
-                );
+                let _ = req
+                    .respond(tiny_http::Response::from_string("not found").with_status_code(404));
                 continue;
             }
             hits_c.fetch_add(1, Ordering::SeqCst);
@@ -101,7 +100,8 @@ fn start_stub(
             if behaviour == Behaviour::Reject409 {
                 let _ = req.respond(
                     tiny_http::Response::from_string(
-                        serde_json::json!({"ok": false, "error": "assignment rejected"}).to_string(),
+                        serde_json::json!({"ok": false, "error": "assignment rejected"})
+                            .to_string(),
                     )
                     .with_status_code(409),
                 );
@@ -154,18 +154,9 @@ fn fixture(behaviour: Behaviour, enabled: bool) -> Fixture {
     let ap = Sr25519Signer::from_uri("//Alice").unwrap();
     let prov = Arc::new(Sr25519Signer::from_uri("//Bob").unwrap());
     let provider_key = PubKey(prov.public_key()).to_hex();
-    let stub = start_stub(
-        behaviour,
-        PubKey(ap.public_key()),
-        prov.clone(),
-        DEPOSIT,
-    );
+    let stub = start_stub(behaviour, PubKey(ap.public_key()), prov.clone(), DEPOSIT);
 
-    let dir = std::env::temp_dir().join(format!(
-        "gpn-chan-{}-{}",
-        std::process::id(),
-        stub.port
-    ));
+    let dir = std::env::temp_dir().join(format!("gpn-chan-{}-{}", std::process::id(), stub.port));
     let _ = std::fs::create_dir_all(&dir);
     let state_path = dir.join("hub_channels.json");
 
@@ -295,7 +286,10 @@ fn provider_failure_signs_a_refund_so_fallback_cannot_double_charge() {
         Ok(_) => panic!("a refunded job is not a success"),
     }
     let ch = channel(&f);
-    assert_eq!(ch.state.balance_provider, 0, "refund restored the provider balance");
+    assert_eq!(
+        ch.state.balance_provider, 0,
+        "refund restored the provider balance"
+    );
     assert_eq!(ch.state.balance_requestor, DEPOSIT);
     assert_eq!(ch.state.nonce, 2, "refund advances the nonce by two");
     assert_eq!(ch.pending_len(), 0, "refunded job is not left pending");
@@ -307,11 +301,18 @@ fn provider_failure_signs_a_refund_so_fallback_cannot_double_charge() {
 fn rejected_assignment_aborts_the_pending_entry() {
     let f = fixture(Behaviour::Reject409, true);
     match run(&f, 10) {
-        Err(e) => assert!(e.fallback_ok(), "a 4xx at accept-time means nothing was paid"),
+        Err(e) => assert!(
+            e.fallback_ok(),
+            "a 4xx at accept-time means nothing was paid"
+        ),
         Ok(_) => panic!("provider rejected the assignment"),
     }
     let ch = channel(&f);
-    assert_eq!(ch.pending_len(), 0, "rejected assignment must not stay pending");
+    assert_eq!(
+        ch.pending_len(),
+        0,
+        "rejected assignment must not stay pending"
+    );
     assert_eq!(ch.state.nonce, 0, "no state was advanced");
     assert_eq!(
         f.stub.hits.load(Ordering::SeqCst),
@@ -385,7 +386,10 @@ fn concurrent_jobs_on_one_channel_take_turns_instead_of_racing() {
     }
     let ch = channel(&f);
     assert_eq!(ch.state.balance_provider, 20, "both jobs were paid");
-    assert_eq!(ch.state.nonce, 2, "one signed state update per job, no collision");
+    assert_eq!(
+        ch.state.nonce, 2,
+        "one signed state update per job, no collision"
+    );
     assert_eq!(ch.pending_len(), 0);
     assert_eq!(
         f.stub.hits.load(Ordering::SeqCst),
@@ -440,7 +444,10 @@ fn a_billed_job_charges_actual_usage_through_the_real_wire_path() {
     assert_eq!(out.charge, 430);
     assert_eq!(out.usage, Some((3, 4)));
     let ch = channel(&f);
-    assert_eq!(ch.state.balance_provider, 430, "charged actual, not the ceiling");
+    assert_eq!(
+        ch.state.balance_provider, 430,
+        "charged actual, not the ceiling"
+    );
     assert_eq!(ch.state.balance_requestor, DEPOSIT - 430);
     assert_eq!(ch.state.nonce, 1, "a cheaper settlement is the same update");
     assert_eq!(ch.pending_len(), 0);

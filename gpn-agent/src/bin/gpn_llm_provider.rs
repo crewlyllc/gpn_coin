@@ -1463,18 +1463,13 @@ const STARTUP_READY_DELAY_MS: u64 = 1_000;
 /// can neither skip it (0 tries) nor hang startup for hours.
 fn startup_ready_budget(tries: Option<u64>, delay_ms: Option<u64>) -> (u32, u64) {
     let tries = tries.unwrap_or(STARTUP_READY_TRIES as u64).clamp(1, 600) as u32;
-    let delay = delay_ms
-        .unwrap_or(STARTUP_READY_DELAY_MS)
-        .clamp(50, 5_000);
+    let delay = delay_ms.unwrap_or(STARTUP_READY_DELAY_MS).clamp(50, 5_000);
     (tries, delay)
 }
 
 fn startup_ready_budget_from_env() -> (u32, u64) {
     let num = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<u64>().ok());
-    startup_ready_budget(
-        num("GPN_STARTUP_READY_TRIES"),
-        num("GPN_STARTUP_READY_MS"),
-    )
+    startup_ready_budget(num("GPN_STARTUP_READY_TRIES"), num("GPN_STARTUP_READY_MS"))
 }
 
 /// A pass may only run when the tip is **readable**. `Some(0)` is legitimate (a
@@ -1509,7 +1504,9 @@ fn attest_plan(rec: Option<(u64, u64)>, head: u64, refresh_blocks: u64) -> Attes
     match rec {
         None => AttestPlan::Attest,
         Some((0, _)) => AttestPlan::Attest,
-        Some((_, at)) if head > at && head.saturating_sub(at) > refresh_blocks => AttestPlan::Attest,
+        Some((_, at)) if head > at && head.saturating_sub(at) > refresh_blocks => {
+            AttestPlan::Attest
+        }
         Some(_) => AttestPlan::Skip,
     }
 }
@@ -1582,11 +1579,10 @@ async fn maybe_refresh_attestation(client: &ChainClient, addr: &str) {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0);
-            let measured = tokio::task::spawn_blocking(move || {
-                gpn_agent::gpu::measure_gflops(device)
-            })
-            .await
-            .unwrap_or_else(|e| Err(format!("measurement task failed: {e}")));
+            let measured =
+                tokio::task::spawn_blocking(move || gpn_agent::gpu::measure_gflops(device))
+                    .await
+                    .unwrap_or_else(|e| Err(format!("measurement task failed: {e}")));
             let gflops = match measured {
                 Ok(g) if g > 0 => g,
                 Ok(_) => {
@@ -1614,7 +1610,10 @@ async fn maybe_refresh_attestation(client: &ChainClient, addr: &str) {
                 return;
             }
             println!("[attest] measured {gflops} GFLOPS — submitting a fresh attestation");
-            let challenge = client.get_attestation_challenge().await.unwrap_or([0u8; 32]);
+            let challenge = client
+                .get_attestation_challenge()
+                .await
+                .unwrap_or([0u8; 32]);
             let (model, _tflops) = gpn_agent::gpu::detect_gpu_capability();
             let info = gpn_agent::gpu::GPUInfo {
                 model_name: model,
@@ -1663,11 +1662,7 @@ fn warn_chain_unreadable_once() {
 }
 
 /// Bounded startup wait for a readable `NextJobId`.
-async fn wait_for_chain_ready(
-    client: &ChainClient,
-    tries: u32,
-    delay_ms: u64,
-) -> Option<u64> {
+async fn wait_for_chain_ready(client: &ChainClient, tries: u32, delay_ms: u64) -> Option<u64> {
     for attempt in 0..tries.max(1) {
         if let Some(tip) = client.try_get_next_job_id().await {
             return Some(tip);
@@ -2346,8 +2341,7 @@ async fn run_job(
     // gpn_diffusion_provider (same box, different process) now makes us WAIT
     // for the GPU instead of colliding with it in VRAM. The blocking acquire
     // runs off the async runtime so a long wait cannot stall other tasks.
-    let gpu = match tokio::task::spawn_blocking(gpn_agent::gpu_yield::GpuYieldGuard::acquire)
-        .await
+    let gpu = match tokio::task::spawn_blocking(gpn_agent::gpu_yield::GpuYieldGuard::acquire).await
     {
         Ok(Ok(g)) => g,
         Ok(Err(e)) => {
@@ -2866,7 +2860,10 @@ mod settled_cache_tests {
         assert_eq!(startup_ready_budget(None, None), (20, 1_000));
         // Garbage/absurd values are clamped, never a zero-attempt "wait".
         assert_eq!(startup_ready_budget(Some(0), Some(0)), (1, 50));
-        assert_eq!(startup_ready_budget(Some(10_000), Some(10_000_000)), (600, 5_000));
+        assert_eq!(
+            startup_ready_budget(Some(10_000), Some(10_000_000)),
+            (600, 5_000)
+        );
         // Honest values pass through untouched.
         assert_eq!(startup_ready_budget(Some(5), Some(250)), (5, 250));
     }
@@ -2879,20 +2876,38 @@ mod settled_cache_tests {
         assert_eq!(attest_plan(None, 175_000, 7_200), AttestPlan::Attest);
         // A zeroed record is a measurement that failed somewhere — repair it
         // even if it was written a minute ago (item #5's whole point).
-        assert_eq!(attest_plan(Some((0, 175_000)), 175_001, 7_200), AttestPlan::Attest);
+        assert_eq!(
+            attest_plan(Some((0, 175_000)), 175_001, 7_200),
+            AttestPlan::Attest
+        );
         // Current record: re-attesting would burn a tx and a GEMM run for
         // nothing. This is the steady state — startups must be quiet.
-        assert_eq!(attest_plan(Some((30_000, 170_000)), 175_000, 7_200), AttestPlan::Skip);
+        assert_eq!(
+            attest_plan(Some((30_000, 170_000)), 175_000, 7_200),
+            AttestPlan::Skip
+        );
         // At exactly the refresh age, still current (strictly older re-attests).
-        assert_eq!(attest_plan(Some((30_000, 167_800)), 175_000, 7_200), AttestPlan::Skip);
+        assert_eq!(
+            attest_plan(Some((30_000, 167_800)), 175_000, 7_200),
+            AttestPlan::Skip
+        );
         // One block past it: stale.
-        assert_eq!(attest_plan(Some((30_000, 167_799)), 175_000, 7_200), AttestPlan::Attest);
+        assert_eq!(
+            attest_plan(Some((30_000, 167_799)), 175_000, 7_200),
+            AttestPlan::Attest
+        );
         // box1's live record: 188 GFLOPS written at block 51 on a 175k chain.
-        assert_eq!(attest_plan(Some((188, 51)), 175_000, 7_200), AttestPlan::Attest);
+        assert_eq!(
+            attest_plan(Some((188, 51)), 175_000, 7_200),
+            AttestPlan::Attest
+        );
         // Unreadable head (0) is NOT evidence of staleness — no spurious tx on
         // a cold start, and a record dated in the future never "ages".
         assert_eq!(attest_plan(Some((30_000, 51)), 0, 7_200), AttestPlan::Skip);
-        assert_eq!(attest_plan(Some((30_000, 999_999)), 175_000, 7_200), AttestPlan::Skip);
+        assert_eq!(
+            attest_plan(Some((30_000, 999_999)), 175_000, 7_200),
+            AttestPlan::Skip
+        );
     }
 
     #[test]

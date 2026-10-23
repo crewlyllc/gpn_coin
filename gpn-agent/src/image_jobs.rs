@@ -82,7 +82,18 @@ pub struct ImageJob {
 }
 
 impl ImageJob {
-    pub fn new(id: String, prompt: &str, model: &str, width: u32, height: u32, steps: u32, seed: i64, n: u32, estimated_seconds: f64, price_gpn: f64) -> Self {
+    pub fn new(
+        id: String,
+        prompt: &str,
+        model: &str,
+        width: u32,
+        height: u32,
+        steps: u32,
+        seed: i64,
+        n: u32,
+        estimated_seconds: f64,
+        price_gpn: f64,
+    ) -> Self {
         let now = now_secs();
         Self {
             id,
@@ -248,7 +259,10 @@ pub fn new_id(prompt: &str) -> String {
     h.update(std::process::id().to_le_bytes());
     h.update(prompt.as_bytes());
     let out = h.finalize();
-    out[..ID_LEN / 2].iter().map(|b| format!("{b:02x}")).collect()
+    out[..ID_LEN / 2]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// Ids are hex-only and exactly 32 chars — the path-traversal guard.
@@ -398,7 +412,11 @@ pub fn is_png(bytes: &[u8]) -> bool {
 /// 5000² should be told the price/VRAM cannot cover it instead of silently
 /// getting something else.
 pub fn parse_size(s: &str) -> Result<(u32, u32), String> {
-    let t = s.trim().to_ascii_lowercase().replace('*', "x").replace(' ', "");
+    let t = s
+        .trim()
+        .to_ascii_lowercase()
+        .replace('*', "x")
+        .replace(' ', "");
     let (w, h) = t
         .split_once('x')
         .ok_or_else(|| format!("size must look like 512x512, got '{s}'"))?;
@@ -469,7 +487,10 @@ mod tests {
         assert!(sync_refusal(30.0).is_none());
         assert!(sync_refusal(60.0).is_none());
         let msg = sync_refusal(60.1).expect("over budget must refuse");
-        assert!(msg.contains("poll"), "the refusal must point at the poll path");
+        assert!(
+            msg.contains("poll"),
+            "the refusal must point at the poll path"
+        );
         assert!(sync_refusal(120.0).unwrap().contains("120.0"));
     }
 
@@ -488,7 +509,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::env::set_var("GPN_IMAGE_DIR", &dir);
         let id = new_id("roundtrip");
-        let mut job = ImageJob::new(id.clone(), "cat", "sd-turbo", 512, 512, 8, 0, 1, 30.0, 0.0076);
+        let mut job = ImageJob::new(
+            id.clone(),
+            "cat",
+            "sd-turbo",
+            512,
+            512,
+            8,
+            0,
+            1,
+            30.0,
+            0.0076,
+        );
         save(&job).unwrap();
         assert_eq!(get(&id).unwrap().status, "pending");
         put_artifact(&id, 0, b"\x89PNG\r\n\x1a\nREST").unwrap();
@@ -509,7 +541,18 @@ mod tests {
     #[test]
     fn public_json_shape_matches_openai() {
         let id = new_id("shape");
-        let mut job = ImageJob::new(id.clone(), "cat", "sd-turbo", 512, 512, 8, 0, 1, 30.0, 0.0076);
+        let mut job = ImageJob::new(
+            id.clone(),
+            "cat",
+            "sd-turbo",
+            512,
+            512,
+            8,
+            0,
+            1,
+            30.0,
+            0.0076,
+        );
         let pending = job.pending_shape();
         assert_eq!(pending["status"], "pending");
         assert_eq!(pending["data"].as_array().unwrap().len(), 0);

@@ -1116,8 +1116,7 @@ fn model_resolution_status(reg: &[Provider], err: &str) -> (u16, String) {
     if reg.is_empty() {
         (
             503,
-            "provider registry is warming up (no providers polled yet); retry shortly"
-                .to_string(),
+            "provider registry is warming up (no providers polled yet); retry shortly".to_string(),
         )
     } else {
         (400, err.to_string())
@@ -1583,7 +1582,9 @@ fn parse_finetune_request(v: &Value) -> Result<(String, String, u32, u32), Strin
         }
     };
     if arr.is_empty() {
-        return Err("dataset is empty: at least one {\"prompt\", \"completion\"} pair is required".into());
+        return Err(
+            "dataset is empty: at least one {\"prompt\", \"completion\"} pair is required".into(),
+        );
     }
     if arr.len() > MAX_FINETUNE_EXAMPLES {
         return Err(format!(
@@ -1593,7 +1594,11 @@ fn parse_finetune_request(v: &Value) -> Result<(String, String, u32, u32), Strin
     }
     let mut clean: Vec<Value> = Vec::with_capacity(arr.len());
     for (i, ex) in arr.iter().enumerate() {
-        let p = ex.get("prompt").and_then(|x| x.as_str()).unwrap_or("").trim();
+        let p = ex
+            .get("prompt")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim();
         let c = ex
             .get("completion")
             .and_then(|x| x.as_str())
@@ -2267,7 +2272,11 @@ fn run_image_record(ctx: &ImageCtx, rec: &ImageJob, index: u32, units: u128) -> 
                     rec.id,
                     attempt + 1,
                     route.provider_addr,
-                    if refused { "provider-signed refund" } else { "not attempted" },
+                    if refused {
+                        "provider-signed refund"
+                    } else {
+                        "not attempted"
+                    },
                     e.reason(),
                     if attempt + 1 < limit {
                         " — trying the next provider"
@@ -2334,10 +2343,12 @@ fn respond_image(mut req: tiny_http::Request, id: &str, index: u32) -> bool {
         return false;
     };
     let ct = Header::from_bytes(&b"Content-Type"[..], &b"image/png"[..]).unwrap();
-    let cache =
-        Header::from_bytes(&b"Cache-Control"[..], &b"public, max-age=86400"[..]).unwrap();
-    let _ = req
-        .respond(Response::from_data(bytes).with_header(ct).with_header(cache));
+    let cache = Header::from_bytes(&b"Cache-Control"[..], &b"public, max-age=86400"[..]).unwrap();
+    let _ = req.respond(
+        Response::from_data(bytes)
+            .with_header(ct)
+            .with_header(cache),
+    );
     true
 }
 
@@ -2748,7 +2759,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(Mutex::new(std::collections::HashMap::new()));
     // Warm the GPN-price snapshot (chat//jobs convert USD → GPN base units) and
     // keep an eye on providers earning below their own declared cost.
-    spawn_feed_refresh(client.clone(), rt.clone(), registry.clone(), pcfg.clone(), 30);
+    spawn_feed_refresh(
+        client.clone(),
+        rt.clone(),
+        registry.clone(),
+        pcfg.clone(),
+        30,
+    );
     refresh(
         &registry,
         &Arc::new(urls.clone()),
@@ -3260,8 +3277,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // `GPN_INPUT_RATE_FRAC` × the output rate, and escrow covers
                     // `prompt_tokens×frac + max_tokens` output-equivalents.
                     let feed = feed_now();
-                    let prompt_tokens =
-                        gpn_agent::pricing::estimate_prompt_tokens(&prompt);
+                    let prompt_tokens = gpn_agent::pricing::estimate_prompt_tokens(&prompt);
                     let usd_per_token_out = match pcfg.model {
                         pricing::PricingModel::Throughput => pcfg.price_per_token_out(),
                         pricing::PricingModel::Market => {
@@ -3274,26 +3290,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             } else {
                                 live.iter()
                                     .map(|p| {
-                                        roofline_tok_per_s(
-                                            p.gflops as f64,
-                                            p.mem_bw_gbps,
-                                            params_b,
-                                        )
+                                        roofline_tok_per_s(p.gflops as f64, p.mem_bw_gbps, params_b)
                                     })
                                     .sum::<f64>()
                                     / live.len() as f64
                             };
-                            pcfg.legacy_price_per_token_out(
-                                feed.market_hr,
-                                tok_per_s,
-                                feed.util,
-                            )
+                            pcfg.legacy_price_per_token_out(feed.market_hr, tok_per_s, feed.util)
                         }
                     };
                     let chat_price_per_token =
                         pcfg.gpn_per_token(usd_per_token_out, feed.token_price_usd);
-                    let escrow_units =
-                        pcfg.escrow_token_units(prompt_tokens, chat_max_tokens);
+                    let escrow_units = pcfg.escrow_token_units(prompt_tokens, chat_max_tokens);
                     // Single-rate pallet approximation for the on-chain path; the
                     // channel path carries the ceiling as an exact amount.
                     let (onchain_rate, onchain_cap) = pcfg.onchain_rate_and_cap(
@@ -3334,7 +3341,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let billing = gpn_agent::hub_channel::BillingRates {
                             in_rate: (chat_price_per_token as f64
                                 * pcfg.input_rate_frac.clamp(0.0, 1.0))
-                                .round() as u128,
+                            .round() as u128,
                             out_rate: chat_price_per_token,
                         };
                         let _t0 = std::time::Instant::now();
@@ -3353,7 +3360,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             )
                         });
                         match outcome {
-                            Failover::Served { value: out, attempted, .. } => {
+                            Failover::Served {
+                                value: out,
+                                attempted,
+                                ..
+                            } => {
                                 println!(
                                     "[chat] channel settle: job {} on channel {} in {} ms (attempt {})",
                                     out.job_id,
@@ -3663,9 +3674,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Ok(wh) => wh,
                         Err(e) => {
                             let _ = req.respond(
-                                Response::from_string(json!({
-                                    "error": {"message": e, "type": "gpn_bad_request"}
-                                }).to_string())
+                                Response::from_string(
+                                    json!({
+                                        "error": {"message": e, "type": "gpn_bad_request"}
+                                    })
+                                    .to_string(),
+                                )
                                 .with_header(hdr.clone())
                                 .with_status_code(400),
                             );
@@ -3677,11 +3691,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .and_then(|x| x.as_u64())
                         .unwrap_or(8)
                         .clamp(1, 50) as u32;
-                    let n = v
-                        .get("n")
-                        .and_then(|x| x.as_u64())
-                        .unwrap_or(1)
-                        .clamp(1, 4) as u32;
+                    let n = v.get("n").and_then(|x| x.as_u64()).unwrap_or(1).clamp(1, 4) as u32;
                     let seed = v.get("seed").and_then(|x| x.as_i64()).unwrap_or(0);
                     let b64 = v
                         .get("response_format")
@@ -3693,13 +3703,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if sync {
                         if let Some(msg) = image_jobs::sync_refusal(est) {
                             let _ = req.respond(
-                                Response::from_string(json!({
-                                    "error": {
-                                        "message": msg,
-                                        "type": "gpn_sync_too_slow",
-                                        "estimated_seconds": (est * 100.0).round() / 100.0
-                                    }
-                                }).to_string())
+                                Response::from_string(
+                                    json!({
+                                        "error": {
+                                            "message": msg,
+                                            "type": "gpn_sync_too_slow",
+                                            "estimated_seconds": (est * 100.0).round() / 100.0
+                                        }
+                                    })
+                                    .to_string(),
+                                )
                                 .with_header(hdr.clone())
                                 .with_status_code(400),
                             );
@@ -3713,12 +3726,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         model: model.clone(),
                         ..Default::default()
                     };
-                    let candidates = route_candidates(
-                        &reg,
-                        JobKind::Image,
-                        &needs,
-                        &rtt_overrides(&v),
-                    );
+                    let candidates =
+                        route_candidates(&reg, JobKind::Image, &needs, &rtt_overrides(&v));
                     if candidates.is_empty() {
                         let empty = reg.iter().all(|p| p.last_seen.is_none());
                         let mut r = Response::from_string(json!({
@@ -3782,13 +3791,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         );
                         eprintln!("[images] refusing generation request: {msg}");
                         let _ = req.respond(
-                            Response::from_string(json!({
-                                "error": {
-                                    "message": msg,
-                                    "type": "gpn_unavailable",
-                                    "candidates": skipped
-                                }
-                            }).to_string())
+                            Response::from_string(
+                                json!({
+                                    "error": {
+                                        "message": msg,
+                                        "type": "gpn_unavailable",
+                                        "candidates": skipped
+                                    }
+                                })
+                                .to_string(),
+                            )
                             .with_header(hdr.clone())
                             .with_header(retry_after_header())
                             .with_status_code(503),
@@ -3845,7 +3857,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let mut failure = ImageFailure::Failed;
                         for i in 0..n {
                             failure = run_image_record(&ctx, &rec, i, per_image_units.max(1));
-                            if image_jobs::get(&id).map(|j| j.status == "failed").unwrap_or(false)
+                            if image_jobs::get(&id)
+                                .map(|j| j.status == "failed")
+                                .unwrap_or(false)
                             {
                                 break;
                             }
@@ -3878,7 +3892,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::thread::spawn(move || {
                         for i in 0..n {
                             let _ = run_image_record(&ctx, &rec_worker, i, per_image_units.max(1));
-                            if image_jobs::get(&id).map(|j| j.status == "failed").unwrap_or(false)
+                            if image_jobs::get(&id)
+                                .map(|j| j.status == "failed")
+                                .unwrap_or(false)
                             {
                                 break;
                             }
@@ -3906,9 +3922,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let mut r = Response::from_string(j.public_json(want_b64).to_string())
                                 .with_header(hdr.clone());
                             if unavailable {
-                                r = r
-                                    .with_header(retry_after_header())
-                                    .with_status_code(503);
+                                r = r.with_header(retry_after_header()).with_status_code(503);
                             }
                             let _ = req.respond(r);
                         }
@@ -4021,7 +4035,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         model: model.clone(),
                         ..Default::default()
                     };
-                    let candidates = route_candidates(&reg, JobKind::Finetune, &needs, &rtt_overrides(&v));
+                    let candidates =
+                        route_candidates(&reg, JobKind::Finetune, &needs, &rtt_overrides(&v));
                     let provider = match candidates.first() {
                         Some(c) => c.provider.clone(),
                         None => {
@@ -4121,7 +4136,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         return;
                     }
                     let id = outcome.id;
-                    let job = gpn_agent::llm::LlmJob::new_finetune(&model, &dataset_json, lora_r, epochs);
+                    let job =
+                        gpn_agent::llm::LlmJob::new_finetune(&model, &dataset_json, lora_r, epochs);
                     let store = gpn_agent::llm::LlmStore::new();
                     if !persist_job_payload(&store, id, &job) {
                         // Same rule as every other create: never advertise an
@@ -4129,7 +4145,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let refunded = rt.block_on(client.fail_job_fast(id, 0)).is_ok();
                         eprintln!(
                             "[store] finetune #{id}: payload not persisted — not dispatched ({})",
-                            if refunded { "escrow refunded" } else { "refund pending; on-chain expiry will reclaim it" }
+                            if refunded {
+                                "escrow refunded"
+                            } else {
+                                "refund pending; on-chain expiry will reclaim it"
+                            }
                         );
                         let _ = req.respond(
                             Response::from_string(
@@ -4198,8 +4218,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             return;
                         }
                     };
-                    let off = gpn_agent::llm::get_job(idn)
-                        .filter(|j| j.kind == "finetune");
+                    let off = gpn_agent::llm::get_job(idn).filter(|j| j.kind == "finetune");
                     let chain = rt.block_on(client.get_job_state(idn));
                     let chain_state = chain.as_ref().map(|(s, _, _, _)| s.clone());
                     if off.is_none() && chain.is_none() {
@@ -4251,7 +4270,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // as any other model in `/v1/chat/completions`.
                         out["tuned_model"] = json!(format!("tuned-{idn}"));
                     }
-                    let _ = req.respond(Response::from_string(out.to_string()).with_header(hdr.clone()));
+                    let _ = req
+                        .respond(Response::from_string(out.to_string()).with_header(hdr.clone()));
                     return;
                 }
                 (Method::Post, ["jobs"]) => {
@@ -4467,8 +4487,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         min_tflops,
                         pull_penalty_ms,
                     };
-                    let candidates =
-                        route_candidates(&reg, kind, &needs, &rtt_overrides(&v));
+                    let candidates = route_candidates(&reg, kind, &needs, &rtt_overrides(&v));
                     let (provider, needs_pull) = match candidates.first() {
                         Some(c) => (c.provider.clone(), c.needs_pull),
                         None => {
@@ -4512,7 +4531,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 billing,
                             )
                         }) {
-                            Failover::Served { value: out, provider: served, needs_pull: served_pull, attempted } => {
+                            Failover::Served {
+                                value: out,
+                                provider: served,
+                                needs_pull: served_pull,
+                                attempted,
+                            } => {
                                 let mut resp = json!({
                                     "ok": true,
                                     "escrow": "channel",
@@ -4690,9 +4714,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "buyer_price_is_gpu_independent": true
                             });
                         }
-                        let _ = req.respond(
-                            Response::from_string(q.to_string()).with_header(hdr.clone()),
-                        );
+                        let _ = req
+                            .respond(Response::from_string(q.to_string()).with_header(hdr.clone()));
                         return;
                     }
                     // ONE nonce authority: create through the shared fast stream (the same one
@@ -5170,70 +5193,72 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     &rtt_overrides(&route_body),
                                 );
                                 match cands.first() {
-                                Some(c) => {
-                                    let p = c.provider.clone();
-                                    let pull = c.needs_pull;
-                                    // Client-signed path: the prompt lives only in the
-                                    // caller's body. If they included the off-chain job
-                                    // (item #14) persist + push it, so a REMOTE provider
-                                    // can run it; otherwise a remote provider will claim
-                                    // but find no local prompt.
-                                    let job_payload = route_body.get("job").and_then(|jv| {
-                                        serde_json::from_value::<gpn_agent::llm::LlmJob>(jv.clone())
+                                    Some(c) => {
+                                        let p = c.provider.clone();
+                                        let pull = c.needs_pull;
+                                        // Client-signed path: the prompt lives only in the
+                                        // caller's body. If they included the off-chain job
+                                        // (item #14) persist + push it, so a REMOTE provider
+                                        // can run it; otherwise a remote provider will claim
+                                        // but find no local prompt.
+                                        let job_payload = route_body.get("job").and_then(|jv| {
+                                            serde_json::from_value::<gpn_agent::llm::LlmJob>(
+                                                jv.clone(),
+                                            )
                                             .ok()
-                                    });
-                                    // Abuse guardrail (item #22): the routing AP is the
-                                    // chokepoint; refuse a prohibited-use prompt here
-                                    // too (client-signed jobs still route through us).
-                                    if let Some(cat) = job_payload
-                                        .as_ref()
-                                        .and_then(|j| moderation_block(&j.prompt))
-                                    {
-                                        let r = Response::from_string(json!({
+                                        });
+                                        // Abuse guardrail (item #22): the routing AP is the
+                                        // chokepoint; refuse a prohibited-use prompt here
+                                        // too (client-signed jobs still route through us).
+                                        if let Some(cat) = job_payload
+                                            .as_ref()
+                                            .and_then(|j| moderation_block(&j.prompt))
+                                        {
+                                            let r = Response::from_string(json!({
                                         "ok": false,
                                         "error": {"message": cat.reason(), "type": "gpn_policy_violation", "category": cat.id()}
                                     }).to_string()).with_header(hdr.clone()).with_status_code(451);
-                                        let _ = req.respond(r);
-                                        return;
-                                    }
-                                    let mut payload_ok = true;
-                                    if let Some(j) = &job_payload {
-                                        let store = gpn_agent::llm::LlmStore::new();
-                                        payload_ok = persist_job_payload(&store, idn, j);
-                                    }
-                                    if !payload_ok {
-                                        // Advertise nothing: a lease for a job whose payload
-                                        // never landed can only be skipped by the provider
-                                        // (#41) and left to expire. The client keeps its own
-                                        // on-chain job and may retry the route call.
-                                        eprintln!(
+                                            let _ = req.respond(r);
+                                            return;
+                                        }
+                                        let mut payload_ok = true;
+                                        if let Some(j) = &job_payload {
+                                            let store = gpn_agent::llm::LlmStore::new();
+                                            payload_ok = persist_job_payload(&store, idn, j);
+                                        }
+                                        if !payload_ok {
+                                            // Advertise nothing: a lease for a job whose payload
+                                            // never landed can only be skipped by the provider
+                                            // (#41) and left to expire. The client keeps its own
+                                            // on-chain job and may retry the route call.
+                                            eprintln!(
                                             "[store] route job #{idn}: payload not persisted — not advertised"
                                         );
-                                        json!({"ok": false, "job_id": idn,
+                                            json!({"ok": false, "job_id": idn,
                                             "error": "could not persist the job payload to the off-chain store; the job was not advertised"})
-                                    } else {
-                                        let callback_token = new_callback_token(idn);
-                                        let _ = write_assignment(
-                                            &assign_store,
-                                            idn,
-                                            &p.address,
-                                            &qmodel,
-                                            pull,
-                                            &callback_url,
-                                            &callback_token,
-                                        );
-                                        // #46 Phase 3: no push — the provider's pull
-                                        // long-poll delivers the lease written above.
-                                        json!({"ok":true,"job_id":idn,"routed_to":p.address,
+                                        } else {
+                                            let callback_token = new_callback_token(idn);
+                                            let _ = write_assignment(
+                                                &assign_store,
+                                                idn,
+                                                &p.address,
+                                                &qmodel,
+                                                pull,
+                                                &callback_url,
+                                                &callback_token,
+                                            );
+                                            // #46 Phase 3: no push — the provider's pull
+                                            // long-poll delivers the lease written above.
+                                            json!({"ok":true,"job_id":idn,"routed_to":p.address,
                                        "model":qmodel,"pull":pull,
                                        "latency_ms":p.latency_ms,"load":format!("{}/{}",p.active,p.capacity)})
+                                        }
+                                    }
+                                    None => {
+                                        json!({"ok":false,"error":"no compatible provider available"})
                                     }
                                 }
-                                None => {
-                                    json!({"ok":false,"error":"no compatible provider available"})
-                                }
-                                }
-                            },
+                            }
                         }
                     }
                 }
@@ -6172,7 +6197,12 @@ mod tests {
 
         // With a live provider the rejection stays a hard 400 and keeps the reason:
         // an unservable model would otherwise orphan a Pending job forever.
-        let reg = vec![prov("5Me", "http://127.0.0.1:8093/status", 5, "llama3.2:1b")];
+        let reg = vec![prov(
+            "5Me",
+            "http://127.0.0.1:8093/status",
+            5,
+            "llama3.2:1b",
+        )];
         let (code, msg) = model_resolution_status(&reg, err);
         assert_eq!(code, 400);
         assert_eq!(msg, err);
@@ -6291,12 +6321,19 @@ mod tests {
                 // match on it, exactly like text. Fine-tune also ignores it — its
                 // base model is an HF id, not an Ollama tag — see the assertion
                 // below.
-                model: if kind.is_generation() { "sd-turbo".into() } else { model.into() },
+                model: if kind.is_generation() {
+                    "sd-turbo".into()
+                } else {
+                    model.into()
+                },
                 ..Default::default()
             };
             let got = route_candidates(&reg, kind, &needs, &RttOverrides::new());
             assert_eq!(got.len(), 1, "{kind:?} must match exactly one box");
-            assert_eq!(got[0].provider.address, want, "{kind:?} routed to the wrong kind");
+            assert_eq!(
+                got[0].provider.address, want,
+                "{kind:?} routed to the wrong kind"
+            );
             assert!(!got[0].needs_pull, "generation never needs an Ollama pull");
         }
         // An ML job for a model nobody serves is NOT routable (no orphaned
@@ -6323,13 +6360,34 @@ mod tests {
     /// the same kind the chat/image facades do.
     #[test]
     fn job_type_and_model_classify_to_the_same_kinds() {
-        assert_eq!(JobKind::from_job_type("LLMInference", "llama3.2:1b"), JobKind::Text);
-        assert_eq!(JobKind::from_job_type("ImageGeneration", "sd-turbo"), JobKind::Image);
-        assert_eq!(JobKind::from_job_type("LLMInference", "sd-turbo"), JobKind::Image);
-        assert_eq!(JobKind::from_job_type("VideoGeneration", "ltx-video"), JobKind::Video);
-        assert_eq!(JobKind::from_job_type("LLMInference", "ltx-video"), JobKind::Video);
-        assert_eq!(JobKind::from_job_type("MLInference", "resnet50"), JobKind::Ml);
-        assert_eq!(JobKind::from_job_type("FineTuning", "llama3.2:1b"), JobKind::Finetune);
+        assert_eq!(
+            JobKind::from_job_type("LLMInference", "llama3.2:1b"),
+            JobKind::Text
+        );
+        assert_eq!(
+            JobKind::from_job_type("ImageGeneration", "sd-turbo"),
+            JobKind::Image
+        );
+        assert_eq!(
+            JobKind::from_job_type("LLMInference", "sd-turbo"),
+            JobKind::Image
+        );
+        assert_eq!(
+            JobKind::from_job_type("VideoGeneration", "ltx-video"),
+            JobKind::Video
+        );
+        assert_eq!(
+            JobKind::from_job_type("LLMInference", "ltx-video"),
+            JobKind::Video
+        );
+        assert_eq!(
+            JobKind::from_job_type("MLInference", "resnet50"),
+            JobKind::Ml
+        );
+        assert_eq!(
+            JobKind::from_job_type("FineTuning", "llama3.2:1b"),
+            JobKind::Finetune
+        );
     }
 
     // ── public fine-tuning (queue item #67) ──────────────────────────────────
@@ -6355,7 +6413,14 @@ mod tests {
         // A pre-encoded JSON string is normalized to the same array payload.
         let as_text = json!({"model": "m", "dataset": "[{\"prompt\":\"a\",\"completion\":\"b\"}]"});
         let (_, d2, _, _) = parse_finetune_request(&as_text).unwrap();
-        assert_eq!(serde_json::from_str::<Value>(&d2).unwrap().as_array().unwrap().len(), 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&d2)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
 
         // Hyperparameters are clamped into a sane band, never trusted raw.
         let clamped = json!({"model": "m", "dataset": [{"prompt": "a", "completion": "b"}], "lora_r": 9999, "epochs": 0});
@@ -6364,10 +6429,15 @@ mod tests {
 
         // Rejections: no base model, no dataset, empty dataset, a missing half
         // of a pair, and an oversized dataset (a tune is minutes of GPU).
-        assert!(parse_finetune_request(&json!({"dataset": [{"prompt": "a", "completion": "b"}]})).is_err());
+        assert!(
+            parse_finetune_request(&json!({"dataset": [{"prompt": "a", "completion": "b"}]}))
+                .is_err()
+        );
         assert!(parse_finetune_request(&json!({"model": "m"})).is_err());
         assert!(parse_finetune_request(&json!({"model": "m", "dataset": []})).is_err());
-        assert!(parse_finetune_request(&json!({"model": "m", "dataset": [{"prompt": "a"}]})).is_err());
+        assert!(
+            parse_finetune_request(&json!({"model": "m", "dataset": [{"prompt": "a"}]})).is_err()
+        );
         let big: Vec<Value> = (0..MAX_FINETUNE_EXAMPLES + 1)
             .map(|i| json!({"prompt": format!("p{i}"), "completion": "c"}))
             .collect();
@@ -6380,13 +6450,34 @@ mod tests {
     #[test]
     fn finetune_status_prefers_the_chain_for_terminal_states() {
         assert_eq!(finetune_public_status(None, Some("Pending")), "queued");
-        assert_eq!(finetune_public_status(Some("queued"), Some("Accepted")), "running");
-        assert_eq!(finetune_public_status(Some("running"), Some("Running")), "running");
-        assert_eq!(finetune_public_status(Some("done"), Some("AwaitingVerification")), "succeeded");
-        assert_eq!(finetune_public_status(Some("done"), Some("Completed")), "succeeded");
-        assert_eq!(finetune_public_status(Some("done"), Some("Failed")), "failed");
-        assert_eq!(finetune_public_status(Some("error"), Some("Cancelled")), "failed");
-        assert_eq!(finetune_public_status(Some("error"), Some("Running")), "failed");
+        assert_eq!(
+            finetune_public_status(Some("queued"), Some("Accepted")),
+            "running"
+        );
+        assert_eq!(
+            finetune_public_status(Some("running"), Some("Running")),
+            "running"
+        );
+        assert_eq!(
+            finetune_public_status(Some("done"), Some("AwaitingVerification")),
+            "succeeded"
+        );
+        assert_eq!(
+            finetune_public_status(Some("done"), Some("Completed")),
+            "succeeded"
+        );
+        assert_eq!(
+            finetune_public_status(Some("done"), Some("Failed")),
+            "failed"
+        );
+        assert_eq!(
+            finetune_public_status(Some("error"), Some("Cancelled")),
+            "failed"
+        );
+        assert_eq!(
+            finetune_public_status(Some("error"), Some("Running")),
+            "failed"
+        );
         assert_eq!(finetune_public_status(None, None), "queued");
     }
 
@@ -6410,7 +6501,9 @@ mod tests {
         };
         let got = route_candidates(&reg, JobKind::Text, &needs, &RttOverrides::new());
         assert_eq!(
-            got.iter().map(|c| c.provider.address.as_str()).collect::<Vec<_>>(),
+            got.iter()
+                .map(|c| c.provider.address.as_str())
+                .collect::<Vec<_>>(),
             vec!["a", "b", "busy"],
             "idle boxes first (by latency), the busy one last"
         );
@@ -6458,7 +6551,11 @@ mod tests {
             ..Default::default()
         };
         let got = route_candidates(&reg, JobKind::Video, &needs, &RttOverrides::new());
-        assert_eq!(got.len(), 1, "the 8 GB box must be excluded for a video job");
+        assert_eq!(
+            got.len(),
+            1,
+            "the 8 GB box must be excluded for a video job"
+        );
         assert_eq!(got[0].provider.address, "big");
 
         // min_gflops is a floor, applied per kind.
@@ -6506,7 +6603,12 @@ mod tests {
             model: "m".into(),
             ..Default::default()
         };
-        let got = route_candidates(&[busy.clone(), idle], JobKind::Text, &needs, &RttOverrides::new());
+        let got = route_candidates(
+            &[busy.clone(), idle],
+            JobKind::Text,
+            &needs,
+            &RttOverrides::new(),
+        );
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].provider.address, "idle");
         let only_busy = route_candidates(&[busy], JobKind::Text, &needs, &RttOverrides::new());
@@ -6520,7 +6622,13 @@ mod tests {
     fn a_refusal_moves_to_the_next_candidate_and_the_second_provider_serves() {
         use gpn_agent::hub_ap::ChannelFail;
         let first = prov_caps("first", "http://first", 1, "sd-turbo", &["ImageGeneration"]);
-        let second = prov_caps("second", "http://second", 50, "sd-turbo", &["ImageGeneration"]);
+        let second = prov_caps(
+            "second",
+            "http://second",
+            50,
+            "sd-turbo",
+            &["ImageGeneration"],
+        );
         let cands = route_candidates(
             &[first, second],
             JobKind::Image,
@@ -6543,7 +6651,12 @@ mod tests {
             }
         });
         match out {
-            Failover::Served { value, provider, attempted, .. } => {
+            Failover::Served {
+                value,
+                provider,
+                attempted,
+                ..
+            } => {
                 assert_eq!(value, "second");
                 assert_eq!(provider.address, "second");
                 assert_eq!(attempted, 2);
@@ -6572,7 +6685,9 @@ mod tests {
         let mut tried = Vec::new();
         let out: Failover<String> = failover("test-text", &cands, |p| {
             tried.push(p.address.clone());
-            Err(ChannelFail::Ambiguous("500 after the assignment was signed".into()))
+            Err(ChannelFail::Ambiguous(
+                "500 after the assignment was signed".into(),
+            ))
         });
         assert_eq!(tried, vec!["a"], "must not touch the second provider");
         match out {
@@ -6590,7 +6705,15 @@ mod tests {
     fn exhaustion_reports_every_candidate_reason_and_caps_attempts() {
         use gpn_agent::hub_ap::ChannelFail;
         let reg: Vec<Provider> = (0..5)
-            .map(|i| prov_caps(&format!("p{i}"), &format!("http://p{i}"), i as u64, "m", &["LLMInference"]))
+            .map(|i| {
+                prov_caps(
+                    &format!("p{i}"),
+                    &format!("http://p{i}"),
+                    i as u64,
+                    "m",
+                    &["LLMInference"],
+                )
+            })
             .collect();
         let cands = route_candidates(
             &reg,
@@ -6607,7 +6730,10 @@ mod tests {
             tried += 1;
             Err(ChannelFail::NotAttempted(format!("{} is down", p.address)))
         });
-        assert_eq!(tried, MAX_ROUTE_ATTEMPTS, "at most {MAX_ROUTE_ATTEMPTS} attempts");
+        assert_eq!(
+            tried, MAX_ROUTE_ATTEMPTS,
+            "at most {MAX_ROUTE_ATTEMPTS} attempts"
+        );
         let reasons = match out {
             Failover::Exhausted { reasons } => reasons,
             other => panic!("expected Exhausted, got {other:?}"),
@@ -6617,7 +6743,10 @@ mod tests {
         assert!(reasons[1].starts_with("p1: "));
         let body = exhaustion_json(JobKind::Image, &reasons);
         assert_eq!(body["error"]["type"], "gpn_unavailable");
-        assert_eq!(body["error"]["candidates"].as_array().unwrap().len(), MAX_ROUTE_ATTEMPTS);
+        assert_eq!(
+            body["error"]["candidates"].as_array().unwrap().len(),
+            MAX_ROUTE_ATTEMPTS
+        );
         assert!(body["error"]["message"].as_str().unwrap().contains("image"));
     }
 

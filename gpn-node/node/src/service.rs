@@ -1958,7 +1958,10 @@ mod idle_mode_tests {
         assert!(!idle_active(read_idle_until(&p), 2_000));
         std::fs::write(&p, b"{}").unwrap();
         assert!(!idle_active(read_idle_until(&p), 2_000));
-        assert!(!idle_active(read_idle_until(&dir.join("absent.json")), 2_000));
+        assert!(!idle_active(
+            read_idle_until(&dir.join("absent.json")),
+            2_000
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1967,7 +1970,10 @@ mod idle_mode_tests {
     #[test]
     fn the_miner_gate_respects_idle_and_the_role() {
         assert!(mining_allowed(Role::Authority, false));
-        assert!(!mining_allowed(Role::Authority, true), "idle parks an authority");
+        assert!(
+            !mining_allowed(Role::Authority, true),
+            "idle parks an authority"
+        );
         assert!(!mining_allowed(Role::Full, false));
         assert!(!mining_allowed(Role::Full, true));
     }
@@ -2010,7 +2016,9 @@ mod idle_mode_tests {
         assert!(gap.update(false, 0).is_none());
         assert!(gap.update(false, 5_000).is_none());
         // Threshold crossed: exactly one warning, carrying the elapsed time.
-        let line = gap.update(false, TEMPLATE_GAP_WARN_MS).expect("warn at 30 s");
+        let line = gap
+            .update(false, TEMPLATE_GAP_WARN_MS)
+            .expect("warn at 30 s");
         assert!(line.warn, "a stall must be a warning");
         assert!(line.text.contains("30.0s"), "{}", line.text);
         assert!(line.text.contains("NO consensus template"), "{}", line.text);
@@ -2040,6 +2048,9 @@ mod idle_mode_tests {
         let mut back = TemplateGap::new();
         assert!(back.update(false, 50_000).is_none());
         assert!(back.update(false, 1_000).is_none());
-        assert!(back.update(true, 2_000).is_none(), "no warning ⇒ no recovery line");
+        assert!(
+            back.update(true, 2_000).is_none(),
+            "no warning ⇒ no recovery line"
+        );
     }
 }

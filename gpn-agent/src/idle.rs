@@ -373,7 +373,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(state_at(&p, 1_500).is_some(), "still idle before the deadline");
+        assert!(
+            state_at(&p, 1_500).is_some(),
+            "still idle before the deadline"
+        );
         assert!(
             state_at(&p, 2_000).is_none(),
             "at the deadline the node must start active"
@@ -475,7 +478,10 @@ mod tests {
         let key = "GPN_IDLE_FILE";
         let old = std::env::var(key).ok();
         std::env::set_var(key, "/tmp/gpn-idle-env-override.json");
-        assert_eq!(idle_path(), PathBuf::from("/tmp/gpn-idle-env-override.json"));
+        assert_eq!(
+            idle_path(),
+            PathBuf::from("/tmp/gpn-idle-env-override.json")
+        );
         match old {
             Some(v) => std::env::set_var(key, v),
             None => std::env::remove_var(key),

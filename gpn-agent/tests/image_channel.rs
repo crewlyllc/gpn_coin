@@ -82,12 +82,10 @@ fn start_stub(
                 artifacts_c.fetch_add(1, Ordering::SeqCst);
                 let token = url.split_once("?t=").map(|(_, t)| t).unwrap_or("");
                 if artifact_server && token.len() == 64 {
-                    let ct = tiny_http::Header::from_bytes(
-                        &b"Content-Type"[..],
-                        &b"image/png"[..],
-                    )
-                    .unwrap();
-                    let _ = req.respond(tiny_http::Response::from_data(PNG.to_vec()).with_header(ct));
+                    let ct = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"image/png"[..])
+                        .unwrap();
+                    let _ =
+                        req.respond(tiny_http::Response::from_data(PNG.to_vec()).with_header(ct));
                 } else {
                     let _ = req.respond(
                         tiny_http::Response::from_string("no such artifact").with_status_code(404),
@@ -130,7 +128,8 @@ fn start_stub(
             if behaviour == Behaviour::Reject409 {
                 let _ = req.respond(
                     tiny_http::Response::from_string(
-                        serde_json::json!({"ok": false, "error": "assignment rejected"}).to_string(),
+                        serde_json::json!({"ok": false, "error": "assignment rejected"})
+                            .to_string(),
                     )
                     .with_status_code(409),
                 );
@@ -168,9 +167,7 @@ fn start_stub(
             let body = match (behaviour, msg) {
                 (Behaviour::GarbageResult, _) => "{}".to_string(),
                 (_, Ok(m)) => serde_json::to_string(&m).unwrap(),
-                (_, Err(e)) => {
-                    serde_json::json!({"ok": false, "error": e.to_string()}).to_string()
-                }
+                (_, Err(e)) => serde_json::json!({"ok": false, "error": e.to_string()}).to_string(),
             };
             let _ = req.respond(tiny_http::Response::from_string(body));
         }
@@ -201,13 +198,15 @@ fn fixture(behaviour: Behaviour, artifact_server: bool) -> Fixture {
     let ap = Sr25519Signer::from_uri("//Alice").unwrap();
     let prov = Arc::new(Sr25519Signer::from_uri("//Bob").unwrap());
     let provider_key = PubKey(prov.public_key()).to_hex();
-    let stub = start_stub(behaviour, PubKey(ap.public_key()), prov.clone(), artifact_server);
+    let stub = start_stub(
+        behaviour,
+        PubKey(ap.public_key()),
+        prov.clone(),
+        artifact_server,
+    );
 
-    let dir = std::env::temp_dir().join(format!(
-        "gpn-imgchan-{}-{}",
-        std::process::id(),
-        stub.port
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("gpn-imgchan-{}-{}", std::process::id(), stub.port));
     let _ = std::fs::create_dir_all(&dir);
     let state_path = dir.join("hub_channels.json");
     let image_dir = dir.join("images");
@@ -297,7 +296,18 @@ fn happy_path_202_poll_completes_with_zero_transactions() {
     let _s = serialize();
     let f = fixture(Behaviour::Serve, true);
     let id = image_jobs::new_id("a cozy cabin at dusk");
-    let rec = ImageJob::new(id.clone(), "a cozy cabin at dusk", "sd-turbo", 512, 512, 8, 7, 1, 30.15, 0.0076);
+    let rec = ImageJob::new(
+        id.clone(),
+        "a cozy cabin at dusk",
+        "sd-turbo",
+        512,
+        512,
+        8,
+        7,
+        1,
+        30.15,
+        0.0076,
+    );
     image_jobs::save(&rec).unwrap();
     assert_eq!(image_jobs::get(&id).unwrap().status, "pending");
 
@@ -312,9 +322,17 @@ fn happy_path_202_poll_completes_with_zero_transactions() {
         "http://127.0.0.1:{}/channel/artifact/{}?t={}",
         f.stub.port, out.job_id, token
     );
-    let bytes = reqwest::blocking::get(&url).unwrap().bytes().unwrap().to_vec();
+    let bytes = reqwest::blocking::get(&url)
+        .unwrap()
+        .bytes()
+        .unwrap()
+        .to_vec();
     assert!(image_jobs::is_png(&bytes), "fetched bytes must be a PNG");
-    assert_eq!(sha256_hex(&bytes), sha, "provider's sha256 must match the bytes");
+    assert_eq!(
+        sha256_hex(&bytes),
+        sha,
+        "provider's sha256 must match the bytes"
+    );
     image_jobs::put_artifact(&id, 0, &bytes).unwrap();
     image_jobs::update(&id, |j| {
         j.status = "completed".into();
@@ -332,7 +350,10 @@ fn happy_path_202_poll_completes_with_zero_transactions() {
     });
 
     let done = image_jobs::get(&id).unwrap();
-    assert_eq!(done.status, "completed", "poll must transition to completed");
+    assert_eq!(
+        done.status, "completed",
+        "poll must transition to completed"
+    );
     assert_eq!(done.payment, "channel", "settled off-chain");
     assert_eq!(done.job_id, Some(out.job_id));
     assert_eq!(done.data[0].media_type, "image/png");
@@ -344,7 +365,11 @@ fn happy_path_202_poll_completes_with_zero_transactions() {
     assert_eq!(ch.state.nonce, 1, "exactly one signed state update, no tx");
     assert_eq!(ch.pending_len(), 0);
     assert_eq!(f.stub.jobs.load(Ordering::SeqCst), 1);
-    assert_eq!(f.stub.artifacts.load(Ordering::SeqCst), 1, "bytes fetched once");
+    assert_eq!(
+        f.stub.artifacts.load(Ordering::SeqCst),
+        1,
+        "bytes fetched once"
+    );
 
     let _ = std::fs::remove_dir_all(f.state_path.parent().unwrap());
 }
@@ -355,7 +380,10 @@ fn sync_mode_refuses_a_render_over_the_budget_and_explains_the_estimate() {
     // 1024² / 50 steps: the estimate is comfortably over 60 s.
     let est = 30.0 + (1024.0 * 1024.0 * 50.0 / 1e6) * 0.73;
     let msg = image_jobs::sync_refusal(est).expect("must refuse");
-    assert!(msg.contains("estimated"), "the refusal must quote the estimate");
+    assert!(
+        msg.contains("estimated"),
+        "the refusal must quote the estimate"
+    );
     assert!(msg.contains("poll"), "and point at the polling path");
     // ... while the reference 512²/8 render is allowed inline.
     assert!(image_jobs::sync_refusal(30.15).is_none());

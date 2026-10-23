@@ -136,10 +136,7 @@ impl GpuYieldGuard {
                 // two jobs on one GPU is a hardware error.
                 return Err(GpuBusyError {
                     waited: Duration::ZERO,
-                    holder: Some(format!(
-                        "cannot open lock {}: {e}",
-                        lock_path.display()
-                    )),
+                    holder: Some(format!("cannot open lock {}: {e}", lock_path.display())),
                 });
             }
         };
@@ -178,7 +175,11 @@ impl GpuYieldGuard {
                     timeout.as_secs()
                 );
             }
-            std::thread::sleep(backoff.min(timeout.saturating_sub(waited)).max(Duration::from_millis(1)));
+            std::thread::sleep(
+                backoff
+                    .min(timeout.saturating_sub(waited))
+                    .max(Duration::from_millis(1)),
+            );
             backoff = (backoff * 2).min(Duration::from_millis(250));
         }
 
@@ -188,12 +189,7 @@ impl GpuYieldGuard {
         let mut f = &file;
         let _ = f.set_len(0);
         let _ = f.seek(SeekFrom::Start(0));
-        let _ = write!(
-            f,
-            "pid={} since={}\n",
-            std::process::id(),
-            now_ms()
-        );
+        let _ = write!(f, "pid={} since={}\n", std::process::id(), now_ms());
         let _ = f.flush();
 
         if acquired_after >= Duration::from_millis(20) {
@@ -417,7 +413,10 @@ mod tests {
         let err = GpuYieldGuard::acquire_with_timeout(Duration::from_millis(300)).unwrap_err();
         let waited = t0.elapsed();
         assert!(waited >= Duration::from_millis(250), "returned too early");
-        assert!(waited < Duration::from_secs(5), "did not honour the timeout");
+        assert!(
+            waited < Duration::from_secs(5),
+            "did not honour the timeout"
+        );
         let msg = err.to_string();
         assert!(msg.contains("GPU busy"), "unexpected message: {msg}");
         drop(held);

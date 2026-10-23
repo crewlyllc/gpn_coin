@@ -1002,7 +1002,10 @@ mod tests {
     #[test]
     fn refresh_is_fast_while_short_of_peers_and_slow_once_stocked() {
         assert_eq!(refresh_interval_secs(0, 0, 0), REFRESH_FAST_SECS);
-        assert_eq!(refresh_interval_secs(PEER_TARGET - 1, 0, 0), REFRESH_FAST_SECS);
+        assert_eq!(
+            refresh_interval_secs(PEER_TARGET - 1, 0, 0),
+            REFRESH_FAST_SECS
+        );
         assert_eq!(refresh_interval_secs(PEER_TARGET, 0, 0), REFRESH_SLOW_SECS);
         assert_eq!(refresh_interval_secs(64, 0, 0), REFRESH_SLOW_SECS);
     }
@@ -1181,7 +1184,10 @@ mod bootstrap_seed_tests {
             "network.json must ship at least one hardcoded seed (a floor of one is still a floor)"
         );
         let addrs = bootstrap_seed_addrs(&registry.bootstrap_seeds);
-        assert!(!addrs.is_empty(), "shipped seeds must resolve to dialable multiaddrs");
+        assert!(
+            !addrs.is_empty(),
+            "shipped seeds must resolve to dialable multiaddrs"
+        );
         assert!(addrs.iter().all(|a| a.contains("/p2p/")));
         assert!(
             !registry.bootstrap_urls.is_empty(),

@@ -507,8 +507,8 @@ pub fn ss58_of_uri(uri: &str) -> Result<String, String> {
     if let Ok(a) = ss58_of(uri) {
         return Ok(a);
     }
-    let pair = sr25519::Pair::from_string(uri, None)
-        .map_err(|e| format!("invalid signer URI: {e:?}"))?;
+    let pair =
+        sr25519::Pair::from_string(uri, None).map_err(|e| format!("invalid signer URI: {e:?}"))?;
     Ok(pair.public().to_ss58check())
 }
 
@@ -1211,7 +1211,10 @@ mod tests {
             "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
         );
         // Real secrets and plain garbage behave as before.
-        assert_eq!(ss58_of_uri(ALICE_PHRASE).unwrap(), ss58_of(ALICE_PHRASE).unwrap());
+        assert_eq!(
+            ss58_of_uri(ALICE_PHRASE).unwrap(),
+            ss58_of(ALICE_PHRASE).unwrap()
+        );
         assert!(ss58_of_uri("not a key").is_err());
         assert!(ss58_of_uri("").is_err());
     }

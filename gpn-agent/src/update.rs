@@ -2086,24 +2086,27 @@ mod tests {
                 down += 1
             }
         }
-        assert!(up > 40 && down > 40, "jitter must spread both ways ({up}/{down})");
+        assert!(
+            up > 40 && down > 40,
+            "jitter must spread both ways ({up}/{down})"
+        );
         // Deterministic per (node, counter), and counters differ.
-        assert_eq!(check_jitter(&seed, 7, interval), check_jitter(&seed, 7, interval));
-        assert_ne!(check_jitter(&seed, 7, interval), check_jitter(&seed, 8, interval));
+        assert_eq!(
+            check_jitter(&seed, 7, interval),
+            check_jitter(&seed, 7, interval)
+        );
+        assert_ne!(
+            check_jitter(&seed, 7, interval),
+            check_jitter(&seed, 8, interval)
+        );
         assert_eq!(check_jitter(&seed, 0, Duration::ZERO), 0);
     }
 
     #[test]
     fn next_interval_applies_the_jitter_and_never_reaches_zero() {
         let interval = Duration::from_secs(21_600);
-        assert_eq!(
-            next_interval(interval, 600),
-            Duration::from_secs(22_200)
-        );
-        assert_eq!(
-            next_interval(interval, -600),
-            Duration::from_secs(21_000)
-        );
+        assert_eq!(next_interval(interval, 600), Duration::from_secs(22_200));
+        assert_eq!(next_interval(interval, -600), Duration::from_secs(21_000));
         assert_eq!(next_interval(interval, 0), interval);
         assert_eq!(
             next_interval(Duration::from_secs(10), -9_999),
@@ -2178,10 +2181,7 @@ mod tests {
             .collect();
         // All ten start at the same phase (same start time) is not what happens
         // in the fleet, but the jitter must separate them regardless.
-        let jumps: Vec<i64> = seeds
-            .iter()
-            .map(|s| check_jitter(s, 1, interval))
-            .collect();
+        let jumps: Vec<i64> = seeds.iter().map(|s| check_jitter(s, 1, interval)).collect();
         let distinct: std::collections::HashSet<_> = jumps.iter().collect();
         assert_eq!(distinct.len(), jumps.len(), "jitter must differ per node");
     }
@@ -2206,8 +2206,14 @@ mod tests {
             seen.insert(d.as_secs());
         }
         assert!(seen.len() > 400, "the delay must be spread, not constant");
-        assert!(*seen.iter().min().unwrap() < 60, "some node goes nearly at once");
-        assert!(*seen.iter().max().unwrap() > 1100, "some node waits most of the window");
+        assert!(
+            *seen.iter().min().unwrap() < 60,
+            "some node goes nearly at once"
+        );
+        assert!(
+            *seen.iter().max().unwrap() > 1100,
+            "some node waits most of the window"
+        );
 
         // Per (node, version): stable on retry, different for another release.
         assert_eq!(

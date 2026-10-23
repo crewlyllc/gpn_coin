@@ -174,7 +174,10 @@ mod tests {
         let over: Registry = serde_json::from_str(override_json).unwrap();
         assert!(over.bootstrap_seeds.is_empty());
         let merged = apply_bootstrap_floor(over, &embedded());
-        assert_eq!(merged.bootstrap_seeds.len(), embedded().bootstrap_seeds.len());
+        assert_eq!(
+            merged.bootstrap_seeds.len(),
+            embedded().bootstrap_seeds.len()
+        );
         assert!(!merged.bootstrap_urls.is_empty());
     }
 
@@ -193,6 +196,9 @@ mod tests {
         let merged = apply_bootstrap_floor(over, &embedded());
         assert_eq!(merged.bootstrap_seeds.len(), 1);
         assert_eq!(merged.bootstrap_seeds[0].id, "mine");
-        assert_eq!(merged.bootstrap_urls, vec!["https://example.org/seeds.json"]);
+        assert_eq!(
+            merged.bootstrap_urls,
+            vec!["https://example.org/seeds.json"]
+        );
     }
 }

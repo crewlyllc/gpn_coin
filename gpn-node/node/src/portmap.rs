@@ -1278,12 +1278,17 @@ mod tests {
 
         // Unchanged state says nothing, whatever it is.
         assert!(maintenance_notice(&mapped, &mapped, 30333, retry).is_none());
-        assert!(maintenance_notice(&MapState::Unavailable, &MapState::Unavailable, 30333, retry)
-            .is_none());
         assert!(
-            maintenance_notice(&MapState::Cgnat(ip("100.64.1.1")), &MapState::Cgnat(ip("100.64.1.1")), 30333, retry)
+            maintenance_notice(&MapState::Unavailable, &MapState::Unavailable, 30333, retry)
                 .is_none()
         );
+        assert!(maintenance_notice(
+            &MapState::Cgnat(ip("100.64.1.1")),
+            &MapState::Cgnat(ip("100.64.1.1")),
+            30333,
+            retry
+        )
+        .is_none());
 
         // Losing the rule warns once, and says it keeps trying.
         let lost = maintenance_notice(&mapped, &MapState::Unavailable, 30333, retry).unwrap();
@@ -1306,14 +1311,18 @@ mod tests {
         assert!(changed.line.contains("45123"), "{}", changed.line);
 
         // Falling into CGNAT warns, and is recoverable when the WAN moves again.
-        let cgnat = maintenance_notice(&mapped, &MapState::Cgnat(ip("100.64.9.9")), 30333, retry)
-            .unwrap();
+        let cgnat =
+            maintenance_notice(&mapped, &MapState::Cgnat(ip("100.64.9.9")), 30333, retry).unwrap();
         assert!(cgnat.warn);
         assert!(cgnat.line.contains("CGNAT"), "{}", cgnat.line);
-        let recovered = maintenance_notice(&MapState::Cgnat(ip("100.64.9.9")), &mapped, 30333, retry)
-            .unwrap();
+        let recovered =
+            maintenance_notice(&MapState::Cgnat(ip("100.64.9.9")), &mapped, 30333, retry).unwrap();
         assert!(!recovered.warn);
-        assert!(recovered.line.contains("public again"), "{}", recovered.line);
+        assert!(
+            recovered.line.contains("public again"),
+            "{}",
+            recovered.line
+        );
     }
 
     #[test]
