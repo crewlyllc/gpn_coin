@@ -949,6 +949,12 @@ impl ProviderChannel {
 
     /// Verify an assignment and commit its pre-authorised payment.
     pub fn accept(&mut self, a: &Assignment) -> Result<AcceptedJob, HubError> {
+        // Drop entries whose deadline has passed: the AP abandons those and will
+        // never ask about them again, so they must not block a retry of the same
+        // job id (and keeping them forever would leak). `reconcile_stale_accepts`
+        // rewinds the state they are holding open.
+        let now = now_ms();
+        self.accepted.retain(|_, j| j.deadline_ms >= now);
         if a.channel_id != self.channel_id || a.requestor != self.requestor {
             return Err(HubError::ChannelMismatch);
         }
@@ -1115,7 +1121,17 @@ impl ProviderChannel {
         };
         r.sig_provider = Signature64(signer.sign_raw(&result_payload(&r)));
         self.state = after;
-        self.accepted.remove(&job_id);
+        // Keep the accepted entry (it is what `reconcile_stale_accepts` rewinds
+        // from) instead of deleting it. Deleting erased the only record of the
+        // pre-refund state, so when the AP never received this refund message —
+        // its client had already timed out on a long/cold render, live
+        // 2026-10-23 — the mirror sat two nonces ahead with an empty `accepted`
+        // map, and no rewind could ever repair it. The entry is expired by the
+        // next reconcile and dropped there.
+        if let Some(job) = self.accepted.get_mut(&job_id) {
+            job.after = after;
+            job.price = 0;
+        }
         Ok(r)
     }
 

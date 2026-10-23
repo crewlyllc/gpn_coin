@@ -38,16 +38,50 @@ fn is_wedged(id: u64) -> bool {
 }
 
 /// Item #78: HF repos this process has proved it can never load (401/404/unknown
-/// alias). Re-attempting the download every poll is what produced "HF pull
-/// sdxl-turbo failed … Repository Not Found (401)" four times in eight seconds
-/// while the job sat `Accepted`. In-memory only (a restart re-probes once).
+/// alias, or a load that dies on this host — OOM). Re-attempting the download
+/// every poll is what produced "HF pull sdxl-turbo failed … Repository Not
+/// Found (401)" four times in eight seconds while the job sat `Accepted`.
+///
+/// **Persisted** (`~/.gpn/diffusion_unloadable.json`): the verdict must survive a
+/// restart, or the box re-attempts a model it has already proved it cannot load.
+/// Live 2026-10-23: `stabilityai/sdxl-turbo` pulled 13 GB and was then OOM-killed
+/// at 7.2 GB RSS (8 GB VRAM / 15 GB RAM host) — a restart would have burned the
+/// same 45 minutes again.
+fn unloadable_path() -> std::path::PathBuf {
+    std::env::var("GPN_DIFFUSION_UNLOADABLE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+            std::path::PathBuf::from(home)
+                .join(".gpn")
+                .join("diffusion_unloadable.json")
+        })
+}
+
+fn load_unloadable() -> HashSet<String> {
+    std::fs::read_to_string(unloadable_path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<HashSet<String>>(&s).ok())
+        .unwrap_or_default()
+}
+
 fn unloadable_set() -> &'static Mutex<HashSet<String>> {
     static UNLOADABLE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    UNLOADABLE.get_or_init(|| Mutex::new(HashSet::new()))
+    UNLOADABLE.get_or_init(|| Mutex::new(load_unloadable()))
 }
 
 fn mark_unloadable(repo: &str) {
-    unloadable_set().lock().unwrap().insert(repo.to_string());
+    let mut set = unloadable_set().lock().unwrap();
+    if !set.insert(repo.to_string()) {
+        return;
+    }
+    let path = unloadable_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(s) = serde_json::to_vec_pretty(&*set) {
+        let _ = std::fs::write(&path, s);
+    }
 }
 
 fn is_unloadable(repo: &str) -> bool {
@@ -230,6 +264,36 @@ fn load_channels(path: &PathBuf) -> ChannelStore {
         .unwrap_or_default()
 }
 
+/// Item #75 rewind, wired into the **diffusion** lane too (it existed only in
+/// `gpn_llm_provider`, so an image job whose helper was killed — the #72 watchdog
+/// SIGKILL, a wedge kill, a crash — left this mirror ahead of the AP's forever
+/// and every later image assignment was rejected `state_before is not the
+/// current channel state` ⇒ HTTP 409, live on 2026-10-23).
+///
+/// Rewinding an expired, unanswered accept restores the state the AP still
+/// believes in; if the AP did adopt the later state, `sync_to_assignment` adopts
+/// it right back, so this is safe either way. Persisted immediately.
+fn rewind_stale_accepts(path: &PathBuf) -> usize {
+    let mut store = load_channels(path);
+    let now = gpn_agent::hub_channel::now_ms();
+    let mut rewound = 0;
+    for ch in store.channels.values_mut() {
+        let n = ch.reconcile_stale_accepts(now);
+        if n > 0 {
+            println!(
+                "[channel] channel {}: rewound {n} expired unanswered accept(s) to nonce {} — \
+                 the AP never acknowledged them (helper died mid-job)",
+                ch.channel_id, ch.state.nonce
+            );
+        }
+        rewound += n;
+    }
+    if rewound > 0 {
+        save_channels(path, &store);
+    }
+    rewound
+}
+
 fn save_channels(path: &PathBuf, store: &ChannelStore) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -365,6 +429,19 @@ fn serve_channel_job(ctx: &ChannelCtx, body: &str) -> (u16, serde_json::Value) {
     );
     let outcome = match decision {
         gpn_agent::image_channel::ServeDecision::Refund(reason) => Err(reason),
+        gpn_agent::image_channel::ServeDecision::Run
+            if is_unloadable(resolve_model_alias(&a.model)) =>
+        {
+            // Item #78, channel lane: a model this host has already proved it
+            // cannot load (e.g. `stabilityai/sdxl-turbo` OOM-killed at 7.2 GB RSS
+            // on this 8 GB-VRAM/15 GB-RAM box) must not be re-attempted — the
+            // reload burned ~1 min of RAM and risked OOM-killing the whole unit
+            // mid-render. Refund immediately with the recorded verdict.
+            Err(format!(
+                "model {} is unloadable on this host (recorded)",
+                resolve_model_alias(&a.model)
+            ))
+        }
         gpn_agent::image_channel::ServeDecision::Run => {
             let out_dir = std::env::var("GPN_ARTIFACTS").unwrap_or_else(|_| {
                 gpn_agent::utils::temp_dir()
@@ -644,6 +721,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .join(".gpn")
                     .join("diffusion_channels.json")
             });
+        // Before serving any assignment: undo accepts from a process that died
+        // before the AP could acknowledge them (item #75, diffusion lane).
+        rewind_stale_accepts(&state_path);
         let vram_mb = std::env::var("GPN_VRAM_MB")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
@@ -810,6 +890,33 @@ fn diffuse_timeout(kind: &str) -> Duration {
 /// is visible as "still running at Ns" rather than dead air.
 const HELPER_HEARTBEAT: Duration = Duration::from_secs(30);
 
+/// How often the watchdog re-reads the child's I/O counters to decide whether a
+/// long helper is still *making progress*.
+const PROGRESS_CHECK: Duration = Duration::from_secs(15);
+
+/// Bytes a child must read between two checks to count as "progressing". A
+/// cold HuggingFace pull writes hundreds of MB per check; a wedged CUDA/GPU
+/// helper reads nothing at all, so 1 MiB cleanly separates the two.
+const PROGRESS_MIN_BYTES: u64 = 1 << 20;
+
+/// Hard ceiling on how far progress may extend one helper run: `timeout * 4`
+/// (images ⇒ 40 min, video ⇒ 2 h). A genuinely endless pull therefore still
+/// ends, but a slow-but-alive 7 GB cold pull can finish.
+const PROGRESS_CAP_MULT: u32 = 4;
+
+/// Cumulative bytes this process has read (Linux `/proc/<pid>/io`). `None` on
+/// other platforms or when the counter is unavailable ⇒ caller keeps the flat
+/// wall-clock budget, exactly as before this change.
+fn io_read_bytes(pid: u32) -> Option<u64> {
+    let s = std::fs::read_to_string(format!("/proc/{pid}/io")).ok()?;
+    for line in s.lines() {
+        if let Some(v) = line.strip_prefix("read_bytes:") {
+            return v.trim().parse::<u64>().ok();
+        }
+    }
+    None
+}
+
 /// Run a command under a hard watchdog, capturing stdout/stderr to temp files.
 ///
 /// Returns `(stdout, stderr)` on success. On non-zero exit returns the helper's
@@ -844,7 +951,11 @@ fn run_with_watchdog(
     let mut child = cmd.spawn().map_err(|e| format!("spawn: {e}"))?;
     let pid = child.id();
     let start = std::time::Instant::now();
+    let hard_cap = timeout * PROGRESS_CAP_MULT;
+    let mut deadline = timeout;
     let mut last_hb = start;
+    let mut last_progress = start;
+    let mut last_io = io_read_bytes(pid);
     let result = loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -858,12 +969,40 @@ fn run_with_watchdog(
                 };
             }
             Ok(None) => {
-                if start.elapsed() >= timeout {
+                // A helper that is still *moving bytes* is not wedged: the flat
+                // budget exists to catch a stalled download or a hung GPU, and a
+                // cold multi-GB pull legitimately outlives it. Extend the budget
+                // while I/O advances, up to the hard cap.
+                let elapsed = start.elapsed();
+                if last_progress.elapsed() >= PROGRESS_CHECK {
+                    last_progress = std::time::Instant::now();
+                    if let (Some(prev), Some(now)) = (last_io, io_read_bytes(pid)) {
+                        if now.saturating_sub(prev) >= PROGRESS_MIN_BYTES {
+                            last_io = Some(now);
+                            let want = elapsed + timeout;
+                            if want > deadline && want <= hard_cap {
+                                deadline = want;
+                                eprintln!(
+                                    "[watchdog] {label} helper pid {pid} is progressing (download?) — budget extended to {}s (hard cap {}s)",
+                                    deadline.as_secs(),
+                                    hard_cap.as_secs()
+                                );
+                            } else if want > hard_cap && deadline < hard_cap {
+                                deadline = hard_cap;
+                                eprintln!(
+                                    "[watchdog] {label} helper pid {pid} still progressing — budget raised to the hard cap {}s",
+                                    hard_cap.as_secs()
+                                );
+                            }
+                        }
+                    }
+                }
+                if elapsed >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
                     break Err(format!(
                         "WEDGE: {label} helper (pid {pid}) exceeded {}s — killed (GPU/download hang?)",
-                        timeout.as_secs()
+                        deadline.as_secs()
                     ));
                 }
                 if last_hb.elapsed() >= HELPER_HEARTBEAT {
@@ -1568,10 +1707,21 @@ mod tests {
 
     #[test]
     fn unloadable_registry_roundtrip() {
+        // Never touch the operator's live registry from a test.
+        let tmp =
+            std::env::temp_dir().join(format!("gpn_unloadable_test_{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        std::env::set_var("GPN_DIFFUSION_UNLOADABLE", &tmp);
         let repo = "example/definitely-not-a-real-repo-for-test";
         assert!(!is_unloadable(repo));
         mark_unloadable(repo);
         assert!(is_unloadable(repo));
+        // The verdict is persisted: a restart must not re-probe this model.
+        assert!(
+            load_unloadable().contains(repo),
+            "unloadable verdict must survive a restart"
+        );
+        let _ = std::fs::remove_file(&tmp);
         assert!(!is_failed_locally(918273));
         mark_failed_locally(918273);
         assert!(is_failed_locally(918273));

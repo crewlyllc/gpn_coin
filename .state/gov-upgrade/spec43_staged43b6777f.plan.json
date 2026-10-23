@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "artifact_path": "wasm/gpn_runtime_spec43_retarget_clamp.compact.compressed.wasm",
+  "encoded_len": 519286,
+  "decoded_len": 2628427,
+  "compressed": true,
+  "sha256": "0x5604f140a935c3758c0a4d56a754deae2c255661468a66002f7161d74d3d10cd",
+  "code_hash": "0x43b6777f7b31988827493b8ea6813f7b938ef3c52b2918c0bcadf2dd3ae8361c",
+  "spec_name": "gpn",
+  "spec_version": 43,
+  "impl_version": 1,
+  "transaction_version": 1,
+  "system_version": 1,
+  "chain_name": "GPN Public Testnet",
+  "chain_spec_version_at_stage": 41,
+  "track": "committee",
+  "call": "set_code",
+  "mode": "inline",
+  "created_at_unix": 1792706007
+}
