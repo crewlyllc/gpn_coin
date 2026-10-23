@@ -1047,9 +1047,53 @@ fn refresh(
         //    enter the registry: the AP never dials it.
         apply_poll_caps(&mut out, &poll_caps);
 
+        // 4b. Two records publishing the SAME libp2p peer id means at least one
+        //     of them is republishing another node's identity — exactly the
+        //     2026-10-23 box1 defect, where a provider's heartbeat read its
+        //     peer id from the seed node's RPC. The suffix check cannot catch
+        //     it (the id matches its own address list); only a cross-record
+        //     comparison can. Warn, keyed on the pair, so it is visible in the
+        //     AP log instead of silently poisoning the directory.
+        warn_duplicate_peer_ids(&out);
+
         *reg.lock().unwrap() = out;
         std::thread::sleep(Duration::from_secs(5));
     });
+}
+
+/// Warn (once per id/host pair) when two registry records claim one peer id.
+/// One node = one libp2p key, so this is always a mis-publication.
+fn warn_duplicate_peer_ids(providers: &[Provider]) {
+    use std::collections::HashMap;
+    let mut owners: HashMap<&str, Vec<&str>> = HashMap::new();
+    for p in providers {
+        if let Some(pid) = p.peer_id.as_deref() {
+            let host = p
+                .p2p_multiaddrs
+                .first()
+                .and_then(|m| m.split("/tcp/").next())
+                .unwrap_or(&p.status_url);
+            owners.entry(pid).or_default().push(host);
+        }
+    }
+    for (pid, mut hosts) in owners {
+        hosts.sort_unstable();
+        hosts.dedup();
+        if hosts.len() < 2 {
+            continue;
+        }
+        let key = format!("{pid}|{}", hosts.join(","));
+        if !warn_once(&key) {
+            continue;
+        }
+        log::warn!(
+            "providers: peer_id {pid} is published by {} different hosts ({}) — one node has one \
+             libp2p identity, so at least one heartbeat is republishing another node's peer id \
+             (check its --node-endpoint/GPN_NODE_ENDPOINT); its multiaddrs are undialable",
+            hosts.len(),
+            hosts.join(", ")
+        );
+    }
 }
 
 /// Resolve a registry entry's `address`: prefer the provider's own heartbeat

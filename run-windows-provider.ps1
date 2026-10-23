@@ -29,6 +29,10 @@
 param(
   [string]$Chain           = "testnet",                # testnet | mainnet | dev | path to chain-spec.json
   [string]$Rpc             = "ws://gpn-testnet.duckdns.org:9944",
+  # Identity RPC for the heartbeat: MUST be this box's own node. It used to be
+  # $Rpc — a seed node — so /status published the SEED's peer id in our
+  # multiaddr (2026-10-23) and every peer failed to dial us.
+  [string]$NodeRpc         = "ws://127.0.0.1:9944",
   [string]$Signer          = "//Alice",
   [string]$Address         = "",                     # ss58 payout/identity address (optional; shown if given)
   [string]$PublicStatusUrl = "",                     # e.g. http://1.2.3.4:8093/status  (enables on-chain discovery)
@@ -96,6 +100,8 @@ Write-Host "[2/4] registering provider (min_gflops=150) ..."
 Write-Host "[3/4] configuring node (miner + provider) ..."
 $env:GPN_CHAIN   = $Chain
 $env:GPN_ENDPOINT = $Rpc
+# Peer identity is read from THIS box's node, never from the (remote) chain RPC.
+$env:GPN_NODE_ENDPOINT = $NodeRpc
 $env:GPN_SIGNER  = $Signer
 $env:GPN_OLLAMA  = $Ollama
 $env:GPN_GFLOPS  = "$Gflops"

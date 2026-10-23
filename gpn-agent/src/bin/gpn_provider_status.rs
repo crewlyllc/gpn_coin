@@ -29,8 +29,26 @@
 //! `peer_id` / `multiaddrs` / `p2p_port` (peer-id publication) let the public
 //! directory (`https://gpncoin.ai/seeds.json`) turn this provider into a
 //! **dialable** libp2p peer instead of an informational HTTP endpoint. The peer
-//! id + listen addresses are read from the local node over JSON-RPC
-//! (`system_localPeerId` / `system_localListenAddresses`) and cached.
+//! id + listen addresses are read from the node over JSON-RPC
+//! (`system_localPeerId` / `system_localListenAddresses`) on **every** publish
+//! (bounded by a 5 s TTL, never a long-lived cache).
+//!
+//! # Identity endpoint vs chain endpoint (2026-10-23 fix)
+//!
+//! `--endpoint` / `GPN_ENDPOINT` is the *chain* RPC: it may be remote (a public
+//! RPC or another box's node) and is used for `state_getStorage` attestation
+//! reads. The *identity* — `peer_id` and `system_localListenAddresses` — MUST
+//! come from the node that actually serves this provider's p2p port:
+//! `--node-endpoint` / `GPN_NODE_ENDPOINT`, default `ws://127.0.0.1:9944`.
+//!
+//! These used to be the same setting. On box1 the provider script defaulted
+//! `GPN_ENDPOINT` to the **seed** node (`ws://gpn-testnet.duckdns.org:9944`),
+//! so the heartbeat read the seed's peer id and published
+//! `/ip4/23.241.109.255/tcp/30333/p2p/<seed id>` — a healthy-looking provider
+//! advertising an identity that cannot complete a handshake on that host. Every
+//! peer that trusted it failed to dial. Identity is therefore now read from a
+//! dedicated, local-first endpoint, logged at startup, and a failed read
+//! publishes `peer_id: null` + `multiaddrs: []` rather than anything cached.
 //!
 //! # Publishing a dialable address
 //!
@@ -65,7 +83,8 @@
 //!                       [--models <m1,m2>] [--capacity <n>] [--active <n>]
 //!                       [--ollama http://127.0.0.1:11434]
 //!                       [--capabilities <LLMInference,ImageGeneration,…>]
-//!                       [--endpoint ws://127.0.0.1:9944] [--public-addr <ip:port>]
+//!                       [--endpoint <chain rpc>] [--node-endpoint ws://127.0.0.1:9944]
+//!                       [--public-addr <ip:port>]
 //! Env: LISTEN, ADDRESS, GFLOPS, MODELS, CAPACITY, ACTIVE, GPN_OLLAMA, CAPABILITIES,
 //!      GPN_ENDPOINT, GPN_PUBLIC_ADDR
 
@@ -89,12 +108,24 @@ fn opt(args: &[String], flag: &str) -> Option<String> {
 /// pulled model still appears almost immediately.
 const MODELS_TTL: Duration = Duration::from_secs(10);
 
-/// How long a peer-id snapshot is reused. The peer id never changes for a
-/// running node, but the listen addresses can (restart on a different port), so
-/// refresh occasionally instead of once at boot. A failure is retried sooner:
-/// the node RPC may simply not be up yet when the heartbeat starts.
-const P2P_TTL: Duration = Duration::from_secs(60);
+/// How long a peer-id snapshot is reused.
+///
+/// This is deliberately SHORT. The peer id is the one field that must never be
+/// served from a long-lived cache: a stale id makes the box look healthy while
+/// being undialable (2026-10-23: box1 published the *seed node's* peer id in
+/// its multiaddr for hours because the identity came from a cached/remote
+/// read). `/status` is polled every ~5 s, so a 5 s TTL means an effectively
+/// live read at no measurable cost to a local node RPC.
+const P2P_TTL: Duration = Duration::from_secs(5);
+/// A failed read is retried at this interval (the node may not be up yet).
+/// Failures are never masked by an older success — see [`p2p_info`].
 const P2P_RETRY_TTL: Duration = Duration::from_secs(10);
+
+/// How long a hardware measurement (VRAM / RAM / GPU class / TFLOPS) is reused.
+/// Hardware is static in practice, but re-probing keeps a box honest after a
+/// hot-swap or VM migration, and — the point — means a number is never served
+/// indefinitely after a measurement stops working.
+const HARDWARE_TTL: Duration = Duration::from_secs(60);
 
 /// How long a STUN result is reused. A NAT mapping can change (router reboot,
 /// lease expiry); a few minutes is cheap and fresh enough.
@@ -140,6 +171,178 @@ fn rpc_call(endpoint: &str, method: &str, params: Value) -> Option<Value> {
         .json()
         .ok()?;
     v.get("result").cloned()
+}
+
+/// Print `msg` only when it differs from the last message printed through this
+/// helper. `/status` is polled every ~5 s and the identity/hardware snapshots
+/// refresh on that order, so an unconditional line here would be a log storm.
+fn log_change_once(msg: &str) {
+    static LAST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    if let Ok(mut last) = LAST.lock() {
+        if last.as_deref() == Some(msg) {
+            return;
+        }
+        eprintln!("{msg}");
+        *last = Some(msg.to_string());
+    }
+}
+
+/// Is this RPC endpoint on the machine we are running on?
+///
+/// Only a loopback endpoint can be *proved* local; anything else could be
+/// another box's node (the box1 defect). We do not refuse to publish for a
+/// non-loopback endpoint — a containerised/remote-managed node is legitimate —
+/// but we say so loudly at startup, because the peer id we publish then belongs
+/// to that node, not necessarily to the host serving the multiaddr.
+fn endpoint_is_loopback(endpoint: &str) -> bool {
+    let rest = endpoint
+        .split_once("://")
+        .map(|(_, r)| r)
+        .unwrap_or(endpoint);
+    let host = rest.split('/').next().unwrap_or(rest);
+    let host = host.rsplit_once('@').map(|(_, h)| h).unwrap_or(host);
+    // Strip the port; keep bracketed IPv6 intact.
+    let host = if let Some(h) = host.strip_prefix('[') {
+        h.split(']').next().unwrap_or(h).to_string()
+    } else {
+        host.rsplit_once(':')
+            .map(|(h, _)| h.to_string())
+            .unwrap_or_else(|| host.to_string())
+    };
+    matches!(
+        host.as_str(),
+        "127.0.0.1" | "localhost" | "::1" | "0.0.0.0" | "[::1]"
+    )
+}
+
+// ─── Hardware snapshot (live, TTL-bounded) ─────────────────────────────────
+//
+// VRAM / RAM / GPU class / TFLOPS were read exactly once at startup and then
+// republished verbatim for the life of the process. That is fine for a card
+// that cannot change, but it silently froze *another machine's* numbers on a
+// box whose service file was copied between hosts (2026-10-23: box1 reported
+// `gflops: 188`, `mem_bw_gbps: 250.0`, `tflops: 44.0` unchanged across many
+// restarts). Hardware is now re-measured at most every [`HARDWARE_TTL`], and a
+// measurement that fails publishes 0 ("unknown") — never a remembered value.
+
+/// Operator-fixed hardware values (`--vram-mb` etc.). `Some` wins over any
+/// measurement; `None` means "measure it".
+#[derive(Debug, Clone, Default)]
+struct HardwareSpec {
+    vram_mb: Option<u64>,
+    ram_mb: Option<u64>,
+    gpu_class: Option<String>,
+    tflops: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct Hardware {
+    vram_mb: u64,
+    ram_mb: u64,
+    gpu_class: String,
+    tflops: f64,
+}
+
+impl Hardware {
+    /// Blend the measured snapshot with the operator's overrides.
+    fn with_overrides(self, spec: &HardwareSpec) -> Hardware {
+        Hardware {
+            vram_mb: spec.vram_mb.unwrap_or(self.vram_mb),
+            ram_mb: spec.ram_mb.unwrap_or(self.ram_mb),
+            gpu_class: spec.gpu_class.clone().unwrap_or(self.gpu_class),
+            tflops: spec.tflops.unwrap_or(self.tflops),
+        }
+    }
+}
+
+/// Take a real measurement of this box. 0 / "unknown" means the probe failed —
+/// deliberately not a fallback constant.
+fn measure_hardware() -> Hardware {
+    let (gpu_class, tflops) = detect_gpu_capability();
+    Hardware {
+        vram_mb: detect_vram_mb(),
+        ram_mb: detect_ram_mb(),
+        gpu_class,
+        tflops,
+    }
+}
+
+/// Cached measurement, refreshed when older than `ttl`. `measure` is injectable
+/// so the TTL behaviour is testable without a GPU.
+fn resolve_hardware_with(
+    spec: &HardwareSpec,
+    cache: &std::sync::Mutex<Option<(Instant, Hardware)>>,
+    ttl: Duration,
+    now: Instant,
+    measure: &dyn Fn() -> Hardware,
+) -> Hardware {
+    let mut fresh: Option<Hardware> = None;
+    if let Ok(guard) = cache.lock() {
+        if let Some((at, hw)) = guard.as_ref() {
+            // `now` is passed in (not `Instant::now()`) so a test can move the
+            // clock; `checked_duration_since` keeps a future stamp from
+            // panicking and simply forces a refresh.
+            match now.checked_duration_since(*at) {
+                Some(age) if age < ttl => fresh = Some(hw.clone()),
+                _ => {}
+            }
+        }
+    }
+    let hw = match fresh {
+        Some(hw) => hw,
+        None => {
+            let hw = measure();
+            if let Ok(mut guard) = cache.lock() {
+                *guard = Some((now, hw.clone()));
+            }
+            hw
+        }
+    };
+    let resolved = hw.with_overrides(spec);
+    log_unmeasured(&resolved);
+    resolved
+}
+
+fn hardware_cache() -> &'static std::sync::Mutex<Option<(Instant, Hardware)>> {
+    static C: std::sync::OnceLock<std::sync::Mutex<Option<(Instant, Hardware)>>> =
+        std::sync::OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn resolve_hardware(spec: &HardwareSpec) -> Hardware {
+    resolve_hardware_with(
+        spec,
+        hardware_cache(),
+        HARDWARE_TTL,
+        Instant::now(),
+        &measure_hardware,
+    )
+}
+
+/// Say it once per process when a hardware figure is unknown — a silent 0 looks
+/// like a deliberate configuration, and the AP gates on these numbers.
+fn log_unmeasured(hw: &Hardware) {
+    fn note(msg: &str) {
+        static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        if let Ok(mut seen) = SEEN.lock() {
+            if !seen.iter().any(|s| s == msg) {
+                seen.push(msg.to_string());
+                eprintln!("{msg}");
+            }
+        }
+    }
+    if hw.vram_mb == 0 {
+        note("[status] vram_mb=0 (unmeasurable — not advertised; the VRAM model gate is off)");
+    }
+    if hw.ram_mb == 0 {
+        note("[status] ram_mb=0 (unmeasurable — not advertised)");
+    }
+    if hw.tflops <= 0.0 {
+        note("[status] tflops=0 (GPU capability unmeasurable — a job with min_tflops cannot be routed here)");
+    }
+    if hw.gpu_class == "unknown" {
+        note("[status] gpu_class=unknown (no nvidia-smi/rocm-smi/lspci evidence)");
+    }
 }
 
 // ─── Attested compute (queue #65) ───────────────────────────────────────────
@@ -511,6 +714,9 @@ fn choose_public_base(
 /// Build the published peer information. `public_addr` is authoritative when
 /// configured (a NATed box listening on `0.0.0.0` cannot infer its own public
 /// IP); otherwise the evidence ladder in [`choose_public_base`] decides.
+/// Convenience wrapper used by tests: [`build_p2p_info_with`] with no extra
+/// evidence rungs.
+#[cfg(test)]
 fn build_p2p_info(
     peer_id: String,
     public_addr: Option<&str>,
@@ -545,9 +751,11 @@ fn build_p2p_info_with(
         }
     }
     if doubled {
-        eprintln!(
+        // /status is polled every ~5 s and the identity snapshot is refreshed
+        // that often, so this must not repeat verbatim forever.
+        log_change_once(
             "[p2p] node RPC reported a doubled /p2p/<id>/p2p/<id> listen address (upstream \
-             litep2p bug) — normalised before publication"
+             litep2p bug) — normalised before publication",
         );
     }
 
@@ -562,6 +770,19 @@ fn build_p2p_info_with(
         .into_iter()
         .map(|b| format!("{b}/p2p/{peer_id}"))
         .collect();
+    // Fail closed on identity/address disagreement. Normally a no-op (we append
+    // `peer_id` ourselves), but it also covers an operator-supplied base that
+    // already carries somebody else's `/p2p/<id>`: the AP's sanitizer drops
+    // those, and publishing them would be a lie either way.
+    let suffix = format!("/p2p/{peer_id}");
+    let before = multiaddrs.len();
+    multiaddrs.retain(|ma| ma.ends_with(&suffix) && ma.matches("/p2p/").count() == 1);
+    if multiaddrs.len() != before {
+        eprintln!(
+            "[p2p] dropped {} address(es) whose /p2p/ identity was not {peer_id}",
+            before - multiaddrs.len()
+        );
+    }
     multiaddrs.sort();
     multiaddrs.dedup();
 
@@ -573,16 +794,19 @@ fn build_p2p_info_with(
     // Explain an empty publication once per change — an operator seeing
     // `multiaddrs: []` in the directory must not have to guess.
     if multiaddrs.is_empty() {
-        eprintln!(
+        // Deduped: the reason only changes when the ladder's inputs do.
+        let mut msg = format!(
             "[p2p] publishing NO public address for peer {peer_id} — peers cannot dial this box:"
         );
         for n in &notes {
-            eprintln!("[p2p]   - {n}");
+            msg.push_str("\n[p2p]   - ");
+            msg.push_str(n);
         }
-        eprintln!(
-            "[p2p]   fix: set GPN_PUBLIC_ADDR=/ip4/<wan-ip>/tcp/<port> (or enable UPnP) and restart \
-             the heartbeat"
+        msg.push_str(
+            "\n[p2p]   fix: set GPN_PUBLIC_ADDR=/ip4/<wan-ip>/tcp/<port> (or enable UPnP) and restart \
+             the heartbeat",
         );
+        log_change_once(&msg);
     }
 
     P2pInfo {
@@ -594,23 +818,7 @@ fn build_p2p_info_with(
     }
 }
 
-/// Read peer id + listen addresses from the node RPC. `None` when the node is
-/// unreachable or answers something unexpected.
-fn read_p2p_info(
-    endpoint: &str,
-    public_addr: Option<&str>,
-    node_evidence: Option<&str>,
-    stun: Option<&str>,
-) -> Option<P2pInfo> {
-    p2p_info_from_rpc_evidence(
-        &|method| rpc_call(endpoint, method, json!([])),
-        public_addr,
-        node_evidence,
-        stun,
-    )
-}
-
-/// RPC-agnostic core of [`read_p2p_info`] — injectable so tests can mock the
+/// RPC-agnostic core of the identity read — injectable so tests can mock the
 /// node without a socket.
 fn p2p_info_from_rpc(
     rpc: &dyn Fn(&str) -> Option<Value>,
@@ -644,15 +852,29 @@ fn p2p_info_from_rpc_evidence(
     ))
 }
 
-/// Attach the peer-id fields to a `/status` body. Omitted entirely when there
-/// is nothing to publish, so the shape stays backwards compatible.
+/// Attach the peer-id fields to a `/status` body.
+///
+/// With no live identity the fields are published **empty** (`null` / `[]`),
+/// not omitted and above all not stale. `null` is unambiguous: "I have no peer
+/// identity right now", which a consumer can act on (skip this provider); an
+/// omitted key is indistinguishable from an old heartbeat that never had the
+/// feature, and a cached id is the bug this replaced.
 fn attach_p2p(body: &mut Value, info: Option<&P2pInfo>) {
-    if let Some(p2p) = info {
-        body["peer_id"] = json!(p2p.peer_id);
-        body["multiaddrs"] = json!(p2p.multiaddrs);
-        body["p2p_port"] = json!(p2p.p2p_port);
-        body["listen_addrs"] = json!(p2p.listen_addrs);
-        body["address_source"] = json!(p2p.address_source);
+    match info {
+        Some(p2p) => {
+            body["peer_id"] = json!(p2p.peer_id);
+            body["multiaddrs"] = json!(p2p.multiaddrs);
+            body["p2p_port"] = json!(p2p.p2p_port);
+            body["listen_addrs"] = json!(p2p.listen_addrs);
+            body["address_source"] = json!(p2p.address_source);
+        }
+        None => {
+            body["peer_id"] = Value::Null;
+            body["multiaddrs"] = json!([]);
+            body["p2p_port"] = Value::Null;
+            body["listen_addrs"] = json!([]);
+            body["address_source"] = json!("none");
+        }
     }
 }
 
@@ -813,21 +1035,16 @@ fn p2p_cache() -> &'static std::sync::Mutex<Option<(Instant, Option<P2pInfo>)>> 
     C.get_or_init(|| std::sync::Mutex::new(None))
 }
 
-/// Cached [`read_p2p_info`]. Never blocks the heartbeat for long: the RPC calls
-/// are time-bounded at 1.5 s and a miss (node not up yet) is retried in 10 s.
+/// Cached [`p2p_info_cached`]. Never blocks the heartbeat for long: the RPC
+/// calls are time-bounded at 1.5 s and a miss (node not up yet) is retried in
+/// 10 s.
+///
+/// A cache **miss** always re-reads the node; a failed read stores `None` and
+/// therefore publishes no peer id at all. A previously successful snapshot is
+/// only ever reused inside [`P2P_TTL`] (5 s), so a node whose identity changed
+/// (key file replaced, or the endpoint reassigned to another node) cannot be
+/// advertised with the old id for longer than one poll.
 fn p2p_info(endpoint: &str, public_addr: Option<&str>) -> Option<P2pInfo> {
-    if let Ok(guard) = p2p_cache().lock() {
-        if let Some((at, info)) = guard.as_ref() {
-            let ttl = if info.is_some() {
-                P2P_TTL
-            } else {
-                P2P_RETRY_TTL
-            };
-            if at.elapsed() < ttl {
-                return info.clone();
-            }
-        }
-    }
     let evidence = read_dialability_state();
     // The STUN rung needs the node's listen port. Probe the RPC once for it
     // (cheap, and the answer is cached right below with the rest).
@@ -835,9 +1052,49 @@ fn p2p_info(endpoint: &str, public_addr: Option<&str>) -> Option<P2pInfo> {
         .and_then(|v| v.as_array().cloned())
         .and_then(|a| a.iter().filter_map(|x| x.as_str()).find_map(port_of));
     let stun = stun_evidence(listen_port);
-    let answer = read_p2p_info(endpoint, public_addr, evidence.as_deref(), stun.as_deref());
-    if let Ok(mut guard) = p2p_cache().lock() {
-        *guard = Some((Instant::now(), answer.clone()));
+    p2p_info_cached(
+        public_addr,
+        Instant::now(),
+        p2p_cache(),
+        &|method| rpc_call(endpoint, method, json!([])),
+        evidence.as_deref(),
+        stun.as_deref(),
+    )
+}
+
+/// The caching/TTL core of [`p2p_info`], with the clock, the cache and the RPC
+/// injected so the "never serve a stale identity" rule is unit-testable.
+fn p2p_info_cached(
+    public_addr: Option<&str>,
+    now: Instant,
+    cache: &std::sync::Mutex<Option<(Instant, Option<P2pInfo>)>>,
+    rpc: &dyn Fn(&str) -> Option<Value>,
+    evidence: Option<&str>,
+    stun: Option<&str>,
+) -> Option<P2pInfo> {
+    let mut hit: Option<Option<P2pInfo>> = None;
+    if let Ok(guard) = cache.lock() {
+        if let Some((at, info)) = guard.as_ref() {
+            let ttl = if info.is_some() {
+                P2P_TTL
+            } else {
+                P2P_RETRY_TTL
+            };
+            // `checked_duration_since` treats a future stamp as expired
+            // instead of panicking (a test clock can move either way).
+            if matches!(now.checked_duration_since(*at), Some(age) if age < ttl) {
+                hit = Some(info.clone());
+            }
+        }
+    }
+    if let Some(info) = hit {
+        return info;
+    }
+    // Miss (or expired): read the node again. A failure here yields `None` and
+    // is stored as such — an old success is never resurrected into a publish.
+    let answer = p2p_info_from_rpc_evidence(rpc, public_addr, evidence, stun);
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some((now, answer.clone()));
     }
     answer
 }
@@ -972,6 +1229,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let endpoint = opt(&args, "--endpoint")
         .or_else(|| std::env::var("GPN_ENDPOINT").ok())
         .unwrap_or_else(|| "ws://127.0.0.1:9944".into());
+    // Identity RPC — the node that serves THIS provider's p2p port. Kept
+    // separate from `--endpoint` because the chain RPC is often remote while
+    // the peer id is inherently local (2026-10-23: box1 read the seed node's
+    // identity through `GPN_ENDPOINT` and published an undialable multiaddr).
+    let node_endpoint = opt(&args, "--node-endpoint")
+        .or_else(|| std::env::var("GPN_NODE_ENDPOINT").ok())
+        .unwrap_or_else(|| "ws://127.0.0.1:9944".into());
     // The address peers should dial — REQUIRED for a box behind NAT that
     // listens on 0.0.0.0. Accepts a multiaddr (`/ip4/1.2.3.4/tcp/30333`) or
     // `host:port`.
@@ -996,33 +1260,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|| std::env::var("GPN_OWNER_COST_USD_HR").ok())
         .and_then(|s| s.parse().ok())
         .unwrap_or(0.03);
-    // Memory bandwidth (GB/s) — the other half of the roofline. A hardware spec.
-    let mem_bw_gbps: f64 = opt(&args, "--mem-bw-gbps")
+    // Memory bandwidth (GB/s) — the other half of the roofline. A hardware spec
+    // that we CANNOT measure, so it is operator-declared or unknown (0). The
+    // old default was a hardcoded 250.0, which is a number from somebody else's
+    // card: it made every box look like the same machine on the rate card.
+    let mem_bw_gbps: Option<f64> = opt(&args, "--mem-bw-gbps")
         .or_else(|| std::env::var("GPN_MEM_BW_GBPS").ok())
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(250.0);
+        .and_then(|s| s.parse().ok());
+    if mem_bw_gbps.is_none() {
+        eprintln!(
+            "[status] mem_bw_gbps=0 (not measurable — pass --mem-bw-gbps/GPN_MEM_BW_GBPS with \
+             this card's spec; 0 means unknown, never a default borrowed from another box)"
+        );
+    }
     // Hardware capability (item 14): advertise VRAM/RAM so a job's `min_vram_mb`/
-    // `min_ram_mb` floor can be enforced *off-chain* by the scheduler. Auto-detected;
-    // 0 = unknown (explicitly NOT filtered against, so pre-item-14 boxes keep working).
-    let vram_mb: u64 = opt(&args, "--vram-mb")
-        .or_else(|| std::env::var("VRAM_MB").ok())
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(detect_vram_mb);
-    let ram_mb: u64 = opt(&args, "--ram-mb")
-        .or_else(|| std::env::var("RAM_MB").ok())
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(detect_ram_mb);
-    // Minimum GPU capability (item 19): advertise the GPU *class* + an FP32
-    // TFLOPS estimate so the scheduler can gate a job's `min_tflops` floor and
-    // reject CPU/APU integrated graphics. Auto-detected; overridable.
-    let (gpu_class, tflops_detected) = detect_gpu_capability();
-    let gpu_class: String = opt(&args, "--gpu-class")
-        .or_else(|| std::env::var("GPU_CLASS").ok())
-        .unwrap_or(gpu_class);
-    let tflops: f64 = opt(&args, "--tflops")
-        .or_else(|| std::env::var("TFLOPS").ok())
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(tflops_detected);
+    // `min_ram_mb` floor can be enforced *off-chain* by the scheduler. 0 =
+    // unknown (explicitly NOT filtered against, so pre-item-14 boxes keep working).
+    // `Some` here = operator override; `None` = re-measured every HARDWARE_TTL.
+    let hw_spec = HardwareSpec {
+        vram_mb: opt(&args, "--vram-mb")
+            .or_else(|| std::env::var("VRAM_MB").ok())
+            .and_then(|s| s.parse().ok()),
+        ram_mb: opt(&args, "--ram-mb")
+            .or_else(|| std::env::var("RAM_MB").ok())
+            .and_then(|s| s.parse().ok()),
+        gpu_class: opt(&args, "--gpu-class").or_else(|| std::env::var("GPU_CLASS").ok()),
+        tflops: opt(&args, "--tflops")
+            .or_else(|| std::env::var("TFLOPS").ok())
+            .and_then(|s| s.parse().ok()),
+    };
+    // Boot measurement (also warms the cache and logs anything unmeasurable).
+    let boot_hw = resolve_hardware(&hw_spec);
+    let mem_bw: f64 = mem_bw_gbps.unwrap_or(0.0);
     let models: Vec<String> = models_csv
         .split(',')
         .map(|s| s.trim().to_string())
@@ -1046,6 +1315,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
     println!("GPN provider heartbeat on http://{listen} — address={address} gflops={gflops} ({gflops_source}) models={:?} active={active}/{capacity} capabilities={:?}", models, capabilities);
+    println!(
+        "[status] hardware: vram_mb={} ram_mb={} gpu_class={} tflops={} mem_bw_gbps={} (re-measured every {}s)",
+        boot_hw.vram_mb,
+        boot_hw.ram_mb,
+        boot_hw.gpu_class,
+        boot_hw.tflops,
+        mem_bw,
+        HARDWARE_TTL.as_secs()
+    );
+    // Identity source, logged once at startup: with this line alone an operator
+    // can answer "which node am I publishing?" — the question that took hours
+    // on box1, where `peer_id` belonged to the seed node.
+    println!("[status] identity RPC = {node_endpoint} (chain RPC = {endpoint})");
+    if !endpoint_is_loopback(&node_endpoint) {
+        eprintln!(
+            "[status] WARNING: identity RPC {node_endpoint} is NOT loopback. The published \
+             peer_id will be THAT node's identity, and every multiaddr we emit will be dialled \
+             as that peer on this host's IP. Point --node-endpoint/GPN_NODE_ENDPOINT at this \
+             box's own node (ws://127.0.0.1:9944) unless the node really is remote."
+        );
+    }
+    match rpc_call(&node_endpoint, "system_localPeerId", json!([]))
+        .and_then(|v| v.as_str().and_then(normalize_peer_id))
+    {
+        Some(id) => println!("[status] peer_id={id} (from node RPC {node_endpoint})"),
+        None => eprintln!(
+            "[status] ERROR: node RPC {node_endpoint} did not answer system_localPeerId — \
+             /status will publish peer_id=null and multiaddrs=[] until it does (a cached or \
+             guessed id would be undialable, which is worse than none)"
+        ),
+    }
     if gflops == 0 {
         // Item 5: a 0 here reaches the marketplace as "no compute". Say so at
         // boot instead of letting a silent 0 look like a healthy heartbeat.
@@ -1061,12 +1361,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     if !models.is_empty() {
-        let usable = vram_filter_logged(&models, vram_mb);
+        let usable = vram_filter_logged(&models, boot_hw.vram_mb);
         if usable.len() != models.len() {
             println!(
-                "[models] advertising {}/{} configured model(s) after the VRAM gate (vram={vram_mb} MiB)",
+                "[models] advertising {}/{} configured model(s) after the VRAM gate (vram={} MiB)",
                 usable.len(),
-                models.len()
+                models.len(),
+                boot_hw.vram_mb
             );
         }
     }
@@ -1091,11 +1392,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for req in server.incoming_requests() {
         let (body, code) = match (req.method(), req.url()) {
             (Method::Get, "/status") => {
+                // Hardware is re-measured at most every HARDWARE_TTL — never
+                // carried over from a previous machine/process lifetime.
+                let hw_now = resolve_hardware(&hw_spec);
                 let (models_now, can_pull) = ollama_models(&ollama, &models);
                 // Item 3: never advertise a model this box's VRAM cannot hold —
                 // the access point routes on `models`, so an unfittable entry is
                 // a promise the box will OOM on.
-                let models_now = vram_filter_logged(&models_now, vram_mb);
+                let models_now = vram_filter_logged(&models_now, hw_now.vram_mb);
                 // Item #43: report free space so a monitor can alert before
                 // ENOSPC silently halts block production. 0/null = unknown.
                 let disk = disk_space(
@@ -1119,17 +1423,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "can_pull": can_pull, "active": active, "capacity": capacity.max(1),
                     "capabilities": capabilities,
                     "tok_per_s": tok_per_s, "owner_cost_usd_hr": owner_cost_usd_hr,
-                    "mem_bw_gbps": mem_bw_gbps, "vram_mb": vram_mb, "ram_mb": ram_mb,
-                    "gpu_class": gpu_class, "tflops": tflops,
+                    "mem_bw_gbps": mem_bw, "vram_mb": hw_now.vram_mb, "ram_mb": hw_now.ram_mb,
+                    "gpu_class": hw_now.gpu_class, "tflops": hw_now.tflops,
                     "disk_free_mb": disk.free_mb, "disk_total_mb": disk.total_mb,
                     "disk_free_pct": disk.free_percent()
                 });
-                // Peer-id publication (best-effort). Omitted — not null — when
-                // the node RPC cannot be read, so consumers see the same shape
-                // they always have.
+                // Peer-id publication: always read live from THIS box's node.
+                // On failure the fields are published empty (null / []) — never
+                // a cached id, which would advertise an undialable identity.
                 attach_p2p(
                     &mut body,
-                    p2p_info(&endpoint, public_addr.as_deref()).as_ref(),
+                    p2p_info(&node_endpoint, public_addr.as_deref()).as_ref(),
                 );
                 (body, 200)
             }
@@ -1193,11 +1497,200 @@ mod tests {
         assert!(p2p_info_from_rpc(&rpc, None).is_none());
         let mut body = json!({"address": "5Abc"});
         attach_p2p(&mut body, None);
-        assert!(body.get("peer_id").is_none());
-        assert!(body.get("multiaddrs").is_none());
-        assert!(body.get("p2p_port").is_none());
+        // Publish the absence explicitly: `null` + `[]` is actionable ("no peer
+        // identity right now"), while an omitted key is ambiguous.
+        assert_eq!(body["peer_id"], Value::Null);
+        assert_eq!(body["multiaddrs"], json!([]));
+        assert_eq!(body["p2p_port"], Value::Null);
+        assert_eq!(body["listen_addrs"], json!([]));
+        assert_eq!(body["address_source"], json!("none"));
         // The heartbeat still has its normal fields.
         assert_eq!(body["address"], json!("5Abc"));
+    }
+
+    /// THE box1 regression (2026-10-23): the heartbeat published
+    /// `peer_id = <seed node id>` with `/ip4/23.241.109.255/tcp/30333/p2p/<seed
+    /// id>`. Whatever id the *node RPC* answers must appear in `peer_id` AND in
+    /// every published multiaddr's trailing `/p2p/` component — one identity,
+    /// no mixing.
+    #[test]
+    fn published_identity_matches_every_multiaddr_suffix() {
+        for id in [
+            "12D3KooWRmEpPduYCn29uAAUF7WDnbsTXooPXA7YGRWCC7C7feJm",
+            "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
+        ] {
+            let rpc = move |method: &str| -> Option<Value> {
+                match method {
+                    "system_localPeerId" => Some(json!(id)),
+                    "system_localListenAddresses" => Some(json!([
+                        "/ip4/0.0.0.0/tcp/30333",
+                        "/ip4/192.168.1.20/tcp/30333"
+                    ])),
+                    _ => None,
+                }
+            };
+            let info = p2p_info_from_rpc(&rpc, Some("/ip4/203.0.113.9/tcp/30333")).unwrap();
+            let mut body = json!({});
+            attach_p2p(&mut body, Some(&info));
+            assert_eq!(body["peer_id"], json!(id));
+            let addrs = body["multiaddrs"].as_array().unwrap();
+            assert!(!addrs.is_empty());
+            for ma in addrs {
+                let ma = ma.as_str().unwrap();
+                assert!(
+                    ma.ends_with(&format!("/p2p/{id}")),
+                    "multiaddr {ma} must carry the live peer id {id}"
+                );
+                assert_eq!(
+                    ma.rsplit_once("/p2p/").unwrap().1,
+                    body["peer_id"].as_str().unwrap(),
+                    "peer_id and multiaddrs disagree: {ma}"
+                );
+            }
+        }
+    }
+
+    /// A cached snapshot older than [`P2P_TTL`] must be re-read even when the
+    /// node's identity changed underneath us (key file replaced): serving the
+    /// old id is exactly the undialable-but-green failure.
+    #[test]
+    fn an_expired_identity_snapshot_is_re_read_and_a_failure_publishes_nothing() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Mutex;
+        let cache: Mutex<Option<(Instant, Option<P2pInfo>)>> = Mutex::new(None);
+        let rpc_up = AtomicBool::new(true);
+        let id = Mutex::new("12D3KooWRmEpPduYCn29uAAUF7WDnbsTXooPXA7YGRWCC7C7feJm".to_string());
+        let rpc = |method: &str| -> Option<Value> {
+            if !rpc_up.load(Ordering::SeqCst) {
+                return None;
+            }
+            match method {
+                "system_localPeerId" => Some(json!(id.lock().unwrap().clone())),
+                "system_localListenAddresses" => Some(json!(["/ip4/0.0.0.0/tcp/30333"])),
+                _ => None,
+            }
+        };
+        let t0 = Instant::now();
+        let addr = Some("/ip4/203.0.113.9/tcp/30333");
+
+        // First read: id A.
+        let first = p2p_info_cached(addr, t0, &cache, &rpc, None, None).unwrap();
+        assert!(first.multiaddrs[0]
+            .ends_with("/p2p/12D3KooWRmEpPduYCn29uAAUF7WDnbsTXooPXA7YGRWCC7C7feJm"));
+
+        // Inside the TTL the (still valid) cached snapshot is reused.
+        let cached = p2p_info_cached(addr, t0 + P2P_TTL / 2, &cache, &rpc, None, None).unwrap();
+        assert_eq!(cached.peer_id, first.peer_id);
+
+        // Node restarts with a new key; past the TTL we must publish the NEW id.
+        *id.lock().unwrap() = "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo".to_string();
+        let refreshed = p2p_info_cached(
+            addr,
+            t0 + P2P_TTL + Duration::from_secs(1),
+            &cache,
+            &rpc,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            refreshed.peer_id,
+            "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo"
+        );
+        assert!(refreshed.multiaddrs[0].ends_with(&format!("/p2p/{}", refreshed.peer_id)));
+
+        // The node goes away: past the TTL nothing at all is published — never
+        // the last known identity.
+        rpc_up.store(false, Ordering::SeqCst);
+        let gone = p2p_info_cached(addr, t0 + P2P_TTL * 4, &cache, &rpc, None, None);
+        assert!(
+            gone.is_none(),
+            "a failed read must never resurrect a stale id"
+        );
+        let mut body = json!({});
+        attach_p2p(&mut body, gone.as_ref());
+        assert_eq!(body["peer_id"], Value::Null);
+        assert_eq!(body["multiaddrs"], json!([]));
+    }
+
+    // ── Hardware: live, TTL-bounded, never borrowed ─────────────────────
+
+    #[test]
+    fn hardware_is_re_measured_once_the_ttl_expires() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Mutex;
+        let cache: Mutex<Option<(Instant, Hardware)>> = Mutex::new(None);
+        let calls = AtomicU32::new(0);
+        let measure = || {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            Hardware {
+                vram_mb: if n == 0 { 8188 } else { 16303 },
+                ram_mb: 15879,
+                gpu_class: "discrete".into(),
+                tflops: 15.1,
+            }
+        };
+        let t0 = Instant::now();
+        let spec = HardwareSpec::default();
+
+        let first = resolve_hardware_with(&spec, &cache, HARDWARE_TTL, t0, &measure);
+        assert_eq!(first.vram_mb, 8188);
+        // Inside the TTL: no new measurement.
+        let again =
+            resolve_hardware_with(&spec, &cache, HARDWARE_TTL, t0 + HARDWARE_TTL / 2, &measure);
+        assert_eq!(again.vram_mb, 8188);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // Past the TTL: a fresh read (the card changed under us).
+        let later = resolve_hardware_with(
+            &spec,
+            &cache,
+            HARDWARE_TTL,
+            t0 + HARDWARE_TTL + Duration::from_secs(1),
+            &measure,
+        );
+        assert_eq!(later.vram_mb, 16303);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn unmeasurable_hardware_publishes_zero_and_operator_overrides_win() {
+        let cache = std::sync::Mutex::new(None);
+        let measure = || Hardware {
+            vram_mb: 0,
+            ram_mb: 0,
+            gpu_class: "unknown".into(),
+            tflops: 0.0,
+        };
+        let spec = HardwareSpec::default();
+        let hw = resolve_hardware_with(&spec, &cache, HARDWARE_TTL, Instant::now(), &measure);
+        // 0 / "unknown" — NOT a borrowed constant (the old code froze 250 GB/s
+        // and another box's TFLOPS here).
+        assert_eq!(hw.vram_mb, 0);
+        assert_eq!(hw.ram_mb, 0);
+        assert_eq!(hw.tflops, 0.0);
+        assert_eq!(hw.gpu_class, "unknown");
+
+        let cache = std::sync::Mutex::new(None);
+        let spec = HardwareSpec {
+            vram_mb: Some(24576),
+            ram_mb: Some(65536),
+            gpu_class: Some("discrete".into()),
+            tflops: Some(82.6),
+        };
+        let hw = resolve_hardware_with(&spec, &cache, HARDWARE_TTL, Instant::now(), &measure);
+        assert_eq!(hw.vram_mb, 24576);
+        assert_eq!(hw.ram_mb, 65536);
+        assert_eq!(hw.tflops, 82.6);
+    }
+
+    #[test]
+    fn only_loopback_identity_endpoints_are_provable_local() {
+        assert!(endpoint_is_loopback("ws://127.0.0.1:9944"));
+        assert!(endpoint_is_loopback("http://localhost:9944"));
+        assert!(endpoint_is_loopback("ws://[::1]:9944"));
+        // box1's actual setting: the SEED node's RPC — not this box.
+        assert!(!endpoint_is_loopback("ws://gpn-testnet.duckdns.org:9944"));
+        assert!(!endpoint_is_loopback("ws://192.168.1.20:9944"));
     }
 
     #[test]
