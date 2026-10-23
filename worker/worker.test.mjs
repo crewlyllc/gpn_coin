@@ -650,3 +650,199 @@ test("rateLimit counts per key and resets after the window", async () => {
   // Zero-length window: every call starts a fresh slot.
   assert.equal(await __test.rateLimit({}, "203.0.113.99", "unit-c", 0, 0), true);
 });
+
+/* ── /api/v1/finetunes proxy ──────────────────────────────────────────────── */
+
+/**
+ * A fake AP transport: records the upstream call and answers with `reply`.
+ * Mirrors what `apRequest` returns on a real socket.
+ */
+function stubAp(reply, seen = []) {
+  return async (req) => {
+    seen.push(req);
+    return reply;
+  };
+}
+
+const jsonReply = (status, payload) => ({
+  status,
+  contentType: "application/json",
+  body: JSON.stringify(payload),
+});
+
+test("finetune submit: 202 is passed through with the AP body", async () => {
+  const seen = [];
+  const res = await worker.fetch(
+    new Request("https://gpncoin.ai/api/v1/finetunes", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: "https://gpncoin.ai",
+        "cf-connecting-ip": "203.0.113.41",
+      },
+      body: JSON.stringify({
+        model: "llama3.2:1b",
+        dataset: [{ prompt: "hi", completion: "hello" }],
+        epochs: 1,
+      }),
+    }),
+    {
+      __test_ap_transport: stubAp(
+        jsonReply(202, {
+          id: "1234",
+          object: "finetune",
+          status: "queued",
+          tuned_model: "tuned-1234",
+          poll_url: "/v1/finetunes/1234",
+        }),
+        seen,
+      ),
+    },
+    { waitUntil() {} },
+  );
+
+  assert.equal(res.status, 202);
+  assert.equal(res.headers.get("x-gpn-proxy"), "access-point");
+  assert.equal(res.headers.get("access-control-allow-origin"), "https://gpncoin.ai");
+  const body = await res.json();
+  assert.equal(body.id, "1234");
+  assert.equal(body.tuned_model, "tuned-1234");
+  // The proxy forwarded the submit to the AP's own path, method intact.
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].method, "POST");
+  assert.equal(seen[0].path, "/v1/finetunes");
+  assert.match(seen[0].body, /"model":"llama3.2:1b"/);
+});
+
+test("finetune submit: validates model and dataset before any upstream call", async () => {
+  const seen = [];
+  const env = { __test_ap_transport: stubAp(jsonReply(202, { id: "1" }), seen) };
+  const post = (payload, ip) =>
+    worker.fetch(
+      new Request("https://gpncoin.ai/api/v1/finetunes", {
+        method: "POST",
+        headers: { "content-type": "application/json", "cf-connecting-ip": ip },
+        body: JSON.stringify(payload),
+      }),
+      env,
+      { waitUntil() {} },
+    );
+
+  const noModel = await post({ dataset: [{ prompt: "a", completion: "b" }] }, "203.0.113.42");
+  assert.equal(noModel.status, 400);
+  assert.match((await noModel.json()).error.message, /model/);
+
+  const noData = await post({ model: "llama3.2:1b" }, "203.0.113.43");
+  assert.equal(noData.status, 400);
+  assert.match((await noData.json()).error.message, /dataset/);
+
+  const emptyData = await post({ model: "llama3.2:1b", dataset: [] }, "203.0.113.44");
+  assert.equal(emptyData.status, 400);
+
+  // None of the rejects reached the AP.
+  assert.equal(seen.length, 0);
+
+  // GET on the submit route is a 405, not a 404.
+  const wrong = await worker.fetch(
+    new Request("https://gpncoin.ai/api/v1/finetunes", { headers: { "cf-connecting-ip": "203.0.113.45" } }),
+    env,
+    { waitUntil() {} },
+  );
+  assert.equal(wrong.status, 405);
+  assert.match(wrong.headers.get("allow") || "", /POST/);
+});
+
+test("finetune poll: status passthrough including a 404 for an unknown id", async () => {
+  const run = (id, reply, ip) =>
+    worker.fetch(
+      new Request(`https://gpncoin.ai/api/v1/finetunes/${id}`, {
+        headers: { "cf-connecting-ip": ip },
+      }),
+      { __test_ap_transport: stubAp(reply) },
+      { waitUntil() {} },
+    );
+
+  const running = await run(
+    "1234",
+    jsonReply(200, { id: "1234", object: "finetune", status: "running" }),
+    "203.0.113.46",
+  );
+  assert.equal(running.status, 200);
+  assert.equal((await running.json()).status, "running");
+  assert.equal(running.headers.get("access-control-allow-origin"), "*");
+
+  const missing = await run(
+    "99999999",
+    jsonReply(404, { error: { message: "unknown fine-tune id", type: "gpn_not_found" } }),
+    "203.0.113.47",
+  );
+  assert.equal(missing.status, 404);
+  assert.equal((await missing.json()).error.type, "gpn_not_found");
+});
+
+test("finetune artifact: /artifact/<id> is proxied as binary", async () => {
+  const seen = [];
+  const bytes = new TextEncoder().encode("PK\u0003\u0004fake-lora-zip");
+  const res = await worker.fetch(
+    new Request("https://gpncoin.ai/api/v1/finetunes/1234/artifact", {
+      headers: { "cf-connecting-ip": "203.0.113.48" },
+    }),
+    {
+      __test_ap_transport: stubAp(
+        { status: 200, contentType: "application/zip", body: bytes, binary: true },
+        seen,
+      ),
+    },
+    { waitUntil() {} },
+  );
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "application/zip");
+  assert.equal(seen[0].path, "/artifact/1234");
+  assert.equal(seen[0].binary, true);
+  assert.equal((await res.arrayBuffer()).byteLength, bytes.byteLength);
+});
+
+test("finetune: CORS preflight allows POST from the site origin", async () => {
+  const pre = (origin) =>
+    worker.fetch(
+      new Request("https://gpncoin.ai/api/v1/finetunes", {
+        method: "OPTIONS",
+        headers: { origin, "access-control-request-method": "POST" },
+      }),
+      {},
+      { waitUntil() {} },
+    );
+
+  const ok = await pre("https://gpncoin.ai");
+  assert.equal(ok.status, 204);
+  assert.equal(ok.headers.get("access-control-allow-origin"), "https://gpncoin.ai");
+  assert.match(ok.headers.get("access-control-allow-methods"), /POST/);
+
+  const evil = await pre("https://evil.example");
+  assert.notEqual(evil.headers.get("access-control-allow-origin"), "https://evil.example");
+});
+
+test("finetune: submissions are rate-limited (4/hour per IP)", async () => {
+  const env = { __test_ap_transport: stubAp(jsonReply(202, { id: "1", status: "queued" })) };
+  const post = (ip) =>
+    worker.fetch(
+      new Request("https://gpncoin.ai/api/v1/finetunes", {
+        method: "POST",
+        headers: { "content-type": "application/json", "cf-connecting-ip": ip },
+        body: JSON.stringify({ model: "llama3.2:1b", dataset: [{ prompt: "a", completion: "b" }] }),
+      }),
+      env,
+      { waitUntil() {} },
+    );
+
+  for (let i = 0; i < __test.FINETUNE_RATE_MAX; i += 1) {
+    assert.equal((await post("203.0.113.49")).status, 202);
+  }
+  const limited = await post("203.0.113.49");
+  assert.equal(limited.status, 429);
+  assert.equal(limited.headers.get("retry-after"), String(__test.FINETUNE_RATE_WINDOW_SECONDS));
+  assert.match((await limited.json()).error.type, /rate_limited/);
+
+  // A different IP is unaffected.
+  assert.equal((await post("203.0.113.50")).status, 202);
+});

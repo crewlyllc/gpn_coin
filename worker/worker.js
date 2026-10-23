@@ -104,6 +104,11 @@ const CHAT_RATE_MAX = 12;
 const CHAT_RATE_WINDOW_SECONDS = 600;
 /** Concurrent chat jobs this isolate will hold open. */
 const CHAT_INFLIGHT_MAX = 8;
+/** Fine-tunes per IP per window. A tune is GPU-minutes and a flat 50 GPN of
+ * escrow, so it gets its own, tighter bucket than chat. */
+const FINETUNE_RATE_MAX = 4;
+/** Rate-limit window for fine-tune submissions, in seconds. */
+const FINETUNE_RATE_WINDOW_SECONDS = 3600;
 
 /** Cheap read endpoints (models/health/providers). */
 const READ_RATE_MAX = 120;
@@ -258,6 +263,17 @@ function apBase(env) {
  */
 async function apRequest(env, opts) {
   const binary = !!(opts && opts.binary);
+  // Test seam (`node --test`): a harness may supply a transport instead of a
+  // real socket. Worker env is configuration, never code, so production cannot
+  // accidentally set this.
+  if (env && typeof env.__test_ap_transport === "function") {
+    return await env.__test_ap_transport({
+      method: opts.method,
+      path: opts.path,
+      body: opts.body == null ? null : opts.body,
+      binary,
+    });
+  }
   const base = apBase(env);
   if (!base) return { error: "access point is not configured (AP_JOB_URL)" };
 
@@ -1079,6 +1095,9 @@ async function rateLimit(env, ip, bucket, max, windowSeconds) {
  *   GET  /api/v1/models          -> GET  /v1/models
  *   GET  /api/jobs/<id>          -> GET  /job/<id>
  *   POST /api/v1/chat/completions -> POST /v1/chat/completions
+ *   POST /api/v1/finetunes        -> POST /v1/finetunes (202 + id)
+ *   GET  /api/v1/finetunes/<id>   -> GET  /v1/finetunes/<id> (poll)
+ *   GET  /api/v1/finetunes/<id>/artifact -> GET /artifact/<id> (adapter zip)
  *
  * The AP's status code and body are passed through; only transport failures
  * become a 502 here.
@@ -1095,7 +1114,8 @@ async function handleApi(request, env, path) {
     const postRoute =
       route === "/v1/chat/completions" ||
       route === "/chat/completions" ||
-      route === "/v1/images/generations";
+      route === "/v1/images/generations" ||
+      route === "/v1/finetunes";
     return apiPreflight(origin, postRoute);
   }
 
@@ -1106,6 +1126,7 @@ async function handleApi(request, env, path) {
   let allow = "GET";
   let cache = "no-store";
   let binary = false;
+  let finetune = false;
 
   if (route === "/health" || route === "/ping") upstream = "/health";
   else if (route === "/mode") upstream = "/mode";
@@ -1130,6 +1151,21 @@ async function handleApi(request, env, path) {
     upstream = route;
     binary = true;
     cache = "public, max-age=86400";
+  } else if (route === "/v1/finetunes") {
+    // OpenAI-style fine-tune submit: 202 + id + poll_url. A LoRA tune is
+    // GPU-minutes, so — like images — the AP answers immediately and the
+    // training happens in the background.
+    upstream = "/v1/finetunes";
+    allow = "POST";
+    finetune = true;
+  } else if (/^\/v1\/finetunes\/\d{1,20}\/artifact$/.test(route)) {
+    // The finished LoRA adapter (zip). Binary: never decode it as text.
+    upstream = `/artifact/${route.split("/")[3]}`;
+    binary = true;
+    cache = "public, max-age=86400";
+  } else if (/^\/v1\/finetunes\/\d{1,20}$/.test(route)) {
+    // Poll: queued -> running -> succeeded | failed.
+    upstream = route;
   } else {
     const m = /^\/(?:jobs?)\/(\d{1,20})$/.exec(route);
     if (m) upstream = `/job/${m[1]}`;
@@ -1157,9 +1193,14 @@ async function handleApi(request, env, path) {
   }
 
   const isChat = allow === "POST";
-  const max = isChat ? CHAT_RATE_MAX : READ_RATE_MAX;
-  const windowSeconds = isChat ? CHAT_RATE_WINDOW_SECONDS : READ_RATE_WINDOW_SECONDS;
-  if (!(await rateLimit(env, ip, isChat ? "chat" : "read", max, windowSeconds))) {
+  const bucket = finetune ? "finetune" : isChat ? "chat" : "read";
+  const max = finetune ? FINETUNE_RATE_MAX : isChat ? CHAT_RATE_MAX : READ_RATE_MAX;
+  const windowSeconds = finetune
+    ? FINETUNE_RATE_WINDOW_SECONDS
+    : isChat
+      ? CHAT_RATE_WINDOW_SECONDS
+      : READ_RATE_WINDOW_SECONDS;
+  if (!(await rateLimit(env, ip, bucket, max, windowSeconds))) {
     return apiJson(
       {
         error: {
@@ -1205,27 +1246,54 @@ async function handleApi(request, env, path) {
     } catch {
       return apiJson({ error: { message: "expected a JSON body", type: "gpn_bad_request" } }, 400, origin, "POST");
     }
-    // Refuse a request with no usable prompt before it becomes an on-chain job
-    // (the AP rejects it too, but a clear message here is cheaper).
-    const usable =
-      parsed &&
-      typeof parsed === "object" &&
-      !Array.isArray(parsed) &&
-      ((Array.isArray(parsed.messages) && parsed.messages.length > 0) ||
-        typeof parsed.prompt === "string" ||
-        typeof parsed.input === "string");
-    if (!usable) {
-      return apiJson(
-        {
-          error: {
-            message: "missing prompt: send messages[] (OpenAI style) or a top-level prompt/input",
-            type: "gpn_bad_request",
+    // Refuse a request with no usable payload before it becomes an on-chain
+    // job (the AP rejects it too, but a clear message here is cheaper).
+    if (finetune) {
+      // A tune needs a base model and a non-empty dataset of prompt/completion
+      // pairs. The AP's parser is authoritative; this is only the cheap guard.
+      const ds = parsed && typeof parsed === "object" ? parsed.dataset : null;
+      const usable =
+        parsed &&
+        typeof parsed === "object" &&
+        !Array.isArray(parsed) &&
+        typeof parsed.model === "string" &&
+        parsed.model.trim() !== "" &&
+        ((Array.isArray(ds) && ds.length > 0) || typeof ds === "string");
+      if (!usable) {
+        return apiJson(
+          {
+            error: {
+              message:
+                'missing fine-tune fields: send {"model": "llama3.2:1b", "dataset": [{"prompt": "…", "completion": "…"}]}',
+              type: "gpn_bad_request",
+            },
           },
-        },
-        400,
-        origin,
-        "POST",
-      );
+          400,
+          origin,
+          "POST",
+        );
+      }
+    } else {
+      const usable =
+        parsed &&
+        typeof parsed === "object" &&
+        !Array.isArray(parsed) &&
+        ((Array.isArray(parsed.messages) && parsed.messages.length > 0) ||
+          typeof parsed.prompt === "string" ||
+          typeof parsed.input === "string");
+      if (!usable) {
+        return apiJson(
+          {
+            error: {
+              message: "missing prompt: send messages[] (OpenAI style) or a top-level prompt/input",
+              type: "gpn_bad_request",
+            },
+          },
+          400,
+          origin,
+          "POST",
+        );
+      }
     }
     if (chatInflight >= CHAT_INFLIGHT_MAX) {
       return apiJson(
@@ -1523,5 +1591,7 @@ export const __test = {
   originAllowed,
   AP_PROXY_MAX_BODY,
   CHAT_RATE_MAX,
+  FINETUNE_RATE_MAX,
+  FINETUNE_RATE_WINDOW_SECONDS,
   STATIC_BOOTNODES,
 };
