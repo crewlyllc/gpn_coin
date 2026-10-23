@@ -104,6 +104,193 @@ fn payload_gate(has_payload: bool, first_sighting: bool) -> ClaimGate {
     }
 }
 
+/// Item #74: how a failed `accept_job` should be treated.
+///
+/// A *transient* failure (the requestor's escrow cannot pay the accept-time
+/// charge — `TokenError::FundsUnavailable` — or the tx never made it into a
+/// block) must be retried later with backoff: the old code logged it and moved
+/// on, so the job sat `Pending` until its on-chain deadline and the requestor's
+/// escrow was refunded for work nobody ever attempted. A *permanent* failure
+/// (the chain says the job is not in a claimable state, we are not its
+/// provider, we are not registered, we are under the compute floor) must NOT be
+/// retried: re-sending the same call can only fail again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AcceptOutcome {
+    /// Worth trying again after a backoff.
+    Retry,
+    /// Re-sending the same call cannot succeed; stop.
+    GiveUp,
+}
+
+const ACCEPT_RETRY_MAX: u32 = 5;
+const ACCEPT_RETRY_BASE_MS: u64 = 2_000;
+const ACCEPT_RETRY_CAP_MS: u64 = 60_000;
+
+/// Classify an `accept_job` error string. Deliberately string-based: the chain
+/// client surfaces a dispatch failure as `tx included but FAILED dispatch:
+/// <pallet>::<ErrorName>`, and pool/connection failures as free text.
+/// Unknown errors resolve to `GiveUp` — never a hot retry loop on a cause we do
+/// not understand.
+fn classify_accept_error(msg: &str) -> AcceptOutcome {
+    let m = msg.to_ascii_lowercase();
+    // State errors answer "no, and asking again changes nothing" until some
+    // *other* event moves the job — the reconcile/adoption paths own those.
+    const PERMANENT: [&str; 8] = [
+        "jobnotpending",
+        "jobnotfound",
+        "alreadyaccepted",
+        "notjobprovider",
+        "providernotregistered",
+        "providercomputeinsufficient",
+        "badorigin",
+        "call filter",
+    ];
+    if PERMANENT.iter().any(|p| m.contains(p)) {
+        return AcceptOutcome::GiveUp;
+    }
+    // `MaxProviderCapacity` is transient (a slot frees when our running job
+    // settles), and the funding/pool/timeout class is transient by definition.
+    const TRANSIENT: [&str; 11] = [
+        "fundsunavailable",
+        "funds unavailable",
+        "insufficient",
+        "priority is too low",
+        "transaction is outdated",
+        "tx inclusion timed out",
+        "timed out",
+        "subscription dropped",
+        "connection",
+        "maxprovidercapacity",
+        "pool is full",
+    ];
+    if TRANSIENT.iter().any(|p| m.contains(p)) {
+        AcceptOutcome::Retry
+    } else {
+        AcceptOutcome::GiveUp
+    }
+}
+
+/// True when the failure is the requestor being unable to fund the accept.
+fn is_requestor_unfunded(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    m.contains("fundsunavailable") || m.contains("funds unavailable")
+}
+
+/// Exponential backoff for the Nth retry (0-based): 2 s, 4 s, 8 s, 16 s, 32 s,
+/// capped at 60 s. Bounded so a long-lived unfunded requestor cannot pin a GPU
+/// slot, and so a retry never waits longer than one block-time-scale window.
+fn accept_backoff_ms(attempts: u32) -> u64 {
+    ACCEPT_RETRY_BASE_MS
+        .saturating_mul(1u64 << attempts.min(6))
+        .min(ACCEPT_RETRY_CAP_MS)
+}
+
+/// The retry a failed accept earns, if any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AcceptRetryPlan {
+    /// 1-based retry number (how many attempts have now been made).
+    attempt: u32,
+    delay_ms: u64,
+    requestor_unfunded: bool,
+}
+
+/// Pure decision: given how many attempts have failed so far, does this error
+/// earn another one?
+fn accept_retry_plan(attempts: u32, err: &str) -> Option<AcceptRetryPlan> {
+    if classify_accept_error(err) == AcceptOutcome::GiveUp || attempts >= ACCEPT_RETRY_MAX {
+        return None;
+    }
+    Some(AcceptRetryPlan {
+        attempt: attempts + 1,
+        delay_ms: accept_backoff_ms(attempts),
+        requestor_unfunded: is_requestor_unfunded(err),
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AcceptRetryState {
+    attempts: u32,
+    next_at: Instant,
+}
+
+fn accept_retry_state() -> &'static Mutex<HashMap<u64, AcceptRetryState>> {
+    static M: OnceLock<Mutex<HashMap<u64, AcceptRetryState>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// May this job be claimed right now, or are we inside an accept backoff?
+fn accept_retry_gate(job_id: u64) -> bool {
+    let m = accept_retry_state()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    match m.get(&job_id) {
+        Some(s) => Instant::now() >= s.next_at,
+        None => true,
+    }
+}
+
+/// Record a failed accept. Returns the plan when another attempt is scheduled;
+/// `None` means give up (state error, unknown error, or budget exhausted).
+fn accept_retry_record(job_id: u64, err: &str) -> Option<AcceptRetryPlan> {
+    let mut m = accept_retry_state()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let attempts = m.get(&job_id).map(|s| s.attempts).unwrap_or(0);
+    match accept_retry_plan(attempts, err) {
+        Some(p) => {
+            m.insert(
+                job_id,
+                AcceptRetryState {
+                    attempts: p.attempt,
+                    next_at: Instant::now() + Duration::from_millis(p.delay_ms),
+                },
+            );
+            Some(p)
+        }
+        None => {
+            m.remove(&job_id);
+            None
+        }
+    }
+}
+
+/// A successful accept (or a job that is no longer ours to claim) clears any
+/// backoff, so a later re-assignment starts with a fresh budget.
+fn accept_retry_clear(job_id: u64) {
+    accept_retry_state()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&job_id);
+}
+
+/// Log one accept failure at the right level, with the retry countdown.
+fn log_accept_failure(job_id: u64, err: &str, plan: Option<AcceptRetryPlan>) {
+    match plan {
+        Some(p) => {
+            let left = ACCEPT_RETRY_MAX - p.attempt;
+            if p.requestor_unfunded {
+                eprintln!(
+                    "[provider] accept #{job_id} failed: requestor escrow unfunded — {left} retries \
+                     left (retry {}/{ACCEPT_RETRY_MAX} in {}s): {err}",
+                    p.attempt,
+                    p.delay_ms / 1000
+                );
+            } else {
+                eprintln!(
+                    "[provider] accept #{job_id} failed (transient — retry {}/{ACCEPT_RETRY_MAX} in \
+                     {}s, {left} retries left): {err}",
+                    p.attempt,
+                    p.delay_ms / 1000
+                );
+            }
+        }
+        None => eprintln!(
+            "[provider] accept #{job_id} failed permanently — not retrying (the reconcile/adoption \
+             path owns the job from here): {err}"
+        ),
+    }
+}
+
 /// What an on-chain read says about whether a job may be claimed right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClaimRead {
@@ -2550,11 +2737,18 @@ async fn process_once(
             }
             ClaimGate::SkipSilently => continue,
         }
+        // Item #74: honour an accept backoff before touching the job again, so a
+        // transient failure (unfunded requestor / stalled tx) is retried with
+        // exponential backoff instead of being dropped or hammered every pass.
+        if !accept_retry_gate(job_id) {
+            continue;
+        }
         println!("[provider] claiming LLM job #{job_id}");
         if fast_claim {
             // accept_job + start_job as one nonce-ordered burst, no block wait.
             match client.claim_job_pipelined(job_id).await {
                 Ok(()) => {
+                    accept_retry_clear(job_id);
                     // The claim's own `accept` is now in the pool: stop the
                     // reconcile pass from re-driving it (item #49).
                     heal_mark_attempt(job_id, HealStep::Accept);
@@ -2564,15 +2758,20 @@ async fn process_once(
                     break;
                 }
                 Err(e) => {
-                    eprintln!("[provider] pipelined claim #{job_id} failed: {e}");
+                    let msg = e.to_string();
+                    let plan = accept_retry_record(job_id, &msg);
+                    log_accept_failure(job_id, &msg, plan);
                     continue;
                 }
             }
         }
         if let Err(e) = client.accept_job(job_id).await {
-            eprintln!("[provider] accept #{job_id} failed: {e}");
+            let msg = e.to_string();
+            let plan = accept_retry_record(job_id, &msg);
+            log_accept_failure(job_id, &msg, plan);
             continue;
         }
+        accept_retry_clear(job_id);
         if let Err(e) = client.start_job(job_id).await {
             eprintln!("[provider] start #{job_id} failed: {e}");
         }
@@ -2938,6 +3137,90 @@ mod prep_candidate_tests {
         assert!(prep_candidate(6253, 6250, &settled));
         // Nothing settled ⇒ everything eligible.
         assert!(prep_candidate(6261, 6270, &HashSet::new()));
+    }
+}
+
+#[cfg(test)]
+mod accept_retry_tests {
+    //! Item #74: a failed `accept_job` must be retried with bounded backoff for
+    //! transient causes (unfunded requestor escrow, stalled/outbid tx) and must
+    //! NOT be retried for state errors — the old code logged and moved on, so the
+    //! job sat `Pending` until its deadline while the requestor's escrow paid for
+    //! work nobody attempted.
+    use super::{
+        accept_backoff_ms, accept_retry_plan, classify_accept_error, is_requestor_unfunded,
+        AcceptOutcome, ACCEPT_RETRY_MAX,
+    };
+
+    #[test]
+    fn transient_failures_are_retryable_and_state_errors_are_not() {
+        // The item's own case: the requestor cannot fund the accept.
+        assert_eq!(
+            classify_accept_error("tx included but FAILED dispatch: Token::FundsUnavailable"),
+            AcceptOutcome::Retry
+        );
+        // A tx that never reached a block is worth another try.
+        assert_eq!(
+            classify_accept_error("tx inclusion timed out after 300s (tx not in a best block)"),
+            AcceptOutcome::Retry
+        );
+        assert_eq!(
+            classify_accept_error("tx dropped: The background task closed connection closed"),
+            AcceptOutcome::Retry
+        );
+        // A slot frees when our running job settles.
+        assert_eq!(
+            classify_accept_error("ComputeMarketplace::MaxProviderCapacity"),
+            AcceptOutcome::Retry
+        );
+        // State answers: re-sending the identical call changes nothing.
+        for e in [
+            "ComputeMarketplace::JobNotPending",
+            "ComputeMarketplace::JobNotFound",
+            "ComputeMarketplace::AlreadyAccepted",
+            "ComputeMarketplace::NotJobProvider",
+            "ComputeMarketplace::ProviderNotRegistered",
+            "ComputeMarketplace::ProviderComputeInsufficient",
+        ] {
+            assert_eq!(classify_accept_error(e), AcceptOutcome::GiveUp, "{e}");
+        }
+        // `ProviderComputeInsufficient` contains "insufficient" but must not be
+        // mistaken for a funding problem.
+        assert!(!is_requestor_unfunded(
+            "tx included but FAILED dispatch: ComputeMarketplace::ProviderComputeInsufficient"
+        ));
+        // An error we do not understand is never a retry loop.
+        assert_eq!(
+            classify_accept_error("some novel failure"),
+            AcceptOutcome::GiveUp
+        );
+    }
+
+    #[test]
+    fn retries_are_bounded_and_back_off_exponentially_up_to_the_cap() {
+        // 2 s, 4 s, 8 s, 16 s, 32 s then capped at 60 s.
+        let delays: Vec<u64> = (0..ACCEPT_RETRY_MAX).map(accept_backoff_ms).collect();
+        assert_eq!(delays, vec![2_000, 4_000, 8_000, 16_000, 32_000]);
+        assert_eq!(accept_backoff_ms(6), 60_000);
+        assert_eq!(accept_backoff_ms(99), 60_000);
+
+        let err = "tx included but FAILED dispatch: Token::FundsUnavailable";
+        // First failure schedules retry #1 at 2 s and names the cause.
+        let first = accept_retry_plan(0, err).expect("funding failures are retryable");
+        assert_eq!(first.attempt, 1);
+        assert_eq!(first.delay_ms, 2_000);
+        assert!(first.requestor_unfunded);
+        // Every attempt in the budget earns the next one...
+        for attempts in 0..ACCEPT_RETRY_MAX {
+            assert!(
+                accept_retry_plan(attempts, err).is_some(),
+                "attempt {attempts}"
+            );
+        }
+        // ...and then the budget is spent: no sixth attempt.
+        assert!(accept_retry_plan(ACCEPT_RETRY_MAX, err).is_none());
+        // A permanent error never earns even the first retry.
+        assert!(accept_retry_plan(0, "ComputeMarketplace::JobNotPending").is_none());
     }
 }
 
