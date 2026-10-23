@@ -1713,6 +1713,44 @@ fn feed_now() -> FeedSnapshot {
     *feed_snapshot().lock().unwrap()
 }
 
+/// Where the prices currently in force came from (item #68).
+///
+/// The refresher used to fall back to the compiled defaults **silently**: the
+/// only way to tell whether jobs were priced off the on-chain
+/// `ProfitabilityOracle::CurrentFeed` or off `$0.15 / $3.00 / 65%` was to read
+/// chain state by hand. That is how the feed stayed unposted for weeks without
+/// anyone noticing. Every transition is now logged once.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FeedSource {
+    Unknown,
+    OnChain,
+    Fallback,
+}
+
+fn log_feed_source(prev: FeedSource, now: FeedSource, f: FeedSnapshot) {
+    if prev == now {
+        return;
+    }
+    match now {
+        FeedSource::OnChain => eprintln!(
+            "[pricing] feed source: ON-CHAIN ProfitabilityOracle::CurrentFeed \
+             (token ${:.4}, market ${:.4}/gpu-hr, util {:.1}%)",
+            f.token_price_usd,
+            f.market_hr,
+            f.util * 100.0
+        ),
+        FeedSource::Fallback => eprintln!(
+            "[pricing] feed source: FALLBACK defaults (token ${:.4}, market ${:.4}/gpu-hr, \
+             util {:.1}%) — no on-chain oracle feed; run the operator loop so prices are \
+             auditable (docs/oracle-feed.md)",
+            f.token_price_usd,
+            f.market_hr,
+            f.util * 100.0
+        ),
+        FeedSource::Unknown => {}
+    }
+}
+
 /// Refresh the cached feed every `secs` seconds. A failed read keeps the last
 /// good values (never zeroes a price).
 ///
@@ -1726,7 +1764,9 @@ fn spawn_feed_refresh(
     pcfg: PricingConfig,
     secs: u64,
 ) {
+    let mut source = FeedSource::Unknown;
     std::thread::spawn(move || loop {
+        let mut next_source = FeedSource::Fallback;
         if let Some(f) = rt.block_on(client.get_feed()) {
             let mut g = feed_snapshot().lock().unwrap();
             if f.token_price_usd > 0.0 {
@@ -1738,7 +1778,18 @@ fn spawn_feed_refresh(
             if f.utilization > 0.0 {
                 g.util = f.utilization.clamp(0.05, 1.0);
             }
+            // A feed carrying only a token price is still a real feed for the
+            // GPN conversion, but a zero market/util value means the operator
+            // never posted those fields — report OnChain only when the read
+            // actually carried the market anchor.
+            next_source = if f.avg_gpu_hour_price_usd > 0.0 {
+                FeedSource::OnChain
+            } else {
+                FeedSource::Fallback
+            };
         }
+        log_feed_source(source, next_source, feed_now());
+        source = next_source;
         if pcfg.model == pricing::PricingModel::Throughput {
             let reg = registry.lock().unwrap().clone();
             for p in reg.iter().filter(|p| p.last_seen.is_some()) {

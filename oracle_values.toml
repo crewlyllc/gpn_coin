@@ -1,0 +1,4 @@
+token_price_usd      = 150000    # micro-USD -> $0.15  (owner anchor D1 2026-09-15; no GPN market pre-listing)
+avg_gpu_hour_price   = 300000    # micro-USD -> $0.30/hr (observed 4090 rental band: floor $0.20, median $0.45, Oct 2026)
+utilization_rate_bps = 6500      # pricing-model steady-state efficiency factor (NOT measured network utilisation)
+staking_apr_bps      = 0         # measured: staking rewards are fee-funded and both reward pools read 0 on chain
