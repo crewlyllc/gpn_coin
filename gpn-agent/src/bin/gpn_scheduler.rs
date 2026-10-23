@@ -49,6 +49,79 @@ fn record_created(id: u64, max_tokens: u64) {
         .push((id, Instant::now(), max_tokens));
 }
 
+/// When each job's lease was last handed to a provider by `GET /assignments`.
+///
+/// Item #91 (janitor vs claim race): the janitor decides "stale" from the
+/// **on-chain** state plus the job's create age, but the `accept`/`start` txs
+/// that move a job off `Pending` queue behind block time (60–120 s per
+/// transition on this chain). A job that was just delivered to a provider is
+/// therefore indistinguishable from an abandoned one, so the AP's own
+/// `cancel_job` can win the race against the provider's `accept`: the start then
+/// fails `JobNotPending`, the provider's work has no on-chain job, and the poll
+/// reports `succeeded` while the chain disagrees (observed 2026-10-23, #6528).
+/// Delivery is the earliest claim signal an access point has, so it arms a short
+/// veto on the staleness clock.
+fn lease_delivered() -> &'static Mutex<HashMap<u64, Instant>> {
+    static L: OnceLock<Mutex<HashMap<u64, Instant>>> = OnceLock::new();
+    L.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// How long a delivered lease keeps the janitor's cancel suspended: one
+/// `accept` plus one `start` inclusion, with slack for a slow block. A provider
+/// that wins the claim needs both to land before the chain stops reading
+/// `Pending`; a genuinely dead provider is still reclaimed by the on-chain
+/// deadline (and by the fast path once this window lapses).
+const CLAIM_IN_FLIGHT_SECS: u64 = 240;
+
+/// Stamps older than this are dropped: they can no longer veto anything, and the
+/// map must not grow with the job history.
+const LEASE_STAMP_RETENTION_SECS: u64 = 3600;
+
+/// Record that job `id`'s lease was handed to a provider at `now`.
+fn note_lease_delivered(id: u64, now: Instant) {
+    let mut map = lease_delivered().lock().unwrap();
+    map.retain(|_, t| now.duration_since(*t).as_secs() < LEASE_STAMP_RETENTION_SECS);
+    map.insert(id, now);
+}
+
+/// Seconds since this job's lease was last delivered to a provider.
+fn lease_delivered_secs(id: u64, now: Instant) -> Option<u64> {
+    let map = lease_delivered().lock().unwrap();
+    map.get(&id).map(|t| now.duration_since(*t).as_secs())
+}
+
+/// Is a claim for this job plausibly in flight (its lease was delivered within
+/// [`CLAIM_IN_FLIGHT_SECS`])?
+fn claim_in_flight_now(id: u64, now: Instant) -> bool {
+    claim_in_flight(lease_delivered_secs(id, now))
+}
+
+/// Ids already reported as claim-in-flight, so the 30 s janitor pass cannot
+/// repeat the same explanation for the same job.
+fn claim_veto_logged() -> &'static Mutex<Vec<u64>> {
+    static V: OnceLock<Mutex<Vec<u64>>> = OnceLock::new();
+    V.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Explain one vetoed cancel, once per job.
+fn note_claim_veto(id: u64, age_secs: u64, delivered_secs: u64) {
+    let mut seen = claim_veto_logged().lock().unwrap();
+    if seen.contains(&id) {
+        return;
+    }
+    seen.push(id);
+    println!(
+        "[janitor] #{id} has been Pending {age_secs}s, but its lease was handed to a \
+         provider {delivered_secs}s ago — a claim is in flight; not cancelling"
+    );
+}
+
+/// Pure half of [`claim_in_flight_now`]: `Some(secs since delivery)`.
+/// No stamp at all is not a claim.
+fn claim_in_flight(delivered_secs: Option<u64>) -> bool {
+    matches!(delivered_secs, Some(s) if s < CLAIM_IN_FLIGHT_SECS)
+}
+
 /// Attempts for the off-chain payload write before we give up on a job.
 const PAYLOAD_PUT_ATTEMPTS: u32 = 3;
 /// Small pause between payload-write attempts (the store lock is held for
@@ -196,8 +269,18 @@ fn job_has_result(status: &str) -> bool {
 /// delivered work (observed 2026-10-18 on #5534: answered at 18:58, still read
 /// `Pending` on-chain at 19:00 because the accept/start txs were queued behind
 /// ~61 s blocks).
-fn should_cancel_stale(state: &str, age_secs: u64, stale_for_job: u64, delivered: bool) -> bool {
-    state == "Pending" && !delivered && age_secs > stale_for_job
+/// `claim_in_flight` vetoes the decision outright: a lease handed to a provider
+/// within [`CLAIM_IN_FLIGHT_SECS`] means the `accept`/`start` that moves the job
+/// off `Pending` may still be in the pool, and cancelling would strand the
+/// provider's work (item #91).
+fn should_cancel_stale(
+    state: &str,
+    age_secs: u64,
+    stale_for_job: u64,
+    delivered: bool,
+    claim_in_flight: bool,
+) -> bool {
+    state == "Pending" && !delivered && !claim_in_flight && age_secs > stale_for_job
 }
 
 /// Has a job outlived its on-chain deadline (`now > created_at + max_duration`)?
@@ -340,7 +423,17 @@ fn spawn_janitor(client: Arc<ChainClient>, rt: Arc<tokio::runtime::Runtime>) {
                     .as_ref()
                     .map(|job| job_has_result(&job.status))
                     .unwrap_or(false);
-                if !should_cancel_stale(&state, age_secs, stale_for_job, delivered) {
+                // Item #91: a lease this AP handed out moments ago is a claim in
+                // flight — the provider's accept/start may still be in the pool,
+                // so cancelling now would strand work that has no on-chain job.
+                let delivered_secs = lease_delivered_secs(id, now);
+                let in_flight = claim_in_flight(delivered_secs);
+                if !should_cancel_stale(&state, age_secs, stale_for_job, delivered, in_flight) {
+                    if in_flight {
+                        if let Some(secs) = delivered_secs {
+                            note_claim_veto(id, age_secs, secs);
+                        }
+                    }
                     keep.push((id, t, mt));
                     continue;
                 }
@@ -2640,6 +2733,12 @@ fn collect_leases(store: &str, provider: &str, since: u64, limit: usize) -> Vec<
         .collect();
     ids.sort_unstable();
     ids.truncate(limit);
+    // Item #91: this response IS the delivery — stamp it so the janitor knows a
+    // claim may be in flight before it decides the job is abandoned.
+    let now = Instant::now();
+    for id in &ids {
+        note_lease_delivered(*id, now);
+    }
     ids.into_iter()
         .map(|id| {
             let rec = map.get(&id.to_string()).cloned().unwrap_or(json!({}));
@@ -6032,15 +6131,56 @@ mod tests {
         let mt = 512; // stale_secs(512) = 60 + 25*2 = 120 (the floor)
         assert_eq!(stale_secs(mt), 120);
         // Delivered but still Pending on-chain and past the window -> DO NOT cancel.
-        assert!(!should_cancel_stale("Pending", 361, 120, true));
+        assert!(!should_cancel_stale("Pending", 361, 120, true, false));
         // Not delivered -> the age heuristic still reclaims a stranded Pending job.
-        assert!(should_cancel_stale("Pending", 361, 120, false));
+        assert!(should_cancel_stale("Pending", 361, 120, false, false));
         // …but only past its own token-scaled window.
-        assert!(!should_cancel_stale("Pending", 119, 120, false));
+        assert!(!should_cancel_stale("Pending", 119, 120, false, false));
         // Work already started on-chain is never requestor-cancelled.
         for s in ["Accepted", "Running", "AwaitingVerification"] {
-            assert!(!should_cancel_stale(s, 10_000, 120, false));
+            assert!(!should_cancel_stale(s, 10_000, 120, false, false));
         }
+        // Item #91: a lease delivered moments ago is a claim in flight — the
+        // janitor must wait for it even though the job is old and unusable-looking.
+        assert!(!should_cancel_stale("Pending", 361, 120, false, true));
+    }
+
+    /// Item #91: delivery arms a bounded veto, and the veto lapses so a dead
+    /// provider is still reclaimed by the fast path. Also pins the stamping
+    /// itself: without it `claim_in_flight` can never be true in production.
+    #[test]
+    fn a_delivered_lease_suspends_the_stale_cancel() {
+        // Boundary: the veto covers one accept + one start inclusion.
+        assert!(claim_in_flight(Some(0)));
+        assert!(claim_in_flight(Some(CLAIM_IN_FLIGHT_SECS - 1)));
+        assert!(!claim_in_flight(Some(CLAIM_IN_FLIGHT_SECS)));
+        assert!(
+            CLAIM_IN_FLIGHT_SECS >= 120,
+            "one accept + one start at the observed 60-120 s/inclusion"
+        );
+        // No stamp at all (never delivered, e.g. an adopted orphan) is not a claim.
+        assert!(!claim_in_flight(None));
+
+        // The map half: a stamped id vetoes, an unstamped one does not, and the
+        // stamp ages out with the clock rather than lingering forever.
+        let id = 9_900_091u64;
+        let now = Instant::now();
+        assert!(!claim_in_flight_now(id, now));
+        note_lease_delivered(id, now);
+        assert!(claim_in_flight_now(id, now));
+        assert!(claim_in_flight_now(
+            id,
+            now + Duration::from_secs(CLAIM_IN_FLIGHT_SECS - 1)
+        ));
+        assert!(!claim_in_flight_now(
+            id,
+            now + Duration::from_secs(CLAIM_IN_FLIGHT_SECS)
+        ));
+        // Retention: a stamp older than the retention window is pruned on the
+        // next delivery, so the map cannot grow with the job history.
+        let later = now + Duration::from_secs(LEASE_STAMP_RETENTION_SECS + 1);
+        note_lease_delivered(9_900_092u64, later);
+        assert!(lease_delivered().lock().unwrap().get(&id).is_none());
     }
 
     #[test]
@@ -6064,6 +6204,7 @@ mod tests {
             "Pending",
             145,
             stale_secs_for_kind("finetune", 0),
+            false,
             false
         ));
         // … while a genuinely stranded fine-tune is still reclaimed past the floor.
@@ -6071,6 +6212,7 @@ mod tests {
             "Pending",
             1801,
             stale_secs_for_kind("finetune", 0),
+            false,
             false
         ));
     }
@@ -6440,6 +6582,32 @@ mod tests {
             "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
         ));
         assert!(!provider_matches("", ss58));
+    }
+
+    #[test]
+    fn collect_leases_stamps_delivery_so_the_janitor_sees_a_claim_in_flight() {
+        // Item #91: the poll response IS the delivery; if it is not stamped the
+        // janitor can cancel the very job the provider is accepting.
+        let dir = std::env::temp_dir().join(format!("gpn-lease-stamp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = dir.join("assignments.json");
+        std::fs::write(
+            &store,
+            r#"{"7001":{"provider":"0xabc","model":"m","pull":true},"7002":{"provider":"0xdef","model":"m","pull":true}}"#,
+        )
+        .unwrap();
+        let leases = collect_leases(store.to_str().unwrap(), "0xabc", 0, 20);
+        assert_eq!(leases.len(), 1, "only 7001 belongs to this provider");
+        let now = Instant::now();
+        assert!(
+            claim_in_flight_now(7001, now),
+            "a lease returned to a provider must count as a claim in flight"
+        );
+        assert!(
+            !claim_in_flight_now(7002, now),
+            "another provider's lease was not delivered to anyone"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
