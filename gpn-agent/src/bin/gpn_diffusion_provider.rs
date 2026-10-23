@@ -1071,6 +1071,74 @@ fn read_assigned(me: &str, addr: &str) -> Vec<(u64, String, bool)> {
         .collect()
 }
 
+/// Files a cold pull must NOT fetch.
+///
+/// `gpn_diffuse.py` loads with `torch_dtype=torch.float16` and **no `variant=`**,
+/// so diffusers (0.38) resolves `variant = None` and only ever opens the
+/// *non-variant* weights — the `*.fp16.safetensors`/`*.fp16.bin` copies, the ONNX
+/// export, legacy pickles and GGUF packs are never read. Measured on
+/// `stabilityai/sdxl-turbo`: 20.8 GB of the repo is redundant weight formats
+/// (fp16 unet + fp16/onnx text encoders + onnx unet), never touched by the load
+/// path — pure download time on a ~5 MB/s link. Configs, tokenizers and
+/// `model_index.json` are untouched; only redundant weight formats are skipped.
+fn pull_ignore_patterns() -> &'static [&'static str] {
+    &[
+        "*.fp16.safetensors",
+        "*.fp16.bin",
+        "*.bf16.safetensors",
+        "*.onnx",
+        "*.onnx_data",
+        "*.msgpack",
+        "*.h5",
+        "*.ckpt",
+        "*.gguf",
+        "*.pth",
+    ]
+}
+
+/// The python program that pulls a repo, fetching only what the loader opens.
+///
+/// Two savings, both provable from the load path:
+/// 1. the redundant weight formats above (`ignore_patterns`);
+/// 2. when the repo is a *diffusers folder* (`model_index.json` present), the
+///    root-level single-file checkpoints. `AutoPipelineForText2Image.
+///    from_pretrained(<folder>)` reads `model_index.json` and then only the
+///    declared component subfolders — a root `sd_xl_turbo_1.0.safetensors`
+///    (13.9 GB on sdxl-turbo) is never opened. Only done when `model_index.json`
+///    exists, so a single-file-only repo is still pulled whole.
+///
+/// Pure (takes the repo id, returns the source) so the exact program can be
+/// asserted in a unit test.
+fn pull_script(model: &str) -> String {
+    let pats = pull_ignore_patterns()
+        .iter()
+        .map(|p| format!("'{p}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let program = r#"
+import json, sys
+from huggingface_hub import hf_hub_download, list_repo_files, snapshot_download
+repo = __REPO__
+try:
+    files = list_repo_files(repo)
+    if 'model_index.json' not in files:
+        raise RuntimeError('no model_index.json: single-file checkpoint, pulling whole')
+    idx = json.load(open(hf_hub_download(repo, 'model_index.json')))
+    comps = [k for k, v in idx.items() if isinstance(v, list)]
+    if not comps:
+        raise RuntimeError('empty model_index: pulling whole')
+    kw = dict(ignore_patterns=[__SKIP__], allow_patterns=['model_index.json'] + [c + '/*' for c in comps])
+    print('[pull] diffusers folder: %d component(s) declared, skipping root checkpoints' % len(comps))
+except Exception as e:
+    print('[pull] %s' % e, file=sys.stderr)
+    kw = dict(ignore_patterns=[__SKIP__])
+snapshot_download(repo, **kw)
+"#;
+    program
+        .replace("__REPO__", &format!("'{model}'"))
+        .replace("__SKIP__", &pats)
+}
+
 /// Ensure a diffusion model is present; download from HuggingFace if missing.
 /// `model` is an HF repo id (e.g. `stabilityai/stable-diffusion-2-1`) or a local
 /// path. Empty/`auto` = use whatever the helper defaults to.
@@ -1097,9 +1165,7 @@ fn ensure_model(model: &str) -> Result<String, PullError> {
     println!("[provider] diffusion model {model} missing — pulling from HuggingFace…");
     let out = std::process::Command::new("python3")
         .arg("-c")
-        .arg(format!(
-            "from huggingface_hub import snapshot_download; snapshot_download('{model}')"
-        ))
+        .arg(pull_script(&model))
         .output()
         .map_err(|e| PullError {
             message: format!("spawn python3: {e}"),
@@ -1728,6 +1794,41 @@ mod tests {
     }
 
     // ---- item #59: the claim scan must stay bounded and rate-limited ----
+
+    #[test]
+    fn a_cold_pull_skips_the_weight_formats_the_loader_never_opens() {
+        // `gpn_diffuse.py` calls from_pretrained(torch_dtype=float16) with no
+        // `variant=`, so diffusers resolves variant=None and opens only the
+        // non-variant weights. Fetching the fp16 copies is pure waste (5.1 GB of
+        // the sdxl-turbo unet alone).
+        let s = pull_script("stabilityai/sdxl-turbo");
+        assert!(s.contains("repo = 'stabilityai/sdxl-turbo'"), "{s}");
+        assert!(s.contains("'*.fp16.safetensors'"), "{s}");
+        assert!(!s.contains("__REPO__") && !s.contains("__SKIP__"), "{s}");
+    }
+
+    #[test]
+    fn a_diffusers_folder_pull_is_limited_to_the_declared_components() {
+        // A root-level single-file checkpoint (13.9 GB on sdxl-turbo) is never
+        // opened by from_pretrained(<folder>) — but a single-file-ONLY repo must
+        // still be pulled whole, so the allow-list is built from model_index.json
+        // and only when that file exists.
+        let s = pull_script("stabilityai/sd-turbo");
+        assert!(s.contains("list_repo_files"), "{s}");
+        assert!(s.contains("'model_index.json' not in files"), "{s}");
+        assert!(s.contains("allow_patterns=['model_index.json']"), "{s}");
+        assert!(s.contains("snapshot_download(repo, **kw)"), "{s}");
+        // The fallback (no model_index / any probe error) must still be a valid
+        // pull with the format exclusions applied — never a crash.
+        assert!(s.contains("except Exception"), "{s}");
+        // The non-variant weights and every config/tokenizer file must stay.
+        for keep in ["*.safetensors", "*.json", "*.txt"] {
+            assert!(
+                !pull_ignore_patterns().contains(&keep),
+                "{keep} must be kept"
+            );
+        }
+    }
 
     #[test]
     fn claim_scan_only_reads_the_newest_window() {
