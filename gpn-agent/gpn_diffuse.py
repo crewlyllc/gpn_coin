@@ -36,6 +36,14 @@ def model_id(m, kind="image"):
         "sd-turbo": "stabilityai/sd-turbo",
         "sd15": "runwayml/stable-diffusion-v1-5",
         "sd1.5": "runwayml/stable-diffusion-v1-5",
+        # Item #78: the AP's default generation model name is `sd-turbo`, but
+        # clients (and the #76 repro) also send `sdxl-turbo`, whose real repo is
+        # `stabilityai/sdxl-turbo`. Without the alias the literal string was
+        # handed to from_pretrained() and every such job died on a 401.
+        "sdxl-turbo": "stabilityai/sdxl-turbo",
+        "sdxl": "stabilityai/stable-diffusion-xl-base-1.0",
+        "sd21": "stabilityai/stable-diffusion-2-1",
+        "sd2.1": "stabilityai/stable-diffusion-2-1",
         # Video alias: the provider/scheduler advertise "ltx-video", and the
         # scheduler emits model="ltx-video" for VideoGeneration. Without this the
         # literal string was handed to from_pretrained() and the job always

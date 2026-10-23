@@ -37,6 +37,137 @@ fn is_wedged(id: u64) -> bool {
     wedged_set().lock().unwrap().contains(&id)
 }
 
+/// Item #78: HF repos this process has proved it can never load (401/404/unknown
+/// alias). Re-attempting the download every poll is what produced "HF pull
+/// sdxl-turbo failed … Repository Not Found (401)" four times in eight seconds
+/// while the job sat `Accepted`. In-memory only (a restart re-probes once).
+fn unloadable_set() -> &'static Mutex<HashSet<String>> {
+    static UNLOADABLE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    UNLOADABLE.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn mark_unloadable(repo: &str) {
+    unloadable_set().lock().unwrap().insert(repo.to_string());
+}
+
+fn is_unloadable(repo: &str) -> bool {
+    unloadable_set().lock().unwrap().contains(repo)
+}
+
+/// Job ids this process has already failed on-chain (permanent model error), so a
+/// still-visible assignment cannot produce a second `fail_job` every poll.
+fn failed_set() -> &'static Mutex<HashSet<u64>> {
+    static FAILED: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
+    FAILED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn mark_failed_locally(id: u64) {
+    failed_set().lock().unwrap().insert(id);
+}
+
+fn is_failed_locally(id: u64) -> bool {
+    failed_set().lock().unwrap().contains(&id)
+}
+
+/// `(attempts, last_attempt)` per job, for TRANSIENT pull failures. The old code
+/// retried forever at the poll cadence; a bounded count turns "the network is
+/// down" into one loud give-up instead of an infinite log storm.
+fn pull_attempts() -> &'static Mutex<std::collections::HashMap<u64, u32>> {
+    static PULLS: OnceLock<Mutex<std::collections::HashMap<u64, u32>>> = OnceLock::new();
+    PULLS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn record_pull_failure(id: u64) -> u32 {
+    let mut m = pull_attempts().lock().unwrap();
+    let n = m.entry(id).or_insert(0);
+    *n += 1;
+    *n
+}
+
+fn clear_pull_failures(id: u64) {
+    pull_attempts().lock().unwrap().remove(&id);
+}
+
+/// Bounded retries for the on-chain `fail_job` itself (a nonce/tx hiccup must not
+/// leave a job wedged and must not be re-hammered every poll either).
+fn fail_attempts() -> &'static Mutex<std::collections::HashMap<u64, u32>> {
+    static FAILS: OnceLock<Mutex<std::collections::HashMap<u64, u32>>> = OnceLock::new();
+    FAILS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn record_fail_attempt(id: u64) -> u32 {
+    let mut m = fail_attempts().lock().unwrap();
+    let n = m.entry(id).or_insert(0);
+    *n += 1;
+    *n
+}
+
+const MAX_FAIL_ATTEMPTS: u32 = 3;
+
+fn fail_give_up(attempts: u32) -> bool {
+    attempts >= MAX_FAIL_ATTEMPTS
+}
+
+/// How many transient pull failures a job may accumulate before we fail it.
+const MAX_PULL_ATTEMPTS: u32 = 3;
+
+fn pull_give_up(attempts: u32) -> bool {
+    attempts >= MAX_PULL_ATTEMPTS
+}
+
+/// Short model names the network hands out → real HuggingFace repo ids. Kept in
+/// sync with `gpn_diffuse.py::model_id` (item #78(a)): the AP's default gen model
+/// is `sd-turbo`, clients also send `sdxl-turbo`, and the diffusion helper now
+/// resolves both — but `ensure_model` must pull the SAME repo the helper will
+/// load, or it downloads one id and the helper asks for another.
+const HF_ALIASES: &[(&str, &str)] = &[
+    ("sd-turbo", "stabilityai/sd-turbo"),
+    ("sd15", "runwayml/stable-diffusion-v1-5"),
+    ("sd1.5", "runwayml/stable-diffusion-v1-5"),
+    ("sdxl-turbo", "stabilityai/sdxl-turbo"),
+    ("sdxl", "stabilityai/stable-diffusion-xl-base-1.0"),
+    ("sd21", "stabilityai/stable-diffusion-2-1"),
+    ("sd2.1", "stabilityai/stable-diffusion-2-1"),
+    ("ltx-video", "Lightricks/LTX-Video"),
+    ("ltx", "Lightricks/LTX-Video"),
+];
+
+fn resolve_model_alias(model: &str) -> &str {
+    HF_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == model)
+        .map(|(_, repo)| *repo)
+        .unwrap_or(model)
+}
+
+/// Is this failure PERMANENT (retrying can never help) or TRANSIENT (network,
+/// disk, rate limit)? Only permanent failures may fail the job: a transient one
+/// must not throw away a servable job.
+fn is_permanent_load_error(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    [
+        "repository not found",
+        "repository not found for url",
+        "401 client error",
+        "403 client error",
+        "404 client error",
+        "gatedrepoerror",
+        "invalid username or password",
+        "not a valid model identifier",
+        "is not a valid model",
+        "cannot load model",
+        "no model card",
+    ]
+    .iter()
+    .any(|needle| m.contains(needle))
+}
+
+/// The classified failure of `ensure_model`.
+struct PullError {
+    message: String,
+    permanent: bool,
+}
+
 /// `--flag value` lookup (the binary does not use a CLI parser).
 fn opt_str(args: &[String], flag: &str) -> Option<String> {
     args.iter()
@@ -684,6 +815,21 @@ const HELPER_HEARTBEAT: Duration = Duration::from_secs(30);
 /// Returns `(stdout, stderr)` on success. On non-zero exit returns the helper's
 /// stderr in `Err`. On timeout the child is **killed** and `Err("WEDGE: …")` is
 /// returned so the caller logs the wedge and keeps serving instead of stalling.
+/// The helper's structured failure text, if it printed one. `gpn_diffuse.py`
+/// reports failures as `{"ok": false, "error": "..."}` on **stdout** and then
+/// exits 1, so a stderr-only error string throws away the real cause (and with it
+/// the ability to tell a permanent 401 from a transient network error).
+fn json_reason(stdout: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
+    if v.get("ok").and_then(|b| b.as_bool()) == Some(true) {
+        return None;
+    }
+    v.get("error")
+        .and_then(|e| e.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
 fn run_with_watchdog(
     mut cmd: std::process::Command,
     timeout: Duration,
@@ -707,7 +853,8 @@ fn run_with_watchdog(
                 break if status.success() {
                     Ok((so, se))
                 } else {
-                    Err(format!("helper exited {:?}: {}", status.code(), se.trim()))
+                    let detail = json_reason(&so).unwrap_or_else(|| se.trim().to_string());
+                    Err(format!("helper exited {:?}: {}", status.code(), detail))
                 };
             }
             Ok(None) => {
@@ -788,7 +935,7 @@ fn read_assigned(me: &str, addr: &str) -> Vec<(u64, String, bool)> {
 /// Ensure a diffusion model is present; download from HuggingFace if missing.
 /// `model` is an HF repo id (e.g. `stabilityai/stable-diffusion-2-1`) or a local
 /// path. Empty/`auto` = use whatever the helper defaults to.
-fn ensure_model(model: &str) -> Result<String, String> {
+fn ensure_model(model: &str) -> Result<String, PullError> {
     if model.is_empty() || model == "auto" {
         return Ok("no specific model requested".into());
     }
@@ -798,12 +945,7 @@ fn ensure_model(model: &str) -> Result<String, String> {
     // Map short aliases (as advertised by gpn_diffuse.py) to real HF repo ids,
     // otherwise ensure_model would try to pull a non-existent repo (e.g. "sd-turbo")
     // and 401/404 every poll cycle.
-    let model = match model {
-        "sd-turbo" => "stabilityai/sd-turbo",
-        "sd15" | "sd1.5" => "runwayml/stable-diffusion-v1-5",
-        "ltx-video" => "Lightricks/LTX-Video",
-        other => other,
-    };
+    let model = resolve_model_alias(model);
     // HF cache marker: ~/.cache/huggingface/hub/models--<org>--<name>
     let repo_dir = format!("models--{}", model.replace('/', "--"));
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
@@ -820,14 +962,86 @@ fn ensure_model(model: &str) -> Result<String, String> {
             "from huggingface_hub import snapshot_download; snapshot_download('{model}')"
         ))
         .output()
-        .map_err(|e| format!("spawn python3: {e}"))?;
+        .map_err(|e| PullError {
+            message: format!("spawn python3: {e}"),
+            permanent: false,
+        })?;
     if out.status.success() {
         Ok(format!("pulled diffusion model {model} from HuggingFace"))
     } else {
-        Err(format!(
-            "HF pull {model} failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ))
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        Err(PullError {
+            permanent: is_permanent_load_error(&stderr),
+            message: format!("HF pull {model} failed: {stderr}"),
+        })
+    }
+}
+
+/// Fail a job whose model this provider can NEVER load: one loud line, off-chain
+/// error recorded, `fail_job(5)` so the requestor's escrow refunds and the
+/// provider's capacity slot frees immediately instead of at the on-chain
+/// deadline (item #78 — the #76 class in the provider #76 did not touch).
+async fn fail_unloadable_job(client: &ChainClient, me: &str, id: u64, model: &str, why: &str) {
+    if is_failed_locally(id) {
+        return;
+    }
+    let msg = if why.starts_with("cannot load diffusion model") {
+        why.to_string()
+    } else {
+        format!("cannot load diffusion model {model}: {why}")
+    };
+    let _ = LlmStore::new().set_error(id, &msg);
+    // Read the CHAIN before acting: a stale store entry can outlive its job, and
+    // announcing "failing the job" for one that is already `Failed` is noise.
+    // A `Pending` job also has no assigned provider yet, so `fail_job` answers
+    // `NotJobProvider` (observed live on #6519) — we were leased this job, so
+    // accept+start it first; those are one-shot and make the refund + slot
+    // release happen now instead of at the deadline.
+    let state = match client.get_job_state(id).await {
+        Some((state, _price, _req, provider)) => {
+            let mine = provider.as_deref() == Some(me);
+            if matches!(state.as_str(), "Completed" | "Failed" | "Cancelled") {
+                // Nothing left to fail — just stop looking at it.
+                mark_failed_locally(id);
+                return;
+            }
+            if state != "Pending" && !mine {
+                // Accepted/Running but owned by someone else — never steal it.
+                return;
+            }
+            state
+        }
+        // Chain unreadable: try again next pass (bounded by the fail budget).
+        None => return,
+    };
+    eprintln!("[job {id}] \u{26a0} {msg} — failing the job (escrow refunds, slot frees)");
+    if state == "Pending" {
+        if let Err(e) = client.accept_job(id).await {
+            if !e.to_string().contains("JobNotPending") {
+                eprintln!("[job {id}] accept (unloadable model) failed: {e}");
+            }
+        }
+        if let Err(e) = client.start_job(id).await {
+            if !e.to_string().contains("JobNotPending") && !e.to_string().contains("JobNotStarted")
+            {
+                eprintln!("[job {id}] start (unloadable model) failed: {e}");
+            }
+        }
+    }
+    match client.fail_job(id, 5).await {
+        Ok(()) => {
+            mark_failed_locally(id);
+            println!("[job {id}] failed on-chain (unloadable model) — escrow refunded");
+        }
+        Err(e) => {
+            let n = record_fail_attempt(id);
+            if fail_give_up(n) {
+                mark_failed_locally(id);
+            }
+            eprintln!(
+                "[job {id}] fail_job (unloadable model) failed ({n}/{MAX_FAIL_ATTEMPTS}): {e}"
+            );
+        }
     }
 }
 
@@ -916,19 +1130,71 @@ async fn process_once(
             if !gen_ids.contains(id) {
                 continue;
             }
+            // Already failed on-chain for an unloadable model — never re-fail.
+            if is_failed_locally(*id) {
+                continue;
+            }
             let Some(job) = get_job(*id) else { continue };
+            // `done` = settled; `error` = we already concluded about this job
+            // (a permanent model failure, a wedge, …). Preparing a model for a job
+            // we have finished with is what kept the #6518 storm alive for hours
+            // after that job was on-chain `Failed`. An errored job that the chain
+            // still holds non-terminal is re-driven to `Failed` once (bounded), so
+            // its escrow is refunded now instead of at the deadline.
             if job.status == "done" {
+                continue;
+            }
+            if job.status == "error" {
+                let repo = resolve_model_alias(model).to_string();
+                let why = job
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "earlier failure".into());
+                fail_unloadable_job(client, me, *id, &repo, &why).await;
                 continue;
             }
             if model.is_empty() || model == "auto" {
                 continue;
             }
             let _ = pull;
+            let repo = resolve_model_alias(model).to_string();
+            // A repo this process already proved permanent-unloadable must not be
+            // re-pulled on every poll (item #78): fail the job once instead.
+            if is_unloadable(&repo) {
+                fail_unloadable_job(client, me, *id, &repo, "known unloadable on this host").await;
+                continue;
+            }
             match ensure_model(model) {
                 // Only report a pull that actually happened (avoid per-cycle noise).
-                Ok(n) if n.starts_with("pulled") => println!("[provider] job #{id}: {n}"),
-                Ok(_) => {}
-                Err(e) => eprintln!("[provider] job #{id}: {e}"),
+                Ok(n) if n.starts_with("pulled") => {
+                    clear_pull_failures(*id);
+                    println!("[provider] job #{id}: {n}");
+                }
+                Ok(_) => clear_pull_failures(*id),
+                Err(e) if e.permanent => {
+                    // 401/404/unknown alias: retrying can never help. Remember it
+                    // for the repo (so other jobs skip the pull) and fail THIS job
+                    // once, so escrow refunds and the capacity slot frees now.
+                    mark_unloadable(&repo);
+                    fail_unloadable_job(client, me, *id, &repo, &e.message).await;
+                }
+                Err(e) => {
+                    let attempts = record_pull_failure(*id);
+                    eprintln!(
+                        "[provider] job #{id}: {} (transient, attempt {attempts}/{MAX_PULL_ATTEMPTS})",
+                        e.message
+                    );
+                    if pull_give_up(attempts) {
+                        fail_unloadable_job(
+                            client,
+                            me,
+                            *id,
+                            &repo,
+                            &format!("pull failed {attempts} times: {}", e.message),
+                        )
+                        .await;
+                    }
+                }
             }
         }
         assigned
@@ -1133,6 +1399,16 @@ async fn run_job(
             if e.contains("WEDGE") {
                 eprintln!("[job {id}] ⚠ SILENT-WEDGE DETECTED — {e}");
                 mark_wedged(id);
+            } else if is_permanent_load_error(&e) {
+                // Item #78: a model this host can never load (401/404/unknown
+                // alias) will never succeed on a retry — fail the job so the
+                // requestor's escrow refunds and our slot frees, instead of
+                // leaving it `Running` until the on-chain deadline.
+                mark_unloadable(resolve_model_alias(model));
+                let me = client.signer_address_hex().unwrap_or_default();
+                fail_unloadable_job(client, &me, id, model, &e).await;
+                let _ = std::fs::remove_file(&req_file);
+                return Ok(());
             } else {
                 eprintln!("[job {id}] generation error: {e}");
             }
@@ -1162,6 +1438,13 @@ async fn run_job(
             .to_string();
         let _ = LlmStore::new().set_error(id, &err);
         eprintln!("[job {id}] generation failed: {err}");
+        // Same rationale as the helper-exit path above: a permanent model error
+        // is not worth an on-chain deadline wait.
+        if is_permanent_load_error(&err) {
+            mark_unloadable(resolve_model_alias(model));
+            let me = client.signer_address_hex().unwrap_or_default();
+            fail_unloadable_job(client, &me, id, model, &err).await;
+        }
     }
     let _ = std::fs::remove_file(&req_file);
     Ok(())
@@ -1221,6 +1504,77 @@ mod tests {
         assert!(!is_wedged(424242));
         mark_wedged(424242);
         assert!(is_wedged(424242));
+    }
+
+    // ---- item #78: unloadable models are failed once, never retried forever ----
+
+    #[test]
+    fn aliases_resolve_to_the_same_repo_the_helper_loads() {
+        // The AP's default gen model, the #76 repro name, and the video alias.
+        assert_eq!(resolve_model_alias("sd-turbo"), "stabilityai/sd-turbo");
+        assert_eq!(resolve_model_alias("sdxl-turbo"), "stabilityai/sdxl-turbo");
+        assert_eq!(resolve_model_alias("ltx-video"), "Lightricks/LTX-Video");
+        // A real repo id (and a local path) must pass through untouched.
+        assert_eq!(
+            resolve_model_alias("stabilityai/stable-diffusion-2-1"),
+            "stabilityai/stable-diffusion-2-1"
+        );
+        assert_eq!(resolve_model_alias("/models/local"), "/models/local");
+    }
+
+    #[test]
+    fn permanent_load_errors_are_told_apart_from_transient_ones() {
+        // The live 01:34 failure: a retired/nonexistent repo answered 401.
+        assert!(is_permanent_load_error(
+            "Repository Not Found for url: https://huggingface.co/api/models/sdxl-turbo. Please make sure you specified the repo id. (401 Client Error)"
+        ));
+        assert!(is_permanent_load_error(
+            "OSError: sdxl-turbo is not a valid model identifier"
+        ));
+        assert!(is_permanent_load_error("GatedRepoError: 403 Client Error"));
+        // Transient: network/disk problems must NEVER fail a servable job.
+        assert!(!is_permanent_load_error(
+            "ConnectionError: HTTPSConnectionPool … Max retries exceeded"
+        ));
+        assert!(!is_permanent_load_error(
+            "No space left on device (os error 28)"
+        ));
+        assert!(!is_permanent_load_error("CUDA out of memory"));
+    }
+
+    #[test]
+    fn transient_pull_failures_give_up_after_a_bounded_number_of_attempts() {
+        // 4 attempts in 8 s is exactly the storm #78 reported; the budget must
+        // stop at MAX_PULL_ATTEMPTS instead of retrying at the poll cadence.
+        assert!(!pull_give_up(1));
+        assert!(!pull_give_up(MAX_PULL_ATTEMPTS - 1));
+        assert!(pull_give_up(MAX_PULL_ATTEMPTS));
+        assert!(pull_give_up(MAX_PULL_ATTEMPTS + 7));
+    }
+
+    #[test]
+    fn helper_json_error_is_the_reported_reason() {
+        // gpn_diffuse.py prints its failure on stdout and exits 1; the watchdog
+        // must surface that text (not an empty stderr) so it can be classified.
+        assert_eq!(
+            json_reason(r#"{"ok": false, "error": "OSError: Repository Not Found (401)"}"#)
+                .as_deref(),
+            Some("OSError: Repository Not Found (401)")
+        );
+        // A success payload is not an error reason, and noise is ignored.
+        assert!(json_reason(r#"{"ok": true, "artifact": "/tmp/a.png"}"#).is_none());
+        assert!(json_reason("Traceback (most recent call last):").is_none());
+    }
+
+    #[test]
+    fn unloadable_registry_roundtrip() {
+        let repo = "example/definitely-not-a-real-repo-for-test";
+        assert!(!is_unloadable(repo));
+        mark_unloadable(repo);
+        assert!(is_unloadable(repo));
+        assert!(!is_failed_locally(918273));
+        mark_failed_locally(918273);
+        assert!(is_failed_locally(918273));
     }
 
     // ---- item #59: the claim scan must stay bounded and rate-limited ----
