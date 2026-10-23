@@ -1477,6 +1477,32 @@ systemctl --user enable --now gpn-node.service
 journalctl --user -u gpn-node.service -f     # the one prefixed log stream
 ```
 
+## Node identity — one key per machine, generated on first run
+
+Your node generates its own libp2p identity on first run. **Never copy a node
+key file between machines.**
+
+* **Windows (release bundle / `start-node.cmd`):** the launcher creates
+  `%USERPROFILE%\.gpn\node-key` once per Windows user with
+  `gpn-node.exe key generate-node-key --file …` and exports it as
+  `GPN_NODE_KEY_FILE`. If that generation fails the launcher **aborts** rather
+  than starting a node with a default/shared identity.
+* **Linux / macOS:** if you set neither `GPN_NODE_KEY` nor `GPN_NODE_KEY_FILE`,
+  `gpn-node` creates and persists its network secret under
+  `<base-path>/chains/<chain>/network/secret_ed25519` on first start. To keep an
+  explicit, backup-able identity file use `GPN_NODE_KEY_FILE=~/.gpn/node-key`
+  (create it with `gpn-node key generate-node-key --file ~/.gpn/node-key`).
+
+> **Symptom of a copied key:** two nodes with the same `peer_id`. Peers dial the
+> wrong host, the directory collapses the two entries into one, and neither box
+> is reliably reachable. If you see two nodes sharing a peer id, one of them
+> copied a key file — delete `node-key` (`secret_ed25519` on Linux) on the
+> copied box and restart it so it generates a fresh identity.
+
+`GPN_NODE_KEY` (a 64-hex literal) still works but is only for a single
+hand-managed box; never bake it into an installer, an image, or a fleet
+checkout — that is how every machine ends up with the same identity.
+
 ## Windows
 
 `gpn_node.exe` is the same binary. From the release bundle (`.\bin\`):

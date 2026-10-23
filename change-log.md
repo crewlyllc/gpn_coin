@@ -1,5 +1,44 @@
 # GPN change-log
 
+## 2026-10-23 13:5x PT — PM07 #90 **installer identity fix**: every Windows install now generates its OWN node key; legacy `GPNProvider` task retired unconditionally; duplicate-instance guard
+
+**WHY (proven defect, today's box1 incident):** `.github/workflows/release-windows.yml` wrote
+`C:\gpn\start-node.cmd` with a hard-coded `set "GPN_NODE_KEY=8f9e5ccd…"`. That literal was baked
+into **every** install from the bundle, so all boxes advertised the **same libp2p peer id** — they
+collide in the directory and cannot peer with each other. Worse, the launcher is marked
+"AUTO-GENERATED — do not hand-edit", so the hand fix done on box1 was reverted by the next deploy.
+Separately, `GPNProvider` was only removed inside the deploy path, so a box that missed a deploy
+kept both tasks and the legacy one silently won the DB + ports; and `schtasks /Run` on an
+already-running `GPN-Node` could fork a **second** supervision tree (~2 h of confusion).
+
+**WHAT:**
+* `start-node.cmd`: the literal is gone. The launcher clears `GPN_NODE_KEY`, ensures
+  `%USERPROFILE%\.gpn\node-key` exists (`gpn-node.exe key generate-node-key --file …`, guarded by
+  `if not exist` so re-deploys never rotate a working identity), exports
+  `GPN_NODE_KEY_FILE`, and **aborts** (`exit /b 1`) with a clear message if the key cannot be
+  created — never a default/shared identity.
+* New step **`retire legacy GPNProvider task + supervisor (UNCONDITIONAL)`**: stop → disable →
+  unregister `GPNProvider`, kill leftover `run-provider.ps1` supervisors, rename
+  `C:\gpn\run-provider.ps1` → `run-provider.ps1.retired-<ts>`. Runs on every deploy, independent of
+  `GPN_AUTOSTART_NODE` and before the deploy step.
+* `GPN-Node` is created then set to `MultipleInstances = IgnoreNew` (ScheduledTasks module, with a
+  task-XML fallback) **before** the first `/Run`.
+* **Build-time self-check**: after rendering the launcher, the job asserts it contains
+  `GPN_NODE_KEY_FILE=`, contains no 64-hex literal, and does not assign `GPN_NODE_KEY`; it re-reads
+  the file from disk and asserts the same. Any violation fails the job before the file is published.
+* `scripts/run-windows.cmd` — same rule (dev launcher had the same literal).
+* Linux is already per-machine (no `--node-key` passed ⇒ the node persists its own secret under
+  `<base-path>/chains/<chain>/network/secret_ed25519`); no pinned key exists in the Unix path.
+* `docs/run-a-node.md` — new "Node identity — one key per machine, generated on first run" section
+  incl. the symptom "two nodes with the same peer id ⇒ one copied a key file".
+
+**TESTS:** workflow YAML parses (8 steps); the extracted here-string replayed against the same regex
+self-check passes (old HEAD launcher fails it — negative control); `gpn-node key
+generate-node-key --file` executed twice in separate HOME dirs → two different 64-hex keys and two
+different peer ids; the `if not exist` / abort control flow emulated (generate / preserve / abort).
+Not executed: anything Windows-only (schtasks, ScheduledTasks module, the .cmd itself) — no Windows
+host here.
+
 ## 2026-10-22 17:1x PT — PM07 #66 **STAGED, NOT APPLIED**: two-rate (input vs output) billing, spec 44; no set_code, no genesis change, no restart
 
 **WHY:** a job's price was one blended rate `(price_per_token, max_tokens, actual_tokens)`, so the

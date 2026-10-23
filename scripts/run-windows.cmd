@@ -13,7 +13,7 @@ REM  for the job, then resumes — task #24).
 REM
 REM  Configure via env / a config file (see docs/run-a-node.md). Set:
 REM    GPN_CHAIN, GPN_SIGNER, GPN_ACCOUNT, GPN_PROVIDER_ENDPOINT, GPN_OLLAMA,
-REM    GPN_GFLOPS, GPN_ASSIGN_TOKEN, GPN_NODE_KEY, GPN_BOOTNODES
+REM    GPN_GFLOPS, GPN_ASSIGN_TOKEN, GPN_NODE_KEY_FILE, GPN_BOOTNODES
 REM  Rewards go to the node's own (or the configured payout) account.
 REM
 REM  Ollama is REQUIRED to serve LLM jobs (mining works without it). If it is
@@ -28,7 +28,21 @@ REM ============================================================================
 
 REM --- Node: miner + AI provider, supervised together --------------------------
 set "GPN_CHAIN=testnet"
-set "GPN_NODE_KEY=8f9e5ccd99ed3f4516563495d598a7dbcfff5c18b658d3e5cea5718307a4ba74"
+REM Per-machine identity. Never hard-code a key here: a shared key gives every
+REM install the same peer id, so the boxes collide instead of peering.
+set "GPN_NODE_KEY="
+set "GPN_NODE_KEY_FILE=%USERPROFILE%\.gpn\node-key"
+if not exist "%USERPROFILE%\.gpn" mkdir "%USERPROFILE%\.gpn" >nul 2>&1
+if not exist "%GPN_NODE_KEY_FILE%" (
+  echo [gpn] generating this machine's node identity: %GPN_NODE_KEY_FILE%
+  gpn-node.exe key generate-node-key --file "%GPN_NODE_KEY_FILE%"
+)
+if not exist "%GPN_NODE_KEY_FILE%" (
+  echo [gpn] ERROR: no node key at %GPN_NODE_KEY_FILE% - refusing to start with a shared identity.
+  echo [gpn] ERROR: run:  gpn-node.exe key generate-node-key --file "%GPN_NODE_KEY_FILE%"
+  pause
+  exit /b 1
+)
 set "GPN_RPC_PORT=9944"
 set "GPN_BOOTNODES=/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo"
 REM

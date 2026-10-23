@@ -114,6 +114,44 @@ jobs:
           Write-Host '::error::ollama is REQUIRED and is not reachable at http://127.0.0.1:11434 - refusing to deploy a node that cannot serve LLM jobs'
           exit 1
 
+      - name: retire legacy GPNProvider task + supervisor (UNCONDITIONAL)
+        shell: powershell
+        run: |
+          # Boxes that missed an earlier deploy kept BOTH the old GPNProvider task
+          # and the new GPN-Node one. The legacy task then won the DB + ports and
+          # the new tree silently failed to bind (2026-10-23 incident). This runs
+          # on EVERY deploy, before anything else touches the node, and does not
+          # depend on GPN_AUTOSTART_NODE or on the deploy step succeeding.
+          $ErrorActionPreference = 'Continue'
+          Write-Host '== legacy cleanup: GPNProvider =='
+          schtasks /End /TN GPNProvider 2>&1 | Out-Null
+          schtasks /Change /TN GPNProvider /DISABLE 2>&1 | Out-Null
+          if (Get-Command Disable-ScheduledTask -ErrorAction SilentlyContinue) {
+            try { Disable-ScheduledTask -TaskName 'GPNProvider' -ErrorAction Stop | Out-Null; Write-Host 'legacy cleanup: disabled GPNProvider' }
+            catch { Write-Host "legacy cleanup: GPNProvider not disableable ($($_.Exception.Message))" }
+          }
+          schtasks /Query /TN GPNProvider 2>&1 | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            schtasks /Delete /TN GPNProvider /F 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) { Write-Host 'legacy cleanup: unregistered scheduled task GPNProvider' }
+            else { Write-Host "::warning::legacy cleanup: could not delete GPNProvider (rc=$LASTEXITCODE)" }
+          } else {
+            Write-Host 'legacy cleanup: no GPNProvider task present'
+          }
+          # Kill any supervisor the legacy task left behind, then retire its script
+          # so a stale shortcut/manual launch cannot bring it back.
+          Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
+            Where-Object { $_.CommandLine -like '*run-provider.ps1*' } |
+            ForEach-Object { Write-Host "legacy cleanup: stopping run-provider.ps1 pid=$($_.ProcessId)"; Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+          $legacy = 'C:\gpn\run-provider.ps1'
+          if (Test-Path $legacy) {
+            $leaf = 'run-provider.ps1.retired-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
+            try { Rename-Item -Path $legacy -NewName $leaf -ErrorAction Stop; Write-Host "legacy cleanup: renamed $legacy -> $leaf" }
+            catch { Write-Host "::warning::legacy cleanup: could not rename $legacy ($($_.Exception.Message))" }
+          } else {
+            Write-Host 'legacy cleanup: no C:\gpn\run-provider.ps1'
+          }
+
       - name: deploy binaries + restart node to C:\gpn\bin  (auto-update)
         shell: powershell
         run: |
@@ -146,7 +184,26 @@ jobs:
           REM --base-path agree. (A legacy DB at %LOCALAPPDATA%\gpn-node.exe\data
           REM is still auto-detected by gpn_node for backward-compat.)
           set "GPN_BASE_PATH=C:\gpn\data"
-          set "GPN_NODE_KEY=8f9e5ccd99ed3f4516563495d598a7dbcfff5c18b658d3e5cea5718307a4ba74"
+          REM ── Node identity ──────────────────────────────────────────────────
+          REM NEVER put a literal key here. A key baked into the bundle gives
+          REM EVERY install the same peer id: the boxes collide in the directory
+          REM and cannot peer with each other. Generate one per Windows user on
+          REM first run and hand the node the FILE (GPN_NODE_KEY_FILE).
+          set "GPN_NODE_KEY="
+          set "GPN_NODE_KEY_FILE=%USERPROFILE%\.gpn\node-key"
+          if not exist "%USERPROFILE%\.gpn" mkdir "%USERPROFILE%\.gpn" >nul 2>&1
+          if not exist "%GPN_NODE_KEY_FILE%" (
+            echo [gpn] generating this machine's node identity: %GPN_NODE_KEY_FILE%
+            "%GPN_BIN%\gpn-node.exe" key generate-node-key --file "%GPN_NODE_KEY_FILE%"
+          )
+          if not exist "%GPN_NODE_KEY_FILE%" (
+            echo [gpn] ERROR: could not create a node key at %GPN_NODE_KEY_FILE%
+            echo [gpn] ERROR: refusing to start a node with a shared/default identity.
+            echo [gpn] ERROR: create it by hand with:
+            echo [gpn] ERROR:   "%GPN_BIN%\gpn-node.exe" key generate-node-key --file "%GPN_NODE_KEY_FILE%"
+            echo [gpn] ERROR: then re-run this script.
+            exit /b 1
+          )
           set "GPN_BOOTNODES=/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo"
           cd /d C:\gpn
           REM show output live in the console AND append to node.log (Tee), so an
@@ -154,13 +211,33 @@ jobs:
           powershell -NoProfile -Command "& 'C:\gpn\bin\gpn_node.exe' 2>&1 | Tee-Object -FilePath 'C:\gpn\node.log' -Append"
           '@
           $script = $script.Replace('__CHAIN__', $chain)
+
+          # ── self-check BEFORE publishing the launcher: it must use the
+          #    per-machine key FILE and must not contain a baked-in 64-hex
+          #    secret. Shipping a literal key gives every install one peer id.
+          if ($script -notmatch 'GPN_NODE_KEY_FILE=') {
+            throw 'start-node.cmd lost GPN_NODE_KEY_FILE - refusing to publish a launcher with no per-machine identity'
+          }
+          $hex = [regex]::Matches($script, '(?i)\b[0-9a-f]{64}\b')
+          if ($hex.Count -gt 0) {
+            throw ("start-node.cmd contains a literal 64-hex key (starts {0}) - never ship a shared node identity" -f $hex[0].Value.Substring(0,12))
+          }
+          if ($script -match 'GPN_NODE_KEY=[0-9a-fA-F]') {
+            throw 'start-node.cmd still assigns a value to GPN_NODE_KEY'
+          }
+
           Set-Content -Path 'C:\gpn\start-node.cmd' -Value $script -Encoding ascii
-          Write-Host "wrote C:\gpn\start-node.cmd (chain=$chain)"
+          $onDisk = Get-Content -Raw -Path 'C:\gpn\start-node.cmd'
+          if ($onDisk -notmatch 'GPN_NODE_KEY_FILE=') { throw 'on-disk start-node.cmd is missing GPN_NODE_KEY_FILE' }
+          if ([regex]::IsMatch($onDisk, '(?i)\b[0-9a-f]{64}\b')) { throw 'on-disk start-node.cmd contains a 64-hex literal' }
+          Write-Host "wrote C:\gpn\start-node.cmd (chain=$chain)  self-check OK: per-machine key file, no literal key"
 
           # ── 1. STOP: end the supervisor task(s) + kill every gpn* process so
-          #      the .exe files are not locked. Also retire the legacy
-          #      GPNProvider task + its run-provider.ps1 supervisor so exactly
-          #      ONE supervisor runs (two would fight over :8094 + the DB).
+          #      the .exe files are not locked. The legacy GPNProvider task +
+          #      run-provider.ps1 supervisor are retired by the dedicated
+          #      'legacy cleanup' step above (belt-and-braces: repeat it here in
+          #      case it was recreated between steps) so exactly ONE supervisor
+          #      runs (two would fight over :8094 + the DB).
           # native schtasks writes to stderr when a task is absent; that must not
           # trip $ErrorActionPreference='Stop' — check exit codes explicitly.
           $ErrorActionPreference = 'Continue'
@@ -216,6 +293,39 @@ jobs:
             $ErrorActionPreference = 'Continue'   # schtasks is native; we check rc explicitly
             schtasks /Create /TN 'GPN-Node' /TR $tr /SC ONLOGON /RL HIGHEST /F 2>&1 | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "schtasks /Create GPN-Node failed (rc=$LASTEXITCODE)" }
+
+            # ── guard: ONE instance only. `schtasks /Run` on an already-running
+            #    task spawns a SECOND supervision tree (two nodes, same base path,
+            #    same ports) - that cost ~2h of confusion on 2026-10-23.
+            $miSet = $false
+            try {
+              $st = Get-ScheduledTask -TaskName 'GPN-Node' -ErrorAction Stop
+              $st.Settings.MultipleInstances = 'IgnoreNew'
+              Set-ScheduledTask -TaskName 'GPN-Node' -Settings $st.Settings -ErrorAction Stop | Out-Null
+              $miSet = ((Get-ScheduledTask -TaskName 'GPN-Node').Settings.MultipleInstances -eq 'IgnoreNew')
+            } catch { Write-Host "MultipleInstances via ScheduledTasks module failed: $($_.Exception.Message)" }
+            if (-not $miSet) {
+              # Fallback: rewrite the task XML (hosts without the ScheduledTasks module).
+              try {
+                $xml = Join-Path $env:RUNNER_TEMP 'gpn-node-task.xml'
+                $raw = (& cmd /c "schtasks /Query /TN GPN-Node /XML") -join "`r`n"
+                $doc = New-Object System.Xml.XmlDocument
+                $doc.LoadXml(($raw -replace '(?s)^\s*<\?xml[^>]*\?>', ''))
+                $node = $doc.SelectSingleNode('/Task/Settings/MultipleInstancesPolicy')
+                if (-not $node) { throw 'could not find MultipleInstancesPolicy in the GPN-Node task XML' }
+                $node.InnerText = 'IgnoreNew'
+                $doc.InsertBefore($doc.CreateXmlDeclaration('1.0','UTF-16',$null), $doc.DocumentElement) | Out-Null
+                $doc.Save($xml)
+                schtasks /Create /TN 'GPN-Node' /XML $xml /F 2>&1 | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw "schtasks /Create (XML) GPN-Node failed (rc=$LASTEXITCODE)" }
+                $miSet = $true
+              } catch {
+                Write-Host "::warning::could not set MultipleInstances via XML either ($($_.Exception.Message)) - a manual /Run can now fork a second tree"
+              }
+            }
+            if ($miSet) { Write-Host 'GPN-Node MultipleInstances = IgnoreNew (a second /Run cannot fork a second tree)' }
+            else { Write-Host '::warning::duplicate-instance guard NOT applied' }
+
             schtasks /Run /TN 'GPN-Node' 2>&1 | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "schtasks /Run GPN-Node failed (rc=$LASTEXITCODE)" }
             Write-Host 'GPN-Node scheduled task (re)created + started'
