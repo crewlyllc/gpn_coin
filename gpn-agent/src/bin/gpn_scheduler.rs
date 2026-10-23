@@ -118,6 +118,39 @@ fn stale_secs(max_tokens: u64) -> u64 {
     (JANITOR_BASE_SECS + gen).clamp(JANITOR_MIN_SECS, JANITOR_MAX_SECS)
 }
 
+/// Stale floor for job kinds whose **on-chain** `Pending` window is not a proxy
+/// for a stranded job.
+///
+/// The token-scaled window above assumes the only latency is inference, but a
+/// fine-tune, a render or a video takes minutes of *provider* work, and the
+/// accept/start txs that move the job off `Pending` queue behind block time
+/// (60–120 s per transition on this chain). With `max_tokens == 0` — which every
+/// non-LLM payload has — a long job therefore looked "abandoned" long before any
+/// provider could possibly have started it.
+/// Observed 2026-10-23: fine-tune #6528 was pulled by the provider at 12:30:48
+/// and was actively tuning at 12:34:35, but the janitor had already issued a
+/// requestor `cancel_job` at 12:33:14 ("waited >120s", `max_tokens 0`); the
+/// provider's `start` then failed `JobNotPending` — a guaranteed-wasted dispatch
+/// that on a slightly slower block would have thrown away the finished adapter.
+fn kind_stale_floor(kind: &str) -> u64 {
+    match kind {
+        // LoRA/QLoRA fine-tune + adapter export + model registration.
+        "finetune" => 1800,
+        // Diffusion/video renders, including a cold model pull.
+        "image" | "video" | "gen" => 900,
+        // Vector/raw-completion jobs are usually fast but still ollama-bound.
+        "ml" => 300,
+        // LLM/chat keeps the token-scaled window.
+        _ => 0,
+    }
+}
+
+/// The effective stale window for a tracked job: token-scaled, but never shorter
+/// than the floor its kind needs to legitimately leave `Pending`.
+fn stale_secs_for_kind(kind: &str, max_tokens: u64) -> u64 {
+    stale_secs(max_tokens).max(kind_stale_floor(kind))
+}
+
 /// Terminal job states — a job here no longer holds an `ActiveJobCount` slot,
 /// so the janitor stops tracking it.
 fn is_terminal_state(state: &str) -> bool {
@@ -163,8 +196,8 @@ fn job_has_result(status: &str) -> bool {
 /// delivered work (observed 2026-10-18 on #5534: answered at 18:58, still read
 /// `Pending` on-chain at 19:00 because the accept/start txs were queued behind
 /// ~61 s blocks).
-fn should_cancel_stale(state: &str, age_secs: u64, max_tokens: u64, delivered: bool) -> bool {
-    state == "Pending" && !delivered && age_secs > stale_secs(max_tokens)
+fn should_cancel_stale(state: &str, age_secs: u64, stale_for_job: u64, delivered: bool) -> bool {
+    state == "Pending" && !delivered && age_secs > stale_for_job
 }
 
 /// Has a job outlived its on-chain deadline (`now > created_at + max_duration`)?
@@ -290,23 +323,32 @@ fn spawn_janitor(client: Arc<ChainClient>, rt: Arc<tokio::runtime::Runtime>) {
                 }
             }
             // Fast path: requestor cancel of our own stale Pending jobs.
-            if state == "Pending" && age_secs > stale_secs(mt) {
+            // The floor is kind-aware: a fine-tune/render needs minutes to leave
+            // `Pending` legitimately, so the token-scaled window alone would let
+            // the AP cancel its own in-flight long job.
+            let job = gpn_agent::llm::get_job(id);
+            let stale_for_job = match job.as_ref() {
+                Some(j) => stale_secs_for_kind(&j.kind, mt),
+                None => stale_secs(mt),
+            };
+            if state == "Pending" && age_secs > stale_for_job {
                 // Never cancel work the provider already delivered: the on-chain
                 // state lags the real work whenever our accept/start txs are
                 // queued behind slow blocks. Leave it to the completion path (and
                 // to the pallet `expire_job` past its on-chain deadline).
-                let delivered = gpn_agent::llm::get_job(id)
+                let delivered = job
+                    .as_ref()
                     .map(|job| job_has_result(&job.status))
                     .unwrap_or(false);
-                if !should_cancel_stale(&state, age_secs, mt, delivered) {
+                if !should_cancel_stale(&state, age_secs, stale_for_job, delivered) {
                     keep.push((id, t, mt));
                     continue;
                 }
                 match rt.block_on(client.cancel_job_fast(id)) {
                     Ok(()) => {
                         println!(
-                            "[janitor] cancelled stale Pending #{id} (max_tokens {mt}, waited >{}s)",
-                            stale_secs(mt)
+                            "[janitor] cancelled stale Pending #{id} ({}, max_tokens {mt}, waited >{stale_for_job}s)",
+                            job.as_ref().map(|j| j.kind.as_str()).unwrap_or("unknown")
                         );
                         // Keep tracking (with a fresh retry clock) instead of
                         // dropping the entry: dropping it let the adopt scan
@@ -5946,15 +5988,47 @@ mod tests {
         let mt = 512; // stale_secs(512) = 60 + 25*2 = 120 (the floor)
         assert_eq!(stale_secs(mt), 120);
         // Delivered but still Pending on-chain and past the window -> DO NOT cancel.
-        assert!(!should_cancel_stale("Pending", 361, mt, true));
+        assert!(!should_cancel_stale("Pending", 361, 120, true));
         // Not delivered -> the age heuristic still reclaims a stranded Pending job.
-        assert!(should_cancel_stale("Pending", 361, mt, false));
+        assert!(should_cancel_stale("Pending", 361, 120, false));
         // …but only past its own token-scaled window.
-        assert!(!should_cancel_stale("Pending", 119, mt, false));
+        assert!(!should_cancel_stale("Pending", 119, 120, false));
         // Work already started on-chain is never requestor-cancelled.
         for s in ["Accepted", "Running", "AwaitingVerification"] {
-            assert!(!should_cancel_stale(s, 10_000, mt, false));
+            assert!(!should_cancel_stale(s, 10_000, 120, false));
         }
+    }
+
+    #[test]
+    fn long_job_kinds_get_a_stale_floor_the_token_window_would_cut_short() {
+        // Observed 2026-10-23: fine-tune #6528 (max_tokens 0) was requestor-cancelled
+        // by the AP janitor 145 s after creation while the provider was actively
+        // tuning it; its `start` then failed JobNotPending.
+        assert_eq!(stale_secs(0), 120, "LLM floor is unchanged");
+        assert!(
+            stale_secs_for_kind("finetune", 0) >= 1800,
+            "a fine-tune needs minutes before it can leave Pending"
+        );
+        assert!(stale_secs_for_kind("image", 0) >= 900);
+        assert!(stale_secs_for_kind("video", 0) >= 900);
+        assert!(stale_secs_for_kind("ml", 0) >= 300);
+        // LLM/chat keeps the token-scaled window exactly.
+        assert_eq!(stale_secs_for_kind("llm", 4000), stale_secs(4000));
+        assert_eq!(stale_secs_for_kind("", 512), stale_secs(512));
+        // The 12:33:14 self-cancel would not have fired at 145 s for a fine-tune …
+        assert!(!should_cancel_stale(
+            "Pending",
+            145,
+            stale_secs_for_kind("finetune", 0),
+            false
+        ));
+        // … while a genuinely stranded fine-tune is still reclaimed past the floor.
+        assert!(should_cancel_stale(
+            "Pending",
+            1801,
+            stale_secs_for_kind("finetune", 0),
+            false
+        ));
     }
 
     #[test]
