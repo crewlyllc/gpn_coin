@@ -74,6 +74,58 @@ journalctl --user -u gpn-accesspoint | grep 'feed source'
 `UpdateTooSoon` in the operator log is **expected** between posts: each operator may post
 once per `OracleUpdateInterval` (600 blocks). The loop logs it and waits.
 
+## Roster key custody audit (item #88, 2026-10-23)
+
+Question: *before mainnet, does every authorised feed writer have a key we hold **and** a
+balance to pay fees?* Answer on this chain: **no — 1 of 5 genesis roster keys qualifies.**
+Measured on chain at head ~180,116 (audit re-verified after a real post at 180,141):
+
+| role | address | key on this host | balance | posts feeds? |
+|---|---|---|---|---|
+| oracle-1 | `5DUaYAf5…M5Y6` | **yes** (`~/.gpn/oracle.env`, `ORACLE_SIGNER`) | 199.99 GPN | **yes** — bonded 1000 GPN, the only `StakedOperators` entry, i.e. the sole `effective_feed()` contributor |
+| oracle-2 | `5Dk6Yv3B…RtwNtV` | no | **0.0000 GPN** | no — cannot pay fees |
+| oracle-3 | `5F1eQwdy…MwKwD9` | no | **0.0000 GPN** | no |
+| oracle-4 | `5DV1GPah…enSDUa` | no | **0.0000 GPN** | no |
+| oracle-5 | `5Cvguz6w…JGASbm` | no | **0.0000 GPN** | no |
+| committee-1 | `5HTWBtWr…3PJRteWN` | yes | 99.99 GPN | n/a (admission only) |
+| committee-2 | `5Cd5NiY2…uEX3Dx` | yes | 99.99 GPN | n/a |
+| committee-3 | `5HeUVTK6…j5h` | yes | **100.00 GPN** (funded this run — was 0) | n/a |
+
+`OracleOperators` = 5 (genesis `testnet_oracle_operators()`, Jeremy's `oracle-roster`
+2026-09-16; `OperatorCount = 5`, `MaxOracleOperators = 10`). `Committee` = 3, all held
+here, `AdmissionThreshold = 2`. `committee-4/5` from the 2026-10-21 key file are **not**
+committee members on this chain (they are mainnet additions).
+
+**Why the four dead entries are not an immediate emergency, and why they still matter:**
+`effective_feed()` aggregates **only** `StakedOperators`, so a non-bonded roster account
+contributes nothing to pricing — the feed is not being polluted by unreachable keys. What
+they do is make the roster *look* redundant when it is not: the network's price feed
+currently depends on **one** key in `~/.gpn/oracle.env`. Lose that file (or this host) and
+the feed freezes at the last posted value; `StaleOperatorBlocks = 2112` (~9 h at 15 s)
+after the last post the bonded operator also becomes slashable (10 % of the 1000 GPN bond).
+
+**Fee runway:** one post per operator per `OracleUpdateInterval` (600 blocks). At ~2.7 h
+per post, 199.99 GPN is thousands of posts of runway — fees are not the constraint.
+
+**Remediation done this run (no runtime/genesis/`set_code`):** funded `committee-3`
+(0 → 100 GPN) so all three admission-committee keys can pay fees for the only path that
+can replace a lost roster key (`propose_operator`/`approve_operator`/`remove_operator`),
+and proved a real end-to-end write: `update_feed` from oracle-1 landed at block **180141**
+(`LastUpdateBlock` 179539 → 180141, `OperatorFeeds[oracle-1].updated_at` likewise,
+`gpn_effective_feed` reads `updated at block = 180141`, `gpn_check_feed` still plausible).
+
+**Open decision for Jeremy (owner-gated — key custody, cannot be resolved from here):**
+1. **Import** the four cold `oracle-roster` seeds onto a host that runs a feed loop (or run
+them from the cold machine), or
+2. **Retire** them with `remove_operator` from a committee key (we hold 2-of-3) so the
+   roster states the truth, and instead add a **second bonded operator** with its own
+   `gpn-oracle` instance — different bond size so the median is genuinely weighted.
+
+Option 2 plus a second service is the only arrangement that survives losing any single key,
+which is what "the feed must not go stale before mainnet" actually requires. **Do not bond
+a second operator without a service to keep it fresh:** an unmaintained bond is a slash
+waiting to happen.
+
 ## Known gaps (not fixed here — each needs its own decision)
 
 - **`utilization_rate_bps` is overloaded.** The pallet documents it as "network GPU
