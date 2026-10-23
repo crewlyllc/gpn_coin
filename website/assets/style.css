@@ -431,6 +431,9 @@ section[id], [id="join"] { scroll-margin-top: 74px; }
 .subtabs .tab[aria-selected="true"] {
   background: var(--bg-2); color: var(--text); border-color: var(--accent); box-shadow: none;
 }
+/* Environment selector, one level under the purpose tabs on /ai. */
+.subtabs.envtabs { margin: 2px 0 16px; }
+.subtabs.envtabs .tab { font-size: .82rem; padding: 7px 13px; }
 .codeblock {
   background: var(--bg); border: 1px solid var(--line);
   border-radius: var(--radius-sm); margin: 0 0 14px;

@@ -117,94 +117,92 @@
   <section id="code">
     <div class="wrap">
       <span class="kicker">Copy &amp; paste</span>
-      <h2>Pick your environment</h2>
-      <p class="sub">Same request every time — what changes is the quoting. Pasting bash into PowerShell is
-        the usual way this goes wrong, so the samples below are split by environment and each one is
-        written in that environment's own idiom. The testnet ignores the API key, but the OpenAI SDK
-        still requires one: any non-empty string works.</p>
+      <h2>Pick what you want to do</h2>
+      <p class="sub">Two steps: choose <b>what</b> you want to generate, then the environment you'll call
+        it from. The request shape is the same everywhere — what changes is the quoting, and pasting bash
+        into PowerShell is the usual way this goes wrong. The testnet ignores the API key, but the OpenAI
+        SDK still requires one: any non-empty string works.</p>
 
       <div class="card" style="padding:0;overflow:hidden">
-        <div class="tabs" role="tablist" aria-label="Choose your environment">
-          <button class="tab" type="button" id="os-tab-windows" role="tab" aria-selected="false"
-                  aria-controls="os-windows" data-os="windows" tabindex="-1">Windows · PowerShell</button>
-          <button class="tab" type="button" id="os-tab-linux" role="tab" aria-selected="true"
-                  aria-controls="os-linux" data-os="linux">Linux</button>
-          <button class="tab" type="button" id="os-tab-macos" role="tab" aria-selected="false"
-                  aria-controls="os-macos" data-os="macos" tabindex="-1">macOS</button>
-          <button class="tab" type="button" id="os-tab-python" role="tab" aria-selected="false"
-                  aria-controls="os-python" data-os="python" tabindex="-1">Any OS · Python</button>
-          <button class="tab" type="button" id="os-tab-node" role="tab" aria-selected="false"
-                  aria-controls="os-node" data-os="node" tabindex="-1">Any OS · Node</button>
+        <div class="tabs" role="tablist" aria-label="What do you want to do?">
+          <button class="tab" type="button" id="do-tab-text" role="tab" aria-selected="true"
+                  aria-controls="do-text" data-os="text">💬 Text / LLM</button>
+          <button class="tab" type="button" id="do-tab-image" role="tab" aria-selected="false"
+                  aria-controls="do-image" data-os="image" tabindex="-1">🎨 Image generation</button>
+          <button class="tab" type="button" id="do-tab-video" role="tab" aria-selected="false"
+                  aria-controls="do-video" data-os="video" tabindex="-1">🎬 Video generation
+            <span class="tab-soon">coming soon</span></button>
         </div>
 
-        <!-- ===== Windows ===== -->
-        <div class="qs-panel" id="os-windows" role="tabpanel" aria-labelledby="os-tab-windows" tabindex="0" hidden>
-          <p class="hint" style="margin-top:0"><b>Runs on:</b> PowerShell 5.1+ (shipped with Windows 10 1803+
-            and Server 2019+). Two traps: <code>curl</code> in PowerShell is an alias for
-            <code>Invoke-WebRequest</code> — you must type <code>curl.exe</code> to get real curl — and
-            line continuations are a backtick, not a backslash.</p>
+        <!-- ==================== PURPOSE: TEXT ==================== -->
+        <div class="qs-panel" id="do-text" role="tabpanel" aria-labelledby="do-tab-text" tabindex="0">
+          <p class="hint" style="margin-top:0">One request, five environments. Every sample asks the same
+            question — <i>“What is the capital of Kenya? One word.”</i> — so you can see exactly what
+            changes between them.</p>
 
-          <div class="subtabs" role="tablist" aria-label="Windows PowerShell variant">
-            <button class="tab sub" type="button" id="win-tab-curl" role="tab" aria-selected="true"
-                    aria-controls="win-curl" data-os="ps-curl">curl.exe</button>
-            <button class="tab sub" type="button" id="win-tab-irm" role="tab" aria-selected="false"
-                    aria-controls="win-irm" data-os="ps-irm" tabindex="-1">Invoke-RestMethod</button>
+          <div class="subtabs envtabs" role="tablist" aria-label="Choose your environment">
+            <button class="tab sub" type="button" id="t-os-tab-windows" role="tab" aria-selected="false"
+                    aria-controls="t-os-windows" data-os="windows" tabindex="-1">Windows · PowerShell</button>
+            <button class="tab sub" type="button" id="t-os-tab-linux" role="tab" aria-selected="true"
+                    aria-controls="t-os-linux" data-os="linux">Linux</button>
+            <button class="tab sub" type="button" id="t-os-tab-macos" role="tab" aria-selected="false"
+                    aria-controls="t-os-macos" data-os="macos" tabindex="-1">macOS</button>
+            <button class="tab sub" type="button" id="t-os-tab-python" role="tab" aria-selected="false"
+                    aria-controls="t-os-python" data-os="python" tabindex="-1">Any OS · Python</button>
+            <button class="tab sub" type="button" id="t-os-tab-node" role="tab" aria-selected="false"
+                    aria-controls="t-os-node" data-os="node" tabindex="-1">Any OS · Node</button>
           </div>
 
-          <div class="qs-panel sub" id="win-curl" role="tabpanel" aria-labelledby="win-tab-curl" tabindex="0">
-            <div class="codeblock">
-              <div class="codeblock-head"><span class="lang">powershell</span>
-                <button class="copy-btn" type="button" data-copy="#src-win-curl" aria-label="Copy the PowerShell curl.exe example">Copy</button></div>
-              <pre><code id="src-win-curl">$body = '{"model":"llama3.2:1b","max_tokens":32,"messages":[{"role":"user","content":"What is the capital of Kenya? One word."}]}'
+          <!-- ===== Text · Windows ===== -->
+          <div class="qs-panel sub" id="t-os-windows" role="tabpanel" aria-labelledby="t-os-tab-windows" tabindex="0" hidden>
+            <p class="hint" style="margin-top:0"><b>Runs on:</b> PowerShell 5.1+ (shipped with Windows 10 1803+
+              and Server 2019+). Two traps: <code>curl</code> in PowerShell is an alias for
+              <code>Invoke-WebRequest</code> — you must type <code>curl.exe</code> to get real curl — and
+              line continuations are a backtick, not a backslash.</p>
+
+            <div class="subtabs" role="tablist" aria-label="Windows PowerShell variant">
+              <button class="tab sub" type="button" id="t-win-tab-curl" role="tab" aria-selected="true"
+                      aria-controls="t-win-curl" data-os="ps-curl">curl.exe</button>
+              <button class="tab sub" type="button" id="t-win-tab-irm" role="tab" aria-selected="false"
+                      aria-controls="t-win-irm" data-os="ps-irm" tabindex="-1">Invoke-RestMethod</button>
+            </div>
+
+            <div class="qs-panel sub" id="t-win-curl" role="tabpanel" aria-labelledby="t-win-tab-curl" tabindex="0">
+              <div class="codeblock">
+                <div class="codeblock-head"><span class="lang">powershell</span>
+                  <button class="copy-btn" type="button" data-copy="#src-t-win-curl" aria-label="Copy the PowerShell curl.exe example">Copy</button></div>
+                <pre><code id="src-t-win-curl">$body = '{"model":"llama3.2:1b","max_tokens":32,"messages":[{"role":"user","content":"What is the capital of Kenya? One word."}]}'
 
 $body | curl.exe -sS --max-time 150 `
   https://gpncoin.ai/api/v1/chat/completions `
   -H "Content-Type: application/json" `
   --data-binary "@-"</code></pre>
-            </div>
-            <div class="codeblock">
-              <div class="codeblock-head"><span class="lang">powershell · extract the answer</span>
-                <button class="copy-btn" type="button" data-copy="#src-win-curl-out" aria-label="Copy the PowerShell extraction example">Copy</button></div>
-              <pre><code id="src-win-curl-out"># uses $body from the block above
+              </div>
+              <div class="codeblock">
+                <div class="codeblock-head"><span class="lang">powershell · extract the answer</span>
+                  <button class="copy-btn" type="button" data-copy="#src-t-win-curl-out" aria-label="Copy the PowerShell extraction example">Copy</button></div>
+                <pre><code id="src-t-win-curl-out"># uses $body from the block above
 $r = $body | curl.exe -sS --max-time 150 `
   https://gpncoin.ai/api/v1/chat/completions `
   -H "Content-Type: application/json" `
   --data-binary "@-" | ConvertFrom-Json
 
 $r.choices[0].message.content</code></pre>
+              </div>
+              <p class="hint mb-0">The JSON body goes in on <b>stdin</b> on purpose: it never passes through
+                PowerShell's argument parsing, so no escaping is involved. Inline
+                <code>-d '{"model":"…"}'</code> is the classic failure — Windows PowerShell 5.1 re-quotes the
+                argument and the inner double quotes are lost, so curl receives malformed JSON. If you do
+                need it inline on 5.1, escape as <code>-d '{\"model\":\"llama3.2:1b\"}'</code>; PowerShell
+                7.3+ passes arguments verbatim instead, so those backslashes must be dropped there. The stdin
+                form above behaves the same on both.</p>
             </div>
-            <p class="hint mb-0">The JSON body goes in on <b>stdin</b> on purpose: it never passes through
-              PowerShell's argument parsing, so no escaping is involved. Inline
-              <code>-d '{"model":"…"}'</code> is the classic failure — Windows PowerShell 5.1 re-quotes the
-              argument and the inner double quotes are lost, so curl receives malformed JSON. If you do
-              need it inline on 5.1, escape as <code>-d '{\"model\":\"llama3.2:1b\"}'</code>; PowerShell
-              7.3+ passes arguments verbatim instead, so those backslashes must be dropped there. The stdin
-              form above behaves the same on both.</p>
-            <div class="codeblock">
-              <div class="codeblock-head"><span class="lang">powershell · image generation (submit → poll → download)</span>
-                <button class="copy-btn" type="button" data-copy="#src-win-img" aria-label="Copy the PowerShell image example">Copy</button></div>
-              <pre><code id="src-win-img">$API = "https://gpncoin.ai/api/v1"   # or http://142.129.54.88:8092 before the Worker deploy
 
-$job = @{ model="sd-turbo"; prompt="a cozy cabin at dusk, warm windows"; size="512x512"; steps=8 } |
-  ConvertTo-Json -Compress |
-  curl.exe -sS -X POST "$API/images/generations" -H "Content-Type: application/json" --data-binary "@-" |
-  ConvertFrom-Json
-
-while ($job.status -eq "pending") {
-  Start-Sleep -Seconds 2
-  $job = curl.exe -sS "$API/images/generations/$($job.id)" | ConvertFrom-Json
-}
-
-curl.exe -sS "$API/images/$($job.id)" -o cabin.png
-Get-Item cabin.png | Select-Object Name, Length</code></pre>
-            </div>
-          </div>
-
-          <div class="qs-panel sub" id="win-irm" role="tabpanel" aria-labelledby="win-tab-irm" tabindex="0" hidden>
-            <div class="codeblock">
-              <div class="codeblock-head"><span class="lang">powershell</span>
-                <button class="copy-btn" type="button" data-copy="#src-win-irm" aria-label="Copy the Invoke-RestMethod example">Copy</button></div>
-              <pre><code id="src-win-irm">$body = @{
+            <div class="qs-panel sub" id="t-win-irm" role="tabpanel" aria-labelledby="t-win-tab-irm" tabindex="0" hidden>
+              <div class="codeblock">
+                <div class="codeblock-head"><span class="lang">powershell</span>
+                  <button class="copy-btn" type="button" data-copy="#src-t-win-irm" aria-label="Copy the Invoke-RestMethod example">Copy</button></div>
+                <pre><code id="src-t-win-irm">$body = @{
   model      = "llama3.2:1b"
   max_tokens = 32
   messages   = @(@{ role = "user"; content = "What is the capital of Kenya? One word." })
@@ -217,23 +215,23 @@ $r = Invoke-RestMethod -Uri "https://gpncoin.ai/api/v1/chat/completions" `
   -TimeoutSec 150
 
 $r.choices[0].message.content</code></pre>
+              </div>
+              <p class="hint mb-0">No quoting to think about — PowerShell serialises the hashtable and parses
+                the reply for you, so the answer is just <code>$r.choices[0].message.content</code>.
+                <code>-TimeoutSec 150</code> matters: a cold job runs 20–90&nbsp;s and the default is 100&nbsp;s.
+                On older Windows 10 builds add
+                <code>[Net.ServicePointManager]::SecurityProtocol = 'Tls12'</code> first if TLS fails.</p>
             </div>
-            <p class="hint mb-0">No quoting to think about — PowerShell serialises the hashtable and parses
-              the reply for you, so the answer is just <code>$r.choices[0].message.content</code>.
-              <code>-TimeoutSec 150</code> matters: a cold job runs 20–90&nbsp;s and the default is 100&nbsp;s.
-              On older Windows 10 builds add
-              <code>[Net.ServicePointManager]::SecurityProtocol = 'Tls12'</code> first if TLS fails.</p>
           </div>
-        </div>
 
-        <!-- ===== Linux ===== -->
-        <div class="qs-panel" id="os-linux" role="tabpanel" aria-labelledby="os-tab-linux" tabindex="0">
-          <p class="hint" style="margin-top:0"><b>Runs on:</b> bash or zsh on any Linux distro — curl and a
-            POSIX shell are all you need (<code>jq</code> optional, from your package manager).</p>
-          <div class="codeblock">
-            <div class="codeblock-head"><span class="lang">bash</span>
-              <button class="copy-btn" type="button" data-copy="#src-curl" aria-label="Copy the curl example">Copy</button></div>
-            <pre><code id="src-curl">curl -sS --max-time 150 https://gpncoin.ai/api/v1/chat/completions \
+          <!-- ===== Text · Linux ===== -->
+          <div class="qs-panel sub" id="t-os-linux" role="tabpanel" aria-labelledby="t-os-tab-linux" tabindex="0">
+            <p class="hint" style="margin-top:0"><b>Runs on:</b> bash or zsh on any Linux distro — curl and a
+              POSIX shell are all you need (<code>jq</code> optional, from your package manager).</p>
+            <div class="codeblock">
+              <div class="codeblock-head"><span class="lang">bash</span>
+                <button class="copy-btn" type="button" data-copy="#src-t-curl" aria-label="Copy the curl example">Copy</button></div>
+              <pre><code id="src-t-curl">curl -sS --max-time 150 https://gpncoin.ai/api/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "llama3.2:1b",
@@ -242,49 +240,28 @@ $r.choices[0].message.content</code></pre>
       {"role": "user", "content": "What is the capital of Kenya? One word."}
     ]
   }'</code></pre>
-          </div>
-          <div class="codeblock">
-            <div class="codeblock-head"><span class="lang">bash · just the answer (jq)</span>
-              <button class="copy-btn" type="button" data-copy="#src-curl-out" aria-label="Copy the jq extraction example">Copy</button></div>
-            <pre><code id="src-curl-out">curl -sS --max-time 150 https://gpncoin.ai/api/v1/chat/completions \
+            </div>
+            <div class="codeblock">
+              <div class="codeblock-head"><span class="lang">bash · just the answer (jq)</span>
+                <button class="copy-btn" type="button" data-copy="#src-t-curl-out" aria-label="Copy the jq extraction example">Copy</button></div>
+              <pre><code id="src-t-curl-out">curl -sS --max-time 150 https://gpncoin.ai/api/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"llama3.2:1b","max_tokens":32,"messages":[{"role":"user","content":"What is the capital of Kenya? One word."}]}' \
   | jq -r '.choices[0].message.content'</code></pre>
+            </div>
+            <p class="hint mb-0"><code>--max-time 150</code> covers a cold job (block inclusion + model load).
+              Single quotes are literal in bash/zsh, so the JSON is passed through untouched.</p>
           </div>
-          <p class="hint mb-0"><code>--max-time 150</code> covers a cold job (block inclusion + model load).
-            Single quotes are literal in bash/zsh, so the JSON is passed through untouched.</p>
-          <div class="codeblock">
-            <div class="codeblock-head"><span class="lang">bash · image generation (submit → poll → download)</span>
-              <button class="copy-btn" type="button" data-copy="#src-curl-img" aria-label="Copy the image example">Copy</button></div>
-            <pre><code id="src-curl-img">API=https://gpncoin.ai/api/v1   # or http://142.129.54.88:8092 until the Worker deploy
 
-id=$(curl -sS -X POST $API/images/generations \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"sd-turbo","prompt":"a cozy cabin at dusk, warm windows","size":"512x512","steps":8}' \
-  | jq -r .id)
-echo "job $id"
-
-# the render takes ~30 s; poll every 2 s
-while [ "$(curl -sS $API/images/generations/$id | jq -r .status)" = pending ]; do sleep 2; done
-
-curl -sS "$API/images/$id" -o cabin.png
-file cabin.png   # PNG image data, 512 x 512</code></pre>
-          </div>
-          <p class="hint mb-0">Submit answers <code>202</code> immediately with an id; polling costs nothing
-            and returns <code>status</code>, then <code>data[].url</code> once completed. Add <code>"sync":true</code>
-            to hold the connection instead — allowed only when the estimate is under 60 s
-            (512×512 @ 8 steps ≈ 31 s yes; 1024×1024 @ 50 steps ≈ 68 s is refused with the estimate).</p>
-        </div>
-
-        <!-- ===== macOS ===== -->
-        <div class="qs-panel" id="os-macos" role="tabpanel" aria-labelledby="os-tab-macos" tabindex="0" hidden>
-          <p class="hint" style="margin-top:0"><b>Runs on:</b> the default zsh (or bash 3.2) on any current
-            macOS — curl and Python 3 ship with the OS, so this is copy-paste with nothing to install.
-            <code>jq</code> is the only optional extra (<code>brew install jq</code>).</p>
-          <div class="codeblock">
-            <div class="codeblock-head"><span class="lang">zsh / bash</span>
-              <button class="copy-btn" type="button" data-copy="#src-mac" aria-label="Copy the macOS example">Copy</button></div>
-            <pre><code id="src-mac">#!/bin/zsh
+          <!-- ===== Text · macOS ===== -->
+          <div class="qs-panel sub" id="t-os-macos" role="tabpanel" aria-labelledby="t-os-tab-macos" tabindex="0" hidden>
+            <p class="hint" style="margin-top:0"><b>Runs on:</b> the default zsh (or bash 3.2) on any current
+              macOS — curl and Python 3 ship with the OS, so this is copy-paste with nothing to install.
+              <code>jq</code> is the only optional extra (<code>brew install jq</code>).</p>
+            <div class="codeblock">
+              <div class="codeblock-head"><span class="lang">zsh / bash</span>
+                <button class="copy-btn" type="button" data-copy="#src-t-mac" aria-label="Copy the macOS example">Copy</button></div>
+              <pre><code id="src-t-mac">#!/bin/zsh
 curl -sS --max-time 150 https://gpncoin.ai/api/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
@@ -295,46 +272,30 @@ curl -sS --max-time 150 https://gpncoin.ai/api/v1/chat/completions \
     ]
   }' \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["choices"][0]["message"]["content"])'</code></pre>
-          </div>
-          <p class="hint mb-0">The <code>python3 -c</code> tail pulls out the answer without jq — Python 3 is
-            always present on macOS. Everything else is identical to Linux: backslash continuations,
-            single-quoted JSON.</p>
-          <div class="codeblock">
-            <div class="codeblock-head"><span class="lang">zsh · image generation (submit → poll → download)</span>
-              <button class="copy-btn" type="button" data-copy="#src-mac-img" aria-label="Copy the macOS image example">Copy</button></div>
-            <pre><code id="src-mac-img">API=https://gpncoin.ai/api/v1   # or http://142.129.54.88:8092 before the Worker deploy
-
-id=$(curl -sS -X POST $API/images/generations \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"sd-turbo","prompt":"a cozy cabin at dusk","size":"512x512","steps":8}' \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
-
-while [ "$(curl -sS $API/images/generations/$id | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')" = pending ]; do
-  sleep 2
-done
-
-curl -sS "$API/images/$id" -o cabin.png && file cabin.png</code></pre>
-          </div>
-        </div>
-
-        <!-- ===== Python ===== -->
-        <div class="qs-panel" id="os-python" role="tabpanel" aria-labelledby="os-tab-python" tabindex="0" hidden>
-          <p class="hint" style="margin-top:0"><b>Runs on:</b> any OS with Python 3.8+ — Windows, Linux and
-            macOS all run this identically. No shell quoting is involved, which makes it the most
-            portable option on this page.</p>
-
-          <div class="subtabs" role="tablist" aria-label="Python variant">
-            <button class="tab sub" type="button" id="py-tab-req" role="tab" aria-selected="true"
-                    aria-controls="py-req" data-os="requests">requests</button>
-            <button class="tab sub" type="button" id="py-tab-sdk" role="tab" aria-selected="false"
-                    aria-controls="py-sdk" data-os="sdk" tabindex="-1">OpenAI SDK</button>
+            </div>
+            <p class="hint mb-0">The <code>python3 -c</code> tail pulls out the answer without jq — Python 3 is
+              always present on macOS. Everything else is identical to Linux: backslash continuations,
+              single-quoted JSON.</p>
           </div>
 
-          <div class="qs-panel sub" id="py-req" role="tabpanel" aria-labelledby="py-tab-req" tabindex="0">
-            <div class="codeblock">
-              <div class="codeblock-head"><span class="lang">python · requests</span>
-                <button class="copy-btn" type="button" data-copy="#src-py" aria-label="Copy the Python requests example">Copy</button></div>
-              <pre><code id="src-py">import requests
+          <!-- ===== Text · Python ===== -->
+          <div class="qs-panel sub" id="t-os-python" role="tabpanel" aria-labelledby="t-os-tab-python" tabindex="0" hidden>
+            <p class="hint" style="margin-top:0"><b>Runs on:</b> any OS with Python 3.8+ — Windows, Linux and
+              macOS all run this identically. No shell quoting is involved, which makes it the most
+              portable option on this page.</p>
+
+            <div class="subtabs" role="tablist" aria-label="Python variant">
+              <button class="tab sub" type="button" id="t-py-tab-req" role="tab" aria-selected="true"
+                      aria-controls="t-py-req" data-os="requests">requests</button>
+              <button class="tab sub" type="button" id="t-py-tab-sdk" role="tab" aria-selected="false"
+                      aria-controls="t-py-sdk" data-os="sdk" tabindex="-1">OpenAI SDK</button>
+            </div>
+
+            <div class="qs-panel sub" id="t-py-req" role="tabpanel" aria-labelledby="t-py-tab-req" tabindex="0">
+              <div class="codeblock">
+                <div class="codeblock-head"><span class="lang">python · requests</span>
+                  <button class="copy-btn" type="button" data-copy="#src-t-py" aria-label="Copy the Python requests example">Copy</button></div>
+                <pre><code id="src-t-py">import requests
 
 r = requests.post(
     "https://gpncoin.ai/api/v1/chat/completions",
@@ -348,49 +309,16 @@ r = requests.post(
 )
 r.raise_for_status()
 print(r.json()["choices"][0]["message"]["content"])</code></pre>
+              </div>
+              <p class="hint mb-0"><code>pip install requests</code>. No SDK, no key.
+                <code>timeout=150</code> covers a cold testnet job; raise it if the network is busy.</p>
             </div>
-            <p class="hint mb-0"><code>pip install requests</code>. No SDK, no key.
-              <code>timeout=150</code> covers a cold testnet job; raise it if the network is busy.</p>
-            <div class="codeblock">
-              <div class="codeblock-head"><span class="lang">python · image generation (submit → poll → download)</span>
-                <button class="copy-btn" type="button" data-copy="#src-py-img" aria-label="Copy the Python image example">Copy</button></div>
-              <pre><code id="src-py-img">import time
-import requests
 
-API = "https://gpncoin.ai/api/v1"   # or http://142.129.54.88:8092 before the Worker deploy
-
-job = requests.post(
-    f"{API}/images/generations",
-    json={"model": "sd-turbo",
-          "prompt": "a cozy cabin at dusk, warm windows",
-          "size": "512x512", "steps": 8},
-    timeout=60,
-).json()
-print(job["id"], job["status"])          # 202: pending + poll_url
-
-while job["status"] == "pending":
-    time.sleep(2)
-    job = requests.get(job["poll_url"], timeout=30).json()
-
-if job["status"] != "completed":
-    raise SystemExit(f"render failed: {job.get('error')}")
-
-png = requests.get(job["data"][0]["url"], timeout=60)
-png.raise_for_status()
-open("cabin.png", "wb").write(png.content)
-print("saved cabin.png", len(png.content), "bytes", job["gpn"])</code></pre>
-            </div>
-            <p class="hint mb-0">The result carries <code>gpn.payment</code> = <code>"channel"</code> when the
-              request was batched off-chain or <code>"onchain"</code> when it settled per job on chain
-              (with its own <code>job_id</code> receipt) — never both. Images expire after 24 h;
-              <code>expires_at</code> says when.</p>
-          </div>
-
-          <div class="qs-panel sub" id="py-sdk" role="tabpanel" aria-labelledby="py-tab-sdk" tabindex="0" hidden>
-            <div class="codeblock">
-              <div class="codeblock-head"><span class="lang">python · openai</span>
-                <button class="copy-btn" type="button" data-copy="#src-sdk" aria-label="Copy the OpenAI SDK example">Copy</button></div>
-              <pre><code id="src-sdk"># pip install openai
+            <div class="qs-panel sub" id="t-py-sdk" role="tabpanel" aria-labelledby="t-py-tab-sdk" tabindex="0" hidden>
+              <div class="codeblock">
+                <div class="codeblock-head"><span class="lang">python · openai</span>
+                  <button class="copy-btn" type="button" data-copy="#src-t-sdk" aria-label="Copy the OpenAI SDK example">Copy</button></div>
+                <pre><code id="src-t-sdk"># pip install openai
 from openai import OpenAI
 
 client = OpenAI(
@@ -405,21 +333,21 @@ reply = client.chat.completions.create(
     messages=[{"role": "user", "content": "What is the capital of Kenya? One word."}],
 )
 print(reply.choices[0].message.content)</code></pre>
+              </div>
+              <p class="hint mb-0">Any OpenAI-compatible client works: <code>base_url</code> is the only change.
+                The reply object is the same shape — the answer is <code>reply.choices[0].message.content</code>.</p>
             </div>
-            <p class="hint mb-0">Any OpenAI-compatible client works: <code>base_url</code> is the only change.
-              The reply object is the same shape — the answer is <code>reply.choices[0].message.content</code>.</p>
           </div>
-        </div>
 
-        <!-- ===== Node ===== -->
-        <div class="qs-panel" id="os-node" role="tabpanel" aria-labelledby="os-tab-node" tabindex="0" hidden>
-          <p class="hint" style="margin-top:0"><b>Runs on:</b> Node 18+ on any OS (global <code>fetch</code> and
-            <code>AbortSignal.timeout</code> are built in — no <code>npm install</code>), or paste the
-            <code>fetch</code> call into a browser console or Deno/Bun.</p>
-          <div class="codeblock">
-            <div class="codeblock-head"><span class="lang">javascript</span>
-              <button class="copy-btn" type="button" data-copy="#src-js" aria-label="Copy the Node example">Copy</button></div>
-            <pre><code id="src-js">(async () => {
+          <!-- ===== Text · Node ===== -->
+          <div class="qs-panel sub" id="t-os-node" role="tabpanel" aria-labelledby="t-os-tab-node" tabindex="0" hidden>
+            <p class="hint" style="margin-top:0"><b>Runs on:</b> Node 18+ on any OS (global <code>fetch</code> and
+              <code>AbortSignal.timeout</code> are built in — no <code>npm install</code>), or paste the
+              <code>fetch</code> call into a browser console or Deno/Bun.</p>
+            <div class="codeblock">
+              <div class="codeblock-head"><span class="lang">javascript</span>
+                <button class="copy-btn" type="button" data-copy="#src-t-js" aria-label="Copy the Node example">Copy</button></div>
+              <pre><code id="src-t-js">(async () =&gt; {
   const res = await fetch("https://gpncoin.ai/api/v1/chat/completions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -434,21 +362,262 @@ print(reply.choices[0].message.content)</code></pre>
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
   const data = await res.json();
   console.log(data.choices[0].message.content);
-})().catch((err) => {
+})().catch((err) =&gt; {
   console.error(err);
   process.exit(1);
 });</code></pre>
+            </div>
+            <p class="hint mb-0">Save as <code>chat.js</code> and <code>node chat.js</code>. The IIFE means it
+              runs as CommonJS or ESM; <code>AbortSignal.timeout</code> is what stops a hung cold job.</p>
           </div>
-          <p class="hint mb-0">Save as <code>chat.js</code> and <code>node chat.js</code>. The IIFE means it
-            runs as CommonJS or ESM; <code>AbortSignal.timeout</code> is what stops a hung cold job.</p>
-          <div class="codeblock">
-            <div class="codeblock-head"><span class="lang">javascript · image generation (submit → poll → download)</span>
-              <button class="copy-btn" type="button" data-copy="#src-js-img" aria-label="Copy the Node image example">Copy</button></div>
-            <pre><code id="src-js-img">// node 18+: global fetch. Writes cabin.png with no dependencies.
+
+          <div class="callout" style="margin-top:18px">
+            <span class="ct">Response shape — text</span>
+            <pre style="margin:10px 0 0"><code>{
+  "id": "chatcmpl-gpn-6238",
+  "object": "chat.completion",
+  "model": "llama3.2:1b",
+  "choices": [
+    { "index": 0, "finish_reason": "stop",
+      "message": { "role": "assistant", "content": "Nairobi" } }
+  ],
+  "usage": { "prompt_tokens": 39, "completion_tokens": 3, "total_tokens": 42 }
+}</code></pre>
+            <p style="margin:12px 0 0">The answer is always <code>choices[0].message.content</code> —
+              <code>data.choices[0].message.content</code> in JS, <code>$r.choices[0].message.content</code> in
+              PowerShell, <code>data["choices"][0]["message"]["content"]</code> in Python.</p>
+          </div>
+        </div>
+
+        <!-- ==================== PURPOSE: IMAGE ==================== -->
+        <div class="qs-panel" id="do-image" role="tabpanel" aria-labelledby="do-tab-image" tabindex="0" hidden>
+          <p class="hint" style="margin-top:0"><b>Live.</b> Three steps in every language: <b>submit</b>
+            (answers <code>202</code> in milliseconds with an id), <b>poll</b> the id until
+            <code>status</code> is <code>completed</code> (a 512×512 render takes ~25–35&nbsp;s), then
+            <b>download</b> <code>data[0].url</code> — a PNG whose sha256 matches the bytes the provider
+            signed. Polling is free; only the render is billed.</p>
+
+          <div class="subtabs envtabs" role="tablist" aria-label="Choose your environment">
+            <button class="tab sub" type="button" id="i-os-tab-windows" role="tab" aria-selected="false"
+                    aria-controls="i-os-windows" data-os="windows" tabindex="-1">Windows · PowerShell</button>
+            <button class="tab sub" type="button" id="i-os-tab-linux" role="tab" aria-selected="true"
+                    aria-controls="i-os-linux" data-os="linux">Linux</button>
+            <button class="tab sub" type="button" id="i-os-tab-macos" role="tab" aria-selected="false"
+                    aria-controls="i-os-macos" data-os="macos" tabindex="-1">macOS</button>
+            <button class="tab sub" type="button" id="i-os-tab-python" role="tab" aria-selected="false"
+                    aria-controls="i-os-python" data-os="python" tabindex="-1">Any OS · Python</button>
+            <button class="tab sub" type="button" id="i-os-tab-node" role="tab" aria-selected="false"
+                    aria-controls="i-os-node" data-os="node" tabindex="-1">Any OS · Node</button>
+          </div>
+
+          <!-- ===== Image · Windows ===== -->
+          <div class="qs-panel sub" id="i-os-windows" role="tabpanel" aria-labelledby="i-os-tab-windows" tabindex="0" hidden>
+            <p class="hint" style="margin-top:0"><b>Runs on:</b> PowerShell 5.1+ on Windows 10 1803+ or
+              Server 2019+. Same two traps as text — type <code>curl.exe</code>, and continue lines with a
+              backtick.</p>
+
+            <div class="subtabs" role="tablist" aria-label="Windows PowerShell variant">
+              <button class="tab sub" type="button" id="i-win-tab-curl" role="tab" aria-selected="true"
+                      aria-controls="i-win-curl" data-os="ps-curl">curl.exe</button>
+              <button class="tab sub" type="button" id="i-win-tab-irm" role="tab" aria-selected="false"
+                      aria-controls="i-win-irm" data-os="ps-irm" tabindex="-1">Invoke-RestMethod</button>
+            </div>
+
+            <div class="qs-panel sub" id="i-win-curl" role="tabpanel" aria-labelledby="i-win-tab-curl" tabindex="0">
+              <div class="codeblock">
+                <div class="codeblock-head"><span class="lang">powershell · curl.exe (submit → poll → download)</span>
+                  <button class="copy-btn" type="button" data-copy="#src-i-win-curl" aria-label="Copy the PowerShell curl.exe image example">Copy</button></div>
+                <pre><code id="src-i-win-curl">$API = "https://gpncoin.ai/api/v1"
+
+# 1. submit: 202 with an id, a poll_url and the price
+$body = '{"model":"sd-turbo","prompt":"a cozy cabin at dusk, warm windows","size":"512x512","steps":8}'
+
+$job = $body | curl.exe -sS -X POST "$API/images/generations" `
+  -H "Content-Type: application/json" `
+  --data-binary "@-" | ConvertFrom-Json
+
+Write-Host "job $($job.id) $($job.status) $($job.gpn.price_gpn) GPN"
+
+# 2. poll every 2 s — the render takes ~25-35 s
+while ($job.status -eq "pending") {
+  Start-Sleep -Seconds 2
+  $job = curl.exe -sS "$API/images/generations/$($job.id)" | ConvertFrom-Json
+}
+
+if ($job.status -ne "completed") { throw "render failed: $($job.error)" }
+
+# 3. download the provider-signed PNG
+curl.exe -sS $job.data[0].url -o cabin.png
+Get-Item cabin.png | Select-Object Name, Length</code></pre>
+              </div>
+              <p class="hint mb-0">Only the <b>submit</b> response carries <code>poll_url</code>; the poll
+                response does not, so the loop rebuilds the URL from <code>$job.id</code>. Downloading
+                <code>data[0].url</code> is the documented path;
+                <code>GET $API/images/$($job.id)</code> serves the same bytes if you'd rather keep the id.</p>
+            </div>
+
+            <div class="qs-panel sub" id="i-win-irm" role="tabpanel" aria-labelledby="i-win-tab-irm" tabindex="0" hidden>
+              <div class="codeblock">
+                <div class="codeblock-head"><span class="lang">powershell · Invoke-RestMethod (submit → poll → download)</span>
+                  <button class="copy-btn" type="button" data-copy="#src-i-win-irm" aria-label="Copy the Invoke-RestMethod image example">Copy</button></div>
+                <pre><code id="src-i-win-irm">$API = "https://gpncoin.ai/api/v1"
+
+# 1. submit — Invoke-RestMethod serialises the hashtable and parses the reply
+$body = @{
+  model  = "sd-turbo"
+  prompt = "a cozy cabin at dusk, warm windows"
+  size   = "512x512"
+  steps  = 8
+} | ConvertTo-Json -Compress
+
+$job = Invoke-RestMethod -Uri "$API/images/generations" `
+  -Method Post `
+  -ContentType "application/json" `
+  -Body $body `
+  -TimeoutSec 60
+
+# 2. poll every 2 s until it renders
+while ($job.status -eq "pending") {
+  Start-Sleep -Seconds 2
+  $job = Invoke-RestMethod -Uri "$API/images/generations/$($job.id)" -TimeoutSec 30
+}
+
+if ($job.status -ne "completed") { throw "render failed: $($job.error)" }
+
+# 3. download the PNG
+Invoke-WebRequest -Uri $job.data[0].url -OutFile cabin.png
+(Get-Item cabin.png).Length</code></pre>
+              </div>
+              <p class="hint mb-0">No quoting, no <code>ConvertFrom-Json</code> — the reply is already an
+                object, so <code>$job.data[0].url</code> is the PNG and <code>$job.gpn.payment</code> tells
+                you how it settled.</p>
+            </div>
+          </div>
+
+          <!-- ===== Image · Linux ===== -->
+          <div class="qs-panel sub" id="i-os-linux" role="tabpanel" aria-labelledby="i-os-tab-linux" tabindex="0">
+            <p class="hint" style="margin-top:0"><b>Runs on:</b> bash or zsh with curl and
+              <code>jq</code> (install <code>jq</code> from your package manager — or use the macOS tab,
+              which parses with <code>python3</code> instead).</p>
+            <div class="codeblock">
+              <div class="codeblock-head"><span class="lang">bash · submit → poll → download</span>
+                <button class="copy-btn" type="button" data-copy="#src-i-curl" aria-label="Copy the bash image example">Copy</button></div>
+              <pre><code id="src-i-curl">API=https://gpncoin.ai/api/v1
+
+# 1. submit: 202 in milliseconds
+job=$(curl -sS -X POST $API/images/generations \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"sd-turbo","prompt":"a cozy cabin at dusk, warm windows","size":"512x512","steps":8}')
+id=$(echo "$job" | jq -r .id)
+echo "job $id — $(echo "$job" | jq -r .status)"   # 202: pending, with the price quoted
+
+# 2. poll every 2 s until the render finishes (~25-35 s)
+while :; do
+  out=$(curl -sS $API/images/generations/$id)
+  status=$(echo "$out" | jq -r .status)
+  [ "$status" = pending ] || break
+  sleep 2
+done
+[ "$status" = completed ] || { echo "render failed: $(echo "$out" | jq -r .error)"; exit 1; }
+
+# 3. download the PNG the provider signed
+curl -sS "$(echo "$out" | jq -r '.data[0].url')" -o cabin.png
+file cabin.png   # PNG image data, 512 x 512</code></pre>
+            </div>
+            <p class="hint mb-0">Polling costs nothing and returns <code>status</code>, then
+              <code>data[].url</code> once completed. Add <code>"sync":true</code> to hold the connection
+              instead — allowed only when the estimate is under 60&nbsp;s (512×512 @ 8 steps ≈ 31&nbsp;s yes;
+              1024×1024 @ 50 steps ≈ 68&nbsp;s is refused with the estimate). Images expire after 24&nbsp;h;
+              <code>expires_at</code> says when.</p>
+          </div>
+
+          <!-- ===== Image · macOS ===== -->
+          <div class="qs-panel sub" id="i-os-macos" role="tabpanel" aria-labelledby="i-os-tab-macos" tabindex="0" hidden>
+            <p class="hint" style="margin-top:0"><b>Runs on:</b> the default zsh on any current macOS —
+              curl and Python 3 ship with the OS, so there is nothing to install (no <code>jq</code>
+              either).</p>
+            <div class="codeblock">
+              <div class="codeblock-head"><span class="lang">zsh · submit → poll → download</span>
+                <button class="copy-btn" type="button" data-copy="#src-i-mac" aria-label="Copy the macOS image example">Copy</button></div>
+              <pre><code id="src-i-mac">API=https://gpncoin.ai/api/v1
+json() { python3 -c "import json,sys; print(json.load(sys.stdin)$1)"; }
+
+# 1. submit
+id=$(curl -sS -X POST $API/images/generations \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"sd-turbo","prompt":"a cozy cabin at dusk","size":"512x512","steps":8}' \
+  | json '["id"]')
+
+# 2. poll every 2 s
+while [ "$(curl -sS $API/images/generations/$id | json '["status"]')" = pending ]; do
+  sleep 2
+done
+
+# 3. download the PNG
+url=$(curl -sS $API/images/generations/$id | json '["data"][0]["url"]')
+curl -sS "$url" -o cabin.png && file cabin.png</code></pre>
+            </div>
+            <p class="hint mb-0">The <code>json</code> helper is a one-line <code>python3</code> JSON reader,
+              so the sample works on a stock Mac with no <code>brew install</code>. Same three steps, same
+              response keys as every other environment.</p>
+          </div>
+
+          <!-- ===== Image · Python ===== -->
+          <div class="qs-panel sub" id="i-os-python" role="tabpanel" aria-labelledby="i-os-tab-python" tabindex="0" hidden>
+            <p class="hint" style="margin-top:0"><b>Runs on:</b> any OS with Python 3.8+ and
+              <code>requests</code> (<code>pip install requests</code>).</p>
+            <div class="codeblock">
+              <div class="codeblock-head"><span class="lang">python · requests (submit → poll → download)</span>
+                <button class="copy-btn" type="button" data-copy="#src-i-py" aria-label="Copy the Python image example">Copy</button></div>
+              <pre><code id="src-i-py">import time
+import requests
+
+API = "https://gpncoin.ai/api/v1"
+
+# 1. submit: 202 -> pending, with the price already quoted
+job = requests.post(
+    f"{API}/images/generations",
+    json={"model": "sd-turbo",
+          "prompt": "a cozy cabin at dusk, warm windows",
+          "size": "512x512", "steps": 8},
+    timeout=60,
+).json()
+print(job["id"], job["status"], job["gpn"]["price_gpn"], "GPN")
+
+# 2. poll every 2 s; build the URL from the id (only the submit reply has poll_url)
+while job["status"] == "pending":
+    time.sleep(2)
+    job = requests.get(f"{API}/images/generations/{job['id']}", timeout=30).json()
+
+if job["status"] != "completed":
+    raise SystemExit(f"render failed: {job.get('error')}")
+
+# 3. download the provider-signed PNG
+png = requests.get(job["data"][0]["url"], timeout=60)
+png.raise_for_status()
+open("cabin.png", "wb").write(png.content)
+print("saved cabin.png", len(png.content), "bytes", job["gpn"]["payment"])</code></pre>
+            </div>
+            <p class="hint mb-0">The result carries <code>gpn.payment</code> = <code>"channel"</code> when the
+              request was batched off-chain or <code>"onchain"</code> when it settled per job on chain
+              (with its own <code>job_id</code> receipt) — never both. Images expire after 24 h;
+              <code>expires_at</code> says when.</p>
+          </div>
+
+          <!-- ===== Image · Node ===== -->
+          <div class="qs-panel sub" id="i-os-node" role="tabpanel" aria-labelledby="i-os-tab-node" tabindex="0" hidden>
+            <p class="hint" style="margin-top:0"><b>Runs on:</b> Node 18+ on any OS — global
+              <code>fetch</code> and <code>node:fs/promises</code> are built in, so there is no
+              <code>npm install</code>.</p>
+            <div class="codeblock">
+              <div class="codeblock-head"><span class="lang">javascript · submit → poll → download</span>
+                <button class="copy-btn" type="button" data-copy="#src-i-js" aria-label="Copy the Node image example">Copy</button></div>
+              <pre><code id="src-i-js">// node 18+: global fetch. Writes cabin.png with no dependencies.
 import { writeFile } from "node:fs/promises";
 
-const API = "https://gpncoin.ai/api/v1"; // or http://142.129.54.88:8092 pre-deploy
+const API = "https://gpncoin.ai/api/v1";
 
+// 1. submit
 let job = await (await fetch(`${API}/images/generations`, {
   method: "POST",
   headers: { "Content-Type": "application/json" },
@@ -460,34 +629,72 @@ let job = await (await fetch(`${API}/images/generations`, {
   }),
 })).json();
 
+// 2. poll every 2 s (the submit reply's poll_url is not echoed back by the poll)
 while (job.status === "pending") {
   await new Promise((r) =&gt; setTimeout(r, 2000));
-  job = await (await fetch(job.poll_url)).json();
+  job = await (await fetch(`${API}/images/generations/${job.id}`)).json();
 }
 if (job.status !== "completed") throw new Error(job.error);
 
+// 3. download the PNG
 const png = Buffer.from(await (await fetch(job.data[0].url)).arrayBuffer());
 await writeFile("cabin.png", png);
-console.log(job.gpn.payment, png.length, "bytes");</code></pre>
+console.log(png.length, "bytes", job.gpn.payment);</code></pre>
+            </div>
+            <p class="hint mb-0">Save as <code>image.mjs</code> and run <code>node image.mjs</code>. The
+              buffer starts with the 8-byte PNG signature
+              (<code>89 50 4e 47 0d 0a 1a 0a</code>) — a cheap integrity check before you trust the
+              file.</p>
+          </div>
+
+          <div class="callout" style="margin-top:18px">
+            <span class="ct">Response shape — image</span>
+            <pre style="margin:10px 0 0"><code>POST /api/v1/images/generations       → 202
+{"id":"810ed01346cd…","status":"pending","poll_url":"…/images/generations/810ed01346cd…",
+ "gpn":{"price_gpn":0.00759,"payment":"pending","estimated_seconds":31.5},
+ "expires_at":1792869423}
+
+GET  /api/v1/images/generations/{id}  → 200
+{"id":"810ed01346cd…","status":"completed","error":null,
+ "data":[{"url":"…/images/810ed01346cd…","sha256":"67fe14…","width":512,"height":512}],
+ "gpn":{"price_gpn":0.00759,"payment":"channel","channel_id":7}}
+
+GET  data[0].url                      → 200 image/png</code></pre>
+            <p style="margin:12px 0 0">Only the <b>submit</b> reply has <code>poll_url</code>; poll the id you
+              already hold. <code>status</code> is <code>pending</code> → <code>completed</code> (or
+              <code>failed</code>, with <code>error</code> set). The file is always
+              <code>data[0].url</code>.</p>
           </div>
         </div>
-      </div>
 
-      <div class="callout" style="margin-top:20px">
-        <span class="ct">The response shape is the same everywhere</span>
-        <pre style="margin:10px 0 0"><code>{
-  "id": "chatcmpl-gpn-6238",
-  "object": "chat.completion",
-  "model": "llama3.2:1b",
-  "choices": [
-    { "index": 0, "finish_reason": "stop",
-      "message": { "role": "assistant", "content": "Nairobi" } }
-  ],
-  "usage": { "prompt_tokens": 39, "completion_tokens": 3, "total_tokens": 42 }
-}</code></pre>
-        <p style="margin:12px 0 0">The answer is always <code>choices[0].message.content</code> —
-          <code>data.choices[0].message.content</code> in JS, <code>$r.choices[0].message.content</code> in
-          PowerShell, <code>data["choices"][0]["message"]["content"]</code> in Python.</p>
+        <!-- ==================== PURPOSE: VIDEO ==================== -->
+        <div class="qs-panel" id="do-video" role="tabpanel" aria-labelledby="do-tab-video" tabindex="0" hidden>
+          <div class="callout warn" style="margin-top:0">
+            <span class="ct">Not available — do not call this</span>
+            <p class="mb-0">There is <b>no public video endpoint</b>, and no video job has ever completed on
+              the testnet. <code>gpn_diffuse.py</code> knows how to run <code>VideoGeneration</code>
+              (LTX-Video), but its T5-XXL text encoder needs more VRAM than the 8&nbsp;GB cards on the
+              testnet have. <b>BLOCKED</b> until a bigger box renders one — the request below is shown so
+              you can see the shape, not so you can run it.</p>
+          </div>
+
+          <div class="codeblock" style="margin-top:14px">
+            <div class="codeblock-head"><span class="lang">request shape only · not callable</span>
+              <button class="copy-btn" type="button" data-copy="#src-video" aria-label="Copy the video request shape">Copy</button></div>
+            <pre><code id="src-video">POST /jobs                       (signed job API, not public — no /v1/videos route exists)
+{"job_type": "VideoGeneration",
+ "model": "Lightricks/LTX-Video",
+ "prompt": "waves at sunset",
+ "width": 256, "height": 256,
+ "frames": 16, "fps": 8, "steps": 30}
+→ {"ok": true, "job_id": 1234, "price_gpn": 0.044}</code></pre>
+          </div>
+
+          <p class="hint mb-0">Pricing exists (≈0.044&nbsp;GPN for 256×256, 16 frames, 30 steps) but the
+            constants are estimates off the same throughput curve as images and text — there is no measured
+            render to check them against. When a card with &gt;8&nbsp;GB VRAM joins the testnet and completes
+            one end-to-end, it will appear here as a normal submit → poll → download flow like images.</p>
+        </div>
       </div>
     </div>
   </section>
@@ -519,21 +726,20 @@ console.log(job.gpn.payment, png.length, "bytes");</code></pre>
         </div>
 
         <div class="card">
-          <h3><span class="ico" aria-hidden="true">🎨</span> Image generation <span class="tag wip">AP live · public route pending deploy</span></h3>
-          <p class="muted"><b>Channel-settled, measured 2026-10-22.</b> <code>POST /v1/images/generations</code>
-            on the access point returns <code>202</code> in milliseconds, renders 512×512 <code>sd-turbo</code> in
-            <b>~30 s</b> on the testnet 4060, and settles over the <b>same signed-payment channel as text</b>
+          <h3><span class="ico" aria-hidden="true">🎨</span> Image generation <span class="tag live">live</span></h3>
+          <p class="muted"><b>Live over HTTPS, verified 2026-10-23.</b>
+            <code>POST https://gpncoin.ai/api/v1/images/generations</code> returns <code>202</code> in
+            milliseconds, renders 512×512 <code>sd-turbo</code> in <b>~25–35 s</b> on the testnet 4060, and
+            settles over the <b>same signed-payment channel as text</b>
             (<code>"gpn": {"payment": "channel"}</code>) — one channel update, zero transactions. The poll
-            returns a stable PNG URL whose sha256 matches the bytes the provider signed (verified: 512×512,
-            447 KB, valid PNG header). The HTTPS route <code>https://gpncoin.ai/api/v1/images/generations</code>
-            goes live with the Worker deploy that ships this page; Cloudflare credentials are not on the node,
-            so until then the identical call works against the access point directly on
-            <code>http://142.129.54.88:8092</code>. Renders are priced from the same anchor as tokens:
+            returns a stable PNG URL whose sha256 matches the bytes the provider signed (verified end to end
+            from a public client: <code>status: completed</code> in 26–35 s, 471–543 KB, 512×512, PNG header
+            <code>89 50 4e 47</code>). Renders are priced from the same anchor as tokens:
             <b>≈0.0076 GPN</b> for 512×512 @ 8 steps (≈$0.0011), <b>≈0.0109 GPN</b> for 1024×1024 @ 20 steps.
             See <a href="#economics">image pricing</a>.</p>
-          <pre><code>POST /v1/images/generations        → 202 {"id":"…","status":"pending","poll_url":"…"}
-GET  /v1/images/generations/{id}   → {"status":"completed","data":[{"url":"…png"}]}
-GET  /v1/images/{id}               → image/png</code></pre>
+          <pre><code>POST /api/v1/images/generations      → 202 {"id":"…","status":"pending","poll_url":"…"}
+GET  /api/v1/images/generations/{id} → {"status":"completed","data":[{"url":"…png"}]}
+GET  data[0].url                     → image/png</code></pre>
         </div>
 
         <div class="card">
@@ -562,8 +768,10 @@ GET  /v1/images/{id}               → image/png</code></pre>
         <div class="card">
           <h3><span class="ico" aria-hidden="true">🎛️</span> Fine-tuning <span class="tag wip">shipped · not wired</span></h3>
           <p class="muted">LoRA fine-tunes have completed on the testnet: a finished tune is served back as
-            model <code>tuned-&lt;jobid&gt;</code> (one is in the live model list now). Same gap as images —
-            no public endpoint, only the signed job API, so there is no click-to-run path here.</p>
+            model <code>tuned-&lt;jobid&gt;</code> (one is in the live model list now). The access point does
+            expose <code>POST /v1/finetunes</code> (202 + a poll URL, same pattern as images), but unlike
+            images that route is not proxied at <code>gpncoin.ai</code> — it still answers
+            <code>404 unknown API route</code> there — so there is no public, click-to-run path yet.</p>
           <pre><code>POST /jobs          (signed job API, not public)
 {"job_type": "FineTuning", "model": "llama3.2:1b",
  "dataset": [{"prompt": "…", "completion": "…"}], "epochs": 1}
