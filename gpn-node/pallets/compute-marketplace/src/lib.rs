@@ -44,6 +44,30 @@ impl Default for GPURequirements {
     }
 }
 
+/// Two-rate (input vs output) billing for a job (item #66).
+///
+/// Prompt tokens and completion tokens are priced separately — an inference
+/// provider's cost is dominated by the generated tokens, so charging one
+/// blended rate for `prompt + max_tokens` over-bills (or under-bills) every
+/// job. Kept in its own map (`JobBillingV2`) so the legacy `JobBilling` tuple
+/// and `ComputeJob`'s storage layout are untouched: jobs created before the
+/// upgrade keep their single rate and need no migration.
+#[derive(
+    Clone, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, PartialEq, Eq, Debug, TypeInfo,
+)]
+pub struct TwoRateBilling {
+    /// Price per input (prompt) token, in the token's base unit.
+    pub input_price_per_token: u128,
+    /// Price per output (completion) token, in the token's base unit.
+    pub output_price_per_token: u128,
+    /// Cap on billable output tokens (the legacy `max_tokens`).
+    pub max_output_tokens: u32,
+    /// Output tokens actually produced (`submit_result_v2`).
+    pub actual_output_tokens: u32,
+    /// Input tokens actually consumed (`submit_result_v2`).
+    pub actual_input_tokens: u32,
+}
+
 /// A provider's pre-booking of the *next* job id (item #8, pallet-side
 /// optimistic claim).
 ///
@@ -303,6 +327,14 @@ pub mod pallet {
     #[pallet::storage]
     pub type JobBilling<T: Config> =
         StorageMap<_, Blake2_128Concat, u64, (u128, u32, u32), ValueQuery>;
+
+    /// Two-rate billing (item #66) for jobs created via `create_job_v2`.
+    /// `OptionQuery`: an absent entry means "use the legacy single rate" —
+    /// which is exactly the state of every job created before the upgrade, so
+    /// no migration is required.
+    #[pallet::storage]
+    pub type JobBillingV2<T: Config> =
+        StorageMap<_, Blake2_128Concat, u64, TwoRateBilling, OptionQuery>;
     #[pallet::storage]
     pub type RegisteredProviders<T: Config> =
         StorageMap<_, Blake2_128Concat, T::AccountId, GPURequirements, OptionQuery>;
@@ -899,98 +931,72 @@ pub mod pallet {
             workload_hash: [u8; 32],
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            let requestor = who.clone();
-
-            ensure!(
-                <ActiveJobCount<T>>::get() < T::MaxActiveJobs::get(),
-                Error::<T>::TooManyActiveJobs
-            );
-            // Per-requestor cap: `RequestorJobs` holds exactly this account's
-            // non-terminal jobs (freed on complete/fail/expire/cancel), so its
-            // length is the faithful per-requestor active count.
-            ensure!(
-                (<RequestorJobs<T>>::get(&requestor).len() as u32)
-                    < T::MaxActiveJobsPerRequestor::get(),
-                Error::<T>::TooManyRequestorJobs
-            );
-            ensure!(
-                !workload_hash.iter().all(|&b| b == 0),
-                Error::<T>::InvalidWorkload
-            );
-            ensure!(
-                max_duration <= T::MaxJobDuration::get(),
-                Error::<T>::JobExpired
-            );
-            ensure!(price > Zero::zero(), Error::<T>::InsufficientPayment);
-
-            // RED-TEAM 2026-10-09 (finding #25, compute-marketplace / state
-            // consistency): the id counter used to be bumped here, *before* the
-            // fallible escrow `transfer` below. FRAME does not roll back storage
-            // when a dispatch returns `Err` (the call is not `#[transactional]`),
-            // so a create whose escrow transfer fails still permanently consumed
-            // a `NextJobId` -> an id gap. The access point seeds its off-chain
-            // job-id predictor from `NextJobId`, so a single failed create
-            // desyncs it from the chain by one and the *next* real job is labeled
-            // with a stale id (the documented on-chain/off-chain mislabel -> orphan
-            // class, items (a)/(d)). Read the id now, but only bump the counter
-            // once the escrow has actually been taken (below).
-            let job_id = <NextJobId<T>>::get();
-
-            let now: u32 = frame_system::Pallet::<T>::block_number()
-                .try_into()
-                .unwrap_or(0);
-            let max_dur: u32 = max_duration.try_into().unwrap_or(100_000);
-
-            let job_tier = tier.clone();
-            let job = ComputeJob {
-                id: job_id,
+            // Item #66: legacy single-rate billing on this entry point.
+            Self::create_job_body(
+                who,
                 gpu_requirements,
                 job_type,
-                tier: job_tier,
-                state: JobState::Pending,
-                price: price.try_into().unwrap_or(0),
-                max_duration: max_dur,
-                created_at: now,
-                started_at: None,
-                workload_hash,
-                result_hash: None,
-            };
-
-            T::Currency::transfer(
-                &requestor,
-                &Self::account_id(),
-                price,
-                ExistenceRequirement::KeepAlive,
-            )?;
-
-            // Escrow taken -> the job id is now genuinely consumed (finding #25).
-            <NextJobId<T>>::mutate(|id| *id += 1);
-            <Jobs<T>>::insert(job_id, job);
-            // Per-token billing in a SEPARATE map so `ComputeJob`'s on-chain layout
-            // is unchanged (no storage migration needed). (rate, cap, used)
-            <JobBilling<T>>::insert(job_id, (price_per_token, max_tokens, 0u32));
-            <JobRequestor<T>>::insert(job_id, who.clone());
-            <JobEscrow<T>>::insert(job_id, price);
-
-            let mut jobs = <RequestorJobs<T>>::get(&requestor);
-            jobs.push(job_id);
-            <RequestorJobs<T>>::insert(&requestor, jobs);
-            <ActiveJobCount<T>>::mutate(|c| *c += 1);
-
-            // Item #8: if a provider optimistically pre-booked this id, attach it
-            // NOW — in the create's own inclusion block. The provider started
-            // GPU work when it saw the tx in the pool, so the job is born
-            // `Accepted` and its result can ride the very next block instead of
-            // waiting for a second accept/claim block. Best-effort by design: a
-            // stale or ineligible claim must never fail (or delay) the create.
-            Self::try_attach_optimistic_claim(job_id);
-
-            Self::deposit_event(Event::<T>::JobCreated {
-                job_id,
-                requestor: who,
                 tier,
-            });
-            Ok(())
+                price,
+                max_duration,
+                workload_hash,
+                None,
+                (price_per_token, max_tokens),
+            )
+        }
+
+        /// Create a job billed with **separate input and output token rates**
+        /// (item #66). Behaviourally identical to `create_job` except that the
+        /// billing record is `TwoRateBilling`, so settlement charges
+        /// `input_rate × prompt_tokens + output_rate × completion_tokens`
+        /// instead of one blended rate.
+        ///
+        /// Additive on purpose: `create_job`'s signature (and therefore every
+        /// already-deployed access point / tool) keeps working unchanged, so
+        /// enacting this runtime cannot strand an existing client.
+        #[pallet::call_index(17)]
+        #[pallet::weight(
+            <T as Config>::WeightInfo::create_job()
+                .saturating_add(<T as frame_system::Config>::DbWeight::get().writes(1))
+        )]
+        pub fn create_job_v2(
+            origin: OriginFor<T>,
+            gpu_requirements: GPURequirements,
+            job_type: JobType,
+            tier: JobTier,
+            price: BalanceOf<T>,
+            input_price_per_token: u128,
+            output_price_per_token: u128,
+            max_output_tokens: u32,
+            max_duration: BlockNumberFor<T>,
+            workload_hash: [u8; 32],
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            // An output rate with no cap would settle at zero (nothing is
+            // billable), silently paying the provider nothing — reject it.
+            ensure!(
+                output_price_per_token == 0 || max_output_tokens > 0,
+                Error::<T>::InvalidWorkload
+            );
+            let billing = TwoRateBilling {
+                input_price_per_token,
+                output_price_per_token,
+                max_output_tokens,
+                actual_output_tokens: 0,
+                actual_input_tokens: 0,
+            };
+            Self::create_job_body(
+                who,
+                gpu_requirements,
+                job_type,
+                tier,
+                price,
+                max_duration,
+                workload_hash,
+                Some(billing),
+                // Legacy map stays empty for a two-rate job.
+                (0, 0),
+            )
         }
 
         #[pallet::call_index(3)]
@@ -1088,6 +1094,56 @@ pub mod pallet {
             let mut billing = <JobBilling<T>>::get(job_id);
             billing.2 = actual_tokens;
             <JobBilling<T>>::insert(job_id, billing);
+            Self::deposit_event(Event::<T>::JobCompleted {
+                job_id,
+                provider: who,
+            });
+            Ok(())
+        }
+
+        /// Deliver a result **with the real input/output token split** for a
+        /// job created by `create_job_v2` (item #66), so settlement can bill
+        /// prompt and completion tokens at their own rates.
+        ///
+        /// Same auth/state rules as `submit_result`. If the job turns out to be
+        /// a legacy single-rate job, the split is collapsed into the legacy
+        /// `actual_tokens` counter so the provider is still paid for the work —
+        /// a mismatched call can never zero out a payout.
+        #[pallet::call_index(18)]
+        #[pallet::weight(<T as Config>::WeightInfo::submit_result())]
+        pub fn submit_result_v2(
+            origin: OriginFor<T>,
+            job_id: u64,
+            result_hash: [u8; 32],
+            input_tokens: u32,
+            output_tokens: u32,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            let mut job = <Jobs<T>>::get(job_id).ok_or(Error::<T>::JobNotFound)?;
+            ensure!(
+                matches!(job.state, JobState::Accepted | JobState::Running),
+                Error::<T>::JobNotRunning
+            );
+            let assigned_provider =
+                <JobProvider<T>>::get(job_id).ok_or(Error::<T>::NotJobProvider)?;
+            ensure!(assigned_provider == who, Error::<T>::NotJobProvider);
+
+            job.state = JobState::AwaitingVerification;
+            job.result_hash = Some(result_hash);
+            <Jobs<T>>::insert(job_id, job);
+
+            match <JobBillingV2<T>>::get(job_id) {
+                Some(mut bill) => {
+                    bill.actual_input_tokens = input_tokens;
+                    bill.actual_output_tokens = output_tokens;
+                    <JobBillingV2<T>>::insert(job_id, bill);
+                }
+                None => {
+                    let mut legacy = <JobBilling<T>>::get(job_id);
+                    legacy.2 = input_tokens.saturating_add(output_tokens);
+                    <JobBilling<T>>::insert(job_id, legacy);
+                }
+            }
             Self::deposit_event(Event::<T>::JobCompleted {
                 job_id,
                 provider: who,
@@ -1409,6 +1465,124 @@ pub mod pallet {
 
     // Public helpers
     impl<T: Config> Pallet<T> {
+        /// Shared body of `create_job` (legacy single rate) and
+        /// `create_job_v2` (item #66, separate input/output rates).
+        #[allow(clippy::too_many_arguments)]
+        fn create_job_body(
+            who: T::AccountId,
+            gpu_requirements: GPURequirements,
+            job_type: JobType,
+            tier: JobTier,
+            price: BalanceOf<T>,
+            max_duration: BlockNumberFor<T>,
+            workload_hash: [u8; 32],
+            two_rate: Option<TwoRateBilling>,
+            legacy_rate: (u128, u32),
+        ) -> DispatchResult {
+            let requestor = who.clone();
+            ensure!(
+                <ActiveJobCount<T>>::get() < T::MaxActiveJobs::get(),
+                Error::<T>::TooManyActiveJobs
+            );
+            // Per-requestor cap: `RequestorJobs` holds exactly this account's
+            // non-terminal jobs (freed on complete/fail/expire/cancel), so its
+            // length is the faithful per-requestor active count.
+            ensure!(
+                (<RequestorJobs<T>>::get(&requestor).len() as u32)
+                    < T::MaxActiveJobsPerRequestor::get(),
+                Error::<T>::TooManyRequestorJobs
+            );
+            ensure!(
+                !workload_hash.iter().all(|&b| b == 0),
+                Error::<T>::InvalidWorkload
+            );
+            ensure!(
+                max_duration <= T::MaxJobDuration::get(),
+                Error::<T>::JobExpired
+            );
+            ensure!(price > Zero::zero(), Error::<T>::InsufficientPayment);
+
+            // RED-TEAM 2026-10-09 (finding #25, compute-marketplace / state
+            // consistency): the id counter used to be bumped here, *before* the
+            // fallible escrow `transfer` below. FRAME does not roll back storage
+            // when a dispatch returns `Err` (the call is not `#[transactional]`),
+            // so a create whose escrow transfer fails still permanently consumed
+            // a `NextJobId` -> an id gap. The access point seeds its off-chain
+            // job-id predictor from `NextJobId`, so a single failed create
+            // desyncs it from the chain by one and the *next* real job is labeled
+            // with a stale id (the documented on-chain/off-chain mislabel -> orphan
+            // class, items (a)/(d)). Read the id now, but only bump the counter
+            // once the escrow has actually been taken (below).
+            let job_id = <NextJobId<T>>::get();
+
+            let now: u32 = frame_system::Pallet::<T>::block_number()
+                .try_into()
+                .unwrap_or(0);
+            let max_dur: u32 = max_duration.try_into().unwrap_or(100_000);
+
+            let job_tier = tier.clone();
+            let job = ComputeJob {
+                id: job_id,
+                gpu_requirements,
+                job_type,
+                tier: job_tier,
+                state: JobState::Pending,
+                price: price.try_into().unwrap_or(0),
+                max_duration: max_dur,
+                created_at: now,
+                started_at: None,
+                workload_hash,
+                result_hash: None,
+            };
+
+            T::Currency::transfer(
+                &requestor,
+                &Self::account_id(),
+                price,
+                ExistenceRequirement::KeepAlive,
+            )?;
+
+            // Escrow taken -> the job id is now genuinely consumed (finding #25).
+            <NextJobId<T>>::mutate(|id| *id += 1);
+            <Jobs<T>>::insert(job_id, job);
+            // Per-token billing in a SEPARATE map so `ComputeJob`'s on-chain layout
+            // is unchanged (no storage migration needed). (rate, cap, used)
+            match two_rate {
+                // Item #66: two-rate job — record input/output rates in the v2
+                // map and leave the legacy map empty so settlement cannot bill
+                // twice. `actual_*` counters are filled by `submit_result_v2`.
+                Some(bill) => {
+                    <JobBillingV2<T>>::insert(job_id, bill);
+                }
+                None => {
+                    let (rate, cap) = legacy_rate;
+                    <JobBilling<T>>::insert(job_id, (rate, cap, 0u32));
+                }
+            }
+            <JobRequestor<T>>::insert(job_id, who.clone());
+            <JobEscrow<T>>::insert(job_id, price);
+
+            let mut jobs = <RequestorJobs<T>>::get(&requestor);
+            jobs.push(job_id);
+            <RequestorJobs<T>>::insert(&requestor, jobs);
+            <ActiveJobCount<T>>::mutate(|c| *c += 1);
+
+            // Item #8: if a provider optimistically pre-booked this id, attach it
+            // NOW — in the create's own inclusion block. The provider started
+            // GPU work when it saw the tx in the pool, so the job is born
+            // `Accepted` and its result can ride the very next block instead of
+            // waiting for a second accept/claim block. Best-effort by design: a
+            // stale or ineligible claim must never fail (or delay) the create.
+            Self::try_attach_optimistic_claim(job_id);
+
+            Self::deposit_event(Event::<T>::JobCreated {
+                job_id,
+                requestor: who,
+                tier,
+            });
+            Ok(())
+        }
+
         pub fn account_id() -> T::AccountId {
             frame_support::PalletId(*b"gpn/cmkt").into_account_truncating()
         }
@@ -1430,21 +1604,43 @@ pub mod pallet {
             requestor: &T::AccountId,
         ) -> DispatchResult {
             // ── Per-token billing ──────────────────────────────────────────
-            // When the job carries a rate + cap, the real charge is
-            // `price_per_token × actual_tokens` (bounded by the escrow); the unused
-            // remainder is refunded to the requestor. No rate => legacy flat price.
+            // Item #66: a `create_job_v2` job carries SEPARATE input and output
+            // rates, so the real charge is
+            // `input_rate × prompt_tokens + output_rate × completion_tokens`
+            // (output tokens capped by `max_output_tokens`, total by the escrow).
+            // A legacy job carries the single blended rate
+            // `price_per_token × actual_tokens`. No rate at all => flat price.
             let charge: BalanceOf<T> = {
-                let (price_per_token, max_tokens, actual_tokens) = <JobBilling<T>>::get(job_id);
-                if price_per_token > 0 && max_tokens > 0 {
-                    let toks: u128 = (actual_tokens.min(max_tokens)) as u128;
-                    let cap: u128 = escrow.try_into().unwrap_or(u128::MAX);
-                    price_per_token
-                        .saturating_mul(toks)
-                        .min(cap)
-                        .try_into()
-                        .unwrap_or(escrow)
-                } else {
-                    escrow
+                let cap: u128 = escrow.try_into().unwrap_or(u128::MAX);
+                let converted = |raw: u128| -> BalanceOf<T> {
+                    raw.min(cap).try_into().unwrap_or(escrow)
+                };
+                match <JobBillingV2<T>>::get(job_id) {
+                    Some(bill) => {
+                        if bill.input_price_per_token > 0 || bill.output_price_per_token > 0 {
+                            let out_toks: u128 =
+                                bill.actual_output_tokens.min(bill.max_output_tokens) as u128;
+                            let raw = bill
+                                .input_price_per_token
+                                .saturating_mul(bill.actual_input_tokens as u128)
+                                .saturating_add(
+                                    bill.output_price_per_token.saturating_mul(out_toks),
+                                );
+                            converted(raw)
+                        } else {
+                            escrow
+                        }
+                    }
+                    None => {
+                        let (price_per_token, max_tokens, actual_tokens) =
+                            <JobBilling<T>>::get(job_id);
+                        if price_per_token > 0 && max_tokens > 0 {
+                            let toks: u128 = (actual_tokens.min(max_tokens)) as u128;
+                            converted(price_per_token.saturating_mul(toks))
+                        } else {
+                            escrow
+                        }
+                    }
                 }
             };
             let ed = T::Currency::minimum_balance();
@@ -2403,6 +2599,189 @@ mod tests {
             let j2 = create_job(ALICE);
             MarketPallet::fail_job(RuntimeOrigin::signed(ALICE), j2, 2).unwrap();
             assert_eq!(Jobs::<Test>::get(j2).unwrap().state, JobState::Failed);
+        });
+    }
+
+    #[test]
+    fn test_two_rate_billing_charges_input_and_output_separately() {
+        // Item #66: input and output tokens are priced independently. A job
+        // with input_rate 2 and output_rate 10 consuming 100 prompt + 20
+        // completion tokens must charge 200 + 200 = 400 (not one blended
+        // rate), pay the provider that minus the 1% fee, and refund the rest of
+        // the escrow to the requestor.
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            MarketPallet::create_job_v2(
+                RuntimeOrigin::signed(ALICE),
+                default_reqs(),
+                JobType::LLMInference,
+                JobTier::Spot,
+                10_000,
+                2,
+                10,
+                1_000,
+                100,
+                workload(),
+            )
+            .unwrap();
+            let job_id = NextJobId::<Test>::get() - 1;
+            // The two-rate record lives in its own map; the legacy map is empty.
+            let bill = JobBillingV2::<Test>::get(job_id).expect("v2 billing record");
+            assert_eq!(bill.input_price_per_token, 2);
+            assert_eq!(bill.output_price_per_token, 10);
+            assert_eq!(bill.max_output_tokens, 1_000);
+            assert_eq!(JobBilling::<Test>::get(job_id), (0, 0, 0));
+
+            MarketPallet::accept_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
+            MarketPallet::start_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
+            MarketPallet::submit_result_v2(
+                RuntimeOrigin::signed(BOB),
+                job_id,
+                [7u8; 32],
+                100,
+                20,
+            )
+            .unwrap();
+
+            let alice_before = pallet_balances::Pallet::<Test>::free_balance(ALICE);
+            let bob_before = pallet_balances::Pallet::<Test>::free_balance(BOB);
+            MarketPallet::complete_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
+
+            // charge 400, fee 1% = 4, provider 396, requestor refunded 9_600.
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(BOB),
+                bob_before + 396
+            );
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(ALICE),
+                alice_before + 9_600
+            );
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(MarketPallet::account_id()),
+                0
+            );
+        });
+    }
+
+    #[test]
+    fn test_two_rate_billing_clips_output_cap_and_escrow() {
+        // The output rate is billed only up to `max_output_tokens`, and the
+        // total charge can never exceed the escrowed price (which doubles as
+        // the requestor's protection against a runaway provider).
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            MarketPallet::create_job_v2(
+                RuntimeOrigin::signed(ALICE),
+                default_reqs(),
+                JobType::LLMInference,
+                JobTier::Spot,
+                1_000,
+                1,
+                10,
+                10, // cap: bill at most 10 output tokens
+                100,
+                workload(),
+            )
+            .unwrap();
+            let job_id = NextJobId::<Test>::get() - 1;
+            MarketPallet::accept_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
+            MarketPallet::start_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
+            // 50 prompt + 500 output tokens reported; output bills as 10.
+            // raw = 1 * 50 + 10 * 10 = 150, well inside the 1_000 escrow.
+            MarketPallet::submit_result_v2(
+                RuntimeOrigin::signed(BOB),
+                job_id,
+                [7u8; 32],
+                50,
+                500,
+            )
+            .unwrap();
+            let bob_before = pallet_balances::Pallet::<Test>::free_balance(BOB);
+            MarketPallet::complete_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
+            // charge 150 -> fee 1 (1% floors) -> provider 149.
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(BOB),
+                bob_before + 149
+            );
+
+            // Second job: a huge usage must charge the escrow and no more.
+            MarketPallet::create_job_v2(
+                RuntimeOrigin::signed(ALICE),
+                default_reqs(),
+                JobType::LLMInference,
+                JobTier::Spot,
+                100,
+                1,
+                10,
+                100_000,
+                100,
+                workload(),
+            )
+            .unwrap();
+            let job2 = NextJobId::<Test>::get() - 1;
+            MarketPallet::accept_job(RuntimeOrigin::signed(BOB), job2).unwrap();
+            MarketPallet::start_job(RuntimeOrigin::signed(BOB), job2).unwrap();
+            MarketPallet::submit_result_v2(
+                RuntimeOrigin::signed(BOB),
+                job2,
+                [7u8; 32],
+                1_000_000,
+                1_000_000,
+            )
+            .unwrap();
+            let bob_before2 = pallet_balances::Pallet::<Test>::free_balance(BOB);
+            MarketPallet::complete_job(RuntimeOrigin::signed(BOB), job2).unwrap();
+            // Charge capped at the 100 escrow: fee 1, provider 99.
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(BOB),
+                bob_before2 + 99
+            );
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(MarketPallet::account_id()),
+                0
+            );
+        });
+    }
+
+    #[test]
+    fn test_two_rate_submit_on_a_legacy_job_still_pays() {
+        // A `submit_result_v2` arriving for a legacy single-rate job must not
+        // strand the provider: the split is collapsed into the legacy counter.
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            MarketPallet::create_job(
+                RuntimeOrigin::signed(ALICE),
+                default_reqs(),
+                JobType::LLMInference,
+                JobTier::Spot,
+                10_000,
+                2,
+                100,
+                100,
+                workload(),
+            )
+            .unwrap();
+            let job_id = NextJobId::<Test>::get() - 1;
+            MarketPallet::accept_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
+            MarketPallet::start_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
+            MarketPallet::submit_result_v2(
+                RuntimeOrigin::signed(BOB),
+                job_id,
+                [7u8; 32],
+                30,
+                20,
+            )
+            .unwrap();
+            assert_eq!(JobBilling::<Test>::get(job_id), (2, 100, 50));
+            assert!(JobBillingV2::<Test>::get(job_id).is_none());
+
+            let bob_before = pallet_balances::Pallet::<Test>::free_balance(BOB);
+            MarketPallet::complete_job(RuntimeOrigin::signed(BOB), job_id).unwrap();
+            // charge = 2 * 50 = 100 -> fee 1 -> provider 99.
+            assert_eq!(
+                pallet_balances::Pallet::<Test>::free_balance(BOB),
+                bob_before + 99
+            );
         });
     }
 
