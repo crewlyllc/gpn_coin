@@ -4897,3 +4897,19 @@ Window sweep (the requested "shorter window" check) on real noise: p95 **66.8 / 
 **FIX (one, targeted):** rebuilt `cargo build --release --bin gpn_llm_provider` (22.8 s, 1 pre-existing warning), backed up the old binary to `~/.local/bin/gpn_llm_provider.bak.pre-headrefund`, installed the HEAD build, `systemctl --user restart gpn-provider`. No source edits, no flag/default changes (fast path `GPN_FAST_CLAIM=1`/`GPN_FAST_AP=1` untouched).
 **VERIFIED:** new instance 1517184 up in ~40 s — `fast claim path: ON`, watchdog armed, infer/channel endpoints bound, `[reconcile] startup adoption … 0 non-terminal`. Channel job **#1792759840942 served** on channel 7 (infer 0.6 s); LLM e2e **0.65 s / 88 tok ≈ 135 tok/s** (also 0.63 s / 89 tok pre-restart). `/jobs` 256-window **250 Completed / 3 Cancelled / 3 Failed, 0 Pending/Running ⇒ no orphans**. AP `/providers`: `healthy:true, active:0, latency_ms:6`. **0 panics** in the journal; the single 01:02:56 panic remains the pre-`965cc7c` artifact already closed at 02:05.
 **BENIGN, WATCH ONLY:** startup `set_provider_endpoint(...) failed: ModuleError(ProfitabilityOracle::UpdateTooSoon)` — the oracle refuses a re-registration inside its update window; the on-chain record still holds the same URL (AP shows the provider healthy), so it self-clears and needs no action.
+
+## 2026-10-23 07:15 PT — PM07 driver (cron d496e0b0) — item #81 DONE: a cold diffusion model is refused **before** the job is accepted, and warmed in the background
+
+**Why:** the last open sub-item (b) of the 03:30 image-lane escalation. A channel render carries the AP's wall-clock deadline (default 180 s) while a cold HF pull is ~13 GB (20–45 min). The provider accepted anyway, downloaded, and the caller waited out its own timeout to be told `every candidate refused … channel state stayed stale`; the next attempt started the download from zero.
+**Fix (`c6ffe21`):** `serve_channel_job` now decides before `accept` — pure `cold_refusal(model, cached, unloadable, remaining_ms, budget_ms)` + `hf_cache_present()` (factored out of `ensure_model`):
+| model | remaining deadline | result |
+|---|---|---|
+| warm | any | served |
+| recorded unloadable | any | refused instantly, never re-pulled |
+| cold | ≥ `GPN_COLD_PULL_BUDGET_MS` (15 min default) | pulled in-band |
+| cold | < budget | **HTTP 425 in ~50 ms** + one background pull |
+425 is a **4xx on purpose**: the AP classifies it `NotAttempted`, so failover tries the next candidate and nothing is charged. One pull per model per process; a permanent 401/403/404 in the warm path is written to `~/.gpn/diffusion_unloadable.json` so later requests refuse instantly as `unloadable (recorded)`.
+**Tests:** +4 (full matrix incl. expired deadline; unloadable-at-any-deadline; budget env; warm inputs) → `gpn_diffusion_provider` **18/18**, `cargo fmt --check` clean.
+**Live:** cold `sd21` → `[channel] job … refused: model stabilityai/stable-diffusion-2-1 is not warm on this host (15 min download) and the request leaves 179s …` → AP `candidate #1 … not attempted: … HTTP 425` → poll `payment:"not_charged"` in **2.5 s**; the resulting 401 was recorded and the retry refused instantly with no pull. Warm regression `sd-turbo` → `completed` on channel 7 (`fd5da9fa…`); chat e2e HTTP 200 in 0.147 s; chain advancing.
+**Docs:** `docs/run-a-node.md` → *Image/video lane — a cold model is refused, then warmed in the background*.
+**Residual (not this item):** the LLM channel lane can still pull a cold ollama tag in-request (#56 fixed only the claim lane), and the AP has no warm-set advertisement, so a cold model costs one fast 4xx round-trip per request until the pull lands.
