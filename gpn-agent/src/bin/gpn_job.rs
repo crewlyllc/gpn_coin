@@ -11,7 +11,6 @@
 //! Env: GPN_WALLET, GPN_ENDPOINT, GPN_SCHEDULER
 
 use gpn_agent::chain::ChainClient;
-use serde_json::json;
 
 fn opt(args: &[String], flag: &str) -> Option<String> {
     args.iter()
@@ -27,19 +26,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|| std::env::var("GPN_WALLET").ok())
         .ok_or("set --wallet <secret-seed> (your wallet)")?;
     let prompt = opt(&args, "--prompt").ok_or("set --prompt \"...\"")?;
-    let model = opt(&args, "--model").unwrap_or_else(|| "llama3.2:1b".into());
     let price_gpn: f64 = opt(&args, "--price")
         .and_then(|s| s.parse().ok())
         .unwrap_or(10.0);
     let min_gflops: u64 = opt(&args, "--min-gflops")
         .and_then(|s| s.parse().ok())
         .unwrap_or(150);
-    let job_type = opt(&args, "--job-type").unwrap_or_else(|| "LLMInference".into());
-    // Generative (image/video) params — only used when --job-type is an Image/Video generation.
-    let gen_kind = if job_type.eq_ignore_ascii_case("ImageGeneration") {
-        Some("image")
-    } else if job_type.eq_ignore_ascii_case("VideoGeneration") {
-        Some("video")
+    let model_arg = opt(&args, "--model");
+    // Item #76: the kind comes from the shared classifier, so a generation model
+    // submitted WITHOUT `--job-type` (the default used to be LLMInference) is
+    // still a generation job — on chain, in the off-chain payload, and at the
+    // provider. Deriving it from `--job-type` alone created an `LLMInference`
+    // job with an LLM payload for `sdxl-turbo`, which the diffusion provider
+    // would not claim and the LLM provider could not run: `Running` forever.
+    let kind = match gpn_agent::jobkind::admit(
+        opt(&args, "--job-type").as_deref(),
+        model_arg.as_deref().unwrap_or(""),
+    ) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("❌ {}", e.message());
+            std::process::exit(2);
+        }
+    };
+    let job_type = kind.onchain_name().to_string();
+    // Generative (image/video) params — only used when the job is a render.
+    let gen_kind: Option<&'static str> = if kind.is_generation() {
+        Some(kind.payload_kind())
     } else {
         None
     };
@@ -61,10 +74,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(8);
     // Diffusion model default differs from the LLM fallback.
-    let model = if gen_kind.is_some() {
-        opt(&args, "--model").unwrap_or_else(|| "sd-turbo".into())
-    } else {
-        model
+    let model = match (gen_kind, model_arg) {
+        (Some(_), None) => "sd-turbo".to_string(),
+        (_, Some(m)) => m,
+        (None, None) => "llama3.2:1b".to_string(),
     };
     let endpoint = opt(&args, "--endpoint")
         .or_else(|| std::env::var("GPN_ENDPOINT").ok())
@@ -113,9 +126,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  ✅ job #{id} created + escrowed from YOUR wallet");
 
     // Store the off-chain prompt/model so the provider can read it.
-    let job = match gen_kind {
-        Some(kind) => gpn_agent::llm::LlmJob::new_gen(
-            kind,
+    // The payload kind must agree with the kind that was written on chain and
+    // with the provider that will claim it (item #76).
+    let job = match kind {
+        k if k.is_generation() => gpn_agent::llm::LlmJob::new_gen(
+            k.payload_kind(),
             &model,
             &prompt,
             negative.as_deref(),
@@ -126,7 +141,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             frames,
             fps,
         ),
-        None => gpn_agent::llm::LlmJob::new_llm(&model, &prompt, 0.7, 256),
+        gpn_agent::jobkind::JobKind::Ml => gpn_agent::llm::LlmJob::new_ml(
+            &model,
+            &prompt,
+            gpn_agent::llm::normalize_ml_task(opt(&args, "--task").as_deref()),
+            0.7,
+            256,
+        ),
+        _ => gpn_agent::llm::LlmJob::new_llm(&model, &prompt, 0.7, 256),
     };
     let _ = gpn_agent::llm::LlmStore::new().put(id, job);
 

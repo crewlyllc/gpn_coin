@@ -112,6 +112,16 @@ GPN_FINETUNE_SCRIPT=$PWD/gpn_finetune.py GPN_SERVEMODEL_SCRIPT=$PWD/gpn_servemod
 
 ## 4. Do AI work via the REST API
 
+**`job_type` (queue item #76).** It takes one of `LLMInference`, `ImageGeneration`,
+`VideoGeneration`, `MLInference`, `FineTuning` — or you can **omit it and let the
+model decide**, which is what a client that forgets the flag does. A generation
+model name (`sd-turbo`, `sdxl-*`, `flux-*`, `ltx-video`, `playground-*`, …) is
+always routed as generation even if `job_type` still says `LLMInference`, because
+a diffusion model can never run on a chat box. An **unknown** `job_type`
+(`ImageGen`, `Custom`, …) is refused with **HTTP 400 before any escrow is taken**
+instead of being silently treated as text. See `gpn-agent/src/jobkind.rs` — the
+access point, `gpn_job` and the providers all classify through it.
+
 ### 4.1 LLM chat (any model in ollama)
 ```bash
 curl -X POST http://127.0.0.1:8082/jobs -H 'Content-Type: application/json' -d '{

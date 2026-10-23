@@ -1130,18 +1130,57 @@ fn record_failure(id: u64) -> u64 {
 }
 
 /// Should we (still) attempt inference for this job? False once we've hit the
-/// attempt cap, or when the requested model is a known non-text kind.
+/// attempt cap, or when the requested model is a kind this box can never serve.
 fn should_attempt(id: u64, model: &str) -> bool {
-    if fail_count(id) >= MAX_INFER_ATTEMPTS {
-        return false;
+    fail_count(id) < MAX_INFER_ATTEMPTS && unrunnable_reason(model).is_none()
+}
+
+/// Why this provider can never run `model`, or `None` if it can try (item #76).
+///
+/// Uses the SHARED classifier — the same table the access point admits and
+/// routes with. A private copy here is how a diffusion model could be routed to
+/// an LLM box and then skipped forever: the two lists drifted.
+fn unrunnable_reason(model: &str) -> Option<String> {
+    match gpn_agent::jobkind::model_kind(model) {
+        Some(k) if k.is_generation() => Some(format!(
+            "model '{model}' is a {} model — this is an LLM provider",
+            k.label()
+        )),
+        _ => None,
     }
-    // Fast-path reject: image/video/audio diffusion models can't serve chat.
-    let m = model.to_ascii_lowercase();
-    !(m.contains("sd-")
-        || m.contains("diffusion")
-        || m.contains("sdxl")
-        || m.contains("flux")
-        || m.contains("stable-diffusion"))
+}
+
+/// Item #76: a job this provider OWNS but provably cannot run must be failed
+/// on-chain — escrow refunded, slots freed — never skipped silently.
+///
+/// The silent skip is what left a mis-kinded job `Running` until its on-chain
+/// deadline: nothing was ever attempted, so the inference-failure path (and its
+/// attempt cap) never ran. One failure per job per process (the chain call is
+/// idempotent, the log line is not worth repeating every 300 ms).
+async fn fail_unrunnable(client: &ChainClient, id: u64, why: &str, fast: bool) {
+    static ONCE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u64>>> =
+        std::sync::OnceLock::new();
+    let once = ONCE.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    if let Ok(mut done) = once.lock() {
+        if !done.insert(id) {
+            return; // already failed in this process
+        }
+    }
+    eprintln!(
+        "[job {id}] cannot be run here: {why} — failing on-chain (reason {FAIL_CANNOT_RUN}); \
+         escrow refunded, slot freed (item #76: never leave it Running)"
+    );
+    let _ = LlmStore::new().set_error(id, &format!("gpn_wrong_kind: {why}"));
+    let r = if fast {
+        client.fail_job_fast(id, FAIL_CANNOT_RUN).await
+    } else {
+        client.fail_job(id, FAIL_CANNOT_RUN).await
+    };
+    match r {
+        Ok(()) => println!("[job {id}] failed on-chain after a kind check — escrow refunded"),
+        Err(e) if is_benign_state_err(&e.to_string()) => {}
+        Err(e) => eprintln!("[job {id}] fail_job (wrong kind) failed: {e}"),
+    }
 }
 
 /// Job ids the access-point scheduler assigned to this provider (matched by
@@ -2993,7 +3032,17 @@ async fn process_once(
     if fast_claim {
         for id in just_claimed.iter().copied() {
             if let Some(job) = get_job(id) {
-                if job.kind == "llm" && should_attempt(id, &job.model) {
+                if job.kind != "llm" {
+                    continue;
+                }
+                // Item #76: a payload this box can never run is FAILED now, not
+                // skipped — a skip leaves the job `Running` until the on-chain
+                // deadline with its escrow locked.
+                if let Some(why) = unrunnable_reason(&job.model) {
+                    fail_unrunnable(client, id, &why, true).await;
+                    continue;
+                }
+                if should_attempt(id, &job.model) {
                     if let Err(e) = run_job(client, id, &job, true, progress).await {
                         eprintln!("[provider] run #{id} (pipelined) failed: {e}");
                     }
@@ -3027,9 +3076,14 @@ async fn process_once(
         if let Some((state, _price, _req, provider)) = client.get_job_state(id).await {
             let is_mine = provider.as_deref() == Some(me);
             if state == "Running" && is_mine {
+                // Item #76: fail what we provably cannot run (kind mismatch) instead
+                // of skipping it forever while it burns its on-chain deadline.
+                if let Some(why) = unrunnable_reason(&job.model) {
+                    fail_unrunnable(client, id, &why, fast_claim).await;
+                    continue;
+                }
                 if !should_attempt(id, &job.model) {
-                    // Already failed too many times, or a foreign (non-text)
-                    // model that can never run here — stop hammering it.
+                    // Attempt cap already exhausted (run_job failed it on-chain).
                     continue;
                 }
                 run_job(client, id, &job, fast_claim, progress).await?;
@@ -3848,6 +3902,32 @@ mod settled_cache_tests {
 #[cfg(test)]
 mod startup_adoption_tests {
     use super::*;
+
+    /// Item #76: the provider's "can I run this?" answer must be the SHARED
+    /// classifier, so a diffusion model is recognised as unrunnable instead of
+    /// being claimed, skipped silently and left `Running` until the deadline.
+    #[test]
+    fn a_generation_model_is_never_runnable_on_an_llm_box() {
+        for m in [
+            "sdxl-turbo",
+            "sd-turbo",
+            "flux-dev",
+            "ltx-video",
+            "playground-v2",
+        ] {
+            assert!(
+                unrunnable_reason(m).is_some(),
+                "{m} must be recognised as a generation model"
+            );
+        }
+        // Real chat/ML tags stay runnable (the resolve_model fallback owns cold pulls).
+        for m in ["llama3.2:1b", "qwen2.5:7b", "resnet50", "auto", ""] {
+            assert!(unrunnable_reason(m).is_none(), "{m} must stay runnable");
+        }
+        // should_attempt keeps both halves of its old contract.
+        assert!(should_attempt(u64::MAX, "llama3.2:1b"));
+        assert!(!should_attempt(u64::MAX, "sdxl-turbo"));
+    }
 
     #[test]
     fn adoption_resumes_or_settles_stale_jobs_instead_of_leaving_them() {

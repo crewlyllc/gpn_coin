@@ -22,6 +22,7 @@
 use gpn_agent::chain::ChainClient;
 use gpn_agent::hub_channel::GenParams;
 use gpn_agent::image_jobs::{self, ImageArtifact, ImageJob};
+use gpn_agent::jobkind::{admit, model_kind, JobKind};
 use gpn_agent::pricing::{self, params_b_for, roofline_tok_per_s, PricingConfig};
 use gpn_agent::routing::{self, RttOverrides};
 use serde_json::{json, Value};
@@ -1154,82 +1155,10 @@ fn image_price_gpn(
 // both were single-shot — a wrong, down or incapable first choice failed the
 // request instead of moving on.
 
-/// What kind of AI work a request is. One variant per advertised capability so
-/// the filter is a single table lookup, not a per-job-type special case.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum JobKind {
-    Text,
-    Image,
-    Video,
-    Ml,
-    Finetune,
-}
-
-impl JobKind {
-    /// The `capabilities[]` entry a provider must advertise to serve this work.
-    fn capability(self) -> &'static str {
-        match self {
-            JobKind::Text => "LLMInference",
-            JobKind::Image => "ImageGeneration",
-            JobKind::Video => "VideoGeneration",
-            JobKind::Ml => "MLInference",
-            JobKind::Finetune => "FineTuning",
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            JobKind::Text => "text",
-            JobKind::Image => "image",
-            JobKind::Video => "video",
-            JobKind::Ml => "ml-inference",
-            JobKind::Finetune => "fine-tune",
-        }
-    }
-
-    /// Generation is routed purely by CAPABILITY: a diffusion/video model
-    /// (`sd-turbo`, `ltx-video`) is never in the heartbeat's Ollama `models[]`,
-    /// so matching on it can never pick the box that can actually render.
-    /// Fine-tuning shares that property (an HF base-model id is not an Ollama
-    /// tag) — see `gates_on_model`.
-    fn is_generation(self) -> bool {
-        matches!(self, JobKind::Image | JobKind::Video)
-    }
-
-    /// Text and ML jobs name a model that an Ollama box must already serve (or
-    /// be able to pull) — routing a job for a model nobody has only creates an
-    /// orphaned `Pending` job that burns a global `MaxActiveJobs` slot. A
-    /// fine-tune names a **HuggingFace base model** the executor downloads and
-    /// trains, not an Ollama tag it serves (item #67), so it gates on capability
-    /// only — exactly like generation. (Gating it on `models[]` made every
-    /// `HuggingFaceTB/SmolLM2-135M` tune unroutable: 400/503 with no candidate.)
-    fn gates_on_model(self) -> bool {
-        matches!(self, JobKind::Text | JobKind::Ml)
-    }
-
-    /// Classify a native `POST /jobs` body (`job_type` + `model`). Mirrors the
-    /// legacy `is_gen` sniffing so existing callers keep working.
-    fn from_job_type(job_type: &str, model: &str) -> JobKind {
-        let jt = job_type.to_ascii_lowercase();
-        let m = model.to_ascii_lowercase();
-        if jt.contains("video") || m.contains("ltx") {
-            JobKind::Video
-        } else if jt.contains("image")
-            || m.contains("sd-")
-            || m.contains("stable-diffusion")
-            || m.contains("sdxl")
-            || m.contains("flux")
-        {
-            JobKind::Image
-        } else if jt.contains("finetun") || jt.contains("fine-tun") {
-            JobKind::Finetune
-        } else if jt.contains("ml") {
-            JobKind::Ml
-        } else {
-            JobKind::Text
-        }
-    }
-}
+// What kind of work a request is lives in `gpn_agent::jobkind` (item #76): the AP,
+// the submit CLI and the providers must classify a request identically, or a
+// generation model gets routed to a chat box and the job sits `Running` until
+// the on-chain deadline. `JobKind`, `model_kind` and `admit` are imported above.
 
 /// Everything a request needs from a provider. `Default` = text routing with no
 /// hardware floor (the `/v1/chat/completions` case).
@@ -2390,8 +2319,22 @@ fn loopback_if_wildcard(listen: &str) -> String {
     }
 }
 
-/// Write the lease row for a job handed to `provider` (#46 Phase 3 step 2).
+/// What kind of work does an ALREADY-CREATED job (`POST /route/{id}`) represent?
 ///
+/// The stored payload kind is authoritative — it is what the provider will read
+/// — with the model name as the fallback and text as the default (item #76).
+/// Routing this path as text is what made a client-created generation job
+/// unroutable: its diffusion model is not a chat tag, so the request was refused
+/// as "unknown model" (created, never routed) or handed to a box that could not
+/// run it.
+fn route_kind(stored_payload_kind: Option<&str>, model: &str) -> JobKind {
+    stored_payload_kind
+        .and_then(JobKind::from_payload_kind)
+        .or_else(|| model_kind(model))
+        .unwrap_or(JobKind::Text)
+}
+
+/// Write the lease row for a job handed to `provider` (#46 Phase 3 step 2).///
 /// This IS the delivery: the access point no longer pushes to a provider's
 /// heartbeat. A provider learns about the job from its own `GET /assignments`
 /// long-poll within ~250 ms, so a NAT'd/CGNAT box with no inbound port is a
@@ -2414,6 +2357,61 @@ fn write_assignment(
     // process's just-written assignment (same lost-update class as `LlmStore`).
     let rec = json!({"provider": provider, "model": model, "pull": pull, "callback": callback_url, "callback_token": callback_token});
     gpn_agent::llm::merge_json_object(std::path::Path::new(store), &job_id.to_string(), rec)
+}
+
+/// Hand a just-created job to a provider — or refund it (item #76).
+///
+/// The lease row IS the delivery (#46 Phase 3: the provider learns about the job
+/// from its own `GET /assignments` long-poll), so a lease that never landed
+/// means the job can never be routed: it would sit `Pending` until its on-chain
+/// deadline while the caller was told `ok:true`. That is the "created but never
+/// routed" half of item #76 (e.g. gen job #86). So the write is CHECKED, and a
+/// failure fails the job on-chain (escrow refunded immediately) and returns the
+/// reason to the caller.
+fn dispatch_lease(
+    store: &str,
+    rt: &tokio::runtime::Runtime,
+    client: &ChainClient,
+    job_id: u64,
+    provider: &str,
+    model: &str,
+    pull: bool,
+    callback_url: &str,
+    callback_token: &str,
+) -> Result<(), String> {
+    match write_assignment(
+        store,
+        job_id,
+        provider,
+        model,
+        pull,
+        callback_url,
+        callback_token,
+    ) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // Nothing can ever run this job: refund now (the requestor may fail a
+            // Pending job — finding #12) instead of letting it expire.
+            let refunded = rt.block_on(client.fail_job_fast(job_id, 0)).is_ok();
+            eprintln!(
+                "[dispatch] job #{job_id}: could not write the lease for {provider} ({e}) — \
+                 not routed ({}); the caller must be told",
+                if refunded {
+                    "escrow refunded"
+                } else {
+                    "refund pending; on-chain expiry will reclaim it"
+                }
+            );
+            Err(format!(
+                "could not hand the job to a provider (lease write failed: {e}); {}",
+                if refunded {
+                    "the escrow was refunded and no job was dispatched"
+                } else {
+                    "no job was dispatched; the on-chain expiry will refund it"
+                }
+            ))
+        }
+    }
 }
 
 /// Generate an unguessable per-job callback token (item #16, red-team finding #2).
@@ -3531,8 +3529,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             );
                         } else {
                             let callback_token = new_callback_token(id);
-                            let _ = write_assignment(
+                            let dispatched = dispatch_lease(
                                 &assign_store,
+                                &rt,
+                                &client,
                                 id,
                                 &provider.address,
                                 &model,
@@ -3542,27 +3542,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             );
                             // #46 Phase 3: delivery is the provider's pull long-poll;
                             // the lease row above is the only hand-off.
-                            // block until the provider finishes (OpenAI calls are synchronous)
-                            for _ in 0..1200 {
-                                if let Some(j) = gpn_agent::llm::get_job(id) {
-                                    if j.status == "done" {
-                                        text = j.response.clone().unwrap_or_default();
-                                        if let (Some(p), Some(c)) =
-                                            (j.prompt_tokens, j.completion_tokens)
-                                        {
-                                            usage = Some((p, c));
+                            match dispatched {
+                                // Item #76: never report a job as dispatched when the
+                                // lease never landed — say what happened instead, and
+                                // do not sit in the completion wait for work that was
+                                // never handed over.
+                                Err(e) => text = format!("[gpn error] {e} (job #{id})"),
+                                // block until the provider finishes (OpenAI calls are synchronous)
+                                Ok(()) => {
+                                    for _ in 0..1200 {
+                                        if let Some(j) = gpn_agent::llm::get_job(id) {
+                                            if j.status == "done" {
+                                                text = j.response.clone().unwrap_or_default();
+                                                if let (Some(p), Some(c)) =
+                                                    (j.prompt_tokens, j.completion_tokens)
+                                                {
+                                                    usage = Some((p, c));
+                                                }
+                                                break;
+                                            }
+                                            if j.status == "error" {
+                                                text = format!(
+                                                    "[gpn error] {}",
+                                                    j.error.clone().unwrap_or_default()
+                                                );
+                                                break;
+                                            }
                                         }
-                                        break;
-                                    }
-                                    if j.status == "error" {
-                                        text = format!(
-                                            "[gpn error] {}",
-                                            j.error.clone().unwrap_or_default()
-                                        );
-                                        break;
+                                        std::thread::sleep(Duration::from_millis(300));
                                     }
                                 }
-                                std::thread::sleep(Duration::from_millis(300));
                             }
                         }
                     } else {
@@ -4173,15 +4182,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     record_created(id, 0);
                     let callback_token = new_callback_token(id);
-                    let _ = write_assignment(
+                    // Item #76: a lease that never landed means the tune can never be
+                    // routed — refund it and say so instead of returning 202.
+                    if let Err(e) = dispatch_lease(
                         &assign_store,
+                        &rt,
+                        &client,
                         id,
                         &provider.address,
                         &model,
                         false,
                         &callback_url,
                         &callback_token,
-                    );
+                    ) {
+                        let _ = req.respond(
+                            Response::from_string(
+                                json!({
+                                    "error": {"message": e, "type": "gpn_error"},
+                                    "job_id": id
+                                })
+                                .to_string(),
+                            )
+                            .with_header(hdr.clone())
+                            .with_status_code(500),
+                        );
+                        return;
+                    }
                     let _ = req.respond(
                         Response::from_string(
                             json!({
@@ -4385,10 +4411,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         })
                         .unwrap_or(0.0);
                     let price_gpn = v.get("price_gpn").and_then(|x| x.as_f64()).unwrap_or(10.0);
-                    let job_type = v
-                        .get("job_type")
-                        .and_then(|x| x.as_str())
-                        .unwrap_or("LLMInference");
+                    // Item #76: ONE classification, decided BEFORE any escrow. An
+                    // unknown `job_type` is a 4xx (it used to be silently downgraded
+                    // to text), and a generation model wins over the `LLMInference`
+                    // default, so a caller who omits `job_type` can no longer create a
+                    // *text* job out of an image/video model — which is what sent a
+                    // diffusion job to the LLM box, where it was skipped forever and
+                    // sat `Running` until the on-chain deadline.
+                    let kind = match admit(v.get("job_type").and_then(|x| x.as_str()), &model) {
+                        Ok(k) => k,
+                        Err(e) => {
+                            eprintln!("[jobs] refused: {}", e.message());
+                            let _ = req.respond(
+                                Response::from_string(
+                                    json!({"ok": false, "error": e.message()}).to_string(),
+                                )
+                                .with_header(hdr.clone())
+                                .with_status_code(400),
+                            );
+                            return;
+                        }
+                    };
+                    // The name written on chain is the kind's own, so chain state, the
+                    // off-chain payload and the routing decision can never disagree.
+                    let job_type = kind.onchain_name();
                     // Effective prompt: `prompt` (native), `input` (ML), or an
                     // OpenAI-style `messages[]`/`system` body. Red-team finding #24
                     // (agent/AP input validation / orphan-job DoS): a native
@@ -4448,17 +4494,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // unknown models only for LLM/text jobs (prevents orphaned
                     // Pending jobs).
                     let jt_lc = job_type.to_ascii_lowercase();
-                    let model_lc = model.to_ascii_lowercase();
-                    let is_gen = jt_lc.contains("image")
-                        || jt_lc.contains("video")
-                        || model_lc.contains("sd-")
-                        || model_lc.contains("stable-diffusion")
-                        || model_lc.contains("sdxl")
-                        || model_lc.contains("flux")
-                        || model_lc.contains("ltx");
-                    // The ONE classification used for routing: text/ML/fine-tune
-                    // gate on the model, generation on the advertised capability.
-                    let kind = JobKind::from_job_type(job_type, &model);
+                    let is_gen = kind.is_generation();
                     let reg = registry.lock().unwrap().clone();
                     let model = if kind.is_generation() {
                         model
@@ -4484,7 +4520,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     };
                     // One shared candidate pipeline for every job type (item
                     // #70): text gates on the model, generation/ML/fine-tune gate
-                    // on the advertised capability (`JobKind::from_job_type`).
+                    // on the advertised capability (`gpn_agent::jobkind::admit`).
                     let needs = RouteNeeds {
                         model: model.clone(),
                         min_gflops,
@@ -4758,53 +4794,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // a diffusion model; the diffusion provider only claims
                             // jobs where `kind` is image/video.
                             if let Some(p) = prompt.as_ref() {
-                                let jt = job_type.to_ascii_lowercase();
-                                // Guard: a diffusion/video model submitted with
-                                // job_type omitted (defaults to LLMInference) must
-                                // be routed to the diffusion provider, not the LLM
-                                // provider (which 404/500s pulling it from ollama).
-                                let model_l = model.to_ascii_lowercase();
-                                let model_diff = model_l.contains("sd-")
-                                    || model_l.contains("stable-diffusion")
-                                    || model_l.contains("sdxl")
-                                    || model_l.contains("flux")
-                                    || model_l.contains("ltx");
-                                let is_gen_kind =
-                                    jt.contains("image") || jt.contains("video") || model_diff;
-                                let is_ml_kind = jt == "mlinference";
-                                let job = if is_gen_kind {
-                                    let kind = if jt.contains("video") || model_l.contains("ltx") {
-                                        "video"
-                                    } else {
-                                        "image"
-                                    };
-                                    let neg = v.get("negative_prompt").and_then(|x| x.as_str());
-                                    gpn_agent::llm::LlmJob::new_gen(
-                                        kind,
-                                        &model,
-                                        p,
-                                        neg,
-                                        g("width", 512) as u32,
-                                        g("height", 512) as u32,
-                                        g("steps", 8) as u32,
-                                        v.get("seed").and_then(|x| x.as_i64()),
-                                        g("frames", 16) as u32,
-                                        g("fps", 8) as u32,
-                                    )
-                                } else if is_ml_kind {
-                                    let task = v
-                                        .get("task")
-                                        .and_then(|x| x.as_str())
-                                        .unwrap_or("generate");
-                                    gpn_agent::llm::LlmJob::new_ml(
-                                        &model,
-                                        p,
-                                        gpn_agent::llm::normalize_ml_task(Some(task)),
-                                        0.7,
-                                        256,
-                                    )
-                                } else {
-                                    gpn_agent::llm::LlmJob::new_llm(&model, p, 0.7, mtok_eff)
+                                // Item #76: the payload kind comes from the SAME
+                                // classification that chose the provider (`kind`), not
+                                // from a fourth private sniff of the model name. A
+                                // payload whose kind disagrees with the box it was
+                                // routed to is a job nobody can run.
+                                let job = match kind {
+                                    JobKind::Image | JobKind::Video => {
+                                        let neg = v.get("negative_prompt").and_then(|x| x.as_str());
+                                        gpn_agent::llm::LlmJob::new_gen(
+                                            kind.payload_kind(),
+                                            &model,
+                                            p,
+                                            neg,
+                                            g("width", 512) as u32,
+                                            g("height", 512) as u32,
+                                            g("steps", 8) as u32,
+                                            v.get("seed").and_then(|x| x.as_i64()),
+                                            g("frames", 16) as u32,
+                                            g("fps", 8) as u32,
+                                        )
+                                    }
+                                    JobKind::Ml => {
+                                        let task = v
+                                            .get("task")
+                                            .and_then(|x| x.as_str())
+                                            .unwrap_or("generate");
+                                        gpn_agent::llm::LlmJob::new_ml(
+                                            &model,
+                                            p,
+                                            gpn_agent::llm::normalize_ml_task(Some(task)),
+                                            0.7,
+                                            256,
+                                        )
+                                    }
+                                    // `POST /jobs` has no fine-tune body shape (that
+                                    // lives on `/v1/finetunes`); a FineTuning kind is
+                                    // still admitted above and recorded as text here.
+                                    JobKind::Text | JobKind::Finetune => {
+                                        gpn_agent::llm::LlmJob::new_llm(&model, p, 0.7, mtok_eff)
+                                    }
                                 };
                                 let store = gpn_agent::llm::LlmStore::new();
                                 if !persist_job_payload(&store, id, &job) {
@@ -4836,15 +4865,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // plus the model + whether it must pull the model first.
                             record_created(id, mtok_eff as u64);
                             let callback_token = new_callback_token(id);
-                            let _ = write_assignment(
+                            // Item #76: the lease row is the delivery. If it cannot be
+                            // written the job can never be routed, so refund it and
+                            // answer with the truth rather than `ok:true`.
+                            if let Err(e) = dispatch_lease(
                                 &assign_store,
+                                &rt,
+                                &client,
                                 id,
                                 &provider.address,
                                 &model,
                                 needs_pull,
                                 &callback_url,
                                 &callback_token,
-                            );
+                            ) {
+                                let _ = req.respond(
+                                    Response::from_string(
+                                        json!({"ok": false, "job_id": id, "error": e}).to_string(),
+                                    )
+                                    .with_header(hdr.clone())
+                                    .with_status_code(500),
+                                );
+                                return;
+                            }
                             // #46 Phase 3: delivery is the provider's pull long-poll;
                             // the lease row above is the only hand-off.
                             // optional inline wait: poll the off-chain store and return the
@@ -5177,7 +5220,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         json!({"ok":false,"error":"job not found"})
                     } else {
                         let reg = registry.lock().unwrap().clone();
-                        match resolve_requested_model(&reg, &qmodel) {
+                        // Item #76: route by the job's OWN kind. `/route/{id}` used to
+                        // assume text, so a generation job created by a client was
+                        // validated against the LLM catalogue (refused as "unknown
+                        // model" — created, never routed) or handed to a chat box that
+                        // could not run it. The stored payload is the authority; the
+                        // caller's `job` body and the model name are the fallbacks.
+                        let stored_kind =
+                            gpn_agent::llm::get_job(idn).map(|j| j.kind).or_else(|| {
+                                route_body
+                                    .get("job")
+                                    .and_then(|j| j.get("kind"))
+                                    .and_then(|k| k.as_str())
+                                    .map(str::to_string)
+                            });
+                        let kind = route_kind(stored_kind.as_deref(), &qmodel);
+                        // A generation model is not an Ollama tag: resolving it against
+                        // the chat catalogue is what made these jobs unroutable.
+                        let resolved = if kind.is_generation() {
+                            Ok(qmodel)
+                        } else {
+                            resolve_requested_model(&reg, &qmodel)
+                        };
+                        match resolved {
                             Err(e) => {
                                 // Route path keeps its `ok:false` shape but must not
                                 // claim "unknown model" when nobody has polled yet.
@@ -5194,7 +5259,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 };
                                 let cands = route_candidates(
                                     &reg,
-                                    JobKind::Text,
+                                    kind,
                                     &needs,
                                     &rtt_overrides(&route_body),
                                 );
@@ -5244,20 +5309,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             "error": "could not persist the job payload to the off-chain store; the job was not advertised"})
                                         } else {
                                             let callback_token = new_callback_token(idn);
-                                            let _ = write_assignment(
+                                            // Item #76: this path is where a client-created
+                                            // job used to be "created but never routed" — the
+                                            // lease failure was discarded, so the caller saw
+                                            // `ok:true` for a job no provider would ever learn
+                                            // about. Refund + report instead.
+                                            match dispatch_lease(
                                                 &assign_store,
+                                                &rt,
+                                                &client,
                                                 idn,
                                                 &p.address,
                                                 &qmodel,
                                                 pull,
                                                 &callback_url,
                                                 &callback_token,
-                                            );
-                                            // #46 Phase 3: no push — the provider's pull
-                                            // long-poll delivers the lease written above.
-                                            json!({"ok":true,"job_id":idn,"routed_to":p.address,
+                                            ) {
+                                                Err(e) => json!({"ok": false, "job_id": idn,
+                                                    "error": e}),
+                                                // #46 Phase 3: no push — the provider's pull
+                                                // long-poll delivers the lease written above.
+                                                Ok(()) => {
+                                                    json!({"ok":true,"job_id":idn,"routed_to":p.address,
                                        "model":qmodel,"pull":pull,
                                        "latency_ms":p.latency_ms,"load":format!("{}/{}",p.active,p.capacity)})
+                                                }
+                                            }
                                         }
                                     }
                                     None => {
@@ -6362,38 +6439,55 @@ mod tests {
         assert_eq!(ft_only[0].provider.address, "ft");
     }
 
-    /// `job_type` + model classification: the native `POST /jobs` path must pick
-    /// the same kind the chat/image facades do.
+    /// `job_type` + model admission (item #76): the native `POST /jobs` path must
+    /// pick the same kind the chat/image facades do, and it must classify the
+    /// model rather than trust a defaulted `job_type`.
     #[test]
     fn job_type_and_model_classify_to_the_same_kinds() {
         assert_eq!(
-            JobKind::from_job_type("LLMInference", "llama3.2:1b"),
-            JobKind::Text
+            admit(Some("LLMInference"), "llama3.2:1b"),
+            Ok(JobKind::Text)
         );
         assert_eq!(
-            JobKind::from_job_type("ImageGeneration", "sd-turbo"),
-            JobKind::Image
+            admit(Some("ImageGeneration"), "sd-turbo"),
+            Ok(JobKind::Image)
         );
+        // The reported #76 shape: `job_type` left at the LLM default.
+        assert_eq!(admit(Some("LLMInference"), "sd-turbo"), Ok(JobKind::Image));
         assert_eq!(
-            JobKind::from_job_type("LLMInference", "sd-turbo"),
-            JobKind::Image
+            admit(Some("VideoGeneration"), "ltx-video"),
+            Ok(JobKind::Video)
         );
+        assert_eq!(admit(Some("LLMInference"), "ltx-video"), Ok(JobKind::Video));
+        assert_eq!(admit(Some("MLInference"), "resnet50"), Ok(JobKind::Ml));
         assert_eq!(
-            JobKind::from_job_type("VideoGeneration", "ltx-video"),
-            JobKind::Video
+            admit(Some("FineTuning"), "llama3.2:1b"),
+            Ok(JobKind::Finetune)
         );
+        // An unknown type is refused, not downgraded to text (before any escrow).
+        assert!(admit(Some("ImageGen"), "sd-turbo").is_err());
+        assert!(admit(Some("Custom"), "llama3.2:1b").is_err());
+    }
+
+    /// `POST /route/{id}` classifies an existing job from its stored payload, so a
+    /// client-created image/video job is never validated against the chat catalogue
+    /// or handed to an LLM box (item #76).
+    #[test]
+    fn an_existing_job_is_routed_by_its_payload_kind() {
+        assert_eq!(route_kind(Some("image"), "sd-turbo"), JobKind::Image);
+        assert_eq!(route_kind(Some("video"), "ltx-video"), JobKind::Video);
+        assert_eq!(route_kind(Some("ml"), "resnet50"), JobKind::Ml);
         assert_eq!(
-            JobKind::from_job_type("LLMInference", "ltx-video"),
-            JobKind::Video
-        );
-        assert_eq!(
-            JobKind::from_job_type("MLInference", "resnet50"),
-            JobKind::Ml
-        );
-        assert_eq!(
-            JobKind::from_job_type("FineTuning", "llama3.2:1b"),
+            route_kind(Some("finetune"), "HuggingFaceTB/SmolLM2-135M"),
             JobKind::Finetune
         );
+        assert_eq!(route_kind(Some("llm"), "llama3.2:1b"), JobKind::Text);
+        // No stored payload (a remote client kept it): the model name decides.
+        assert_eq!(route_kind(None, "sdxl-turbo"), JobKind::Image);
+        assert_eq!(route_kind(None, "ltx-video"), JobKind::Video);
+        assert_eq!(route_kind(None, "llama3.2:1b"), JobKind::Text);
+        // A stale/unknown payload kind must not hide a generation model.
+        assert_eq!(route_kind(Some("banana"), "flux-dev"), JobKind::Image);
     }
 
     // ── public fine-tuning (queue item #67) ──────────────────────────────────
