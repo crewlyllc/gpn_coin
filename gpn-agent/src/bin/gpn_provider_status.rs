@@ -468,7 +468,7 @@ fn clamp_operator_gflops(
         return (operator, source);
     };
     let ceiling = m.saturating_mul(3) / 2;
-    if operator > ceiling {
+    if operator > ceiling && notice_once(&format!("operator-implausible:{operator}:{m}")) {
         eprintln!(
             "[status] ⚠ --gflops {operator} is implausible for {card}: this box measured {m} GFLOPS \
              on an idle GPU with the {unit} method (ceiling {ceiling} = 1.5x). Advertising the \
@@ -479,6 +479,49 @@ fn clamp_operator_gflops(
         return (m, "local idle measurement (--gflops implausible)");
     }
     (operator, source)
+}
+
+/// Item #99: emit a `<state>` notice **once per distinct state**, not once per
+/// `/status` request.
+///
+/// The access point polls `/status` every ~3 s. The #97 sanity checks warned
+/// from inside the *value resolver*, so this box wrote one identical line (two,
+/// while the resolver was called twice per request) on every poll: measured
+/// **1 808 lines an hour — 100 % of the unit's journal** — which buried every
+/// other message the heartbeat emits and grew the journal without bound (#42's
+/// class, one layer up). The condition is a **state** (a legacy chain record
+/// that disagrees with this box's own measurement), so it belongs on the
+/// transition: log when it appears, and again only when the state changes (a
+/// fresh attestation accepted, a new measurement, a different operator bound).
+///
+/// The key carries the values, so a change re-logs; an unchanged poll logs
+/// nothing. Same shape as `vram_filter_logged`'s `SEEN` book in this file.
+static NOTICE_SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Pure: may `key` be announced given what has already been announced?
+fn notice_is_new(seen: &[String], key: &str) -> bool {
+    !seen.iter().any(|s| s == key)
+}
+
+/// Announce `key` at most once. Returns `true` when the caller should log.
+fn notice_once(key: &str) -> bool {
+    match NOTICE_SEEN.lock() {
+        Ok(mut seen) => {
+            if !notice_is_new(&seen, key) {
+                return false;
+            }
+            seen.push(key.to_string());
+            // A box that re-attests repeatedly must not grow the book without
+            // bound; keep the last 32 distinct states.
+            if seen.len() > 32 {
+                seen.remove(0);
+            }
+            true
+        }
+        // A poisoned book must never suppress a warning silently for the rest
+        // of the process: log this one and keep going.
+        Err(_) => true,
+    }
 }
 
 /// The advertised value, with the operator bound **and the chain record**
@@ -493,8 +536,15 @@ fn clamp_operator_gflops(
 fn advertised_gflops(operator: u64, attested: Option<u64>) -> (u64, &'static str) {
     let measured = gpn_agent::attest_idle::read_state().map(|s| s.measured_gflops);
     let (op, _src) = clamp_operator_gflops(operator, measured, "this box", "operator bound");
+    let attested_was = attested;
     let (attested, implausible) = clamp_chain_record(attested, measured);
-    if implausible {
+    if implausible
+        && notice_once(&format!(
+            "chain-implausible:{}:{}",
+            attested_was.unwrap_or(0),
+            measured.unwrap_or(0)
+        ))
+    {
         eprintln!(
             "[status] ⚠ on-chain attestation disagrees with this box's idle measurement — the \
              record is a legacy/contended artefact. Advertising the measurement; the AP will not \
@@ -1547,7 +1597,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     attested_gflops(&endpoint, &address)
                 };
-                let (gflops_now, _) = advertised_gflops(operator_gflops, chain_now);
+                let (gflops_now, gflops_src) = advertised_gflops(operator_gflops, chain_now);
                 let mut body = json!({
                     "address": address, "gflops": gflops_now, "models": models_now,
                     "can_pull": can_pull, "active": active, "capacity": capacity.max(1),
@@ -1561,12 +1611,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // #93: measurement conditions (samples, spread, "attested-idle"
                 // provenance, stale-record warning) — so a low number can be
                 // told apart from one taken under contention.
-                attach_attest_conditions(
-                    &mut body,
-                    gflops_now,
-                    chain_now,
-                    advertised_gflops(operator_gflops, chain_now).1,
-                );
+                attach_attest_conditions(&mut body, gflops_now, chain_now, gflops_src);
                 // Peer-id publication: always read live from THIS box's node.
                 // On failure the fields are published empty (null / []) — never
                 // a cached id, which would advertise an undialable identity.
@@ -2255,5 +2300,36 @@ mod tests {
         );
         assert_eq!(clamp_chain_record(None, Some(825)), (None, false));
         assert_eq!(clamp_chain_record(Some(0), Some(825)), (None, false));
+    }
+
+    /// Item #99: a `<state>` notice is announced on the transition, never on
+    /// every `/status` poll.
+    ///
+    /// Live symptom this pins down: the #97 chain-record warning was emitted
+    /// from the value resolver, which the `/status` handler called **twice** per
+    /// request while the AP polls every ~3 s — 1 808 identical lines an hour,
+    /// i.e. 100 % of `gpn-provider-heartbeat`'s journal.
+    #[test]
+    fn state_notices_are_announced_once_not_per_poll() {
+        // The pure predicate is the whole decision; keep it value-based so a
+        // changed state (fresh attestation, new measurement) re-logs.
+        let seen = vec!["chain-implausible:30000:825".to_string()];
+        assert!(!notice_is_new(&seen, "chain-implausible:30000:825"));
+        assert!(notice_is_new(&seen, "chain-implausible:30000:912"));
+        assert!(notice_is_new(&seen, "operator-implausible:30000:825"));
+        assert!(notice_is_new(&[], "chain-implausible:30000:825"));
+
+        // And the book itself: first call emits, every repeat is silent, a new
+        // state emits, and the book is bounded.
+        let key = "test-notice-once-99";
+        assert!(notice_once(key));
+        for _ in 0..100 {
+            assert!(!notice_once(key), "a repeat poll must not log again");
+        }
+        assert!(notice_once("test-notice-once-99-second-state"));
+        for i in 0..64 {
+            notice_once(&format!("test-notice-bound-{i}"));
+        }
+        assert!(NOTICE_SEEN.lock().unwrap().len() <= 32 + 2);
     }
 }

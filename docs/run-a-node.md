@@ -1361,6 +1361,14 @@ Measurement rules that matter when you compare two boxes:
 * the **discrete** card is measured (device 0 is ordered discrete-first, so the
   benchmark and the miner always use the same GPU — before 2026-10-23 they did
   not, and a Windows box attested an iGPU-class 188 GFLOPS for a 16 GB card);
+* **a state warning is logged once, not once per poll.** `/status` is polled
+  every ~3 s, so the "on-chain attestation disagrees" / "`--gflops` implausible"
+  notices fire on the **transition** (they appear when the state first holds, and
+  again only if the record or the measurement actually changes). The same
+  information is in the body of every response as `gflops_stale_warning`, so a
+  monitor never needs the journal. Before 2026-10-23 these lines were emitted
+  from the value resolver — twice per request — and a single box wrote ~1 800
+  identical lines an hour, which crowded out everything else the heartbeat logs;
 * **only `gflops_source: "attested-idle"` is usable evidence.** The access point
   will not route a `min_gflops > 0` job to a box whose number came from a
   hand-typed `--gflops`, an older chain record or a contended sample: that value
