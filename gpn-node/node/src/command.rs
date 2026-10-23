@@ -47,98 +47,6 @@ impl SubstrateCli for Cli {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use clap::Parser;
-
-    /// Stub-argv test for the regression this fixes: a **bare** `gpn-node`
-    /// launch (no `--validator`, no `--alice`, no `--force-authoring`) must
-    /// still end up as an authority whose miner is spawned.
-    ///
-    /// The CLI alone derives nothing (role=Full, force_authoring=false) — that
-    /// is the exact divergence that produced "Prepared block for proposing…"
-    /// with no seal. `service::force_mining` + `service::miner_should_run`
-    /// close it: mining follows the (forced) role, never the unused flag.
-    #[test]
-    fn bare_argv_is_forced_to_authority_and_spawns_miner() {
-        let cli = Cli::try_parse_from(["gpn-node", "--chain", "dev", "--tmp"])
-            .expect("a plain run argv must parse");
-
-        // The stub argv sets none of the flags Substrate would otherwise need.
-        assert!(!cli.run.validator, "bare argv must not rely on --validator");
-        assert!(!cli.run.alice, "bare argv must not rely on --alice");
-        assert!(
-            !cli.run.force_authoring,
-            "bare argv must not have to pass --force-authoring"
-        );
-
-        // The miner decision is driven by the ROLE only — and a forced
-        // Authority always mines, with or without --force-authoring.
-        assert!(service::miner_should_run(sc_service::Role::Authority));
-        assert!(!service::miner_should_run(sc_service::Role::Full));
-    }
-
-    /// `--alice` (what the supervisor passes via `author = "alice"`) sets
-    /// role=Authority but *not* `--force-authoring` — the historical gate that
-    /// left a proposer with no miner. It must still mine.
-    #[test]
-    fn alice_without_force_authoring_spawns_miner() {
-        let cli = Cli::try_parse_from(["gpn-node", "--chain", "dev", "--tmp", "--alice"])
-            .expect("argv parses");
-        assert!(cli.run.alice);
-        assert!(
-            !cli.run.force_authoring,
-            "--alice does not imply --force-authoring on this Substrate rev"
-        );
-        assert!(service::miner_should_run(sc_service::Role::Authority));
-    }
-
-    /// Membership flags: seed/discoverable default OFF *as flags* (the service
-    /// defaults them ON), and the opt-outs parse cleanly.
-    #[test]
-    fn membership_flags_parse() {
-        let bare = Cli::try_parse_from(["gpn-node", "--chain", "dev"]).expect("argv parses");
-        assert!(!bare.seed && !bare.no_seed && !bare.discoverable && !bare.no_discoverable);
-        // The hard gate is the default; both flags are opt-in at the CLI level
-        // (an unset flag leaves the environment, hence the default, alone).
-        assert!(!bare.require_backbone);
-        assert!(!bare.no_require_backbone);
-        // Port mapping is ON by default; only the opt-out flag exists.
-        assert!(!bare.no_upnp);
-
-        let no_upnp =
-            Cli::try_parse_from(["gpn-node", "--chain", "dev", "--no-upnp"]).expect("argv parses");
-        assert!(no_upnp.no_upnp);
-
-        let private = Cli::try_parse_from([
-            "gpn-node",
-            "--chain",
-            "dev",
-            "--no-discoverable",
-            "--require-backbone",
-        ])
-        .expect("argv parses");
-        assert!(private.no_discoverable);
-        assert!(private.require_backbone);
-
-        // The documented opt-out must parse and must conflict with the explicit
-        // hard-gate flag (never silently resolve).
-        let soft = Cli::try_parse_from(["gpn-node", "--chain", "dev", "--no-require-backbone"])
-            .expect("argv parses");
-        assert!(soft.no_require_backbone);
-        assert!(!soft.require_backbone);
-        assert!(
-            Cli::try_parse_from(["gpn-node", "--require-backbone", "--no-require-backbone"])
-                .is_err()
-        );
-
-        // Mutually exclusive pairs must be rejected, not silently resolved.
-        assert!(Cli::try_parse_from(["gpn-node", "--seed", "--no-seed"]).is_err());
-        assert!(Cli::try_parse_from(["gpn-node", "--discoverable", "--no-discoverable"]).is_err());
-    }
-}
-
 /// Translate the membership CLI flags into the `GPN_*` environment that
 /// [`service::new_full`] reads.
 ///
@@ -297,5 +205,97 @@ pub fn run() -> sc_cli::Result<()> {
                 }
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    /// Stub-argv test for the regression this fixes: a **bare** `gpn-node`
+    /// launch (no `--validator`, no `--alice`, no `--force-authoring`) must
+    /// still end up as an authority whose miner is spawned.
+    ///
+    /// The CLI alone derives nothing (role=Full, force_authoring=false) — that
+    /// is the exact divergence that produced "Prepared block for proposing…"
+    /// with no seal. `service::force_mining` + `service::miner_should_run`
+    /// close it: mining follows the (forced) role, never the unused flag.
+    #[test]
+    fn bare_argv_is_forced_to_authority_and_spawns_miner() {
+        let cli = Cli::try_parse_from(["gpn-node", "--chain", "dev", "--tmp"])
+            .expect("a plain run argv must parse");
+
+        // The stub argv sets none of the flags Substrate would otherwise need.
+        assert!(!cli.run.validator, "bare argv must not rely on --validator");
+        assert!(!cli.run.alice, "bare argv must not rely on --alice");
+        assert!(
+            !cli.run.force_authoring,
+            "bare argv must not have to pass --force-authoring"
+        );
+
+        // The miner decision is driven by the ROLE only — and a forced
+        // Authority always mines, with or without --force-authoring.
+        assert!(service::miner_should_run(sc_service::Role::Authority));
+        assert!(!service::miner_should_run(sc_service::Role::Full));
+    }
+
+    /// `--alice` (what the supervisor passes via `author = "alice"`) sets
+    /// role=Authority but *not* `--force-authoring` — the historical gate that
+    /// left a proposer with no miner. It must still mine.
+    #[test]
+    fn alice_without_force_authoring_spawns_miner() {
+        let cli = Cli::try_parse_from(["gpn-node", "--chain", "dev", "--tmp", "--alice"])
+            .expect("argv parses");
+        assert!(cli.run.alice);
+        assert!(
+            !cli.run.force_authoring,
+            "--alice does not imply --force-authoring on this Substrate rev"
+        );
+        assert!(service::miner_should_run(sc_service::Role::Authority));
+    }
+
+    /// Membership flags: seed/discoverable default OFF *as flags* (the service
+    /// defaults them ON), and the opt-outs parse cleanly.
+    #[test]
+    fn membership_flags_parse() {
+        let bare = Cli::try_parse_from(["gpn-node", "--chain", "dev"]).expect("argv parses");
+        assert!(!bare.seed && !bare.no_seed && !bare.discoverable && !bare.no_discoverable);
+        // The hard gate is the default; both flags are opt-in at the CLI level
+        // (an unset flag leaves the environment, hence the default, alone).
+        assert!(!bare.require_backbone);
+        assert!(!bare.no_require_backbone);
+        // Port mapping is ON by default; only the opt-out flag exists.
+        assert!(!bare.no_upnp);
+
+        let no_upnp =
+            Cli::try_parse_from(["gpn-node", "--chain", "dev", "--no-upnp"]).expect("argv parses");
+        assert!(no_upnp.no_upnp);
+
+        let private = Cli::try_parse_from([
+            "gpn-node",
+            "--chain",
+            "dev",
+            "--no-discoverable",
+            "--require-backbone",
+        ])
+        .expect("argv parses");
+        assert!(private.no_discoverable);
+        assert!(private.require_backbone);
+
+        // The documented opt-out must parse and must conflict with the explicit
+        // hard-gate flag (never silently resolve).
+        let soft = Cli::try_parse_from(["gpn-node", "--chain", "dev", "--no-require-backbone"])
+            .expect("argv parses");
+        assert!(soft.no_require_backbone);
+        assert!(!soft.require_backbone);
+        assert!(
+            Cli::try_parse_from(["gpn-node", "--require-backbone", "--no-require-backbone"])
+                .is_err()
+        );
+
+        // Mutually exclusive pairs must be rejected, not silently resolved.
+        assert!(Cli::try_parse_from(["gpn-node", "--seed", "--no-seed"]).is_err());
+        assert!(Cli::try_parse_from(["gpn-node", "--discoverable", "--no-discoverable"]).is_err());
     }
 }

@@ -192,7 +192,7 @@ fn serve_channel_job(ctx: &ChannelCtx, body: &str) -> (u16, serde_json::Value) {
         );
     };
     let mut store = load_channels(&ctx.state_path);
-    if !store.channels.contains_key(&a.channel_id) {
+    if let std::collections::btree_map::Entry::Vacant(e) = store.channels.entry(a.channel_id) {
         // First sight of this channel: adopt the state the AP signed for this
         // job. Two providers (LLM on 8094, diffusion on 8095) share ONE channel
         // per requestor, so a fresh mirror must NOT assume the channel is in its
@@ -206,7 +206,7 @@ fn serve_channel_job(ctx: &ChannelCtx, body: &str) -> (u16, serde_json::Value) {
             "[channel] adopting channel {} at nonce {} (requestor balance {})",
             a.channel_id, ch.state.nonce, ch.state.balance_requestor
         );
-        store.channels.insert(a.channel_id, ch);
+        e.insert(ch);
     }
     {
         let ch = store.channels.get_mut(&a.channel_id).unwrap();

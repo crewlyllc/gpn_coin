@@ -471,5 +471,5 @@ fn unknown_image_ids_are_404_and_traversal_is_rejected() {
     std::env::set_var("GPN_IMAGE_DIR", std::env::temp_dir().join("gpn-img-404"));
     assert!(image_jobs::get("0".repeat(32).as_str()).is_none());
     assert!(!image_jobs::valid_id("../../etc/passwd"));
-    assert!(image_jobs::artifact_path("../../etc/passwd", 0).exists() == false);
+    assert!(!image_jobs::artifact_path("../../etc/passwd", 0).exists());
 }

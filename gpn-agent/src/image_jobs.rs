@@ -423,7 +423,7 @@ pub fn parse_size(s: &str) -> Result<(u32, u32), String> {
     let w: u32 = w.parse().map_err(|_| format!("bad width in '{s}'"))?;
     let h: u32 = h.parse().map_err(|_| format!("bad height in '{s}'"))?;
     for (label, v) in [("width", w), ("height", h)] {
-        if v < 256 || v > 1536 {
+        if !(256..=1536).contains(&v) {
             return Err(format!("{label} must be 256..1536, got {v}"));
         }
         if v % 8 != 0 {

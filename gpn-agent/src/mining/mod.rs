@@ -446,8 +446,8 @@ fn submit_solution_direct(
 
         let solution = SubxtValue::unnamed_composite(vec![
             SubxtValue::u128(seal.nonce as u128),
-            SubxtValue::from_bytes(&seal.mix),
-            SubxtValue::from_bytes(&solution_hash),
+            SubxtValue::from_bytes(seal.mix),
+            SubxtValue::from_bytes(solution_hash),
             SubxtValue::u128(ALGORITHM_VERSION as u128),
         ]);
         let difficulty_val = SubxtValue::unnamed_composite(vec![

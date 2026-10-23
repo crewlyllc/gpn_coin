@@ -21,12 +21,12 @@ fn main() {
     let hex_pub = hex::encode(pair.public().0);
 
     println!("phrase_text\t{phrase}");
-    println!("seed\t0x{}", hex::encode(&seed));
+    println!("seed\t0x{}", hex::encode(seed));
     println!("public_hex\t0x{hex_pub}");
     println!("ss58\t{ss58}");
     // Tab-separated governance-keys.txt line (label filled by caller):
     println!(
         "keyline\t<label>\t{phrase}\t0x{}\t{ss58}",
-        hex::encode(&seed)
+        hex::encode(seed)
     );
 }

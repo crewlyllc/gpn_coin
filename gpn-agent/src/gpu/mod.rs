@@ -450,10 +450,7 @@ fn value_after_marker(line: &str, marker: &str) -> Option<String> {
     let val = if let Some(s) = after.strip_prefix('"') {
         s.split('"').next().unwrap_or("")
     } else {
-        after
-            .split(|c: char| c == ',' || c == '"')
-            .next()
-            .unwrap_or("")
+        after.split([',', '"']).next().unwrap_or("")
     };
     let v = val.trim();
     if v.is_empty() {
@@ -931,7 +928,7 @@ fn scan_display_lines<'a>(lines: impl Iterator<Item = &'a str>) -> (String, f64)
             || l.contains("display controller")
         {
             // `00:02.0 VGA compatible controller: Intel Corporation …`
-            if let Some(name) = line.splitn(2, ':').nth(1) {
+            if let Some(name) = line.split_once(':').map(|x| x.1) {
                 names.push(name.trim());
             }
         }

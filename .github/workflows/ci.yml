@@ -37,9 +37,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # The workspace builds on stable (verified locally: rustc 1.97.x). Also pinned
-  # in rust-toolchain.toml so local + CI agree.
-  RUST_TOOLCHAIN: stable
+  # Pinned to the same channel as rust-toolchain.toml (1.98.1) so a new stable
+  # release cannot silently change the clippy lint set under `-D warnings`.
+  RUST_TOOLCHAIN: "1.98.1"
   # Leave the live provider/node headroom on the shared box.
   CARGO_BUILD_JOBS: "2"
   # (CARGO_TARGET_DIR is set per job: incremental, persistent, and outside both

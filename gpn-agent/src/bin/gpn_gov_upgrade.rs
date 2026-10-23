@@ -594,15 +594,15 @@ async fn cmd_stage(
         }
         eprintln!("   --force given: continuing even though System.set_code would revert");
     }
-    if art.version.as_ref().map(|v| v.spec_version) != opts.expect_spec
-        && opts.expect_spec.is_some()
-    {
-        eprintln!(
-            "❌ --expect-spec {} but the artifact says {:?}",
-            opts.expect_spec.unwrap(),
-            art.version.as_ref().map(|v| v.spec_version)
-        );
-        return Ok(3);
+    if let Some(expect) = opts.expect_spec {
+        if art.version.as_ref().map(|v| v.spec_version) != Some(expect) {
+            eprintln!(
+                "❌ --expect-spec {} but the artifact says {:?}",
+                expect,
+                art.version.as_ref().map(|v| v.spec_version)
+            );
+            return Ok(3);
+        }
     }
 
     let plan = Plan::from_artifact(&art, &cs, &opts.track, &opts.call, &opts.mode);
@@ -769,7 +769,7 @@ async fn cmd_propose(
     let signer_uri = require_signer(opts)?;
     let sg = Sr25519Signer::from_uri(&signer_uri).map_err(|e| e.to_string())?;
     let who = sg.account_id().to_string();
-    if !surface.members.is_empty() && !surface.members.iter().any(|m| *m == who) {
+    if !surface.members.is_empty() && !surface.members.contains(&who) {
         eprintln!(
             "❌ {who} is not a committee member. Members: {:?}",
             surface.members
@@ -785,10 +785,7 @@ async fn cmd_propose(
         subxt::dynamic::tx(
             PALLET,
             "propose_preimage",
-            vec![
-                Value::from_bytes(&code_hash),
-                Value::from_bytes(&call_bytes),
-            ],
+            vec![Value::from_bytes(code_hash), Value::from_bytes(&call_bytes)],
         )
     } else {
         subxt::dynamic::tx(PALLET, "propose", vec![set_code_value(opts, &bytes)?])
@@ -858,14 +855,14 @@ async fn cmd_approve(
     let signer_uri = require_signer(opts)?;
     let sg = Sr25519Signer::from_uri(&signer_uri).map_err(|e| e.to_string())?;
     let who = sg.account_id().to_string();
-    if !surface.members.is_empty() && !surface.members.iter().any(|m| *m == who) {
+    if !surface.members.is_empty() && !surface.members.contains(&who) {
         eprintln!(
             "❌ {who} is not a committee member. Members: {:?}",
             surface.members
         );
         return Ok(3);
     }
-    let call = subxt::dynamic::tx(PALLET, "approve", vec![Value::from_bytes(&hash)]);
+    let call = subxt::dynamic::tx(PALLET, "approve", vec![Value::from_bytes(hash)]);
     let nonce = signer::current_nonce(client, &opts.endpoint, &sg.account_id()).await;
     println!("approving as {who} [nonce {nonce}]…");
     signer::submit_signed(client, &call, &sg, nonce)
@@ -1078,7 +1075,7 @@ async fn cmd_execute(
 
     let signer_uri = require_signer(opts)?;
     let sg = Sr25519Signer::from_uri(&signer_uri).map_err(|e| e.to_string())?;
-    let call = subxt::dynamic::tx(PALLET, "execute", vec![Value::from_bytes(&hash)]);
+    let call = subxt::dynamic::tx(PALLET, "execute", vec![Value::from_bytes(hash)]);
     let nonce = signer::current_nonce(client, &opts.endpoint, &sg.account_id()).await;
     println!("executing as {} [nonce {nonce}]…", sg.account_id());
     signer::submit_signed(client, &call, &sg, nonce)
@@ -1139,7 +1136,7 @@ async fn cmd_verify(opts: &Opts, rpc: &Rpc) -> Result<i32, String> {
     loop {
         let cs = chain_state(rpc).await?;
         let code = rpc.storage(gov::CODE_KEY_HEX).await?;
-        let observed_hash = code.as_deref().map(|b| blake2_hash(b));
+        let observed_hash = code.as_deref().map(blake2_hash);
         let state = gov::verify_outcome(expect_spec, expect_hash, cs.spec_version, observed_hash);
         let code_desc = match (&code, observed_hash) {
             (Some(b), Some(h)) => format!("{} bytes, blake2 {}", b.len(), gov::hex0x(&h)),

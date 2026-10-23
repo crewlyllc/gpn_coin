@@ -1144,7 +1144,7 @@ mod tests {
                 let after = GpuPowPallet::adjust_difficulty(parent, actual_ms);
                 let factor = 2f64.powf(log2_of(after) - before);
                 assert!(
-                    factor >= 100.0 / 133.0 - 1e-9 && factor <= 1.33 + 1e-9,
+                    (100.0 / 133.0 - 1e-9..=1.33 + 1e-9).contains(&factor),
                     "actual_ms={} moved the target {:.4}x (outside [0.7519, 1.33])",
                     actual_ms,
                     factor

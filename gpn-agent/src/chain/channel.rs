@@ -237,12 +237,12 @@ mod tests {
 
         assert!(sr25519::Pair::verify(
             &sr25519::Signature::from_raw(sig_req),
-            &payload,
+            payload,
             &req.public()
         ));
         assert!(sr25519::Pair::verify(
             &sr25519::Signature::from_raw(sig_prov),
-            &payload,
+            payload,
             &prov.public()
         ));
     }

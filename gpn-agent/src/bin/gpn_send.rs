@@ -60,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let call = subxt::dynamic::tx(
         "Balances",
         "transfer_allow_death",
-        vec![Value::from_bytes(&dest_bytes), Value::u128(amount_raw)],
+        vec![Value::from_bytes(dest_bytes), Value::u128(amount_raw)],
     );
     let nonce = signer::current_nonce(&client, &endpoint, &sudo.account_id()).await;
     println!(

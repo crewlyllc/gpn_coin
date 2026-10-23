@@ -911,7 +911,7 @@ impl ChainClient {
             "ComputeMarketplace",
             "open_channel",
             vec![
-                Value::from_bytes(&provider),
+                Value::from_bytes(provider),
                 Value::u128(amount),
                 Value::u128(ttl as u128),
             ],
@@ -939,8 +939,8 @@ impl ChainClient {
                 Value::u128(balance_requestor),
                 Value::u128(balance_provider),
                 Value::u128(nonce as u128),
-                Value::from_bytes(&sig_requestor),
-                Value::from_bytes(&sig_provider),
+                Value::from_bytes(sig_requestor),
+                Value::from_bytes(sig_provider),
             ],
         )
         .await
@@ -966,7 +966,7 @@ impl ChainClient {
                 Value::u128(balance_requestor),
                 Value::u128(balance_provider),
                 Value::u128(nonce as u128),
-                Value::from_bytes(&sig_counterparty),
+                Value::from_bytes(sig_counterparty),
             ],
         )
         .await
@@ -1256,7 +1256,7 @@ impl ChainClient {
         // the pipelined nonce stream silently diverges (the create-path stall). Drop the
         // stream so we reconnect with fresh best-block metadata + a re-seeded nonce.
         if let Some(cur) = signer::runtime_spec_version(&self.endpoint).await {
-            if guard.as_ref().map_or(false, |s| s.spec_version() != cur) {
+            if guard.as_ref().is_some_and(|s| s.spec_version() != cur) {
                 log::warn!(
                     "runtime spec changed ({} -> {}) — re-seeding the fast submitter",
                     guard.as_ref().map(|s| s.spec_version()).unwrap_or(0),

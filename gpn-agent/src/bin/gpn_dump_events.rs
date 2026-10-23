@@ -14,8 +14,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let methods = LegacyRpcMethods::<GpnConfig>::new(rpc.clone());
     let hh: H256 = match block_arg {
         Some(s) => {
-            if s.starts_with("0x") {
-                let b = hex::decode(&s[2..])?;
+            if let Some(hex_body) = s.strip_prefix("0x") {
+                let b = hex::decode(hex_body)?;
                 let mut a = [0u8; 32];
                 a.copy_from_slice(&b);
                 H256(a)

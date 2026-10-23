@@ -341,7 +341,7 @@ pub fn parse_leases(body: &str) -> Vec<Lease> {
 /// consumer (claim loops, `run_job`, result callback) is unchanged.
 ///
 /// Returns whether the off-chain payload was stored.
-pub fn apply_lease(lease: &Lease, provider: &str, assignment_store: &PathBuf) -> bool {
+pub fn apply_lease(lease: &Lease, provider: &str, assignment_store: &std::path::Path) -> bool {
     apply_lease_to(lease, provider, assignment_store, &LlmStore::new())
 }
 

@@ -118,7 +118,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "GPUAttestation",
         vec![Value::unnamed_variant(
             "set_challenge_verifier",
-            vec![Value::from_bytes(&nb)],
+            vec![Value::from_bytes(nb)],
         )],
     );
     let call = subxt::dynamic::tx("Sudo", "sudo", vec![inner]);

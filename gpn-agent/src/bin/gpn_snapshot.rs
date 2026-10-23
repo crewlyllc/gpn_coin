@@ -431,10 +431,7 @@ fn send_sig(sig: &str, pid: u32) -> io::Result<()> {
     if st.success() {
         Ok(())
     } else {
-        Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("kill -{sig} {pid} failed"),
-        ))
+        Err(io::Error::other(format!("kill -{sig} {pid} failed")))
     }
 }
 

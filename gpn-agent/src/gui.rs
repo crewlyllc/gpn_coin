@@ -142,7 +142,7 @@ pub fn check_loopback(listen: &str) -> Result<String, String> {
 }
 
 /// The idle portion of the status document.
-fn idle_json(path: &PathBuf, now: u64) -> Value {
+fn idle_json(path: &std::path::Path, now: u64) -> Value {
     match idle::state_at(path, now) {
         Some(st) => json!({
             "active": true,

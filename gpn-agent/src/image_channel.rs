@@ -75,13 +75,12 @@ pub fn serve_decision(
         ));
     }
     if vram_mb > 0 {
-        match crate::models::check_model_vram(model, vram_mb) {
-            VramFit::TooBig { needs_gb, have_gb } => {
-                return ServeDecision::Refund(format!(
-                    "model '{model}' needs ~{needs_gb:.1} GB but this card has {have_gb:.1} GB"
-                ));
-            }
-            _ => {}
+        if let VramFit::TooBig { needs_gb, have_gb } =
+            crate::models::check_model_vram(model, vram_mb)
+        {
+            return ServeDecision::Refund(format!(
+                "model '{model}' needs ~{needs_gb:.1} GB but this card has {have_gb:.1} GB"
+            ));
         }
         let need = estimated_render_vram_mb(width, height);
         if need > vram_mb {

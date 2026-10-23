@@ -12,10 +12,10 @@
 //! lookup only logs at debug/info), and disabled with `GPN_NTP_CHECK=0`.
 //!
 //! Config:
-//!   * `GPN_NTP_SERVER`      — NTP host (default `pool.ntp.org`).
-//!   * `GPN_NTP_MAX_SKEW_MS` — warn threshold in ms (default 5000; a value
-//!                             >30_000 escalates the log to ERROR).
-//!   * `GPN_NTP_CHECK`       — set to `0`/`false` to skip the check entirely.
+//! - `GPN_NTP_SERVER` — NTP host (default `pool.ntp.org`).
+//! - `GPN_NTP_MAX_SKEW_MS` — warn threshold in ms (default 5000; values above
+//!   30_000 escalate the log to ERROR).
+//! - `GPN_NTP_CHECK` — set to `0`/`false` to skip the check entirely.
 
 use std::net::UdpSocket;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

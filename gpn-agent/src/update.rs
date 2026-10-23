@@ -1159,18 +1159,16 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     let first = needle[0];
     let mut i = 0usize;
     while i + needle.len() <= haystack.len() {
-        match haystack[i..].iter().position(|b| *b == first) {
-            Some(k) => {
-                let at = i + k;
-                if at + needle.len() > haystack.len() {
-                    return None;
-                }
-                if &haystack[at..at + needle.len()] == needle {
-                    return Some(at);
-                }
-                i = at + 1;
+        {
+            let k = haystack[i..].iter().position(|b| *b == first)?;
+            let at = i + k;
+            if at + needle.len() > haystack.len() {
+                return None;
             }
-            None => return None,
+            if &haystack[at..at + needle.len()] == needle {
+                return Some(at);
+            }
+            i = at + 1;
         }
     }
     None
@@ -2413,7 +2411,11 @@ mod tests {
     fn stamped_binary(version: &str) -> Vec<u8> {
         let mut v = Vec::new();
         v.extend_from_slice(b"\x7fELF-padding-padding-padding");
-        v.extend_from_slice(format!("gpn-build-v1 version=unknown sha=unknown\0").as_bytes());
+        v.extend_from_slice(
+            "gpn-build-v1 version=unknown sha=unknown\0"
+                .to_string()
+                .as_bytes(),
+        );
         v.extend_from_slice(
             format!("gpn-build-v1 version={version} sha=deadbeef spec=41\0").as_bytes(),
         );

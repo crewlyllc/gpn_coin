@@ -787,7 +787,7 @@ pub async fn probe_configured_endpoint(
         if let Some((ip, mapped_port)) =
             stun_probe(server, Duration::from_secs(STUN_TIMEOUT_SECS)).await
         {
-            if mapped_port == port && resolved.iter().any(|r| *r == ip) {
+            if mapped_port == port && resolved.contains(&ip) {
                 return (resolved, true, false);
             }
             log::debug!(
@@ -900,10 +900,10 @@ To force the hard failure regardless:  GPN_DIALABILITY_SAFETY=0
 /// `GPN_DIALABILITY_SAFETY` — default ON; an explicit false-y value lets the
 /// gate exit even when it would stop the last authority.
 pub fn parse_safety_enabled(raw: Option<&str>) -> bool {
-    match raw.map(|s| s.trim().to_ascii_lowercase()) {
-        Some(v) if matches!(v.as_str(), "0" | "false" | "no" | "off") => false,
-        _ => true,
-    }
+    !matches!(
+        raw.map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        Some("0" | "false" | "no" | "off")
+    )
 }
 
 /// `GPN_STUN_SERVER` — `off`/`0`/`no` disables the external STUN probe.
@@ -1019,27 +1019,27 @@ impl GateConfig {
 /// Parse the `GPN_REQUIRE_DIALABLE` value. Default **ON**; only an explicit
 /// false-y value opts out.
 pub fn parse_require_dialable(raw: Option<&str>) -> bool {
-    match raw.map(|s| s.trim().to_ascii_lowercase()) {
-        Some(v) if matches!(v.as_str(), "0" | "false" | "no" | "off") => false,
-        _ => true,
-    }
+    !matches!(
+        raw.map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        Some("0" | "false" | "no" | "off")
+    )
 }
 
 /// Parse `GPN_SEED`. Default **ON**; an explicit false-y value opts out of
 /// seed publication (and silences the degradation notice).
 pub fn parse_seed(raw: Option<&str>) -> bool {
-    match raw.map(|s| s.trim().to_ascii_lowercase()) {
-        Some(v) if matches!(v.as_str(), "0" | "false" | "no" | "off") => false,
-        _ => true,
-    }
+    !matches!(
+        raw.map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        Some("0" | "false" | "no" | "off")
+    )
 }
 
 /// Parse `GPN_DISCOVERABLE`. Default **ON**.
 pub fn parse_discoverable(raw: Option<&str>) -> bool {
-    match raw.map(|s| s.trim().to_ascii_lowercase()) {
-        Some(v) if matches!(v.as_str(), "0" | "false" | "no" | "off") => false,
-        _ => true,
-    }
+    !matches!(
+        raw.map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        Some("0" | "false" | "no" | "off")
+    )
 }
 
 /// Parse `GPN_REQUIRE_BACKBONE`. Default **ON** — a node that cannot be
@@ -1049,10 +1049,10 @@ pub fn parse_discoverable(raw: Option<&str>) -> bool {
 /// soft mode: run degraded, re-check every 10 minutes, print NOW DIALABLE on
 /// promotion.
 pub fn parse_require_backbone(raw: Option<&str>) -> bool {
-    match raw.map(|s| s.trim().to_ascii_lowercase()) {
-        Some(v) if matches!(v.as_str(), "0" | "false" | "no" | "off") => false,
-        _ => true,
-    }
+    !matches!(
+        raw.map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        Some("0" | "false" | "no" | "off")
+    )
 }
 
 /// Best-effort local LAN IPv4 address (no packet is sent: a UDP `connect` only

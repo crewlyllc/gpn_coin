@@ -61,7 +61,7 @@ pub fn parse_df_output(out: &str) -> Option<DiskSpace> {
     // Filesystem 1024-blocks Used Available Capacity Mounted-on
     // Take the LAST non-empty line: the header is line 1 and a path with spaces
     // can only affect the final field, never the numeric ones.
-    let line = out.lines().filter(|l| !l.trim().is_empty()).next_back()?;
+    let line = out.lines().rfind(|l| !l.trim().is_empty())?;
     let f: Vec<&str> = line.split_whitespace().collect();
     if f.len() < 4 {
         return None;

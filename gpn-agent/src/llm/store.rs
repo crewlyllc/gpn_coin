@@ -696,10 +696,7 @@ mod tests {
             drop(b);
         });
         std::thread::sleep(std::time::Duration::from_millis(50));
-        assert!(
-            handle.is_finished() == false,
-            "second lock acquired while held"
-        );
+        assert!(!handle.is_finished(), "second lock acquired while held");
         drop(a);
         handle.join().unwrap();
     }

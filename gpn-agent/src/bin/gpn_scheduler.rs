@@ -195,6 +195,7 @@ const JANITOR_ADOPT_WINDOW: u64 = 32;
 ///   2. **Fast path — `cancel_job` (requestor-only, Pending-only):** our own
 ///      still-`Pending` jobs past the token-scaled [`stale_secs`] window get a
 ///      quick requestor cancel, well before the on-chain deadline.
+///
 /// Both use the shared nonce stream (`*_fast`) so they can't desync request-path
 /// txs. Tracking is seeded from recent chain job ids so restarts don't leak slots.
 fn spawn_janitor(client: Arc<ChainClient>, rt: Arc<tokio::runtime::Runtime>) {
@@ -1373,6 +1374,11 @@ fn route_candidates(
 }
 
 /// Outcome of walking the candidate list.
+///
+/// `Served` carries the whole response value plus the provider record, so this
+/// enum is intentionally lopsided: it is a routing result, consumed once per
+/// request, never stored in bulk.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 enum Failover<T> {
     /// A provider took the work and (for channel jobs) finished it.
@@ -4876,7 +4882,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             out
                         }
                         false => match outcome.err {
-                            Some(e) => json!({"ok":false,"error":format!("{e}")}),
+                            Some(e) => json!({"ok":false,"error":e.to_string()}),
                             None => json!({"ok":false,"error":"could not create job"}),
                         },
                     }
@@ -6040,7 +6046,7 @@ mod tests {
         // A known-but-too-low tflops is excluded even if it claims "discrete"...
         let weak = mk("weak", "http://w", 1, "discrete", 2.0);
         assert!(pick(
-            &vec![weak.clone()],
+            std::slice::from_ref(&weak),
             0,
             0,
             0,
@@ -6053,7 +6059,7 @@ mod tests {
         // ...and an *unknown* tflops (0) is trusted ONLY when self-declared discrete.
         let unknown_disc = mk("ud", "http://ud", 1, "discrete", 0.0);
         assert!(pick(
-            &vec![unknown_disc],
+            &[unknown_disc],
             0,
             0,
             0,
@@ -6065,7 +6071,7 @@ mod tests {
         .is_some());
         let unknown_integ = mk("ui", "http://ui", 1, "integrated", 0.0);
         assert!(pick(
-            &vec![unknown_integ],
+            &[unknown_integ],
             0,
             0,
             0,
@@ -6091,7 +6097,7 @@ mod tests {
         let dgpu = mk_amd("amd-d", "http://d", 50, "AMD Radeon RX 7900 XTX");
         assert_eq!(dgpu.gpu_class, "discrete");
         assert!(pick(
-            &vec![dgpu],
+            &[dgpu],
             0,
             0,
             0,
@@ -6105,7 +6111,7 @@ mod tests {
         let igpu = mk_amd("amd-i", "http://i", 1, "AMD Radeon(TM) Graphics");
         assert_eq!(igpu.gpu_class, "integrated");
         assert!(pick(
-            &vec![igpu],
+            &[igpu],
             0,
             0,
             0,

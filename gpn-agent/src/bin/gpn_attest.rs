@@ -59,8 +59,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "GPUAttestation",
         "submit_attestation",
         vec![
-            Value::from_bytes(&challenge),
-            Value::from_bytes(&gpu_hash),
+            Value::from_bytes(challenge),
+            Value::from_bytes(gpu_hash),
             Value::u128(1),              // gpu_count
             Value::u128(gflops as u128), // compute_gflops
         ],

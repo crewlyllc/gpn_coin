@@ -4,35 +4,35 @@
 //! (no Ollama probe, so every caller — heartbeat, provider claim loop, access
 //! point routing — can use the same rules without extra HTTP):
 //!
-//! 1. **Does it fit?** A provider must not advertise or claim a model whose
-//!    weights cannot fit in its VRAM. [`MODEL_VRAM_GB`] is a deliberately small,
-//!    conservative table of common assistant models; the check applies a
-//!    headroom factor ([`DEFAULT_VRAM_HEADROOM`], 1.15× by default) so KV cache
-//!    + runtime overhead never push a "just fits" model into an OOM. An unknown
-//!    model is **not** blocked (we cannot know its size) — it is reported as
-//!    [`VramFit::Unknown`] so the caller can log it. Operators override with
-//!    `GPN_MODEL_VRAM_OVERRIDE`.
+//! **Q1 — does it fit?** A provider must not advertise or claim a model whose
+//! weights cannot fit in its VRAM. [`MODEL_VRAM_GB`] is a deliberately small,
+//! conservative table of common assistant models; the check applies a
+//! headroom factor ([`DEFAULT_VRAM_HEADROOM`], 1.15× by default) so KV cache
+//! plus runtime overhead never push a "just fits" model into an OOM. An unknown
+//! model is **not** blocked (we cannot know its size) — it is reported as
+//! [`VramFit::Unknown`] so the caller can log it. Operators override with
+//! `GPN_MODEL_VRAM_OVERRIDE`.
 //!
-//!    Why a static table: querying Ollama's `/api/show` for every model on every
-//!    `/status` poll is exactly the noise item #48 removed. The table is the
-//!    fast path; a size can be overridden per model
-//!    (`GPN_MODEL_VRAM_OVERRIDE="qwen2.5:7b=5.2"`).
+//! Why a static table: querying Ollama's `/api/show` for every model on every
+//! `/status` poll is exactly the noise item #48 removed. The table is the
+//! fast path; a size can be overridden per model
+//! (`GPN_MODEL_VRAM_OVERRIDE="qwen2.5:7b=5.2"`).
 //!
-//! 2. **May it be listed publicly?** `GET /v1/models` (the OpenAI facade) and the
-//!    public site are a shop window: a fine-tune artifact (`tuned-<job>`), a toy
-//!    model (`stories260K`, anything under ~300M params) or an unvetted name has
-//!    no business there. [`is_public_model`] enforces a known-good allowlist;
-//!    GPN_PUBLIC_MODELS (CSV) replaces it for an operator who knows better. A
-//!    model excluded from the catalogue is still **usable internally**: a
-//!    provider keeps serving it and a caller who names it explicitly still gets
-//!    an answer — it just is not advertised.
+//! **Q2 — may it be listed publicly?** `GET /v1/models` (the OpenAI facade) and the
+//! public site are a shop window: a fine-tune artifact (`tuned-<job>`), a toy
+//! model (`stories260K`, anything under ~300M params) or an unvetted name has
+//! no business there. [`is_public_model`] enforces a known-good allowlist;
+//! GPN_PUBLIC_MODELS (CSV) replaces it for an operator who knows better. A
+//! model excluded from the catalogue is still **usable internally**: a
+//! provider keeps serving it and a caller who names it explicitly still gets
+//! an answer — it just is not advertised.
 //!
 //! Env:
-//!   GPN_MODEL_VRAM_HEADROOM   headroom multiplier (default 1.15; 1.0 disables)
-//!   GPN_MODEL_VRAM_OVERRIDE   `all` (gate off) | CSV of `model` or `model=GB`
-//!   GPN_PUBLIC_MODELS         CSV allowlist replacing the built-in one;
-//!                             `all`/`*` publishes everything not in the hard
-//!                             exclusion set
+//! GPN_MODEL_VRAM_HEADROOM   headroom multiplier (default 1.15; 1.0 disables)
+//! GPN_MODEL_VRAM_OVERRIDE   `all` (gate off) | CSV of `model` or `model=GB`
+//! GPN_PUBLIC_MODELS         CSV allowlist replacing the built-in one;
+//! `all`/`*` publishes everything not in the hard
+//! exclusion set
 
 use std::sync::OnceLock;
 
@@ -329,11 +329,7 @@ pub fn is_hard_excluded(model: &str) -> bool {
 /// The allowlist in force: `GPN_PUBLIC_MODELS` when set, else the built-in one.
 pub fn public_allowlist() -> Vec<String> {
     let raw = std::env::var("GPN_PUBLIC_MODELS").unwrap_or_default();
-    let list: Vec<String> = raw
-        .split(',')
-        .map(|s| norm(s))
-        .filter(|s| !s.is_empty())
-        .collect();
+    let list: Vec<String> = raw.split(',').map(norm).filter(|s| !s.is_empty()).collect();
     if list.is_empty() {
         PUBLIC_MODELS_DEFAULT.iter().map(|s| norm(s)).collect()
     } else {

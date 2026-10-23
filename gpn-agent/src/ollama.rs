@@ -138,10 +138,10 @@ pub fn classify(status: Option<u16>, body: Option<&str>) -> Probe {
 /// Parse `GPN_REQUIRE_OLLAMA`. Default **ON**; only an explicit false-y value
 /// opts out (mirrors `GPN_REQUIRE_DIALABLE`).
 pub fn require_ollama(raw: Option<&str>) -> bool {
-    match raw.map(|s| s.trim().to_ascii_lowercase()) {
-        Some(v) if matches!(v.as_str(), "0" | "false" | "no" | "off") => false,
-        _ => true,
-    }
+    !matches!(
+        raw.map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        Some("0" | "false" | "no" | "off")
+    )
 }
 
 /// The hard-gate decision. Pure.

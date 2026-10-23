@@ -709,9 +709,9 @@ mod tests {
             MOCK_STAKE.with(|c| c.set(10_000));
             assert!(Token::distribute_staking_rewards(RuntimeOrigin::root(), vec![1, 2]).is_ok());
             assert_eq!(StakingRewardPool::<Test>::get(), 0);
-            assert_eq!(Balances::free_balance(&pallet_account), 0);
-            assert_eq!(Balances::free_balance(&1), 1_000_001);
-            assert_eq!(Balances::free_balance(&2), 1_000_001);
+            assert_eq!(Balances::free_balance(pallet_account), 0);
+            assert_eq!(Balances::free_balance(1), 1_000_001);
+            assert_eq!(Balances::free_balance(2), 1_000_001);
         });
     }
 
@@ -724,9 +724,9 @@ mod tests {
             <OracleRewardPool<Test>>::put(2u128);
             assert!(Token::distribute_oracle_rewards(RuntimeOrigin::root(), vec![1, 2]).is_ok());
             assert_eq!(OracleRewardPool::<Test>::get(), 0);
-            assert_eq!(Balances::free_balance(&pallet_account), 0);
-            assert_eq!(Balances::free_balance(&1), 1_000_001);
-            assert_eq!(Balances::free_balance(&2), 1_000_001);
+            assert_eq!(Balances::free_balance(pallet_account), 0);
+            assert_eq!(Balances::free_balance(1), 1_000_001);
+            assert_eq!(Balances::free_balance(2), 1_000_001);
         });
     }
 

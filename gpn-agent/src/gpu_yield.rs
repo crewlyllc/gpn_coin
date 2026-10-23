@@ -189,7 +189,7 @@ impl GpuYieldGuard {
         let mut f = &file;
         let _ = f.set_len(0);
         let _ = f.seek(SeekFrom::Start(0));
-        let _ = write!(f, "pid={} since={}\n", std::process::id(), now_ms());
+        let _ = writeln!(f, "pid={} since={}", std::process::id(), now_ms());
         let _ = f.flush();
 
         if acquired_after >= Duration::from_millis(20) {

@@ -614,7 +614,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// This box's VRAM in MiB (0 = unknown), probed once per process.
 fn node_vram_mb() -> u64 {
     static VRAM: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *VRAM.get_or_init(|| gpn_agent::gpu::detect_vram_mb())
+    *VRAM.get_or_init(gpn_agent::gpu::detect_vram_mb)
 }
 
 /// Resolve a requested model to a concrete one. `auto`/empty means "pick any
@@ -1485,12 +1485,10 @@ fn chain_tip_readable(tip: Option<u64>) -> bool {
 /// `(compute_gflops, submitted_at block)` — the exact two fields the pallet
 /// keeps and the two that matter:
 ///
-/// * no record at all          → attest (the node was never attested at all)
-/// * `compute_gflops == 0`     → attest (a zero record is a broken measurement
-///                               someone wrote: box1's whole complaint)
-/// * older than `refresh_blocks` → attest (age = block number; `MaxAttestationAge`
-///                               is 14 400, so the default lands mid-window)
-/// * otherwise                 → keep it (re-attesting costs a tx and a GEMM run)
+/// * no record at all → attest (the node was never attested at all)
+/// * `compute_gflops == 0` → attest (a zero record is a broken measurement someone wrote: box1's complaint)
+/// * older than `refresh_blocks` → attest (age = block number; `MaxAttestationAge` is 14 400)
+/// * otherwise → keep it (re-attesting costs a tx and a GEMM run)
 ///
 /// `head == 0` (unreadable) never counts as "old": without a head there is no
 /// evidence of staleness, and a spurious attestation on every start is noise.

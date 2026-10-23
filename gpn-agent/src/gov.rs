@@ -770,9 +770,9 @@ impl ProposalEntry {
 ///
 /// Layout (storage version 1):
 /// `ProposalCall` (variant byte `0x00` inline / `0x01` preimage)
-///  * inline:    `RuntimeCall` (pallet u8, call u8, args…)
-///  * preimage:  `hash: [u8;32]` ++ `len: u32 (LE)`
-/// ++ `approvals: Vec<AccountId32>` (compact len + 32·n) ++ `created_at: u32`.
+/// - inline: `RuntimeCall` (pallet u8, call u8, args…)
+/// - preimage: `hash: [u8;32]` ++ `len: u32 (LE)`
+///   ++ `approvals: Vec<AccountId32>` (compact len + 32·n) ++ `created_at: u32`.
 ///
 /// Version 0 (pre-spec-42, i.e. everything up to and including the live
 /// spec-41 chain) had **no** variant byte: the entry starts directly with the
@@ -1344,7 +1344,7 @@ mod tests {
         b.push((code.len() as u8) << 2);
         b.extend_from_slice(code);
         b.push((approvals as u8) << 2);
-        b.extend(std::iter::repeat(9u8).take(32 * approvals as usize));
+        b.extend(std::iter::repeat_n(9u8, 32 * approvals as usize));
         b.extend_from_slice(&created_at.to_le_bytes());
         b
     }
@@ -1386,7 +1386,7 @@ mod tests {
         b.push((code.len() as u8) << 2);
         b.extend_from_slice(code);
         b.push((approvals as u8) << 2);
-        b.extend(std::iter::repeat(3u8).take(32 * approvals as usize));
+        b.extend(std::iter::repeat_n(3u8, 32 * approvals as usize));
         b.extend_from_slice(&created_at.to_le_bytes());
         b
     }
@@ -1429,7 +1429,7 @@ mod tests {
         b.extend_from_slice(&hash);
         b.extend_from_slice(&len.to_le_bytes());
         b.push((approvals as u8) << 2);
-        b.extend(std::iter::repeat(7u8).take(32 * approvals as usize));
+        b.extend(std::iter::repeat_n(7u8, 32 * approvals as usize));
         b.extend_from_slice(&created_at.to_le_bytes());
         b
     }

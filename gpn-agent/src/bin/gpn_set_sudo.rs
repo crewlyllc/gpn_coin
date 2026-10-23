@@ -130,7 +130,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Sudo",
         vec![Value::unnamed_variant(
             "set_key",
-            vec![Value::from_bytes(&new_bytes)],
+            vec![Value::from_bytes(new_bytes)],
         )],
     );
     let call = subxt::dynamic::tx("Sudo", "sudo", vec![inner]);

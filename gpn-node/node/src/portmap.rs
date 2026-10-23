@@ -218,8 +218,10 @@ pub struct IgdMapper {
 impl IgdMapper {
     /// Discover an IGD via SSDP within [`UPNP_SEARCH_TIMEOUT`].
     pub fn discover() -> Result<Self, MapError> {
-        let mut opts = igd_next::SearchOptions::default();
-        opts.timeout = Some(UPNP_SEARCH_TIMEOUT);
+        let opts = igd_next::SearchOptions {
+            timeout: Some(UPNP_SEARCH_TIMEOUT),
+            ..Default::default()
+        };
         igd_next::search_gateway(opts)
             .map(|gateway| IgdMapper { gateway })
             .map_err(|e| MapError::NoGateway(e.to_string()))
@@ -512,10 +514,10 @@ pub fn parse_retry_secs(raw: Option<&str>) -> u64 {
 
 /// Parse `GPN_UPNP`. Default **on** (`auto`); only an explicit off opts out.
 pub fn parse_upnp(raw: Option<&str>) -> bool {
-    match raw.map(|s| s.trim().to_ascii_lowercase()) {
-        Some(v) if matches!(v.as_str(), "off" | "0" | "false" | "no" | "disabled") => false,
-        _ => true,
-    }
+    !matches!(
+        raw.map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        Some("off" | "0" | "false" | "no" | "disabled")
+    )
 }
 
 /// Which port the router should forward to on our side (the listen port).
