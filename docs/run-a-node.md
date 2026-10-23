@@ -1834,6 +1834,31 @@ sudo resolvectl dns <iface> 1.1.1.1 192.168.1.1 && resolvectl flush-caches
 # e.g. iface = enp42s0
 ```
 
+## Rebuilding and deploying a binary (one at a time)
+
+**Deploy one binary at a time; the lane lock exists because two deploys once raced and shipped the wrong build.**
+Two agents once ran `cargo build --release` from the same `target/release` and
+installed at the same moment; a parallel build replaced the installed provider
+with a binary that did not contain the change under test, and the test passed
+against stale code. Build/install only through the lane:
+
+```bash
+cd gpn-agent
+../scripts/deploy-bin.sh --bin gpn_llm_provider --unit gpn-provider --expect-marker gpu-lock
+```
+
+It takes an exclusive `flock` on `~/.gpn/deploy.lock` (a second run waits and
+says so), refuses a stale artifact, asserts `--expect-marker` substrings in the
+built binary **before** installing, backs the old binary up as
+`<name>.bak-<UTC ts>`, installs by atomic rename, restarts the named
+`systemctl --user` unit(s) until `is-active`, and prints sha256 built-vs-installed.
+
+Then confirm the **running process**, not just the file:
+
+```bash
+strings -a /proc/$(systemctl --user show -p MainPID --value gpn-provider)/exe | grep -F gpu-lock
+```
+
 ## Fault isolation / why separate processes
 
 The supervisor deliberately keeps one process per part: an ollama/diffusion
