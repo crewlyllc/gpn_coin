@@ -1,5 +1,26 @@
 # GPN change-log
 
+## 2026-10-23 17:00 PT — PM07 #99 **journal flood**: a *state* notice was logged as an *event* (1 808 identical lines/hour)
+
+**WHY (measured):** `journalctl --user -u gpn-provider-heartbeat --since -60min` returned **1 808 lines and every one of them was the same message** — `[status] ⚠ on-chain attestation disagrees with this box's idle measurement …` — **twice per poll**, every 2–6 s. The unit's journal was 100 % this one line, so nothing else the heartbeat says (peer identity, hardware re-measure, model filtering, p2p warnings) survived in a log an operator can read, and the journal grew ~44 k lines/day for no information.
+
+**ROOT CAUSE:** item #97's sanity checks warned from inside the **value resolver** (`clamp_operator_gflops`, and the chain-record branch of `advertised_gflops`), and the `/status` handler called the resolver **twice per request**: once for the body's `gflops`, once again inline for the `gflops_source` argument of `attach_attest_conditions`. The condition is a *state* (a legacy chain record that disagrees with this box's own idle measurement), not an *event* — so it belonged on the transition, not on every read.
+
+**FIX (`gpn-agent/src/bin/gpn_provider_status.rs`):**
+* `notice_once(key)` — a value-keyed `NOTICE_SEEN` book, the same shape as this file's existing `vram_filter_logged`. It logs the **first** time a state is seen and again only if the state changes (the key carries `record:measurement` / `operator:measurement`, so a fresh attestation or a new measurement re-logs); it is bounded to the last 32 states; and a **poisoned lock fails open** (logs) rather than silently suppressing a warning for the life of the process.
+* the handler now resolves `(gflops, gflops_source)` **once** per request and passes the source into `attach_attest_conditions`, instead of calling the resolver a second time.
+* **no signal is lost:** every `/status` response still publishes `gflops_source` and `gflops_stale_warning`, so a monitor reads the state from JSON and never needs the journal.
+
+**TESTS:** +1 `state_notices_are_announced_once_not_per_poll` — the pure predicate matrix (same key silent, changed value re-logs, different notice independent, empty book) plus 100 repeats staying silent and the book staying bounded → `gpn_provider_status` **28 passed / 0 failed**; `cargo fmt --all --check` clean; the **exact CI clippy lane** (allow-list + `-D warnings`) clean.
+
+**LIVE (deployed through the one lane, `deploy-bin.sh`: marker `gflops-unit-v97-status` asserted in the built artifact **before** install, fingerprint equal, `.bak-20261023-235538` kept, `lane waited: no`):**
+* `gpn-provider-heartbeat` restarted; boot prints the warning **once**.
+* since the restart: **9 lines total, exactly 1 occurrence of the warning, 0 repeats across ~50 polls** (was ~2 per poll ⇒ ~30/min ⇒ 1 808/h).
+* `/status` unchanged in content: `gflops 825`, `gflops_source "local idle measurement (chain record implausible or absent)"`, `gflops_stale_warning "on-chain record 30000 GFLOPS is 3536% above this card's idle measurement of 825 GFLOPS"`, `gflops_samples/spread/conditions`.
+* rule-5a: chain spec **41**, head advancing, `/jobs` 256-window **247 Completed / 5 Cancelled / 4 Failed, 0 non-terminal**, 0 ERROR/panic; chat e2e **HTTP 200 in 75 ms `payment: "channel"`** (channel 7); AP still lists this provider healthy with the honest source.
+
+**Docs:** `docs/run-a-node.md` — a bullet in the measurement rules stating that a state warning is logged on the transition (and that the same facts live in `gflops_stale_warning` / `gflops_source` in every response). **Residual (not this item):** AP `/providers` lists this box **twice** (both `gflops 825`, `latency_ms` 12 and 100) — the duplicate-registration identity class that `warn_duplicate_peer_ids` only logs.
+
 ## 2026-10-23 15:00 PT — PM07 #97 **GFLOPS units + eligibility floor**: stop gating routes on invented numbers
 
 **WHY (measured, idle, best-of-3 on this box):** the chain carried `compute_gflops: 30000` for an
