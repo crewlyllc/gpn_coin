@@ -314,7 +314,9 @@ writes an assignment → that provider claims + runs it`. The chain stays the es
    reaches ~5–7 % of a card's FP32 peak: an RTX 4060 (15.1 TFLOPS peak) measures 823–912, an RTX 5070 Ti
    ~2 300–2 650 (estimate). The eligibility floor is **250 GFLOPS** (30 % of the weakest supported card's
    measurement), replacing the old `3000` that was written on the peak scale and which no consumer card
-   could ever clear. `30000` on a 15 TFLOPS card is a pre-2026-10 unit bug, not a fast GPU.
+   could ever clear — **staged for the next runtime upgrade (spec 44); the chain still enforces 3000
+   until it enacts**, so a fresh attestation below that is rejected (`BelowEligibilityFloor`) and the
+   box keeps its old record. `30000` on a 15 TFLOPS card is a pre-2026-10 unit bug, not a fast GPU.
 
    **Only `gflops_source: "attested-idle"` counts.** A hand-typed `--gflops`, an older chain record or a
    contended sample is **unknown**, never evidence: the AP will not admit *or* exclude a box on it. With
