@@ -603,11 +603,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         spawn_infer_server(&listen, chan);
     }
 
+    // Item #72 — progress-based liveness. The loop below had no bounded wait:
+    // a chain read over a half-open websocket, a stalled block import or any
+    // future unbounded `await` just parks it, the unit stays `active`, nothing
+    // is logged, and the only symptom is a job that never moves (the 20:24
+    // wedge: ~23 min silent with #100 sitting on-chain `Pending`). Every phase
+    // transition now bumps `~/.gpn/provider-tick.json`, and a plain thread (a
+    // wedged runtime must not supervise itself) turns a stall into a WARN + a
+    // real restart via `Restart=always`.
+    let progress = std::sync::Arc::new(std::sync::Mutex::new(
+        gpn_agent::provider_watchdog::Progress::new(
+            gpn_agent::provider_watchdog::tick_path(),
+            gpn_agent::provider_watchdog::stale_after_from_env(),
+        ),
+    ));
+    if gpn_agent::provider_watchdog::watchdog_enabled() {
+        let budget = gpn_agent::provider_watchdog::stale_after_from_env();
+        println!(
+            "[watchdog] armed: no progress for {}s in a normal phase (gpu-wait/infer phase get \
+             their own longer budgets) ⇒ WARN + exit {} for a restart; tick {}",
+            budget.as_secs(),
+            gpn_agent::provider_watchdog::STALL_EXIT_CODE,
+            gpn_agent::provider_watchdog::tick_path().display()
+        );
+        gpn_agent::provider_watchdog::spawn(progress.clone(), Duration::from_secs(15));
+    } else {
+        eprintln!("[watchdog] DISABLED (GPN_PROVIDER_WATCHDOG=0) — a wedged loop will not restart");
+    }
+    set_phase(&progress, "idle");
+
     loop {
-        if let Err(e) = process_once(&client, &me, &addr, fast_claim).await {
+        if let Err(e) = process_once(&client, &me, &addr, fast_claim, &progress).await {
             eprintln!("[provider] cycle error: {e}");
         }
+        if let Ok(mut p) = progress.lock() {
+            p.finish_pass();
+        }
         tokio::time::sleep(Duration::from_millis(poll_ms)).await;
+    }
+}
+
+/// Item #72: mark the step the provider is entering. Cheap, never held across
+/// an `await`, and silently ignored if the cell is poisoned (a watchdog that
+/// panics must not take the provider with it).
+fn set_phase(
+    progress: &std::sync::Arc<std::sync::Mutex<gpn_agent::provider_watchdog::Progress>>,
+    phase: &str,
+) {
+    if let Ok(mut p) = progress.lock() {
+        p.set_phase(phase);
     }
 }
 
@@ -1672,12 +1716,16 @@ async fn wait_for_chain_ready(client: &ChainClient, tries: u32, delay_ms: u64) -
     None
 }
 
+type ProgressCell = std::sync::Arc<std::sync::Mutex<gpn_agent::provider_watchdog::Progress>>;
+
 async fn process_once(
     client: &ChainClient,
     me: &str,
     addr: &str,
     fast_claim: bool,
+    progress: &ProgressCell,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    set_phase(progress, "pass");
     // -1. Reconcile: finalize any of our jobs left in `AwaitingVerification`.
     // `complete_job` is the provider's own finalization call (state
     // Running|AwaitingVerification → Completed). On a slow chain a
@@ -1688,6 +1736,7 @@ async fn process_once(
     // reclaimed. Kind-agnostic so it also clears zombies with no off-chain
     // payload entry.
     if should_reconcile() {
+        set_phase(progress, "reconcile");
         // Item #61: no tip ⇒ nothing to reconcile *and* no evidence the chain is
         // empty. Skip the pass rather than scanning a bogus `0..0` window.
         let Some(next) = client.try_get_next_job_id().await else {
@@ -1972,6 +2021,7 @@ async fn process_once(
     // `0`, the tip filter discarded the whole settled set, and every historical
     // assignment was replayed — so a start during a chain-down window turned
     // completed jobs into permanent "waiting for inclusion" noise.
+    set_phase(progress, "claim");
     let settled_path = settled_store_path();
     let chain_tip = match client.try_get_next_job_id().await {
         Some(tip) if chain_tip_readable(Some(tip)) => tip,
@@ -2186,7 +2236,7 @@ async fn process_once(
         for id in just_claimed.iter().copied() {
             if let Some(job) = get_job(id) {
                 if job.kind == "llm" && should_attempt(id, &job.model) {
-                    if let Err(e) = run_job(client, id, &job, true).await {
+                    if let Err(e) = run_job(client, id, &job, true, progress).await {
                         eprintln!("[provider] run #{id} (pipelined) failed: {e}");
                     }
                 }
@@ -2224,7 +2274,7 @@ async fn process_once(
                     // model that can never run here — stop hammering it.
                     continue;
                 }
-                run_job(client, id, &job, fast_claim).await?;
+                run_job(client, id, &job, fast_claim, progress).await?;
             }
         }
     }
@@ -2268,7 +2318,9 @@ async fn run_job(
     id: u64,
     job: &gpn_agent::llm::LlmJob,
     fast: bool,
+    progress: &ProgressCell,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    set_phase(progress, &format!("run #{id}"));
     let job = job.clone();
     // Item #22 build-order step 3: the provider-side policy hook. Re-check the
     // assigned job BEFORE spending any GPU cycles — refuse hard-harm categories
@@ -2339,6 +2391,7 @@ async fn run_job(
     // gpn_diffusion_provider (same box, different process) now makes us WAIT
     // for the GPU instead of colliding with it in VRAM. The blocking acquire
     // runs off the async runtime so a long wait cannot stall other tasks.
+    set_phase(progress, "gpu-wait");
     let gpu = match tokio::task::spawn_blocking(gpn_agent::gpu_yield::GpuYieldGuard::acquire).await
     {
         Ok(Ok(g)) => g,
@@ -2368,10 +2421,12 @@ async fn run_job(
             return Ok(());
         }
     };
+    set_phase(progress, "infer");
     let result = {
         let _yield = gpu;
         run_inference_with_usage(&model, &job.prompt, job.temperature, job.max_tokens).await
     };
+    set_phase(progress, "settle");
     match result {
         Ok((text, hash, usage)) => {
             // Salted commitment: on-chain value = sha256(salt ‖ answer). The salt is

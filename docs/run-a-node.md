@@ -1513,6 +1513,38 @@ It is deliberately conservative so it never fights healthy behaviour:
 
 Tune it with `GPN_STALL_SECS` (min 60) and `GPN_STALL_CHECK_SECS` (min 10).
 
+## Watchdog — auto-recover a silently wedged **provider**
+
+A provider can wedge the same way the node can, and the symptom is worse for a
+customer: on 2026-10-22 `gpn-provider` made no progress for ~23 minutes while a
+job sat on-chain `Pending`. The unit stayed `active`, nothing was logged, and a
+plain `systemctl --user restart gpn-provider` fixed it instantly — it was a
+zombie, not a crash. Nothing bounded the provider's waits (a chain read over a
+half-open websocket has no request timeout), so any hung `await` parked the
+claim loop forever.
+
+`gpn_llm_provider` now reports **progress**, not just liveness:
+
+* every phase change and every completed pass bumps `~/.gpn/provider-tick.json`
+  (`{"pid","loops","phase","updated_unix"}`) — a stale tick therefore **names
+  the step that hung** (`reconcile`, `claim`, `run #N`, `gpu-wait`, `infer`,
+  `settle`, `idle`);
+* a plain watchdog thread (not a tokio task — a wedged runtime must not be able
+  to wedge its own supervisor) polls that state and, if nothing moved for the
+  phase's budget, logs ONE loud `⚠ [watchdog]` line naming the phase, the idle
+  time and the completed-pass count, then exits with code **75** so
+  `Restart=always` performs a real restart.
+
+Budgets are per phase because some steps are legitimately slow: `gpu-wait` uses
+`GPN_GPU_LOCK_TIMEOUT_SECS` + 300 s (default 1200 s), `infer` uses the 300 s
+ollama timeout + 300 s, `startup` gets 30 min (a cold model pull), and every
+other phase uses `GPN_PROVIDER_WATCHDOG_SECS` (default **300 s**, floor 60 s).
+
+Knobs: `GPN_PROVIDER_WATCHDOG=0` disables it, `GPN_PROVIDER_WATCHDOG_SECS` sets
+the default-phase budget, `GPN_PROVIDER_TICK` moves the tick file. Check the
+state with `cat ~/.gpn/provider-tick.json` (a healthy provider's `loops` grows
+about three times a second at the default 300 ms poll).
+
 ## Troubleshooting — node connected but not syncing
 
 **Symptom.** The node shows peers at the p2p layer — `system_peers` lists them as

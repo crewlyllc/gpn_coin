@@ -33,6 +33,7 @@ pub mod ollama;
 pub mod pricing;
 pub mod profitability;
 pub mod provider_policy;
+pub mod provider_watchdog;
 pub mod routing;
 pub mod seedlist;
 pub mod settle_policy;
