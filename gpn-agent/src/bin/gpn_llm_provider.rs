@@ -743,7 +743,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // a capable node then routes as a weak one forever. Measure and (re)attest
     // here, once, before the claim loop starts: this process has not submitted a
     // single nonce yet, so it cannot race the claim lane (the #31 class).
-    maybe_refresh_attestation(&client, &addr).await;
+    //
+    // Item #93: a busy GPU defers the attempt instead of measuring under
+    // contention; `attest_retry` below then retries from the main loop, i.e.
+    // still between claim passes, so the nonce never races the claim lane.
+    let mut attest_retry = gpn_agent::attest_idle::RetrySchedule::from_env();
+    let mut attest_at = match maybe_refresh_attestation(&client, &addr).await {
+        outcome if outcome.wants_retry() => {
+            let delay = attest_retry.on_busy();
+            if let AttestOutcome::SkippedBusy(reason) = &outcome {
+                eprintln!("[attest] deferred ({reason}) — retrying in {delay}s");
+            } else {
+                eprintln!("[attest] attempt did not complete — retrying in {delay}s");
+            }
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(delay))
+        }
+        _ => {
+            attest_retry.reset();
+            None
+        }
+    };
     if let Some(cfg) = gpn_agent::assign_pull::PullConfig::from_env(&me) {
         gpn_agent::assign_pull::spawn(cfg);
     }
@@ -883,6 +902,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     set_phase(&progress, "idle");
 
     loop {
+        // Item #93: retry a deferred attestation between passes. Running it here
+        // (same task as the claim lane) keeps the nonce serialised: a second
+        // concurrent submitter could read the same account nonce and one tx
+        // would be dropped.
+        if let Some(at) = attest_at {
+            if std::time::Instant::now() >= at {
+                let outcome = maybe_refresh_attestation(&client, &addr).await;
+                if outcome.wants_retry() {
+                    let delay = attest_retry.on_busy();
+                    if let AttestOutcome::SkippedBusy(reason) = &outcome {
+                        eprintln!(
+                            "[attest] GPU still busy ({reason}) after {} attempt(s) — next try in \
+                             {delay}s",
+                            attest_retry.attempts()
+                        );
+                    } else {
+                        eprintln!("[attest] retry did not complete — next try in {delay}s");
+                    }
+                    attest_at = Some(std::time::Instant::now() + std::time::Duration::from_secs(delay));
+                } else {
+                    attest_retry.reset();
+                    attest_at = None;
+                }
+            }
+        }
         if let Err(e) = process_once(&client, &me, &addr, fast_claim, &progress).await {
             eprintln!("[provider] cycle error: {e}");
         }
@@ -1904,17 +1948,51 @@ fn attest_measurement_useful(measured: u64, on_chain: Option<u64>, peak_gflops: 
     implausible
 }
 
+/// What a single attestation attempt did. The caller uses this to decide
+/// whether to retry later (item #93: a busy GPU is a *deferral*, not a failure).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AttestOutcome {
+    /// `GPN_ATTEST_REFRESH=0` — the operator opted out.
+    Disabled,
+    /// The on-chain record is current; nothing to do.
+    UpToDate,
+    /// The GPU was busy: nothing was measured and nothing was submitted.
+    SkippedBusy(String),
+    /// Measured on an idle GPU, but the measurement does not improve (or is not
+    /// allowed to replace) the record — e.g. below the chain's eligibility
+    /// floor.
+    NotUseful,
+    /// A fresh attestation was submitted.
+    Attested,
+    /// The measurement itself could not be taken (no device, kernel error) or
+    /// the submission failed.
+    Failed,
+}
+
+impl AttestOutcome {
+    /// Should the caller schedule another attempt?
+    fn wants_retry(&self) -> bool {
+        matches!(self, AttestOutcome::SkippedBusy(_) | AttestOutcome::Failed)
+    }
+}
+
 /// Measure this box's real GPU throughput and submit a fresh attestation when
 /// the on-chain record is missing, zeroed or stale. Never fatal: a node must
 /// still mine and serve if the chain/RPC/GPU probe misbehaves. **Never attests
 /// 0** — a failed measurement must not downgrade a good record (item #5).
-async fn maybe_refresh_attestation(client: &ChainClient, addr: &str) {
+///
+/// Item #93: the measurement is only taken while the GPU is **idle** and is the
+/// best of several runs. box1 spent months re-attesting 26/44/45 GFLOPS for a
+/// 16 GB card because every attempt ran while the operator's own AI workload
+/// held the card; those readings never cleared the eligibility floor, so the
+/// bad record could not be replaced and routing kept gating on it.
+async fn maybe_refresh_attestation(client: &ChainClient, addr: &str) -> AttestOutcome {
     if std::env::var("GPN_ATTEST_REFRESH")
         .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
         .unwrap_or(false)
     {
         println!("[attest] GPN_ATTEST_REFRESH=0 — leaving the on-chain attestation alone");
-        return;
+        return AttestOutcome::Disabled;
     }
     let head = client.head_block_number().await.unwrap_or(0);
     let rec = client
@@ -1929,6 +2007,7 @@ async fn maybe_refresh_attestation(client: &ChainClient, addr: &str) {
                 "[attest] on-chain attestation is current: {gflops} GFLOPS at block {at} \
                  (head {head}, refresh every {refresh} blocks) — not re-attesting"
             );
+            AttestOutcome::UpToDate
         }
         AttestPlan::Attest => {
             let why = match rec {
@@ -1943,26 +2022,106 @@ async fn maybe_refresh_attestation(client: &ChainClient, addr: &str) {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0);
-            let measured =
-                tokio::task::spawn_blocking(move || gpn_agent::gpu::measure_gflops(device))
-                    .await
-                    .unwrap_or_else(|e| Err(format!("measurement task failed: {e}")));
-            let gflops = match measured {
-                Ok(g) if g > 0 => g,
-                Ok(_) => {
+            // Item #93: an attestation is only ever measured on an **idle** GPU.
+            // Blocking (OpenCL + the settle sleep), so it stays off the runtime.
+            let policy = gpn_agent::attest_idle::IdlePolicy::from_env();
+            let runs = gpn_agent::attest_idle::runs_from_env();
+            let settle = gpn_agent::attest_idle::settle_from_env();
+            let measured = tokio::task::spawn_blocking(move || {
+                let mut probe = gpn_agent::attest_idle::RealProbe::new(device);
+                gpn_agent::attest_idle::measure_when_idle(&mut probe, &policy, runs, || {
+                    // Let the co-located miner see the yield flag and stand
+                    // down before utilisation is read, otherwise our own miner
+                    // reads as "someone else's workload" forever.
+                    std::thread::sleep(settle);
+                })
+            })
+            .await
+            .unwrap_or_else(|e| gpn_agent::attest_idle::IdleMeasurement::Failed {
+                reason: format!("measurement task failed: {e}"),
+            });
+            let (set, load) = match measured {
+                gpn_agent::attest_idle::IdleMeasurement::Busy {
+                    reason,
+                    load,
+                    after_settle,
+                } => {
+                    // This is the line an operator greps for: it is loud, it
+                    // names the cause, and it says nothing was submitted.
                     eprintln!(
-                        "[attest] ⚠ measured 0 GFLOPS — NOT attesting 0 (that would downgrade the \
-                         record and make this node unroutable). Fix the OpenCL/CUDA device or set \
-                         GPN_GFLOPS and pass it to the heartbeat."
+                        "{}",
+                        gpn_agent::attest_idle::busy_summary(
+                            &load,
+                            &reason,
+                            after_settle,
+                            settle
+                        )
                     );
-                    return;
+                    return AttestOutcome::SkippedBusy(reason);
                 }
-                Err(e) => {
-                    eprintln!("[attest] ⚠ GPU compute measurement failed ({e}) — not attesting");
-                    return;
+                gpn_agent::attest_idle::IdleMeasurement::Failed { reason } => {
+                    eprintln!(
+                        "[attest] ⚠ GPU compute measurement failed ({reason}) — not attesting"
+                    );
+                    return AttestOutcome::Failed;
                 }
+                gpn_agent::attest_idle::IdleMeasurement::Measured { set, load } => (set, load),
             };
+            let gflops = set.chosen();
+            if set.unstable {
+                println!(
+                    "[attest] idle measurement: {} — spread over {:+.0}%, taking the best \
+                     ({} GFLOPS); a moving measurement means contention or thermal throttling",
+                    set.describe(),
+                    gpn_agent::attest_idle::SPREAD_THRESHOLD_PCT,
+                    gflops
+                );
+            } else {
+                println!("[attest] idle measurement: {} — taking {} GFLOPS", set.describe(), gflops);
+            }
+            if set.zero_samples > 0 {
+                eprintln!(
+                    "[attest] ⚠ {} of {} run(s) returned 0 GFLOPS (failed launch, not a slow \
+                     card) and were discarded",
+                    set.zero_samples,
+                    set.zero_samples + set.samples.len()
+                );
+            }
             let on_chain = rec.map(|(g, _)| g).filter(|g| *g > 0);
+            // Item #93(3): never let a wrong record sit there silently.
+            if let Some(d) = gpn_agent::attest_idle::record_divergence(
+                on_chain,
+                gflops,
+                gpn_agent::attest_idle::RECORD_TOLERANCE_PCT,
+            ) {
+                eprintln!("[attest] ⚠ STALE/WRONG RECORD: {d}");
+                eprintln!(
+                    "[attest] ⚠ routing gates on the on-chain value, so this box is being routed \
+                     as a {} GFLOPS card until the record is replaced",
+                    d.on_chain
+                );
+            }
+            // Publish the conditions with the number, so `/status` can say
+            // "attested-idle" (and an operator can tell it from a stale one).
+            let at_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let mut state = gpn_agent::attest_idle::AttestState {
+                measured_gflops: gflops,
+                samples: set.samples.clone(),
+                median_gflops: set.median,
+                spread_pct: set.spread_pct,
+                conditions: "idle".to_string(),
+                util_percent: load.util_percent,
+                vram_used_mb: load.vram_used_mb,
+                vram_total_mb: load.vram_total_mb,
+                runs: set.samples.len() + set.zero_samples,
+                at_unix,
+                submitted: false,
+                on_chain_before: on_chain,
+            };
+            gpn_agent::attest_idle::write_state(&state);
             // The card's *estimated* FP32 peak (model-name table) is only used
             // to recognise an impossible record, never to invent a number.
             let (_model_name, peak_tflops) = gpn_agent::gpu::detect_gpu_capability();
@@ -1975,7 +2134,16 @@ async fn maybe_refresh_attestation(client: &ChainClient, addr: &str) {
                         .map(|g| g.to_string())
                         .unwrap_or_else(|| "none".to_string())
                 );
-                return;
+                if gflops < ELIGIBILITY_FLOOR_GFLOPS && on_chain.is_some() {
+                    eprintln!(
+                        "[attest] ⚠ the chain will refuse a record below {ELIGIBILITY_FLOOR_GFLOPS} \
+                         GFLOPS, so the existing {} GFLOPS record cannot be replaced yet. This is a \
+                         floor/scale problem (see docs/run-a-node.md \"What compute_gflops actually \
+                         measures\"), not a reason to submit a bad number.",
+                        on_chain.unwrap_or(0)
+                    );
+                }
+                return AttestOutcome::NotUseful;
             }
             if let Some(rec) = on_chain {
                 if gflops <= rec {
@@ -1986,7 +2154,7 @@ async fn maybe_refresh_attestation(client: &ChainClient, addr: &str) {
                     );
                 }
             }
-            println!("[attest] measured {gflops} GFLOPS — submitting a fresh attestation");
+            println!("[attest] measured {gflops} GFLOPS on an idle GPU — submitting a fresh attestation");
             let challenge = client
                 .get_attestation_challenge()
                 .await
@@ -1996,9 +2164,9 @@ async fn maybe_refresh_attestation(client: &ChainClient, addr: &str) {
                 model_name: model,
                 driver_version: String::new(),
                 vram_total_bytes: gpn_agent::gpu::detect_vram_mb() * 1024 * 1024,
-                vram_used_mb: 0,
+                vram_used_mb: load.vram_used_mb.unwrap_or(0),
                 temperature_celsius: 0.0,
-                gpu_utilization_percent: 0,
+                gpu_utilization_percent: load.util_percent.unwrap_or(0) as u8,
                 current_hashrate_mhs: 0.0,
                 compute_capability: String::new(),
                 cuda_version: None,
@@ -2007,18 +2175,34 @@ async fn maybe_refresh_attestation(client: &ChainClient, addr: &str) {
             let gpu_hash = gpn_agent::gpu::hash_gpu_info(&info);
             // Bounded: `submit_attestation` waits for inclusion (up to its 300 s
             // timeout). Startup must not hang on a stalled chain.
-            match tokio::time::timeout(
+            let submitted = match tokio::time::timeout(
                 std::time::Duration::from_secs(90),
                 client.submit_attestation(challenge, gpu_hash, 1, gflops),
             )
             .await
             {
-                Ok(Ok(())) => println!("[attest] attested {gflops} GFLOPS on chain"),
-                Ok(Err(e)) => eprintln!("[attest] submit_attestation failed: {e}"),
-                Err(_) => eprintln!(
-                    "[attest] submit_attestation timed out after 90s (chain stalled?) — \
-                     continuing; the claim lane re-reads the chain anyway"
-                ),
+                Ok(Ok(())) => {
+                    println!("[attest] attested {gflops} GFLOPS on chain");
+                    true
+                }
+                Ok(Err(e)) => {
+                    eprintln!("[attest] submit_attestation failed: {e}");
+                    false
+                }
+                Err(_) => {
+                    eprintln!(
+                        "[attest] submit_attestation timed out after 90s (chain stalled?) — \
+                         continuing; the claim lane re-reads the chain anyway"
+                    );
+                    false
+                }
+            };
+            if submitted {
+                state.submitted = true;
+                gpn_agent::attest_idle::write_state(&state);
+                AttestOutcome::Attested
+            } else {
+                AttestOutcome::Failed
             }
         }
     }

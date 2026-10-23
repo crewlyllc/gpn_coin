@@ -448,6 +448,41 @@ fn resolve_advertised_gflops(operator: u64, attested: Option<u64>) -> (u64, &'st
     }
 }
 
+/// Item #93: attach the *conditions* of the last attestation measurement, so an
+/// operator can tell a number this box measured on an idle GPU from a stale or
+/// contention-contaminated one. Adds nothing when no state file exists (a fresh
+/// box, or one that never attested).
+///
+/// Fields: `gflops_source` becomes `"attested-idle"` when the advertised value
+/// is exactly what we measured and submitted; `gflops_samples` / 
+/// `gflops_spread_pct` / `gflops_measured_at` / `gflops_conditions` describe the
+/// measurement; `gflops_stale_warning` names a record that disagrees with it.
+fn attach_attest_conditions(
+    body: &mut Value,
+    advertised: u64,
+    chain: Option<u64>,
+    source: &'static str,
+) {
+    let state = gpn_agent::attest_idle::read_state();
+    let (idle_source, warning) = gpn_agent::attest_idle::status_gflops_source(
+        advertised,
+        chain,
+        state.as_ref(),
+    );
+    body["gflops_source"] = json!(if idle_source.is_empty() { source } else { idle_source });
+    if let Some(st) = state {
+        body["gflops_measured"] = json!(st.measured_gflops);
+        body["gflops_samples"] = json!(st.samples);
+        body["gflops_spread_pct"] = json!((st.spread_pct * 10.0).round() / 10.0);
+        body["gflops_conditions"] = json!(st.conditions);
+        body["gflops_measured_at"] = json!(st.at_unix);
+        body["gflops_util_percent"] = json!(st.util_percent);
+        if let Some(w) = warning {
+            body["gflops_stale_warning"] = json!(w);
+        }
+    }
+}
+
 /// Accept only a plausible libp2p peer id (base58-ish, ed25519 `12D3Koo…` or
 /// legacy multihash `Qm…`). Anything else is dropped rather than relayed.
 fn normalize_peer_id(raw: &str) -> Option<String> {
@@ -1306,14 +1341,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server = Server::http(&listen).map_err(|e| format!("cannot bind {listen}: {e}"))?;
     // #65: `gflops` is what the access point routes on, so advertise the CHAIN's
     // attested value (capped by `--gflops`) instead of a hand-typed number.
-    let (gflops, gflops_source) = resolve_advertised_gflops(
-        operator_gflops,
-        if address.is_empty() {
-            None
-        } else {
-            attested_gflops(&endpoint, &address)
-        },
-    );
+    let boot_chain_gflops = if address.is_empty() {
+        None
+    } else {
+        attested_gflops(&endpoint, &address)
+    };
+    let (gflops, gflops_source) =
+        resolve_advertised_gflops(operator_gflops, boot_chain_gflops);
+    // #93: prefer "attested-idle" when the value is one this box measured on an
+    // idle GPU (state file written by the provider at attestation time).
+    let gflops_source = {
+        let mut meta = json!({});
+        attach_attest_conditions(&mut meta, gflops, boot_chain_gflops, gflops_source);
+        meta["gflops_source"]
+            .as_str()
+            .unwrap_or(gflops_source)
+            .to_string()
+    };
     println!("GPN provider heartbeat on http://{listen} — address={address} gflops={gflops} ({gflops_source}) models={:?} active={active}/{capacity} capabilities={:?}", models, capabilities);
     println!(
         "[status] hardware: vram_mb={} ram_mb={} gpu_class={} tflops={} mem_bw_gbps={} (re-measured every {}s)",
@@ -1410,14 +1454,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // #65: re-resolve per request (60 s cache) so a provider that
                 // re-attests while this heartbeat runs is picked up without a
                 // restart; the value never exceeds what the chain will accept.
-                let (gflops_now, _) = resolve_advertised_gflops(
-                    operator_gflops,
-                    if address.is_empty() {
-                        None
-                    } else {
-                        attested_gflops(&endpoint, &address)
-                    },
-                );
+                let chain_now = if address.is_empty() {
+                    None
+                } else {
+                    attested_gflops(&endpoint, &address)
+                };
+                let (gflops_now, _) = resolve_advertised_gflops(operator_gflops, chain_now);
                 let mut body = json!({
                     "address": address, "gflops": gflops_now, "models": models_now,
                     "can_pull": can_pull, "active": active, "capacity": capacity.max(1),
@@ -1428,6 +1470,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "disk_free_mb": disk.free_mb, "disk_total_mb": disk.total_mb,
                     "disk_free_pct": disk.free_percent()
                 });
+                // #93: measurement conditions (samples, spread, "attested-idle"
+                // provenance, stale-record warning) — so a low number can be
+                // told apart from one taken under contention.
+                attach_attest_conditions(
+                    &mut body,
+                    gflops_now,
+                    chain_now,
+                    resolve_advertised_gflops(operator_gflops, chain_now).1,
+                );
                 // Peer-id publication: always read live from THIS box's node.
                 // On failure the fields are published empty (null / []) — never
                 // a cached id, which would advertise an undialable identity.

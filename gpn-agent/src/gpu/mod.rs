@@ -179,6 +179,10 @@ impl GPUMonitor {
 pub fn measure_gflops(device_index: usize) -> Result<u64, String> {
     // Ask the co-located miner to stand down for the measurement (best-effort:
     // a contended reading is still a reading, and must not fail the call).
+    // NOTE: `attest_idle` (item #93) does NOT use this path — it takes the lock
+    // itself, verifies the device is idle, and calls
+    // [`measure_gflops_samples_locked`], precisely because a contended reading
+    // must never be submitted as an attestation.
     let _yield =
         crate::gpu_yield::GpuYieldGuard::acquire_with_timeout(std::time::Duration::from_secs(10))
             .ok();
@@ -192,6 +196,32 @@ pub fn measure_gflops(device_index: usize) -> Result<u64, String> {
     // matched to a card is not verifiable (the #87 confusion in one line).
     log::info!(
         "GPU benchmark: {gflops} GFLOPS (FP32 GEMM, best of 5) on device {device_index}: {}",
+        mm.device_name()
+    );
+    Ok(gflops)
+}
+
+/// Same GEMM benchmark as [`measure_gflops`], but returns **every** run
+/// separately instead of the single best one, and takes no lock: the caller
+/// already owns the GPU (`attest_idle::RealProbe` does, and holds the miner's
+/// yield flag while measuring). Taking the lock again here would deadlock
+/// against the caller's own `flock` for the whole 10 s acquisition timeout.
+///
+/// Returns GFLOPS per run (rounded), zeros preserved so the caller can see a
+/// run that produced nothing.
+pub fn measure_gflops_samples_locked(device_index: usize, runs: usize) -> Result<Vec<u64>, String> {
+    let mut mm =
+        matmul::GpuMatmul::new(device_index, 1024).map_err(|e| format!("open GPU matmul: {e}"))?;
+    let samples = mm
+        .run_samples(runs.max(1))
+        .map_err(|e| format!("GEMM benchmark: {e}"))?;
+    let gflops: Vec<u64> = samples
+        .iter()
+        .map(|f| (f / 1_000_000_000.0).round().max(0.0) as u64)
+        .collect();
+    log::info!(
+        "GPU benchmark samples: {gflops:?} GFLOPS (FP32 GEMM, {} run(s)) on device {device_index}: {}",
+        runs.max(1),
         mm.device_name()
     );
     Ok(gflops)

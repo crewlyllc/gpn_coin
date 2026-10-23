@@ -202,30 +202,50 @@ impl GPUMiningNodeAgent {
         // Measure real compute throughput (GFLOPS) on the GPU — this is the
         // on-chain attestable metric proving real AI-compute capability.
         //
-        // Item 5: never let a failed measurement become a SILENT 0. A 0 here is
-        // written on-chain as `compute_gflops = 0`, which makes the provider
-        // ineligible for every `min_gflops > 0` job (and puts it in the lowest
-        // attestation tier) — so say exactly why it happened.
-        let gflops = match gpu::measure_gflops(self.config.mining_device_index) {
-            Ok(g) => g,
-            Err(e) => {
+        // Item #93: only an **idle** device yields a capability figure. This is
+        // the exact path that wrote box1's permanent `188 GFLOPS` for a 16 GB
+        // RTX 5070 Ti: it measured while the operator's other AI workload held
+        // the card, and a contended reading (26/44/45 GFLOPS) is not a
+        // capability — it is a measurement of someone else's job.
+        //
+        // Item 5: never let a failed measurement become a SILENT 0 either — a 0
+        // written on-chain makes the provider ineligible for every
+        // `min_gflops > 0` job. Both cases now SKIP the attestation instead of
+        // submitting a number that would be wrong in the only place that
+        // matters (the chain).
+        let policy = gpn_agent::attest_idle::IdlePolicy::from_env();
+        let runs = gpn_agent::attest_idle::runs_from_env();
+        let settle = gpn_agent::attest_idle::settle_from_env();
+        let mut probe = gpn_agent::attest_idle::RealProbe::new(self.config.mining_device_index);
+        let measured = gpn_agent::attest_idle::measure_when_idle(&mut probe, &policy, runs, || {
+            std::thread::sleep(settle)
+        });
+        let set = match measured {
+            gpn_agent::attest_idle::IdleMeasurement::Measured { set, .. } => set,
+            gpn_agent::attest_idle::IdleMeasurement::Busy {
+                reason,
+                load,
+                after_settle,
+            } => {
                 log::warn!(
-                    "⚠ GPU compute measurement FAILED ({e}) — attesting gflops=0. This provider \
-                     will only be routed jobs with min_gflops=0 and will not reach a paid \
-                     attestation tier. Fix the OpenCL/CUDA device (device index \
-                     {}) or set GFLOPS explicitly.",
-                    self.config.mining_device_index
+                    "{}",
+                    gpn_agent::attest_idle::busy_summary(&load, &reason, after_settle, settle)
                 );
-                0
+                return Ok(());
+            }
+            gpn_agent::attest_idle::IdleMeasurement::Failed { reason } => {
+                log::warn!(
+                    "⚠ GPU compute measurement FAILED ({reason}) — skipping this attestation \
+                     rather than writing gflops=0 on chain"
+                );
+                return Ok(());
             }
         };
-        if gflops == 0 {
-            log::warn!(
-                "⚠ measured 0 GFLOPS — the GEMM benchmark returned no throughput (GPU busy, \
-                 driver mismatch, or OpenCL runtime missing)"
-            );
-        }
-        log::info!("Measured GPU compute: {} GFLOPS (FP32)", gflops);
+        let gflops = set.chosen();
+        log::info!(
+            "Measured GPU compute: {gflops} GFLOPS (FP32, idle GPU; samples {})",
+            set.describe()
+        );
 
         // Submit attestation to chain
         self.chain_client

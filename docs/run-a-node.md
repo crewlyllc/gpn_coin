@@ -1257,6 +1257,12 @@ min_version_enforce = true    # false = mine below the minimum (unsupported)
 | `GPN_GFLOPS` | upper bound on advertised compute; the heartbeat advertises `min(this, attested)` — leave it `0`/unset to advertise the on-chain attestation as-is | `0` |
 | `GPN_ATTEST_REFRESH` | `0` = never (re)attest from the provider loop | `1` |
 | `GPN_ATTEST_REFRESH_BLOCKS` | re-attest when the on-chain record is this old (half of `MaxAttestationAge` = 14 400) | `7200` |
+| `GPN_ATTEST_SAMPLES` | timed GEMM runs per attestation measurement (1–10); the best run is attested when they disagree | `3` |
+| `GPN_ATTEST_SETTLE_MS` | wait after taking the GPU lock before reading utilisation, so the co-located miner has stood down (0–30 000) | `2000` |
+| `GPN_ATTEST_MAX_UTIL_PCT` | device counts as **busy** above this utilisation; a busy GPU defers the attestation (0–100) | `10` |
+| `GPN_ATTEST_MAX_VRAM_FRACTION` | device counts as busy above this VRAM fraction even if utilisation reads low (a loaded model leaves no room for a stable run) | `0.5` |
+| `GPN_ATTEST_RETRY_SECS` | first retry delay after a skipped (busy) attestation; doubles per attempt | `300` |
+| `GPN_ATTEST_RETRY_MAX_SECS` | cap for the attestation retry backoff | `3600` |
 
 ### What `compute_gflops` actually measures
 
@@ -1272,11 +1278,26 @@ It is a **relative capability score, not spec-sheet TFLOPS**:
 
 Measurement rules that matter when you compare two boxes:
 
+* **attestation runs only when the GPU is idle.** Before measuring, the provider
+  takes the same cross-process GPU lock a job takes (no waiting: if a job holds
+  it, the attempt is skipped), waits `GPN_ATTEST_SETTLE_MS` for the co-located
+  miner to stand down, then reads utilisation and VRAM. If the card is still
+  loaded by anything else — an operator CUDA/ollama job, a desktop session, a
+  second miner — the attempt is logged as
+  `[attest] skipping: GPU busy (util …%) — will retry later` and retried with
+  backoff (`GPN_ATTEST_RETRY_SECS`, doubling, capped). **No measurement taken
+  under contention is ever submitted.** If your card also runs other AI work,
+  expect the value to update during quiet periods, not on the first attempt;
+* the number is a **best-of-N** (`GPN_ATTEST_SAMPLES`, default 3) and the spread
+  is logged: a >20 % spread is contention or thermal throttling, so the highest
+  sample is used, and `/status` publishes `gflops_samples`,
+  `gflops_spread_pct`, `gflops_conditions` and (when the advertised value is
+  this box's own idle measurement) `gflops_source: "attested-idle"`. A record
+  that disagrees with the idle measurement by more than 30 % is named in a loud
+  warning (`gflops_stale_warning` too);
 * the **discrete** card is measured (device 0 is ordered discrete-first, so the
   benchmark and the miner always use the same GPU — before 2026-10-23 they did
   not, and a Windows box attested an iGPU-class 188 GFLOPS for a 16 GB card);
-* never compare a reading taken while the GPU is busy — that is contention, not
-  capability;
 * a record that is **physically impossible** for the card (above 1.5x its
   estimated FP32 peak, e.g. an old pre-units-fix `30000` on a 15 TFLOPS card)
   may be corrected downward; a plausible record is never downgraded.

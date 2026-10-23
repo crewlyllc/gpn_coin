@@ -215,6 +215,21 @@ impl GpuMatmul {
         total_flops / elapsed.as_secs_f64().max(1e-9)
     }
 
+    /// One warm-up run, then `iters` timed runs, returning **each run's** FLOP/s
+    /// separately (item #93). `run_bench` keeps the maximum and throws the rest
+    /// away, which hides the spread — and spread is precisely how you tell a
+    /// clean measurement from one contaminated by another workload or by
+    /// thermal throttling.
+    pub fn run_samples(&mut self, iters: usize) -> Result<Vec<f64>, String> {
+        self.run_once()?; // warm-up: first launch includes JIT + clock ramp
+        let mut out = Vec::with_capacity(iters.max(1));
+        for _ in 0..iters.max(1) {
+            let elapsed = self.run_once()?;
+            out.push(Self::flops_of(self.n, elapsed));
+        }
+        Ok(out)
+    }
+
     /// Run `iters` matmuls back to back, returning (total_elapsed, avg_flops).
     /// FLOPs per matmul = 2 * N^3.
     pub fn run_many(&mut self, iters: usize) -> Result<(std::time::Duration, f64), String> {

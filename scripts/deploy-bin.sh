@@ -169,7 +169,14 @@ if [ "${#MARKERS[@]}" -gt 0 ]; then
   say "asserting markers in BUILT artifact (before install)"
   for src in "${BUILT[@]}"; do
     for m in "${MARKERS[@]}"; do
-      if strings -a -- "$src" | grep -qF -- "$m"; then
+      # `strings | grep -q` is a trap here: grep exits the moment it matches, the
+      # still-writing `strings` takes SIGPIPE, and `set -o pipefail` turns the
+      # pipeline into status 141 — a FALSE "MARKER MISSING" on exactly the big
+      # binaries this gate exists to protect (2026-10-23: gpn_llm_provider,
+      # 21 MB, failed the check while `strings -a | grep -F` found the marker by
+      # hand). `grep -c` reads the whole stream and exits 0/1 on presence.
+      n=$(strings -a -- "$src" | grep -cF -- "$m" || true)
+      if [ "${n:-0}" -gt 0 ]; then
         info "$(basename "$src"): marker '$m' present"
       else
         die 5 "MARKER MISSING: '$m' not found in $src. NOT installed — this is exactly the stale/wrong-build failure. Re-run the build and check the source actually contains it (grep -rn '$m' $CRATE_DIR/src)."

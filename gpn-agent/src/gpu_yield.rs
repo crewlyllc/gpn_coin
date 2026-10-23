@@ -113,6 +113,19 @@ impl GpuYieldGuard {
         Self::acquire_with_timeout(lock_timeout())
     }
 
+    /// Take the GPU **without waiting**: `None` means another job (in this
+    /// process or another) owns it right now.
+    ///
+    /// This is the probe the attestation gate uses (queue item #93): an
+    /// attestation measurement must be taken on an *idle* device, so "who owns
+    /// the GPU" is answered by trying to take it rather than by inspecting a
+    /// flag. On success the caller holds real exclusion — which is what makes
+    /// the following measurement uncontended for its whole duration, not just
+    /// at the instant of the check.
+    pub fn try_acquire() -> Option<Self> {
+        Self::acquire_with_timeout(Duration::ZERO).ok()
+    }
+
     /// Take the GPU, waiting at most `timeout`. Blocks the calling thread while
     /// waiting — call it from a blocking context (a job thread, or
     /// `spawn_blocking`), never from an async task that must stay responsive.
