@@ -1603,6 +1603,7 @@ next attempt (this is what wedged the image lane on 2026-10-23).
 |---|---|---|
 | on disk (warm) | any | served normally |
 | recorded unloadable on this host | any | refused instantly, never re-pulled |
+| needs credentials (401/403) | any | refused instantly **until the verdict lapses** (default 6 h) |
 | cold | ≥ `GPN_COLD_PULL_BUDGET_MS` (default **900000** = 15 min) | pulled in-band, then rendered |
 | cold | < the budget | **refused in ~50 ms** with `HTTP 425`, a background pull starts |
 
@@ -1616,13 +1617,30 @@ request leaves 179s — downloading it now in the background; retry when warm
 ```
 
 One background pull per model per process (a retry storm cannot spawn more), and
-a permanent failure (401/403/404 — removed or gated repo) is recorded in
-`~/.gpn/diffusion_unloadable.json`, so later requests refuse instantly with
-`… is unloadable on this host (recorded)` instead of downloading again.
+a failure no retry can fix is recorded so later requests refuse instantly instead
+of downloading again. Two verdicts, deliberately different lifetimes:
+
+* **`~/.gpn/diffusion_unloadable.json`** — the repo/loader itself is broken
+  (`404`, not a model id, `cannot load model`, OOM on this box). **Forever**: no
+  local action can change it, and re-attempting burned ~1 min of RAM and risked
+  an OOM kill. Message: `… is unloadable on this host (recorded …)`.
+* **`~/.gpn/diffusion_needs_auth.json`** — HuggingFace answered **`401`/`403`**.
+  That is *this host*, not the repo: HF returns `401` identically for a private
+  repo, a gated repo, a retired repo and a bad token. **Timed**
+  (`GPN_DIFFUSION_AUTH_RETRY_SECS`, default **21600** = 6 h), so setting
+  `HF_TOKEN` heals the model with no state editing. Message: `… needs HuggingFace
+  credentials on this host — or the repo is private, gated or does not exist …`
+
+So if a model you know is public is refused for credentials, export `HF_TOKEN`
+for `gpn-diffusion` (or delete the entry) — do **not** add it to the unloadable
+file, which would condemn it permanently.
 
 Knobs: `GPN_COLD_PULL_BUDGET_MS` (how long a cold pull may take before we refuse
-instead of accepting the job), `GPN_DIFFUSE_TIMEOUT_SECS` (the render budget —
-now progress-aware, extended while the helper keeps reading bytes).
+instead of accepting the job), `GPN_DIFFUSION_AUTH_RETRY_SECS` (how long a
+`401`/`403` verdict silences a model), `GPN_DIFFUSION_NEEDS_AUTH` /
+`GPN_DIFFUSION_UNLOADABLE` (registry paths), `GPN_DIFFUSE_TIMEOUT_SECS` (the
+render budget — now progress-aware, extended while the helper keeps reading
+bytes).
 
 **Operator advice:** for a model you plan to serve, warm it before announcing the
 capability — a first request for an uncached large model will be refused by

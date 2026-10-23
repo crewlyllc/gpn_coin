@@ -15,7 +15,7 @@ use gpn_agent::chain::ChainClient;
 use gpn_agent::hub_channel::{Assignment, GenParams, JobResultMsg, ProviderChannel, PubKey};
 use gpn_agent::llm::{get_job, LlmStore};
 use serde_json::json;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -86,6 +86,114 @@ fn mark_unloadable(repo: &str) {
 
 fn is_unloadable(repo: &str) -> bool {
     unloadable_set().lock().unwrap().contains(repo)
+}
+
+// ---- item #82: an AUTH failure is not a property of the repo -----------------
+//
+// `401`/`403` means this host has no usable HuggingFace credentials (or the repo
+// is gated). `diffusion_unloadable.json` is forever by design, so recording an
+// auth failure there condemned good models permanently. This registry carries an
+// **expiry** instead: requests inside the TTL are still refused instantly (no
+// pull storm — the whole point of #78), and once a token is supplied the model
+// heals by itself when the verdict lapses.
+
+fn needs_auth_path() -> std::path::PathBuf {
+    std::env::var("GPN_DIFFUSION_NEEDS_AUTH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+            std::path::PathBuf::from(home)
+                .join(".gpn")
+                .join("diffusion_needs_auth.json")
+        })
+}
+
+/// How long a `401`/`403` verdict silences the model before we try again.
+/// Default 6 h: long enough that a tokenless box never pull-storms, short enough
+/// that setting `HF_TOKEN` heals the model the same working day.
+fn auth_block_ttl_ms() -> u64 {
+    std::env::var("GPN_DIFFUSION_AUTH_RETRY_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .unwrap_or(6 * 3600)
+        * 1000
+}
+
+fn load_needs_auth() -> HashMap<String, u64> {
+    std::fs::read_to_string(needs_auth_path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<HashMap<String, u64>>(&s).ok())
+        .unwrap_or_default()
+}
+
+fn needs_auth_map() -> &'static Mutex<HashMap<String, u64>> {
+    static NEEDS_AUTH: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    NEEDS_AUTH.get_or_init(|| Mutex::new(load_needs_auth()))
+}
+
+fn persist_needs_auth(map: &HashMap<String, u64>) {
+    let path = needs_auth_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(s) = serde_json::to_vec_pretty(map) {
+        let _ = std::fs::write(&path, s);
+    }
+}
+
+/// Record that `repo` needs credentials, until `now + TTL`.
+fn mark_needs_auth(repo: &str) {
+    let expiry = gpn_agent::hub_channel::now_ms().saturating_add(auth_block_ttl_ms());
+    let mut map = needs_auth_map().lock().unwrap();
+    map.insert(repo.to_string(), expiry);
+    persist_needs_auth(&map);
+}
+
+/// How many seconds remain on an auth verdict for `repo` (`None` = not blocked).
+/// Expired entries are pruned here, so the registry cannot grow stale verdicts.
+fn needs_auth_remaining_secs(repo: &str) -> Option<u64> {
+    let now = gpn_agent::hub_channel::now_ms();
+    let mut map = needs_auth_map().lock().unwrap();
+    match map.get(repo).copied() {
+        Some(exp) if exp > now => Some((exp - now) / 1000),
+        Some(_) => {
+            map.remove(repo);
+            persist_needs_auth(&map);
+            None
+        }
+        None => None,
+    }
+}
+
+/// The single question the admission path asks: may this model be attempted right
+/// now, and if not, why (in operator-actionable words)?
+///
+/// `None` ⇒ attempt it. `Some(reason)` ⇒ refuse without charging anything.
+fn model_block_reason(repo: &str) -> Option<String> {
+    if is_unloadable(repo) {
+        return Some(format!(
+            "model {repo} is unloadable on this host (recorded — the repo cannot be loaded here)"
+        ));
+    }
+    if let Some(secs) = needs_auth_remaining_secs(repo) {
+        let mins = secs.div_ceil(60).max(1);
+        return Some(format!(
+            "model {repo} needs HuggingFace credentials on this host — or the repo is private, \
+             gated or does not exist (HuggingFace answers 401 to all three anonymously). Set \
+             HF_TOKEN for the diffusion provider; this verdict retries by itself in {mins} min"
+        ));
+    }
+    None
+}
+
+/// Persist the verdict for a failed pull, in the registry that matches its class.
+fn record_load_failure(repo: &str, class: LoadFailure) {
+    match class {
+        LoadFailure::Permanent => mark_unloadable(repo),
+        LoadFailure::NeedsAuth => mark_needs_auth(repo),
+        LoadFailure::Transient => {}
+    }
 }
 
 /// Job ids this process has already failed on-chain (permanent model error), so a
@@ -174,32 +282,85 @@ fn resolve_model_alias(model: &str) -> &str {
         .unwrap_or(model)
 }
 
-/// Is this failure PERMANENT (retrying can never help) or TRANSIENT (network,
-/// disk, rate limit)? Only permanent failures may fail the job: a transient one
-/// must not throw away a servable job.
-fn is_permanent_load_error(msg: &str) -> bool {
+/// Why a diffusion model could not be prepared on this host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LoadFailure {
+    /// The repo itself cannot exist for anybody: removed, renamed, not a repo id,
+    /// or the loader rejects the folder. Retrying can never help ⇒ remember for
+    /// good (`diffusion_unloadable.json`).
+    Permanent,
+    /// HuggingFace answered `401`/`403`: *this host* has no valid credentials (or
+    /// the repo is gated). The repo is fine — retrying with an `HF_TOKEN` works.
+    /// Still a fatal failure for the job, but the verdict must EXPIRE rather than
+    /// condemn the model forever (see `mark_needs_auth`).
+    NeedsAuth,
+    /// Network, disk, rate limit — never worth discarding a servable job for.
+    Transient,
+}
+
+/// Classify a HuggingFace/loader failure message.
+///
+/// **Item #82:** the old code had one flat list of "permanent" needles that
+/// included `401 client error`/`403 client error`/`gatedrepoerror`, so a missing
+/// or stale `HF_TOKEN` was recorded as a property of the *repo* and persisted
+/// forever as "unloadable on this host (recorded)" — with no way back except
+/// hand-editing `~/.gpn/diffusion_unloadable.json`. Live 2026-10-23:
+/// `stabilityai/stable-diffusion-2-1` was condemned that way while
+/// `stabilityai/sd-turbo` and `openai/clip-vit-base-patch32` answered `200` from
+/// the same host (so the network and the box were fine).
+///
+/// HuggingFace deliberately answers `401 … Repository Not Found` for a *private or
+/// gated* repo it will not admit to holding, so the text alone cannot tell
+/// "gone" from "needs a token". The **status code can**: `404` means the repo is
+/// really not there; `401`/`403` means credentials. So auth is matched first, and
+/// an auth verdict is TIMED (see `mark_needs_auth`) rather than forever.
+fn classify_load_error(msg: &str) -> LoadFailure {
     let m = msg.to_ascii_lowercase();
-    [
-        "repository not found",
-        "repository not found for url",
-        "401 client error",
-        "403 client error",
+    // No HTTP status attached (a loader-side rejection): the words are the only
+    // evidence, and these are unambiguous.
+    const PERMANENT: [&str; 6] = [
         "404 client error",
-        "gatedrepoerror",
-        "invalid username or password",
         "not a valid model identifier",
         "is not a valid model",
         "cannot load model",
         "no model card",
-    ]
-    .iter()
-    .any(|needle| m.contains(needle))
+        "does not appear to have a file named",
+    ];
+    const NEEDS_AUTH: [&str; 6] = [
+        "401 client error",
+        "403 client error",
+        "invalid username or password",
+        "gatedrepoerror",
+        "gated repo",
+        "you need to be authenticated",
+    ];
+    if NEEDS_AUTH.iter().any(|n| m.contains(n)) {
+        return LoadFailure::NeedsAuth;
+    }
+    if PERMANENT.iter().any(|n| m.contains(n)) {
+        return LoadFailure::Permanent;
+    }
+    LoadFailure::Transient
+}
+
+/// Is this failure one that retrying will never fix *for this job*? (Both a dead
+/// repo and a credential problem are: the escrow must refund now instead of at
+/// the on-chain deadline.) A transient failure must never throw away a servable
+/// job.
+fn is_fatal_load_error(msg: &str) -> bool {
+    classify_load_error(msg) != LoadFailure::Transient
+}
+
+/// Is this failure a property of the repo that no local action can change?
+#[cfg(test)]
+fn is_permanent_load_error(msg: &str) -> bool {
+    classify_load_error(msg) == LoadFailure::Permanent
 }
 
 /// The classified failure of `ensure_model`.
 struct PullError {
     message: String,
-    permanent: bool,
+    class: LoadFailure,
 }
 
 /// `--flag value` lookup (the binary does not use a CLI parser).
@@ -396,16 +557,19 @@ fn serve_channel_job(ctx: &ChannelCtx, body: &str) -> (u16, serde_json::Value) {
         let now = gpn_agent::hub_channel::now_ms();
         let remaining = a.deadline_ms.saturating_sub(now);
         let repo = resolve_model_alias(&a.model);
-        let unloadable = is_unloadable(&repo);
+        let blocked = model_block_reason(&repo);
         if let Some(reason) = cold_refusal(
             &a.model,
             hf_cache_present(&a.model),
-            unloadable,
+            blocked,
             remaining,
             cold_pull_budget_ms(),
         ) {
             eprintln!("[channel] job {} refused: {reason}", a.job_id);
-            if !unloadable {
+            // Nothing to warm while a recorded verdict stands: a permanent one
+            // cannot change, and an auth one is waiting on a token (and would
+            // only re-storm the puller).
+            if model_block_reason(&repo).is_none() {
                 warm_in_background(&a.model);
             }
             return (
@@ -464,17 +628,15 @@ fn serve_channel_job(ctx: &ChannelCtx, body: &str) -> (u16, serde_json::Value) {
     let outcome = match decision {
         gpn_agent::image_channel::ServeDecision::Refund(reason) => Err(reason),
         gpn_agent::image_channel::ServeDecision::Run
-            if is_unloadable(resolve_model_alias(&a.model)) =>
+            if model_block_reason(resolve_model_alias(&a.model)).is_some() =>
         {
-            // Item #78, channel lane: a model this host has already proved it
+            // Item #78/#82, channel lane: a model this host has already proved it
             // cannot load (e.g. `stabilityai/sdxl-turbo` OOM-killed at 7.2 GB RSS
-            // on this 8 GB-VRAM/15 GB-RAM box) must not be re-attempted — the
-            // reload burned ~1 min of RAM and risked OOM-killing the whole unit
-            // mid-render. Refund immediately with the recorded verdict.
-            Err(format!(
-                "model {} is unloadable on this host (recorded)",
-                resolve_model_alias(&a.model)
-            ))
+            // on this 8 GB-VRAM/15 GB-RAM box), or cannot authenticate to, must not
+            // be re-attempted — the reload burned ~1 min of RAM and risked
+            // OOM-killing the whole unit mid-render. Refund immediately with the
+            // recorded verdict.
+            Err(model_block_reason(resolve_model_alias(&a.model)).unwrap_or_default())
         }
         gpn_agent::image_channel::ServeDecision::Run => {
             let out_dir = std::env::var("GPN_ARTIFACTS").unwrap_or_else(|_| {
@@ -1231,12 +1393,16 @@ fn warm_in_background(model: &str) {
             Ok(msg) => println!("[warm] {msg}"),
             Err(e) => {
                 eprintln!("[warm] pull for {pull_model} failed: {}", e.message);
-                // A permanent failure (401/403/404, removed or gated repo) will
-                // fail identically on every retry: record it, so the next
-                // request is refused instantly as unloadable instead of
-                // spawning another download thread (#78's rule, warm path).
-                if e.permanent {
-                    mark_unloadable(&resolve_model_alias(&pull_model));
+                // A permanent failure (the repo itself is gone) or a credential
+                // failure (401/403 — this host has no usable HF token) will fail
+                // identically on every retry: record it in the registry that
+                // matches its class, so the next request is refused instantly
+                // instead of spawning another download thread (#78's rule, warm
+                // path). An auth verdict expires (#82), so a later HF_TOKEN
+                // heals the model without hand-editing state.
+                let class = classify_load_error(&e.message);
+                if class != LoadFailure::Transient {
+                    record_load_failure(&resolve_model_alias(&pull_model), class);
                 }
             }
         }
@@ -1257,15 +1423,12 @@ fn warm_in_background(model: &str) {
 fn cold_refusal(
     model: &str,
     cached: bool,
-    unloadable: bool,
+    blocked: Option<String>,
     remaining_ms: u64,
     budget_ms: u64,
 ) -> Option<String> {
-    if unloadable {
-        return Some(format!(
-            "model {} is unloadable on this host (recorded)",
-            resolve_model_alias(model)
-        ));
+    if let Some(reason) = blocked {
+        return Some(reason);
     }
     if cached {
         return None;
@@ -1304,14 +1467,14 @@ fn ensure_model(model: &str) -> Result<String, PullError> {
         .output()
         .map_err(|e| PullError {
             message: format!("spawn python3: {e}"),
-            permanent: false,
+            class: LoadFailure::Transient,
         })?;
     if out.status.success() {
         Ok(format!("pulled diffusion model {model} from HuggingFace"))
     } else {
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
         Err(PullError {
-            permanent: is_permanent_load_error(&stderr),
+            class: classify_load_error(&stderr),
             message: format!("HF pull {model} failed: {stderr}"),
         })
     }
@@ -1498,10 +1661,10 @@ async fn process_once(
             }
             let _ = pull;
             let repo = resolve_model_alias(model).to_string();
-            // A repo this process already proved permanent-unloadable must not be
+            // A repo this process already proved it cannot load must not be
             // re-pulled on every poll (item #78): fail the job once instead.
-            if is_unloadable(&repo) {
-                fail_unloadable_job(client, me, *id, &repo, "known unloadable on this host").await;
+            if let Some(why) = model_block_reason(&repo) {
+                fail_unloadable_job(client, me, *id, &repo, &why).await;
                 continue;
             }
             match ensure_model(model) {
@@ -1511,11 +1674,12 @@ async fn process_once(
                     println!("[provider] job #{id}: {n}");
                 }
                 Ok(_) => clear_pull_failures(*id),
-                Err(e) if e.permanent => {
-                    // 401/404/unknown alias: retrying can never help. Remember it
-                    // for the repo (so other jobs skip the pull) and fail THIS job
-                    // once, so escrow refunds and the capacity slot frees now.
-                    mark_unloadable(&repo);
+                Err(e) if e.class != LoadFailure::Transient => {
+                    // Dead repo or missing credentials: retrying can never help
+                    // THIS job. Remember the verdict (forever / with a TTL) so
+                    // other jobs skip the pull, and fail this one once, so escrow
+                    // refunds and the capacity slot frees now.
+                    record_load_failure(&repo, e.class);
                     fail_unloadable_job(client, me, *id, &repo, &e.message).await;
                 }
                 Err(e) => {
@@ -1739,12 +1903,13 @@ async fn run_job(
             if e.contains("WEDGE") {
                 eprintln!("[job {id}] ⚠ SILENT-WEDGE DETECTED — {e}");
                 mark_wedged(id);
-            } else if is_permanent_load_error(&e) {
-                // Item #78: a model this host can never load (401/404/unknown
-                // alias) will never succeed on a retry — fail the job so the
-                // requestor's escrow refunds and our slot frees, instead of
-                // leaving it `Running` until the on-chain deadline.
-                mark_unloadable(resolve_model_alias(model));
+            } else if is_fatal_load_error(&e) {
+                // Item #78/#82: a model this host can never load (dead repo) or
+                // cannot authenticate to (401/403) will never succeed on a retry
+                // — fail the job so the requestor's escrow refunds and our slot
+                // frees, instead of leaving it `Running` until the deadline.
+                let repo = resolve_model_alias(model);
+                record_load_failure(&repo, classify_load_error(&e));
                 let me = client.signer_address_hex().unwrap_or_default();
                 fail_unloadable_job(client, &me, id, model, &e).await;
                 let _ = std::fs::remove_file(&req_file);
@@ -1778,10 +1943,12 @@ async fn run_job(
             .to_string();
         let _ = LlmStore::new().set_error(id, &err);
         eprintln!("[job {id}] generation failed: {err}");
-        // Same rationale as the helper-exit path above: a permanent model error
-        // is not worth an on-chain deadline wait.
-        if is_permanent_load_error(&err) {
-            mark_unloadable(resolve_model_alias(model));
+        // Same rationale as the helper-exit path above: a fatal model error
+        // (dead repo or missing credentials) is not worth an on-chain deadline
+        // wait.
+        if is_fatal_load_error(&err) {
+            let repo = resolve_model_alias(model);
+            record_load_failure(&repo, classify_load_error(&err));
             let me = client.signer_address_hex().unwrap_or_default();
             fail_unloadable_job(client, &me, id, model, &err).await;
         }
@@ -1864,22 +2031,127 @@ mod tests {
 
     #[test]
     fn permanent_load_errors_are_told_apart_from_transient_ones() {
-        // The live 01:34 failure: a retired/nonexistent repo answered 401.
-        assert!(is_permanent_load_error(
-            "Repository Not Found for url: https://huggingface.co/api/models/sdxl-turbo. Please make sure you specified the repo id. (401 Client Error)"
-        ));
-        assert!(is_permanent_load_error(
-            "OSError: sdxl-turbo is not a valid model identifier"
-        ));
-        assert!(is_permanent_load_error("GatedRepoError: 403 Client Error"));
+        // HuggingFace answers 401 to a repo it will not admit to holding (retired,
+        // private or gated), so a 401 body that also says "Repository Not Found"
+        // is NOT proof the repo is gone — it is an auth verdict with a TTL (#82).
+        assert_eq!(
+            classify_load_error(
+                "Repository Not Found for url: https://huggingface.co/api/models/sdxl-turbo. Please make sure you specified the repo id. (401 Client Error)"
+            ),
+            LoadFailure::NeedsAuth
+        );
+        // An explicit 404 is the one code that means "not there".
+        assert_eq!(
+            classify_load_error("EntryNotFoundError: 404 Client Error"),
+            LoadFailure::Permanent
+        );
+        // Loader-side rejections carry no status; the words are unambiguous.
+        assert_eq!(
+            classify_load_error("OSError: sdxl-turbo is not a valid model identifier"),
+            LoadFailure::Permanent
+        );
+        assert_eq!(
+            classify_load_error("OSError: cannot load model /models/local"),
+            LoadFailure::Permanent
+        );
         // Transient: network/disk problems must NEVER fail a servable job.
-        assert!(!is_permanent_load_error(
-            "ConnectionError: HTTPSConnectionPool … Max retries exceeded"
+        assert_eq!(
+            classify_load_error("ConnectionError: HTTPSConnectionPool … Max retries exceeded"),
+            LoadFailure::Transient
+        );
+        assert_eq!(
+            classify_load_error("No space left on device (os error 28)"),
+            LoadFailure::Transient
+        );
+        assert_eq!(
+            classify_load_error("CUDA out of memory"),
+            LoadFailure::Transient
+        );
+        // Both fatal classes refund the job now; only the registry differs.
+        assert!(is_fatal_load_error("401 Client Error"));
+        assert!(is_fatal_load_error(
+            "Repository Not Found (401 Client Error)"
         ));
-        assert!(!is_permanent_load_error(
-            "No space left on device (os error 28)"
+        assert!(!is_fatal_load_error(
+            "ConnectionError: Max retries exceeded"
         ));
-        assert!(!is_permanent_load_error("CUDA out of memory"));
+    }
+
+    /// Item #82: a `401`/`403` means *this host* has no usable HuggingFace
+    /// credentials — not that the repo is dead. The live case: the box recorded
+    /// `stabilityai/stable-diffusion-2-1` as permanently "unloadable" from a bare
+    /// `401 Client Error`, so a model that only needed `HF_TOKEN` was refused
+    /// forever with no way back but hand-editing the registry file.
+    #[test]
+    fn an_auth_failure_is_a_timed_verdict_not_a_permanent_condemnation() {
+        let msg = "401 Client Error. (Request ID: Root=1-…) RepositoryNotFoundError";
+        assert_eq!(classify_load_error(msg), LoadFailure::NeedsAuth);
+        // The exact live text that condemned sd-2-1: 401 + "Repository Not Found"
+        // + "Invalid username or password" — HuggingFace's deliberately
+        // ambiguous refusal for a private/gated/missing repo.
+        assert_eq!(
+            classify_load_error(
+                "RepositoryNotFoundError: 401 Client Error.\nRepository Not Found for url: \
+                 https://huggingface.co/api/models/stabilityai/stable-diffusion-2-1/revision/main.\n\
+                 Invalid username or password.\n"
+            ),
+            LoadFailure::NeedsAuth
+        );
+        assert_eq!(
+            classify_load_error("GatedRepoError: 403 Client Error"),
+            LoadFailure::NeedsAuth,
+            "a gated repo is reachable WITH a token — never permanently unloadable"
+        );
+        assert!(
+            !is_permanent_load_error("401 Client Error"),
+            "auth is not permanent"
+        );
+        assert!(
+            is_fatal_load_error("401 Client Error"),
+            "but it is fatal for the job"
+        );
+
+        let repo = "test-org/auth-needing-model-#82";
+        let dir = std::env::temp_dir().join(format!("gpn_auth_82_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::env::set_var("GPN_DIFFUSION_NEEDS_AUTH", dir.join("needs_auth.json"));
+        std::env::set_var("GPN_DIFFUSION_AUTH_RETRY_SECS", "60");
+
+        assert!(needs_auth_remaining_secs(repo).is_none());
+        assert!(model_block_reason(repo).is_none());
+        mark_needs_auth(repo);
+        let left = needs_auth_remaining_secs(repo).expect("recorded verdict must block");
+        assert!((1..=60).contains(&left), "ttl left was {left}");
+        let why = model_block_reason(repo).expect("blocked");
+        assert!(
+            why.contains("HF_TOKEN"),
+            "the reason must name the remedy: {why}"
+        );
+        assert!(
+            !why.contains("unloadable"),
+            "must not claim the repo is dead: {why}"
+        );
+        // The verdict survives a restart (it is on disk), just like #78's.
+        assert!(load_needs_auth().contains_key(repo));
+        // …but it must NEVER leak into the forever-registry.
+        assert!(!is_unloadable(repo));
+
+        // An expired verdict stops blocking and is pruned from the file.
+        std::env::set_var("GPN_DIFFUSION_AUTH_RETRY_SECS", "1");
+        needs_auth_map().lock().unwrap().insert(
+            repo.to_string(),
+            gpn_agent::hub_channel::now_ms().saturating_sub(1),
+        );
+        assert!(needs_auth_remaining_secs(repo).is_none());
+        assert!(
+            !load_needs_auth().contains_key(repo),
+            "expired verdict pruned"
+        );
+        assert!(model_block_reason(repo).is_none(), "the model self-heals");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::remove_var("GPN_DIFFUSION_NEEDS_AUTH");
+        std::env::remove_var("GPN_DIFFUSION_AUTH_RETRY_SECS");
     }
 
     #[test]
@@ -1913,12 +2185,12 @@ mod tests {
         // can fail over instead of waiting out its own timeout.
         let budget = 900_000; // 15 min
                               // Warm → serve, whatever the deadline.
-        assert!(cold_refusal("sd-turbo", true, false, 1_000, budget).is_none());
+        assert!(cold_refusal("sd-turbo", true, None, 1_000, budget).is_none());
         // Cold but a long deadline → an in-band pull is legitimate.
-        assert!(cold_refusal("sd-turbo", false, false, budget, budget).is_none());
-        assert!(cold_refusal("sd-turbo", false, false, budget + 60_000, budget).is_none());
+        assert!(cold_refusal("sd-turbo", false, None, budget, budget).is_none());
+        assert!(cold_refusal("sd-turbo", false, None, budget + 60_000, budget).is_none());
         // Cold and a short deadline (the live default is 180 s) → refuse.
-        let why = cold_refusal("sd-turbo", false, false, 180_000, budget)
+        let why = cold_refusal("sd-turbo", false, None, 180_000, budget)
             .expect("a 3-minute request cannot download 13 GB");
         assert!(why.contains("not warm"), "reason was: {why}");
         assert!(
@@ -1930,15 +2202,25 @@ mod tests {
             "reason should name the deadline: {why}"
         );
         // No deadline at all (already expired) is the same refusal, not a panic.
-        assert!(cold_refusal("sd-turbo", false, false, 0, budget).is_some());
+        assert!(cold_refusal("sd-turbo", false, None, 0, budget).is_some());
     }
 
     #[test]
     fn a_recorded_unloadable_model_is_refused_at_any_deadline() {
         // #78 + #81: a model this host proved it cannot load is never served and
         // never re-pulled, even if the caller would have waited long enough.
-        let why = cold_refusal("sdxl-turbo", true, true, 86_400_000, 900_000)
-            .expect("unloadable must refuse");
+        let why = cold_refusal(
+            "sdxl-turbo",
+            true,
+            Some(
+                "model stabilityai/sdxl-turbo is unloadable on this host (recorded — the repo \
+                 cannot be loaded here)"
+                    .to_string(),
+            ),
+            86_400_000,
+            900_000,
+        )
+        .expect("unloadable must refuse");
         assert!(why.contains("unloadable"), "reason was: {why}");
         assert!(
             why.contains("stabilityai/sdxl-turbo"),
