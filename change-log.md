@@ -5128,3 +5128,24 @@ passthrough + upstream path/method/body, pre-flight rejects (no model / no datas
 without an upstream call, GET-on-submit → 405, poll 200 and 404 passthrough, binary artifact
 (`/artifact/<id>`), CORS preflight for the POST route, 4/hour rate limit + `retry-after`, and the
 256 KB fine-tune body cap (a 100 KB dataset passes, >256 KB is 413).
+
+## 2026-10-23 17:5x PT — PM07 item #100: a provider's poll advertises its own capabilities, not the host's
+
+`assign_pull::caps_snapshot()` copied the machine-wide heartbeat (`:8093/status`), so every
+co-located provider claimed all five capabilities. `gpn_finetune_provider` (own wallet
+`5Fh75o8N…`) therefore registered as a second, fully capable identity for this box: `/providers`
+listed the box twice (same peer id, same models, all five caps) and chat/image requests burned a
+candidate on it (`candidate #2 (5Fh75o8N…) not attempted`). `poll_caps` was also keyed by address
+alone, so the LLM and diffusion providers on one wallet overwrote each other's caps every 25 s.
+
+Fix: `caps_snapshot_with(provider, own)` narrows the heartbeat's capability list to what the
+calling process declares (`caps_declared`; a declared-empty list makes the AP fail closed, no
+declaration keeps legacy behaviour) and every snapshot carries `caps_source` (pid); the AP keys
+`poll_caps` by `(address, source)` and aggregates per address — capabilities/models unioned,
+capacity/active maxed, a stale source retiring with its caps. Bins declare LLMInference /
+Image+Video / FineTuning / MLInference.
+
+Live: `/providers` → `5ENqSp5Q = [ImageGeneration, LLMInference, VideoGeneration]`,
+`5Fh75o8N = [FineTuning]`; chat 200 on the channel, image `sd-turbo` completed (108 577 B),
+fine-tune #6537 routed to `5Fh75o8N` and succeeded. Tests: `assign_pull` 9/9 (+1),
+`gpn_scheduler` 62/62 (+2). Commit `3342bfc`.
