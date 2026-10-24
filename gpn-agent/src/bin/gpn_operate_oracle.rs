@@ -9,8 +9,10 @@
 //!
 //!   - Reads the current feed values from a TOML/JSON file each iteration (so an
 //!     external price feed / operator can update prices without restarting).
-//!   - Respects the pallet's `UpdateTooSoon` guard: it never spams; if the
-//!     interval hasn't elapsed it logs and waits instead of erroring.
+//!   - Respects the pallet's `UpdateTooSoon` guard **before spending a fee**: it
+//!     reads `LastUpdateBlock` + the `OracleUpdateInterval` constant and skips the
+//!     iteration entirely when the interval has not elapsed (item #106 — the loop
+//!     used to submit blind, so every restart burned one rejected extrinsic).
 //!   - Re-reads its own nonce from the head block each cycle (the cycle-27 fix,
 //!     so a second+ tx from the same account isn't rejected as stale).
 //!   - Handles the authorization failure (`NotAuthorized`) as a fatal, clear
@@ -102,6 +104,25 @@ fn update_feed_call(v: &OracleValues) -> impl subxt::tx::Payload + Clone {
     )
 }
 
+/// The pallet's own acceptance gate for `update_feed`: a post is accepted when
+/// the feed has never been written (`last == 0`) or when at least
+/// `OracleUpdateInterval` blocks have elapsed since the last accepted post.
+///
+/// Item #106: this is the same predicate the pallet applies (see
+/// `profitability-oracle::update_feed`), evaluated *before* signing, so a
+/// restart no longer pays a fee to discover it (`UpdateTooSoon`).
+fn feed_post_is_due(head: u64, last_update: u64, interval: u64) -> bool {
+    last_update == 0 || head >= last_update.saturating_add(interval)
+}
+
+/// Blocks still to wait before the pallet accepts a post (`0` = due now).
+fn blocks_until_feed_due(head: u64, last_update: u64, interval: u64) -> u64 {
+    if feed_post_is_due(head, last_update, interval) {
+        return 0;
+    }
+    last_update.saturating_add(interval).saturating_sub(head)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
@@ -180,6 +201,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // First iteration immediately, then every `interval_secs`.
+    //
+    // Item #106: a read-only view of the pallet's feed gate. `ChainClient` keeps
+    // a healable client (#80), so reading `LastUpdateBlock` / the interval
+    // constant costs no transaction and recovers by itself.
+    let gate_chain = ChainClient::new(&endpoint).await?;
     let mut tick = 0u64;
     loop {
         tick += 1;
@@ -202,6 +228,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
 
         let call = update_feed_call(&vals);
+
+        // Item #106: ask the pallet's gate BEFORE signing anything. The loop used
+        // to submit blind and learn the interval from a *paid* rejection
+        // (`UpdateTooSoon` costs a real fee and logs a scary dispatch error), so
+        // every restart of this unit burned one extrinsic for nothing. If the
+        // gate can't be read, fail OPEN and attempt the post — a feed must never
+        // freeze because a read failed.
+        match (
+            gate_chain.oracle_last_update_block().await,
+            gate_chain.oracle_update_interval().await,
+            gate_chain.head_block_number().await,
+        ) {
+            (Some(last), Some(interval), Some(head)) => {
+                if !feed_post_is_due(head, last, interval) {
+                    println!(
+                        "  ⏳ update_feed not due: last post at block {}, interval {} blocks, head {} — next eligible at block {} (in {} block(s)); no transaction sent",
+                        last,
+                        interval,
+                        head,
+                        last.saturating_add(interval),
+                        blocks_until_feed_due(head, last, interval),
+                    );
+                    tokio::time::sleep(Duration::from_secs(interval_secs)).await;
+                    continue;
+                }
+            }
+            _ => println!(
+                "  · pallet feed gate unreadable — attempting the post (fail-open, never starve the feed)"
+            ),
+        }
 
         // Item #105: this loop used to hold one `OnlineClient` forever and call
         // `submit_signed` with a nonce read from it. The moment the websocket
@@ -235,5 +291,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         tokio::time::sleep(Duration::from_secs(interval_secs)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Item #106: the pre-submit gate must agree with the pallet's own rule, and
+    /// it must never make the loop wait forever on a first-ever post.
+    #[test]
+    fn the_feed_gate_matches_the_pallet_and_skips_only_when_genuinely_too_soon() {
+        const INTERVAL: u64 = 600;
+
+        // Never posted -> always due, even at block 0 (genesis).
+        assert!(feed_post_is_due(0, 0, INTERVAL));
+        assert_eq!(blocks_until_feed_due(0, 0, INTERVAL), 0);
+
+        // The exact boundary the pallet accepts: head == last + interval.
+        assert!(feed_post_is_due(600, 0, INTERVAL));
+        assert!(feed_post_is_due(1_200, 600, INTERVAL));
+
+        // One block early -> not due, and the wait is exactly one block.
+        assert!(!feed_post_is_due(1_199, 600, INTERVAL));
+        assert_eq!(blocks_until_feed_due(1_199, 600, INTERVAL), 1);
+
+        // The live shape that motivated the item: a restart 113 blocks after a
+        // post must NOT pay for an `UpdateTooSoon` rejection.
+        assert!(!feed_post_is_due(183_302, 183_189, INTERVAL));
+        assert_eq!(blocks_until_feed_due(183_302, 183_189, INTERVAL), 487);
+
+        // An unreadable/zero interval on a posted feed is due immediately
+        // (fail-open: never starve the feed because the gate looks wrong).
+        assert!(feed_post_is_due(5, 1, 0));
+
+        // Saturation: absurd values must not panic or wrap into "due".
+        assert!(!feed_post_is_due(u64::MAX - 1, u64::MAX - 1, 600));
+        // The saturating target clamps at u64::MAX, so the wait is 1 block, not a
+        // wrapped-around huge number (a wait that never ends would be worse).
+        assert_eq!(blocks_until_feed_due(u64::MAX - 1, u64::MAX - 1, 600), 1);
     }
 }

@@ -505,6 +505,38 @@ impl ChainClient {
         self.storage_at_head(&addr).await?.as_u128()
     }
 
+    /// `ProfitabilityOracle::LastUpdateBlock` — the block number at which the
+    /// pallet last accepted a feed post (`0` = never posted).
+    ///
+    /// Item #106: the oracle loop used to learn the pallet's minimum-update
+    /// interval by **paying** for a rejected `UpdateTooSoon` extrinsic on every
+    /// restart. The gate itself is on-chain state plus a constant, so a caller
+    /// that reads them first never has to guess.
+    pub async fn oracle_last_update_block(&self) -> Option<u64> {
+        let addr = subxt::dynamic::storage("ProfitabilityOracle", "LastUpdateBlock", vec![]);
+        self.storage_at_head(&addr)
+            .await?
+            .as_u128()
+            .map(|v| v as u64)
+    }
+
+    /// `ProfitabilityOracle::OracleUpdateInterval` — the minimum number of
+    /// blocks between accepted feed posts, read from the live metadata constant
+    /// (so a `set_code` that changes it is picked up without a rebuild).
+    pub async fn oracle_update_interval(&self) -> Option<u64> {
+        let client = self.current_client()?;
+        client
+            .constants()
+            .at(&subxt::dynamic::constant(
+                "ProfitabilityOracle",
+                "OracleUpdateInterval",
+            ))
+            .ok()
+            .and_then(|c| c.to_value().ok())
+            .and_then(|v| v.as_u128())
+            .map(|v| v as u64)
+    }
+
     /// Enumerate every **bonded** (permissionless, Phase-C) oracle operator's
     /// bond size from `ProfitabilityOracle::StakedOperators`, as
     /// `(hex account, bond GPN-raw)`. This is the bond-weight side of the
