@@ -51,6 +51,41 @@ pub fn should_fail_now(kind: FtFailure, attempt: u32, max_attempts: u32) -> bool
     }
 }
 
+/// Bounded retries for settling an **already-trained** adapter.
+///
+/// The training is the expensive half; the settlement is two extrinsics. The
+/// old code had no resume path at all: a `submit_result`/`complete_job` failure
+/// propagated out of `run_job`, the job stayed `Running` and assigned to us, the
+/// next pass saw it again and **re-ran the whole fine-tune** — and the first
+/// thing a re-run does is `remove_dir_all(out_dir)`, i.e. it destroyed the
+/// adapter it had already produced. A transient chain error therefore cost a
+/// full GPU training run, every pass, until the on-chain deadline.
+///
+/// A resume retries only the two extrinsics, so the budget can be generous; it
+/// is still bounded so a permanently unsettleable job does not spin forever
+/// (the on-chain deadline refunds the requestor either way).
+const MAX_SETTLE_ATTEMPTS: u32 = 20;
+
+/// A settled-or-resumable outcome recovered from the off-chain store, so a
+/// restart or a settlement failure does not throw the trained adapter away.
+///
+/// `status == "done"` is written by `complete_artifact` **before** the
+/// settlement extrinsics, so it means "the adapter exists and is hashed", not
+/// "the chain knows about it" — exactly the state a resume has to act on. The
+/// hash must still be a real 32-byte hex digest and the adapter must still be on
+/// disk; anything less is not resumable and the job is trained normally.
+pub fn resumable_settlement(
+    status: &str,
+    hash: &str,
+    artifact: &str,
+    artifact_exists: bool,
+) -> bool {
+    status == "done"
+        && !artifact.is_empty()
+        && artifact_exists
+        && hex::decode(hash).map(|b| b.len() == 32).unwrap_or(false)
+}
+
 /// Parse the fine-tuner's verdict out of its output.
 ///
 /// `transformers`' `Trainer` prints progress dicts to stdout, so the verdict is
@@ -221,6 +256,41 @@ fn clear_attempts(id: u64) {
         .remove(&id);
 }
 
+/// Per-job settlement counter, separate from the training budget: a resume must
+/// not consume the training retries (and vice versa).
+fn settle_counters() -> &'static Mutex<HashMap<u64, u32>> {
+    static COUNTERS: OnceLock<Mutex<HashMap<u64, u32>>> = OnceLock::new();
+    COUNTERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn bump_settle_attempt(id: u64) -> u32 {
+    let mut m = settle_counters().lock().unwrap_or_else(|e| e.into_inner());
+    let n = m.entry(id).or_insert(0);
+    *n += 1;
+    *n
+}
+
+fn clear_settle_attempts(id: u64) {
+    settle_counters()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&id);
+}
+
+/// `submit_result` + `complete_job` for an adapter that already exists. Split
+/// out so the fresh-run path and the resume path settle exactly the same way.
+async fn settle_adapter(
+    client: &ChainClient,
+    id: u64,
+    hash: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut hb = [0u8; 32];
+    hb.copy_from_slice(&hex::decode(hash)?);
+    client.submit_result(id, hb, 0).await?;
+    client.complete_job(id).await?;
+    Ok(())
+}
+
 /// Settle an unpayable fine-tune on chain so the escrow refunds and the
 /// capacity slot frees now instead of at the deadline. Reason 5 = the provider
 /// cannot produce a result for this job (same code the LLM/diffusion providers
@@ -250,6 +320,38 @@ async fn run_job(
         job.lora_r.unwrap_or(16),
         job.epochs.unwrap_or(2)
     );
+    // #95(a) — resume an already-trained adapter instead of re-training it.
+    // `complete_artifact` writes `status:"done"` + the hash BEFORE the
+    // settlement extrinsics, so a job that is `Running` and assigned to us with
+    // a done record in this provider's store already has its adapter on disk:
+    // only the two settlement extrinsics are missing. Re-training here would
+    // `remove_dir_all` that adapter (the first thing a run does) and burn the
+    // GPU again on every poll.
+    if let Some(prev) = LlmStore::new().get(id) {
+        let hash = prev.result_hash.clone().unwrap_or_default();
+        let artifact = prev.artifact_path.clone().unwrap_or_default();
+        let exists = !artifact.is_empty() && std::path::Path::new(&artifact).exists();
+        if resumable_settlement(&prev.status, &hash, &artifact, exists) {
+            let attempt = bump_settle_attempt(id);
+            if attempt > MAX_SETTLE_ATTEMPTS {
+                eprintln!(
+                    "[job {id}] settlement still failing after {MAX_SETTLE_ATTEMPTS} attempts — leaving the job to the on-chain deadline (the adapter {artifact} is kept on disk)"
+                );
+                return Ok(());
+            }
+            println!(
+                "[job {id}] resuming settlement (attempt {attempt}/{MAX_SETTLE_ATTEMPTS}) — adapter {artifact} is already on disk, not re-training"
+            );
+            settle_adapter(client, id, &hash).await?;
+            clear_settle_attempts(id);
+            println!(
+                "[job {id}] done (resumed) — adapter {artifact} hash {:.16}…",
+                hash
+            );
+            return Ok(());
+        }
+    }
+
     let _ = LlmStore::new().set_status(id, "running");
 
     let out_dir = gpn_agent::utils::temp_dir()
@@ -343,11 +445,11 @@ async fn run_job(
             .to_string();
         let hash = out["sha256"].as_str().unwrap_or("").to_string();
         let loss = out["loss"].as_f64().unwrap_or(0.0);
+        // Recorded before settlement on purpose: if the next two calls fail, the
+        // resume path above settles this adapter instead of re-training it.
         let _ = LlmStore::new().complete_artifact(id, &artifact, &media, &hash);
-        let mut hb = [0u8; 32];
-        hb.copy_from_slice(&hex::decode(&hash)?);
-        client.submit_result(id, hb, 0).await?;
-        client.complete_job(id).await?;
+        settle_adapter(client, id, &hash).await?;
+        clear_settle_attempts(id);
         println!("[job {id}] done — adapter {artifact} loss={loss:.3} hash {hash:.16}…");
         // Auto-register the tuned model for serving (tuned-<jobid>): merge LoRA
         // -> GGUF -> ollama create, detached so the poll loop isn't blocked.
@@ -439,6 +541,50 @@ mod tests {
         assert_eq!(seen, vec![1, 2, 3]);
         assert_eq!(bump_attempt(9001), 1, "a terminal failure frees the slot");
         clear_attempts(9001);
+    }
+
+    #[test]
+    fn a_trained_adapter_is_resumed_instead_of_retrained() {
+        // The resume predicate is the whole fix for #95(a): only a job whose
+        // adapter is recorded, hashed and still on disk may skip training.
+        let hash = "ab".repeat(32);
+        let artifact = "/tmp/gpn_artifacts/job_1_ft/adapter.zip";
+        assert!(resumable_settlement("done", &hash, artifact, true));
+        // Not trained yet / still training / failed: never resume.
+        for status in ["queued", "running", "error", ""] {
+            assert!(
+                !resumable_settlement(status, &hash, artifact, true),
+                "{status}"
+            );
+        }
+        // A recorded adapter that the disk no longer holds cannot be settled.
+        assert!(!resumable_settlement("done", &hash, artifact, false));
+        assert!(!resumable_settlement("done", &hash, "", true));
+        // A malformed / truncated digest is not a result hash.
+        assert!(!resumable_settlement("done", "", artifact, true));
+        assert!(!resumable_settlement("done", "zz", artifact, true));
+        assert!(!resumable_settlement(
+            "done",
+            &"ab".repeat(31),
+            artifact,
+            true
+        ));
+    }
+
+    #[test]
+    fn the_settlement_budget_is_separate_from_the_training_budget() {
+        // A resume must not eat the training retries: #95's whole point is that
+        // a settlement failure leaves the trained adapter reusable.
+        clear_attempts(9002);
+        clear_settle_attempts(9002);
+        assert_eq!(bump_settle_attempt(9002), 1);
+        assert_eq!(bump_settle_attempt(9002), 2);
+        assert_eq!(bump_attempt(9002), 1, "training budget is untouched");
+        assert!(MAX_SETTLE_ATTEMPTS >= 1, "the budget must be bounded");
+        clear_settle_attempts(9002);
+        assert_eq!(bump_settle_attempt(9002), 1, "a successful settle frees it");
+        clear_attempts(9002);
+        clear_settle_attempts(9002);
     }
 
     #[test]
