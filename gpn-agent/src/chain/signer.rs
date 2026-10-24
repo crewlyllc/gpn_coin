@@ -128,6 +128,7 @@ pub async fn connect(
 pub async fn connect_robust<T: Config>(
     endpoint: &str,
 ) -> Result<OnlineClient<T>, Box<dyn std::error::Error>> {
+    remember_endpoint(endpoint);
     // Preferred: metadata at the best (head) block — always available and
     // matches the current runtime (survives forkless upgrades).
     if let Some(client) = connect_best_block::<T>(endpoint).await {
@@ -435,6 +436,136 @@ where
     Err("nonce collision: exceeded maximum retries".into())
 }
 
+/// Strip the SCALE compact length prefix from an encoded extrinsic, yielding the
+/// form a block body stores.
+fn extrinsic_body(encoded: &[u8]) -> &[u8] {
+    subxt::utils::strip_compact_prefix(encoded)
+        .map(|(_, body)| body)
+        .unwrap_or(encoded)
+}
+
+/// Decode one `chain_getBlock` body entry. The node returns these as arrays of
+/// byte values (`[[40,5,2,...]]`), not hex strings; accept both.
+fn json_extrinsic_bytes(v: &serde_json::Value) -> Option<Vec<u8>> {
+    if let Some(s) = v.as_str() {
+        let s = s.strip_prefix("0x").unwrap_or(s);
+        return hex::decode(s).ok();
+    }
+    let arr = v.as_array()?;
+    let mut out = Vec::with_capacity(arr.len());
+    for x in arr {
+        out.push(u8::try_from(x.as_u64()?).ok()?);
+    }
+    Some(out)
+}
+
+/// Index of our own extrinsic in `block_hash`, or `None` if it cannot be
+/// resolved. Uses the **raw** `chain_getBlock` because subxt's typed block-body
+/// decode fails on this runtime (byte-array `extrinsics`), which is what made the
+/// old code fall back to blaming any failure in the block on us.
+async fn our_extrinsic_index(block_hash: &H256, our_body: &[u8]) -> Option<u32> {
+    if our_body.is_empty() {
+        return None;
+    }
+    let endpoint = known_endpoint()?;
+    let rpc = RpcClient::from_insecure_url(&endpoint).await.ok()?;
+    let raw: serde_json::Value = rpc
+        .request(
+            "chain_getBlock",
+            subxt::backend::rpc::rpc_params![format!("{:?}", block_hash)],
+        )
+        .await
+        .ok()?;
+    let exts = raw.get("block")?.get("extrinsics")?.as_array()?;
+    for (i, v) in exts.iter().enumerate() {
+        let raw_ext = json_extrinsic_bytes(v)?;
+        if is_our_extrinsic(our_body, extrinsic_body(&raw_ext)) {
+            return Some(i as u32);
+        }
+    }
+    None
+}
+
+/// The most recent endpoint this process connected to. Attribution needs a raw
+/// RPC handle and `OnlineClient` deliberately exposes none; every client in this
+/// process is built by [`connect`], which records the URL here.
+fn known_endpoints() -> &'static std::sync::Mutex<Vec<String>> {
+    static ENDPOINTS: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> =
+        std::sync::OnceLock::new();
+    ENDPOINTS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+fn remember_endpoint(endpoint: &str) {
+    let book = known_endpoints();
+    let mut v = book.lock().unwrap_or_else(|e| e.into_inner());
+    if !v.iter().any(|e| e == endpoint) {
+        v.push(endpoint.to_string());
+    }
+}
+
+fn known_endpoint() -> Option<String> {
+    known_endpoints()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .last()
+        .cloned()
+}
+
+/// True when `candidate` is the very same extrinsic we submitted. Compares the
+/// FULL signed bytes: the call bytes alone are identical for two different
+/// senders of the same call (two providers racing `accept_job(N)`), so matching
+/// on them can pick up the other party's extrinsic and inherit its failure.
+fn is_our_extrinsic(our: &[u8], candidate: &[u8]) -> bool {
+    !our.is_empty() && our == candidate
+}
+
+#[cfg(test)]
+mod attribution_tests {
+    use super::*;
+    use subxt::ext::codec::Encode as _;
+
+    #[test]
+    fn only_the_exact_signed_extrinsic_is_ours() {
+        // Two submissions of the SAME call (`accept_job(6528)`): identical call
+        // bytes, different signature/nonce prefix. Only the first is ours.
+        let ours = [0xAAu8, 0xBB, 0x0B, 0x0B, 0x84, 0x02];
+        let theirs = [0xAAu8, 0xCC, 0x0B, 0x0B, 0x84, 0x02];
+        assert_eq!(&ours[2..], &theirs[2..], "same call bytes by construction");
+        assert!(is_our_extrinsic(&ours, &ours));
+        assert!(!is_our_extrinsic(&ours, &theirs));
+        // An empty expectation never matches anything (and never claims ours).
+        assert!(!is_our_extrinsic(&[], &ours));
+    }
+
+    #[test]
+    fn the_compact_prefix_is_stripped_before_comparison() {
+        // A submitted extrinsic is `compact(len) ++ body`; a block-body one is
+        // just `body`. Comparing the two raw forms never matches — which would
+        // silently swallow every real dispatch failure (caught live: the
+        // root-gate probe started reporting "ACCEPTED while signed").
+        let body = [0x84u8, 0x04, 0x0B, 0x0B, 0x84, 0x02];
+        let mut submitted = Vec::new();
+        subxt::ext::codec::Compact(body.len() as u32).encode_to(&mut submitted);
+        submitted.extend(body);
+        assert_ne!(submitted.as_slice(), &body[..]);
+        assert_eq!(extrinsic_body(&submitted), &body[..]);
+        assert!(is_our_extrinsic(extrinsic_body(&submitted), &body));
+    }
+
+    #[test]
+    fn both_block_body_encodings_are_read() {
+        // The node hands back arrays of byte values; some nodes use hex strings.
+        let body = [0x84u8, 0x04, 0x0B, 0x0B, 0x84, 0x02];
+        let as_array = serde_json::json!(body.to_vec());
+        assert_eq!(json_extrinsic_bytes(&as_array).unwrap(), body.to_vec());
+        let as_hex = serde_json::json!(format!("0x{}", hex::encode(body)));
+        assert_eq!(json_extrinsic_bytes(&as_hex).unwrap(), body.to_vec());
+        // Junk never fabricates a match.
+        assert!(json_extrinsic_bytes(&serde_json::json!("0xzz")).is_none());
+        assert!(json_extrinsic_bytes(&serde_json::json!([1, 300])).is_none());
+    }
+}
+
 /// True when an error string indicates a transaction-pool nonce collision.
 fn is_nonce_collision(msg: &str) -> bool {
     let m = msg.to_lowercase();
@@ -465,11 +596,18 @@ where
     // the finalized head stays at genesis and its state is pruned, so that read
     // fails with "State already discarded". We resolve the nonce ourselves (see
     // `current_nonce`), so sign offline and submit the raw bytes directly.
-    let progress = client
-        .tx()
-        .create_signed_offline(call, signer, params)?
-        .submit_and_watch()
-        .await?;
+    let signed = client.tx().create_signed_offline(call, signer, params)?;
+    // #103 — keep the finished bytes of OUR extrinsic. Attribution of a
+    // dispatch failure below must be exact: the *call* bytes are identical for
+    // two different senders of the same call (e.g. two providers racing
+    // `accept_job(6528)`), so matching on them can select the other party's
+    // extrinsic. The signed bytes include the signature + nonce, so they are
+    // unique to this submission.
+    //
+    // NOTE: `SubmittableExtrinsic::encoded()` carries the SCALE compact length
+    // prefix, while a block-body extrinsic has it stripped — compare the BODIES.
+    let our_extrinsic = extrinsic_body(signed.encoded()).to_vec();
+    let progress = signed.submit_and_watch().await?;
 
     // Wait for the tx to be included in a **best** block. We deliberately do
     // NOT wait for finalization (no GRANDPA gadget on a PoW chain, so
@@ -536,65 +674,82 @@ where
     let events_bytes = read_events_storage(client, included.block_hash()).await?;
     let events = subxt::events::Events::<GpnConfig>::decode_from(events_bytes, client.metadata());
 
-    // Which extrinsic is OURS? A busy chain packs several extrinsics per block,
-    // and a *concurrent* failure (e.g. a provider's `accept_job` hitting its
-    // capacity) would otherwise be mis-attributed to us. Resolve our index by
-    // matching our extrinsic hash against the block's extrinsics; if that can't
-    // be read, fall back to the old "any failure" behaviour.
-    let our_index: Option<u32> = {
-        let mut our_call = Vec::new();
-        let md = client.metadata();
-        let _ = call.encode_call_data_to(&md, &mut our_call);
-        if our_call.is_empty() {
-            None
-        } else {
-            async {
-                let block = client.blocks().at(included.block_hash()).await.ok()?;
-                let exts = block.extrinsics().await.ok()?;
-                for e in exts.iter().flatten() {
-                    if e.call_bytes() == our_call.as_slice() {
-                        return Some(e.index());
-                    }
-                }
-                None
-            }
-            .await
+    // **Dispatch-outcome check.** Inclusion in a block is not success: a failing
+    // extrinsic still gets included, just with a `System::ExtrinsicFailed` event.
+    //
+    // #103 — attribution must be EXACT, because this chain packs several
+    // providers' extrinsics into one block and the losers of an accept race
+    // revert with `JobNotPending` every few seconds:
+    //   * the previous code matched the *call* bytes, which are identical for
+    //     two different senders of the same call (two providers racing
+    //     `accept_job(6528)`), so it took the FIRST match — the other party's;
+    //   * worse, `client.blocks().at(..).extrinsics()` ALWAYS fails here (the
+    //     node returns `extrinsics` as arrays of byte values, not hex strings,
+    //     so subxt's serde decode errors), so the index was never resolvable and
+    //     the code fell through to "any failure in this block counts as ours".
+    //     Observed consequence: `start #6528 failed: JobNotPending` — an error
+    //     `start_job` cannot even raise (it raises `JobNotAccepted`) — while the
+    //     job went `Running` in the same pass, i.e. our tx had succeeded.
+    // Now: match the full signed bytes (signature + nonce + call ⇒ unique) from
+    // the raw `chain_getBlock` body, and only do that work when the block
+    // actually contains a failure.
+    let failed_indexes: Vec<u32> = events
+        .iter()
+        .flatten()
+        .filter(|ev| ev.pallet_name() == "System" && ev.variant_name() == "ExtrinsicFailed")
+        .filter_map(|ev| match ev.phase() {
+            subxt::events::Phase::ApplyExtrinsic(i) => Some(i),
+            _ => None,
+        })
+        .collect();
+
+    if failed_indexes.is_empty() {
+        // Nothing failed in this block — our tx cannot have been the failure.
+        log::info!(
+            "tx dispatched successfully ({} event(s) in block)",
+            events.len()
+        );
+        return Ok(());
+    }
+
+    let our_index = our_extrinsic_index(&included.block_hash(), &our_extrinsic).await;
+    let blamed = match our_index {
+        Some(ix) => failed_indexes.contains(&ix),
+        None => {
+            // We could not locate our own extrinsic, so we cannot prove either
+            // outcome. Treat it as NOT failed — acting on a phantom failure is
+            // strictly worse (it strands an accepted job, burns the #74
+            // accept-retry budget, and can push the AP's job-id allocator off
+            // the chain) — but say so, once per process.
+            static UNRESOLVED: std::sync::Once = std::sync::Once::new();
+            UNRESOLVED.call_once(|| {
+                log::warn!(
+                    "could not locate our own extrinsic in the included block — dispatch outcome unknown (treated as success; every caller's reconcile path repairs a genuinely missing transition)"
+                );
+            });
+            false
         }
     };
 
-    let mut dispatch_failure: Option<String> = None;
-    for ev in events.iter() {
-        let ev = match ev {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let (pallet, variant) = (ev.pallet_name(), ev.variant_name());
-        if pallet == "System" && variant == "ExtrinsicFailed" {
-            // Only count a failure that belongs to our own extrinsic.
-            if let Some(ix) = our_index {
-                if !matches!(ev.phase(), subxt::events::Phase::ApplyExtrinsic(i) if i == ix) {
-                    continue;
-                }
-            }
-            dispatch_failure = Some(describe_module_error(client, ev.field_bytes()));
-            break;
-        }
+    if !blamed {
+        log::info!(
+            "tx dispatched successfully ({} event(s) in block; {} failure(s) belonged to other senders)",
+            events.len(),
+            failed_indexes.len()
+        );
+        return Ok(());
     }
 
-    match dispatch_failure {
-        None => {
-            log::info!(
-                "tx dispatched successfully ({} event(s) in block)",
-                events.len()
-            );
-            Ok(())
-        }
-        Some(msg) => {
-            let full = format!("tx included but FAILED dispatch: {}", msg);
-            log::error!("{}", full);
-            Err(full.into())
-        }
-    }
+    let msg = events
+        .iter()
+        .flatten()
+        .filter(|ev| ev.pallet_name() == "System" && ev.variant_name() == "ExtrinsicFailed")
+        .find(|ev| matches!(ev.phase(), subxt::events::Phase::ApplyExtrinsic(i) if Some(i) == our_index))
+        .map(|ev| describe_module_error(client, ev.field_bytes()))
+        .unwrap_or_else(|| "ExtrinsicFailed (error not decodable)".to_string());
+    let full = format!("tx included but FAILED dispatch: {}", msg);
+    log::error!("{}", full);
+    Err(full.into())
 }
 
 /// Submit a signed call and return as soon as the node has **accepted it into
