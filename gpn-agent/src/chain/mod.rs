@@ -118,7 +118,7 @@ const HEAL_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15
 /// restart required"); other variants say the connection closed / is not
 /// connected. None of these mean the transaction was rejected — the submit never
 /// reached the node — so a fresh connection may safely resubmit the same call.
-fn is_connection_lost(msg: &str) -> bool {
+pub fn is_connection_lost(msg: &str) -> bool {
     let m = msg.to_lowercase();
     m.contains("restart required")
         || m.contains("restartneeded")

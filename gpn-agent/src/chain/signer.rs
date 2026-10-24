@@ -372,6 +372,68 @@ pub async fn current_nonce(
     fetch.await.unwrap_or(0)
 }
 
+/// Should a long-lived submit loop heal its client and retry? Item #105: a
+/// caller that holds one `OnlineClient` for hours (the oracle feed loop) must
+/// reconnect when the socket died, but must NEVER retry a chain-level answer
+/// (`UpdateTooSoon`, `NotAuthorized`, `BelowEligibilityFloor`, …) — the tx did
+/// reach the node and re-sending it would be a second write with different
+/// meaning. One heal per attempt, so a genuinely down RPC cannot hot-loop.
+pub fn should_heal_and_retry(msg: &str, already_healed: bool) -> bool {
+    !already_healed && super::is_connection_lost(msg)
+}
+
+/// Submit `call` from a **long-lived loop**: read the nonce, submit, and if the
+/// RPC socket turns out to be dead (`RestartNeeded` / closed connection) rebuild
+/// the client, re-read the nonce from the fresh connection and submit exactly
+/// once more.
+///
+/// The returned client replaces the caller's, so the next iteration uses the
+/// live one. A connection failure is not a rejection (the tx never reached the
+/// node), so resubmitting the same call is safe; a chain-level error is returned
+/// unchanged for the caller to interpret.
+///
+pub async fn submit_signed_reconnecting<Call>(
+    client: &mut OnlineClient<GpnConfig>,
+    endpoint: &str,
+    call: &Call,
+    signer: &Sr25519Signer,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    Call: Payload,
+{
+    let nonce = current_nonce(&*client, endpoint, &signer.account_id()).await;
+    match submit_signed(&*client, call, signer, nonce).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let msg = e.to_string();
+            if !should_heal_and_retry(&msg, false) {
+                return Err(e);
+            }
+            // `eprintln!` on purpose: `log` output is filtered out unless
+            // `RUST_LOG` is set and the unit sets no filter — an invisible heal is
+            // how the freeze in this item went unnoticed for 64 iterations.
+            eprintln!("  ♻️ RPC socket lost ({msg}) — reconnecting and resubmitting once");
+            match connect(endpoint).await {
+                Ok(fresh) => {
+                    *client = fresh;
+                    let nonce = current_nonce(&*client, endpoint, &signer.account_id()).await;
+                    submit_signed(&*client, call, signer, nonce).await
+                }
+                Err(ce) => {
+                    // The node itself is down. Do NOT exit: a long-lived service
+                    // keeps its cadence and tries again next cycle (the unit is
+                    // `Restart=always`, but a restart would lose the loop state
+                    // and hammer the RPC).
+                    eprintln!(
+                        "  ⚠️ reconnect failed ({ce}) — keeping the loop alive, retrying next cycle"
+                    );
+                    Err(e)
+                }
+            }
+        }
+    }
+}
+
 /// Submit a dynamic call signed by `signer` and wait for it to be **included and
 /// dispatched successfully** on the best (not necessarily finalized) fork.
 ///
@@ -986,6 +1048,7 @@ fn describe_module_error(client: &OnlineClient<GpnConfig>, field_bytes: &[u8]) -
 
 #[cfg(test)]
 mod tests {
+    use super::should_heal_and_retry;
 
     /// Pure helper mirroring `describe_module_error`'s byte parsing, so the
     /// dispatch-error decode logic is unit-testable without a live node.
@@ -1109,5 +1172,37 @@ mod tests {
             }
         );
         assert!(!r.is_ready());
+    }
+
+    /// Item #105: the oracle feed loop held one `OnlineClient` for the life of
+    /// the process, so the first dropped RPC socket froze the feed forever while
+    /// every 30-minute retry printed "will retry" (live: 64 consecutive
+    /// failures, feed 3 040 blocks stale). The heal decision must reconnect on a
+    /// dead socket exactly once and never on a chain-level answer.
+    #[test]
+    fn a_dead_socket_is_healed_once_but_chain_answers_are_final() {
+        for dead in [
+            "Rpc error: RPC error: The background task closed connection closed; restart required",
+            "RestartNeeded",
+            "connection reset by peer",
+        ] {
+            assert!(should_heal_and_retry(dead, false), "must heal: {dead}");
+            assert!(
+                !should_heal_and_retry(dead, true),
+                "must not hot-loop the reconnect: {dead}"
+            );
+        }
+        for chain in [
+            "ModuleError(ProfitabilityOracle::UpdateTooSoon) [pallet=12 error=3]",
+            "ModuleError(ProfitabilityOracle::NotAuthorized)",
+            "ModuleError(GPUAttestation::BelowEligibilityFloor)",
+            "1010 Transaction is outdated",
+            "tx included but FAILED dispatch: ModuleError(ProfitabilityOracle::InvalidPrice)",
+        ] {
+            assert!(
+                !should_heal_and_retry(chain, false),
+                "a chain answer is not a dead socket: {chain}"
+            );
+        }
     }
 }

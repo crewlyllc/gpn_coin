@@ -142,3 +142,14 @@ waiting to happen.
   operator (different bond size, so the median is genuinely weighted) is the next step.
 - **APR has nothing to measure.** Until fee revenue exists, 0 is correct but useless as a
   signal; revisit when the marketplace has volume.
+
+## Operator loop: RPC reconnection (item #105)
+
+The feed loop (`gpn_operate_oracle`, unit `gpn-oracle`) holds one RPC client for the
+life of the process. A dropped socket (`The background task closed connection closed;
+restart required`) used to freeze the feed silently — 64 consecutive failures, 3 040
+blocks stale — so the loop now heals itself: it logs `♻️ RPC socket lost … reconnecting`,
+rebuilds the client, re-reads the nonce and resubmits **once**. A chain-level answer
+(`UpdateTooSoon`, `NotAuthorized`) is never retried, and if the node is down the loop
+keeps its cadence instead of exiting. Watch for the `♻️` line: repeated heals mean the
+RPC is unstable, not that the feed is broken.

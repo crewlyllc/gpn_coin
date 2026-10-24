@@ -130,7 +130,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         endpoint, signer_uri, values_file, interval_secs
     );
 
-    let client = signer::connect(&endpoint).await?;
+    let mut client = signer::connect(&endpoint).await?;
     let signer = signer::Sr25519Signer::from_uri(&signer_uri)?;
     let signer_id = signer.account_id();
     println!("Connected to GPN chain; signing as {}", signer_id);
@@ -201,10 +201,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             vals.staking_apr_bps as f64 / 100.0,
         );
 
-        let nonce = signer::current_nonce(&client, &endpoint, &signer.account_id()).await;
         let call = update_feed_call(&vals);
 
-        match signer::submit_signed(&client, &call, &signer, nonce).await {
+        // Item #105: this loop used to hold one `OnlineClient` forever and call
+        // `submit_signed` with a nonce read from it. The moment the websocket
+        // background task died (node restart / idle drop) EVERY later iteration
+        // failed with `RestartNeeded` and printed "will retry" — for 64
+        // iterations and counting, freezing the live price feed while the RPC
+        // was healthy. `submit_signed_reconnecting` heals the socket once and
+        // resubmits; the client it returns is the one the next iteration uses.
+        match signer::submit_signed_reconnecting(&mut client, &endpoint, &call, &signer).await {
             Ok(()) => println!(
                 "  ✅ update_feed dispatched successfully (iteration #{})",
                 tick
