@@ -1079,7 +1079,7 @@ fn apply_poll_caps(out: &mut Vec<Provider>, poll_caps: &Arc<Mutex<PollCaps>>) {
         by_addr
             .into_iter()
             .map(|(addr, mut snaps)| {
-                snaps.sort_by(|a, b| b.0.cmp(&a.0));
+                snaps.sort_by_key(|a| std::cmp::Reverse(a.0));
                 let vals: Vec<Value> = snaps.into_iter().map(|(_, v)| v).collect();
                 (addr, aggregate_snapshots(&vals))
             })

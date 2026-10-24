@@ -376,24 +376,26 @@ pub struct ChannelServeCtx {
 
 type ProviderChannels = HashMap<u64, gpn_agent::hub_channel::ProviderChannel>;
 
-fn load_provider_channels(path: &std::path::Path) -> ProviderChannels {
-    let mut chans: ProviderChannels = std::fs::read_to_string(path)
+/// Item #75: a process that died — or a request that panicked, item #101 —
+/// between "persist the pre-paid accept" and "return the signed result" leaves
+/// our mirror one nonce ahead of the AP's, which wedges the whole channel lane
+/// (every later assignment is rejected `StaleStateBefore`). Rewind those
+/// expired, unanswered accepts and persist the result. Returns the count.
+fn rewind_stale_accepts(path: &std::path::Path, why: &str) -> usize {
+    let mut chans: ProviderChannels = match std::fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
-    // Item #75: a process that died between "persist the pre-paid accept" and
-    // "return the signed result" leaves our mirror one nonce ahead of the AP's,
-    // which wedges the whole channel lane (every later assignment is rejected
-    // `StaleStateBefore`). Rewind those expired, unanswered accepts here — at
-    // load, i.e. before any new assignment is considered.
+    {
+        Some(c) => c,
+        None => return 0,
+    };
     let now = gpn_agent::hub_channel::now_ms();
     let mut rewound = 0;
     for ch in chans.values_mut() {
         let n = ch.reconcile_stale_accepts(now);
         if n > 0 {
             println!(
-                "[channel] channel {}: rewound {n} expired unanswered accept(s) to nonce {} — \
-                 the AP never acknowledged them (previous process died mid-job)",
+                "[channel] channel {}: rewound {n} expired unanswered accept(s) to nonce {} — {why}",
                 ch.channel_id, ch.state.nonce
             );
         }
@@ -402,7 +404,19 @@ fn load_provider_channels(path: &std::path::Path) -> ProviderChannels {
     if rewound > 0 {
         save_provider_channels(path, &chans);
     }
-    chans
+    rewound
+}
+
+fn load_provider_channels(path: &std::path::Path) -> ProviderChannels {
+    // At load, i.e. before any new assignment is considered.
+    rewind_stale_accepts(
+        path,
+        "the AP never acknowledged them (previous process died mid-job)",
+    );
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
 }
 
 fn save_provider_channels(path: &std::path::Path, chans: &ProviderChannels) {
@@ -590,88 +604,137 @@ fn spawn_infer_server(listen: &str, chan: Option<ChannelServeCtx>) {
             .enable_all()
             .build()
             .expect("infer runtime");
-        for mut req in server.incoming_requests() {
-            let path = req.url().split('?').next().unwrap_or("").to_string();
-            if req.method() == &tiny_http::Method::Get && path == "/channel/status" {
-                // Capability probe: the AP checks this BEFORE opening (and
-                // funding) a channel, so a provider that cannot serve channel
-                // jobs never costs the AP a locked deposit.
-                let hdr =
-                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-                        .unwrap();
-                let body = match chan.as_ref() {
-                    Some(ctx) => {
-                        let ids: Vec<u64> = load_provider_channels(&ctx.state_path)
-                            .keys()
-                            .copied()
-                            .collect();
-                        serde_json::json!({
-                            "ok": true, "channel": true,
-                            "provider": ctx.me.to_hex(), "channels": ids,
-                        })
-                    }
-                    None => serde_json::json!({"ok": false, "channel": false}),
-                };
-                let _ = req
-                    .respond(tiny_http::Response::from_string(body.to_string()).with_header(hdr));
-                continue;
-            }
-            if req.method() == &tiny_http::Method::Post && path == "/channel/job" {
-                let mut body = String::new();
-                let _ = req.as_reader().read_to_string(&mut body);
-                let hdr =
-                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-                        .unwrap();
-                let (code, resp) = match chan.as_ref() {
-                    Some(ctx) => serve_channel_job(ctx, &rt, &body),
-                    None => (
-                        404,
-                        serde_json::json!({"ok": false, "error": "channel mode disabled on this provider"}),
-                    ),
-                };
-                let _ = req.respond(
-                    tiny_http::Response::from_string(resp.to_string())
-                        .with_header(hdr)
-                        .with_status_code(code),
-                );
-                continue;
-            }
-            let is_infer = req.method() == &tiny_http::Method::Post && path == "/infer";
-            if !is_infer {
-                let _ = req
-                    .respond(tiny_http::Response::from_string("not found").with_status_code(404));
-                continue;
-            }
-            let mut body = String::new();
-            let _ = req.as_reader().read_to_string(&mut body);
-            let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
-            let model = v.get("model").and_then(|x| x.as_str()).unwrap_or("auto");
-            let prompt = v.get("prompt").and_then(|x| x.as_str()).unwrap_or("");
-            let temp = v.get("temperature").and_then(|x| x.as_f64()).unwrap_or(0.7) as f32;
-            let max_tokens = v.get("max_tokens").and_then(|x| x.as_u64()).unwrap_or(256) as u32;
-            let model_r = resolve_model(model);
-            // One GPU = one job, on this path too: the passthrough `/infer`
-            // endpoint drives the same GPU as the chain/channel lanes and as
-            // gpn_diffusion_provider, so it must take the same cross-process
-            // lock. (It did NOT before 2026-10-22 — a direct /infer call during
-            // a render collided in VRAM just like chat did.)
-            let resp = match gpn_agent::gpu_yield::GpuYieldGuard::acquire() {
-                Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}),
-                Ok(_yield) => {
-                    match rt.block_on(run_inference(&model_r, prompt, temp, max_tokens)) {
-                        Ok((text, _hash)) => {
-                            serde_json::json!({"ok": true, "text": text, "model": model_r})
-                        }
-                        Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}),
-                    }
+        for req in server.incoming_requests() {
+            // Item #101: one request must never take the lane down with it.
+            //
+            // Before this, every request ran bare on the ONE thread that owns
+            // this port, so any panic inside the handler unwound out of the
+            // `incoming_requests()` loop and killed the thread for the rest of
+            // the process's life: the listener was dropped (nothing bound to
+            // :8094 any more), every later chat silently fell back to on-chain
+            // escrow, and the systemd unit still read `active` with a healthy
+            // PID — a silent, permanent degradation of the dominant lane.
+            // Observed live on 2026-10-23 (a panic in the channel handler,
+            // item #75's own first cut). `gpn_diffusion_provider` already
+            // isolates per request by spawning a thread; this lane does not.
+            // The panicking request itself is dropped (no result is signed for
+            // it and the client sees a closed connection, which the AP already
+            // classifies as not-attempted), but the lane survives.
+            let ok = with_panic_guard("request handler", || {
+                handle_infer_request(req, &rt, chan.as_ref())
+            });
+            if !ok {
+                // The panic may have left a pre-paid accept persisted with no
+                // signed result (`serve_channel_job` writes that BEFORE the
+                // work). Expired ones are rewound by the next request's load;
+                // this also heals any that have since timed out.
+                if let Some(ctx) = chan.as_ref() {
+                    let _ = rewind_stale_accepts(
+                        &ctx.state_path,
+                        "the request panicked before a result was signed (#101)",
+                    );
                 }
-            };
-            let hdr = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-                .unwrap();
-            let _ =
-                req.respond(tiny_http::Response::from_string(resp.to_string()).with_header(hdr));
+            }
         }
     });
+}
+
+/// Run one fallible piece of request handling without letting a panic escape.
+///
+/// Returns `true` when it completed. A panic is logged LOUDLY (an unwinding
+/// handler is never acceptable as a silent background event) and swallowed, so
+/// the caller's loop keeps serving.
+fn with_panic_guard<F: FnOnce()>(what: &str, f: F) -> bool {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(()) => true,
+        Err(_) => {
+            eprintln!(
+                "⚠ [infer] {what} panicked — the listening lane stays up; this request is \
+                 dropped without a result (the client retries / the AP fails over)"
+            );
+            false
+        }
+    }
+}
+
+/// Handle exactly one HTTP request on the passthrough/channel lane.
+fn handle_infer_request(
+    mut req: tiny_http::Request,
+    rt: &tokio::runtime::Runtime,
+    chan: Option<&ChannelServeCtx>,
+) {
+    let path = req.url().split('?').next().unwrap_or("").to_string();
+    if req.method() == &tiny_http::Method::Get && path == "/channel/status" {
+        // Capability probe: the AP checks this BEFORE opening (and
+        // funding) a channel, so a provider that cannot serve channel
+        // jobs never costs the AP a locked deposit.
+        let hdr =
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
+        let body = match chan {
+            Some(ctx) => {
+                let ids: Vec<u64> = load_provider_channels(&ctx.state_path)
+                    .keys()
+                    .copied()
+                    .collect();
+                serde_json::json!({
+                    "ok": true, "channel": true,
+                    "provider": ctx.me.to_hex(), "channels": ids,
+                })
+            }
+            None => serde_json::json!({"ok": false, "channel": false}),
+        };
+        let _ = req.respond(tiny_http::Response::from_string(body.to_string()).with_header(hdr));
+        return;
+    }
+    if req.method() == &tiny_http::Method::Post && path == "/channel/job" {
+        let mut body = String::new();
+        let _ = req.as_reader().read_to_string(&mut body);
+        let hdr =
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
+        let (code, resp) = match chan {
+            Some(ctx) => serve_channel_job(ctx, rt, &body),
+            None => (
+                404,
+                serde_json::json!({"ok": false, "error": "channel mode disabled on this provider"}),
+            ),
+        };
+        let _ = req.respond(
+            tiny_http::Response::from_string(resp.to_string())
+                .with_header(hdr)
+                .with_status_code(code),
+        );
+        return;
+    }
+    let is_infer = req.method() == &tiny_http::Method::Post && path == "/infer";
+    if !is_infer {
+        let _ = req.respond(tiny_http::Response::from_string("not found").with_status_code(404));
+        return;
+    }
+    let mut body = String::new();
+    let _ = req.as_reader().read_to_string(&mut body);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    let model = v.get("model").and_then(|x| x.as_str()).unwrap_or("auto");
+    let prompt = v.get("prompt").and_then(|x| x.as_str()).unwrap_or("");
+    let temp = v.get("temperature").and_then(|x| x.as_f64()).unwrap_or(0.7) as f32;
+    let max_tokens = v.get("max_tokens").and_then(|x| x.as_u64()).unwrap_or(256) as u32;
+    let model_r = resolve_model(model);
+    // One GPU = one job, on this path too: the passthrough `/infer`
+    // endpoint drives the same GPU as the chain/channel lanes and as
+    // gpn_diffusion_provider, so it must take the same cross-process
+    // lock. (It did NOT before 2026-10-22 — a direct /infer call during
+    // a render collided in VRAM just like chat did.)
+    let resp = match gpn_agent::gpu_yield::GpuYieldGuard::acquire() {
+        Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}),
+        Ok(_yield) => match rt.block_on(run_inference(&model_r, prompt, temp, max_tokens)) {
+            Ok((text, _hash)) => {
+                serde_json::json!({"ok": true, "text": text, "model": model_r})
+            }
+            Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}),
+        },
+    };
+    let hdr =
+        tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
+    let _ = req.respond(tiny_http::Response::from_string(resp.to_string()).with_header(hdr));
 }
 
 #[tokio::main]
@@ -4453,5 +4516,39 @@ mod job_timing_tests {
         assert!(claimed.claimed >= claimed.first_seen, "seen before claim");
         // `seen` is only used to prove the first clock really recorded a time.
         let _ = seen;
+    }
+}
+
+#[cfg(test)]
+mod item101_panic_isolation {
+    use super::with_panic_guard;
+    use std::cell::Cell;
+
+    /// The exact regression: before item #101 the handler ran bare on the ONE
+    /// thread that owns the listening port, so a panic propagated out of the
+    /// request loop and the lane was dead for the rest of the process's life
+    /// (port unbound, every later chat silently on-chain, unit still `active`).
+    #[test]
+    fn a_panicking_request_is_contained_and_the_lane_keeps_serving() {
+        let ran_after = Cell::new(0);
+        let ok = with_panic_guard("request handler", || {
+            panic!("simulated handler panic (item #101)");
+        });
+        assert!(!ok, "a panic must be reported as not-completed");
+        // The caller keeps looping: nothing was unwound into it.
+        for _ in 0..3 {
+            let served = with_panic_guard("request handler", || {
+                ran_after.set(ran_after.get() + 1);
+            });
+            assert!(served, "a healthy request still reports completion");
+        }
+        assert_eq!(ran_after.get(), 3, "the lane served every later request");
+    }
+
+    #[test]
+    fn a_healthy_request_reports_completion() {
+        let hit = Cell::new(false);
+        assert!(with_panic_guard("request handler", || hit.set(true)));
+        assert!(hit.get());
     }
 }
