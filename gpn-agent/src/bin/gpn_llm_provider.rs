@@ -772,7 +772,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     if let Some(cfg) = gpn_agent::assign_pull::PullConfig::from_env(&me) {
-        gpn_agent::assign_pull::spawn(cfg);
+        // #100: this process serves text inference only — its poll must not
+        // advertise the image/video/fine-tune capabilities of its co-located
+        // siblings, or the AP will route work here that nothing will claim.
+        gpn_agent::assign_pull::spawn(cfg.with_capabilities(&["LLMInference"]));
     }
 
     // Guaranteed baseline: every node ships a starter model set so the network

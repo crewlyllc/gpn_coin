@@ -793,6 +793,17 @@ fn jpost(url: &str) -> Option<Value> {
 /// poll's tolerance for a box that has gone away.
 const POLL_CAPS_TTL_SECS: u64 = 90;
 
+/// Capability snapshots delivered by pull polls, keyed by
+/// `(provider address, polling process)`.
+///
+/// One address can host several provider processes (this box runs the LLM and
+/// diffusion providers under one wallet, plus a fine-tune provider under its
+/// own). Keying by address alone let the last poll win, so the address's
+/// advertised capability set flip-flopped — and a process that shipped the
+/// whole *host's* capability list made a fine-tune-only identity look like a
+/// full LLM/image provider (#100).
+type PollCaps = std::collections::HashMap<(String, String), (Instant, Value)>;
+
 /// Latency assumed for a provider we have never dialled (pull-only behind
 /// NAT). It is deliberately neutral: a client-measured RTT hint still wins in
 /// `pick()`, and an AP-measured value (when a `/status` endpoint exists) is
@@ -920,9 +931,19 @@ fn provider_from_caps(addr: &str, v: &Value, status_url: String, latency_ms: u64
             .unwrap_or("unknown")
             .to_string(),
         tflops: v.get("tflops").and_then(|x| x.as_f64()).unwrap_or(0.0),
-        capabilities: if caps.is_empty() {
+        capabilities: if caps.is_empty()
+            && !v
+                .get("caps_declared")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false)
+        {
+            // No capability information at all (legacy snapshot) — assume the
+            // full set, exactly as before.
             default_capabilities()
         } else {
+            // A declared-but-empty list is a deliberate answer: this process
+            // serves none of the kinds the host advertises. Keep it empty so
+            // routing fails closed instead of inventing capabilities (#100).
             caps
         },
         peer_id,
@@ -945,11 +966,7 @@ fn provider_from_caps(addr: &str, v: &Value, status_url: String, latency_ms: u64
 /// Keyed by the canonical ss58 address (the poll's `provider` may be hex), so
 /// a snapshot merges with an on-chain-discovered entry for the same box rather
 /// than duplicating it.
-fn ingest_caps(
-    poll_caps: &Arc<Mutex<std::collections::HashMap<String, (Instant, Value)>>>,
-    provider: &str,
-    caps: &Value,
-) {
+fn ingest_caps(poll_caps: &Arc<Mutex<PollCaps>>, provider: &str, caps: &Value) {
     let addr = if provider.starts_with("0x") || provider.starts_with("0X") {
         hex_to_ss58(provider).unwrap_or_else(|| provider.to_string())
     } else {
@@ -957,10 +974,81 @@ fn ingest_caps(
     };
     // The snapshot's own `address` must never redirect the entry: the caller is
     // authenticated as `provider`, so that is who these capabilities belong to.
+    // `caps_source` distinguishes co-located processes on that one address; a
+    // snapshot from an older build carries none and simply replaces itself.
+    let source = caps
+        .get("caps_source")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
     poll_caps
         .lock()
         .unwrap()
-        .insert(addr, (Instant::now(), caps.clone()));
+        .insert((addr, source), (Instant::now(), caps.clone()));
+}
+
+/// Aggregate every live snapshot for one address into a single capability view.
+///
+/// Capabilities and models are **unioned** (the address's processes serve the
+/// union between them), while the hardware/load fields come from the newest
+/// snapshot (same host) and `capacity`/`active` take the max, because two
+/// processes on one GPU do not double the box's capacity.
+fn aggregate_snapshots(snaps: &[Value]) -> Value {
+    let mut out = snaps
+        .first()
+        .cloned()
+        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+    let arr_of = |v: &Value, key: &str| -> Vec<String> {
+        v.get(key)
+            .and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut caps: Vec<String> = Vec::new();
+    let mut models: Vec<String> = Vec::new();
+    let mut declared = false;
+    let mut capacity = 0u64;
+    let mut active = 0u64;
+    for s in snaps {
+        for c in arr_of(s, "capabilities") {
+            if !caps.iter().any(|h| h.eq_ignore_ascii_case(&c)) {
+                caps.push(c);
+            }
+        }
+        for m in arr_of(s, "models") {
+            if !models.iter().any(|h| h == &m) {
+                models.push(m);
+            }
+        }
+        declared |= s
+            .get("caps_declared")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+        capacity = capacity.max(s.get("capacity").and_then(|x| x.as_u64()).unwrap_or(0));
+        active = active.max(s.get("active").and_then(|x| x.as_u64()).unwrap_or(0));
+    }
+    if let Some(o) = out.as_object_mut() {
+        o.insert(
+            "capabilities".into(),
+            Value::Array(caps.into_iter().map(Value::String).collect()),
+        );
+        o.insert(
+            "models".into(),
+            Value::Array(models.into_iter().map(Value::String).collect()),
+        );
+        if declared {
+            o.insert("caps_declared".into(), Value::Bool(true));
+        }
+        if capacity > 0 {
+            o.insert("capacity".into(), json!(capacity));
+        }
+        o.insert("active".into(), json!(active));
+    }
+    out
 }
 
 /// Merge fresh poll-delivered capability snapshots into the `/status`-pulled
@@ -972,15 +1060,29 @@ fn ingest_caps(
 /// for a box that also has a dialable `/status` replaces the measured fields
 /// but KEEPS the AP-measured latency and the endpoint URL (the endpoint is a
 /// routing key for client RTT hints and the diffusion port mapping).
-fn apply_poll_caps(
-    out: &mut Vec<Provider>,
-    poll_caps: &Arc<Mutex<std::collections::HashMap<String, (Instant, Value)>>>,
-) {
+fn apply_poll_caps(out: &mut Vec<Provider>, poll_caps: &Arc<Mutex<PollCaps>>) {
+    // Group the live snapshots per address, newest first, then collapse each
+    // group into one capability view. Ordering matters only for the fields we
+    // take from the newest snapshot.
     let snapshots: Vec<(String, Value)> = {
         let map = poll_caps.lock().unwrap();
-        map.iter()
-            .filter(|(_, (seen, _))| seen.elapsed().as_secs() <= POLL_CAPS_TTL_SECS)
-            .map(|(addr, (_, v))| (addr.clone(), v.clone()))
+        let mut by_addr: std::collections::HashMap<String, Vec<(Instant, Value)>> =
+            std::collections::HashMap::new();
+        for ((addr, _source), (seen, v)) in map.iter() {
+            if seen.elapsed().as_secs() <= POLL_CAPS_TTL_SECS {
+                by_addr
+                    .entry(addr.clone())
+                    .or_default()
+                    .push((*seen, v.clone()));
+            }
+        }
+        by_addr
+            .into_iter()
+            .map(|(addr, mut snaps)| {
+                snaps.sort_by(|a, b| b.0.cmp(&a.0));
+                let vals: Vec<Value> = snaps.into_iter().map(|(_, v)| v).collect();
+                (addr, aggregate_snapshots(&vals))
+            })
             .collect()
     };
     for (addr, caps) in snapshots {
@@ -1074,7 +1176,7 @@ fn refresh(
     urls: &Arc<Vec<String>>,
     client: Arc<ChainClient>,
     rt: Arc<tokio::runtime::Runtime>,
-    poll_caps: Arc<Mutex<std::collections::HashMap<String, (Instant, Value)>>>,
+    poll_caps: Arc<Mutex<PollCaps>>,
 ) {
     let reg = registry.clone();
     let urls = urls.clone();
@@ -3043,8 +3145,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // #46 Phase 3 step 2: capabilities delivered by providers' own pull polls.
     // Kept beside the registry (not in it) because it must survive the 5 s
     // `/status` rebuild, and it is keyed by canonical address.
-    let poll_caps: Arc<Mutex<std::collections::HashMap<String, (Instant, Value)>>> =
-        Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let poll_caps: Arc<Mutex<PollCaps>> = Arc::new(Mutex::new(std::collections::HashMap::new()));
     // Warm the GPN-price snapshot (chat//jobs convert USD → GPN base units) and
     // keep an eye on providers earning below their own declared cost.
     spawn_feed_refresh(
@@ -5873,8 +5974,7 @@ mod tests {
     /// AP-measured latency. Stale snapshots retire on their own.
     #[test]
     fn pull_poll_caps_register_a_provider_the_ap_cannot_dial() {
-        let map: Arc<Mutex<std::collections::HashMap<String, (Instant, Value)>>> =
-            Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let map: Arc<Mutex<PollCaps>> = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let hex = "0xd43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d";
         let ss58 = hex_to_ss58(hex).unwrap();
         let caps = json!({
@@ -5917,7 +6017,7 @@ mod tests {
         {
             let mut m = map.lock().unwrap();
             m.insert(
-                ss58.clone(),
+                (ss58.clone(), String::new()),
                 (
                     Instant::now() - std::time::Duration::from_secs(POLL_CAPS_TTL_SECS + 1),
                     caps.clone(),
@@ -5927,6 +6027,87 @@ mod tests {
         let mut out3: Vec<Provider> = vec![];
         apply_poll_caps(&mut out3, &map);
         assert!(out3.is_empty(), "stale caps are dropped");
+    }
+
+    /// #100: this box hosts the LLM provider and the diffusion provider under
+    /// ONE wallet, plus the fine-tune provider under another. Each process now
+    /// declares only what it can serve, so the address's entry must be the
+    /// UNION of the live pollers — not whichever poll happened to land last.
+    #[test]
+    fn co_located_pollers_on_one_address_advertise_the_union_of_their_caps() {
+        let map: Arc<Mutex<PollCaps>> = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let addr = "5ENqSp5Q65bxfgryZExQDRnV1rEW1qb2UBztvswLamkoUrqj";
+        let llm = json!({
+            "address": addr, "caps_source": "111", "caps_declared": true,
+            "gflops": 825, "models": ["llama3.2:1b"], "capacity": 1, "active": 0,
+            "peer_id": "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
+            "capabilities": ["LLMInference"]
+        });
+        let imggen = json!({
+            "address": addr, "caps_source": "222", "caps_declared": true,
+            "gflops": 825, "models": ["sd-turbo"], "capacity": 1, "active": 1,
+            "peer_id": "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
+            "capabilities": ["ImageGeneration", "VideoGeneration"]
+        });
+        ingest_caps(&map, addr, &llm);
+        ingest_caps(&map, addr, &imggen);
+
+        let mut out: Vec<Provider> = vec![];
+        apply_poll_caps(&mut out, &map);
+        assert_eq!(out.len(), 1, "one address is one provider entry");
+        let mut caps = out[0].capabilities.clone();
+        caps.sort();
+        assert_eq!(
+            caps,
+            vec![
+                "ImageGeneration".to_string(),
+                "LLMInference".to_string(),
+                "VideoGeneration".to_string()
+            ],
+            "the union of the co-located processes"
+        );
+        let mut models = out[0].models.clone();
+        models.sort();
+        assert_eq!(
+            models,
+            vec!["llama3.2:1b".to_string(), "sd-turbo".to_string()]
+        );
+        assert_eq!(out[0].capacity, 1, "two processes on one GPU is one slot");
+        assert_eq!(out[0].active, 1, "max in-flight across the address");
+
+        // When one process stops polling, its capabilities retire with it —
+        // a dead provider must not keep advertising work it can no longer serve.
+        {
+            let mut m = map.lock().unwrap();
+            m.insert(
+                (addr.to_string(), "222".to_string()),
+                (
+                    Instant::now() - std::time::Duration::from_secs(POLL_CAPS_TTL_SECS + 1),
+                    imggen.clone(),
+                ),
+            );
+        }
+        let mut out2: Vec<Provider> = vec![];
+        apply_poll_caps(&mut out2, &map);
+        assert_eq!(out2.len(), 1);
+        assert_eq!(out2[0].capabilities, vec!["LLMInference".to_string()]);
+    }
+
+    /// A process that declares a capability set which is empty (or wholly
+    /// unavailable on this host) must not be widened to "everything" — that is
+    /// exactly how a fine-tune-only identity became a routable chat provider.
+    #[test]
+    fn a_declared_empty_capability_set_is_never_widened_to_everything() {
+        let declared_empty = json!({ "address": "5X", "caps_declared": true, "capabilities": [] });
+        let p = provider_from_caps("5X", &declared_empty, "pull://5X".into(), 100);
+        assert!(p.capabilities.is_empty(), "fails closed, not open");
+
+        // Legacy snapshot with no capability information at all keeps the old
+        // assume-the-full-set behaviour.
+        let legacy = json!({ "address": "5Y", "gflops": 900 });
+        let p2 = provider_from_caps("5Y", &legacy, "pull://5Y".into(), 100);
+        assert!(!p2.capabilities.is_empty());
+        assert!(p2.capabilities.iter().any(|c| c == "LLMInference"));
     }
 
     fn prov(addr: &str, url: &str, latency_ms: u64, model: &str) -> Provider {

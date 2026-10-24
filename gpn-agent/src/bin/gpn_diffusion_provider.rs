@@ -940,7 +940,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // #46 Phase 1 — pull assignments from the AP (works behind NAT; see
     // gpn_agent::assign_pull). Push remains active unless GPN_ASSIGN_SOURCE=pull.
     if let Some(cfg) = gpn_agent::assign_pull::PullConfig::from_env(&me) {
-        gpn_agent::assign_pull::spawn(cfg);
+        // #100: image/video only — the AP aggregates this with the LLM
+        // provider's poll when they share a wallet, so the union stays truthful.
+        gpn_agent::assign_pull::spawn(
+            cfg.with_capabilities(&["ImageGeneration", "VideoGeneration"]),
+        );
     }
 
     // Item #59: the claimable-job scan and the reconcile sweep are chain-heavy

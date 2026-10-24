@@ -63,7 +63,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // #46 Phase 1 — pull assignments from the AP (works behind NAT; see
     // gpn_agent::assign_pull). Push remains active unless GPN_ASSIGN_SOURCE=pull.
     if let Some(cfg) = gpn_agent::assign_pull::PullConfig::from_env(&me) {
-        gpn_agent::assign_pull::spawn(cfg);
+        // #100: MLInference only (see assign_pull::caps_snapshot_with).
+        gpn_agent::assign_pull::spawn(cfg.with_capabilities(&["MLInference"]));
     }
 
     loop {

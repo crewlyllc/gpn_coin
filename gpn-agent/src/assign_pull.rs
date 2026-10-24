@@ -154,6 +154,14 @@ pub struct PullConfig {
     pub wait_ms: u64,
     /// Backoff ceiling between failed polls.
     pub max_backoff: Duration,
+    /// The capabilities THIS PROCESS can serve (#100).
+    ///
+    /// The caps snapshot is read from the machine-wide heartbeat, which
+    /// describes every provider running here — so without this filter a
+    /// fine-tune-only process advertises `LLMInference`/`ImageGeneration` too
+    /// and the AP registers an identity it will route work to that can never
+    /// claim it. Empty = no filtering (legacy behaviour).
+    pub capabilities: Vec<String>,
 }
 
 impl PullConfig {
@@ -196,7 +204,15 @@ impl PullConfig {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(DEFAULT_WAIT_MS),
             max_backoff: Duration::from_secs(30),
+            capabilities: Vec::new(),
         })
+    }
+
+    /// Declare what this process can actually serve, so its poll advertises the
+    /// truth about *this* provider rather than the whole host (#100).
+    pub fn with_capabilities(mut self, caps: &[&str]) -> Self {
+        self.capabilities = caps.iter().map(|c| c.to_string()).collect();
+        self
     }
 
     /// Build the poll URL for a cursor position, carrying this provider's
@@ -229,6 +245,63 @@ impl PullConfig {
 /// Best-effort by design: if the heartbeat is down we still send the identity
 /// plus a sane capacity, because an address-only entry is still routable.
 pub fn caps_snapshot(provider: &str) -> String {
+    caps_snapshot_with(provider, &[])
+}
+
+/// Same, but narrowed to the capabilities this process can serve.
+///
+/// The heartbeat is a property of the **host**; the poll speaks for one
+/// **process**. Sending the host's full capability set made every co-located
+/// provider look like it could run every job kind, so the AP routed chat work
+/// to a fine-tune-only identity (and `/providers` listed the box twice with the
+/// same five capabilities). `own` empty keeps the old behaviour for any caller
+/// that has not declared a capability set.
+pub fn caps_snapshot_with(provider: &str, own: &[String]) -> String {
+    let mut v = fetch_heartbeat(provider);
+    if let Some(o) = v.as_object_mut() {
+        // Identity of the polling PROCESS, so the AP can aggregate several
+        // co-located providers on one address instead of letting the last
+        // poll win (#100).
+        o.insert(
+            "caps_source".into(),
+            Value::String(std::process::id().to_string()),
+        );
+    }
+    filter_capabilities(&mut v, own);
+    v.to_string()
+}
+
+/// Keep only the capabilities this process declared, and mark the list as
+/// deliberate so an empty result is never "unknown, assume everything".
+pub fn filter_capabilities(v: &mut Value, own: &[String]) {
+    if own.is_empty() {
+        return;
+    }
+    let have: Vec<String> = v
+        .get("capabilities")
+        .and_then(|x| x.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let kept: Vec<String> = own
+        .iter()
+        .filter(|c| have.iter().any(|h| h.eq_ignore_ascii_case(c)))
+        .cloned()
+        .collect();
+    if let Some(o) = v.as_object_mut() {
+        o.insert(
+            "capabilities".into(),
+            Value::Array(kept.into_iter().map(Value::String).collect()),
+        );
+        o.insert("caps_declared".into(), Value::Bool(true));
+    }
+}
+
+/// Fetch the machine-wide heartbeat JSON (best-effort, empty object on failure).
+fn fetch_heartbeat(provider: &str) -> Value {
     let url = std::env::var("GPN_STATUS_URL")
         .ok()
         .filter(|s| !s.trim().is_empty())
@@ -254,7 +327,7 @@ pub fn caps_snapshot(provider: &str) -> String {
         o.entry("capacity").or_insert(serde_json::json!(1));
         o.insert("poll".into(), serde_json::json!(true));
     }
-    v.to_string()
+    v
 }
 
 /// Minimal percent-encoding for a query value (providers are `0x…`/base58, so
@@ -475,7 +548,7 @@ pub fn run_loop(cfg: PullConfig, provider_label: String) {
         // Fresh caps every poll: `active` (the one-GPU-one-job lock) and the
         // model list change minute to minute, so a cached snapshot would route
         // work to a box that is mid-job.
-        let url = cfg.poll_url(since, &caps_snapshot(&cfg.provider));
+        let url = cfg.poll_url(since, &caps_snapshot_with(&cfg.provider, &cfg.capabilities));
         let client = match crate::net::ipv4_only_client(Duration::from_millis(cfg.wait_ms + 10_000))
         {
             Ok(c) => c,
@@ -592,6 +665,7 @@ mod tests {
             token: String::new(),
             wait_ms: 25000,
             max_backoff: Duration::from_secs(30),
+            capabilities: Vec::new(),
         };
         assert_eq!(
             cfg.poll_url(42, ""),
@@ -618,6 +692,42 @@ mod tests {
         assert_eq!(v.get("capacity").and_then(|x| x.as_u64()), Some(1));
         assert_eq!(v.get("poll").and_then(|x| x.as_bool()), Some(true));
         std::env::remove_var("GPN_STATUS_URL");
+    }
+
+    #[test]
+    fn a_process_declares_only_the_capabilities_it_can_serve() {
+        // The heartbeat describes the whole HOST (this box runs all five kinds).
+        let mut v = serde_json::json!({
+            "capabilities": ["LLMInference", "ImageGeneration", "VideoGeneration",
+                             "MLInference", "FineTuning"],
+            "models": ["llama3.2:1b"]
+        });
+        filter_capabilities(&mut v, &["FineTuning".to_string()]);
+        assert_eq!(
+            v.get("capabilities").unwrap(),
+            &serde_json::json!(["FineTuning"]),
+            "a fine-tune provider must not advertise chat/image"
+        );
+        assert_eq!(v.get("caps_declared").and_then(|x| x.as_bool()), Some(true));
+        assert_eq!(
+            v.get("models").unwrap(),
+            &serde_json::json!(["llama3.2:1b"]),
+            "the model list is a host fact and is left alone"
+        );
+
+        // A declaration the host does not offer yields an EMPTY, explicit list
+        // (the AP then fails closed) rather than being widened.
+        let mut v2 = serde_json::json!({ "capabilities": ["LLMInference"] });
+        filter_capabilities(&mut v2, &["ImageGeneration".to_string()]);
+        assert_eq!(v2.get("capabilities").unwrap(), &serde_json::json!([]));
+
+        // No declaration = legacy behaviour, untouched.
+        let mut v3 = serde_json::json!({ "capabilities": ["LLMInference", "FineTuning"] });
+        filter_capabilities(&mut v3, &[]);
+        assert_eq!(
+            v3.get("capabilities").unwrap(),
+            &serde_json::json!(["LLMInference", "FineTuning"])
+        );
     }
 
     #[test]

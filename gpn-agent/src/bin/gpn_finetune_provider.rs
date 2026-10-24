@@ -132,7 +132,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // #46 Phase 1 — pull assignments from the AP (works behind NAT; see
     // gpn_agent::assign_pull). Push remains active unless GPN_ASSIGN_SOURCE=pull.
     if let Some(cfg) = gpn_agent::assign_pull::PullConfig::from_env(&me) {
-        gpn_agent::assign_pull::spawn(cfg);
+        // #100: fine-tune only. This provider runs under its OWN wallet, so
+        // without this filter it registered as a second, fully-capable
+        // identity for this box (same peer id, same models) that could never
+        // claim a chat or image job routed to it.
+        gpn_agent::assign_pull::spawn(cfg.with_capabilities(&["FineTuning"]));
     }
 
     loop {
