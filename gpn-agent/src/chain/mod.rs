@@ -780,6 +780,30 @@ impl ChainClient {
         Some((gpus, gflops, submitted_at))
     }
 
+    /// `GPUAttestation::MinEligibilityGflops` as the **live** runtime carries it.
+    ///
+    /// Item #104: the floor is a governed runtime constant, and a binary can be
+    /// newer or older than the chain. A client that assumes its own compiled
+    /// floor therefore either pays for a tx the chain is certain to reject
+    /// (`BelowEligibilityFloor`, observed at every provider restart while the
+    /// staged `3000 → 250` change is pending) or, worse, believes it can attest
+    /// when it cannot. Callers must treat `None` as "unreadable — fail open and
+    /// use the local floor": a metadata read failure is not evidence about the
+    /// runtime.
+    pub async fn gpu_attestation_floor(&self) -> Option<u64> {
+        let client = self.current_client()?;
+        client
+            .constants()
+            .at(&subxt::dynamic::constant(
+                "GPUAttestation",
+                "MinEligibilityGflops",
+            ))
+            .ok()
+            .and_then(|c| c.to_value().ok())
+            .and_then(|v| v.as_u128())
+            .map(|v| v as u64)
+    }
+
     pub async fn get_attestation_challenge(&self) -> Result<[u8; 32], Box<dyn std::error::Error>> {
         // Read `GPUAttestation::AttestationChallenge` from the chain via a
         // dynamic storage query. Falls back to a placeholder only if the

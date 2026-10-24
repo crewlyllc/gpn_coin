@@ -2010,6 +2010,29 @@ static FLOOR_REJECTED_BY_CHAIN: std::sync::atomic::AtomicBool =
 /// and reported as such instead of retried in a loop.
 const ELIGIBILITY_FLOOR_GFLOPS: u64 = gpn_agent::compute_unit::MIN_ELIGIBLE_GFLOPS;
 
+/// The floor that actually decides whether a submission is accepted: the
+/// **chain's** `MinEligibilityGflops` when it is readable, raised to our own
+/// canonical floor if the chain's is lower.
+///
+/// Item #104. The two numbers are allowed to disagree while a staged runtime
+/// change is pending: this binary ships `250`
+/// (`compute_unit::MIN_ELIGIBLE_GFLOPS`) but the live chain still carries the
+/// old spec-sheet `3000`, so an honest `824 GFLOPS` measurement was submitted at
+/// **every provider restart**, each one an included-but-failed extrinsic
+/// (`GPUAttestation::BelowEligibilityFloor`), a burned fee and an `ERROR` line —
+/// for a condition only a governed `set_code` can fix. Reading the live constant
+/// makes the skip automatic and self-healing: the moment the upgrade enacts, the
+/// same logic submits and succeeds with no code change.
+///
+/// `chain` is `None` when the constant could not be read; that is **not**
+/// evidence, so the local floor is used (fail open, never silently permissive).
+fn effective_eligibility_floor(local: u64, chain: Option<u64>) -> u64 {
+    match chain {
+        Some(f) => local.max(f),
+        None => local,
+    }
+}
+
 /// Should a fresh measurement replace the on-chain record?
 ///
 /// A measurement may always **improve** the record. It must not casually
@@ -2218,6 +2241,29 @@ async fn maybe_refresh_attestation(client: &ChainClient, addr: &str) -> AttestOu
                 );
             }
             let on_chain = rec.map(|(g, _)| g).filter(|g| *g > 0);
+            // Item #104: never pay for a tx the live runtime is certain to
+            // reject. The chain's own constant is authoritative here — this
+            // binary's compiled floor may be ahead of (or behind) the upgrade
+            // that is actually enacted.
+            let chain_floor = client.gpu_attestation_floor().await;
+            let floor = effective_eligibility_floor(ELIGIBILITY_FLOOR_GFLOPS, chain_floor);
+            if gflops < floor {
+                let source = match chain_floor {
+                    Some(f) if f > ELIGIBILITY_FLOOR_GFLOPS => format!(
+                        "the live runtime constant `MinEligibilityGflops = {f}` (this binary ships \
+                         {ELIGIBILITY_FLOOR_GFLOPS}; the staged recalibration \
+                         `shared/artifacts/project7/staged/gflops-floor-v1.md` is not enacted yet)"
+                    ),
+                    _ => format!("the eligibility floor {floor}"),
+                };
+                println!(
+                    "[attest] measured {gflops} GFLOPS, below {source} — not submitting (the chain \
+                     would reject it with BelowEligibilityFloor and charge for the tx). No number is \
+                     fabricated: this clears by itself once the floor is recalibrated and the \
+                     provider restarts."
+                );
+                return AttestOutcome::NotUseful;
+            }
             // Item #93(3): never let a wrong record sit there silently.
             if let Some(d) = gpn_agent::attest_idle::record_divergence(
                 on_chain,
@@ -4306,6 +4352,29 @@ mod settled_cache_tests {
         assert!(attest_measurement_useful(340, None, 6_500));
         // The reference card's real reading is comfortably inside.
         assert!(attest_measurement_useful(823, None, 15_100));
+    }
+
+    /// Item #104: a submission must clear the floor the **live chain** enforces,
+    /// not the one this binary was compiled with. Pinned by the live journal:
+    /// `[attest] submit_attestation failed: … BelowEligibilityFloor` at every
+    /// restart, paying a fee for a tx that could never land.
+    #[test]
+    fn a_submission_must_clear_the_live_chain_floor_not_the_compiled_one() {
+        // The exact live case: 824 measured, chain still carries 3000.
+        let floor = effective_eligibility_floor(250, Some(3_000));
+        assert_eq!(floor, 3_000);
+        assert!(
+            824 < floor,
+            "824 GFLOPS must not be submitted under a 3000 floor"
+        );
+        // Once the staged recalibration enacts, the same measurement submits.
+        assert_eq!(effective_eligibility_floor(250, Some(250)), 250);
+        assert!(824 >= effective_eligibility_floor(250, Some(250)));
+        // An unreadable constant is not evidence — fail open, and never let an
+        // implausibly low chain value lower our own canonical floor either.
+        assert_eq!(effective_eligibility_floor(250, None), 250);
+        assert_eq!(effective_eligibility_floor(250, Some(50)), 250);
+        assert_eq!(effective_eligibility_floor(250, Some(0)), 250);
     }
 }
 
