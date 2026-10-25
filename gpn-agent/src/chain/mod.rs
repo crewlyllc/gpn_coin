@@ -665,29 +665,63 @@ impl ChainClient {
         &self,
         address: &str,
     ) -> Result<AccountInfo, Box<dyn std::error::Error>> {
-        // Best-effort: read System::Account balance if connected, else 0.
-        let mut balance = 0.0f64;
-        if self.current_client().is_some() {
-            if let Ok(addr32) = address.parse::<subxt::utils::AccountId32>() {
-                let storage_addr = subxt::dynamic::storage(
-                    "System",
-                    "Account",
-                    vec![Value::from_bytes(addr32.as_ref() as &[u8; 32])],
-                );
-                if let Some(val) = self.storage_at_head(&storage_addr).await {
-                    if let Some(data) = get_field(&val, "data") {
-                        if let Some(free) = get_u128_field(data, "free") {
-                            balance = free as f64 / 1_000_000_000_000.0;
-                        }
-                    }
-                }
-            }
+        // Best-effort (unchanged behaviour for every existing caller): a read that
+        // fails still yields a zero balance. Item #110 added
+        // [`Self::get_account_info_result`] for diagnostics, which must be able to
+        // say *which* of the two happened.
+        Ok(self
+            .get_account_info_result(address)
+            .await
+            .unwrap_or_else(|_| AccountInfo {
+                address: address.to_string(),
+                balance: 0.0,
+                nonce: 0,
+            }))
+    }
+
+    /// The same read as [`Self::get_account_info`], but it keeps the failure
+    /// instead of inventing a zero balance.
+    ///
+    /// Item #110: `balance = 0.0` used to be the answer for **five** different
+    /// situations — no connection, an unparseable address, a dead socket, an
+    /// undecodable value, and a genuinely empty account. A diagnostic that prints
+    /// the last one when any of the others happened states it as a fact about the
+    /// chain, and any script keying off the exit code (e.g. the AP top-up guard)
+    /// is then acting on a balance the chain never reported.
+    ///
+    /// `Ok(info with balance 0.0)` here means exactly one thing: the read
+    /// succeeded and the account has no `System::Account` entry.
+    pub async fn get_account_info_result(&self, address: &str) -> Result<AccountInfo, String> {
+        if self.current_client().is_none() {
+            return Err(format!("no chain connection to {}", self.endpoint));
         }
-        Ok(AccountInfo {
-            address: address.to_string(),
-            balance,
-            nonce: 0,
-        })
+        let addr32 = address
+            .parse::<subxt::utils::AccountId32>()
+            .map_err(|e| format!("{address} is not a valid SS58/AccountId32 address: {e}"))?;
+        let storage_addr = subxt::dynamic::storage(
+            "System",
+            "Account",
+            vec![Value::from_bytes(addr32.as_ref() as &[u8; 32])],
+        );
+        match self.storage_at_head_result(&storage_addr).await? {
+            Some(val) => {
+                let data = get_field(&val, "data")
+                    .ok_or_else(|| "System::Account decoded without a `data` field".to_string())?;
+                let free = get_u128_field(data, "free")
+                    .ok_or_else(|| "System::Account has no decodable `free` balance".to_string())?;
+                Ok(AccountInfo {
+                    address: address.to_string(),
+                    balance: free as f64 / 1_000_000_000_000.0,
+                    nonce: get_u32_field(&val, "nonce").unwrap_or(0) as u64,
+                })
+            }
+            // A real answer, not a failure: this account has never been funded.
+            None => Ok(AccountInfo {
+                address: address.to_string(),
+                balance: 0.0,
+                nonce: 0,
+            }),
+        }
     }
 
     pub async fn get_difficulty(&self) -> Result<f64, Box<dyn std::error::Error>> {
@@ -747,32 +781,46 @@ impl ChainClient {
     /// head-block nonce, a second+ signed tx from the same account is rejected
     /// as `Transaction is outdated`.
     pub async fn get_account_nonce(&self, address: &str) -> u64 {
+        self.get_account_nonce_result(address).await.unwrap_or(0)
+    }
+
+    /// Item #110: the nonce has the same collapse as the balance — `0` meant
+    /// "no connection", "bad address", "read failed" and "fresh account" alike.
+    pub async fn get_account_nonce_result(&self, address: &str) -> Result<u64, String> {
         if self.current_client().is_none() {
-            return 0;
+            return Err(format!("no chain connection to {}", self.endpoint));
         }
-        let Ok(addr32) = address.parse::<subxt::utils::AccountId32>() else {
-            return 0;
-        };
+        let addr32 = address
+            .parse::<subxt::utils::AccountId32>()
+            .map_err(|e| format!("{address} is not a valid SS58/AccountId32 address: {e}"))?;
         let storage_addr = subxt::dynamic::storage(
             "System",
             "Account",
             vec![Value::from_bytes(addr32.as_ref() as &[u8; 32])],
         );
-        match self.storage_at_head(&storage_addr).await {
-            Some(v) => get_u32_field(&v, "nonce").unwrap_or(0) as u64,
-            None => 0,
+        match self.storage_at_head_result(&storage_addr).await? {
+            Some(v) => Ok(get_u32_field(&v, "nonce").unwrap_or(0) as u64),
+            None => Ok(0),
         }
     }
 
     /// Read whether the account has staked (has a `ProviderStake` entry) and
     /// whether it has an active attestation record, straight from storage.
     pub async fn get_provider_state(&self, address: &str) -> (bool, bool) {
+        self.get_provider_state_result(address)
+            .await
+            .unwrap_or((false, false))
+    }
+
+    /// Item #110: `(false, false)` meant both "not a provider" and "the chain was
+    /// never read". The result form keeps the second case distinguishable.
+    pub async fn get_provider_state_result(&self, address: &str) -> Result<(bool, bool), String> {
         if self.current_client().is_none() {
-            return (false, false);
+            return Err(format!("no chain connection to {}", self.endpoint));
         }
-        let Ok(addr32) = address.parse::<subxt::utils::AccountId32>() else {
-            return (false, false);
-        };
+        let addr32 = address
+            .parse::<subxt::utils::AccountId32>()
+            .map_err(|e| format!("{address} is not a valid SS58/AccountId32 address: {e}"))?;
         let key = (addr32.as_ref() as &[u8; 32]).to_vec();
         let stake = subxt::dynamic::storage(
             "GPUAttestation",
@@ -784,24 +832,43 @@ impl ChainClient {
             "Attestations",
             vec![Value::from_bytes(key)],
         );
-        let has_stake = self.storage_at_head(&stake).await.is_some();
-        let has_att = self.storage_at_head(&att).await.is_some();
-        (has_stake, has_att)
+        let has_stake = self.storage_at_head_result(&stake).await?.is_some();
+        let has_att = self.storage_at_head_result(&att).await?.is_some();
+        Ok((has_stake, has_att))
     }
 
     /// Read the provider's attestation record: (gpu_count, compute_gflops,
     /// tier). Returns None if not attested / record unreadable.
     pub async fn get_attestation_record(&self, address: &str) -> Option<(u8, u64, String)> {
-        let addr32 = address.parse::<subxt::utils::AccountId32>().ok()?;
+        self.get_attestation_record_result(address)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// Item #110: `None` meant "never attested" *and* "the read failed", so a
+    /// diagnostic silently printed no attestation line for a chain it never reached.
+    pub async fn get_attestation_record_result(
+        &self,
+        address: &str,
+    ) -> Result<Option<(u8, u64, String)>, String> {
+        let addr32 = address
+            .parse::<subxt::utils::AccountId32>()
+            .map_err(|e| format!("{address} is not a valid SS58/AccountId32 address: {e}"))?;
         let key = (addr32.as_ref() as &[u8; 32]).to_vec();
         let att = subxt::dynamic::storage(
             "GPUAttestation",
             "Attestations",
             vec![Value::from_bytes(key)],
         );
-        let v = self.storage_at_head(&att).await?;
-        let gpus = get_u8_field(&v, "gpu_count")?;
-        let gflops = get_u64_field(&v, "compute_gflops")?;
+        let v = match self.storage_at_head_result(&att).await? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let gpus = get_u8_field(&v, "gpu_count")
+            .ok_or_else(|| "attestation record has no decodable gpu_count".to_string())?;
+        let gflops = get_u64_field(&v, "compute_gflops")
+            .ok_or_else(|| "attestation record has no decodable compute_gflops".to_string())?;
         let tier = get_field(&v, "tier")
             .and_then(|t| {
                 // AttestationTier enum decodes as a named variant (e.g. { Bronze: null }).
@@ -823,7 +890,7 @@ impl ChainClient {
                 }
             })
             .unwrap_or_else(|| "?".to_string());
-        Some((gpus, gflops, tier))
+        Ok(Some((gpus, gflops, tier)))
     }
 
     /// Read the provider's attestation **with its age**: `(gpu_count,
