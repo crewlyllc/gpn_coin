@@ -24,6 +24,7 @@ use gpn_agent::hub_channel::GenParams;
 use gpn_agent::image_jobs::{self, ImageArtifact, ImageJob};
 use gpn_agent::jobkind::{admit, model_kind, JobKind};
 use gpn_agent::pricing::{self, params_b_for, roofline_tok_per_s, PricingConfig};
+use gpn_agent::profitability::{classify_feed_read, FeedRead};
 use gpn_agent::routing::{self, RttOverrides};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -2040,15 +2041,62 @@ fn feed_now() -> FeedSnapshot {
 /// `ProfitabilityOracle::CurrentFeed` or off `$0.15 / $3.00 / 65%` was to read
 /// chain state by hand. That is how the feed stayed unposted for weeks without
 /// anyone noticing. Every transition is now logged once.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum FeedSource {
     Unknown,
     OnChain,
     Fallback,
+    /// The chain **read itself failed** (item #109). `Fallback` means "the read
+    /// succeeded and carried no usable market anchor", i.e. a statement about
+    /// the chain; this variant means "I could not look", which is a statement
+    /// about the reader — an unreachable node, a dropped socket, or a
+    /// present-but-undecodable value. Both keep the last good prices, so no
+    /// price is ever corrupted, but before this the journal blamed the chain
+    /// for our own blind spot.
+    Unreadable(String),
 }
 
-fn log_feed_source(prev: FeedSource, now: FeedSource, f: FeedSnapshot) {
-    if prev == now {
+impl FeedSource {
+    /// Compare by *kind*, not by payload: a persistently unreachable node must
+    /// not re-log every tick just because the error text moved.
+    fn same_kind(&self, other: &FeedSource) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+    }
+}
+
+/// Turn one classified feed read into the source that is now in force, updating
+/// the cached snapshot for a real feed. Pure enough to unit-test the decision
+/// (item #109): a failed read can never be reported as a missing feed.
+fn apply_feed_read(read: FeedRead) -> FeedSource {
+    match read {
+        FeedRead::Present(f) => {
+            let mut g = feed_snapshot().lock().unwrap();
+            if f.token_price_usd > 0.0 {
+                g.token_price_usd = f.token_price_usd;
+            }
+            if f.avg_gpu_hour_price_usd > 0.0 {
+                g.market_hr = f.avg_gpu_hour_price_usd;
+            }
+            if f.utilization > 0.0 {
+                g.util = f.utilization.clamp(0.05, 1.0);
+            }
+            // A feed carrying only a token price is still a real feed for the
+            // GPN conversion, but a zero market/util value means the operator
+            // never posted those fields — report OnChain only when the read
+            // actually carried the market anchor.
+            if f.avg_gpu_hour_price_usd > 0.0 {
+                FeedSource::OnChain
+            } else {
+                FeedSource::Fallback
+            }
+        }
+        FeedRead::Absent => FeedSource::Fallback,
+        FeedRead::Unreadable(why) => FeedSource::Unreadable(why),
+    }
+}
+
+fn log_feed_source(prev: &FeedSource, now: &FeedSource, f: FeedSnapshot) {
+    if prev.same_kind(now) {
         return;
     }
     match now {
@@ -2063,6 +2111,15 @@ fn log_feed_source(prev: FeedSource, now: FeedSource, f: FeedSnapshot) {
             "[pricing] feed source: FALLBACK defaults (token ${:.4}, market ${:.4}/gpu-hr, \
              util {:.1}%) — no on-chain oracle feed; run the operator loop so prices are \
              auditable (docs/oracle-feed.md)",
+            f.token_price_usd,
+            f.market_hr,
+            f.util * 100.0
+        ),
+        FeedSource::Unreadable(why) => eprintln!(
+            "[pricing] feed source: UNREADABLE — the chain read failed ({}); keeping the last \
+             good prices (token ${:.4}, market ${:.4}/gpu-hr, util {:.1}%). This is NOT evidence \
+             that no operator has posted a feed — check the node and the endpoint",
+            why,
             f.token_price_usd,
             f.market_hr,
             f.util * 100.0
@@ -2086,29 +2143,8 @@ fn spawn_feed_refresh(
 ) {
     let mut source = FeedSource::Unknown;
     std::thread::spawn(move || loop {
-        let mut next_source = FeedSource::Fallback;
-        if let Some(f) = rt.block_on(client.get_feed()) {
-            let mut g = feed_snapshot().lock().unwrap();
-            if f.token_price_usd > 0.0 {
-                g.token_price_usd = f.token_price_usd;
-            }
-            if f.avg_gpu_hour_price_usd > 0.0 {
-                g.market_hr = f.avg_gpu_hour_price_usd;
-            }
-            if f.utilization > 0.0 {
-                g.util = f.utilization.clamp(0.05, 1.0);
-            }
-            // A feed carrying only a token price is still a real feed for the
-            // GPN conversion, but a zero market/util value means the operator
-            // never posted those fields — report OnChain only when the read
-            // actually carried the market anchor.
-            next_source = if f.avg_gpu_hour_price_usd > 0.0 {
-                FeedSource::OnChain
-            } else {
-                FeedSource::Fallback
-            };
-        }
-        log_feed_source(source, next_source, feed_now());
+        let next_source = apply_feed_read(classify_feed_read(rt.block_on(client.get_feed_read())));
+        log_feed_source(&source, &next_source, feed_now());
         source = next_source;
         if pcfg.model == pricing::PricingModel::Throughput {
             let reg = registry.lock().unwrap().clone();
@@ -7493,6 +7529,32 @@ mod tests {
             MAX_ROUTE_ATTEMPTS
         );
         assert!(body["error"]["message"].as_str().unwrap().contains("image"));
+    }
+
+    /// Item #109: the refresher used to collapse *every* unsuccessful read into
+    /// one `Fallback` line, so an unreachable node and a chain nobody had posted
+    /// a feed to looked identical — and the log blamed the chain for our own
+    /// blind spot. Both still keep the last good prices; only the report differs.
+    #[test]
+    fn a_failed_feed_read_is_not_reported_as_a_missing_feed() {
+        let live = "Rpc error: RPC error: The background task closed connection closed; \
+                    restart required"
+            .to_string();
+        let unreadable = apply_feed_read(FeedRead::Unreadable(live.clone()));
+        match &unreadable {
+            FeedSource::Unreadable(why) => assert_eq!(why, &live),
+            other => panic!("a failed read must not be reported as {:?}", other),
+        }
+        // A genuinely empty `CurrentFeed` is a different statement entirely.
+        assert!(matches!(
+            apply_feed_read(FeedRead::Absent),
+            FeedSource::Fallback
+        ));
+        assert!(!unreadable.same_kind(&FeedSource::Fallback));
+        assert!(!unreadable.same_kind(&FeedSource::OnChain));
+        // The same failure with different text must not re-log every tick.
+        assert!(unreadable.same_kind(&FeedSource::Unreadable("Connection refused".into())));
+        assert!(!FeedSource::Fallback.same_kind(&FeedSource::OnChain));
     }
 
     /// The text facade and the image facade use the same `route_candidates`, so
