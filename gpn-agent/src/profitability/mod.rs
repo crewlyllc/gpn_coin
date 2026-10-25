@@ -5,6 +5,33 @@ pub mod scripted;
 use crate::{chain::ChainClient, config::AgentConfig, gpu::GPUMonitor, Mode};
 use serde::{Deserialize, Serialize};
 
+/// How a diagnostic read of the on-chain profitability feed resolved.
+///
+/// `Absent` and `Unreadable` are deliberately distinct (item #108): "the chain
+/// carries no feed" is a statement about the chain, while "I could not read
+/// the chain" is a statement about the reader. Both mean the consumer must
+/// fall back on per-field defaults, but only the first one is evidence that no
+/// operator has ever posted.
+#[derive(Clone, Debug)]
+pub enum FeedRead {
+    /// The pallet has a `CurrentFeed` and it decoded.
+    Present(crate::chain::OnChainFeed),
+    /// The read succeeded and the storage key is genuinely empty.
+    Absent,
+    /// The read itself failed — nothing can be concluded about the chain.
+    Unreadable(String),
+}
+
+/// Classify the result of `ChainClient::get_feed_read()` without touching a
+/// chain, so the distinction (and the exit codes built on it) is unit-testable.
+pub fn classify_feed_read(read: Result<Option<crate::chain::OnChainFeed>, String>) -> FeedRead {
+    match read {
+        Ok(Some(feed)) => FeedRead::Present(feed),
+        Ok(None) => FeedRead::Absent,
+        Err(e) => FeedRead::Unreadable(e),
+    }
+}
+
 /// Result of a profitability analysis
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProfitAnalysis {
@@ -505,5 +532,37 @@ mod tests {
             decide_switch(&analysis(1.0, 10.0, 1.0), Mode::StakeOnly, 5.0),
             Some(Mode::Compute)
         );
+    }
+
+    /// Item #108: an unreadable chain must never be reported as "the chain has
+    /// no feed". The three states stay distinct all the way to the caller.
+    #[test]
+    fn an_unreadable_chain_is_not_reported_as_an_absent_feed() {
+        let feed = crate::chain::OnChainFeed {
+            token_price_usd: 0.15,
+            avg_gpu_hour_price_usd: 0.30,
+            utilization: 0.65,
+            staking_apr_percent: 0.0,
+            updated_at_block: 187_004,
+        };
+
+        assert!(matches!(
+            classify_feed_read(Ok(Some(feed))),
+            FeedRead::Present(_)
+        ));
+        assert!(matches!(classify_feed_read(Ok(None)), FeedRead::Absent));
+
+        // The two failure shapes that used to print "ABSENT": a dead socket and
+        // a node that never answered. Both keep their text so the operator can
+        // see what actually happened.
+        for err in [
+            "The background task closed connection closed; restart required".to_string(),
+            "connection refused".to_string(),
+        ] {
+            match classify_feed_read(Err(err.clone())) {
+                FeedRead::Unreadable(why) => assert_eq!(why, err),
+                other => panic!("a read failure was classified as {other:?}"),
+            }
+        }
     }
 }

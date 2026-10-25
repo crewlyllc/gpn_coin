@@ -360,25 +360,43 @@ impl ChainClient {
             IsFetchable = subxt::utils::Yes,
         >,
     {
-        let client = self.current_client()?;
+        self.storage_at_head_result(addr).await.ok().flatten()
+    }
+
+    /// The same read as [`Self::storage_at_head`], but it keeps the failure
+    /// instead of collapsing it into `None`.
+    ///
+    /// Item #108: `Ok(None)` means "the key is empty on chain", while a dead
+    /// socket, an unreachable node or an undecodable value are *different*
+    /// answers. A diagnostic that prints the first when the second happened
+    /// states it as a fact about the chain when the chain was never read.
+    async fn storage_at_head_result<Addr>(
+        &self,
+        addr: &Addr,
+    ) -> Result<Option<subxt::dynamic::Value>, String>
+    where
+        Addr: subxt::storage::Address<
+            Target = subxt::dynamic::DecodedValueThunk,
+            IsFetchable = subxt::utils::Yes,
+        >,
+    {
+        let client = self
+            .current_client()
+            .ok_or_else(|| format!("no chain connection to {}", self.endpoint))?;
         let head = self.head_block_hash().await;
         match Self::fetch_with(&client, addr, head).await {
-            Ok(v) => v,
+            Ok(v) => Ok(v),
             Err(e) if is_connection_lost(&e) => {
-                let fresh = self.heal_client().await?;
+                let fresh = self.heal_client().await.ok_or_else(|| {
+                    format!(
+                        "connection to {} lost and reconnect failed: {e}",
+                        self.endpoint
+                    )
+                })?;
                 let head = self.head_block_hash().await;
-                match Self::fetch_with(&fresh, addr, head).await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        log::debug!("storage read failed after reconnect: {e}");
-                        None
-                    }
-                }
+                Self::fetch_with(&fresh, addr, head).await
             }
-            Err(e) => {
-                log::debug!("storage read failed: {e}");
-                None
-            }
+            Err(e) => Err(e),
         }
     }
 
@@ -449,6 +467,25 @@ impl ChainClient {
     /// chain is unreachable or the feed has not been set by an operator yet.
     pub async fn get_feed(&self) -> Option<OnChainFeed> {
         self.fetch_feed().await
+    }
+
+    /// The feed read that does **not** confuse "the chain has no feed" with
+    /// "I could not read the chain" (item #108).
+    ///
+    /// - `Ok(Some(feed))` — the pallet has a `CurrentFeed` and it decoded.
+    /// - `Ok(None)` — the read succeeded and the key is genuinely empty (a
+    ///   fresh chain, or no operator has posted yet).
+    /// - `Err(e)` — the read failed (unreachable node, dropped socket, or a
+    ///   value present but not decodable). Nothing can be concluded about the
+    ///   chain from this, so per-field fallbacks are the only honest option.
+    pub async fn get_feed_read(&self) -> Result<Option<OnChainFeed>, String> {
+        let addr = subxt::dynamic::storage("ProfitabilityOracle", "CurrentFeed", vec![]);
+        match self.storage_at_head_result(&addr).await? {
+            None => Ok(None),
+            Some(fields) => parse_feed_value(&fields).map(Some).ok_or_else(|| {
+                "ProfitabilityOracle::CurrentFeed is present but could not be decoded".to_string()
+            }),
+        }
     }
 
     /// Read the on-chain profitability feed. Returns `None` if the chain is
