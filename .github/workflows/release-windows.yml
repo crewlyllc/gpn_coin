@@ -115,6 +115,7 @@ jobs:
           exit 1
 
       - name: retire legacy GPNProvider task + supervisor (UNCONDITIONAL)
+        continue-on-error: true   # best-effort cleanup must never block the deploy
         shell: powershell
         run: |
           # Boxes that missed an earlier deploy kept BOTH the old GPNProvider task
@@ -151,6 +152,12 @@ jobs:
           } else {
             Write-Host 'legacy cleanup: no C:\gpn\run-provider.ps1'
           }
+          # This step is best-effort CLEANUP: the last native command above
+          # (`schtasks /Query` for an absent task) exits 1, which GitHub Actions
+          # would turn into a failed step and SKIP the deploy. That is exactly how
+          # box1 was left offline on 2026-10-26. Always exit 0 here.
+          Write-Host 'legacy cleanup: complete (best-effort; never fails the job)'
+          exit 0
 
       - name: deploy binaries + restart node to C:\gpn\bin  (auto-update)
         shell: powershell
