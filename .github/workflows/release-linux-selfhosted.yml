@@ -92,33 +92,12 @@ jobs:
               --manifest-path gpn-agent/Cargo.toml --bins
           ) 9>"$BUILD_LOCK"
 
-          echo "== canonical wasm (post-build)"
-          got=$(sha256sum gpn-node/runtime/gpn_runtime.compact.compressed.wasm | cut -d' ' -f1)
-          echo "canonical wasm: $got"
-          [ "$got" = "$CANON_SHA" ] || { echo "::error::build modified the canonical runtime WASM ($got)"; exit 1; }
 
           # ── package: identical layout to release-unix.yml (layout=bundle) ──
-          stage="$RUNNER_TEMP/gpn-linux-stage"
-          rm -rf "$stage" && mkdir -p "$stage/scripts"
-          # every provider/driver binary; *.d are rustc dep-info files, not bins
-          find "$CT_AGENT/release" -maxdepth 1 -type f -name 'gpn_*' ! -name '*.d' -exec cp {} "$stage/" \;
-          cp "$CT_NODE/release/gpn-node" "$stage/"
-          cp scripts/install-ollama.sh scripts/install-ollama-amd.sh "$stage/scripts/"
-          cp gpn-node.example.toml README-FIRST-RUN.txt "$stage/"
-          chmod +x "$stage"/gpn_* "$stage/scripts/"*.sh
-
-          # completeness gates — a half-empty bundle must never be published
-          bins=$(find "$stage" -maxdepth 1 -type f -name 'gpn_*' ! -name '*.d' | wc -l)
-          echo "agent binaries staged: $bins"
-          [ "$bins" -ge 50 ] || { echo "::error::only $bins gpn_* binaries staged"; exit 1; }
-          for f in gpn-node gpn_node gpn_llm_provider gpn_finetune_provider gpn_attest gpn_wallet \
-                   scripts/install-ollama.sh scripts/install-ollama-amd.sh \
-                   gpn-node.example.toml README-FIRST-RUN.txt; do
-            [ -s "$stage/$f" ] || { echo "::error::bundle is missing required file: $f"; exit 1; }
-          done
-
-          tar -czf "$RUNNER_TEMP/gpn-linux.tar.gz" -C "$stage" .
-          echo "package contents:"; find "$stage" -type f | sed "s|$stage/|  |" | sort
+          # script also re-verifies the canonical WASM and gates on a complete
+          # bundle (declared bins only — no *.d files, no stale binaries).
+          CT_NODE="$CT_NODE" CT_AGENT="$CT_AGENT" CANON_SHA="$CANON_SHA" \
+            bash scripts/ci/package-linux-bundle.sh "$RUNNER_TEMP/gpn-linux.tar.gz"
           sz=$(stat -c%s "$RUNNER_TEMP/gpn-linux.tar.gz")
           sh=$(sha256sum "$RUNNER_TEMP/gpn-linux.tar.gz" | cut -d' ' -f1)
           echo "asset size=$sz sha256=$sh"
