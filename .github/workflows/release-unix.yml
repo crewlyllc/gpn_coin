@@ -18,7 +18,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # Linux moved to release-linux-selfhosted.yml: GitHub-hosted runners are
+        # billing-blocked on this account (this job had 0 runs ever, which left
+        # linux-latest frozen at 2026-10-21). macOS has no self-hosted runner,
+        # so it stays on the hosted matrix.
+        os: [macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

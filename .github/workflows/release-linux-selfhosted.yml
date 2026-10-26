@@ -1,0 +1,152 @@
+name: Linux binaries (self-hosted)
+
+# GitHub-hosted runners on this account are billing-blocked, so the Linux leg of
+# release-unix.yml had 0 runs ever and linux-latest froze at the 2026-10-21
+# bundle. This lane builds the SAME package (layout=bundle: gpn_* + gpn-node at
+# the root, scripts/install-ollama*.sh, gpn-node.example.toml,
+# README-FIRST-RUN.txt) on the self-hosted Linux/GPU runner and publishes the
+# rolling `linux-latest` release. macOS stays on the hosted matrix.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  actions: write
+  contents: write   # to publish the linux-latest GitHub Release asset
+
+env:
+  RUST_TOOLCHAIN: 1.98.1
+  # Canonical genesis runtime WASM — must be byte-identical before and after the
+  # build (the runtime build script embeds it, never regenerates it).
+  CANON_SHA: 76f37b23a33e8ba3ada91849e69b66836590673f14ea009ef6d914eb0d16fa97
+  # Persistent clone + target dirs. A real `actions/checkout` rewrites every
+  # file's mtime, which makes cargo rebuild the whole tree (~1-2 h). Keeping a
+  # clone we `reset --hard` into preserves mtimes of unchanged files, so repeat
+  # runs are incremental.
+  SRC: /home/jeremyg/.gpn/ci-src
+  CT_NODE: /home/jeremyg/.gpn/ci-target/gpn-node
+  CT_AGENT: /home/jeremyg/.gpn/ci-target/gpn-agent
+  BUILD_LOCK: /home/jeremyg/.gpn/build.lock
+
+jobs:
+  linux:
+    runs-on: [self-hosted, Linux, gpu]
+    timeout-minutes: 240
+    steps:
+      - name: sync source tree to the dispatched commit (mtime-preserving)
+        env:
+          REPO_URL: https://github.com/${{ github.repository }}.git
+        run: |
+          set -euo pipefail
+          if [ ! -d "$SRC/.git" ]; then
+            git clone --no-checkout "$REPO_URL" "$SRC"
+          fi
+          git -C "$SRC" remote set-url origin "$REPO_URL"
+          git -C "$SRC" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'
+          if ! git -C "$SRC" cat-file -e "${GITHUB_SHA}^{commit}" 2>/dev/null; then
+            git -C "$SRC" fetch origin "$GITHUB_SHA"
+          fi
+          git -C "$SRC" -c advice.detachedHead=false checkout --force --detach "$GITHUB_SHA"
+          # untracked/ignored build leftovers must not leak into the bundle;
+          # target/ lives outside the tree (CARGO_TARGET_DIR) so this is cheap.
+          git -C "$SRC" clean -ffdx
+          echo "building $GITHUB_SHA ($(git -C "$SRC" log -1 --format=%s))"
+
+      - name: canonical runtime WASM (pre-build)
+        run: |
+          set -euo pipefail
+          got=$(sha256sum "$SRC/gpn-node/runtime/gpn_runtime.compact.compressed.wasm" | cut -d' ' -f1)
+          echo "canonical wasm: $got"
+          [ "$got" = "$CANON_SHA" ] || { echo "::error::canonical runtime WASM is $got, expected $CANON_SHA"; exit 1; }
+
+      - name: build + package (holds ~/.gpn/build.lock)
+        # Serialises against local/other builds on this box: the lock is the same
+        # one interactive cargo builds take, so a release never competes with
+        # them for RAM/CPU. -w 7200 waits up to 2 h, then fails loudly.
+        env:
+          # the checkout is in $SRC, not github.workspace — run everything there
+          WORK: /home/jeremyg/.gpn/ci-src
+        run: |
+          set -euo pipefail
+          export RUST_TOOLCHAIN
+          cd "$WORK"
+          node -v >/dev/null 2>&1 || true
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal >/dev/null
+          rustup target add wasm32-unknown-unknown --toolchain "$RUST_TOOLCHAIN" >/dev/null
+          rustup component add rust-src --toolchain "$RUST_TOOLCHAIN" >/dev/null
+          export CARGO_NET_GIT_FETCH_WITH_CLI=true
+
+          (
+            flock -w 7200 9 || { echo "::error::could not acquire $BUILD_LOCK within 2 h"; exit 1; }
+            echo "acquired build lock $(date -Is)"
+
+            echo "== build node"
+            CARGO_TARGET_DIR="$CT_NODE" cargo build --release \
+              --manifest-path gpn-node/Cargo.toml -p gpn-node
+
+            echo "== build agent"
+            CARGO_TARGET_DIR="$CT_AGENT" cargo build --release \
+              --manifest-path gpn-agent/Cargo.toml --bins
+          ) 9>"$BUILD_LOCK"
+
+          echo "== canonical wasm (post-build)"
+          got=$(sha256sum gpn-node/runtime/gpn_runtime.compact.compressed.wasm | cut -d' ' -f1)
+          echo "canonical wasm: $got"
+          [ "$got" = "$CANON_SHA" ] || { echo "::error::build modified the canonical runtime WASM ($got)"; exit 1; }
+
+          # ── package: identical layout to release-unix.yml (layout=bundle) ──
+          stage="$RUNNER_TEMP/gpn-linux-stage"
+          rm -rf "$stage" && mkdir -p "$stage/scripts"
+          # every provider/driver binary; *.d are rustc dep-info files, not bins
+          find "$CT_AGENT/release" -maxdepth 1 -type f -name 'gpn_*' ! -name '*.d' -exec cp {} "$stage/" \;
+          cp "$CT_NODE/release/gpn-node" "$stage/"
+          cp scripts/install-ollama.sh scripts/install-ollama-amd.sh "$stage/scripts/"
+          cp gpn-node.example.toml README-FIRST-RUN.txt "$stage/"
+          chmod +x "$stage"/gpn_* "$stage/scripts/"*.sh
+
+          # completeness gates — a half-empty bundle must never be published
+          bins=$(find "$stage" -maxdepth 1 -type f -name 'gpn_*' ! -name '*.d' | wc -l)
+          echo "agent binaries staged: $bins"
+          [ "$bins" -ge 50 ] || { echo "::error::only $bins gpn_* binaries staged"; exit 1; }
+          for f in gpn-node gpn_node gpn_llm_provider gpn_finetune_provider gpn_attest gpn_wallet \
+                   scripts/install-ollama.sh scripts/install-ollama-amd.sh \
+                   gpn-node.example.toml README-FIRST-RUN.txt; do
+            [ -s "$stage/$f" ] || { echo "::error::bundle is missing required file: $f"; exit 1; }
+          done
+
+          tar -czf "$RUNNER_TEMP/gpn-linux.tar.gz" -C "$stage" .
+          echo "package contents:"; find "$stage" -type f | sed "s|$stage/|  |" | sort
+          sz=$(stat -c%s "$RUNNER_TEMP/gpn-linux.tar.gz")
+          sh=$(sha256sum "$RUNNER_TEMP/gpn-linux.tar.gz" | cut -d' ' -f1)
+          echo "asset size=$sz sha256=$sh"
+          {
+            echo "### linux-latest asset"
+            echo "- commit: \`$GITHUB_SHA\`"
+            echo "- size: $sz bytes"
+            echo "- sha256: \`$sh\`"
+            echo "- canonical wasm: \`$CANON_SHA\` (untouched)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: publish GitHub Release (rolling 'linux-latest')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eo pipefail
+          tag="linux-latest"; asset="gpn-linux.tar.gz"; src="$RUNNER_TEMP/$asset"
+          hdr=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json")
+          relid=$(curl -sf "${hdr[@]}" "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$tag" | jq -r '.id // empty' || true)
+          if [ -z "$relid" ]; then
+            curl -sf "${hdr[@]}" -X POST "https://api.github.com/repos/$GITHUB_REPOSITORY/releases" \
+              -d "{\"tag_name\":\"$tag\",\"name\":\"GPN linux (latest)\",\"body\":\"Rolling GPN Linux build. commit $GITHUB_SHA\",\"target_commitish\":\"main\"}" >/dev/null
+            relid=$(curl -sf "${hdr[@]}" "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$tag" | jq -r '.id')
+          fi
+          for asid in $(curl -sf "${hdr[@]}" "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/$relid/assets" | jq -r ".[] | select(.name==\"$asset\") | .id"); do
+            curl -sf "${hdr[@]}" -X DELETE "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$asid" >/dev/null
+          done
+          curl -sf "${hdr[@]}" -H "Content-Type: application/gzip" \
+            --data-binary "@$src" \
+            "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$relid/assets?name=$asset" >/dev/null
+          echo "published $tag / $asset ($(stat -c%s "$src") bytes, sha256 $(sha256sum "$src" | cut -d' ' -f1))"
