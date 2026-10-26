@@ -320,6 +320,31 @@ impl ChainClient {
         }
     }
 
+    /// The client handle for a read, connecting for the first time if this
+    /// process never managed to.
+    ///
+    /// Item #111: [`Self::heal_client`] only repairs a socket that *existed* and
+    /// died (#80). A process started **before** the node — the normal shape
+    /// during a runtime upgrade, where the enactment restarts the access point
+    /// and the node within the same second — therefore kept `client = None` for
+    /// its entire life: every read answered `no chain connection`, no reconnect
+    /// was ever attempted, and the access point reported `chain_unavailable`,
+    /// skipped its janitor re-adopt scan and read the oracle feed as UNREADABLE
+    /// until a human restarted it (observed live on the spec-43 enactment,
+    /// 2026-10-25 21:52). Attempting a (rate-limited) connect here makes that
+    /// state self-heal on the first tick after the node is back.
+    async fn ensure_client(&self) -> Result<OnlineClient<SubstrateConfig>, String> {
+        if let Some(c) = self.current_client() {
+            return Ok(c);
+        }
+        self.heal_client().await.ok_or_else(|| {
+            format!(
+                "no chain connection to {} (reconnect attempt failed)",
+                self.endpoint
+            )
+        })
+    }
+
     /// One storage fetch against a specific client, surfacing the error text so
     /// the caller can tell a dead socket apart from a chain-level `None`.
     async fn fetch_with<Addr>(
@@ -380,9 +405,7 @@ impl ChainClient {
             IsFetchable = subxt::utils::Yes,
         >,
     {
-        let client = self
-            .current_client()
-            .ok_or_else(|| format!("no chain connection to {}", self.endpoint))?;
+        let client = self.ensure_client().await?;
         let head = self.head_block_hash().await;
         match Self::fetch_with(&client, addr, head).await {
             Ok(v) => Ok(v),
@@ -692,9 +715,7 @@ impl ChainClient {
     /// `Ok(info with balance 0.0)` here means exactly one thing: the read
     /// succeeded and the account has no `System::Account` entry.
     pub async fn get_account_info_result(&self, address: &str) -> Result<AccountInfo, String> {
-        if self.current_client().is_none() {
-            return Err(format!("no chain connection to {}", self.endpoint));
-        }
+        self.ensure_client().await?;
         let addr32 = address
             .parse::<subxt::utils::AccountId32>()
             .map_err(|e| format!("{address} is not a valid SS58/AccountId32 address: {e}"))?;
@@ -787,9 +808,7 @@ impl ChainClient {
     /// Item #110: the nonce has the same collapse as the balance — `0` meant
     /// "no connection", "bad address", "read failed" and "fresh account" alike.
     pub async fn get_account_nonce_result(&self, address: &str) -> Result<u64, String> {
-        if self.current_client().is_none() {
-            return Err(format!("no chain connection to {}", self.endpoint));
-        }
+        self.ensure_client().await?;
         let addr32 = address
             .parse::<subxt::utils::AccountId32>()
             .map_err(|e| format!("{address} is not a valid SS58/AccountId32 address: {e}"))?;
@@ -815,9 +834,7 @@ impl ChainClient {
     /// Item #110: `(false, false)` meant both "not a provider" and "the chain was
     /// never read". The result form keeps the second case distinguishable.
     pub async fn get_provider_state_result(&self, address: &str) -> Result<(bool, bool), String> {
-        if self.current_client().is_none() {
-            return Err(format!("no chain connection to {}", self.endpoint));
-        }
+        self.ensure_client().await?;
         let addr32 = address
             .parse::<subxt::utils::AccountId32>()
             .map_err(|e| format!("{address} is not a valid SS58/AccountId32 address: {e}"))?;
@@ -2823,6 +2840,61 @@ mod tests {
         let limbs = [0u64, 0, 0, 1u64 << 48];
         let d = target_to_difficulty(limbs);
         assert!((d - 65536.0).abs() < 1.0, "expected ~65536, got {}", d);
+    }
+
+    /// Item #111: a client that **never** connected must try to connect on a
+    /// read, instead of answering "no chain connection" forever.
+    ///
+    /// The live shape (2026-10-25 21:52, spec-43 enactment): the timer restarted
+    /// the node and the access point in the same second, `ChainClient::new` lost
+    /// the race, and from then on every read failed with `no chain connection`
+    /// while the node was healthy — `/jobs` answered `chain_unavailable`, the
+    /// janitor skipped its re-adopt scan and the feed read as UNREADABLE until a
+    /// human restarted the AP. `heal_client` could not help: it only repairs a
+    /// socket that existed and died (#80).
+    ///
+    /// A read now attempts a rate-limited connect. The attempt must be *made*
+    /// (that is the part that was missing) and must stay rate-limited (one per
+    /// `HEAL_MIN_INTERVAL`, so a down node cannot become a connect storm).
+    #[tokio::test]
+    async fn a_client_that_never_connected_tries_to_connect_on_a_read() {
+        // Opt out of the 15 s readiness gate: this test's port is dead on purpose.
+        std::env::set_var("GPN_RPC_READY_GATE", "0");
+        let offline = ChainClient::new("ws://127.0.0.1:1").await.unwrap();
+        std::env::remove_var("GPN_RPC_READY_GATE");
+        assert!(
+            offline.current_client().is_none(),
+            "127.0.0.1:1 must not connect"
+        );
+
+        // Force the heal clock past the interval so the first read is allowed to try.
+        *offline.last_heal.lock().unwrap() =
+            std::time::Instant::now() - HEAL_MIN_INTERVAL - std::time::Duration::from_secs(1);
+        let before = *offline.last_heal.lock().unwrap();
+
+        let err = offline
+            .get_account_nonce_result("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY")
+            .await
+            .expect_err("a dead endpoint cannot answer");
+        assert!(
+            err.contains("no chain connection to ws://127.0.0.1:1"),
+            "the failure must still name the endpoint honestly, got: {err}"
+        );
+        let after = *offline.last_heal.lock().unwrap();
+        assert!(
+            after > before,
+            "the read must have ATTEMPTED a connect (that is the whole defect)"
+        );
+
+        // Rate limit: an immediate second read must not attempt another connect.
+        let _ = offline
+            .get_account_nonce_result("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY")
+            .await;
+        assert_eq!(
+            *offline.last_heal.lock().unwrap(),
+            after,
+            "a second read inside HEAL_MIN_INTERVAL must not start another connect"
+        );
     }
 
     /// An UNREADABLE `NextJobId` must not look like `0`: the access point allocates
