@@ -22,5 +22,8 @@ fn min_eligibility_gflops_is_250_measured() {
 fn floor_sits_between_igpu_and_discrete_card() {
     let floor = gpn_runtime::MinEligibilityGflops::get();
     assert!(floor > 110, "floor {floor} would admit an integrated GPU");
-    assert!(floor < 823, "floor {floor} exceeds the reference 4060 measurement");
+    assert!(
+        floor < 823,
+        "floor {floor} exceeds the reference 4060 measurement"
+    );
 }

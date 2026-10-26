@@ -580,7 +580,10 @@ mod tests {
         assert_eq!(bump_settle_attempt(9002), 1);
         assert_eq!(bump_settle_attempt(9002), 2);
         assert_eq!(bump_attempt(9002), 1, "training budget is untouched");
-        assert!(MAX_SETTLE_ATTEMPTS >= 1, "the budget must be bounded");
+        // Compile-time assertion: the bound is a constant, so clippy's
+        // `assertions_on_constants` asks for a const block. Same invariant,
+        // enforced at build time instead of on every test run.
+        const { assert!(MAX_SETTLE_ATTEMPTS >= 1, "the budget must be bounded") };
         clear_settle_attempts(9002);
         assert_eq!(bump_settle_attempt(9002), 1, "a successful settle frees it");
         clear_attempts(9002);

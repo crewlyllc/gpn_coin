@@ -24,10 +24,76 @@ no-default-features = false
 # the upstream repo; point it at a mirror here if the runners are air-gapped.
 version = 2
 yanked = "warn"
-unmaintained = "warn"
+# cargo-deny 0.20 removed the old `warn` level for `unmaintained`. These findings
+# carry no exploit path ("the author stopped publishing"), and the previous
+# setting was explicitly non-failing, so the check is off here. The signal is NOT
+# lost: `cargo audit` still prints every unmaintained crate as an allowed
+# warning on both workspaces, and the id list is reviewed with the other
+# suppressions (2027-01-26). Only *new vulnerabilities* fail this gate.
+unmaintained = "none"
 ignore = [
-    # Add `"RUSTSEC-XXXX-YYYY" = "reason"` entries here after review, e.g. when
-    # an advisory only affects code paths we do not compile (test-only, wasm).
+    # MIRROR OF THE cargo-audit SUPPRESSIONS. The full per-advisory reasoning
+    # lives in gpn-node/.cargo/audit.toml and gpn-agent/.cargo/audit.toml; keep
+    # this list in sync with those two files (2026-10-26, CI run 40317098274).
+    # Every entry is blocked by a *pinned parent crate* we do not control, not
+    # by preference. Review 2027-01-26, or on any polkadot-sdk / litep2p /
+    # subxt / sp-core / wasmtime bump.
+
+    # gpn-node + gpn-agent (shared crates)
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 via elliptic-curve 0.13 (sp-core); fix needs elliptic-curve 0.14" },
+    { id = "RUSTSEC-2026-0258", reason = "h2 0.3.x via hyper 0.14 (subxt / jsonrpsee 0.22); h2 0.3 has no patched release. Our own paths use h2 0.4.16" },
+    { id = "RUSTSEC-2026-0119", reason = "hickory-proto 0.24.4/0.25.2 pinned by libp2p-mdns 0.46 and litep2p 0.14.3; fix needs hickory 0.26" },
+    { id = "RUSTSEC-2026-0118", reason = "hickory-proto 0.25.2 NSEC3 loop: no fixed release exists; DNSSEC validation disabled" },
+    { id = "RUSTSEC-2025-0009", reason = "ring 0.16.20 via libp2p-tls 0.5 + rcgen 0.11; debug-only overflow panic. Our TLS uses ring 0.17.14" },
+    { id = "RUSTSEC-2026-0382", reason = "rustls-webpki 0.101/0.102 via rustls 0.21/0.22 (libp2p-tls 0.5, jsonrpsee 0.22); our verifier is 0.103.16" },
+    { id = "RUSTSEC-2026-0099", reason = "rustls-webpki 0.101/0.102 via libp2p-tls 0.5 / jsonrpsee 0.22" },
+    { id = "RUSTSEC-2026-0098", reason = "rustls-webpki 0.101/0.102 via libp2p-tls 0.5 / jsonrpsee 0.22" },
+    { id = "RUSTSEC-2026-0104", reason = "rustls-webpki 0.101/0.102 CRL parse panic; CRLs are never parsed on these paths" },
+    { id = "RUSTSEC-2025-0055", reason = "tracing-subscriber pinned to =0.3.19 by sc-tracing 28 and to 0.2 by sp-tracing 14/16" },
+    { id = "RUSTSEC-2026-0381", reason = "webpki-roots 0.25.4 via libp2p-websocket 0.44; our root store is webpki-roots 1.0.11" },
+    { id = "RUSTSEC-2026-0391", reason = "zstd 0.13.3 is pinned by wasmtime-internal-cache 36.0.19 (needs wasmtime >=37 for zstd 0.14)" },
+    { id = "RUSTSEC-2026-0398", reason = "zstd-safe 7.2.4 via zstd 0.13 inside wasmtime 36.x; needs zstd-safe >=8.2.0" },
+    { id = "RUSTSEC-2026-0403", reason = "zstd-safe 6.0.6/7.2.4 via zstd 0.12/0.13 inside wasmtime 36.x; needs zstd-safe >=8.2.0" },
+
+    # gpn-agent only (subxt 0.37 / sp-core 28 trees)
+    { id = "RUSTSEC-2024-0344", reason = "curve25519-dalek 2.1.3/3.2.0 via schnorrkel 0.9 + ed25519-zebra 3 (sp-core 28); needs dalek 4.x" },
+    { id = "RUSTSEC-2026-0346", reason = "rustls 0.21.12/0.22.4 via jsonrpsee 0.22 (subxt 0.37); our stack is rustls 0.23.46 and never Debug-formats session values" },
+    { id = "RUSTSEC-2026-0349", reason = "rustls 0.21.12/0.22.4 via jsonrpsee 0.22 (subxt 0.37)" },
+    { id = "RUSTSEC-2026-0049", reason = "rustls-webpki 0.102.8 CRL matching via jsonrpsee 0.22; revocation not checked there" },
+    { id = "RUSTSEC-2026-0344", reason = "ruzstd 0.5.0 decompression bomb via smoldot 0.16 (subxt 0.37 light client)" },
+    { id = "RUSTSEC-2023-0091", reason = "wasmtime 8.0.1 embedded by sp-wasm-interface 20 (sp-core 28); gpn-agent executes no wasm" },
+    { id = "RUSTSEC-2024-0438", reason = "wasmtime 8.0.1 embedded by sp-wasm-interface 20 (sp-core 28); gpn-agent executes no wasm" },
+    { id = "RUSTSEC-2025-0118", reason = "wasmtime 8.0.1 embedded by sp-wasm-interface 20 (sp-core 28); gpn-agent executes no wasm" },
+    { id = "RUSTSEC-2026-0020", reason = "wasmtime 8.0.1 embedded by sp-wasm-interface 20 (sp-core 28); gpn-agent executes no wasm" },
+    { id = "RUSTSEC-2026-0021", reason = "wasmtime 8.0.1 embedded by sp-wasm-interface 20 (sp-core 28); gpn-agent executes no wasm" },
+    { id = "RUSTSEC-2026-0085", reason = "wasmtime 8.0.1 embedded by sp-wasm-interface 20 (sp-core 28); gpn-agent executes no wasm" },
+    { id = "RUSTSEC-2026-0086", reason = "wasmtime 8.0.1 embedded by sp-wasm-interface 20 (sp-core 28); gpn-agent executes no wasm" },
+    { id = "RUSTSEC-2026-0087", reason = "wasmtime 8.0.1 embedded by sp-wasm-interface 20 (sp-core 28); gpn-agent executes no wasm" },
+    { id = "RUSTSEC-2026-0088", reason = "wasmtime 8.0.1 embedded by sp-wasm-interface 20 (sp-core 28); gpn-agent executes no wasm" },
+    { id = "RUSTSEC-2026-0089", reason = "wasmtime 8.0.1 embedded by sp-wasm-interface 20 (sp-core 28); gpn-agent executes no wasm" },
+    { id = "RUSTSEC-2026-0091", reason = "wasmtime 8.0.1 embedded by sp-wasm-interface 20 (sp-core 28); gpn-agent executes no wasm" },
+    { id = "RUSTSEC-2026-0092", reason = "wasmtime 8.0.1 embedded by sp-wasm-interface 20 (sp-core 28); gpn-agent executes no wasm" },
+    { id = "RUSTSEC-2026-0093", reason = "wasmtime 8.0.1 embedded by sp-wasm-interface 20 (sp-core 28); gpn-agent executes no wasm" },
+    { id = "RUSTSEC-2026-0094", reason = "wasmtime 8.0.1 embedded by sp-wasm-interface 20 (sp-core 28); gpn-agent executes no wasm" },
+    { id = "RUSTSEC-2026-0095", reason = "wasmtime 8.0.1 embedded by sp-wasm-interface 20 (sp-core 28); gpn-agent executes no wasm" },
+    { id = "RUSTSEC-2026-0096", reason = "wasmtime 8.0.1 embedded by sp-wasm-interface 20 (sp-core 28); gpn-agent executes no wasm" },
+    { id = "RUSTSEC-2026-0222", reason = "wasmtime 8.0.1 embedded by sp-wasm-interface 20 (sp-core 28); gpn-agent executes no wasm" },
+    { id = "RUSTSEC-2026-0269", reason = "wasmtime 8.0.1 embedded by sp-wasm-interface 20 (sp-core 28); gpn-agent executes no wasm" },
+    { id = "RUSTSEC-2026-0316", reason = "wasmtime 8.0.1 embedded by sp-wasm-interface 20 (sp-core 28); gpn-agent executes no wasm" },
+    { id = "RUSTSEC-2026-0363", reason = "wasmtime 8.0.1 embedded by sp-wasm-interface 20 (sp-core 28); gpn-agent executes no wasm" },
+    { id = "RUSTSEC-2026-0379", reason = "wasmtime 8.0.1 embedded by sp-wasm-interface 20 (sp-core 28); gpn-agent executes no wasm" },
+    { id = "RUSTSEC-2026-0380", reason = "wasmtime 8.0.1 embedded by sp-wasm-interface 20 (sp-core 28); gpn-agent executes no wasm" },
+
+    # --- `unsound` advisories that cargo-audit only warns about ------------
+    # cargo-deny hard-fails these; the same upstream pins apply, so they are
+    # suppressed here with the same reasoning rather than left as a red gate
+    # everybody learns to ignore.
+    { id = "RUSTSEC-2026-0386", reason = "tokio 1.53.1 AsyncFd I/O-safety; we never construct AsyncFd from a raw fd with an unowned lifetime. Upgrade blocked only by the polkadot-sdk rev" },
+    { id = "RUSTSEC-2026-0253", reason = "lru 0.7.8/0.12.5 LruCache::pop panic safety, via substrate's state caches" },
+    { id = "RUSTSEC-2026-0002", reason = "lru 0.12.5 IterMut Stacked Borrows, via substrate's state caches" },
+    { id = "RUSTSEC-2026-0186", reason = "memmap2 0.5.10 unchecked pointer offset, via substrate's memory-mapped DB; only reachable with an already-corrupt map" },
+    { id = "RUSTSEC-2026-0097", reason = "rand 0.7.3 custom-logger unsoundness, via substrate; we install no custom rand logger" },
+    { id = "RUSTSEC-2024-0442", reason = "wasmtime-jit-debug 8.0.1 JitDumpFile, via sp-wasm-interface 20; gpn-agent writes no JIT dumps" },
 ]
 
 [licenses]

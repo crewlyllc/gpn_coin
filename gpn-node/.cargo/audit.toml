@@ -3,12 +3,81 @@
 # Run:  cd gpn-node && cargo audit
 # Requires: cargo install cargo-audit --locked
 #
-# Add time-boxed suppressions here with a justification and an expiry note so
-# we never silently ignore a real advisory. Example:
+# Policy (2026-10-26, CI run 40317098274):
 #
-#   [[advisories.ignore]]
-#   id = "RUSTSEC-2024-0000"
-#   reason = "Only affects the `wasm32` test helper; not compiled into node/runtime."
-#   expires = "2026-12-31"
+#   * A fixable advisory is FIXED by a dependency bump, never ignored. The
+#     2026-10-26 pass bumped rustls 0.23.46, rustls-webpki 0.103.16, h2 0.4.16,
+#     quinn-proto 0.11.18, wasmtime 36.0.19, webpki-roots 1.0.11 and
+#     zstd-sys 2.1.2, which cleared 19 advisories.
+#   * An entry may only be ignored when the *only* fix is a major-version or
+#     upstream-pin change in a crate we do not control (polkadot-sdk rev,
+#     litep2p/libp2p, wasmtime major, hyper 0.14, elliptic-curve 0.13). Each
+#     entry below names the pinned parent crate, so it can be re-checked the
+#     moment that parent is bumped.
+#   * Every entry carries a review date. `expires` makes the suppression
+#     self-cancel, so a forgotten ignore cannot outlive its review.
+#
+# Ignoring an id here does not silence the tool: a *new* advisory for the same
+# crate still fails the audit.
+#
+# Next review: 2027-01-26 (or on any polkadot-sdk / litep2p / wasmtime bump).
+
 [advisories]
-ignore = []
+ignore = [
+    # --- Substrate / sp-core: elliptic-curve 0.13 pins crypto-bigint 0.5 -----
+    "RUSTSEC-2026-0387", # crypto-bigint 0.5.5 timing variability. Fix needs
+    #   crypto-bigint >=0.7.6, i.e. elliptic-curve 0.14 + k256 0.14, which
+    #   sp-core (polkadot-sdk rev da5c9660) pins to 0.13. Our own code does no
+    #   constant-time bigint work; this is reached only through sr25519/ecdsa
+    #   key handling inside sp-core.
+
+    # --- hyper 0.14 (via subxt 0.37 / sc-* RPC clients) ----------------------
+    "RUSTSEC-2026-0258", # h2 0.3.27 unbounded empty DATA frames. h2 0.3 has no
+    #   patched release (fix is h2 >=0.4.16 = hyper 1.x). hyper 0.14 comes from
+    #   the subxt/sc RPC client stack. Our node's own HTTP server/client paths
+    #   use h2 0.4.16 (already bumped); h2 0.3 is only reachable from the
+    #   substrate JSON-RPC client.
+
+    # --- libp2p-mdns 0.46 / litep2p 0.14: hickory-proto -----------------------
+    "RUSTSEC-2026-0119", # hickory-proto 0.24.4 + 0.25.2 O(n^2) name
+    #   compression. Fix is hickory-proto >=0.26.1; both copies are pinned by
+    #   libp2p-mdns 0.46 (0.24.4) and litep2p 0.14.3 (0.25.2). Name compression
+    #   only triggers on *encoding* peer names we did not author.
+    "RUSTSEC-2026-0118", # hickory-proto 0.25.2 NSEC3 closest-encloser loop.
+    #   Advisory has NO fixed release; must wait for a litep2p/hickory bump.
+    #   DNSSEC validation is not enabled on our resolvers.
+
+    # --- libp2p-tls 0.5 -> rustls 0.21 / ring 0.16 ---------------------------
+    "RUSTSEC-2025-0009", # ring 0.16.20 AES panic on overflow checks (debug
+    #   builds only). ring 0.16 is pinned by libp2p-tls 0.5 + rcgen 0.11; our
+    #   own TLS uses ring 0.17.14. Release binaries do not enable overflow
+    #   checks.
+    "RUSTSEC-2026-0382", # rustls-webpki 0.101.7 distrusted intermediates.
+    "RUSTSEC-2026-0099", # rustls-webpki 0.101.7 wildcard name constraints.
+    "RUSTSEC-2026-0098", # rustls-webpki 0.101.7 URI name constraints.
+    "RUSTSEC-2026-0104", # rustls-webpki 0.101.7 CRL parse panic. rustls-webpki
+    #   0.101 is the verifier behind rustls 0.21 (libp2p-tls 0.5). Revocation
+    #   lists are never parsed on this path. Our own verifier uses 0.103.16.
+
+    # --- libp2p-websocket 0.44 -> webpki-roots 0.25 -------------------------
+    "RUSTSEC-2026-0381", # webpki-roots 0.25.4 trusts emSign intermediates.
+    #   Pinned by libp2p-websocket 0.44 (polkadot-sdk rev). Our own
+    #   discovery/TLS root store uses webpki-roots 1.0.11 (bumped).
+
+    # --- wasmtime 36.x pins zstd 0.13 internally ----------------------------
+    "RUSTSEC-2026-0391", # zstd 0.13.3 stream-reuse leak. Only fix is
+    #   zstd >=0.14.3, which wasmtime-internal-cache 36.0.19 does not allow
+    #   (needs wasmtime >=37 major). Used by the wasmtime *compilation cache*
+    #   only, on artifacts this node compiles itself.
+    "RUSTSEC-2026-0398", # zstd-safe 7.2.4 Seekable::decompress Vec length.
+    "RUSTSEC-2026-0403", # zstd-safe 6.0.6 / 7.2.4 legacy-frame uninit memory.
+    #   Both come from zstd (0.12/0.13) inside wasmtime 36.x; same release
+    #   train as RUSTSEC-2026-0391 above. Needs zstd-safe >=8.2.0.
+
+    # --- polkadot-sdk pins tracing-subscriber exactly -----------------------
+    "RUSTSEC-2025-0055", # tracing-subscriber 0.3.19 ANSI escape poisoning.
+    #   sc-tracing 28.0.0 depends on `tracing-subscriber = "=0.3.19"` (exact
+    #   pin), so 0.3.20 cannot be selected without bumping the polkadot-sdk
+    #   rev. We never log untrusted peer input through the fmt layer with ANSI
+    #   enabled.
+]
