@@ -56,13 +56,18 @@ impl AttestationTier {
     /// Minimum measured compute throughput (FP32 GFLOPS) required to earn this
     /// tier. Ties the tier to **proof of real compute** — a provider must
     /// demonstrate it can actually serve a usable AI workload, not just report
-    /// a GPU count. (RTX 4060 ≈ 9-15 TFLOPS FP32; Bronze needs only a slice.)
+    /// a GPU count.
+    ///
+    /// Thresholds are in the *measured* `GPN-GEMM-F32-1024` unit, not the
+    /// spec-sheet peak scale (see gflops-floor-v1.md §2): Silver = one RTX
+    /// 4060-class card, Gold = four of them. The old 1_000/5_000 were written
+    /// on the peak scale and were unreachable for every consumer card.
     pub fn min_gflops(&self) -> u64 {
         match self {
             Self::Unattested => 0,
             Self::Bronze => 100,
-            Self::Silver => 1_000,
-            Self::Gold => 5_000,
+            Self::Silver => 800,
+            Self::Gold => 3_200,
         }
     }
 }
@@ -1122,6 +1127,24 @@ mod tests {
     }
 
     #[test]
+    fn test_gflops_thresholds_pin_measured_unit() {
+        // Spec 44 / queue #97: tier thresholds are expressed in the measured
+        // `GPN-GEMM-F32-1024` unit, not the spec-sheet peak scale. Pinned so a
+        // future edit cannot quietly restore the unreachable 1_000/5_000.
+        assert_eq!(AttestationTier::Unattested.min_gflops(), 0);
+        assert_eq!(AttestationTier::Bronze.min_gflops(), 100);
+        assert_eq!(AttestationTier::Silver.min_gflops(), 800);
+        assert_eq!(AttestationTier::Gold.min_gflops(), 3_200);
+
+        // A measured RTX 4060 (823-912) clears Silver but not Gold: one card
+        // per tier step, which is the intent of the recalibration.
+        assert!(900 >= AttestationTier::Silver.min_gflops());
+        assert!(900 < AttestationTier::Gold.min_gflops());
+        // …and an integrated GPU (~50-110) still cannot reach even Silver.
+        assert!(110 < AttestationTier::Silver.min_gflops());
+    }
+
+    #[test]
     fn test_gflops_thresholds_per_tier() {
         new_test_ext().execute_with(|| {
             // Bronze needs >=100; exactly 100 passes.
@@ -1139,7 +1162,7 @@ mod tests {
                 AttestationTier::Bronze
             );
 
-            // 4 GPUs claim Silver (needs >=1000) but deliver 500 → rejected.
+            // 4 GPUs claim Silver (needs >=800) but deliver 500 → rejected.
             AttestPallet::deposit_stake(RuntimeOrigin::signed(BOB), 500).unwrap();
             let result = AttestPallet::submit_attestation(
                 RuntimeOrigin::signed(BOB),

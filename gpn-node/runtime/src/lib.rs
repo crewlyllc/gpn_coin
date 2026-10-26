@@ -500,10 +500,15 @@ parameter_types! {
     pub const MaxAttestationAge: BlockNumber = 14400; // ~60 hours
     pub const MaxMissedAttestations: u32 = 3;
     /// Minimum GPU capability (item 19): a device must *measure* at least this
-    /// many FP32 GFLOPS to be eligible to attest (⇒ to earn). 3,000 GFLOPS =
-    /// **3 TFLOPS** — a CPU/APU **integrated** GPU (≈1–2 TFLOPS) never clears it,
-    /// while a discrete card does. Tunable via a reviewed runtime upgrade.
-    pub const MinEligibilityGflops: u64 = 3_000;
+    /// many FP32 GFLOPS to be eligible to attest (⇒ to earn).
+    ///
+    /// Measured-unit floor (queue #97). 250 GFLOPS = 30% of the lowest idle
+    /// GPN-GEMM-F32-1024 measurement of the weakest supported card (RTX 4060
+    /// 8 GB: 823). The old 3_000 was written on the spec-sheet-TFLOPS scale
+    /// while compute_gflops stores the measured GEMM throughput (~5.5% of
+    /// peak), so no honest attestation could ever clear it.
+    /// Derivation + migration: shared/artifacts/project7/staged/gflops-floor-v1.md
+    pub const MinEligibilityGflops: u64 = 250;
     pub const BaseStakingAPR: u32 = 1000; // 10.00% (in basis points)
     pub const SilverUptimeBps: u32 = 9_000; // 90% rolling uptime
     pub const GoldUptimeBps: u32 = 9_500; // 95% rolling uptime
