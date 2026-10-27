@@ -132,8 +132,14 @@ fn governance_config_is_the_documented_one() {
     );
     assert_eq!(
         timelock(),
-        17_280,
-        "3 days at 15 s blocks — changing this changes the mainnet upgrade timeline"
+        if cfg!(feature = "testnet-fast-timelock") {
+            10
+        } else {
+            17_280
+        },
+        "3 days at 15 s blocks on mainnet (feature off); 10 blocks on a \
+         testnet-fast-timelock build — changing the default changes the mainnet \
+         upgrade timeline"
     );
     assert_eq!(
         expiry(),

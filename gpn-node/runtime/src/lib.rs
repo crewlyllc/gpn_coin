@@ -340,11 +340,31 @@ fn hex_nibble(b: u8) -> u8 {
     }
 }
 
+/// Governance timelock, in blocks.
+///
+/// **Mainnet (the default build): 3 days** — 17 280 blocks at 15 s. A mainnet
+/// build is a feature-off build, and `tests/testnet_timelock_spec45.rs` pins
+/// the feature-off value, so enabling the testnet feature by accident fails CI
+/// instead of silently shipping a 10-block upgrade door to mainnet.
+///
+/// `testnet-fast-timelock` (spec 45) shortens the door to **10 blocks**
+/// (~2–2.5 min) so testnet governance still exercises the whole
+/// propose → approve → execute path, just in minutes instead of days.
+///
+/// Testnet build:  cargo build -p gpn-runtime --release --features testnet-fast-timelock
+/// Mainnet build:  cargo build -p gpn-runtime --release
+#[cfg(feature = "testnet-fast-timelock")]
+pub const GOVERNANCE_TIMELOCK_BLOCKS: BlockNumber = 10;
+/// Mainnet / default: 3 days at 15 s blocks — unchanged by the hardening upgrade.
+#[cfg(not(feature = "testnet-fast-timelock"))]
+pub const GOVERNANCE_TIMELOCK_BLOCKS: BlockNumber = 3 * DAYS;
+
 parameter_types! {
     /// 3 distinct members must approve (and 3 must approve a cancel).
     pub const GovernanceApprovalsRequired: u32 = 3;
-    /// 3 days at 15 s blocks — unchanged by the hardening upgrade.
-    pub const GovernanceTimelockPeriod: BlockNumber = 3 * DAYS;
+    /// 3 days on mainnet (feature off); 10 blocks on a `testnet-fast-timelock`
+    /// build. See `GOVERNANCE_TIMELOCK_BLOCKS`.
+    pub const GovernanceTimelockPeriod: BlockNumber = GOVERNANCE_TIMELOCK_BLOCKS;
     /// A proposal older than 14 days can no longer be executed and is pruned.
     pub const GovernanceProposalExpiry: BlockNumber = 14 * DAYS;
     pub const GovernanceMaxMembers: u32 = 8;

@@ -52,6 +52,11 @@ bls12_381 = { version = "0.8", default-features = false, features = ["alloc","pa
 
 [features]
 default = ["std"]
+# Testnet-only (spec 45): shorten `GovernanceTimelockPeriod` from 3 days
+# (17 280 blocks) to 10 blocks so governance still runs end-to-end on testnet
+# in minutes. NEVER enable this for a mainnet build — the default (feature off)
+# keeps 3 * DAYS, and `tests/testnet_timelock_spec45.rs` pins that default.
+testnet-fast-timelock = []
 std = [
     "codec/std",
     "scale-info/std",

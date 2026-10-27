@@ -97,7 +97,8 @@ fn print_help() {
            surface                        governance surface (members, threshold, timelock, tracks)\n\
            stage <wasm>                   validate artifact, hash it, write a plan file\n\
            propose [--wasm <p>|--plan <p>]  propose System.set_code (committee member)\n\
-           approve <proposal-hash>        approve a pending proposal (committee member)\n\
+           approve <proposal-hash>        approve a pending proposal (committee member)
+           cancel <proposal-hash>         withdraw a pending proposal (needs the threshold)\n\
            status [proposal-hash]         show pending proposals and readiness\n\
            execute <proposal-hash>        execute as Root (anyone, after threshold+timelock)\n\
            verify [--plan <p>]            poll until enacted, then verify spec+code+health\n\
@@ -884,6 +885,71 @@ async fn cmd_approve(
     Ok(0)
 }
 
+/// `cancel <proposal-hash>` — withdraw a pending proposal. The pallet requires
+/// the **same** approval threshold as execution (3 of 3 here), so a cancel is
+/// signed once the collection is complete. No timelock applies to a cancel.
+async fn cmd_cancel(
+    opts: &Opts,
+    rpc: &Rpc,
+    client: &OnlineClient<GpnConfig>,
+) -> Result<i32, String> {
+    let hash_hex = opts
+        .args
+        .first()
+        .cloned()
+        .ok_or("usage: cancel <proposal-hash>")?;
+    let hash = gov::parse_hash(&hash_hex)?;
+    let surface = read_surface(rpc, client).await?;
+    let entry = rpc
+        .storage(&gov::storage_key_map_blake2_256(PALLET, "Proposals", &hash))
+        .await?
+        .ok_or_else(|| {
+            format!("no proposal {hash_hex} on chain (wrong hash, or already executed)")
+        })?;
+    let parsed = gov::parse_proposal_entry(&entry)
+        .map_err(|e| format!("cannot decode proposal {hash_hex}: {e}"))?;
+    println!(
+        "proposal {hash_hex}: {} approvals, created at block {}",
+        parsed.approvals, parsed.created_at
+    );
+    if parsed.approvals < surface.approvals_required {
+        eprintln!(
+            "❌ cancel needs {}/{} approvals, this proposal has {}",
+            surface.approvals_required, surface.approvals_required, parsed.approvals
+        );
+        return Ok(2);
+    }
+
+    let signer_uri = require_signer(opts)?;
+    let sg = Sr25519Signer::from_uri(&signer_uri).map_err(|e| e.to_string())?;
+    let who = sg.account_id().to_string();
+    if !surface.members.is_empty() && !surface.members.contains(&who) {
+        eprintln!(
+            "❌ {who} is not a committee member. Members: {:?}",
+            surface.members
+        );
+        return Ok(3);
+    }
+    let call = subxt::dynamic::tx(PALLET, "cancel", vec![Value::from_bytes(hash)]);
+    let nonce = signer::current_nonce(client, &opts.endpoint, &sg.account_id()).await;
+    println!("cancelling as {who} [nonce {nonce}]…");
+    signer::submit_signed(client, &call, &sg, nonce)
+        .await
+        .map_err(|e| e.to_string())?;
+    let still_there = rpc
+        .storage(&gov::storage_key_map_blake2_256(PALLET, "Proposals", &hash))
+        .await?;
+    println!(
+        "✅ proposal cancelled{}",
+        if still_there.is_some() {
+            " (still readable — re-check status)"
+        } else {
+            ", removed"
+        }
+    );
+    Ok(0)
+}
+
 /// Enumerate every pending proposal `(id, raw entry)`.
 ///
 /// `Proposals` is a `Blake2_256`-hashed map, so the proposal id is *not* in the
@@ -1059,9 +1125,16 @@ async fn cmd_execute(
     ) {
         Ok(()) => {}
         Err(e) => {
-            eprintln!("❌ not executable yet: {e}");
-            eprintln!("   re-check with: gpn_gov_upgrade status {hash_hex}");
-            return Ok(2);
+            // `--force` submits anyway, so the **pallet's** own guard is exercised
+            // on chain (the tx is included and fails dispatch with the pallet
+            // error, e.g. `TimelockNotElapsed`) instead of only the local check.
+            if opts.force {
+                eprintln!("⚠️  local readiness check failed: {e} — --force: submitting anyway");
+            } else {
+                eprintln!("❌ not executable yet: {e}");
+                eprintln!("   re-check with: gpn_gov_upgrade status {hash_hex}");
+                return Ok(2);
+            }
         }
     }
     if let Some(code) = &entry.code {
@@ -1367,6 +1440,7 @@ async fn run(opts: &Opts) -> Result<i32, String> {
         "stage" => cmd_stage(opts, &rpc, &client).await,
         "propose" => cmd_propose(opts, &rpc, &client).await,
         "approve" => cmd_approve(opts, &rpc, &client).await,
+        "cancel" => cmd_cancel(opts, &rpc, &client).await,
         "status" => cmd_status(opts, &rpc, &client).await,
         "execute" => cmd_execute(opts, &rpc, &client).await,
         "verify" => cmd_verify(opts, &rpc).await,
