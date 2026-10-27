@@ -3276,6 +3276,19 @@ mod tests {
 #[cfg(test)]
 mod idle_cli_tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// `isolate()` points the idle state at a per-test file through the
+    /// **process-global** `GPN_IDLE_FILE` env var, so these tests are *not*
+    /// independent: running in parallel, one test's `set_var` retargets
+    /// another's write and its state file "goes missing".
+    /// `..._writes_state_and_resume_clears_it_with_force` failed ~1 run in 4
+    /// this way (CI red 2026-10-27 on `--bin gpn_node`). Serialize them; a
+    /// test panicking while holding the lock must not poison the rest.
+    fn serial() -> MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     /// Point the idle state at a per-test file so the CLI verbs under test can
     /// never touch the operator's real `~/.gpn/idle.json`.
@@ -3302,6 +3315,7 @@ mod idle_cli_tests {
 
     #[test]
     fn idle_verb_refuses_an_over_long_window() {
+        let _serial = serial();
         let p = isolate("toolong");
         let cfg = dead_port_cfg("toolong", true);
         let argv = vec![
@@ -3321,6 +3335,7 @@ mod idle_cli_tests {
 
     #[test]
     fn idle_verb_refuses_when_the_node_is_the_only_authority() {
+        let _serial = serial();
         let p = isolate("sole");
         let cfg = dead_port_cfg("sole", false);
         let argv = vec!["gpn_node".to_string(), "idle".to_string(), "60".to_string()];
@@ -3331,6 +3346,7 @@ mod idle_cli_tests {
 
     #[test]
     fn idle_verb_writes_state_and_resume_clears_it_with_force() {
+        let _serial = serial();
         let p = isolate("force");
         let cfg = dead_port_cfg("force", true);
         let argv = vec!["gpn_node".to_string(), "idle".to_string(), "45".to_string()];
@@ -3351,6 +3367,7 @@ mod idle_cli_tests {
 
     #[test]
     fn a_normal_start_runs_no_control_verb() {
+        let _serial = serial();
         let _ = isolate("normal");
         let cfg = dead_port_cfg("normal", false);
         let argv = vec!["gpn_node".to_string(), "--gui".to_string()];
