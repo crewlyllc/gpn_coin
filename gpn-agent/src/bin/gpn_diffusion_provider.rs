@@ -1712,24 +1712,40 @@ async fn process_once(
             .collect()
     };
 
-    let attested_gflops = client
-        .get_attestation_record(addr)
-        .await
-        .map(|(_, f, _)| f)
-        .unwrap_or(0);
+    // Strict read (#110 family): a failed attestation read used to become
+    // `0 GFLOPS`, silently narrowing the claim window to `min_gflops = 0` jobs.
+    // Unknown means "skip the claim decision this pass", not "claim at zero".
+    let attested = gpn_agent::strict::Strict::from_result(
+        "diffusion_provider.chain_attestation",
+        client.get_attestation_record_result(addr).await,
+    );
+    let attested_gflops: Option<u64> = match attested {
+        gpn_agent::strict::Strict::Known(Some((_, f, _))) => Some(f),
+        gpn_agent::strict::Strict::Known(None) => Some(0),
+        gpn_agent::strict::Strict::Unknown(reason) => {
+            eprintln!(
+                "[provider] claim pass skipped: attestation record UNKNOWN ({reason}) — \
+                 not claiming at an invented 0 GFLOPS"
+            );
+            None
+        }
+    };
     // Item #59: bounded + throttled scan (was: full history, every poll).
     let claim_scan_ms = env_millis("GPN_CLAIM_SCAN_MS", DEFAULT_CLAIM_SCAN_MS);
     let claim_window = env_millis("GPN_CLAIM_SCAN_WINDOW", DEFAULT_CLAIM_SCAN_WINDOW);
-    let claimable =
-        if !assigned_ids.is_empty() || due(*last_claim_scan, Instant::now(), claim_scan_ms) {
+    let claimable = match attested_gflops {
+        None => Vec::new(),
+        Some(attested_gflops)
+            if !assigned_ids.is_empty() || due(*last_claim_scan, Instant::now(), claim_scan_ms) =>
+        {
             *last_claim_scan = Some(Instant::now());
             let (from, to) = claim_scan_range(next, claim_window);
             client
                 .list_claimable_jobs_window(from, to, attested_gflops)
                 .await
-        } else {
-            Vec::new()
-        };
+        }
+        Some(_) => Vec::new(),
+    };
     for (job_id, min_gflops) in claimable {
         if !assigned_ids.is_empty() && !assigned_ids.contains(&job_id) {
             continue;

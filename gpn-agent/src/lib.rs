@@ -41,6 +41,7 @@ pub mod provider_watchdog;
 pub mod routing;
 pub mod seedlist;
 pub mod settle_policy;
+pub mod strict;
 pub mod update;
 pub mod utils;
 
