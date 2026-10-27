@@ -52,9 +52,21 @@ impl GPUMiningNodeAgent {
             .await?
             .with_signer(&config.signer_uri);
         let gpu_monitor = gpu::GPUMonitor::new()?;
-        let account = chain_client
-            .get_account_info(&config.account_address)
-            .await?;
+        // Display-only snapshot: nothing downstream decides anything on
+        // `AgentState::account`. Read through the result form so a failed read is
+        // stated (and logged once by `Strict`) instead of arriving as a silent
+        // zero balance; the placeholder is taken explicitly, by name.
+        let account = gpn_agent::strict::Strict::from_result(
+            "agent.startup_balance",
+            chain_client
+                .get_account_info_result(&config.account_address)
+                .await,
+        )
+        .or_for_display_only(chain::AccountInfo {
+            address: config.account_address.clone(),
+            balance: 0.0,
+            nonce: 0,
+        });
 
         let state = Arc::new(RwLock::new(AgentState {
             current_mode: Mode::Mining,
@@ -312,22 +324,48 @@ impl GPUMiningNodeAgent {
 
         // 1. Provider must be registered. Register idempotently if not.
         if !self.chain_client.is_provider_registered(&addr).await {
-            log::info!("registering as marketplace provider ({}...)", &addr[..10]);
             // Advertise the attested compute tier so the marketplace can match us.
-            let attested = self.chain_client.get_attestation_record(&addr).await;
-            let (gpus, gflops) = attested.map(|(g, f, _)| (g, f)).unwrap_or((1, 0));
-            self.chain_client
-                .register_provider(8_000, 75, gpus, 0, gflops)
-                .await?;
+            // Strict read: registering spends a bond and writes an identity
+            // record, so a failed read must NOT become `gpus=1, gflops=0`
+            // (which is what `unwrap_or((1, 0))` did — a registration claiming
+            // compute the chain never measured).
+            match registration_gate(self.chain_client.get_attestation_record_result(&addr).await) {
+                RegistrationGate::Register { gpus, gflops } => {
+                    log::info!("registering as marketplace provider ({}...)", &addr[..10]);
+                    self.chain_client
+                        .register_provider(8_000, 75, gpus, 0, gflops)
+                        .await?;
+                }
+                RegistrationGate::SkipUnknown(reason) => {
+                    log::warn!(
+                        "registration skipped: the attestation record for {} could not be read \
+                         ({reason}) — not registering with invented gflops/gpu_count.",
+                        &addr[..addr.len().min(12)]
+                    );
+                    return Ok(0);
+                }
+            }
         }
 
         // 2. Provider must be attested to take gated jobs.
-        let attested_gflops = self
-            .chain_client
-            .get_attestation_record(&addr)
-            .await
-            .map(|(_, f, _)| f)
-            .unwrap_or(0);
+        //
+        // Strict read: a failed read used to become `0 GFLOPS`, which looks
+        // exactly like "this box was measured at nothing" and silently narrowed
+        // the marketplace to `min_gflops = 0` jobs. `Unknown` must not claim —
+        // we do not know what this provider can legally take, so no routing
+        // decision is taken this tick.
+        let attested_gflops =
+            match claim_gate(self.chain_client.get_attestation_record_result(&addr).await) {
+                ClaimGate::Claim(gflops) => gflops,
+                ClaimGate::RefuseUnknown(reason) => {
+                    log::warn!(
+                    "claim skipped: the attestation record for {} could not be read ({reason}) — \
+                     NOT treating that as 0 GFLOPS.",
+                    &addr[..addr.len().min(12)]
+                );
+                    return Ok(0);
+                }
+            };
 
         // 3. Find pending jobs we can actually satisfy.
         let claimable = self.chain_client.list_claimable_jobs(attested_gflops).await;
@@ -422,6 +460,52 @@ impl GPUMiningNodeAgent {
 /// 2026-10-20). Flags are now answered or rejected before this is reached.
 const DEFAULT_CONFIG_PATH: &str = "config/default.toml";
 
+/// What to do about marketplace registration, given how the attestation read
+/// resolved.
+///
+/// Pure and total so the failure path can be unit-tested without a chain: the
+/// old code was `map(..).unwrap_or((1, 0))`, which turned an unreadable chain
+/// into a registration advertising **one GPU and zero GFLOPS** — a bond spent
+/// on a claim the chain never made.
+enum RegistrationGate {
+    Register {
+        gpus: u8,
+        gflops: u64,
+    },
+    /// The chain was not read; do nothing this tick and say why.
+    SkipUnknown(String),
+}
+
+fn registration_gate(record: Result<Option<(u8, u64, String)>, String>) -> RegistrationGate {
+    match record {
+        Ok(Some((gpus, gflops, _tier))) => RegistrationGate::Register { gpus, gflops },
+        // A real answer: this account was never attested. Pre-attestation
+        // defaults are then an honest starting point (the marketplace will not
+        // route gated work to it until a real record exists).
+        Ok(None) => RegistrationGate::Register { gpus: 1, gflops: 0 },
+        Err(e) => RegistrationGate::SkipUnknown(e),
+    }
+}
+
+/// May this tick claim marketplace jobs, and with what advertised compute?
+///
+/// `Ok(None)` (never attested) is a legitimately claimable state at 0 GFLOPS —
+/// only `min_gflops = 0` jobs will match, which is what the chain actually
+/// says. `Err` means the chain was not read at all, and claiming then would be
+/// routing on an invented capability.
+enum ClaimGate {
+    Claim(u64),
+    RefuseUnknown(String),
+}
+
+fn claim_gate(record: Result<Option<(u8, u64, String)>, String>) -> ClaimGate {
+    match record {
+        Ok(Some((_, gflops, _tier))) => ClaimGate::Claim(gflops),
+        Ok(None) => ClaimGate::Claim(0),
+        Err(e) => ClaimGate::RefuseUnknown(e),
+    }
+}
+
 fn config_path_from(argv: &[String]) -> String {
     argv.get(1)
         .cloned()
@@ -490,6 +574,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     agent.run().await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod strict_gate_tests {
+    use super::{claim_gate, registration_gate, ClaimGate, RegistrationGate};
+
+    #[test]
+    fn an_unreadable_attestation_refuses_claiming_rather_than_claiming_zero() {
+        match claim_gate(Err("dead socket".to_string())) {
+            ClaimGate::RefuseUnknown(reason) => assert_eq!(reason, "dead socket"),
+            ClaimGate::Claim(g) => panic!("claimed {g} GFLOPS off a failed read"),
+        }
+    }
+
+    #[test]
+    fn a_real_absent_record_is_still_claimable_at_zero() {
+        match claim_gate(Ok(None)) {
+            ClaimGate::Claim(g) => assert_eq!(g, 0),
+            ClaimGate::RefuseUnknown(r) => panic!("refused a readable chain: {r}"),
+        }
+        match claim_gate(Ok(Some((1, 188, "Bronze".to_string())))) {
+            ClaimGate::Claim(g) => assert_eq!(g, 188),
+            ClaimGate::RefuseUnknown(r) => panic!("refused a readable chain: {r}"),
+        }
+    }
+
+    #[test]
+    fn an_unreadable_attestation_never_registers_with_invented_capacity() {
+        match registration_gate(Err("connection refused".to_string())) {
+            RegistrationGate::SkipUnknown(reason) => assert_eq!(reason, "connection refused"),
+            RegistrationGate::Register { gpus, gflops } => {
+                panic!("registered {gpus} GPUs / {gflops} GFLOPS off a failed read")
+            }
+        }
+    }
+
+    #[test]
+    fn registration_uses_the_chain_record_when_it_is_there() {
+        match registration_gate(Ok(Some((2, 400, "Silver".to_string())))) {
+            RegistrationGate::Register { gpus, gflops } => {
+                assert_eq!((gpus, gflops), (2, 400));
+            }
+            RegistrationGate::SkipUnknown(r) => panic!("skipped a readable chain: {r}"),
+        }
+        match registration_gate(Ok(None)) {
+            RegistrationGate::Register { gpus, gflops } => assert_eq!((gpus, gflops), (1, 0)),
+            RegistrationGate::SkipUnknown(r) => panic!("skipped a readable chain: {r}"),
+        }
+    }
 }
 
 #[cfg(test)]

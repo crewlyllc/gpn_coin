@@ -196,8 +196,39 @@ impl ProfitabilityCalculator {
 
         // Live chain feed (single fetch — the old code read the feed 4x, one
         // network round-trip per field; we now fetch once and reuse it).
-        let difficulty = self.chain_client.get_difficulty().await?;
-        let mut feed = self.chain_client.get_feed().await;
+        //
+        // Strict reads (the #108/#110/#105 family): every value below feeds the
+        // mining-vs-compute mode decision, so a failed read must not arrive as a
+        // number. `Unknown` on either ends the analysis with an error — no
+        // decision is taken on a value the chain never reported.
+        let difficulty = match self.chain_client.get_difficulty_strict().await {
+            crate::strict::Strict::Known(d) => d,
+            crate::strict::Strict::Unknown(reason) => {
+                log::warn!(
+                    "Profitability: difficulty UNKNOWN ({reason}) — no mode decision taken this cycle."
+                );
+                return Err(format!(
+                    "profitability analysis skipped: mining difficulty could not be read ({reason})"
+                )
+                .into());
+            }
+        };
+        let mut feed = match self.chain_client.get_feed_strict().await {
+            crate::strict::Strict::Known(f) => f,
+            crate::strict::Strict::Unknown(reason) => {
+                // No feed *value* and no decision. Publishing a mode switch off
+                // a price we never read is the same defect as #108 one layer
+                // up; the caller logs this and leaves the current mode alone.
+                log::warn!(
+                    "Profitability: feed UNREADABLE ({reason}) — no pricing decision taken this \
+                     cycle (current mode kept)."
+                );
+                return Err(format!(
+                    "profitability analysis skipped: the on-chain feed could not be read ({reason})"
+                )
+                .into());
+            }
+        };
         let head_block = self.chain_client.head_block_number().await;
 
         // Oracle-governance §6 gap #3: when `feed_aggregation = "median"`,
@@ -271,11 +302,21 @@ impl ProfitabilityCalculator {
         // stale feed could otherwise drive the whole network off mining onto
         // outdated compute/staking prices.
         let ttl = self.config.feed_staleness_ttl_blocks;
-        let stale = feed
-            .as_ref()
-            .zip(head_block)
-            .map(|(f, h)| crate::chain::is_feed_stale(f.updated_at_block, h, ttl))
-            .unwrap_or(false);
+        let stale = match feed.as_ref().zip(head_block) {
+            Some((f, h)) => crate::chain::is_feed_stale(f.updated_at_block, h, ttl),
+            // A feed we cannot date (head unreadable) is not evidence of
+            // freshness. Before, `.unwrap_or(false)` read that failure as
+            // "fresh" and let the prices drive the switch.
+            None if feed.is_some() => {
+                log::warn!(
+                    "Profitability: head block UNKNOWN — cannot judge feed staleness; treating the feed as stale."
+                );
+                true
+            }
+            // No feed at all is a real answer (`Known(None)`); the per-field
+            // bootstrap fallbacks below are the documented launch behaviour.
+            None => false,
+        };
         if stale {
             log::warn!(
                 "Profitability feed STALE (updated at block {}, head {}, TTL {:?} blocks). Forcing conservative Mining default.",

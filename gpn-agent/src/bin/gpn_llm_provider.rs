@@ -3224,11 +3224,26 @@ async fn process_once(
     };
     let (mut settled, pruned) = read_settled_from_with_tip(&settled_path, chain_tip);
     let targets: Vec<u64> = if assigned.is_empty() {
-        let attested_gflops = client
-            .get_attestation_record(addr)
-            .await
-            .map(|(_, f, _)| f)
-            .unwrap_or(0);
+        // Strict read (#110 family): a failed attestation read used to become
+        // `0 GFLOPS`, which silently narrowed the marketplace to
+        // `min_gflops = 0` jobs and looked like an idle provider. If the chain
+        // cannot be read we do not claim this pass at all.
+        let attested = gpn_agent::strict::Strict::from_result(
+            "llm_provider.chain_attestation",
+            client.get_attestation_record_result(addr).await,
+        );
+        let attested_gflops = match attested {
+            gpn_agent::strict::Strict::Known(Some((_, f, _))) => f,
+            // The chain answered: never attested. `min_gflops = 0` only — true.
+            gpn_agent::strict::Strict::Known(None) => 0,
+            gpn_agent::strict::Strict::Unknown(reason) => {
+                eprintln!(
+                    "[provider] claim pass skipped: attestation record UNKNOWN ({reason}) — \
+                     not claiming at an invented 0 GFLOPS"
+                );
+                return Ok(());
+            }
+        };
         client
             .list_claimable_jobs(attested_gflops)
             .await

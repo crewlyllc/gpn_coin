@@ -248,22 +248,12 @@ fn route(
         ("GET", ["provider", addr]) => {
             let rt = rt_handle;
             let reg = rt.block_on(async { client.is_provider_registered(addr).await });
-            let (staked, attested) = rt.block_on(client.get_provider_state(addr));
-            let att = rt.block_on(client.get_attestation_record(addr));
+            let state = rt.block_on(client.get_provider_state_result(addr));
+            let att = rt.block_on(client.get_attestation_record_result(addr));
             let challenge = rt
                 .block_on(client.get_attestation_challenge())
                 .unwrap_or_default();
-            let (gpu_count, gflops, tier) = att.unwrap_or((0, 0, "Unattested".to_string()));
-            json_ok(&serde_json::json!({
-                "address": addr,
-                "provider_registered": reg,
-                "staked": staked,
-                "attested": attested,
-                "tier": tier,
-                "gpu_count": gpu_count,
-                "compute_gflops": gflops,
-                "challenge_hex": hex::encode(challenge),
-            }))
+            json_ok(&provider_payload(addr, reg, state, att, &challenge))
         }
         // ---- jobs ----
         ("GET", ["job", id]) => {
@@ -643,6 +633,55 @@ fn hash_workload(desc: &str) -> [u8; 32] {
     out
 }
 
+/// Build `GET /provider/{addr}` from already-resolved reads.
+///
+/// Pure so the failure path is testable: this endpoint is what an
+/// explorer/dashboard shows, and `(false, false)` + `"Unattested"` used to be
+/// published for a chain that was never read — a provider looked de-registered
+/// when the node was merely down (#108/#110 family). Now an unreadable part is
+/// `null` and the reason travels in `chain_read_error`.
+fn provider_payload(
+    address: &str,
+    registered: bool,
+    state: Result<(bool, bool), String>,
+    att: Result<Option<(u8, u64, String)>, String>,
+    challenge: &[u8],
+) -> serde_json::Value {
+    let (staked, attested) = match state {
+        Ok((s, a)) => (Some(s), Some(a)),
+        Err(e) => {
+            log::warn!("[api] /provider/{address}: provider state UNKNOWN — {e}");
+            (None, None)
+        }
+    };
+    let (gpu_count, gflops, tier, read_error): (
+        Option<u8>,
+        Option<u64>,
+        Option<String>,
+        Option<String>,
+    ) = match att {
+        Ok(Some((g, f, t))) => (Some(g), Some(f), Some(t), None),
+        // A real answer: this address has never attested.
+        Ok(None) => (None, None, Some("Unattested".to_string()), None),
+        Err(e) => {
+            log::warn!("[api] /provider/{address}: attestation UNKNOWN — {e}");
+            (None, None, None, Some(e))
+        }
+    };
+    serde_json::json!({
+        "address": address,
+        "provider_registered": registered,
+        "staked": staked,
+        "attested": attested,
+        "tier": tier,
+        "gpu_count": gpu_count,
+        "compute_gflops": gflops,
+        "challenge_hex": hex::encode(challenge),
+        // Present only when part of this answer could not be read.
+        "chain_read_error": read_error,
+    })
+}
+
 /// sha2-256 over arbitrary bytes, into a 32-byte array. Used for gpu_info_hash
 /// and the (off-chain computed) challenge_response in the attestation flow.
 fn sha256(data: &[u8]) -> [u8; 32] {
@@ -653,4 +692,57 @@ fn sha256(data: &[u8]) -> [u8; 32] {
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&out);
     arr
+}
+
+#[cfg(test)]
+mod strict_read_tests {
+    use super::provider_payload;
+
+    /// The dashboard answer for a chain that was not read: every chain-derived
+    /// field is `null` and the reason is published — never `false`/`0`/
+    /// `"Unattested"`, which read as facts about a provider.
+    #[test]
+    fn an_unreadable_chain_publishes_nulls_and_the_reason() {
+        let body = provider_payload(
+            "5Abc",
+            false,
+            Err("connection refused".to_string()),
+            Err("dead socket".to_string()),
+            &[1, 2, 3],
+        );
+        assert!(body["staked"].is_null(), "staked: {body}");
+        assert!(body["attested"].is_null(), "attested: {body}");
+        assert!(body["compute_gflops"].is_null(), "gflops: {body}");
+        assert!(body["gpu_count"].is_null(), "gpu_count: {body}");
+        assert!(body["tier"].is_null(), "tier: {body}");
+        assert_eq!(body["chain_read_error"], "dead socket");
+    }
+
+    /// A chain that answered "no attestation" is a real answer and keeps its
+    /// existing shape, with no error attached.
+    #[test]
+    fn a_readable_but_unattested_provider_is_not_an_error() {
+        let body = provider_payload("5Abc", true, Ok((false, false)), Ok(None), &[]);
+        assert_eq!(body["staked"], false);
+        assert_eq!(body["attested"], false);
+        assert_eq!(body["tier"], "Unattested");
+        assert!(body["compute_gflops"].is_null());
+        assert!(body["chain_read_error"].is_null());
+    }
+
+    #[test]
+    fn an_attested_provider_publishes_the_record() {
+        let body = provider_payload(
+            "5Abc",
+            true,
+            Ok((true, true)),
+            Ok(Some((2, 400, "Silver".to_string()))),
+            &[0xab],
+        );
+        assert_eq!(body["staked"], true);
+        assert_eq!(body["gpu_count"], 2);
+        assert_eq!(body["compute_gflops"], 400);
+        assert_eq!(body["tier"], "Silver");
+        assert_eq!(body["challenge_hex"], "ab");
+    }
 }

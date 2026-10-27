@@ -511,6 +511,23 @@ impl ChainClient {
         }
     }
 
+    /// [`Self::get_feed_read`] wrapped in [`crate::strict::Strict`], with the
+    /// retry semantics a remote read deserves.
+    ///
+    /// - `Known(Some(feed))` — the pallet has a feed and it decoded.
+    /// - `Known(None)` — the read worked and the key is genuinely empty.
+    /// - `Unknown(reason)` — the chain was not read. Three states, three
+    ///   decisions; the old `Option` collapsed the third into the second and
+    ///   silently priced jobs off fallback constants (#108).
+    pub async fn get_feed_strict(&self) -> crate::strict::Strict<Option<OnChainFeed>> {
+        crate::strict::retry_read(
+            "chain.feed",
+            crate::strict::RetryPolicy::default(),
+            || async { self.get_feed_read().await },
+        )
+        .await
+    }
+
     /// Read the on-chain profitability feed. Returns `None` if the chain is
     /// unreachable or the feed has not been set by an oracle operator yet.
     async fn fetch_feed(&self) -> Option<OnChainFeed> {
@@ -752,6 +769,29 @@ impl ChainClient {
         }))
     }
 
+    /// The difficulty read that keeps the failure.
+    ///
+    /// A failed read used to become [`FALLBACK_DIFFICULTY`] — an ordinary number
+    /// that then went into the mining-revenue formula and could win or lose the
+    /// mining-vs-compute decision against a real compute price. `Unknown` here
+    /// means "nobody knows what mining pays right now", which is a different
+    /// input to that decision (see `profitability::analyze`).
+    pub async fn get_difficulty_strict(&self) -> crate::strict::Strict<f64> {
+        match self
+            .storage_at_head_result(&subxt::dynamic::storage("GPUPoW", "Difficulty", vec![]))
+            .await
+        {
+            Ok(Some(limbs)) => {
+                crate::strict::Strict::known(target_to_difficulty(composite_limbs(&limbs)))
+            }
+            Ok(None) => crate::strict::Strict::unknown(
+                "chain.difficulty",
+                "GPUPoW::Difficulty is absent on chain",
+            ),
+            Err(e) => crate::strict::Strict::unknown("chain.difficulty", e),
+        }
+    }
+
     pub async fn get_token_price_usd(&self) -> Result<f64, Box<dyn std::error::Error>> {
         Ok(self
             .feed_value(|f| f.token_price_usd, FALLBACK_TOKEN_PRICE_USD)
@@ -820,6 +860,35 @@ impl ChainClient {
         match self.storage_at_head_result(&storage_addr).await? {
             Some(v) => Ok(get_u32_field(&v, "nonce").unwrap_or(0) as u64),
             None => Ok(0),
+        }
+    }
+
+    /// The nonce to **sign** a transaction with, or an error stating that the
+    /// chain was not read.
+    ///
+    /// A signed extrinsic's nonce is a money-and-identity decision: submit it
+    /// too low and the node answers `1010 Transaction is outdated` (observed
+    /// live during the spec-43 enactment, TOOLS/gpn-tasks), too high and it
+    /// sits in the pool forever. Reading it through the value form meant a
+    /// failed read became `0` and the transaction was signed anyway — the write
+    /// half of the same bug class as #108/#110.
+    ///
+    /// Retries first ([`crate::strict::retry_read`]) because a connection that
+    /// is *not up yet* (#111) is not the same as one that will never answer.
+    async fn signing_nonce(&self, signer: &signer::Sr25519Signer) -> Result<u64, String> {
+        let address = signer.account_id().to_string();
+        let strict = crate::strict::retry_read(
+            "chain.signing_nonce",
+            crate::strict::RetryPolicy::default(),
+            || async { self.get_account_nonce_result(&address).await },
+        )
+        .await;
+        match strict {
+            crate::strict::Strict::Known(n) => Ok(n),
+            crate::strict::Strict::Unknown(reason) => Err(format!(
+                "refusing to sign: the account nonce for {address} could not be read ({reason}). \
+                 Signing with an invented nonce would be rejected or stall the stream."
+            )),
         }
     }
 
@@ -1004,9 +1073,7 @@ impl ChainClient {
             ],
         );
 
-        let nonce = self
-            .get_account_nonce(&signer.account_id().to_string())
-            .await;
+        let nonce = self.signing_nonce(&signer).await?;
         signer::submit_signed(&client, &call, &signer, nonce).await?;
         log::info!("GPU attestation submitted on-chain and succeeded.");
         Ok(())
@@ -1033,9 +1100,7 @@ impl ChainClient {
             signer.account_id()
         );
 
-        let nonce = self
-            .get_account_nonce(&signer.account_id().to_string())
-            .await;
+        let nonce = self.signing_nonce(&signer).await?;
         let call = subxt::dynamic::tx("GPUAttestation", "deposit_stake", vec![Value::u128(amount)]);
 
         signer::submit_signed(&client, &call, &signer, nonce).await?;
@@ -1060,9 +1125,7 @@ impl ChainClient {
             signer.account_id()
         );
 
-        let nonce = self
-            .get_account_nonce(&signer.account_id().to_string())
-            .await;
+        let nonce = self.signing_nonce(&signer).await?;
         let call_args: Vec<subxt::dynamic::Value> = Vec::new();
         let call = subxt::dynamic::tx("GPUAttestation", "withdraw_stake", call_args);
 
@@ -1110,9 +1173,7 @@ impl ChainClient {
         let signer = signer::Sr25519Signer::from_uri(uri)?;
         let client = signer::connect(&self.endpoint).await?;
         let call = subxt::dynamic::tx(pallet, call_name, args);
-        let nonce = self
-            .get_account_nonce(&signer.account_id().to_string())
-            .await;
+        let nonce = self.signing_nonce(&signer).await?;
         log::info!(
             "Submitting {}::{} as {}",
             pallet,
@@ -2101,9 +2162,7 @@ impl ChainClient {
             "register_fullnode",
             vec![Value::from_bytes(endpoint_bytes)],
         );
-        let nonce = self
-            .get_account_nonce(&signer.account_id().to_string())
-            .await;
+        let nonce = self.signing_nonce(&signer).await?;
         signer::submit_signed(&client, &call, &signer, nonce).await?;
         log::info!(
             "Registered as a full node on-chain (endpoint {}).",
@@ -2128,9 +2187,7 @@ impl ChainClient {
             "witness_reachable",
             vec![Value::from_bytes(key)],
         );
-        let nonce = self
-            .get_account_nonce(&signer.account_id().to_string())
-            .await;
+        let nonce = self.signing_nonce(&signer).await?;
         signer::submit_signed(&client, &call, &signer, nonce).await?;
         log::info!("Witnessed full node {} reachable this window.", target);
         Ok(())
@@ -2149,9 +2206,7 @@ impl ChainClient {
         let target32: subxt::utils::AccountId32 = target.parse()?;
         let key = (target32.as_ref() as &[u8; 32]).to_vec();
         let call = subxt::dynamic::tx("Liveness", "submit_liveness", vec![Value::from_bytes(key)]);
-        let nonce = self
-            .get_account_nonce(&signer.account_id().to_string())
-            .await;
+        let nonce = self.signing_nonce(&signer).await?;
         signer::submit_signed(&client, &call, &signer, nonce).await?;
         log::info!("Finalized liveness window for {}.", target);
         Ok(())
@@ -2167,9 +2222,7 @@ impl ChainClient {
         let signer = signer::Sr25519Signer::from_uri(uri)?;
         let client = signer::connect(&self.endpoint).await?;
         let call = subxt::dynamic::tx("Liveness", "unregister_fullnode", Vec::<Value>::new());
-        let nonce = self
-            .get_account_nonce(&signer.account_id().to_string())
-            .await;
+        let nonce = self.signing_nonce(&signer).await?;
         signer::submit_signed(&client, &call, &signer, nonce).await?;
         log::info!("Unregistered full node; bond returned.");
         Ok(())

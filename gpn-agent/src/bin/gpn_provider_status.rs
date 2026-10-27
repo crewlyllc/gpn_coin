@@ -361,12 +361,16 @@ fn log_unmeasured(hw: &Hardware) {
 
 /// How long a chain-read attestation stays authoritative in `/status`.
 const ATTEST_TTL: Duration = Duration::from_secs(60);
-/// Retry sooner when the last read failed (chain down / RPC busy).
+/// Retry sooner when the last read returned "never attested".
 const ATTEST_RETRY_TTL: Duration = Duration::from_secs(30);
+/// Retry fastest when the read failed outright — the node may just be starting.
+const ATTEST_UNKNOWN_TTL: Duration = Duration::from_secs(5);
 
-fn attest_cache() -> &'static std::sync::Mutex<Option<(Option<u64>, Instant)>> {
-    static C: std::sync::OnceLock<std::sync::Mutex<Option<(Option<u64>, Instant)>>> =
-        std::sync::OnceLock::new();
+fn attest_cache(
+) -> &'static std::sync::Mutex<Option<(gpn_agent::strict::Strict<Option<u64>>, Instant)>> {
+    static C: std::sync::OnceLock<
+        std::sync::Mutex<Option<(gpn_agent::strict::Strict<Option<u64>>, Instant)>>,
+    > = std::sync::OnceLock::new();
     C.get_or_init(|| std::sync::Mutex::new(None))
 }
 
@@ -407,32 +411,63 @@ fn decode_attested_gflops(bytes: &[u8]) -> Option<u64> {
     Some(u64::from_le_bytes(b))
 }
 
-/// The provider's on-chain attested GFLOPS (None = unreadable / never attested).
-/// Cached briefly: `/status` is polled every 5 s by the access point, and the
-/// chain value only changes when the provider re-attests.
-fn attested_gflops(endpoint: &str, address: &str) -> Option<u64> {
+/// The provider's on-chain attested GFLOPS.
+///
+/// Three states, not two (the #108/#110/#105 family):
+///
+/// * `Known(Some(g))` — the chain has an attestation record for this address.
+/// * `Known(None)` — the read worked and this address has never attested.
+/// * `Unknown(reason)` — the chain was not read. This used to be published as
+///   "never attested", which then fell through to the hand-typed `--gflops`
+///   bound — a number no chain ever confirmed, advertised to the router.
+///
+/// Retried before it is declared unknown: `/status` is polled every 5 s and a
+/// node that is restarting is "not yet", not "never" (#105/#111).
+/// Cached briefly: the chain value only changes when the provider re-attests.
+fn attested_gflops(endpoint: &str, address: &str) -> gpn_agent::strict::Strict<Option<u64>> {
+    use gpn_agent::strict::{retry_read_blocking, RetryPolicy, Strict};
     if let Ok(guard) = attest_cache().lock() {
         if let Some((v, at)) = guard.as_ref() {
-            let ttl = if v.is_some() {
-                ATTEST_TTL
-            } else {
-                ATTEST_RETRY_TTL
+            let ttl = match v {
+                Strict::Known(Some(_)) => ATTEST_TTL,
+                Strict::Known(None) => ATTEST_RETRY_TTL,
+                Strict::Unknown(_) => ATTEST_UNKNOWN_TTL,
             };
             if at.elapsed() < ttl {
-                return *v;
+                return v.clone();
             }
         }
     }
-    let answer = account_pubkey(address).and_then(|pk| {
-        rpc_call(endpoint, "state_getStorage", json!([attestation_key(&pk)]))
-            .and_then(|v| {
-                v.as_str()
-                    .and_then(|s| hex::decode(s.trim_start_matches("0x")).ok())
+    let answer = retry_read_blocking(
+        "provider_status.chain_attestation",
+        RetryPolicy {
+            attempts: 3,
+            base: Duration::from_millis(200),
+            max: Duration::from_secs(1),
+        },
+        || {
+            let pk = account_pubkey(address)
+                .ok_or_else(|| format!("{address} is not a valid SS58/hex account id"))?;
+            let v = rpc_call(endpoint, "state_getStorage", json!([attestation_key(&pk)]))
+                .ok_or_else(|| format!("no answer from {endpoint} for state_getStorage"))?;
+            // A JSON null is the chain saying "no record" — a real answer.
+            let hex_str = match v.as_str() {
+                Some(s) => s,
+                None if v.is_null() => return Ok(None),
+                None => return Err(format!("state_getStorage returned {:?}", v)),
+            };
+            let bytes = hex::decode(hex_str.trim_start_matches("0x"))
+                .map_err(|e| format!("undecodable storage value: {e}"))?;
+            decode_attested_gflops(&bytes).map(Some).ok_or_else(|| {
+                format!(
+                    "attestation record is {} bytes, expected >= 77",
+                    bytes.len()
+                )
             })
-            .and_then(|b| decode_attested_gflops(&b))
-    });
+        },
+    );
     if let Ok(mut guard) = attest_cache().lock() {
-        *guard = Some((answer, Instant::now()));
+        *guard = Some((answer.clone(), Instant::now()));
     }
     answer
 }
@@ -533,9 +568,27 @@ fn notice_once(key: &str) -> bool {
 /// the **measurement** instead and says why. The value is deliberately not
 /// labelled `attested-idle`: it has not been accepted on chain yet, so the AP
 /// keeps treating it as unverified.
-fn advertised_gflops(operator: u64, attested: Option<u64>) -> (u64, &'static str) {
+fn advertised_gflops(
+    operator: u64,
+    attested: gpn_agent::strict::Strict<Option<u64>>,
+) -> (u64, &'static str) {
+    use gpn_agent::strict::Strict;
     let measured = gpn_agent::attest_idle::read_state().map(|s| s.measured_gflops);
     let (op, _src) = clamp_operator_gflops(operator, measured, "this box", "operator bound");
+    let attested: Option<u64> = match attested {
+        Strict::Known(a) => a,
+        // A failed chain read is NOT "never attested". Publishing the typed
+        // `--gflops` here is what let a box advertise a number the chain never
+        // accepted; publishing 0 makes the access point route no gated job to
+        // it, which is the honest state while the chain cannot be read.
+        Strict::Unknown(reason) => {
+            log_change_once(&format!(
+                "[status] ⚠ chain attestation UNKNOWN ({reason}) — advertising gflops=0 \
+                 (no typed bound, no stale record) until the chain answers"
+            ));
+            return (0, "unreadable (chain attestation not read)");
+        }
+    };
     let attested_was = attested;
     let (attested, implausible) = clamp_chain_record(attested, measured);
     if implausible
@@ -1479,12 +1532,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server = Server::http(&listen).map_err(|e| format!("cannot bind {listen}: {e}"))?;
     // #65: `gflops` is what the access point routes on, so advertise the CHAIN's
     // attested value (capped by `--gflops`) instead of a hand-typed number.
-    let boot_chain_gflops = if address.is_empty() {
-        None
+    let boot_chain = if address.is_empty() {
+        gpn_agent::strict::Strict::Known(None)
     } else {
         attested_gflops(&endpoint, &address)
     };
-    let (gflops, gflops_source) = advertised_gflops(operator_gflops, boot_chain_gflops);
+    let boot_chain_gflops: Option<u64> = boot_chain.clone().into_option().flatten();
+    let (gflops, gflops_source) = advertised_gflops(operator_gflops, boot_chain.clone());
     // #93: prefer "attested-idle" when the value is one this box measured on an
     // idle GPU (state file written by the provider at attestation time).
     let gflops_source = {
@@ -1593,11 +1647,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // re-attests while this heartbeat runs is picked up without a
                 // restart; the value never exceeds what the chain will accept.
                 let chain_now = if address.is_empty() {
-                    None
+                    gpn_agent::strict::Strict::Known(None)
                 } else {
                     attested_gflops(&endpoint, &address)
                 };
-                let (gflops_now, gflops_src) = advertised_gflops(operator_gflops, chain_now);
+                let chain_known: Option<u64> = chain_now.clone().into_option().flatten();
+                let (gflops_now, gflops_src) =
+                    advertised_gflops(operator_gflops, chain_now.clone());
                 let mut body = json!({
                     "address": address, "gflops": gflops_now, "models": models_now,
                     "can_pull": can_pull, "active": active, "capacity": capacity.max(1),
@@ -1611,7 +1667,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // #93: measurement conditions (samples, spread, "attested-idle"
                 // provenance, stale-record warning) — so a low number can be
                 // told apart from one taken under contention.
-                attach_attest_conditions(&mut body, gflops_now, chain_now, gflops_src);
+                attach_attest_conditions(&mut body, gflops_now, chain_known, gflops_src);
+                // A failed chain read is stated, never smoothed over: the
+                // router must be able to tell "this box has no attestation"
+                // from "this box's attestation was not read".
+                if let gpn_agent::strict::Strict::Unknown(reason) = &chain_now {
+                    body["chain_attestation"] = json!("unknown");
+                    body["chain_read_error"] = json!(reason);
+                }
                 // Peer-id publication: always read live from THIS box's node.
                 // On failure the fields are published empty (null / []) — never
                 // a cached id, which would advertise an undialable identity.
@@ -2229,6 +2292,29 @@ mod tests {
         assert!(attestation_key(&a).starts_with("0x"));
         assert_eq!(attestation_key(&a).len(), 2 + 80 * 2); // twox128 + twox128 + blake2_128_concat
         assert!(account_pubkey("not-an-address").is_none());
+    }
+
+    /// THE other half of #65/#108: an unreadable chain must NOT fall through to
+    /// `--gflops`. The router advertises `gflops` and routes on it; publishing a
+    /// hand-typed bound because the node was down is a capability claim no chain
+    /// ever confirmed. Nothing is claimed (0) and the reason is published.
+    #[test]
+    fn an_unreadable_chain_attestation_advertises_zero_not_the_typed_bound() {
+        use gpn_agent::strict::Strict;
+        let unknown: Strict<Option<u64>> =
+            Strict::unknown("provider_status.chain_attestation", "connection refused");
+        let (gflops, src) = advertised_gflops(2500, unknown);
+        assert_eq!(gflops, 0, "advertised the typed bound off a failed read");
+        assert!(src.contains("unreadable"), "{src}");
+
+        // The three readable states still behave as before.
+        let (g, _) = advertised_gflops(2500, Strict::Known(Some(188)));
+        assert_eq!(g, 188);
+        let (g, _) = advertised_gflops(2500, Strict::Known(None));
+        assert_eq!(
+            g, 2500,
+            "never-attested still falls back to the typed bound"
+        );
     }
 
     #[test]
