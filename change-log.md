@@ -5149,3 +5149,13 @@ Live: `/providers` → `5ENqSp5Q = [ImageGeneration, LLMInference, VideoGenerati
 `5Fh75o8N = [FineTuning]`; chat 200 on the channel, image `sd-turbo` completed (108 577 B),
 fine-tune #6537 routed to `5Fh75o8N` and succeeded. Tests: `assign_pull` 9/9 (+1),
 `gpn_scheduler` 62/62 (+2). Commit `3342bfc`.
+
+## 2026-10-28 11:59 PT — PM07 monitor: one transient `cannot read NextJobId` (self-recovered, no action)
+
+Cause: single chain-read hiccup at 11:49:59 — provider's NextJobId read failed, so it skipped one
+claim/reconcile pass. Evidence: `gpn-fleet`/node healthy throughout (3 peers, best #206880, importing
+blocks every ~6s), `system_health` OK, RPC `state_getStorage` answering; only one occurrence in the
+journal and no other errors.
+Fix: none needed — no restart, no flag change. Result: next request at 11:58:39 served normally
+(job 1793213918995, e2e 0.74s, 71 tok in 0.7s infer ≈ 100 tok/s, 1 claim, no storm); /jobs has 0
+Pending orphans (245 Completed / 7 Cancelled / 4 Failed). Watched for recurrence.
