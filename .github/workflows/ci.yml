@@ -214,6 +214,15 @@ jobs:
           bash scripts/tests/test-wallet-provision.sh \
             /home/jeremyg/.ci-cache/gpn-agent-target/release
 
+      # Fast sync (weekly snapshot bootstrap): success, hash mismatch, 404,
+      # --no-fast-sync / GPN_FAST_SYNC=0, and a pre-existing DB that must not be
+      # touched. Fully offline — the snapshot is exported locally and served by
+      # a loopback HTTP server. Also text-asserts the Windows launcher guards.
+      - name: Fast sync (snapshot bootstrap) guards
+        env:
+          GPN_SNAPSHOT_BIN: /home/jeremyg/.ci-cache/gpn-agent-target/release/gpn_snapshot
+        run: bash scripts/tests/test-fast-sync.sh
+
   # ---------------------------------------------------------------------------
   # Desktop matrix — EXPERIMENTAL and MANUAL ONLY. macOS/Windows need paid
   # GitHub-hosted minutes which this account cannot use, so a normal push no

@@ -40,32 +40,76 @@ manage them individually.
 
 ## Fast sync (skip the ~200k-block catch-up)
 
-A fresh node normally imports the whole chain, which takes a long time on a PoW testnet. A
-**weekly snapshot** is published to the public mirror and can be imported instead:
+A fresh node normally verifies ~200k blocks from peers (hours on a PoW testnet).
+A **weekly snapshot** is published to the public mirror, and **an installer uses
+it automatically** — you do not have to do anything:
+
+```bash
+./install.sh                 # fast sync is the default
+```
+
+At install time it:
+
+1. fetches `snapshot.json` — **signed** with the GPN release ed25519 key (the same
+   key compiled into `gpn_node` for `releases.json`). The release *description* is
+   for humans and is never trusted;
+2. checks the signature, then the archive's exact **size** and **sha256** against
+   that signed document *before* importing a single byte;
+3. imports into a scratch directory with `--pruning archive`, and only then moves
+   `chains/` into the node base path;
+4. prints, at the end, either `chain data: bootstrapped from the weekly snapshot
+   (block N)` or `chain data: none yet — the node will full-sync from peers`.
+
+URLs (both are overridable with `GPN_SNAPSHOT_URL` / `GPN_SNAPSHOT_META_URL`):
 
 ```
 https://github.com/crewlyllc/gpn_coin/releases/download/snapshot-latest/gpn-testnet-snapshot.tar.gz
+https://github.com/crewlyllc/gpn_coin/releases/download/snapshot-latest/snapshot.json
 ```
 
-Download it, then import into the node's base path before first start:
+### Disabling it
 
 ```bash
+./install.sh --no-fast-sync          # CLI
+GPN_FAST_SYNC=0 ./install.sh         # env (same effect)
+```
+
+In that case the node simply syncs every block from peers as before.
+
+### What the fallback does
+
+Fast sync is **best-effort by design: it can never fail an install**. Any of
+these — metadata 404/timeout, bad or missing signature, size/sha256 mismatch, a
+dropped download, less than 3× the snapshot size free on disk, or an import
+error — prints one line
+
+```
+! fast sync unavailable (<reason>) — falling back to a normal full peer sync (slower, still correct).
+```
+
+deletes only its own scratch directory, and continues with a normal sync. A
+**pre-existing chain DB is never touched**: if `<base>/chains` already has
+content the installer skips fast sync entirely (and says whether it found the
+`.gpn-pruning-archive` marker), so a DB created with a different pruning mode
+cannot be corrupted into `Incompatible pruning modes` / `Column families not
+opened` failures.
+
+### Doing it by hand
+
+```bash
+curl -fLO https://github.com/crewlyllc/gpn_coin/releases/download/snapshot-latest/snapshot.json
+curl -fLO https://github.com/crewlyllc/gpn_coin/releases/download/snapshot-latest/gpn-testnet-snapshot.tar.gz
+gpn_snapshot verify --meta snapshot.json --snapshot gpn-testnet-snapshot.tar.gz
 gpn_snapshot import --snapshot gpn-testnet-snapshot.tar.gz --base-path ~/.gpn/node --pruning archive
 ```
 
-Windows (PowerShell):
+`gpn_snapshot verify` exits non-zero and imports nothing if the signature, size
+or hash does not match. Windows is identical (`gpn_snapshot.exe`; the installer's
+launcher performs the same checks with `curl.exe`).
 
-```powershell
-curl.exe -L -o snap.tar.gz https://github.com/crewlyllc/gpn_coin/releases/download/snapshot-latest/gpn-testnet-snapshot.tar.gz
-\gpn_snapshot.exe import --snapshot snap.tar.gz --base-path C:\gpn\data --pruning archive
-```
-
-Notes:
-- The import expects the **archive** pruning mode; importing into a DB created with a different
-  pruning mode fails with `Incompatible pruning modes` — move that DB aside first.
-- The snapshot is rebuilt every Monday at 04:00 PT; its block height, size and sha256 are written
-  into the release description, so you can verify what you downloaded.
-- Verify before importing: `sha256sum snap.tar.gz` should match the value in the release body.
+The snapshot is rebuilt every Monday at 04:00 PT (`scripts/snapshot-weekly.sh`);
+its block height, size and sha256 are in the signed `snapshot.json` and echoed in
+the release description for convenience.
 
 ## Install on a new computer
 

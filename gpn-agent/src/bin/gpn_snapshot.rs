@@ -14,6 +14,7 @@
 //!   gpn_snapshot info   [--rpc URL]                       # what a snapshot would record (node up)
 //!   gpn_snapshot export --base-path <node dir> --out <file> [--chain-dir <dir>] [--meta <json>] [--allow-live]
 //!   gpn_snapshot import --snapshot <file> --base-path <dir> [--force] [--pruning archive|none]
+//!   gpn_snapshot verify --meta <snapshot.json> [--snapshot <file>]
 //! ```
 //!
 //! ## Safety — STOP THE NODE FIRST
@@ -38,6 +39,13 @@
 //! manifest's `genesis_hash` against the chain they expect, and (for anything
 //! security-sensitive) a recent-block hash against an independent node. The
 //! archive carries a `sha256` in its manifest for integrity, not authenticity.
+//!
+//! `verify` closes that gap for the **public weekly snapshot**: it checks a
+//! `snapshot.json` signed with the release ed25519 key (the same one embedded in
+//! `gpn_node` for `releases.json`), and — with `--snapshot` — the downloaded
+//! archive's exact size and sha256 against it. Installers use it to decide
+//! whether the bytes are worth importing; an unsigned page scrape is never
+//! trusted.
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -278,6 +286,7 @@ fn usage() -> String {
   gpn_snapshot info   [--rpc URL] [--out meta.json]
   gpn_snapshot export --base-path <node dir> --out <file.tar.gz|.tar.zst> [--chain-dir <dir>] [--meta <json>] [--rpc URL] [--freeze] [--allow-live]
   gpn_snapshot import --snapshot <file> --base-path <dir> [--force] [--pruning archive|none]
+  gpn_snapshot verify --meta <snapshot.json> [--snapshot <file>]
 ".to_string()
 }
 
@@ -831,6 +840,144 @@ fn info(a: &Args) -> Result<(), String> {
     Ok(())
 }
 
+// ------------------------------------------------------------------ verify
+
+/// Signed metadata for the public weekly snapshot (`snapshot.json`).
+///
+/// The release body (what a human reads on GitHub) is **not** a trust anchor:
+/// anyone who can serve a page can edit text. This document is signed with the
+/// same ed25519 release key that `gpn_node` uses for `releases.json`, over a
+/// canonical text blob, so an installer can verify the expected digest before
+/// it downloads (or imports) a single byte of chain data.
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
+struct SnapshotMeta {
+    #[serde(default)]
+    format: String,
+    url: String,
+    sha256: String,
+    size: u64,
+    #[serde(default)]
+    block: Option<u64>,
+    #[serde(default)]
+    built: String,
+    #[serde(default)]
+    signing_key: String,
+    #[serde(default)]
+    signature: String,
+}
+
+const SNAPSHOT_CANONICAL_PREFIX: &str = "gpn-snapshot-v1";
+
+impl SnapshotMeta {
+    /// The exact bytes that are signed. Field order is fixed and hex is
+    /// lower-cased, so a re-serialised document still verifies.
+    fn canonical_text(&self) -> Vec<u8> {
+        format!(
+            "{SNAPSHOT_CANONICAL_PREFIX}\nurl={}\nsha256={}\nsize={}\nblock={}\nbuilt={}\nsigning_key={}\n",
+            self.url.trim(),
+            self.sha256.trim().to_ascii_lowercase(),
+            self.size,
+            self.block.map(|b| b.to_string()).unwrap_or_default(),
+            self.built.trim(),
+            self.signing_key.trim().to_ascii_lowercase(),
+        )
+        .into_bytes()
+    }
+}
+
+/// Verify a `snapshot.json` against `pubkey_hex`; optionally also check a
+/// downloaded archive's size and sha256 against it.
+///
+/// A parameter (not the constant) so tests can use their own key.
+fn verify_snapshot_meta(
+    meta_bytes: &[u8],
+    pubkey_hex: &str,
+    archive: Option<&Path>,
+) -> Result<SnapshotMeta, String> {
+    let m: SnapshotMeta =
+        serde_json::from_slice(meta_bytes).map_err(|e| format!("snapshot.json: {e}"))?;
+    if m.signature.trim().is_empty() || m.signing_key.trim().is_empty() {
+        return Err("snapshot.json is UNSIGNED — refusing to trust it".into());
+    }
+    let embedded = pubkey_hex.trim().to_ascii_lowercase();
+    if m.signing_key.trim().to_ascii_lowercase() != embedded {
+        return Err(format!(
+            "snapshot.json was signed by a different key ({}) than the one built into this node ({embedded})",
+            m.signing_key.trim()
+        ));
+    }
+    let key = hex::decode(&embedded).map_err(|e| format!("embedded key: {e}"))?;
+    let key_arr: [u8; 32] = key
+        .as_slice()
+        .try_into()
+        .map_err(|_| "embedded key is not 32 bytes".to_string())?;
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&key_arr)
+        .map_err(|e| format!("verifying key: {e}"))?;
+    let sig_raw = hex::decode(m.signature.trim()).map_err(|e| format!("signature hex: {e}"))?;
+    let sig_arr: [u8; 64] = sig_raw
+        .as_slice()
+        .try_into()
+        .map_err(|_| "signature is not 64 bytes".to_string())?;
+    let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
+    use ed25519_dalek::Verifier;
+    vk.verify(&m.canonical_text(), &sig)
+        .map_err(|_| "snapshot.json signature does NOT verify (edited or forged)".to_string())?;
+
+    if m.sha256.trim().len() != 64 || !m.sha256.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("snapshot.json has no valid sha256".into());
+    }
+    if m.size == 0 {
+        return Err("snapshot.json has no size".into());
+    }
+
+    if let Some(path) = archive {
+        let got_len = fs::metadata(path)
+            .map_err(|e| format!("stat {}: {e}", path.display()))?
+            .len();
+        if got_len != m.size {
+            return Err(format!(
+                "size mismatch for {}: expected {} bytes, got {got_len}",
+                path.display(),
+                m.size
+            ));
+        }
+        let got_sha = sha256_file(path).map_err(|e| format!("hash {}: {e}", path.display()))?;
+        if got_sha != m.sha256.trim().to_ascii_lowercase() {
+            return Err(format!(
+                "sha256 mismatch for {}: expected {}, got {got_sha}",
+                path.display(),
+                m.sha256.trim()
+            ));
+        }
+    }
+    Ok(m)
+}
+
+fn verify(a: &Args) -> Result<(), String> {
+    let meta_path = a
+        .meta
+        .as_ref()
+        .ok_or("verify needs --meta <snapshot.json>")?;
+    let bytes = fs::read(meta_path).map_err(|e| format!("read {}: {e}", meta_path.display()))?;
+    let m = verify_snapshot_meta(
+        &bytes,
+        gpn_agent::update::RELEASE_PUBKEY_HEX,
+        a.snapshot.as_deref(),
+    )?;
+    println!("snapshot metadata: SIGNED and valid");
+    println!("url={}", m.url);
+    println!(
+        "block={}",
+        m.block.map(|b| b.to_string()).unwrap_or_else(|| "?".into())
+    );
+    println!("size={}", m.size);
+    println!("sha256={}", m.sha256);
+    if let Some(p) = a.snapshot.as_deref() {
+        println!("file={} (sha256 + size verified)", p.display());
+    }
+    Ok(())
+}
+
 // ------------------------------------------------------------------ main
 
 fn main() {
@@ -845,6 +992,7 @@ fn main() {
         "export" => export(&a),
         "import" => import(&a),
         "info" => info(&a),
+        "verify" => verify(&a),
         "help" | "-h" | "--help" => {
             println!("{}", usage());
             Ok(())
@@ -897,5 +1045,82 @@ mod tests {
     fn import_pruning_normalises_case_and_space() {
         assert_eq!(effective_import_pruning(Some(" Archive "), None), "archive");
         assert_eq!(effective_import_pruning(None, Some("NONE")), "none");
+    }
+
+    // ── signed snapshot metadata ────────────────────────────────────────────
+
+    fn signed_meta(sk: &ed25519_dalek::SigningKey, size: u64) -> (Vec<u8>, [u8; 32]) {
+        use ed25519_dalek::Signer;
+        let pubkey = sk.verifying_key().to_bytes();
+        let mut m = SnapshotMeta {
+            format: SNAPSHOT_CANONICAL_PREFIX.into(),
+            url: "https://example.invalid/snap.tar.gz".into(),
+            sha256: "ab".repeat(32),
+            size,
+            block: Some(206_860),
+            built: "2026-10-28T18:50:02Z".into(),
+            signing_key: hex::encode(pubkey),
+            signature: String::new(),
+        };
+        let sig = sk.sign(&m.canonical_text());
+        m.signature = hex::encode(sig.to_bytes());
+        (serde_json::to_vec(&m).unwrap(), pubkey)
+    }
+
+    #[test]
+    fn verify_accepts_a_correctly_signed_meta() {
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]);
+        let (json, pubkey) = signed_meta(&sk, 1234);
+        let m = verify_snapshot_meta(&json, &hex::encode(pubkey), None).unwrap();
+        assert_eq!(m.size, 1234);
+        assert_eq!(m.block, Some(206_860));
+    }
+
+    #[test]
+    fn verify_rejects_a_tampered_size_or_wrong_key() {
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]);
+        let (json, pubkey) = signed_meta(&sk, 1234);
+        // Tamper with a signed field: the signature no longer covers the doc.
+        let tampered = String::from_utf8(json.clone())
+            .unwrap()
+            .replace("\"size\":1234", "\"size\":9999");
+        assert!(verify_snapshot_meta(tampered.as_bytes(), &hex::encode(pubkey), None).is_err());
+        // A doc signed by someone else's key is refused outright.
+        let other = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        assert!(
+            verify_snapshot_meta(&json, &hex::encode(other.verifying_key().to_bytes()), None)
+                .is_err()
+        );
+        // An unsigned doc is refused.
+        let unsigned = String::from_utf8(json)
+            .unwrap()
+            .replace("\"signature\":", "\"signature\":\"\",\"x\":");
+        assert!(verify_snapshot_meta(unsigned.as_bytes(), &hex::encode(pubkey), None).is_err());
+    }
+
+    #[test]
+    fn verify_archive_size_and_hash_must_match() {
+        let dir = std::env::temp_dir().join(format!("gpn-snap-verify-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("snap.bin");
+        fs::write(&f, b"hello").unwrap();
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]);
+        let (json, pubkey) = signed_meta(&sk, 5);
+        // Wrong digest (declared sha256 is not the file's) -> error.
+        assert!(verify_snapshot_meta(&json, &hex::encode(pubkey), Some(&f)).is_err());
+        // Correct digest + size -> ok.
+        let mut m: SnapshotMeta = serde_json::from_slice(&json).unwrap();
+        m.sha256 = sha256_file(&f).unwrap();
+        use ed25519_dalek::Signer;
+        m.signature = hex::encode(sk.sign(&m.canonical_text()).to_bytes());
+        let good = serde_json::to_vec(&m).unwrap();
+        assert!(verify_snapshot_meta(&good, &hex::encode(pubkey), Some(&f)).is_ok());
+        // Size mismatch -> error.
+        let mut m2 = m.clone();
+        m2.size = 6;
+        m2.signature = hex::encode(sk.sign(&m2.canonical_text()).to_bytes());
+        let bad = serde_json::to_vec(&m2).unwrap();
+        assert!(verify_snapshot_meta(&bad, &hex::encode(pubkey), Some(&f)).is_err());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

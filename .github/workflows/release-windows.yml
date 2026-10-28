@@ -229,6 +229,88 @@ jobs:
             echo [gpn] ERROR: then re-run this script.
             exit /b 1
           )
+          REM ── Fast sync: weekly snapshot (default; GPN_FAST_SYNC=0 opts out) ────────
+          REM  A fresh node otherwise verifies ~200k blocks from peers (hours). The
+          REM  default imports the published weekly snapshot, but only after checking the
+          REM  ed25519-signed snapshot.json (release key built into gpn_snapshot.exe) and
+          REM  the archive's exact size + sha256. ANY failure falls back to a normal full
+          REM  sync; the install never fails because of fast sync.
+          if "%GPN_FAST_SYNC%"=="0" (
+          echo [gpn] fast sync disabled by GPN_FAST_SYNC=0 - the node will sync from peers.
+          goto :gpn_fast_sync_done
+          )
+          set "GPN_HAVE_DB="
+          if exist "%GPN_BASE_PATH%\chains" for /f "delims=" %%F in ('dir /b "%GPN_BASE_PATH%\chains" 2^>nul') do set "GPN_HAVE_DB=1"
+          if defined GPN_HAVE_DB (
+          if exist "%GPN_BASE_PATH%\.gpn-pruning-archive" (
+          echo [gpn] existing chain DB under %GPN_BASE_PATH% - fast sync not needed.
+          ) else (
+          echo [gpn] existing chain DB with no archive-pruning marker - NOT touching it; fast sync skipped.
+          )
+          goto :gpn_fast_sync_done
+          )
+          set "GPN_SNAPSHOT_URL=https://github.com/crewlyllc/gpn_coin/releases/download/snapshot-latest/gpn-testnet-snapshot.tar.gz"
+          set "GPN_SNAPSHOT_META_URL=https://github.com/crewlyllc/gpn_coin/releases/download/snapshot-latest/snapshot.json"
+          set "GPN_FS_TMP=%TEMP%\gpn-fast-sync-%RANDOM%%RANDOM%"
+          mkdir "%GPN_FS_TMP%" >nul 2>&1
+          where curl.exe >nul 2>&1
+          if errorlevel 1 (
+          echo [gpn] fast sync unavailable (curl.exe not found) - falling back to a normal full peer sync.
+          goto :gpn_fast_sync_cleanup
+          )
+          curl.exe -fsSL --connect-timeout 15 --max-time 60 -o "%GPN_FS_TMP%\snapshot.json" "%GPN_SNAPSHOT_META_URL%"
+          if errorlevel 1 (
+          echo [gpn] fast sync unavailable (snapshot metadata not available) - falling back to a normal full peer sync.
+          goto :gpn_fast_sync_cleanup
+          )
+          "%GPN_BIN%\gpn_snapshot.exe" verify --meta "%GPN_FS_TMP%\snapshot.json" > "%GPN_FS_TMP%\verify.txt" 2>&1
+          if errorlevel 1 (
+          echo [gpn] fast sync unavailable (snapshot metadata failed verification) - falling back to a normal full peer sync.
+          goto :gpn_fast_sync_cleanup
+          )
+          set "GPN_SNAP_SIZE="
+          set "GPN_SNAP_BLOCK="
+          for /f "tokens=1,* delims==" %%A in ('findstr /b "size=" "%GPN_FS_TMP%\verify.txt"') do set "GPN_SNAP_SIZE=%%B"
+          for /f "tokens=1,* delims==" %%A in ('findstr /b "block=" "%GPN_FS_TMP%\verify.txt"') do set "GPN_SNAP_BLOCK=%%B"
+          echo [gpn] weekly snapshot: block %GPN_SNAP_BLOCK%, %GPN_SNAP_SIZE% bytes - downloading...
+          for /f "delims=" %%F in ('powershell -NoProfile -Command "if ((Get-Item '%GPN_BASE_PATH%').PSDrive.Free -lt ([int64]%GPN_SNAP_SIZE% * 3)) { 'low' } else { 'ok' }"') do set "GPN_SPACE=%%F"
+          if not "%GPN_SPACE%"=="ok" (
+          echo [gpn] fast sync skipped (free space is less than 3x the snapshot size).
+          goto :gpn_fast_sync_cleanup
+          )
+          curl.exe -fL --retry 2 --retry-delay 2 --connect-timeout 15 --max-time 3600 -o "%GPN_FS_TMP%\snap.tar.gz" "%GPN_SNAPSHOT_URL%"
+          if errorlevel 1 (
+          echo [gpn] fast sync unavailable (snapshot download failed) - falling back to a normal full peer sync.
+          goto :gpn_fast_sync_cleanup
+          )
+          "%GPN_BIN%\gpn_snapshot.exe" verify --meta "%GPN_FS_TMP%\snapshot.json" --snapshot "%GPN_FS_TMP%\snap.tar.gz"
+          if errorlevel 1 (
+          echo [gpn] fast sync unavailable (downloaded bytes failed verification) - falling back to a normal full peer sync.
+          goto :gpn_fast_sync_cleanup
+          )
+          "%GPN_BIN%\gpn_snapshot.exe" import --snapshot "%GPN_FS_TMP%\snap.tar.gz" --base-path "%GPN_FS_TMP%\stage" --pruning archive
+          if errorlevel 1 (
+          echo [gpn] fast sync unavailable (snapshot import failed) - falling back to a normal full peer sync.
+          goto :gpn_fast_sync_cleanup
+          )
+          if not exist "%GPN_FS_TMP%\stage\chains" (
+          echo [gpn] fast sync unavailable (import produced no chain DB) - falling back to a normal full peer sync.
+          goto :gpn_fast_sync_cleanup
+          )
+          if exist "%GPN_BASE_PATH%\chains" (
+          echo [gpn] fast sync unavailable (a chain DB appeared during import) - not overwriting it.
+          goto :gpn_fast_sync_cleanup
+          )
+          move "%GPN_FS_TMP%\stage\chains" "%GPN_BASE_PATH%\chains" >nul
+          if errorlevel 1 (
+          echo [gpn] fast sync unavailable (could not move the imported DB) - falling back to a normal full peer sync.
+          goto :gpn_fast_sync_cleanup
+          )
+          if exist "%GPN_FS_TMP%\stage\.gpn-pruning-archive" move "%GPN_FS_TMP%\stage\.gpn-pruning-archive" "%GPN_BASE_PATH%\.gpn-pruning-archive" >nul 2>&1
+          echo [gpn] bootstrapped from the weekly snapshot at block %GPN_SNAP_BLOCK% - skipping the full peer sync.
+          :gpn_fast_sync_cleanup
+          if exist "%GPN_FS_TMP%" rmdir /s /q "%GPN_FS_TMP%" >nul 2>&1
+          :gpn_fast_sync_done
           set "GPN_BOOTNODES=/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo"
           cd /d C:\gpn
           REM show output live in the console AND append to node.log (Tee), so an

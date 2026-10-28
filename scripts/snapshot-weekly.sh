@@ -80,11 +80,57 @@ if [ "$CODE" != "201" ] && [ "$CODE" != "200" ]; then
 fi
 
 DL="https://github.com/$REPO/releases/download/$TAG/$ASSET"
-# update the release body with the current snapshot facts (public metadata)
+
+# ── Signed metadata (the ONLY trust anchor an installer may use) ─────────────
+# An installer must not scrape this release body: text on a page is not signed.
+# Publish a small ed25519-signed `snapshot.json` as an asset next to the archive,
+# over the same URL the installer will download — that is what
+# `gpn_snapshot verify --meta snapshot.json` checks before importing anything.
+META_OUT="$OUT_DIR/snapshot.json"
+if ! python3 "$(dirname "$0")/snapshot-metadata.py" sign \
+      --url "$DL" --sha256 "$SHA" --size "$SIZE" --block "$BLOCK" \
+      --built "$STAMP UTC" --out "$META_OUT"; then
+  echo "FATAL: could not sign snapshot.json — refusing to publish an unverifiable snapshot" >&2
+  exit 4
+fi
+
+# Cross-check with the verifier a node actually ships (catches signer/verifier drift).
+VERIFY_BIN="${GPN_SNAPSHOT_BIN:-$HOME/.local/bin/gpn_snapshot}"
+if [ -x "$VERIFY_BIN" ]; then
+  if "$VERIFY_BIN" verify --meta "$META_OUT" --snapshot "$OUT" > /tmp/snap-verify.out 2>&1; then
+    echo "[snapshot] signed metadata self-check OK"
+  else
+    echo "FATAL: gpn_snapshot verify rejected the signed metadata:" >&2
+    cat /tmp/snap-verify.out >&2
+    exit 4
+  fi
+else
+  echo "[snapshot] WARN: $VERIFY_BIN not found — publishing WITHOUT the local verify self-check" >&2
+fi
+
+# Upload the metadata first, then (re)point the release at it: an installer that
+# races the weekly job must never see new bytes with the previous digest.
+OLD_META=$(curl -sf -H "Authorization: Bearer $TOKEN" "$API/releases/$REL_ID/assets?per_page=100" \
+  | python3 -c "import sys,json;print(next((a['id'] for a in json.load(sys.stdin) if a['name']=='snapshot.json'),''))" 2>/dev/null || true)
+if [ -n "${OLD_META:-}" ]; then
+  curl -sf -X DELETE -H "Authorization: Bearer $TOKEN" "$API/releases/assets/$OLD_META" >/dev/null || true
+fi
+CODE=$(curl -s -o /tmp/snap-meta-upload.out -w '%{http_code}' --max-time 120 -X POST \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  --data-binary "@$META_OUT" \
+  "https://uploads.github.com/repos/$REPO/releases/$REL_ID/assets?name=snapshot.json")
+if [ "$CODE" != "201" ] && [ "$CODE" != "200" ]; then
+  echo "FATAL: snapshot.json upload failed HTTP $CODE: $(head -c 300 /tmp/snap-meta-upload.out)" >&2
+  exit 4
+fi
+rm -f "$META_OUT"
+
+# The release body stays for humans; it is NOT a trust anchor (see above).
 curl -sf -X PATCH -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
   "$API/releases/$REL_ID" \
-  -d "{\"body\":\"Automated weekly chain snapshot.\n\nblock: $BLOCK\nsize: $SIZE\nsha256: $SHA\nbuilt: $STAMP UTC\n\nImport:\n\`\`\`\ngpn_snapshot import --snapshot $ASSET --base-path <node dir> --pruning archive\n\`\`\`\"}" >/dev/null || true
+  -d "{\"body\":\"Automated weekly chain snapshot.\\n\\nblock: $BLOCK\\nsize: $SIZE\\nsha256: $SHA\\nbuilt: $STAMP UTC\\n\\nSigned metadata (what installers verify): https://github.com/$REPO/releases/download/$TAG/snapshot.json\\n\\nImport manually:\\n\`\`\`\\ngpn_snapshot import --snapshot $ASSET --base-path <node dir> --pruning archive\\n\`\`\`\"}" >/dev/null || true
 
 echo "[snapshot] published $DL"
+echo "[snapshot] published https://github.com/$REPO/releases/download/$TAG/snapshot.json"
 echo "[snapshot] block=$BLOCK size=$SIZE sha256=$SHA"
 rm -f "$OUT" "$META"

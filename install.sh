@@ -13,6 +13,13 @@
 #   GPN_BIN      bin dir    (default ~/.local/bin)
 #   GPN_NETWORK  testnet | mainnet (default testnet)
 #   GPN_REPO_URL git URL    (default: current repo's origin)
+#   GPN_FAST_SYNC      1 (default) bootstraps from the weekly snapshot; 0 = full sync
+#   GPN_SNAPSHOT_URL   override the snapshot archive URL
+#   GPN_SNAPSHOT_META_URL  override the signed snapshot.json URL
+#
+# Flags:
+#   --no-fast-sync   skip the snapshot and sync every block from peers
+#   --fast-sync      force it on (the default), overriding GPN_FAST_SYNC=0
 
 set -euo pipefail
 
@@ -21,10 +28,138 @@ PREFIX="${GPN_PREFIX:-$HOME/.gpn}"
 BIN_DIR="${GPN_BIN:-$HOME/.local/bin}"
 NETWORK="${GPN_NETWORK:-testnet}"
 SRC="$PREFIX/src"
+GPN_BASE_PATH="$PREFIX/node"
 
 log() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn(){ printf '\033[1;33m !\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[1;31m✗\033[0m %s\n' "$*" >&2; exit 1; }
+
+# ── Fast sync (weekly snapshot) ────────────────────────────────────────────────
+# A fresh node otherwise verifies ~200k blocks from peers (hours). The default is
+# therefore to import the published weekly snapshot, verified against a *signed*
+# metadata document before a single byte is trusted. It is opt-OUT, and every
+# failure — no metadata, bad signature, 404, short disk, hash mismatch, import
+# error — is a fallback to the normal full sync, never an install failure.
+SNAPSHOT_URL="${GPN_SNAPSHOT_URL:-https://github.com/crewlyllc/gpn_coin/releases/download/snapshot-latest/gpn-testnet-snapshot.tar.gz}"
+SNAPSHOT_META_URL="${GPN_SNAPSHOT_META_URL:-https://github.com/crewlyllc/gpn_coin/releases/download/snapshot-latest/snapshot.json}"
+
+# `--no-fast-sync` / `--fast-sync`; env GPN_FAST_SYNC=0 disables.
+FAST_SYNC=1
+[ "${GPN_FAST_SYNC:-1}" = 0 ] && FAST_SYNC=0
+CLI_FAST_SYNC=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-fast-sync) FAST_SYNC=0; CLI_FAST_SYNC=0; shift ;;
+    --fast-sync)    FAST_SYNC=1; CLI_FAST_SYNC=1; shift ;;
+    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+    *) die "unknown argument: $1 (see --help)" ;;
+  esac
+done
+
+# One clear line, then normal sync. Never fatal.
+fast_sync_fallback() {
+  warn "fast sync unavailable ($1) — falling back to a normal full peer sync (slower, still correct)."
+}
+
+fast_sync() {
+  local base="$GPN_BASE_PATH"
+  local snap_bin="$BIN_DIR/gpn_snapshot"
+
+  if [ "$FAST_SYNC" = 0 ]; then
+    if [ "$CLI_FAST_SYNC" = 0 ]; then
+      log "fast sync disabled (--no-fast-sync) — the node will sync from peers."
+    else
+      log "fast sync disabled (GPN_FAST_SYNC=0) — the node will sync from peers."
+    fi
+    return 0
+  fi
+
+  # Never touch an existing chain DB. A DB created with a different pruning mode
+  # is exactly what makes `gpn-node` fail with `Incompatible pruning modes` /
+  # `Column families not opened` — importing over it would corrupt the install.
+  if [ -d "$base/chains" ] && [ -n "$(ls -A "$base/chains" 2>/dev/null || true)" ]; then
+    if [ -f "$base/.gpn-pruning-archive" ]; then
+      log "found an existing chain DB at $base — fast sync not needed (leaving it untouched)."
+    else
+      warn "found an existing chain DB at $base with no archive-pruning marker — NOT touching it; fast sync skipped."
+    fi
+    return 0
+  fi
+
+  if [ ! -x "$snap_bin" ]; then fast_sync_fallback "gpn_snapshot not installed"; return 0; fi
+  command -v curl >/dev/null 2>&1 || { fast_sync_fallback "curl not found"; return 0; }
+
+  # Everything below happens inside a scratch dir that is deleted on the way
+  # out (success or failure). A failed fast sync leaves the real base path with
+  # nothing but what was already there.
+  FS_WORK="$(mktemp -d "$PREFIX/.fast-sync.XXXXXX" 2>/dev/null)" \
+    || { fast_sync_fallback "cannot create a temp dir under $PREFIX"; return 0; }
+  _fast_sync_try || true
+  rm -rf "$FS_WORK"
+  return 0
+}
+
+_fast_sync_try() {
+  local base="$GPN_BASE_PATH"
+  local snap_bin="$BIN_DIR/gpn_snapshot"
+  local work="$FS_WORK"
+  local meta="$work/snapshot.json" vout="$work/verify.txt"
+  log "fetching signed snapshot metadata…"
+  if ! curl -fsSL --connect-timeout 15 --max-time 60 -o "$meta" "$SNAPSHOT_META_URL" 2>/dev/null; then
+    fast_sync_fallback "snapshot metadata not available (404/timeout) at $SNAPSHOT_META_URL"; return 0
+  fi
+  # Signature first: an unsigned or edited document is never trusted, so the
+  # size/hash it advertises is never used.
+  if ! "$snap_bin" verify --meta "$meta" > "$vout" 2>&1; then
+    fast_sync_fallback "snapshot metadata failed verification: $(tail -n1 "$vout" 2>/dev/null)"; return 0
+  fi
+
+  local snap_size snap_block
+  snap_size="$(sed -n 's/^size=//p' "$vout" | head -n1)"
+  snap_block="$(sed -n 's/^block=//p' "$vout" | head -n1)"
+  case "$snap_size" in ''|*[!0-9]*) fast_sync_fallback "signed metadata has no usable size"; return 0 ;; esac
+
+  log "weekly snapshot: block ${snap_block:-?}, $((snap_size/1024/1024)) MiB — downloading…"
+
+  # Disk guard: the archive plus the unpacked DB needs room; require 3x.
+  local avail_kb need_kb
+  avail_kb="$(df -Pk "$PREFIX" 2>/dev/null | awk 'NR==2{print $4}')"
+  need_kb=$(( snap_size * 3 / 1024 ))
+  if [ -n "$avail_kb" ] && [ "$avail_kb" -lt "$need_kb" ] 2>/dev/null; then
+    fast_sync_fallback "only $((avail_kb/1024)) MiB free, need ~$((need_kb/1024)) MiB (3x snapshot)"; return 0
+  fi
+
+  local arch="$work/snap.tar.gz"
+  if ! curl -fL --retry 2 --retry-delay 2 --connect-timeout 15 --max-time 3600 \
+        --progress-bar -o "$arch" "$SNAPSHOT_URL"; then
+    fast_sync_fallback "snapshot download failed"; return 0
+  fi
+  # Verify the *bytes on disk* against the signed size + sha256.
+  if ! "$snap_bin" verify --meta "$meta" --snapshot "$arch" > "$vout" 2>&1; then
+    fast_sync_fallback "snapshot failed verification: $(tail -n1 "$vout" 2>/dev/null)"; return 0
+  fi
+
+  # Import into a STAGING dir, never over the real base path: a failure then has
+  # nothing to undo except our own temp dir.
+  local stage="$work/stage"
+  log "importing snapshot (archive pruning) — a few minutes…"
+  if ! "$snap_bin" import --snapshot "$arch" --base-path "$stage" --pruning archive >>"$work/import.log" 2>&1; then
+    fast_sync_fallback "snapshot import failed: $(tail -n1 "$work/import.log" 2>/dev/null)"; return 0
+  fi
+  if [ ! -d "$stage/chains" ]; then fast_sync_fallback "import produced no chains/ dir"; return 0; fi
+
+  mkdir -p "$base"
+  if [ -e "$base/chains" ]; then fast_sync_fallback "$base/chains appeared during import — not overwriting it"; return 0; fi
+  mv "$stage/chains" "$base/chains" \
+    || { fast_sync_fallback "could not move the imported DB into $base"; return 0; }
+  if [ -f "$stage/.gpn-pruning-archive" ]; then
+    mv "$stage/.gpn-pruning-archive" "$base/.gpn-pruning-archive" 2>/dev/null || true
+  fi
+
+  SNAPSHOT_BOOTSTRAPPED="block ${snap_block:-?}"
+  log "bootstrapped from the weekly snapshot at block ${snap_block:-?} — skipping the full peer sync."
+  return 0
+}
 
 # Install ollama user-local into $PREFIX/ollama (no sudo) and prepare the model
 # store at $PREFIX/models. Idempotent: no-op if ollama is already present. This
@@ -126,6 +261,12 @@ done
 # scripts/install-ollama.ps1 (Windows).
 install_ollama
 
+# 4c ── Fast sync: import the weekly snapshot (default; opt-out) ───────────────
+# Runs BEFORE any node starts, into $GPN_BASE_PATH (what `gpn_node` uses).
+# Every failure falls back to a normal full sync — see fast_sync().
+SNAPSHOT_BOOTSTRAPPED=""
+fast_sync
+
 # 5 ── Wallet (the MONEY identity) ──────────────────────────────────────────
 # One wallet per machine, in the node's own keystore (`<base>/keystore.json`,
 # 0600). `gpn_node --ensure-wallet` creates it once and reuses it forever; it
@@ -168,6 +309,12 @@ EOF
 
 # 7 ── Done ──────────────────────────────────────────────────────────────────
 log "installed. payout account: ${WALLET:-<see $PREFIX/wallet.setup>}"
+# Say plainly where the chain data came from — no ambiguity for the operator.
+if [ -n "$SNAPSHOT_BOOTSTRAPPED" ]; then
+  log "chain data: bootstrapped from the weekly snapshot ($SNAPSHOT_BOOTSTRAPPED) — the node only has to catch up the last few blocks."
+else
+  log "chain data: none yet — the node will full-sync from peers on first start (hours)."
+fi
 echo
 echo "Start earning — three steps, one question:"
 echo "  gpn_node --setup     # generate a new wallet, or import an existing one"
