@@ -38,6 +38,35 @@ manage them individually.
                    (miner)    _status    provider   provider      provider  provider
 ```
 
+## Fast sync (skip the ~200k-block catch-up)
+
+A fresh node normally imports the whole chain, which takes a long time on a PoW testnet. A
+**weekly snapshot** is published to the public mirror and can be imported instead:
+
+```
+https://github.com/crewlyllc/gpn_coin/releases/download/snapshot-latest/gpn-testnet-snapshot.tar.gz
+```
+
+Download it, then import into the node's base path before first start:
+
+```bash
+gpn_snapshot import --snapshot gpn-testnet-snapshot.tar.gz --base-path ~/.gpn/node --pruning archive
+```
+
+Windows (PowerShell):
+
+```powershell
+curl.exe -L -o snap.tar.gz https://github.com/crewlyllc/gpn_coin/releases/download/snapshot-latest/gpn-testnet-snapshot.tar.gz
+\gpn_snapshot.exe import --snapshot snap.tar.gz --base-path C:\gpn\data --pruning archive
+```
+
+Notes:
+- The import expects the **archive** pruning mode; importing into a DB created with a different
+  pruning mode fails with `Incompatible pruning modes` — move that DB aside first.
+- The snapshot is rebuilt every Monday at 04:00 PT; its block height, size and sha256 are written
+  into the release description, so you can verify what you downloaded.
+- Verify before importing: `sha256sum snap.tar.gz` should match the value in the release body.
+
 ## Install on a new computer
 
 Three steps, one question.
