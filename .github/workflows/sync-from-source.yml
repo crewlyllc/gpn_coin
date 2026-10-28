@@ -1,0 +1,185 @@
+name: Sync from jeremyzguo/gpn_coin
+
+# ONE-WAY mirror: private dev repo jeremyzguo/gpn_coin -> this public repo.
+# This repository is never a source of truth; anything pushed here by hand is
+# overwritten on the next run. The only file that lives here and not in the
+# source is this workflow itself, which is re-added after each force push.
+#
+# Secrets:
+#   SOURCE_TOKEN - PAT with read access to jeremyzguo/gpn_coin.
+#   MIRROR_TOKEN - PAT with contents+workflows WRITE on THIS repo. Required because
+#                  pushes that touch .github/workflows/ are refused for GITHUB_TOKEN
+#                  ("refusing to allow a GitHub App to create or update workflow").
+#
+# Runs on FREE public-repo Actions minutes (the private repo's minutes are
+# billing-blocked, which is why this workflow lives here and not there).
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'   # every 6 hours at :17 UTC
+  workflow_dispatch:
+    inputs:
+      sync_assets:
+        description: 'Also mirror release assets (downloads 200-340 MB per asset)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mirror-sync
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPO: jeremyzguo/gpn_coin
+  WF_PATH: .github/workflows/sync-from-source.yml
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout this repo (keeps a copy of this workflow file)
+        uses: actions/checkout@v4
+        with:
+          path: dest-work
+          fetch-depth: 1
+          persist-credentials: false   # a lingering GITHUB_TOKEN extraheader would
+                                       # override MIRROR_TOKEN on push
+      - name: Save workflow file aside
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/keep/.github/workflows"
+          cp "dest-work/$WF_PATH" "$RUNNER_TEMP/keep/$WF_PATH"
+
+      - name: Clone source (mirror)
+        env:
+          SOURCE_TOKEN: ${{ secrets.SOURCE_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -n "$SOURCE_TOKEN" ] || { echo "::error::SOURCE_TOKEN secret is not set"; exit 1; }
+          git clone --mirror "https://x-access-token:${SOURCE_TOKEN}@github.com/${SOURCE_REPO}.git" src.git
+          cd src.git
+          echo "SOURCE_HEAD=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          git for-each-ref --format='  %(refname) %(objectname:short)'
+
+      - name: Force-push branches and tags
+        env:
+          GH_TOKEN: ${{ secrets.MIRROR_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd src.git
+          # Tags are force-updated but never pruned: release tags must not vanish
+          # from the public releases page.
+          git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*'
+
+      - name: Re-add this workflow file
+        env:
+          GH_TOKEN: ${{ secrets.MIRROR_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd dest-work
+          git config --unset-all 'http.https://github.com/.extraheader' || true
+          git fetch "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" main
+          git reset --hard FETCH_HEAD
+          if [ -f "$WF_PATH" ] && cmp -s "$WF_PATH" "$RUNNER_TEMP/keep/$WF_PATH"; then
+            echo "workflow file intact after sync"
+            exit 0
+          fi
+          mkdir -p .github/workflows
+          cp "$RUNNER_TEMP/keep/$WF_PATH" "$WF_PATH"
+          git -c user.name='gpn-mirror-bot' -c user.email='mirror@gpncoin.ai' add "$WF_PATH"
+          git -c user.name='gpn-mirror-bot' -c user.email='mirror@gpncoin.ai' \
+              commit -m "chore(mirror): restore sync workflow after mirror push [skip ci]"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
+          echo "restored $WF_PATH"
+
+      - name: Verify destination against source
+        env:
+          GH_TOKEN: ${{ secrets.MIRROR_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd dest-work
+          git fetch "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" main
+          DEST_HEAD=$(git rev-parse FETCH_HEAD)
+          echo "source HEAD:      $SOURCE_HEAD"
+          echo "destination HEAD: $DEST_HEAD"
+          # The destination carries exactly one extra file (this workflow); every
+          # other path must be byte-identical to the source.
+          git ls-tree -r FETCH_HEAD | grep -v "$WF_PATH" > /tmp/dest.tree
+          git -C ../src.git ls-tree -r "$SOURCE_HEAD" | grep -v "$WF_PATH" > /tmp/src.tree
+          if diff -u /tmp/src.tree /tmp/dest.tree; then
+            echo "::notice::destination matches source (excluding $WF_PATH)"
+          else
+            echo "::error::destination differs from source"
+            exit 1
+          fi
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}" -f default_branch=main >/dev/null 2>&1 || true
+
+      - name: Mirror release assets
+        if: ${{ github.event_name == 'schedule' || inputs.sync_assets }}
+        env:
+          SOURCE_TOKEN: ${{ secrets.SOURCE_TOKEN }}
+          GH_TOKEN: ${{ secrets.MIRROR_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, subprocess, time
+          SRC = os.environ['SOURCE_TOKEN']; DST = os.environ['GH_TOKEN']
+          S, D = 'jeremyzguo/gpn_coin', os.environ['GITHUB_REPOSITORY']
+
+          def api(url, tok, method='GET', data=None):
+              cmd = ['curl','-sS','-X',method,'-H',f'Authorization: token {tok}',
+                     '-H','Accept: application/vnd.github+json']
+              if data is not None:
+                  cmd += ['-d', json.dumps(data)]
+              out = subprocess.run(cmd + [url], capture_output=True, check=True).stdout.decode()
+              return json.loads(out) if out.strip() else {}
+
+          src = api(f'https://api.github.com/repos/{S}/releases?per_page=100', SRC)
+          dst = {r['tag_name']: r for r in api(f'https://api.github.com/repos/{D}/releases?per_page=100', DST)}
+
+          for r in src:
+              tag = r['tag_name']
+              d = dst.get(tag)
+              if not d:
+                  d = api(f'https://api.github.com/repos/{D}/releases', DST, 'POST', {
+                      'tag_name': tag, 'name': r['name'], 'body': r.get('body') or '',
+                      'draft': False, 'prerelease': r.get('prerelease', False)})
+                  print('created release', tag)
+              for a in r['assets']:
+                  have = [x for x in api(f'https://api.github.com/repos/{D}/releases/{d["id"]}/assets', DST)
+                          if x['name'] == a['name'] and x['state'] == 'uploaded']
+                  if have and have[0]['size'] == a['size']:
+                      print(f'  up to date: {tag}/{a["name"]} ({a["size"]} bytes)')
+                      continue
+                  lp = f'/tmp/{a["name"]}'
+                  print(f'  downloading {tag}/{a["name"]} ({a["size"]/1e6:.1f} MB) from source')
+                  subprocess.run(['curl','-sSL','--fail','--retry','3',
+                      '-H',f'Authorization: token {SRC}','-H','Accept: application/octet-stream',
+                      '-o',lp,f'https://api.github.com/repos/{S}/releases/assets/{a["id"]}'], check=True)
+                  got = os.path.getsize(lp)
+                  if got != a['size']:
+                      raise SystemExit(f'download size mismatch for {a["name"]}: {got} != {a["size"]}')
+                  # Rolling tags mean the asset is REPLACED: drop the stale copy first,
+                  # otherwise the upload fails with "already_exists".
+                  for x in have:
+                      print(f'    deleting stale asset id={x["id"]} size={x["size"]}')
+                      api(f'https://api.github.com/repos/{D}/releases/assets/{x["id"]}', DST, 'DELETE')
+                      time.sleep(2)
+                  print('    uploading')
+                  up = subprocess.run(['curl','-sS','--fail-with-body','-X','POST',
+                      '-H',f'Authorization: token {DST}',
+                      '-H','Content-Type: application/octet-stream',
+                      '--data-binary',f'@{lp}',
+                      f'https://uploads.github.com/repos/{D}/releases/{d["id"]}/assets?name={a["name"]}'],
+                      capture_output=True)
+                  if up.returncode:
+                      raise SystemExit(f'upload failed: {up.stdout.decode()[:400]} {up.stderr.decode()[:200]}')
+                  chk = [x for x in api(f'https://api.github.com/repos/{D}/releases/{d["id"]}/assets', DST)
+                         if x['name'] == a['name']]
+                  if not chk or chk[0]['size'] != a['size'] or chk[0]['state'] != 'uploaded':
+                      raise SystemExit(f'verification failed for {a["name"]}: {chk}')
+                  print(f'    verified {a["name"]} size={chk[0]["size"]} digest={chk[0].get("digest")}')
+          PY
