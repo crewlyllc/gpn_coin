@@ -223,6 +223,13 @@ jobs:
           GPN_SNAPSHOT_BIN: /home/jeremyg/.ci-cache/gpn-agent-target/release/gpn_snapshot
         run: bash scripts/tests/test-fast-sync.sh
 
+      # Referral capture (data collection only). Offline: install.sh arg
+      # parsing (a bare PATH stops it at the prerequisite check, so nothing is
+      # built/cloned), write-once storage, Windows launcher parity, and the
+      # snapshot's referred_by / referral_summary attribution.
+      - name: Referral capture (install + write-once + snapshot)
+        run: bash scripts/tests/test-referral.sh
+
   # ---------------------------------------------------------------------------
   # Desktop matrix — EXPERIMENTAL and MANUAL ONLY. macOS/Windows need paid
   # GitHub-hosted minutes which this account cannot use, so a normal push no

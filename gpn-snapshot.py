@@ -20,8 +20,18 @@ which an account appeared, and is preserved across runs in the snapshot index
 comes from the on-chain `uptime_bits` bitmask (bit 0 = most recent window,
 UptimeLookback = 10 windows -> 10_000 bps = 100%).
 
+Referral attribution (data collection only, NOT a reward calculation): the
+access point records, per provider address, the referral code that address
+first published on its heartbeat (`~/.gpn/referral-registry.json`, write-once).
+When that file is present the snapshot adds `referred_by` to each attributed
+account and a top-level `referral_summary` (code -> referred address count and
+their combined blocks/jobs/uptime) so a later airdrop calculator can use it.
+Nothing is inferred: accounts with no recorded code simply have no
+`referred_by`. Amounts and eligibility rules are TBD — see
+`shared/artifacts/project7/airdrop/REFERRAL-AND-MIGRATION-POLICY.md`.
+
 Usage:
-  python3 gpn-snapshot.py [--rpc URL] [--out DIR]
+  python3 gpn-snapshot.py [--rpc URL] [--out DIR] [--referral-registry PATH]
 """
 import argparse
 import hashlib
@@ -243,6 +253,94 @@ TIERS = ["Unattested", "Bronze", "Silver", "Gold"]
 UPTIME_LOOKBACK = 10  # gpn-liveness::UptimeLookback (runtime constant, windows)
 
 
+def default_referral_registry():
+    """
+    The AP's address -> referral-code registry (see
+    shared/artifacts/project7/airdrop/REFERRAL-AND-MIGRATION-POLICY.md).
+    """
+    env = os.environ.get("GPN_REFERRAL_REGISTRY")
+    if env:
+        return env
+    prefix = os.environ.get("GPN_PREFIX") or os.path.join(os.path.expanduser("~"), ".gpn")
+    return os.path.join(prefix, "referral-registry.json")
+
+
+def load_referrals(path):
+    """
+    Read the referral registry. Missing/corrupt file => {} (never fatal: a
+    snapshot must work on a machine that never ran an access point).
+
+    Returns {address: {"ref": code, "first_seen": ts}}.
+    """
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    for addr, rec in data.items():
+        if not isinstance(addr, str) or not isinstance(rec, dict):
+            continue
+        code = rec.get("ref")
+        if not isinstance(code, str) or not code.strip():
+            continue
+        out[addr] = {"ref": code.strip(), "first_seen": rec.get("first_seen")}
+    return out
+
+
+def attribute_referrals(records, refs):
+    """
+    Attach `referred_by` to every record the registry knows.
+
+    Matched by ss58 (what the AP stores) or by hex, case-insensitively —
+    addresses are compared, never inferred from anything else. Returns the
+    number of attributed records.
+    """
+    by_key = {addr.lower(): rec for addr, rec in refs.items()}
+    n = 0
+    for r in records:
+        hit = by_key.get(r.get("ss58", "").lower()) or by_key.get(r.get("hex", "").lower())
+        if hit:
+            r["referred_by"] = hit["ref"]
+            n += 1
+    return n
+
+
+def referral_summary(records):
+    """
+    Aggregate attributed accounts per code.
+
+    Trust nothing about eligibility here: this is a plain tally of who was
+    attributed and what they did, so the (undecided) airdrop rules can be
+    applied later without re-deriving anything.
+    """
+    agg = {}
+    for r in records:
+        code = r.get("referred_by")
+        if not code:
+            continue
+        a = agg.setdefault(code, {
+            "referred_addresses": 0,
+            "blocks_authored": 0,
+            "jobs_served": 0,
+            "jobs_created": 0,
+            "uptime_bps_sum": 0,
+            "active_seconds_sum": 0,
+        })
+        a["referred_addresses"] += 1
+        a["blocks_authored"] += r.get("blocks_authored", 0)
+        a["jobs_served"] += r.get("jobs_served", 0)
+        a["jobs_created"] += r.get("jobs_created", 0)
+        a["uptime_bps_sum"] += r.get("observed_uptime_bps", 0)
+        a["active_seconds_sum"] += r.get("active_seconds", 0)
+    for a in agg.values():
+        n = a["referred_addresses"] or 1
+        a["mean_uptime_bps"] = a.pop("uptime_bps_sum") // n
+    return agg
+
+
 def collect(rpc):
     parts = {}
 
@@ -357,6 +455,9 @@ def main():
     ap.add_argument("--rpc", default=os.environ.get("GPN_RPC", "http://127.0.0.1:9944"))
     ap.add_argument("--out", default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                                   "shared", "artifacts", "project7", "airdrop"))
+    ap.add_argument("--referral-registry", default=default_referral_registry(),
+                    help="AP address->referral-code registry (default: $GPN_REFERRAL_REGISTRY "
+                         "or ~/.gpn/referral-registry.json; absent = no attribution)")
     args = ap.parse_args()
 
     rpc = Rpc(args.rpc)
@@ -399,6 +500,12 @@ def main():
         d["observed_uptime_bps"] = (10000 * d["snapshots_seen"] // snapshot_count) if snapshot_count else 0
         records.append(d)
 
+    # Referral attribution (data collection only): a code recorded by the access
+    # point for this account. Absent = never referred (or an older registry
+    # snapshot) — never inferred from anything else.
+    refs = load_referrals(args.referral_registry)
+    attribute_referrals(records, refs)
+
     humans = [r for r in records if not r["is_pallet_account"]]
     snapshot = {
         "tool": "gpn-snapshot",
@@ -413,6 +520,8 @@ def main():
         "participant_count": len(humans),
         "pallet_account_count": len(records) - len(humans),
         "snapshot_count": snapshot_count,
+        "referral_registry": args.referral_registry if refs else None,
+        "referral_summary": referral_summary(humans),
         "participants": records,
     }
 
@@ -433,6 +542,10 @@ def main():
     print("  spec=%s best=#%d participants=%d (+%d pallet accounts)"
           % (rv.get("specVersion"), height, len(humans), len(records) - len(humans)))
     print("  roles: %s" % ", ".join("%s=%d" % kv for kv in sorted(roles.items())))
+    rs = snapshot["referral_summary"]
+    if rs:
+        print("  referrals: %s" % ", ".join(
+            "%s=%d" % (c, v["referred_addresses"]) for c, v in sorted(rs.items())))
 
 
 if __name__ == "__main__":

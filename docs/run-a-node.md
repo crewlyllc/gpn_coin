@@ -38,6 +38,29 @@ manage them individually.
                    (miner)    _status    provider   provider      provider  provider
 ```
 
+## Referral code (optional, data collection only)
+
+If somebody referred you to the testnet, pass their code at install time:
+
+```bash
+./install.sh --ref team-alpha          # or: GPN_REF=team-alpha ./install.sh
+```
+
+Windows: `.\run-windows-provider.ps1 -Ref team-alpha` (env `GPN_REF` also works).
+
+- Format: **4–32 characters**, letters/digits/`-`/`_`. An invalid code only
+  prints a warning — it never fails an install.
+- Stored **once** in `~/.gpn/referral` (one line). A later `--ref` is ignored
+  (`[referral] already set to …; ignoring new value`), so the attribution cannot
+  be rewritten afterwards. Delete the file only if you *want* to lose it.
+- Published on the provider heartbeat as `"ref"` in `/status`, and recorded by
+  the access point once per provider address (it is not a secret).
+- Purely for the testnet-participation allocation at mainnet launch. Amounts
+  are undecided and no reward is promised — see
+  `shared/artifacts/project7/airdrop/REFERRAL-AND-MIGRATION-POLICY.md`.
+- A node installed without a code behaves exactly as before (the field is
+  omitted entirely).
+
 ## Fast sync (skip the ~200k-block catch-up)
 
 A fresh node normally verifies ~200k blocks from peers (hours on a PoW testnet).

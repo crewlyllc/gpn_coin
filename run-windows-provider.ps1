@@ -49,6 +49,10 @@ param(
                                            # 0 = advertise the on-chain attestation (recommended)
   [string]$Ollama          = "http://127.0.0.1:11434",
   [string]$BaselineModel   = "llama3.2:1b",           # pulled if Ollama has no models
+  # Referral code of whoever referred this box (4-32 chars, [A-Za-z0-9_-]).
+  # Data collection only: written ONCE to %USERPROFILE%\.gpn\referral and
+  # published on the provider heartbeat. Invalid/absent just warns.
+  [string]$Ref             = $env:GPN_REF,
   [switch]$InstallOllama                              # auto-install/start Ollama if missing
 )
 
@@ -114,6 +118,41 @@ Write-Host "      models: $($models -join ', ')"
 #    second call is harmless but logs the pallet error. Needs a funded wallet.
 Write-Host "[2/4] registering provider (min_gflops=150) ..."
 & (Need "gpn_register.exe") $Rpc $Signer
+
+# 2b. Referral code (data collection only) — written ONCE, never fatal.
+#     Same storage + rules as Linux: %USERPROFILE%\.gpn\referral, 4–32 chars of
+#     [A-Za-z0-9_-], first value wins so a box cannot re-refer itself later.
+if (-not [string]::IsNullOrWhiteSpace($Ref)) {
+  $refCode = $Ref.Trim()
+  $refDir  = Join-Path $env:USERPROFILE ".gpn"
+  $refFile = Join-Path $refDir "referral"
+  $refOk = ($refCode.Length -ge 4 -and $refCode.Length -le 32 -and $refCode -match '^[A-Za-z0-9_-]+$')
+  if (-not $refOk) {
+    Write-Host "[!] [referral] invalid code '$refCode' (need 4-32 chars of A-Z a-z 0-9 _ -) — continuing WITHOUT a referral" -ForegroundColor Yellow
+  } elseif (Test-Path $refFile) {
+    $existing = (Get-Content $refFile -TotalCount 1)
+    Write-Host "[!] [referral] already set to '$existing'; ignoring new value '$refCode'" -ForegroundColor Yellow
+  } else {
+    try {
+      New-Item -ItemType Directory -Force -Path $refDir | Out-Null
+      # CreateNew = O_EXCL create: it throws if the file exists (even if another
+      # run created it a microsecond ago), so the first value always wins.
+      $fs = [System.IO.File]::Open($refFile, [System.IO.FileMode]::CreateNew,
+                                   [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+      try {
+        $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes("$refCode`n")
+        $fs.Write($bytes, 0, $bytes.Length)
+        $fs.Flush()
+      } finally { $fs.Dispose() }
+      Write-Host "      referral recorded: '$refCode' -> $refFile (write-once)"
+    } catch [System.IO.IOException] {
+      $existing = (Get-Content $refFile -TotalCount 1)
+      Write-Host "[!] [referral] already set to '$existing'; ignoring new value '$refCode'" -ForegroundColor Yellow
+    } catch {
+      Write-Host "[!] [referral] could not write $refFile ($_) — continuing without a referral" -ForegroundColor Yellow
+    }
+  }
+}
 
 # 3. Configure the node (env overrides for the supervisor). A node is always
 #    miner + provider, so we set BOTH sides: chain/node settings and provider.

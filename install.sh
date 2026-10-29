@@ -16,10 +16,19 @@
 #   GPN_FAST_SYNC      1 (default) bootstraps from the weekly snapshot; 0 = full sync
 #   GPN_SNAPSHOT_URL   override the snapshot archive URL
 #   GPN_SNAPSHOT_META_URL  override the signed snapshot.json URL
+#   GPN_REF      referral code (same as --ref); data collection only
 #
 # Flags:
 #   --no-fast-sync   skip the snapshot and sync every block from peers
 #   --fast-sync      force it on (the default), overriding GPN_FAST_SYNC=0
+#   --ref CODE       referral code of whoever referred you (4-32 chars,
+#                    [A-Za-z0-9_-]). Stored ONCE in $PREFIX/referral and
+#                    published on the provider heartbeat. An invalid code only
+#                    warns — it never fails the install.
+#
+# Referral codes are recorded for the testnet-participation allocation at
+# mainnet launch (amounts TBD). They cannot be reconstructed later, so they are
+# captured at install time and never rewritten (see scripts/gpn-referral.sh).
 
 set -euo pipefail
 
@@ -47,11 +56,16 @@ SNAPSHOT_META_URL="${GPN_SNAPSHOT_META_URL:-https://github.com/crewlyllc/gpn_coi
 FAST_SYNC=1
 [ "${GPN_FAST_SYNC:-1}" = 0 ] && FAST_SYNC=0
 CLI_FAST_SYNC=""
+# Referral code: `--ref CODE` / `--ref=CODE` / `GPN_REF=CODE`. Optional; a bad
+# value is a warning, never an install failure (see the write step below).
+REF_CODE="${GPN_REF:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-fast-sync) FAST_SYNC=0; CLI_FAST_SYNC=0; shift ;;
     --fast-sync)    FAST_SYNC=1; CLI_FAST_SYNC=1; shift ;;
-    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+    --ref)          [ $# -ge 2 ] || die "--ref needs a code (4-32 chars, [A-Za-z0-9_-])"; REF_CODE="$2"; shift 2 ;;
+    --ref=*)        REF_CODE="${1#--ref=}"; shift ;;
+    -h|--help) sed -n '2,/^set -euo pipefail/p' "$0" | sed '$d'; exit 0 ;;
     *) die "unknown argument: $1 (see --help)" ;;
   esac
 done
@@ -241,6 +255,29 @@ else
   git -C "$SRC" pull --ff-only >/dev/null 2>&1 || warn "couldn't pull (continuing with existing source)"
 fi
 
+# 2b ── Referral code (data collection only) ─────────────────────────────────
+# Optional, and it must NEVER fail an install: an invalid or absent code is a
+# warning and the install proceeds. The file is write-once — a second install
+# with a different --ref keeps the first value (no retroactive re-referring).
+REF_HELPER="$SRC/scripts/gpn-referral.sh"
+[ -f "$REF_HELPER" ] || REF_HELPER="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/scripts/gpn-referral.sh"
+if [ -n "$REF_CODE" ]; then
+  if [ -f "$REF_HELPER" ] && . "$REF_HELPER" 2>/dev/null; then
+    if referral_write_once "$PREFIX" "$REF_CODE"; then
+      log "referral recorded: '$(referral_read "$PREFIX" 2>/dev/null)' → $PREFIX/referral (write-once; used for the mainnet testnet-participation allocation)"
+    else
+      rc=$?
+      if [ "$rc" = 2 ]; then
+        warn "[referral] already set to '$(referral_read "$PREFIX" 2>/dev/null)'; ignoring new value '$REF_CODE'"
+      else
+        warn "[referral] invalid code '$REF_CODE': $(referral_validate "$REF_CODE" 2>/dev/null) — continuing WITHOUT a referral"
+      fi
+    fi
+  else
+    warn "[referral] helper scripts/gpn-referral.sh not found — skipping referral '$REF_CODE' (install continues)"
+  fi
+fi
+
 # 3 ── Build ─────────────────────────────────────────────────────────────────
 log "building gpn-node + gpn-agent (a few minutes, first run)…"
 cargo build --release --manifest-path "$SRC/gpn-node/Cargo.toml" -p gpn-node
@@ -305,6 +342,9 @@ GPN_DATA=$PREFIX/data
 # ollama (AI-compute) — user-local, sandboxed under $PREFIX
 OLLAMA_BIN=$PREFIX/ollama/bin/ollama
 OLLAMA_MODELS=$PREFIX/models
+
+# Referral (data collection only; write-once, so there is deliberately no
+# setting here — the value lives in $PREFIX/referral and must not be rewritable).
 EOF
 
 # 7 ── Done ──────────────────────────────────────────────────────────────────

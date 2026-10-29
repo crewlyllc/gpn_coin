@@ -746,6 +746,11 @@ struct Provider {
     /// The provider's libp2p TCP port, advertised even behind NAT (the
     /// directory combines it with the host it reaches the provider on).
     p2p_port: Option<u16>,
+    /// Referral code this provider published on its heartbeat (`ref`), as
+    /// recorded by the AP on FIRST sighting. Data collection only: it is not a
+    /// secret (a code is not an identity), it is never used for routing, and it
+    /// never changes once recorded — see [`apply_referrals`].
+    referral: Option<String>,
     active: u64,
     capacity: u64,
     latency_ms: u64,
@@ -950,6 +955,14 @@ fn provider_from_caps(addr: &str, v: &Value, status_url: String, latency_ms: u64
         peer_id,
         p2p_multiaddrs,
         p2p_port,
+        // Raw candidate; validated + first-write-wins recorded in
+        // `apply_referrals` (which also knows the peer id, for self-referral).
+        referral: v
+            .get("ref")
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from),
         active: v.get("active").and_then(|x| x.as_u64()).unwrap_or(0),
         capacity: v
             .get("capacity")
@@ -1160,7 +1173,75 @@ fn merge_poll_snapshot(
             }
         }
     }
+    // The referral is never re-derived from a poll: whatever this address was
+    // first attributed to stays (`apply_referrals` is the authority).
+    if merged.referral.is_none() {
+        merged.referral = existing.referral.clone();
+    }
     merged
+}
+
+/// Record + attach referral codes for the providers in the registry.
+///
+/// Two passes over the freshly polled list:
+///
+/// 1. **Record** — a provider that published `ref` on its heartbeat has it
+///    stored against its ss58 address, **once**. `record_once` validates the
+///    code, refuses a code that names the node itself (self-referral), and is
+///    write-once per address, so a box cannot re-point itself at a different
+///    referrer later.
+/// 2. **Attach** — every entry then carries the *recorded* code (not the
+///    published one), so `/providers` shows the attribution the airdrop
+///    calculator will use rather than whatever the last heartbeat claimed.
+///
+/// Nothing here affects routing: a provider with no code, a bad code or a
+/// self-referral is still a perfectly routable provider.
+fn apply_referrals(out: &mut [Provider]) {
+    let path = gpn_agent::referral::registry_path();
+    apply_referrals_at(out, &path);
+}
+
+/// [`apply_referrals`] with an explicit registry path (tests use a temp file).
+fn apply_referrals_at(out: &mut [Provider], path: &std::path::Path) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    for p in out.iter_mut() {
+        let addr = p.address.trim().to_string();
+        if addr.is_empty() {
+            continue;
+        }
+        let Some(raw) = p.referral.take() else {
+            continue;
+        };
+        match gpn_agent::referral::record_once(path, &addr, &raw, p.peer_id.as_deref(), now) {
+            Ok(gpn_agent::referral::RecordOutcome::New(code)) => {
+                println!("[referral] {addr} attributed to {code}");
+            }
+            Ok(gpn_agent::referral::RecordOutcome::Existing(code)) => {
+                if !code.eq_ignore_ascii_case(&raw) {
+                    println!(
+                        "[referral] {addr} already attributed to {code}; ignoring new value {raw}"
+                    );
+                }
+            }
+            Ok(gpn_agent::referral::RecordOutcome::SelfReferral(code)) => {
+                eprintln!("[referral] {addr} published its own code ({code}); not recorded");
+            }
+            Ok(gpn_agent::referral::RecordOutcome::Invalid(e)) => {
+                eprintln!("[referral] {addr} published an unusable code ({e}); not recorded");
+            }
+            Ok(gpn_agent::referral::RecordOutcome::Skipped) => {}
+            Err(e) => eprintln!("[referral] could not record {addr}: {e}"),
+        }
+    }
+    let reg = gpn_agent::referral::load_registry(path);
+    for p in out.iter_mut() {
+        if let Some(entry) = reg.get(p.address.trim()) {
+            p.referral = Some(entry.r#ref.clone());
+        }
+    }
 }
 
 /// Poll every provider's /status into the shared registry.
@@ -1233,6 +1314,7 @@ fn refresh(
                     peer_id: None,
                     p2p_multiaddrs: vec![],
                     p2p_port: None,
+                    referral: None,
                     active: 0,
                     capacity: 0,
                     latency_ms: 9999,
@@ -1262,6 +1344,10 @@ fn refresh(
         //     comparison can. Warn, keyed on the pair, so it is visible in the
         //     AP log instead of silently poisoning the directory.
         warn_duplicate_peer_ids(&out);
+
+        // 4c. Referral attribution (data collection for the mainnet airdrop).
+        //     First sighting wins, per provider address — see `apply_referrals`.
+        apply_referrals(&mut out);
 
         *reg.lock().unwrap() = out;
         std::thread::sleep(Duration::from_secs(5));
@@ -3452,6 +3538,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "capabilities": p.capabilities,
                     "peer_id": p.peer_id, "multiaddrs": p.p2p_multiaddrs,
                     "p2p_port": p.p2p_port,
+                    "referral": p.referral,
                     "healthy": p.last_seen.is_some()
                 })).collect::<Vec<_>>() })
                 }
@@ -6165,6 +6252,7 @@ mod tests {
             peer_id: None,
             p2p_multiaddrs: vec![],
             p2p_port: None,
+            referral: None,
             active: 0,
             capacity: 4,
             latency_ms,
@@ -7590,5 +7678,112 @@ mod tests {
             &RttOverrides::new()
         )
         .is_empty());
+    }
+
+    // ── referral capture (data collection only) ─────────────────────────────
+
+    fn ref_tmp(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("gpn-ap-ref-{tag}-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("referral-registry.json");
+        (dir, p)
+    }
+
+    /// The heartbeat's `ref` reaches the registry once, and a later heartbeat
+    /// with a different code does NOT re-point the address (first write wins).
+    #[test]
+    fn ap_records_the_first_referral_and_never_overwrites_it() {
+        let (dir, reg) = ref_tmp("once");
+        let pid = "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo";
+        let hb = json!({"address": "5Miner", "gflops": 900, "ref": "team-alpha", "peer_id": pid});
+        let mut out = vec![provider_from_caps("5Miner", &hb, "http://h1".into(), 5)];
+        apply_referrals_at(&mut out, &reg);
+        assert_eq!(out[0].referral.as_deref(), Some("team-alpha"));
+
+        // Same address, a different claim on a later sweep.
+        let hb2 =
+            json!({"address": "5Miner", "gflops": 900, "ref": "someone-else", "peer_id": pid});
+        let mut out = vec![provider_from_caps("5Miner", &hb2, "http://h1".into(), 5)];
+        apply_referrals_at(&mut out, &reg);
+        assert_eq!(
+            out[0].referral.as_deref(),
+            Some("team-alpha"),
+            "the recorded attribution must not be rewritable"
+        );
+        let stored = gpn_agent::referral::load_registry(&reg);
+        assert_eq!(stored["5Miner"].r#ref, "team-alpha");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A node cannot refer itself through the AP: its own address or the code
+    /// derived from its own peer id is refused (and logged), and it stays
+    /// routable — attribution is not a gate.
+    #[test]
+    fn ap_rejects_self_referral_and_bad_codes_but_keeps_the_provider() {
+        let (dir, reg) = ref_tmp("self");
+        let pid = "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo";
+        let own = gpn_agent::referral::peer_ref_code(pid).unwrap();
+
+        let mut out = vec![
+            provider_from_caps(
+                "5Self",
+                &json!({"address": "5Self", "peer_id": pid, "ref": own}),
+                "http://self".into(),
+                5,
+            ),
+            provider_from_caps(
+                "5Bad",
+                &json!({"address": "5Bad", "ref": "not a code"}),
+                "http://bad".into(),
+                5,
+            ),
+            provider_from_caps(
+                "5NoRef",
+                &json!({"address": "5NoRef", "gflops": 500}),
+                "http://noref".into(),
+                5,
+            ),
+            provider_from_caps(
+                "5Good",
+                &json!({"address": "5Good", "ref": "Team_Alpha-1"}),
+                "http://good".into(),
+                5,
+            ),
+        ];
+        apply_referrals_at(&mut out, &reg);
+        assert_eq!(out.len(), 4, "attribution never drops a provider");
+        assert!(out[0].referral.is_none(), "self-referral must not record");
+        assert!(out[1].referral.is_none(), "an invalid code must not record");
+        assert!(out[2].referral.is_none(), "no code stays unseen");
+        // Stored as given (case preserved), compared case-insensitively.
+        assert_eq!(out[3].referral.as_deref(), Some("Team_Alpha-1"));
+        assert_eq!(gpn_agent::referral::load_registry(&reg).len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `/providers` carries the attribution (it is not a secret) and `null`
+    /// when the address has none — the field is additive, never a gate.
+    #[test]
+    fn providers_view_exposes_the_recorded_referral() {
+        let mut p = prov("5Ref", "http://r", 5, "m");
+        p.referral = Some("team-alpha".into());
+        let v = json!({"address": p.address, "referral": p.referral});
+        assert_eq!(v["referral"], json!("team-alpha"));
+        let q = prov("5Plain", "http://q", 5, "m");
+        assert_eq!(json!({"referral": q.referral})["referral"], Value::Null);
+    }
+
+    /// A legacy heartbeat (no `ref` key at all) is a provider with no referral —
+    /// exactly as before this feature existed.
+    #[test]
+    fn a_heartbeat_without_ref_parses_with_no_referral() {
+        let v = json!({"address": "5Old", "gflops": 825});
+        let p = provider_from_caps("5Old", &v, "http://old".into(), 5);
+        assert!(p.referral.is_none());
+        assert_eq!(p.gflops, 825);
     }
 }

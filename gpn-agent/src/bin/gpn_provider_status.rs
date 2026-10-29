@@ -1,7 +1,13 @@
 //! gpn_provider_status — a tiny HTTP heartbeat for a provider, polled by the
 //! access-point scheduler to learn capabilities + load + latency.
 //!
-//! `GET /status` → `{ address, gflops, models[], capabilities[], can_pull, active, capacity, vram_mb, ram_mb, gpu_class, tflops, disk_free_mb, disk_total_mb, disk_free_pct, peer_id?, multiaddrs[]?, p2p_port?, listen_addrs[]? }`
+//! `GET /status` → `{ address, gflops, models[], capabilities[], can_pull, active, capacity, vram_mb, ram_mb, gpu_class, tflops, disk_free_mb, disk_total_mb, disk_free_pct, peer_id?, multiaddrs[]?, p2p_port?, listen_addrs[]?, ref? }`
+//!
+//! `ref` is the referral code this node was installed with — a 4–32 char
+//! `[A-Za-z0-9_-]` token chosen by whoever referred the operator. It is read
+//! from `$GPN_PREFIX/referral` (write-once; see `gpn_agent::referral`) on every
+//! request. The field is **omitted entirely** when the node has no code, so a
+//! node installed without `--ref` publishes byte-identical JSON to before.
 //!
 //! `capabilities[]` lists the JOB TYPES this node serves — `LLMInference`,
 //! `ImageGeneration`, `VideoGeneration`, `MLInference`, `FineTuning`. A GPN
@@ -1085,6 +1091,19 @@ fn p2p_info_from_rpc_evidence(
 /// identity right now", which a consumer can act on (skip this provider); an
 /// omitted key is indistinguishable from an old heartbeat that never had the
 /// feature, and a cached id is the bug this replaced.
+/// Attach the referral code to a `/status` body — **only when one is set**.
+///
+/// Deliberately omitted rather than `null`: nodes that never set a code must
+/// produce exactly the JSON they produced before referral capture existed
+/// (there is a regression test for that), and "absent" is unambiguous for the
+/// access point (nothing to record) while `null` invites a distinction nobody
+/// needs.
+fn attach_referral(body: &mut Value, code: Option<&str>) {
+    if let Some(c) = code.map(str::trim).filter(|c| !c.is_empty()) {
+        body["ref"] = json!(c);
+    }
+}
+
 fn attach_p2p(body: &mut Value, info: Option<&P2pInfo>) {
     match info {
         Some(p2p) => {
@@ -1466,6 +1485,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // listens on 0.0.0.0. Accepts a multiaddr (`/ip4/1.2.3.4/tcp/30333`) or
     // `host:port`.
     let public_addr = opt(&args, "--public-addr").or_else(|| std::env::var("GPN_PUBLIC_ADDR").ok());
+    // Referral code (data collection only): read from the node's write-once
+    // file so a restart with a different env cannot change it. `GPN_REF` is
+    // accepted as a boot-time fallback for a hand-run heartbeat, but the file
+    // wins once it exists. An invalid value is dropped with a warning — the
+    // heartbeat must never fail because of it.
+    let referral_path = gpn_agent::referral::default_path();
+    let referral_code = match gpn_agent::referral::read(&referral_path) {
+        Some(code) => match gpn_agent::referral::validate(&code) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                eprintln!(
+                    "[referral] ignoring {}: {e} (fix or remove the file)",
+                    referral_path.display()
+                );
+                None
+            }
+        },
+        None => std::env::var("GPN_REF").ok().and_then(|raw| {
+            match gpn_agent::referral::validate(&raw) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    eprintln!("[referral] ignoring GPN_REF: {e}");
+                    None
+                }
+            }
+        }),
+    };
+    if let Some(c) = referral_code.as_deref() {
+        println!("[referral] publishing ref={c}");
+    }
     // Job-type capabilities this node serves. A GPN node serves EVERY job type
     // by design ("one GPU, one job" = one job *at a time*, mutual exclusion —
     // NOT a limit on job types). Advertised so the scheduler can route
@@ -1682,6 +1731,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &mut body,
                     p2p_info(&node_endpoint, public_addr.as_deref()).as_ref(),
                 );
+                // Referral attribution: the AP records this once, per provider
+                // address. Omitted (not null) when unset — an old node's
+                // `/status` must stay byte-identical.
+                attach_referral(&mut body, referral_code.as_deref());
                 (body, 200)
             }
             (Method::Get, "/health") => (json!({"status":"ok"}), 200),
@@ -2417,5 +2470,58 @@ mod tests {
             notice_once(&format!("test-notice-bound-{i}"));
         }
         assert!(NOTICE_SEEN.lock().unwrap().len() <= 32 + 2);
+    }
+
+    // ── referral capture (data collection only) ─────────────────────────────
+
+    /// A status body with every field the handler publishes, as a fixed
+    /// reference. Used by the regression test below.
+    fn full_status_body() -> Value {
+        json!({
+            "address": "5Abc", "gflops": 825, "models": ["llama3.2:1b"],
+            "can_pull": true, "active": 0, "capacity": 1,
+            "capabilities": ["LLMInference"],
+            "tok_per_s": 40.0, "owner_cost_usd_hr": 0.03, "mem_bw_gbps": 0.0,
+            "vram_mb": 8192, "ram_mb": 32768,
+            "gpu_class": "discrete", "tflops": 15.0,
+            "disk_free_mb": 100_000, "disk_total_mb": 200_000, "disk_free_pct": 50
+        })
+    }
+
+    #[test]
+    fn referral_field_is_published_when_set() {
+        let mut body = full_status_body();
+        attach_referral(&mut body, Some("team-alpha"));
+        assert_eq!(body["ref"], json!("team-alpha"));
+    }
+
+    #[test]
+    fn referral_field_is_absent_when_unset_or_blank() {
+        for none in [None, Some(""), Some("   ")] {
+            let mut body = full_status_body();
+            attach_referral(&mut body, none);
+            assert!(
+                body.get("ref").is_none(),
+                "`ref` must be OMITTED (not null) when there is no code: {none:?}"
+            );
+        }
+    }
+
+    /// Regression: a node installed without `--ref` must publish exactly the
+    /// JSON it published before referral capture existed.
+    ///
+    /// The only referral code on the `/status` path is the `attach_referral`
+    /// call, so "the call is a byte-level no-op" is the whole property — a
+    /// reordered key or an inserted `null` would both change the document the
+    /// access point (and every snapshot of it) sees.
+    #[test]
+    fn a_node_without_a_referral_produces_byte_identical_status_json() {
+        let before = full_status_body();
+        let before_text = serde_json::to_string(&before).unwrap();
+        let mut after = before.clone();
+        attach_referral(&mut after, None);
+        let after_text = serde_json::to_string(&after).unwrap();
+        assert_eq!(before_text, after_text);
+        assert!(!after_text.contains("\"ref\""), "{after_text}");
     }
 }
