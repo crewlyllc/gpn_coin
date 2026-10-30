@@ -86,8 +86,7 @@ pub fn is_dialable_bootnode(ma: &str) -> bool {
     if !(pid.starts_with("12D3Koo") || pid.starts_with("Qm")) {
         return false;
     }
-    if ma.starts_with("/ip4/") {
-        let rest = &ma["/ip4/".len()..];
+    if let Some(rest) = ma.strip_prefix("/ip4/") {
         let host = rest.split('/').next().unwrap_or("");
         let octets: Vec<u8> = host
             .split('.')
