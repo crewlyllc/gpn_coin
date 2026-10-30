@@ -411,15 +411,26 @@ test("HEAD /releases.json reports success with no body", async () => {
 /* ───────────────────────── /api/join ───────────────────────── */
 
 /**
- * Minimal KV mock: get/put/delete over a Map, recording expiry options.
+ * The AP transport seam (`env.__test_ap_transport`): records each call and
+ * answers with whatever the test wants. No sockets, no network.
  */
-function mockKv() {
-  const store = new Map();
+function mockAp(reply) {
+  const calls = [];
   return {
-    store,
-    async get(key) { return store.has(key) ? store.get(key) : null; },
-    async put(key, value, opts) { store.set(key, String(value)); this.lastOpts = opts; },
-    async delete(key) { store.delete(key); },
+    calls,
+    env: {
+      async __test_ap_transport(req) {
+        calls.push(req);
+        return typeof reply === "function" ? reply(req) : reply;
+      },
+    },
+  };
+}
+
+function apStored(extra = {}) {
+  return {
+    status: 200,
+    body: JSON.stringify({ ok: true, stored: true, delivered: true, reference: "abc123", ...extra }),
   };
 }
 
@@ -438,98 +449,152 @@ const GOOD_APP = {
   message: "I wrote a memory-hard kernel once.",
 };
 
-test("/api/join stores a valid application in JOIN_KV", async () => {
-  const kv = mockKv();
-  const res = await worker.fetch(joinRequest(GOOD_APP), { JOIN_KV: kv }, { waitUntil() {} });
+test("/api/join proxies a valid application to the AP's /join", async () => {
+  const ap = mockAp(apStored());
+  const res = await worker.fetch(joinRequest(GOOD_APP), ap.env, { waitUntil() {} });
   assert.equal(res.status, 200);
   assert.equal(res.headers.get("content-type"), "application/json; charset=utf-8");
   const body = await res.json();
+  assert.deepEqual(body, {
+    ok: true,
+    stored: true,
+    delivered: true,
+    reference: "abc123",
+  });
+
+  assert.equal(ap.calls.length, 1);
+  assert.equal(ap.calls[0].method, "POST");
+  assert.equal(ap.calls[0].path, "/join");
+  const sent = JSON.parse(ap.calls[0].body);
+  assert.deepEqual(sent, GOOD_APP);
+});
+
+test("/api/join reports delivered:false when the AP stored but could not deliver", async () => {
+  const ap = mockAp({
+    status: 200,
+    body: JSON.stringify({ ok: true, stored: true, delivered: false, reference: "r1" }),
+  });
+  const body = await (
+    await worker.fetch(joinRequest(GOOD_APP), ap.env, { waitUntil() {} })
+  ).json();
   assert.equal(body.ok, true);
   assert.equal(body.stored, true);
-  assert.ok(body.reference);
-
-  const keys = [...kv.store.keys()].filter((k) => k.startsWith("app:"));
-  assert.equal(keys.length, 1);
-  assert.match(keys[0], /^app:\d{4}-\d\d-\d\dT[\d:.]+Z:[a-z0-9]+$/);
-  const record = JSON.parse(kv.store.get(keys[0]));
-  assert.equal(record.email, "ada@example.com");
-  assert.equal(record.name, "Ada Lovelace");
-  assert.equal(record.ip, "203.0.113.9");
+  assert.equal(body.delivered, false);
 });
 
-test("/api/join without JOIN_KV degrades: 200, stored:false, email fallback", async () => {
-  const res = await worker.fetch(joinRequest(GOOD_APP, { ip: "198.51.100.7" }), {}, { waitUntil() {} });
+test("/api/join: unreachable AP → 200 JSON with the mailto fallback", async () => {
+  const ap = mockAp({ error: "connection refused" });
+  const res = await worker.fetch(joinRequest(GOOD_APP, { ip: "198.51.100.7" }), ap.env, {
+    waitUntil() {},
+  });
   assert.equal(res.status, 200);
   const body = await res.json();
-  assert.equal(body.ok, true);
+  assert.equal(body.ok, false);
   assert.equal(body.stored, false);
+  assert.equal(body.error, "applications are temporarily unavailable");
   assert.equal(body.fallback, "email");
-  assert.match(body.error, /JOIN_KV is not bound/);
+  assert.equal(body.email, "crewlyllc@gmail.com");
 });
 
-test("/api/join validates fields and stays JSON even when wrong", async () => {
-  const kv = mockKv();
+test("/api/join: AP 5xx or non-JSON → same unavailable shape", async () => {
+  for (const reply of [
+    { status: 500, body: "<html>oops</html>" },
+    { status: 200, body: "not json" },
+    { status: 200, body: JSON.stringify({ ok: false, error: "boom" }) },
+  ]) {
+    const ap = mockAp(reply);
+    const body = await (
+      await worker.fetch(joinRequest(GOOD_APP, { ip: "198.51.100.8" }), ap.env, { waitUntil() {} })
+    ).json();
+    assert.equal(body.ok, false);
+    assert.equal(body.error, "applications are temporarily unavailable");
+    assert.equal(body.email, "crewlyllc@gmail.com");
+  }
+});
+
+test("/api/join validates fields locally and never calls the AP", async () => {
+  const ap = mockAp(apStored());
   const cases = [
     [{ ...GOOD_APP, name: "" }, /name/i],
     [{ ...GOOD_APP, name: "x".repeat(81) }, /too long/i],
     [{ ...GOOD_APP, email: "not-an-email" }, /email/i],
-    [{ ...GOOD_APP, email: "a@b.co" , message: "x".repeat(4001) }, /4000/],
+    [{ ...GOOD_APP, email: "a@b.co", message: "x".repeat(4001) }, /4000/],
   ];
   for (const [payload, re] of cases) {
-    const res = await worker.fetch(joinRequest(payload, { ip: "203.0.113.11" }), { JOIN_KV: kv }, { waitUntil() {} });
+    const res = await worker.fetch(joinRequest(payload, { ip: "203.0.113.11" }), ap.env, {
+      waitUntil() {},
+    });
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.equal(body.ok, false, JSON.stringify(payload).slice(0, 60));
     assert.match(body.error, re);
   }
-  assert.equal([...kv.store.keys()].filter((k) => k.startsWith("app:")).length, 0);
+  assert.equal(ap.calls.length, 0);
 
   // Malformed JSON and oversized bodies are also 200 JSON.
-  const bad = await worker.fetch(joinRequest("{not json", { ip: "203.0.113.12" }), { JOIN_KV: kv }, { waitUntil() {} });
+  const bad = await worker.fetch(joinRequest("{not json", { ip: "203.0.113.12" }), ap.env, {
+    waitUntil() {},
+  });
   assert.equal(bad.status, 200);
   assert.equal((await bad.json()).ok, false);
 
   const huge = await worker.fetch(
     joinRequest("x".repeat(9000), { ip: "203.0.113.13" }),
-    { JOIN_KV: kv },
+    ap.env,
     { waitUntil() {} },
   );
   assert.equal(huge.status, 200);
   assert.equal((await huge.json()).ok, false);
+  assert.equal(ap.calls.length, 0);
 });
 
-test("/api/join honeypot is silently ignored (nothing stored)", async () => {
-  const kv = mockKv();
+test("/api/join honeypot is silently ignored (nothing sent)", async () => {
+  const ap = mockAp(apStored());
   const res = await worker.fetch(
     joinRequest({ ...GOOD_APP, website: "http://spam.example" }, { ip: "203.0.113.14" }),
-    { JOIN_KV: kv },
+    ap.env,
     { waitUntil() {} },
   );
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(body.ok, true);
-  assert.equal([...kv.store.keys()].filter((k) => k.startsWith("app:")).length, 0);
+  assert.equal(body.stored, false);
+  assert.equal(ap.calls.length, 0);
 });
 
-test("/api/join rate-limits per IP (5/hour)", async () => {
-  const kv = mockKv();
+test("/api/join rate-limits per IP (5/hour) without touching the AP", async () => {
+  const ap = mockAp(apStored());
   const ip = "203.0.113.20";
   for (let i = 0; i < 5; i++) {
-    const res = await worker.fetch(joinRequest(GOOD_APP, { ip }), { JOIN_KV: kv }, { waitUntil() {} });
+    const res = await worker.fetch(joinRequest(GOOD_APP, { ip }), ap.env, { waitUntil() {} });
     assert.equal((await res.json()).ok, true, `attempt ${i + 1}`);
   }
-  const blocked = await worker.fetch(joinRequest(GOOD_APP, { ip }), { JOIN_KV: kv }, { waitUntil() {} });
+  const blocked = await worker.fetch(joinRequest(GOOD_APP, { ip }), ap.env, { waitUntil() {} });
   assert.equal(blocked.status, 200);
   const body = await blocked.json();
   assert.equal(body.ok, false);
   assert.match(body.error, /Too many/i);
-
-  // No rate limit is written as an application.
-  assert.equal([...kv.store.keys()].filter((k) => k.startsWith("app:")).length, 5);
+  assert.equal(body.email, "crewlyllc@gmail.com");
+  assert.equal(ap.calls.length, 5);
 
   // A different IP is unaffected.
-  const other = await worker.fetch(joinRequest(GOOD_APP, { ip: "203.0.113.21" }), { JOIN_KV: kv }, { waitUntil() {} });
+  const other = await worker.fetch(joinRequest(GOOD_APP, { ip: "203.0.113.21" }), ap.env, {
+    waitUntil() {},
+  });
   assert.equal((await other.json()).ok, true);
+});
+
+test("/api/join success path never exposes the fallback address", async () => {
+  const ap = mockAp(apStored());
+  const res = await worker.fetch(joinRequest(GOOD_APP, { ip: "203.0.113.30" }), ap.env, {
+    waitUntil() {},
+  });
+  const text = await res.text();
+  assert.ok(!text.includes("crewlyllc@gmail.com"), `success body leaked email: ${text}`);
+  assert.ok(!text.includes("hello@gpncoin.ai"));
+  const body = JSON.parse(text);
+  assert.equal(body.email, undefined);
+  assert.equal(body.fallback, undefined);
 });
 
 test("/api/join rejects GET, answers OPTIONS preflight", async () => {

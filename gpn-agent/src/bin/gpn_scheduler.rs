@@ -2311,6 +2311,92 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// `POST /join` — a home-page job application.
+///
+/// Store first, deliver second: the JSONL ledger line is written before the
+/// Discord webhook is attempted, and a delivery failure is logged but never
+/// fails the request (the applicant must not be told to resend because Discord
+/// hiccuped). The webhook URL never appears in a response or a log line.
+fn join_submission(body: &str, ip: &str) -> Value {
+    let ledger = gpn_agent::join::ledger_path();
+    let hook = gpn_agent::join::webhook();
+    join_submission_with(body, ip, &ledger, hook.as_deref())
+}
+
+/// [`join_submission`] with the ledger path and webhook injected (tests).
+fn join_submission_with(
+    body: &str,
+    ip: &str,
+    ledger: &std::path::Path,
+    hook: Option<&str>,
+) -> Value {
+    use gpn_agent::join;
+    if body.len() > join::MAX_BODY {
+        return json!({ "_status": 413, "ok": false, "error": "That submission is too large." });
+    }
+    let v: Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => return json!({ "_status": 400, "ok": false, "error": "Expected valid JSON." }),
+    };
+    // Honeypot: pretend it worked, store nothing.
+    if join::is_honeypot(&v) {
+        return json!({ "ok": true, "stored": false, "reference": "ignored" });
+    }
+    if !join::rate_limit_ok(ip) {
+        return json!({
+            "_status": 429, "ok": false,
+            "error": "Too many applications from this address. Try again in an hour."
+        });
+    }
+    let app = match join::validate(&v) {
+        Ok(a) => a,
+        Err(e) => return json!({ "_status": 400, "ok": false, "error": e }),
+    };
+
+    let now = now_secs();
+    let record = json!({
+        "id": join::new_id(),
+        "received_at": join::iso8601(now),
+        "received_at_unix": now,
+        "name": app.name,
+        "email": app.email,
+        "role": app.role,
+        "message": app.message,
+        "source": "gpncoin.ai/join",
+        "ip": ip,
+    });
+    let path = ledger;
+    let id = record
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("-")
+        .to_string();
+    if let Err(e) = join::append(path, &record) {
+        eprintln!("[join] could not store {id}: {e}");
+        return json!({
+            "_status": 500, "ok": false, "stored": false,
+            "error": "We couldn't save that just now. Please try again in a minute."
+        });
+    }
+
+    // Delivery is best-effort and strictly after the durable write.
+    let mut delivered = false;
+    match hook {
+        None => eprintln!("[join] stored {id} but no webhook is configured"),
+        Some(url) => {
+            let payload = join::discord_payload(&record, &app);
+            match join::deliver(url, &payload) {
+                Ok(status) => {
+                    delivered = true;
+                    println!("[join] stored {id} and delivered (http {status})");
+                }
+                Err(e) => eprintln!("[join] stored but not delivered: {e}"),
+            }
+        }
+    }
+    json!({ "ok": true, "stored": true, "delivered": delivered, "reference": id })
+}
+
 /// Public rate card served at `GET /pricing`. Derived from the immutable config
 /// plus the cached GPN price; contains no secrets and no per-provider identity.
 fn pricing_public_json(pcfg: &PricingConfig, f: FeedSnapshot) -> Value {
@@ -3326,6 +3412,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Deploy marker + the routing rule it implements (item #97). A plain literal
     // (no format args) so `strings` finds it verbatim.
     println!("[route] gflops-unit-v97-ap: min_gflops is gated only on gflops_source=attested-idle");
+    // `POST /join`: durable JSONL ledger + best-effort Discord delivery.
+    println!("[route] join-store-v1: /join stores first (~/.gpn/join-applications.jsonl), delivers second");
     println!("  chain: {endpoint}");
     println!("  providers: {} ({})", urls.len(), urls.join(", "));
     println!("  assign store: {assign_store}");
@@ -3645,6 +3733,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (Method::Get, ["reports"]) => {
                     let reports = gpn_agent::abuse::read_reports(&reports_path, 50);
                     json!({"count": reports.len(), "reports": reports})
+                }
+                // ── Home-page job applications ───────────────────────────────────
+                // The Worker (gpncoin.ai/api/join) is the only intended caller: it
+                // validates, rate-limits and honeypots on its side, then proxies
+                // here so the application is DURABLY stored (~/.gpn/join-applications.jsonl)
+                // and announced in Discord. `X-Forwarded-For` is honoured only
+                // because this POST is token-gated for non-loopback callers — the
+                // header comes from our own Worker, not the applicant.
+                (Method::Post, ["join"]) => {
+                    let peer = req
+                        .remote_addr()
+                        .map(|a| a.ip().to_string())
+                        .unwrap_or_else(|| "unknown".into());
+                    let fwd = req
+                        .headers()
+                        .iter()
+                        .find(|h| h.field.equiv("X-Forwarded-For"))
+                        .and_then(|h| h.value.as_str().split(',').next())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+                    join_submission(&body, fwd.as_deref().unwrap_or(&peer))
                 }
                 // Operator ban/unban (item #22, step 4). POST => token-gated.
                 (Method::Post, ["admin", "ban"]) => {
@@ -5923,10 +6032,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 _ => json!({"error":"not found"}),
             };
 
-            let code = if resp.get("error").map(|v| !v.is_null()).unwrap_or(false) {
-                404
-            } else {
-                200
+            // A handler may pin its own HTTP status with a `_status` key (used by
+            // `POST /join`, where 400/413/429 are meaningful to the client). The
+            // key is internal: strip it before the body goes on the wire.
+            let mut resp = resp;
+            let explicit_status = resp
+                .get("_status")
+                .and_then(|v| v.as_u64())
+                .map(|c| c as u16);
+            if let Some(obj) = resp.as_object_mut() {
+                obj.remove("_status");
+            }
+            let code = match explicit_status {
+                Some(c) => c,
+                None if resp.get("error").map(|v| !v.is_null()).unwrap_or(false) => 404,
+                None => 200,
             };
             let _ = req.respond(
                 Response::from_string(resp.to_string())
@@ -7878,5 +7998,110 @@ mod tests {
             chain_spec_for_serving(spec, &["/ip4/203.0.113.9/tcp/30333".to_string()]).unwrap();
         assert!(served.starts_with(r#"{"a":1,"bootNodes":["#));
         assert!(served.ends_with(r#""genesis":{"runtimeGenesis":{"code":"0x00"}},"z":[1,2]}"#));
+    }
+
+    // ── POST /join ─────────────────────────────────────────────────────────
+
+    fn join_tmp(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("gpn-sched-join-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("join-applications.jsonl")
+    }
+
+    fn join_body(name: &str) -> String {
+        json!({
+            "name": name,
+            "email": "ada@example.com",
+            "role": "GPU / CUDA engineering",
+            "message": "I wrote a memory-hard kernel once.",
+        })
+        .to_string()
+    }
+
+    fn lines(path: &std::path::Path) -> usize {
+        std::fs::read_to_string(path)
+            .map(|t| t.lines().filter(|l| !l.trim().is_empty()).count())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn join_stores_a_line_and_answers_ok() {
+        let path = join_tmp("store");
+        let resp = join_submission_with(&join_body("Ada Lovelace"), "10.9.0.1", &path, None);
+        assert_eq!(resp["ok"], json!(true));
+        assert_eq!(resp["stored"], json!(true));
+        assert_eq!(resp["delivered"], json!(false));
+        assert_eq!(lines(&path), 1);
+        let rec: Value =
+            serde_json::from_str(std::fs::read_to_string(&path).unwrap().trim()).unwrap();
+        assert_eq!(rec["email"], json!("ada@example.com"));
+        assert_eq!(rec["ip"], json!("10.9.0.1"));
+        assert!(rec["received_at"].as_str().unwrap().ends_with('Z'));
+        assert_eq!(rec["id"].as_str().unwrap().len(), 12);
+    }
+
+    #[test]
+    fn join_honeypot_stores_nothing() {
+        let path = join_tmp("honeypot");
+        let body = json!({
+            "name": "Spam Bot",
+            "email": "bot@example.com",
+            "message": "buy now",
+            "website": "http://spam.example",
+        })
+        .to_string();
+        let resp = join_submission_with(&body, "10.9.0.2", &path, None);
+        assert_eq!(resp["ok"], json!(true), "a bot must see success");
+        assert_eq!(resp["stored"], json!(false));
+        assert_eq!(lines(&path), 0);
+    }
+
+    #[test]
+    fn join_missing_fields_is_400() {
+        let path = join_tmp("invalid");
+        for body in [
+            json!({"name": "Ada Lovelace"}).to_string(),
+            json!({"name": "A", "email": "ada@example.com"}).to_string(),
+            json!({"name": "Ada Lovelace", "email": "nope"}).to_string(),
+        ] {
+            let resp = join_submission_with(&body, "10.9.0.3", &path, None);
+            assert_eq!(resp["_status"], json!(400), "body: {body}");
+            assert_eq!(resp["ok"], json!(false));
+        }
+        assert_eq!(lines(&path), 0);
+    }
+
+    #[test]
+    fn join_rate_limit_is_429_after_five() {
+        let path = join_tmp("ratelimit");
+        let ip = "10.9.0.40";
+        for i in 0..5 {
+            let resp = join_submission_with(&join_body("Ada Lovelace"), ip, &path, None);
+            assert_eq!(resp["ok"], json!(true), "attempt {i}");
+        }
+        let blocked = join_submission_with(&join_body("Ada Lovelace"), ip, &path, None);
+        assert_eq!(blocked["_status"], json!(429));
+        assert_eq!(blocked["ok"], json!(false));
+        assert_eq!(lines(&path), 5, "a throttled request stores nothing");
+    }
+
+    #[test]
+    fn join_webhook_failure_still_succeeds_but_reports_not_delivered() {
+        let path = join_tmp("undelivered");
+        let resp = join_submission_with(
+            &join_body("Ada Lovelace"),
+            "10.9.0.50",
+            &path,
+            Some("http://127.0.0.1:1/hook"),
+        );
+        assert_eq!(resp["ok"], json!(true));
+        assert_eq!(resp["stored"], json!(true));
+        assert_eq!(resp["delivered"], json!(false));
+        assert_eq!(lines(&path), 1);
+        // The response must never mention the webhook or a filesystem path.
+        let text = resp.to_string();
+        assert!(!text.contains("127.0.0.1") && !text.contains("join-applications"));
     }
 }

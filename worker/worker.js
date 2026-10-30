@@ -24,12 +24,12 @@
  * `Authorization: Bearer` the AP requires from non-loopback callers.
  *
  * `/api/join` accepts `{name, email, role, message}` as JSON, validates it,
- * rate-limits per IP, and stores each application in the `JOIN_KV` namespace
- * under `app:<ISO timestamp>:<id>`. It **always** answers 200 with JSON so the
- * page can render one code path; `ok:false` carries a human-readable `error`.
- * When `JOIN_KV` is not bound the route still returns 200 but sets
- * `stored:false`, and the page offers a prefilled mailto fallback — a
- * half-configured deploy must never look like a successful submission.
+ * rate-limits per IP, then proxies the application to the access point's
+ * `POST /join`, which durably appends it to `~/.gpn/join-applications.jsonl`
+ * and announces it in Discord. It **always** answers 200 with JSON so the page
+ * can render one code path; `ok:false` carries a human-readable `error`.
+ * If the AP is unreachable the route answers `ok:false` with a mailto fallback
+ * address (`crewlyllc@gmail.com`) so a real application is never lost silently.
  * Honeypot field: `website` (hidden on the page). A filled honeypot returns the
  * normal success shape and stores nothing.
  *
@@ -320,6 +320,7 @@ async function apRequest(env, opts) {
   const token = env && env.AP_TOKEN ? String(env.AP_TOKEN).trim() : "";
   if (token) headers.authorization = `Bearer ${token}`;
   else console.warn("[api] AP_TOKEN secret is not set; proxying without Authorization");
+  if (opts && opts.headers) Object.assign(headers, opts.headers);
 
   const forceSocket = !!(env && env.AP_FORCE_SOCKET && String(env.AP_FORCE_SOCKET) !== "0");
   const standardPort =
@@ -1393,23 +1394,34 @@ async function handleApi(request, env, path) {
 }
 
 /** Largest JSON body we will read for an application. */
-const JOIN_MAX_BODY = 8 * 1024;/** Applications per IP per window. */
+const JOIN_MAX_BODY = 8 * 1024;
+/** Applications per IP per window. The AP enforces its own 5/hour too. */
 const JOIN_RATE_MAX = 5;
-/** Rate-limit window, in seconds (also the KV TTL). */
+/** Rate-limit window, in seconds. */
 const JOIN_RATE_WINDOW = 3600;
 /** Per-field caps; mirrored by `maxlength` on the page. */
 const JOIN_LIMITS = { name: 80, email: 200, role: 60, message: 4000 };
+/**
+ * Where a failed application can be emailed instead. Shown ONLY when the AP is
+ * unreachable — never on success (a successful submission is delivered to
+ * Discord, so there is nothing for the applicant to do).
+ */
+const JOIN_FALLBACK_EMAIL = "crewlyllc@gmail.com";
+/** The message the page shows when no application could be stored. */
+const JOIN_UNAVAILABLE = "applications are temporarily unavailable";
 
 /**
- * Best-effort per-IP rate limit used when `JOIN_KV` is not bound. Resets with
- * the isolate, which is acceptable: it only exists to blunt a naive flood.
+ * Best-effort per-IP rate limit. Resets with the isolate, which is acceptable:
+ * it only exists to blunt a naive flood.
  * @type {Map<string, { count: number, reset: number }>}
  */
 const joinRateMem = new Map();
 
-/** @param {string} ip @returns {boolean} */
-function joinRateOkMemory(ip) {
-  const now = Date.now();
+/**
+ * @param {string} ip
+ * @param {number} [now]
+ */
+function joinRateOkMemory(ip, now = Date.now()) {
   const slot = joinRateMem.get(ip);
   if (!slot || slot.reset <= now) {
     joinRateMem.set(ip, { count: 1, reset: now + JOIN_RATE_WINDOW * 1000 });
@@ -1420,18 +1432,6 @@ function joinRateOkMemory(ip) {
   }
   if (slot.count >= JOIN_RATE_MAX) return false;
   slot.count += 1;
-  return true;
-}
-
-/**
- * @param {{ get: Function, put: Function }} kv
- * @param {string} ip
- */
-async function joinRateOkKv(kv, ip) {
-  const key = `rl:${ip}`;
-  const seen = Number(await kv.get(key)) || 0;
-  if (seen >= JOIN_RATE_MAX) return false;
-  await kv.put(key, String(seen + 1), { expirationTtl: JOIN_RATE_WINDOW });
   return true;
 }
 
@@ -1491,8 +1491,13 @@ function joinJson(payload, status = 200) {
  * Accept a job application. Never throws, never returns non-JSON: the page
  * relies on one shape, and a failure here must not look like a sent form.
  *
+ * The AP is the durable store (JSONL ledger + Discord). Validation, the
+ * honeypot and the per-IP limit stay here so a bad request never reaches it.
+ * If the AP cannot be reached the response carries the mailto fallback — the
+ * page only shows that address on failure.
+ *
  * @param {Request} request
- * @param {{ JOIN_KV?: { get: Function, put: Function } }} env
+ * @param {{ AP_JOB_URL?: string, AP_TOKEN?: string, AP_FORCE_SOCKET?: string }} env
  */
 async function handleJoin(request, env) {
   try {
@@ -1528,54 +1533,89 @@ async function handleJoin(request, env) {
     const app = checked.value;
 
     const ip = request.headers.get("cf-connecting-ip") || "unknown";
-    const kv = env && env.JOIN_KV && typeof env.JOIN_KV.put === "function" ? env.JOIN_KV : null;
-
-    const allowed = kv ? await joinRateOkKv(kv, ip) : joinRateOkMemory(ip);
-    if (!allowed) {
-      return joinJson({ ok: false, error: "Too many applications from this address. Try again in an hour, or email us." });
-    }
-
-    if (!kv) {
-      /* Not a success: nothing was persisted. The page turns `stored:false`
-         into a prefilled mailto draft so the application is not lost. */
+    if (!joinRateOkMemory(ip)) {
       return joinJson({
-        ok: true,
-        stored: false,
+        ok: false,
+        error: "Too many applications from this address. Try again in an hour.",
         fallback: "email",
-        error: "Applications are not being stored on this deployment (JOIN_KV is not bound). Please email hello@gpncoin.ai.",
+        email: JOIN_FALLBACK_EMAIL,
       });
     }
 
-    const now = new Date();
-    const id = `${now.getTime().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-    const record = {
-      id,
-      received_at: now.toISOString(),
-      name: app.name,
-      email: app.email,
-      role: app.role,
-      message: app.message,
-      ip,
-      country: (request.cf && request.cf.country) || null,
-      user_agent: (request.headers.get("user-agent") || "").slice(0, 300),
-    };
+    /* The AP owns the durable store. `X-Forwarded-For` carries the applicant's
+       IP so the AP's own per-IP limit keys on the person, not on this Worker's
+       egress address (the AP only honours it on the token-gated POST). */
+    const upstream = await apRequest(env, {
+      method: "POST",
+      path: "/join",
+      body: JSON.stringify(app),
+      headers: { "x-forwarded-for": ip },
+      timeoutMs: AP_TIMEOUT_MS,
+    });
 
+    if (!upstream || upstream.error) {
+      console.warn(`[join] access point unreachable: ${upstream && upstream.error}`);
+      return joinJson({
+        ok: false,
+        stored: false,
+        error: JOIN_UNAVAILABLE,
+        fallback: "email",
+        email: JOIN_FALLBACK_EMAIL,
+      });
+    }
+
+    let stored;
     try {
-      await kv.put(`app:${record.received_at}:${id}`, JSON.stringify(record));
+      stored = JSON.parse(upstream.body);
     } catch {
+      stored = null;
+    }
+    if (!stored || typeof stored !== "object") {
+      console.warn(`[join] access point answered ${upstream.status} with a non-JSON body`);
       return joinJson({
-        ok: true,
+        ok: false,
         stored: false,
+        error: JOIN_UNAVAILABLE,
         fallback: "email",
-        error: "We couldn't save that just now. Please email hello@gpncoin.ai.",
+        email: JOIN_FALLBACK_EMAIL,
       });
     }
 
-    return joinJson({ ok: true, stored: true, reference: id });
+    /* Validation / rate-limit / store failures keep the AP's message (they are
+       already written for an applicant); anything else is treated the same as
+       an unreachable AP so the page renders one fallback. */
+    if (stored.ok !== true) {
+      if (upstream.status === 400 || upstream.status === 429) {
+        return joinJson({
+          ok: false,
+          error: String(stored.error || "That application could not be accepted."),
+          fallback: "email",
+          email: JOIN_FALLBACK_EMAIL,
+        });
+      }
+      return joinJson({
+        ok: false,
+        stored: false,
+        error: JOIN_UNAVAILABLE,
+        fallback: "email",
+        email: JOIN_FALLBACK_EMAIL,
+      });
+    }
+
+    return joinJson({
+      ok: true,
+      stored: stored.stored === true,
+      delivered: stored.delivered === true,
+      reference: stored.reference || null,
+    });
   } catch (err) {
+    console.warn(`[join] unexpected failure: ${err && err.message}`);
     return joinJson({
       ok: false,
-      error: "Something went wrong on our side. Please email hello@gpncoin.ai.",
+      stored: false,
+      error: JOIN_UNAVAILABLE,
+      fallback: "email",
+      email: JOIN_FALLBACK_EMAIL,
     });
   }
 }
@@ -1635,6 +1675,8 @@ export const __test = {
   validateJoin,
   joinRateOkMemory,
   JOIN_LIMITS,
+  JOIN_FALLBACK_EMAIL,
+  JOIN_UNAVAILABLE,
   dialableMultiaddrs,
   multiaddrFromUrl,
   peerIdOf,

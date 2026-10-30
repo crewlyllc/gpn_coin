@@ -40,22 +40,11 @@
     "AP_JOB_URL": "http://142.129.54.88:8092"
   },
   // ── Home-page job applications ("/api/join") ────────────────────────────
-  // Applications are written to the JOIN_KV namespace under "app:<ISO>:<id>".
-  // The binding is COMMENTED OUT on purpose: the namespace id is per-account
-  // and a binding pointing at a namespace that does not exist fails the
-  // Cloudflare build. Create it once, then uncomment:
-  //
-  //   1) npx wrangler kv namespace create JOIN_KV
-  //   2) put the printed id in the block below and uncomment it
-  //   3) redeploy, then read applications with
-  //        npx wrangler kv key list --namespace-id <id> --prefix "app:"
-  //        npx wrangler kv key get  --namespace-id <id> --key "app:<ts>:<id>"
-  //
-  // With no binding the route still answers 200 JSON with `stored: false`,
-  // and the page falls back to a prefilled mailto draft — never a silent loss.
-  // "kv_namespaces": [
-  //   { "binding": "JOIN_KV", "id": "<id from step 1>" }
-  // ],
+  // No KV binding: the Worker validates the form and proxies it to the access
+  // point's `POST /join`, which appends it to `~/.gpn/join-applications.jsonl`
+  // on the AP host and announces it in Discord. If the AP is unreachable the
+  // page shows a mailto fallback (crewlyllc@gmail.com) — never a silent loss.
+  // `AP_JOB_URL`/`AP_TOKEN` above are the only configuration this route needs.
   "routes": [
     { "pattern": "gpncoin.ai", "custom_domain": true },
     { "pattern": "www.gpncoin.ai", "custom_domain": true }

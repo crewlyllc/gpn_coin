@@ -298,6 +298,8 @@
     var out = document.getElementById("join-result");
     var submit = document.getElementById("join-submit");
     var emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+    /* Shown only when the application could not be stored (see renderFallback). */
+    var FALLBACK_EMAIL = "crewlyllc@gmail.com";
 
     function render(cls, html) {
       if (!out) return;
@@ -339,29 +341,25 @@
         });
       }).then(function (data) {
         if (!data.ok) {
-          render("", '<span class="err">Not sent.</span>\n' + escapeHtml(data.error || "Something went wrong."));
-          return;
+          return renderFallback(data.error || "Applications are temporarily unavailable \u2014 try again in a minute.");
         }
         var ref = data.reference ? '<span class="meter">reference ' + escapeHtml(data.reference) + '</span>' : "";
-        if (data.stored === false) {
-          var mail = "mailto:hello@gpncoin.ai?subject=" + encodeURIComponent("Join GPN") +
-            "&body=" + encodeURIComponent(name + " <" + email + ">\n" + (role || "") + "\n\n" + message);
-          render("", '<span class="ok">Almost \u2014 one more step.</span>\n' +
-            "Our form couldn't save your application automatically. Please send the same details by email " +
-            '(<a href="' + escapeHtml(mail) + '">open the draft</a>) and we\'ll reply.' + ref);
-          return;
-        }
-        render("", '<span class="ok">Application received \u2014 thank you.</span>\n' +
-          "We read everything and reply from hello@gpncoin.ai. If you have a repo or benchmark, " +
-          "replying to that address with a link is the fastest way to get our attention." + ref);
+        render("ok", '<span class="ok">Application received \u2014 we\'ll be in touch.</span>' + ref);
         form.reset();
-      }).catch(function (err) {
-        var mail = "mailto:hello@gpncoin.ai?subject=" + encodeURIComponent("Join GPN") +
-          "&body=" + encodeURIComponent(name + " <" + email + ">\n" + (role || "") + "\n\n" + message);
-        render("", '<span class="err">Could not reach the server.</span>\n' +
-          escapeHtml(String(err.message || err)) + "\n" +
-          'Please <a href="' + escapeHtml(mail) + '">send it by email instead</a>.');
+      }).catch(function () {
+        renderFallback("Applications are temporarily unavailable \u2014 try again in a minute.");
       }).finally(function () { if (submit) submit.disabled = false; });
+
+      /* The email fallback is shown ONLY when the application could not be
+         stored. A successful submission is announced in Discord, so there is
+         nothing for the applicant to do. */
+      function renderFallback(msg) {
+        var mail = "mailto:" + FALLBACK_EMAIL + "?subject=" + encodeURIComponent("GPN application") +
+          "&body=" + encodeURIComponent(name + " <" + email + ">\n" + (role || "") + "\n\n" + message);
+        render("", '<span class="err">Not sent.</span>\n' + escapeHtml(msg) +
+          '<br>You can send the same details by email: <a href="' + escapeHtml(mail) + '">' +
+          escapeHtml(FALLBACK_EMAIL) + '</a>.');
+      }
     });
   }
 

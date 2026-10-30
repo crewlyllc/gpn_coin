@@ -236,6 +236,16 @@ jobs:
       - name: Referral links (website ?ref= validation)
         run: node website/tests/referral.test.js
 
+      # Join form: exactly one success message and exactly one failure address
+      # (crewlyllc@gmail.com, never shown on success). Pure Node, no browser.
+      - name: Join form copy + fallback address
+        run: node website/tests/join-form.test.js
+
+      # The Worker's /api/join path: proxies to the AP, keeps the always-200
+      # JSON shape, and falls back to email only when nothing was stored.
+      - name: Worker unit tests (/api/join + proxies)
+        run: node --test worker/worker.test.mjs
+
   # ---------------------------------------------------------------------------
   # Desktop matrix — EXPERIMENTAL and MANUAL ONLY. macOS/Windows need paid
   # GitHub-hosted minutes which this account cannot use, so a normal push no

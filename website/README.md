@@ -75,31 +75,24 @@ bodyless 405).
 - Body: `{name, email, role, message}` — lengths are capped (80 / 200 / 60 / 4000), the honeypot
   field `website` must stay empty, and the route answers **200 JSON** in every case
   (`ok:false` + `error` for a rejected submission, so the page can render one code path).
-- Rate limit: 5 applications per IP per hour (`cf-connecting-ip`), via `JOIN_KV` when bound and an
-  in-isolate `Map` otherwise.
-- Storage: `app:<ISO timestamp>:<id>` in the **`JOIN_KV`** namespace, value = JSON record
-  (name/email/role/message/ip/country/user-agent).
+- Rate limit: 5 applications per IP per hour (`cf-connecting-ip`), in-isolate `Map`.
+- Delivery: the Worker proxies the validated application to the access point's `POST /join`
+  (`AP_JOB_URL` + `AP_TOKEN`). The AP appends it to `~/.gpn/join-applications.jsonl` on the AP host
+  and posts a Discord embed to `GPN_JOIN_WEBHOOK` (see `~/.gpn/join-webhook.env`). Store first,
+  deliver second: a Discord outage never loses an application.
+- Failure: if the AP is unreachable the route answers
+  `{ok:false, stored:false, error:"applications are temporarily unavailable", fallback:"email",
+  email:"crewlyllc@gmail.com"}` and the page shows a prefilled mailto draft. That address is never
+  shown on success.
 
-**One manual Cloudflare step is required before applications are stored:**
-
-```bash
-npx wrangler kv namespace create JOIN_KV
-# copy the printed id into wrangler.jsonc → "kv_namespaces"
-```
-
-The binding in `wrangler.jsonc` ships **commented out** on purpose: an id that does not exist in the
-account fails the build. Until it is set, the route returns `{ok:true, stored:false, fallback:"email"}`
-and the page swaps the success message for a prefilled `mailto:hello@gpncoin.ai` draft — a
-half-configured deploy can never look like a saved application.
-
-Read applications with:
+Reading applications on the AP host:
 
 ```bash
-npx wrangler kv key list --namespace-id <id> --prefix "app:"
-npx wrangler kv key get  --namespace-id <id> --key "app:<timestamp>:<id>"
+wc -l ~/.gpn/join-applications.jsonl
+tail -1 ~/.gpn/join-applications.jsonl | jq .
 ```
 
-Tests: `node --test worker/worker.test.mjs` (includes 7 `/api/join` cases with a mock KV).
+Tests: `node --test worker/worker.test.mjs` (includes 8 `/api/join` cases with a mock AP transport).
 
 ## Deploy
 

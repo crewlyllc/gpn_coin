@@ -26,6 +26,7 @@ pub mod idle_auto;
 pub mod image_channel;
 pub mod image_jobs;
 pub mod jobkind;
+pub mod join;
 pub mod llm;
 pub mod mining;
 pub mod models;
