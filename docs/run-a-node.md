@@ -804,7 +804,7 @@ assign_source = "pull"          # push | pull | both  (default: pull)
 
 | Setting | Meaning | Default |
 |---|---|---|
-| `GPN_AP_URL` | Access point base URL used for the poll. **Required** — without it nothing is delivered (see below). | _(unset → degraded, with a warning)_ |
+| `GPN_AP_URL` | Access point base URL used for the poll. **Your node serves AI by default**: unset → the canonical AP below. Set it to point at a different AP; set it **empty** (`GPN_AP_URL=`) to disable AI serving (the node warns loudly). | `http://gpn-testnet.duckdns.org:8092` |
 | `GPN_ASSIGN_SOURCE` | `pull` (the only delivery path since #46 Phase 3), `both` (same, kept for config compatibility), `push` (**degraded**: no delivery) | `pull` |
 | `GPN_ASSIGN_WAIT_MS` | Long-poll budget. The AP answers the instant it has work, so this only sets how long an **idle** poll waits before returning empty. | `25000` |
 | `GPN_ASSIGN_TOKEN` | Shared AP↔provider secret for `GET /assignments`; a remote provider must present the AP's token. | _(empty → permissive, warns)_ |
@@ -812,11 +812,20 @@ assign_source = "pull"          # push | pull | both  (default: pull)
 
 Notes:
 
-- **Pull is the only delivery path since #46 Phase 3 (2026-10-19)** and needs
-  `GPN_AP_URL`. The assignment **push is gone**: the AP no longer dials
-  `:8093`, so a provider behind NAT/CGNAT receives work with no inbound port.
-  Without an AP URL the provider logs a loud one-time warning and serves only
-  jobs already in its local store.
+- **Your node serves AI by default.** It polls the canonical access point
+  (`http://gpn-testnet.duckdns.org:8092`) unless `GPN_AP_URL` says otherwise, so
+  a plain install receives work with no extra configuration. At startup the
+  log says `[assign] no GPN_AP_URL set — defaulting to <url>` when the default
+  is used, so the choice is never silent.
+- **`GPN_AP_URL` points it at an access point.** Set it (env or `ap_url` in
+  `~/.gpn/node.toml`) to use a private/test AP; an explicit value always wins
+  over the default.
+- **Setting it empty disables serving.** `GPN_AP_URL=` means "this box must not
+  take AI work". That is a deliberate choice, so the node does **not** re-apply
+  the default; it prints
+  `[provider] WARNING: no access point URL — this node will NOT serve AI jobs
+  (mining only)` once at startup. The dashboard then shows **AI serving: no —
+  no ap url**.
 - **`POST /assign` no longer exists on the heartbeat** (#46 Phase 3 step 2).
   An old AP's push gets a `404` and the job is picked up by the poll — the
   lease row is written *before* any delivery attempt, so nothing is lost. The
@@ -1400,7 +1409,7 @@ min_version_enforce = true    # false = mine below the minimum (unsupported)
 | `GPN_ASSIGN_TOKEN` | shared AP↔provider secret (`GET /assignments` auth) | _(empty → legacy-permissive, warns)_ |
 | `GPN_AP_TOKEN` | access-point bearer token for non-loopback callers. Unset → read from the env file → generate on first boot and print once. | _(generated)_ |
 | `GPN_AP_TOKEN_FILE` | where the AP reads/writes `GPN_AP_TOKEN` | `~/.gpn/accesspoint.env` |
-| `GPN_AP_URL` | access point base URL for the **pull** transport (e.g. `http://gpn-testnet.duckdns.org:8092`). Unset → no delivery, with a loud warning. | _(none)_ |
+| `GPN_AP_URL` | access point base URL for the **pull** transport. Unset → the canonical `http://gpn-testnet.duckdns.org:8092`; empty → AI serving disabled (loud warning). | `http://gpn-testnet.duckdns.org:8092` |
 | `GPN_ASSIGN_SOURCE` | `pull` (the only delivery path) \| `both` \| `push` (**degraded**, no delivery) — see [Pull vs push](#pull-vs-push--work-behind-nat). | `pull` |
 | `GPN_ASSIGN_WAIT_MS` | pull long-poll budget (the AP answers immediately when there is work) | `25000` |
 | `GPN_OLLAMA` | ollama base URL | `http://127.0.0.1:11434` |

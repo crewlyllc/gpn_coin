@@ -2090,6 +2090,11 @@ fn status_doc(cfg: &Config, shared: &Shared) -> serde_json::Value {
         "current_job": job,
         "models": ollama_models(&cfg.ollama),
         "children": children,
+        // Is this box actually receiving AI work? Derived from the pull loop's
+        // own 2xx evidence, never guessed — see assign_pull::serving_status.
+        "serving": gpn_agent::assign_pull::serving_status(
+            gpn_agent::assign_pull::unix_now()
+        ),
         "chain": cfg.chain,
         "rpc_port": cfg.rpc_port,
         "account": cfg.account,
@@ -2184,6 +2189,14 @@ fn run_control_verb(cfg: &Config, argv: &[String]) -> Option<i32> {
 
 fn build_children(cfg: &Config) -> Vec<ChildSpec> {
     let mut specs = Vec::new();
+
+    // Resolve the access point once: unset → canonical default (the node logs
+    // the notice at startup), explicit → authoritative, empty → disabled and
+    // forwarded empty so the providers' own one-time warning fires.
+    let ap_env = gpn_agent::assign_pull::ap_url_from_env()
+        .url()
+        .unwrap_or("")
+        .to_string();
 
     // Item 6: a libp2p node key copied from another machine gives BOTH boxes the
     // same peer id — peers dial the wrong host, the directory collapses the two
@@ -2379,6 +2392,12 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
         let mut penvs = vec![
             ("OLLAMA_URL".to_string(), cfg.ollama.clone()),
             ("SIGNER_URI".to_string(), cfg.signer.clone()),
+            // One resolved AP URL for the whole supervision tree. Resolved here
+            // (unset → canonical) rather than in each child so the "defaulting"
+            // line is logged ONCE by the node, not five times; an explicit
+            // `GPN_AP_URL=` is forwarded as empty so the children warn (a node
+            // that will not serve must say so, not quietly re-default).
+            ("GPN_AP_URL".to_string(), ap_env.clone()),
         ];
         if let Some(pe) = &cfg.provider_endpoint {
             penvs.push(("GPN_PROVIDER_ENDPOINT".to_string(), pe.clone()));
@@ -2406,7 +2425,10 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
                         cfg.signer.clone(),
                         cfg.diffusion_poll_ms.to_string(),
                     ],
-                    envs: vec![("SIGNER_URI".to_string(), cfg.signer.clone())],
+                    envs: vec![
+                        ("SIGNER_URI".to_string(), cfg.signer.clone()),
+                        ("GPN_AP_URL".to_string(), ap_env.clone()),
+                    ],
                 });
             } else {
                 log_event(
@@ -2431,6 +2453,7 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
                     envs: vec![
                         ("SIGNER_URI".to_string(), cfg.signer.clone()),
                         ("OLLAMA_URL".to_string(), cfg.ollama.clone()),
+                        ("GPN_AP_URL".to_string(), ap_env.clone()),
                     ],
                 });
             } else {
@@ -2453,7 +2476,10 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
                         cfg.signer.clone(),
                         cfg.finetune_poll_ms.to_string(),
                     ],
-                    envs: vec![("SIGNER_URI".to_string(), cfg.signer.clone())],
+                    envs: vec![
+                        ("SIGNER_URI".to_string(), cfg.signer.clone()),
+                        ("GPN_AP_URL".to_string(), ap_env.clone()),
+                    ],
                 });
             } else {
                 log_event(
@@ -2821,6 +2847,22 @@ async fn main() {
     };
     if let Some(code) = verb_code {
         std::process::exit(code);
+    }
+
+    // ── Access point (AI serving) ────────────────────────────────────────
+    // A node that cannot reach an AP receives no jobs — and before this it
+    // logged nothing that said so. Resolve once here: unset → canonical
+    // default (say so), explicit → authoritative, empty → loud warning.
+    {
+        let ap = gpn_agent::assign_pull::ap_url_from_env();
+        if let Some(msg) = gpn_agent::assign_pull::default_notice(&ap) {
+            asciiprintln!("{msg}");
+        }
+        if ap.is_disabled() {
+            asciiprintln!("{}", gpn_agent::assign_pull::NO_AP_WARNING);
+        } else {
+            asciiprintln!("  access point: {}", ap.url().unwrap_or(""));
+        }
     }
 
     print_dashboard_hint(&cfg);
@@ -3416,6 +3458,55 @@ mod tests {
         }
         apply_ref_arg(&args(&["gpn_node", "--ref"]), &p);
         assert!(!p.exists(), "a bare --ref must not create the file");
+    }
+
+    /// Every provider child must be told where the access point is: a child
+    /// left with `GPN_AP_URL` unset would (now) default correctly, but the
+    /// supervisor resolves it once so the "defaulting" line is logged once
+    /// rather than five times. An explicit empty value is forwarded as empty,
+    /// which is what makes "disabled" stay disabled.
+    #[test]
+    fn provider_children_inherit_the_resolved_access_point() {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let old = std::env::var_os("GPN_AP_URL");
+        let ap_of = |specs: &[ChildSpec]| {
+            specs
+                .iter()
+                .find(|s| s.label == "provider")
+                .expect("provider child")
+                .envs
+                .iter()
+                .find(|(k, _)| k == "GPN_AP_URL")
+                .map(|(_, v)| v.clone())
+                .expect("provider child must carry GPN_AP_URL")
+        };
+
+        std::env::remove_var("GPN_AP_URL");
+        assert_eq!(
+            ap_of(&build_children(&test_config())),
+            gpn_agent::assign_pull::DEFAULT_AP_URL,
+            "unset -> canonical default"
+        );
+
+        std::env::set_var("GPN_AP_URL", "http://ap.test:9000/");
+        assert_eq!(
+            ap_of(&build_children(&test_config())),
+            "http://ap.test:9000",
+            "explicit value wins (normalised)"
+        );
+
+        std::env::set_var("GPN_AP_URL", "");
+        assert_eq!(
+            ap_of(&build_children(&test_config())),
+            "",
+            "explicit empty stays empty -> children warn, no silent default"
+        );
+
+        match old {
+            Some(v) => std::env::set_var("GPN_AP_URL", v),
+            None => std::env::remove_var("GPN_AP_URL"),
+        }
     }
 }
 

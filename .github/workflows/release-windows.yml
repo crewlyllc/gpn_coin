@@ -181,6 +181,11 @@ jobs:
           set "GPN_CHAIN=__CHAIN__"
           set "GPN_RPC_PORT=9944"
           set "GPN_ENDPOINT=ws://gpn-testnet.duckdns.org:9944"
+          REM Access point this node polls for AI work. A node serves AI by
+          REM default: without this the provider polls nothing and the box is
+          REM silently miner-only. Override for a private AP; set it EMPTY
+          REM (GPN_AP_URL=) to opt out deliberately - the node warns loudly.
+          set "GPN_AP_URL=http://gpn-testnet.duckdns.org:8092"
           REM Pin the node base path so gpn_node's DB/pruning guard and the node's
           REM --base-path agree. (A legacy DB at %LOCALAPPDATA%\gpn-node.exe\data
           REM is still auto-detected by gpn_node for backward-compat.)
@@ -355,6 +360,12 @@ jobs:
             }
             if ($Text -notmatch 'GPN_SIGNER_FILE=') {
               $problems += 'does not point GPN_SIGNER_FILE at the on-disk keystore'
+            }
+            # A node that cannot poll an AP receives no AI work at all — this is
+            # the 2026-10-30 defect (4 peers, 2 providers). The launcher must
+            # name an access point.
+            if ($Text -notmatch 'GPN_AP_URL=') {
+              $problems += 'no GPN_AP_URL - the node would never poll for AI work (miner only)'
             }
             if ($problems.Count -gt 0) {
               throw ("LAUNCHER SELF-CHECK FAILED ({0}): {1}" -f $What, ($problems -join '; '))

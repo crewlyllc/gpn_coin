@@ -17,6 +17,8 @@
 #   GPN_SNAPSHOT_URL   override the snapshot archive URL
 #   GPN_SNAPSHOT_META_URL  override the signed snapshot.json URL
 #   GPN_REF      referral code (same as --ref); data collection only
+#   GPN_AP_URL   access point this node polls for AI work (default
+#                http://gpn-testnet.duckdns.org:8092; set it EMPTY to disable AI serving)
 #
 # Flags:
 #   --no-fast-sync   skip the snapshot and sync every block from peers
@@ -44,6 +46,11 @@ GPN_BASE_PATH="$PREFIX/node"
 # operator-supplied GPN_BOOTNODES wins (comma-separated multiaddrs).
 GPN_BOOTNODES="${GPN_BOOTNODES:-/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo,/ip4/142.129.54.88/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo,/ip4/23.241.109.255/tcp/30333/p2p/12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz}"
 export GPN_BOOTNODES
+# Access point the node polls for AI work. Defaults to the canonical testnet AP
+# so a fresh install serves AI out of the box; set it (or set it EMPTY to opt
+# out of AI serving) before/after install to point at another AP.
+GPN_AP_URL="${GPN_AP_URL-http://gpn-testnet.duckdns.org:8092}"
+export GPN_AP_URL
 
 log() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn(){ printf '\033[1;33m !\033[0m %s\n' "$*" >&2; }
@@ -347,6 +354,10 @@ GPN_DATA=$PREFIX/data
 # Canonical bootstrap peers (comma-separated multiaddrs). Explicit so even a
 # stale/hijacked chain spec cannot strand the node on a loopback bootnode.
 GPN_BOOTNODES=$GPN_BOOTNODES
+# Access point for AI work assignments (pull transport). Your node serves AI by
+# default; this is where it asks for jobs. Empty (GPN_AP_URL=) disables AI
+# serving and leaves a miner-only box — the node logs a warning if you do.
+GPN_AP_URL=$GPN_AP_URL
 
 # ollama (AI-compute) — user-local, sandboxed under $PREFIX
 OLLAMA_BIN=$PREFIX/ollama/bin/ollama

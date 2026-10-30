@@ -72,6 +72,102 @@ pub const DEFAULT_WAIT_MS: u64 = 25_000;
 /// Default transport when `GPN_ASSIGN_SOURCE` is unset (#46 Phase 2).
 pub const DEFAULT_SOURCE: &str = "pull";
 
+/// The canonical public access point.
+///
+/// A node that does not say otherwise talks to this AP, so "install and start"
+/// serves AI without a second, easily-missed configuration step. Before this
+/// default existed a launcher that forgot `GPN_AP_URL` produced a box that
+/// synced, mined and looked healthy — and never received a single job.
+pub const DEFAULT_AP_URL: &str = "http://gpn-testnet.duckdns.org:8092";
+
+/// Environment variable naming the access point (authoritative when set).
+pub const AP_URL_ENV: &str = "GPN_AP_URL";
+
+/// A poll that succeeded this recently is treated as evidence the node is
+/// actually serving (the loop polls at least every 25 s).
+pub const POLL_FRESH_SECS: u64 = 300;
+
+/// Minimum spacing between pull-health state writes, so a 25 s poll loop does
+/// not rewrite a file every iteration (a lease sighting always writes).
+pub const POLL_STATE_MIN_SECS: u64 = 30;
+
+/// How the access point URL was resolved. Pure value so the
+/// default/override/disable matrix is testable without touching the process
+/// environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApUrl {
+    /// Set by the operator — authoritative, never replaced by the default.
+    Configured(String),
+    /// Not set at all → the canonical AP is used (logged once at startup).
+    Defaulted(String),
+    /// Explicitly set to empty (`GPN_AP_URL=`) → AI serving deliberately off.
+    Disabled,
+}
+
+impl ApUrl {
+    /// The URL to poll, `None` when serving is disabled.
+    pub fn url(&self) -> Option<&str> {
+        match self {
+            ApUrl::Configured(u) | ApUrl::Defaulted(u) => Some(u.as_str()),
+            ApUrl::Disabled => None,
+        }
+    }
+
+    /// Does this configuration let the node pull work?
+    pub fn enabled(&self) -> bool {
+        self.url().is_some()
+    }
+
+    /// `true` for an explicit `GPN_AP_URL=` (disabled), not for an unset var.
+    pub fn is_disabled(&self) -> bool {
+        matches!(self, ApUrl::Disabled)
+    }
+}
+
+/// Classify a raw `GPN_AP_URL` value.
+///
+/// `None` = **unset** → default. `Some("")` (or whitespace) = **explicitly
+/// disabled** → `Disabled`, which is *not* the same thing as unset: an operator
+/// who writes `GPN_AP_URL=` means "this node must not serve AI", and silently
+/// substituting the canonical AP would overrule them.
+pub fn classify_ap_url(value: Option<&str>) -> ApUrl {
+    match value {
+        None => ApUrl::Defaulted(DEFAULT_AP_URL.to_string()),
+        Some(raw) => {
+            let trimmed = raw.trim().trim_end_matches('/');
+            if trimmed.is_empty() {
+                ApUrl::Disabled
+            } else {
+                ApUrl::Configured(trimmed.to_string())
+            }
+        }
+    }
+}
+
+/// Read `GPN_AP_URL` from the environment, distinguishing **unset** (default
+/// applies) from **set to empty** (disabled). `std::env::var` cannot tell them
+/// apart, which is exactly the bug this module had.
+pub fn ap_url_from_env() -> ApUrl {
+    match std::env::var_os(AP_URL_ENV) {
+        None => classify_ap_url(None),
+        Some(os) => classify_ap_url(Some(os.to_string_lossy().as_ref())),
+    }
+}
+
+/// The one-time startup line for a defaulted AP URL, if this resolution needs
+/// one. Kept separate from the printing so tests can assert the wording.
+pub fn default_notice(ap: &ApUrl) -> Option<String> {
+    match ap {
+        ApUrl::Defaulted(u) => Some(format!("[assign] no GPN_AP_URL set — defaulting to {u}")),
+        _ => None,
+    }
+}
+
+/// The loud line for a node that cannot receive work. Emitted once per process
+/// at startup, never from the poll loop.
+pub const NO_AP_WARNING: &str =
+    "[provider] WARNING: no access point URL — this node will NOT serve AI jobs (mining only)";
+
 /// Local heartbeat the capability snapshot is read from. Loopback, so it works
 /// on a box whose `:8093` is not reachable from anywhere else — which is the
 /// whole point of #46 Phase 3 step 2.
@@ -90,11 +186,12 @@ pub enum AssignSource {
     Both,
 }
 
-/// Effective transport given the `GPN_ASSIGN_SOURCE` value and whether an AP
-/// URL is configured. Pull without an AP URL cannot work, so it degrades to
-/// push — which since #46 Phase 3 is a *degraded* mode (no delivery), signalled
-/// loudly by `PullConfig::from_env`. Pure so the fallback matrix is testable
-/// without touching the environment.
+/// Legacy transport matrix, kept for callers that only know a raw URL.
+///
+/// The provider supervision path no longer uses this: since the AP URL has a
+/// canonical default, "pull without a URL" can only mean the operator set
+/// `GPN_AP_URL=` on purpose (disabled), and silently degrading to the removed
+/// push path would hide that. See [`PullConfig::from_env`].
 pub fn resolve(source: &str, ap_url: Option<&str>) -> AssignSource {
     let want = AssignSource::parse(source);
     if want.pulls() && ap_url.is_none() {
@@ -176,25 +273,33 @@ impl PullConfig {
     /// degraded mode, so it is logged loudly rather than silently.
     pub fn from_env(provider: &str) -> Option<Self> {
         let raw = std::env::var("GPN_ASSIGN_SOURCE").unwrap_or_else(|_| DEFAULT_SOURCE.into());
-        let ap_url = std::env::var("GPN_AP_URL")
-            .ok()
-            .map(|s| s.trim().trim_end_matches('/').to_string())
-            .filter(|s| !s.is_empty());
-        let source = resolve(&raw, ap_url.as_deref());
+        let ap = ap_url_from_env();
+        // Once, at startup: say that the canonical AP is being assumed. This is
+        // the line that used to be missing entirely, which made a miner-only
+        // box look perfectly healthy.
+        if let Some(msg) = default_notice(&ap) {
+            eprintln!("{msg}");
+        }
+        let source = AssignSource::parse(&raw);
         if !source.pulls() {
             eprintln!(
-                "⚠ [assign] NO pull transport ({}) — assignment PUSH was removed in #46 Phase 3, \
-                 so this provider will only serve jobs whose payload is already in its local \
-                 store; set GPN_AP_URL (e.g. http://<ap-host>:8092) to receive work.",
-                if ap_url.is_none() {
-                    format!("GPN_ASSIGN_SOURCE={} but GPN_AP_URL is unset", raw.trim())
-                } else {
-                    format!("GPN_ASSIGN_SOURCE={} selects push only", raw.trim())
-                }
+                "⚠ [assign] NO pull transport (GPN_ASSIGN_SOURCE={} selects push only) — \
+                 assignment PUSH was removed in #46 Phase 3, so this provider will only serve \
+                 jobs whose payload is already in its local store; set GPN_AP_URL (e.g. \
+                 http://<ap-host>:8092) to receive work.",
+                raw.trim()
             );
             return None;
         }
-        let ap_url = ap_url?;
+        let ap_url = match ap {
+            ApUrl::Configured(u) | ApUrl::Defaulted(u) => u,
+            ApUrl::Disabled => {
+                // `GPN_AP_URL=` is an explicit operator decision, and since the
+                // push path is gone it means this box will sit idle forever.
+                eprintln!("{NO_AP_WARNING}");
+                return None;
+            }
+        };
         Some(Self {
             ap_url,
             provider: provider.to_string(),
@@ -586,6 +691,14 @@ pub fn run_loop(cfg: PullConfig, provider_label: String) {
                     since = newest;
                     write_cursor(&cfg.provider, since);
                 }
+                // Evidence for the dashboard: the AP really answered. Throttled
+                // inside `record_poll_ok`, so this is not per-poll disk churn.
+                record_poll_ok(
+                    &cfg.provider,
+                    &cfg.ap_url,
+                    unix_now(),
+                    leases.iter().map(|l| l.job_id).max(),
+                );
             }
             Ok(resp) => {
                 // 401 = our token does not match the AP's. That will never fix
@@ -612,6 +725,137 @@ pub fn run_loop(cfg: PullConfig, provider_label: String) {
             }
         }
     }
+}
+
+/// Unix seconds. One definition so the poll loop and the dashboard agree.
+pub fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Path of the pull-health file (`$HOME/.gpn/assign-pull-state.json`).
+///
+/// This is the *evidence* the dashboard reports on: a timestamp written only
+/// after the AP actually answered a poll. Without it the dashboard could only
+/// guess, and "configured" is not the same as "serving".
+pub fn pull_state_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    PathBuf::from(format!("{home}/.gpn/assign-pull-state.json"))
+}
+
+/// One provider's last confirmed poll.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PollState {
+    /// AP the provider polled.
+    pub ap_url: String,
+    /// Unix seconds of the last 2xx poll.
+    pub last_ok: u64,
+    /// Highest job id seen for this provider, when one was ever delivered.
+    pub last_lease: Option<u64>,
+}
+
+fn read_state_map() -> serde_json::Map<String, Value> {
+    std::fs::read_to_string(pull_state_path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default()
+}
+
+/// Parse one provider's entry from the state document.
+pub fn poll_state_of(map: &serde_json::Map<String, Value>, provider: &str) -> Option<PollState> {
+    let e = map.get(provider)?;
+    Some(PollState {
+        ap_url: e.get("ap_url").and_then(|x| x.as_str())?.to_string(),
+        last_ok: e.get("last_ok").and_then(|x| x.as_u64())?,
+        last_lease: e.get("last_lease").and_then(|x| x.as_u64()),
+    })
+}
+
+/// Read one provider's last confirmed poll (best-effort; `None` = no evidence).
+pub fn read_poll_state(provider: &str) -> Option<PollState> {
+    poll_state_of(&read_state_map(), provider)
+}
+
+/// The most recent confirmed poll across every provider on this host. This is
+/// what the dashboard reports: one provider serving is a serving node.
+pub fn last_poll_ok() -> Option<u64> {
+    read_state_map()
+        .values()
+        .filter_map(|e| e.get("last_ok").and_then(|x| x.as_u64()))
+        .max()
+}
+
+/// Throttle decision for [`record_poll_ok`], pure so it is testable: a lease
+/// sighting always records, an idle poll at most once per
+/// [`POLL_STATE_MIN_SECS`].
+pub fn should_record(prev: Option<&PollState>, now: u64, lease: Option<u64>) -> bool {
+    match prev {
+        None => true,
+        Some(p) => lease.is_some() || now.saturating_sub(p.last_ok) >= POLL_STATE_MIN_SECS,
+    }
+}
+
+/// Record a successful poll (best-effort, atomic). Called from the poll loop
+/// after the AP answered — never from a failed request, so the dashboard's
+/// "ok" always means a real 2xx.
+pub fn record_poll_ok(provider: &str, ap_url: &str, now: u64, lease: Option<u64>) {
+    let path = pull_state_path();
+    let mut map = read_state_map();
+    let prev = poll_state_of(&map, provider);
+    if !should_record(prev.as_ref(), now, lease) {
+        return;
+    }
+    let last_lease = lease.or_else(|| prev.as_ref().and_then(|p| p.last_lease));
+    map.insert(
+        provider.to_string(),
+        serde_json::json!({
+            "ap_url": ap_url,
+            "last_ok": now,
+            "last_lease": last_lease,
+        }),
+    );
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let tmp = path.with_extension("json.tmp");
+    if let Ok(mut f) = std::fs::File::create(&tmp) {
+        if f.write_all(Value::Object(map).to_string().as_bytes())
+            .is_ok()
+            && f.sync_all().is_ok()
+        {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+}
+
+/// Derive the dashboard verdict from real state. Pure: `enabled` comes from the
+/// AP-URL resolution, `last_ok` from the poll loop's evidence.
+pub fn serving_reason(enabled: bool, last_ok: Option<u64>, now: u64) -> (&'static str, bool) {
+    if !enabled {
+        return ("no ap url", false);
+    }
+    match last_ok {
+        Some(t) if now.saturating_sub(t) <= POLL_FRESH_SECS => ("ok", true),
+        Some(_) => ("not polling", true),
+        None => ("configured, not confirmed", false),
+    }
+}
+
+/// The `serving` block of `GET /api/status` for the local dashboard.
+pub fn serving_status(now: u64) -> Value {
+    let ap = ap_url_from_env();
+    let last_ok = last_poll_ok();
+    let (reason, registered) = serving_reason(ap.enabled(), last_ok, now);
+    serde_json::json!({
+        "enabled": ap.enabled(),
+        "ap_url": ap.url().unwrap_or(""),
+        "registered": registered,
+        "reason": reason,
+        "last_poll_ok": last_ok,
+    })
 }
 
 /// First 10 chars + `…` for log lines (keeps journals readable).
@@ -650,11 +894,165 @@ mod tests {
         assert_eq!(resolve("both", ap), AssignSource::Both);
         assert_eq!(resolve("push", ap), AssignSource::Push);
         assert_eq!(resolve("", ap), AssignSource::Pull);
-        // Without one: anything that wanted to pull keeps the old push path.
+        // Legacy matrix without one (only reachable for callers that pass a raw
+        // Option<&str>, not the env-resolving from_env).
         assert_eq!(resolve("pull", None), AssignSource::Push);
         assert_eq!(resolve("both", None), AssignSource::Push);
         assert_eq!(resolve("", None), AssignSource::Push);
         assert_eq!(resolve("push", None), AssignSource::Push);
+    }
+
+    // ── Access point URL: default / override / disable ───────────────────────
+
+    #[test]
+    fn unset_ap_url_defaults_to_the_canonical_access_point() {
+        assert_eq!(
+            classify_ap_url(None),
+            ApUrl::Defaulted(DEFAULT_AP_URL.to_string())
+        );
+        assert_eq!(DEFAULT_AP_URL, "http://gpn-testnet.duckdns.org:8092");
+        assert!(classify_ap_url(None).enabled());
+        assert_eq!(
+            default_notice(&classify_ap_url(None)).as_deref(),
+            Some(format!("[assign] no GPN_AP_URL set — defaulting to {DEFAULT_AP_URL}").as_str())
+        );
+    }
+
+    #[test]
+    fn an_explicit_ap_url_wins_over_the_default() {
+        let ap = classify_ap_url(Some(" http://10.0.0.5:8092/ "));
+        assert_eq!(ap, ApUrl::Configured("http://10.0.0.5:8092".into()));
+        assert_eq!(ap.url(), Some("http://10.0.0.5:8092"));
+        assert!(default_notice(&ap).is_none(), "no default notice when set");
+        assert!(!ap.is_disabled());
+    }
+
+    #[test]
+    fn an_empty_ap_url_disables_serving_and_warns_loudly() {
+        assert_eq!(classify_ap_url(Some("")), ApUrl::Disabled);
+        assert_eq!(classify_ap_url(Some("   ")), ApUrl::Disabled);
+        assert!(!classify_ap_url(Some("")).enabled());
+        assert!(classify_ap_url(Some("")).is_disabled());
+        assert!(
+            default_notice(&ApUrl::Disabled).is_none(),
+            "disabled is not 'unset': no default notice"
+        );
+        assert!(NO_AP_WARNING.contains("NOT serve AI jobs (mining only)"));
+    }
+
+    #[test]
+    fn from_env_applies_the_default_keeps_overrides_and_honours_disable() {
+        // `GPN_AP_URL` is touched only by this test; a lock keeps its three
+        // resolutions from interleaving (the other env-touching test uses
+        // GPN_STATUS_URL).
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK.lock().unwrap();
+        let me = "5ProviderDefault";
+
+        std::env::remove_var(AP_URL_ENV);
+        std::env::remove_var("GPN_ASSIGN_SOURCE");
+        let cfg = PullConfig::from_env(me).expect("unset → default AP, pull enabled");
+        assert_eq!(cfg.ap_url, DEFAULT_AP_URL);
+
+        std::env::set_var(AP_URL_ENV, "http://ap.internal:9000/");
+        let cfg = PullConfig::from_env(me).expect("explicit URL wins");
+        assert_eq!(cfg.ap_url, "http://ap.internal:9000");
+
+        // Explicit empty: disabled — no pull loop, and NOT quietly defaulted.
+        std::env::set_var(AP_URL_ENV, "");
+        assert!(PullConfig::from_env(me).is_none());
+
+        // Push-only is still possible but never the default.
+        std::env::set_var(AP_URL_ENV, "http://ap.internal:9000");
+        std::env::set_var("GPN_ASSIGN_SOURCE", "push");
+        assert!(PullConfig::from_env(me).is_none());
+
+        std::env::remove_var(AP_URL_ENV);
+        std::env::remove_var("GPN_ASSIGN_SOURCE");
+    }
+
+    // ── Poll evidence + dashboard verdict ────────────────────────────────────
+
+    #[test]
+    fn poll_state_is_throttled_so_the_loop_does_not_churn_the_disk() {
+        let prev = PollState {
+            ap_url: "http://ap:8092".into(),
+            last_ok: 1_000,
+            last_lease: Some(7),
+        };
+        // Idle poll 2 s later: no write.
+        assert!(!should_record(Some(&prev), 1_002, None));
+        // A lease sighting always records.
+        assert!(should_record(Some(&prev), 1_002, Some(8)));
+        // Idle poll past the throttle window records.
+        assert!(should_record(Some(&prev), 1_030, None));
+        // First ever success records.
+        assert!(should_record(None, 5, None));
+        // And a lease that arrives with no prior state records too.
+        assert!(should_record(None, 5, Some(1)));
+    }
+
+    #[test]
+    fn poll_state_round_trips_and_feeds_the_dashboard() {
+        // These go through $HOME, which is process-global; serialise against the
+        // other test that writes this file.
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("gpn-pollstate-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        // Redirect HOME so nothing touches the live ~/.gpn.
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &dir);
+
+        let now = 1_700_000_000u64;
+        record_poll_ok("5P", DEFAULT_AP_URL, now, Some(42));
+        let st = read_poll_state("5P").expect("state recorded");
+        assert_eq!(st.ap_url, DEFAULT_AP_URL);
+        assert_eq!(st.last_ok, now);
+        assert_eq!(st.last_lease, Some(42));
+        assert_eq!(last_poll_ok(), Some(now));
+
+        // The reason matrix the dashboard renders.
+        assert_eq!(serving_reason(false, Some(now), now), ("no ap url", false));
+        assert_eq!(serving_reason(true, Some(now), now), ("ok", true));
+        assert_eq!(
+            serving_reason(true, Some(now), now + POLL_FRESH_SECS),
+            ("ok", true),
+            "the boundary is inclusive"
+        );
+        assert_eq!(
+            serving_reason(true, Some(now), now + POLL_FRESH_SECS + 1),
+            ("not polling", true),
+            "stale evidence is not 'ok'"
+        );
+        assert_eq!(
+            serving_reason(true, None, now),
+            ("configured, not confirmed", false),
+            "never claim 'ok' without a 2xx on record"
+        );
+
+        match old_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn serving_status_has_the_documented_shape() {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK.lock().unwrap();
+        let old = std::env::var_os(AP_URL_ENV);
+        std::env::set_var(AP_URL_ENV, "");
+        let v = serving_status(unix_now());
+        assert_eq!(v["enabled"], serde_json::json!(false));
+        assert_eq!(v["ap_url"], serde_json::json!(""));
+        assert_eq!(v["registered"], serde_json::json!(false));
+        assert_eq!(v["reason"], serde_json::json!("no ap url"));
+        match old {
+            Some(o) => std::env::set_var(AP_URL_ENV, o),
+            None => std::env::remove_var(AP_URL_ENV),
+        }
     }
 
     #[test]

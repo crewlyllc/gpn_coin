@@ -42,6 +42,9 @@ check_launcher() { # $1 = file, $2 = label
   grep -Eq '5[1-9A-HJ-NP-Za-km-z]{47}' "$f" && problems+=("hard-coded SS58 account")
   grep -q -- '--ensure-wallet' "$f" || problems+=("does not call gpn_node --ensure-wallet")
   grep -q 'GPN_SIGNER_FILE=' "$f" || problems+=("no GPN_SIGNER_FILE")
+  # A node with no access point receives no AI work at all (2026-10-30: 4 peers,
+  # 2 providers). The launcher must name one.
+  grep -q 'GPN_AP_URL=' "$f" || problems+=("no GPN_AP_URL - the node would never poll for AI work (miner only)")
 
   if [ "${#problems[@]}" -eq 0 ]; then
     ok "$label: per-machine node key + wallet, no dev URI, no pinned account"
@@ -71,10 +74,18 @@ else
   grep -q 'if errorlevel 1' "$tmp/start-node.cmd" \
     && ok "provisioning failure stops the launcher" \
     || bad "no errorlevel guard after --ensure-wallet"
+  # AI serving out of the box: the shipped launcher must point at the canonical
+  # access point, and the same value must appear in scripts/run-windows.cmd.
+  grep -q 'set "GPN_AP_URL=http://gpn-testnet.duckdns.org:8092"' "$tmp/start-node.cmd" \
+    && ok "generated start-node.cmd exports the canonical GPN_AP_URL" \
+    || bad "start-node.cmd does not set GPN_AP_URL to the canonical access point"
 fi
 
 echo "== scripts/run-windows.cmd =="
 check_launcher "$cmdfile" "scripts/run-windows.cmd" || true
+grep -q 'set "GPN_AP_URL=http://gpn-testnet.duckdns.org:8092"' "$cmdfile" \
+  && ok "run-windows.cmd exports the canonical GPN_AP_URL" \
+  || bad "run-windows.cmd does not set GPN_AP_URL to the canonical access point"
 grep -Eqi '//(alice|bob)' "$cmdfile" && bad "run-windows.cmd still mentions a dev URI" || ok "no dev URI"
 
 echo "== negative control (pre-#96 template must be REJECTED) =="

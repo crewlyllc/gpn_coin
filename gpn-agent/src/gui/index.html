@@ -140,6 +140,7 @@
       <div class="card"><div class="k">Peers</div><div class="v" id="peers">—</div><div class="s" id="peersSub">&nbsp;</div></div>
       <div class="card"><div class="k">Block height</div><div class="v mono" id="best">—</div><div class="s" id="bestSub">&nbsp;</div></div>
       <div class="card"><div class="k">Mining</div><div class="v" id="mining">—</div><div class="s" id="miningSub">&nbsp;</div></div>
+      <div class="card"><div class="k">AI serving</div><div class="v" id="serving">—</div><div class="s" id="servingSub">&nbsp;</div></div>
       <div class="card"><div class="k">GPU</div><div class="v" id="gpu">—</div><div class="s" id="gpuSub">&nbsp;</div></div>
       <div class="card"><div class="k">Current job</div><div class="v" id="job">—</div><div class="s" id="jobSub">&nbsp;</div></div>
       <div class="card"><div class="k">Models served</div><div class="v" id="models">—</div><div class="s" id="modelsSub">&nbsp;</div></div>
@@ -295,6 +296,12 @@
     text($("bestSub"), s.syncing ? "syncing…" : "synced");
     text($("mining"), s.mining === true ? "on" : "off");
     text($("miningSub"), idleOn ? "paused by idle" : (s.mining ? "sealing blocks" : "idle"));
+    // AI serving: answer "is this node receiving work?" from evidence, not
+    // intent. `reason` comes from the pull loop's last confirmed poll.
+    var sv = s.serving || {};
+    var servingOk = sv.reason === "ok";
+    text($("serving"), servingOk ? "yes" : "no");
+    text($("servingSub"), (sv.reason || "unknown") + (sv.ap_url ? " · " + sv.ap_url : ""));
     text($("gpu"), s.gpu || "—");
     text($("gpuSub"), s.vram || "");
     var job = s.current_job;

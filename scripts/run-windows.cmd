@@ -13,7 +13,7 @@ REM  for the job, then resumes — task #24).
 REM
 REM  Configure via env / a config file (see docs/run-a-node.md). Set:
 REM    GPN_CHAIN, GPN_PROVIDER_ENDPOINT, GPN_OLLAMA, GPN_GFLOPS,
-REM    GPN_ASSIGN_TOKEN, GPN_NODE_KEY_FILE, GPN_BOOTNODES
+REM    GPN_ASSIGN_TOKEN, GPN_AP_URL, GPN_NODE_KEY_FILE, GPN_BOOTNODES
 REM  Money identity (GPN_SIGNER_FILE -> keystore.json) is created on this
 REM  machine on first run; only set GPN_SIGNER/GPN_ACCOUNT to OVERRIDE it
 REM  (operator override / fleet install).
@@ -147,6 +147,10 @@ echo [gpn] bootstrapped from the weekly snapshot at block %GPN_SNAP_BLOCK% - ski
 if exist "%GPN_FS_TMP%" rmdir /s /q "%GPN_FS_TMP%" >nul 2>&1
 :gpn_fast_sync_done
 set "GPN_RPC_PORT=9944"
+REM  Access point for AI work (pull transport). A GPN node serves AI by default;
+REM  this tells it where to ask for jobs. Override for a private AP. Setting it
+REM  EMPTY (set "GPN_AP_URL=") disables AI serving - the node warns loudly.
+set "GPN_AP_URL=http://gpn-testnet.duckdns.org:8092"
 set "GPN_BOOTNODES=/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo,/ip4/142.129.54.88/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo,/ip4/23.241.109.255/tcp/30333/p2p/12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz"
 REM
 REM --- Ollama: first-class prerequisite (needed to serve LLM jobs) -------------

@@ -447,6 +447,20 @@ mod tests {
     }
 
     #[test]
+    fn the_dashboard_renders_the_ai_serving_card() {
+        // The card is driven by `serving.reason` — the operator must be able to
+        // tell "receiving work" from "configured but nothing confirmed"
+        // without reading the journal.
+        let r = handle("GET", "/", "", &source(Some(1)), &opts("serving"), 1_000);
+        assert!(r.body.contains("AI serving"), "missing the AI serving card");
+        assert!(r.body.contains("s.serving"), "the card must read serving.*");
+        assert!(
+            r.body.contains("servingSub"),
+            "the card must show the reason"
+        );
+    }
+
+    #[test]
     fn status_includes_idle_block_and_the_dashboard_metadata() {
         let o = opts("status");
         let r = handle("GET", "/api/status", "", &source(Some(2)), &o, 1_000);
