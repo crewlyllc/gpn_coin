@@ -147,7 +147,7 @@ echo [gpn] bootstrapped from the weekly snapshot at block %GPN_SNAP_BLOCK% - ski
 if exist "%GPN_FS_TMP%" rmdir /s /q "%GPN_FS_TMP%" >nul 2>&1
 :gpn_fast_sync_done
 set "GPN_RPC_PORT=9944"
-set "GPN_BOOTNODES=/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo"
+set "GPN_BOOTNODES=/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo,/ip4/142.129.54.88/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo,/ip4/23.241.109.255/tcp/30333/p2p/12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz"
 REM
 REM --- Ollama: first-class prerequisite (needed to serve LLM jobs) -------------
 REM  A GPN node mines without it, but CANNOT serve LLM jobs until Ollama runs.

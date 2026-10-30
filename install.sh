@@ -39,6 +39,12 @@ NETWORK="${GPN_NETWORK:-testnet}"
 SRC="$PREFIX/src"
 GPN_BASE_PATH="$PREFIX/node"
 
+# Canonical bootstrap peers, passed explicitly as belt and braces: even a stale
+# or hijacked chain spec cannot strand this node on a loopback bootnode. An
+# operator-supplied GPN_BOOTNODES wins (comma-separated multiaddrs).
+GPN_BOOTNODES="${GPN_BOOTNODES:-/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo,/ip4/142.129.54.88/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo,/ip4/23.241.109.255/tcp/30333/p2p/12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz}"
+export GPN_BOOTNODES
+
 log() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn(){ printf '\033[1;33m !\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[1;31m✗\033[0m %s\n' "$*" >&2; exit 1; }
@@ -338,6 +344,9 @@ GPN_ENDPOINT=wss://testnet.gpn.example:9944   # TODO: replace with the real publ
 GPN_BASE_PATH=$GPN_BASE_PATH
 GPN_SIGNER_FILE=$GPN_BASE_PATH/keystore.json
 GPN_DATA=$PREFIX/data
+# Canonical bootstrap peers (comma-separated multiaddrs). Explicit so even a
+# stale/hijacked chain spec cannot strand the node on a loopback bootnode.
+GPN_BOOTNODES=$GPN_BOOTNODES
 
 # ollama (AI-compute) — user-local, sandboxed under $PREFIX
 OLLAMA_BIN=$PREFIX/ollama/bin/ollama

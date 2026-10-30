@@ -192,6 +192,23 @@ export default {
       return handleJoin(request, env);
     }
 
+    // Canonical chain spec over HTTPS. A fresh `--setup` fetches this instead
+    // of plain HTTP from a home box; the AP's `/genesis-spec` is the upstream
+    // (bootNodes rewritten there at request time). `/genesis-spec` is kept as
+    // an alias so existing installers keep working during the transition.
+    if (path === "/chain-spec" || path === "/genesis-spec") {
+      if (request.method === "OPTIONS") return preflight();
+      if (request.method !== "GET" && request.method !== "HEAD") {
+        return withCors(
+          new Response("method not allowed\n", {
+            status: 405,
+            headers: { allow: "GET, HEAD, OPTIONS" },
+          }),
+        );
+      }
+      return chainSpec(request, env);
+    }
+
     if (path === "/api" || path.startsWith("/api/")) {
       return handleApi(request, env, path);
     }
@@ -1563,6 +1580,43 @@ async function handleJoin(request, env) {
   }
 }
 
+/**
+ * Proxy the canonical chain spec from the access point.
+ *
+ * The installer's `--setup` now fetches `https://gpncoin.ai/chain-spec`; the
+ * AP serves it (with `bootNodes` rewritten from the canonical list) at
+ * `/genesis-spec`. Failures are JSON, never an HTML error page, because the
+ * installer parses the body as JSON.
+ *
+ * @param {Request} request
+ * @param {{ AP_JOB_URL?: string, AP_URL?: string, AP_TOKEN?: string, AP_FORCE_SOCKET?: string }} env
+ */
+async function chainSpec(request, env) {
+  const upstream = await apRequest(env, { method: "GET", path: "/genesis-spec" });
+  if (upstream.error) {
+    return withCors(
+      new Response(JSON.stringify({ error: `chain spec unavailable: ${upstream.error}` }) + "\n", {
+        status: 503,
+        headers: {
+          "content-type": "application/json; charset=utf-8",
+          "cache-control": "no-store",
+        },
+      }),
+    );
+  }
+  const status = upstream.status || 200;
+  const headers = {
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "public, max-age=300",
+    "x-gpn-spec-source": "access-point",
+  };
+  if (status === 200) {
+    headers["content-disposition"] = 'attachment; filename="gpn-testnet-spec.json"';
+  }
+  const body = request.method === "HEAD" ? null : upstream.body;
+  return withCors(new Response(body, { status, headers }));
+}
+
 /** @param {Response} res */
 function withCors(res) {
   const headers = new Headers(res.headers);
@@ -1589,6 +1643,7 @@ export const __test = {
   parseHttpBody,
   parseHttpResponse,
   handleApi,
+  chainSpec,
   apRequest,
   rateLimit,
   originAllowed,

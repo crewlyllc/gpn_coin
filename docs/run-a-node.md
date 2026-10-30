@@ -175,7 +175,8 @@ Building from source instead: see [Appendix A](#appendix-a--manual--detailed-ins
 ```
 $ ./gpn_node --setup
 [gpn_node] base path: /home/you/.gpn/node (node database + wallet — where GPN keeps its data; default)
-[gpn_node] chain spec: http://gpn-testnet.duckdns.org:8092/genesis-spec -> /home/you/.gpn/node/testnet-spec.json (auto)
+[gpn_node] chain spec: source https://gpncoin.ai/chain-spec · genesis 0xb8e4636a… (verified) · bootnodes /dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc…,/ip4/142.129.54.88/tcp/30333/p2p/12D3KooWAFtUNxc…,/ip4/23.241.109.255/tcp/30333/p2p/12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz
+[gpn_node] chain spec: saved -> /home/you/.gpn/node/testnet-spec.json (auto)
 [gpn_node] no wallet configured — starting the one-time wallet setup (stores /home/you/.gpn/node/keystore.json; owner-only)
 
 Set up your wallet
@@ -279,7 +280,7 @@ account as **Payout account** — check it is yours after an install.
 | Item | Automatic behaviour | Override |
 |---|---|---|
 | **Data folder** | `~/.gpn/node` (Unix) / `C:\gpn\data` (Windows), created on first run. Holds the chain DB **and** the wallet. | `GPN_BASE_PATH` |
-| **Chain spec** | If no `GPN_CHAIN` and no `<base>/testnet-spec.json`, it is downloaded once from `http://gpn-testnet.duckdns.org:8092/genesis-spec`, validated (`genesis` field required) and pinned in the base dir. One log line, no prompt. | `GPN_CHAIN`, `GPN_SPEC_URL` |
+| **Chain spec** | If no `GPN_CHAIN` and no `<base>/testnet-spec.json`, it is downloaded once over **HTTPS** from `https://gpncoin.ai/chain-spec` (legacy `http://gpn-testnet.duckdns.org:8092/genesis-spec` as fallback), its **genesis is verified against the pinned testnet genesis hash** — a mismatch is refused, never silently used — and its `bootNodes` are cleaned of loopback/private entries. Then pinned in the base dir. One log line, no prompt. | `GPN_CHAIN`, `GPN_SPEC_URL` |
 | **Wallet** | Generated (headless: `gpn_node --ensure-wallet`) or imported by the wizard; SS58 address printed once and on every start as `payout account:`. Later runs read the keystore silently and never rewrite it. | `GPN_SIGNER`, `GPN_SIGNER_FILE` |
 | **Payout account** | Derived from the wallet, so earnings can never go to a placeholder. A corrupt keystore aborts the start instead of inventing a new account. | `GPN_ACCOUNT` |
 | **Peers** | `https://gpncoin.ai/seeds.json` (live directory) + compiled-in bootnodes; failing URLs are logged and ignored. | `GPN_BOOTNODES`, `GPN_BOOTNODES_URL` |
@@ -327,8 +328,8 @@ gpn_node                               # one command: miner + AI provider
 ```bash
 export GPN_BASE_PATH="$HOME/.gpn/node"                    # data + wallet
 mkdir -p "$GPN_BASE_PATH"
-curl -fsS http://gpn-testnet.duckdns.org:8092/genesis-spec \
-  -o "$GPN_BASE_PATH/testnet-spec.json"                   # pin the spec
+curl -fsS https://gpncoin.ai/chain-spec \
+  -o "$GPN_BASE_PATH/testnet-spec.json"                   # pin the spec (HTTPS)
 export GPN_CHAIN="$GPN_BASE_PATH/testnet-spec.json"
 export GPN_SIGNER="<your mnemonic or 0x seed>"           # or GPN_SIGNER_FILE
 # optional: export GPN_PUBLIC_ADDR=/ip4/203.0.113.10/tcp/30333
@@ -1353,7 +1354,7 @@ min_version_enforce = true    # false = mine below the minimum (unsupported)
 | `GPN_CHAIN` | chain spec (`testnet`/`mainnet`/`dev`/path) | auto: `<base>/testnet-spec.json`, fetched if missing |
 | `GPN_SIGNER` | signer URI / seed / mnemonic — **overrides** the local keystore and is logged as an override (fleet/operator use only) | _(none — the wallet on this machine, else the first-run wizard)_ |
 | `GPN_SIGNER_FILE` | path to an sr25519 JSON keystore (owner-only) | `<base>/keystore.json` when it exists |
-| `GPN_SPEC_URL` | where to fetch the chain spec from | `http://gpn-testnet.duckdns.org:8092/genesis-spec` |
+| `GPN_SPEC_URL` | where to fetch the chain spec from | `https://gpncoin.ai/chain-spec` (falls back to `http://gpn-testnet.duckdns.org:8092/genesis-spec`) |
 | `GPN_AUTOSTART` | informational: operator intends to install a service unit | `false` |
 | `GPN_ACCOUNT` | payout / advertised address — **overrides** the address derived from the wallet (operator use only) | _(empty → derived from the wallet)_ |
 | `GPN_ENDPOINT` | chain RPC (ws) for the provider loop | `ws://127.0.0.1:9944` |

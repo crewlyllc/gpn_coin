@@ -50,6 +50,41 @@ fn record_created(id: u64, max_tokens: u64) {
         .push((id, Instant::now(), max_tokens));
 }
 
+/// Log the bootnodes the AP serves in `/genesis-spec` exactly once per process.
+///
+/// The list is rewritten into every response at request time (never taken from
+/// the file's stale `bootNodes`), so this one line is the canonical answer to
+/// "what does a fresh install actually dial?".
+fn log_bootnodes_once(bootnodes: &[String]) {
+    static LOGGED: OnceLock<()> = OnceLock::new();
+    if LOGGED.set(()).is_ok() {
+        println!(
+            "[scheduler] /genesis-spec bootNodes ({}): {}",
+            bootnodes.len(),
+            bootnodes.join(", ")
+        );
+    }
+}
+
+/// Rewrite a spec document's `bootNodes` for serving (pure; unit-tested).
+fn chain_spec_for_serving(spec: &str, bootnodes: &[String]) -> Result<String, String> {
+    gpn_agent::chainspec::rewrite_bootnodes(spec, bootnodes)
+}
+
+/// Warn once if the file being served is not the pinned genesis.
+///
+/// The AP does not alter genesis, but serving a wrong-chain file would make
+/// every fresh install that trusts this AP fail verification — better to say
+/// so in the log than to stay silent.
+fn warn_if_spec_unverified(spec: &str) {
+    static CHECKED: OnceLock<()> = OnceLock::new();
+    if CHECKED.set(()).is_ok() {
+        if let Err(e) = gpn_agent::chainspec::verify_genesis(spec) {
+            eprintln!("[scheduler] ! /genesis-spec is serving an UNVERIFIED spec: {e}");
+        }
+    }
+}
+
 /// When each job's lease was last handed to a provider by `GET /assignments`.
 ///
 /// Item #91 (janitor vs claim race): the janitor decides "stale" from the
@@ -5654,23 +5689,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 // Serve the canonical chain-spec so a fresh node (e.g. Windows) can
                 // join THIS chain: `--chain <downloaded>.json` pins the exact genesis.
+                //
+                // `bootNodes` is rewritten AT REQUEST TIME from the canonical list
+                // (GPN_BOOTNODES, else built-in) — the file's own field is never
+                // trusted. A static file once shipped only `127.0.0.1`, which made
+                // every fresh install dial itself and never join (2026-10-30).
+                // Everything else (genesis, code, properties) is served byte-identical.
                 (Method::Get, ["genesis-spec"]) => {
                     let p = std::env::var("GPN_SPEC_PATH").unwrap_or_else(|_| {
                     "/home/jeremyg/shared_workspace/artifacts/project7/gpn-testnet-spec.json".to_string()
                 });
-                    match std::fs::read(&p) {
-                        Ok(bytes) => {
-                            let ct =
-                                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                    match std::fs::read_to_string(&p) {
+                        Ok(spec) => {
+                            let bootnodes = gpn_agent::chainspec::bootnodes_from_env();
+                            match chain_spec_for_serving(&spec, &bootnodes) {
+                                Ok(served) => {
+                                    log_bootnodes_once(&bootnodes);
+                                    warn_if_spec_unverified(&spec);
+                                    let ct = Header::from_bytes(
+                                        &b"Content-Type"[..],
+                                        &b"application/json"[..],
+                                    )
                                     .unwrap_or_else(|_| hdr.clone());
-                            let cd = Header::from_bytes(
-                                &b"Content-Disposition"[..],
-                                &b"attachment; filename=\"gpn-testnet-spec.json\""[..],
-                            )
-                            .unwrap_or_else(|_| hdr.clone());
-                            let _ = req.respond(
-                                Response::from_data(bytes).with_header(ct).with_header(cd),
-                            );
+                                    let cd = Header::from_bytes(
+                                        &b"Content-Disposition"[..],
+                                        &b"attachment; filename=\"gpn-testnet-spec.json\""[..],
+                                    )
+                                    .unwrap_or_else(|_| hdr.clone());
+                                    let _ = req.respond(
+                                        Response::from_data(served.into_bytes())
+                                            .with_header(ct)
+                                            .with_header(cd),
+                                    );
+                                }
+                                Err(e) => {
+                                    let _ = req.respond(
+                                        Response::from_string(
+                                            json!({"error": e.to_string()}).to_string(),
+                                        )
+                                        .with_header(hdr.clone())
+                                        .with_status_code(500),
+                                    );
+                                }
+                            }
                         }
                         Err(e) => {
                             let _ = req.respond(
@@ -7785,5 +7846,35 @@ mod tests {
         let p = provider_from_caps("5Old", &v, "http://old".into(), 5);
         assert!(p.referral.is_none());
         assert_eq!(p.gflops, 825);
+    }
+
+    /// `/genesis-spec` must never echo the file's stale `bootNodes`. A spec
+    /// whose file still says `/ip4/127.0.0.1/...` is served with the canonical
+    /// list, while genesis/code/properties stay byte-identical.
+    #[test]
+    fn genesis_spec_serves_canonical_bootnodes_not_the_files() {
+        let spec = r#"{"name":"GPN Public Testnet","id":"gpn_testnet","bootNodes":["/ip4/127.0.0.1/tcp/30333/p2p/12D3KooWNm2fbwKaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"protocolId":"gpn","properties":{"tokenDecimals":12,"tokenSymbol":"GPN"},"genesis":{"runtimeGenesis":{"code":"0x0061736d","config":{}}}}"#;
+        let bn = gpn_agent::chainspec::canonical_bootnodes();
+        let served = chain_spec_for_serving(spec, &bn).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&served).unwrap();
+        assert_eq!(v["bootNodes"], json!(bn));
+        assert!(!served.contains("127.0.0.1"));
+        let orig: serde_json::Value = serde_json::from_str(spec).unwrap();
+        assert_eq!(v["genesis"], orig["genesis"], "genesis must be untouched");
+        assert_eq!(v["properties"], orig["properties"]);
+        assert_eq!(v["protocolId"], orig["protocolId"]);
+        assert_eq!(
+            gpn_agent::chainspec::genesis_sha256(&served).unwrap(),
+            gpn_agent::chainspec::genesis_sha256(spec).unwrap()
+        );
+    }
+
+    /// The served document is byte-identical outside the `bootNodes` array.
+    #[test]
+    fn genesis_spec_rewrite_touches_only_the_array() {
+        let spec = r#"{"a":1,"bootNodes":[],"genesis":{"runtimeGenesis":{"code":"0x00"}},"z":[1,2]}"#;
+        let served = chain_spec_for_serving(spec, &["/ip4/203.0.113.9/tcp/30333".to_string()]).unwrap();
+        assert!(served.starts_with(r#"{"a":1,"bootNodes":["#));
+        assert!(served.ends_with(r#""genesis":{"runtimeGenesis":{"code":"0x00"}},"z":[1,2]}"#));
     }
 }

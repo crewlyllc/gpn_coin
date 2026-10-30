@@ -17,6 +17,8 @@
       "/bootnodes.txt",
       "/seeds.txt",
       "/releases.json",
+      "/chain-spec",
+      "/genesis-spec",
       "/api/*"
     ]
   },

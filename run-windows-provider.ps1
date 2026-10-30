@@ -166,6 +166,17 @@ Write-Host "      signer: explicit -Signer OVERRIDES the local keystore (fleet/o
 $env:GPN_OLLAMA  = $Ollama
 $env:GPN_GFLOPS  = "$Gflops"
 $env:GPN_LISTEN  = "0.0.0.0:$ListenPort"
+# Canonical bootstrap peers — belt and braces: even a stale/hijacked chain spec
+# cannot strand this box on a loopback bootnode. GPN_BOOTNODES (if already set)
+# wins, so a fleet can override it.
+if ([string]::IsNullOrWhiteSpace($env:GPN_BOOTNODES)) {
+  $env:GPN_BOOTNODES = (
+    "/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo," +
+    "/ip4/142.129.54.88/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo," +
+    "/ip4/23.241.109.255/tcp/30333/p2p/12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz"
+  )
+}
+Write-Host "      bootnodes: $($env:GPN_BOOTNODES)"
 if ($Address) { $env:GPN_ACCOUNT = $Address } else { Remove-Item Env:\GPN_ACCOUNT -ErrorAction SilentlyContinue }
 if ($PublicStatusUrl) {
   $env:GPN_PROVIDER_ENDPOINT = $PublicStatusUrl

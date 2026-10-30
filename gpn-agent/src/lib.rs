@@ -8,6 +8,7 @@ pub mod ap_token;
 pub mod assign_pull;
 pub mod attest_idle;
 pub mod chain;
+pub mod chainspec;
 pub mod cli;
 pub mod compute;
 pub mod compute_unit;

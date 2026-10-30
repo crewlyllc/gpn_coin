@@ -48,7 +48,7 @@ from it automatically (code + release assets), so the public history always matc
 
 ## Also available
 - **CI artifacts** (`gpn-windows`, `gpn-linux`, …) under **Actions** — but these **expire** (retention-days) and are quota-limited; the **Releases** above are the durable distribution.
-- **Chain spec:** `GET /genesis-spec` on any access point (e.g. `http://gpn-testnet.duckdns.org:8092/genesis-spec`).
+- **Chain spec:** `GET https://gpncoin.ai/chain-spec` (HTTPS; the installer verifies its genesis), or `GET /genesis-spec` on any access point (e.g. `http://gpn-testnet.duckdns.org:8092/genesis-spec`).
 - **Whitepaper:** `docs/GPN-WHITEPAPER.md` / `.html`.
 
 ## DB snapshot (fast node onboarding / recovery)

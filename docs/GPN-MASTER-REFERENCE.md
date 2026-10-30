@@ -715,7 +715,9 @@ scan). Rollback requires a *new* spec — v1 storage is not readable by spec-41 
 
 - **Genesis mismatch:** a Windows build embedded a **different runtime WASM** → different genesis
   (`0x07f8…` vs canonical `0xb8e4…`) → couldn't peer. Fix: run with the **exported chain-spec file**
-  (`--chain testnet-spec.json`) so the genesis `:code` is pinned. AP serves it at `GET /genesis-spec`.
+  (`--chain testnet-spec.json`) so the genesis `:code` is pinned. AP serves it at `GET /genesis-spec`
+  and the Worker mirrors it at `GET https://gpncoin.ai/chain-spec`; the installer verifies the genesis
+  hash before use and refuses a mismatch (see `gpn-agent/src/chainspec.rs`).
 - **Fork poisoning:** a node started with `--force-authoring` **mines from genesis before syncing** →
   announces a private fork → the main chain rejects those blocks → drops the peer → flapping.
   Fix: **sync first without `--force-authoring`**, then restart WITH it.

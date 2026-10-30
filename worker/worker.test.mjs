@@ -873,3 +873,109 @@ test("finetune: a dataset body over the chat cap is accepted, past 256 KB is not
   });
   assert.equal((await submit(huge, "203.0.113.52")).status, 413);
 });
+
+test("GET /chain-spec proxies the AP's /genesis-spec as JSON", async () => {
+  const spec = {
+    name: "GPN Public Testnet",
+    id: "gpn_testnet",
+    bootNodes: [
+      "/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
+    ],
+    genesis: { runtimeGenesis: { code: "0x0061736d" } },
+  };
+  const seen = [];
+  const env = {
+    AP_JOB_URL: "http://203.0.113.7:8092",
+    __test_ap_transport: async (opts) => {
+      seen.push(opts);
+      return { status: 200, contentType: "application/json", body: JSON.stringify(spec) };
+    },
+  };
+  const res = await worker.fetch(new Request("https://gpncoin.ai/chain-spec"), env, {
+    waitUntil() {},
+  });
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-type"), /application\/json/);
+  assert.equal(res.headers.get("access-control-allow-origin"), "*");
+  assert.equal(res.headers.get("x-gpn-spec-source"), "access-point");
+  assert.match(res.headers.get("content-disposition"), /gpn-testnet-spec\.json/);
+  const body = await res.json();
+  assert.deepEqual(body.bootNodes, spec.bootNodes);
+  assert.deepEqual(body.genesis, spec.genesis);
+  assert.equal(seen[0].method, "GET");
+  assert.equal(seen[0].path, "/genesis-spec");
+});
+
+test("GET /genesis-spec is an alias of /chain-spec", async () => {
+  const env = {
+    AP_URL: "http://203.0.113.7:8092",
+    __test_ap_transport: async () => ({
+      status: 200,
+      contentType: "application/json",
+      body: '{"genesis":{},"bootNodes":[]}',
+    }),
+  };
+  const res = await worker.fetch(new Request("https://gpncoin.ai/genesis-spec"), env, {
+    waitUntil() {},
+  });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).bootNodes.length, 0);
+});
+
+test("/chain-spec is a JSON 503 (never HTML) when the AP is unreachable", async () => {
+  const res = await worker.fetch(new Request("https://gpncoin.ai/chain-spec"), {}, {
+    waitUntil() {},
+  });
+  assert.equal(res.status, 503);
+  assert.match(res.headers.get("content-type"), /application\/json/);
+  assert.match((await res.json()).error, /chain spec unavailable/);
+});
+
+test("/chain-spec passes through upstream errors and rejects non-GET", async () => {
+  const env = {
+    AP_JOB_URL: "http://203.0.113.7:8092",
+    __test_ap_transport: async () => ({
+      status: 500,
+      contentType: "application/json",
+      body: '{"error":"no spec file"}',
+    }),
+  };
+  const res = await worker.fetch(new Request("https://gpncoin.ai/chain-spec"), env, {
+    waitUntil() {},
+  });
+  assert.equal(res.status, 500);
+  assert.equal((await res.json()).error, "no spec file");
+
+  const post = await worker.fetch(
+    new Request("https://gpncoin.ai/chain-spec", { method: "POST" }),
+    env,
+    { waitUntil() {} },
+  );
+  assert.equal(post.status, 405);
+  assert.match(post.headers.get("allow"), /GET/);
+
+  const opt = await worker.fetch(
+    new Request("https://gpncoin.ai/chain-spec", { method: "OPTIONS" }),
+    env,
+    { waitUntil() {} },
+  );
+  assert.equal(opt.status, 204);
+});
+
+test("HEAD /chain-spec answers 200 with no body", async () => {
+  const env = {
+    AP_JOB_URL: "http://203.0.113.7:8092",
+    __test_ap_transport: async () => ({
+      status: 200,
+      contentType: "application/json",
+      body: '{"genesis":{},"bootNodes":[]}',
+    }),
+  };
+  const res = await worker.fetch(
+    new Request("https://gpncoin.ai/chain-spec", { method: "HEAD" }),
+    env,
+    { waitUntil() {} },
+  );
+  assert.equal(res.status, 200);
+  assert.equal(await res.text(), "");
+});

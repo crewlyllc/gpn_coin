@@ -7,8 +7,11 @@
 //!   default (`~/.gpn/node` on Unix, `C:\gpn\data` on Windows), created on
 //!   first use. It holds the node database **and** the wallet keystore.
 //! * **chain spec** — `GPN_CHAIN` (or config `chain`), else
-//!   `<base>/testnet-spec.json`, else it is **fetched** from the public access
-//!   point (`GET /genesis-spec`) and saved there. No prompt; one log line.
+//!   `<base>/testnet-spec.json`, else it is **fetched** over HTTPS from
+//!   `https://gpncoin.ai/chain-spec` (legacy HTTP access point as fallback)
+//!   and saved there. The fetched spec is verified against the pinned genesis
+//!   hash before it is used, and its `bootNodes` are sanitised.
+//!   No prompt; one log line.
 //! * **wallet** — `GPN_SIGNER` → config `signer` → `GPN_SIGNER_FILE` →
 //!   config `signer_file` → `<base>/keystore.json`. If none exists and stdin is
 //!   a TTY, the wizard generates/imports one. If stdin is **not** a TTY
@@ -29,8 +32,15 @@ use sp_core::sr25519;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
-/// Public access point endpoint that serves the canonical chain spec.
-/// `gpn_scheduler` exposes it at `GET /genesis-spec`.
+/// Canonical chain-spec URL (HTTPS, served by the gpncoin.ai Worker).
+///
+/// The installer must never depend on plain HTTP from a home box: that path
+/// once served a stale spec whose only bootnode was `127.0.0.1`, so every
+/// fresh install dialled itself and never joined.
+pub const GENESIS_SPEC_URL_HTTPS: &str = "https://gpncoin.ai/chain-spec";
+
+/// Legacy plain-HTTP endpoint (the access point on :8092). Kept as a
+/// fallback during the transition, never as the primary source.
 pub const GENESIS_SPEC_URL: &str = "http://gpn-testnet.duckdns.org:8092/genesis-spec";
 
 /// File name of the pinned testnet spec inside the base path.
@@ -173,6 +183,9 @@ pub fn help_text() -> String {
         "  GPN_BASE_PATH         node data dir - chain DB + wallet\n",
         "                        (default ~/.gpn/node; Windows C:\\gpn\\data)\n",
         "  GPN_CHAIN             chain spec: testnet | mainnet | dev | <path>\n",
+        "  GPN_SPEC_URL          chain-spec URL (default https://gpncoin.ai/chain-spec)\n",
+        "  GPN_BOOTNODES         comma-separated bootnode multiaddrs (belt and braces:\n",
+        "                        used when a fetched spec has none usable)\n",
         "  GPN_SIGNER            signer URI / seed / mnemonic\n",
         "  GPN_SIGNER_FILE       sr25519 JSON keystore (owner-only, 0600)\n",
         "  GPN_PUBLIC_ADDR       public multiaddr, e.g. /dns4/host/tcp/30333\n",
@@ -334,9 +347,10 @@ where
     }
 
     println!(
-        "[gpn_node] chain spec: could not fetch {GENESIS_SPEC_URL} — falling back to the \
-         built-in `testnet` spec (the node will still start; set GPN_CHAIN to a local spec \
-         file if the genesis hash must be pinned)"
+        "[gpn_node] chain spec: no verified spec could be fetched ({GENESIS_SPEC_URL_HTTPS}, \
+         then {GENESIS_SPEC_URL}) — falling back to the built-in `testnet` spec. The node will \
+         still start; set GPN_CHAIN to a local spec file (or GPN_SPEC_URL to a known-good \
+         mirror) if the genesis hash must be pinned."
     );
     ChainResolution {
         chain: "testnet".to_string(),
@@ -353,22 +367,46 @@ where
     let url = std::env::var("GPN_SPEC_URL")
         .ok()
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| GENESIS_SPEC_URL.to_string());
+        .unwrap_or_else(|| GENESIS_SPEC_URL_HTTPS.to_string());
     match fetch(&url) {
-        Ok(body) => match write_spec(dest, &body) {
-            Ok(()) => {
-                println!(
-                    "[gpn_node] chain spec: {} -> {} (auto)",
-                    url,
-                    dest.display()
-                );
-                Some(dest.to_path_buf())
+        Ok(body) => {
+            // Never persist a spec that dials loopback/private addresses: strip
+            // them, and if nothing is left fall back to GPN_BOOTNODES (or the
+            // canonical list). The stored genesis stays byte-identical.
+            let fallback = crate::chainspec::bootnodes_from_env();
+            let body = match crate::chainspec::sanitize_spec_bootnodes(&body, &fallback) {
+                Ok(p) => {
+                    if !p.dropped.is_empty() {
+                        println!(
+                            "[gpn_node] chain spec: dropped {} undialable bootnode(s): {}",
+                            p.dropped.len(),
+                            p.dropped.join(", ")
+                        );
+                    }
+                    if p.used_fallback {
+                        println!(
+                            "[gpn_node] chain spec: no usable bootNodes in the fetched spec — using {} fallback bootnode(s)",
+                            p.bootnodes.len()
+                        );
+                    }
+                    p.body
+                }
+                Err(e) => {
+                    eprintln!("[gpn_node] chain spec: fetched {url} but it is not usable: {e}");
+                    return None;
+                }
+            };
+            match write_spec(dest, &body) {
+                Ok(()) => {
+                    println!("[gpn_node] chain spec: saved -> {} (auto)", dest.display());
+                    Some(dest.to_path_buf())
+                }
+                Err(e) => {
+                    eprintln!("[gpn_node] chain spec: fetched {url} but could not save it: {e}");
+                    None
+                }
             }
-            Err(e) => {
-                eprintln!("[gpn_node] chain spec: fetched {url} but could not save it: {e}");
-                None
-            }
-        },
+        }
         Err(e) => {
             eprintln!("[gpn_node] chain spec: fetch {url} failed: {e}");
             None
@@ -421,7 +459,46 @@ pub fn fetch_spec(url: &str) -> Result<String, String> {
 }
 
 fn fetch_spec_guarded(url: &str) -> Result<String, String> {
-    fetch_spec(url)
+    // Primary is HTTPS; the legacy plain-HTTP access point is a transition
+    // fallback only (and only when no explicit GPN_SPEC_URL was given).
+    let mut urls = vec![url.to_string()];
+    if url == GENESIS_SPEC_URL_HTTPS {
+        urls.push(GENESIS_SPEC_URL.to_string());
+    }
+    let fallback = crate::chainspec::bootnodes_from_env();
+    let mut errors: Vec<String> = Vec::new();
+    for u in urls {
+        match fetch_spec(&u) {
+            Ok(spec) => match crate::chainspec::prepare_spec(&spec, &fallback) {
+                Ok(p) => {
+                    println!(
+                        "[gpn_node] chain spec: source {u} · genesis {} (verified) · bootnodes {}",
+                        crate::chainspec::EXPECTED_GENESIS_HASH,
+                        p.bootnodes.join(",")
+                    );
+                    if !p.dropped.is_empty() {
+                        println!(
+                            "[gpn_node] chain spec: dropped {} undialable bootnode(s) from {u}: {}",
+                            p.dropped.len(),
+                            p.dropped.join(", ")
+                        );
+                    }
+                    return Ok(p.body);
+                }
+                Err(e) => {
+                    // A spec that fails verification is REFUSED — never used,
+                    // never silently replaced by a different chain.
+                    eprintln!("[gpn_node] chain spec: REFUSED {u}: {e}");
+                    errors.push(format!("{u}: {e}"));
+                }
+            },
+            Err(e) => {
+                eprintln!("[gpn_node] chain spec: fetch {u} failed: {e}");
+                errors.push(format!("{u}: {e}"));
+            }
+        }
+    }
+    Err(errors.join("; "))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1277,12 +1354,28 @@ mod tests {
     fn missing_spec_is_fetched_and_saved() {
         let b = td("fetch");
         let r = resolve_chain_with(None, &b, |url| {
-            assert_eq!(url, GENESIS_SPEC_URL);
+            assert_eq!(url, GENESIS_SPEC_URL_HTTPS);
             Ok(VALID_SPEC.to_string())
         });
         assert_eq!(r.source, ChainSource::Fetched);
         assert!(b.join(DEFAULT_SPEC_FILE).is_file());
         assert_eq!(r.chain, b.join(DEFAULT_SPEC_FILE).to_string_lossy());
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn fetched_spec_bootnodes_are_sanitized_before_saving() {
+        let b = td("sanitize");
+        let body = r#"{"name":"t","id":"t","bootNodes":["/ip4/127.0.0.1/tcp/30333/p2p/12D3KooWabc"],"genesis":{"runtimeGenesis":{"code":"0x00"}}}"#;
+        let r = resolve_chain_with(None, &b, |_| Ok(body.to_string()));
+        assert_eq!(r.source, ChainSource::Fetched);
+        let saved = std::fs::read_to_string(b.join(DEFAULT_SPEC_FILE)).unwrap();
+        assert!(!saved.contains("127.0.0.1"), "loopback must never be saved: {saved}");
+        let v: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        assert_eq!(
+            v["bootNodes"],
+            serde_json::json!(crate::chainspec::bootnodes_from_env())
+        );
         let _ = std::fs::remove_dir_all(&b);
     }
 
