@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Chat — talk to the GPN testnet</title>
+<meta name="description" content="A simple ChatGPT-style chat for the GPN public testnet. Free, OpenAI-compatible, small open models on consumer GPUs. No signup, no API key." />
+<meta name="theme-color" content="#07090f" />
+<link rel="canonical" href="https://gpncoin.ai/chat" />
+<meta property="og:site_name" content="GPN" />
+<meta property="og:url" content="https://gpncoin.ai/chat" />
+<meta property="og:image" content="https://gpncoin.ai/assets/og.png" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:image" content="https://gpncoin.ai/assets/og.png" />
+<meta property="og:title" content="Chat — talk to the GPN testnet" />
+<meta property="og:description" content="A familiar chat window in front of an unfamiliar network: free OpenAI-compatible inference on small open models." />
+<meta property="og:type" content="website" />
+<meta name="twitter:title" content="Chat — talk to the GPN testnet" />
+<meta name="twitter:description" content="Free OpenAI-compatible inference on small open models. Not a frontier model — and it says so." />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237c6cff'/%3E%3Ctext x='16' y='22' font-size='16' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%2307090f'%3EG%3C/text%3E%3C/svg%3E" />
+<link rel="stylesheet" href="assets/style.css" />
+<link rel="stylesheet" href="assets/chat.css" />
+</head>
+<body class="chat-body">
+<a class="skip-link" href="#messages">Skip to messages</a>
+
+<header class="site-header">
+  <div class="wrap nav">
+    <a class="brand" href="index.html" aria-label="GPN home"><span class="dot" aria-hidden="true">G</span><span>GPN<br><small>GPU-NATIVE NETWORK</small></span></a>
+    <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Toggle navigation">☰</button>
+    <nav class="nav-links" id="nav-links" aria-label="Primary">
+      <a href="index.html">Home</a>
+      <a href="download.html">Download</a>
+      <a href="deploy.html">Deploy</a>
+      <a href="ai.html">AI</a>
+      <a href="chat.html" aria-current="page">Chat</a>
+      <a href="access-points.html">Access Points</a>
+      <a href="nodes.html">Nodes</a>
+      <a href="buy.html">Buy GPN</a>
+      <a href="docs/index.html">Docs</a>
+      <a href="contact.html">Contact</a>
+      <a href="index.html#join">Join us</a>
+    </nav>
+    <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
+  </div>
+</header>
+
+<div class="chat-shell" id="chat-shell">
+  <button class="chat-backdrop" id="chat-backdrop" type="button" aria-label="Close conversation list" hidden></button>
+
+  <aside class="chat-sidebar" id="chat-sidebar" aria-label="Conversations">
+    <div class="sidebar-head">
+      <button class="btn small new-chat" id="new-chat" type="button"><span aria-hidden="true">+</span> New chat</button>
+    </div>
+
+    <div class="conv-list" id="conv-list" role="list"></div>
+    <p class="conv-empty" id="conv-empty">No saved chats yet. They stay in this browser only.</p>
+
+    <div class="sidebar-foot">
+      <label for="model-select" class="sidebar-label">Model</label>
+      <select id="model-select" aria-describedby="model-note"></select>
+      <p class="sidebar-note" id="model-note">&nbsp;</p>
+      <div class="sidebar-actions">
+        <button class="link-btn" id="export-btn" type="button" disabled>Export .md</button>
+        <button class="link-btn danger" id="clear-all" type="button">Clear all</button>
+      </div>
+      <p class="sidebar-note"><a href="ai.html">Open the full API page →</a></p>
+    </div>
+  </aside>
+
+  <div class="chat-main">
+    <div class="chat-topbar">
+      <button class="chat-menu" id="chat-menu" type="button" aria-expanded="false" aria-controls="chat-sidebar" aria-label="Open conversation list">☰</button>
+      <div class="topbar-title">
+        <b>GPN chat</b>
+        <span class="topbar-sub" id="chat-status">Testnet · free · open models</span>
+      </div>
+      <a class="topbar-link" href="ai.html">API docs</a>
+    </div>
+
+    <div class="chat-scroll" id="chat-scroll">
+      <section class="empty-state" id="empty-state">
+        <div class="empty-inner">
+          <span class="empty-dot" aria-hidden="true">G</span>
+          <h1>Testnet · free · open models 0.5B–7B.<br><span class="muted">Not a frontier model.</span></h1>
+          <p class="empty-copy">A familiar chat window in front of an unfamiliar network. Every reply is one GPU
+            job on the GPN public testnet — small open models on consumer cards, rate-limited to 12 chats per
+            10 minutes. Don't paste secrets: prompts are visible to the access point and the provider.</p>
+          <p class="empty-copy"><b>Running the smallest models for speed</b> — switch models above if you want
+            to trade latency for quality.</p>
+          <div class="starters" id="starters" aria-label="Starter prompts"></div>
+          <p class="empty-foot">Want the raw endpoint? <a href="ai.html">curl, Python and Node examples →</a></p>
+        </div>
+      </section>
+
+      <div class="messages" id="messages" role="log" aria-live="polite" aria-relevant="additions text" hidden></div>
+    </div>
+
+    <form class="composer" id="composer" autocomplete="off">
+      <div class="composer-inner">
+        <label class="sr-only" for="composer-input">Message</label>
+        <textarea id="composer-input" rows="1" maxlength="8000" spellcheck="false"
+                  placeholder="Message the testnet…  (Enter to send, Shift+Enter for a new line)"></textarea>
+        <div class="composer-buttons">
+          <button class="btn small" id="send-btn" type="submit">Send</button>
+          <button class="btn small ghost" id="stop-btn" type="button" hidden>Stop</button>
+        </div>
+      </div>
+      <p class="composer-note" id="composer-note" role="status" aria-live="polite"></p>
+    </form>
+  </div>
+</div>
+
+<script src="assets/chat.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

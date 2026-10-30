@@ -241,6 +241,12 @@ jobs:
       - name: Join form copy + fallback address
         run: node website/tests/join-form.test.js
 
+      # Chat page (/chat): the markdown renderer's escape boundary (script tags,
+      # javascript:/data: links, nested fences), the SSE chunk parser, the
+      # conversation cap, and the API error copy. Pure Node, no browser.
+      - name: Chat page (markdown + SSE + storage caps)
+        run: node website/tests/chat.test.js
+
       # The Worker's /api/join path: proxies to the AP, keeps the always-200
       # JSON shape, and falls back to email only when nothing was stored.
       - name: Worker unit tests (/api/join + proxies)

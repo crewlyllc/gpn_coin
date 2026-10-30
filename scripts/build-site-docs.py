@@ -96,6 +96,7 @@ NAV = [
     ("../download.html", "Download", "download"),
     ("../deploy.html", "Deploy", "deploy"),
     ("../ai.html", "AI", "ai"),
+    ("../chat.html", "Chat", "chat"),
     ("../access-points.html", "Access Points", "access-points"),
     ("../nodes.html", "Nodes", "nodes"),
     ("../buy.html", "Buy GPN", "buy"),
