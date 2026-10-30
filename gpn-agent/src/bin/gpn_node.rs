@@ -2495,6 +2495,80 @@ fn on_path(name: &str) -> bool {
     false
 }
 
+/// What `--ref` looked like on the command line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RefArg {
+    /// `--ref CODE` / `--ref=CODE`.
+    Code(String),
+    /// A bare `--ref` with nothing after it.
+    MissingValue,
+}
+
+/// Find `--ref CODE` or `--ref=CODE` in a full `argv` (index 0 is skipped).
+///
+/// The LAST occurrence wins, matching the usual "later flags override" rule.
+/// Pure: no filesystem, no env — the caller decides whether to store it.
+pub(crate) fn ref_from_argv(argv: &[String]) -> Option<RefArg> {
+    let mut found: Option<RefArg> = None;
+    let mut i = 1;
+    while i < argv.len() {
+        let a = &argv[i];
+        if let Some(v) = a.strip_prefix("--ref=") {
+            found = Some(RefArg::Code(v.to_string()));
+        } else if a == "--ref" {
+            match argv.get(i + 1) {
+                Some(v) => {
+                    found = Some(RefArg::Code(v.clone()));
+                    i += 1;
+                }
+                None => found = Some(RefArg::MissingValue),
+            }
+        }
+        i += 1;
+    }
+    found
+}
+
+/// Record the `--ref` code, once, at `path`.
+///
+/// This is deliberately **non-fatal** in every direction: a code that is
+/// already set, malformed, or an unwritable prefix only produces a log line — a
+/// referral never stops a node from starting. Write-once lives in
+/// [`gpn_agent::referral::write_once`], so a second `--ref` cannot rewrite the
+/// first.
+fn apply_ref_arg(argv: &[String], path: &std::path::Path) {
+    use gpn_agent::referral::{write_once, WriteOutcome};
+    let arg = match ref_from_argv(argv) {
+        Some(a) => a,
+        None => return,
+    };
+    let raw = match arg {
+        RefArg::Code(c) => c,
+        RefArg::MissingValue => {
+            asciieprintln!(
+                "[referral] --ref needs a code (4-32 chars, [A-Za-z0-9_-]) — continuing without a referral"
+            );
+            return;
+        }
+    };
+    match write_once(path, &raw) {
+        Ok(WriteOutcome::Written(code)) => asciiprintln!(
+            "[referral] recorded '{code}' -> {} (write-once; used for the mainnet testnet-participation allocation)",
+            path.display()
+        ),
+        Ok(WriteOutcome::AlreadySet(have)) => asciiprintln!(
+            "[referral] already set to '{have}'; ignoring --ref '{raw}'"
+        ),
+        Ok(WriteOutcome::Invalid(e)) => asciieprintln!(
+            "[referral] invalid code '{raw}': {e} — continuing WITHOUT a referral"
+        ),
+        Err(e) => asciieprintln!(
+            "[referral] could not write {}: {e} — continuing WITHOUT a referral",
+            path.display()
+        ),
+    }
+}
+
 /// `gpn_node --setup` — one-shot bootstrap of the REQUIRED ollama component.
 ///
 /// Installs (if absent), starts `ollama serve` detached, waits for `/api/tags`,
@@ -2646,7 +2720,14 @@ async fn main() {
     let argv: Vec<String> = std::env::args().collect();
     set_ascii_mode(ascii_mode_default(&argv));
 
-    // ── Informational flags, answered BEFORE first-run/setup detection. ─────
+    // ── Referral capture: `--ref CODE` / `--ref=CODE` (write-once). ─────────
+    // Applied before the informational flags so a `--help`/`--version` probe
+    // can double as a cheap, side-effect-free-otherwise way to record a code
+    // (nothing else in the node has run yet: no config, no network, no wallet).
+    // Without `--ref` this is a no-op and the node behaves exactly as before.
+    apply_ref_arg(&argv, &gpn_agent::referral::default_path());
+
+    // ── Informational flags, answered BEFORE first-run/setup detection. ────
     // `--version`/`-V` and `--help`/`-h` must never enter `Config::load()`
     // (that creates the base dir, may fetch the chain spec and can run the
     // wallet wizard). Pure output, exit 0.
@@ -3270,6 +3351,71 @@ mod tests {
     fn ascii_safe_output_is_always_ascii() {
         let s = "\u{26a0}\u{fe0f} \u{1f680} \u{2705} \u{2014} \u{2026} \u{2022}";
         assert!(to_ascii_safe(s).is_ascii());
+    }
+
+    // ── referral flag (`--ref`) ────────────────────────────────────────────
+
+    #[test]
+    fn ref_flag_is_parsed_in_every_published_form() {
+        // `--ref CODE`
+        assert_eq!(
+            ref_from_argv(&args(&["gpn_node", "--ref", "abc123"])),
+            Some(RefArg::Code("abc123".into()))
+        );
+        // `--ref=CODE`
+        assert_eq!(
+            ref_from_argv(&args(&["gpn_node", "--ref=abc123"])),
+            Some(RefArg::Code("abc123".into()))
+        );
+        // The exact Windows snippet order: --setup then --ref.
+        assert_eq!(
+            ref_from_argv(&args(&["gpn_node", "--setup", "--ref", "abc123"])),
+            Some(RefArg::Code("abc123".into()))
+        );
+        // …and the other order, and with other flags around it.
+        assert_eq!(
+            ref_from_argv(&args(&["gpn_node", "--ref", "abc123", "--setup"])),
+            Some(RefArg::Code("abc123".into()))
+        );
+        assert_eq!(
+            ref_from_argv(&args(&["gpn_node", "--gui", "--ref=abc123", "--setup"])),
+            Some(RefArg::Code("abc123".into()))
+        );
+        // A bare --ref (nothing after it) is reported, not silently dropped.
+        assert_eq!(
+            ref_from_argv(&args(&["gpn_node", "--ref"])),
+            Some(RefArg::MissingValue)
+        );
+        // No flag at all: nothing to do (the pre-referral world).
+        assert_eq!(ref_from_argv(&args(&["gpn_node", "--setup"])), None);
+        assert_eq!(ref_from_argv(&args(&["gpn_node"])), None);
+    }
+
+    #[test]
+    fn apply_ref_arg_writes_once_and_never_fails() {
+        let dir = td("ref-apply");
+        let p = dir.join("referral");
+
+        // First write wins.
+        apply_ref_arg(&args(&["gpn_node", "--setup", "--ref", "team-alpha"]), &p);
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "team-alpha\n");
+
+        // A different code later changes nothing (log line only, no panic).
+        apply_ref_arg(&args(&["gpn_node", "--ref=other-team"]), &p);
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "team-alpha\n");
+    }
+
+    #[test]
+    fn apply_ref_arg_rejects_bad_codes_without_creating_the_file() {
+        let dir = td("ref-bad");
+        let p = dir.join("referral");
+
+        for bad in ["abc", "has space", "quote\"d", "<script>", ""] {
+            apply_ref_arg(&args(&["gpn_node", "--ref", bad]), &p);
+            assert!(!p.exists(), "{bad:?} must not create the referral file");
+        }
+        apply_ref_arg(&args(&["gpn_node", "--ref"]), &p);
+        assert!(!p.exists(), "a bare --ref must not create the file");
     }
 }
 

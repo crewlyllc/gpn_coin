@@ -365,7 +365,63 @@
     });
   }
 
-  function init() { wireTheme(); wireNav(); wireYear(); wireTryIt(); wireCopy(); wireTabs(); wireJoinForm(); }
+  /* ---------- Referral links (`?ref=CODE`) ----------
+     A download URL cannot carry a query param into a zip, so the page bakes
+     the code into the copy-paste command instead: every `<span
+     data-ref-arg></span>` placeholder becomes " --ref CODE". The code is
+     validated and written as TEXT (assets/referral.js); with no code the
+     placeholders stay empty and the page is byte-identical to before.
+
+     Persisted in sessionStorage so it survives clicking around the site. */
+  function wireReferral() {
+    var R = window.GPN && window.GPN.referral;
+    if (!R) return;
+    var KEY = "gpn-ref";
+    var DISMISSED = "gpn-ref-note-dismissed";
+
+    var code = R.fromSearch(window.location.search);
+    if (code) {
+      try { sessionStorage.setItem(KEY, code); } catch (e) { /* storage off */ }
+    } else {
+      try { code = R.validate(sessionStorage.getItem(KEY) || ""); } catch (e) { code = null; }
+    }
+    if (!code) return;
+
+    var targets = document.querySelectorAll("[data-ref-arg]");
+    if (!targets.length) return;
+    Array.prototype.forEach.call(targets, function (el) { R.renderInto(el, code); });
+
+    var dismissed = false;
+    try { dismissed = sessionStorage.getItem(DISMISSED) === code; } catch (e) {}
+    if (dismissed) return;
+
+    var note = document.createElement("p");
+    note.className = "ref-note small muted";
+    note.setAttribute("role", "status");
+
+    var text = document.createElement("span");
+    /* textContent, not markup assignment: `code` is URL input. */
+    text.textContent = "Referral: " + code + " \u2014 recorded once on first run";
+    note.appendChild(text);
+
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn small ghost no-print";
+    btn.textContent = "Dismiss";
+    btn.addEventListener("click", function () {
+      note.parentNode && note.parentNode.removeChild(note);
+      try { sessionStorage.setItem(DISMISSED, code); } catch (e) {}
+    });
+    note.appendChild(document.createTextNode(" "));
+    note.appendChild(btn);
+
+    /* Place the note next to the first command it applies to. */
+    var anchor = targets[0].closest ? targets[0].closest(".field, .codeblock") : null;
+    var host = anchor || targets[0].parentNode;
+    if (host && host.parentNode) host.parentNode.insertBefore(note, host.nextSibling);
+  }
+
+  function init() { wireTheme(); wireNav(); wireYear(); wireTryIt(); wireCopy(); wireTabs(); wireReferral(); wireJoinForm(); }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
   else init();
 })();

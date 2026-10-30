@@ -169,6 +169,14 @@ pub fn help_text() -> String {
         "                         the node keeps syncing/peering; auto-resumes\n",
         "  gpn_node resume        end an idle window now\n",
         "  gpn_node --setup       one-time bootstrap: wallet + ollama (interactive)\n",
+        "  gpn_node --setup --ref CODE\n",
+        "                         the same, recording who referred you (optional;\n",
+        "                         also works without --setup: `gpn_node --ref CODE`)\n",
+        "  gpn_node --ref CODE    record a referral code, once, in ~/.gpn/referral\n",
+        "                         (4-32 chars of [A-Za-z0-9_-]; --ref=CODE works\n",
+        "                         too). Write-once: an existing code is kept and\n",
+        "                         the new one is ignored with a log line. Invalid\n",
+        "                         codes only warn - a referral never blocks a start.\n",
         "  gpn_node --ensure-wallet  headless: create this machine's wallet if\n",
         "                         missing, print the payout address, exit (used\n",
         "                         by the service/launcher on every start)\n",
@@ -1309,6 +1317,10 @@ mod tests {
             h.contains("--version") && h.contains("--help") && h.contains("--setup"),
             "{h}"
         );
+        assert!(
+            h.contains("--ref CODE") && h.contains("--ref=CODE"),
+            "--help must document the referral flag: {h}"
+        );
         for key in [
             "GPN_BASE_PATH",
             "GPN_CHAIN",
@@ -1370,7 +1382,10 @@ mod tests {
         let r = resolve_chain_with(None, &b, |_| Ok(body.to_string()));
         assert_eq!(r.source, ChainSource::Fetched);
         let saved = std::fs::read_to_string(b.join(DEFAULT_SPEC_FILE)).unwrap();
-        assert!(!saved.contains("127.0.0.1"), "loopback must never be saved: {saved}");
+        assert!(
+            !saved.contains("127.0.0.1"),
+            "loopback must never be saved: {saved}"
+        );
         let v: serde_json::Value = serde_json::from_str(&saved).unwrap();
         assert_eq!(
             v["bootNodes"],

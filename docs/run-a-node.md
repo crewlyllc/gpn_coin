@@ -46,8 +46,29 @@ If somebody referred you to the testnet, pass their code at install time:
 ./install.sh --ref team-alpha          # or: GPN_REF=team-alpha ./install.sh
 ```
 
-Windows: `.\run-windows-provider.ps1 -Ref team-alpha` (env `GPN_REF` also works).
+Windows: `.\run-windows-provider.ps1 -Ref team-alpha` (env `GPN_REF` also works),
+or the binary directly: `.\bin\gpn_node.exe --setup --ref team-alpha`.
 
+If you installed a prebuilt release and never ran `install.sh`, the node binary
+takes the same flag itself, on first run:
+
+```bash
+./gpn_node --setup --ref team-alpha    # wallet + ollama bootstrap; code recorded
+./gpn_node --ref team-alpha            # standalone (no --setup)
+./gpn_node --ref=team-alpha            # --ref=CODE works too
+```
+
+**Share links.** `https://gpncoin.ai/download?ref=team-alpha` (also `?r=`) renders
+the code into the page's copy-paste commands: the Windows block becomes
+`.\bin\gpn_node.exe --setup --ref team-alpha` and the Linux block
+`./install.sh --ref team-alpha`. The page validates the code against
+`^[A-Za-z0-9_-]{4,32}$` and silently ignores anything else (that is the XSS
+boundary: the value is written as text, never as markup), and remembers it for
+the browser session so it survives clicking around the site.
+
+- Write-once: the binary stores the code only if `$GPN_PREFIX/referral` does not
+  exist yet; an existing value wins and the new `--ref` is ignored with a log
+  line (`[referral] already set to …; ignoring --ref …`).
 - Format: **4–32 characters**, letters/digits/`-`/`_`. An invalid code only
   prints a warning — it never fails an install.
 - Stored **once** in `~/.gpn/referral` (one line). A later `--ref` is ignored

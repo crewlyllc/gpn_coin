@@ -340,6 +340,19 @@ textarea { resize: vertical; min-height: 96px; font-family: var(--font); }
 .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 @media (max-width: 620px) { .field-row { grid-template-columns: 1fr; } }
 
+/* ---------- Referral note (?ref=CODE) ---------- */
+.ref-note {
+  margin: 8px 0 18px;
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent);
+  background: var(--panel);
+  border-radius: var(--radius-sm);
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
 /* ---------- Try-it result ---------- */
 .result {
   margin-top: 16px; border: 1px solid var(--line); border-radius: var(--radius-sm);

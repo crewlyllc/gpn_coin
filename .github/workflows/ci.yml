@@ -230,6 +230,12 @@ jobs:
       - name: Referral capture (install + write-once + snapshot)
         run: bash scripts/tests/test-referral.sh
 
+      # Referral download links (`?ref=CODE`): the page-side half. Pure Node,
+      # no browser: validation rule, URL parsing, and the XSS boundary (the
+      # code is only ever written as text, never as markup).
+      - name: Referral links (website ?ref= validation)
+        run: node website/tests/referral.test.js
+
   # ---------------------------------------------------------------------------
   # Desktop matrix — EXPERIMENTAL and MANUAL ONLY. macOS/Windows need paid
   # GitHub-hosted minutes which this account cannot use, so a normal push no

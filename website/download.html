@@ -75,7 +75,7 @@
             installs a user-local Ollama + baseline models, and writes <code>~/.gpn/gpn.env</code>.</p>
           <div class="field">
             <label for="cmd-install">From a clone</label>
-            <pre id="cmd-install"><code>./install.sh</code></pre>
+            <pre id="cmd-install"><code>./install.sh<span data-ref-arg></span></code></pre>
             <button class="btn small ghost no-print" data-copy="#cmd-install" type="button">Copy</button>
           </div>
           <p class="small muted mb-0">Or pipe from a hosted copy (once the repo is public):
@@ -98,6 +98,20 @@
             <a href="access-points.html">access-points page</a>.</p>
         </div>
       </div>
+
+      <div class="field" style="margin-top:20px">
+        <label for="cmd-win-node">Windows (prebuilt zip) — node + miner/agent</label>
+        <pre id="cmd-win-node"><code>New-Item -ItemType Directory -Force C:\gpn | Out-Null
+curl.exe -L -o C:\gpn\gpn-windows.zip https://github.com/crewlyllc/gpn_coin/releases/download/windows-latest/gpn-windows.zip
+Expand-Archive C:\gpn\gpn-windows.zip -DestinationPath C:\gpn\bin -Force
+cd C:\gpn
+.\bin\gpn_node.exe --setup<span data-ref-arg></span>
+.\bin\gpn_node.exe</code></pre>
+        <button class="btn small ghost no-print" data-copy="#cmd-win-node" type="button">Copy</button>
+      </div>
+      <p class="small muted mb-0">No Rust toolchain needed on Windows. <code>--setup</code> asks once
+        whether to generate or import a wallet; that wallet is your node identity and payout address.
+        The same block is on the <a href="index.html#join">home page</a>.</p>
     </div>
   </section>
 
@@ -259,6 +273,7 @@ cd gpn_coin</code></pre>
   </div>
 </footer>
 
+<script src="assets/referral.js"></script>
 <script src="assets/app.js"></script>
 </body>
 </html>

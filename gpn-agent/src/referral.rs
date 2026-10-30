@@ -123,11 +123,18 @@ pub fn normalize(code: &str) -> String {
 }
 
 /// `$GPN_PREFIX`, defaulting to `~/.gpn`.
+///
+/// `HOME` is the Unix convention; Windows shells set `USERPROFILE` (and often
+/// not `HOME`), so both are consulted — otherwise `gpn_node.exe --ref` would
+/// write to `./.gpn/referral` while the PowerShell installer writes to
+/// `%USERPROFILE%\.gpn\referral`, and a Windows operator would end up with two
+/// different referral files.
 pub fn prefix_dir() -> PathBuf {
     std::env::var_os("GPN_PREFIX")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             let home = std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("."));
             home.join(".gpn")
