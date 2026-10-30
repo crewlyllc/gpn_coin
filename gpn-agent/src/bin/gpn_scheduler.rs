@@ -7872,8 +7872,10 @@ mod tests {
     /// The served document is byte-identical outside the `bootNodes` array.
     #[test]
     fn genesis_spec_rewrite_touches_only_the_array() {
-        let spec = r#"{"a":1,"bootNodes":[],"genesis":{"runtimeGenesis":{"code":"0x00"}},"z":[1,2]}"#;
-        let served = chain_spec_for_serving(spec, &["/ip4/203.0.113.9/tcp/30333".to_string()]).unwrap();
+        let spec =
+            r#"{"a":1,"bootNodes":[],"genesis":{"runtimeGenesis":{"code":"0x00"}},"z":[1,2]}"#;
+        let served =
+            chain_spec_for_serving(spec, &["/ip4/203.0.113.9/tcp/30333".to_string()]).unwrap();
         assert!(served.starts_with(r#"{"a":1,"bootNodes":["#));
         assert!(served.ends_with(r#""genesis":{"runtimeGenesis":{"code":"0x00"}},"z":[1,2]}"#));
     }

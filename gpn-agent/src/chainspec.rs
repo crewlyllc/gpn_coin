@@ -157,7 +157,8 @@ pub fn genesis_sha256(spec: &str) -> Result<String, String> {
         .get("genesis")
         .or_else(|| v.get("genesisRaw"))
         .ok_or("JSON has no `genesis` field — not a chain spec")?;
-    let bytes = serde_json::to_vec(genesis).map_err(|e| format!("genesis not serialisable: {e}"))?;
+    let bytes =
+        serde_json::to_vec(genesis).map_err(|e| format!("genesis not serialisable: {e}"))?;
     Ok(hex::encode(Sha256::digest(&bytes)))
 }
 
@@ -302,7 +303,12 @@ pub struct PreparedSpec {
 /// `fallback` (normally `GPN_BOOTNODES`, else the canonical list) is used when
 /// the spec itself carries no usable bootnode.
 pub fn prepare_spec(spec: &str, fallback: &[String]) -> Result<PreparedSpec, String> {
-    prepare_spec_with(spec, fallback, EXPECTED_GENESIS_HASH, EXPECTED_GENESIS_SHA256)
+    prepare_spec_with(
+        spec,
+        fallback,
+        EXPECTED_GENESIS_HASH,
+        EXPECTED_GENESIS_SHA256,
+    )
 }
 
 /// Bootnode hygiene only (no genesis verification).
@@ -416,11 +422,16 @@ mod tests {
     #[test]
     fn empty_or_loopback_bootnodes_are_stripped() {
         let local = vec![
-            "/ip4/127.0.0.1/tcp/30333/p2p/12D3KooWNm2fbwKaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
-            "/ip4/192.168.1.5/tcp/30333/p2p/12D3KooWNm2fbwKaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
-            "/ip4/10.0.0.2/tcp/30333/p2p/12D3KooWNm2fbwKaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
-            "/ip4/172.20.0.2/tcp/30333/p2p/12D3KooWNm2fbwKaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
-            "/dns4/localhost/tcp/30333/p2p/12D3KooWNm2fbwKaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            "/ip4/127.0.0.1/tcp/30333/p2p/12D3KooWNm2fbwKaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
+            "/ip4/192.168.1.5/tcp/30333/p2p/12D3KooWNm2fbwKaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
+            "/ip4/10.0.0.2/tcp/30333/p2p/12D3KooWNm2fbwKaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
+            "/ip4/172.20.0.2/tcp/30333/p2p/12D3KooWNm2fbwKaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
+            "/dns4/localhost/tcp/30333/p2p/12D3KooWNm2fbwKaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
         ];
         let (kept, dropped) = sanitize_bootnodes(&local);
         assert!(kept.is_empty());
@@ -429,7 +440,9 @@ mod tests {
         assert!(is_dialable_bootnode(CANONICAL_BOOTNODES[1]));
         assert!(is_dialable_bootnode(CANONICAL_BOOTNODES[2]));
         assert!(!is_dialable_bootnode("/ip4/127.0.0.1/tcp/30333"));
-        assert!(!is_dialable_bootnode("/ip4/127.0.0.1/tcp/30333/p2p/notapeer"));
+        assert!(!is_dialable_bootnode(
+            "/ip4/127.0.0.1/tcp/30333/p2p/notapeer"
+        ));
         assert!(!is_dialable_bootnode("/ip4/8.8.8.8/tcp/30333")); // no peer id
     }
 
@@ -445,11 +458,16 @@ mod tests {
             reparsed["bootNodes"],
             serde_json::json!(canonical_bootnodes())
         );
-        assert_eq!(genesis_sha256(&out.body).unwrap(), genesis_sha256(FIXTURE).unwrap());
+        assert_eq!(
+            genesis_sha256(&out.body).unwrap(),
+            genesis_sha256(FIXTURE).unwrap()
+        );
         // Everything outside bootNodes is byte-identical.
         let before = &FIXTURE[..FIXTURE.find("\"bootNodes\"").unwrap()];
         assert!(out.body.starts_with(before));
-        assert!(out.body.contains("\"properties\": {\"tokenDecimals\": 12, \"tokenSymbol\": \"GPN\"}"));
+        assert!(out
+            .body
+            .contains("\"properties\": {\"tokenDecimals\": 12, \"tokenSymbol\": \"GPN\"}"));
         assert!(out.body.contains("\"code\": \"0x0061736d\""));
     }
 
@@ -466,7 +484,10 @@ mod tests {
         assert_eq!(out.bootnodes, envlist);
         let reparsed: Value = serde_json::from_str(&out.body).unwrap();
         assert_eq!(reparsed["bootNodes"], serde_json::json!(envlist));
-        assert_eq!(genesis_sha256(&out.body).unwrap(), genesis_sha256(FIXTURE).unwrap());
+        assert_eq!(
+            genesis_sha256(&out.body).unwrap(),
+            genesis_sha256(FIXTURE).unwrap()
+        );
     }
 
     #[test]
@@ -489,10 +510,7 @@ mod tests {
         assert_eq!(bootnodes_from_str(Some("")), canonical_bootnodes());
         assert_eq!(bootnodes_from_str(None), canonical_bootnodes());
         // de-duplication
-        let dup = bootnodes_from_str(Some(&format!(
-            "{0},{0}",
-            CANONICAL_BOOTNODES[0]
-        )));
+        let dup = bootnodes_from_str(Some(&format!("{0},{0}", CANONICAL_BOOTNODES[0])));
         assert_eq!(dup.len(), 1);
     }
 
@@ -503,7 +521,10 @@ mod tests {
         let after = out.find("\"bootNodes\"").unwrap();
         assert_eq!(&FIXTURE[..before], &out[..after]);
         assert!(out.contains("\"bootNodes\": [\"/ip4/198.51.100.9/tcp/30333\"]"));
-        assert_eq!(genesis_sha256(&out).unwrap(), genesis_sha256(FIXTURE).unwrap());
+        assert_eq!(
+            genesis_sha256(&out).unwrap(),
+            genesis_sha256(FIXTURE).unwrap()
+        );
     }
 
     /// The real, shipped spec must match the pinned constants. Skipped (with a
