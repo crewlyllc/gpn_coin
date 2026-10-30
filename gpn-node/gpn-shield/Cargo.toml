@@ -1,6 +1,6 @@
 [package]
 name = "gpn-shield"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 description = "GPN shielded-pool client prover (Step 5): generates Groth16 proofs over BLS12-381 byte-compatible with pallet-shielded-pool's on-chain verifier"
 license = "Apache-2.0"

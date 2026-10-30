@@ -5159,3 +5159,11 @@ journal and no other errors.
 Fix: none needed — no restart, no flag change. Result: next request at 11:58:39 served normally
 (job 1793213918995, e2e 0.74s, 71 tok in 0.7s infer ≈ 100 tok/s, 1 claim, no storm); /jobs has 0
 Pending orphans (245 Completed / 7 Cancelled / 4 Failed). Watched for recurrence.
+
+Root cause sharpened (14:03 run): the RPC error was `ServerError(4003) UnknownBlock: State already
+discarded for 0xb8e4636a…` — a stale-block state read, not a node stall. The AP's `[pricing] feed
+source: UNREADABLE` logged the identical error in the same second (11:49:59) and re-read the feed
+successfully 30 s later, so both callers were reading state at a block the node had already pruned.
+Frequency: 2 occurrences in 4 days (Oct 26 12:20, Oct 28 11:49), both self-healing — a known
+pruning race, not a provider defect. No action; provider serves fine (e2e 0.53s, 227 tok/s,
+0 Pending orphans, txpool empty, all GPN units active).
