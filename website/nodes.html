@@ -43,6 +43,19 @@
   .role-seed { color: var(--accent-2); }
   .role-backbone { color: var(--amber); }
   .role-provider { color: var(--green); }
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px;
+    border-radius: 999px; font-size: .74rem; font-weight: 800; letter-spacing: .02em;
+    border: 1px solid var(--line); white-space: nowrap;
+  }
+  .badge .d { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .badge.serving { color: var(--green); border-color: rgba(63,185,80,.4); background: rgba(63,185,80,.08); }
+  .badge.peer { color: var(--accent-2); border-color: rgba(124,108,255,.4); background: rgba(124,108,255,.08); }
+  .badge.offline { color: var(--amber); border-color: rgba(240,166,58,.4); background: rgba(240,166,58,.08); }
+  .badge.cached { color: var(--muted); border-color: var(--line); }
+  .dir-table tr.offline-row td { opacity: .6; }
+  .dir-table tr.offline-row td:first-child { opacity: 1; }
+  .counts-note { margin-top: 10px; }
   .dir-empty { color: var(--muted-2); }
   .join-steps { display: grid; gap: 10px; margin: 12px 0 16px; padding: 0; list-style: none; counter-reset: step; }
   .join-steps li { position: relative; padding-left: 38px; color: var(--muted); counter-increment: step; }
@@ -105,11 +118,11 @@
     <div class="wrap">
       <span class="kicker">Network</span>
       <h1>Live node directory</h1>
-      <p>Every node this network knows how to reach: the <b>seeds</b> shipped with the client, plus the
-        <b>providers</b> an access point currently reports as healthy. It is read straight from
-        <code>/seeds.json</code> — the same directory a bootstrapping node uses, not a marketing list.</p>
+      <p>Who is on the network <b>right now</b>: the peers this network's own node is connected to
+        (<code>system_peers</code> plus itself), the providers an access point reports as healthy, and the
+        known seeds that are <b>not</b> currently connected — labelled, never counted as online.</p>
       <div class="dir-status">
-        <span class="chip neutral" id="status-chip"><span class="d"></span><span id="status-text">Loading directory…</span></span>
+        <span class="chip neutral" id="status-chip"><span class="d"></span><span id="status-text">Reading the chain…</span></span>
         <span class="small muted" id="refresh-text" aria-live="polite">—</span>
       </div>
     </div>
@@ -119,50 +132,50 @@
     <div class="wrap">
 
       <div class="callout danger" id="dir-error" hidden>
-        <span class="ct">Directory unreachable</span>
-        <p class="mb-0">The live directory could not be fetched, so nothing is listed here. This does not mean
-          the network is down — nodes still ship with the compiled-in seed list and will keep dialing it.
-          Try reloading, or read the raw JSON at <a href="/seeds.json"><code>/seeds.json</code></a>.</p>
+        <span class="ct">cached — live data unavailable</span>
+        <p class="mb-0">The live directory could not be read, so the rows below are the <b>last-known static
+          list</b> shipped with the client. Nothing here is live: do not read it as “these nodes are online”.
+          Nodes still dial the compiled-in seeds either way. Try reloading, or read the raw JSON at
+          <a href="/api/network"><code>/api/network</code></a> / <a href="/seeds.json"><code>/seeds.json</code></a>.</p>
       </div>
 
       <h2>Network at a glance</h2>
-      <p class="sub">Directory metadata, as published by the network itself.</p>
+      <p class="sub">Read from the chain this second, not from a hand-maintained list.</p>
 
       <div class="stats" id="summary">
-        <div class="stat"><div class="v tiny" id="s-network">…</div><div class="l">Network</div></div>
-        <div class="stat"><div class="v mono" id="s-chain">…</div><div class="l">Chain ID</div></div>
-        <div class="stat"><div class="v mono" id="s-genesis" title="">…</div><div class="l">Genesis (short)</div></div>
-        <div class="stat"><div class="v" id="s-updated">…</div><div class="l">Directory updated</div></div>
-        <div class="stat"><div class="v tiny" id="s-source">…</div><div class="l">Source</div></div>
-        <div class="stat"><div class="v" id="s-ttl">…</div><div class="l">TTL</div></div>
-        <div class="stat"><div class="v" id="s-providers">…</div><div class="l">Live providers</div></div>
-        <div class="stat"><div class="v" id="s-count">…</div><div class="l">Nodes listed</div></div>
+        <div class="stat"><div class="v" id="c-live">…</div><div class="l">Peers online</div></div>
+        <div class="stat"><div class="v" id="c-serving">…</div><div class="l">Serving AI</div></div>
+        <div class="stat"><div class="v" id="c-offline">…</div><div class="l">Offline (known)</div></div>
+        <div class="stat"><div class="v tiny mono" id="c-generated">…</div><div class="l">Chain read at</div></div>
       </div>
+      <p class="small muted counts-note" id="counts-note">Peers online counts distinct peer ids seen by the
+        network's node. Offline rows are known seeds/providers that are <b>not</b> in that set.</p>
 
       <h2 style="margin-top:34px">Nodes</h2>
-      <p class="sub">A <b>seed</b> is a fixed entry point shipped with the client. A <b>backbone</b> node is a
-        long-lived public full node. A <b>provider</b> is a GPU serving AI jobs right now. Only entries with a
-        <code>/p2p/&lt;peer-id&gt;</code> multiaddr are dialable; endpoints without one are shown for reference.</p>
+      <p class="sub">One row per machine, deduped by <code>peer-id</code>: a <b>serving</b> node is a healthy
+        provider (serving AI), a <b>peer-only</b> node is connected but serves no AI jobs, and an
+        <b>offline</b> node is a known seed or provider that is not connected right now.</p>
 
       <div class="table-wrap">
         <table class="dir-table" id="nodes-table">
           <caption class="sr-only" style="position:absolute;left:-9999px">Live GPN node directory</caption>
           <thead>
             <tr>
-              <th scope="col">Role</th>
-              <th scope="col">Multiaddr</th>
               <th scope="col">Peer ID</th>
-              <th scope="col">Source</th>
-              <th scope="col">Endpoint / address</th>
+              <th scope="col">Status</th>
+              <th scope="col">VRAM</th>
+              <th scope="col">Models</th>
+              <th scope="col">Address</th>
+              <th scope="col">Last seen</th>
             </tr>
           </thead>
           <tbody id="nodes-body">
-            <tr><td colspan="5" class="dir-empty">Loading the directory…</td></tr>
+            <tr><td colspan="6" class="dir-empty">Reading the chain…</td></tr>
           </tbody>
         </table>
       </div>
       <p class="small muted dir-note">Peer IDs are shortened to 8…6 characters; hover for the full value, or
-        use the copy button. Multiaddrs are copied in full.</p>
+        use the copy button.</p>
 
       <h2 style="margin-top:34px">How to join</h2>
       <div class="callout">
@@ -191,8 +204,13 @@
           providers — instead of a hardcoded address:</p>
         <pre><code>GPN_BOOTNODES_URL=https://gpncoin.ai/seeds.json gpn-node</code></pre>
         <p class="small muted" style="margin:12px 0 0">Endpoints (all CORS-enabled, cached for 60 s):</p>
-        <pre><code>GET https://gpncoin.ai/seeds.json      # metadata + multiaddrs + per-node detail
+        <pre><code>GET https://gpncoin.ai/api/network     # live: peer ids, providers, counts, offline seeds
+GET https://gpncoin.ai/seeds.json      # dial targets (deduped, with a live flag per node)
 GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code></pre>
+        <p class="small muted" style="margin:12px 0 0"><code>/api/network</code> is the live view behind this page:
+          <code>peer_ids</code> is what <code>system_peers</code> sees, <code>counts</code> has
+          <code>peers_live</code> / <code>serving_ai</code> / <code>offline</code>, and <code>stale: true</code>
+          means the chain read failed — the numbers are then deliberately withheld, not guessed.</p>
         <p class="small muted" style="margin:12px 0 0">The wire format is stable: <code>multiaddrs</code> is
           always present and is all a simple client needs. <code>nodes</code> adds roles, peer IDs, and
           provider endpoints; <code>source</code> says whether the AP answered
@@ -257,41 +275,63 @@ GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code><
 <script>
 /* ============================================================
    Live node directory.
-   Fetches /seeds.json (the same document gpn-node reads) and
-   renders it. Vanilla JS, no dependencies, no innerHTML with
-   node-provided values — every string goes through textContent.
+   Reads /api/network (the AP's `GET /network`: peers from the
+   chain's `system_peers` + the node itself, deduped providers,
+   and known-but-offline seeds). Vanilla JS, no dependencies,
+   no innerHTML with network-provided values — every string goes
+   through textContent.
+
+   If the live read fails, the page shows the compiled-in seed
+   list and labels it **cached — live data unavailable**. It
+   never presents stale data as live.
    ============================================================ */
 (function () {
   "use strict";
 
-  var REFRESH_MS = 60000;   /* aligned with the directory TTL */
+  var REFRESH_MS = 30000;   /* the AP caches /network for 30 s */
   var TICK_MS = 1000;
 
-  /* Optional local mock for previewing without a backend:
-     append ?mock=1 and the page renders a fixture instead of fetching. */
+  /* Baked-in copy of network.json's bootnodes: the last-known static list,
+     used ONLY for the clearly-labelled cached fallback. */
+  var CACHED_BOOTNODES = [
+    "/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
+    "/ip4/142.129.54.88/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
+    "/ip4/23.241.109.255/tcp/30333/p2p/12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz"
+  ];
+
+  /* Optional local mock for previewing without a backend: ?mock=1 */
   var MOCK = {
-    network: "GPN Public Testnet",
-    chain_id: "gpn_testnet",
-    genesis: "0xb8e4636a65d0c812abb437c38dd7e937bd7c3355c54c54d63060f26a33519a5c",
-    updated_at: new Date().toISOString(),
-    updated: Math.floor(Date.now() / 1000),
-    ttl: 60,
-    source: "static+ap",
-    live_providers: 2,
-    multiaddrs: [
-      "/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
-      "/ip4/142.129.54.88/tcp/30334/p2p/12D3KooWRWv4yVdJGiVg7xRgdUJY9G57EeutB596gWVpAwGC9qQ2"
+    generated_at: new Date().toISOString(),
+    peers: 4,
+    peer_ids: [
+      "12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz",
+      "12D3KooWRfKQbKnynFsKVyi76FjFDWLQqQPTKZFrMFF6Zt7zoZ2o",
+      "12D3KooWRhz9gbuEZpXAxfGeudnN1JQYw8D5nqPXTbWJQZiSbDiJ",
+      "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo"
     ],
-    nodes: [
-      { multiaddr: "/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo", peer_id: "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo", role: "seed", source: "compiled-in" },
-      { multiaddr: "/ip4/142.129.54.88/tcp/30334/p2p/12D3KooWRWv4yVdJGiVg7xRgdUJY9G57EeutB596gWVpAwGC9qQ2", peer_id: "12D3KooWRWv4yVdJGiVg7xRgdUJY9G57EeutB596gWVpAwGC9qQ2", role: "seed", source: "compiled-in" },
-      { endpoint: "http://gpn-testnet.duckdns.org:8093/status", multiaddr: "/dns4/gpn-testnet.duckdns.org/tcp/8093", peer_id: null, role: "provider", source: "ap", address: "5ENqExampleAddress0000000000000000000000000000000000" }
-    ]
+    providers: [
+      {
+        address: "5ENqExampleAddress0000000000000000000000000000000000",
+        peer_id: "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
+        healthy: true,
+        vram_mb: 8188,
+        models: ["qwen2.5:7b", "llama3.2:1b"],
+        multiaddrs: ["/ip4/142.129.54.88/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo"],
+        last_seen_secs: 3,
+        status_url: "http://127.0.0.1:8093"
+      }
+    ],
+    seeds: [
+      { multiaddr: "/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo", peer_id: "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo", live: true, source: "compiled-in" },
+      { multiaddr: "/ip4/142.129.54.88/tcp/30334/p2p/12D3KooWRWv4yVdJGiVg7xRgdUJY9G57EeutB596gWVpAwGC9qQ2", peer_id: "12D3KooWRWv4yVdJGiVg7xRgdUJY9G57EeutB596gWVpAwGC9qQ2", live: false, source: "compiled-in" }
+    ],
+    counts: { peers_live: 4, serving_ai: 1, offline: 1 },
+    stale: false
   };
 
   var state = {
-    lastFetch: 0,       /* Date.now() of the last completed attempt */
-    updatedAt: 0,       /* the directory's own updated_at, ms */
+    lastFetch: 0,
+    generatedAt: 0,
     ok: false,
     timer: null
   };
@@ -308,16 +348,10 @@ GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code><
     return s.slice(0, head) + "…" + s.slice(-tail);
   }
 
-  function shortGenesis(g) {
-    g = String(g || "");
-    if (g.length <= 16) return g || "—";
-    return g.slice(0, 10) + "…" + g.slice(-6);
-  }
-
   function ago(ms) {
     if (!ms) return "—";
     var s = Math.round((Date.now() - ms) / 1000);
-    if (s < -5) return "just now";       /* clock skew: don't show negatives */
+    if (s < -5) return "just now";
     if (s < 1) return "just now";
     if (s < 60) return s + "s ago";
     var m = Math.floor(s / 60);
@@ -327,25 +361,24 @@ GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code><
     return Math.floor(h / 24) + "d ago";
   }
 
-  function sourceLabel(src) {
-    switch (src) {
-      case "static+ap": return "static + access point";
-      case "static+ap-empty": return "static (AP empty)";
-      case "static-fallback":
-      case "static": return "static fallback";
-      default: return src || "unknown";
-    }
+  function peerIdOf(ma) {
+    if (!ma) return null;
+    var s = String(ma);
+    var i = s.lastIndexOf("/p2p/");
+    return i >= 0 ? s.slice(i + 5) : null;
   }
 
-  function roleClass(role) {
-    var r = String(role || "").toLowerCase();
-    if (r === "seed") return "role-seed";
-    if (r === "backbone") return "role-backbone";
-    if (r === "provider") return "role-provider";
-    return "muted";
+  function seenAgo(secs) {
+    if (secs == null || !isFinite(secs)) return "—";
+    if (secs < 90) return secs + "s ago";
+    var m = Math.round(secs / 60);
+    if (m < 90) return m + "m ago";
+    var h = Math.round(m / 60);
+    if (h < 48) return h + "h ago";
+    return Math.round(h / 24) + "d ago";
   }
 
-  /* ---------- copy helper (works on dynamically built buttons) ---------- */
+  /* ---------- copy helper ---------- */
   function copyText(text, btn) {
     var done = function () {
       if (!btn) return;
@@ -384,87 +417,241 @@ GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code><
     return b;
   }
 
-  /* ---------- render ---------- */
-  function renderSummary(data) {
-    setText($("s-network"), data.network);
-    setText($("s-chain"), data.chain_id);
+  /* ---------- row model ----------
+     Merge seeds + providers on peer id so one machine is one row.
+     Live peers with no known record (a box that publishes no
+     multiaddr) still appear, as peer-only. */
+  function buildRows(doc) {
+    var live = new Set(Array.isArray(doc.peer_ids) ? doc.peer_ids : []);
+    var byPeer = new Map();
+    var anonymous = [];
 
-    var gen = $("s-genesis");
-    if (gen) {
-      gen.textContent = shortGenesis(data.genesis);
-      if (data.genesis) gen.title = String(data.genesis);
+    function ensure(pid) {
+      if (!byPeer.has(pid)) {
+        byPeer.set(pid, {
+          peer_id: pid, address: null, vram_mb: 0, models: [],
+          multiaddrs: [], status_url: null, last_seen_secs: null,
+          serving: false, seed: false
+        });
+      }
+      return byPeer.get(pid);
     }
 
-    state.updatedAt = data.updated_at ? Date.parse(data.updated_at)
-                    : (data.updated ? data.updated * 1000 : 0);
-    if (!isFinite(state.updatedAt)) state.updatedAt = 0;
-    setText($("s-updated"), state.updatedAt ? ago(state.updatedAt) : "just now");
+    (Array.isArray(doc.providers) ? doc.providers : []).forEach(function (p) {
+      if (!p || typeof p !== "object") return;
+      if (!p.peer_id) {
+        // Healthy provider that publishes no peer id: still serving, but it
+        // cannot be matched to a peer, so it is its own row.
+        if (p.healthy === true) {
+          anonymous.push({
+            peer_id: null, address: p.address || null, vram_mb: p.vram_mb || 0,
+            models: Array.isArray(p.models) ? p.models : [],
+            multiaddrs: [], status_url: p.status_url || null,
+            last_seen_secs: p.last_seen_secs != null ? p.last_seen_secs : null,
+            serving: true, seed: false, live: null
+          });
+        }
+        return;
+      }
+      var r = ensure(p.peer_id);
+      if (p.address) r.address = p.address;
+      if (p.vram_mb) r.vram_mb = p.vram_mb;
+      if (Array.isArray(p.models) && p.models.length) r.models = p.models;
+      if (Array.isArray(p.multiaddrs)) r.multiaddrs = r.multiaddrs.concat(p.multiaddrs);
+      if (p.status_url) r.status_url = p.status_url;
+      if (p.last_seen_secs != null) r.last_seen_secs = p.last_seen_secs;
+      if (p.healthy === true) r.serving = true;
+    });
 
-    setText($("s-source"), sourceLabel(data.source));
-    setText($("s-ttl"), (data.ttl != null ? data.ttl : 60) + " s");
-    setText($("s-providers"), data.live_providers != null ? String(data.live_providers) : "0");
-    setText($("s-count"), String(Array.isArray(data.nodes) ? data.nodes.length : 0));
+    (Array.isArray(doc.seeds) ? doc.seeds : []).forEach(function (s) {
+      if (!s || !s.peer_id) return;
+      var r = ensure(s.peer_id);
+      r.seed = true;
+      if (s.multiaddr) r.multiaddrs = r.multiaddrs.concat([s.multiaddr]);
+    });
+
+    // Connected peers we have no registry record for.
+    live.forEach(function (pid) { ensure(pid); });
+
+    var rows = [];
+    byPeer.forEach(function (r) {
+      r.live = live.has(r.peer_id);
+      if (!r.live) r.status = "offline";
+      else if (r.serving) r.status = "serving";
+      else r.status = "peer-only";
+      rows.push(r);
+    });
+    rows = rows.concat(anonymous);
+
+    var order = { serving: 0, "peer-only": 1, offline: 2 };
+    rows.sort(function (a, b) {
+      var d = (order[a.status] == null ? 3 : order[a.status]) - (order[b.status] == null ? 3 : order[b.status]);
+      if (d) return d;
+      return String(a.peer_id || "").localeCompare(String(b.peer_id || ""));
+    });
+    return rows;
   }
 
+  /* ---------- render ---------- */
   function td(label) {
     var cell = document.createElement("td");
     cell.setAttribute("data-label", label);
     return cell;
   }
 
-  function renderNodes(data) {
+  function statusBadge(status, cached) {
+    var b = document.createElement("span");
+    b.className = "badge " + (cached ? "cached" : status);
+    var dot = document.createElement("span");
+    dot.className = "d";
+    b.appendChild(dot);
+    b.appendChild(document.createTextNode(
+      cached ? "cached" : status === "peer-only" ? "peer only" : status
+    ));
+    return b;
+  }
+
+  function renderCounts(counts, generatedAt, stale) {
+    var live = counts && counts.peers_live != null ? counts.peers_live : null;
+    var serving = counts && counts.serving_ai != null ? counts.serving_ai : null;
+    var offline = counts && counts.offline != null ? counts.offline : null;
+    setText($("c-live"), stale ? "?" : live);
+    setText($("c-serving"), serving);
+    setText($("c-offline"), offline);
+    setText($("c-generated"), generatedAt ? ago(generatedAt) : "just now");
+  }
+
+  function renderNodes(doc) {
     var body = $("nodes-body");
     if (!body) return;
     while (body.firstChild) body.removeChild(body.firstChild);
 
-    var nodes = Array.isArray(data.nodes) ? data.nodes : [];
-    /* Back-compat: a directory with only `multiaddrs` still renders. */
-    if (!nodes.length && Array.isArray(data.multiaddrs)) {
-      nodes = data.multiaddrs.map(function (ma) {
-        return { multiaddr: ma, peer_id: peerIdOf(ma), role: "seed", source: "compiled-in" };
-      });
-    }
-
-    if (!nodes.length) {
+    var rows = buildRows(doc);
+    if (!rows.length) {
       var empty = document.createElement("tr");
       var c = td("");
-      c.colSpan = 5;
+      c.colSpan = 6;
       c.className = "dir-empty";
-      c.textContent = "The directory answered, but lists no nodes right now.";
+      c.textContent = "The network answered, but reports no nodes right now.";
       empty.appendChild(c);
       body.appendChild(empty);
       return;
     }
 
-    nodes.forEach(function (n) {
-      if (!n || typeof n !== "object") return;
+    rows.forEach(function (r) {
       var tr = document.createElement("tr");
-
-      /* Role */
-      var roleCell = td("Role");
-      var role = document.createElement("span");
-      role.className = roleClass(n.role);
-      role.textContent = String(n.role || "node");
-      roleCell.appendChild(role);
-
-      /* Multiaddr + copy */
-      var maCell = td("Multiaddr");
-      if (n.multiaddr) {
-        var ma = document.createElement("span");
-        ma.className = "ma";
-        ma.textContent = String(n.multiaddr);
-        maCell.appendChild(ma);
-        maCell.appendChild(copyButton(String(n.multiaddr)));
-      } else {
-        var dash = document.createElement("span");
-        dash.className = "dir-empty";
-        dash.textContent = "not dialable (no multiaddr)";
-        maCell.appendChild(dash);
-      }
+      if (r.status === "offline") tr.className = "offline-row";
 
       /* Peer id */
       var peerCell = td("Peer ID");
-      var pid = n.peer_id || peerIdOf(n.multiaddr);
+      if (r.peer_id) {
+        var p = document.createElement("span");
+        p.className = "peer-short";
+        p.textContent = short(r.peer_id, 8, 6);
+        p.title = String(r.peer_id);
+        peerCell.appendChild(p);
+        peerCell.appendChild(copyButton(String(r.peer_id)));
+      } else {
+        var pd = document.createElement("span");
+        pd.className = "dir-empty";
+        pd.textContent = "no peer id published";
+        peerCell.appendChild(pd);
+      }
+
+      /* Status */
+      var stCell = td("Status");
+      stCell.appendChild(statusBadge(r.status));
+
+      /* VRAM */
+      var vCell = td("VRAM");
+      setText(vCell, r.vram_mb ? (r.vram_mb >= 1024
+        ? (r.vram_mb / 1024).toFixed(r.vram_mb % 1024 ? 1 : 0) + " GB"
+        : r.vram_mb + " MB") : "—");
+
+      /* Models */
+      var mCell = td("Models");
+      setText(mCell, r.models && r.models.length ? r.models.length : "—");
+      if (r.models && r.models.length) mCell.title = r.models.join(", ");
+
+      /* Address */
+      var aCell = td("Address");
+      var addr = r.address;
+      if (addr) {
+        var sp = document.createElement("span");
+        sp.className = "ep";
+        sp.textContent = String(addr);
+        sp.title = String(addr);
+        aCell.appendChild(sp);
+        aCell.appendChild(copyButton(String(addr)));
+      } else if (r.multiaddrs && r.multiaddrs.length) {
+        var ma = document.createElement("span");
+        ma.className = "ma";
+        ma.textContent = String(r.multiaddrs[0]);
+        aCell.appendChild(ma);
+        aCell.appendChild(copyButton(String(r.multiaddrs[0])));
+      } else if (r.status_url && /^https?:/.test(r.status_url)) {
+        var a = document.createElement("a");
+        a.className = "ep";
+        a.href = String(r.status_url);
+        a.rel = "noopener";
+        a.textContent = String(r.status_url);
+        aCell.appendChild(a);
+      } else {
+        setText(aCell, "—");
+      }
+
+      /* Last seen */
+      var lCell = td("Last seen");
+      setText(lCell, r.live ? seenAgo(r.last_seen_secs) : "—");
+
+      tr.appendChild(peerCell);
+      tr.appendChild(stCell);
+      tr.appendChild(vCell);
+      tr.appendChild(mCell);
+      tr.appendChild(aCell);
+      tr.appendChild(lCell);
+      body.appendChild(tr);
+    });
+  }
+
+  function showOk(doc) {
+    var box = $("dir-error");
+    if (box) box.hidden = true;
+    var chip = $("status-chip");
+    var stale = doc.stale === true;
+    if (chip) chip.className = "chip " + (stale ? "warn" : "up");
+    var n = doc.counts && doc.counts.peers_live != null ? doc.counts.peers_live : doc.peers;
+    setText($("status-text"), stale
+      ? "chain read failed — liveness unknown"
+      : "live · " + (n != null ? n : "?") + " peer" + (n === 1 ? "" : "s") + " online");
+  }
+
+  /* Clearly-labelled static list. Never dressed up as live. */
+  function showCached(reason) {
+    var box = $("dir-error");
+    if (box) box.hidden = false;
+    var chip = $("status-chip");
+    if (chip) chip.className = "chip down";
+    setText($("status-text"), "cached — live data unavailable");
+    setText($("refresh-text"), reason || "Retrying in 30 s");
+
+    setText($("c-live"), "?");
+    setText($("c-serving"), "?");
+    setText($("c-offline"), "?");
+    setText($("c-generated"), "unknown");
+
+    var body = $("nodes-body");
+    if (!body) return;
+    while (body.firstChild) body.removeChild(body.firstChild);
+
+    var seenPeer = new Set();
+    CACHED_BOOTNODES.forEach(function (ma) {
+      var pid = peerIdOf(ma);
+      if (pid && seenPeer.has(pid)) return; // one row per machine
+      if (pid) seenPeer.add(pid);
+      var tr = document.createElement("tr");
+
+      var peerCell = td("Peer ID");
       if (pid) {
         var p = document.createElement("span");
         p.className = "peer-short";
@@ -473,123 +660,69 @@ GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code><
         peerCell.appendChild(p);
         peerCell.appendChild(copyButton(String(pid)));
       } else {
-        var pd = document.createElement("span");
-        pd.className = "dir-empty";
-        pd.textContent = "—";
-        peerCell.appendChild(pd);
+        setText(peerCell, "—");
       }
 
-      /* Source */
-      var srcCell = td("Source");
-      srcCell.appendChild(document.createTextNode(String(n.source || "unknown")));
+      var stCell = td("Status");
+      stCell.appendChild(statusBadge("offline", true));
 
-      /* Endpoint / address */
-      var epCell = td("Endpoint / address");
-      if (n.endpoint) {
-        var e = document.createElement("span");
-        e.className = "ep";
-        var a = document.createElement("a");
-        a.href = String(n.endpoint);
-        a.rel = "noopener";
-        a.textContent = String(n.endpoint);
-        e.appendChild(a);
-        epCell.appendChild(e);
-      }
-      if (n.address) {
-        if (n.endpoint) epCell.appendChild(document.createElement("br"));
-        var addr = document.createElement("span");
-        addr.className = "ep";
-        addr.textContent = String(n.address);
-        addr.title = String(n.address);
-        epCell.appendChild(addr);
-        epCell.appendChild(copyButton(String(n.address)));
-      }
-      if (!n.endpoint && !n.address) {
-        var none = document.createElement("span");
-        none.className = "dir-empty";
-        none.textContent = "—";
-        epCell.appendChild(none);
-      }
+      var vCell = td("VRAM"); setText(vCell, "—");
+      var mCell = td("Models"); setText(mCell, "—");
 
-      tr.appendChild(roleCell);
-      tr.appendChild(maCell);
+      var aCell = td("Address");
+      var maSpan = document.createElement("span");
+      maSpan.className = "ma";
+      maSpan.textContent = String(ma);
+      aCell.appendChild(maSpan);
+      aCell.appendChild(copyButton(String(ma)));
+
+      var lCell = td("Last seen"); setText(lCell, "unknown");
+
       tr.appendChild(peerCell);
-      tr.appendChild(srcCell);
-      tr.appendChild(epCell);
+      tr.appendChild(stCell);
+      tr.appendChild(vCell);
+      tr.appendChild(mCell);
+      tr.appendChild(aCell);
+      tr.appendChild(lCell);
       body.appendChild(tr);
     });
   }
 
-  function peerIdOf(ma) {
-    if (!ma) return null;
-    var s = String(ma);
-    var i = s.lastIndexOf("/p2p/");
-    return i >= 0 ? s.slice(i + 5) : null;
-  }
-
-  function showError(msg) {
-    var box = $("dir-error");
-    if (box) box.hidden = false;
-    var chip = $("status-chip");
-    if (chip) { chip.className = "chip down"; }
-    setText($("status-text"), "directory unreachable");
-    setText($("refresh-text"), msg || "Retrying in 60 s");
-    var body = $("nodes-body");
-    if (body) {
-      while (body.firstChild) body.removeChild(body.firstChild);
-      var tr = document.createElement("tr");
-      var c = td("");
-      c.colSpan = 5;
-      c.className = "dir-empty";
-      c.textContent = "No directory data. The static seeds are still used by nodes.";
-      tr.appendChild(c);
-      body.appendChild(tr);
-    }
-  }
-
-  function showOk(data) {
-    var box = $("dir-error");
-    if (box) box.hidden = true;
-    var chip = $("status-chip");
-    if (chip) chip.className = "chip up";
-    var src = data.source || "static";
-    setText($("status-text"), src === "static-fallback" ? "live · AP unreachable" : "live directory");
-  }
-
   function tick() {
     if (state.ok) {
-      setText($("s-updated"), state.updatedAt ? ago(state.updatedAt) : "just now");
       setText($("refresh-text"),
-        "last refreshed " + ago(state.lastFetch) + " · auto-refresh every " + (REFRESH_MS / 1000) + "s" +
+        "last read " + ago(state.lastFetch) + " · auto-refresh every " + (REFRESH_MS / 1000) + "s" +
         (document.hidden ? " (paused)" : ""));
     }
   }
 
   function load() {
-    if (document.hidden) return; /* don't poll a background tab */
-    var url = "/seeds.json";
+    if (document.hidden) return;
     var useMock = false;
     try { useMock = new URLSearchParams(location.search).get("mock") === "1"; } catch (e) {}
 
     var req = useMock
       ? Promise.resolve({ ok: true, json: function () { return Promise.resolve(MOCK); } })
-      : fetch(url, { cache: "no-store", headers: { accept: "application/json" } })
+      : fetch("/api/network", { cache: "no-store", headers: { accept: "application/json" } })
           .then(function (res) {
             if (!res.ok) throw new Error("HTTP " + res.status);
             return res.json();
           });
 
-    req.then(function (data) {
+    req.then(function (doc) {
+      if (!doc || typeof doc !== "object") throw new Error("empty directory");
       state.lastFetch = Date.now();
       state.ok = true;
-      renderSummary(data);
-      renderNodes(data);
-      showOk(data);
+      state.generatedAt = doc.generated_at ? Date.parse(doc.generated_at) : 0;
+      if (!isFinite(state.generatedAt)) state.generatedAt = 0;
+      renderCounts(doc.counts, state.generatedAt, doc.stale === true);
+      renderNodes(doc);
+      showOk(doc);
       tick();
     }).catch(function (err) {
       state.lastFetch = Date.now();
       state.ok = false;
-      showError("Retrying in 60 s. (" + (err && err.message ? err.message : "network error") + ")");
+      showCached("Retrying in 30 s. (" + (err && err.message ? err.message : "network error") + ")");
     });
   }
 
@@ -598,7 +731,6 @@ GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code><
     state.timer = setInterval(tick, TICK_MS);
     setInterval(load, REFRESH_MS);
     document.addEventListener("visibilitychange", function () {
-      /* Catch up immediately when the tab comes back. */
       if (!document.hidden && Date.now() - state.lastFetch > REFRESH_MS) load();
     });
   }

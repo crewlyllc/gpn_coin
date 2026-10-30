@@ -2311,6 +2311,34 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// Build the dial target for a `network.json` `bootstrap_seeds` entry.
+///
+/// The DNS name is preferred (it survives an IP change); the `/ip4/` form is
+/// only a fallback. Returns `None` when the entry has no usable host or peer id.
+fn bootstrap_seed_multiaddr(seed: &gpn_agent::network_registry::BootstrapSeed) -> Option<String> {
+    let pid = seed.peer_id.trim();
+    if pid.is_empty() {
+        return None;
+    }
+    if !seed.dns4.trim().is_empty() {
+        return Some(format!(
+            "/dns4/{}/tcp/{}/p2p/{}",
+            seed.dns4.trim(),
+            seed.port,
+            pid
+        ));
+    }
+    if !seed.ip4.trim().is_empty() {
+        return Some(format!(
+            "/ip4/{}/tcp/{}/p2p/{}",
+            seed.ip4.trim(),
+            seed.port,
+            pid
+        ));
+    }
+    None
+}
+
 /// `POST /join` — a home-page job application.
 ///
 /// Store first, deliver second: the JSONL ledger line is written before the
@@ -3412,13 +3440,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Deploy marker + the routing rule it implements (item #97). A plain literal
     // (no format args) so `strings` finds it verbatim.
     println!("[route] gflops-unit-v97-ap: min_gflops is gated only on gflops_source=attested-idle");
+    // `GET /network`: the live directory behind /nodes — chain peers + this
+    // node, deduped by peer id, offline seeds labelled, `stale:true` when the
+    // RPC read fails. Plain literal so `strings` verifies the deployed binary.
+    println!("[route] network-live-v1: /network = system_peers + self, deduped by peer id");
     // `POST /join`: durable JSONL ledger + best-effort Discord delivery.
     println!("[route] join-store-v1: /join stores first (~/.gpn/join-applications.jsonl), delivers second");
     println!("  chain: {endpoint}");
     println!("  providers: {} ({})", urls.len(), urls.join(", "));
     println!("  assign store: {assign_store}");
     println!(
-        "  endpoints: /health /ping /providers /jobs /job/{{id}} /mode | POST /jobs /v1/finetunes /route/{{id}} | GET /v1/finetunes/{{id}}"
+        "  endpoints: /health /ping /providers /network /jobs /job/{{id}} /mode | POST /jobs /v1/finetunes /route/{{id}} | GET /v1/finetunes/{{id}}"
     );
     println!(
         "  abuse: denylist={} ({} bans) reports={}",
@@ -3647,6 +3679,77 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // state: safe to hammer.
                 (Method::Get, ["ping"]) => {
                     json!({"ok":true, "ap": listen, "t": now_secs()})
+                }
+                // GET /network — the LIVE network directory behind /nodes.
+                //
+                // Answers "who is on the network right now" from the chain
+                // (`system_peers` + this node) instead of from the hand-kept
+                // seed list. Deduped by peer id, with known-but-offline
+                // entries labelled as such and an honest `stale: true` when
+                // the RPC read fails (2026-10-30, /nodes showed 3 nodes while
+                // the chain saw 4 computers).
+                (Method::Get, ["network"]) => {
+                    let providers: Vec<gpn_agent::network_directory::DirProvider> = {
+                        let reg = registry.lock().unwrap();
+                        reg.iter()
+                            .map(|p| gpn_agent::network_directory::DirProvider {
+                                address: p.address.clone(),
+                                peer_id: p.peer_id.clone(),
+                                healthy: p.last_seen.is_some(),
+                                vram_mb: p.vram_mb,
+                                models: p.models.clone(),
+                                multiaddrs: p.p2p_multiaddrs.clone(),
+                                last_seen_secs: p.last_seen.map(|i| i.elapsed().as_secs()),
+                                status_url: p.status_url.clone(),
+                            })
+                            .collect()
+                    };
+                    let net = gpn_agent::network_registry::load_registry();
+                    let mut seeds: Vec<gpn_agent::network_directory::KnownSeed> = Vec::new();
+                    // The seeds shipped inside the binary are always part of the
+                    // known set — a runtime override of network.json must not be
+                    // able to hide them from the public directory.
+                    for ma in gpn_agent::chainspec::canonical_bootnodes() {
+                        seeds.push(gpn_agent::network_directory::KnownSeed {
+                            multiaddr: ma,
+                            source: "compiled-in".into(),
+                        });
+                    }
+                    for ma in &net.bootnodes {
+                        seeds.push(gpn_agent::network_directory::KnownSeed {
+                            multiaddr: ma.clone(),
+                            source: "registry".into(),
+                        });
+                    }
+                    for s in &net.bootstrap_seeds {
+                        if let Some(ma) = bootstrap_seed_multiaddr(s) {
+                            seeds.push(gpn_agent::network_directory::KnownSeed {
+                                multiaddr: ma,
+                                source: "bootstrap-seed".into(),
+                            });
+                        }
+                    }
+                    for p in &providers {
+                        for ma in &p.multiaddrs {
+                            seeds.push(gpn_agent::network_directory::KnownSeed {
+                                multiaddr: ma.clone(),
+                                source: "provider".into(),
+                            });
+                        }
+                    }
+                    let (live, self_id) = rt.block_on(async {
+                        let live = client.system_peers().await;
+                        let me = client.system_local_peer_id().await.ok();
+                        (live, me)
+                    });
+                    let ts = gpn_agent::join::iso8601(now_secs());
+                    gpn_agent::network_directory::build(
+                        &ts,
+                        self_id.as_deref(),
+                        live,
+                        &providers,
+                        &seeds,
+                    )
                 }
                 (Method::Get, ["providers"]) => {
                     let reg = registry.lock().unwrap();

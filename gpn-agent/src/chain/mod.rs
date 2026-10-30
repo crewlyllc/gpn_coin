@@ -453,6 +453,77 @@ impl ChainClient {
         u64::from_str_radix(number_hex.trim_start_matches("0x"), 16).ok()
     }
 
+    /// The peers this node is currently connected to (`system_peers`).
+    ///
+    /// Returns `Err` when the RPC read itself fails, so the caller can say
+    /// "unknown" instead of "nobody is online" — the distinction the public
+    /// `/nodes` directory depends on (2026-10-30).
+    pub async fn system_peers(&self) -> Result<Vec<String>, String> {
+        let http_url = self
+            .endpoint
+            .replace("ws://", "http://")
+            .replace("wss://", "https://");
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "system_peers",
+            "params": []
+        });
+        let resp: serde_json::Value = self
+            .http
+            .post(&http_url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?
+            .json()
+            .await
+            .map_err(|e| e.to_string())?;
+        if let Some(err) = resp.get("error") {
+            return Err(format!("system_peers: {err}"));
+        }
+        let arr = resp
+            .get("result")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| "system_peers: response has no result array".to_string())?;
+        Ok(arr
+            .iter()
+            .filter_map(|p| p.get("peerId").and_then(|v| v.as_str()))
+            .map(|s| s.to_string())
+            .collect())
+    }
+
+    /// This node's own libp2p peer id (`system_localPeerId`).
+    pub async fn system_local_peer_id(&self) -> Result<String, String> {
+        let http_url = self
+            .endpoint
+            .replace("ws://", "http://")
+            .replace("wss://", "https://");
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "system_localPeerId",
+            "params": []
+        });
+        let resp: serde_json::Value = self
+            .http
+            .post(&http_url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?
+            .json()
+            .await
+            .map_err(|e| e.to_string())?;
+        if let Some(err) = resp.get("error") {
+            return Err(format!("system_localPeerId: {err}"));
+        }
+        resp.get("result")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| "system_localPeerId: response has no result string".to_string())
+    }
+
     /// How many extrinsics are sitting in the node's transaction pool.
     ///
     /// With per-job on-chain settlement as the default, every chat costs the AP

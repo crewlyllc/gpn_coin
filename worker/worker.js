@@ -11,6 +11,7 @@
  *   GET /api/health     proxy -> access point `GET /health`
  *   GET /api/v1/models  proxy -> `GET /v1/models` (OpenAI model list)
  *   GET /api/providers  proxy -> `GET /providers` (live capabilities)
+ *   GET /api/network    proxy -> `GET /network` (live peer directory)
  *   GET /api/mode       proxy -> `GET /mode`
  *   GET /api/jobs/<id>  proxy -> `GET /job/<id>`
  *   POST /api/v1/chat/completions  proxy -> OpenAI-compatible chat
@@ -71,7 +72,8 @@
  */
 const STATIC_BOOTNODES = [
   "/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
-  "/ip4/142.129.54.88/tcp/30334/p2p/12D3KooWRWv4yVdJGiVg7xRgdUJY9G57EeutB596gWVpAwGC9qQ2",
+  "/ip4/142.129.54.88/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
+  "/ip4/23.241.109.255/tcp/30333/p2p/12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz",
 ];
 
 const GENESIS = "0xb8e4636a65d0c812abb437c38dd7e937bd7c3355c54c54d63060f26a33519a5c";
@@ -230,8 +232,23 @@ async function directory(env, ctx) {
   const now = Date.now();
   if (cache.body && now - cache.at < TTL_SECONDS * 1000) return cache.body;
 
-  const live = await fetchLiveProviders(env);
-  const body = buildDirectory(live);
+  // Prefer the AP's live view (chain `system_peers` + its providers). When it
+  // is unavailable (older AP, RPC down) fall back to the provider list only,
+  // and mark liveness unknown rather than inventing it.
+  const net = await fetchNetwork(env);
+  /** @type {string[] | null} */
+  let livePeerIds = null;
+  /** @type {Array<object> | null} */
+  let providers;
+  if (net) {
+    if (Array.isArray(net.peer_ids) && net.stale !== true) livePeerIds = net.peer_ids;
+    providers = Array.isArray(net.providers) ? net.providers : null;
+  } else {
+    providers = await fetchLiveProviders(env);
+  }
+  const body = buildDirectory(providers, livePeerIds);
+  body.live_source = net ? (net.stale === true ? "stale" : "chain") : "none";
+  body.counts = net && net.counts && typeof net.counts === "object" ? net.counts : null;
   cache = { at: now, body };
   // Nothing to defer today; kept so a future KV/registration write can be
   // pushed off the request path without changing the signature.
@@ -252,6 +269,30 @@ async function fetchLiveProviders(env) {
   try {
     const doc = JSON.parse(res.body);
     return doc && Array.isArray(doc.providers) ? doc.providers : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The AP's live network directory (`GET /network`). Returns `null` when the AP
+ * is unreachable or the route does not exist (an older access point), so the
+ * caller falls back to `/providers` and then to the static list.
+ *
+ * The document is authoritative for liveness: `peer_ids` is what the chain's
+ * `system_peers` (+ the AP's own node) actually sees. A `stale: true` document
+ * is accepted but its `peer_ids` must not be treated as a live set.
+ *
+ * @param {{ AP_URL?: string, AP_JOB_URL?: string }} env
+ * @returns {Promise<{peer_ids?: string[], providers?: object[], counts?: object, stale?: boolean} | null>}
+ */
+async function fetchNetwork(env) {
+  const res = await apRequest(env, { method: "GET", path: "/network", timeoutMs: AP_TIMEOUT_MS });
+  if (!res || res.error || res.status !== 200) return null;
+  try {
+    const doc = JSON.parse(res.body);
+    if (!doc || typeof doc !== "object") return null;
+    return doc;
   } catch {
     return null;
   }
@@ -615,12 +656,20 @@ function indexOfCrlf(buf, from) {
  * it may not be re-used for a different peer id.
  *
  * @param {Array<object> | null} providers
+ * @param {string[] | null} [livePeerIds] when the AP published `/network`, the
+ *   peer ids it sees connected; `null` means "unknown" (the `live` flag is
+ *   then `null`, never a false claim of being offline).
  */
-function buildDirectory(providers) {
+function buildDirectory(providers, livePeerIds = null) {
   /** @type {Array<{multiaddr: string, peer_id?: string, role: string, source: string, best?: boolean}>} */
   const nodes = [];
   const multiaddrs = [];
   const seen = new Set();
+  /** Peer ids that already have a published, dialable row (one row per node). */
+  const emittedPeers = new Set();
+  const liveSet = Array.isArray(livePeerIds) ? new Set(livePeerIds.filter((x) => typeof x === "string")) : null;
+  /** Live flags: `null` when the AP could not tell us (never claim "offline"). */
+  const isLive = (pid) => (liveSet && pid ? liveSet.has(pid) : null);
 
   /** Claims gathered from addresses a node published about itself. */
   const claims = { hostsByPeer: new Map(), ownerByEndpoint: new Map() };
@@ -631,8 +680,19 @@ function buildDirectory(providers) {
     if (pid && sanitizePeerId(pid)) claimEndpoint(claims, pid, ma);
     if (seen.has(ma)) continue;
     seen.add(ma);
+    // One ROW per machine, but keep every dialable address in `multiaddrs`:
+    // a DNS name and its IP are two paths to the same node, not two nodes.
     multiaddrs.push(ma);
-    nodes.push({ multiaddr: ma, peer_id: peerIdOf(ma), role: "seed", source: "compiled-in" });
+    const firstForPeer = !pid || !emittedPeers.has(pid);
+    if (pid) emittedPeers.add(pid);
+    if (!firstForPeer) continue;
+    nodes.push({
+      multiaddr: ma,
+      peer_id: pid,
+      role: "seed",
+      source: "compiled-in",
+      live: isLive(pid),
+    });
   }
 
   /** Live providers, normalised once. */
@@ -675,6 +735,11 @@ function buildDirectory(providers) {
         if (seen.has(ma)) continue;
         seen.add(ma);
         multiaddrs.push(ma);
+        // One row per machine: a provider that is already published as a seed
+        // (the compiled-in entry wins) must not appear twice.
+        const firstForPeer = !peerId || !emittedPeers.has(peerId);
+        if (peerId) emittedPeers.add(peerId);
+        if (!firstForPeer) continue;
         nodes.push({
           multiaddr: ma,
           peer_id: peerId,
@@ -682,6 +747,7 @@ function buildDirectory(providers) {
           source: "ap",
           endpoint: statusUrl,
           address: typeof p.address === "string" ? p.address : null,
+          live: isLive(peerId),
           best: false,
         });
       }
@@ -696,6 +762,7 @@ function buildDirectory(providers) {
       role: "provider",
       source: "ap",
       address: typeof p.address === "string" ? p.address : null,
+      live: isLive(peerId),
       best: false,
     });
   }
@@ -713,6 +780,10 @@ function buildDirectory(providers) {
     live_providers: live,
     // The field gpn-node actually reads.
     multiaddrs,
+    // The seed list: dialable entries only, deduped by peer id, with liveness.
+    seeds: nodes
+      .filter((n) => n.multiaddr && n.peer_id)
+      .map((n) => ({ multiaddr: n.multiaddr, peer_id: n.peer_id, live: n.live, source: n.source })),
     // Rich form: one entry per node/endpoint, including non-dialable providers.
     nodes: nodes.concat(endpoints),
     publisher: "gpncoin.ai",
@@ -1113,6 +1184,7 @@ async function rateLimit(env, ip, bucket, max, windowSeconds) {
  *   GET  /api/ping               -> GET  /health
  *   GET  /api/mode               -> GET  /mode
  *   GET  /api/providers          -> GET  /providers
+ *   GET  /api/network            -> GET  /network
  *   GET  /api/v1/models          -> GET  /v1/models
  *   GET  /api/jobs/<id>          -> GET  /job/<id>
  *   POST /api/v1/chat/completions -> POST /v1/chat/completions
@@ -1151,7 +1223,13 @@ async function handleApi(request, env, path) {
 
   if (route === "/health" || route === "/ping") upstream = "/health";
   else if (route === "/mode") upstream = "/mode";
-  else if (route === "/providers") {
+  else if (route === "/network") {
+    // The live node directory behind /nodes: peers from the chain, providers
+    // deduped by peer id, offline entries labelled. Short cache so a node
+    // that just left stops being reported as online.
+    upstream = "/network";
+    cache = "public, max-age=30";
+  } else if (route === "/providers") {
     upstream = "/providers";
     cache = "public, max-age=30";
   } else if (route === "/v1/models" || route === "/models") {
@@ -1687,6 +1765,7 @@ export const __test = {
   handleApi,
   chainSpec,
   apRequest,
+  fetchNetwork,
   rateLimit,
   originAllowed,
   AP_PROXY_MAX_BODY,

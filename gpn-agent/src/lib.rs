@@ -33,6 +33,7 @@ pub mod models;
 pub mod moderation;
 pub mod modes;
 pub mod net;
+pub mod network_directory;
 pub mod network_registry;
 pub mod nodestatus;
 pub mod ollama;

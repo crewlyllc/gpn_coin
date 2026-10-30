@@ -5,7 +5,8 @@
   "spec_version": 6,
   "bootnodes": [
     "/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
-    "/ip4/142.129.54.88/tcp/30334/p2p/12D3KooWRWv4yVdJGiVg7xRgdUJY9G57EeutB596gWVpAwGC9qQ2"
+    "/ip4/142.129.54.88/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
+    "/ip4/23.241.109.255/tcp/30333/p2p/12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz"
   ],
   "bootstrap_seeds": [
     {
@@ -14,6 +15,14 @@
       "port": 30333,
       "peer_id": "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
       "dns4": "gpn-testnet.duckdns.org",
+      "operator": "gpn-core"
+    },
+    {
+      "id": "seed-2",
+      "ip4": "23.241.109.255",
+      "port": 30333,
+      "peer_id": "12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz",
+      "dns4": "",
       "operator": "gpn-core"
     }
   ],

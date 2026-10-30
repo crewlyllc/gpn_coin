@@ -247,6 +247,11 @@ jobs:
       - name: Chat page (markdown + SSE + storage caps)
         run: node website/tests/chat.test.js
 
+      # /nodes directory: renders from /api/network, deduped by peer id, with
+      # a clearly-labelled "cached — live data unavailable" fallback. Pure Node.
+      - name: Nodes directory (live counts + cached fallback)
+        run: node --test website/tests/nodes-directory.test.js
+
       # The Worker's /api/join path: proxies to the AP, keeps the always-200
       # JSON shape, and falls back to email only when nothing was stored.
       - name: Worker unit tests (/api/join + proxies)

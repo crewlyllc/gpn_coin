@@ -70,7 +70,8 @@ test("a live entry with a /p2p/ id becomes dialable", () => {
 });
 
 test("a provider that publishes a peer id becomes dialable", () => {
-  const pid = "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo";
+  // A peer id that is not already a compiled-in seed (those win the row).
+  const pid = "12D3KooWQ8fU4oXcZf3YhU8yTt4cY5q1mS2n8HkWq7jB6xU4aB3c";
   const body = __test.buildDirectory([
     {
       status_url: "http://203.0.113.7:8093/status",
@@ -108,7 +109,7 @@ test("a peer id already published elsewhere is not re-synthesised at another hos
   const linuxPid = __test.peerIdOf(network.bootnodes[0]);
   const body = __test.buildDirectory([
     {
-      status_url: "http://23.241.109.255:8093/status",
+      status_url: "http://198.51.100.44:8093/status",
       healthy: true,
       peer_id: linuxPid,
       p2p_port: 30333,
@@ -116,14 +117,14 @@ test("a peer id already published elsewhere is not re-synthesised at another hos
     },
   ]);
   assert.ok(
-    !body.multiaddrs.includes(`/ip4/23.241.109.255/tcp/30333/p2p/${linuxPid}`),
+    !body.multiaddrs.includes(`/ip4/198.51.100.44/tcp/30333/p2p/${linuxPid}`),
     "must not pair another box's host with an already-published peer id",
   );
-  assert.ok(!body.multiaddrs.some((m) => m.startsWith("/ip4/23.241.109.255")), "nothing at that host");
+  assert.ok(!body.multiaddrs.some((m) => m.startsWith("/ip4/198.51.100.44")), "nothing at that host");
   // The endpoint is still visible for monitoring.
-  const entry = body.nodes.find((n) => n.endpoint === "http://23.241.109.255:8093/status");
+  const entry = body.nodes.find((n) => n.endpoint === "http://198.51.100.44:8093/status");
   assert.ok(entry, "the provider endpoint is still listed");
-  assert.equal(entry.multiaddr, "/ip4/23.241.109.255/tcp/8093");
+  assert.equal(entry.multiaddr, "/ip4/198.51.100.44/tcp/8093");
 });
 
 test("two providers cannot publish the same peer id at two hosts", () => {
@@ -1043,4 +1044,83 @@ test("HEAD /chain-spec answers 200 with no body", async () => {
   );
   assert.equal(res.status, 200);
   assert.equal(await res.text(), "");
+});
+
+/* ── live network directory (`/api/network`, `/seeds.json` liveness) ────── */
+
+const LIVE_A = "12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz";
+const LIVE_B = "12D3KooWRfKQbKnynFsKVyi76FjFDWLQqQPTKZFrMFF6Zt7zoZ2o";
+
+test("seeds.json dedupes one machine published as a seed and a provider", () => {
+  const staticMa = network.bootnodes[0];
+  const pid = __test.peerIdOf(staticMa);
+  const body = __test.buildDirectory(
+    [{ status_url: "http://203.0.113.7:8093/status", healthy: true, peer_id: pid, multiaddrs: [staticMa] }],
+    [pid],
+  );
+  // One row for that peer, not seed + provider.
+  assert.equal(body.nodes.filter((n) => n.peer_id === pid).length, 1);
+  assert.equal(body.nodes.find((n) => n.peer_id === pid).role, "seed");
+  assert.equal(body.nodes.find((n) => n.peer_id === pid).live, true);
+  // The dial list still carries the address once.
+  assert.equal(body.multiaddrs.filter((m) => m === staticMa).length, 1);
+});
+
+test("seeds.json marks a stale seed not live and exposes it in `seeds`", () => {
+  const body = __test.buildDirectory(null, [LIVE_A, LIVE_B]);
+  const byPeer = new Map(body.seeds.map((s) => [s.peer_id, s]));
+  // The Linux box's own seed (dns4) is not in the live set here → false.
+  const selfPid = __test.peerIdOf(network.bootnodes[0]);
+  assert.equal(byPeer.get(selfPid).live, false);
+  // Box #1 is live.
+  assert.equal(byPeer.get(LIVE_A).live, true);
+  // Every published seed has a real multiaddr and a peer id.
+  for (const s of body.seeds) {
+    assert.ok(s.multiaddr.startsWith("/"));
+    assert.match(s.multiaddr, /\/p2p\/12D3Koo/);
+  }
+});
+
+test("seeds.json says live:null when the AP could not report liveness", () => {
+  const body = __test.buildDirectory(null);
+  for (const n of body.nodes) assert.equal(n.live, null, "must never claim offline without evidence");
+});
+
+test("GET /api/network proxies the AP's live document unchanged", async () => {
+  const seen = [];
+  const doc = {
+    generated_at: "2026-10-30T20:00:00Z",
+    peers: 4,
+    peer_ids: [LIVE_A, LIVE_B],
+    providers: [{ peer_id: LIVE_A, healthy: true, vram_mb: 8188, models: ["m"], multiaddrs: [], last_seen_secs: 3, status_url: "http://203.0.113.7:8093/status", address: "5A" }],
+    seeds: [{ multiaddr: network.bootnodes[0], peer_id: __test.peerIdOf(network.bootnodes[0]), live: true, source: "compiled-in" }],
+    counts: { peers_live: 4, serving_ai: 1, offline: 1 },
+    stale: false,
+  };
+  const env = { __test_ap_transport: stubAp(jsonReply(200, doc), seen) };
+  const res = await worker.fetch(
+    new Request("https://gpncoin.ai/api/network", { headers: { "cf-connecting-ip": "203.0.113.60" } }),
+    env,
+    { waitUntil() {} },
+  );
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("x-gpn-proxy"), "access-point");
+  assert.equal(res.headers.get("access-control-allow-origin"), "*");
+  // Passed through byte-for-byte: the AP is authoritative for counts.
+  assert.deepEqual(await res.json(), doc);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].method, "GET");
+  assert.equal(seen[0].path, "/network");
+});
+
+test("GET /api/network is a JSON 502 (never HTML) when the AP is unreachable", async () => {
+  const res = await worker.fetch(
+    new Request("https://gpncoin.ai/api/network"),
+    { AP_URL: "http://127.0.0.1:1" },
+    { waitUntil() {} },
+  );
+  assert.equal(res.status, 502);
+  assert.match(res.headers.get("content-type"), /application\/json/);
+  const body = await res.json();
+  assert.equal(body.error.type, "gpn_proxy_error");
 });
