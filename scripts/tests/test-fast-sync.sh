@@ -107,6 +107,7 @@ run_install() { # run_install <prefix> <meta-url> [extra env as K=V... | -- inst
   while [ $# -gt 0 ] && [ "$1" != "--" ]; do envs+=("$1"); shift; done
   [ "${1:-}" = "--" ] && shift
   env PATH="$p/fakebin:$PATH" GPN_PREFIX="$p" GPN_BIN="$p/bin" \
+      GPN_AUTOSTART=0 \
       GPN_SNAPSHOT_URL="http://127.0.0.1:$PORT/gpn-testnet-snapshot.tar.gz" \
       GPN_SNAPSHOT_META_URL="$meta" "${envs[@]}" \
       bash "$REPO/install.sh" "$@" >"$p/out.log" 2>&1

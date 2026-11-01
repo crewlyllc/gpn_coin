@@ -230,6 +230,16 @@ jobs:
       - name: Referral capture (install + write-once + snapshot)
         run: bash scripts/tests/test-referral.sh
 
+      # Autostart installers ("a downloaded install survives a reboot",
+      # 2026-11-01). The release bundles shipped only binaries, so extracting
+      # and running gpn_node left nothing to start after a reboot -- and
+      # ollama (a hard prerequisite) was never restarted either. Static gates
+      # on install.ps1 (+ launcher identity rules), a real install/idempotency/
+      # remove run of scripts/gpn-autostart.sh in a temp HOME with a stubbed
+      # systemctl/loginctl, bundle-packaging checks and README parity.
+      - name: Autostart installers (Windows + Linux, reversible)
+        run: bash scripts/tests/test-autostart-installers.sh
+
       # Referral download links (`?ref=CODE`): the page-side half. Pure Node,
       # no browser: validation rule, URL parsing, and the XSS boundary (the
       # code is only ever written as text, never as markup).

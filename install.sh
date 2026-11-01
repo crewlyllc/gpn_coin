@@ -14,6 +14,8 @@
 #   GPN_NETWORK  testnet | mainnet (default testnet)
 #   GPN_REPO_URL git URL    (default: current repo's origin)
 #   GPN_FAST_SYNC      1 (default) bootstraps from the weekly snapshot; 0 = full sync
+#   GPN_AUTOSTART      1 (default) installs systemd user units + enable-linger;
+#                      0 = nothing starts after a reboot (same as --no-autostart)
 #   GPN_SNAPSHOT_URL   override the snapshot archive URL
 #   GPN_SNAPSHOT_META_URL  override the signed snapshot.json URL
 #   GPN_REF      referral code (same as --ref); data collection only
@@ -23,6 +25,9 @@
 # Flags:
 #   --no-fast-sync   skip the snapshot and sync every block from peers
 #   --fast-sync      force it on (the default), overriding GPN_FAST_SYNC=0
+#   --no-autostart   do NOT install the systemd user units / enable-linger
+#                    (the node then only runs while you run it by hand)
+#   --autostart      force autostart on (the default)
 #   --ref CODE       referral code of whoever referred you (4-32 chars,
 #                    [A-Za-z0-9_-]). Stored ONCE in $PREFIX/referral and
 #                    published on the provider heartbeat. An invalid code only
@@ -69,6 +74,12 @@ SNAPSHOT_META_URL="${GPN_SNAPSHOT_META_URL:-https://github.com/crewlyllc/gpn_coi
 FAST_SYNC=1
 [ "${GPN_FAST_SYNC:-1}" = 0 ] && FAST_SYNC=0
 CLI_FAST_SYNC=""
+# Autostart (systemd user units + enable-linger). On by default: a node that
+# does not come back after a reboot is indistinguishable from a dead node
+# (2026-11-01: two Windows boxes stayed down for exactly this reason).
+AUTOSTART=1
+[ "${GPN_AUTOSTART:-1}" = 0 ] && AUTOSTART=0
+CLI_AUTOSTART=""
 # Referral code: `--ref CODE` / `--ref=CODE` / `GPN_REF=CODE`. Optional; a bad
 # value is a warning, never an install failure (see the write step below).
 REF_CODE="${GPN_REF:-}"
@@ -76,6 +87,8 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --no-fast-sync) FAST_SYNC=0; CLI_FAST_SYNC=0; shift ;;
     --fast-sync)    FAST_SYNC=1; CLI_FAST_SYNC=1; shift ;;
+    --no-autostart) AUTOSTART=0; CLI_AUTOSTART=0; shift ;;
+    --autostart)    AUTOSTART=1; CLI_AUTOSTART=1; shift ;;
     --ref)          [ $# -ge 2 ] || die "--ref needs a code (4-32 chars, [A-Za-z0-9_-])"; REF_CODE="$2"; shift 2 ;;
     --ref=*)        REF_CODE="${1#--ref=}"; shift ;;
     -h|--help) sed -n '2,/^set -euo pipefail/p' "$0" | sed '$d'; exit 0 ;;
@@ -245,10 +258,24 @@ install_ollama() {
   log "baseline models ready"
 }
 
+# 0 ── Bundle mode ───────────────────────────────────────────────────────────
+# The release tarball ships PREBUILT binaries next to this script. In that case
+# there is nothing to clone and nothing to build — but everything else (ollama,
+# fast sync, wallet, config, autostart) is identical. Without this, README's
+# "extract → ./install.sh" would fail on the first `command -v cargo`.
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+BUNDLE=0
+if [ "${GPN_BUNDLE:-0}" = 1 ] || { [ -x "$SELF_DIR/gpn-node" ] && [ -x "$SELF_DIR/gpn_node" ]; }; then
+  BUNDLE=1
+  log "bundle mode: installing the prebuilt binaries in $SELF_DIR (no build)"
+fi
+
 # 1 ── Prerequisites ──────────────────────────────────────────────────────────
 log "checking prerequisites…"
-command -v cargo >/dev/null 2>&1 || die "Rust/cargo not found — install: https://rustup.rs"
-command -v git  >/dev/null 2>&1 || die "git not found"
+if [ "$BUNDLE" = 0 ]; then
+  command -v cargo >/dev/null 2>&1 || die "Rust/cargo not found — install: https://rustup.rs"
+  command -v git  >/dev/null 2>&1 || die "git not found"
+fi
 if [ ! -d /etc/OpenCL/vendors ] && [ ! -d /etc/OpenCL ]; then
   warn "no OpenCL ICD detected — GPU mining will fall back to CPU (slower)."
   warn "  NVIDIA: install nvidia-opencl-icd / reboot. AMD: install rocm-opencl-runtime."
@@ -256,7 +283,10 @@ fi
 
 # 2 ── Source ────────────────────────────────────────────────────────────────
 mkdir -p "$PREFIX"
-if [ ! -d "$SRC/.git" ]; then
+if [ "$BUNDLE" = 1 ]; then
+  log "bundle mode: using $SELF_DIR as the source of binaries"
+  SRC="$SELF_DIR"
+elif [ ! -d "$SRC/.git" ]; then
   if [ -z "$GPN_REPO_URL" ]; then
     GPN_REPO_URL="$(git -C "$(cd "$(dirname "$0")" && pwd)" remote get-url origin 2>/dev/null || true)"
     [ -n "$GPN_REPO_URL" ] || die "no source and no GPN_REPO_URL — clone the repo and run ./install.sh, or set GPN_REPO_URL"
@@ -292,17 +322,33 @@ if [ -n "$REF_CODE" ]; then
 fi
 
 # 3 ── Build ─────────────────────────────────────────────────────────────────
-log "building gpn-node + gpn-agent (a few minutes, first run)…"
-cargo build --release --manifest-path "$SRC/gpn-node/Cargo.toml" -p gpn-node
-cargo build --release --manifest-path "$SRC/gpn-agent/Cargo.toml" --bins
+if [ "$BUNDLE" = 1 ]; then
+  log "skipping build (prebuilt bundle)"
+else
+  log "building gpn-node + gpn-agent (a few minutes, first run)…"
+  cargo build --release --manifest-path "$SRC/gpn-node/Cargo.toml" -p gpn-node
+  cargo build --release --manifest-path "$SRC/gpn-agent/Cargo.toml" --bins
+fi
 
 # 4 ── Install binaries ──────────────────────────────────────────────────────
 log "installing binaries → $BIN_DIR"
 mkdir -p "$BIN_DIR"
-ln -sf "$SRC/gpn-node/target/release/gpn-node" "$BIN_DIR/gpn-node"
-for b in gpn_node gpn_provider_status gpn_llm_provider gpn_diffusion_provider gpn_gpu_mine gpn_external_miner gpn_gpu_compute gpn_simulate_autoswitch gpn_pull_model gpn_snapshot gpn_seedlist; do
-  [ -f "$SRC/gpn-agent/target/release/$b" ] && ln -sf "$SRC/gpn-agent/target/release/$b" "$BIN_DIR/$b"
-done
+if [ "$BUNDLE" = 1 ]; then
+  # Copy (not symlink): the extracted download folder may be deleted/cleaned.
+  cp "$SRC/gpn-node" "$BIN_DIR/gpn-node"
+  for f in "$SRC"/gpn_*; do
+    [ -f "$f" ] || continue
+    case "$f" in *.sh|*.ps1|*.txt) continue ;; esac
+    cp "$f" "$BIN_DIR/$(basename "$f")"
+  done
+  chmod 755 "$BIN_DIR"/gpn-node "$BIN_DIR"/gpn_* 2>/dev/null || true
+else
+  ln -sf "$SRC/gpn-node/target/release/gpn-node" "$BIN_DIR/gpn-node"
+  for b in gpn_node gpn_provider_status gpn_llm_provider gpn_diffusion_provider gpn_gpu_mine gpn_external_miner gpn_gpu_compute gpn_simulate_autoswitch gpn_pull_model gpn_snapshot gpn_seedlist; do
+    [ -f "$SRC/gpn-agent/target/release/$b" ] && ln -sf "$SRC/gpn-agent/target/release/$b" "$BIN_DIR/$b"
+  done
+fi
+[ -x "$BIN_DIR/gpn_node" ] || die "gpn_node is missing from $BIN_DIR — the install cannot continue"
 
 # 4b ── ollama (AI-compute models, REQUIRED to serve LLMs, user-local) ─────────
 # A node mines without ollama, but cannot serve LLM jobs until ollama runs (the
@@ -367,6 +413,30 @@ OLLAMA_MODELS=$PREFIX/models
 # setting here — the value lives in $PREFIX/referral and must not be rewritable).
 EOF
 
+# 6b ── Autostart (survive a reboot) ─────────────────────────────────────────
+# Units alone are not enough: a `systemctl --user` service starts at LOGIN.
+# gpn-autostart.sh also runs `loginctl enable-linger`, which is what makes the
+# user manager start at boot on a headless box.
+AUTOSTART_HELPER="$SRC/scripts/gpn-autostart.sh"
+[ -f "$AUTOSTART_HELPER" ] || AUTOSTART_HELPER="$SELF_DIR/scripts/gpn-autostart.sh"
+if [ "$AUTOSTART" = 1 ] && [ -f "$AUTOSTART_HELPER" ]; then
+  log "installing autostart (systemd user units + linger)…"
+  GPN_PREFIX="$PREFIX" GPN_BIN="$BIN_DIR" GPN_AP_URL="$GPN_AP_URL" GPN_BOOTNODES="$GPN_BOOTNODES" \
+    bash "$AUTOSTART_HELPER" install --prefix "$PREFIX" --bin-dir "$BIN_DIR" \
+    || warn "autostart setup failed — the node still works, but you must start it yourself after a reboot"
+  AUTOSTART_DONE=1
+elif [ "$AUTOSTART" = 1 ]; then
+  warn "autostart helper not found — skipping (start the node manually after a reboot)"
+  AUTOSTART_DONE=0
+else
+  if [ "$CLI_AUTOSTART" = 0 ]; then
+    log "autostart disabled (--no-autostart) — nothing starts after a reboot."
+  else
+    log "autostart disabled (GPN_AUTOSTART=0) — nothing starts after a reboot."
+  fi
+  AUTOSTART_DONE=0
+fi
+
 # 7 ── Done ──────────────────────────────────────────────────────────────────
 log "installed. payout account: ${WALLET:-<see $PREFIX/wallet.setup>}"
 # Say plainly where the chain data came from — no ambiguity for the operator.
@@ -401,3 +471,14 @@ echo "  gpn_pull_model pull llama3.2:1b"
 echo "  gpn_pull_model gguf TheBloke/Llama-2-7B-GGUF llama-2-7b.Q4_K_M.gguf"
 echo
 echo "Config/env: $PREFIX/gpn.env   ·   keystore (secret): $GPN_BASE_PATH/keystore.json"
+echo
+echo "Payout address: ${WALLET:-<see $PREFIX/wallet.setup>}"
+if [ "${AUTOSTART_DONE:-0}" = 1 ]; then
+  echo "Your node will start automatically at boot (systemd user units + linger)."
+  echo "  Dashboard: http://127.0.0.1:8099"
+  echo "  status:  systemctl --user status gpn-node.service"
+  echo "  logs:    journalctl --user -u gpn-node.service -f"
+else
+  echo "Autostart is OFF — after a reboot you must run 'gpn_node' yourself."
+fi
+echo "  undo autostart later:  ./uninstall.sh --remove-autostart"

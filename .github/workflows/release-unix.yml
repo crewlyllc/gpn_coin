@@ -74,14 +74,22 @@ jobs:
           os=$(echo "$RUNNER_OS" | tr '[:upper:]' '[:lower:]')
           tag="${os}-latest"
           asset="gpn-${os}.tar.gz"
-          # Package binaries + the bundled ollama installer, example config and
-          # first-run docs (mirrors the Windows zip).
+          # Package binaries + the installers, ollama installer, example config
+          # and first-run docs (mirrors the Windows zip). The installers are
+          # what make the extracted node survive a reboot (systemd units +
+          # enable-linger); a bare tarball has no autostart at all.
           stage="$RUNNER_TEMP/gpn-${os}-stage"
           rm -rf "$stage" && mkdir -p "$stage/scripts"
           cp gpn-agent/target/release/gpn_* gpn-node/target/release/gpn-node "$stage/"
           cp scripts/install-ollama.sh scripts/install-ollama-amd.sh "$stage/scripts/"
+          cp scripts/gpn-autostart.sh "$stage/scripts/"
+          cp install.sh uninstall.sh install.ps1 install.cmd uninstall.ps1 "$stage/"
           cp gpn-node.example.toml README-FIRST-RUN.txt "$stage/"
-          chmod +x "$stage"/gpn_* "$stage/scripts/"*.sh
+          chmod +x "$stage"/gpn_* "$stage/scripts/"*.sh "$stage/install.sh" "$stage/uninstall.sh"
+          for f in install.sh uninstall.sh install.ps1 install.cmd uninstall.ps1 \
+                   scripts/gpn-autostart.sh; do
+            [ -s "$stage/$f" ] || { echo "::error::bundle is missing $f"; exit 1; }
+          done
           ( cd "$stage" && tar -czf "$RUNNER_TEMP/$asset" . )
           echo "package contents:"; find "$stage" -type f | sed "s|$stage/|  |"
           hdr=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json")

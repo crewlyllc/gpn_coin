@@ -7,8 +7,15 @@
 # Layout (unchanged from the original release-unix.yml packaging):
 #   gpn-node                the chain node/miner
 #   gpn_*                   the agent binaries at the bundle root
+#   install.sh, uninstall.sh, scripts/gpn-autostart.sh
+#   install.ps1, install.cmd, uninstall.ps1  (same set as the Windows zip, so
+#                                          README-FIRST-RUN.txt is true for
+#                                          both packages)
 #   scripts/install-ollama.sh, scripts/install-ollama-amd.sh
 #   gpn-node.example.toml, README-FIRST-RUN.txt
+#
+# The installers are what make a downloaded node survive a reboot: the tarball
+# alone is just binaries with no unit, so nothing ever starts again.
 #
 # Differences from the old glob: only bins that gpn-agent/Cargo.toml actually
 # declares are copied (the old `gpn_*` glob also swept in rustc *.d dep-info
@@ -46,10 +53,14 @@ done
 [ "$n" -ge 50 ] || { echo "ERROR: only $n agent binaries staged" >&2; exit 1; }
 cp "$CT_NODE/release/gpn-node" "$stage/"
 cp scripts/install-ollama.sh scripts/install-ollama-amd.sh "$stage/scripts/"
+cp scripts/gpn-autostart.sh "$stage/scripts/"
+cp install.sh uninstall.sh install.ps1 install.cmd uninstall.ps1 "$stage/"
 cp gpn-node.example.toml README-FIRST-RUN.txt "$stage/"
-chmod +x "$stage"/gpn_* "$stage/scripts/"*.sh
+chmod +x "$stage"/gpn_* "$stage/scripts/"*.sh "$stage/install.sh" "$stage/uninstall.sh"
 
 for f in gpn-node gpn_node gpn_llm_provider gpn_finetune_provider gpn_attest gpn_wallet \
+         install.sh uninstall.sh install.ps1 install.cmd uninstall.ps1 \
+         scripts/gpn-autostart.sh \
          scripts/install-ollama.sh scripts/install-ollama-amd.sh \
          gpn-node.example.toml README-FIRST-RUN.txt; do
   [ -s "$stage/$f" ] || { echo "ERROR: bundle is missing required file: $f" >&2; exit 1; }

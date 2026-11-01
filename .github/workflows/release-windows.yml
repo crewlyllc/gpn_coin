@@ -524,8 +524,14 @@ jobs:
           Copy-Item 'gpn-agent\target\release\*.exe' $stage -Force
           Copy-Item 'gpn-node\target\release\gpn-node.exe' $stage -Force
           New-Item -ItemType Directory -Force -Path (Join-Path $stage 'scripts') | Out-Null
-          foreach ($f in @('scripts\install-ollama.ps1','scripts\install-ollama.sh','scripts\install-ollama-amd.sh')) {
+          foreach ($f in @('scripts\install-ollama.ps1','scripts\install-ollama.sh','scripts\install-ollama-amd.sh','scripts\gpn-autostart.sh')) {
             if (Test-Path $f) { Copy-Item $f (Join-Path $stage 'scripts') -Force } else { throw "missing required package file: $f" }
+          }
+          # The installers are what make the extracted node survive a reboot.
+          # Without install.ps1 a user who extracts and runs gpn_node.exe has no
+          # scheduled task, and after a reboot nothing runs (2026-11-01).
+          foreach ($f in @('install.ps1','install.cmd','uninstall.ps1','install.sh','uninstall.sh')) {
+            if (Test-Path $f) { Copy-Item $f $stage -Force } else { throw "missing required package file: $f" }
           }
           foreach ($f in @('gpn-node.example.toml','README-FIRST-RUN.txt')) {
             if (Test-Path $f) { Copy-Item $f $stage -Force } else { throw "missing required package file: $f" }

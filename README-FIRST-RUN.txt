@@ -1,39 +1,64 @@
 GPN NODE — FIRST RUN
 ====================
 
-Three steps. One question.
+Two steps, one question.
 
   1) Download + extract this package
-  2) ./gpn_node --setup      (answer: generate or import a wallet)
-  3) ./gpn_node
+  2) Run the installer for your OS:
+        Windows:     install.ps1        (or double-click install.cmd)
+        Linux:       ./install.sh
 
-Nothing else needs to be configured. `--setup` downloads the chain spec,
-creates the data folder, creates (or imports) your wallet, derives the payout
-address, and installs/starts ollama with the baseline model. The second run
-reads ~/.gpn/node.toml (Windows: %USERPROFILE%\.gpn\node.toml) and starts with
-no flags and no environment variables.
+That is it. The installer copies the binaries, creates the data folder and the
+wallet, makes sure ollama is installed and serving, and registers an autostart
+entry so THE NODE (AND OLLAMA) COME BACK BY THEMSELVES AFTER A REBOOT.
+
+  Windows:  a scheduled task "GPN-Node" (/SC ONLOGON /RL HIGHEST, one instance
+            only) runs C:\gpn\start-node.cmd, which logs to C:\gpn\node.log.
+            Ollama gets its own autostart too (task "GPN-Ollama", or the entry
+            Ollama's own installer created — never a duplicate).
+  Linux:    systemd user units gpn-node.service + gpn-ollama.service, enabled,
+            plus `loginctl enable-linger` so they start at BOOT and not only
+            after a login.
+
+Dashboard after start:  http://127.0.0.1:8099  (loopback only)
+The installer prints your payout address when it finishes.
 
 A GPN node is ALWAYS a miner AND an AI provider. Ollama is a REQUIRED
 component: `gpn_node` will REFUSE TO START if ollama cannot be reached
-(exit code 69, `node=down(no ollama)`).
+(exit code 69, `node=down(no ollama)`). That is why the installer refuses to
+continue when ollama is missing instead of leaving you with a dead node.
 
 Files in this package
 ---------------------
-  gpn-node(.exe)          the chain node/miner
-  gpn_*(.exe)             the agent binaries (gpn_node is the one supervisor)
+  gpn-node(.exe)                 the chain node/miner
+  gpn_*(.exe)                    the agent binaries (gpn_node is the supervisor)
+  install.ps1                    Windows installer (install + autostart)
+  install.cmd                    Windows double-click wrapper for install.ps1
+  uninstall.ps1                  Windows: remove the autostart in one command
+  install.sh                     Linux installer (install + autostart)
+  uninstall.sh                   Linux: --remove-autostart / --status
+  scripts/gpn-autostart.sh       Linux: systemd user units + enable-linger
   scripts/install-ollama.ps1     ollama installer (Windows)
   scripts/install-ollama.sh      ollama installer (Linux/macOS)
   scripts/install-ollama-amd.sh  AMD/ROCm variant (Linux)
-  gpn-node.example.toml   example config (optional — the wizard writes one)
-  README-FIRST-RUN.txt    this file
+  gpn-node.example.toml          example config (optional — the wizard writes one)
+  README-FIRST-RUN.txt           this file
 
 If gpn_node / gpn-node binaries are missing, download the full release zip
 from the GitHub Releases page of the repo.
 
-1) Setup
---------
-  Windows:   gpn_node.exe --setup
-  Linux:     ./gpn_node --setup
+1) Install
+----------
+  Windows:   powershell -ExecutionPolicy Bypass -File .\install.ps1
+             (or just double-click install.cmd)
+
+  Linux:     ./install.sh
+             ./install.sh --no-autostart     # do NOT set up autostart
+             ./install.sh --no-fast-sync     # skip the snapshot, sync from peers
+
+If Windows refuses to run the script ("running scripts is disabled"), the
+install.cmd wrapper already passes -ExecutionPolicy Bypass. You can also
+unblock a downloaded file: right-click install.ps1 -> Properties -> Unblock.
 
 You will be asked ONE question:
 
@@ -46,15 +71,26 @@ You will be asked ONE question:
   * Import   — paste a 12/24-word mnemonic or a 0x-prefixed 32-byte seed.
 
 The resulting SS58 address is printed and used as the payout account.
-Run `--setup` again any time; it keeps the existing wallet by default.
+Re-running the installer keeps the existing wallet (it is never replaced).
 
-2) Start the node
------------------
-  Windows:   gpn_node.exe
-  Linux:     ./gpn_node
+2) Nothing else
+---------------
+The node is already running and will restart by itself after a reboot:
 
-One command starts the miner + heartbeat + every AI provider, and supervises
-them as one node with one log stream and one status line.
+  Windows:   schtasks /End /TN GPN-Node      # stop
+             schtasks /Run /TN GPN-Node      # start again now
+             powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall
+
+  Linux:     systemctl --user status gpn-node.service
+             journalctl --user -u gpn-node.service -f
+             ./uninstall.sh --remove-autostart
+
+Uninstalling the AUTOSTART never deletes your data or your wallet: the chain
+DB, keystore.json and downloaded models are left exactly where they are, and a
+printed note tells you where.
+
+Running the installer twice is safe: tasks are recreated by name and unit files
+rewritten, so you never end up with two nodes fighting over one data folder.
 
 What is automatic
 -----------------
@@ -66,6 +102,12 @@ What is automatic
   public address configured GPN_PUBLIC_ADDR -> public-IP detection ->
                  UPnP/NAT-PMP port mapping (on by default)
   ollama         installed/started + baseline model pulled
+  autostart      Windows scheduled tasks / systemd user units + linger
+
+Manual run (no autostart, e.g. a one-off test)
+---------------------------------------------
+  Windows:   C:\gpn\start-node.cmd
+  Linux:     gpn_node
 
 Fallbacks / manual overrides
 ----------------------------
