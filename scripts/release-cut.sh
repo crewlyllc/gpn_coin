@@ -48,6 +48,8 @@
 #   GPN_RELEASE_KEY      ~/.openclaw/credentials/gpn-release-key.txt
 #   GPN_VERIFY_KEY       (optional) expected pubkey hex for the self-check
 #   GPN_POLL_INTERVAL    seconds between publish polls (10)
+#   GPN_WORK_DIR         where partial downloads are kept for resuming
+#                        (~/.cache/gpn-release-cut; ~550 MB when populated)
 #
 # Exit: 0 = published or nothing to do; 2 = refused (precondition); 1 = failed.
 set -euo pipefail
@@ -250,6 +252,10 @@ if [ -n "$(git -C "$REPO" status --porcelain -- "$MANIFEST_REL")" ]; then
 fi
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/gpn-release-cut.XXXXXX")"
+# A stable work dir so an interrupted run resumes instead of restarting a
+# 300 MB download. The sidecar pins which build the partial file belongs to.
+WORK="${GPN_WORK_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/gpn-release-cut}"
+mkdir -p "$WORK"
 CFG_SRC="$TMP/curl-src.cfg"
 CFG_DST="$TMP/curl-dst.cfg"
 make_curl_cfg "$SRC_PAT_FILE" "$CFG_SRC"
@@ -293,6 +299,10 @@ step "2/6 download and verify the built assets"
 SRC_BASE="$GPN_GH_API/repos/$SRC_REPO/releases/assets"
 fetch_asset() { # api_asset_id file expected_sha label
   local id=$1 file=$2 want=$3 label=$4 got
+  # resume only within the same build; a changed digest starts from zero
+  if [ "$(cat "$file.expected" 2>/dev/null || true)" != "$want" ]; then
+    rm -f "$file"; printf '%s' "$want" > "$file.expected"
+  fi
   say "downloading $label…"
   curl -L --fail --silent --show-error --retry 3 --retry-delay 3 --retry-all-errors \
     --connect-timeout 20 -C - -K "$CFG_SRC" \
@@ -307,8 +317,8 @@ fetch_asset() { # api_asset_id file expected_sha label
     exit 1
   fi
 }
-F_LINUX="$TMP/gpn-linux.tar.gz"
-F_WIN="$TMP/gpn-windows.zip"
+F_LINUX="$WORK/gpn-linux.tar.gz"
+F_WIN="$WORK/gpn-windows.zip"
 ID_LINUX="$(asset_meta "$CFG_SRC" "$SRC_REPO" linux-latest gpn-linux.tar.gz | cut -d' ' -f3)"
 ID_WIN="$(asset_meta "$CFG_SRC" "$SRC_REPO" windows-latest gpn-windows.zip | cut -d' ' -f3)"
 fetch_asset "$ID_LINUX" "$F_LINUX" "$S_LINUX" gpn-linux.tar.gz

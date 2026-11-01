@@ -147,7 +147,7 @@ PY
          GPN_RELEASE_DOWNLOAD_BASE="$BASE/download/mirror/gpn" \
          GPN_RELEASE_KEY="$T/key.txt" GPN_VERIFY_KEY="$(cat "$T/pub.txt")" \
          GPN_GPN_PAT_FILE="$T/src.pat" GPN_CREWLYLLC_PAT_FILE="$T/dst.pat" \
-         GPN_POLL_INTERVAL=1
+         GPN_POLL_INTERVAL=1 GPN_WORK_DIR="$T/work"
   git -C "$R" config --global --get user.email >/dev/null 2>&1 || true
 }
 

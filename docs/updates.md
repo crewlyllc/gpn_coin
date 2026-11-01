@@ -369,8 +369,10 @@ That single command is the whole former 30-minute last mile:
 1. **detects** whether the built assets are already the published ones —
    `already released 0.3.5 — nothing to do.` and exit 0 when they are, so it is
    safe to run on a timer;
-2. **downloads** both bundles (resumable) and verifies each sha256 against the
-   digest GitHub reports — a truncated upload can never be signed;
+2. **downloads** both bundles and verifies each sha256 against the digest
+   GitHub reports — a truncated upload can never be signed. Interrupted runs
+   resume from `~/.cache/gpn-release-cut` (the cached copy is pinned to the
+   expected digest, so a new build never resumes onto an old partial file);
 3. **reads the version out of the bundles** (`gpn-build-v1 version=…`); it never
    guesses. `--version X.Y.Z` is accepted as an *assertion* and a mismatch
    aborts before anything is uploaded;
