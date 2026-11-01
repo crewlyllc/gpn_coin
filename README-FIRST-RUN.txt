@@ -25,8 +25,13 @@ The installer prints your payout address when it finishes.
 
 A GPN node is ALWAYS a miner AND an AI provider. Ollama is a REQUIRED
 component: `gpn_node` will REFUSE TO START if ollama cannot be reached
-(exit code 69, `node=down(no ollama)`). That is why the installer refuses to
-continue when ollama is missing instead of leaving you with a dead node.
+(exit code 69, `node=down(no ollama)`).
+
+So the installer INSTALLS ollama for you when it is missing (winget, falling
+back to the official OllamaSetup.exe), starts it, and pulls the baseline
+models. That can take a few minutes on a fresh machine -- it is not hung.
+If you want to install ollama yourself, pass -NoOllamaInstall and the
+installer will stop and tell you instead.
 
 Files in this package
 ---------------------

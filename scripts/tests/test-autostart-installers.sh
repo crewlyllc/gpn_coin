@@ -95,6 +95,13 @@ if [ "${boots:-0}" -ge 3 ]; then ok "canonical 3 bootstrap peers"; else bad "exp
 # ---- ollama is a hard prerequisite ---------------------------------------
 assert_has "$ps1" "http://127.0.0.1:11434/api/tags" "waits on ollama /api/tags"
 assert_has "$ps1" "function Wait-Ollama"            "has an explicit ollama wait loop"
+assert_has "$ps1" "ollama is missing -- installing it"   "installs ollama instead of exiting on a fresh machine"
+assert_has "$ps1" "install-ollama.ps1"                   "delegates to the ollama installer"
+assert_has "$ps1" "OllamaSetup.exe"                      "has a direct-install fallback (winget absent)"
+assert_has "$ps1" "Programs\\Ollama\\ollama.exe"      "refreshes PATH for a per-user ollama install"
+assert_has "$ps1" "no-?ollama-?install"                  "documents the -NoOllamaInstall opt-out"
+assert_not_has "$ps1" "Install it, then run this installer again:[^\n]*\n[^\n]*winget install[^\n]*\n[^\n]*Nothing was changed" \
+  "no longer dead-ends the user on a missing ollama"
 assert_has "$ps1" "winget install --id Ollama.Ollama -e" "prints the install command when ollama is missing"
 assert_has "$ps1" "REFUSE TO START"                 "explains why it refuses to continue without ollama"
 

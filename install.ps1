@@ -32,6 +32,12 @@
 .PARAMETER NoStart
   Register the autostart but do not launch the node now.
 
+.PARAMETER NoOllamaInstall
+  Fail instead of installing ollama when it is missing. By default the
+  installer installs ollama (winget, else the official installer), starts it,
+  and pulls the baseline models -- a fresh machine has no ollama, and
+  gpn_node exits 69 without it.
+
 .PARAMETER InstallDir
   Install root (default C:\gpn).
 
@@ -57,6 +63,7 @@ $ErrorActionPreference = 'Continue'
 $Uninstall  = $false
 $WhatIf     = $false
 $NoStart    = $false
+$NoOllamaInstall = $false
 $InstallDir = 'C:\gpn'
 
 for ($i = 0; $i -lt $args.Count; $i++) {
@@ -65,6 +72,7 @@ for ($i = 0; $i -lt $args.Count; $i++) {
     '^-{1,2}(uninstall|remove-autostart)$' { $Uninstall = $true }
     '^-{1,2}what ?if$'                     { $WhatIf    = $true }
     '^-{1,2}no-?start$'                    { $NoStart   = $true }
+    '^-{1,2}no-?ollama-?install$'          { $NoOllamaInstall = $true }
     '^-{1,2}install-?dir[=:](.+)$'         { $InstallDir = $Matches[1] }
     '^-{1,2}install-?dir$' {
       if ($i + 1 -lt $args.Count) { $i++; $InstallDir = [string]$args[$i] }
@@ -333,6 +341,45 @@ if (Test-Ollama) {
   Say 'ollama is already serving on 127.0.0.1:11434'
 } else {
   $ollama = Get-Command ollama -ErrorAction SilentlyContinue
+  if (-not $ollama -and -not $NoOllamaInstall) {
+    # Installing ollama is the installer's job -- a fresh machine has none, and
+    # "exit 1 and tell the user to run winget" is indistinguishable from a
+    # crash when the window closes. Do it here instead.
+    Say 'ollama is missing -- installing it (this can take a few minutes)'
+    $helper = Join-Path $Root 'scripts\install-ollama.ps1'
+    if ($WhatIf) {
+      Write-Host "[whatif] would install ollama (winget Ollama.Ollama, else OllamaSetup.exe /VERYSILENT)" -ForegroundColor Cyan
+      Write-Host "[whatif] would start ollama serve and pull the baseline models" -ForegroundColor Cyan
+    } elseif (Test-Path $helper) {
+      Invoke-Step 'install ollama + baseline models' {
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $helper
+      }
+      if ($LASTEXITCODE -ne 0) { Warn "ollama helper exited $LASTEXITCODE -- falling back to a direct install" }
+    } else {
+      Invoke-Step 'install ollama (direct)' {
+        $wg = Get-Command winget -ErrorAction SilentlyContinue
+        if ($wg) {
+          & winget install --id Ollama.Ollama -e --accept-source-agreements --accept-package-agreements --silent 2>&1 | Out-Null
+        }
+        if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {
+          $setup = Join-Path $env:TEMP 'OllamaSetup.exe'
+          Invoke-WebRequest -Uri 'https://ollama.com/download/OllamaSetup.exe' -OutFile $setup
+          Start-Process -FilePath $setup -ArgumentList '/VERYSILENT' -Wait
+        }
+      }
+    }
+    if (-not $WhatIf) {
+      # The installer updated PATH in the machine scope; this process's copy is stale.
+      $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
+                   [System.Environment]::GetEnvironmentVariable('Path', 'User')
+      if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {
+        $candidate = Join-Path $env:LOCALAPPDATA 'Programs\Ollama\ollama.exe'
+        if (Test-Path $candidate) { $env:Path = (Split-Path -Parent $candidate) + ';' + $env:Path }
+      }
+      $ollama = Get-Command ollama -ErrorAction SilentlyContinue
+    }
+  }
+
   if (-not $ollama) {
     Write-Host ''
     Write-Host 'OLLAMA IS MISSING -- the node will REFUSE TO START without it.' -ForegroundColor Red
@@ -343,7 +390,7 @@ if (Test-Ollama) {
     if ($WhatIf) {
       Warn 'continuing because -WhatIf never changes anything'
     } else {
-      Write-Host 'Nothing was changed.' -ForegroundColor Red
+      Write-Host "Nothing else was changed (node not started). Re-run without -NoOllamaInstall to let the installer handle it." -ForegroundColor Red
       exit 1
     }
   } else {
