@@ -298,7 +298,7 @@ It is still read-only: it fetches the manifest, reports, and installs nothing.
 
 | | Where it lives | Who has it |
 |---|---|---|
-| **Private** key (32-byte ed25519 seed) | Offline with GPN release operations. Default on an ops machine: `~/.openclaw/credentials/gpn-release-key.txt` (mode `0600`). **Never in the repo, never in CI logs, never in a chat.** | Release ops only |
+| **Private** key (32-byte ed25519 seed) | Offline with GPN release operations. Default on an ops machine: `~/.openclaw/credentials/gpn-release-key.txt` (mode `0600`). **Never in the repo, never in CI logs, never in a chat, never a GitHub Actions secret.** Only `scripts/release-cut.sh` (local, or local cron) reads it. | Release ops only |
 | **Public** key | Compiled into every node: `gpn-agent/src/update.rs::RELEASE_PUBKEY_HEX` | Everyone |
 | Fingerprint | `scripts/gpn-release-key.sh --show` → first 16 hex of `sha256(pubkey)` | Published with each release |
 
@@ -329,84 +329,120 @@ If you regenerate, you **must** update `RELEASE_PUBKEY_HEX` in
 
 ---
 
-## 5. Publishing a release: the checklist
+## 5. Cutting a release
 
-Every step is required; each one has a failure mode that only shows up on an
-operator's machine.
+Three steps: **bump**, **dispatch the build workflows**, **cut**. The third one
+is automated and idempotent — you can run it by hand, or let cron do it.
+
+### 1. Bump — one level, with the change that earned it
 
 ```bash
-# 1. BUMP — one level, with the change that earned it (docs above).
 scripts/bump-version.py minor
 $EDITOR CHANGELOG.md                 # replace the TODOs; this text ships
 scripts/bump-version.py --check      # all crates agree, version is strict semver
+```
 
-# 2. BUILD — from a CLEAN tree at the commit you will tag. The version and SHA
-#    baked into the artifact come from here, not from the manifest command.
-git status --porcelain               # must be empty — the stamp records the
-                                     # COMMIT, so uncommitted changes would ship
-                                     # under a SHA that does not contain them
-cargo build --release --manifest-path gpn-node/Cargo.toml -p gpn-node
-cargo build --release --manifest-path gpn-agent/Cargo.toml --bins
-gpn-agent/target/release/gpn_node --version   # gpn_node 0.2.0 (spec 41, <sha7>)
+Land the bump in the same commit as the change. The build stamps the version and
+git SHA **into the binary**, so an uncommitted tree ships under a SHA that does
+not contain it.
 
-#    Windows: build on the Windows box (run-windows-provider.ps1 /
-#    windows-build-log.md) and copy the .exe into dist/. It cannot be built
-#    cross-platform here, and it is stamped the same way.
+### 2. Build — dispatch the two workflows
 
-# 3. BUNDLE — one archive per platform, flat at the root, the way
-#    `.github/workflows/release-{unix,windows}.yml` builds it.
-#    A bundle must contain BOTH gpn_node (the supervisor) and gpn-node.
-stage=/tmp/gpn-linux-stage; rm -rf $stage; mkdir -p $stage/scripts
-cp gpn-agent/target/release/gpn_* gpn-node/target/release/gpn-node $stage/
-cp scripts/install-ollama*.sh $stage/scripts/
-cp gpn-node.example.toml README-FIRST-RUN.txt $stage/
-chmod +x $stage/gpn_* $stage/scripts/*.sh
-(cd $stage && tar -czf gpn-linux.tar.gz .)      # flat: ./gpn_node, ./gpn-node, …
+```bash
+gh workflow run release-unix.yml    --repo jeremyzguo/gpn_coin
+gh workflow run release-windows.yml --repo jeremyzguo/gpn_coin
+```
 
-# 4. UPLOAD THE BUNDLE FIRST. The manifest must never point at a 404 — an
-#    auto-updating fleet would all fail the download in the same minute.
-#    Tag: linux-latest / windows-latest (rolling), or vX.Y.Z.
-gpn-agent/target/release/gpn_node --version    # gpn_node 0.2.0 (spec 41, <sha7>)
+They upload `gpn-linux.tar.gz` to release `linux-latest` and `gpn-windows.zip`
+to `windows-latest` in the build repo (`jeremyzguo/gpn_coin`). Windows builds on
+its own runner; see `windows-build-log.md`.
 
-# 5. MANIFEST — the digest is READ FROM GITHUB, never typed:
-#      --bundle os/arch=URL   → sha256 + size from the release API
-#      --bundle os/arch=PATH  → computed locally, and the build stamp is read
-#                               out of the archive to cross-check --version
-#    A remote bundle cannot be introspected, so --version is an assertion here;
-#    the node still proves the version from the extracted stamps before switching.
+### 3. Cut — mirror, sign, publish, verify
+
+```bash
+scripts/release-cut.sh --dry-run     # what it would publish, touches nothing
+scripts/release-cut.sh               # do it
+```
+
+That single command is the whole former 30-minute last mile:
+
+1. **detects** whether the built assets are already the published ones —
+   `already released 0.3.5 — nothing to do.` and exit 0 when they are, so it is
+   safe to run on a timer;
+2. **downloads** both bundles (resumable) and verifies each sha256 against the
+   digest GitHub reports — a truncated upload can never be signed;
+3. **reads the version out of the bundles** (`gpn-build-v1 version=…`); it never
+   guesses. `--version X.Y.Z` is accepted as an *assertion* and a mismatch
+   aborts before anything is uploaded;
+4. **mirrors** both assets into the public repo `crewlyllc/gpn_coin`, renaming
+   the previous asset aside first so a failed upload leaves a complete mirror
+   rather than a 404 for every auto-updating node, then verifies the mirror's
+   digest and deletes the superseded copies;
+5. **signs** `website/releases.json` with the local ed25519 key and verifies its
+   own signature against the key compiled into the node;
+6. **publishes** (commits only `website/releases.json`, pushes `main`) and polls
+   `https://gpncoin.ai/releases.json` until it serves the new version;
+7. **verifies** by downloading each mirrored asset anonymously and comparing its
+   sha256 to the signed manifest. Any mismatch fails loudly.
+
+`min_version` is **carried over** from the published manifest unless you pass
+`--min-version`, so an automated cut never silently cuts off a segment of the
+fleet.
+
+Useful flags: `--dry-run`, `--skip-mirror` (once the sync workflow mirrors the
+assets itself), `--version`, `--min-version`, `--timeout N` (seconds to wait for
+the live manifest, default 300).
+
+It refuses to run at all if `website/releases.json` is dirty in the working
+tree — that is somebody else's edit, and signing it would launder it.
+
+**Cron does this for you.** An OpenClaw job runs `scripts/release-cut.sh` every
+30 minutes in an isolated session and announces only when it publishes or
+fails. So the normal flow is: dispatch the workflows, walk away, and get a
+message when a signed release is live. Nothing is announced when there is
+nothing new.
+
+If you must do it by hand (a non-GitHub mirror, an unusual cutoff), the
+underlying commands are still:
+
+```bash
+# digest READ from GitHub, never typed; --version is an assertion
 scripts/gen-release-manifest.py \
     --bundle linux/x86_64=https://github.com/crewlyllc/gpn_coin/releases/download/linux-latest/gpn-linux.tar.gz \
     --bundle windows/x86_64=https://github.com/crewlyllc/gpn_coin/releases/download/windows-latest/gpn-windows.zip \
-    --version 0.2.0 --min-version 0.1.0 \
+    --version 0.3.5 --min-version 0.1.0 \
     --key ~/.openclaw/credentials/gpn-release-key.txt \
     --out website/releases.json
-#    `layout: "bundle"` is written to the JSON for consumers, but NOT into the
-#    signature (no --sign-layout): a pre-bundle node has to be able to verify
-#    this manifest, or the fleet can never update. Add --sign-layout from 0.3.0.
-#    The script prints the digest it used and re-verifies the signature it just
-#    produced against the key compiled into the node. If it says OK, publish.
-#    Optional: --bundle-files os/arch=<unpacked dir> adds per-file hashes on
-#    top of the build-stamp check (needs --sign-layout).
-
-# 6. PUBLISH — artifacts FIRST, manifest SECOND.
-#    commit website/releases.json to main; the Cloudflare deploy serves it at
-#    https://gpncoin.ai/releases.json (worker/worker.js::releaseManifest)
-
-# 7. VERIFY — read-only, from a machine that is NOT the release box.
-gpn_node --check-updates
-#    expect: manifest verified … latest=0.2.0 min=0.1.0
-#            update: asset linux/x86_64 layout=bundle 331643208 bytes sha256=…
-#            result: this node (0.2.0) is supported — it would mine
-#                    — installed bundle: (none — not installed from a bundle)
-curl -s https://gpncoin.ai/releases.json | head -3
-#    and check the asset's sha256 matches the release page
-
-# 8. WATCH ONE NODE do the real thing before announcing:
-#    GPN_AUTO_UPDATE=1 GPN_UPDATE_CHECK_HOURS=1 journalctl --user -u gpn-node -f
-#    "downloading 0.2.0 (linux/x86_64, layout=bundle)" → "downloaded 331/316 MiB"
-#      → "staged bundle 0.2.0 at …/versions/0.2.0" → "restarting to apply"
-#      → "0.2.0 verified and switched in; previous build kept at …/versions/0.1.0"
+scripts/commit-paths.sh -m "release: sign 0.3.5" website/releases.json && git push origin main
 ```
+
+`layout: "bundle"` is written to the JSON but not into the signature (no
+`--sign-layout`) so pre-bundle nodes can still verify the manifest.
+
+### 4. Watch one node do the real thing before announcing
+
+```bash
+GPN_AUTO_UPDATE=1 GPN_UPDATE_CHECK_HOURS=1 journalctl --user -u gpn-node -f
+# "downloading 0.3.5 (linux/x86_64, layout=bundle)" → "downloaded 317/302 MiB"
+#   → "staged bundle 0.3.5 at …/versions/0.3.5" → "restarting to apply"
+#   → "0.3.5 verified and switched in; previous build kept at …/versions/0.3.4"
+gpn_node --check-updates      # read-only: manifest + asset digest, installs nothing
+```
+
+### Why signing stays on this machine, not in CI
+
+The private key is deliberately **not** a GitHub Actions secret and the release
+workflows cannot sign anything. A CI job can only produce an *unsigned* asset;
+`release-cut.sh` refuses to sign one whose version stamp disagrees with what it
+was told to publish, and it verifies the bytes it downloaded against the digest
+GitHub recorded. Putting the key in Actions would trade that boundary for
+convenience: one leaked repo secret, or one compromised third-party action,
+could then sign a release that every auto-updating node installs. Build
+infrastructure being writable by CI is acceptable; the trust root is not.
+
+The cost is that cutting needs this box awake. That is why the automation is a
+local cron job rather than a workflow — and why a completed build can no longer
+sit unsigned for days.
 
 **Do not** sign or publish a manifest over a bundle that does not match the
 commit you built from: the signature makes it authoritative, and every
