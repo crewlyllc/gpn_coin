@@ -340,7 +340,16 @@ foreach ($needed in @('gpn_node.exe', 'gpn-node.exe')) {
 Invoke-Step "create $BinDir and copy the release binaries" {
   New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
   New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
-  Copy-Item (Join-Path $Root '*.exe') $BinDir -Force
+  # Installing from the archive itself (C:\gpn\bin\install.ps1) means $Root and
+  # $BinDir are the same directory: Copy-Item would then try to copy every file
+  # onto itself and fail with "Cannot overwrite the item ... with itself".
+  $srcFull = [System.IO.Path]::GetFullPath($Root).TrimEnd('\')
+  $dstFull = [System.IO.Path]::GetFullPath($BinDir).TrimEnd('\')
+  if ($srcFull -ieq $dstFull) {
+    Say 'binaries are already in place (installing from the archive) -- nothing to copy'
+  } else {
+    Copy-Item (Join-Path $Root '*.exe') $BinDir -Force
+  }
 }
 Say "binaries installed in $BinDir"
 

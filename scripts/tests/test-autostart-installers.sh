@@ -100,6 +100,19 @@ assert_has "$ps1" "install-ollama.ps1"                   "delegates to the ollam
 assert_has "$ps1" "OllamaSetup.exe"                      "has a direct-install fallback (winget absent)"
 assert_has "$ps1" "Programs\\Ollama\\ollama.exe"      "refreshes PATH for a per-user ollama install"
 assert_has "$ps1" "no-?ollama-?install"                  "documents the -NoOllamaInstall opt-out"
+assert_has "$ps1" "installing from the archive"          "does not Copy-Item a file onto itself (Root == BinDir)"
+assert_has "$ps1" "srcFull -ieq \$dstFull"               "compares resolved install dirs before copying"
+
+# Windows PowerShell 5.1 reads .ps1 as ANSI unless there is a BOM: any non-ASCII
+# byte (em dash, ellipsis, box drawing) can break string parsing with errors like
+# "The string is missing the terminator". Keep every shipped script pure ASCII.
+while IFS= read -r f; do
+  if LC_ALL=C grep -q $'[^\x01-\x7F]' "$f"; then
+    fail "$f contains non-ASCII bytes (breaks Windows PowerShell 5.1 parsing)"
+  else
+    ok "$(basename "$f") is ASCII-only"
+  fi
+done < <(find "$repo" -name '*.ps1' -not -path '*/target/*' -not -path '*/.git/*')
 assert_not_has "$ps1" "Install it, then run this installer again:[^\n]*\n[^\n]*winget install[^\n]*\n[^\n]*Nothing was changed" \
   "no longer dead-ends the user on a missing ollama"
 assert_has "$ps1" "winget install --id Ollama.Ollama -e" "prints the install command when ollama is missing"

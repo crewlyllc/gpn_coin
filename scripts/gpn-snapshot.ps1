@@ -1,4 +1,4 @@
-# gpn-snapshot.ps1 — thin wrapper around the `gpn_snapshot.exe` binary (GPN-TASKS #23).
+# gpn-snapshot.ps1 - thin wrapper around the `gpn_snapshot.exe` binary (GPN-TASKS #23).
 #
 # Fast node onboarding on Windows: export an already-synced node's RocksDB + a
 # manifest, then import it into a fresh node so it starts near the tip instead

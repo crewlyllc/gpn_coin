@@ -1,15 +1,15 @@
 @echo off
 REM ============================================================================
-REM  GPN Windows — start this box as a GPN node.
+REM  GPN Windows - start this box as a GPN node.
 REM
-REM  A GPN node is ALWAYS both a miner and an AI provider — there is no role
+REM  A GPN node is ALWAYS both a miner and an AI provider - there is no role
 REM  option and no mine-only / provider-only mode. This launches the single-node
 REM  supervisor gpn_node.exe, which brings up the chain node/miner, the provider
 REM  heartbeat (:8093) and the AI provider claim/infer loop TOGETHER, with one
 REM  log stream and clean shutdown (Ctrl-C stops everything).
 REM
 REM  The one GPU is auto-yielded to an AI job while it runs (mining fully stops
-REM  for the job, then resumes — task #24).
+REM  for the job, then resumes - task #24).
 REM
 REM  Configure via env / a config file (see docs/run-a-node.md). Set:
 REM    GPN_CHAIN, GPN_PROVIDER_ENDPOINT, GPN_OLLAMA, GPN_GFLOPS,
@@ -25,14 +25,14 @@ REM  it (see the Ollama step below).
 REM
 REM  NOTE: a second author on the SAME authoring key forks the chain. Only one
 REM  designated author should mine per key. The external miner (if used) must run
-REM  on a SEPARATE machine — gpn_external_miner refuses a localhost node, so one
+REM  on a SEPARATE machine - gpn_external_miner refuses a localhost node, so one
 REM  GPU can never double-mine.
 REM ============================================================================
 
 REM --- Node: miner + AI provider, supervised together --------------------------
 set "GPN_CHAIN=testnet"
 REM Money identity (queue #96). NEVER hard-code a signer or payout account here:
-REM every install would then mine, sign and be PAID as the same account — and a
+REM every install would then mine, sign and be PAID as the same account - and a
 REM dev URI (a well-known test key) is derivable by anyone. The wallet is
 REM generated once on this machine and reused forever; GPN_SIGNER/GPN_ACCOUNT
 REM left empty on purpose (setting them OVERRIDES the local keystore).
@@ -64,7 +64,7 @@ if not exist "%GPN_NODE_KEY_FILE%" (
   exit /b 1
 )
 set "GPN_BIN=%~dp0..\gpn-agent\target\release"
-REM ── Fast sync: weekly snapshot (default; GPN_FAST_SYNC=0 opts out) ────────
+REM ---- Fast sync: weekly snapshot (default; GPN_FAST_SYNC=0 opts out) ----------------
 REM  A fresh node otherwise verifies ~200k blocks from peers (hours). The
 REM  default imports the published weekly snapshot, but only after checking the
 REM  ed25519-signed snapshot.json (release key built into gpn_snapshot.exe) and
@@ -169,7 +169,7 @@ REM set "GPN_PROVIDER_ENDPOINT=http://<your-public-ip>:8093/status"
 REM set "GPN_ASSIGN_TOKEN=<shared AP-provider secret>"
 start "gpn-node" "C:\actions-runner\_work\gpn_coin\gpn_coin\gpn-agent\target\release\gpn_node.exe"
 
-REM --- (OPTIONAL) external miner — run on a SEPARATE machine ----------------
+REM --- (OPTIONAL) external miner - run on a SEPARATE machine ----------------
 REM  Uncomment the line below on a DIFFERENT PC (it will refuse to run here,
 REM  since the node is on the same machine). Replace <NODE_IP> with the node's
 REM  public IP, and <WALLET_SEED> with the miner's own wallet seed.

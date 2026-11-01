@@ -1,11 +1,11 @@
 <#
-  GPN Windows — run this box as a GPN node (miner + AI provider).
+  GPN Windows - run this box as a GPN node (miner + AI provider).
 
-  A GPN node is ALWAYS both a miner and an AI provider — there is no role
+  A GPN node is ALWAYS both a miner and an AI provider - there is no role
   option, and no provider-only or mine-only mode. This script brings the whole
   node up together: the chain node/miner, the provider heartbeat, and the
   provider claim/infer loop. The one GPU is auto-yielded to an AI job while it
-  runs (mining fully stops, then resumes — task #24).
+  runs (mining fully stops, then resumes - task #24).
 
   It does this by running the single-node supervisor `gpn_node.exe`, which
   starts, logs ([node]/[heartbeat]/[provider]), monitors and cleanly stops all
@@ -13,7 +13,7 @@
 
   Prereqs (see shared/artifacts/project7/windows-client-test.md):
     * Ollama installed + running with at least one model pulled
-      (default in-network model: llama3.2:1b). REQUIRED to serve LLM jobs —
+      (default in-network model: llama3.2:1b). REQUIRED to serve LLM jobs -
       without it the box still mines but cannot serve. Use -InstallOllama to
       auto-install/start it via scripts\install-ollama.ps1.
     * The Windows release bundle unpacked next to this script in .\bin\
@@ -27,7 +27,7 @@
         -PublicStatusUrl "http://<your-public-ip>:8093/status"
 
   IDENTITY (queue #96): -Signer is REQUIRED and has no default. This box must
-  sign and be paid with an account that belongs to whoever runs it — a dev URI
+  sign and be paid with an account that belongs to whoever runs it - a dev URI
   such as //Alice or //Bob is public knowledge, so shipping it as a default
   would make every install mine for the same account. Omit -Signer and the
   script stops and tells you how to create/attach a wallet on this machine.
@@ -38,10 +38,10 @@ param(
   [string]$Chain           = "testnet",                # testnet | mainnet | dev | path to chain-spec.json
   [string]$Rpc             = "ws://gpn-testnet.duckdns.org:9944",
   # Identity RPC for the heartbeat: MUST be this box's own node. It used to be
-  # $Rpc — a seed node — so /status published the SEED's peer id in our
+  # $Rpc - a seed node - so /status published the SEED's peer id in our
   # multiaddr (2026-10-23) and every peer failed to dial us.
   [string]$NodeRpc         = "ws://127.0.0.1:9944",
-  [string]$Signer          = "",                       # REQUIRED: this box's own seed/mnemonic/dev URI (no default — see header)
+  [string]$Signer          = "",                       # REQUIRED: this box's own seed/mnemonic/dev URI (no default - see header)
   [string]$Address         = "",                     # ss58 payout/identity address (optional; shown if given)
   [string]$PublicStatusUrl = "",                     # e.g. http://1.2.3.4:8093/status  (enables on-chain discovery)
   [int]$ListenPort         = 8093,
@@ -60,7 +60,7 @@ $ErrorActionPreference = "Stop"
 $bin = Join-Path $PSScriptRoot "bin"
 function Need($exe) {
   $p = Join-Path $bin $exe
-  if (-not (Test-Path $p)) { throw "missing $p — unpack the gpn-windows artifact into .\bin\" }
+  if (-not (Test-Path $p)) { throw "missing $p - unpack the gpn-windows artifact into .\bin\" }
   return $p
 }
 
@@ -75,7 +75,7 @@ if ([string]::IsNullOrWhiteSpace($Signer)) {
   exit 2
 }
 
-# 1. Ollama must be up — it is the inference backend. Make it a first-class,
+# 1. Ollama must be up - it is the inference backend. Make it a first-class,
 #    self-healing step: if missing, either auto-install (-InstallOllama) or
 #    fail with the exact, copy-pasteable commands.
 function Test-Ollama {
@@ -83,7 +83,7 @@ function Test-Ollama {
 }
 Write-Host "[1/4] checking Ollama at $Ollama ..."
 if (-not (Test-Ollama)) {
-  Write-Warning "Ollama not reachable at $Ollama — the node would still MINE but could not serve LLM jobs."
+  Write-Warning "Ollama not reachable at $Ollama - the node would still MINE but could not serve LLM jobs."
   if ($InstallOllama) {
     $helper = Join-Path $PSScriptRoot "scripts\install-ollama.ps1"
     if (-not (Test-Path $helper)) { throw "install helper not found: $helper" }
@@ -106,7 +106,7 @@ Or re-run this script with:  -InstallOllama
 $tags = Invoke-RestMethod "$Ollama/api/tags"
 $models = @($tags.models | ForEach-Object { $_.name })
 if ($models.Count -eq 0) {
-  Write-Host "      Ollama has no models — pulling baseline: $BaselineModel ..."
+  Write-Host "      Ollama has no models - pulling baseline: $BaselineModel ..."
   & ollama pull $BaselineModel
   $tags = Invoke-RestMethod "$Ollama/api/tags"
   $models = @($tags.models | ForEach-Object { $_.name })
@@ -114,13 +114,13 @@ if ($models.Count -eq 0) {
 if ($models.Count -eq 0) { throw "Ollama has no models. Run: ollama pull $BaselineModel" }
 Write-Host "      models: $($models -join ', ')"
 
-# 2. (optional) register this provider on-chain. Idempotent in practice — a
+# 2. (optional) register this provider on-chain. Idempotent in practice - a
 #    second call is harmless but logs the pallet error. Needs a funded wallet.
 Write-Host "[2/4] registering provider (min_gflops=150) ..."
 & (Need "gpn_register.exe") $Rpc $Signer
 
-# 2b. Referral code (data collection only) — written ONCE, never fatal.
-#     Same storage + rules as Linux: %USERPROFILE%\.gpn\referral, 4–32 chars of
+# 2b. Referral code (data collection only) - written ONCE, never fatal.
+#     Same storage + rules as Linux: %USERPROFILE%\.gpn\referral, 4-32 chars of
 #     [A-Za-z0-9_-], first value wins so a box cannot re-refer itself later.
 if (-not [string]::IsNullOrWhiteSpace($Ref)) {
   $refCode = $Ref.Trim()
@@ -128,7 +128,7 @@ if (-not [string]::IsNullOrWhiteSpace($Ref)) {
   $refFile = Join-Path $refDir "referral"
   $refOk = ($refCode.Length -ge 4 -and $refCode.Length -le 32 -and $refCode -match '^[A-Za-z0-9_-]+$')
   if (-not $refOk) {
-    Write-Host "[!] [referral] invalid code '$refCode' (need 4-32 chars of A-Z a-z 0-9 _ -) — continuing WITHOUT a referral" -ForegroundColor Yellow
+    Write-Host "[!] [referral] invalid code '$refCode' (need 4-32 chars of A-Z a-z 0-9 _ -) - continuing WITHOUT a referral" -ForegroundColor Yellow
   } elseif (Test-Path $refFile) {
     $existing = (Get-Content $refFile -TotalCount 1)
     Write-Host "[!] [referral] already set to '$existing'; ignoring new value '$refCode'" -ForegroundColor Yellow
@@ -149,7 +149,7 @@ if (-not [string]::IsNullOrWhiteSpace($Ref)) {
       $existing = (Get-Content $refFile -TotalCount 1)
       Write-Host "[!] [referral] already set to '$existing'; ignoring new value '$refCode'" -ForegroundColor Yellow
     } catch {
-      Write-Host "[!] [referral] could not write $refFile ($_) — continuing without a referral" -ForegroundColor Yellow
+      Write-Host "[!] [referral] could not write $refFile ($_) - continuing without a referral" -ForegroundColor Yellow
     }
   }
 }
@@ -166,7 +166,7 @@ Write-Host "      signer: explicit -Signer OVERRIDES the local keystore (fleet/o
 $env:GPN_OLLAMA  = $Ollama
 $env:GPN_GFLOPS  = "$Gflops"
 $env:GPN_LISTEN  = "0.0.0.0:$ListenPort"
-# Canonical bootstrap peers — belt and braces: even a stale/hijacked chain spec
+# Canonical bootstrap peers - belt and braces: even a stale/hijacked chain spec
 # cannot strand this box on a loopback bootnode. GPN_BOOTNODES (if already set)
 # wins, so a fleet can override it.
 if ([string]::IsNullOrWhiteSpace($env:GPN_BOOTNODES)) {
@@ -183,7 +183,7 @@ if ($PublicStatusUrl) {
   Write-Host "      advertising on-chain endpoint: $PublicStatusUrl"
 } else {
   Remove-Item Env:\GPN_PROVIDER_ENDPOINT -ErrorAction SilentlyContinue
-  Write-Host "      GPN_PROVIDER_ENDPOINT unset — on-chain discovery disabled"
+  Write-Host "      GPN_PROVIDER_ENDPOINT unset - on-chain discovery disabled"
 }
 
 # 4. Run the supervisor: chain node/miner + heartbeat + provider loop, together.

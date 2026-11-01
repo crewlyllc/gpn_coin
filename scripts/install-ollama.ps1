@@ -1,9 +1,9 @@
-# install-ollama.ps1 — make ollama a first-class GPN node prerequisite (Windows).
+# install-ollama.ps1 - make ollama a first-class GPN node prerequisite (Windows).
 #
 # A GPN node cannot serve LLM jobs without ollama: the provider calls
 # http://127.0.0.1:11434. Mining works without it, but every AI request fails.
 # This makes the node never fail with a bare
-# `pull … failed: error sending request for url (http://127.0.0.1:11434/…)`.
+# `pull ... failed: error sending request for url (http://127.0.0.1:11434/...)`.
 #
 # What it does (idempotent):
 #   1. installs ollama if missing (winget, else the official installer),
@@ -29,14 +29,14 @@ function Test-OllamaListening {
     } catch { return $false }
 }
 
-# ── 1. install ────────────────────────────────────────────────────────────────
+# ---- 1. install --------------------------------------------------------------------------------------------------------------------------------
 $ollama = Get-Command ollama -ErrorAction SilentlyContinue
 if ($ollama) {
     Info "ollama already installed: $($ollama.Source)"
 } else {
     $winget = Get-Command winget -ErrorAction SilentlyContinue
     if ($winget) {
-        Info "installing ollama via winget (Ollama.Ollama) …"
+        Info "installing ollama via winget (Ollama.Ollama) ..."
         try {
             winget install --id Ollama.Ollama -e --accept-source-agreements --accept-package-agreements
         } catch {
@@ -44,10 +44,10 @@ if ($ollama) {
         }
     }
     if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {
-        Info "downloading the official ollama installer (OllamaSetup.exe) …"
+        Info "downloading the official ollama installer (OllamaSetup.exe) ..."
         $setup = Join-Path $env:TEMP "OllamaSetup.exe"
         Invoke-WebRequest -Uri "https://ollama.com/download/OllamaSetup.exe" -OutFile $setup
-        Info "running $setup (/VERYSILENT) …"
+        Info "running $setup (/VERYSILENT) ..."
         Start-Process -FilePath $setup -ArgumentList "/VERYSILENT" -Wait
     }
     # winget/installer put it on PATH, but this process's PATH may be stale.
@@ -60,11 +60,11 @@ if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-# ── 2. serve ──────────────────────────────────────────────────────────────────
+# ---- 2. serve ------------------------------------------------------------------------------------------------------------------------------------
 if (Test-OllamaListening) {
     Info "ollama is already serving at $Endpoint"
 } else {
-    Info "starting 'ollama serve' in the background …"
+    Info "starting 'ollama serve' in the background ..."
     Start-Process -FilePath "ollama" -ArgumentList "serve" -WindowStyle Hidden
     $ok = $false
     for ($i = 0; $i -lt 30; $i++) {
@@ -72,13 +72,13 @@ if (Test-OllamaListening) {
         if (Test-OllamaListening) { $ok = $true; break }
     }
     if (-not $ok) {
-        Warn "ollama did not come up at $Endpoint within 30s — start it manually with: ollama serve"
+        Warn "ollama did not come up at $Endpoint within 30s - start it manually with: ollama serve"
     } else {
         Info "ollama is up at $Endpoint"
     }
 }
 
-# ── 3. baseline model(s) ──────────────────────────────────────────────────────
+# ---- 3. baseline model(s) ------------------------------------------------------------------------------------------------------------
 foreach ($m in ($Baseline -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
     Info "pulling baseline model: $m"
     & ollama pull $m
