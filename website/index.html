@@ -100,14 +100,13 @@
             <pre><code id="qs-windows-cmd">New-Item -ItemType Directory -Force C:\gpn | Out-Null
 curl.exe -L -o C:\gpn\gpn-windows.zip https://github.com/crewlyllc/gpn_coin/releases/download/windows-latest/gpn-windows.zip
 Expand-Archive C:\gpn\gpn-windows.zip -DestinationPath C:\gpn\bin -Force
-cd C:\gpn
-.\bin\gpn_node.exe --setup<span data-ref-arg></span>
-.\bin\gpn_node.exe</code></pre>
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\gpn\bin\install.ps1<span data-ref-arg></span></code></pre>
           </div>
           <ul class="qs-next">
             <li><b>Paste the whole block</b> into PowerShell (no admin needed; it uses <code>C:\gpn</code>).</li>
-            <li><b>--setup</b> asks once: generate a new wallet, or import an existing one. That wallet is your node identity and payout address.</li>
-            <li>Then <b>gpn_node.exe</b> starts mining and serving AI jobs on the same GPU &mdash; leave the window open.</li>
+            <li><b>install.ps1</b> does the rest: installs Ollama (3&ndash;6 min, that part looks idle), generates the wallet and prints your payout address, registers <code>GPN-Node</code> to start at logon, then launches the node.</li>
+            <li><b>No console window stays open</b> &mdash; the node runs as the scheduled task. Dashboard: <code>http://127.0.0.1:8099</code>, log: <code>C:\gpn\node.log</code>.</li>
+            <li>It is a miner <b>and</b> an AI provider on the same GPU, one job at a time. Undo with <code>install.ps1 -Uninstall</code>.</li>
           </ul>
         </div>
 
@@ -120,13 +119,13 @@ cd C:\gpn
             </div>
             <pre><code id="qs-linux-cmd">curl -L -o gpn-linux.tar.gz https://github.com/crewlyllc/gpn_coin/releases/download/linux-latest/gpn-linux.tar.gz
 mkdir -p ~/gpn &amp;&amp; tar -xzf gpn-linux.tar.gz -C ~/gpn &amp;&amp; cd ~/gpn
-./gpn_node --setup<span data-ref-arg></span>     # generate or import your wallet (asked once)
-./gpn_node</code></pre>
+./install.sh<span data-ref-arg></span></code></pre>
           </div>
           <ul class="qs-next">
             <li><b>Paste the block</b> into a terminal &mdash; it downloads ~320 MB into <code>~/gpn</code> and unpacks in place.</li>
-            <li><b>--setup</b> asks once: generate a new wallet, or import an existing one. Wallet = node identity + payout address.</li>
-            <li>Then <b>./gpn_node</b> starts mining and serving AI jobs on the same GPU. Ctrl-C to stop.</li>
+            <li><b>install.sh</b> installs the current release's binaries (no Rust toolchain), sets up Ollama, generates the wallet and prints your payout address.</li>
+            <li>It also enables <b>systemd user units + <code>loginctl enable-linger</code></b>, so the node comes back after a reboot without a login.</li>
+            <li>Dashboard: <code>http://127.0.0.1:8099</code>. Undo: <code>./uninstall.sh --remove-autostart</code>.</li>
           </ul>
         </div>
 
