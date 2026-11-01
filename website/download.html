@@ -61,10 +61,62 @@
     </div>
   </section>
 
+  <!-- ============ INSTALL A NODE (primary path) ============ -->
+  <section>
+    <div class="wrap">
+      <h2>Install a node</h2>
+      <p class="sub">One command per platform. The installer handles Ollama, the wallet, autostart on
+        boot/login, the dashboard and the access-point connection — then starts the node. Add
+        <code>?ref=CODE</code> to this page's URL to record a referral.</p>
+
+      <div class="grid cols-2">
+        <div class="card">
+          <h3><span class="ico" aria-hidden="true">🪟</span> Windows</h3>
+          <p class="muted">Downloads the current release, then runs <code>install.ps1</code>. No Rust toolchain.</p>
+          <div class="field">
+            <label for="cmd-win-node">PowerShell</label>
+            <pre id="cmd-win-node"><code>New-Item -ItemType Directory -Force C:\gpn | Out-Null
+curl.exe -L -o C:\gpn\gpn-windows.zip https://github.com/crewlyllc/gpn_coin/releases/download/windows-latest/gpn-windows.zip
+Expand-Archive C:\gpn\gpn-windows.zip -DestinationPath C:\gpn\bin -Force
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\gpn\bin\install.ps1<span data-ref-arg></span></code></pre>
+            <button class="btn small ghost no-print" data-copy="#cmd-win-node" type="button">Copy</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3><span class="ico" aria-hidden="true">🐧</span> Linux</h3>
+          <p class="muted">Same installer, systemd user units + <code>enable-linger</code> so it starts at boot.</p>
+          <div class="field">
+            <label for="cmd-linux-node">bash</label>
+            <pre id="cmd-linux-node"><code>curl -L -o gpn-linux.tar.gz https://github.com/crewlyllc/gpn_coin/releases/download/linux-latest/gpn-linux.tar.gz
+mkdir -p gpn &amp;&amp; tar -xzf gpn-linux.tar.gz -C gpn &amp;&amp; cd gpn
+./install.sh<span data-ref-arg></span></code></pre>
+            <button class="btn small ghost no-print" data-copy="#cmd-linux-node" type="button">Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <details style="margin-top:18px">
+        <summary style="cursor:pointer;color:#c0392b;font-weight:600">⚠ Advanced / debugging only — this does NOT install anything (no autostart, no logs, no Ollama)</summary>
+        <div class="field" style="margin-top:12px">
+          <label for="cmd-win-manual">Windows — manual</label>
+          <pre id="cmd-win-manual"><code>cd C:\gpn
+.\bin\gpn_node.exe --setup<span data-ref-arg></span>
+.\bin\gpn_node.exe</code></pre>
+          <button class="btn small ghost no-print" data-copy="#cmd-win-manual" type="button">Copy</button>
+        </div>
+        <p class="small mb-0" style="color:#c0392b">Running <code>gpn_node.exe</code> by hand creates <b>no</b>
+          autostart entry and <b>no logs</b>, will not come back after a reboot, and exits immediately if Ollama
+          is not installed (exit 69) — with nothing to tell you why. If you are setting up a node, use the
+          commands at the top of this page.</p>
+      </details>
+    </div>
+  </section>
+
   <!-- ============ ONE-COMMAND ============ -->
   <section>
     <div class="wrap">
-      <h2>One-command installers</h2>
+      <h2>From a source clone</h2>
       <p class="sub">Two scripts cover the two install paths (a node, or an access point). Both run from a
         local clone of the public repository (or any copy of the source).</p>
 
@@ -101,51 +153,6 @@
         </div>
       </div>
 
-      <h3 style="margin-top:26px">Recommended: one command per platform</h3>
-      <p class="sub" style="margin-top:6px">The installer handles Ollama, the wallet, autostart on boot/login, the
-        dashboard and the access-point connection — then starts the node. Add <code>?ref=CODE</code> to this
-        page's URL to record a referral.</p>
-
-      <div class="grid cols-2">
-        <div class="card">
-          <h3><span class="ico" aria-hidden="true">🪟</span> Windows</h3>
-          <p class="muted">Downloads the current release, then runs <code>install.ps1</code>. No Rust toolchain.</p>
-          <div class="field">
-            <label for="cmd-win-node">PowerShell</label>
-            <pre id="cmd-win-node"><code>New-Item -ItemType Directory -Force C:\gpn | Out-Null
-curl.exe -L -o C:\gpn\gpn-windows.zip https://github.com/crewlyllc/gpn_coin/releases/download/windows-latest/gpn-windows.zip
-Expand-Archive C:\gpn\gpn-windows.zip -DestinationPath C:\gpn\bin -Force
-C:\gpn\bin\install.ps1<span data-ref-arg></span></code></pre>
-            <button class="btn small ghost no-print" data-copy="#cmd-win-node" type="button">Copy</button>
-          </div>
-        </div>
-
-        <div class="card">
-          <h3><span class="ico" aria-hidden="true">🐧</span> Linux</h3>
-          <p class="muted">Same installer, systemd user units + <code>enable-linger</code> so it starts at boot.</p>
-          <div class="field">
-            <label for="cmd-linux-node">bash</label>
-            <pre id="cmd-linux-node"><code>curl -L -o gpn-linux.tar.gz https://github.com/crewlyllc/gpn_coin/releases/download/linux-latest/gpn-linux.tar.gz
-mkdir -p gpn &amp;&amp; tar -xzf gpn-linux.tar.gz -C gpn &amp;&amp; cd gpn
-./install.sh<span data-ref-arg></span></code></pre>
-            <button class="btn small ghost no-print" data-copy="#cmd-linux-node" type="button">Copy</button>
-          </div>
-        </div>
-      </div>
-
-      <details style="margin-top:18px">
-        <summary class="small muted" style="cursor:pointer">Advanced: run the binaries directly (no autostart)</summary>
-        <div class="field" style="margin-top:12px">
-          <label for="cmd-win-manual">Windows — manual</label>
-          <pre id="cmd-win-manual"><code>cd C:\gpn
-.\bin\gpn_node.exe --setup<span data-ref-arg></span>
-.\bin\gpn_node.exe</code></pre>
-          <button class="btn small ghost no-print" data-copy="#cmd-win-manual" type="button">Copy</button>
-        </div>
-        <p class="small muted mb-0">Running <code>gpn_node.exe</code> by hand creates <b>no</b> autostart entry —
-          the node will not come back after a reboot, and it will not serve AI unless <code>GPN_AP_URL</code> is
-          set. Use the installer above unless you have a reason not to.</p>
-      </details>
 
     </div>
   </section>
