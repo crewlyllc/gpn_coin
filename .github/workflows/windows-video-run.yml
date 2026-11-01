@@ -19,7 +19,7 @@ on:
 
 jobs:
   video:
-    runs-on: self-hosted
+    runs-on: [self-hosted, Windows]
     timeout-minutes: 180
     steps:
       - name: checkout repo (for gpn_diffuse.py)

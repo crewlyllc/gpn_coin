@@ -15,7 +15,7 @@ on:
 
 jobs:
   install:
-    runs-on: self-hosted
+    runs-on: [self-hosted, Windows]
     timeout-minutes: 120
     steps:
       - name: checkout repo (for gpn_diffuse.py)

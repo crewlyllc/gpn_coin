@@ -41,7 +41,7 @@ on:
 
 jobs:
   start:
-    runs-on: self-hosted
+    runs-on: [self-hosted, Windows]
     steps:
       - name: write supervisor script
         shell: powershell

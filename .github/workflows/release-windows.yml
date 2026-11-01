@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   windows:
-    runs-on: self-hosted
+    runs-on: [self-hosted, Windows]
     steps:
       - uses: actions/checkout@v4
       - name: git config
