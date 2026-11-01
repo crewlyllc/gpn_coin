@@ -157,18 +157,40 @@ the release description for convenience.
 
 ## Install on a new computer
 
-Three steps, one question.
+Two steps, one question.
 
 ```
 1. Download + extract
-2. ./gpn_node --setup        (answer: generate or import a wallet)
-3. ./gpn_node
+2. Windows: install.ps1 (or install.cmd)   ·   Linux: ./install.sh
 ```
 
-That is the whole install. Nothing else has to be set: the chain spec, data
-folder, payout address, peer list and public address are all resolved
-automatically. `--setup` also installs/starts ollama and pulls the baseline
-model, because a GPN node is always **miner + AI provider**.
+That is the whole install. The installer copies the binaries, creates the
+wallet, makes ollama serve, and registers an **autostart entry so the node and
+ollama come back by themselves after a reboot**. Nothing else has to be set:
+the chain spec, data folder, payout address, peer list and public address are
+all resolved automatically. A GPN node is always **miner + AI provider**.
+
+Running the binaries by hand still works (`./gpn_node --setup`, then
+`./gpn_node`), but then nothing restarts after a reboot — see
+[Autostart](#autostart--your-node-comes-back-after-a-reboot).
+
+### Autostart — your node comes back after a reboot
+
+A downloaded release used to be binaries only: after a reboot nothing ran.
+Both installers now set this up, and both can undo it in one command.
+
+| | Windows | Linux |
+|---|---|---|
+| node | scheduled task `GPN-Node`, `/SC ONLOGON /RL HIGHEST`, one instance (`MultipleInstances=IgnoreNew`) | `gpn-node.service` (systemd **user** unit) |
+| ollama | task `GPN-Ollama`, or the entry Ollama already created (never both) | `gpn-ollama.service` |
+| boot without login | starts at logon | `loginctl enable-linger` |
+| undo | `powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall` | `./uninstall.sh --remove-autostart` |
+
+`loginctl enable-linger` is not optional on a headless box: without it a
+`systemctl --user` service only starts when you log in, and nobody ever logs
+into a mining rig. `./install.sh --no-autostart` skips the whole thing.
+
+Uninstalling the autostart never touches the chain DB or `keystore.json`.
 
 ### Check the version / all options
 
@@ -187,7 +209,8 @@ which build a machine is running before debugging anything else.
 
 Grab the release archive for your OS (Linux, macOS, Windows) and unpack it
 anywhere. It contains `gpn_node`, `gpn-node`, the `gpn_*` agent binaries, the
-`scripts/` folder and `gpn-node.example.toml`.
+`scripts/` folder, the installers (`install.ps1`, `install.cmd`,
+`uninstall.ps1`, `install.sh`, `uninstall.sh`) and `gpn-node.example.toml`.
 
 Building from source instead: see [Appendix A](#appendix-a--manual--detailed-installation).
 

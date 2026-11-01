@@ -327,6 +327,8 @@ else
 fi
 assert_has "$readme" "http://127.0.0.1:8099" "README states the dashboard URL"
 assert_has "$readme" "enable-linger" "README explains Linux boot autostart"
+assert_has "$repo/docs/run-a-node.md" "install.ps1" "run-a-node docs point at the installer"
+assert_has "$repo/docs/run-a-node.md" "enable-linger" "run-a-node docs explain linger"
 
 # ---- syntax ---------------------------------------------------------------
 echo "== syntax =="
