@@ -90,6 +90,18 @@ $NodeLog   = Join-Path $InstallDir 'node.log'
 $NodeTask  = 'GPN-Node'
 $OllamaTask = 'GPN-Ollama'
 $Dashboard = 'http://127.0.0.1:8099'
+$InstallLog = Join-Path $InstallDir 'install-log.txt'
+
+# Self-logging: "it installed and then the window closed" is undiagnosable.
+# Every run writes the full transcript here, so the last line is always the
+# reason, whether the run succeeded, refused, or crashed.
+if (-not $WhatIf) {
+  try {
+    New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+    Start-Transcript -Path $InstallLog -Append -Force | Out-Null
+    Say "logging this run to $InstallLog"
+  } catch { }
+}
 
 # Canonical defaults -- identical to install.sh. An operator-supplied env var
 # wins; nothing here is a secret (never put a key in this file).
@@ -391,6 +403,8 @@ if (Test-Ollama) {
       Warn 'continuing because -WhatIf never changes anything'
     } else {
       Write-Host "Nothing else was changed (node not started). Re-run without -NoOllamaInstall to let the installer handle it." -ForegroundColor Red
+      Write-Host "Log: $InstallLog" -ForegroundColor Red
+      try { Stop-Transcript | Out-Null } catch { }
       exit 1
     }
   } else {
@@ -456,3 +470,4 @@ Write-Host "  stop:           schtasks /End /TN $NodeTask"
 Write-Host ''
 Write-Host 'Remove the autostart in one command (data + wallet are kept):'
 Write-Host '  powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall'
+try { Stop-Transcript | Out-Null } catch { }
