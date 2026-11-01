@@ -1,25 +1,25 @@
 {
-  "version": "0.3.4",
+  "version": "0.3.5",
   "min_version": "0.1.0",
-  "published_at": "2026-11-01T08:44:50Z",
+  "published_at": "2026-11-01T09:30:52Z",
   "assets": [
     {
       "os": "linux",
       "arch": "x86_64",
       "url": "https://github.com/crewlyllc/gpn_coin/releases/download/linux-latest/gpn-linux.tar.gz",
-      "sha256": "c81113be931d2d0def0e96598fdce532ce6d478cbbc7a07a066f849ffe1da5ba",
-      "size": 317346533,
+      "sha256": "15104ff11b9552cd99f9459d1393fabf29690848f1148b4ad2a34c234351b206",
+      "size": 317366027,
       "layout": "bundle"
     },
     {
       "os": "windows",
       "arch": "x86_64",
       "url": "https://github.com/crewlyllc/gpn_coin/releases/download/windows-latest/gpn-windows.zip",
-      "sha256": "c3814c64e3c6e2bb9388b68db25a324eb68377863ba40c7847f09994956f4f3c",
-      "size": 234466698,
+      "sha256": "158ee66a188373696dce0b67f4f892a42335cb86e841ddc98643b5cfd6d57387",
+      "size": 234481227,
       "layout": "bundle"
     }
   ],
   "signing_key": "78015fab541c9a6230d3fb302a89f1a9950d1b181652cdf0a65901b6f0278c5e",
-  "signature": "82325ee18ca81c98e85b12b39c26e7e9258e74b7495c2b46446980ee8ecb624b53d1a91f7ea5137eeb95705664856d066a2f6bb0dfd688561d2cd2b23aaa1c0e"
+  "signature": "830777cbe36fa6d03be98e32da41c713e2547758fe32721189227ad67e9b776b3f198e2b47e98298c23e73894a0a6f369a495b937da04ecb050597b4b23aaa01"
 }
