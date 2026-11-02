@@ -265,6 +265,15 @@ jobs:
       - name: Nodes directory (live counts + cached fallback)
         run: node --test website/tests/nodes-directory.test.js
 
+      # /access-points bootnode table (queue #114). The page had hand-copied
+      # multiaddrs and they drifted (30334 + retired peer ids), so a reader who
+      # copied a row could not join. Now generated from /seeds.json, and this
+      # check fails the build if any published multiaddr disagrees with the
+      # live seed list in network.json — exact port and /p2p/ id — or if a live
+      # seed is missing from the page. Pure Node, no browser.
+      - name: Access points (published multiaddrs match the live seed list)
+        run: node --test website/tests/access-points.test.js
+
       # The Worker's /api/join path: proxies to the AP, keeps the always-200
       # JSON shape, and falls back to email only when nothing was stored.
       - name: Worker unit tests (/api/join + proxies)

@@ -94,36 +94,41 @@
         network grows, additional regional access points will be listed here.</p>
 
       <h2>Network nodes (bootnodes)</h2>
-      <p class="sub">Three always-on, publicly-reachable full nodes run the testnet: one Linux bootnode and two
-        Windows full nodes. New nodes dial these to join (P2P multiaddrs).</p>
+      <p class="sub">The seed and full nodes new nodes dial to join (P2P multiaddrs). The list below is read
+        from <a href="/seeds.json">seeds.json</a> at page load — the same file a node's bootstrap uses — so a
+        multiaddr copied from here always matches the live seed list.</p>
       <div class="table-wrap">
         <table>
           <caption class="sr-only" style="position:absolute;left:-9999px">GPN full nodes / bootnodes</caption>
           <thead><tr>
-            <th scope="col">Node</th><th scope="col">Peer</th><th scope="col">P2P multiaddr</th><th scope="col">Status</th>
+            <th scope="col">Host</th><th scope="col">Peer</th><th scope="col">P2P multiaddr</th><th scope="col">Status</th>
           </tr></thead>
-          <tbody>
+          <!-- Rendered from /seeds.json (see the script at the end of this page).
+               These rows are the offline fallback and must stay identical to
+               network.json's `bootnodes`; website/tests/access-points.test.js
+               fails the build if they drift. -->
+          <tbody id="bootnode-rows">
             <tr>
-              <td><b>gpn-bootnode-1</b> (Linux)</td>
+              <td><b>gpn-testnet.duckdns.org:30333</b><br><span class="small muted">DNS name</span></td>
               <td><code>12D3KooWAFt…</code></td>
               <td><code>/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo</code></td>
               <td><span class="chip up"><span class="d" aria-hidden="true"></span> Live</span></td>
             </tr>
             <tr>
-              <td><b>gpn-seed-1b</b> (same peer, IP literal)</td>
+              <td><b>142.129.54.88:30333</b><br><span class="small muted">IP literal</span></td>
               <td><code>12D3KooWAFt…</code></td>
               <td><code>/ip4/142.129.54.88/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo</code></td>
               <td><span class="chip up"><span class="d" aria-hidden="true"></span> Live</span></td>
             </tr>
             <tr>
-              <td><b>gpn-fullnode-2</b> (Windows)</td>
+              <td><b>23.241.109.255:30333</b><br><span class="small muted">IP literal</span></td>
               <td><code>12D3KooWFqZ2…</code></td>
               <td><code>/ip4/23.241.109.255/tcp/30333/p2p/12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz</code></td>
               <td><span class="chip up"><span class="d" aria-hidden="true"></span> Live</span></td>
             </tr>
           </tbody>
         </table>
-        <p class="muted" style="margin:14px 0 0">Source of truth: <a href="https://gpncoin.ai/seeds.json" rel="noopener">seeds.json</a> (fetched 2026-11-02). Port <b>30333</b> on every entry; the retired <code>WRWv4…:30334</code> identity is gone.</p>
+        <p class="muted" id="bootnode-source" style="margin:14px 0 0">Source of truth: <a href="/seeds.json" rel="noopener">seeds.json</a> — read at page load; the rows above are the last-known fallback from <code>network.json</code>.</p>
       </div>
 
       <div class="grid cols-2" style="margin-top:22px">
@@ -214,5 +219,145 @@ gpn-accesspoint-run</code></pre>
 </footer>
 
 <script src="assets/app.js"></script>
+<script>
+/* Bootnode table, generated from /seeds.json (queue item #114).
+  
+exact source of truth is the same directory a node's bootstrap reads, so the
+   page cannot drift from the live seed list again: the retired
+   `WRWv4…:30334` / `MXU21…` rows that made this table unusable were a
+   hand-copied snapshot. The static <tbody> rows stay as a labelled fallback
+   for a failed fetch, and website/tests/access-points.test.js asserts they
+   match network.json. */
+(function () {
+  "use strict";
+
+  var tbody = document.getElementById("bootnode-rows");
+  var note = document.getElementById("bootnode-source");
+  if (!tbody) return;
+
+  /** "…/dns4/host/tcp/port/p2p/id" (also udp/quic-v1) → {host, port, peer, kind} */
+  function describe(ma) {
+    var host = /^\/(dns4|dns6|ip4|ip6)\/([^/]+)\/(tcp|udp)\/(\d+)(?:\/|$)/.exec(ma);
+    var peer = /\/p2p\/([A-Za-z0-9]+)$/.exec(ma);
+    if (!host || !peer) return null;
+    return {
+      host: host[2] + ":" + host[4],
+      port: host[4],
+      peer: peer[1],
+      kind: host[1] === "dns4" || host[1] === "dns6" ? "DNS name" : "IP literal"
+    };
+  }
+
+  function shortPeer(pid) {
+    return pid.length > 12 ? pid.slice(0, 12) + "…" : pid;
+  }
+
+  function chip(live) {
+    var span = document.createElement("span");
+    span.className = "chip " + (live === true ? "up" : live === false ? "down" : "neutral");
+    var dot = document.createElement("span");
+    dot.className = "d";
+    dot.setAttribute("aria-hidden", "true");
+    span.appendChild(dot);
+    span.appendChild(document.createTextNode(
+      live === true ? " Live" : live === false ? " Offline" : " Unreported"
+    ));
+    return span;
+  }
+
+  function row(ma, live) {
+    var d = describe(ma);
+    var tr = document.createElement("tr");
+
+    var host = document.createElement("td");
+    var b = document.createElement("b");
+    b.textContent = d ? d.host : ma;
+    host.appendChild(b);
+    if (d) {
+      host.appendChild(document.createElement("br"));
+      var kind = document.createElement("span");
+      kind.className = "small muted";
+      kind.textContent = d.kind;
+      host.appendChild(kind);
+    }
+
+    var peer = document.createElement("td");
+    var peerCode = document.createElement("code");
+    peerCode.textContent = d ? shortPeer(d.peer) : "—";
+    peer.appendChild(peerCode);
+
+    var addr = document.createElement("td");
+    var addrCode = document.createElement("code");
+    addrCode.textContent = ma;
+    addr.appendChild(addrCode);
+
+    var status = document.createElement("td");
+    status.appendChild(chip(live));
+
+    tr.appendChild(host);
+    tr.appendChild(peer);
+    tr.appendChild(addr);
+    tr.appendChild(status);
+    return tr;
+  }
+
+  function render(doc) {
+    var nodes = Array.isArray(doc && doc.nodes) ? doc.nodes : [];
+    var addrs = Array.isArray(doc && doc.multiaddrs) && doc.multiaddrs.length
+      ? doc.multiaddrs
+      : nodes.map(function (n) { return n && n.multiaddr; });
+
+    /* peer id → live flag, so an IP literal and a DNS name for the same node
+       share one status (null = the AP could not report liveness; say so
+       rather than inventing "offline"). */
+    var liveByPeer = {};
+    nodes.forEach(function (n) {
+      if (n && n.peer_id && liveByPeer[n.peer_id] === undefined) liveByPeer[n.peer_id] = n.live;
+    });
+
+    var seen = {};
+    var rows = [];
+    addrs.forEach(function (ma) {
+      if (typeof ma !== "string" || !ma.startsWith("/") || seen[ma]) return;
+      seen[ma] = true;
+      var d = describe(ma);
+      rows.push(row(ma, d && liveByPeer[d.peer] !== undefined ? liveByPeer[d.peer] : null));
+    });
+    if (!rows.length) throw new Error("no dialable multiaddrs in seeds.json");
+
+    tbody.textContent = "";
+    rows.forEach(function (tr) { tbody.appendChild(tr); });
+
+    var count = rows.length;
+    if (note) {
+      note.textContent = "";
+      note.appendChild(document.createTextNode(
+        count + (count === 1 ? " multiaddr" : " multiaddrs") + " read from "
+      ));
+      var a = document.createElement("a");
+      a.href = "/seeds.json";
+      a.rel = "noopener";
+      a.textContent = "seeds.json";
+      note.appendChild(a);
+      note.appendChild(document.createTextNode(
+        " just now (live flag from the access point's peer view)."
+      ));
+    }
+  }
+
+  fetch("/seeds.json", { cache: "no-store", headers: { accept: "application/json" } })
+    .then(function (res) {
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return res.json();
+    })
+    .then(render)
+    .catch(function (err) {
+      if (!note) return;
+      note.textContent =
+        "Live seed list unavailable (" + (err && err.message ? err.message : "network error") +
+        ") — the rows above are the last-known list. Check seeds.json before relying on an address.";
+    });
+})();
+</script>
 </body>
 </html>
