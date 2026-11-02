@@ -15,7 +15,11 @@
 #
 # Usage:
 #   gpn-autostart.sh install [--prefix DIR] [--bin-dir DIR]
+#   gpn-autostart.sh install-updater [--prefix DIR] [--bin-dir DIR]
+#       only gpn-update.service + gpn-update.timer — for a host whose node is
+#       started some other way (gpn_fleet.service, a shell, a container)
 #   gpn-autostart.sh remove
+#   gpn-autostart.sh remove-updater
 #   gpn-autostart.sh status
 #
 # Env overrides:
@@ -87,6 +91,78 @@ enable_linger() {
   fi
 }
 
+# Write gpn-update.service + gpn-update.timer. Shared by `install` (which also
+# manages node/ollama) and `install-updater` (which must NOT touch them: on a
+# host whose node is started by gpn_fleet.service, enabling a second
+# gpn-node.service would run two supervisors against one base path).
+write_update_units() {
+  local default_restart="$1"
+  mkdir -p "$UNIT_DIR" "$PREFIX"
+
+  # Auto-update lives in gpn_node for installer deployments, but a host that
+  # runs `gpn_fleet`, a hand-started node, or anything else would never check
+  # the signed manifest and would freeze on its tarball. gpn_update is the
+  # deployment-mode-independent check; the timer runs it every 6 h.
+  #
+  # Restart hook: never guessed by the binary. Here the default is the unit the
+  # caller owns; GPN_UPDATE_RESTART_CMD overrides it, and an empty default
+  # leaves it unset (the updater then prints the command instead).
+  if [ ! -x "$BIN_DIR/gpn_update" ]; then
+    warn "no gpn_update at $BIN_DIR — NOT writing $UPDATE_UNIT (nothing to run)"
+    warn "  it ships in every release bundle; copy it next to gpn_node first."
+    return 1
+  fi
+
+  local restart_cmd="${GPN_UPDATE_RESTART_CMD-$default_restart}"
+  local restart_line=""
+  if [ -n "$restart_cmd" ]; then
+    restart_line="Environment=\"GPN_UPDATE_RESTART_CMD=$restart_cmd\""
+  fi
+
+  cat > "$UNIT_DIR/$UPDATE_UNIT" <<EOF
+# Written by gpn-autostart.sh — do not edit; re-run install to regenerate.
+[Unit]
+Description=GPN signed-release updater (one check + apply)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=GPN_UPDATE_DIR=$PREFIX/update
+Environment=GPN_UPDATE_TARGET_DIR=$BIN_DIR
+$restart_line
+Nice=10
+# 0 = applied/up to date, 2 = manifest unreachable (offline), 3 = newer release
+# exists but GPN_AUTO_UPDATE=0 refused it. Only a real error (1) fails the unit.
+SuccessExitStatus=0 2 3
+ExecStart=$BIN_DIR/gpn_update --apply --quiet
+
+[Install]
+WantedBy=default.target
+EOF
+  chmod 644 "$UNIT_DIR/$UPDATE_UNIT"
+
+  cat > "$UNIT_DIR/$UPDATE_TIMER" <<EOF
+# Written by gpn-autostart.sh — do not edit; re-run install to regenerate.
+[Unit]
+Description=Check for GPN releases every 6 hours (randomized across the fleet)
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=6h
+# A fleet that installs together must not download 300 MB together.
+RandomizedDelaySec=30min
+AccuracySec=1min
+Persistent=true
+Unit=$UPDATE_UNIT
+
+[Install]
+WantedBy=timers.target
+EOF
+  chmod 644 "$UNIT_DIR/$UPDATE_TIMER"
+  return 0
+}
+
 write_units() {
   mkdir -p "$UNIT_DIR" "$PREFIX"
 
@@ -150,61 +226,7 @@ WantedBy=default.target
 EOF
   chmod 644 "$UNIT_DIR/$NODE_UNIT"
 
-  # ── updater ──────────────────────────────────────────────────────────────
-  # Auto-update lives in gpn_node for installer deployments, but a host that
-  # runs `gpn_fleet`, a hand-started node, or anything else would never check
-  # the signed manifest and would freeze on its tarball. gpn_update is the
-  # deployment-mode-independent check; the timer runs it every 6 h.
-  #
-  # Restart hook: this script wrote $NODE_UNIT, so restarting it is not a guess.
-  # It can be overridden (e.g. `systemctl --user restart gpn-fleet`) without
-  # editing the unit: GPN_UPDATE_RESTART_CMD=... ./scripts/gpn-autostart.sh install
-  if [ ! -x "$BIN_DIR/gpn_update" ]; then
-    warn "no gpn_update at $BIN_DIR — NOT writing $UPDATE_UNIT (nothing to run)"
-  else
-    local restart_cmd="${GPN_UPDATE_RESTART_CMD:-systemctl --user restart $NODE_UNIT}"
-    cat > "$UNIT_DIR/$UPDATE_UNIT" <<EOF
-# Written by gpn-autostart.sh — do not edit; re-run install to regenerate.
-[Unit]
-Description=GPN signed-release updater (one check + apply)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-Environment=GPN_UPDATE_DIR=$PREFIX/update
-Environment=GPN_UPDATE_TARGET_DIR=$BIN_DIR
-Environment="GPN_UPDATE_RESTART_CMD=$restart_cmd"
-Nice=10
-# 0 = applied/up to date, 2 = manifest unreachable (offline), 3 = newer release
-# exists but GPN_AUTO_UPDATE=0 refused it. Only a real error (1) fails the unit.
-SuccessExitStatus=0 2 3
-ExecStart=$BIN_DIR/gpn_update --apply --quiet
-
-[Install]
-WantedBy=default.target
-EOF
-    chmod 644 "$UNIT_DIR/$UPDATE_UNIT"
-
-    cat > "$UNIT_DIR/$UPDATE_TIMER" <<EOF
-# Written by gpn-autostart.sh — do not edit; re-run install to regenerate.
-[Unit]
-Description=Check for GPN releases every 6 hours (randomized across the fleet)
-
-[Timer]
-OnBootSec=10min
-OnUnitActiveSec=6h
-# A fleet that installs together must not download 300 MB together.
-RandomizedDelaySec=30min
-AccuracySec=1min
-Persistent=true
-Unit=$UPDATE_UNIT
-
-[Install]
-WantedBy=timers.target
-EOF
-    chmod 644 "$UNIT_DIR/$UPDATE_TIMER"
-  fi
+  write_update_units "$NODE_UNIT"
 
   # Marker: what we created, so `remove` (and the tests) know exactly what is
   # ours and nothing else is touched.
@@ -214,6 +236,39 @@ EOF
     echo "units=$OLLAMA_UNIT $NODE_UNIT $UPDATE_UNIT $UPDATE_TIMER"
     echo "linger=loginctl enable-linger $(id -un)"
   } > "$MARKER"
+}
+
+# Enable ONLY the updater. Refuses to touch node/ollama units: on a fleet host
+# enabling a second gpn-node.service would run two supervisors on one base path.
+cmd_install_updater() {
+  local default_restart=""
+  if [ -f "$UNIT_DIR/gpn-fleet.service" ]; then
+    default_restart="systemctl --user restart gpn-fleet.service"
+  elif [ -f "$UNIT_DIR/$NODE_UNIT" ]; then
+    default_restart="systemctl --user restart $NODE_UNIT"
+  fi
+  write_update_units "$default_restart" || return 1
+  sc daemon-reload
+  sc enable --now "$UPDATE_TIMER"
+  log "updater installed: $UNIT_DIR/{$UPDATE_UNIT,$UPDATE_TIMER}"
+  if [ -n "$default_restart" ]; then
+    log "  restart hook: $default_restart"
+  else
+    log "  restart hook: none (the updater will print the command to run)"
+  fi
+  log "  first check in 10 min · logs: journalctl --user -u $UPDATE_UNIT -f"
+}
+
+cmd_remove_updater() {
+  local unit
+  for unit in "$UPDATE_TIMER" "$UPDATE_UNIT"; do
+    if [ -f "$UNIT_DIR/$unit" ]; then
+      sc disable --now "$unit" || true
+    fi
+  done
+  sc daemon-reload
+  rm -f "$UNIT_DIR/$UPDATE_TIMER" "$UNIT_DIR/$UPDATE_UNIT"
+  log "updater removed (only $UPDATE_TIMER and $UPDATE_UNIT). Nothing else was touched."
 }
 
 cmd_install() {
@@ -287,6 +342,8 @@ done
 
 case "$ACTION" in
   install) cmd_install ;;
+  install-updater) cmd_install_updater ;;
+  remove-updater)  cmd_remove_updater ;;
   remove)  cmd_remove ;;
   status)  cmd_status ;;
   *) sed -n '2,/^set -euo pipefail/p' "$0" | sed '$d'; exit 2 ;;

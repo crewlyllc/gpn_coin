@@ -750,6 +750,8 @@ instead of downloading again, then finishes the copy.
 
 `scripts/gpn-autostart.sh install` writes four user units: `gpn-ollama.service`,
 `gpn-node.service`, `gpn-update.service` and `gpn-update.timer`.
+(`install-updater` writes only the last two — see "Enabling it on a
+`gpn_fleet` host" below.)
 
 ```ini
 # ~/.config/systemd/user/gpn-update.service
@@ -794,57 +796,39 @@ WantedBy=timers.target
 
 ### Enabling it on a `gpn_fleet` host
 
-The fleet host is not managed by `install.sh`'s node unit, so write the two
-units by hand (the installer on any other host writes the same content):
+A fleet host's node is owned by `gpn-fleet.service`, not by the installer's
+`gpn-node.service`, so `install` would start a **second** supervisor against the
+same base path. Use the updater-only action — it writes just the two units and
+picks `gpn-fleet.service` as the restart hook when that unit exists:
 
 ```bash
-mkdir -p ~/.config/systemd/user
+# gpn_update ships in every release bundle; it must sit next to gpn_node
+scripts/gpn-autostart.sh install-updater --prefix "$HOME/.gpn" --bin-dir "$HOME/.local/bin"
+```
 
-cat > ~/.config/systemd/user/gpn-update.service <<'EOF'
-[Unit]
-Description=GPN signed-release updater (one check + apply)
-After=network-online.target
-Wants=network-online.target
+On this repo checkout the binary is `gpn-agent/target/release/gpn_update`; copy
+it into the bin dir first if the bundle did not (that is also how it gets
+upgraded afterwards).
 
+The generated unit then carries exactly these three `Environment=` lines:
+
+```ini
 [Service]
-Type=oneshot
 Environment=GPN_UPDATE_DIR=%h/.gpn/update
 Environment=GPN_UPDATE_TARGET_DIR=%h/.local/bin
 Environment="GPN_UPDATE_RESTART_CMD=systemctl --user restart gpn-fleet.service"
-Nice=10
-SuccessExitStatus=0 2 3
-ExecStart=%h/.local/bin/gpn_update --apply --quiet
-
-[Install]
-WantedBy=default.target
-EOF
-
-cat > ~/.config/systemd/user/gpn-update.timer <<'EOF'
-[Unit]
-Description=Check for GPN releases every 6 hours (randomized)
-
-[Timer]
-OnBootSec=10min
-OnUnitActiveSec=6h
-RandomizedDelaySec=30min
-AccuracySec=1min
-Persistent=true
-Unit=gpn-update.service
-
-[Install]
-WantedBy=timers.target
-EOF
-
-systemctl --user daemon-reload
-systemctl --user enable --now gpn-update.timer
 ```
+
+(Write them by hand in `~/.config/systemd/user/gpn-update.service` if you prefer
+— `install-updater` only generates that file plus the timer shown above.)
 
 Two details that matter on a fleet box:
 
 * `GPN_UPDATE_RESTART_CMD` must name the unit that owns `gpn_fleet`. If the
   fleet is started from a shell or a different unit, **leave it unset** — the
   updater then installs and prints the command instead of guessing, and a wrong
-  guess cannot take the network down.
+  guess cannot take the network down. `install-updater` leaves it unset when it
+  finds neither `gpn-fleet.service` nor `gpn-node.service`.
 * `GPN_UPDATE_DIR` is separate from the fleet's base path (`~/.gpn/node`) on
   purpose: the updater owns `versions/`, `current` and `current.previous`, and
   must not be confused with the chain database next door.
@@ -855,6 +839,12 @@ Verify without changing anything:
 ~/.local/bin/gpn_update --check; echo "exit=$?"
 systemctl --user list-timers gpn-update.timer
 journalctl --user -u gpn-update.service -n 50
+```
+
+Undo just the updater (never touches the node/fleet units):
+
+```bash
+scripts/gpn-autostart.sh remove-updater
 ```
 
 ---
