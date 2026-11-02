@@ -249,9 +249,11 @@ if not exist "%USERPROFILE%\.gpn" mkdir "%USERPROFILE%\.gpn" >nul 2>&1
 if not exist "%GPN_NODE_KEY_FILE%" (
   echo [gpn] generating this machine's node identity: %GPN_NODE_KEY_FILE%
   "%GPN_BIN%\gpn-node.exe" key generate-node-key --file "%GPN_NODE_KEY_FILE%"
+  set "KEYRC=%ERRORLEVEL%"
 )
 if not exist "%GPN_NODE_KEY_FILE%" (
-  echo [gpn] ERROR: could not create a node key at %GPN_NODE_KEY_FILE%
+  echo [gpn] ERROR: could not create a node key at %GPN_NODE_KEY_FILE% (exit %KEYRC%)
+  if "%KEYRC%"=="-1073741515" echo [gpn] ERROR: 0xC0000135 = missing Visual C++ runtime -- run: winget install --id Microsoft.VCRedist.2015+.x64 -e
   echo [gpn] ERROR: refusing to start a node with a shared/default identity.
   exit /b 1
 )
@@ -352,6 +354,63 @@ Invoke-Step "create $BinDir and copy the release binaries" {
   }
 }
 Say "binaries installed in $BinDir"
+
+# 1b. Windows runtime: the release binaries are Rust MSVC builds and need the
+# Visual C++ runtime. On a machine without it every .exe dies at load with
+# 0xC0000135 (exit -1073741515) and prints NOTHING -- indistinguishable from
+# "the installer did nothing".
+function Get-ExeExitCode {
+  param([string]$Exe, [string[]]$ExeArgs = @('key', '--help'))
+  if (-not (Test-Path $Exe)) { return 0 }
+  try {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $Exe
+    $psi.Arguments = ($ExeArgs -join ' ')
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+    $p = [System.Diagnostics.Process]::Start($psi)
+    if (-not $p.WaitForExit(15000)) { try { $p.Kill() } catch { }; return 0 }
+    return [int]$p.ExitCode
+  } catch { return 0 }
+}
+
+function Test-MissingVCRuntime {
+  param([string]$Exe)
+  $rc = Get-ExeExitCode -Exe $Exe
+  # signed and unsigned spellings of STATUS_DLL_NOT_FOUND
+  return ($rc -eq -1073741515 -or $rc -eq 3221225781)
+}
+
+if (Test-MissingVCRuntime $nodeExe) {
+  Say 'the binaries cannot load: missing Visual C++ runtime (0xC0000135) -- installing it'
+  if ($WhatIf) {
+    Write-Host '[whatif] would install the Microsoft Visual C++ 2015-2022 redistributable (x64)' -ForegroundColor Cyan
+  } else {
+    Invoke-Step 'install VC++ redistributable' {
+      $wg = Get-Command winget -ErrorAction SilentlyContinue
+      if ($wg) {
+        & winget install --id Microsoft.VCRedist.2015+.x64 -e --accept-source-agreements --accept-package-agreements --disable-interactivity 2>&1 | Out-Null
+      }
+      if (Test-MissingVCRuntime $nodeExe) {
+        $vc = Join-Path $env:TEMP 'vc_redist.x64.exe'
+        Invoke-WebRequest -Uri 'https://aka.ms/vs/17/release/vc_redist.x64.exe' -OutFile $vc -UseBasicParsing
+        Start-Process -FilePath $vc -ArgumentList '/install', '/quiet', '/norestart' -Wait
+      }
+    }
+    if (Test-MissingVCRuntime $nodeExe) {
+      Write-Host ''
+      Write-Host 'The Visual C++ runtime is still missing, so the node cannot start.' -ForegroundColor Red
+      Write-Host 'Install it, then run this installer again:' -ForegroundColor Red
+      Write-Host '    winget install --id Microsoft.VCRedist.2015+.x64 -e' -ForegroundColor Red
+      Write-Host "Log: $InstallLog" -ForegroundColor Red
+      try { Stop-Transcript | Out-Null } catch { }
+      exit 1
+    }
+    Say 'Visual C++ runtime installed'
+  }
+}
 
 $gpnNode = Join-Path $BinDir 'gpn_node.exe'
 $nodeExe = Join-Path $BinDir 'gpn-node.exe'
@@ -456,6 +515,14 @@ if (-not (Test-Path $keyFile)) {
   Invoke-Step "generate this machine's node key ($keyFile)" {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $keyFile) | Out-Null
     & $nodeExe key generate-node-key --file $keyFile | Out-Null
+  }
+  if (-not $WhatIf -and -not (Test-Path $keyFile)) {
+    Write-Host ''
+    Write-Host "Could not create the node key at $keyFile -- refusing to start a node with a" -ForegroundColor Red
+    Write-Host 'shared/default identity (two boxes with one key advertise the same peer id).' -ForegroundColor Red
+    Write-Host "Log: $InstallLog" -ForegroundColor Red
+    try { Stop-Transcript | Out-Null } catch { }
+    exit 1
   }
 }
 
