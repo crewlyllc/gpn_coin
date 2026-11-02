@@ -671,6 +671,194 @@ Then a normal restart (or a service restart) applies it.
 
 ---
 
+## 6b. Every deployment mode: `gpn_update`
+
+Auto-update used to exist **only inside `gpn_node`**. That is fine for hosts
+started by the installer, but a host can run the same binaries a different way:
+
+| Deployment | What starts | Was it ever checked? |
+|---|---|---|
+| installer / systemd | `gpn-node.service` → `gpn_node` | yes — the supervisor's own thread |
+| fleet | `run-fleet.sh` → `gpn_fleet` | **no** — froze at the tarball's version |
+| hand-run / container / process manager | `gpn-node`, `gpn_scheduler`, … | **no** |
+| Windows zip | `gpn_node.exe` | yes |
+
+Replacing the fleet with `gpn_node` is not an option: the fleet carries the
+fleet directive, `GPN_MINER_ACCOUNT` and the challenge-verifier secrets. So the
+check is its own binary, shipped in every bundle and installer alongside the
+node:
+
+```text
+gpn_update --check    # default: fetch + verify the manifest, download NOTHING
+gpn_update --apply    # download, verify, install, copy, (optionally) restart
+```
+
+It reuses `gpn_agent::update` — the same manifest parser, the same ed25519
+verification against the compiled-in release key, the same size+sha256 checks,
+the same `versions/<v>/` extraction and `current` flip. Nothing about
+verification is re-implemented.
+
+### `--check` (read-only)
+
+```text
+$ gpn_update --check
+  current      0.3.11   /home/me/.local/bin/gpn_node
+  latest       0.3.12   published 2026-11-02T18:00:00Z
+  min_version  0.3.11   (supported)
+  asset        linux/x86_64 layout=bundle 317.1 MB sha256=a300453a…
+  -> update available: 0.3.12 (run `gpn_update --apply`)
+```
+
+The version on the left is read from the **installed** `gpn_node` build stamp
+(falling back to the updater's own version), so an updater that is itself one
+release ahead still reports what the box is actually running.
+
+| Exit | Meaning |
+|---|---|
+| `0` | up to date |
+| `1` | error: bad signature/key, no asset for this platform, I/O |
+| `2` | the manifest could not be fetched, or the body was not a manifest (offline, DNS, HTTP ≠ 2xx, captive portal) |
+| `3` | a **newer verified** release exists — the scriptable "update me" signal |
+
+### `--apply`
+
+1. Fetch + verify the manifest (same checks as above).
+2. If the version is not newer → exit `0`, nothing touched.
+3. Refuse when `GPN_AUTO_UPDATE=0` → exit `3`, **no download**.
+4. Download the asset to a temp file whose extension comes from the signed URL
+   (`.tar.gz`/`.tgz`/`.tar`/`.zip`), verify `sha256`+`size`, extract to
+   `versions/<v>/`, prove the build stamps say `<v>`.
+5. Flip `current`, keep `current.previous`, prune older version directories.
+6. Copy every `gpn*` file from `versions/<v>/` into the install dir
+   (`GPN_UPDATE_TARGET_DIR`, default `~/.local/bin`), **one atomic rename per
+   file** (`.<name>.tmp-<pid>` → `<name>`). A crash leaves either the old
+   file or the complete new one — never a half-written executable.
+7. Run `GPN_UPDATE_RESTART_CMD` if set; otherwise print the command to run.
+   **Nothing is restarted by default.**
+
+`--json` prints one object; `--quiet` prints nothing (the timer uses it).
+
+First run on a host that has never been updated: the binaries in the install dir
+are snapshotted into `versions/<running>/` before the flip, so even the first
+update has a real rollback target instead of a one-way door.
+
+If the copy step fails, the tree and `current` are already new but the install
+dir is mixed. Re-run `gpn_update --apply`: it re-verifies and reuses the tree
+instead of downloading again, then finishes the copy.
+
+### The timer the installer ships
+
+`scripts/gpn-autostart.sh install` writes four user units: `gpn-ollama.service`,
+`gpn-node.service`, `gpn-update.service` and `gpn-update.timer`.
+
+```ini
+# ~/.config/systemd/user/gpn-update.service
+[Unit]
+Description=GPN signed-release updater (one check + apply)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=GPN_UPDATE_DIR=/home/me/.gpn/update
+Environment=GPN_UPDATE_TARGET_DIR=/home/me/.local/bin
+Environment="GPN_UPDATE_RESTART_CMD=systemctl --user restart gpn-node.service"
+Nice=10
+SuccessExitStatus=0 2 3
+ExecStart=/home/me/.local/bin/gpn_update --apply --quiet
+
+[Install]
+WantedBy=default.target
+```
+
+```ini
+# ~/.config/systemd/user/gpn-update.timer
+[Unit]
+Description=Check for GPN releases every 6 hours (randomized across the fleet)
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=6h
+RandomizedDelaySec=30min
+AccuracySec=1min
+Persistent=true
+Unit=gpn-update.service
+
+[Install]
+WantedBy=timers.target
+```
+
+`SuccessExitStatus=0 2 3` is deliberate: being offline (`2`) or holding at
+`GPN_AUTO_UPDATE=0` (`3`) is not a unit failure; only a real error (`1`) is.
+`RandomizedDelaySec` is what stops a fleet from pulling 300 MB in lockstep.
+
+### Enabling it on a `gpn_fleet` host
+
+The fleet host is not managed by `install.sh`'s node unit, so write the two
+units by hand (the installer on any other host writes the same content):
+
+```bash
+mkdir -p ~/.config/systemd/user
+
+cat > ~/.config/systemd/user/gpn-update.service <<'EOF'
+[Unit]
+Description=GPN signed-release updater (one check + apply)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=GPN_UPDATE_DIR=%h/.gpn/update
+Environment=GPN_UPDATE_TARGET_DIR=%h/.local/bin
+Environment="GPN_UPDATE_RESTART_CMD=systemctl --user restart gpn-fleet.service"
+Nice=10
+SuccessExitStatus=0 2 3
+ExecStart=%h/.local/bin/gpn_update --apply --quiet
+
+[Install]
+WantedBy=default.target
+EOF
+
+cat > ~/.config/systemd/user/gpn-update.timer <<'EOF'
+[Unit]
+Description=Check for GPN releases every 6 hours (randomized)
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=6h
+RandomizedDelaySec=30min
+AccuracySec=1min
+Persistent=true
+Unit=gpn-update.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl --user daemon-reload
+systemctl --user enable --now gpn-update.timer
+```
+
+Two details that matter on a fleet box:
+
+* `GPN_UPDATE_RESTART_CMD` must name the unit that owns `gpn_fleet`. If the
+  fleet is started from a shell or a different unit, **leave it unset** — the
+  updater then installs and prints the command instead of guessing, and a wrong
+  guess cannot take the network down.
+* `GPN_UPDATE_DIR` is separate from the fleet's base path (`~/.gpn/node`) on
+  purpose: the updater owns `versions/`, `current` and `current.previous`, and
+  must not be confused with the chain database next door.
+
+Verify without changing anything:
+
+```bash
+~/.local/bin/gpn_update --check; echo "exit=$?"
+systemctl --user list-timers gpn-update.timer
+journalctl --user -u gpn-update.service -n 50
+```
+
+---
+
 ## 7. The minimum-version cutoff
 
 Three layers, weakest to strongest. Only the first is implemented in this
@@ -759,7 +947,13 @@ download.
 ```bash
 ls -l ~/.gpn/node/update/          # current -> versions/0.3.0
 cat ~/.gpn/node/update/current.previous     # the rollback target
+```
 
+(`gpn_update` deployments: the same files under `~/.gpn/update/`. To roll a fleet
+box back, flip that link **and** re-run `gpn_update`'s copy step by re-applying
+the old manifest, or copy `versions/<old>/gpn*` over the install dir by hand.)
+
+```bash
 systemctl --user stop gpn-node
 
 # Flip `current` back to the previous version directory (stop the node first:
@@ -843,6 +1037,9 @@ distinguishes "below the cutoff" from "no peers", "no ollama", or a stuck miner.
 | `GPN_UPDATE_RESTART` | `1` | `0` = stage now, apply at the next start |
 | `GPN_UPDATE_CHECK` | `1` | `0` = never fetch the manifest (air-gapped) |
 | `GPN_MIN_VERSION_ENFORCE` | `1` | `0` = mine even when below `min_version` (unsupported) |
+| `GPN_UPDATE_DIR` | `$GPN_PREFIX/update`, else `~/.gpn/update` | `gpn_update`: where `versions/`, `current`, `current.previous` live |
+| `GPN_UPDATE_TARGET_DIR` | `~/.local/bin` | `gpn_update`: install dir whose `gpn*` binaries are replaced |
+| `GPN_UPDATE_RESTART_CMD` | *(unset)* | `gpn_update`: run after a successful swap, e.g. `systemctl --user restart gpn-fleet`. Unset = print, never restart |
 
 Config-file equivalents (`~/.gpn/node.toml`): `auto_update`, `update_url`,
 `update_check_hours`, `update_restart`, `update_check`, `min_version_enforce`.
@@ -860,6 +1057,10 @@ Config-file equivalents (`~/.gpn/node.toml`): `auto_update`, `update_url`,
 | `<bin>/gpn_node.new` | single-layout staging (only between staging and swap) |
 | `<bin>/gpn_node.bak` | single-layout rollback copy of the previous binary |
 
+`gpn_update` uses `GPN_UPDATE_DIR` (default `~/.gpn/update`) as `<base>` above;
+the supervisor uses its node base path (`~/.gpn/node/update`). Both layouts are
+the same on disk.
+
 ### Code
 
 | Path | Role |
@@ -870,6 +1071,7 @@ Config-file equivalents (`~/.gpn/node.toml`): `auto_update`, `update_url`,
 | `scripts/bump-version.py` | the only writer of the version (+ `CHANGELOG.md` stub) |
 | `CHANGELOG.md` | one heading per released version, newest first |
 | `gpn-agent/src/bin/gpn_node.rs` | opt-in policy, startup check, updater thread, restart, `--setup` question |
+| `gpn-agent/src/bin/gpn_update.rs` | standalone updater for every other deployment mode (`--check`/`--apply`, exit 3/2/1, atomic per-file install, restart hook) |
 | `gpn-node/node/src/service.rs` | `GPN_STANDBY` → no proposer, no miner |
 | `scripts/gen-release-manifest.py` | build + sign + verify the manifest (single binaries **and** bundles; digests read from the GitHub API, never typed) |
 | `scripts/gpn-release-key.sh` | create/inspect the release key |

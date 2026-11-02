@@ -13,7 +13,13 @@ the GPN-specific meaning of each level documented in `docs/updates.md`.
 Bumped from 0.3.10 (`scripts/bump-version.py patch`). Describe the release before publishing it.
 
 ### Added
-- _TODO_
+- `gpn_update`: a standalone updater for every deployment mode where `gpn_node`
+  never runs (`gpn_fleet`, hand-run nodes, containers). `--check` verifies the
+  signed manifest without downloading (exit 3 when newer); `--apply` installs
+  into `versions/<v>/`, flips `current`, keeps `current.previous`, and copies
+  the binaries over the install dir atomically per file.
+  `scripts/gpn-autostart.sh` now also writes `gpn-update.service` +
+  `gpn-update.timer` (every 6 h, randomized ±30 min).
 
 ### Changed
 - _TODO_

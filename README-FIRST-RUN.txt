@@ -18,7 +18,8 @@ entry so THE NODE (AND OLLAMA) COME BACK BY THEMSELVES AFTER A REBOOT.
             Ollama's own installer created — never a duplicate).
   Linux:    systemd user units gpn-node.service + gpn-ollama.service, enabled,
             plus `loginctl enable-linger` so they start at BOOT and not only
-            after a login.
+            after a login. Also gpn-update.timer, which verifies the signed
+            release manifest every 6 h and installs newer binaries in place.
 
 Dashboard after start:  http://127.0.0.1:8099  (loopback only)
 The installer prints your payout address when it finishes.

@@ -478,6 +478,8 @@ if [ "${AUTOSTART_DONE:-0}" = 1 ]; then
   echo "  Dashboard: http://127.0.0.1:8099"
   echo "  status:  systemctl --user status gpn-node.service"
   echo "  logs:    journalctl --user -u gpn-node.service -f"
+  echo "  updater: gpn-update.timer checks the signed manifest every 6 h"
+  echo "           (systemctl --user list-timers gpn-update.timer; logs: journalctl --user -u gpn-update.service)"
 else
   echo "Autostart is OFF — after a reboot you must run 'gpn_node' yourself."
 fi

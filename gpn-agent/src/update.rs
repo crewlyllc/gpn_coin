@@ -560,6 +560,28 @@ pub fn node_bin(dir: &Path) -> PathBuf {
     dir.join(node_bin_name())
 }
 
+/// A pid-unique download path whose **extension** says how to extract it.
+///
+/// [`extract_bundle`] dispatches on the file name, so a staging file called
+/// `…download` makes every bundle fail with "not a .tar.gz/.tar/.zip bundle".
+/// Deriving the suffix from the signed asset URL keeps download and extraction
+/// in agreement.
+pub fn bundle_temp_path(state_dir: &Path, version: &str, asset: &ReleaseAsset) -> PathBuf {
+    let url = asset.url.trim().to_ascii_lowercase();
+    let path = url.split(['?', '#']).next().unwrap_or(&url);
+    let ext = [".tar.gz", ".tgz", ".tar", ".zip"]
+        .iter()
+        .find(|e| path.ends_with(**e))
+        .copied()
+        .unwrap_or(".tar.gz");
+    state_dir.join(format!(
+        ".{}-bundle-{}{}",
+        version.trim(),
+        std::process::id(),
+        ext
+    ))
+}
+
 /// Does `versions/<version>` exist and look installed?
 pub fn bundle_installed(state_dir: &Path, version: &str) -> bool {
     node_bin(&version_dir(state_dir, version)).is_file()
@@ -1525,6 +1547,72 @@ fn write_previous_pointer(state_dir: &Path, previous: &Path) -> Result<(), Updat
     Ok(())
 }
 
+/// Verify `versions/<version>` and make it `current`, keeping one rollback
+/// pointer. Returns the version directory that was live **before** the flip.
+///
+/// This is the switch itself, shared by [`apply_pending_bundle`] (the staged
+/// path the supervisor uses) and [`activate_version`] (the standalone updater
+/// reusing a tree it already staged, e.g. after a crash in its copy step).
+fn flip_to(state_dir: &Path, vdir: &Path, version: &str) -> Result<Option<PathBuf>, UpdateError> {
+    verify_bundle_stamps(vdir, version)?;
+    // `current` is the normal rollback source. A *recorded* pointer (written by
+    // the standalone updater before the very first flip) is the fallback, so
+    // pruning does not delete the only copy of the version being replaced.
+    let previous = current_version_dir(state_dir).or_else(|| previous_pointer_dir(state_dir));
+    switch_current(state_dir, vdir)?;
+    if let Some(prev) = &previous {
+        let _ = write_previous_pointer(state_dir, prev);
+    }
+    prune_versions(state_dir, vdir, previous.as_deref());
+    Ok(previous)
+}
+
+/// Point `current` at an already-extracted, stamp-verified `versions/<version>`
+/// without needing a `pending-update.json` marker.
+///
+/// Used by `gpn_update --apply` when the version tree is already on disk but
+/// the marker was consumed (or the previous run died before the copy step).
+pub fn activate_version(state_dir: &Path, version: &str) -> Result<PathBuf, UpdateError> {
+    let vdir = version_dir(state_dir, version);
+    if !node_bin(&vdir).is_file() {
+        return Err(UpdateError::BundleShape(format!(
+            "{} is not a complete version directory",
+            vdir.display()
+        )));
+    }
+    flip_to(state_dir, &vdir, version)?;
+    Ok(vdir)
+}
+
+/// The version directory named in `current.previous`, for reporting.
+pub fn previous_pointer_label(state_dir: &Path) -> Option<String> {
+    let p = previous_pointer_dir(state_dir)?;
+    Some(
+        p.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| p.display().to_string()),
+    )
+}
+
+/// Record `dir` as the rollback target (`current.previous`).
+///
+/// Used by the standalone updater on a host that has no `current` yet: it
+/// snapshots the install dir into `versions/<running>/` first, so the first
+/// update still has a rollback target and is not a one-way door.
+pub fn record_previous(state_dir: &Path, dir: &Path) -> Result<(), UpdateError> {
+    write_previous_pointer(state_dir, dir)
+}
+
+/// The directory named by `current.previous`, if it is readable.
+pub fn previous_pointer_dir(state_dir: &Path) -> Option<PathBuf> {
+    let body = std::fs::read(previous_pointer(state_dir)).ok()?;
+    let p = PathBuf::from(String::from_utf8_lossy(&body).trim().to_string());
+    if p.as_os_str().is_empty() {
+        return None;
+    }
+    Some(p)
+}
+
 fn apply_pending_bundle(
     state_dir: &Path,
     pending: &PendingUpdate,
@@ -1545,20 +1633,19 @@ fn apply_pending_bundle(
         verify_bundle_files(&vdir, &pending.files)?;
     }
 
-    let previous = current_version_dir(state_dir);
-    if let Err(e) = switch_current(state_dir, &vdir) {
-        // `current` still points at the old complete tree: nothing half-swapped.
-        return Ok(Err(SwapDeferred {
-            version: pending.version.clone(),
-            staged: vdir,
-            reason: e.to_string(),
-        }));
-    }
-    if let Some(prev) = &previous {
-        let _ = write_previous_pointer(state_dir, prev);
-    }
+    let previous = match flip_to(state_dir, &vdir, &pending.version) {
+        Ok(prev) => prev,
+        Err(e) => {
+            // `current` still points at the old complete tree: nothing
+            // half-swapped.
+            return Ok(Err(SwapDeferred {
+                version: pending.version.clone(),
+                staged: vdir,
+                reason: e.to_string(),
+            }));
+        }
+    };
     let _ = std::fs::remove_file(pending_path(state_dir));
-    prune_versions(state_dir, &vdir, previous.as_deref());
 
     Ok(Ok(Some(Applied {
         version: pending.version.clone(),
@@ -3022,5 +3109,67 @@ mod tests {
         let t: Result<T, _> = toml::from_str(&out);
         assert!(t.is_ok(), "must stay valid TOML: {out}");
         assert!(t.unwrap().auto_update);
+    }
+
+    // ── download staging name ──────────────────────────────────────────────
+
+    /// `extract_bundle` dispatches on the file extension, so the staging path
+    /// must keep the asset's extension (a `.download` suffix made every bundle
+    /// fail to extract).
+    #[test]
+    fn bundle_temp_path_keeps_the_extractable_extension() {
+        let dir = Path::new("/tmp/state");
+        for (url, want) in [
+            ("https://x/gpn-linux.tar.gz", ".tar.gz"),
+            ("https://x/gpn-linux.tgz?tok=1", ".tgz"),
+            ("https://x/gpn-linux.tar#frag", ".tar"),
+            ("https://x/gpn-win.zip", ".zip"),
+            // Unknown/no extension: default to the Linux archive, which is
+            // what every signed GPN bundle has been.
+            ("https://x/download?id=7", ".tar.gz"),
+        ] {
+            let asset = ReleaseAsset {
+                url: url.into(),
+                ..sample_asset()
+            };
+            let p = bundle_temp_path(dir, "0.3.12", &asset);
+            let name = p.file_name().unwrap().to_string_lossy().into_owned();
+            assert!(name.ends_with(want), "{url} -> {name}, want {want}");
+            assert!(name.starts_with(".0.3.12-bundle-"), "{name}");
+        }
+    }
+
+    /// The first `gpn_update --apply` on a fleet host has no `current` yet; the
+    /// pointer it records before the flip must survive `prune_versions`.
+    #[test]
+    fn recorded_previous_survives_the_first_flip() {
+        let st = td("recorded-prev");
+        let old = version_dir(&st, "0.3.11");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(
+            old.join("gpn_node"),
+            format!("{BUILD_STAMP_PREFIX}0.3.11\n"),
+        )
+        .unwrap();
+        std::fs::write(old.join("gpn-node"), b"rust").unwrap();
+        record_previous(&st, &old).unwrap();
+
+        let new = version_dir(&st, "0.3.12");
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(
+            new.join("gpn_node"),
+            format!("{BUILD_STAMP_PREFIX}0.3.12\n"),
+        )
+        .unwrap();
+        std::fs::write(new.join("gpn-node"), b"rust").unwrap();
+
+        let prev = activate_version(&st, "0.3.12").unwrap();
+        assert_eq!(prev, new);
+        assert!(
+            old.is_dir(),
+            "the recorded rollback target must not be pruned"
+        );
+        assert_eq!(previous_pointer_label(&st).as_deref(), Some("0.3.11"));
+        std::fs::remove_dir_all(&st).ok();
     }
 }

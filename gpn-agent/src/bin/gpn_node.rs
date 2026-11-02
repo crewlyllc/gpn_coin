@@ -1419,11 +1419,7 @@ fn download_and_stage(
     if layout == update::LAYOUT_BUNDLE {
         let dir = cfg.update_dir();
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        let tmp = dir.join(format!(
-            "{}-bundle-{}.download",
-            m.version,
-            std::process::id()
-        ));
+        let tmp = update::bundle_temp_path(&dir, &m.version, asset);
         let staged = download_to_file(&asset.url, &tmp, Duration::from_secs(3600)).and_then(|_| {
             update::stage_bundle_file(&dir, &m.version, asset, &tmp).map_err(|e| e.to_string())
         });

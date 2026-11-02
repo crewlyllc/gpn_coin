@@ -24,14 +24,19 @@
 #   GPN_AP_URL         access point     (default: canonical testnet AP)
 #   GPN_BOOTNODES      bootstrap peers  (default: canonical 3)
 #   GPN_AUTOSTART_DIR  unit dir         (default ~/.config/systemd/user)
+#   GPN_UPDATE_RESTART_CMD  command the 6-hourly updater runs after a swap
+#                      (default `systemctl --user restart gpn-node.service`)
 #   GPN_NO_LINGER=1    do not enable-linger (containers / CI; node then only
 #                      starts at login — say so out loud)
+#
+# Units written: gpn-node.service, gpn-ollama.service, gpn-update.service and
+# gpn-update.timer (a signed-manifest check every 6 h, ±30 min).
 #
 # Safety:
 #   * idempotent — install twice == install once (unit files are rewritten,
 #     never duplicated; there is exactly one gpn-node.service and one
 #     gpn-ollama.service)
-#   * remove deletes ONLY the two units this script owns plus the linger bit,
+#   * remove deletes ONLY the four units this script owns plus the linger bit,
 #     and never touches $PREFIX/node (chain DB + keystore) or $PREFIX/models
 #   * every systemctl/loginctl call is non-fatal with an explicit warning, so a
 #     broken/absent systemd never fails an install that otherwise worked
@@ -42,6 +47,8 @@ BIN_DIR="${GPN_BIN:-$HOME/.local/bin}"
 UNIT_DIR="${GPN_AUTOSTART_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}"
 NODE_UNIT="gpn-node.service"
 OLLAMA_UNIT="gpn-ollama.service"
+UPDATE_UNIT="gpn-update.service"
+UPDATE_TIMER="gpn-update.timer"
 MARKER="$PREFIX/autostart"
 
 GPN_AP_URL="${GPN_AP_URL-http://gpn-testnet.duckdns.org:8092}"
@@ -143,12 +150,68 @@ WantedBy=default.target
 EOF
   chmod 644 "$UNIT_DIR/$NODE_UNIT"
 
+  # ── updater ──────────────────────────────────────────────────────────────
+  # Auto-update lives in gpn_node for installer deployments, but a host that
+  # runs `gpn_fleet`, a hand-started node, or anything else would never check
+  # the signed manifest and would freeze on its tarball. gpn_update is the
+  # deployment-mode-independent check; the timer runs it every 6 h.
+  #
+  # Restart hook: this script wrote $NODE_UNIT, so restarting it is not a guess.
+  # It can be overridden (e.g. `systemctl --user restart gpn-fleet`) without
+  # editing the unit: GPN_UPDATE_RESTART_CMD=... ./scripts/gpn-autostart.sh install
+  if [ ! -x "$BIN_DIR/gpn_update" ]; then
+    warn "no gpn_update at $BIN_DIR — NOT writing $UPDATE_UNIT (nothing to run)"
+  else
+    local restart_cmd="${GPN_UPDATE_RESTART_CMD:-systemctl --user restart $NODE_UNIT}"
+    cat > "$UNIT_DIR/$UPDATE_UNIT" <<EOF
+# Written by gpn-autostart.sh — do not edit; re-run install to regenerate.
+[Unit]
+Description=GPN signed-release updater (one check + apply)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=GPN_UPDATE_DIR=$PREFIX/update
+Environment=GPN_UPDATE_TARGET_DIR=$BIN_DIR
+Environment="GPN_UPDATE_RESTART_CMD=$restart_cmd"
+Nice=10
+# 0 = applied/up to date, 2 = manifest unreachable (offline), 3 = newer release
+# exists but GPN_AUTO_UPDATE=0 refused it. Only a real error (1) fails the unit.
+SuccessExitStatus=0 2 3
+ExecStart=$BIN_DIR/gpn_update --apply --quiet
+
+[Install]
+WantedBy=default.target
+EOF
+    chmod 644 "$UNIT_DIR/$UPDATE_UNIT"
+
+    cat > "$UNIT_DIR/$UPDATE_TIMER" <<EOF
+# Written by gpn-autostart.sh — do not edit; re-run install to regenerate.
+[Unit]
+Description=Check for GPN releases every 6 hours (randomized across the fleet)
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=6h
+# A fleet that installs together must not download 300 MB together.
+RandomizedDelaySec=30min
+AccuracySec=1min
+Persistent=true
+Unit=$UPDATE_UNIT
+
+[Install]
+WantedBy=timers.target
+EOF
+    chmod 644 "$UNIT_DIR/$UPDATE_TIMER"
+  fi
+
   # Marker: what we created, so `remove` (and the tests) know exactly what is
   # ours and nothing else is touched.
   {
     echo "mechanism=systemd-user"
     echo "unit_dir=$UNIT_DIR"
-    echo "units=$OLLAMA_UNIT $NODE_UNIT"
+    echo "units=$OLLAMA_UNIT $NODE_UNIT $UPDATE_UNIT $UPDATE_TIMER"
     echo "linger=loginctl enable-linger $(id -un)"
   } > "$MARKER"
 }
@@ -160,22 +223,28 @@ cmd_install() {
     sc enable "$OLLAMA_UNIT"
   fi
   sc enable "$NODE_UNIT"
+  # The timer is what keeps an out-of-date box from staying out of date. It does
+  # not download during install: the first run is OnBootSec=10min away.
+  if [ -f "$UNIT_DIR/$UPDATE_TIMER" ]; then
+    sc enable --now "$UPDATE_TIMER"
+  fi
   enable_linger
-  log "autostart installed: $UNIT_DIR/{$OLLAMA_UNIT,$NODE_UNIT}"
+  log "autostart installed: $UNIT_DIR/{$OLLAMA_UNIT,$NODE_UNIT,$UPDATE_UNIT,$UPDATE_TIMER}"
   log "  start now:  systemctl --user start $NODE_UNIT"
   log "  logs:       journalctl --user -u $NODE_UNIT -f"
+  log "  updater:    systemctl --user list-timers $UPDATE_TIMER   (first check in 10 min)"
   log "  undo:       ./uninstall.sh --remove-autostart"
 }
 
 cmd_remove() {
   local unit
-  for unit in "$NODE_UNIT" "$OLLAMA_UNIT"; do
+  for unit in "$UPDATE_TIMER" "$UPDATE_UNIT" "$NODE_UNIT" "$OLLAMA_UNIT"; do
     if [ -f "$UNIT_DIR/$unit" ]; then
       sc disable --now "$unit" || true
     fi
   done
   sc daemon-reload
-  for unit in "$NODE_UNIT" "$OLLAMA_UNIT"; do
+  for unit in "$UPDATE_TIMER" "$UPDATE_UNIT" "$NODE_UNIT" "$OLLAMA_UNIT"; do
     rm -f "$UNIT_DIR/$unit"
   done
   if have loginctl; then
@@ -190,7 +259,7 @@ cmd_remove() {
 
 cmd_status() {
   local unit
-  for unit in "$NODE_UNIT" "$OLLAMA_UNIT"; do
+  for unit in "$NODE_UNIT" "$OLLAMA_UNIT" "$UPDATE_UNIT" "$UPDATE_TIMER"; do
     if [ -f "$UNIT_DIR/$unit" ]; then
       printf '%s: installed\n' "$unit"
       if have systemctl; then

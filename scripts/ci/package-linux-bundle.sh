@@ -58,7 +58,7 @@ cp install.sh uninstall.sh install.ps1 install.cmd uninstall.ps1 "$stage/"
 cp gpn-node.example.toml README-FIRST-RUN.txt "$stage/"
 chmod +x "$stage"/gpn_* "$stage/scripts/"*.sh "$stage/install.sh" "$stage/uninstall.sh"
 
-for f in gpn-node gpn_node gpn_llm_provider gpn_finetune_provider gpn_attest gpn_wallet \
+for f in gpn-node gpn_node gpn_update gpn_llm_provider gpn_finetune_provider gpn_attest gpn_wallet \
          install.sh uninstall.sh install.ps1 install.cmd uninstall.ps1 \
          scripts/gpn-autostart.sh \
          scripts/install-ollama.sh scripts/install-ollama-amd.sh \
