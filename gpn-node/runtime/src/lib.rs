@@ -123,7 +123,7 @@ pub const VERSION: sp_version::RuntimeVersion = sp_version::RuntimeVersion {
     spec_name: create_runtime_str!("gpn"),
     impl_name: create_runtime_str!("gpn"),
     authoring_version: 1,
-    spec_version: 42,
+    spec_version: 46,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 1,
@@ -514,8 +514,36 @@ impl pallet_gpu_pow::Config for Runtime {
     type MiningAttestationThreshold = MiningAttestationThreshold;
 }
 
+/// Require a hardware-identity fingerprint on every attestation.
+///
+/// Mainnet: **true** — model-only digests cannot prove one-card-one-provider.
+/// A `testnet-lenient-identity` build sets it false so operators still running
+/// a pre-upgrade agent (which sends the legacy model+VRAM digest) keep working
+/// on testnet. Live attestations are grandfathered either way: the migration
+/// only *adds* `GpuOwner` entries and never retro-rejects a record.
+#[cfg(feature = "testnet-lenient-identity")]
+pub const RUNTIME_REQUIRE_GPU_IDENTITY: bool = false;
+#[cfg(not(feature = "testnet-lenient-identity"))]
+pub const RUNTIME_REQUIRE_GPU_IDENTITY: bool = true;
+
+/// Minimum stake accepted by `deposit_stake`.
+///
+/// **OWNER-DECIDED, NOT FINAL.** The owner's 2026-11-02 decision is *no
+/// attestation staking*: attestation itself is, and stays, free
+/// (`submit_attestation` never transfers funds). A `testnet-no-stake` build
+/// pins this to **0**, which also makes `submit_attestation` record
+/// `ProviderStake = 0` and skip any transfer. The default build keeps the
+/// legacy 1,000 GPN value as a placeholder only — the real mainnet number is
+/// the owner's to set; this runtime does not invent one.
+#[cfg(feature = "testnet-no-stake")]
+pub const RUNTIME_MIN_ATTESTATION_STAKE: Balance = 0;
+/// Placeholder for the owner-decided mainnet value (see above).
+#[cfg(not(feature = "testnet-no-stake"))]
+pub const RUNTIME_MIN_ATTESTATION_STAKE: Balance = 1_000_000_000_000_000;
+
 parameter_types! {
-    pub const MinAttestationStake: Balance = 1_000_000_000_000_000; // 1,000 GPN (12 decimals)
+    pub const MinAttestationStake: Balance = RUNTIME_MIN_ATTESTATION_STAKE;
+    pub const RequireGpuIdentity: bool = RUNTIME_REQUIRE_GPU_IDENTITY;
     pub const AttestationInterval: BlockNumber = 3600; // ~15 hours at 15s blocks
     pub const MaxAttestationAge: BlockNumber = 14400; // ~60 hours
     pub const MaxMissedAttestations: u32 = 3;
@@ -551,6 +579,7 @@ impl pallet_gpu_attestation::Config for Runtime {
     type Currency = Balances;
     type Liveness = Liveness;
     type MinAttestationStake = MinAttestationStake;
+    type RequireGpuIdentity = RequireGpuIdentity;
     type AttestationInterval = AttestationInterval;
     type MaxAttestationAge = MaxAttestationAge;
     type MaxMissedAttestations = MaxMissedAttestations;
@@ -767,6 +796,53 @@ construct_runtime!(
     }
 );
 
+/// One-shot storage migrations applied at the next runtime upgrade.
+///
+/// `spec 43 (GPU identity)`: seed `GpuOwner` from existing attestations so a
+/// pre-upgrade record keeps its (legacy, model+VRAM) fingerprint and is
+/// **grandfathered** — never retro-rejected. No `Attestations` row is changed.
+pub mod migrations {
+    use super::*;
+    use core::marker::PhantomData;
+    use frame_support::traits::{Get, OnRuntimeUpgrade, StorageVersion};
+
+    /// Target pallet storage version written by this migration.
+    pub const TARGET_STORAGE_VERSION: u16 = 1;
+
+    pub struct GrandfatherGpuOwner<T>(PhantomData<T>);
+
+    impl<T: pallet_gpu_attestation::Config> OnRuntimeUpgrade for GrandfatherGpuOwner<T> {
+        fn on_runtime_upgrade() -> Weight {
+            let target = StorageVersion::new(TARGET_STORAGE_VERSION);
+            let on_chain = StorageVersion::get::<pallet_gpu_attestation::Pallet<T>>();
+            if on_chain >= target {
+                log::info!(target: "runtime::migrations", "gpu-identity: already at storage v{TARGET_STORAGE_VERSION}, skipping");
+                return T::DbWeight::get().reads(1);
+            }
+
+            let total = pallet_gpu_attestation::Attestations::<T>::iter().count() as u64;
+            let mut seeded = 0u64;
+            for (who, rec) in pallet_gpu_attestation::Attestations::<T>::iter() {
+                // Zero = pre-identity client; never owned (zero is not a card).
+                if rec.gpu_info_hash == [0u8; 32] {
+                    continue;
+                }
+                if pallet_gpu_attestation::GpuOwner::<T>::contains_key(rec.gpu_info_hash) {
+                    continue;
+                }
+                pallet_gpu_attestation::GpuOwner::<T>::insert(rec.gpu_info_hash, &who);
+                seeded += 1;
+            }
+            // Two *pre-upgrade* records may share a model+VRAM digest;
+            // `contains_key` keeps the first owner and the later account stays
+            // attested (grandfathered, just unowned).
+            target.put::<pallet_gpu_attestation::Pallet<T>>();
+            log::info!(target: "runtime::migrations", "gpu-identity: seeded {seeded} GPU owner(s) from {total} attestation(s)");
+            T::DbWeight::get().reads_writes(total + 2, seeded + 1)
+        }
+    }
+}
+
 /// Executive: handles dispatch to the various modules.
 pub type Executive = frame_executive::Executive<
     Runtime,
@@ -774,6 +850,7 @@ pub type Executive = frame_executive::Executive<
     frame_system::ChainContext<Runtime>,
     Runtime,
     AllPalletsWithSystem,
+    migrations::GrandfatherGpuOwner<Runtime>,
 >;
 
 // ###########################################################################

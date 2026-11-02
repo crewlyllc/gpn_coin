@@ -148,7 +148,7 @@ mkdir -p ~/gpn &amp;&amp; tar -xzf gpn-linux.tar.gz -C ~/gpn &amp;&amp; cd ~/gpn
         </div>
 
         <div class="qs-foot">
-          <span>Behind a router? Enable <b>UPnP</b> or forward TCP <b>30333</b> (peer port) and <b>8092</b> (AI endpoint).</span>
+          <span>Behind a router? No inbound port is required — jobs are pulled. For a listing/seed, enable <b>UPnP</b> or forward TCP <b>30333</b>.</span>
           <a href="docs/run-a-node.html">Full install guide &rarr;</a>
         </div>
       </div>
@@ -216,8 +216,8 @@ mkdir -p ~/gpn &amp;&amp; tar -xzf gpn-linux.tar.gz -C ~/gpn &amp;&amp; cd ~/gpn
         </div>
       </div>
       <p class="switch-note">There is no provider-only or mine-only mode, and no profitability switch. The GPU
-        is fully yielded per job — so a job never contends with the miner for VRAM. A separate
-        <b>Staking</b> role is planned.</p>
+        is fully yielded per job — so a job never contends with the miner for VRAM. There is
+        <b>no stake required</b> to attest, list, or serve; optional staking only raises a reward multiplier.</p>
     </div>
   </section>
 
@@ -250,12 +250,14 @@ mkdir -p ~/gpn &amp;&amp; tar -xzf gpn-linux.tar.gz -C ~/gpn &amp;&amp; cd ~/gpn
         <div class="card">
           <h3><span class="ico" aria-hidden="true">🧭</span> Routing</h3>
           <p class="muted mb-0">Buyers hit a single <b>access point</b>. The scheduler filters by capability,
-            requires an idle GPU, and picks the <b>lowest-latency, least-loaded</b> verified provider —
-            discovered on-chain, not from a hand-maintained list.</p>
+            requires an idle GPU, and picks the <b>lowest-latency, least-loaded</b> attested provider —
+            discovered on-chain, not from a hand-maintained list. Attestation says the GPU is real and
+            online; it does not verify the returned output (no result verification exists yet).</p>
         </div>
         <div class="card">
           <h3><span class="ico" aria-hidden="true">🔒</span> Escrow &amp; settlement</h3>
-          <p class="muted mb-0">Funds are escrowed on-chain and released on delivery. Optional
+          <p class="muted mb-0">Funds are escrowed on-chain and released when the provider submits a result
+            hash — settlement follows the submission, not a correctness check. Optional
             <b>payment channels</b> lock funds once and settle each job off-chain, so the AI path has
             <b>no per-job block delay</b>.</p>
         </div>
@@ -271,9 +273,9 @@ mkdir -p ~/gpn &amp;&amp; tar -xzf gpn-linux.tar.gz -C ~/gpn &amp;&amp; cd ~/gpn
         <span class="ct">Live network today</span>
         <p class="mb-0"><b>Three public nodes</b> &mdash; one Linux bootnode and two Windows full nodes &mdash;
           are reachable on the testnet. Builds roll out through rolling GitHub releases
-          (<code>windows-latest</code>, <code>linux-latest</code>, <code>macos-latest</code>) on the public
+          (<code>windows-latest</code>, <code>linux-latest</code>) on the public
           mirror <a href="https://github.com/crewlyllc/gpn_coin" rel="noopener">crewlyllc/gpn_coin</a>,
-          so downloads need no account or token.</p>
+          so downloads need no account or token. <code>macos-latest</code> is not published yet.</p>
       </div>
     </div>
   </section>
@@ -346,11 +348,12 @@ mkdir -p ~/gpn &amp;&amp; tar -xzf gpn-linux.tar.gz -C ~/gpn &amp;&amp; cd ~/gpn
           </ul>
         </div>
         <div class="card plain">
-          <h3><span class="ico" aria-hidden="true">🎛</span> GPU-only, verifiably</h3>
+          <h3><span class="ico" aria-hidden="true">🎛</span> GPU-only, provably</h3>
           <ul class="checks">
             <li>Memory-hard PoW makes CPUs non-competitive by construction.</li>
-            <li>Attestation tiers (Bronze/Silver/Gold) raise your reward multiplier.</li>
-            <li>Stake-free path: producing a valid block <em>is</em> proof of real GPU work.</li>
+            <li>Attestation tiers (Bronze/Silver/Gold) raise your reward multiplier — staking is optional, never required.</li>
+            <li>Producing a valid block <em>is</em> proof of real GPU work.</li>
+            <li>Attestation proves the GPU is online, <b>not</b> that a result is correct — no output verification exists today (roadmap).</li>
           </ul>
         </div>
         <div class="card plain">
@@ -358,7 +361,7 @@ mkdir -p ~/gpn &amp;&amp; tar -xzf gpn-linux.tar.gz -C ~/gpn &amp;&amp; cd ~/gpn
           <ul class="checks">
             <li>On-chain escrow; the chain is the root of trust.</li>
             <li>Optional payment channels — <b>no per-job block delay</b>.</li>
-            <li>Committee governance — 3-member committee, 2-of-3 approvals, 3-day timelock (testnet); treasury spend gated by a separate 13-of-25 roster. An immutable genesis.</li>
+            <li>Council governance — 5 members, 3-of-5 approvals (design; also what the testnet runs today, with a 10-block testnet timelock). Testnet governance is a bootstrap, not a security guarantee; there is no cancel/veto. Treasury spend is gated by a separate 13-of-25 roster. An immutable genesis.</li>
           </ul>
         </div>
         <div class="card plain">
@@ -396,9 +399,10 @@ mkdir -p ~/gpn &amp;&amp; tar -xzf gpn-linux.tar.gz -C ~/gpn &amp;&amp; cd ~/gpn
             converges at ≈ 420 M GPN.</p>
         </div>
         <div class="card">
-          <h3>Disclosed, vested treasury</h3>
+          <h3>Disclosed, vested treasury (at mainnet launch)</h3>
           <p class="muted mb-0">100 M GPN held by a keyless pallet account — 70 M unlocked at genesis and
-            30 M vesting over 10 years — spendable only by a 13-of-25 governance roster. A 5% marketplace
+            30 M vesting over 10 years — spendable only by a 13-of-25 treasury spend roster. These are
+            mainnet-launch figures; the testnet treasury holds 0 GPN. A 5% marketplace
             fee splits 40% staking / 30% treasury / 20% burn / 10% oracle operators.</p>
         </div>
       </div>

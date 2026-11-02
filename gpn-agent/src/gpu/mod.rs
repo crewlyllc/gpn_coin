@@ -18,6 +18,13 @@ pub struct GPUInfo {
     pub compute_capability: String,
     pub cuda_version: Option<String>,
     pub gpu_count: u8,
+    /// Driver-reported hardware identity of the primary card (`GPU-…` from
+    /// `nvidia-smi --query-gpu=uuid`, or the ROCm unique id). **Never
+    /// serialized**: the raw UUID must not leave this machine (it is not in
+    /// logs, status endpoints or the chain). Only the derived fingerprint
+    /// ([`gpu_fingerprint`]) is ever submitted.
+    #[serde(default, skip)]
+    pub gpu_uuid: Option<String>,
 }
 
 #[derive(Clone)]
@@ -49,6 +56,7 @@ impl GPUMonitor {
             compute_capability: "8.0".to_string(),
             cuda_version: None,
             gpu_count: 1,
+            gpu_uuid: None,
         })
     }
 
@@ -77,6 +85,7 @@ impl GPUMonitor {
             compute_capability: parts.get(6).unwrap_or(&"8.0").to_string(),
             cuda_version: Self::get_cuda_version(),
             gpu_count: stdout.lines().count() as u8,
+            gpu_uuid: None,
         })
     }
 
@@ -120,6 +129,7 @@ impl GPUMonitor {
             compute_capability: String::new(),
             cuda_version: None,
             gpu_count: 1,
+            gpu_uuid: None,
         })
     }
 
@@ -231,12 +241,303 @@ pub fn measure_gflops_samples_locked(device_index: usize, runs: usize) -> Result
     Ok(gflops)
 }
 
+/// Legacy GPU-info digest: `sha256(serde_json(GPUInfo))` = model + VRAM +
+/// driver/telemetry fields.
+///
+/// This is NOT a hardware identity: two identical cards produce the same
+/// digest, and one card can produce several digests (driver/telemetry churn).
+/// It is kept only as the **weak fallback** fingerprint when no hardware UUID
+/// can be read (see [`gpu_fingerprint`]).
+///
+/// Note: `GPUInfo::gpu_uuid` is `#[serde(skip)]`, so the serialized form — and
+/// therefore this digest — is byte-identical to the pre-UUID version.
 pub fn hash_gpu_info(info: &GPUInfo) -> [u8; 32] {
     let serialized = serde_json::to_vec(info).unwrap_or_default();
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(&serialized);
     hasher.finalize().into()
+}
+
+// ── Hardware identity → on-chain fingerprint ────────────────────────────────
+//
+// One physical GPU must map to one provider account (`GpuOwner` on chain). The
+// model+VRAM hash cannot do that: two 4090s are indistinguishable (false
+// collision) and one 4090 hashes differently after a driver update (false
+// split). The driver's persistent GPU UUID is the hardware identity.
+//
+// The fingerprint is `sha256(DOMAIN || uuid || genesis_hash)`:
+// * the genesis hash binds it to one chain, so the same card on two chains is
+//   unlinkable (and cannot copy an attestation across networks);
+// * the domain tag separates this use of SHA-256 from every other digest;
+// * the raw UUID never leaves the machine — only this digest is submitted.
+//
+// If no UUID is available we fall back to the legacy digest and mark the
+// fingerprint **weak** (callers log it; it still works on testnet).
+
+/// Domain separator for the GPU identity fingerprint (v1).
+pub const GPU_ID_DOMAIN: &[u8] = b"GPN-GPU-ID-V1";
+
+/// Where a hardware identity came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuIdSource {
+    /// `nvidia-smi --query-gpu=uuid`.
+    NvidiaSmi,
+    /// `rocm-smi --showuniqueid`.
+    RocmSmi,
+    /// No UUID: the legacy model+VRAM digest is used (weak).
+    None,
+}
+
+/// An attestation fingerprint plus how strong it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GpuFingerprint {
+    /// Value submitted on-chain as `gpu_info_hash`.
+    pub hash: [u8; 32],
+    /// True when `hash` is the legacy model+VRAM digest (no UUID available):
+    /// identical cards collide and a driver change can move it.
+    pub weak: bool,
+    pub source: GpuIdSource,
+}
+
+/// Normalise a driver-reported GPU UUID, rejecting placeholders.
+///
+/// Trims whitespace/quotes and lowercases (NVIDIA reports lowercase already;
+/// lowercasing makes the digest stable if a driver ever changes case).
+/// `N/A`, `[N/A]`, `unknown`, empty and the all-zero id are *not* identities.
+pub fn normalize_gpu_uuid(raw: &str) -> Option<String> {
+    let v = raw.trim().trim_matches('"').trim();
+    if v.is_empty() {
+        return None;
+    }
+    let lower = v.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "n/a" | "[n/a]" | "na" | "unknown" | "none" | "null" | "0"
+    ) {
+        return None;
+    }
+    // An all-zero UUID is what some virtualised drivers return.
+    if let Some(hex) = lower.strip_prefix("0x") {
+        if !hex.is_empty() && hex.chars().all(|c| c == '0') {
+            return None;
+        }
+    }
+    Some(lower)
+}
+
+/// Parse `nvidia-smi --query-gpu=uuid --format=csv,noheader` output.
+/// One UUID per GPU, first valid one wins (`N/A` rows are skipped).
+///
+/// ```text
+/// GPU-18f2b349-8dcf-c788-fdd7-655e082874de
+/// ```
+pub fn parse_nvidia_smi_uuid(out: &str) -> Option<String> {
+    for line in out.lines() {
+        // Rows may be `GPU-…` or (older drivers) `0` for the board serial.
+        if let Some(u) = normalize_gpu_uuid(line) {
+            // A bare PCI index (`0`, `1`), a log line or a `command not
+            // found` message is not an identity — require NVIDIA's UUID form
+            // (`GPU-…`; MIG devices report `MIG-…`).
+            if u.starts_with("gpu-") || u.starts_with("mig-") {
+                return Some(u);
+            }
+        }
+    }
+    None
+}
+
+/// Parse `rocm-smi --showuniqueid --csv` output (classic line or CSV/JSON).
+///
+/// ```text
+/// device,Unique ID
+/// card0,0x9a1b2c3d4e5f6071
+/// ```
+/// or the classic form `GPU[0] : Unique ID: 0x9a1b2c3d4e5f6071`.
+pub fn parse_rocm_smi_uuid(out: &str) -> Option<String> {
+    let mut csv_mode = false;
+    for line in out.lines() {
+        let l = line.to_ascii_lowercase();
+        if l.contains("unique id") {
+            if line.contains(':') {
+                // Classic / JSON form: the value follows the marker.
+                if let Some(v) = value_after_marker(line, "unique id") {
+                    if let Some(u) = normalize_gpu_uuid(&v) {
+                        return Some(u);
+                    }
+                }
+            } else {
+                // Header row of the CSV form — values are on following lines.
+                csv_mode = true;
+            }
+            continue;
+        }
+        if csv_mode {
+            // `card0,0x…` (or `0x…` alone).
+            if let Some(cell) = line.split(',').next_back() {
+                if let Some(u) = normalize_gpu_uuid(cell) {
+                    if u.len() >= 8 {
+                        return Some(u);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Run a vendor CLI, returning its stdout only on success.
+fn cli_stdout(program: &str, args: &[&str]) -> Option<String> {
+    let out = Command::new(program).args(args).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// Candidate program names for a vendor CLI. On Windows the tool is normally
+/// on `PATH`, but a service account can have a stripped `PATH`; NVIDIA also
+/// installs into `C:\Windows\System32` on some driver packages.
+fn cli_candidates(name: &str) -> Vec<String> {
+    #[cfg(windows)]
+    {
+        vec![
+            name.to_string(),
+            format!(r"C:\Windows\System32\{name}.exe"),
+            format!(r"C:\Program Files\NVIDIA Corporation\NVSMI\{name}.exe"),
+        ]
+    }
+    #[cfg(not(windows))]
+    {
+        vec![name.to_string()]
+    }
+}
+
+fn run_first_available(name: &str, args: &[&str]) -> Option<String> {
+    for prog in cli_candidates(name) {
+        if let Some(s) = cli_stdout(&prog, args) {
+            return Some(s);
+        }
+    }
+    None
+}
+
+/// Best-effort hardware identity of the **primary** (index 0) GPU.
+///
+/// Order: `nvidia-smi` → `rocm-smi`. Returns `(uuid, source)`; `(None, None)`
+/// when neither tool yields a UUID (missing tool, no GPU, virtualised driver).
+pub fn collect_gpu_identity() -> (Option<String>, GpuIdSource) {
+    if let Some(out) =
+        run_first_available("nvidia-smi", &["--query-gpu=uuid", "--format=csv,noheader"])
+    {
+        if let Some(u) = parse_nvidia_smi_uuid(&out) {
+            return (Some(u), GpuIdSource::NvidiaSmi);
+        }
+    }
+    if let Some(out) = run_first_available("rocm-smi", &["--showuniqueid", "--csv"]) {
+        if let Some(u) = parse_rocm_smi_uuid(&out) {
+            return (Some(u), GpuIdSource::RocmSmi);
+        }
+    }
+    (None, GpuIdSource::None)
+}
+
+/// The genesis hash used to bind fingerprints to a chain.
+///
+/// Override with `GPN_GENESIS_HASH` (32-byte hex, `0x` optional); otherwise the
+/// canonical network registry (`network.json`, or `GPN_NETWORK_REGISTRY`).
+pub fn canonical_genesis_bytes() -> Option<[u8; 32]> {
+    if let Ok(s) = std::env::var("GPN_GENESIS_HASH") {
+        if let Some(b) = parse_hex_32(&s) {
+            return Some(b);
+        }
+    }
+    let r = crate::network_registry::load_registry();
+    if r.genesis_is_placeholder() {
+        return None;
+    }
+    parse_hex_32(&r.genesis_hash)
+}
+
+/// Decode a 32-byte hex string (`0x` optional).
+fn parse_hex_32(s: &str) -> Option<[u8; 32]> {
+    let s = s.trim().trim_start_matches("0x");
+    if s.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
+/// `sha256(DOMAIN || uuid || genesis_hash)` — the strong fingerprint.
+pub fn fingerprint_from_uuid(uuid: &str, genesis_hash: &[u8; 32]) -> Option<[u8; 32]> {
+    let uuid = normalize_gpu_uuid(uuid)?;
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(GPU_ID_DOMAIN);
+    h.update(uuid.as_bytes());
+    h.update(genesis_hash);
+    Some(h.finalize().into())
+}
+
+/// Compute the on-chain fingerprint from an already-collected identity.
+///
+/// `strong = sha256(DOMAIN || uuid || genesis_hash)`;
+/// when `info.gpu_uuid` is `None`/invalid, falls back to [`hash_gpu_info`] and
+/// marks the result weak. `source` is unknown here (the UUID may have come from
+/// any driver); use [`resolve_fingerprint`] to also classify the source.
+pub fn gpu_fingerprint(info: &GPUInfo, genesis_hash: &[u8; 32]) -> GpuFingerprint {
+    match info
+        .gpu_uuid
+        .as_deref()
+        .and_then(|u| fingerprint_from_uuid(u, genesis_hash))
+    {
+        Some(hash) => GpuFingerprint {
+            hash,
+            weak: false,
+            source: GpuIdSource::None,
+        },
+        None => GpuFingerprint {
+            hash: hash_gpu_info(info),
+            weak: true,
+            source: GpuIdSource::None,
+        },
+    }
+}
+
+/// Compute the fingerprint, probing the vendor CLIs when `info.gpu_uuid` was
+/// not populated (e.g. `GPUInfo` came from deserialized telemetry).
+pub fn resolve_fingerprint(info: &GPUInfo, genesis_hash: &[u8; 32]) -> GpuFingerprint {
+    if let Some(uuid) = info.gpu_uuid.as_deref().and_then(normalize_gpu_uuid) {
+        return match fingerprint_from_uuid(&uuid, genesis_hash) {
+            Some(hash) => GpuFingerprint {
+                hash,
+                weak: false,
+                source: GpuIdSource::None,
+            },
+            None => GpuFingerprint {
+                hash: hash_gpu_info(info),
+                weak: true,
+                source: GpuIdSource::None,
+            },
+        };
+    }
+    let (uuid, source) = collect_gpu_identity();
+    match uuid.and_then(|u| fingerprint_from_uuid(&u, genesis_hash)) {
+        Some(hash) => GpuFingerprint {
+            hash,
+            weak: false,
+            source,
+        },
+        None => GpuFingerprint {
+            hash: hash_gpu_info(info),
+            weak: true,
+            source: GpuIdSource::None,
+        },
+    }
 }
 
 fn parse_mem(s: &str) -> u64 {
@@ -1106,6 +1407,7 @@ mod tests {
             compute_capability: "8.9".into(),
             cuda_version: Some("12.2".into()),
             gpu_count: 1,
+            gpu_uuid: None,
         };
         let hash = hash_gpu_info(&info);
         assert_eq!(hash.len(), 32);
@@ -1354,5 +1656,149 @@ PC,2147483648,AMD Radeon(TM) Graphics\n";
         let (class, tflops) = scan_names(rows.iter().map(|(n, _)| n.as_str()));
         assert_eq!(class, "discrete");
         assert!((tflops - 37.0).abs() < 0.05);
+    }
+
+    // ── Hardware identity → fingerprint (one physical GPU = one provider) ───
+
+    fn test_info(uuid: Option<&str>) -> GPUInfo {
+        GPUInfo {
+            model_name: "NVIDIA GeForce RTX 4060".into(),
+            driver_version: "560.94".into(),
+            vram_total_bytes: 8 << 30,
+            vram_used_mb: 0,
+            temperature_celsius: 40.0,
+            gpu_utilization_percent: 0,
+            current_hashrate_mhs: 0.0,
+            compute_capability: "8.9".into(),
+            cuda_version: None,
+            gpu_count: 1,
+            gpu_uuid: uuid.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn nvidia_smi_uuid_is_parsed() {
+        // Verified value from this host.
+        assert_eq!(
+            parse_nvidia_smi_uuid("GPU-18f2b349-8dcf-c788-fdd7-655e082874de\n").as_deref(),
+            Some("gpu-18f2b349-8dcf-c788-fdd7-655e082874de")
+        );
+        // Multi-GPU: first valid row wins; `N/A` skipped.
+        assert_eq!(
+            parse_nvidia_smi_uuid("N/A\nGPU-aaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n").as_deref(),
+            Some("gpu-aaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        );
+        // No GPU / tool missing / placeholder output.
+        assert_eq!(parse_nvidia_smi_uuid(""), None);
+        assert_eq!(parse_nvidia_smi_uuid("N/A\n"), None);
+        assert_eq!(parse_nvidia_smi_uuid("[N/A]\n"), None);
+        assert_eq!(parse_nvidia_smi_uuid("0\n"), None);
+        assert_eq!(
+            parse_nvidia_smi_uuid("nvidia-smi: command not found\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn rocm_smi_uuid_is_parsed() {
+        let classic = "GPU[0]\t\t: Unique ID: 0x9a1b2c3d4e5f6071\n";
+        assert_eq!(
+            parse_rocm_smi_uuid(classic).as_deref(),
+            Some("0x9a1b2c3d4e5f6071")
+        );
+        let csv = "device,Unique ID\ncard0,0xdeadbeefcafebabe\n";
+        assert_eq!(
+            parse_rocm_smi_uuid(csv).as_deref(),
+            Some("0xdeadbeefcafebabe")
+        );
+        let json = r#"{"card0": {"Unique ID": "0x0011223344556677"}}"#;
+        assert_eq!(
+            parse_rocm_smi_uuid(json).as_deref(),
+            Some("0x0011223344556677")
+        );
+        // Warnings / empty / placeholder output.
+        assert_eq!(parse_rocm_smi_uuid(""), None);
+        assert_eq!(
+            parse_rocm_smi_uuid("WARNING: No AMD GPUs specified\n"),
+            None
+        );
+        assert_eq!(parse_rocm_smi_uuid("device,Unique ID\ncard0,N/A\n"), None);
+    }
+
+    #[test]
+    fn normalize_uuid_rejects_placeholders() {
+        assert_eq!(
+            normalize_gpu_uuid("  \"GPU-ABC-123\"  ").as_deref(),
+            Some("gpu-abc-123")
+        );
+        for junk in ["", " ", "N/A", "[N/A]", "unknown", "null", "0", "0x0000"] {
+            assert_eq!(normalize_gpu_uuid(junk), None, "{junk:?}");
+        }
+    }
+
+    #[test]
+    fn fingerprint_is_stable_and_chain_bound() {
+        let chain_a = [0x11u8; 32];
+        let chain_b = [0x22u8; 32];
+        let info = test_info(Some("GPU-18f2b349-8dcf-c788-fdd7-655e082874de"));
+
+        let a1 = gpu_fingerprint(&info, &chain_a);
+        let a2 = gpu_fingerprint(&info, &chain_a);
+        assert_eq!(a1.hash, a2.hash, "fingerprint must be stable across runs");
+        assert!(!a1.weak);
+
+        // Same card, different chain → unlinkable.
+        let b = gpu_fingerprint(&info, &chain_b);
+        assert_ne!(a1.hash, b.hash, "same card must not link across chains");
+
+        // Different card, same chain → different fingerprint.
+        let other = test_info(Some("GPU-ffffffff-0000-1111-2222-333333333333"));
+        assert_ne!(a1.hash, gpu_fingerprint(&other, &chain_a).hash);
+
+        // Exact construction: sha256(domain || uuid || genesis).
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(GPU_ID_DOMAIN);
+        h.update(b"gpu-18f2b349-8dcf-c788-fdd7-655e082874de");
+        h.update(chain_a);
+        let want: [u8; 32] = h.finalize().into();
+        assert_eq!(a1.hash, want);
+    }
+
+    #[test]
+    fn no_uuid_falls_back_to_weak_legacy_hash() {
+        let genesis = [0x33u8; 32];
+        let info = test_info(None);
+        let fp = gpu_fingerprint(&info, &genesis);
+        assert!(fp.weak, "no UUID must be marked weak");
+        assert_eq!(fp.hash, hash_gpu_info(&info), "legacy digest kept");
+        assert_eq!(fp.source, GpuIdSource::None);
+
+        // A placeholder UUID is the same as no UUID.
+        let placeholder = test_info(Some("N/A"));
+        assert!(gpu_fingerprint(&placeholder, &genesis).weak);
+    }
+
+    #[test]
+    fn legacy_hash_is_unchanged_by_the_uuid_field() {
+        // `gpu_uuid` is `#[serde(skip)]`, so pre-existing model+VRAM digests do
+        // not move when the field is populated — that is what keeps old
+        // attestations (and the weak fallback) stable.
+        let without = test_info(None);
+        let with = test_info(Some("GPU-18f2b349-8dcf-c788-fdd7-655e082874de"));
+        assert_eq!(hash_gpu_info(&without), hash_gpu_info(&with));
+        // And the UUID never appears in the serialized telemetry.
+        let json = serde_json::to_string(&with).unwrap();
+        assert!(!json.to_ascii_lowercase().contains("18f2b349"));
+    }
+
+    #[test]
+    fn genesis_hex_parsing() {
+        let h = "0xb8e4636a65d0c812abb437c38dd7e937bd7c3355c54c54d63060f26a33519a5c";
+        let b = parse_hex_32(h).unwrap();
+        assert_eq!(b[0], 0xb8);
+        assert_eq!(b[31], 0x5c);
+        assert!(parse_hex_32("0x00").is_none());
+        assert!(parse_hex_32("zz").is_none());
     }
 }

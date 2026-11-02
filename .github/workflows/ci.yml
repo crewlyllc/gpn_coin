@@ -115,6 +115,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: spec_version guard (source must not trail the registered network spec)
+        run: bash scripts/check-spec-version.sh
+
       - name: Show toolchain
         run: |
           # Repeated --component: rustup 1.29 rejects a space-separated component

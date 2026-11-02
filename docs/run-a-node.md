@@ -196,7 +196,7 @@ Uninstalling the autostart never touches the chain DB or `keystore.json`.
 
 ```
 $ ./gpn_node --version
-gpn_node 0.1.0 (spec 41)
+gpn_node 0.3.11 (spec 45)
 
 $ ./gpn_node --help      # usage, --setup/--version/--help, key GPN_* env vars
 ```
@@ -259,19 +259,19 @@ Run `--setup` more than once and it is idempotent: an existing wallet is kept
 After the ollama check, `--setup` asks **one** question about updates:
 
 ```
-  Keep this node auto-updated? [y/N]
+  Keep this node auto-updated? [Y/n]
     yes: verify + install GPN releases automatically (signed manifest,
          ed25519), restarting briefly when one is published. Recommended:
          the network drops nodes that fall below the minimum version, and an
          old node cannot mine.
     no : you update manually. This node will REFUSE TO MINE once its
          version is below the published minimum (it keeps syncing).
-  Currently: off
+  Currently: on
   >
 ```
 
-`y` writes `auto_update = true` into `~/.gpn/node.toml`; pressing Enter (or `n`)
-leaves it off. It is genuinely optional — but see
+`n` writes `auto_update = false` into `~/.gpn/node.toml`; pressing Enter (or `y`)
+leaves it on. It is on by default — but see
 [Updates](#updates-auto-update-and-the-minimum-version-cutoff) for what "off"
 means once a release raises the floor.
 
@@ -339,12 +339,14 @@ account as **Payout account** — check it is yours after an install.
   node starts on its built-in `testnet` spec with a warning. Set `GPN_CHAIN`
   to a local spec file if the genesis hash must match a specific network.
 * **Router with UPnP disabled** — the node prints the NOT-DIALABLE notice with
-  the exact port-forward rule (TCP 30333 → this machine) and exits `78`. See
-  [Make your node dialable](#make-your-node-dialable). If the router rewrites
-  the external port, set `GPN_PUBLIC_ADDR=/ip4/<ip>/tcp/<port>`.
-* **CGNAT** (`100.64.0.0/10` WAN address) — no forward can work; run the node
-  on a host with a public IP, or opt out of the gate with
-  `--no-require-backbone` (degraded mode).
+  the exact port-forward rule (TCP 30333 → this machine) and **keeps running**.
+  Publication is best-effort: a NAT'd node still serves AI jobs over the pull
+  transport. See [Make your node dialable](#make-your-node-dialable). If the
+  router rewrites the external port, set
+  `GPN_PUBLIC_ADDR=/ip4/<ip>/tcp/<port>`.
+* **CGNAT** (`100.64.0.0/10` WAN address) — no forward can work. The node still
+  serves; you just do not get a seed listing or liveness credit. No opt-out is
+  required to earn.
 * **systemd / container / CI (no TTY)** — the wizard never hangs: with no wallet
   configured it exits `2` and tells you to run `gpn_node --setup` once
   interactively (or `gpn_node --ensure-wallet`, which needs no terminal at all).
@@ -387,27 +389,29 @@ does exactly this.
 See the rest of this document for the full environment-variable reference,
 systemd/Windows service units, snapshots, and troubleshooting.
 
-## Backbone by default — dialable is REQUIRED
+## Dialability — useful, never a gate on serving
 
-Every GPN node is a **backbone** node: it announces its endpoint, accepts
-inbound peers, relays and serves blocks for the mesh, and earns the
-`gpn-liveness` uptime credit that gates the Silver/Gold staking multiplier. The
-best nodes become **seeds** (bootstrap targets) automatically — see
+Every GPN node can be a **backbone** node: announce its endpoint, accept
+inbound peers, relay and serve blocks for the mesh, and earn the
+`gpn-liveness` uptime credit that gates the Silver/Gold multiplier. The best
+nodes become **seeds** (bootstrap targets) automatically — see
 [How to become a seed](#how-to-become-a-seed--bootstrap-node).
 
-The network is still growing, so **inbound reachability is required by
-default**. A node that cannot be dialled prints the notice below and **exits
-with code 78** (`EX_CONFIG`, reported as `node=down(not dialable)`). Nothing is
-silently half-joined.
+**Inbound reachability is not required to earn.** Publishing an address is
+**best-effort**: the provider heartbeat walks an evidence ladder, publishes
+when it finds a reachable endpoint, and logs exactly which rungs failed when it
+does not. An empty publication is not an error — jobs are **pulled** by the
+node, so a box behind NAT/CGNAT serves AI jobs, mines, and gets paid normally.
+What you lose without a dialable address is seed-list eligibility, the small
+routing tie-break, and liveness uptime credit — not income.
 
-> **Opting out (not recommended while the network is growing).**
-> `--no-require-backbone` (or `GPN_REQUIRE_BACKBONE=0`) keeps the node running
-> when it cannot be dialled: it prints the same notice and continues in
-> **degraded, non-discoverable mode** — syncing, mining and serving AI jobs with
-> the same block rewards and job payouts. The only things it does not get are
-> liveness credit, seed-list eligibility, and a small routing tie-break. In
-> this mode it re-checks every **10 minutes** and prints `NOW DIALABLE` once
-> when the forward starts working.
+> **A note on the current build.** `gpn_node` still ships a startup
+dialability probe whose hard-fail default (`--require-backbone`) can stop a
+non-dialable node with exit `78` before it serves. That behaviour is legacy and
+being removed; **set `--no-require-backbone` (or `GPN_REQUIRE_BACKBONE=0`)** if
+your box cannot accept an inbound connection, and it will run normally. The
+safety valve already overrides the check when refusing would leave the chain
+without its last authoring node.
 
 At startup the node probes inbound reachability for up to **120 s**
 (`GPN_DIALABLE_TIMEOUT_SECS`), in this order:
@@ -423,8 +427,8 @@ At startup the node probes inbound reachability for up to **120 s**
    here first: a WAN address in `100.64.0.0/10` (or an RFC1918 WAN address)
    means no forward can work, and the attempt is skipped;
 4. CGNAT/private WAN → no forward is possible (reported by the notice);
-5. not dialable: print the notice and **exit 78** (default), or continue in
-   degraded mode with `--no-require-backbone`.
+5. not dialable: publish nothing, log the exact fix, and keep serving (see the
+   build note above; the legacy hard-fail path is `exit 78`).
 
 ### Evidence model
 
@@ -460,9 +464,9 @@ Only globally routable addresses count — RFC1918 (`10/8`, `172.16/12`,
 `192.168/16`), CGNAT (`100.64/10`), loopback, link-local and `0.0.0.0` never do.
 
 > **Opting out.** `--no-require-backbone` (or `GPN_REQUIRE_BACKBONE=0`)
-> disables the hard gate: the node logs the same notice and continues as a
-> non-discoverable participant instead of exiting. Use it for a machine that
-> physically cannot be forwarded (CGNAT) and must still run.
+> disables the startup hard gate. Set it on any machine that cannot accept an
+> inbound connection — the node then publishes nothing, logs the notice, and
+> runs normally as a non-seed provider.
 
 | Flag / env | Meaning | Default |
 |---|---|---|
@@ -472,8 +476,8 @@ Only globally routable addresses count — RFC1918 (`10/8`, `172.16/12`,
 | `--no-discoverable` / `GPN_DISCOVERABLE=0` | Privacy mode: no announce, no inbound, not in any list. Implies `--no-seed`. | — |
 | `--no-upnp` / `GPN_UPNP=off` | Never contact the router; no UPnP/NAT-PMP attempt. The attempt is logged when it happens. | `auto` |
 | `--public-addr` / `GPN_PUBLIC_ADDR` | Explicit public multiaddr; always wins over detection. | unset |
-| `--require-backbone` / `GPN_REQUIRE_BACKBONE=1` | **Default.** Exit 78 instead of degrading. | **on** |
-| `--no-require-backbone` / `GPN_REQUIRE_BACKBONE=0` | Opt out: run degraded when not dialable (re-checks every 10 min). | — |
+| `--require-backbone` / `GPN_REQUIRE_BACKBONE=1` | Legacy hard gate: exit 78 instead of serving when not dialable. **Deprecated — do not set it.** | off in new installs |
+| `--no-require-backbone` / `GPN_REQUIRE_BACKBONE=0` | Recommended for NAT'd/CGNAT hosts: publish best-effort, keep serving. | — |
 | `GPN_DIALABLE_TIMEOUT_SECS` | Probe grace window. | `120` |
 | `GPN_STUN_SERVER` | External STUN server for the mapping probe; `off` disables it. | `stun.l.google.com:19302` |
 | `GPN_DIALABILITY_SAFETY` | `0` lets the hard gate exit even when that would stop the last authority. | on |
@@ -1267,7 +1271,7 @@ GPN_AUTO_UPDATE=1 gpn_node
 manifest's `min_version` is checked. Below it:
 
 ```
-  !! UPGRADE REQUIRED — this node is 0.1.0, the network requires >= 0.2.0
+  !! UPGRADE REQUIRED — this node is 0.3.9, the network requires >= 0.3.11
   This node will SYNC ... but will NOT MINE and will NOT ANNOUNCE itself.
 ```
 
@@ -1434,7 +1438,7 @@ ml_poll_ms   = 2000
 finetune     = true                                # fine-tune provider (gpn_finetune_provider)
 finetune_poll_ms = 4000
 
-# ── updates: auto-update is OPT-IN; the version cutoff applies regardless ──
+# ── updates: auto-update is ON by default; opt out with GPN_AUTO_UPDATE=0 ──
 auto_update         = false   # true = install signed GPN releases automatically
 update_url          = "https://gpncoin.ai/releases.json"
 update_check_hours  = 6       # how often to look for a release (1-168)
@@ -1461,7 +1465,7 @@ min_version_enforce = true    # false = mine below the minimum (unsupported)
 | `GPN_BOOTNODES_URL` | comma/space list of published seed-list URLs. Replaces the built-in live directory. | `https://gpncoin.ai/seeds.json` |
 | `GPN_PUBLIC_ADDR` | `--public-addr` (e.g. `/dns4/host/tcp/30333`). Recommended for a public node; the capability probe also reads it. | _(none)_ |
 | `GPN_REQUIRE_DIALABLE` | Run the inbound-reachability probe. `0` skips it entirely (local testing only). | `1` |
-| `GPN_REQUIRE_BACKBONE` | Hard gate: exit 78 when not dialable (instead of degrading). | `0` |
+| `GPN_REQUIRE_BACKBONE` | Legacy hard gate: `1` exits 78 when not dialable. **Leave unset.** | `0` |
 | `GPN_SEED` | Willing to be published as a seed candidate; `0` also silences the not-dialable notice. | `1` |
 | `GPN_DISCOVERABLE` | Announce endpoint / accept inbound; `0` implies `GPN_SEED=0`. | `1` |
 | `GPN_UPNP` | Try UPnP-IGD/NAT-PMP (`auto`/`off`). See [UPnP / NAT-PMP](#3-upnp--nat-pmp--automatic-on-by-default). | `auto` |
@@ -1479,7 +1483,7 @@ min_version_enforce = true    # false = mine below the minimum (unsupported)
 | `GPN_ASSIGN_SOURCE` | `pull` (the only delivery path) \| `both` \| `push` (**degraded**, no delivery) — see [Pull vs push](#pull-vs-push--work-behind-nat). | `pull` |
 | `GPN_ASSIGN_WAIT_MS` | pull long-poll budget (the AP answers immediately when there is work) | `25000` |
 | `GPN_OLLAMA` | ollama base URL | `http://127.0.0.1:11434` |
-| `GPN_AUTO_UPDATE` | `1` = install signed GPN releases automatically (**opt-in**) | `0` |
+| `GPN_AUTO_UPDATE` | `1` = install signed GPN releases automatically (**on by default; opt out with 0**) | `1` |
 | `GPN_UPDATE_URL` | signed release manifest URL | `https://gpncoin.ai/releases.json` |
 | `GPN_UPDATE_CHECK_HOURS` | hours between auto-update checks (1–168) | `6` |
 | `GPN_UPDATE_RESTART` | `0` = stage an update but apply it at the next start | `1` |
@@ -1499,6 +1503,46 @@ min_version_enforce = true    # false = mine below the minimum (unsupported)
 | `GPN_ATTEST_MAX_VRAM_FRACTION` | device counts as busy above this VRAM fraction even if utilisation reads low (a loaded model leaves no room for a stable run) | `0.5` |
 | `GPN_ATTEST_RETRY_SECS` | first retry delay after a skipped (busy) attestation; doubles per attempt | `300` |
 | `GPN_ATTEST_RETRY_MAX_SECS` | cap for the attestation retry backoff | `3600` |
+
+### GPU identity: one physical GPU = one provider
+
+Registration requires a **GPU identity**. (Capital/staking policy is a separate,
+owner-decided topic — see the staking documentation.) What this section covers
+is the hardware identity the node submits and how the chain uses it.
+
+The node derives the on-chain fingerprint from the card's driver UUID:
+
+```
+1. nvidia-smi --query-gpu=uuid --format=csv,noheader   → GPU-18f2b349-…
+2. rocm-smi --showuniqueid --csv                       → 0x9a1b2c3d…  (AMD)
+
+fingerprint = sha256("GPN-GPU-ID-V1" || uuid || genesis_hash)
+```
+
+* The **raw UUID never leaves the machine** and never reaches the chain — only
+the digest is submitted as `gpu_info_hash`.
+* The genesis hash binds the fingerprint to one chain, so the same card is
+unlinkable across chains.
+* The chain keeps `GpuOwner[fingerprint] = account`. A **different** account
+presenting the same fingerprint is rejected with `GpuAlreadyOwned`; the owner
+may re-attest as often as it likes, and genuinely different cards never collide
+(the old model+VRAM hash collided for two identical cards and split after a
+driver update).
+* `withdraw_stake` removes the attestation **and releases the fingerprint**, so
+the card can be registered under another account afterwards.
+* No UUID (missing `nvidia-smi`/`rocm-smi`, a virtualised driver, or a CPU-only
+box) falls back to the legacy model+VRAM digest and is logged as a **weak**
+fingerprint. A mainnet chain (`RequireGpuIdentity = true`) rejects a zero
+fingerprint with `GpuIdentityMissing`; a lenient testnet build may accept it.
+
+**If the fingerprint changes** (reinstalled driver, GPU moved to another slot,
+board replaced, UUID reset): the provider sees `GpuAlreadyOwned` or simply
+attests a new card. Re-attesting from the **same account** releases the old
+fingerprint automatically. To move the card to **another account**, the previous
+owner must `withdraw_stake` first — that releases its `GpuOwner` entry. (Note:
+`withdraw_stake` requires a recorded stake; an account that attested without
+staking has no separate release path today. That gap is a follow-up decision,
+not part of the identity change.)
 
 ### What `compute_gflops` actually measures
 

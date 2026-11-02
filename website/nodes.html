@@ -144,17 +144,20 @@
 
       <div class="stats" id="summary">
         <div class="stat"><div class="v" id="c-live">…</div><div class="l">Peers online</div></div>
-        <div class="stat"><div class="v" id="c-serving">…</div><div class="l">Serving AI</div></div>
+        <div class="stat"><div class="v" id="c-serving">…</div><div class="l">AI providers (registered)</div></div>
         <div class="stat"><div class="v" id="c-offline">…</div><div class="l">Offline (known)</div></div>
         <div class="stat"><div class="v tiny mono" id="c-generated">…</div><div class="l">Chain read at</div></div>
       </div>
       <p class="small muted counts-note" id="counts-note">Peers online counts distinct peer ids seen by the
-        network's node. Offline rows are known seeds/providers that are <b>not</b> in that set.</p>
+        network's node. AI providers counts providers the access point has registered and can lease;
+        a heartbeat that is not publicly reachable does not make a node a non-provider. Offline rows are
+        known seeds/providers that are <b>not</b> connected right now.</p>
 
       <h2 style="margin-top:34px">Nodes</h2>
-      <p class="sub">One row per machine, deduped by <code>peer-id</code>: a <b>serving</b> node is a healthy
-        provider (serving AI), a <b>peer-only</b> node is connected but serves no AI jobs, and an
-        <b>offline</b> node is a known seed or provider that is not connected right now.</p>
+      <p class="sub">One row per machine, deduped by <code>peer-id</code>: every GPN node is
+        <b>miner + AI provider</b>. A row reads <b>mining + serving</b> when its provider status URL is
+        reachable, <b>mining + provider registered</b> when the access point knows it but its status URL
+        is not publicly reachable, and <b>offline</b> when a known seed or provider is not connected.</p>
 
       <div class="table-wrap">
         <table class="dir-table" id="nodes-table">
@@ -299,7 +302,7 @@ GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code><
     "/ip4/23.241.109.255/tcp/30333/p2p/12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz"
   ];
 
-  /* Optional local mock for previewing without a backend: ?mock=1 */
+  /* Optional local mock for previewing without a backend: ?mock=1 — must mirror seeds.json */
   var MOCK = {
     generated_at: new Date().toISOString(),
     peers: 4,
@@ -323,9 +326,9 @@ GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code><
     ],
     seeds: [
       { multiaddr: "/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo", peer_id: "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo", live: true, source: "compiled-in" },
-      { multiaddr: "/ip4/142.129.54.88/tcp/30334/p2p/12D3KooWRWv4yVdJGiVg7xRgdUJY9G57EeutB596gWVpAwGC9qQ2", peer_id: "12D3KooWRWv4yVdJGiVg7xRgdUJY9G57EeutB596gWVpAwGC9qQ2", live: false, source: "compiled-in" }
+      { multiaddr: "/ip4/23.241.109.255/tcp/30333/p2p/12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz", peer_id: "12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz", live: true, source: "compiled-in" }
     ],
-    counts: { peers_live: 4, serving_ai: 1, offline: 1 },
+    counts: { peers_live: 4, serving_ai: 1, offline: 0 },
     stale: false
   };
 
@@ -506,7 +509,7 @@ GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code><
     dot.className = "d";
     b.appendChild(dot);
     b.appendChild(document.createTextNode(
-      cached ? "cached" : status === "peer-only" ? "peer only" : status
+      cached ? "cached" : status === "peer-only" ? "mining + provider registered" : status
     ));
     return b;
   }

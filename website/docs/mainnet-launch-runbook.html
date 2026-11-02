@@ -36,7 +36,7 @@
       <a href="../nodes.html">Nodes</a>
       <a href="../buy.html">Buy GPN</a>
       <a href="index.html" aria-current="page">Docs</a>
-    <a href="../index.html#join">Join us</a>
+      <a href="../index.html#join">Join us</a>
     </nav>
     <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
   </div>
@@ -64,6 +64,9 @@ treasury operations, monitoring, verification, and abort/rollback criteria.</p>
 all-zeros placeholder</strong> (<code>AccountId::new([0u8;32])</code>) with no private key. Every privileged
 action listed below is done through <strong>root/governance</strong> (<code>Sudo</code>-only calls are replaced by a
 governance runtime call) or the on-chain <strong><code>pallet-gpn-treasury</code> 13-of-25</strong> flow. See §6.</p>
+<p>Runtime upgrades have their own runbook: <strong><code>docs/upgrades-governance.md</code></strong> — the
+<code>gpn_gov_upgrade</code> pipeline (stage → propose → approve → 3-day timelock → execute → verify),
+the 2-of-3 committee, and rollback. <code>gpn_upgrade_runtime</code> (sudo) is dev/testnet only.</p>
 </blockquote>
 <hr />
 <h2 id="1-what-mainnet-actually-is-facts-to-verify-not-assume">1. What mainnet actually is (facts to verify, not assume)</h2>
@@ -247,9 +250,12 @@ gpn-agent/target/release/gpn_check_state --endpoint ws://127.0.0.1:9944 | head
 - [ ] Sudo is unreachable (the all-zeros key is not funded and has no known private key).</p>
 <hr />
 <h2 id="6-post-launch-governance-actions-first-days">6. Post-launch governance actions (first days)</h2>
-<p>All of these are <strong>root/governance</strong> calls (mainnet has no usable sudo). Queue them as a
-governed <code>Sudo.sudo → &lt;call&gt;</code> or via the governance committee per
-<code>design/protocols/05-oracle-governance.md</code>.</p>
+<p>All of these are <strong>root/governance</strong> calls (mainnet has no usable sudo). They go through
+<code>pallet-gpn-governance</code>: a committee member proposes the call, a second member approves, and
+after the 3-day timelock anyone may <code>execute</code> it as Root (2-of-3, <code>ApprovalsRequired = 2</code>,
+<code>TimelockPeriod = 17 280</code> blocks). The mechanics — and the <code>gpn_gov_upgrade</code> tool that builds,
+proposes, verifies and rolls back these calls — are in <strong><code>docs/upgrades-governance.md</code></strong>.
+Oracle-operator admission additionally follows <code>design/protocols/05-oracle-governance.md</code>.</p>
 <ol>
 <li><strong>Set the block-reward beneficiary.</strong> Without this, mined blocks pay <strong>no one</strong> (the genesis
    beneficiary is <code>None</code> — deliberate, no hardcoded dev backdoor). Set the mining pool / ops
@@ -338,8 +344,12 @@ is non-negotiable.</p>
 <hr />
 <h2 id="10-open-business-decisions-need-jeremy">10. Open business decisions (need Jeremy)</h2>
 <ol>
-<li>Rotate the mainnet sudo placeholder into a <strong>governed</strong> path (or leave permanently inert) —
-   see <code>design/protocols/05-oracle-governance.md</code>.</li>
+<li>~~Rotate the mainnet sudo placeholder into a governed path~~ — <strong>resolved</strong>: the governed
+   path is <code>pallet-gpn-governance</code> (2-of-3 committee + 3-day timelock, <code>System.set_code</code> via
+   <code>execute</code> as Root). The sudo placeholder stays permanently inert. Runbook:
+   <code>docs/upgrades-governance.md</code>. Remaining sub-decision: whether the production committee is
+   the three <code>testnet_committee()</code> addresses or a different set — this is a <strong>genesis</strong> choice,
+   so settle it before cutting the mainnet genesis.</li>
 <li>Bootnode + full-node set and the decentralization plan (who runs the first nodes, where).</li>
 <li>Token listing / liquidity plan (CEX/DEX).</li>
 <li>Marketplace go-live: first paying customers + SLA / reputation policy
@@ -352,7 +362,7 @@ is non-negotiable.</p>
    reviewed) before the mainnet genesis is cut.</li>
 </ol>
     </article>
-    <p class="doc-updated small muted">Last generated 2026-10-19 from the project documentation set.</p>
+    <p class="doc-updated small muted">Last generated 2026-11-02 from the project documentation set.</p>
   </div>
 </main>
 

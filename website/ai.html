@@ -913,8 +913,8 @@ await writeFile("adapter.zip", Buffer.from(await zip.arrayBuffer()));</code></pr
         <div class="card">
           <h3><span class="ico" aria-hidden="true">💬</span> Text / LLM <span class="tag live">live</span></h3>
           <p class="muted">OpenAI-compatible chat completions on <b>small open models</b> —
-            <code>llama3.2:1b</code>, <code>qwen2.5</code> (0.5B/7B), <code>deepseek-r1</code> (7B/14B), plus
-            LoRA tunes. The model list is whatever the online providers report. Scale matters: these are
+            <code>llama3.2:1b</code>, <code>qwen2.5:0.5b</code>, <code>qwen2.5:7b</code>. The model list is
+            whatever the online providers report; <code>GET /v1/models</code> is authoritative. Scale matters: these are
             consumer-GPU models, not frontier reasoning models — see
             <a href="#economics">the economics</a> for what that means per token.</p>
           <pre><code>POST /api/v1/chat/completions
@@ -932,9 +932,8 @@ await writeFile("adapter.zip", Buffer.from(await zip.arrayBuffer()));</code></pr
             milliseconds, renders 512×512 <code>sd-turbo</code> in <b>~25–35 s</b> on the testnet 4060, and
             settles over the <b>same signed-payment channel as text</b>
             (<code>"gpn": {"payment": "channel"}</code>) — one channel update, zero transactions. The poll
-            returns a stable PNG URL whose sha256 matches the bytes the provider signed (verified end to end
-            from a public client: <code>status: completed</code> in 26–35 s, 471–543 KB, 512×512, PNG header
-            <code>89 50 4e 47</code>). Renders are priced from the same anchor as tokens:
+            returns a stable PNG URL whose sha256 matches the bytes the provider served (delivery
+            integrity — <b>not</b> a check that the image is correct or the prompt was followed). Renders are priced from the same anchor as tokens:
             <b>≈0.0076 GPN</b> for 512×512 @ 8 steps (≈$0.0011), <b>≈0.0109 GPN</b> for 1024×1024 @ 20 steps.
             See <a href="#economics">image pricing</a>.</p>
           <pre><code>POST /api/v1/images/generations      → 202 {"id":"…","status":"pending","poll_url":"…"}
@@ -1012,8 +1011,8 @@ POST /api/v1/chat/completions {"model":"tuned-6527", …} → 200, answers in th
 
       <div class="callout warn">
         <span class="ct">The comparison this is <em>not</em></span>
-        <p class="mb-0">GPN's quality tier today is <b>small open models (0.5B–14B) on consumer GPUs</b> —
-          currently <code>llama3.2:1b</code>, <code>qwen2.5</code>, <code>deepseek-r1</code>, plus LoRA tunes.
+        <p class="mb-0">GPN's quality tier today is <b>small open models (0.5B–7B) on consumer GPUs</b> —
+          currently <code>llama3.2:1b</code>, <code>qwen2.5:0.5b</code>, <code>qwen2.5:7b</code>.
           It is not a frontier model, and nothing here claims GPT-class reasoning. You are buying cheap
           inference of a small model, not a 1T-parameter agent. Every row in the table below carries its
           model class so the comparison is not rigged by omission.</p>
@@ -1031,11 +1030,11 @@ POST /api/v1/chat/completions {"model":"tuned-6527", …} → 200, answers in th
           <tbody>
             <tr>
               <td><b>GPN</b> · <code>llama3.2:1b</code><br><span class="hint">throughput curve · 95.2 tok/s anchor</span></td>
-              <td>1B, any provider GPU, single stream</td><td><b>$0.095</b></td><td><b>≈$0.38</b> <span class="hint">illustrative</span></td><td><b>≈2.53</b></td>
+              <td>1B, any provider GPU, single stream</td><td><b>$0.057</b></td><td><b>≈$0.38</b> <span class="hint">illustrative</span></td><td><b>≈2.53</b></td>
             </tr>
             <tr>
               <td><b>GPN</b> · <code>qwen2.5:7b</code><br><span class="hint">same buyer price by design</span></td>
-              <td>7B, any provider GPU, single stream</td><td><b>$0.095</b></td><td><b>≈$0.38</b> <span class="hint">illustrative</span></td><td><b>≈2.53</b></td>
+              <td>7B, any provider GPU, single stream</td><td><b>$0.057</b></td><td><b>≈$0.38</b> <span class="hint">illustrative</span></td><td><b>≈2.53</b></td>
             </tr>
             <tr><td>OpenAI <code>gpt-5-nano</code></td><td>small, hosted</td><td>$0.05</td><td>$0.40</td><td>—</td></tr>
             <tr><td>OpenAI <code>gpt-6-luna</code></td><td>small, hosted</td><td>$0.10</td><td>$0.50</td><td>—</td></tr>
@@ -1056,7 +1055,8 @@ POST /api/v1/chat/completions {"model":"tuned-6527", …} → 200, answers in th
         <a href="https://ai.google.dev/gemini-api/docs/pricing" rel="noopener">ai.google.dev/gemini-api/docs/pricing</a> —
         standard (non-batch, short-context) tiers, read 2026-10-21. GPN's input rate is 15% of its output
         rate (<code>GPN_INPUT_RATE_FRAC=0.15</code>). Vendors change prices; treat the hosted columns as a
-        snapshot, and re-check the links. <code>GET /api/pricing</code> returns the live numbers.</p>
+        snapshot, and re-check the links. The access point's <code>GET /pricing</code> returns the live
+        numbers (it is not exposed on the public <code>/api</code> route yet).</p>
 
       <div class="callout" style="margin-top:18px">
         <span class="ct">The buyer's price does not depend on the GPU — on purpose</span>
@@ -1084,7 +1084,7 @@ POST /api/v1/chat/completions {"model":"tuned-6527", …} → 200, answers in th
         </table>
       </div>
       <p class="hint" style="margin-top:10px">A card whose modelled earning falls below its operator's
-        declared cost is flagged at startup and on <code>/api/pricing</code> — a provider that cannot cover
+        declared cost is flagged at startup and in the access point's <code>GET /pricing</code> response — a provider that cannot cover
         its electricity is a provider that will leave.</p>
 
       <h3 style="margin-top:26px">Image pricing — the same anchor, a different work unit</h3>
@@ -1108,9 +1108,8 @@ gpn = usd ÷ token_price</code></pre>
           </tbody>
         </table>
       </div>
-      <p class="hint" style="margin-top:10px">Roughly <b>1/120th</b> of what the old oracle-market anchor charged
-        for the same 512²/8 image ($0.1385 at the $3.00/hr fallback) — because that anchor priced a consumer
-        card at cloud-A100 rental rates. One curve now sets both tokens and images: a 4060 is assumed to earn
+      <p class="hint" style="margin-top:10px">That makes a 512²/8-step image cost about <b>a tenth of a
+        cent</b>. One curve now sets both tokens and images: the 4060 is assumed to earn
         $0.10/hr whether it is decoding or denoising.</p>
       <div class="callout" style="margin-top:14px">
         <span class="ct">Provider side: same fee per image, more images per hour</span>
@@ -1181,8 +1180,8 @@ gpn/tok  = 3.793e-7 / 0.15 = 2.53 GPN per 1M</code></pre>
         <div class="card plain">
           <h3><span class="ico" aria-hidden="true">🪙</span> Emission</h3>
           <p class="muted mb-0"><b>50 GPN per 15 s block ≈ 288,000 GPN/day</b> to miners under the halving
-            schedule, capped at ~420.48M emitted, plus a fixed <b>100M</b> treasury (70M genesis-unlocked,
-            30M vested) — a hard ceiling of <b>≈520.5M GPN</b>. Fees are separate from emission: they
+            schedule, capped at ~420.48M emitted, plus a fixed <b>100M treasury allocation at mainnet launch</b> (70M genesis-unlocked,
+            30M vested) — a hard ceiling of <b>≈520.5M GPN</b>. The testnet treasury holds 0 GPN today. Fees are separate from emission: they
             recycle GPN, they do not mint it.</p>
         </div>
       </div>
@@ -1202,9 +1201,7 @@ gpn/tok  = 3.793e-7 / 0.15 = 2.53 GPN per 1M</code></pre>
               <label for="ec-model">Model</label>
               <select id="ec-model">
                 <option value="1" selected>llama3.2:1b (1B)</option>
-                <option value="3">llama3.2:3b (3B)</option>
                 <option value="7">qwen2.5:7b (7B)</option>
-                <option value="14">deepseek-r1:14b (14B)</option>
               </select>
             </div>
             <div class="field">
@@ -1305,7 +1302,7 @@ gpn/tok  = 3.793e-7 / 0.15 = 2.53 GPN per 1M</code></pre>
             <tr><td><code>GET /api/jobs/&lt;id&gt;</code></td><td>On-chain state of a job (<code>Pending</code>, <code>Running</code>, <code>Completed</code>…).</td><td>120 / min per IP</td></tr>
             <tr><td><code>GET /api/providers</code></td><td>Live provider registry: models, capabilities, latency.</td><td>120 / min per IP</td></tr>
             <tr><td><code>GET /api/mode</code></td><td>Whether this AP is testnet (free AI) or mainnet (client-signed).</td><td>120 / min per IP</td></tr>
-            <tr><td><code>GET /api/pricing</code></td><td>The live rate card: anchor, <code>k</code>, input/output price per token, and the provider-earnings table for reference GPUs.</td><td>cacheable 60 s</td></tr>
+            <tr><td><code>GET /pricing</code> <span class="hint">(access point; not on the public /api route)</span></td><td>The live rate card: anchor, <code>k</code>, input/output price per token, and the provider-earnings table for reference GPUs.</td><td>not yet public</td></tr>
           </tbody>
         </table>
       </div>

@@ -81,19 +81,148 @@ manage them individually.</p>
                    gpn-node  gpn_provider gpn_llm_  gpn_diffusion_  gpn_ml_  gpn_finetune_
                    (miner)    _status    provider   provider      provider  provider
 </code></pre>
-<h2 id="install-on-a-new-computer">Install on a new computer</h2>
-<p>Three steps, one question.</p>
-<pre><code>1. Download + extract
-2. ./gpn_node --setup        (answer: generate or import a wallet)
-3. ./gpn_node
+<h2 id="referral-code-optional-data-collection-only">Referral code (optional, data collection only)</h2>
+<p>If somebody referred you to the testnet, pass their code at install time:</p>
+<pre><code class="language-bash">./install.sh --ref team-alpha          # or: GPN_REF=team-alpha ./install.sh
 </code></pre>
-<p>That is the whole install. Nothing else has to be set: the chain spec, data
-folder, payout address, peer list and public address are all resolved
-automatically. <code>--setup</code> also installs/starts ollama and pulls the baseline
-model, because a GPN node is always <strong>miner + AI provider</strong>.</p>
+<p>Windows: <code>.\run-windows-provider.ps1 -Ref team-alpha</code> (env <code>GPN_REF</code> also works),
+or the binary directly: <code>.\bin\gpn_node.exe --setup --ref team-alpha</code>.</p>
+<p>If you installed a prebuilt release and never ran <code>install.sh</code>, the node binary
+takes the same flag itself, on first run:</p>
+<pre><code class="language-bash">./gpn_node --setup --ref team-alpha    # wallet + ollama bootstrap; code recorded
+./gpn_node --ref team-alpha            # standalone (no --setup)
+./gpn_node --ref=team-alpha            # --ref=CODE works too
+</code></pre>
+<p><strong>Share links.</strong> <code>https://gpncoin.ai/download?ref=team-alpha</code> (also <code>?r=</code>) renders
+the code into the page's copy-paste commands: the Windows block becomes
+<code>.\bin\gpn_node.exe --setup --ref team-alpha</code> and the Linux block
+<code>./install.sh --ref team-alpha</code>. The page validates the code against
+<code>^[A-Za-z0-9_-]{4,32}$</code> and silently ignores anything else (that is the XSS
+boundary: the value is written as text, never as markup), and remembers it for
+the browser session so it survives clicking around the site.</p>
+<ul>
+<li>Write-once: the binary stores the code only if <code>$GPN_PREFIX/referral</code> does not
+  exist yet; an existing value wins and the new <code>--ref</code> is ignored with a log
+  line (<code>[referral] already set to …; ignoring --ref …</code>).</li>
+<li>Format: <strong>4–32 characters</strong>, letters/digits/<code>-</code>/<code>_</code>. An invalid code only
+  prints a warning — it never fails an install.</li>
+<li>Stored <strong>once</strong> in <code>~/.gpn/referral</code> (one line). A later <code>--ref</code> is ignored
+  (<code>[referral] already set to …; ignoring new value</code>), so the attribution cannot
+  be rewritten afterwards. Delete the file only if you <em>want</em> to lose it.</li>
+<li>Published on the provider heartbeat as <code>"ref"</code> in <code>/status</code>, and recorded by
+  the access point once per provider address (it is not a secret).</li>
+<li>Purely for the testnet-participation allocation at mainnet launch. Amounts
+  are undecided and no reward is promised — see
+  <code>shared/artifacts/project7/airdrop/REFERRAL-AND-MIGRATION-POLICY.md</code>.</li>
+<li>A node installed without a code behaves exactly as before (the field is
+  omitted entirely).</li>
+</ul>
+<h2 id="fast-sync-skip-the-200k-block-catch-up">Fast sync (skip the ~200k-block catch-up)</h2>
+<p>A fresh node normally verifies ~200k blocks from peers (hours on a PoW testnet).
+A <strong>weekly snapshot</strong> is published to the public mirror, and <strong>an installer uses
+it automatically</strong> — you do not have to do anything:</p>
+<pre><code class="language-bash">./install.sh                 # fast sync is the default
+</code></pre>
+<p>At install time it:</p>
+<ol>
+<li>fetches <code>snapshot.json</code> — <strong>signed</strong> with the GPN release ed25519 key (the same
+   key compiled into <code>gpn_node</code> for <code>releases.json</code>). The release <em>description</em> is
+   for humans and is never trusted;</li>
+<li>checks the signature, then the archive's exact <strong>size</strong> and <strong>sha256</strong> against
+   that signed document <em>before</em> importing a single byte;</li>
+<li>imports into a scratch directory with <code>--pruning archive</code>, and only then moves
+   <code>chains/</code> into the node base path;</li>
+<li>prints, at the end, either <code>chain data: bootstrapped from the weekly snapshot
+   (block N)</code> or <code>chain data: none yet — the node will full-sync from peers</code>.</li>
+</ol>
+<p>URLs (both are overridable with <code>GPN_SNAPSHOT_URL</code> / <code>GPN_SNAPSHOT_META_URL</code>):</p>
+<pre><code>https://github.com/crewlyllc/gpn_coin/releases/download/snapshot-latest/gpn-testnet-snapshot.tar.gz
+https://github.com/crewlyllc/gpn_coin/releases/download/snapshot-latest/snapshot.json
+</code></pre>
+<h3 id="disabling-it">Disabling it</h3>
+<pre><code class="language-bash">./install.sh --no-fast-sync          # CLI
+GPN_FAST_SYNC=0 ./install.sh         # env (same effect)
+</code></pre>
+<p>In that case the node simply syncs every block from peers as before.</p>
+<h3 id="what-the-fallback-does">What the fallback does</h3>
+<p>Fast sync is <strong>best-effort by design: it can never fail an install</strong>. Any of
+these — metadata 404/timeout, bad or missing signature, size/sha256 mismatch, a
+dropped download, less than 3× the snapshot size free on disk, or an import
+error — prints one line</p>
+<pre><code>! fast sync unavailable (&lt;reason&gt;) — falling back to a normal full peer sync (slower, still correct).
+</code></pre>
+<p>deletes only its own scratch directory, and continues with a normal sync. A
+<strong>pre-existing chain DB is never touched</strong>: if <code>&lt;base&gt;/chains</code> already has
+content the installer skips fast sync entirely (and says whether it found the
+<code>.gpn-pruning-archive</code> marker), so a DB created with a different pruning mode
+cannot be corrupted into <code>Incompatible pruning modes</code> / <code>Column families not
+opened</code> failures.</p>
+<h3 id="doing-it-by-hand">Doing it by hand</h3>
+<pre><code class="language-bash">curl -fLO https://github.com/crewlyllc/gpn_coin/releases/download/snapshot-latest/snapshot.json
+curl -fLO https://github.com/crewlyllc/gpn_coin/releases/download/snapshot-latest/gpn-testnet-snapshot.tar.gz
+gpn_snapshot verify --meta snapshot.json --snapshot gpn-testnet-snapshot.tar.gz
+gpn_snapshot import --snapshot gpn-testnet-snapshot.tar.gz --base-path ~/.gpn/node --pruning archive
+</code></pre>
+<p><code>gpn_snapshot verify</code> exits non-zero and imports nothing if the signature, size
+or hash does not match. Windows is identical (<code>gpn_snapshot.exe</code>; the installer's
+launcher performs the same checks with <code>curl.exe</code>).</p>
+<p>The snapshot is rebuilt every Monday at 04:00 PT (<code>scripts/snapshot-weekly.sh</code>);
+its block height, size and sha256 are in the signed <code>snapshot.json</code> and echoed in
+the release description for convenience.</p>
+<h2 id="install-on-a-new-computer">Install on a new computer</h2>
+<p>Two steps, one question.</p>
+<pre><code>1. Download + extract
+2. Windows: install.ps1 (or install.cmd)   ·   Linux: ./install.sh
+</code></pre>
+<p>That is the whole install. The installer copies the binaries, creates the
+wallet, makes ollama serve, and registers an <strong>autostart entry so the node and
+ollama come back by themselves after a reboot</strong>. Nothing else has to be set:
+the chain spec, data folder, payout address, peer list and public address are
+all resolved automatically. A GPN node is always <strong>miner + AI provider</strong>.</p>
+<p>Running the binaries by hand still works (<code>./gpn_node --setup</code>, then
+<code>./gpn_node</code>), but then nothing restarts after a reboot — see
+<a href="#autostart--your-node-comes-back-after-a-reboot">Autostart</a>.</p>
+<h3 id="autostart-your-node-comes-back-after-a-reboot">Autostart — your node comes back after a reboot</h3>
+<p>A downloaded release used to be binaries only: after a reboot nothing ran.
+Both installers now set this up, and both can undo it in one command.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Windows</th>
+<th>Linux</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>node</td>
+<td>scheduled task <code>GPN-Node</code>, <code>/SC ONLOGON /RL HIGHEST</code>, one instance (<code>MultipleInstances=IgnoreNew</code>)</td>
+<td><code>gpn-node.service</code> (systemd <strong>user</strong> unit)</td>
+</tr>
+<tr>
+<td>ollama</td>
+<td>task <code>GPN-Ollama</code>, or the entry Ollama already created (never both)</td>
+<td><code>gpn-ollama.service</code></td>
+</tr>
+<tr>
+<td>boot without login</td>
+<td>starts at logon</td>
+<td><code>loginctl enable-linger</code></td>
+</tr>
+<tr>
+<td>undo</td>
+<td><code>powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall</code></td>
+<td><code>./uninstall.sh --remove-autostart</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>loginctl enable-linger</code> is not optional on a headless box: without it a
+<code>systemctl --user</code> service only starts when you log in, and nobody ever logs
+into a mining rig. <code>./install.sh --no-autostart</code> skips the whole thing.</p>
+<p>Uninstalling the autostart never touches the chain DB or <code>keystore.json</code>.</p>
 <h3 id="check-the-version-all-options">Check the version / all options</h3>
 <pre><code>$ ./gpn_node --version
-gpn_node 0.1.0 (spec 41)
+gpn_node 0.3.11 (spec 45)
 
 $ ./gpn_node --help      # usage, --setup/--version/--help, key GPN_* env vars
 </code></pre>
@@ -103,12 +232,14 @@ which build a machine is running before debugging anything else.</p>
 <h3 id="1-download-extract">1. Download + extract</h3>
 <p>Grab the release archive for your OS (Linux, macOS, Windows) and unpack it
 anywhere. It contains <code>gpn_node</code>, <code>gpn-node</code>, the <code>gpn_*</code> agent binaries, the
-<code>scripts/</code> folder and <code>gpn-node.example.toml</code>.</p>
+<code>scripts/</code> folder, the installers (<code>install.ps1</code>, <code>install.cmd</code>,
+<code>uninstall.ps1</code>, <code>install.sh</code>, <code>uninstall.sh</code>) and <code>gpn-node.example.toml</code>.</p>
 <p>Building from source instead: see <a href="#appendix-a--manual--detailed-installation">Appendix A</a>.</p>
 <h3 id="2-gpn_node-setup">2. <code>./gpn_node --setup</code></h3>
 <pre><code>$ ./gpn_node --setup
 [gpn_node] base path: /home/you/.gpn/node (node database + wallet — where GPN keeps its data; default)
-[gpn_node] chain spec: http://gpn-testnet.duckdns.org:8092/genesis-spec -&gt; /home/you/.gpn/node/testnet-spec.json (auto)
+[gpn_node] chain spec: source https://gpncoin.ai/chain-spec · genesis 0xb8e4636a… (verified) · bootnodes /dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc…,/ip4/142.129.54.88/tcp/30333/p2p/12D3KooWAFtUNxc…,/ip4/23.241.109.255/tcp/30333/p2p/12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz
+[gpn_node] chain spec: saved -&gt; /home/you/.gpn/node/testnet-spec.json (auto)
 [gpn_node] no wallet configured — starting the one-time wallet setup (stores /home/you/.gpn/node/keystore.json; owner-only)
 
 Set up your wallet
@@ -142,24 +273,78 @@ the config file or the repo.</p>
 <p>Run <code>--setup</code> more than once and it is idempotent: an existing wallet is kept
 (press Enter), an existing spec is reused, and ollama is re-verified.</p>
 <p>After the ollama check, <code>--setup</code> asks <strong>one</strong> question about updates:</p>
-<pre><code>  Keep this node auto-updated? [y/N]
+<pre><code>  Keep this node auto-updated? [Y/n]
     yes: verify + install GPN releases automatically (signed manifest,
          ed25519), restarting briefly when one is published. Recommended:
          the network drops nodes that fall below the minimum version, and an
          old node cannot mine.
     no : you update manually. This node will REFUSE TO MINE once its
          version is below the published minimum (it keeps syncing).
-  Currently: off
+  Currently: on
   &gt;
 </code></pre>
-<p><code>y</code> writes <code>auto_update = true</code> into <code>~/.gpn/node.toml</code>; pressing Enter (or <code>n</code>)
-leaves it off. It is genuinely optional — but see
+<p><code>n</code> writes <code>auto_update = false</code> into <code>~/.gpn/node.toml</code>; pressing Enter (or <code>y</code>)
+leaves it on. It is on by default — but see
 <a href="#updates-auto-update-and-the-minimum-version-cutoff">Updates</a> for what "off"
 means once a release raises the floor.</p>
 <h3 id="3-gpn_node">3. <code>./gpn_node</code></h3>
 <p>One command starts the miner, the heartbeat and every AI provider, supervised
 as one node with one log stream and one status line. The second run needs no
 flags and no environment variables — it reads <code>~/.gpn/node.toml</code>.</p>
+<h3 id="your-node-has-two-identities-never-copy-either-from-another-node">Your node has two identities — never copy either from another node</h3>
+<p>Every GPN node owns <strong>two</strong> machine-generated identities, and neither is a
+password you set: they are keys created <strong>on this machine</strong>, on first run.</p>
+<table>
+<thead>
+<tr>
+<th>Identity</th>
+<th>What it is</th>
+<th>Where it lives</th>
+<th>What happens if two nodes share it</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Network identity</strong> (peer id)</td>
+<td>the libp2p key that names this box on the p2p network</td>
+<td><code>~/.gpn/node-key</code> (<code>%USERPROFILE%\.gpn\node-key</code> on Windows)</td>
+<td>both boxes announce the same peer id, the directory treats them as one node and they cannot peer with each other</td>
+</tr>
+<tr>
+<td><strong>Money identity</strong> (account)</td>
+<td>the sr25519 account this box signs with and is <strong>paid</strong> to</td>
+<td><code>&lt;base&gt;/keystore.json</code>, mode <code>0600</code> / user-only ACL</td>
+<td>two boxes with the same account <strong>split and steal each other's rewards</strong> — and whoever else knows the key can take the funds</td>
+</tr>
+</tbody>
+</table>
+<p>Both are generated per machine and are <strong>never</strong> shipped in the bundle: no
+dev URI (<code>//Alice</code>, <code>//Bob</code>), no seed, no fixed payout address. The Windows
+launcher runs <code>gpn_node --ensure-wallet</code> on every start, which</p>
+<ul>
+<li><strong>creates</strong> the wallet on first run and prints
+  <code>this node mines and is paid to 5XXXX… — back up the keystore at …</code> (once, in
+the console and again at startup as <code>payout account: 5XXXX…</code>);</li>
+<li><strong>reuses</strong> an existing keystore unchanged — it is never rewritten, because
+  that would change the payout address and orphan the earnings already mined
+to it;</li>
+<li><strong>refuses to start</strong> if the keystore is corrupt, rather than silently
+  generating a new one (the node would quietly mine to a new account);</li>
+<li>honours <code>GPN_SIGNER</code> / <code>GPN_ACCOUNT</code> when an operator (or a fleet install)
+sets them explicitly, and logs that they <strong>override</strong> the local keystore.</li>
+</ul>
+<blockquote>
+<p><strong>Fleet installs are the one deliberate exception.</strong> A fleet script passes
+<code>--signer-uri &lt;seed&gt;</code> (or <code>GPN_SIGNER=&lt;seed&gt;</code>) on purpose: one operator, many
+boxes, one treasury account. That is an <em>override</em>, and every log line says so.
+A <strong>public bundle install</strong> (the Windows launcher, <code>install.sh</code>) must never
+ship a signer — a stranger's box must never mine for somebody else's account.</p>
+</blockquote>
+<p>Back up <code>keystore.json</code> (and its 12-word phrase) offline. It is the only copy of
+the key; losing it loses the earnings, and copying it to a second node makes the
+two fight over the same rewards.</p>
+<p>The dashboard (<code>gpn_node --gui</code>, <a href="http://127.0.0.1:8099">http://127.0.0.1:8099</a>) shows the payout
+account as <strong>Payout account</strong> — check it is yours after an install.</p>
 <h3 id="what-happens-automatically">What happens automatically</h3>
 <table>
 <thead>
@@ -177,17 +362,17 @@ flags and no environment variables — it reads <code>~/.gpn/node.toml</code>.</
 </tr>
 <tr>
 <td><strong>Chain spec</strong></td>
-<td>If no <code>GPN_CHAIN</code> and no <code>&lt;base&gt;/testnet-spec.json</code>, it is downloaded once from <code>http://gpn-testnet.duckdns.org:8092/genesis-spec</code>, validated (<code>genesis</code> field required) and pinned in the base dir. One log line, no prompt.</td>
+<td>If no <code>GPN_CHAIN</code> and no <code>&lt;base&gt;/testnet-spec.json</code>, it is downloaded once over <strong>HTTPS</strong> from <code>https://gpncoin.ai/chain-spec</code> (legacy <code>http://gpn-testnet.duckdns.org:8092/genesis-spec</code> as fallback), its <strong>genesis is verified against the pinned testnet genesis hash</strong> — a mismatch is refused, never silently used — and its <code>bootNodes</code> are cleaned of loopback/private entries. Then pinned in the base dir. One log line, no prompt.</td>
 <td><code>GPN_CHAIN</code>, <code>GPN_SPEC_URL</code></td>
 </tr>
 <tr>
 <td><strong>Wallet</strong></td>
-<td>Generated or imported by the wizard; SS58 address printed once. Later runs read the keystore silently.</td>
+<td>Generated (headless: <code>gpn_node --ensure-wallet</code>) or imported by the wizard; SS58 address printed once and on every start as <code>payout account:</code>. Later runs read the keystore silently and never rewrite it.</td>
 <td><code>GPN_SIGNER</code>, <code>GPN_SIGNER_FILE</code></td>
 </tr>
 <tr>
 <td><strong>Payout account</strong></td>
-<td>Derived from the wallet, so earnings can never go to a placeholder.</td>
+<td>Derived from the wallet, so earnings can never go to a placeholder. A corrupt keystore aborts the start instead of inventing a new account.</td>
 <td><code>GPN_ACCOUNT</code></td>
 </tr>
 <tr>
@@ -223,15 +408,18 @@ flags and no environment variables — it reads <code>~/.gpn/node.toml</code>.</
   node starts on its built-in <code>testnet</code> spec with a warning. Set <code>GPN_CHAIN</code>
   to a local spec file if the genesis hash must match a specific network.</li>
 <li><strong>Router with UPnP disabled</strong> — the node prints the NOT-DIALABLE notice with
-  the exact port-forward rule (TCP 30333 → this machine) and exits <code>78</code>. See
-  <a href="#make-your-node-dialable">Make your node dialable</a>. If the router rewrites
-  the external port, set <code>GPN_PUBLIC_ADDR=/ip4/&lt;ip&gt;/tcp/&lt;port&gt;</code>.</li>
-<li><strong>CGNAT</strong> (<code>100.64.0.0/10</code> WAN address) — no forward can work; run the node
-  on a host with a public IP, or opt out of the gate with
-  <code>--no-require-backbone</code> (degraded mode).</li>
+  the exact port-forward rule (TCP 30333 → this machine) and <strong>keeps running</strong>.
+  Publication is best-effort: a NAT'd node still serves AI jobs over the pull
+  transport. See <a href="#make-your-node-dialable">Make your node dialable</a>. If the
+  router rewrites the external port, set
+  <code>GPN_PUBLIC_ADDR=/ip4/&lt;ip&gt;/tcp/&lt;port&gt;</code>.</li>
+<li><strong>CGNAT</strong> (<code>100.64.0.0/10</code> WAN address) — no forward can work. The node still
+  serves; you just do not get a seed listing or liveness credit. No opt-out is
+  required to earn.</li>
 <li><strong>systemd / container / CI (no TTY)</strong> — the wizard never hangs: with no wallet
   configured it exits <code>2</code> and tells you to run <code>gpn_node --setup</code> once
-  interactively. After that the service starts with no prompts.</li>
+  interactively (or <code>gpn_node --ensure-wallet</code>, which needs no terminal at all).
+  After that the service starts with no prompts.</li>
 <li><strong>Different data disk</strong> — set <code>GPN_BASE_PATH</code> (or <code>base_path</code> in the config)
   before the first run.</li>
 </ul>
@@ -249,8 +437,8 @@ gpn_node                               # one command: miner + AI provider
 <h3 id="everything-the-wizard-would-otherwise-do-by-hand">Everything the wizard would otherwise do, by hand</h3>
 <pre><code class="language-bash">export GPN_BASE_PATH=&quot;$HOME/.gpn/node&quot;                    # data + wallet
 mkdir -p &quot;$GPN_BASE_PATH&quot;
-curl -fsS http://gpn-testnet.duckdns.org:8092/genesis-spec \
-  -o &quot;$GPN_BASE_PATH/testnet-spec.json&quot;                   # pin the spec
+curl -fsS https://gpncoin.ai/chain-spec \
+  -o &quot;$GPN_BASE_PATH/testnet-spec.json&quot;                   # pin the spec (HTTPS)
 export GPN_CHAIN=&quot;$GPN_BASE_PATH/testnet-spec.json&quot;
 export GPN_SIGNER=&quot;&lt;your mnemonic or 0x seed&gt;&quot;           # or GPN_SIGNER_FILE
 # optional: export GPN_PUBLIC_ADDR=/ip4/203.0.113.10/tcp/30333
@@ -261,25 +449,27 @@ seed in a keystore file (<code>0600</code>) and set <code>signer_file = "&lt;pat
 does exactly this.</p>
 <p>See the rest of this document for the full environment-variable reference,
 systemd/Windows service units, snapshots, and troubleshooting.</p>
-<h2 id="backbone-by-default-dialable-is-required">Backbone by default — dialable is REQUIRED</h2>
-<p>Every GPN node is a <strong>backbone</strong> node: it announces its endpoint, accepts
-inbound peers, relays and serves blocks for the mesh, and earns the
-<code>gpn-liveness</code> uptime credit that gates the Silver/Gold staking multiplier. The
-best nodes become <strong>seeds</strong> (bootstrap targets) automatically — see
+<h2 id="dialability-useful-never-a-gate-on-serving">Dialability — useful, never a gate on serving</h2>
+<p>Every GPN node can be a <strong>backbone</strong> node: announce its endpoint, accept
+inbound peers, relay and serve blocks for the mesh, and earn the
+<code>gpn-liveness</code> uptime credit that gates the Silver/Gold multiplier. The best
+nodes become <strong>seeds</strong> (bootstrap targets) automatically — see
 <a href="#how-to-become-a-seed--bootstrap-node">How to become a seed</a>.</p>
-<p>The network is still growing, so <strong>inbound reachability is required by
-default</strong>. A node that cannot be dialled prints the notice below and <strong>exits
-with code 78</strong> (<code>EX_CONFIG</code>, reported as <code>node=down(not dialable)</code>). Nothing is
-silently half-joined.</p>
+<p><strong>Inbound reachability is not required to earn.</strong> Publishing an address is
+<strong>best-effort</strong>: the provider heartbeat walks an evidence ladder, publishes
+when it finds a reachable endpoint, and logs exactly which rungs failed when it
+does not. An empty publication is not an error — jobs are <strong>pulled</strong> by the
+node, so a box behind NAT/CGNAT serves AI jobs, mines, and gets paid normally.
+What you lose without a dialable address is seed-list eligibility, the small
+routing tie-break, and liveness uptime credit — not income.</p>
 <blockquote>
-<p><strong>Opting out (not recommended while the network is growing).</strong>
-<code>--no-require-backbone</code> (or <code>GPN_REQUIRE_BACKBONE=0</code>) keeps the node running
-when it cannot be dialled: it prints the same notice and continues in
-<strong>degraded, non-discoverable mode</strong> — syncing, mining and serving AI jobs with
-the same block rewards and job payouts. The only things it does not get are
-liveness credit, seed-list eligibility, and a small routing tie-break. In
-this mode it re-checks every <strong>10 minutes</strong> and prints <code>NOW DIALABLE</code> once
-when the forward starts working.</p>
+<p><strong>A note on the current build.</strong> <code>gpn_node</code> still ships a startup
+dialability probe whose hard-fail default (<code>--require-backbone</code>) can stop a
+non-dialable node with exit <code>78</code> before it serves. That behaviour is legacy and
+being removed; <strong>set <code>--no-require-backbone</code> (or <code>GPN_REQUIRE_BACKBONE=0</code>)</strong> if
+your box cannot accept an inbound connection, and it will run normally. The
+safety valve already overrides the check when refusing would leave the chain
+without its last authoring node.</p>
 </blockquote>
 <p>At startup the node probes inbound reachability for up to <strong>120 s</strong>
 (<code>GPN_DIALABLE_TIMEOUT_SECS</code>), in this order:</p>
@@ -295,8 +485,8 @@ when the forward starts working.</p>
    here first: a WAN address in <code>100.64.0.0/10</code> (or an RFC1918 WAN address)
    means no forward can work, and the attempt is skipped;</li>
 <li>CGNAT/private WAN → no forward is possible (reported by the notice);</li>
-<li>not dialable: print the notice and <strong>exit 78</strong> (default), or continue in
-   degraded mode with <code>--no-require-backbone</code>.</li>
+<li>not dialable: publish nothing, log the exact fix, and keep serving (see the
+   build note above; the legacy hard-fail path is <code>exit 78</code>).</li>
 </ol>
 <h3 id="evidence-model">Evidence model</h3>
 <p>The gate passes on <strong>any one</strong> of these (strongest first):</p>
@@ -351,9 +541,9 @@ declares itself dialable. The mapping is renewed at half its lease (default
 <code>192.168/16</code>), CGNAT (<code>100.64/10</code>), loopback, link-local and <code>0.0.0.0</code> never do.</p>
 <blockquote>
 <p><strong>Opting out.</strong> <code>--no-require-backbone</code> (or <code>GPN_REQUIRE_BACKBONE=0</code>)
-disables the hard gate: the node logs the same notice and continues as a
-non-discoverable participant instead of exiting. Use it for a machine that
-physically cannot be forwarded (CGNAT) and must still run.</p>
+disables the startup hard gate. Set it on any machine that cannot accept an
+inbound connection — the node then publishes nothing, logs the notice, and
+runs normally as a non-seed provider.</p>
 </blockquote>
 <table>
 <thead>
@@ -396,12 +586,12 @@ physically cannot be forwarded (CGNAT) and must still run.</p>
 </tr>
 <tr>
 <td><code>--require-backbone</code> / <code>GPN_REQUIRE_BACKBONE=1</code></td>
-<td><strong>Default.</strong> Exit 78 instead of degrading.</td>
-<td><strong>on</strong></td>
+<td>Legacy hard gate: exit 78 instead of serving when not dialable. <strong>Deprecated — do not set it.</strong></td>
+<td>off in new installs</td>
 </tr>
 <tr>
 <td><code>--no-require-backbone</code> / <code>GPN_REQUIRE_BACKBONE=0</code></td>
-<td>Opt out: run degraded when not dialable (re-checks every 10 min).</td>
+<td>Recommended for NAT'd/CGNAT hosts: publish best-effort, keep serving.</td>
 <td>—</td>
 </tr>
 <tr>
@@ -759,8 +949,8 @@ assign_source = &quot;pull&quot;          # push | pull | both  (default: pull)
 <tbody>
 <tr>
 <td><code>GPN_AP_URL</code></td>
-<td>Access point base URL used for the poll. <strong>Required</strong> — without it nothing is delivered (see below).</td>
-<td><em>(unset → degraded, with a warning)</em></td>
+<td>Access point base URL used for the poll. <strong>Your node serves AI by default</strong>: unset → the canonical AP below. Set it to point at a different AP; set it <strong>empty</strong> (<code>GPN_AP_URL=</code>) to disable AI serving (the node warns loudly).</td>
+<td><code>http://gpn-testnet.duckdns.org:8092</code></td>
 </tr>
 <tr>
 <td><code>GPN_ASSIGN_SOURCE</code></td>
@@ -786,11 +976,20 @@ assign_source = &quot;pull&quot;          # push | pull | both  (default: pull)
 </table>
 <p>Notes:</p>
 <ul>
-<li><strong>Pull is the only delivery path since #46 Phase 3 (2026-10-19)</strong> and needs
-  <code>GPN_AP_URL</code>. The assignment <strong>push is gone</strong>: the AP no longer dials
-  <code>:8093</code>, so a provider behind NAT/CGNAT receives work with no inbound port.
-  Without an AP URL the provider logs a loud one-time warning and serves only
-  jobs already in its local store.</li>
+<li><strong>Your node serves AI by default.</strong> It polls the canonical access point
+  (<code>http://gpn-testnet.duckdns.org:8092</code>) unless <code>GPN_AP_URL</code> says otherwise, so
+  a plain install receives work with no extra configuration. At startup the
+  log says <code>[assign] no GPN_AP_URL set — defaulting to &lt;url&gt;</code> when the default
+  is used, so the choice is never silent.</li>
+<li><strong><code>GPN_AP_URL</code> points it at an access point.</strong> Set it (env or <code>ap_url</code> in
+  <code>~/.gpn/node.toml</code>) to use a private/test AP; an explicit value always wins
+  over the default.</li>
+<li><strong>Setting it empty disables serving.</strong> <code>GPN_AP_URL=</code> means "this box must not
+  take AI work". That is a deliberate choice, so the node does <strong>not</strong> re-apply
+  the default; it prints
+  <code>[provider] WARNING: no access point URL — this node will NOT serve AI jobs
+  (mining only)</code> once at startup. The dashboard then shows <strong>AI serving: no —
+  no ap url</strong>.</li>
 <li><strong><code>POST /assign</code> no longer exists on the heartbeat</strong> (#46 Phase 3 step 2).
   An old AP's push gets a <code>404</code> and the job is picked up by the poll — the
   lease row is written <em>before</em> any delivery attempt, so nothing is lost. The
@@ -807,6 +1006,60 @@ in <code>~/.gpn/assignments.json</code>, so upgrading does not re-deliver histor
 <code>GPN_ASSIGN_WAIT_MS</code> (25 s); a busy one is answered immediately.</li>
 <li>CGNAT users should still read <a href="#4-cgnat--when-forwarding-is-impossible">§4</a>:
 pull keeps you <em>earning</em>, but only a dialable node can be a backbone seed.</li>
+</ul>
+<h3 id="the-signed-push-heartbeat-counted-as-serving-without-a-port-forward">The signed push heartbeat — counted as serving without a port forward</h3>
+<p>Pull gets work to you; the <strong>push heartbeat</strong> is what makes the access point
+<em>count</em> you as a serving provider from the public directory (<code>/nodes</code>,
+<code>/network</code>). The AP used to decide that only by polling
+<code>http://&lt;your-host&gt;:8093/status</code> every 5 s, so a box behind NAT looked offline
+even though p2p and the job pull worked perfectly.</p>
+<p>Every ~10 s (±2 s jitter) your heartbeat process now POSTs a small <strong>signed</strong>
+JSON document to <code>&lt;GPN_AP_URL&gt;/provider/heartbeat</code>:</p>
+<pre><code class="language-json">{&quot;peer_id&quot;:&quot;12D3Koo…&quot;,&quot;address&quot;:&quot;5…&quot;,&quot;multiaddrs&quot;:[&quot;/ip4/…/tcp/30333/p2p/12D3Koo…&quot;],
+ &quot;models&quot;:[&quot;llama3.2:1b&quot;],&quot;vram_mb&quot;:8188,&quot;capacity&quot;:1,&quot;active_jobs&quot;:0,
+ &quot;started_at&quot;:1730000000,&quot;ts&quot;:1730000123,&quot;sig&quot;:&quot;0x…&quot;}
+</code></pre>
+<ul>
+<li><code>sig</code> is an <strong>sr25519 signature by this node's own account key</strong>
+  (<code>GPN_SIGNER</code> / <code>~/.gpn/keystore.json</code>) over a canonical message:
+  <code>gpn-hb-v1|&lt;peer_id&gt;|&lt;address&gt;|&lt;ts&gt;|&lt;vram_mb&gt;|&lt;capacity&gt;|&lt;active_jobs&gt;|&lt;sha256(models)&gt;|&lt;sha256(multiaddrs)&gt;</code>.</li>
+<li>The AP verifies it against the account's <strong>on-chain</strong> key, and only for an
+  account that is a registered provider (<code>ComputeMarketplace::RegisteredProviders</code>,
+  cached ~5 min). It also rejects stale/future timestamps (±90 s), oversized
+  bodies, too many models/addresses, and pushes faster than 1 per 3 s.</li>
+<li>A pushed entry lives for <strong>30 s</strong>; a provider that stops pushing stops being
+  counted roughly half a minute later. The AP still polls public nodes, so a
+  box that publishes <code>:8093</code> gets both paths as a cross-check.</li>
+</ul>
+<p><strong>No port forwarding is needed for this.</strong> Inbound TCP 8093 is now optional:
+keep it (or a UPnP mapping) if you want the AP's poll as a second, independent
+liveness signal, but a NAT'd/CGNAT node is counted and routed without it.</p>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Meaning</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GPN_HEARTBEAT_PUSH</code></td>
+<td><code>1</code>/unset → push enabled; <code>0</code>/<code>false</code>/<code>off</code> → disabled (poll-only).</td>
+<td>on</td>
+</tr>
+<tr>
+<td><code>GPN_HEARTBEAT_PUSH_SECS</code></td>
+<td>Interval between pushes, before ±2 s jitter.</td>
+<td><code>10</code></td>
+</tr>
+</tbody>
+</table>
+<p>The signer is resolved the same way as the rest of the agent: <code>GPN_SIGNER</code>,
+else <code>GPN_SIGNER_FILE</code>, else <code>~/.gpn/keystore.json</code>. If none is usable the
+heartbeat logs it once and stays poll-only — it never sends unsigned data the
+AP would reject.</p>
+<ul>
 <li>Check it worked: the provider log prints
   <code>[assign] pull transport starting — ap=… since=…</code> at boot and
   <code>[assign] pulled #&lt;id&gt; (payload stored)</code> per assignment. <code>[assign] AP rejected
@@ -1172,7 +1425,7 @@ GPN_AUTO_UPDATE=1 gpn_node
 </ul>
 <p><strong>The cutoff</strong> (not optional): every start — auto-update or not — the signed
 manifest's <code>min_version</code> is checked. Below it:</p>
-<pre><code>  !! UPGRADE REQUIRED — this node is 0.1.0, the network requires &gt;= 0.2.0
+<pre><code>  !! UPGRADE REQUIRED — this node is 0.3.9, the network requires &gt;= 0.3.11
   This node will SYNC ... but will NOT MINE and will NOT ANNOUNCE itself.
 </code></pre>
 <p>The supervisor launches the chain node with <code>--no-seed --no-discoverable</code> and
@@ -1330,8 +1583,9 @@ start without it (see above; <code>GPN_REQUIRE_OLLAMA=0</code> for special cases
 </ol>
 <p>Example (<code>~/.gpn/node.toml</code>, also see <code>gpn-node.example.toml</code>):</p>
 <pre><code class="language-toml">chain        = &quot;/home/you/.gpn/node/testnet-spec.json&quot;   # testnet | mainnet | dev | &lt;path to chain-spec.json&gt;
-signer       = &quot;//Alice&quot;                           # sr25519 URI or seed (provider identity / authoring key)
-signer_file  = &quot;/home/you/.gpn/node/keystore.json&quot; # owner-only keystore; alternative to `signer`
+# signer     = &quot;&lt;seed/mnemonic&gt;&quot;                     # leave OUT to use this machine's wallet;
+#                                                    # setting it OVERRIDES the keystore (fleet only)
+signer_file  = &quot;/home/you/.gpn/node/keystore.json&quot; # owner-only keystore; the normal choice
 account      = &quot;5ENqSp5Q…&quot;                         # payout / advertised ss58 address (auto-derived from the wallet)
 endpoint     = &quot;ws://127.0.0.1:9944&quot;               # chain RPC used by the provider loop
 base_path    = &quot;~/.gpn/node&quot;                      # or set GPN_BASE_PATH; default: C:\gpn\data (Win) / ~/.gpn/node (Unix)
@@ -1347,7 +1601,14 @@ provider_endpoint = &quot;http://&lt;your-public-ip&gt;:8093/status&quot;   # ad
 assign_token      = &quot;&lt;shared AP↔provider secret&gt;&quot;           # GPN_ASSIGN_TOKEN (see below)
 ollama       = &quot;http://127.0.0.1:11434&quot;
 listen       = &quot;0.0.0.0:8093&quot;                      # heartbeat bind
-gflops       = 30000
+gflops       = 0                                   # UPPER BOUND, in the measured unit
+                                                   # (GPN-GEMM-F32-1024: ~823 on an RTX 4060).
+                                                   # The heartbeat advertises min(this, on-chain
+                                                   # attestation). Leave 0/unset: the attestation
+                                                   # is measured, and any hand-typed value above
+                                                   # 1.5x this box's own measurement is rejected
+                                                   # and replaced (item #97). 30000 here is a unit
+                                                   # bug, not a faster card.
 capacity     = 1
 poll_ms      = 300
 # ── optional providers: ALL ON by design; set false to opt a capability OUT ──
@@ -1358,7 +1619,7 @@ ml_poll_ms   = 2000
 finetune     = true                                # fine-tune provider (gpn_finetune_provider)
 finetune_poll_ms = 4000
 
-# ── updates: auto-update is OPT-IN; the version cutoff applies regardless ──
+# ── updates: auto-update is ON by default; opt out with GPN_AUTO_UPDATE=0 ──
 auto_update         = false   # true = install signed GPN releases automatically
 update_url          = &quot;https://gpncoin.ai/releases.json&quot;
 update_check_hours  = 6       # how often to look for a release (1-168)
@@ -1383,8 +1644,8 @@ min_version_enforce = true    # false = mine below the minimum (unsupported)
 </tr>
 <tr>
 <td><code>GPN_SIGNER</code></td>
-<td>signer URI / seed / mnemonic</td>
-<td><em>(none — first-run wizard, else <code>//Alice</code> on <code>dev</code>)</em></td>
+<td>signer URI / seed / mnemonic — <strong>overrides</strong> the local keystore and is logged as an override (fleet/operator use only)</td>
+<td><em>(none — the wallet on this machine, else the first-run wizard)</em></td>
 </tr>
 <tr>
 <td><code>GPN_SIGNER_FILE</code></td>
@@ -1394,7 +1655,7 @@ min_version_enforce = true    # false = mine below the minimum (unsupported)
 <tr>
 <td><code>GPN_SPEC_URL</code></td>
 <td>where to fetch the chain spec from</td>
-<td><code>http://gpn-testnet.duckdns.org:8092/genesis-spec</code></td>
+<td><code>https://gpncoin.ai/chain-spec</code> (falls back to <code>http://gpn-testnet.duckdns.org:8092/genesis-spec</code>)</td>
 </tr>
 <tr>
 <td><code>GPN_AUTOSTART</code></td>
@@ -1403,8 +1664,8 @@ min_version_enforce = true    # false = mine below the minimum (unsupported)
 </tr>
 <tr>
 <td><code>GPN_ACCOUNT</code></td>
-<td>payout / advertised address</td>
-<td><em>(empty)</em></td>
+<td>payout / advertised address — <strong>overrides</strong> the address derived from the wallet (operator use only)</td>
+<td><em>(empty → derived from the wallet)</em></td>
 </tr>
 <tr>
 <td><code>GPN_ENDPOINT</code></td>
@@ -1448,7 +1709,7 @@ min_version_enforce = true    # false = mine below the minimum (unsupported)
 </tr>
 <tr>
 <td><code>GPN_REQUIRE_BACKBONE</code></td>
-<td>Hard gate: exit 78 when not dialable (instead of degrading).</td>
+<td>Legacy hard gate: <code>1</code> exits 78 when not dialable. <strong>Leave unset.</strong></td>
 <td><code>0</code></td>
 </tr>
 <tr>
@@ -1518,8 +1779,8 @@ min_version_enforce = true    # false = mine below the minimum (unsupported)
 </tr>
 <tr>
 <td><code>GPN_AP_URL</code></td>
-<td>access point base URL for the <strong>pull</strong> transport (e.g. <code>http://gpn-testnet.duckdns.org:8092</code>). Unset → no delivery, with a loud warning.</td>
-<td><em>(none)</em></td>
+<td>access point base URL for the <strong>pull</strong> transport. Unset → the canonical <code>http://gpn-testnet.duckdns.org:8092</code>; empty → AI serving disabled (loud warning).</td>
+<td><code>http://gpn-testnet.duckdns.org:8092</code></td>
 </tr>
 <tr>
 <td><code>GPN_ASSIGN_SOURCE</code></td>
@@ -1538,8 +1799,8 @@ min_version_enforce = true    # false = mine below the minimum (unsupported)
 </tr>
 <tr>
 <td><code>GPN_AUTO_UPDATE</code></td>
-<td><code>1</code> = install signed GPN releases automatically (<strong>opt-in</strong>)</td>
-<td><code>0</code></td>
+<td><code>1</code> = install signed GPN releases automatically (<strong>on by default; opt out with 0</strong>)</td>
+<td><code>1</code></td>
 </tr>
 <tr>
 <td><code>GPN_UPDATE_URL</code></td>
@@ -1593,76 +1854,196 @@ min_version_enforce = true    # false = mine below the minimum (unsupported)
 </tr>
 <tr>
 <td><code>GPN_GFLOPS</code></td>
-<td>advertised compute</td>
+<td>upper bound on advertised compute; the heartbeat advertises <code>min(this, attested)</code> — leave it <code>0</code>/unset to advertise the on-chain attestation as-is</td>
 <td><code>0</code></td>
 </tr>
 <tr>
-<td><code>GPN_CAPACITY</code></td>
-<td>concurrent jobs</td>
+<td><code>GPN_ATTEST_REFRESH</code></td>
+<td><code>0</code> = never (re)attest from the provider loop</td>
 <td><code>1</code></td>
 </tr>
 <tr>
-<td><code>GPN_POLL_MS</code></td>
-<td>provider poll interval</td>
-<td><code>300</code></td>
+<td><code>GPN_ATTEST_REFRESH_BLOCKS</code></td>
+<td>re-attest when the on-chain record is this old (half of <code>MaxAttestationAge</code> = 14 400)</td>
+<td><code>7200</code></td>
 </tr>
 <tr>
-<td><code>GPN_DIFFUSION</code></td>
-<td>image/video provider — set <code>0</code> to OPT OUT (default ON)</td>
-<td><code>1</code></td>
+<td><code>GPN_ATTEST_SAMPLES</code></td>
+<td>timed GEMM runs per attestation measurement (1–10); the best run is attested when they disagree</td>
+<td><code>3</code></td>
 </tr>
 <tr>
-<td><code>GPN_DIFFUSION_POLL_MS</code></td>
-<td>diffusion poll interval</td>
+<td><code>GPN_ATTEST_SETTLE_MS</code></td>
+<td>wait after taking the GPU lock before reading utilisation, so the co-located miner has stood down (0–30 000)</td>
 <td><code>2000</code></td>
 </tr>
 <tr>
-<td><code>GPN_ML</code></td>
-<td>ML-inference provider — set <code>0</code> to OPT OUT (default ON)</td>
-<td><code>1</code></td>
+<td><code>GPN_ATTEST_MAX_UTIL_PCT</code></td>
+<td>device counts as <strong>busy</strong> above this utilisation; a busy GPU defers the attestation (0–100)</td>
+<td><code>10</code></td>
 </tr>
 <tr>
-<td><code>GPN_ML_POLL_MS</code></td>
-<td>ML-inference poll interval</td>
-<td><code>2000</code></td>
+<td><code>GPN_ATTEST_MAX_VRAM_FRACTION</code></td>
+<td>device counts as busy above this VRAM fraction even if utilisation reads low (a loaded model leaves no room for a stable run)</td>
+<td><code>0.5</code></td>
 </tr>
 <tr>
-<td><code>GPN_FINETUNE</code></td>
-<td>fine-tune provider — set <code>0</code> to OPT OUT (default ON)</td>
-<td><code>1</code></td>
-</tr>
-<tr>
-<td><code>GPN_FINETUNE_POLL_MS</code></td>
-<td>fine-tune poll interval</td>
-<td><code>4000</code></td>
-</tr>
-<tr>
-<td><code>GPN_BIN</code></td>
-<td>dir holding the child binaries</td>
-<td>dir of <code>gpn_node</code></td>
-</tr>
-<tr>
-<td><code>GPN_STATUS_SECS</code></td>
-<td>status-line interval</td>
-<td><code>15</code></td>
-</tr>
-<tr>
-<td><code>GPN_STALL_SECS</code></td>
-<td>sync-stall watchdog: restart node after <code>best</code> frozen this long (min 60)</td>
+<td><code>GPN_ATTEST_RETRY_SECS</code></td>
+<td>first retry delay after a skipped (busy) attestation; doubles per attempt</td>
 <td><code>300</code></td>
 </tr>
 <tr>
-<td><code>GPN_STALL_CHECK_SECS</code></td>
-<td>sync-stall watchdog poll interval (min 10)</td>
-<td><code>60</code></td>
-</tr>
-<tr>
-<td><code>GPN_CONFIG</code></td>
-<td>config-file path</td>
-<td><em>(see search order)</em></td>
+<td><code>GPN_ATTEST_RETRY_MAX_SECS</code></td>
+<td>cap for the attestation retry backoff</td>
+<td><code>3600</code></td>
 </tr>
 </tbody>
 </table>
+<h3 id="gpu-identity-one-physical-gpu-one-provider">GPU identity: one physical GPU = one provider</h3>
+<p>Registration requires a <strong>GPU identity</strong>. (Capital/staking policy is a separate,
+owner-decided topic — see the staking documentation.) What this section covers
+is the hardware identity the node submits and how the chain uses it.</p>
+<p>The node derives the on-chain fingerprint from the card's driver UUID:</p>
+<pre><code>1. nvidia-smi --query-gpu=uuid --format=csv,noheader   → GPU-18f2b349-…
+2. rocm-smi --showuniqueid --csv                       → 0x9a1b2c3d…  (AMD)
+
+fingerprint = sha256(&quot;GPN-GPU-ID-V1&quot; || uuid || genesis_hash)
+</code></pre>
+<ul>
+<li>The <strong>raw UUID never leaves the machine</strong> and never reaches the chain — only
+the digest is submitted as <code>gpu_info_hash</code>.</li>
+<li>The genesis hash binds the fingerprint to one chain, so the same card is
+unlinkable across chains.</li>
+<li>The chain keeps <code>GpuOwner[fingerprint] = account</code>. A <strong>different</strong> account
+presenting the same fingerprint is rejected with <code>GpuAlreadyOwned</code>; the owner
+may re-attest as often as it likes, and genuinely different cards never collide
+(the old model+VRAM hash collided for two identical cards and split after a
+driver update).</li>
+<li><code>withdraw_stake</code> removes the attestation <strong>and releases the fingerprint</strong>, so
+the card can be registered under another account afterwards.</li>
+<li>No UUID (missing <code>nvidia-smi</code>/<code>rocm-smi</code>, a virtualised driver, or a CPU-only
+box) falls back to the legacy model+VRAM digest and is logged as a <strong>weak</strong>
+fingerprint. A mainnet chain (<code>RequireGpuIdentity = true</code>) rejects a zero
+fingerprint with <code>GpuIdentityMissing</code>; a lenient testnet build may accept it.</li>
+</ul>
+<p><strong>If the fingerprint changes</strong> (reinstalled driver, GPU moved to another slot,
+board replaced, UUID reset): the provider sees <code>GpuAlreadyOwned</code> or simply
+attests a new card. Re-attesting from the <strong>same account</strong> releases the old
+fingerprint automatically. To move the card to <strong>another account</strong>, the previous
+owner must <code>withdraw_stake</code> first — that releases its <code>GpuOwner</code> entry. (Note:
+<code>withdraw_stake</code> requires a recorded stake; an account that attested without
+staking has no separate release path today. That gap is a follow-up decision,
+not part of the identity change.)</p>
+<h3 id="what-compute_gflops-actually-measures">What <code>compute_gflops</code> actually measures</h3>
+<p>The attested number is the throughput of GPN's own FP32 GEMM benchmark — the
+canonical unit <strong><code>GPN-GEMM-F32-1024</code></strong> (<code>gpn_agent::compute_unit</code>):</p>
+<pre><code>dtype      f32 (OpenCL float)          matrix   N = 1024, C = A·B
+flops/run  2·N³ = 2.147 GFLOP          value    best of 3 timed runs (1 warm-up)
+conditions GPU idle: GPU lock held, miner yielded, util ≤ 10 %, VRAM &lt; 50 %
+</code></pre>
+<p>It is real FP32 GFLOP/s, but <strong>not the card's spec-sheet peak</strong>: the shipped
+16×16 shared-memory tile reaches only ~5–7 % of peak. Expect ±12 % between power
+states on the same card, and ~1 % across repeats in one state. That is plenty to
+separate device classes — which is all routing needs — but it means a floor must
+be written in <em>this</em> unit, never in TFLOPS.</p>
+<table>
+<thead>
+<tr>
+<th>device</th>
+<th>published FP32 peak</th>
+<th>measured (<code>GPN-GEMM-F32-1024</code>)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>RTX 4060 8 GB</td>
+<td>15.1 TFLOPS</td>
+<td><strong>823–912</strong> (822/825/825 attested)</td>
+</tr>
+<tr>
+<td>RTX 5070 Ti 16 GB</td>
+<td>44.0 TFLOPS</td>
+<td>~2 300–2 650 (estimate — not measured idle)</td>
+</tr>
+<tr>
+<td>integrated GPU (Iris Xe / Vega 8 class)</td>
+<td>1.5–2 TFLOPS</td>
+<td>~50–110 (estimate)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Why the old numbers were wrong.</strong> Three defects, all fixed: the field was once
+written from raw FLOP/s, leaving <code>30000</code> on a 15 TFLOPS card (above its own
+hardware peak); box1 attested <code>188</code> from a sample taken while another workload
+held the card; and only an <em>upward</em> re-attestation was ever accepted, so neither
+record could be replaced. <code>30000</code> is not a fast card — it is a unit bug, and it
+is now replaced automatically (a record above 1.5× the card's estimated FP32 peak
+is treated as a legacy artefact, not a capability claim).</p>
+<p>Measurement rules that matter when you compare two boxes:</p>
+<ul>
+<li><strong>attestation runs only when the GPU is idle.</strong> Before measuring, the provider
+  takes the same cross-process GPU lock a job takes (no waiting: if a job holds
+  it, the attempt is skipped), waits <code>GPN_ATTEST_SETTLE_MS</code> for the co-located
+  miner to stand down, then reads utilisation and VRAM. If the card is still
+  loaded by anything else — an operator CUDA/ollama job, a desktop session, a
+  second miner — the attempt is logged as
+  <code>[attest] skipping: GPU busy (util …%) — will retry later</code> and retried with
+  backoff (<code>GPN_ATTEST_RETRY_SECS</code>, doubling, capped). <strong>No measurement taken
+  under contention is ever submitted.</strong> If your card also runs other AI work,
+  expect the value to update during quiet periods, not on the first attempt;</li>
+<li>the number is a <strong>best-of-N</strong> (<code>GPN_ATTEST_SAMPLES</code>, default 3) and the spread
+  is logged: a &gt;20 % spread is contention or thermal throttling, so the highest
+  sample is used, and <code>/status</code> publishes <code>gflops_samples</code>,
+  <code>gflops_spread_pct</code>, <code>gflops_conditions</code> and (when the advertised value is
+  this box's own idle measurement that was actually submitted)
+  <code>gflops_source: "attested-idle"</code>. A record that disagrees with the idle
+  measurement by more than 30 % is named in a loud warning
+  (<code>gflops_stale_warning</code> too);</li>
+<li>the <strong>discrete</strong> card is measured (device 0 is ordered discrete-first, so the
+  benchmark and the miner always use the same GPU — before 2026-10-23 they did
+  not, and a Windows box attested an iGPU-class 188 GFLOPS for a 16 GB card);</li>
+<li><strong>a state warning is logged once, not once per poll.</strong> <code>/status</code> is polled
+  every ~3 s, so the "on-chain attestation disagrees" / "<code>--gflops</code> implausible"
+  notices fire on the <strong>transition</strong> (they appear when the state first holds, and
+  again only if the record or the measurement actually changes). The same
+  information is in the body of every response as <code>gflops_stale_warning</code>, so a
+  monitor never needs the journal. Before 2026-10-23 these lines were emitted
+  from the value resolver — twice per request — and a single box wrote ~1 800
+  identical lines an hour, which crowded out everything else the heartbeat logs;</li>
+<li><strong>only <code>gflops_source: "attested-idle"</code> is usable evidence.</strong> The access point
+  will not route a <code>min_gflops &gt; 0</code> job to a box whose number came from a
+  hand-typed <code>--gflops</code>, an older chain record or a contended sample: that value
+  is treated as <em>unknown</em> (logged, never silent) and the box serves ungated jobs
+  until it re-attests on an idle GPU. Never set <code>--gflops</code>/<code>GPN_GFLOPS</code> unless
+  you are deliberately advertising a <em>lower</em> bound than the measurement.</li>
+</ul>
+<p><strong>The eligibility floor is 250 GFLOPS</strong> (<code>MinEligibilityGflops</code>, also in this
+unit): 30 % of the reference card's lowest idle measurement (823 on an RTX 4060
+8 GB), which admits any discrete 8 GB card and excludes every integrated GPU. It
+used to be <code>3000</code> on the spec-sheet scale, which no consumer card could reach —
+so a new box could not attest at all and kept whatever record it had.</p>
+<blockquote>
+<p><strong>Runtime status:</strong> the constant is changed in source and <strong>staged</strong> as part of
+the next runtime upgrade (<code>shared/artifacts/project7/staged/gflops-floor-v1.md</code>).
+Until it enacts, the chain still answers <code>BelowEligibilityFloor</code> for values
+below 3 000: the provider logs that once and stops retrying (it does <strong>not</strong>
+submit a fabricated number). A restart after the upgrade re-attests
+automatically; <code>GPN_ATTEST_FORCE=1</code> forces a re-measure on the next start for a
+record that is wrong but not provably impossible.</p>
+</blockquote>
+<p>| <code>GPN_CAPACITY</code> | concurrent jobs | <code>1</code> |
+| <code>GPN_POLL_MS</code> | provider poll interval | <code>300</code> |
+| <code>GPN_DIFFUSION</code> | image/video provider — set <code>0</code> to OPT OUT (default ON) | <code>1</code> |
+| <code>GPN_DIFFUSION_POLL_MS</code> | diffusion poll interval | <code>2000</code> |
+| <code>GPN_ML</code> | ML-inference provider — set <code>0</code> to OPT OUT (default ON) | <code>1</code> |
+| <code>GPN_ML_POLL_MS</code> | ML-inference poll interval | <code>2000</code> |
+| <code>GPN_FINETUNE</code> | fine-tune provider — set <code>0</code> to OPT OUT (default ON) | <code>1</code> |
+| <code>GPN_FINETUNE_POLL_MS</code> | fine-tune poll interval | <code>4000</code> |
+| <code>GPN_BIN</code> | dir holding the child binaries | dir of <code>gpn_node</code> |
+| <code>GPN_STATUS_SECS</code> | status-line interval | <code>15</code> |
+| <code>GPN_STALL_SECS</code> | sync-stall watchdog: restart node after <code>best</code> frozen this long (min 60) | <code>300</code> |
+| <code>GPN_STALL_CHECK_SECS</code> | sync-stall watchdog poll interval (min 10) | <code>60</code> |
+| <code>GPN_CONFIG</code> | config-file path | <em>(see search order)</em> |</p>
 <blockquote>
 <p><strong>Secrets stay out of the config file.</strong> <code>gpn_node</code> reads the signer/seed and
 the assign token from env / the config file and only ever writes a secret when
@@ -1800,7 +2181,9 @@ authority would halt the chain. The dashboard answers <code>409</code> and the C
 <a href="node-gui-and-idle.html"><code>node-gui-and-idle.md</code></a>.</p>
 <h2 id="linux">Linux</h2>
 <pre><code class="language-bash"># foreground (Ctrl-C stops everything) — always miner + provider
-GPN_SIGNER=//Alice \
+# No GPN_SIGNER: the node uses the wallet on THIS machine (run
+# `gpn_node --ensure-wallet` once if there is none). Setting GPN_SIGNER is an
+# operator/fleet override and the node logs it as such.
 GPN_PROVIDER_ENDPOINT=http://&lt;public-ip&gt;:8093/status \
 GPN_ASSIGN_TOKEN=$GPN_ASSIGN_TOKEN \
 gpn_node
@@ -1828,10 +2211,48 @@ WantedBy=default.target
 systemctl --user enable --now gpn-node.service
 journalctl --user -u gpn-node.service -f     # the one prefixed log stream
 </code></pre>
+<h2 id="node-identity-one-key-per-machine-generated-on-first-run">Node identity — one key per machine, generated on first run</h2>
+<p>Your node generates its own libp2p identity on first run. <strong>Never copy a node
+key file between machines.</strong></p>
+<ul>
+<li><strong>Windows (release bundle / <code>start-node.cmd</code>):</strong> the launcher creates
+  <code>%USERPROFILE%\.gpn\node-key</code> once per Windows user with
+  <code>gpn-node.exe key generate-node-key --file …</code> and exports it as
+  <code>GPN_NODE_KEY_FILE</code>. If that generation fails the launcher <strong>aborts</strong> rather
+  than starting a node with a default/shared identity.</li>
+<li><strong>Windows money identity:</strong> the same launcher calls
+  <code>gpn_node.exe --ensure-wallet</code> before starting anything, which creates
+  <code>C:\gpn\data\keystore.json</code> on first run (owner-only ACL), reuses it forever
+  afterwards, and prints <code>payout account: 5XXXX…</code>. If the keystore is corrupt
+  the <strong>launcher aborts</strong> instead of mining to a new account.</li>
+<li><strong>Linux / macOS:</strong> if you set neither <code>GPN_NODE_KEY</code> nor <code>GPN_NODE_KEY_FILE</code>,
+  <code>gpn-node</code> creates and persists its network secret under
+  <code>&lt;base-path&gt;/chains/&lt;chain&gt;/network/secret_ed25519</code> on first start. To keep an
+  explicit, backup-able identity file use <code>GPN_NODE_KEY_FILE=~/.gpn/node-key</code>
+  (create it with <code>gpn-node key generate-node-key --file ~/.gpn/node-key</code>).</li>
+</ul>
+<blockquote>
+<p><strong>Symptom of a copied key:</strong> two nodes with the same <code>peer_id</code>. Peers dial the
+wrong host, the directory collapses the two entries into one, and neither box
+is reliably reachable. If you see two nodes sharing a peer id, one of them
+copied a key file — delete <code>node-key</code> (<code>secret_ed25519</code> on Linux) on the
+copied box and restart it so it generates a fresh identity.</p>
+</blockquote>
+<p><code>GPN_NODE_KEY</code> (a 64-hex literal) still works but is only for a single
+hand-managed box; never bake it into an installer, an image, or a fleet
+checkout — that is how every machine ends up with the same identity.</p>
+<p><strong>The other identity — the one that holds the money — follows the same rule.</strong>
+The peer id names the box on the network; the <strong>account</strong> (money identity) is
+what signs and receives earnings, and it is a separate key in
+<code>&lt;base&gt;/keystore.json</code> (created by <code>gpn_node --ensure-wallet</code> / <code>--setup</code>).
+Never copy it between machines and never pin one in a bundle: two nodes sharing
+an account split and steal each other's rewards, and a dev URI (<code>//Alice</code>,
+<code>//Bob</code>) is derivable by anyone. See
+<a href="#your-node-has-two-identities--never-copy-either-from-another-node">Your node has two identities</a>.</p>
 <h2 id="windows">Windows</h2>
 <p><code>gpn_node.exe</code> is the same binary. From the release bundle (<code>.\bin\</code>):</p>
 <pre><code class="language-powershell"># everything supervised under one console window (miner + provider)
-$env:GPN_SIGNER           = &quot;//Alice&quot;          # or your seed
+$env:GPN_SIGNER           = &quot;&lt;your seed/mnemonic&gt;&quot;   # OPTIONAL override; leave unset to use this machine's keystore
 $env:GPN_CHAIN            = &quot;testnet&quot;
 $env:GPN_PROVIDER_ENDPOINT= &quot;http://&lt;public-ip&gt;:8093/status&quot;
 $env:GPN_ASSIGN_TOKEN     = &quot;&lt;shared secret&gt;&quot;
@@ -1884,6 +2305,174 @@ connected</em>, it logs a loud <code>SYNC STALL</code> alert and <strong>restart
 <li>after a restart it resets its timer, so it can't spiral into a tight kill loop.</li>
 </ul>
 <p>Tune it with <code>GPN_STALL_SECS</code> (min 60) and <code>GPN_STALL_CHECK_SECS</code> (min 10).</p>
+<h2 id="watchdog-auto-recover-a-silently-wedged-provider">Watchdog — auto-recover a silently wedged <strong>provider</strong></h2>
+<p>A provider can wedge the same way the node can, and the symptom is worse for a
+customer: on 2026-10-22 <code>gpn-provider</code> made no progress for ~23 minutes while a
+job sat on-chain <code>Pending</code>. The unit stayed <code>active</code>, nothing was logged, and a
+plain <code>systemctl --user restart gpn-provider</code> fixed it instantly — it was a
+zombie, not a crash. Nothing bounded the provider's waits (a chain read over a
+half-open websocket has no request timeout), so any hung <code>await</code> parked the
+claim loop forever.</p>
+<p><code>gpn_llm_provider</code> now reports <strong>progress</strong>, not just liveness:</p>
+<ul>
+<li>every phase change and every completed pass bumps <code>~/.gpn/provider-tick.json</code>
+  (<code>{"pid","loops","phase","updated_unix"}</code>) — a stale tick therefore <strong>names
+  the step that hung</strong> (<code>reconcile</code>, <code>claim</code>, <code>run #N</code>, <code>gpu-wait</code>, <code>infer</code>,
+  <code>settle</code>, <code>idle</code>);</li>
+<li>a plain watchdog thread (not a tokio task — a wedged runtime must not be able
+  to wedge its own supervisor) polls that state and, if nothing moved for the
+  phase's budget, logs ONE loud <code>⚠ [watchdog]</code> line naming the phase, the idle
+  time and the completed-pass count, then exits with code <strong>75</strong> so
+  <code>Restart=always</code> performs a real restart.</li>
+</ul>
+<p>Budgets are per phase because some steps are legitimately slow: <code>gpu-wait</code> uses
+<code>GPN_GPU_LOCK_TIMEOUT_SECS</code> + 300 s (default 1200 s), <code>infer</code> uses the 300 s
+ollama timeout + 300 s, <code>startup</code> gets 30 min (a cold model pull), and every
+other phase uses <code>GPN_PROVIDER_WATCHDOG_SECS</code> (default <strong>300 s</strong>, floor 60 s).</p>
+<p>Knobs: <code>GPN_PROVIDER_WATCHDOG=0</code> disables it, <code>GPN_PROVIDER_WATCHDOG_SECS</code> sets
+the default-phase budget, <code>GPN_PROVIDER_TICK</code> moves the tick file. Check the
+state with <code>cat ~/.gpn/provider-tick.json</code> (a healthy provider's <code>loops</code> grows
+about three times a second at the default 300 ms poll).</p>
+<h2 id="provider-restart-stale-runningaccepted-jobs-are-adopted-at-startup">Provider restart — stale <code>Running</code>/<code>Accepted</code> jobs are adopted at startup</h2>
+<p>A restart in the middle of work used to leave the job in limbo: the claim and
+reconcile loops only ever look at the <strong>last 128 chain ids</strong>, so a job claimed by
+the previous process was re-run only if a later tick happened to land on it
+(<code>Running</code> #97), and an <code>Accepted</code> job whose next step never came (<code>#105</code>) sat
+there until its on-chain deadline. Nothing enumerated "the jobs I actually own".</p>
+<p>Every provider start now runs one <strong>adoption sweep</strong> before the claim loop takes
+its first nonce, over the ids in its own assignment store, and decides once per
+id:</p>
+<table>
+<thead>
+<tr>
+<th>chain state</th>
+<th>payload we hold</th>
+<th>action</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Pending</code></td>
+<td>any</td>
+<td>left to the claim loop, which <strong>waits for create inclusion</strong> (no optimistic accept)</td>
+</tr>
+<tr>
+<td><code>Accepted</code> / <code>Running</code></td>
+<td>queued</td>
+<td><strong>resume inference</strong> → submit result → complete</td>
+</tr>
+<tr>
+<td><code>Accepted</code> / <code>Running</code></td>
+<td>stored result</td>
+<td><strong>resume settlement</strong> → submit result → complete</td>
+</tr>
+<tr>
+<td><code>AwaitingVerification</code></td>
+<td>any</td>
+<td><code>complete_job</code> (frees the capacity slot)</td>
+</tr>
+<tr>
+<td><code>Accepted</code> / <code>Running</code></td>
+<td>none, or not runnable here</td>
+<td><code>fail_job</code> → escrow refunded <strong>now</strong>, slot freed</td>
+</tr>
+</tbody>
+</table>
+<p>A job we hold a live (<code>queued</code>/<code>running</code>) payload for is examined regardless of
+age; ids without one are only examined within 512 of the tip (the store grows
+forever — an O(history) startup scan is the finding-#34 trap, and an older id
+cannot still be in flight). Every id that needs action gets one log line naming
+the state, the payload shape and the action, and the sweep always ends with a
+summary — a quiet start is now provably "nothing to adopt":</p>
+<pre><code>[reconcile] startup adopt #6503 state=Running payload=queued model=llama3.2:1b action=resume-inference
+[reconcile] startup adopt #6504 state=Running payload=none model=- action=fail
+[reconcile] startup adopt #6504: failed on-chain (reason 4: no off-chain payload (cannot ever run it)) — escrow refunded, slot freed
+[reconcile] startup adoption: examined 506 assigned id(s) below tip 6505 (2358 older than 512 ids without a live payload, left to the expiry sweep); 1 non-terminal → 0 resumed, 0 settled, 0 completed, 1 failed
+</code></pre>
+<p><code>fail_job</code> reasons used by the sweep: <strong>4</strong> = no off-chain payload, <strong>5</strong> = the
+payload cannot run here (foreign/diffusion model, or the per-job attempt cap).
+<code>GPN_STARTUP_ADOPT=0</code> disables the sweep.</p>
+<p>The same start also clears a <strong>stale miner-yield flag</strong>: a <code>SIGKILL</code>ed provider
+never runs <code>GpuYieldGuard</code>'s <code>Drop</code>, so <code>~/.gpn/gpu-yield</code> survived and kept the
+co-located miner parked forever. The flag is only meaningful while a GPU lock
+holder exists, so startup takes the lock briefly (1 s): if it succeeds the flag
+is stale and is removed; if not, another provider is genuinely mid-job.</p>
+<h2 id="imagevideo-lane-a-cold-model-is-refused-then-warmed-in-the-background">Image/video lane — a cold model is refused, then warmed in the background</h2>
+<p>A channel (pre-paid) render carries the AP's wall-clock deadline — <strong>180 s</strong> by
+default (<code>GPN_HUB_JOB_DEADLINE_MS</code>). A cold HuggingFace pull is ~13 GB, i.e.
+20–45 minutes, so accepting that job means the caller waits out its own timeout,
+gets <code>every candidate refused</code>, and the download restarts from scratch on the
+next attempt (this is what wedged the image lane on 2026-10-23).</p>
+<p><code>gpn_diffusion_provider</code> now decides <strong>before</strong> it accepts anything:</p>
+<table>
+<thead>
+<tr>
+<th>model state</th>
+<th>remaining deadline</th>
+<th>result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>on disk (warm)</td>
+<td>any</td>
+<td>served normally</td>
+</tr>
+<tr>
+<td>recorded unloadable on this host</td>
+<td>any</td>
+<td>refused instantly, never re-pulled</td>
+</tr>
+<tr>
+<td>needs credentials (401/403)</td>
+<td>any</td>
+<td>refused instantly <strong>until the verdict lapses</strong> (default 6 h)</td>
+</tr>
+<tr>
+<td>cold</td>
+<td>≥ <code>GPN_COLD_PULL_BUDGET_MS</code> (default <strong>900000</strong> = 15 min)</td>
+<td>pulled in-band, then rendered</td>
+</tr>
+<tr>
+<td>cold</td>
+<td>&lt; the budget</td>
+<td><strong>refused in ~50 ms</strong> with <code>HTTP 425</code>, a background pull starts</td>
+</tr>
+</tbody>
+</table>
+<p>The refusal is a <strong>4xx on purpose</strong>: the AP treats it as <em>not attempted</em>, so
+failover moves to the next provider, and nothing is charged (<code>payment:
+not_charged</code>). The caller sees an actionable reason instead of a timeout:</p>
+<pre><code>model stabilityai/sdxl-turbo is not warm on this host (15 min download) and the
+request leaves 179s — downloading it now in the background; retry when warm
+</code></pre>
+<p>One background pull per model per process (a retry storm cannot spawn more), and
+a failure no retry can fix is recorded so later requests refuse instantly instead
+of downloading again. Two verdicts, deliberately different lifetimes:</p>
+<ul>
+<li><strong><code>~/.gpn/diffusion_unloadable.json</code></strong> — the repo/loader itself is broken
+  (<code>404</code>, not a model id, <code>cannot load model</code>, OOM on this box). <strong>Forever</strong>: no
+  local action can change it, and re-attempting burned ~1 min of RAM and risked
+  an OOM kill. Message: <code>… is unloadable on this host (recorded …)</code>.</li>
+<li><strong><code>~/.gpn/diffusion_needs_auth.json</code></strong> — HuggingFace answered <strong><code>401</code>/<code>403</code></strong>.
+  That is <em>this host</em>, not the repo: HF returns <code>401</code> identically for a private
+  repo, a gated repo, a retired repo and a bad token. <strong>Timed</strong>
+  (<code>GPN_DIFFUSION_AUTH_RETRY_SECS</code>, default <strong>21600</strong> = 6 h), so setting
+  <code>HF_TOKEN</code> heals the model with no state editing. Message: <code>… needs HuggingFace
+  credentials on this host — or the repo is private, gated or does not exist …</code></li>
+</ul>
+<p>So if a model you know is public is refused for credentials, export <code>HF_TOKEN</code>
+for <code>gpn-diffusion</code> (or delete the entry) — do <strong>not</strong> add it to the unloadable
+file, which would condemn it permanently.</p>
+<p>Knobs: <code>GPN_COLD_PULL_BUDGET_MS</code> (how long a cold pull may take before we refuse
+instead of accepting the job), <code>GPN_DIFFUSION_AUTH_RETRY_SECS</code> (how long a
+<code>401</code>/<code>403</code> verdict silences a model), <code>GPN_DIFFUSION_NEEDS_AUTH</code> /
+<code>GPN_DIFFUSION_UNLOADABLE</code> (registry paths), <code>GPN_DIFFUSE_TIMEOUT_SECS</code> (the
+render budget — now progress-aware, extended while the helper keeps reading
+bytes).</p>
+<p><strong>Operator advice:</strong> for a model you plan to serve, warm it before announcing the
+capability — a first request for an uncached large model will be refused by
+design rather than making the customer wait 20 minutes.</p>
 <h2 id="troubleshooting-node-connected-but-not-syncing">Troubleshooting — node connected but not syncing</h2>
 <p><strong>Symptom.</strong> The node shows peers at the p2p layer — <code>system_peers</code> lists them as
 <code>FULL</code>/<code>AUTHORITY</code> — but its <strong>best block is frozen</strong> while the network head
@@ -1988,13 +2577,30 @@ Point the host resolver at a resolver that answers AAAA, then flush:</p>
 <pre><code class="language-bash">sudo resolvectl dns &lt;iface&gt; 1.1.1.1 192.168.1.1 &amp;&amp; resolvectl flush-caches
 # e.g. iface = enp42s0
 </code></pre>
+<h2 id="rebuilding-and-deploying-a-binary-one-at-a-time">Rebuilding and deploying a binary (one at a time)</h2>
+<p><strong>Deploy one binary at a time; the lane lock exists because two deploys once raced and shipped the wrong build.</strong>
+Two agents once ran <code>cargo build --release</code> from the same <code>target/release</code> and
+installed at the same moment; a parallel build replaced the installed provider
+with a binary that did not contain the change under test, and the test passed
+against stale code. Build/install only through the lane:</p>
+<pre><code class="language-bash">cd gpn-agent
+../scripts/deploy-bin.sh --bin gpn_llm_provider --unit gpn-provider --expect-marker gpu-lock
+</code></pre>
+<p>It takes an exclusive <code>flock</code> on <code>~/.gpn/deploy.lock</code> (a second run waits and
+says so), refuses a stale artifact, asserts <code>--expect-marker</code> substrings in the
+built binary <strong>before</strong> installing, backs the old binary up as
+<code>&lt;name&gt;.bak-&lt;UTC ts&gt;</code>, installs by atomic rename, restarts the named
+<code>systemctl --user</code> unit(s) until <code>is-active</code>, and prints sha256 built-vs-installed.</p>
+<p>Then confirm the <strong>running process</strong>, not just the file:</p>
+<pre><code class="language-bash">strings -a /proc/$(systemctl --user show -p MainPID --value gpn-provider)/exe | grep -F gpu-lock
+</code></pre>
 <h2 id="fault-isolation-why-separate-processes">Fault isolation / why separate processes</h2>
 <p>The supervisor deliberately keeps one process per part: an ollama/diffusion
 crash, an OOM in the AI stack, or a wedged inference never takes the chain node
 down — the supervisor restarts just that child. Folding everything into one
 binary is tracked separately (task #26, deferred).</p>
     </article>
-    <p class="doc-updated small muted">Last generated 2026-10-22 from the project documentation set.</p>
+    <p class="doc-updated small muted">Last generated 2026-11-02 from the project documentation set.</p>
   </div>
 </main>
 

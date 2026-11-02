@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Deploy GPN — run a miner/node, a provider, or an access point</title>
-<meta name="description" content="Step-by-step deployment for GPN: run a miner/node, onboard as an LLM/diffusion provider, or stand up an access point. Covers config, ports (30333, 9944, 8092, 8093), the Windows path, one-GPU-one-job behavior, and dialability." />
+<meta name="description" content="Step-by-step deployment for GPN: run a miner/node, onboard as an LLM/diffusion provider, or stand up an access point. Covers config, the port map (30333, 9944, 8092, 8093, 8094, 8099), the Windows path, one-GPU-one-job behavior, and dialability." />
 <meta name="theme-color" content="#07090f" />
 <link rel="canonical" href="https://gpncoin.ai/deploy.html" />
 <meta property="og:site_name" content="GPN" />
@@ -207,9 +207,10 @@ curl http://127.0.0.1:8092/providers  # live registry (gflops, latency_ms, model
         <div class="card plain"><h3>2 · A wallet</h3><p class="muted mb-0">Drip a fresh account from the
           testnet faucet — you need GPN for the one-time registration fee and to sign claims. The signer you
           pass to the provider is the source of truth for its identity.</p></div>
-        <div class="card plain"><h3>3 · Reachable /status</h3><p class="muted mb-0">Forward port <b>8093</b>
-          on your router so the URL you advertise resolves from the internet. The scheduler discovers
-          providers from the chain.</p></div>
+        <div class="card plain"><h3>3 · A public /status (optional)</h3><p class="muted mb-0">Forwarding <b>8093</b>
+          makes your <code>/status</code> URL resolve from the internet, which gives the access point a second
+          liveness signal. It is <b>optional</b>: the signed push heartbeat and pull transport register and
+          route a NAT'd provider without any inbound port.</p></div>
       </div>
 
       <div class="callout" style="margin-top:16px">
@@ -292,19 +293,19 @@ GPN_PROVIDERS=http://127.0.0.1:8093
             <tr><th scope="col">Port</th><th scope="col">Service</th><th scope="col">Purpose</th></tr>
           </thead>
           <tbody>
-            <tr><td><code>30333</code></td><td>p2p (libp2p)</td><td>Peer discovery &amp; block gossip (bootnode inbound).</td></tr>
-            <tr><td><code>9944</code></td><td>RPC (ws)</td><td>Chain RPC — jobs, escrow, attestation, result hashes.</td></tr>
-            <tr><td><code>8092</code></td><td>Access point</td><td>Public job API + scheduler (<code>gpn_scheduler</code>).</td></tr>
-            <tr><td><code>8093</code></td><td>Provider heartbeat</td><td><code>GET /status</code> — capabilities, load, latency.</td></tr>
-            <tr><td><code>8082</code></td><td>REST API / explorer</td><td>Local <code>gpn_api</code> / read-only explorer.</td></tr>
-            <tr><td><code>8081</code></td><td>Faucet</td><td>Dev/testnet GPN drip.</td></tr>
-            <tr><td><code>8080</code></td><td>dapp (web UI)</td><td>No-code chat / image / video / fine-tune.</td></tr>
+            <tr><td><code>30333</code></td><td>p2p (libp2p)</td><td>Peer discovery &amp; block gossip. Inbound is <b>optional</b> — recommended for a seed/listing, not required to earn.</td></tr>
+            <tr><td><code>9944</code></td><td>RPC (ws)</td><td>Chain RPC — jobs, escrow, attestation, result hashes. Local by default.</td></tr>
+            <tr><td><code>8092</code></td><td>Access point</td><td>Public job API + scheduler (<code>gpn_scheduler</code>). This belongs to the AP, <b>not</b> to a node.</td></tr>
+            <tr><td><code>8093</code></td><td>Provider heartbeat</td><td><code>GET /status</code> — capabilities, load, latency. Inbound optional (public listing/health).</td></tr>
+            <tr><td><code>8094</code></td><td>Local <code>/infer</code></td><td>Chain-free inference next to the heartbeat (loopback use).</td></tr>
+            <tr><td><code>8099</code></td><td>Node dashboard</td><td><code>--gui</code> panel. Loopback only, by design.</td></tr>
           </tbody>
         </table>
       </div>
-      <p class="small muted" style="margin-top:12px">Open the firewall (and port-forward, for remote peers)
-        on whichever of these you expose. Outbound joins never need port-forwarding — only the receiving
-        host does. If your ISP uses CGNAT, inbound forwarding won't work at all.</p>
+      <p class="small muted" style="margin-top:12px"><b>A node needs no inbound ports.</b> Jobs are
+        pulled — the node long-polls the access point and pushes results back, so a NAT'd or CGNAT box
+        serves normally. Forwarding 30333 is only for reachability, seed listing and a better routing
+        tie-break; 8093 is optional and only for a public health/status URL.
       <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:10px">
         <a class="btn" href="ai.html">Next: use the AI →</a>
         <a class="btn ghost" href="docs/run-a-node.html">Full run-a-node guide</a>

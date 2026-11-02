@@ -2349,8 +2349,18 @@ async fn maybe_refresh_attestation(client: &ChainClient, addr: &str) -> AttestOu
                 compute_capability: String::new(),
                 cuda_version: None,
                 gpu_count: 1,
+                gpu_uuid: None,
             };
-            let gpu_hash = gpn_agent::gpu::hash_gpu_info(&info);
+            // Hardware-identity fingerprint (uuid || genesis), not model+VRAM.
+            let genesis = gpn_agent::gpu::canonical_genesis_bytes().unwrap_or([0u8; 32]);
+            let fp = gpn_agent::gpu::resolve_fingerprint(&info, &genesis);
+            if fp.weak {
+                println!(
+                    "[attest] WARNING: no GPU UUID available — using a weak model+VRAM \
+                     fingerprint (one card per account cannot be enforced for this record)"
+                );
+            }
+            let gpu_hash = fp.hash;
             // Bounded: `submit_attestation` waits for inclusion (up to its 300 s
             // timeout). Startup must not hang on a stalled chain.
             let mut floor_rejected = false;

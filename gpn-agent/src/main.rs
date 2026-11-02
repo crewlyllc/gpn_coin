@@ -206,9 +206,24 @@ impl GPUMiningNodeAgent {
         log::info!("Computing attestation proof on GPU...");
         let result = self.gpu_monitor.compute_challenge(&challenge).await?;
 
-        // Build GPU info hash
+        // Build the on-chain GPU fingerprint.
+        //
+        // This is `sha256("GPN-GPU-ID-V1" || gpu_uuid || genesis_hash)` — a
+        // hardware identity bound to this chain — not the old model+VRAM hash.
+        // The chain enforces one physical GPU = one provider via `GpuOwner`,
+        // so two accounts can no longer attest from the same card. When no
+        // driver UUID is available we fall back to the legacy digest and say
+        // so loudly: that fingerprint is weak (identical cards collide).
         let gpu_info = self.state.read().await.gpu_info.clone();
-        let gpu_info_hash = gpu::hash_gpu_info(&gpu_info);
+        let genesis = gpu::canonical_genesis_bytes().unwrap_or([0u8; 32]);
+        let fingerprint = gpu::resolve_fingerprint(&gpu_info, &genesis);
+        if fingerprint.weak {
+            log::warn!(
+                "⚠ no GPU UUID from nvidia-smi/rocm-smi — attestation uses a WEAK \
+                 model+VRAM fingerprint; a chain enforcing GPU identity may reject it"
+            );
+        }
+        let gpu_info_hash = fingerprint.hash;
         let gpu_count = 1u8; // TODO: read actual GPU count from telemetry
 
         // Measure real compute throughput (GFLOPS) on the GPU — this is the

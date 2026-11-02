@@ -250,6 +250,7 @@ mod tests {
                 compute_capability: "8.0".into(),
                 cuda_version: None,
                 gpu_count: 1,
+                gpu_uuid: None,
             },
             account: crate::chain::AccountInfo {
                 address: "x".into(),

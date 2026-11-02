@@ -576,8 +576,21 @@ fn route(
                 );
             }
             let rt = rt_handle;
-            // gpu_info_hash = sha256(gpu_info); challenge_response = sha256(challenge || gpu_info_hash).
-            let gpu_info_hash = sha256(gpu_info.as_bytes());
+            // gpu_info_hash is the on-chain GPU fingerprint. Preferred form: the
+            // caller supplies the card's driver UUID (`gpu_uuid`), which we turn
+            // into sha256("GPN-GPU-ID-V1" || uuid || genesis_hash) — the same
+            // construction the node uses, so one card maps to one provider.
+            // Legacy form (no `gpu_uuid`): sha256(gpu_info) — a weak
+            // model+VRAM digest that a chain enforcing GPU identity may reject.
+            // challenge_response = sha256(challenge || gpu_info_hash).
+            let gpu_info_hash = match v.get("gpu_uuid").and_then(|x| x.as_str()) {
+                Some(uuid) => {
+                    let genesis = gpn_agent::gpu::canonical_genesis_bytes().unwrap_or([0u8; 32]);
+                    gpn_agent::gpu::fingerprint_from_uuid(uuid, &genesis)
+                        .unwrap_or_else(|| sha256(gpu_info.as_bytes()))
+                }
+                None => sha256(gpu_info.as_bytes()),
+            };
             let challenge = rt
                 .block_on(client.get_attestation_challenge())
                 .unwrap_or_default();

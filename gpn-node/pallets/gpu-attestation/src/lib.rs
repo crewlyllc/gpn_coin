@@ -121,7 +121,7 @@ pub mod pallet {
     use super::*;
     use frame_support::pallet_prelude::*;
     use frame_support::sp_runtime::traits::{AccountIdConversion, Saturating, Zero};
-    use frame_support::traits::{Currency, ExistenceRequirement};
+    use frame_support::traits::{Currency, ExistenceRequirement, StorageVersion};
     use frame_system::pallet_prelude::*;
 
     pub type BalanceOf<T> =
@@ -169,9 +169,22 @@ pub mod pallet {
         /// import. Testnet-acceptable; production would use a verifier
         /// committee. See `design-verifiable-gpu-proof-2026-10-06.md`.
         type ChallengeVerifier: Get<Self::AccountId>;
+        /// Enforce that every attestation carries a real hardware-identity
+        /// fingerprint (`gpu_info_hash != [0; 32]`). True on mainnet; a
+        /// testnet build may set it false so operators that have not yet
+        /// upgraded (and therefore still send the legacy model+VRAM digest)
+        /// keep working. Even when false, a non-zero fingerprint is still
+        /// uniqueness-checked.
+        type RequireGpuIdentity: Get<bool>;
     }
 
+    /// Storage layout version. v1 = `GpuOwner` (spec 43, GPU identity).
+    /// The runtime migration seeds `GpuOwner` from pre-existing attestations
+    /// and stamps this version; it never edits an `Attestations` row.
+    pub const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
+
     #[pallet::pallet]
+    #[pallet::storage_version(STORAGE_VERSION)]
     pub struct Pallet<T>(_);
 
     // Storage
@@ -199,6 +212,17 @@ pub mod pallet {
     #[pallet::storage]
     pub type Attestations<T: Config> =
         StorageMap<_, Blake2_128Concat, T::AccountId, AttestationRecord, OptionQuery>;
+
+    /// **One physical GPU = one provider.** Maps a hardware-identity
+    /// fingerprint (see `gpn-agent::gpu::gpu_fingerprint`:
+    /// `sha256("GPN-GPU-ID-V1" || gpu_uuid || genesis_hash)`) to the account
+    /// that attested it. A different account presenting the same fingerprint
+    /// is rejected (`GpuAlreadyOwned`); the owner may re-attest freely.
+    /// Released on `withdraw_stake`. Grandfathered entries for pre-upgrade
+    /// records are seeded by the spec-43 migration.
+    #[pallet::storage]
+    pub type GpuOwner<T: Config> =
+        StorageMap<_, Blake2_128Concat, [u8; 32], T::AccountId, OptionQuery>;
 
     #[pallet::storage]
     pub type AttestedProviderCount<T: Config> = StorageValue<_, u32, ValueQuery>;
@@ -311,6 +335,12 @@ pub mod pallet {
         NotChallengeVerifier,
         /// No challenge is currently active to confirm against.
         NoActiveChallenge,
+        /// This GPU fingerprint is already attested by a different account.
+        /// One physical GPU may back exactly one provider.
+        GpuAlreadyOwned,
+        /// Attestation carries no GPU identity (zero fingerprint) while
+        /// `RequireGpuIdentity` is enabled.
+        GpuIdentityMissing,
     }
 
     // Hooks
@@ -385,6 +415,23 @@ pub mod pallet {
             // remains available and raises the reward multiplier via the tier system.
             // See design-verifiable-gpu-proof-2026-10-06.md.
 
+            // ── Hardware identity / uniqueness ────────────────────────────
+            // `gpu_info_hash` is a hardware fingerprint, not a model hash: it
+            // is derived from the card's driver UUID, so two accounts cannot
+            // attest from the same physical GPU. A missing (all-zero)
+            // fingerprint is rejected while `RequireGpuIdentity` is on; the
+            // zero value is never written to `GpuOwner`, so testnet's legacy
+            // records cannot collide with each other on a shared zero key.
+            let has_identity = gpu_info_hash != [0u8; 32];
+            if !has_identity && T::RequireGpuIdentity::get() {
+                return Err(Error::<T>::GpuIdentityMissing.into());
+            }
+            if has_identity {
+                if let Some(owner) = <GpuOwner<T>>::get(gpu_info_hash) {
+                    ensure!(owner == who, Error::<T>::GpuAlreadyOwned);
+                }
+            }
+
             // Minimum GPU capability floor (item 19): a CPU/APU integrated GPU
             // cannot attest — hence cannot earn — unless its *measured* FP32
             // throughput clears the floor. This is checked FIRST, before any tier
@@ -440,6 +487,9 @@ pub mod pallet {
             };
 
             let is_new = !<Attestations<T>>::contains_key(&who);
+            // Captured BEFORE the record is overwritten below: the fingerprint
+            // this account previously claimed (to release if it has changed).
+            let prev_hash = <Attestations<T>>::get(&who).map(|r| r.gpu_info_hash);
             // RED-TEAM 2026-10-09 (finding #23, gpu-attestation / liveness-incentive
             // evasion): a RE-submission used to reset `missed_count` to 0 and clear
             // `LastMissBlock`, so a provider that had gone idle could zero its miss
@@ -470,6 +520,31 @@ pub mod pallet {
                 <AttestedProviderCount<T>>::mutate(|c| *c += 1);
             }
 
+            // Claim the fingerprint. If the same account re-attests with a
+            // *different* one (card swapped, driver changed the UUID), release
+            // the old mapping so the previous card does not stay locked to this
+            // account forever.
+            if has_identity {
+                if let Some(prev) = prev_hash {
+                    if prev != gpu_info_hash
+                        && prev != [0u8; 32]
+                        && <GpuOwner<T>>::get(prev).as_ref() == Some(&who)
+                    {
+                        <GpuOwner<T>>::remove(prev);
+                    }
+                }
+                <GpuOwner<T>>::insert(gpu_info_hash, &who);
+            }
+
+            // Staking is optional and, when the chain's minimum is zero, it is
+            // free: no transfer happens and an explicit zero stake is recorded.
+            // A zero-stake provider is attested, registrable and eligible to
+            // serve; it simply gets no staking-pool share (`reward_weight == 0`).
+            if T::MinAttestationStake::get().is_zero() && !<ProviderStake<T>>::contains_key(&who) {
+                let zero: BalanceOf<T> = Zero::zero();
+                <ProviderStake<T>>::insert(&who, zero);
+            }
+
             Self::deposit_event(Event::<T>::AttestationSubmitted {
                 who,
                 gpu_count,
@@ -482,7 +557,16 @@ pub mod pallet {
         #[pallet::weight(<T as Config>::WeightInfo::withdraw_stake())]
         pub fn withdraw_stake(origin: OriginFor<T>) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            let stake = <ProviderStake<T>>::take(&who).ok_or(Error::<T>::NoStakeToWithdraw)?;
+            // Stake, attestation, or both — a zero-minimum attestation records
+            // `ProviderStake = 0`, and a legacy stakeless attestation records
+            // none. Either way withdrawal must release the GPU fingerprint and
+            // remove the record; only an account with neither has nothing to do.
+            let stake_opt = <ProviderStake<T>>::take(&who);
+            let attested = <Attestations<T>>::contains_key(&who);
+            if stake_opt.is_none() && !attested {
+                return Err(Error::<T>::NoStakeToWithdraw.into());
+            }
+            let stake = stake_opt.unwrap_or_default();
 
             // Red-team finding #27 (gpu-attestation / state consistency —
             // non-root): `AttestedProviderCount` is incremented only by a *fresh*
@@ -495,19 +579,31 @@ pub mod pallet {
             // permissionless stats-integrity / invariant break). Only decrement
             // when the account was actually counted (i.e. it held an attestation).
             let was_attested = <Attestations<T>>::contains_key(&who);
+            // Release the physical GPU so another account can register it.
+            if let Some(rec) = <Attestations<T>>::get(&who) {
+                if rec.gpu_info_hash != [0u8; 32]
+                    && <GpuOwner<T>>::get(rec.gpu_info_hash).as_ref() == Some(&who)
+                {
+                    <GpuOwner<T>>::remove(rec.gpu_info_hash);
+                }
+            }
             <Attestations<T>>::remove(&who);
             <LastMissBlock<T>>::remove(&who);
             if was_attested {
                 <AttestedProviderCount<T>>::mutate(|c| *c = c.saturating_sub(1));
             }
-            <TotalStaked<T>>::mutate(|t| *t -= stake);
+            <TotalStaked<T>>::mutate(|t| *t = t.saturating_sub(stake));
 
-            T::Currency::transfer(
-                &Self::account_id(),
-                &who,
-                stake,
-                ExistenceRequirement::AllowDeath,
-            )?;
+            // Zero stake means nothing was ever deposited; skip the transfer
+            // (and its weight/fee implications) entirely.
+            if !stake.is_zero() {
+                T::Currency::transfer(
+                    &Self::account_id(),
+                    &who,
+                    stake,
+                    ExistenceRequirement::AllowDeath,
+                )?;
+            }
 
             Self::deposit_event(Event::<T>::StakeWithdrawn { who, amount: stake });
             Ok(())
@@ -780,7 +876,7 @@ mod tests {
 
     use crate::pallet as local_attest;
     use crate::pallet::{
-        AttestationChallenge, Attestations, AttestedProviderCount, ChallengeVerified,
+        AttestationChallenge, Attestations, AttestedProviderCount, ChallengeVerified, GpuOwner,
         LastMissBlock, ProviderStake, TotalStaked,
     };
 
@@ -839,7 +935,6 @@ mod tests {
     }
 
     parameter_types! {
-        pub const TestMinStake: Balance = 100;
         pub const TestAttestInterval: u64 = 10;
         pub const TestMaxAge: u64 = 50;
         pub const TestMaxMissed: u32 = 3;
@@ -855,10 +950,31 @@ mod tests {
     // Mock liveness provider: configurable active/uptime via thread-local state
     // so each #[test] thread is isolated (cargo runs tests in parallel).
     // Defaults to always-active high-uptime so existing tier tests pass.
+    //
+    // The identity requirement and the minimum stake are thread-local so one
+    // test runtime can exercise the mainnet mode (identity required, non-zero
+    // minimum) and the zero-minimum testnet mode.
     use core::cell::Cell;
+    use frame_support::traits::Get as _;
     thread_local! {
         pub static MOCK_ACTIVE: Cell<bool> = Cell::new(true);
         pub static MOCK_UPTIME: Cell<u32> = Cell::new(10_000);
+        pub static MOCK_REQUIRE_IDENTITY: Cell<bool> = Cell::new(true);
+        pub static MOCK_MIN_STAKE: Cell<Balance> = Cell::new(100);
+    }
+
+    pub struct TestMinStake;
+    impl frame_support::traits::Get<Balance> for TestMinStake {
+        fn get() -> Balance {
+            MOCK_MIN_STAKE.with(|c| c.get())
+        }
+    }
+
+    pub struct TestRequireGpuIdentity;
+    impl frame_support::traits::Get<bool> for TestRequireGpuIdentity {
+        fn get() -> bool {
+            MOCK_REQUIRE_IDENTITY.with(|c| c.get())
+        }
     }
     pub struct MockLiveness;
     impl LivenessProvider<u64> for MockLiveness {
@@ -876,6 +992,7 @@ mod tests {
         type Currency = Balances;
         type Liveness = MockLiveness;
         type MinAttestationStake = TestMinStake;
+        type RequireGpuIdentity = TestRequireGpuIdentity;
         type AttestationInterval = TestAttestInterval;
         type MaxAttestationAge = TestMaxAge;
         type MaxMissedAttestations = TestMaxMissed;
@@ -892,6 +1009,20 @@ mod tests {
     const VERIFIER: u64 = 99;
     const INITIAL_CHALLENGE: [u8; 32] = [7u8; 32];
 
+    /// Distinct hardware fingerprints for the two test accounts. The chain now
+    /// enforces one physical GPU per provider, so every account must present
+    /// its own fingerprint (a shared constant would be `GpuAlreadyOwned`).
+    const ALICE_GPU: [u8; 32] = [0xA1u8; 32];
+    const BOB_GPU: [u8; 32] = [0xB0u8; 32];
+
+    fn gpu_fp(who: u64) -> [u8; 32] {
+        match who {
+            ALICE => ALICE_GPU,
+            BOB => BOB_GPU,
+            other => [other as u8; 32],
+        }
+    }
+
     pub fn new_test_ext() -> sp_io::TestExternalities {
         let mut t = frame_system::GenesisConfig::<Test>::default()
             .build_storage()
@@ -907,6 +1038,8 @@ mod tests {
         // Reset mock liveness to always-active high-uptime for each test.
         MOCK_ACTIVE.with(|c| c.set(true));
         MOCK_UPTIME.with(|c| c.set(10_000));
+        MOCK_REQUIRE_IDENTITY.with(|c| c.set(true));
+        MOCK_MIN_STAKE.with(|c| c.set(100));
         ext.execute_with(|| {
             let cfg = crate::pallet::GenesisConfig::<Test> {
                 initial_challenge: INITIAL_CHALLENGE,
@@ -932,7 +1065,7 @@ mod tests {
         AttestPallet::submit_attestation(
             RuntimeOrigin::signed(who),
             [1u8; 32],
-            [2u8; 32],
+            gpu_fp(who),
             gpus,
             gflops,
         )
@@ -1019,7 +1152,7 @@ mod tests {
             let result = AttestPallet::submit_attestation(
                 RuntimeOrigin::signed(ALICE),
                 [1u8; 32],
-                [2u8; 32],
+                ALICE_GPU,
                 1,
                 10_000,
             );
@@ -1091,7 +1224,7 @@ mod tests {
             let result = AttestPallet::submit_attestation(
                 RuntimeOrigin::signed(ALICE),
                 [1u8; 32],
-                [2u8; 32],
+                ALICE_GPU,
                 0,
                 10_000,
             );
@@ -1117,7 +1250,7 @@ mod tests {
             let result = AttestPallet::submit_attestation(
                 RuntimeOrigin::signed(ALICE),
                 [1u8; 32],
-                [2u8; 32],
+                ALICE_GPU,
                 1,
                 50,
             );
@@ -1152,7 +1285,7 @@ mod tests {
             AttestPallet::submit_attestation(
                 RuntimeOrigin::signed(ALICE),
                 [1u8; 32],
-                [2u8; 32],
+                ALICE_GPU,
                 1,
                 100,
             )
@@ -1167,7 +1300,7 @@ mod tests {
             let result = AttestPallet::submit_attestation(
                 RuntimeOrigin::signed(BOB),
                 [1u8; 32],
-                [2u8; 32],
+                BOB_GPU,
                 4,
                 500,
             );
@@ -1178,7 +1311,7 @@ mod tests {
             AttestPallet::submit_attestation(
                 RuntimeOrigin::signed(BOB),
                 [1u8; 32],
-                [2u8; 32],
+                BOB_GPU,
                 4,
                 1500,
             )
@@ -1200,7 +1333,7 @@ mod tests {
             let result = AttestPallet::submit_attestation(
                 RuntimeOrigin::signed(ALICE),
                 [1u8; 32],
-                [2u8; 32],
+                ALICE_GPU,
                 1,
                 40, // < TestMinEligibilityGflops (50)
             );
@@ -1212,7 +1345,7 @@ mod tests {
             let result = AttestPallet::submit_attestation(
                 RuntimeOrigin::signed(BOB),
                 [1u8; 32],
-                [2u8; 32],
+                BOB_GPU,
                 1,
                 100, // >= floor (50) and >= Bronze (100)
             );
@@ -1424,7 +1557,7 @@ mod tests {
             AttestPallet::submit_attestation(
                 RuntimeOrigin::signed(ALICE),
                 [1u8; 32],
-                [2u8; 32],
+                ALICE_GPU,
                 2,
                 10_000,
             )
@@ -1453,7 +1586,7 @@ mod tests {
             AttestPallet::submit_attestation(
                 RuntimeOrigin::signed(BOB),
                 [3u8; 32],
-                [4u8; 32],
+                BOB_GPU,
                 1,
                 10_000,
             )
@@ -1484,7 +1617,7 @@ mod tests {
             AttestPallet::submit_attestation(
                 RuntimeOrigin::signed(ALICE),
                 [1u8; 32],
-                [2u8; 32],
+                ALICE_GPU,
                 2,
                 10_000,
             )
@@ -1689,7 +1822,7 @@ mod tests {
             AttestPallet::submit_attestation(
                 RuntimeOrigin::signed(ALICE),
                 [1u8; 32],
-                [2u8; 32],
+                ALICE_GPU,
                 16,
                 10_000,
             )
@@ -1709,7 +1842,7 @@ mod tests {
             AttestPallet::submit_attestation(
                 RuntimeOrigin::signed(ALICE),
                 [1u8; 32],
-                [2u8; 32],
+                ALICE_GPU,
                 4,
                 10_000,
             )
@@ -1744,7 +1877,7 @@ mod tests {
             AttestPallet::submit_attestation(
                 RuntimeOrigin::signed(ALICE),
                 [1u8; 32],
-                [2u8; 32],
+                ALICE_GPU,
                 4,
                 10_000,
             )
@@ -1762,6 +1895,298 @@ mod tests {
                 AttestationTier::Silver,
                 "legacy/unverified record must not be demoted by the sweep"
             );
+        });
+    }
+
+    // ── One physical GPU = one provider ─────────────────────────────────────
+
+    #[test]
+    fn same_gpu_cannot_be_attested_by_two_accounts() {
+        new_test_ext().execute_with(|| {
+            // ALICE registers the card.
+            AttestPallet::submit_attestation(
+                RuntimeOrigin::signed(ALICE),
+                [1u8; 32],
+                ALICE_GPU,
+                1,
+                10_000,
+            )
+            .unwrap();
+            assert_eq!(GpuOwner::<Test>::get(ALICE_GPU), Some(ALICE));
+
+            // BOB tries to attest the *same* physical card → rejected.
+            let res = AttestPallet::submit_attestation(
+                RuntimeOrigin::signed(BOB),
+                [1u8; 32],
+                ALICE_GPU,
+                1,
+                10_000,
+            );
+            assert_eq!(res, Err(Error::<Test>::GpuAlreadyOwned.into()));
+            assert!(Attestations::<Test>::get(BOB).is_none());
+            // Ownership unchanged.
+            assert_eq!(GpuOwner::<Test>::get(ALICE_GPU), Some(ALICE));
+        });
+    }
+
+    #[test]
+    fn same_account_can_reattest_and_distinct_cards_do_not_collide() {
+        new_test_ext().execute_with(|| {
+            AttestPallet::submit_attestation(
+                RuntimeOrigin::signed(ALICE),
+                [1u8; 32],
+                ALICE_GPU,
+                1,
+                10_000,
+            )
+            .unwrap();
+            // Re-attest with the same fingerprint: allowed.
+            AttestPallet::submit_attestation(
+                RuntimeOrigin::signed(ALICE),
+                [9u8; 32],
+                ALICE_GPU,
+                1,
+                10_000,
+            )
+            .unwrap();
+            assert_eq!(GpuOwner::<Test>::get(ALICE_GPU), Some(ALICE));
+
+            // A genuinely different card is fine for BOB.
+            AttestPallet::submit_attestation(
+                RuntimeOrigin::signed(BOB),
+                [1u8; 32],
+                BOB_GPU,
+                1,
+                10_000,
+            )
+            .unwrap();
+            assert_eq!(GpuOwner::<Test>::get(BOB_GPU), Some(BOB));
+            assert_eq!(AttestedProviderCount::<Test>::get(), 2);
+        });
+    }
+
+    #[test]
+    fn changing_fingerprint_releases_the_previous_card() {
+        new_test_ext().execute_with(|| {
+            AttestPallet::submit_attestation(
+                RuntimeOrigin::signed(ALICE),
+                [1u8; 32],
+                ALICE_GPU,
+                1,
+                10_000,
+            )
+            .unwrap();
+            // Driver update / card swap → new fingerprint for the same account.
+            AttestPallet::submit_attestation(
+                RuntimeOrigin::signed(ALICE),
+                [1u8; 32],
+                BOB_GPU,
+                1,
+                10_000,
+            )
+            .unwrap();
+            assert_eq!(
+                GpuOwner::<Test>::get(ALICE_GPU),
+                None,
+                "the old fingerprint must not stay locked to ALICE"
+            );
+            assert_eq!(GpuOwner::<Test>::get(BOB_GPU), Some(ALICE));
+
+            // And BOB may now register the released card.
+            AttestPallet::submit_attestation(
+                RuntimeOrigin::signed(BOB),
+                [1u8; 32],
+                ALICE_GPU,
+                1,
+                10_000,
+            )
+            .unwrap();
+            assert_eq!(GpuOwner::<Test>::get(ALICE_GPU), Some(BOB));
+        });
+    }
+
+    #[test]
+    fn withdraw_releases_the_gpu_fingerprint() {
+        new_test_ext().execute_with(|| {
+            stake_and_attest(ALICE, 500, 1);
+            assert_eq!(GpuOwner::<Test>::get(ALICE_GPU), Some(ALICE));
+
+            AttestPallet::withdraw_stake(RuntimeOrigin::signed(ALICE)).unwrap();
+            assert_eq!(GpuOwner::<Test>::get(ALICE_GPU), None);
+            assert!(Attestations::<Test>::get(ALICE).is_none());
+
+            // The freed card can be registered by BOB.
+            AttestPallet::submit_attestation(
+                RuntimeOrigin::signed(BOB),
+                [1u8; 32],
+                ALICE_GPU,
+                1,
+                10_000,
+            )
+            .unwrap();
+            assert_eq!(GpuOwner::<Test>::get(ALICE_GPU), Some(BOB));
+        });
+    }
+
+    #[test]
+    fn zero_fingerprint_is_rejected_when_identity_required() {
+        new_test_ext().execute_with(|| {
+            assert!(TestRequireGpuIdentity::get());
+            let res = AttestPallet::submit_attestation(
+                RuntimeOrigin::signed(ALICE),
+                [1u8; 32],
+                [0u8; 32],
+                1,
+                10_000,
+            );
+            assert_eq!(res, Err(Error::<Test>::GpuIdentityMissing.into()));
+            assert!(Attestations::<Test>::get(ALICE).is_none());
+            assert_eq!(GpuOwner::<Test>::get([0u8; 32]), None);
+        });
+    }
+
+    #[test]
+    fn zero_fingerprint_allowed_on_lenient_testnet_but_never_owned() {
+        new_test_ext().execute_with(|| {
+            MOCK_REQUIRE_IDENTITY.with(|c| c.set(false));
+            // A pre-upgrade client submitting the legacy (zero) fingerprint is
+            // tolerated, but the zero key is never written to `GpuOwner`, so
+            // two such records cannot collide on a shared key.
+            AttestPallet::submit_attestation(
+                RuntimeOrigin::signed(ALICE),
+                [1u8; 32],
+                [0u8; 32],
+                1,
+                10_000,
+            )
+            .unwrap();
+            AttestPallet::submit_attestation(
+                RuntimeOrigin::signed(BOB),
+                [1u8; 32],
+                [0u8; 32],
+                1,
+                10_000,
+            )
+            .unwrap();
+            assert_eq!(GpuOwner::<Test>::get([0u8; 32]), None);
+            assert!(Attestations::<Test>::get(ALICE).is_some());
+            assert!(Attestations::<Test>::get(BOB).is_some());
+        });
+    }
+
+    // ── Optional (zero-minimum) stake ──────────────────────────────────────
+
+    #[test]
+    fn zero_minimum_attestation_with_no_funds_succeeds_and_records_zero() {
+        new_test_ext().execute_with(|| {
+            MOCK_MIN_STAKE.with(|c| c.set(0));
+            // A brand-new account with no balance at all.
+            let broke: u64 = 77;
+            assert_eq!(pallet_balances::Pallet::<Test>::free_balance(broke), 0);
+
+            AttestPallet::submit_attestation(
+                RuntimeOrigin::signed(broke),
+                [1u8; 32],
+                [0x77u8; 32],
+                1,
+                10_000,
+            )
+            .unwrap();
+
+            assert_eq!(ProviderStake::<Test>::get(broke), Some(0));
+            assert_eq!(TotalStaked::<Test>::get(), 0);
+            assert_eq!(AttestPallet::effective_stake(&broke), 0);
+            assert_eq!(
+                <AttestPallet as GPUAttestationProvider<u64>>::reward_weight(&broke),
+                0,
+                "zero stake must mean no staking rewards, not a panic"
+            );
+            // Still a first-class provider: attested, Bronze, and the card is
+            // claimed (registrable/servable, just no staking-pool share).
+            assert_eq!(
+                Attestations::<Test>::get(broke).unwrap().tier,
+                AttestationTier::Bronze
+            );
+            assert_eq!(GpuOwner::<Test>::get([0x77u8; 32]), Some(broke));
+        });
+    }
+
+    #[test]
+    fn zero_minimum_withdraw_releases_record_without_transferring() {
+        new_test_ext().execute_with(|| {
+            MOCK_MIN_STAKE.with(|c| c.set(0));
+            let broke: u64 = 77;
+            AttestPallet::submit_attestation(
+                RuntimeOrigin::signed(broke),
+                [1u8; 32],
+                [0x77u8; 32],
+                1,
+                10_000,
+            )
+            .unwrap();
+            assert_eq!(GpuOwner::<Test>::get([0x77u8; 32]), Some(broke));
+
+            // No funds were ever taken, so withdrawing must succeed (releasing
+            // the card) rather than fail with `NoStakeToWithdraw`.
+            AttestPallet::withdraw_stake(RuntimeOrigin::signed(broke)).unwrap();
+            assert!(Attestations::<Test>::get(broke).is_none());
+            assert_eq!(ProviderStake::<Test>::get(broke), None);
+            assert_eq!(GpuOwner::<Test>::get([0x77u8; 32]), None);
+            assert_eq!(TotalStaked::<Test>::get(), 0);
+        });
+    }
+
+    #[test]
+    fn non_zero_minimum_is_unchanged() {
+        new_test_ext().execute_with(|| {
+            // Default mock minimum is 100: a 0 deposit is still rejected, and
+            // attestation without a deposit records no `ProviderStake`.
+            assert_eq!(TestMinStake::get(), 100);
+            let res = AttestPallet::deposit_stake(RuntimeOrigin::signed(ALICE), 0);
+            assert_eq!(res, Err(Error::<Test>::InsufficientStake.into()));
+            assert_eq!(ProviderStake::<Test>::get(ALICE), None);
+
+            AttestPallet::submit_attestation(
+                RuntimeOrigin::signed(ALICE),
+                [1u8; 32],
+                ALICE_GPU,
+                1,
+                10_000,
+            )
+            .unwrap();
+            assert_eq!(ProviderStake::<Test>::get(ALICE), None);
+        });
+    }
+
+    #[test]
+    fn tier_multiplier_math_is_safe_with_zero_stake() {
+        new_test_ext().execute_with(|| {
+            MOCK_MIN_STAKE.with(|c| c.set(0));
+            // Even a Gold-tier record with no stake yields zero effective stake
+            // and zero reward weight — no division by zero, no panic.
+            AttestPallet::confirm_challenge(RuntimeOrigin::signed(VERIFIER), ALICE).unwrap();
+            AttestPallet::submit_attestation(
+                RuntimeOrigin::signed(ALICE),
+                [1u8; 32],
+                ALICE_GPU,
+                16,
+                10_000,
+            )
+            .unwrap();
+            assert_eq!(
+                Attestations::<Test>::get(ALICE).unwrap().tier,
+                AttestationTier::Gold
+            );
+            assert_eq!(AttestPallet::effective_stake(&ALICE), 0);
+            assert_eq!(
+                <AttestPallet as GPUAttestationProvider<u64>>::reward_weight(&ALICE),
+                0
+            );
+            // The slash path on a zero stake stays zero (no underflow).
+            System::set_block_number(100);
+            AttestPallet::check_expired(RuntimeOrigin::signed(BOB), ALICE).unwrap();
+            assert_eq!(ProviderStake::<Test>::get(ALICE), Some(0));
+            assert_eq!(TotalStaked::<Test>::get(), 0);
         });
     }
 }

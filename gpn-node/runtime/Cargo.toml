@@ -57,6 +57,15 @@ default = ["std"]
 # in minutes. NEVER enable this for a mainnet build — the default (feature off)
 # keeps 3 * DAYS, and `tests/testnet_timelock_spec45.rs` pins that default.
 testnet-fast-timelock = []
+# Testnet-only (spec 43): `MinAttestationStake = 0` — attestation succeeds with
+# no funds (skip the transfer, record ProviderStake = 0). Rewards: zero stake
+# earns no staking-pool share, but the provider is attested, registrable and
+# eligible to serve. Mainnet's value is owner-decided (not invented here).
+testnet-no-stake = []
+# Testnet-only (spec 43): `RequireGpuIdentity = false`, so an operator still
+# running a pre-upgrade agent (legacy model+VRAM digest) keeps attesting while
+# the fleet rolls forward. Mainnet default is `true`.
+testnet-lenient-identity = []
 std = [
     "codec/std",
     "scale-info/std",

@@ -36,7 +36,7 @@
       <a href="../nodes.html">Nodes</a>
       <a href="../buy.html">Buy GPN</a>
       <a href="index.html" aria-current="page">Docs</a>
-    <a href="../index.html#join">Join us</a>
+      <a href="../index.html#join">Join us</a>
     </nav>
     <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
   </div>
@@ -104,7 +104,7 @@ from it automatically (code + release assets), so the public history always matc
 <h2 id="also-available">Also available</h2>
 <ul>
 <li><strong>CI artifacts</strong> (<code>gpn-windows</code>, <code>gpn-linux</code>, …) under <strong>Actions</strong> — but these <strong>expire</strong> (retention-days) and are quota-limited; the <strong>Releases</strong> above are the durable distribution.</li>
-<li><strong>Chain spec:</strong> <code>GET /genesis-spec</code> on any access point (e.g. <code>http://gpn-testnet.duckdns.org:8092/genesis-spec</code>).</li>
+<li><strong>Chain spec:</strong> <code>GET https://gpncoin.ai/chain-spec</code> (HTTPS; the installer verifies its genesis), or <code>GET /genesis-spec</code> on any access point (e.g. <code>http://gpn-testnet.duckdns.org:8092/genesis-spec</code>).</li>
 <li><strong>Whitepaper:</strong> <code>docs/GPN-WHITEPAPER.md</code> / <code>.html</code>.</li>
 </ul>
 <h2 id="db-snapshot-fast-node-onboarding-recovery">DB snapshot (fast node onboarding / recovery)</h2>
@@ -123,7 +123,7 @@ Testnet) and <code>best_block_number</code> before trusting it. The snapshot is 
 from an <strong>archive</strong>-pruned node so it is compatible with the node's default
 <code>--state-pruning archive</code> (a legacy <code>256</code> snapshot would hard-fail).</p>
     </article>
-    <p class="doc-updated small muted">Last generated 2026-10-21 from the project documentation set.</p>
+    <p class="doc-updated small muted">Last generated 2026-11-02 from the project documentation set.</p>
   </div>
 </main>
 

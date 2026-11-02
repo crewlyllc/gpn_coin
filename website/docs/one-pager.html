@@ -36,7 +36,7 @@
       <a href="../nodes.html">Nodes</a>
       <a href="../buy.html">Buy GPN</a>
       <a href="index.html" aria-current="page">Docs</a>
-    <a href="../index.html#join">Join us</a>
+      <a href="../index.html#join">Join us</a>
     </nav>
     <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
   </div>
@@ -47,37 +47,50 @@
     <nav class="crumbs" aria-label="Breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Docs</a> / <span>One-pager</span></nav>
     <article class="prose">
 <h1>GPN — One-Pager</h1>
-<p><strong>What it is.</strong> GPN is a <strong>GPU-native network</strong> where every node is <strong>both a miner and an AI provider</strong>. One install, one card: mining runs whenever the GPU is free, and an AI job pre-empts it, runs on the whole GPU, then hands it back.</p>
+<p><em>Last updated: 2026-11-02</em></p>
+<p><strong>What it is.</strong> GPN is a <strong>GPU-native network</strong> where every node is <strong>miner <em>and</em> AI provider at the same time</strong> — it mines between jobs and serves one when it is assigned. One install, no manual re-listing.</p>
 <p><strong>The problem.</strong> A GPU owner has two ways to earn — mine a coin, or rent the card for AI work — and must <strong>pick one</strong>. Mine and the coin dips → you lose. Rent and nobody books you → $0. The card can't move to where the money is.</p>
-<p><strong>The fix.</strong> GPN removes the choice: the node mines by default and <strong>yields the GPU to each AI job</strong>, so the same card earns from both markets. The chain does coordination + escrow + settlement; the heavy compute runs off-chain.</p>
+<p><strong>The fix.</strong> GPN runs both markets on the same card: the GPU mines by default and serves AI whenever a job is assigned, with no profitability switch to configure. The chain does coordination + escrow + settlement; the heavy compute runs off-chain.</p>
 <hr />
 <p><strong>How it works</strong></p>
 <ul>
 <li><strong>Mining</strong> — GPU proof-of-work; the node that produces a block <strong>keeps that block's reward</strong> (Bitcoin-style).</li>
-<li><strong>Serving AI</strong> — LLM inference, image/video generation, ML inference, fine-tuning — priced <strong>per token</strong> against real cost, escrowed trust-minimally.</li>
-<li><strong>The switch</strong> — per job, not per market cycle: an incoming job pauses mining, frees VRAM, runs on the whole GPU, then mining resumes. One GPU runs exactly one job at a time.</li>
-<li><strong>Routing</strong> — buyers hit one endpoint; the network picks the <strong>lowest-latency, least-loaded</strong> verified GPU. Providers are discovered <strong>on-chain</strong>.</li>
+<li><strong>Serving AI</strong> — LLM inference, image generation, fine-tuning — priced <strong>per token</strong> against a throughput anchor, escrowed trust-minimally.</li>
+<li><strong>No switch to manage</strong> — mining is the default and <strong>stops completely</strong> while an AI job runs, then resumes. A USD/hr profitability auto-switch is a <strong>deferred roadmap item</strong>, not a shipped behaviour.</li>
+<li><strong>No stake to start</strong> — there is <strong>no staking or delegation prerequisite</strong> to attest, list, or serve. Staking is optional and only raises a reward multiplier.</li>
+<li><strong>Routing</strong> — buyers hit one public endpoint (<code>https://gpncoin.ai/api/v1/*</code>, OpenAI-compatible, rate-limited); the network picks the <strong>lowest-latency idle</strong> attested GPU. Providers are discovered <strong>on-chain</strong>, and jobs are <strong>pulled</strong> by the provider, so a NAT'd box still serves.</li>
+<li><strong>Models</strong> — a <strong>curated, VRAM-gated</strong> catalogue: <code>llama3.2:1b</code>, <code>qwen2.5:0.5b</code>, <code>qwen2.5:7b</code> on the reference 8 GB node (<code>GET /v1/models</code> is authoritative; fine-tune artifacts and anything that cannot fit the card's VRAM are never advertised).</li>
+<li><strong>Runs on a gaming PC</strong> — a local dashboard (<code>127.0.0.1:8099</code>) with an <strong>Idle</strong> switch: hand the GPU back for up to 6 h while the node keeps syncing, peering and serving the chain, then resumes on its own.</li>
+<li><strong>Stays current by itself</strong> — signed (ed25519) bundles from <code>https://gpncoin.ai/releases.json</code>, <strong>on by default</strong>, installed with a per-node randomized schedule so the fleet never stampedes a release.</li>
 </ul>
 <p><strong>Why it's different</strong></p>
 <ul>
-<li><strong>Both markets, one machine</strong> — no incumbent (NiceHash, Vast, RunPod, Render, Akash, io.net) is both a native PoW miner and an AI marketplace on the same card.</li>
+<li><strong>Both markets, one machine</strong> — no incumbent (NiceHash, Vast, RunPod, Render, Akash, io.net) lets a GPU mine <em>and</em> serve at once.</li>
 <li><strong>Trust-minimal</strong> — on-chain escrow, optional <strong>payment channels</strong> (no per-job block delay), opaque/private on-chain values.</li>
-<li><strong>GPU-only, verifiably</strong> — proof-of-work + hardware attestation + a compute challenge; a CPU/iGPU can't earn.</li>
+<li><strong>GPU-only, provably</strong> — proof-of-work + hardware attestation + a compute challenge; a CPU/iGPU can't earn. Attestation proves <em>which GPU is online</em>, not that a result is correct — no output verification exists today (roadmap).</li>
 </ul>
 <p><strong>Token (GPN)</strong></p>
 <ul>
 <li><strong>Fair launch via mining</strong> — no ICO, no hidden allocation. 12 decimals.</li>
 <li><strong>Halving every ~2 years</strong> (4,204,800 blocks); block reward 50 GPN @ 15 s.</li>
 <li><strong>Hard supply cap ≈ 520 M GPN</strong> — 420 M emitted over the halving schedule plus 100 M allocated to the treasury.</li>
-<li><strong>Disclosed, vested treasury</strong> — 100 M GPN held by a keyless pallet account; 70 M unlocked at genesis, 30 M vesting over 10 years; spendable only by a 13-of-25 governance roster.</li>
+<li><strong>Disclosed, vested treasury — at mainnet launch</strong> — 100 M GPN held by a keyless pallet account; 70 M unlocked at genesis, 30 M vesting over 10 years; spendable only by a <strong>13-of-25 treasury spend roster</strong>. The testnet genesis mints <strong>0</strong> into the treasury, so none of this exists on the testnet today.</li>
 <li><strong>Token value derives from real AI-compute demand</strong> — not just mining inflation.</li>
 </ul>
 <p><strong>Privacy.</strong> A shielded pool supports private transfers and withdrawals (zero-knowledge spends; nullifier-based double-spend protection).</p>
-<p><strong>Where it is.</strong> Live on a public testnet: PoW chain, per-node rewards, the full AI marketplace (LLM/image/video/ML/fine-tune), payment channels, shielded spends, on-chain provider discovery, peer discovery, committee governance. Next: the public CRS ceremony, mainnet, and a cross-chain bridge.</p>
+<p><strong>Where it is (2026-11-02, testnet — labelled honestly)</strong></p>
+<ul>
+<li><strong>LIVE</strong> — PoW chain with Bitcoin-style per-node rewards (spec 45, release 0.3.11, 15 s); <strong>text/LLM inference</strong> over the public HTTPS API; <strong>image generation</strong> (<code>POST /v1/images/generations</code>); <strong>fine-tuning</strong> (<code>POST /v1/finetunes</code>); per-token escrow + payment channels; on-chain provider discovery; shielded spends; peer discovery; node GUI + Idle; signed auto-update; <strong>free</strong> testnet inference.</li>
+<li><strong>BLOCKED</strong> — video (LTX) is implemented but has never completed: the T5-XXL encoder exceeds 8 GB of VRAM, and there is no public <code>/v1/videos</code> route.</li>
+<li><strong>GOVERNANCE — design:</strong> a <strong>5-member council with 3-of-5 approvals</strong>; treasury spending is a separate <strong>13-of-25 roster</strong>. <strong>What testnet actually runs (verified 2026-11-02, block 236144):</strong> the same 5 members, 3 approvals, and a <strong>10-block (~2 min) timelock</strong> (the mainnet design is 3 days). There is <strong>no cancel/veto extrinsic</strong> and no referendum track — an approved proposal cannot be recalled. Testnet governance is a <strong>bootstrap under operator control, not a security guarantee</strong>, and imposes <strong>no member-count requirement</strong>.</li>
+<li><strong>GAP</strong> — the on-chain GPU-hour oracle feed is absent (the dollar→GPN conversion falls back to $0.15/GPN), and there is no result verification: output is settled as submitted, never checked.</li>
+<li><strong>Next</strong> — result verification, the public CRS ceremony, mainnet (3-day governance timelock), and a cross-chain bridge.</li>
+</ul>
+<p><strong>On price (no overclaim).</strong> GPN prices tokens off <strong>throughput</strong>: an anchor constant (a 4060-class card earns ≈$0.10/hr; the live idle-hardware feed reports ≈$0.30/GPU-hr) divided by the token rate that card reaches on a 1B model, plus a 30% margin. That is <strong>$0.379/1M output</strong> and <strong>$0.057/1M input</strong> (input metered at 15% of output) regardless of which GPU serves the job — a faster card earns the provider more per hour ($0.371 on a 4090, $1.232 on an H100) rather than costing the buyer more. That sits next to <code>gpt-5-nano</code>'s $0.40, not a multiple of it.</p>
 <p><strong>One line:</strong> <em>A GPU should not have to choose.</em></p>
-<p><code>gpncoin.ai</code> · whitepaper + docs at https://gpncoin.ai/docs/</p>
+<p><code>gpn.network</code> · whitepaper + docs in the project corpus</p>
     </article>
-    <p class="doc-updated small muted">Last generated 2026-10-19 from the project documentation set.</p>
+    <p class="doc-updated small muted">Last generated 2026-11-02 from the project documentation set.</p>
   </div>
 </main>
 

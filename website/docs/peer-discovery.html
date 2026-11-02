@@ -36,7 +36,7 @@
       <a href="../nodes.html">Nodes</a>
       <a href="../buy.html">Buy GPN</a>
       <a href="index.html" aria-current="page">Docs</a>
-    <a href="../index.html#join">Join us</a>
+      <a href="../index.html#join">Join us</a>
     </nav>
     <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
   </div>
@@ -61,15 +61,43 @@ the persistent-peer-store task and the on-chain discovery task).</p>
 <h2 id="sources-all-merged-deduplicated-best-effort">Sources (all merged, deduplicated, best-effort)</h2>
 <p>At startup the effective bootnode set is the <strong>union</strong> of:</p>
 <ol>
-<li><strong>Static bootnodes</strong> — <code>--bootnodes &lt;multiaddr&gt;</code> / chain-spec bootnodes /
-   the compiled-in <code>network.json</code> bootnodes. Kept first as the hard fallback.</li>
+<li><strong>Static bootnodes &amp; hardcoded seeds</strong> — <code>--bootnodes &lt;multiaddr&gt;</code> / chain-spec
+   bootnodes / the compiled-in <code>network.json</code>, which carries both <code>bootnodes[]</code>
+   and <strong>Source A</strong> <code>bootstrap_seeds[]</code> (≤5 hardcoded IP dial targets, §"Source
+   A" below). Kept first as the hard fallback — it works with no DNS, no HTTP
+   and no chain (see design §3.0/§3.1).</li>
 <li><strong>Persistent peer store (addrman)</strong> — <code>&lt;base-path&gt;/gpn-peers.json</code>. The node
    periodically snapshots the addresses of peers it is <em>connected to</em> and
    re-dials them on the next start.</li>
 <li><strong>DNS seed</strong> — <code>--bootnodes-dns &lt;name&gt;</code> (repeatable).</li>
 <li><strong>HTTP seed list</strong> — <code>--bootnodes-url &lt;url&gt;</code> (repeatable). <strong>Defaults to the
-   live network directory at <a href="https://gpncoin.ai/seeds.json">https://gpncoin.ai/seeds.json</a></strong> — no flag needed.</li>
+   registry's <code>bootstrap_urls[]</code> (Source B), else the live network directory at
+   <a href="https://gpncoin.ai/seeds.json">https://gpncoin.ai/seeds.json</a></strong> — no flag needed.</li>
 </ol>
+<h3 id="source-a-the-hardcoded-seeds-networkjson-bootstrap_seeds">Source A — the hardcoded seeds (<code>network.json</code> → <code>bootstrap_seeds[]</code>)</h3>
+<pre><code class="language-json">&quot;bootstrap_seeds&quot;: [
+  { &quot;id&quot;: &quot;seed-1&quot;, &quot;ip4&quot;: &quot;142.129.54.88&quot;, &quot;port&quot;: 30333,
+    &quot;peer_id&quot;: &quot;12D3KooWAFt…&quot;, &quot;dns4&quot;: &quot;gpn-testnet.duckdns.org&quot;,
+    &quot;operator&quot;: &quot;gpn-core&quot; }
+]
+</code></pre>
+<ul>
+<li><code>ip4</code> is <strong>authoritative</strong> (a literal IPv4 is the cold-start path); <code>dns4</code> is an
+  optional alias <strong>in the same entry</strong> and is dialled <em>as well</em>, so an IP change
+  survives a DNS update without shipping a client.</li>
+<li><code>peer_id</code> is <strong>mandatory</strong>: it is the real identity check (a dial to a wrong or
+  hostile host fails the libp2p handshake). An entry without a usable peer id,
+  or with neither <code>ip4</code> nor <code>dns4</code>, is logged and skipped at load time.</li>
+<li>Fewer than five entries is valid — "a floor of one is still a floor".</li>
+<li>An operator override (<code>~/.gpn/network.json</code> / <code>GPN_NETWORK_REGISTRY</code>) may change
+  identity fields but <strong>cannot blank this floor</strong>: empty <code>bootstrap_seeds</code> /
+  <code>bootstrap_urls</code> in an override are filled from the compiled-in registry
+  (<code>network_registry::apply_bootstrap_floor</code>).</li>
+</ul>
+<h3 id="source-b-networkjson-bootstrap_urls">Source B — <code>network.json</code> → <code>bootstrap_urls[]</code></h3>
+<p>The default <code>--bootnodes-url</code> list, unioned (not replaced) across publishers. A
+failing URL is logged and skipped. <code>seeds.json</code> is produced by <code>gpn_seedlist</code>
+from on-chain liveness (<code>docs/peer-discovery.md</code> §"Publishing a seed list").</p>
 <p>Sources are resolved independently. <strong>A source that is unreachable, malformed or
 slow is logged and skipped — it never aborts startup.</strong> Only entries that parse
 as a dialable libp2p multiaddress (i.e. end in <code>/p2p/&lt;peer-id&gt;</code>) survive the
@@ -84,6 +112,26 @@ merge.</p>
 union them); the compiled-in <code>--bootnodes</code> always remain as the last-resort
 fallback. The supervisor exposes the same setting as <code>bootnodes_url</code> in
 <code>node.toml</code> and as <code>GPN_BOOTNODES_URL</code>.</p>
+<h3 id="refresh-last-good-cache-a-node-does-not-re-read-the-list-only-once">Refresh + last-good cache (a node does not re-read the list only once)</h3>
+<p>Startup resolution is a snapshot, so the node keeps reading it:</p>
+<ul>
+<li><strong>Cadence</strong> — every <strong>15 minutes while it has fewer than 8 peers</strong>, otherwise
+  <strong>hourly</strong>, with ±15 % (downward) jitter so a fleet started together does not
+  hit the publisher in one burst. Consecutive failures multiply the wait
+  (2×, 4×, 8×) and the wait is capped at 4 h, so a dead publisher is not
+  hammered and never stops being retried.</li>
+<li><strong>Dialling</strong> — each refreshed list is <strong>shuffled</strong> before dialling (Fisher–
+  Yates) and every entry is passed to <code>add_known_address</code>, so a list sorted by
+  uptime cannot funnel the whole network onto the same three seeds.</li>
+<li><strong>Last-good cache</strong> — every successful fetch is written to
+  <code>&lt;base-path&gt;/gpn-seeds-cache.json</code> (<code>{updated_unix, multiaddrs[]}</code>). If the
+  publishers are all unreachable at startup, the node falls back to that cache
+  and logs <code>seed sources unavailable — using N cached seed(s)</code>. A cache older
+  than <strong>7 days</strong> is ignored rather than pinning the node to moved seeds; an
+  empty fetch never overwrites a good cache.</li>
+<li><code>GPN_SEED_REFRESH_SECS</code> overrides the 15-minute cadence (floor 30 s, cap 4 h)
+  — useful for testing an aggressive refresh.</li>
+</ul>
 <h3 id="on-chain-discovery-gpn-native-top-up">On-chain discovery (GPN-native top-up)</h3>
 <p>Once the node has at least one connection, a background task reads two on-chain
 registries via the node's own chain client and dials the endpoints it finds:</p>
@@ -188,6 +236,25 @@ without parsing every address.</li>
 have no <code>/p2p/&lt;peer-id&gt;</code>, so they appear for tooling but are <strong>not</strong> added to
 <code>multiaddrs</code> (the node cannot dial a peer without a peer id).</li>
 </ul>
+<p><strong>Provider peer-id publication.</strong> A provider can make itself dialable by
+publishing its libp2p identity alongside its heartbeat (see
+<a href="#publishing-a-provider-as-a-dialable-peer">Publishing a provider as a dialable peer</a>).
+When it does, the directory emits a real multiaddr for it:</p>
+<pre><code class="language-json">{
+  &quot;multiaddrs&quot;: [
+    &quot;/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFt...&quot;,
+    &quot;/ip4/203.0.113.7/tcp/30333/p2p/12D3KooW9ye...&quot;
+  ],
+  &quot;nodes&quot;: [
+    { &quot;multiaddr&quot;: &quot;/ip4/203.0.113.7/tcp/30333/p2p/12D3KooW9ye...&quot;,
+      &quot;peer_id&quot;: &quot;12D3KooW9ye...&quot;, &quot;role&quot;: &quot;provider&quot;, &quot;source&quot;: &quot;ap&quot;,
+      &quot;endpoint&quot;: &quot;http://203.0.113.7:8093/status&quot;, &quot;address&quot;: &quot;5ENq...&quot; }
+  ]
+}
+</code></pre>
+<p>Duplicate addresses (a provider that is also a compiled-in seed, or two
+heartbeats reporting the same listener) are collapsed - one entry per
+multiaddr.</p>
 <p><strong>Where the live half comes from.</strong> The Worker fetches <code>GET /providers</code> from
 the access point (wrangler var <code>AP_URL</code>), keeps entries the AP reports as
 <code>healthy</code>, converts each <code>status_url</code> to a multiaddr, and merges. The result is
@@ -207,6 +274,81 @@ Worker. Confirm with <code>curl -s https://gpncoin.ai/seeds.json | head</code>;
 <code>"source": "static+ap"</code> means the live merge worked, <code>static-fallback</code> means
 the AP was unreachable (the list is still valid).</p>
 </blockquote>
+<h2 id="publishing-a-provider-as-a-dialable-peer">Publishing a provider as a dialable peer</h2>
+<p>The access point's <code>/providers</code> list only contains what each provider's
+heartbeat (<code>gpn_provider_status</code>, <code>:8093</code>) reports. Historically that was
+<code>status_url</code> + SS58 address - enough to <em>monitor</em> a box, not enough to <em>dial</em>
+it. A provider now also publishes its node's libp2p identity:</p>
+<p><strong>1. The provider reads its own node over JSON-RPC</strong> (<code>GPN_ENDPOINT</code>, default
+<code>ws://127.0.0.1:9944</code>):</p>
+<table>
+<thead>
+<tr>
+<th>RPC</th>
+<th>Used for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>system_localPeerId</code></td>
+<td>the <code>12D3Koo...</code> peer id</td>
+</tr>
+<tr>
+<td><code>system_localListenAddresses</code></td>
+<td><code>/ip4/&lt;public&gt;/tcp/30333</code>, ...</td>
+</tr>
+</tbody>
+</table>
+<p><strong>2. It chooses what to publish.</strong> <code>GPN_PUBLIC_ADDR</code> / <code>--public-addr</code>
+(<code>/ip4/1.2.3.4/tcp/30333</code> or <code>1.2.3.4:30333</code>) is authoritative when set - a box
+listening on <code>0.0.0.0</code> cannot know its own public IP. Without it, every
+<em>globally routable</em> listen address is published; loopback, RFC1918, CGNAT and
+link-local listeners are discarded rather than advertised as if dialable.</p>
+<p><strong>3. <code>GET /status</code> gains these fields</strong> (all optional: omitted - never <code>null</code> -
+when the node RPC cannot be read):</p>
+<pre><code class="language-json">{
+  &quot;peer_id&quot;: &quot;12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo&quot;,
+  &quot;multiaddrs&quot;: [&quot;/ip4/203.0.113.7/tcp/30333/p2p/12D3KooWAFt...&quot;],
+  &quot;p2p_port&quot;: 30333,
+  &quot;listen_addrs&quot;: [&quot;/ip4/0.0.0.0/tcp/30333&quot;, &quot;/ip4/127.0.0.1/tcp/30333&quot;]
+}
+</code></pre>
+<p>The peer id + listen addresses are cached for 60 s (a failure is retried after
+10 s, because the heartbeat may start before the node RPC is up). A peer-id
+lookup failure <strong>never</strong> fails the heartbeat - the rest of <code>/status</code> is
+unaffected.</p>
+<p><strong>4. The AP validates and relays.</strong> <code>GET /providers</code> entries gain
+<code>peer_id</code>, <code>multiaddrs[]</code> and <code>p2p_port</code>:</p>
+<pre><code class="language-json">{ &quot;providers&quot;: [
+  { &quot;status_url&quot;: &quot;http://203.0.113.7:8093/status&quot;, &quot;address&quot;: &quot;5ENq...&quot;,
+    &quot;peer_id&quot;: &quot;12D3KooWAFt...&quot;,
+    &quot;multiaddrs&quot;: [&quot;/ip4/203.0.113.7/tcp/30333/p2p/12D3KooWAFt...&quot;],
+    &quot;p2p_port&quot;: 30333, &quot;healthy&quot;: true }
+] }
+</code></pre>
+<p>This is a public directory, so the AP does not relay arbitrary strings: the
+peer id must be a base58 <code>12D3Koo...</code>/<code>Qm...</code> id; a multiaddr must be a
+<code>/proto/value/...</code> chain of whitelisted protocols (<code>ip4 ip6 dns dns4 dns6 tcp
+udp quic quic-v1 p2p tls sni ws wss</code>) with a numeric port and a <strong>trailing</strong>
+<code>/p2p/&lt;peer-id&gt;</code>; and that trailing id must equal the <code>peer_id</code> in the same
+snapshot. Anything else is dropped (the port alone may survive as metadata).</p>
+<p><strong>5. The Worker merges.</strong> A provider with a peer id and a public p2p address is
+written into <code>multiaddrs</code> (dialable, deduplicated against the compiled-in
+seeds). If it reports only <code>peer_id</code> + <code>p2p_port</code> - the normal NAT case, where
+it listens on <code>0.0.0.0</code> - the Worker combines the port with the <strong>host the AP
+already reached it on</strong> (<code>status_url</code>) to form
+<code>/ip4/&lt;host&gt;/tcp/&lt;p2p_port&gt;/p2p/&lt;peer_id&gt;</code>.</p>
+<p><strong>Fallback.</strong> A provider that cannot publish a peer id (no RPC access, no
+<code>GPN_PUBLIC_ADDR</code> and no routable listener, or a failed validation) stays in
+<code>nodes[]</code> with <code>endpoint</code> only, exactly as before: listed for humans/tooling but
+never added to <code>multiaddrs</code>. A server that can reach its node RPC but does not
+know its own public IP should set <code>GPN_PUBLIC_ADDR</code> - that is the one piece the
+provider cannot infer.</p>
+<blockquote>
+<p>The <code>gpn_node</code> supervisor does not pass <code>--endpoint</code> to the heartbeat child
+yet; it inherits <code>GPN_ENDPOINT</code> from the environment and otherwise defaults to
+<code>ws://127.0.0.1:9944</code>, which is correct when the node runs on the same box.</p>
+</blockquote>
 <h2 id="hosting-a-seed">Hosting a seed</h2>
 <p>Any HTTP host works (static file, object store, small service):</p>
 <ol>
@@ -215,6 +357,28 @@ the AP was unreachable (the list is still valid).</p>
 <li>Operators add it with <code>--bootnodes-url https://…</code> — or just point at the
    default directory, which is already wired in.</li>
 </ol>
+<h3 id="generating-the-list-from-the-chain-gpn_seedlist">Generating the list from the chain (<code>gpn_seedlist</code>)</h3>
+<p>Don't hand-curate it. <code>gpn_seedlist</code> derives the list from on-chain liveness, so
+anyone can audit — or re-publish — the same result:</p>
+<pre><code>gpn_seedlist ws://127.0.0.1:9944 --out /srv/www/seeds.json --ttl 300
+</code></pre>
+<p>Promotion is earned, not asserted: a node is published only when the chain shows
+it is reachable (≥3 distinct bonded witnesses — <code>Liveness::WitnessCounts</code>), is
+reliably online (uptime ≥ 95%), was confirmed online in the last window, and has
+a <strong>dialable</strong> endpoint (a real <code>/p2p/&lt;peer-id&gt;</code> multiaddr — placeholders and
+<code>http://…/status</code> URLs are dropped). Survivors are ranked by uptime and the top
+16 published; the write is atomic (temp + rename), so a cron publisher can never
+serve a half-written file.</p>
+<pre><code>gpn_seedlist --print                       # dry run: who qualifies, and why not
+</code></pre>
+<p>An <strong>empty list is a valid publication</strong> (nobody qualifies yet); the tool only
+exits non-zero when the <em>chain</em> is unreachable, so a cron publisher fails loudly
+instead of replacing a good list with <code>[]</code>. Publishing needs no privileges — a
+captured publisher still cannot inject a node, because peers verify the libp2p
+handshake and the genesis hash.</p>
+<p>Run it from cron every few minutes (the <code>ttl</code> field tells clients how long to
+cache). Set <code>--min-witnesses</code>/<code>--min-uptime-bps</code> only if you deliberately want a
+looser/tighter policy, and say so where you publish.</p>
 <p>A <strong>DNS seed</strong> is a hostname whose <strong>TXT records</strong> contain seed lists:</p>
 <pre><code>$ dig +short TXT seed.example.org
 &quot;\&quot;/ip4/203.0.113.7/tcp/30333/p2p/12D3KooW9ye…\&quot;&quot;
@@ -249,7 +413,7 @@ required on the host.</p>
   different network is harmless (it is rejected during the handshake).</li>
 </ul>
     </article>
-    <p class="doc-updated small muted">Last generated 2026-10-19 from the project documentation set.</p>
+    <p class="doc-updated small muted">Last generated 2026-11-02 from the project documentation set.</p>
   </div>
 </main>
 
