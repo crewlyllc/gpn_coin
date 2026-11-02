@@ -61,6 +61,11 @@ jobs:
           rustup target add wasm32-unknown-unknown --toolchain "$RUST_TOOLCHAIN" >/dev/null
 
       - name: build (waits for ~/.gpn/build.lock)
+        # This runner has 15 GB RAM and also hosts the access point, ollama models
+        # and the CI jobs. A full-parallelism release build got OOM-killed
+        # (signal 9, ~900 MB RSS rustc) -- cap the job count so the box survives.
+        env:
+          CARGO_BUILD_JOBS: "2"
         # -w 7200 waits up to 2 h for a local build to finish, then fails loudly
         # instead of stacking a second heavyweight cargo build on the box.
         run: |
