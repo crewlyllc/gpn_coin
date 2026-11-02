@@ -102,6 +102,12 @@ assert_has "$ps1" "Programs\\Ollama\\ollama.exe"      "refreshes PATH for a per-
 assert_has "$ps1" "no-?ollama-?install"                  "documents the -NoOllamaInstall opt-out"
 assert_has "$ps1" "installing from the archive"          "does not Copy-Item a file onto itself (Root == BinDir)"
 assert_has "$ps1" "srcFull -ieq \$dstFull"               "compares resolved install dirs before copying"
+# After winget reports success the process PATH is still stale; without a refresh
+# the helper downloads the 1.5 GB installer a second time.
+assert_has "$repo/scripts/install-ollama.ps1" "function Update-PathNow"          "helper refreshes PATH itself"
+assert_has "$repo/scripts/install-ollama.ps1" "Programs"                        "helper probes the per-user ollama path"
+assert_has "$repo/scripts/install-ollama.ps1" "disable-interactivity"            "winget runs unattended"
+assert_has "$repo/scripts/install-ollama.ps1" "no progress bar"                  "warns that the download is silent"
 
 # Windows PowerShell 5.1 reads .ps1 as ANSI unless there is a BOM: any non-ASCII
 # byte (em dash, ellipsis, box drawing) can break string parsing with errors like

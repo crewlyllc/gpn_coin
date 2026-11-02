@@ -30,29 +30,61 @@ function Test-OllamaListening {
 }
 
 # ---- 1. install --------------------------------------------------------------------------------------------------------------------------------
-$ollama = Get-Command ollama -ErrorAction SilentlyContinue
+function Update-PathNow {
+    # winget / the installer write to the MACHINE+USER PATH, but this process keeps
+    # its old copy. Without this, the check right after a successful winget install
+    # still says "not found" and we download the 1.5 GB installer a second time.
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
+                [System.Environment]::GetEnvironmentVariable("Path", "User")
+    foreach ($p in @(
+            (Join-Path $env:LOCALAPPDATA 'Programs\Ollama'),
+            (Join-Path $env:ProgramFiles 'Ollama'),
+            (Join-Path ${env:ProgramFiles(x86)} 'Ollama'))) {
+        if ($p -and (Test-Path (Join-Path $p 'ollama.exe'))) {
+            if ($env:Path -notlike "*$p*") { $env:Path = "$p;$env:Path" }
+        }
+    }
+}
+
+function Find-Ollama { Get-Command ollama -ErrorAction SilentlyContinue }
+
+$ollama = Find-Ollama
+if (-not $ollama) { Update-PathNow; $ollama = Find-Ollama }
+
 if ($ollama) {
     Info "ollama already installed: $($ollama.Source)"
 } else {
     $winget = Get-Command winget -ErrorAction SilentlyContinue
     if ($winget) {
-        Info "installing ollama via winget (Ollama.Ollama) ..."
+        Info "installing ollama via winget (Ollama.Ollama) -- this downloads ~1.5 GB"
         try {
-            winget install --id Ollama.Ollama -e --accept-source-agreements --accept-package-agreements
+            & winget install --id Ollama.Ollama -e --accept-source-agreements --accept-package-agreements --disable-interactivity
         } catch {
             Warn "winget install failed ($_). Falling back to the official installer."
         }
+        Update-PathNow
+        $ollama = Find-Ollama
+        if ($ollama) { Info "winget installed ollama: $($ollama.Source)" }
     }
-    if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {
-        Info "downloading the official ollama installer (OllamaSetup.exe) ..."
+
+    if (-not $ollama) {
         $setup = Join-Path $env:TEMP "OllamaSetup.exe"
-        Invoke-WebRequest -Uri "https://ollama.com/download/OllamaSetup.exe" -OutFile $setup
-        Info "running $setup (/VERYSILENT) ..."
-        Start-Process -FilePath $setup -ArgumentList "/VERYSILENT" -Wait
+        $haveIt = (Test-Path $setup) -and ((Get-Item $setup).Length -gt 100MB)
+        if (-not $haveIt) {
+            Info "downloading the official ollama installer (~1.5 GB, no progress bar) ..."
+            try {
+                Invoke-WebRequest -Uri "https://ollama.com/download/OllamaSetup.exe" -OutFile $setup -UseBasicParsing
+            } catch {
+                Warn "download failed: $($_.Exception.Message)"
+            }
+        }
+        if ((Test-Path $setup) -and ((Get-Item $setup).Length -gt 100MB)) {
+            Info "running $setup (/VERYSILENT) -- a few minutes, no output ..."
+            Start-Process -FilePath $setup -ArgumentList "/VERYSILENT" -Wait
+            Update-PathNow
+            $ollama = Find-Ollama
+        }
     }
-    # winget/installer put it on PATH, but this process's PATH may be stale.
-    $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
-                [System.Environment]::GetEnvironmentVariable("Path", "User")
 }
 
 if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {
