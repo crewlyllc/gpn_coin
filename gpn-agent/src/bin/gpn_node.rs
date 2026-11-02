@@ -2381,6 +2381,11 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
         if !cfg.assign_token.is_empty() {
             envs.push(("GPN_ASSIGN_TOKEN".to_string(), cfg.assign_token.clone()));
         }
+        // Signed push heartbeat (NAT-friendly liveness): the status process
+        // signs with this node's account key and POSTs to the AP. Both are the
+        // same resolved values the provider children already get.
+        envs.push(("GPN_SIGNER".to_string(), cfg.signer.clone()));
+        envs.push(("GPN_AP_URL".to_string(), ap_env.clone()));
         specs.push(ChildSpec {
             label: "heartbeat",
             prefix: "[heartbeat]",

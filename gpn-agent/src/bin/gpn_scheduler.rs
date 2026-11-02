@@ -25,6 +25,7 @@ use gpn_agent::image_jobs::{self, ImageArtifact, ImageJob};
 use gpn_agent::jobkind::{admit, model_kind, JobKind};
 use gpn_agent::pricing::{self, params_b_for, roofline_tok_per_s, PricingConfig};
 use gpn_agent::profitability::{classify_feed_read, FeedRead};
+use gpn_agent::provider_heartbeat::{AccountAuthority, CachedKey, PushRegistry, MAX_BODY_BYTES};
 use gpn_agent::routing::{self, RttOverrides};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -790,6 +791,10 @@ struct Provider {
     capacity: u64,
     latency_ms: u64,
     last_seen: Option<Instant>,
+    /// Why this provider is considered healthy: `"push"` when a signed
+    /// heartbeat arrived within its TTL, `"poll"` when the AP's own
+    /// `/status` poll succeeded. Empty when it is not healthy at all.
+    source: String,
     /// When this provider last delivered a pull poll (`GET /assignments`) — i.e.
     /// when we last proved we can actually HAND it work.
     ///
@@ -1006,6 +1011,7 @@ fn provider_from_caps(addr: &str, v: &Value, status_url: String, latency_ms: u64
             .max(1),
         latency_ms,
         last_seen: Some(Instant::now()),
+        source: "poll".to_string(),
         pulled_seen: None,
     }
 }
@@ -1164,6 +1170,83 @@ fn apply_poll_caps(out: &mut Vec<Provider>, poll_caps: &Arc<Mutex<PollCaps>>) {
     }
 }
 
+/// Merge signed push heartbeats into the poll-built registry.
+///
+/// A pushed record and a polled record for the same machine **merge into one
+/// row**: the push refreshes health + live fields, the poll keeps the measured
+/// latency/endpoint. Matching is by peer id first (one node = one libp2p key)
+/// and by address second (a provider that does not publish a peer id).
+///
+/// `source` records *why* the row is healthy: `"push"` wins when a signed
+/// heartbeat is inside its TTL, because that is the evidence a NAT'd box can
+/// produce; `"poll"` is the old inbound-`/status` path.
+fn apply_push_heartbeats(
+    out: &mut Vec<Provider>,
+    pushed: &[&gpn_agent::provider_heartbeat::PushedProvider],
+) {
+    let now = Instant::now();
+    for p in pushed {
+        let existing = out.iter().position(|x| {
+            x.peer_id.as_deref() == Some(p.peer_id.as_str())
+                || (!p.address.is_empty() && x.address.eq_ignore_ascii_case(&p.address))
+        });
+        match existing {
+            Some(i) => {
+                let row = &mut out[i];
+                if row.address.is_empty() {
+                    row.address = p.address.clone();
+                }
+                if row.peer_id.is_none() {
+                    row.peer_id = Some(p.peer_id.clone());
+                }
+                if !p.multiaddrs.is_empty() {
+                    row.p2p_multiaddrs = p.multiaddrs.clone();
+                }
+                if !p.models.is_empty() {
+                    row.models = p.models.clone();
+                }
+                if p.vram_mb > 0 {
+                    row.vram_mb = p.vram_mb;
+                }
+                if p.capacity > 0 {
+                    row.capacity = p.capacity;
+                }
+                row.active = p.active_jobs;
+                row.last_seen = Some(now);
+                row.source = "push".to_string();
+            }
+            None => {
+                out.push(Provider {
+                    status_url: String::new(),
+                    address: p.address.clone(),
+                    gflops: 0,
+                    gflops_source: String::new(),
+                    models: p.models.clone(),
+                    can_pull: true,
+                    tok_per_s: 40.0,
+                    owner_cost_usd_hr: 0.03,
+                    mem_bw_gbps: 0.0,
+                    vram_mb: p.vram_mb,
+                    ram_mb: 0,
+                    gpu_class: "unknown".to_string(),
+                    tflops: 0.0,
+                    capabilities: default_capabilities(),
+                    peer_id: Some(p.peer_id.clone()),
+                    p2p_multiaddrs: p.multiaddrs.clone(),
+                    p2p_port: None,
+                    referral: None,
+                    active: p.active_jobs,
+                    capacity: p.capacity.max(1),
+                    latency_ms: pull_default_latency_ms(),
+                    last_seen: Some(now),
+                    source: "push".to_string(),
+                    pulled_seen: None,
+                });
+            }
+        }
+    }
+}
+
 /// Merge a poll-delivered capability snapshot into an existing registry entry.
 ///
 /// The existing entry's `status_url` is the endpoint the access point actually
@@ -1294,6 +1377,7 @@ fn refresh(
     client: Arc<ChainClient>,
     rt: Arc<tokio::runtime::Runtime>,
     poll_caps: Arc<Mutex<PollCaps>>,
+    push_registry: Arc<Mutex<PushRegistry>>,
 ) {
     let reg = registry.clone();
     let urls = urls.clone();
@@ -1354,6 +1438,7 @@ fn refresh(
                     capacity: 0,
                     latency_ms: 9999,
                     last_seen: None,
+                    source: String::new(),
                     pulled_seen: None,
                 },
             };
@@ -1370,6 +1455,21 @@ fn refresh(
         //    Phase 3 step 2). This is the ONLY way a NAT'd/CGNAT provider can
         //    enter the registry: the AP never dials it.
         apply_poll_caps(&mut out, &poll_caps);
+
+        // 4a. Merge signed provider pushes (NAT'd providers). This is a SECOND
+        //     source of health, not a replacement: a public node still also
+        //     answers the 5 s poll above, so the two are cross-checked. Expired
+        //     pushes are dropped here, which is what makes a silent provider
+        //     stop being "serving" ~30 s later.
+        {
+            let now = now_secs();
+            let mut pushes = push_registry.lock().unwrap();
+            pushes.prune(now);
+            let live: Vec<_> = pushes.live(now).into_iter().cloned().collect();
+            drop(pushes);
+            let refs: Vec<&gpn_agent::provider_heartbeat::PushedProvider> = live.iter().collect();
+            apply_push_heartbeats(&mut out, &refs);
+        }
 
         // 4b. Two records publishing the SAME libp2p peer id means at least one
         //     of them is republishing another node's identity — exactly the
@@ -3417,6 +3517,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Kept beside the registry (not in it) because it must survive the 5 s
     // `/status` rebuild, and it is keyed by canonical address.
     let poll_caps: Arc<Mutex<PollCaps>> = Arc::new(Mutex::new(std::collections::HashMap::new()));
+    // Signed provider pushes (NAT'd boxes) + the 5-minute on-chain account cache
+    // used to authenticate them. Survives the 5 s poll rebuild, like poll_caps.
+    let push_registry: Arc<Mutex<PushRegistry>> = Arc::new(Mutex::new(PushRegistry::new()));
+    let account_auth: Arc<Mutex<AccountAuthority>> = Arc::new(Mutex::new(AccountAuthority::new()));
     // Warm the GPN-price snapshot (chat//jobs convert USD → GPN base units) and
     // keep an eye on providers earning below their own declared cost.
     spawn_feed_refresh(
@@ -3432,6 +3536,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         client.clone(),
         rt.clone(),
         poll_caps.clone(),
+        push_registry.clone(),
     );
     println!("  on-chain discovery: ENABLED (ComputeMarketplace::ProviderEndpoints)");
 
@@ -3483,6 +3588,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let client = client.clone();
         let registry = registry.clone();
         let poll_caps = poll_caps.clone();
+        let push_registry = push_registry.clone();
+        let account_auth = account_auth.clone();
         let assign_store = assign_store.clone();
         let callback_url = callback_url.clone();
         let hdr = hdr.clone();
@@ -3496,13 +3603,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::thread::spawn(move || {
             let url = req.url().to_string();
             let method = req.method().clone();
-            let mut body = String::new();
-            let _ = req.as_reader().read_to_string(&mut body);
             let path: Vec<&str> = url
                 .trim_start_matches('/')
                 .split('/')
                 .filter(|s| !s.is_empty())
                 .collect();
+            // Refuse an oversized heartbeat from its declared length, BEFORE
+            // buffering it. The registry re-checks the actual body too (a liar
+            // can omit Content-Length); this only keeps the common case cheap.
+            if method == Method::Post
+                && path.first() == Some(&"provider")
+                && path.get(1) == Some(&"heartbeat")
+                && req
+                    .body_length()
+                    .map(|n| n > MAX_BODY_BYTES)
+                    .unwrap_or(false)
+            {
+                let _ = req.respond(Response::empty(413));
+                return;
+            }
+            let mut body = String::new();
+            let _ = req.as_reader().read_to_string(&mut body);
 
             // Auth gate (non-loopback only).
             if !ap_token.is_empty() {
@@ -3522,8 +3643,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // token too (design §3). It is content-free.
                 let is_report_post =
                     path.first().map(|s| *s == "report").unwrap_or(false) && method == Method::Post;
+                // `POST /provider/heartbeat` is the provider→AP signed liveness
+                // channel for NAT'd nodes. It cannot carry the user token (a
+                // provider holds none); it is authenticated by the sr25519
+                // signature over the payload against the account's ON-CHAIN key,
+                // checked in the handler.
+                let is_provider_heartbeat = method == Method::Post
+                    && path.first() == Some(&"provider")
+                    && path.get(1) == Some(&"heartbeat");
                 let protected = !is_result_post
                     && !is_report_post
+                    && !is_provider_heartbeat
                     && (method == Method::Post
                         || is_result_path
                         || path
@@ -3680,6 +3810,95 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (Method::Get, ["ping"]) => {
                     json!({"ok":true, "ap": listen, "t": now_secs()})
                 }
+                // POST /provider/heartbeat — SIGNED push liveness for a provider
+                // that cannot accept inbound connections (NAT/CGNAT). The AP's
+                // 5 s `/status` poll stays for public nodes; this is the second,
+                // outbound mechanism. Authentication: the payload is signed by
+                // the provider's own sr25519 account key, verified against the
+                // key of an ON-CHAIN-REGISTERED provider (RPC lookup, cached
+                // 5 min). Nothing in the body is trusted before that check.
+                (Method::Post, ["provider", "heartbeat"]) => {
+                    // Small local macro: `Request::respond` consumes `req`, so
+                    // a closure cannot be reused after it. Each error path both
+                    // responds and returns.
+                    macro_rules! respond_err {
+                        ($code:expr, $why:expr) => {{
+                            let _ = req.respond(
+                                Response::from_string(
+                                    json!({"error": $why}).to_string(),
+                                )
+                                .with_header(hdr.clone())
+                                .with_status_code($code),
+                            );
+                            return;
+                        }};
+                    }
+                    if body.len() > MAX_BODY_BYTES {
+                        respond_err!(413, "body too large");
+                    }
+                    let now = now_secs();
+                    let claimed = serde_json::from_str::<Value>(&body)
+                        .ok()
+                        .and_then(|v| v.get("address").and_then(|x| x.as_str()).map(String::from))
+                        .unwrap_or_default();
+                    // Cheap structural check before touching the chain.
+                    match gpn_agent::provider_heartbeat::ss58_to_pubkey(&claimed) {
+                        Some(_) => {}
+                        None => {
+                            respond_err!(400, "invalid ss58 address");
+                        }
+                    }
+                    // On-chain identity is the authority. The cache keeps the
+                    // RPC read off the hot path; a negative answer expires
+                    // sooner so a just-registered provider is not locked out
+                    // for five minutes.
+                    let onchain = {
+                        let cached = account_auth.lock().unwrap().lookup(&claimed, now);
+                        match cached {
+                            CachedKey::Hit(k) => k,
+                            CachedKey::Miss => {
+                                let registered =
+                                    rt.block_on(client.is_provider_registered(&claimed));
+                                let key = if registered {
+                                    gpn_agent::provider_heartbeat::ss58_to_pubkey(&claimed)
+                                } else {
+                                    None
+                                };
+                                account_auth.lock().unwrap().store(&claimed, now, key);
+                                key
+                            }
+                        }
+                    };
+                    if onchain.is_none() {
+                        eprintln!(
+                            "[push] rejected heartbeat from {}: not a registered provider",
+                            gpn_agent::provider_heartbeat::abbreviated(&claimed)
+                        );
+                        respond_err!(403, "bad signature or unregistered account");
+                    }
+                    let outcome = push_registry
+                        .lock()
+                        .unwrap()
+                        .ingest(&body, now, |_| onchain);
+                    match outcome {
+                        Ok(()) => {
+                            let _ = req.respond(Response::empty(204));
+                            return;
+                        }
+                        Err(e) => {
+                            // Rate limiting is expected fleet behaviour, not an
+                            // incident — stay quiet at info level.
+                            if e != gpn_agent::provider_heartbeat::IngestError::RateLimited {
+                                eprintln!(
+                                    "[push] rejected heartbeat from {}: {}",
+                                    gpn_agent::provider_heartbeat::abbreviated(&claimed),
+                                    e.reason()
+                                );
+                            }
+                            respond_err!(e.status_code(), e.reason());
+                        }
+                    }
+                }
                 // GET /network — the LIVE network directory behind /nodes.
                 //
                 // Answers "who is on the network right now" from the chain
@@ -3701,6 +3920,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 multiaddrs: p.p2p_multiaddrs.clone(),
                                 last_seen_secs: p.last_seen.map(|i| i.elapsed().as_secs()),
                                 status_url: p.status_url.clone(),
+                                source: p.source.clone(),
                             })
                             .collect()
                     };
@@ -3765,7 +3985,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "peer_id": p.peer_id, "multiaddrs": p.p2p_multiaddrs,
                     "p2p_port": p.p2p_port,
                     "referral": p.referral,
-                    "healthy": p.last_seen.is_some()
+                    "healthy": p.last_seen.is_some(),
+                    "source": p.source
                 })).collect::<Vec<_>>() })
                 }
                 (Method::Get, ["mode"]) => json!({
@@ -6436,6 +6657,66 @@ mod tests {
         assert!(out3.is_empty(), "stale caps are dropped");
     }
 
+    #[test]
+    fn push_and_poll_for_the_same_provider_merge_into_one_row() {
+        // The measured `/status` row (poll) and the signed push describe ONE
+        // box: its peer id matches, so the row must be refreshed, not doubled.
+        let mut polled = provider_with(
+            Some("12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo"),
+            None,
+        );
+        polled.address = "5Abc".to_string();
+        polled.models = vec!["old".into()];
+        let mut out = vec![polled];
+        let pushed = gpn_agent::provider_heartbeat::PushedProvider {
+            peer_id: "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo".into(),
+            address: "5Abc".into(),
+            multiaddrs: vec![],
+            models: vec!["llama3.2:1b".into()],
+            vram_mb: 8188,
+            capacity: 2,
+            active_jobs: 1,
+            started_at: 0,
+            ts: 1_000,
+            pushed_at: 1_000,
+        };
+        apply_push_heartbeats(&mut out, &[&pushed]);
+        assert_eq!(out.len(), 1, "one machine, one row");
+        assert!(out[0].last_seen.is_some());
+        assert_eq!(out[0].source, "push");
+        assert_eq!(out[0].models, vec!["llama3.2:1b".to_string()]);
+        assert_eq!(out[0].vram_mb, 8188);
+        assert_eq!(out[0].active, 1);
+        // The poll's measured endpoint is the routing key and must survive.
+        assert_eq!(out[0].status_url, "http://23.241.109.255:8093/status");
+    }
+
+    #[test]
+    fn a_push_only_provider_becomes_a_healthy_row() {
+        let mut out: Vec<Provider> = vec![];
+        let pushed = gpn_agent::provider_heartbeat::PushedProvider {
+            peer_id: "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo".into(),
+            address: "5Abc".into(),
+            multiaddrs: vec![
+                "/ip4/203.0.113.7/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo"
+                    .into(),
+            ],
+            models: vec!["llama3.2:1b".into()],
+            vram_mb: 4096,
+            capacity: 1,
+            active_jobs: 0,
+            started_at: 0,
+            ts: 1_000,
+            pushed_at: 1_000,
+        };
+        apply_push_heartbeats(&mut out, &[&pushed]);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].last_seen.is_some());
+        assert_eq!(out[0].source, "push");
+        assert_eq!(out[0].peer_id.as_deref(), Some(pushed.peer_id.as_str()));
+        assert!(out[0].status_url.is_empty(), "no inbound endpoint needed");
+    }
+
     /// #100: this box hosts the LLM provider and the diffusion provider under
     /// ONE wallet, plus the fine-tune provider under another. Each process now
     /// declares only what it can serve, so the address's entry must be the
@@ -6541,6 +6822,7 @@ mod tests {
             capacity: 4,
             latency_ms,
             last_seen: Some(Instant::now()),
+            source: "poll".to_string(),
             // Routing tests describe *deliverable* providers, so the delivery
             // gate (item #55) stays inert for them.
             pulled_seen: Some(Instant::now()),

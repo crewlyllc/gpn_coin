@@ -865,6 +865,49 @@ in `~/.gpn/assignments.json`, so upgrading does not re-deliver history.
 `GPN_ASSIGN_WAIT_MS` (25 s); a busy one is answered immediately.
 - CGNAT users should still read [§4](#4-cgnat--when-forwarding-is-impossible):
 pull keeps you *earning*, but only a dialable node can be a backbone seed.
+
+### The signed push heartbeat — counted as serving without a port forward
+
+Pull gets work to you; the **push heartbeat** is what makes the access point
+*count* you as a serving provider from the public directory (`/nodes`,
+`/network`). The AP used to decide that only by polling
+`http://<your-host>:8093/status` every 5 s, so a box behind NAT looked offline
+even though p2p and the job pull worked perfectly.
+
+Every ~10 s (±2 s jitter) your heartbeat process now POSTs a small **signed**
+JSON document to `<GPN_AP_URL>/provider/heartbeat`:
+
+```json
+{"peer_id":"12D3Koo…","address":"5…","multiaddrs":["/ip4/…/tcp/30333/p2p/12D3Koo…"],
+ "models":["llama3.2:1b"],"vram_mb":8188,"capacity":1,"active_jobs":0,
+ "started_at":1730000000,"ts":1730000123,"sig":"0x…"}
+```
+
+- `sig` is an **sr25519 signature by this node's own account key**
+  (`GPN_SIGNER` / `~/.gpn/keystore.json`) over a canonical message:
+  `gpn-hb-v1|<peer_id>|<address>|<ts>|<vram_mb>|<capacity>|<active_jobs>|<sha256(models)>|<sha256(multiaddrs)>`.
+- The AP verifies it against the account's **on-chain** key, and only for an
+  account that is a registered provider (`ComputeMarketplace::RegisteredProviders`,
+  cached ~5 min). It also rejects stale/future timestamps (±90 s), oversized
+  bodies, too many models/addresses, and pushes faster than 1 per 3 s.
+- A pushed entry lives for **30 s**; a provider that stops pushing stops being
+  counted roughly half a minute later. The AP still polls public nodes, so a
+  box that publishes `:8093` gets both paths as a cross-check.
+
+**No port forwarding is needed for this.** Inbound TCP 8093 is now optional:
+keep it (or a UPnP mapping) if you want the AP's poll as a second, independent
+liveness signal, but a NAT'd/CGNAT node is counted and routed without it.
+
+| Setting | Meaning | Default |
+|---|---|---|
+| `GPN_HEARTBEAT_PUSH` | `1`/unset → push enabled; `0`/`false`/`off` → disabled (poll-only). | on |
+| `GPN_HEARTBEAT_PUSH_SECS` | Interval between pushes, before ±2 s jitter. | `10` |
+
+The signer is resolved the same way as the rest of the agent: `GPN_SIGNER`,
+else `GPN_SIGNER_FILE`, else `~/.gpn/keystore.json`. If none is usable the
+heartbeat logs it once and stays poll-only — it never sends unsigned data the
+AP would reject.
+
 - Check it worked: the provider log prints
   `[assign] pull transport starting — ap=… since=…` at boot and
   `[assign] pulled #<id> (payload stored)` per assignment. `[assign] AP rejected

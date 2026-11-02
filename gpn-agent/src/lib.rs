@@ -39,6 +39,7 @@ pub mod nodestatus;
 pub mod ollama;
 pub mod pricing;
 pub mod profitability;
+pub mod provider_heartbeat;
 pub mod provider_policy;
 pub mod provider_watchdog;
 pub mod referral;

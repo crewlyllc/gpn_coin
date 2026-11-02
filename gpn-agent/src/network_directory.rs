@@ -30,6 +30,9 @@ pub struct DirProvider {
     pub multiaddrs: Vec<String>,
     pub last_seen_secs: Option<u64>,
     pub status_url: String,
+    /// Why the row is healthy: `"push"` (signed heartbeat, works behind NAT)
+    /// or `"poll"` (the AP reached `status_url`). Empty when unhealthy.
+    pub source: String,
 }
 
 /// A dial target the network ships or advertises, with where it came from.
@@ -117,6 +120,7 @@ pub fn build(
             "multiaddrs": dialable_list(&p.multiaddrs),
             "last_seen_secs": p.last_seen_secs,
             "status_url": p.status_url,
+            "source": p.source,
         });
         match provider_index.get(&key) {
             // Same machine registered twice (e.g. two accounts, pull + push):
@@ -227,6 +231,7 @@ mod tests {
             multiaddrs: vec![ma("142.129.54.88", 30333, peer)],
             last_seen_secs: Some(3),
             status_url: url.into(),
+            source: "poll".into(),
         }
     }
 

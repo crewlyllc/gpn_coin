@@ -94,6 +94,7 @@
 //! Env: LISTEN, ADDRESS, GFLOPS, MODELS, CAPACITY, ACTIVE, GPN_OLLAMA, CAPABILITIES,
 //!      GPN_ENDPOINT, GPN_PUBLIC_ADDR
 
+use gpn_agent::chain::signer::Sr25519Signer;
 use gpn_agent::disk::{disk_space, LOW_DISK_PERCENT};
 use gpn_agent::gpu::{detect_gpu_capability, detect_vram_mb};
 use serde_json::{json, Value};
@@ -1441,6 +1442,107 @@ fn vram_filter_logged(models: &[String], vram_mb: u64) -> Vec<String> {
     out
 }
 
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Resolve the account key used to sign push heartbeats.
+///
+/// Precedence mirrors the rest of the agent: `--signer` / `GPN_SIGNER`, then
+/// `GPN_SIGNER_FILE`, then `~/.gpn/keystore.json`. No signer means no push — the
+/// node stays poll-only rather than sending data the AP would (correctly)
+/// refuse.
+fn resolve_push_signer(args: &[String]) -> Option<Sr25519Signer> {
+    let explicit = opt(args, "--signer").or_else(|| std::env::var("GPN_SIGNER").ok());
+    if let Some(uri) = explicit
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        match Sr25519Signer::from_uri(&uri) {
+            Ok(s) => return Some(s),
+            Err(e) => eprintln!("[heartbeat] GPN_SIGNER is unusable: {e} — push disabled"),
+        }
+    }
+    let path = std::env::var("GPN_SIGNER_FILE")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            let home = std::env::var("HOME").ok()?;
+            let p = std::path::PathBuf::from(format!("{home}/.gpn/keystore.json"));
+            p.exists().then_some(p)
+        });
+    let path = path?;
+    match gpn_agent::firstrun::read_keystore(&path) {
+        Ok(ks) => match Sr25519Signer::from_uri(&ks.mnemonic) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!(
+                    "[heartbeat] keystore {} cannot sign: {e} — push disabled",
+                    path.display()
+                );
+                None
+            }
+        },
+        Err(e) => {
+            eprintln!(
+                "[heartbeat] keystore {} unreadable: {e} — push disabled",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+/// One signed POST to `<AP>/provider/heartbeat`.
+///
+/// Non-2xx responses are errors (the loop logs them and retries); a 429 is the
+/// AP's rate limiter doing its job and is not treated as fatal either.
+#[allow(clippy::too_many_arguments)]
+fn push_once(
+    client: &reqwest::blocking::Client,
+    ap_url: &str,
+    signer: &Sr25519Signer,
+    address: &str,
+    peer: &P2pInfo,
+    mut models: Vec<String>,
+    vram_mb: u64,
+    capacity: u64,
+    active_jobs: u64,
+    started_at: u64,
+) -> Result<(), String> {
+    models.truncate(gpn_agent::provider_heartbeat::MAX_MODELS);
+    let mut multiaddrs = peer.multiaddrs.clone();
+    multiaddrs.truncate(gpn_agent::provider_heartbeat::MAX_MULTIADDRS);
+    let mut hb = gpn_agent::provider_heartbeat::Heartbeat {
+        peer_id: peer.peer_id.clone(),
+        address: address.to_string(),
+        multiaddrs,
+        models,
+        vram_mb,
+        capacity,
+        active_jobs,
+        started_at,
+        ts: now_secs(),
+        sig: String::new(),
+    };
+    gpn_agent::provider_heartbeat::sign_in_place(signer, &mut hb);
+    let url = format!("{}/provider/heartbeat", ap_url.trim_end_matches('/'));
+    let res = client
+        .post(&url)
+        .json(&hb)
+        .send()
+        .map_err(|e| format!("POST {url}: {e}"))?;
+    let code = res.status().as_u16();
+    if code == 200 || code == 204 {
+        Ok(())
+    } else {
+        Err(format!("POST {url}: AP returned {code}"))
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let listen = opt(&args, "--listen")
@@ -1579,6 +1681,102 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
 
     let server = Server::http(&listen).map_err(|e| format!("cannot bind {listen}: {e}"))?;
+
+    // ── Push heartbeat (NAT-friendly liveness) ────────────────────────────────
+    // The AP's 5 s `/status` poll only reaches a provider with an inbound port.
+    // This loop POSTs a SIGNED heartbeat outbound every ~10 s, so a box behind
+    // NAT is still counted as serving. Unset/0 disables it; failures are
+    // non-fatal and never stop the status server.
+    let push_settings = gpn_agent::provider_heartbeat::PushSettings::from_env();
+    let push_ap_url = gpn_agent::assign_pull::ap_url_from_env()
+        .url()
+        .map(str::to_string);
+    let push_signer = if push_settings.enabled {
+        resolve_push_signer(&args)
+    } else {
+        None
+    };
+    let push_address = match &push_signer {
+        None => None,
+        Some(s) => {
+            let derived = gpn_agent::provider_heartbeat::pubkey_to_ss58(&s.public_key());
+            if address.is_empty() {
+                Some(derived)
+            } else {
+                match gpn_agent::provider_heartbeat::ss58_to_pubkey(&address) {
+                    Some(pk) if pk == s.public_key() => Some(address.clone()),
+                    _ => {
+                        eprintln!(
+                            "[heartbeat] --address {} does not belong to the signer key — push disabled",
+                            gpn_agent::provider_heartbeat::abbreviated(&address)
+                        );
+                        None
+                    }
+                }
+            }
+        }
+    };
+    if !push_settings.enabled {
+        eprintln!("[heartbeat] push disabled (GPN_HEARTBEAT_PUSH)");
+    } else if push_signer.is_none() {
+        eprintln!(
+            "[heartbeat] no signer available (GPN_SIGNER / GPN_SIGNER_FILE) — push disabled, \
+             this node is poll-only (inbound :8093 required to be counted)"
+        );
+    } else if push_ap_url.is_none() {
+        eprintln!("[heartbeat] no access point URL (GPN_AP_URL=) — push disabled");
+    }
+    if let (Some(ap), Some(signer), Some(addr)) = (
+        push_ap_url.clone(),
+        push_signer.clone(),
+        push_address.clone(),
+    ) {
+        let node_endpoint = node_endpoint.clone();
+        let public_addr = public_addr.clone();
+        let ollama = ollama.clone();
+        let fallback_models = models.clone();
+        let hw_spec = hw_spec.clone();
+        let settings = push_settings.clone();
+        let interval = settings.interval_secs;
+        eprintln!(
+            "[heartbeat] push enabled — ap={ap} interval={interval}s (±{}s jitter)",
+            gpn_agent::provider_heartbeat::JITTER_SECS
+        );
+        std::thread::spawn(move || {
+            let client = match reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(3))
+                .build()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("[heartbeat] cannot build HTTP client: {e} — push disabled");
+                    return;
+                }
+            };
+            let started_at = now_secs();
+            gpn_agent::provider_heartbeat::run_push_loop(
+                &settings,
+                None,
+                || {
+                    let Some(peer) = p2p_info(&node_endpoint, public_addr.as_deref()) else {
+                        // The node RPC may still be starting up. Not fatal; the
+                        // loop's once-a-minute error log keeps it visible.
+                        return Err(
+                            "no local libp2p identity yet (node RPC unreachable)".to_string()
+                        );
+                    };
+                    let hw = resolve_hardware(&hw_spec);
+                    let (models_now, _) = ollama_models(&ollama, &fallback_models);
+                    let models_now = vram_filter_logged(&models_now, hw.vram_mb);
+                    push_once(
+                        &client, &ap, &signer, &addr, &peer, models_now, hw.vram_mb, capacity,
+                        active, started_at,
+                    )
+                },
+                std::thread::sleep,
+            );
+        });
+    }
     // #65: `gflops` is what the access point routes on, so advertise the CHAIN's
     // attested value (capped by `--gflops`) instead of a hand-typed number.
     let boot_chain = if address.is_empty() {
