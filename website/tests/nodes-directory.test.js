@@ -17,7 +17,7 @@ test("the headline counts container exists with the three numbers", () => {
     assert.match(PAGE, new RegExp(`id="${id}"`));
   }
   assert.match(PAGE, /Peers online/);
-  assert.match(PAGE, /Serving AI/);
+  assert.match(PAGE, /AI providers \(registered\)/);
   assert.match(PAGE, /Offline/);
 });
 

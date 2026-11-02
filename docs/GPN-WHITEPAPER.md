@@ -8,7 +8,7 @@
 
 GPN is a **GPU-native blockchain network** that turns a single GPU into an earning machine two ways: it can **mine** the network's proof-of-work token, or it can **serve AI compute** to paying users — and it **auto-switches** between the two based on which pays more. Unlike GPU rental markets and mining pools, which force an owner to pick one and lock into it, GPN watches both markets continuously and moves the GPU to the more profitable one.
 
-The chain does **coordination, escrow, and settlement**; the heavy compute runs **off-chain**. Rewards are **Bitcoin-style**: the node that produces a block keeps that block's reward. Eligibility is **GPU-only**, enforced by proof-of-work and hardware attestation. AI jobs are priced per token against a cost-derived rate, escrowed on-chain (optionally off-chain via payment channels for zero block delay), and routed to the **nearest, least-loaded** verified provider.
+The chain does **coordination, escrow, and settlement**; the heavy compute runs **off-chain**. Rewards are **Bitcoin-style**: the node that produces a block keeps that block's reward. Eligibility is **GPU-only**, enforced by proof-of-work and hardware attestation. AI jobs are priced per token against a cost-derived rate, escrowed on-chain (optionally off-chain via payment channels for zero block delay), and routed to the **nearest, least-loaded** attested provider. (Attestation says which GPU is online and what it claims to deliver; it does **not** verify the content of the model's output — see §4.)
 
 GPN's thesis: the durable value of a commodity GPU is not mining, but **serving real AI demand** — and a network that lets every GPU do both, without friction, captures more of that value than either market alone.
 
@@ -27,25 +27,21 @@ The catch: **you have to pick one.** Point the card at mining, and if the coin d
 Meanwhile, AI compute is expensive and concentrated: buyers pay hyperscaler prices, and consumer GPUs (the cheapest compute on earth, ~$0.14–0.34/hr on spot markets) sit idle.
 
 ### 1.2 The idea
-**Don't make the owner pick.** GPN is a network where each GPU **mines _or_ serves AI**, **auto-switching** to whichever earns more, and where AI buyers get a single, simple interface that routes their work to that same pool of GPUs — coordinated and settled by a blockchain that no single party controls.
+**Don't make the owner pick.** GPN is a network where every node is **always miner _and_ AI provider** — it mines between jobs and serves one when the access point assigns it, with no profitability switch to configure — and where AI buyers get a single, simple interface that routes their work to that same pool of GPUs, coordinated and settled by a blockchain that no single party controls.
 
 ---
 
 ## 2. System Overview
 
-A GPN node is **one entity** — one identity, one wallet, one GPU — that operates in **one of three modes** at a time:
+A GPN node is **one entity** — one identity, one wallet, one GPU — and it does **two jobs at once**:
 
 | Mode | What the GPU does | Earns |
 |---|---|---|
-| **Mining** | Hashes GPN blocks (Ethash-derived GPU PoW) | Newly-minted GPN (block reward) |
-| **Compute** | Serves AI jobs (LLM, image/video, fine-tune) | GPN from job escrow (paid by requestors) |
-| **Staking** | *(later)* staked-provider rewards | Staking APR |
+| **Mining** | Hashes GPN blocks (Ethash-derived GPU PoW) while idle | Newly-minted GPN (block reward) |
+| **Compute** | Serves AI jobs (LLM, image, fine-tune) when the access point assigns one | GPN from job escrow (paid by requestors) |
+| **Staking** | *(optional)* extra stake raises the tier multiplier | Larger share of the fee pool |
 
-At launch the practical switch is **Mining ⇄ Compute**.
-
-**The switch is a decision, not a guess.** *By design*, every cycle the node estimates each mode's revenue in **USD/hr** — using an on-chain oracle feed of token price, GPU-hour rental price, utilization, and staking APR — and switches **only when the other mode beats the current one by a hysteresis margin (~5%)**, so the GPU doesn't thrash on tiny price crossings. A switch would be a real **stop/start of GPU work**: entering Compute stops the miner and frees VRAM before the model loads.
-
-**What runs today is a yield, not that switch.** Mining is the default; when a node accepts an AI job, mining **stops completely** for the job's duration and resumes when it completes. The economic decision (and the oracle feed that would drive it) is **not yet wired** — see §6.1 and §12.
+There is **no profitability switch to configure**: mining is the default state, and when a node accepts an AI job, mining **stops completely** for the job's duration and resumes when it completes. A USD/hr profitability auto-switch (driven by an oracle feed) is a **deferred roadmap item**, not a shipped behaviour — see §6.1 and §12.
 
 **The chain is thin and trust-minimal.** It holds the job lifecycle, escrow, and payouts, enforces capability and eligibility gates, and settles rewards. The compute — inference, generation, training — **never touches the chain**.
 
@@ -67,8 +63,9 @@ At launch the practical switch is **Mining ⇄ Compute**.
 
 Earning requires proving you are a **real GPU** — not spoofable, and not a CPU/APU.
 
-- **Proof-of-Staked-GPU (PoSG).** An operator **attests** a GPU (count + measured GFLOPS) and, historically, posted a **stake** (1,000 GPN). Attestation carries a **tier** (Bronze/Silver/Gold) and a **reward multiplier** (1.0× / 1.5× / 2.5×) — i.e., **staking increases your reward**.
-- **Stake-free eligibility, verified by work.** The mandatory stake was removed. A miner becomes pay-eligible by **producing blocks**: a seal-verified block *is* proof of real GPU work (the node verifies the Ethash seal on import), so after a small number of authored blocks the producer is paid directly. Staking remains **optional** — a lever that raises your tier and your reward share, not a gate.
+- **Stake-free attestation (Proof-of-Staked-GPU, PoSG).** There is **no staking or delegation prerequisite** to attest, list, or serve. An operator **attests** a GPU (count + measured GFLOPS); that is enough to be listed and paid. Attestation carries a **tier** (Bronze/Silver/Gold) and an optional **reward multiplier** (1.0× / 1.5× / 2.5×) for operators who do choose to stake.
+- **Eligibility, verified by work.** A miner becomes pay-eligible by **producing blocks**: a seal-verified block *is* proof of real GPU work (the node verifies the Ethash seal on import), so after a small number of authored blocks the producer is paid directly. Staking remains **optional** — a lever that raises your tier and your reward share, never a gate.
+- **No output verification today.** Nothing in the protocol checks that a returned completion is correct, non-redundant, or spot-checked. A provider submits a result hash; settlement is per-token against the submitted result. Detectable-on-chain output verification is a **roadmap item**, not a shipped property.
 - **Capability gates.** Jobs carry requirements — `min_gflops`, `min_vram_mb`, `min_ram_mb` — and the scheduler **will not route** a job to a provider that can't meet them (so a video job only goes to a big-VRAM card).
 - **Capacity challenge (proof, not claim).** Because GFLOPS is self-reported, a random **compute challenge** lets a verifier confirm the device actually delivers the throughput it claims, gating high tiers on *proven* compute.
 - **Self-organizing full-node layer.** A **liveness** pallet rewards always-on, publicly-reachable full nodes (peer-witnessed uptime) and gates top tiers behind being one — so the network's bootnode/reachability layer emerges organically rather than depending on a founder.
@@ -112,7 +109,7 @@ A measured caveat, stated plainly: end-to-end latency on the public route is dom
 - **The public list is a shop window.** `/v1/models` lists assistant-grade chat models only — sixteen families by default, prefix-matched so quantisation tags resolve. **Hard-excluded** even when an operator asks for everything: per-job fine-tune artifacts (`tuned-*`), toy models below ~0.3 B parameters (`stories260K` is 0.00026 B), and embedding/reranker models.
 - **Excluded is not unusable.** A caller who names a model explicitly still gets served. The catalogue governs advertising, not permission.
 
-On the reference 8 GB node this yields four served models: `llama3.2:1b`, `qwen2.5:0.5b`, `qwen2.5:7b`, `deepseek-r1:7b` — a deliberate floor of *assistant-grade* models rather than an inventory dump. *(Shipping status, 2026-10-22: the code is live in the 0.2.0 line; the public endpoint is still served by a pre-fix AP process, so the curated list appears once that process is restarted.)*
+On the reference 8 GB node the public catalogue is `llama3.2:1b`, `qwen2.5:0.5b`, `qwen2.5:7b` — a deliberate floor of *assistant-grade* models rather than an inventory dump. `GET /v1/models` is authoritative; do not promise a model that is not served.
 
 ---
 
@@ -122,7 +119,7 @@ On the reference 8 GB node this yields four served models: `llama3.2:1b`, `qwen2
 - **Emission:** all GPN is minted per block and **halves every 4,204,800 blocks (~2 years at 15 s)**. Halving is the sole emission mechanism.
 - **Block reward:** 50 GPN/block (≈ 3.33 GPN/s). The reward and block time are coupled via `emission_rate = reward / target_block_time`.
 - **Supply:** the **hard supply cap is ≈ 520.5 M GPN** — ≈ 420.48 M emitted over the halving schedule (2 × 50 GPN × 4,204,800) plus 100 M allocated to the treasury. The treasury allocation is fixed and does not grow, and emission converges at 420.48 M, so 520.5 M is the true maximum.
-- **Treasury:** 100 M GPN held by a keyless pallet account — 70 M unlocked at genesis and 30 M vesting over 10 years — spendable only by a **13-of-25** governance roster.
+- **Treasury (at mainnet launch):** 100 M GPN held by a keyless pallet account — 70 M unlocked at genesis and 30 M vesting over 10 years — spendable only by a **13-of-25 treasury spend roster**. These are **mainnet-launch figures**: the testnet genesis mints **0** into the treasury, so no part of this allocation exists on the testnet today.
 - **Fees:** a 5% marketplace fee is split **40% staking rewards · 30% treasury · 20% burn · 10% oracle operators**.
 - **Value anchor:** an oracle supplies a GPN/USD price (seeded at $0.15 for the testnet); the token's long-run value is intended to derive from **real AI-marketplace demand**, not mining inflation.
 
@@ -136,7 +133,7 @@ anchor_tok_s = roofline(30,000 GFLOP/s, 272 GB/s, 1B) = 95.2 tok/s
 anchor_rate  = $0.10/hr                               # GPN_GPU_ANCHOR_USD_HR
 k            = anchor_rate / (anchor_tok_s × 3600)    # USD per output token
 price_out    = k × (1 + 0.30)                         # GPN_MARGIN_BPS=3000 → $0.379/1M
-price_in     = price_out × 0.25                       # GPN_INPUT_RATE_FRAC
+price_in     = price_out × 0.15                       # GPN_INPUT_RATE_FRAC
 provider_hr  = roofline(gflops, bw, params_b) × 3600 × k
 escrow       = prompt_tokens/4 + max_tokens           # output-equivalents
 ```
@@ -161,18 +158,17 @@ hour instead:
 And **throughput, not FP32 GFLOPs, is the metric**: decode of a small model is memory-bandwidth-bound, so
 a FLOP-based price would rank a 4090 above an H100.
 
-The result is $0.379 per 1M output tokens and $0.095 per 1M input tokens — next to `gpt-5-nano`'s $0.40,
-rather than the ~$8.75 (22×) that the old `$3.00 GPU-hour` anchor produced. A price outside
+The result is **$0.379 per 1M output tokens** and **$0.057 per 1M input tokens** (input metered at 15% of
+the output rate) — next to `gpt-5-nano`'s $0.40, not a multiple of it. A price outside
 **[$0.05, $5.00] per 1M** refuses to publish unless `GPN_PRICING_UNSAFE=1`, and a provider whose modelled
 earning falls below its own declared cost is logged as such rather than hidden.
 
-**Two limitations we are not papering over.** (1) **Input metering is channel-first.** The off-chain
-channel bills input at 25% of the output rate. The on-chain pallet stores one
+**One limitation we are not papering over.** (1) **Input metering is channel-first.** The off-chain
+channel bills input at 15% of the output rate. The on-chain pallet stores one
 `(price_per_token, max_tokens, actual_tokens)` and charges a single rate, so an on-chain job publishes a
 *blended* rate over `prompt+max` — exact when the completion runs to `max_tokens`, slightly under-billing
 short completions. Exact two-rate settlement on-chain needs a pallet change (a second rate in
-`JobBilling`). (2) **The oracle feed is absent** — the USD→GPN conversion falls back to $0.15/GPN; the
-legacy market model, still available as `GPN_PRICING_MODEL=market`, keeps its $3.00 GPU-hour fallback.
+`JobBilling`). The USD→GPN conversion also falls back to $0.15/GPN while the oracle feed is absent.
 
 ---
 
@@ -189,27 +185,28 @@ GPN includes a **shielded pool** with Sapling-style note commitments and nullifi
 
 ## 8. Governance and Upgrades
 
-### 8.1 What is live on chain today — spec 41
+### 8.1 What is live on chain today — spec 45
 
-- **Committee governance.** A committee proposes and executes **root** calls (e.g., fee splits, parameters) after a timelock — **no single key acts alone**. The mainnet sudo key is **inert**; governance is the committee.
-- **Current parameters, stated exactly:** a **3-member** committee, **2-of-3** approvals, a **3-day** timelock, no `cancel`, no proposal expiry, no preimage proposals, and **zero weights** (`WeightInfo = ()`, so proposal weight is unmetered).
+- **Council governance.** A council proposes and executes **root** calls (e.g., fee splits, parameters) after a timelock — **no single key acts alone**. The mainnet sudo key is **inert**; governance is the council.
+- **The design: a 5-member council with 3-of-5 approvals.** Treasury *spending* is a separate body — the **13-of-25 treasury spend roster** — and must not be conflated with the council.
+- **What the testnet runs today (verified 2026-11-02, block 236144):** the same **5-member council**, **3 approvals required** (max 8 seats), and a **10-block (~2 minute) timelock** from the `testnet-fast-timelock` build (the mainnet design value is **3 days**). There is **no cancel/veto extrinsic**, no referendum/fast-track track, and no preimage track in the runtime. Governance hardening (spec 42) **is applied on testnet**.
+- **Testnet governance is a bootstrap, not a security guarantee.** It runs under operator control, and the testnet imposes **no member-count requirement** — 5/3-of-5 is the design, not a rule the chain enforces today.
 - **Forkless upgrades.** The runtime upgrades **in place** via `set_code` with a separately-built WASM; the genesis — chain-spec, difficulty, supply, and the canonical runtime WASM — is **immutable**. A change that would reset the chain requires explicit sign-off.
 - **Review-first.** Every change is logged (what/why/risk/rollback) and reviewed before it lands.
 
-### 8.2 What is staged — spec 42, built and tested, **not applied**
+### 8.2 Governance hardening (spec 42) — applied on testnet
 
-A hardening upgrade exists as an artifact (**512,888 bytes**, sha256 `7694f7f6…d30f1`, `spec_version 42`) with 22 pallet tests, 10 runtime-rehearsal tests and a storage migration. It would change:
+The hardening runtime (**512,888 bytes**, sha256 `7694f7f6…d30f1`, `spec_version 42`) is **live on the testnet**, verified 2026-11-02 at block 236144. Relative to the original committee it added:
 
-| Today (live) | Staged (spec 42) |
+| Before | Now (spec 42, live on testnet) |
 |---|---|
-| 3-member committee | **5 members**, seedable and replaceable (`set_members`, Root-only) |
+| 3-member committee | **5 members**, replaceable via `set_members` (Root-only) |
 | 2-of-3 approvals | **3-of-5** |
 | proposals live forever | **14-day expiry** + pruning, bounded at 64 open proposals |
-| cannot withdraw a proposal | **`cancel(hash)`** at the same 3-of-5 threshold |
-| call data inline (a 500 KB WASM in a public extrinsic) | **preimage proposals** — approve a `blake2_256` code hash, verify before the timelock elapses |
+| inline call data | **preimage proposals** — approve a `blake2_256` code hash |
 | `WeightInfo = ()` (zero weight) | **hand-set per-byte weights** (benchmarked weights remain a TODO) |
 
-**None of it is on chain.** No `set_code` has been submitted, no committee key has been used, and the canonical genesis WASM is untouched. A reader must not conflate the two columns: the live chain is the left one. The artifact, its review checklist and its exact enactment sequence live in `staged/gov-hardening-v1.md`.
+Still absent: **no `cancel`/veto extrinsic**, and no referendum / fast-track / preimage pallet tracks in the runtime. Do not claim governance can reject or recall an approved proposal. The artifact, review checklist and enactment sequence live in `staged/gov-hardening-v1.md`; the mainnet timelock is **3 days**, while testnet uses a **10-block** fast-timelock build.
 
 ---
 
@@ -250,23 +247,22 @@ Operators who prefer to update by hand may: a node whose version falls below `mi
 
 ## 11. Roadmap
 
-- **Shipped and live on testnet:** PoW chain (spec 41, 15 s, 50 GPN/block) with Bitcoin-style per-node rewards; GPU-only, stake-free, work-verified eligibility; per-token escrow, cost-derived pricing, least-ms routing to idle providers, on-chain provider discovery, VRAM/RAM gates; payment channels; shielded spends; the liveness layer; peer discovery; the **public HTTPS AI API** (with a curated, VRAM-gated catalogue in the 0.2.0 line); the **node dashboard, Idle mode and signed auto-update**.
-- **Shipped but not publicly routed:** image generation (on-chain jobs) and the fine-tune/ML providers.
-- **Blocked:** video (LTX) — the encoder exceeds 8 GB of VRAM.
-- **Staged, not applied:** the spec-42 governance hardening (§8.2).
-- **Next:** the public **CRS ceremony**; applying governance hardening; the on-chain **GPU-hour oracle feed** and **input-token metering**; **client-side RTT** (user→nearest node); folding a node's own miner into the **economic auto-switch**; **mainnet** genesis and launch; a **cross-chain bridge** (post-mainnet).
+- **Shipped and live on testnet:** PoW chain (spec 45, 15 s, 50 GPN/block) with Bitcoin-style per-node rewards; GPU-only, stake-free, work-verified eligibility; per-token escrow, cost-derived pricing, least-ms routing to idle providers, on-chain provider discovery, VRAM/RAM gates; payment channels; shielded spends; the liveness layer; peer discovery; the **public HTTPS AI API** (with a curated, VRAM-gated catalogue in the 0.3.11 line); the **node dashboard, Idle mode and signed auto-update**.
+- **Blocked:** video (LTX) — implementation exists but no job has completed on this fleet; the encoder exceeds 8 GB of VRAM and there is no public `/v1/videos` route.
+- **Applied on testnet:** the spec-42 governance hardening (§8.2) — 5-member council, 3-of-5, 14-day expiry, preimage proposals, hand-set weights.
+- **Next:** the public **CRS ceremony**; mainnet governance (3-day timelock); the on-chain **GPU-hour oracle feed**; **client-side RTT** (user→nearest node); **mainnet** genesis and launch; a **cross-chain bridge** (post-mainnet). **Result verification** — any check that a returned completion is correct — is a roadmap item; nothing verifies output today.
 
 ## 12. Current status and honest limitations
 
 | Capability | Status | What that means |
 |---|---|---|
 | Text / LLM inference | **LIVE** | Public HTTPS, OpenAI-compatible, free on testnet |
-| Image generation | **WORKS INTERNALLY** | Completes via on-chain `POST /jobs` (`ImageGeneration`, sd-turbo); **no public `/v1` route** |
+| Image generation | **LIVE (public)** | `POST /v1/images/generations`, sd-turbo on chain-assigned jobs |
 | Video (LTX) | **BLOCKED** | Implemented, never completed — T5-XXL encoder exceeds 8 GB VRAM |
-| Fine-tune / ML | **WORKS INTERNALLY** | Providers ship and are claimable on chain; not publicly routed |
-| GPU-hour price oracle | **GAP** | Feed absent; scheduler runs on hardcoded fallbacks |
-| Input-token metering | **GAP** | Output only |
-| Governance hardening | **STAGED** | Chain is still 3-member / 2-of-3 / no expiry / zero weights |
+| Fine-tune / ML | **LIVE (public)** | `POST /v1/finetunes`; ML inference is internal only |
+| GPU-hour price oracle | **GAP** | Feed absent; the dollar→GPN conversion falls back to $0.15/GPN |
+| Result verification | **NOT IMPLEMENTED** | No output is checked, spot-checked, or made redundant; settlement follows the submitted result hash. Roadmap. |
+| Governance hardening | **APPLIED (testnet)** | 5-member council / 3-of-5 / 10-block testnet timelock; no cancel or referendum track. Bootstrap, not a security guarantee. |
 | Economic auto-switch | **GAP** | Live behaviour is a mine→stop→resume yield, not oracle-driven switching |
 | Fork choice | **GAP** | Longest-chain by height, not most-work (bounded, non-zero risk) |
 
