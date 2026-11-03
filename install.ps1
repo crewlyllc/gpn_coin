@@ -930,12 +930,19 @@ Invoke-Step "create $BinDir and copy the release binaries" {
 }
 Say "binaries installed in $BinDir"
 
+$gpnNode = Join-Path $BinDir 'gpn_node.exe'
+$nodeExe = Join-Path $BinDir 'gpn-node.exe'
+
 # 1b. Windows runtime: the release binaries are Rust MSVC builds and need the
 # Visual C++ runtime. On a machine without it every .exe dies at load with
 # 0xC0000135 (exit -1073741515) and prints NOTHING -- indistinguishable from
 # "the installer did nothing".
 function Get-ExeExitCode {
   param([string]$Exe, [string[]]$ExeArgs = @('key', '--help'))
+  # An empty path used to reach Test-Path and throw: on box 3 (2026-11-03) this
+  # happened because $nodeExe was assigned *after* the VC++ check, so the check
+  # silently did nothing on every install.
+  if ([string]::IsNullOrWhiteSpace($Exe)) { return 0 }
   if (-not (Test-Path $Exe)) { return 0 }
   try {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -986,9 +993,6 @@ if (Test-MissingVCRuntime $nodeExe) {
     Say 'Visual C++ runtime installed'
   }
 }
-
-$gpnNode = Join-Path $BinDir 'gpn_node.exe'
-$nodeExe = Join-Path $BinDir 'gpn-node.exe'
 
 # 2. ollama: hard prerequisite -- the node refuses to start without it.
 Say 'checking ollama (REQUIRED: gpn_node exits 69 without it)'

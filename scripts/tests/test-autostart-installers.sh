@@ -116,6 +116,21 @@ assert_has "$ps1" "http://127.0.0.1:11434/api/tags" "waits on ollama /api/tags"
 assert_has "$ps1" "function Wait-Ollama"            "has an explicit ollama wait loop"
 assert_has "$ps1" "ollama is missing -- installing it"   "installs ollama instead of exiting on a fresh machine"
 assert_has "$ps1" "Test-MissingVCRuntime"                "detects the missing Visual C++ runtime (0xC0000135)"
+# 2026-11-03 box 3: the VC++ check ran before $nodeExe was assigned, so it
+# tested an empty path (Test-Path error) and silently did nothing.
+assert_has "$ps1" "IsNullOrWhiteSpace(\$Exe)"                 "guards an empty exe path before Test-Path"
+python3 - "$ps1" <<'CHECK'
+import sys, re
+s = open(sys.argv[1]).read()
+def pos(pat):
+    m = re.search(pat, s)
+    return m.start() if m else -1
+defs = pos(r"\$nodeExe = Join-Path \$BinDir 'gpn-node.exe'")
+use  = pos(r"Test-MissingVCRuntime \$nodeExe")
+print("ok   exe path is defined before the VC++ check" if 0 <= defs < use else
+      "FAIL exe path is defined AFTER the VC++ check (empty Test-Path)")
+sys.exit(0 if 0 <= defs < use else 1)
+CHECK
 assert_has "$ps1" "Microsoft.VCRedist.2015+.x64"         "installs the VC++ redistributable"
 assert_has "$ps1" "vc_redist.x64.exe"                    "has a direct redist fallback"
 assert_has "$ps1" "exit %KEYRC%"                         "launcher reports the key-generation exit code"
