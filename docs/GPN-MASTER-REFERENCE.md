@@ -300,6 +300,14 @@ design (the tier multiplier), which was **designed but never implemented** (stub
 - **Fee:** `MarketplaceFeeBps = 500 (5%)`; provider gets price − fee.
 - **Providers:** register (attested, min_gflops gate) → accept → start → run (real GPU) →
   submit result → complete → escrow payout. `provider = price − 5% fee`.
+- **"Verified" = attested + capability-gated, NOT output-verified (queue #128).** Attestation proves
+  a real GPU is online with a measured GFLOPS figure; the router's capability gate proves it fits the
+  job and is idle. Neither says the answer is right: `submit_result` records a hash, the job goes
+  `AwaitingVerification → Completed`, and escrow pays on the submission — the pallet has no
+  correctness check and no delivery check. Recourse today is off-chain and reactive: a content-free
+  `POST /report` on the access point (target + category, never prompt/response text) that operators
+  read, plus **denylists**; the reputation/SLA layer in `marketplace-sla-reputation-proposal.md` is a
+  **proposal, not shipped**. Anything adversarial needs result verification (roadmap).
 - **Job-decryption/privacy:** Q&A off-chain; on-chain salted commitments.
 
 ### 6.1 Who runs a job — the routing (access point → scheduler → one provider)

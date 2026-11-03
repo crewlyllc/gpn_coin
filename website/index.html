@@ -257,7 +257,10 @@ mkdir -p ~/gpn &amp;&amp; tar -xzf gpn-linux.tar.gz -C ~/gpn &amp;&amp; cd ~/gpn
         <div class="card">
           <h3><span class="ico" aria-hidden="true">🔒</span> Escrow &amp; settlement</h3>
           <p class="muted mb-0">Funds are escrowed on-chain and released when the provider submits a result
-            hash — settlement follows the submission, not a correctness check. Optional
+            hash — settlement follows the submission, not a correctness check, and there is no delivery
+            check. Recourse is off-chain: a content-free abuse report (<code>POST /report</code>, target +
+            category, never your prompt or the answer) that operators read, plus denylists; reputation is
+            designed, not shipped. Optional
             <b>payment channels</b> lock funds once and settle each job off-chain, so the AI path has
             <b>no per-job block delay</b>.</p>
         </div>
