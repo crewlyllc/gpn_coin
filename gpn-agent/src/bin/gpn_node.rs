@@ -561,9 +561,17 @@ fn run_ensure_wallet() -> i32 {
 }
 
 /// One line of the `--diagnose` screen.
+///
+/// Not every FAIL means "the node cannot start": a shared fleet node key or a
+/// port held by another program is worth saying out loud, but on a
+/// fleet-managed box the first is deliberate and the second may be the running
+/// node itself. `blocking` keeps the two classes apart so the exit code and the
+/// verdict line stay true (item #130).
 struct Check {
     name: &'static str,
     pass: bool,
+    /// Only meaningful when `pass` is false: does this failure prevent a start?
+    blocking: bool,
     detail: String,
     fix: Option<String>,
 }
@@ -573,17 +581,33 @@ impl Check {
         Self {
             name,
             pass: true,
+            blocking: false,
             detail: detail.into(),
             fix: None,
         }
     }
+    /// A FAIL that stops the node from starting.
     fn fail(name: &'static str, detail: impl Into<String>, fix: impl Into<String>) -> Self {
         Self {
             name,
             pass: false,
+            blocking: true,
             detail: detail.into(),
             fix: Some(fix.into()),
         }
+    }
+    /// A FAIL worth reporting that does not prevent a start (advisory).
+    fn advisory(name: &'static str, detail: impl Into<String>, fix: impl Into<String>) -> Self {
+        Self {
+            name,
+            pass: false,
+            blocking: false,
+            detail: detail.into(),
+            fix: Some(fix.into()),
+        }
+    }
+    fn blocks_start(&self) -> bool {
+        !self.pass && self.blocking
     }
 }
 
@@ -625,10 +649,15 @@ fn run_diagnose() -> i32 {
     checks.push(check_disk(&base));
 
     let failed = checks.iter().filter(|c| !c.pass).count();
+    let blocking = checks.iter().filter(|c| c.blocks_start()).count();
     for c in &checks {
         asciiprintln!(
             "  [{}] {:<14} {}",
-            if c.pass { "PASS" } else { "FAIL" },
+            match (c.pass, c.blocking) {
+                (true, _) => "PASS",
+                (false, true) => "FAIL",
+                (false, false) => "WARN",
+            },
             c.name,
             c.detail
         );
@@ -639,17 +668,30 @@ fn run_diagnose() -> i32 {
         }
     }
     asciiprintln!("");
+    let passed = checks.len() - failed;
     if failed == 0 {
         asciiprintln!(
             "  result: all {} checks passed — the node can start.",
             checks.len()
         );
         0
+    } else if blocking == 0 {
+        asciiprintln!(
+            "  result: {passed} passed, {failed} warning(s) — nothing here prevents a start.",
+        );
+        asciiprintln!("          the node will run; fix the warnings above when convenient.");
+        0
     } else {
         asciiprintln!(
-            "  result: {} passed, {failed} FAILED — the node will not start until every FAIL is fixed.",
-            checks.len() - failed
+            "  result: {passed} passed, {failed} FAILED ({blocking} of them prevent a start) — \
+             the node will not start until those are fixed.",
         );
+        if failed > blocking {
+            asciiprintln!(
+                "          the remaining {} warning(s) are advisory and do not block a start.",
+                failed - blocking
+            );
+        }
         1
     }
 }
@@ -731,6 +773,19 @@ fn check_wallet(base: &Path) -> Check {
             ),
         };
     }
+    // A fleet-managed node pays out to an account it was *configured* with —
+    // `gpn_node` exports GPN_PAYOUT_ACCOUNT to its children and `--payout` may
+    // be in GPN_NODE_ARGS — rather than to a local supervisor keystore. That is
+    // a working configuration, not a missing prerequisite (item #130).
+    if let Some((addr, source)) = fleet_payout_account() {
+        return Check::pass(
+            "wallet",
+            format!(
+                "fleet payout {addr} (via {source}; no local keystore — signers come from \
+                 GPN_SIGNER / the per-service env files)"
+            ),
+        );
+    }
     Check::fail(
         "wallet",
         format!("no keystore at {}", keystore.display()),
@@ -738,13 +793,112 @@ fn check_wallet(base: &Path) -> Check {
     )
 }
 
+/// The payout account a fleet-managed node is configured with, if any.
+///
+/// Mirrors the node's own precedence rather than inventing a new one: an
+/// explicit payout env var, then the config file's `account`, then the miner
+/// account / `--payout` / `--account` in `GPN_NODE_ARGS`, and finally an
+/// authority dev flag (`--alice`, …) which *is* the signing identity on a
+/// fleet box. Returns `(ss58, where it came from)`; an unparseable value is
+/// skipped so the caller still reports the real keystore problem rather than a
+/// confusing half-answer.
+fn fleet_payout_account() -> Option<(String, &'static str)> {
+    let account_ok = |raw: &str| gpn_agent::firstrun::ss58_of_account(raw.trim()).ok();
+
+    for (var, label) in [
+        ("GPN_PAYOUT_ACCOUNT", "GPN_PAYOUT_ACCOUNT"),
+        ("GPN_ACCOUNT", "GPN_ACCOUNT"),
+        ("GPN_MINER_ACCOUNT", "GPN_MINER_ACCOUNT"),
+    ] {
+        if let Some(raw) = env_str(var).filter(|s| !s.trim().is_empty()) {
+            if let Some(a) = account_ok(&raw) {
+                return Some((a, label));
+            }
+        }
+    }
+
+    // The config file the node will actually read (`--config` / GPN_CONFIG, else
+    // $GPN_PREFIX/node.toml). A file that fails to parse is ignored here — the
+    // node reports that itself with a much better message.
+    let cfg_path = env_str("GPN_CONFIG").map(PathBuf::from).or_else(|| {
+        let prefix = expand_tilde(&env_str("GPN_PREFIX").unwrap_or_else(|| "~/.gpn".into()));
+        let p = PathBuf::from(prefix).join("node.toml");
+        p.is_file().then_some(p)
+    });
+    if let Some(path) = cfg_path {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(file) = toml::from_str::<FileConfig>(&text) {
+                if let Some(raw) = file.account.as_deref() {
+                    if let Some(a) = account_ok(raw) {
+                        return Some((a, "account in node.toml"));
+                    }
+                }
+            }
+        }
+    }
+
+    let args = env_str("GPN_NODE_ARGS").unwrap_or_default();
+    let toks: Vec<&str> = args.split_whitespace().collect();
+    let mut i = 0;
+    while i < toks.len() {
+        let tok = toks[i];
+        let value = if let Some(v) = tok
+            .strip_prefix("--payout=")
+            .or_else(|| tok.strip_prefix("--account="))
+        {
+            Some(v.to_string())
+        } else if tok == "--payout" || tok == "--account" {
+            i += 1;
+            toks.get(i).map(|v| v.to_string())
+        } else {
+            None
+        };
+        if let Some(v) = value {
+            if let Some(a) = account_ok(&v) {
+                return Some((a, "--payout/--account in GPN_NODE_ARGS"));
+            }
+        }
+        i += 1;
+    }
+
+    // `--alice`, `--bob`, …: the authority's dev URI is the signing identity, so
+    // the payout account is its public key. Only used when nothing explicit was
+    // configured above.
+    for tok in &toks {
+        let Some(name) = tok.strip_prefix("--") else {
+            continue;
+        };
+        let lower = name.to_ascii_lowercase();
+        if !matches!(
+            lower.as_str(),
+            "alice" | "bob" | "charlie" | "dave" | "eve" | "ferdie"
+        ) {
+            continue;
+        }
+        let uri = format!("//{}", {
+            let mut c = lower.chars();
+            match c.next() {
+                Some(f) => f.to_ascii_uppercase().to_string() + c.as_str(),
+                None => continue,
+            }
+        });
+        if let Ok(a) = gpn_agent::firstrun::ss58_of_uri(&uri) {
+            return Some((a, "authority flag in GPN_NODE_ARGS"));
+        }
+    }
+    None
+}
+
 fn check_node_key() -> Check {
     if let Some(k) = env_str("GPN_NODE_KEY").filter(|s| !s.trim().is_empty()) {
         if k.trim().eq_ignore_ascii_case(SHARED_FLEET_NODE_KEY) {
-            return Check::fail(
+            return Check::advisory(
                 "node-key",
-                "GPN_NODE_KEY is the SHARED fleet key — this box will advertise another box's peer id",
-                "gpn-node key generate-node-key --file ~/.gpn/node-key, then set GPN_NODE_KEY_FILE and unset GPN_NODE_KEY",
+                "GPN_NODE_KEY is the shared fleet key — every box using it advertises the SAME \
+                 peer id, so peers cannot tell two boxes apart (deliberate for a single-node \
+                 fleet, wrong the moment a second box joins)",
+                "gpn-node key generate-node-key --file ~/.gpn/node-key, then set GPN_NODE_KEY_FILE \
+                 and unset GPN_NODE_KEY — only if this is not the one designated fleet identity",
             );
         }
         return Check::pass(
@@ -759,10 +913,15 @@ fn check_node_key() -> Check {
     match std::fs::read_to_string(&path) {
         Ok(body) if body.trim().len() >= 32 => {
             if body.trim().eq_ignore_ascii_case(SHARED_FLEET_NODE_KEY) {
-                Check::fail(
+                Check::advisory(
                     "node-key",
-                    format!("{} contains the SHARED fleet key", path.display()),
-                    "delete it and run: gpn-node key generate-node-key --file ~/.gpn/node-key",
+                    format!(
+                        "{} contains the shared fleet key — this box advertises the fleet peer id; \
+                         fine for the designated identity, ambiguous as soon as another box joins",
+                        path.display()
+                    ),
+                    "only for a second box: gpn-node key generate-node-key --file ~/.gpn/node-key \
+                     (and remove the shared copy)",
                 )
             } else {
                 Check::pass("node-key", format!("per-machine key at {}", path.display()))
@@ -825,7 +984,7 @@ fn check_ports() -> Vec<Check> {
             if ours {
                 Check::pass("port", format!("{port} ({label}) held by the running GPN node"))
             } else {
-                Check::fail(
+                Check::advisory(
                     "port",
                     format!("{port} ({label}) is held by another process"),
                     format!(

@@ -1241,14 +1241,24 @@ A failed start used to be silent: the window closed and nothing said why. Now
 fix, writes the same reason to `~/.gpn/last-exit.json`
 (`%USERPROFILE%\.gpn\last-exit.json` on Windows), and — on Linux — logs one
 `gpn-node` line to syslog. `--diagnose` re-runs every prerequisite and prints
-one PASS/FAIL screen:
+one screen with a fix per line:
+
+* `[PASS]` — this prerequisite is satisfied.
+* `[FAIL]` — **prevents a start**. The node will not run until it is fixed.
+* `[WARN]` — worth knowing, but **the node starts anyway** (a shared fleet node
+  key on the box that *is* the designated fleet identity, or a port held by the
+  node that is already running).
 
 ```bash
-./gpn_node --diagnose          # exit 0 only when every check passes
+./gpn_node --diagnose          # exit 0 unless a [FAIL] is present
 ```
 ```powershell
 gpn_node.exe --diagnose
 ```
+
+The verdict line separates the two classes — `N passed, M FAILED (K of them
+prevent a start)` — and the exit code is **1 only when a `[FAIL]` exists**. A
+screen of WARNs on a healthy fleet box is normal and exits **0**.
 
 | Symptom | What `--diagnose` says | The fix |
 |---|---|---|
@@ -1257,9 +1267,10 @@ gpn_node.exe --diagnose
 | Ollama is up but the node still refuses | `ollama` FAIL: serving, **no model present** | `ollama pull llama3.2:1b` (a node with no model cannot serve LLM jobs). |
 | `FATAL: … refusing to start`, exit **3** | `wallet` FAIL: keystore unusable / address does not match its secret | Restore `keystore.json` from backup. Only if you accept a **new payout account**: delete it on purpose and run `gpn_node --ensure-wallet`. |
 | `no keystore`, wallet prompt on a headless box | `wallet` FAIL: no keystore at `…/keystore.json` | `gpn_node --ensure-wallet` — creates this machine's identity without a TTY. |
-| Two boxes fight over the same peer id | `node-key` FAIL: the **shared fleet key** | `gpn-node key generate-node-key --file ~/.gpn/node-key`, set `GPN_NODE_KEY_FILE` to it, unset `GPN_NODE_KEY`, restart. Never copy a node key between machines. |
+| Fleet box: wallet FAIL even though it pays out fine | `wallet` **PASS**: `fleet payout 5… (via GPN_PAYOUT_ACCOUNT / GPN_ACCOUNT / GPN_MINER_ACCOUNT / --payout / an authority flag)` | Nothing to fix — a fleet-managed node pays to a **configured** account (`GPN_PAYOUT_ACCOUNT`, `GPN_ACCOUNT`, `GPN_MINER_ACCOUNT`, `--payout`/`--account` in `GPN_NODE_ARGS`, an `--alice`-style authority flag, or `account` in `node.toml`) and signs with `GPN_SIGNER` / the per-service env files; it needs no local keystore. The check now says so instead of calling it missing. |
+| Two boxes fight over the same peer id | `node-key` **WARN**: `contains the shared fleet key` | Only on a **second** box: `gpn-node key generate-node-key --file ~/.gpn/node-key`, set `GPN_NODE_KEY_FILE` to it, unset `GPN_NODE_KEY`, restart. On the one box that *is* the fleet identity the shared key is deliberate — the node starts, it just cannot be told apart from another box that copied it. Never copy a node key between machines. |
 | `node=down(not dialable)`, exit **78** | usually all PASS (dialability is no longer a gate by default) | Forward TCP `30333`; see [Make your node dialable](#make-your-node-dialable). `GPN_REQUIRE_BACKBONE=1` restores the hard gate. |
-| Node dies with a port error | `port` FAIL: e.g. `9944 (rpc) is held by another process` | Stop the other program, or move this node with `GPN_RPC_PORT` / `GPN_LISTEN` / `GPN_GUI_LISTEN`. |
+| Node dies with a port error | `port` **WARN**: e.g. `9944 (rpc) is held by another process` | Stop the other program, or move this node with `GPN_RPC_PORT` / `GPN_LISTEN` / `GPN_GUI_LISTEN`. A port held by the node that is **already running** is reported PASS (`held by the running GPN node`); a port held by something else is a warning, because only you can tell whether that program belongs there. |
 | Chain never syncs; peers reject us | `chain-spec` FAIL: genesis does not match the pinned hash | Delete the spec file and re-run `gpn_node` (it re-fetches the verified spec). Never hand-edit `genesis`. |
 | Chain halts, writes fail | `disk` FAIL: below the **10 %** floor | Free space on the filesystem holding the chain DB / models. |
 

@@ -215,8 +215,23 @@ Both installers now set this up, and both can undo it in one command.</p>
 <td><code>powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall</code></td>
 <td><code>./uninstall.sh --remove-autostart</code></td>
 </tr>
+<tr>
+<td>verify</td>
+<td><code>powershell -File .\install.ps1 -Verify</code> (run → up → end → Ready → run → up)</td>
+<td><code>scripts/gpn-autostart.sh verify</code></td>
+</tr>
 </tbody>
 </table>
+<p>Both installers can prove the property instead of asserting it:</p>
+<ul>
+<li><strong>Linux</strong> — <code>scripts/gpn-autostart.sh verify</code> checks that
+  <code>gpn-node.service</code> is <code>enabled</code>, that linger is <code>yes</code>, then stops and starts
+  the unit and confirms it returns to <code>active</code> with no other action.</li>
+<li><strong>Windows</strong> — <code>install.ps1 -Verify</code> runs the task, waits for the node to
+  answer on <code>127.0.0.1:9944</code>/<code>:8099</code>, ends it, checks the task is back to
+  <code>Ready</code>, runs it again, and waits for the node to come up a second time.
+  (<code>-WhatIf</code> prints the sequence without touching the machine.)</li>
+</ul>
 <p><code>loginctl enable-linger</code> is not optional on a headless box: without it a
 <code>systemctl --user</code> service only starts when you log in, and nobody ever logs
 into a mining rig. <code>./install.sh --no-autostart</code> skips the whole thing.</p>
@@ -874,14 +889,63 @@ recovers), never every 10 minutes.</p>
 <ul>
 <li><code>100.64.0.0/10</code> → <strong>carrier-grade NAT</strong>. Your ISP does not give you a public
   IPv4; no port forward can work. Options: ask the ISP for a public/static IP,
-  use IPv6 if your ISP routes a public prefix, or run the node on a cheap VPS.</li>
+  use IPv6 if your ISP routes a public prefix (see
+  <a href="#5-ipv6--the-answer-to-cgnat">§5</a>), or run the node on a cheap VPS.</li>
 <li>A public WAN address that differs from what a "what is my IP" site reports →
   also CGNAT (double NAT).</li>
 </ul>
 <p>CGNAT is <strong>not</strong> an error. The node logs the notice once, cannot be a backbone
 member, and keeps syncing, mining and serving jobs as a non-discoverable
 participant.</p>
-<h3 id="5-tell-the-node-its-public-address-only-if-detection-fails">5. Tell the node its public address (only if detection fails)</h3>
+<h3 id="5-ipv6-the-answer-to-cgnat">5. IPv6 — the answer to CGNAT</h3>
+<p>If your line is CGNATed (or you just want a second, NAT-free path), IPv6 is the
+clean way to become dialable. There is no address translation on IPv6: every
+device can hold a globally routable address, so the <strong>only</strong> external gate is
+the router firewall, and that needs a <strong>pinhole</strong>, not a port forward.</p>
+<p><strong>1. Check that your ISP routes IPv6.</strong> On the node host:</p>
+<pre><code class="language-bash">curl -6 ifconfig.co     # must print a global address (2000::/3)
+</code></pre>
+<p>If this fails or prints nothing, your ISP does not route IPv6 to you and IPv6
+cannot make this node dialable (ask the ISP for a prefix, or use a VPS).</p>
+<p><strong>2. Find the host's global address.</strong></p>
+<pre><code class="language-bash">ip -6 addr show scope global     # Linux
+# macOS: ifconfig | grep inet6
+# Windows: ipconfig /all  (look for a non-fe80 address)
+</code></pre>
+<p>You want a <code>2000::/3</code> address. Link-local (<code>fe80::/10</code>), unique-local
+(<code>fc00::/7</code>) and IPv4-mapped (<code>::ffff:a.b.c.d</code>) addresses are <strong>not</strong> dialable
+and the node ignores them.</p>
+<p><strong>3. Add a router pinhole (not a port forward).</strong> In your router's IPv6
+firewall settings, allow <strong>inbound TCP 30333</strong> to that host's global address
+(or to its interface identifier / MAC, depending on the router). There is no
+NAT and no port rewriting on IPv6, so the external port equals the listen port.
+UPnP-IGD and NAT-PMP do <strong>not</strong> open IPv6 firewall pinholes — this is a manual
+router rule.</p>
+<p><strong>4. Allow 30333 on the host firewall too</strong> — same as the IPv4 instructions
+above.</p>
+<p><strong>5. Optional, for a stable endpoint:</strong> give the host a stable interface
+identifier, or pin its address in the router's DHCPv6 / static lease, so a
+renumber keeps the same host suffix.</p>
+<p>The node detects a global IPv6 address automatically, listens on
+<code>/ip6/::/tcp/30333</code> next to the IPv4 listener, and publishes
+<code>/ip6/&lt;addr&gt;/tcp/30333</code> <strong>in addition to</strong> the IPv4 entry. Ask it to use a
+specific endpoint with:</p>
+<pre><code class="language-toml">public_addr = &quot;/ip6/2001:db8:1::10/tcp/30333&quot;
+# or a name you control (must resolve to global unicast addresses):
+# public_addr = &quot;/dns6/node.example.com/tcp/30333&quot;
+</code></pre>
+<p><strong>Dialable is still required.</strong> A global address proves only <em>addressing</em>, not
+<em>reachability</em>: a host with a global address behind a default-deny firewall is
+<strong>not</strong> dialable and stays in non-discoverable mode, exactly as with IPv4. The
+node requires the same evidence on v6 (a peer that dialed it over v6, a peer's
+observation of the address, STUN over IPv6, or a TCP probe).</p>
+<p><strong>Rotating prefixes.</strong> Residential prefixes (often /56 or /64) can change when
+the ISP reconnects. The node re-checks every 10 minutes and, when the /64
+changes, republishes the new address and drops the stale one (once). Until a
+peer observes the new address, the old published endpoint is kept and a warning
+is logged — so a rotation can leave a dead address advertised for up to one
+re-check interval. A routed, stable prefix avoids this entirely.</p>
+<h3 id="6-tell-the-node-its-public-address-only-if-detection-fails">6. Tell the node its public address (only if detection fails)</h3>
 <p>Auto-detection covers most hosts. Set it explicitly when the router rewrites
 ports or detection is ambiguous:</p>
 <pre><code class="language-toml"># ~/.gpn/node.toml
@@ -894,7 +958,7 @@ public_addr = &quot;/ip4/203.0.113.10/tcp/30333&quot;
 forwarded, not necessarily the listen port. On a VPS with a directly bound
 public IP this is usually unnecessary, but setting it is harmless and makes the
 announced endpoint exact.</p>
-<h3 id="6-verify-from-outside">6. Verify from outside</h3>
+<h3 id="7-verify-from-outside">7. Verify from outside</h3>
 <p>The node re-checks every 10 minutes and prints <code>NOW DIALABLE</code> once the forward
 works — no restart is needed. You can also confirm the forward yourself:</p>
 <ul>
@@ -1298,6 +1362,108 @@ serving, and therefore in the live directory. Only multiaddrs that carry a
 an HTTP <code>status_url</code> are listed under <code>nodes[]</code> for tooling but are not dialled.
 The hardcoded seed set changes only with a release (or a <code>network.json</code>
 update) — being in the live directory does not compile you into clients.</p>
+<h2 id="the-node-wont-start-run-diagnose-first">The node won't start — run <code>--diagnose</code> first</h2>
+<p>A failed start used to be silent: the window closed and nothing said why. Now
+<strong>every</strong> fatal exit prints a boxed block with the failing check and the exact
+fix, writes the same reason to <code>~/.gpn/last-exit.json</code>
+(<code>%USERPROFILE%\.gpn\last-exit.json</code> on Windows), and — on Linux — logs one
+<code>gpn-node</code> line to syslog. <code>--diagnose</code> re-runs every prerequisite and prints
+one screen with a fix per line:</p>
+<ul>
+<li><code>[PASS]</code> — this prerequisite is satisfied.</li>
+<li><code>[FAIL]</code> — <strong>prevents a start</strong>. The node will not run until it is fixed.</li>
+<li><code>[WARN]</code> — worth knowing, but <strong>the node starts anyway</strong> (a shared fleet node
+  key on the box that <em>is</em> the designated fleet identity, or a port held by the
+  node that is already running).</li>
+</ul>
+<pre><code class="language-bash">./gpn_node --diagnose          # exit 0 unless a [FAIL] is present
+</code></pre>
+<pre><code class="language-powershell">gpn_node.exe --diagnose
+</code></pre>
+<p>The verdict line separates the two classes — <code>N passed, M FAILED (K of them
+prevent a start)</code> — and the exit code is <strong>1 only when a <code>[FAIL]</code> exists</strong>. A
+screen of WARNs on a healthy fleet box is normal and exits <strong>0</strong>.</p>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>What <code>--diagnose</code> says</th>
+<th>The fix</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Window closes instantly, <strong>no output at all</strong> on Windows</td>
+<td><code>visual-c++</code> FAIL: <code>vcruntime140.dll</code> / <code>msvcp140.dll</code> missing</td>
+<td><code>winget install --id Microsoft.VCRedist.2015+.x64 -e</code> — the release binaries are Rust MSVC builds and cannot load without it (<code>0xC0000135</code>). The installer now detects this and installs it; the launcher reports it if a node is started by hand.</td>
+</tr>
+<tr>
+<td><code>node=down(no ollama)</code>, exit <strong>69</strong></td>
+<td><code>ollama</code> FAIL: not reachable on <code>127.0.0.1:11434</code></td>
+<td><code>./gpn_node --setup</code> (Windows: <code>gpn_node.exe --setup</code>) installs ollama, starts <code>ollama serve</code>, and pulls <code>llama3.2:1b</code>. Manual: <code>winget install Ollama.Ollama</code> / <code>scripts/install-ollama.sh</code>, then <code>ollama serve &amp;&amp; ollama pull llama3.2:1b</code>.</td>
+</tr>
+<tr>
+<td>Ollama is up but the node still refuses</td>
+<td><code>ollama</code> FAIL: serving, <strong>no model present</strong></td>
+<td><code>ollama pull llama3.2:1b</code> (a node with no model cannot serve LLM jobs).</td>
+</tr>
+<tr>
+<td><code>FATAL: … refusing to start</code>, exit <strong>3</strong></td>
+<td><code>wallet</code> FAIL: keystore unusable / address does not match its secret</td>
+<td>Restore <code>keystore.json</code> from backup. Only if you accept a <strong>new payout account</strong>: delete it on purpose and run <code>gpn_node --ensure-wallet</code>.</td>
+</tr>
+<tr>
+<td><code>no keystore</code>, wallet prompt on a headless box</td>
+<td><code>wallet</code> FAIL: no keystore at <code>…/keystore.json</code></td>
+<td><code>gpn_node --ensure-wallet</code> — creates this machine's identity without a TTY.</td>
+</tr>
+<tr>
+<td>Fleet box: wallet FAIL even though it pays out fine</td>
+<td><code>wallet</code> <strong>PASS</strong>: <code>fleet payout 5… (via GPN_PAYOUT_ACCOUNT / GPN_ACCOUNT / GPN_MINER_ACCOUNT / --payout / an authority flag)</code></td>
+<td>Nothing to fix — a fleet-managed node pays to a <strong>configured</strong> account (<code>GPN_PAYOUT_ACCOUNT</code>, <code>GPN_ACCOUNT</code>, <code>GPN_MINER_ACCOUNT</code>, <code>--payout</code>/<code>--account</code> in <code>GPN_NODE_ARGS</code>, an <code>--alice</code>-style authority flag, or <code>account</code> in <code>node.toml</code>) and signs with <code>GPN_SIGNER</code> / the per-service env files; it needs no local keystore. The check now says so instead of calling it missing.</td>
+</tr>
+<tr>
+<td>Two boxes fight over the same peer id</td>
+<td><code>node-key</code> <strong>WARN</strong>: <code>contains the shared fleet key</code></td>
+<td>Only on a <strong>second</strong> box: <code>gpn-node key generate-node-key --file ~/.gpn/node-key</code>, set <code>GPN_NODE_KEY_FILE</code> to it, unset <code>GPN_NODE_KEY</code>, restart. On the one box that <em>is</em> the fleet identity the shared key is deliberate — the node starts, it just cannot be told apart from another box that copied it. Never copy a node key between machines.</td>
+</tr>
+<tr>
+<td><code>node=down(not dialable)</code>, exit <strong>78</strong></td>
+<td>usually all PASS (dialability is no longer a gate by default)</td>
+<td>Forward TCP <code>30333</code>; see <a href="#make-your-node-dialable">Make your node dialable</a>. <code>GPN_REQUIRE_BACKBONE=1</code> restores the hard gate.</td>
+</tr>
+<tr>
+<td>Node dies with a port error</td>
+<td><code>port</code> <strong>WARN</strong>: e.g. <code>9944 (rpc) is held by another process</code></td>
+<td>Stop the other program, or move this node with <code>GPN_RPC_PORT</code> / <code>GPN_LISTEN</code> / <code>GPN_GUI_LISTEN</code>. A port held by the node that is <strong>already running</strong> is reported PASS (<code>held by the running GPN node</code>); a port held by something else is a warning, because only you can tell whether that program belongs there.</td>
+</tr>
+<tr>
+<td>Chain never syncs; peers reject us</td>
+<td><code>chain-spec</code> FAIL: genesis does not match the pinned hash</td>
+<td>Delete the spec file and re-run <code>gpn_node</code> (it re-fetches the verified spec). Never hand-edit <code>genesis</code>.</td>
+</tr>
+<tr>
+<td>Chain halts, writes fail</td>
+<td><code>disk</code> FAIL: below the <strong>10 %</strong> floor</td>
+<td>Free space on the filesystem holding the chain DB / models.</td>
+</tr>
+</tbody>
+</table>
+<p>Every fatal exit is recorded, one JSON object per line, in
+<code>~/.gpn/last-exit.json</code>:</p>
+<pre><code class="language-json">{&quot;ts&quot;:&quot;2026-11-03T17:06:00Z&quot;,&quot;ts_unix&quot;:1762189560,&quot;code&quot;:69,&quot;kind&quot;:&quot;no-ollama&quot;,
+ &quot;detail&quot;:&quot;ollama is REQUIRED and is not reachable at http://127.0.0.1:11434 — no response&quot;,
+ &quot;remediation&quot;:&quot;gpn_node --setup …&quot;,&quot;version&quot;:&quot;0.3.12&quot;,&quot;os&quot;:&quot;linux&quot;,&quot;pid&quot;:4242}
+</code></pre>
+<p>The <strong>Windows launcher</strong> reads that file when the supervisor exits non-zero and
+shows the reason in a <strong>message box</strong> (a scheduled task runs hidden, so a
+dialog is the only channel the operator sees), writes the same text to
+<code>C:\gpn\node.log</code>, and stops restarting after the <strong>same failure 3 times in 10
+minutes</strong> — an endless crash loop is its own silent failure. On <strong>Linux</strong>, the
+<code>gpn-node.service</code> unit carries <code>OnFailure=gpn-notify@%n.service</code>: it logs a
+clear <code>gpn-node</code> line and, only when a desktop session exists
+(<code>XDG_SESSION_ID</code> / <code>DISPLAY</code> / <code>WAYLAND_DISPLAY</code>), fires <code>notify-send</code>. It
+never fails on a headless box.</p>
 <h2 id="ollama-is-a-required-component-bundled-installer-hard-gate">Ollama is a REQUIRED component (bundled installer + hard gate)</h2>
 <p>A GPN node is <strong>always miner AND AI provider</strong>. Ollama is therefore a
 <strong>first-class, required component</strong>, not an optional extra:</p>
@@ -2600,7 +2766,7 @@ crash, an OOM in the AI stack, or a wedged inference never takes the chain node
 down — the supervisor restarts just that child. Folding everything into one
 binary is tracked separately (task #26, deferred).</p>
     </article>
-    <p class="doc-updated small muted">Last generated 2026-11-02 from the project documentation set.</p>
+    <p class="doc-updated small muted">Last generated 2026-11-03 from the project documentation set.</p>
   </div>
 </main>
 

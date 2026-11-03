@@ -41,6 +41,8 @@ fn clean(cmd: &mut Command, dir: &Path) {
         "GPN_DISK_MIN_PERCENT",
         "GPN_REQUIRE_OLLAMA",
         "GPN_ENSURE_WALLET",
+        "GPN_PAYOUT_ACCOUNT",
+        "GPN_NODE_ARGS",
     ] {
         cmd.env_remove(k);
     }
@@ -124,10 +126,77 @@ fn diagnose_fails_loudly_with_a_fix_for_every_missing_prerequisite() {
     ] {
         assert!(t.contains(needle), "missing {needle:?} in:\n{t}");
     }
-    assert!(
-        t.contains("the node will not start until every FAIL is fixed"),
-        "{t}"
+    assert!(t.contains("prevent a start"), "{t}");
+}
+
+/// Item #130: a FAIL that does not stop the node from starting must not claim
+/// it does, and must not change the exit code. On a fleet-managed host the
+/// shared node key is deliberate and a held port may be the running node.
+#[test]
+fn diagnose_reports_advisory_fails_without_claiming_the_node_cannot_start() {
+    let dir = temp_dir("advisory");
+    let port = serve_once(r#"{"models":[{"name":"llama3.2:1b"}]}"#);
+
+    // Every blocking prerequisite satisfied: a real keystore, ollama serving,
+    // free ports, a good spec and a usable disk floor.
+    let ks = gpn_agent::firstrun::generate_keystore();
+    let ks_path = dir.join("keystore.json");
+    gpn_agent::firstrun::write_keystore(&ks_path, &ks).unwrap();
+
+    // …but the node key is the shared fleet key, which is advisory.
+    let key_path = dir.join("node-key");
+    std::fs::write(
+        &key_path,
+        "4ecac9dd3ce8f61ac2216dec9c366fb490a0d946db37947e05a4dc4de6ab543c",
+    )
+    .unwrap();
+
+    let out = diagnose(
+        &dir,
+        &[
+            ("GPN_OLLAMA", format!("http://127.0.0.1:{port}")),
+            ("GPN_SIGNER_FILE", ks_path.to_string_lossy().into_owned()),
+            ("GPN_NODE_KEY_FILE", key_path.to_string_lossy().into_owned()),
+            ("GPN_CHAIN", "testnet".to_string()),
+            ("GPN_DISK_MIN_PERCENT", "0".to_string()),
+        ],
     );
+    let t = text(&out);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "advisory-only FAILs must exit 0:\n{t}"
+    );
+    assert!(t.contains("[WARN] node-key"), "{t}");
+    assert!(!t.contains("[FAIL]"), "{t}");
+    assert!(t.contains("nothing here prevents a start"), "{t}");
+    assert!(!t.contains("will not start until those are fixed"), "{t}");
+}
+
+/// A fleet-managed node pays out to a configured account, not a local keystore
+/// (#130): `GPN_PAYOUT_ACCOUNT` must read as a pass, not a missing wallet.
+#[test]
+fn diagnose_accepts_a_fleet_payout_account_as_a_wallet() {
+    let dir = temp_dir("payout");
+    let port = serve_once(r#"{"models":[{"name":"llama3.2:1b"}]}"#);
+    let ks = gpn_agent::firstrun::generate_keystore();
+    let key_path = dir.join("node-key");
+    std::fs::write(&key_path, "b".repeat(64)).unwrap();
+
+    let out = diagnose(
+        &dir,
+        &[
+            ("GPN_OLLAMA", format!("http://127.0.0.1:{port}")),
+            ("GPN_NODE_KEY_FILE", key_path.to_string_lossy().into_owned()),
+            ("GPN_PAYOUT_ACCOUNT", ks.address.clone()),
+            ("GPN_CHAIN", "testnet".to_string()),
+            ("GPN_DISK_MIN_PERCENT", "0".to_string()),
+        ],
+    );
+    let t = text(&out);
+    assert_eq!(out.status.code(), Some(0), "{t}");
+    assert!(t.contains("[PASS] wallet"), "{t}");
+    assert!(t.contains("fleet payout"), "{t}");
 }
 
 #[test]
