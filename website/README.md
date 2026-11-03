@@ -13,7 +13,7 @@ no build step at serve time.
 | `deploy.html` | Step-by-step: run a node (mine + serve), how serving works, an access point, the Windows path, config and ports. |
 | `buy.html` | Honest status: testnet today (faucet / mining / job earnings), the mainnet listing plan, fair launch + treasury/vesting + halving, disclaimer. |
 | `ai.html` | The AI marketplace: OpenAI-compatible chat + job API, models, pricing, and a **“Try it”** widget (see the mixed-content note). |
-| `access-points.html` | Known access points and the three public testnet nodes (1 Linux bootnode + 2 Windows full nodes). |
+| `access-points.html` | Known access points and the public testnet seed nodes (a Linux bootnode — its DNS name and IP literal are the same node — plus a Windows full node). |
 | `nodes.html` | **Live node directory** — fetches `/seeds.json` client-side and renders the network's own directory (seeds + live providers, multiaddrs, peer IDs, endpoints), auto-refreshing every 60 s. Canonical URL is `/nodes`. |
 | `404.html` | Static not-found page (Cloudflare Pages serves it automatically per directory; root copy). |
 | `docs/` | **Generated** static docs pages — see below. |

@@ -13,10 +13,10 @@
 <meta name="twitter:card" content="summary_large_image" />
 <meta name="twitter:image" content="https://gpncoin.ai/assets/og.png" />
 <meta property="og:title" content="GPN Access Points — public entry list" />
-<meta property="og:description" content="Known GPN access points and the three public testnet nodes (one Linux bootnode, two Windows full nodes)." />
+<meta property="og:description" content="Known GPN access points and the public testnet seed nodes (a Linux bootnode, its DNS name and IP literal being one node, plus a Windows full node)." />
 <meta property="og:type" content="article" />
 <meta name="twitter:title" content="GPN Access Points — public entry list" />
-<meta name="twitter:description" content="Known GPN access points and the three public testnet nodes." />
+<meta name="twitter:description" content="Known GPN access points and the public testnet seed nodes." />
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237c6cff'/%3E%3Ctext x='16' y='22' font-size='16' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%2307090f'%3EG%3C/text%3E%3C/svg%3E" />
 <link rel="stylesheet" href="assets/style.css" />
 </head>
@@ -106,7 +106,12 @@
           <!-- Rendered from /seeds.json (see the script at the end of this page).
                These rows are the offline fallback and must stay identical to
                network.json's `bootnodes`; website/tests/access-points.test.js
-               fails the build if they drift. -->
+               fails the build if they drift.
+               NOTE: this is a table of DIAL ENDPOINTS, not a node count. Row 1
+               (DNS) and row 2 (IP literal) are the same machine and the same
+               peer id — one bootnode, two addresses. Live seed rows in
+               `/api/network` and `/seeds.json` are deduped by peer id, so the
+               API reports 2 seeds for these 3 endpoints. -->
           <tbody id="bootnode-rows">
             <tr>
               <td><b>gpn-testnet.duckdns.org:30333</b><br><span class="small muted">DNS name</span></td>
@@ -115,7 +120,7 @@
               <td><span class="chip up"><span class="d" aria-hidden="true"></span> Live</span></td>
             </tr>
             <tr>
-              <td><b>142.129.54.88:30333</b><br><span class="small muted">IP literal</span></td>
+              <td><b>142.129.54.88:30333</b><br><span class="small muted">IP literal &mdash; same node as the DNS name above</span></td>
               <td><code>12D3KooWAFt…</code></td>
               <td><code>/ip4/142.129.54.88/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo</code></td>
               <td><span class="chip up"><span class="d" aria-hidden="true"></span> Live</span></td>
@@ -128,7 +133,7 @@
             </tr>
           </tbody>
         </table>
-        <p class="muted" id="bootnode-source" style="margin:14px 0 0">Source of truth: <a href="/seeds.json" rel="noopener">seeds.json</a> — read at page load; the rows above are the last-known fallback from <code>network.json</code>.</p>
+        <p class="muted" id="bootnode-source" style="margin:14px 0 0">Three dial addresses, <b>two machines</b> and two peer ids: the bootnode's DNS name and IP literal are one node. Source of truth: <a href="/seeds.json" rel="noopener">seeds.json</a> — read at page load; the rows above are the last-known fallback from <code>network.json</code>.</p>
       </div>
 
       <div class="grid cols-2" style="margin-top:22px">

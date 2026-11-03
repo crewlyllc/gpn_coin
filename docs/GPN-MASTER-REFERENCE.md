@@ -725,6 +725,10 @@ survive a membership change; no preimage deposits; O(64) prune scan).
   `https://gpncoin.ai/api/*` → AP.
 - **Bootnode (live seeds, 2026-11-02):** peer id `12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo`;
   `/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooW…` and `/ip4/142.129.54.88/tcp/30333/p2p/12D3KooW…`.
+  **Those two multiaddrs are one machine and one identity** (`gpn-testnet.duckdns.org` resolves to
+  `142.129.54.88`, this host's own WAN address) — they are a DNS route and an IP fallback, not two
+  nodes. `/seeds.json` consumers dedupe by peer id (`network_directory::seeds`), so `/api/network`
+  reports **2 seed rows** for the 3 published dial addresses. Do not count the endpoints as nodes.
 - **Node #2 (Windows full node):** peer `12D3KooWFqZ2msY…` at
   `/ip4/23.241.109.255/tcp/30333/p2p/12D3KooW…`. (The old `12D3KooWRWv4…` on `:30334` is the retired
   Windows identity and must not be published.) Runs the **`gpn_node` supervisor** (mine + serve).
