@@ -88,6 +88,7 @@ $Uninstall  = $false
 $WhatIf     = $false
 $NoStart    = $false
 $NoOllamaInstall = $false
+$RunHighest = $false
 $Verify     = $false
 $UpdateTaskOnly = $false
 $InstallDir = 'C:\gpn'
@@ -102,6 +103,7 @@ for ($i = 0; $i -lt $args.Count; $i++) {
     '^-{1,2}what ?if$'                     { $WhatIf    = $true }
     '^-{1,2}no-?start$'                    { $NoStart   = $true }
     '^-{1,2}no-?ollama-?install$'          { $NoOllamaInstall = $true }
+    '^-{1,2}run-?highest$'               { $RunHighest = $true }
     '^-{1,2}(verify|v)$'                   { $Verify = $true }
     '^-{1,2}update-?task-?only$'           { $UpdateTaskOnly = $true }
     '^-{1,2}install-?dir[=:](.+)$'         { $InstallDir = $Matches[1] }
@@ -782,31 +784,39 @@ function Verify-NodeTask {
 
 # ------------------------------------------------------------------ tasks ----
 function Register-NodeTask {
-  Invoke-Step "schtasks /Create /TN $NodeTask /TR `"cmd /c $NodeCmd`" /SC ONLOGON /RL HIGHEST /F" {
-    $rc = Invoke-Schtasks @('/Create', '/TN', $NodeTask, '/TR', "cmd /c $NodeCmd", '/SC', 'ONLOGON', '/RL', 'HIGHEST', '/F')
-    if ($rc -ne 0) {
-      # /RL HIGHEST asks for elevation, so creating the task from a NON-elevated
-      # shell fails with rc=1 "Access is denied" even when no task exists yet
-      # (box 3, 2026-11-03). The node needs no admin rights -- it binds high
-      # ports only -- so retry at normal privilege instead of failing the install.
-      $rc2 = Invoke-Schtasks @('/Create', '/TN', $NodeTask, '/TR', "cmd /c $NodeCmd", '/SC', 'ONLOGON', '/F')
-      if ($rc2 -eq 0) {
-        Warn "created $NodeTask without highest privileges (no elevation available) -- the node needs none"
-        $rc = 0
-      }
+  # Default: create the task at NORMAL privilege. The node binds only high ports
+  # (30333/9944/8093/8094/8099), so it needs no admin rights -- and asking for
+  # them (/RL HIGHEST) makes the create fail with rc=1 "Access is denied" from a
+  # non-elevated shell, which is what broke the stock install on box 3. Elevated
+  # installs used to also produce a task owned by Administrator that never fires
+  # for the user who actually logs in. Opt in with -RunHighest if you want it.
+  $createArgs = @('/Create', '/TN', $NodeTask, '/TR', "cmd /c $NodeCmd", '/SC', 'ONLOGON', '/F')
+  if ($RunHighest) { $createArgs += @('/RL', 'HIGHEST') }
+  Invoke-Step "schtasks /Create /TN $NodeTask (/SC ONLOGON$(if ($RunHighest) { ' /RL HIGHEST' }))" {
+    # A leftover task owned by ANOTHER account cannot be replaced by this one.
+    # Try to clear it first (works when it is ours or we are elevated).
+    $q = (& cmd /c "schtasks /Query /TN $NodeTask /FO LIST /V 2>nul") -join "`n"
+    $owner = ''
+    if ($q -match 'Run As User:\s*(\S+)') { $owner = $Matches[1] }
+    if ($owner -and ($owner -notmatch [regex]::Escape($env:USERNAME))) {
+      [void](Invoke-Schtasks @('/Delete', '/TN', $NodeTask, '/F'))
+    }
+
+    $rc = Invoke-Schtasks $createArgs
+    if ($rc -ne 0 -and $RunHighest) {
+      # Elevation was requested but is unavailable: the node does not need it.
+      Warn "/RL HIGHEST was refused (no elevation) -- retrying at normal privilege"
+      $plain = @('/Create', '/TN', $NodeTask, '/TR', "cmd /c $NodeCmd", '/SC', 'ONLOGON', '/F')
+      $rc = Invoke-Schtasks $plain
     }
     if ($rc -ne 0) {
-      # rc=1 here is almost always "Access is denied": the task already exists and
-      # was registered by a DIFFERENT account (e.g. an earlier install run from an
-      # elevated prompt as Administrator). A standard user cannot replace it, and
-      # a bare "failed (rc=1)" tells nobody that. Diagnose, then say what to do.
-      $owner = ''
-      $q = (& cmd /c "schtasks /Query /TN $NodeTask /FO LIST /V 2>nul") -join "`n"
-      if ($q -match 'Run As User:\s*(\S+)') { $owner = $Matches[1] }
-      if ($owner -and ($owner -notmatch [regex]::Escape($env:USERNAME))) {
-        throw ("$NodeTask already exists and is owned by '$owner', not '$env:USERNAME' -- " +
-               "an earlier install ran elevated. Fix it in an ADMIN prompt: " +
-               "schtasks /Delete /TN $NodeTask /F   then re-run this installer (non-elevated).")
+      $q2 = (& cmd /c "schtasks /Query /TN $NodeTask /FO LIST /V 2>nul") -join "`n"
+      $owner2 = ''
+      if ($q2 -match 'Run As User:\s*(\S+)') { $owner2 = $Matches[1] }
+      if ($owner2 -and ($owner2 -notmatch [regex]::Escape($env:USERNAME))) {
+        throw ("$NodeTask exists and belongs to '$owner2', not '$env:USERNAME'. " +
+               "Open an ADMIN prompt once and run:  schtasks /Delete /TN $NodeTask /F  " +
+               "then run this installer again as $env:USERNAME (NOT elevated).")
       }
       throw "schtasks /Create $NodeTask failed (rc=$rc)"
     }

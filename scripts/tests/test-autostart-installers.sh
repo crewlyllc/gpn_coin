@@ -122,11 +122,14 @@ assert_has "$ps1" "IsNullOrWhiteSpace(\$Exe)"                 "guards an empty e
 # 2026-11-03 box 3: re-running the installer as a normal user hit a GPN-Node task
 # created earlier by Administrator -> schtasks rc=1 "Access is denied" with no
 # explanation. It must name the owner and the fix.
-assert_has "$ps1" "is owned by"                          "explains when GPN-Node belongs to another account"
+assert_has "$ps1" "exists and belongs to"                  "explains when GPN-Node belongs to another account"
 # /RL HIGHEST needs elevation; from a normal shell it fails rc=1 even with no
 # existing task. The node needs no admin rights, so the installer must retry
 # without it rather than abort.
-assert_has "$ps1" "without highest privileges"           "falls back when /RL HIGHEST cannot be created"
+assert_has "$ps1" "retrying at normal privilege"         "falls back when /RL HIGHEST is refused"
+assert_has "$ps1" "-RunHighest"                          "elevated task creation is opt-in, not the default"
+assert_not_has "$ps1" "'/Create', '/TN', \$NodeTask, '/TR', "cmd /c \$NodeCmd", '/SC', 'ONLOGON', '/RL'" \
+  "the default create does NOT request elevation"
 assert_has "$ps1" "schtasks /Delete /TN \$NodeTask /F"    "gives the exact admin command to clear it"
 python3 - "$ps1" <<'CHECK'
 import sys, re
