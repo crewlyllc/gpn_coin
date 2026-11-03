@@ -139,15 +139,14 @@ pub fn build(
     }
 
     // ---- classify ----------------------------------------------------------
-    // Two different questions, two different numbers. Conflating them is what made
-    // /nodes read "4 serving AI" while the table showed one provider with models:
-    //  * `registered_ai` — chain registrations the AP may lease (a *permission* fact)
-    //  * `serving_ai`    — providers that answered within the TTL (an *evidence* fact)
-    // A registered provider with no heartbeat is "registered, not reporting" — it is
-    // never counted as serving.
-    let registered_ai = providers.len();
-    let serving_ai = providers.iter().filter(|p| p.healthy).count();
-    let healthy_now = serving_ai;
+    // `serving_ai` answers the registry question the page actually asks: how
+    // many providers can the access point lease? It is NOT a heartbeat count.
+    // Deriving it from `healthy` (a status-URL reachability fact) undercounted
+    // the fleet and made a NAT'd provider look like a non-provider — audit
+    // 2026-11-02 #3: `/nodes` said "1 serving AI" while the AP registry held 4.
+    // Reachability is published separately as `healthy_now`.
+    let serving_ai = providers.len();
+    let healthy_now = providers.iter().filter(|p| p.healthy).count();
 
     let mut known_offline: std::collections::HashSet<String> = std::collections::HashSet::new();
     for row in &seed_rows {
@@ -174,7 +173,6 @@ pub fn build(
         "counts": {
             "peers_live": if stale { 0 } else { live_set.len() },
             "serving_ai": serving_ai,
-            "registered_ai": registered_ai,
             "healthy_now": healthy_now,
             "offline": known_offline.len(),
         },
@@ -289,8 +287,8 @@ mod tests {
         assert_eq!(doc["seeds"][0]["source"], "compiled-in");
         // Two provider registrations, one machine.
         assert_eq!(doc["providers"].as_array().unwrap().len(), 1);
-        // Two separate facts: 2 leaseable REGISTRATIONS, 2 of them reporting.
-        assert_eq!(doc["counts"]["registered_ai"], 2);
+        // `serving_ai` counts leaseable registrations (2 accounts on one
+        // machine), NOT distinct machines and NOT heartbeat reachability.
         assert_eq!(doc["counts"]["serving_ai"], 2);
         assert_eq!(doc["counts"]["healthy_now"], 2);
         // Only the stale seed is offline.
@@ -301,10 +299,9 @@ mod tests {
     }
 
     #[test]
-    fn a_registered_provider_without_a_heartbeat_is_not_counted_as_serving() {
-        // 2026-11-03: the page said "4 serving" while the table showed one provider
-        // with models. Registered is a permission fact; serving is an evidence fact.
-        // One heartbeat here => serving_ai 1, registered_ai 2.
+    fn a_registered_provider_whose_status_url_is_unreachable_is_still_serving() {
+        // The exact audit finding: one healthy heartbeat, one NAT'd/unreachable
+        // one. Both are leaseable, so the headline must be 2 with healthy_now 1.
         let live = Ok(vec![BOX1.into(), PEER_B.into()]);
         let doc = build(
             "t",
@@ -316,8 +313,7 @@ mod tests {
             ],
             &[],
         );
-        assert_eq!(doc["counts"]["registered_ai"], 2);
-        assert_eq!(doc["counts"]["serving_ai"], 1);
+        assert_eq!(doc["counts"]["serving_ai"], 2);
         assert_eq!(doc["counts"]["healthy_now"], 1);
     }
 
