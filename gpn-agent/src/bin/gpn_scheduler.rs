@@ -3521,6 +3521,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // used to authenticate them. Survives the 5 s poll rebuild, like poll_caps.
     let push_registry: Arc<Mutex<PushRegistry>> = Arc::new(Mutex::new(PushRegistry::new()));
     let account_auth: Arc<Mutex<AccountAuthority>> = Arc::new(Mutex::new(AccountAuthority::new()));
+    // One journal line per unregistered peer per 10 min, not one per heartbeat:
+    // a single mis-keyed box was writing 6,947 identical lines a day and
+    // burying the rest of the journal (2026-11-03).
+    let reject_log: Arc<Mutex<gpn_agent::provider_heartbeat::RejectLog>> =
+        Arc::new(Mutex::new(gpn_agent::provider_heartbeat::RejectLog::new()));
     // Warm the GPN-price snapshot (chat//jobs convert USD → GPN base units) and
     // keep an eye on providers earning below their own declared cost.
     spawn_feed_refresh(
@@ -3590,6 +3595,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let poll_caps = poll_caps.clone();
         let push_registry = push_registry.clone();
         let account_auth = account_auth.clone();
+        let reject_log = reject_log.clone();
         let assign_store = assign_store.clone();
         let callback_url = callback_url.clone();
         let hdr = hdr.clone();
@@ -3870,10 +3876,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     };
                     if onchain.is_none() {
-                        eprintln!(
-                            "[push] rejected heartbeat from {}: not a registered provider",
-                            gpn_agent::provider_heartbeat::abbreviated(&claimed)
-                        );
+                        // State it once per window, then count. The condition is
+                        // unchanged and still refused — only the repetition stops.
+                        match reject_log.lock().unwrap().record(&claimed, now) {
+                            gpn_agent::provider_heartbeat::RejectNotice::Suppressed => {}
+                            gpn_agent::provider_heartbeat::RejectNotice::First => eprintln!(
+                                "[push] rejected heartbeat from {}: not a registered provider \
+                                 (register it on chain, or point it at the right account; \
+                                 further notices at most every {}s)",
+                                gpn_agent::provider_heartbeat::abbreviated(&claimed),
+                                gpn_agent::provider_heartbeat::REJECT_LOG_INTERVAL_SECS
+                            ),
+                            gpn_agent::provider_heartbeat::RejectNotice::Summary { suppressed } => {
+                                eprintln!(
+                                    "[push] still rejecting heartbeats from {}: not a registered \
+                                     provider ({} more since the last notice)",
+                                    gpn_agent::provider_heartbeat::abbreviated(&claimed),
+                                    suppressed
+                                )
+                            }
+                        }
                         respond_err!(403, "bad signature or unregistered account");
                     }
                     let outcome = push_registry

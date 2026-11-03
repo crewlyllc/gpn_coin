@@ -439,6 +439,77 @@ impl AccountAuthority {
     }
 }
 
+/// How often a persistent "rejected heartbeat" condition may be re-stated.
+///
+/// A peer whose account is not a registered provider keeps pushing on its own
+/// heartbeat interval, so the access point's journal filled with the identical
+/// line every ~12 s: **6,947 copies in 24 h** from one box on 2026-11-03. The
+/// signal is real and must not be hidden — but repeating it verbatim buries
+/// every other line in the journal, which is where real faults are found.
+/// One notice per address per window, carrying the number suppressed.
+pub const REJECT_LOG_INTERVAL_SECS: u64 = 600;
+
+/// Upper bound on tracked addresses, so a scanner walking random (structurally
+/// valid) ss58 strings cannot grow this map without limit.
+const REJECT_LOG_MAX_ADDRS: usize = 512;
+
+/// What the caller should print for this rejection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RejectNotice {
+    /// First rejection from this address in the window: log it in full.
+    First,
+    /// The window elapsed while it kept happening: log a counted summary.
+    Summary { suppressed: u64 },
+    /// Already told the operator recently: stay quiet.
+    Suppressed,
+}
+
+/// Per-address throttle for the "not a registered provider" journal line.
+#[derive(Default)]
+pub struct RejectLog {
+    /// address -> (last time it was logged, rejections since then)
+    seen: HashMap<String, (u64, u64)>,
+}
+
+impl RejectLog {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records one rejection and answers whether it deserves a line.
+    pub fn record(&mut self, address: &str, now: u64) -> RejectNotice {
+        if let Some((last, suppressed)) = self.seen.get_mut(address) {
+            if now >= *last && now - *last >= REJECT_LOG_INTERVAL_SECS {
+                let count = *suppressed;
+                *last = now;
+                *suppressed = 0;
+                return RejectNotice::Summary { suppressed: count };
+            }
+            *suppressed += 1;
+            return RejectNotice::Suppressed;
+        }
+        if self.seen.len() >= REJECT_LOG_MAX_ADDRS {
+            // Drop entries that have gone quiet, then start over rather than
+            // silently refusing to report a new offender.
+            let cutoff = now.saturating_sub(REJECT_LOG_INTERVAL_SECS * 6);
+            self.seen.retain(|_, (last, _)| *last >= cutoff);
+            if self.seen.len() >= REJECT_LOG_MAX_ADDRS {
+                self.seen.clear();
+            }
+        }
+        self.seen.insert(address.to_string(), (now, 0));
+        RejectNotice::First
+    }
+
+    pub fn len(&self) -> usize {
+        self.seen.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.seen.is_empty()
+    }
+}
+
 /// Provider-side push configuration, resolved from the environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushSettings {
@@ -850,5 +921,51 @@ mod tests {
             |_| {},
         );
         assert_eq!(attempts, 0);
+    }
+
+    #[test]
+    fn a_persistent_rejection_is_stated_once_per_window_not_every_heartbeat() {
+        // One box pushing every 12 s for an hour must not write 301 lines.
+        let mut log = RejectLog::new();
+        let start = 1_000u64;
+        let interval = 12u64;
+        assert_eq!(log.record("5Hgbpi", start), RejectNotice::First);
+        let mut lines = 1u64;
+        let mut suppressed_total = 0u64;
+        let mut summaries = 0u64;
+        let mut t = start;
+        for _ in 0..300u64 {
+            t += interval;
+            match log.record("5Hgbpi", t) {
+                RejectNotice::Suppressed => {}
+                RejectNotice::Summary { suppressed } => {
+                    summaries += 1;
+                    suppressed_total += suppressed;
+                    lines += 1;
+                }
+                RejectNotice::First => panic!("unchanged condition must not re-report as new"),
+            }
+        }
+        assert_eq!(summaries, 6, "one summary per 10-minute window in an hour");
+        assert_eq!(lines, 7, "301 rejections -> 7 journal lines, not 301");
+        assert_eq!(
+            suppressed_total, 294,
+            "the summaries still account for all 300"
+        );
+        // A different offender is reported immediately: suppression is per address.
+        assert_eq!(log.record("5Other", t), RejectNotice::First);
+        assert_eq!(log.len(), 2);
+    }
+
+    #[test]
+    fn the_rejection_log_cannot_grow_without_limit() {
+        // A scanner walking random-but-valid addresses must not be a memory leak.
+        let mut log = RejectLog::new();
+        for i in 0..(REJECT_LOG_MAX_ADDRS as u64 * 3) {
+            log.record(&format!("addr-{i}"), 10_000 + i);
+        }
+        assert!(log.len() <= REJECT_LOG_MAX_ADDRS, "len = {}", log.len());
+        // And it still reports a fresh offender after pruning.
+        assert_eq!(log.record("addr-fresh", 20_000), RejectNotice::First);
     }
 }
