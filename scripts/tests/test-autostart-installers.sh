@@ -127,6 +127,11 @@ assert_has "$ps1" "exists and belongs to"                  "explains when GPN-No
 # existing task. The node needs no admin rights, so the installer must retry
 # without it rather than abort.
 assert_has "$ps1" "retrying at normal privilege"         "falls back when /RL HIGHEST is refused"
+# The update task must not require elevation either, and the deploy path must
+# never fail the release build when a task cannot be registered.
+assert_has "$ps1" "<RunLevel>LeastPrivilege</RunLevel>"    "update task runs at least privilege"
+assert_not_has "$ps1" "<RunLevel>HighestAvailable</RunLevel>" "update task never requests elevation"
+assert_has "$ps1" "the release is unaffected"              "deploy mode warns instead of failing the build"
 assert_has "$ps1" "-RunHighest"                          "elevated task creation is opt-in, not the default"
 assert_not_has "$ps1" "'/Create', '/TN', \$NodeTask, '/TR', "cmd /c \$NodeCmd", '/SC', 'ONLOGON', '/RL'" \
   "the default create does NOT request elevation"
