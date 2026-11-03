@@ -47,6 +47,7 @@
     <nav class="crumbs" aria-label="Breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Docs</a> / <span>Fast sync</span></nav>
     <article class="prose">
 <h1>Fast node onboarding — snapshots, checkpoints, and why fast-sync won't help</h1>
+<p><em>Verified against: chain spec 45 / release 0.3.11 — checked 2026-11-02 at block 236,986.</em></p>
 <p><strong>Task:</strong> GPN-TASKS #23 · <strong>Status:</strong> snapshot tooling SHIPPED + live-verified; checkpoint DESIGNED (gated).</p>
 <p>A fresh GPN node re-verifies every block, including recomputing its <strong>Ethash seal</strong>
 (<code>hashimoto_light</code> on the light cache) for each imported block. So the time to

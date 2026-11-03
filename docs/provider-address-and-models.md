@@ -1,5 +1,7 @@
 # Provider address publication, VRAM gating and the public model catalogue
 
+*Verified against: chain spec 45 / release 0.3.11 — checked 2026-11-02 at block 236,986.*
+
 Operator-facing reference for three things a provider publishes:
 
 * `multiaddrs` / `listen_addrs` — how peers dial it (`gpn_provider_status`, `GET /status`)

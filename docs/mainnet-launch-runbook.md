@@ -1,5 +1,7 @@
 # GPN Mainnet Launch Runbook
 
+*Verified against: chain spec 45 / release 0.3.11 — checked 2026-11-02 at block 236,986.*
+
 **Audience:** the launch operator (currently Jeremy). **Status:** ready to execute, pending a
 go/no-go and the open business decisions listed in §10.
 

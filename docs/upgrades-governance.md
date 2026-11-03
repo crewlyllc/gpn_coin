@@ -1,28 +1,32 @@
 # Runtime upgrades on mainnet — the governance pipeline
 
+*Verified against: chain spec 45 / release 0.3.11 — checked 2026-11-02 at block 236,986.*
+
 **Audience:** the GPN committee (proposers/approvers), the launch operator, and anyone
 verifying an upgrade happened correctly. **Status:** tool + runbook implemented and rehearsed;
 no runtime change has been applied by this work.
 
-> **Spec 42 — "governance hardening" is STAGED, not applied.** A separately built spec-42
-> artifact (committee 5 / 3 approvals, 14-day proposal expiry, 3-of-5 cancel, hash-addressed
-> preimages, hand-set weights, storage migration v0→v1) exists at
-> `wasm/gpn_runtime_spec42_gov_hardening.compact.compressed.wasm`. The plan, review checklist
-> and exact commands are in `shared/artifacts/project7/staged/gov-hardening-v1.md`. Everything
-> below describes **both** the live (spec 41) behaviour and, where marked *spec 42*, the staged
-> behaviour. Until the upgrade enacts, the live chain is still 2-of-3 with no cancel/expiry.
+> **Status (2026-11-02): everything described below is LIVE.** Governance hardening (spec 42),
+> symmetric retarget + optimistic claim (spec 43), the spec-44 payloads and spec 45 have all been
+> applied on the testnet chain — verified 2026-11-02 at block 236,144; the on-chain
+> `spec_version` is **45**. The separately-built artifacts named in earlier revisions of this page
+> (`wasm/gpn_runtime_spec42_gov_hardening.compact.compressed.wasm`,
+> `wasm/gpn_runtime_spec43_retarget_clamp.compact.compressed.wasm`, 519 286 B,
+> `sha256 5604f140…d10cd`) are kept for the audit trail only.
 >
-> **Spec 43 — "symmetric retarget + optimistic claim" is STAGED, not applied.** Built on top of
-> the spec-42 source: `wasm/gpn_runtime_spec43_retarget_clamp.compact.compressed.wasm`
-> (519 286 B, `sha256 5604f140…d10cd`, code hash `0x43b6777f…8361c`, `spec_version = 43`).
-> Plan, evidence and rollback: `shared/artifacts/project7/staged/retarget-clamp-v1.md`;
-> simulation: `shared/artifacts/project7/analysis/retarget-sim-2026-10-22.md`. See §7.2.
+> Wherever this page says **"live (spec 41)"** or marks something as *spec 42* "staged", read the
+> pair as **before → now**: both columns are live today and the labels are historical. The
+> mechanics below are unchanged.
+>
+> Plan / evidence / rollback: `shared/artifacts/project7/staged/gov-hardening-v1.md`,
+> `shared/artifacts/project7/staged/retarget-clamp-v1.md`; simulation:
+> `shared/artifacts/project7/analysis/retarget-sim-2026-10-22.md`. See §7.2.
 
 Companion docs:
 
 - `docs/mainnet-launch-runbook.md` — the launch itself, and the post-launch governance actions
 - `design/design-gov-preimage-proposals.md` — the *missing* hash-addressed proposal path (staged)
-- `wasm/README-pending-upgrade.md` — the staged spec-42 artifact (not built, not applied)
+- `wasm/README-pending-upgrade.md` — historical record of the spec-42 artifact (since applied)
 - `docs/incident-response.md` — what to do when an upgrade goes wrong
 
 ---
@@ -51,7 +55,7 @@ gpn-agent/target/debug/gpn_gov_upgrade surface --endpoint ws://<node>:9944
 
 ### 2.1 What exists
 
-| Piece | Live (spec 41) | Staged (spec 42) | Where it comes from |
+| Piece | Before hardening (≤ spec 41) | Now (spec 42–45, live) | Where it comes from |
 |---|---|---|---|
 | Pallet | `GpnGovernance` (`pallet-gpn-governance`) | same | `gpn-node/runtime/src/lib.rs` |
 | Members | **3** (`testnet_committee()`), genesis-seeded | **5** (committee-1…5), seeded by the storage migration and replaceable by `set_members` | `node/src/chain_spec.rs`, `GovernanceMigrationMembers` |
@@ -208,7 +212,7 @@ gpn_gov_upgrade propose --mode preimage \
     --plan .state/gov-upgrade/spec42_staged<…>.plan.json --signer <A-uri>
 ```
 
-**On spec 41 (the only path until the upgrade enacts):** the call carries the raw WASM inline.
+**Before spec 42 (≤ spec 41):** the call carries the raw WASM inline.
 
 ```bash
 gpn_gov_upgrade propose --mode inline \
@@ -248,7 +252,7 @@ bytes.
 
 - a competing proposal that reaches 3/5 first (it would upgrade first — `verify` detects the
   code-hash mismatch and tells you to re-stage against the new version);
-- any sign that members' keys are compromised. On spec 41 there is **no cancel**: the only
+- any sign that members' keys are compromised. On spec ≤ 41 there is **no cancel**: the only
   defense is not reaching the threshold, then re-proposing after rotating the committee via a
   *separate* governed upgrade. On spec 42, `cancel` (3 of 5) removes the proposal, and an
   unexecuted proposal expires on its own after 14 days (that includes one whose approvals were
@@ -326,7 +330,7 @@ bypasses the only automatic sanity check the chain has, and a wrong blob bricks 
 it only when `verify` says the chain is broken and the committee has jointly checked the
 artifact hash out-of-band.
 
-**What you cannot do:** shorten the timelock or "undo" an execution. On spec 41 you also cannot
+**What you cannot do:** shorten the timelock or "undo" an execution. On spec ≤ 41 you also cannot
 cancel a pending proposal; from spec 42 `cancel` (3 of 5) removes it, and expiry removes it after
 14 days. Everything else is a new governance action.
 
@@ -387,9 +391,9 @@ max 239 s under the same draws — and the *floor* (target pinned perfectly) is 
 create still pays one block wait, so the achievable e2e p50 is ~12–15 s. **5 s e2e is not
 reachable at a 15 s target**; it needs a shorter target block time and/or more sealer capacity.
 
-**Ordering vs spec 42.** This artifact contains the spec-42 code, so enacting it delivers both.
-Before spec 42 enacts, `propose --mode inline` is the only path (the preimage path does not
-exist on the live runtime). If the committee prefers one change at a time, enact spec 42 first
+**Ordering vs spec 42 (historical).** That artifact contained both changes; on the live chain
+(built up to spec 45) the hash-addressed preimage path exists, so `propose --mode inline` is the
+legacy path rather than the only one. Kept as a record of how the upgrade was sequenced.
 and rebuild this artifact afterwards with `spec_version = 44` — never circulate two artifacts
 claiming the same `spec_version`.
 

@@ -1,5 +1,7 @@
 # Updates — auto-update, the minimum-version cutoff, and release signing
 
+*Verified against: chain spec 45 / release 0.3.11 — checked 2026-11-02 at block 236,986.*
+
 A GPN node is a **consensus participant**, so "run an old binary" is not a
 neutral choice: an out-of-date node can seal blocks that the rest of the network
 rejects (it looks like a chain stall), serve jobs with an incompatible schema, or
@@ -863,7 +865,7 @@ auto-update is on (a manual updater still needs to be told). If
 
 ```
   ============================================================
-  !! UPGRADE REQUIRED — this node is 0.1.0, the network requires >= 0.2.0
+  !! UPGRADE REQUIRED — this node is 0.3.9, the network requires >= 0.3.11
   ============================================================
   This node will SYNC (so its data stays useful) but will NOT MINE and
   will NOT ANNOUNCE itself. An out-of-date node can otherwise produce blocks

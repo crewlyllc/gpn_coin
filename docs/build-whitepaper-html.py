@@ -1,6 +1,6 @@
 import markdown, pathlib, re, datetime
 
-base = pathlib.Path("/home/jeremyg/shared_workspace/artifacts/project7")
+base = pathlib.Path(__file__).resolve().parent  # the repo's docs/ — the canonical source
 md = (base / "GPN-WHITEPAPER.md").read_text()
 
 # Strip the leading H1 + the metadata line; we render our own title page.
@@ -68,7 +68,7 @@ template = """<!doctype html>
     <h1>A GPU-Native Network for Mining&nbsp;and&nbsp;AI&nbsp;Compute</h1>
     <div class="rule"></div>
     <p class="sub">One GPU that mines <em>or</em> serves AI — auto-switching to whichever pays more.</p>
-    <div class="meta">Version 0.9 (draft) &nbsp;·&nbsp; 2026-10-09<br>Fair-launch, proof-of-work, GPU-only, trust-minimal escrow.</div>
+    <div class="meta">Version 0.96 (draft) &nbsp;·&nbsp; 2026-11-02<br>Fair-launch, proof-of-work, GPU-only, trust-minimal escrow.<br>Verified against chain spec 45 / release 0.3.11.</div>
   </section>
   <div class="toc">{toc}</div>
   {body}

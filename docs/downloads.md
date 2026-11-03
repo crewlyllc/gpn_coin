@@ -1,5 +1,7 @@
 # GPN — Downloads
 
+*Verified against: chain spec 45 / release 0.3.11 — checked 2026-11-02 at block 236,986.*
+
 Every GPN build publishes a **rolling GitHub Release**, so there is always a stable, downloadable URL.
 
 **Downloads are public.** The official public repository is

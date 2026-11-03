@@ -1,5 +1,7 @@
 # GPN Incident Response Plan
 
+*Verified against: chain spec 45 / release 0.3.11 — checked 2026-11-02 at block 236,986.*
+
 **Audience:** the on-call operator(s) of GPN mainnet / testnet. **Status:** active.
 
 This document defines how GPN detects, triages, contains, and recovers from incidents, and how

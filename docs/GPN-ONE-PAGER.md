@@ -1,5 +1,7 @@
 # GPN — One-Pager
 
+*Verified against: chain spec 45 / release 0.3.11 — checked 2026-11-02 at block 236,986.*
+
 *Last updated: 2026-11-02*
 
 **What it is.** GPN is a **GPU-native network** where every node is **miner _and_ AI provider at the same time** — it mines between jobs and serves one when it is assigned. One install, no manual re-listing.
