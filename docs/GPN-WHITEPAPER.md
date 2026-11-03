@@ -80,7 +80,7 @@ A requestor submits a job; the chain runs it through a lifecycle:
 Payment is **per token**: the requestor escrows `rate × max_output_tokens` (a cap), the provider meters **actual** usage, the charge is `rate × actual`, and the **surplus auto-refunds**. Priced in dollars, settled in GPN, so a buyer's *dollar* cost is stable while the GPN amount floats.
 
 ### 5.2 Pricing
-Rates are **cost-derived** — a roofline estimate of the provider's true throughput (compute- and memory-bandwidth-bound), divided by realized tokens/sec, times a margin — taken as **half of the comparable market GPU-rental rate**, and clamped between the provider's cost and the market so **a GPU always at least covers its cost**. The full formula, its worked example and its two missing inputs (no oracle feed, no input-token metering) are in §6.1.
+Rates are **cost-derived** — a roofline estimate of the provider's true throughput (compute- and memory-bandwidth-bound), divided by realized tokens/sec, times a margin — taken as **half of the comparable market GPU-rental rate**, and clamped between the provider's cost and the market so **a GPU always at least covers its cost**. The full formula, its worked example and its one remaining limitation (input metering is channel-first; the token-price oracle feed has been live since 2026-10-22) are in §6.1.
 
 ### 5.3 Routing: who runs a job
 A buyer hits a single **access point** (`gpn_scheduler`) and never needs a provider's address. The scheduler:
@@ -168,7 +168,9 @@ channel bills input at 15% of the output rate. The on-chain pallet stores one
 `(price_per_token, max_tokens, actual_tokens)` and charges a single rate, so an on-chain job publishes a
 *blended* rate over `prompt+max` — exact when the completion runs to `max_tokens`, slightly under-billing
 short completions. Exact two-rate settlement on-chain needs a pallet change (a second rate in
-`JobBilling`). The USD→GPN conversion also falls back to $0.15/GPN while the oracle feed is absent.
+`JobBilling`). The USD→GPN conversion reads the live oracle feed (a bonded operator posts token `$0.15`, GPU-hour
+`$0.30`, utilization `65%`, APR `0%`; the effective value is the bond-weighted median) and falls back to
+`$0.15/GPN` only if the chain cannot be read.
 
 ---
 

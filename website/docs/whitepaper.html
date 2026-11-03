@@ -126,7 +126,7 @@
 <code>Pending → Accepted → Running → AwaitingVerification → Completed</code> (+ <code>Cancelled</code>, <code>Failed</code>).
 Payment is <strong>per token</strong>: the requestor escrows <code>rate × max_output_tokens</code> (a cap), the provider meters <strong>actual</strong> usage, the charge is <code>rate × actual</code>, and the <strong>surplus auto-refunds</strong>. Priced in dollars, settled in GPN, so a buyer's <em>dollar</em> cost is stable while the GPN amount floats.</p>
 <h3 id="52-pricing">5.2 Pricing</h3>
-<p>Rates are <strong>cost-derived</strong> — a roofline estimate of the provider's true throughput (compute- and memory-bandwidth-bound), divided by realized tokens/sec, times a margin — taken as <strong>half of the comparable market GPU-rental rate</strong>, and clamped between the provider's cost and the market so <strong>a GPU always at least covers its cost</strong>. The full formula, its worked example and its two missing inputs (no oracle feed, no input-token metering) are in §6.1.</p>
+<p>Rates are <strong>cost-derived</strong> — a roofline estimate of the provider's true throughput (compute- and memory-bandwidth-bound), divided by realized tokens/sec, times a margin — taken as <strong>half of the comparable market GPU-rental rate</strong>, and clamped between the provider's cost and the market so <strong>a GPU always at least covers its cost</strong>. The full formula, its worked example and its one remaining limitation (input metering is channel-first; the token-price oracle feed has been live since 2026-10-22) are in §6.1.</p>
 <h3 id="53-routing-who-runs-a-job">5.3 Routing: who runs a job</h3>
 <p>A buyer hits a single <strong>access point</strong> (<code>gpn_scheduler</code>) and never needs a provider's address. The scheduler:
 1. <strong>Filters</strong> by capability (GFLOPS, VRAM/RAM, model availability).
@@ -225,7 +225,9 @@ channel bills input at 15% of the output rate. The on-chain pallet stores one
 <code>(price_per_token, max_tokens, actual_tokens)</code> and charges a single rate, so an on-chain job publishes a
 <em>blended</em> rate over <code>prompt+max</code> — exact when the completion runs to <code>max_tokens</code>, slightly under-billing
 short completions. Exact two-rate settlement on-chain needs a pallet change (a second rate in
-<code>JobBilling</code>). The USD→GPN conversion also falls back to $0.15/GPN while the oracle feed is absent.</p>
+<code>JobBilling</code>). The USD→GPN conversion reads the live oracle feed (a bonded operator posts token <code>$0.15</code>, GPU-hour
+<code>$0.30</code>, utilization <code>65%</code>, APR <code>0%</code>; the effective value is the bond-weighted median) and falls back to
+<code>$0.15/GPN</code> only if the chain cannot be read.</p>
 <hr />
 <h2 id="7-privacy-shielded-pool">7. Privacy: Shielded Pool</h2>
 <p>GPN includes a <strong>shielded pool</strong> with Sapling-style note commitments and nullifiers:</p>

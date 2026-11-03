@@ -102,7 +102,7 @@
 </table>
 <p>At launch the practical switch is <strong>Mining ⇄ Compute</strong>.</p>
 <p><strong>The switch is a decision, not a guess.</strong> <em>By design</em>, every cycle the node estimates each mode's revenue in <strong>USD/hr</strong> — using an on-chain oracle feed of token price, GPU-hour rental price, utilization, and staking APR — and switches <strong>only when the other mode beats the current one by a hysteresis margin (~5%)</strong>, so the GPU doesn't thrash on tiny price crossings. A switch would be a real <strong>stop/start of GPU work</strong>: entering Compute stops the miner and frees VRAM before the model loads.</p>
-<p><strong>What runs today is a yield, not that switch.</strong> Mining is the default; when a node accepts an AI job, mining <strong>stops completely</strong> for the job's duration and resumes when it completes. The economic decision (and the oracle feed that would drive it) is <strong>not yet wired</strong> — see §6.1 and §12.</p>
+<p><strong>What runs today is a yield, not that switch.</strong> Mining is the default; when a node accepts an AI job, mining <strong>stops completely</strong> for the job's duration and resumes when it completes. The economic decision is <strong>not yet wired</strong> into the node's miner — the oracle feed it would read has been live since 2026-10-22 — see §6.1 and §12.</p>
 <p><strong>The chain is thin and trust-minimal.</strong> It holds the job lifecycle, escrow, and payouts, enforces capability and eligibility gates, and settles rewards. The compute — inference, generation, training — <strong>never touches the chain</strong>.</p>
 <hr />
 <h2 id="3-consensus-and-mining">3. Consensus and Mining</h2>
@@ -132,7 +132,7 @@
 <code>Pending → Accepted → Running → AwaitingVerification → Completed</code> (+ <code>Cancelled</code>, <code>Failed</code>).
 Payment is <strong>per token</strong>: the requestor escrows <code>rate × max_output_tokens</code> (a cap), the provider meters <strong>actual</strong> usage, the charge is <code>rate × actual</code>, and the <strong>surplus auto-refunds</strong>. Priced in dollars, settled in GPN, so a buyer's <em>dollar</em> cost is stable while the GPN amount floats.</p>
 <h3 id="52-pricing">5.2 Pricing</h3>
-<p>Rates are <strong>cost-derived</strong> — a roofline estimate of the provider's true throughput (compute- and memory-bandwidth-bound), divided by realized tokens/sec, times a margin — taken as <strong>half of the comparable market GPU-rental rate</strong>, and clamped between the provider's cost and the market so <strong>a GPU always at least covers its cost</strong>. The full formula, its worked example and its two missing inputs (no oracle feed, no input-token metering) are in §6.1.</p>
+<p>Rates are <strong>cost-derived</strong> — a roofline estimate of the provider's true throughput (compute- and memory-bandwidth-bound), divided by realized tokens/sec, times a margin — taken as <strong>half of the comparable market GPU-rental rate</strong>, and clamped between the provider's cost and the market so <strong>a GPU always at least covers its cost</strong>. The full formula, its worked example and its one remaining limitation (input metering is channel-first) are in §6.1.</p>
 <h3 id="53-routing-who-runs-a-job">5.3 Routing: who runs a job</h3>
 <p>A buyer hits a single <strong>access point</strong> (<code>gpn_scheduler</code>) and never needs a provider's address. The scheduler:
 1. <strong>Filters</strong> by capability (GFLOPS, VRAM/RAM, model availability).
@@ -171,7 +171,7 @@ Payment is <strong>per token</strong>: the requestor escrows <code>rate × max_o
 anchor_rate  = $0.10/hr                               # GPN_GPU_ANCHOR_USD_HR
 k            = anchor_rate / (anchor_tok_s × 3600)    # USD per output token
 price_out    = k × (1 + GPN_MARGIN_BPS/10000)         # 3000 → $0.379/1M
-price_in     = price_out × GPN_INPUT_RATE_FRAC        # 0.25 → $0.095/1M
+price_in     = price_out × GPN_INPUT_RATE_FRAC        # 0.15 → $0.057/1M
 provider_hr  = roofline(gflops, bw, params_b) × 3600 × k
 escrow       = prompt_tokens/4 + max_tokens           # output-equivalents
 </code></pre>
@@ -189,8 +189,8 @@ escrow       = prompt_tokens/4 + max_tokens           # output-equivalents
 </tbody>
 </table>
 <p>And <strong>throughput, not FP32 GFLOPs, is the metric</strong>: decode of a small model is memory-bandwidth-bound, so a FLOP-based price would rank a 4090 above an H100.</p>
-<p>The result is <strong>$0.379 per 1M output tokens</strong> and <strong>$0.095 per 1M input tokens</strong> — next to <code>gpt-5-nano</code>'s $0.40, rather than the ~$8.75 (22×) that the old <code>$3.00 GPU-hour</code> anchor produced. A derived price outside <strong>[$0.05, $5.00] per 1M</strong> refuses to publish unless <code>GPN_PRICING_UNSAFE=1</code>, and a provider whose modelled earning falls below its own declared cost is logged as such rather than hidden.</p>
-<p><strong>Two limitations we are not papering over.</strong> (1) <strong>Input metering is channel-first.</strong> The off-chain channel bills input at 25% of the output rate; the on-chain pallet stores one <code>(price_per_token, max_tokens, actual_tokens)</code> and charges a single rate, so an on-chain job publishes a <em>blended</em> rate over <code>prompt+max</code> — exact when the completion runs to <code>max_tokens</code>, slightly under-billing short completions. Exact two-rate settlement on-chain needs a pallet change (a second rate in <code>JobBilling</code>). (2) <strong>The oracle feed is absent</strong> — the USD→GPN conversion falls back to $0.15/GPN; the legacy market model, still available as <code>GPN_PRICING_MODEL=market</code>, keeps its $3.00 GPU-hour fallback.</p>
+<p>The result is <strong>$0.379 per 1M output tokens</strong> and <strong>$0.057 per 1M input tokens</strong> — next to <code>gpt-5-nano</code>'s $0.40, not a multiple of it. A derived price outside <strong>[$0.05, $5.00] per 1M</strong> refuses to publish unless <code>GPN_PRICING_UNSAFE=1</code>, and a provider whose modelled earning falls below its own declared cost is logged as such rather than hidden.</p>
+<p><strong>One limitation we are not papering over.</strong> (1) <strong>Input metering is channel-first.</strong> The off-chain channel bills input at 15% of the output rate; the on-chain pallet stores one <code>(price_per_token, max_tokens, actual_tokens)</code> and charges a single rate, so an on-chain job publishes a <em>blended</em> rate over <code>prompt+max</code> — exact when the completion runs to <code>max_tokens</code>, slightly under-billing short completions. Exact two-rate settlement on-chain needs a pallet change (a second rate in <code>JobBilling</code>). The USD→GPN conversion reads the <strong>live</strong> oracle feed (a bonded operator posts token $0.15, GPU-hour $0.30, utilization 65%, APR 0%; the effective value is the bond-weighted median) and falls back to $0.15/GPN only if the chain cannot be read.</p>
 <hr />
 <h2 id="7-privacy-shielded-pool">7. Privacy: Shielded Pool</h2>
 <p>GPN includes a <strong>shielded pool</strong> with Sapling-style note commitments and nullifiers:</p>
@@ -278,7 +278,7 @@ escrow       = prompt_tokens/4 + max_tokens           # output-equivalents
 <li><strong>Shipped but not publicly routed:</strong> image generation (on-chain jobs) and the fine-tune/ML providers.</li>
 <li><strong>Blocked:</strong> video (LTX) — the encoder exceeds 8 GB of VRAM.</li>
 <li><strong>Staged, not applied:</strong> the spec-42 governance hardening (§8.2).</li>
-<li><strong>Next:</strong> the public <strong>CRS ceremony</strong>; applying governance hardening; the on-chain <strong>GPU-hour oracle feed</strong> and <strong>input-token metering</strong>; <strong>client-side RTT</strong> (user→nearest node); folding a node's own miner into the <strong>economic auto-switch</strong>; <strong>mainnet</strong> genesis and launch; a <strong>cross-chain bridge</strong> (post-mainnet).</li>
+<li><strong>Next:</strong> the public <strong>CRS ceremony</strong>; applying governance hardening; the node's profitability auto-switch over the live oracle feed, and exact two-rate on-chain input metering; <strong>client-side RTT</strong> (user→nearest node); folding a node's own miner into the <strong>economic auto-switch</strong>; <strong>mainnet</strong> genesis and launch; a <strong>cross-chain bridge</strong> (post-mainnet).</li>
 </ul>
 <h2 id="12-current-status-and-honest-limitations">12. Current status and honest limitations</h2>
 <table>

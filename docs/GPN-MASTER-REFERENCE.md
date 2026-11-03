@@ -24,7 +24,7 @@ Status labels used throughout: **LIVE** · **STAGED (not applied)** · **WORKS-I
 | **Curated + VRAM-gated model catalogue** (3 served on an 8 GB node; `tuned-*`/toy/oversized never advertised) | **LIVE** | §6.4 |
 | **Provider address publication fixed** (doubled `/p2p/<id>/p2p/<id>` normalized; 4-rung dialability ladder; empty publication logged) | **LIVE** | §6.4 |
 | **Node GUI + Idle mode** (`127.0.0.1:8099`, up to 6 h, auto-resume, sole-authority valve) | **LIVE** | §9.2 |
-| **Derived GPU-hour pricing** in the scheduler + a public economics page | **LIVE formula, GAP inputs** (no oracle feed, no input metering) | §7.1 |
+| **Derived GPU-hour pricing** in the scheduler + a public economics page | **LIVE** — throughput formula; oracle feed **LIVE** since 2026-10-22 (bonded operator); input metered on the channel path (15%) | §7.1 |
 | **Governance hardening (spec 42)** — 5-member/3-of-5, expiry, preimages, weights, migration | **APPLIED on testnet** — verified 2026-11-02 at block 236144; 10-block testnet timelock; no cancel/referendum track | §11.2 |
 
 ---
@@ -561,10 +561,13 @@ logged at boot; a provider earning below its declared `owner_cost_usd_hr` is log
    `prompt/4 + max_tokens`. The pallet stores ONE `(price_per_token, max_tokens, actual_tokens)`, so
    on-chain jobs publish a blended rate — exact at full completion, slightly under-billing short ones.
    Exact two-rate on-chain settlement needs a pallet change (second rate in `JobBilling`).
-2. **No on-chain price oracle feed.** The USD→GPN conversion falls back to `$0.15/GPN`. (A legacy
-   market-anchored model exists behind `GPN_PRICING_MODEL=market` for A/B comparison only; it is not the
-   published price.) Batching raises provider earnings without changing the
-   buyer's price.
+2. **The price oracle feed is LIVE (since 2026-10-22).** A bonded operator (`5DUaYAf5…`, 1000 GPN)
+   keeps `ProfitabilityOracle::CurrentFeed` fresh: token `$0.15`, GPU-hour `$0.30`, utilization `65%`,
+   staking APR `0%` — post 2026-11-02 at block 236568; `gpn_effective_feed` returns the bond-weighted
+   median. The USD→GPN conversion therefore reads the chain; it falls back to `$0.15/GPN` **only when the
+   read fails**, and says so in the log. (A legacy market-anchored price model still exists behind
+   `GPN_PRICING_MODEL=market` for A/B comparison only; it is not the published price.) Batching raises
+   provider earnings without changing the buyer's price.
 
 ---
 
@@ -785,7 +788,7 @@ survive a membership change; no preimage deposits; O(64) prune scan).
 - **Distribution:** every build publishes a rolling **GitHub Release** (`windows-latest` / `linux-latest`; `macos-latest` is **not published yet**) on the public mirror `crewlyllc/gpn_coin`; the signed bundle manifest is served at `https://gpncoin.ai/releases.json`.
 - **Ops:** `GPN-TASKS.md` queue + a 30-min **queue-driver cron**; monitors silent when healthy (§16).
 - **Deployment lag, stated honestly:** check the live endpoint before quoting it — `GET /v1/models` currently returns the curated three-model list (`llama3.2:1b`, `qwen2.5:0.5b`, `qwen2.5:7b`).
-- **Open / next:** #27 AMD · #26 single-binary (back burner) · the **deferred profitability auto-switch** · #4/#5b Windows-provider + video verify · #12 mainnet · #13 bridge · #17 ceremony · #22 safety guardrails · **oracle price feed** · **result verification (none exists today)**.
+- **Open / next:** #27 AMD · #26 single-binary (back burner) · the **deferred profitability auto-switch** (the oracle feed it would read is **live**) · #4/#5b Windows-provider + video verify · #12 mainnet · #13 bridge · #17 ceremony · #22 safety guardrails · **result verification (none exists today)**.
 
 ---
 
@@ -798,11 +801,12 @@ job-lifecycle hardening · #10 diffusion wedge watchdog · #11 root-only distrib
 #19 min-GPU gate · #20 snapshot + airdrop tooling · #21 node-free wallet · #23 fast-onboard snapshot ·
 #24 mine→stop→resume + capacity 1 · #25 node supervisor · **signed auto-update (on by default)** ·
 **AP token self-generation** · **public HTTPS API** · **curated/VRAM-gated catalogue** ·
-**provider address publication** · **node GUI + Idle** · **derived pricing + economics page**.
+**provider address publication** · **node GUI + Idle** · **derived pricing + economics page** ·
+**on-chain GPU-hour price oracle feed (2026-10-22)**.
 
 **⏳ IN PROGRESS / OPEN:** #27 AMD support (building) · #4 Windows-provider end-to-end verify · #5b video
 on the Windows box · #2 channels hub routing · #22 abuse/safety guardrails (design done) · the
-**profitability auto-switch** (deferred) · **on-chain oracle feed**.
+**profitability auto-switch** (deferred; its oracle feed is live).
 **🟡 STAGED (built + tested, not applied):** on-chain `MinNodeVersion` cutoff.
 **✅ APPLIED on testnet:** governance hardening spec 42 (§11.2), verified 2026-11-02 at block 236144.
 **🔒 BLOCKED (need Jeremy/external):** #16/#17 the **CRS ceremony** (public multi-party) · #12 mainnet

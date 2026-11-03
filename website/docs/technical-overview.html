@@ -156,8 +156,9 @@ earning is below its own declared <code>owner_cost_usd_hr</code> is logged as lo
 input at 15% of the output rate and escrows <code>prompt_tokens/4 + max_tokens</code>. The on-chain pallet stores a
 single <code>(price_per_token, max_tokens, actual_tokens)</code>, so an on-chain job publishes a <em>blended</em> rate that
 is exact when the completion runs to <code>max_tokens</code> and slightly under-bills short completions; exact
-two-rate settlement on-chain requires a pallet change. Separately, the oracle feed is still absent — the
-GPN price used for the USD→GPN conversion falls back to $0.15.</p>
+two-rate settlement on-chain requires a pallet change. The <strong>oracle feed is live</strong> (since 2026-10-22): a
+bonded operator posts token <code>$0.15</code>, GPU-hour <code>$0.30</code>, utilization <code>65%</code> and APR <code>0%</code>, and the USD→GPN
+conversion reads that bond-weighted median; only an unreadable chain falls back to <code>$0.15/GPN</code>.</p>
 <h2 id="node-operations-dashboard-idle-updates">Node operations: dashboard, Idle, updates</h2>
 <ul>
 <li><strong>Local dashboard</strong> — <code>gpn_node --gui</code> / <code>GPN_GUI=1</code> serves <code>http://127.0.0.1:8099</code> from the supervisor: mode, peers, height, GPU/VRAM, current job, child processes, and the idle panel. <strong>Loopback only, by design</strong> (it can stop the miner); any non-<code>127.0.0.1</code> bind is refused at startup. No auth because there is no network exposure.</li>
@@ -210,8 +211,8 @@ GPN price used for the USD→GPN conversion falls back to $0.15.</p>
 </tr>
 <tr>
 <td><strong>On-chain GPU-hour price oracle</strong></td>
-<td><strong>GAP</strong></td>
-<td>Feed absent; the USD→GPN conversion falls back to $0.15</td>
+<td><strong>LIVE</strong></td>
+<td>Bonded operator posts token $0.15 / GPU-hour $0.30 / util 65% / APR 0% (since 2026-10-22); <code>gpn_effective_feed</code> returns the bond-weighted median</td>
 </tr>
 <tr>
 <td><strong>Result verification</strong></td>

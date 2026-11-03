@@ -88,8 +88,9 @@ earning is below its own declared `owner_cost_usd_hr` is logged as losing money 
 input at 15% of the output rate and escrows `prompt_tokens/4 + max_tokens`. The on-chain pallet stores a
 single `(price_per_token, max_tokens, actual_tokens)`, so an on-chain job publishes a *blended* rate that
 is exact when the completion runs to `max_tokens` and slightly under-bills short completions; exact
-two-rate settlement on-chain requires a pallet change. Separately, the oracle feed is still absent — the
-GPN price used for the USD→GPN conversion falls back to $0.15.
+two-rate settlement on-chain requires a pallet change. The **oracle feed is live** (since 2026-10-22): a
+bonded operator posts token `$0.15`, GPU-hour `$0.30`, utilization `65%` and APR `0%`, and the USD→GPN
+conversion reads that bond-weighted median; only an unreadable chain falls back to `$0.15/GPN`.
 
 ## Node operations: dashboard, Idle, updates
 - **Local dashboard** — `gpn_node --gui` / `GPN_GUI=1` serves `http://127.0.0.1:8099` from the supervisor: mode, peers, height, GPU/VRAM, current job, child processes, and the idle panel. **Loopback only, by design** (it can stop the miner); any non-`127.0.0.1` bind is refused at startup. No auth because there is no network exposure.
@@ -121,7 +122,7 @@ Permissionless, redundant **access points**; **Bitcoin-style peer discovery** (p
 | **Image generation** | **LIVE (public)** | `POST /v1/images/generations`; sd-turbo runs on chain-assigned jobs |
 | **Video generation (LTX)** | **BLOCKED** | Implemented, never completed: the T5-XXL encoder exceeds 8 GB VRAM; no public route |
 | **Fine-tune / ML providers** | **LIVE (public) / internal** | `POST /v1/finetunes` is public; ML inference remains internal |
-| **On-chain GPU-hour price oracle** | **GAP** | Feed absent; the USD→GPN conversion falls back to $0.15 |
+| **On-chain GPU-hour price oracle** | **LIVE** | Bonded operator posts token $0.15 / GPU-hour $0.30 / util 65% / APR 0% (since 2026-10-22); `gpn_effective_feed` returns the bond-weighted median |
 | **Result verification** | **NOT IMPLEMENTED** | No output is verified, spot-checked, or made redundant; settlement follows the submitted result hash. Roadmap. |
 | **Governance hardening (spec 42)** | **APPLIED (testnet)** | 5-member council / 3-of-5 / 10-block testnet timelock; no cancel or referendum track; bootstrap, not a security guarantee |
 

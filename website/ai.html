@@ -1255,8 +1255,10 @@ gpn/tok  = 3.793e-7 / 0.15 = 2.53 GPN per 1M</code></pre>
           section describes the <em>paid</em> model the scheduler is already built for — not what is live.</li>
         <li><b>The token has no reliable market price.</b> GPN is a testnet token. Any USD figure here is an
           <em>illustrative</em> conversion at $0.15/GPN; the GPN-denominated numbers are the real ones.
-          When the on-chain oracle feed is empty (it is today), <code>token_price_usd</code> also falls back
-          to $0.15 — so a change in the feed changes both sides of the ratio.</li>
+          The on-chain oracle feed has been live since 2026-10-22 (a bonded operator posts token $0.15,
+          GPU-hour $0.30, utilization 65%, APR 0%; the effective value is the bond-weighted median), so
+          <code>token_price_usd</code> is read from the chain and falls back to $0.15 only if that read
+          fails — a change in the feed moves both sides of the ratio.</li>
         <li><b>Throughput is measured, not promised.</b> The anchor assumes a 4060-class card reaching
           95 tok/s on a 1B model; a slower card earns less per hour, and a card earning below its
           operator's declared cost is flagged rather than quietly subcontracted. Batching several
