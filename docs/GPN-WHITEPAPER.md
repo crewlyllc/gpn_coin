@@ -251,10 +251,10 @@ Operators who prefer to update by hand may: a node whose version falls below `mi
 
 ## 11. Roadmap
 
-- **Shipped and live on testnet:** PoW chain (spec 45, 15 s, 50 GPN/block) with Bitcoin-style per-node rewards; GPU-only, stake-free, work-verified eligibility; per-token escrow, cost-derived pricing, least-ms routing to idle providers, on-chain provider discovery, VRAM/RAM gates; payment channels; shielded spends; the liveness layer; peer discovery; the **public HTTPS AI API** (with a curated, VRAM-gated catalogue in the 0.3.11 line); the **node dashboard, Idle mode and signed auto-update**.
+- **Shipped and live on testnet:** PoW chain (spec 45, 15 s, 50 GPN/block) with Bitcoin-style per-node rewards; GPU-only, stake-free, work-verified eligibility; per-token escrow, cost-derived pricing, least-ms routing to idle providers, on-chain provider discovery, VRAM/RAM gates; payment channels; shielded spends; the liveness layer; peer discovery; the **public HTTPS AI API** (with a curated, VRAM-gated catalogue in the 0.3.11 line); the **node dashboard, Idle mode and signed auto-update**; the **on-chain GPU-hour price oracle feed** (bonded operator, live since 2026-10-22).
 - **Blocked:** video (LTX) — implementation exists but no job has completed on this fleet; the encoder exceeds 8 GB of VRAM and there is no public `/v1/videos` route.
 - **Applied on testnet:** the spec-42 governance hardening (§8.2) — 5-member council, 3-of-5, 14-day expiry, preimage proposals, hand-set weights.
-- **Next:** the public **CRS ceremony**; mainnet governance (3-day timelock); the on-chain **GPU-hour oracle feed**; **client-side RTT** (user→nearest node); **mainnet** genesis and launch; a **cross-chain bridge** (post-mainnet). **Result verification** — any check that a returned completion is correct — is a roadmap item; nothing verifies output today.
+- **Next:** the public **CRS ceremony**; mainnet governance (3-day timelock); **client-side RTT** (user→nearest node); **mainnet** genesis and launch; a **cross-chain bridge** (post-mainnet). **Result verification** — any check that a returned completion is correct — is a roadmap item; nothing verifies output today.
 
 ## 12. Current status and honest limitations
 
@@ -264,7 +264,7 @@ Operators who prefer to update by hand may: a node whose version falls below `mi
 | Image generation | **LIVE (public)** | `POST /v1/images/generations`, sd-turbo on chain-assigned jobs |
 | Video (LTX) | **BLOCKED** | Implemented, never completed — T5-XXL encoder exceeds 8 GB VRAM |
 | Fine-tune / ML | **LIVE (public)** | `POST /v1/finetunes`; ML inference is internal only |
-| GPU-hour price oracle | **GAP** | Feed absent; the dollar→GPN conversion falls back to $0.15/GPN |
+| GPU-hour price oracle | **LIVE** | Bonded operator posts token $0.15 / GPU-hour $0.30 / util 65% / APR 0% since 2026-10-22; the dollar→GPN conversion reads it (the $0.15 fallback applies only when the read fails) |
 | Result verification | **NOT IMPLEMENTED** | No output is checked, spot-checked, or made redundant; settlement follows the submitted result hash. Roadmap. |
 | Governance hardening | **APPLIED (testnet)** | 5-member council / 3-of-5 / 10-block testnet timelock; no cancel or referendum track. Bootstrap, not a security guarantee. |
 | Economic auto-switch | **GAP** | Live behaviour is a mine→stop→resume yield, not oracle-driven switching |
