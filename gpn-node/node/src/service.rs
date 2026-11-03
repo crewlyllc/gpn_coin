@@ -749,12 +749,12 @@ pub async fn new_full<
         log::info!("==============================================================");
     }
     // ---- Dialability: capability probe, NOT a membership gate (queue #46) ----
-    // Dialable is **REQUIRED** by default: the network is still growing and
-    // every node is expected to be part of the backbone, so a node that cannot
-    // be dialled prints the full operator notice and exits EXIT_NOT_DIALABLE.
-    // `--no-require-backbone` / `GPN_REQUIRE_BACKBONE=0` opts out into the old
-    // soft mode: run degraded, re-check every 10 min, print NOW DIALABLE once
-    // the forward works (design §5.3).
+    // Soft mode is the DEFAULT: a node that cannot be dialled prints the full
+    // operator notice once (with the exact port-forward fix) and keeps syncing,
+    // mining and serving as a non-discoverable participant, re-checking every
+    // 10 min and printing NOW DIALABLE when the forward works (design §5.3).
+    // `--require-backbone` / `GPN_REQUIRE_BACKBONE=1` is the opt-in legacy hard
+    // gate that exits EXIT_NOT_DIALABLE instead.
     {
         if gate_cfg.require {
             log::info!(

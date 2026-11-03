@@ -405,13 +405,14 @@ node, so a box behind NAT/CGNAT serves AI jobs, mines, and gets paid normally.
 What you lose without a dialable address is seed-list eligibility, the small
 routing tie-break, and liveness uptime credit — not income.
 
-> **A note on the current build.** `gpn_node` still ships a startup
-dialability probe whose hard-fail default (`--require-backbone`) can stop a
-non-dialable node with exit `78` before it serves. That behaviour is legacy and
-being removed; **set `--no-require-backbone` (or `GPN_REQUIRE_BACKBONE=0`)** if
-your box cannot accept an inbound connection, and it will run normally. The
-safety valve already overrides the check when refusing would leave the chain
-without its last authoring node.
+> **How a non-dialable node behaves.** The startup probe is an evidence
+> ladder, not a gate. When no rung passes, the node logs one actionable notice
+> (the exact port-forward rule, your detected LAN IP, the CGNAT check),
+> publishes no address, and **keeps syncing, mining and serving AI jobs** —
+> jobs are pulled, so the only loss is seed-list eligibility and the liveness
+> credit. It re-checks every 10 minutes and prints `NOW DIALABLE` when the
+> forward works. The exit-`78` hard gate survives only as the opt-in
+> `--require-backbone` flag; no install sets it.
 
 At startup the node probes inbound reachability for up to **120 s**
 (`GPN_DIALABLE_TIMEOUT_SECS`), in this order:
@@ -463,10 +464,10 @@ declares itself dialable. The mapping is renewed at half its lease (default
 Only globally routable addresses count — RFC1918 (`10/8`, `172.16/12`,
 `192.168/16`), CGNAT (`100.64/10`), loopback, link-local and `0.0.0.0` never do.
 
-> **Opting out.** `--no-require-backbone` (or `GPN_REQUIRE_BACKBONE=0`)
-> disables the startup hard gate. Set it on any machine that cannot accept an
-> inbound connection — the node then publishes nothing, logs the notice, and
-> runs normally as a non-seed provider.
+> **Opting out is not needed.** Soft mode is the default, so a machine that
+> cannot accept an inbound connection publishes nothing, logs the notice once,
+> and runs normally. `--require-backbone` (or `GPN_REQUIRE_BACKBONE=1`)
+> restores the legacy hard gate for a host that must guarantee reachability.
 
 | Flag / env | Meaning | Default |
 |---|---|---|
@@ -476,8 +477,8 @@ Only globally routable addresses count — RFC1918 (`10/8`, `172.16/12`,
 | `--no-discoverable` / `GPN_DISCOVERABLE=0` | Privacy mode: no announce, no inbound, not in any list. Implies `--no-seed`. | — |
 | `--no-upnp` / `GPN_UPNP=off` | Never contact the router; no UPnP/NAT-PMP attempt. The attempt is logged when it happens. | `auto` |
 | `--public-addr` / `GPN_PUBLIC_ADDR` | Explicit public multiaddr; always wins over detection. | unset |
-| `--require-backbone` / `GPN_REQUIRE_BACKBONE=1` | Legacy hard gate: exit 78 instead of serving when not dialable. **Deprecated — do not set it.** | off in new installs |
-| `--no-require-backbone` / `GPN_REQUIRE_BACKBONE=0` | Recommended for NAT'd/CGNAT hosts: publish best-effort, keep serving. | — |
+| `--require-backbone` / `GPN_REQUIRE_BACKBONE=1` | Legacy hard gate: exit 78 instead of serving when not dialable. **Deprecated — do not set it.** | **off** |
+| `--no-require-backbone` / `GPN_REQUIRE_BACKBONE=0` | Explicitly select the default soft mode: publish best-effort, keep serving. | **on** (default) |
 | `GPN_DIALABLE_TIMEOUT_SECS` | Probe grace window. | `120` |
 | `GPN_STUN_SERVER` | External STUN server for the mapping probe; `off` disables it. | `stun.l.google.com:19302` |
 | `GPN_DIALABILITY_SAFETY` | `0` lets the hard gate exit even when that would stop the last authority. | on |
@@ -490,7 +491,7 @@ Only globally routable addresses count — RFC1918 (`10/8`, `172.16/12`,
 > is documented in [provider-address-and-models.md](provider-address-and-models.md).
 
 If the node is not dialable you will see this (exact text, LAN IP and port
-filled in) and, by default, the process exits:
+filled in) and it keeps running:
 
 ```
 ================================================================================
@@ -541,25 +542,23 @@ To fix it (about 5 minutes):
 Full guide with per-OS detail:
   https://gpncoin.ai/docs/run-a-node#make-your-node-dialable
 
-This node will exit until it is dialable.
-To run anyway (not recommended while the network is growing):
-  --no-require-backbone
-================================================================================
-```
-
-In the opt-out mode (`--no-require-backbone`) the last block reads instead:
-
-```
 This node re-checks every 10 minutes and will print NOW DIALABLE here when
 the fix works. You can also restart to force a check.
 
-Soft mode is active (--no-require-backbone / GPN_REQUIRE_BACKBONE=0).
-Run private, silence:      --no-seed   (or GPN_SEED=0)
+Soft mode is the default. Hard gate (opt-in):  --require-backbone
+Run private, silence:                       --no-seed   (or GPN_SEED=0)
 ================================================================================
 ```
 
-When a fix succeeds, the node confirms it once (opt-out mode only — in the
-default mode you just restart into a clean start):
+Only with `--require-backbone` set does the last block read instead:
+
+```
+This node will exit until it is dialable.
+To run anyway, drop --require-backbone.
+================================================================================
+```
+
+When a fix succeeds, the node confirms it once:
 
 ```
 ================================================================================
@@ -749,9 +748,9 @@ Check the **WAN address** on the router status page (not the LAN address):
 - A public WAN address that differs from what a "what is my IP" site reports →
   also CGNAT (double NAT).
 
-CGNAT is **not** an error. By default the node exits with the notice (it cannot
-be a backbone member); with `--no-require-backbone` it keeps syncing, mining and
-serving jobs as a non-discoverable participant.
+CGNAT is **not** an error. The node logs the notice once, cannot be a backbone
+member, and keeps syncing, mining and serving jobs as a non-discoverable
+participant.
 
 ### 5. Tell the node its public address (only if detection fails)
 
@@ -776,9 +775,8 @@ announced endpoint exact.
 
 ### 6. Verify from outside
 
-The node re-checks every 10 minutes **when it is running in the opt-out mode**
-(`--no-require-backbone`); by default it exits instead, so restart it after the
-forward is in place. You can also confirm the forward yourself:
+The node re-checks every 10 minutes and prints `NOW DIALABLE` once the forward
+works — no restart is needed. You can also confirm the forward yourself:
 
 - **From another network** (phone hotspot, a friend's house, a VPS) — not from
   the same LAN, where NAT hairpinning can give a false positive:
@@ -1465,7 +1463,7 @@ min_version_enforce = true    # false = mine below the minimum (unsupported)
 | `GPN_BOOTNODES_URL` | comma/space list of published seed-list URLs. Replaces the built-in live directory. | `https://gpncoin.ai/seeds.json` |
 | `GPN_PUBLIC_ADDR` | `--public-addr` (e.g. `/dns4/host/tcp/30333`). Recommended for a public node; the capability probe also reads it. | _(none)_ |
 | `GPN_REQUIRE_DIALABLE` | Run the inbound-reachability probe. `0` skips it entirely (local testing only). | `1` |
-| `GPN_REQUIRE_BACKBONE` | Legacy hard gate: `1` exits 78 when not dialable. **Leave unset.** | `0` |
+| `GPN_REQUIRE_BACKBONE` | Legacy hard gate: `1` exits 78 when not dialable. **Leave unset** (soft mode is the default). | `0` |
 | `GPN_SEED` | Willing to be published as a seed candidate; `0` also silences the not-dialable notice. | `1` |
 | `GPN_DISCOVERABLE` | Announce endpoint / accept inbound; `0` implies `GPN_SEED=0`. | `1` |
 | `GPN_UPNP` | Try UPnP-IGD/NAT-PMP (`auto`/`off`). See [UPnP / NAT-PMP](#3-upnp--nat-pmp--automatic-on-by-default). | `auto` |
@@ -1730,10 +1728,11 @@ again. Nothing warned beforehand.
   `best` is the node's best block, read cheaply from its own RPC
   (`chain_getHeader`); `?` if the node's RPC isn't answering yet.
 
-  A node that failed the **dialability gate** with `--require-backbone` set is
-  shown distinctly as `node=down(not dialable, restarts N)` (the child exited
-  78), with an actionable hint in the log — set `GPN_PUBLIC_ADDR` and forward
-  the port. Without `--require-backbone`, a non-dialable node stays `up` and
+  A node that failed the **dialability probe** while running with
+  `--require-backbone` set is shown distinctly as
+  `node=down(not dialable, restarts N)` (the child exited 78), with an
+  actionable hint in the log — set `GPN_PUBLIC_ADDR` and forward the port.
+  That flag is off by default, so a non-dialable node normally stays `up` and
   simply runs degraded.
 
 ## Local dashboard + Idle mode ("let me play a game")

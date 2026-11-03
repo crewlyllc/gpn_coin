@@ -51,16 +51,17 @@ pub struct Cli {
     #[arg(long = "no-discoverable")]
     pub no_discoverable: bool,
 
-    /// Hard gate (DEFAULT): exit (code 78) unless the node is inbound-reachable.
+    /// Hard gate (OPT-IN, legacy): exit (code 78) unless the node is
+    /// inbound-reachable.
     ///
-    /// This is the default posture — the network is growing and every node is
-    /// expected to be part of the backbone.
+    /// Off by default: a non-dialable node warns once and keeps syncing,
+    /// mining and serving. Set this only if you need reachability to be a
+    /// guarantee (e.g. a seed host under supervision).
     #[arg(long = "require-backbone", conflicts_with = "no_require_backbone")]
     pub require_backbone: bool,
 
-    /// Opt OUT of the hard gate: keep running as a non-discoverable participant
-    /// when this node cannot be dialed. Not recommended while the network is
-    /// growing.
+    /// Explicitly select the default soft mode: keep running as a
+    /// non-discoverable participant when this node cannot be dialed.
     #[arg(long = "no-require-backbone")]
     pub no_require_backbone: bool,
 

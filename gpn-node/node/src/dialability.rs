@@ -64,22 +64,24 @@
 //! costs an operator a confusing restart, but exiting the last authoring node
 //! costs the network its chain.
 //!
-//! # Behaviour (v2.2 — dialable is REQUIRED by default)
+//! # Behaviour (v2.3 — dialable is the goal, never a gate)
 //!
 //! A node is a **backbone node**: it announces its endpoint and accepts inbound
-//! peers. The network is still growing, so **inbound reachability is a hard
-//! requirement by default** — a node that cannot be dialled prints the full
-//! operator notice and exits with [`EXIT_NOT_DIALABLE`] (78) after the grace
-//! window.
+//! peers. Inbound reachability is what makes it a seed/backbone member, but it
+//! is **never a gate on joining** — dialability cannot be a requirement when
+//! most home connections sit behind NAT or CGNAT and jobs are *pulled* by the
+//! node anyway. A node that cannot be dialled prints the operator notice once
+//! (with the exact port-forward fix) and **keeps syncing, mining and serving**.
 //!
 //! * Probe is ON by default. `GPN_REQUIRE_DIALABLE=0` (also `false`/`no`/`off`)
 //!   skips the probe entirely (local/single-node testing).
-//! * Hard gate is the **default**: `--require-backbone` is implicit;
-//!   `GPN_REQUIRE_BACKBONE` defaults to ON.
-//! * Opt out with `--no-require-backbone` / `GPN_REQUIRE_BACKBONE=0`: the node
-//!   logs the actionable [`degradation_notice`] block once and **continues** as
-//!   a non-discoverable participant, re-checking every 10 minutes and printing
-//!   [`promotion_notice`] once when it becomes dialable.
+//! * Soft mode is the **default**: the node logs the actionable
+//!   [`degradation_notice`] block once, continues as a non-discoverable
+//!   participant, re-checks every 10 minutes and prints [`promotion_notice`]
+//!   once when it becomes dialable.
+//! * `--require-backbone` / `GPN_REQUIRE_BACKBONE=1` restores the exit-
+//!   [`EXIT_NOT_DIALABLE`] (78) hard gate for operators who must guarantee
+//!   reachability. It is opt-in and deprecated for general use.
 //! * `GPN_SEED=0` / `--no-seed` silences the notice (the operator asked to be
 //!   private). `GPN_DISCOVERABLE=0` / `--no-discoverable` implies `--no-seed`.
 //! * Grace window: `GPN_DIALABLE_TIMEOUT_SECS` (default 120 s).
@@ -926,9 +928,9 @@ pub fn stun_server_from_env() -> Option<String> {
 pub struct GateConfig {
     /// Whether the capability probe runs at all. Default: `true`.
     pub require: bool,
-    /// Hard gate (`--require-backbone`, **DEFAULT**): exit
-    /// [`EXIT_NOT_DIALABLE`] when the probe fails. Opt out with
-    /// `--no-require-backbone` / `GPN_REQUIRE_BACKBONE=0` to run degraded.
+    /// Hard gate (`--require-backbone`, **opt-in**): exit
+    /// [`EXIT_NOT_DIALABLE`] when the probe fails. The default is soft mode —
+    /// warn once, run degraded, re-check every 10 minutes.
     pub require_backbone: bool,
     /// Willing to be published as a seed (`GPN_SEED`, default `true`).
     /// Controls the operator notice only; publication is decided by peer
@@ -987,7 +989,7 @@ impl GateConfig {
     pub fn new(require: bool, timeout: Duration, public_addr: Option<Multiaddr>) -> Self {
         GateConfig {
             require,
-            require_backbone: true,
+            require_backbone: false,
             seed: true,
             discoverable: true,
             timeout,
@@ -1042,16 +1044,16 @@ pub fn parse_discoverable(raw: Option<&str>) -> bool {
     )
 }
 
-/// Parse `GPN_REQUIRE_BACKBONE`. Default **ON** — a node that cannot be
-/// dialled prints the §5.2 notice and exits [`EXIT_NOT_DIALABLE`].
+/// Parse `GPN_REQUIRE_BACKBONE`. Default **OFF** (soft mode) — a node that
+/// cannot be dialled prints the §5.2 notice once and keeps serving.
 ///
-/// Only an explicit false-y value (`0`/`false`/`no`/`off`) opts out into the
-/// soft mode: run degraded, re-check every 10 minutes, print NOW DIALABLE on
-/// promotion.
+/// Only an explicit truth-y value (`1`/`true`/`yes`/`on`) turns the hard gate
+/// back on, in which case a non-dialable node exits [`EXIT_NOT_DIALABLE`].
+/// Anything else — unset, empty, or a false-y value — means soft mode.
 pub fn parse_require_backbone(raw: Option<&str>) -> bool {
-    !matches!(
+    matches!(
         raw.map(|s| s.trim().to_ascii_lowercase()).as_deref(),
-        Some("0" | "false" | "no" | "off")
+        Some("1" | "true" | "yes" | "on")
     )
 }
 
@@ -1077,10 +1079,10 @@ pub fn listen_port(listen: &[Multiaddr]) -> Option<u16> {
 /// The operator-facing degradation notice (design §5.2), or `None` when the
 /// operator opted out of seed publication.
 ///
-/// `hard_gate` selects the postamble: the **default** hard gate prints the
-/// notice and exits with [`EXIT_NOT_DIALABLE`]; `--no-require-backbone` (soft
-/// mode) keeps running as a non-discoverable participant and promises the
-/// 10-minute re-check.
+/// `hard_gate` selects the postamble: soft mode (the **default**) keeps
+/// running as a non-discoverable participant and promises the 10-minute
+/// re-check; `--require-backbone` prints the notice and exits with
+/// [`EXIT_NOT_DIALABLE`].
 ///
 /// Emitted **once per degraded transition** (startup, or dialable → not
 /// dialable), after the automatic NAT-mapping attempt in [`crate::portmap`] —
@@ -1881,14 +1883,17 @@ mod tests {
     }
 
     #[test]
-    fn require_backbone_is_on_by_default() {
-        assert!(parse_require_backbone(None));
-        assert!(parse_require_backbone(Some("")));
-        assert!(parse_require_backbone(Some("1")));
-        assert!(parse_require_backbone(Some("on")));
-        // Explicit opt-out into soft mode.
-        for v in ["0", "false", "FALSE", "no", "off", " 0 "] {
-            assert!(!parse_require_backbone(Some(v)), "{v} must opt out");
+    fn require_backbone_is_off_by_default() {
+        // Soft mode unless the operator explicitly asks for the hard gate: an
+        // unset/empty/garbage value must never stop a node from serving.
+        assert!(!parse_require_backbone(None));
+        assert!(!parse_require_backbone(Some("")));
+        for v in ["0", "false", "FALSE", "no", "off", " 0 ", "banana"] {
+            assert!(!parse_require_backbone(Some(v)), "{v} must stay soft");
+        }
+        // Explicit opt-in to the legacy hard gate.
+        for v in ["1", "true", "TRUE", "yes", "on", " 1 "] {
+            assert!(parse_require_backbone(Some(v)), "{v} must enable the gate");
         }
     }
 
