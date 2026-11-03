@@ -738,7 +738,20 @@ fn handle_infer_request(
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() {
+    if let Err(e) = run_main().await {
+        let detail = format!("the LLM provider loop could not start: {e}");
+        let kind = gpn_agent::exit_report::kind_for_text(&detail);
+        gpn_agent::exit_report::fatal(
+            kind,
+            detail,
+            "run `gpn_node --diagnose`; check the chain RPC endpoint (GPN_ENDPOINT / :9944) and \
+             GPN_SIGNER, then restart the node. A required model is pulled by `gpn_node --setup`.",
+        );
+    }
+}
+
+async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
     let endpoint = args

@@ -21,6 +21,10 @@
 #   gpn-autostart.sh remove
 #   gpn-autostart.sh remove-updater
 #   gpn-autostart.sh status
+#   gpn-autostart.sh verify
+#       prove the boot path end-to-end: the unit is enabled, linger is on,
+#       and a stop/start cycle (a simulated reboot) brings the node back with
+#       no user action. Exits non-zero if any check fails.
 #
 # Env overrides:
 #   GPN_PREFIX         install dir      (default ~/.gpn)
@@ -51,6 +55,7 @@ BIN_DIR="${GPN_BIN:-$HOME/.local/bin}"
 UNIT_DIR="${GPN_AUTOSTART_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}"
 NODE_UNIT="gpn-node.service"
 OLLAMA_UNIT="gpn-ollama.service"
+NOTIFY_UNIT="gpn-notify@.service"
 UPDATE_UNIT="gpn-update.service"
 UPDATE_TIMER="gpn-update.timer"
 MARKER="$PREFIX/autostart"
@@ -180,6 +185,7 @@ write_units() {
 Description=GPN ollama (local LLM server for the GPN node)
 After=network-online.target
 Wants=network-online.target
+OnFailure=gpn-notify@%n.service
 
 [Service]
 Type=simple
@@ -205,6 +211,10 @@ Description=GPN node (miner + AI provider supervisor)
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=0
+# A fatal start (exit 69 no-ollama, 78 not-dialable, 3 bad key) is explained
+# by gpn_node itself in ~/.gpn/last-exit.json; this hook makes sure a human
+# sees it even when the journal is the only other place it landed.
+OnFailure=gpn-notify@%n.service
 
 [Service]
 Type=simple
@@ -226,6 +236,23 @@ WantedBy=default.target
 EOF
   chmod 644 "$UNIT_DIR/$NODE_UNIT"
 
+  # The failure notifier. It is deliberately best-effort: a headless box has
+  # no desktop, and a missing notify-send must never fail anything. XDG_SESSION_ID
+  # is inherited from the user manager when a login session exists; DISPLAY /
+  # WAYLAND_DISPLAY is checked too, because a `systemctl --user` unit does not
+  # always inherit the graphical session environment.
+  cat > "$UNIT_DIR/$NOTIFY_UNIT" <<'EOF'
+# Written by gpn-autostart.sh — do not edit; re-run install to regenerate.
+[Unit]
+Description=GPN: report why %i stopped
+
+[Service]
+Type=oneshot
+# Keep this line readable in journalctl and syslog. Nothing here is fatal.
+ExecStart=/bin/sh -c 'msg="GPN unit %i stopped: run gpn_node --diagnose (journal: journalctl --user -u %i)"; logger -t gpn-node -- "$msg" || true; if { [ -n "$XDG_SESSION_ID" ] || [ -n "$DISPLAY" ] || [ -n "$WAYLAND_DISPLAY" ]; } && command -v notify-send >/dev/null 2>&1; then notify-send -u critical "GPN node stopped" "$msg" || true; fi; exit 0'
+EOF
+  chmod 644 "$UNIT_DIR/$NOTIFY_UNIT"
+
   write_update_units "$NODE_UNIT"
 
   # Marker: what we created, so `remove` (and the tests) know exactly what is
@@ -233,7 +260,7 @@ EOF
   {
     echo "mechanism=systemd-user"
     echo "unit_dir=$UNIT_DIR"
-    echo "units=$OLLAMA_UNIT $NODE_UNIT $UPDATE_UNIT $UPDATE_TIMER"
+    echo "units=$NOTIFY_UNIT $OLLAMA_UNIT $NODE_UNIT $UPDATE_UNIT $UPDATE_TIMER"
     echo "linger=loginctl enable-linger $(id -un)"
   } > "$MARKER"
 }
@@ -284,9 +311,10 @@ cmd_install() {
     sc enable --now "$UPDATE_TIMER"
   fi
   enable_linger
-  log "autostart installed: $UNIT_DIR/{$OLLAMA_UNIT,$NODE_UNIT,$UPDATE_UNIT,$UPDATE_TIMER}"
+  log "autostart installed: $UNIT_DIR/{$NOTIFY_UNIT,$OLLAMA_UNIT,$NODE_UNIT,$UPDATE_UNIT,$UPDATE_TIMER}"
   log "  start now:  systemctl --user start $NODE_UNIT"
   log "  logs:       journalctl --user -u $NODE_UNIT -f"
+  log "  verify:     $0 verify   (enabled + linger + simulated reboot)"
   log "  updater:    systemctl --user list-timers $UPDATE_TIMER   (first check in 10 min)"
   log "  undo:       ./uninstall.sh --remove-autostart"
 }
@@ -299,7 +327,7 @@ cmd_remove() {
     fi
   done
   sc daemon-reload
-  for unit in "$UPDATE_TIMER" "$UPDATE_UNIT" "$NODE_UNIT" "$OLLAMA_UNIT"; do
+  for unit in "$UPDATE_TIMER" "$UPDATE_UNIT" "$NODE_UNIT" "$OLLAMA_UNIT" "$NOTIFY_UNIT"; do
     rm -f "$UNIT_DIR/$unit"
   done
   if have loginctl; then
@@ -314,7 +342,7 @@ cmd_remove() {
 
 cmd_status() {
   local unit
-  for unit in "$NODE_UNIT" "$OLLAMA_UNIT" "$UPDATE_UNIT" "$UPDATE_TIMER"; do
+  for unit in "$NOTIFY_UNIT" "$NODE_UNIT" "$OLLAMA_UNIT" "$UPDATE_UNIT" "$UPDATE_TIMER"; do
     if [ -f "$UNIT_DIR/$unit" ]; then
       printf '%s: installed\n' "$unit"
       if have systemctl; then
@@ -325,6 +353,61 @@ cmd_status() {
       printf '%s: NOT installed\n' "$unit"
     fi
   done
+}
+
+# Prove the property the whole script exists for: after a reboot the node
+# comes back with no user action. Failure is loud and returns non-zero.
+cmd_verify() {
+  local ok=1
+  pass() { printf '  PASS %s\n' "$*"; }
+  fail() { printf '  FAIL %s\n' "$*"; ok=0; }
+
+  if [ ! -f "$UNIT_DIR/$NODE_UNIT" ]; then
+    fail "$NODE_UNIT is not installed (run: gpn-autostart.sh install)"
+    return 1
+  fi
+  pass "$NODE_UNIT exists"
+
+  if ! have systemctl; then
+    fail "systemctl not found - cannot verify the boot path on this host"
+    return 1
+  fi
+
+  local en
+  en=$(systemctl --user is-enabled "$NODE_UNIT" 2>/dev/null || true)
+  if [ "$en" = enabled ]; then pass "$NODE_UNIT is enabled"; else fail "$NODE_UNIT is '$en', expected 'enabled'"; fi
+
+  if have loginctl; then
+    if loginctl show-user "$(id -un)" -p Linger 2>/dev/null | grep -qx 'Linger=yes'; then
+      pass "linger is enabled (starts at boot, not only at login)"
+    else
+      fail "linger is OFF - the node starts only when you log in (sudo loginctl enable-linger $(id -un))"
+    fi
+  else
+    fail "loginctl not found - cannot prove the node starts at boot"
+  fi
+
+  # Simulated reboot: stop the unit, then start it again with no other action.
+  systemctl --user stop "$NODE_UNIT" 2>/dev/null || true
+  sleep 1
+  if ! systemctl --user start "$NODE_UNIT" 2>/dev/null; then
+    fail "systemctl --user start $NODE_UNIT failed"
+    return "$ok"
+  fi
+  local i state=""
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    state=$(systemctl --user is-active "$NODE_UNIT" 2>/dev/null || true)
+    [ "$state" = active ] && break
+    sleep 1
+  done
+  if [ "$state" = active ]; then
+    pass "the node came back after stop/start (simulated reboot, no user action)"
+  else
+    fail "unit state after stop/start is '$state', expected 'active'"
+  fi
+
+  if [ "$ok" = 1 ]; then echo "autostart verification PASSED"; else echo "autostart verification FAILED"; fi
+  [ "$ok" = 1 ]
 }
 
 ACTION="${1:-}"
@@ -346,5 +429,6 @@ case "$ACTION" in
   remove-updater)  cmd_remove_updater ;;
   remove)  cmd_remove ;;
   status)  cmd_status ;;
+  verify)  cmd_verify ;;
   *) sed -n '2,/^set -euo pipefail/p' "$0" | sed '$d'; exit 2 ;;
 esac

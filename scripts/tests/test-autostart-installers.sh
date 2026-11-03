@@ -87,6 +87,25 @@ assert_has "$ps1" 'set "GPN_NODE_KEY_FILE=' "launcher uses a per-machine node ke
 assert_has "$ps1" "--ensure-wallet"          "launcher provides the money identity"
 assert_has "$ps1" "GPN_SIGNER_FILE=%GPN_BASE_PATH%" "launcher points at the on-disk keystore"
 
+# ---- a stop must explain itself and survive a reboot ----------------------
+assert_has "$ps1" "report-exit.ps1"            "launcher calls a generated exit reporter"
+assert_has "$ps1" 'set "RC=%ERRORLEVEL%"'      "launcher captures the supervisor's exit code"
+assert_has "$ps1" "if errorlevel 3"             "launcher stops the restart loop on 3 strikes"
+assert_has "$ps1" "goto :run"                   "launcher retries after a reported failure"
+assert_has "$ps1" '[System.Windows.Forms.MessageBox]::Show' "a hidden task surfaces the reason in a message box"
+assert_has "$ps1" "last-exit.json"              "the reporter reads the node's exit log"
+assert_has "$ps1" "crash loop"                  "the reporter names a crash loop"
+assert_has "$ps1" "NOT restarting"              "the reporter says it stopped restarting"
+assert_has "$ps1" "ts_unix"                     "the 3-strike window uses unix timestamps"
+assert_has "$ps1" "winget install --id Microsoft.VCRedist.2015+.x64 -e" "0xC0000135 is mapped to the VC++ fix"
+assert_has "$ps1" "-1073741515"                 "the signed loader-failure code is recognised"
+assert_has "$ps1" "3221225781"                  "the unsigned loader-failure code is recognised"
+assert_has "$ps1" "function Verify-NodeTask"    "installer can verify autostart"
+assert_has "$ps1" "function Wait-NodeUp"        "verification waits for the node to answer"
+assert_has "$ps1" "schtasks /Run"               "verification runs the task"
+assert_has "$ps1" "system_health"               "verification checks the RPC"
+assert_has "$ps1" "'^-{1,2}(verify|v)\$'"       "installer accepts -Verify"
+
 # canonical values, not placeholders left behind
 assert_has "$ps1" "http://gpn-testnet.duckdns.org:8092" "canonical AP default"
 boots=$(grep -o "/p2p/12D3KooW" "$ps1" | wc -l)
@@ -148,6 +167,17 @@ echo "== Windows installer: launcher identity rules =="
 # Extract the single-quoted here-string that becomes C:\gpn\start-node.cmd.
 awk "/^\\\$LauncherTemplate = @'/{f=1;next} f && /^'@\$/{exit} f" "$ps1" > "$tmp/launcher.cmd"
 assert_file "$tmp/launcher.cmd" "launcher template extracted"
+assert_has "$tmp/launcher.cmd" "__REPORT__"      "launcher leaves a slot for the reporter path"
+assert_has "$tmp/launcher.cmd" "Tee-Object"      "launcher still tees to one log"
+
+# The reporter is a separate generated script; extract and check it too.
+awk "/^\\\$ReportTemplate = @'/{f=1;next} f && /^'@\$/{exit} f" "$ps1" > "$tmp/report-exit.ps1"
+assert_file "$tmp/report-exit.ps1" "exit reporter template extracted"
+assert_has "$tmp/report-exit.ps1" "param([int]\$ExitCode" "reporter takes the exit code"
+assert_has "$tmp/report-exit.ps1" "MessageBox"           "reporter shows a message box"
+assert_has "$tmp/report-exit.ps1" "Add-Content -Path \$Log" "reporter writes the same text to node.log"
+assert_has "$tmp/report-exit.ps1" "ConvertFrom-Json"     "reporter parses the NDJSON exit log"
+assert_has "$tmp/report-exit.ps1" ".Count -ge 3"        "reporter applies the 3-strike rule"
 
 # Sets CLA_PROBLEMS (empty = safe). Deliberately does NOT call ok/bad so it
 # can also be used as a negative control.
@@ -193,7 +223,7 @@ echo "== Windows installer: -WhatIf executed (optional) =="
 if command -v pwsh >/dev/null 2>&1; then
   # Real parser, not a text heuristic: a syntax error in install.ps1 would
   # otherwise only surface on the user's Windows box.
-  for f in "$ps1" "$unps"; do
+  for f in "$ps1" "$unps" "$tmp/report-exit.ps1"; do
     if pwsh -NoProfile -Command "\$e=\$null; [void][System.Management.Automation.Language.Parser]::ParseFile('$f',[ref]\$null,[ref]\$e); if (\$e.Count) { \$e | ForEach-Object { Write-Host \$_.Message }; exit 1 }" 2>&1; then
       ok "PowerShell parses $(basename "$f")"
     else
@@ -222,11 +252,20 @@ stub="$tmp/stub"; mkdir -p "$stub"
 cat > "$stub/systemctl" <<'EOF'
 #!/bin/sh
 echo "systemctl $*" >> "$GPN_TEST_LOG"
+case "$*" in
+  *" is-enabled "*) echo enabled ;;
+  *" is-active "*) echo active ;;
+  *" stop "*) echo inactive > "$GPN_TEST_STATE" ;;
+  *" start "*) echo active > "$GPN_TEST_STATE" ;;
+esac
 exit 0
 EOF
 cat > "$stub/loginctl" <<'EOF'
 #!/bin/sh
 echo "loginctl $*" >> "$GPN_TEST_LOG"
+case "$*" in
+  *show-user*) echo 'Linger=yes' ;;
+esac
 exit 0
 EOF
 chmod +x "$stub/systemctl" "$stub/loginctl"
@@ -248,7 +287,15 @@ units="$home/.config/systemd/user"
 run_helper install && ok "install exits 0" || bad "install failed (see $tmp/out.log)"
 assert_file "$units/gpn-node.service" "gpn-node.service written"
 assert_file "$units/gpn-ollama.service" "gpn-ollama.service written"
+assert_file "$units/gpn-notify@.service" "failure notifier unit written"
 assert_file "$home/.gpn/autostart" "autostart marker written"
+
+assert_has "$units/gpn-node.service" "OnFailure=gpn-notify@%n.service" "node unit reports a fatal start"
+assert_has "$units/gpn-ollama.service" "OnFailure=gpn-notify@%n.service" "ollama unit reports a fatal start"
+assert_has "$units/gpn-notify@.service" "logger -t gpn-node" "notifier logs one clear line"
+assert_has "$units/gpn-notify@.service" "notify-send" "notifier fires a desktop alert when one exists"
+assert_has "$units/gpn-notify@.service" "XDG_SESSION_ID" "notifier is desktop-aware"
+assert_has "$units/gpn-notify@.service" "|| true" "notifier never fails a headless box"
 
 assert_has "$units/gpn-node.service" "ExecStart=$home/.local/bin/gpn_node" "node unit runs gpn_node"
 assert_has "$units/gpn-node.service" "Environment=GPN_GUI=1" "node unit enables the dashboard"
@@ -267,8 +314,23 @@ assert_has "$GPN_TEST_LOG" "enable-linger" "enables linger (boot without login)"
 # ---- idempotency: run it again, twice the work must not mean twice the units
 : > "$GPN_TEST_LOG"
 run_helper install || bad "second install failed"
-count=$(find "$units" -name 'gpn-*.service' | wc -l)
-[ "$count" -eq 2 ] && ok "install twice -> still 2 unit files" || bad "install twice -> $count unit files"
+count=$(find "$units" -name 'gpn-node.service' -o -name 'gpn-ollama.service' | wc -l)
+[ "$count" -eq 2 ] && ok "install twice -> still 2 service unit files" || bad "install twice -> $count service unit files"
+count=$(find "$units" -name 'gpn-notify@.service' | wc -l)
+[ "$count" -eq 1 ] && ok "one failure-notifier template" || bad "$count failure-notifier templates"
+
+# ---- verify: enabled + linger + simulated reboot keeps the node up --------
+: > "$GPN_TEST_LOG"
+if HOME="$home" PATH="$stub:$PATH" GPN_TEST_LOG="$GPN_TEST_LOG" GPN_TEST_STATE="$tmp/state" \
+   bash "$helper" verify --prefix "$home/.gpn" --bin-dir "$home/.local/bin" >"$tmp/verify.log" 2>&1; then
+  ok "verify exits 0 when enabled + linger + reboot return the node"
+else
+  bad "verify failed: $(cat "$tmp/verify.log")"
+fi
+grep -q "PASSED" "$tmp/verify.log" && ok "verify says PASSED" || bad "verify did not report PASSED"
+assert_has "$GPN_TEST_LOG" "--user is-enabled gpn-node.service" "verify observed the enabled state"
+assert_has "$GPN_TEST_LOG" "--user stop gpn-node.service" "verify simulated a reboot (stop)"
+assert_has "$GPN_TEST_LOG" "--user start gpn-node.service" "verify simulated a reboot (start)"
 marker_units=$(grep -c '^units=' "$home/.gpn/autostart" || true)
 [ "$marker_units" -eq 1 ] && ok "one marker, one entry" || bad "marker has $marker_units 'units=' lines"
 

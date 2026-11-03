@@ -864,7 +864,20 @@ fn handle_channel_request(mut req: tiny_http::Request, ctx: &ChannelCtx) {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() {
+    if let Err(e) = run_main().await {
+        let detail = format!("the diffusion (image/video) provider could not start: {e}");
+        let kind = gpn_agent::exit_report::kind_for_text(&detail);
+        gpn_agent::exit_report::fatal(
+            kind,
+            detail,
+            "run `gpn_node --diagnose`; if this is optional on this box, set GPN_DIFFUSION=0 \
+             (or `diffusion = false`) and restart the node",
+        );
+    }
+}
+
+async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
     let endpoint = args

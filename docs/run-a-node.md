@@ -187,6 +187,17 @@ Both installers now set this up, and both can undo it in one command.
 | ollama | task `GPN-Ollama`, or the entry Ollama already created (never both) | `gpn-ollama.service` |
 | boot without login | starts at logon | `loginctl enable-linger` |
 | undo | `powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall` | `./uninstall.sh --remove-autostart` |
+| verify | `powershell -File .\install.ps1 -Verify` (run → up → end → Ready → run → up) | `scripts/gpn-autostart.sh verify` |
+
+Both installers can prove the property instead of asserting it:
+
+* **Linux** — `scripts/gpn-autostart.sh verify` checks that
+  `gpn-node.service` is `enabled`, that linger is `yes`, then stops and starts
+  the unit and confirms it returns to `active` with no other action.
+* **Windows** — `install.ps1 -Verify` runs the task, waits for the node to
+  answer on `127.0.0.1:9944`/`:8099`, ends it, checks the task is back to
+  `Ready`, runs it again, and waits for the node to come up a second time.
+  (`-WhatIf` prints the sequence without touching the machine.)
 
 `loginctl enable-linger` is not optional on a headless box: without it a
 `systemctl --user` service only starts when you log in, and nobody ever logs
@@ -746,7 +757,8 @@ Check the **WAN address** on the router status page (not the LAN address):
 
 - `100.64.0.0/10` → **carrier-grade NAT**. Your ISP does not give you a public
   IPv4; no port forward can work. Options: ask the ISP for a public/static IP,
-  use IPv6 if your ISP routes a public prefix, or run the node on a cheap VPS.
+  use IPv6 if your ISP routes a public prefix (see
+  [§5](#5-ipv6--the-answer-to-cgnat)), or run the node on a cheap VPS.
 - A public WAN address that differs from what a "what is my IP" site reports →
   also CGNAT (double NAT).
 
@@ -754,7 +766,73 @@ CGNAT is **not** an error. The node logs the notice once, cannot be a backbone
 member, and keeps syncing, mining and serving jobs as a non-discoverable
 participant.
 
-### 5. Tell the node its public address (only if detection fails)
+### 5. IPv6 — the answer to CGNAT
+
+If your line is CGNATed (or you just want a second, NAT-free path), IPv6 is the
+clean way to become dialable. There is no address translation on IPv6: every
+device can hold a globally routable address, so the **only** external gate is
+the router firewall, and that needs a **pinhole**, not a port forward.
+
+**1. Check that your ISP routes IPv6.** On the node host:
+
+```bash
+curl -6 ifconfig.co     # must print a global address (2000::/3)
+```
+
+If this fails or prints nothing, your ISP does not route IPv6 to you and IPv6
+cannot make this node dialable (ask the ISP for a prefix, or use a VPS).
+
+**2. Find the host's global address.**
+
+```bash
+ip -6 addr show scope global     # Linux
+# macOS: ifconfig | grep inet6
+# Windows: ipconfig /all  (look for a non-fe80 address)
+```
+
+You want a `2000::/3` address. Link-local (`fe80::/10`), unique-local
+(`fc00::/7`) and IPv4-mapped (`::ffff:a.b.c.d`) addresses are **not** dialable
+and the node ignores them.
+
+**3. Add a router pinhole (not a port forward).** In your router's IPv6
+firewall settings, allow **inbound TCP 30333** to that host's global address
+(or to its interface identifier / MAC, depending on the router). There is no
+NAT and no port rewriting on IPv6, so the external port equals the listen port.
+UPnP-IGD and NAT-PMP do **not** open IPv6 firewall pinholes — this is a manual
+router rule.
+
+**4. Allow 30333 on the host firewall too** — same as the IPv4 instructions
+above.
+
+**5. Optional, for a stable endpoint:** give the host a stable interface
+identifier, or pin its address in the router's DHCPv6 / static lease, so a
+renumber keeps the same host suffix.
+
+The node detects a global IPv6 address automatically, listens on
+`/ip6/::/tcp/30333` next to the IPv4 listener, and publishes
+`/ip6/<addr>/tcp/30333` **in addition to** the IPv4 entry. Ask it to use a
+specific endpoint with:
+
+```toml
+public_addr = "/ip6/2001:db8:1::10/tcp/30333"
+# or a name you control (must resolve to global unicast addresses):
+# public_addr = "/dns6/node.example.com/tcp/30333"
+```
+
+**Dialable is still required.** A global address proves only *addressing*, not
+*reachability*: a host with a global address behind a default-deny firewall is
+**not** dialable and stays in non-discoverable mode, exactly as with IPv4. The
+node requires the same evidence on v6 (a peer that dialed it over v6, a peer's
+observation of the address, STUN over IPv6, or a TCP probe).
+
+**Rotating prefixes.** Residential prefixes (often /56 or /64) can change when
+the ISP reconnects. The node re-checks every 10 minutes and, when the /64
+changes, republishes the new address and drops the stale one (once). Until a
+peer observes the new address, the old published endpoint is kept and a warning
+is logged — so a rotation can leave a dead address advertised for up to one
+re-check interval. A routed, stable prefix avoids this entirely.
+
+### 6. Tell the node its public address (only if detection fails)
 
 Auto-detection covers most hosts. Set it explicitly when the router rewrites
 ports or detection is ambiguous:
@@ -775,7 +853,7 @@ forwarded, not necessarily the listen port. On a VPS with a directly bound
 public IP this is usually unnecessary, but setting it is harmless and makes the
 announced endpoint exact.
 
-### 6. Verify from outside
+### 7. Verify from outside
 
 The node re-checks every 10 minutes and prints `NOW DIALABLE` once the forward
 works — no restart is needed. You can also confirm the forward yourself:
@@ -1155,6 +1233,54 @@ serving, and therefore in the live directory. Only multiaddrs that carry a
 an HTTP `status_url` are listed under `nodes[]` for tooling but are not dialled.
 The hardcoded seed set changes only with a release (or a `network.json`
 update) — being in the live directory does not compile you into clients.
+
+## The node won't start — run `--diagnose` first
+
+A failed start used to be silent: the window closed and nothing said why. Now
+**every** fatal exit prints a boxed block with the failing check and the exact
+fix, writes the same reason to `~/.gpn/last-exit.json`
+(`%USERPROFILE%\.gpn\last-exit.json` on Windows), and — on Linux — logs one
+`gpn-node` line to syslog. `--diagnose` re-runs every prerequisite and prints
+one PASS/FAIL screen:
+
+```bash
+./gpn_node --diagnose          # exit 0 only when every check passes
+```
+```powershell
+gpn_node.exe --diagnose
+```
+
+| Symptom | What `--diagnose` says | The fix |
+|---|---|---|
+| Window closes instantly, **no output at all** on Windows | `visual-c++` FAIL: `vcruntime140.dll` / `msvcp140.dll` missing | `winget install --id Microsoft.VCRedist.2015+.x64 -e` — the release binaries are Rust MSVC builds and cannot load without it (`0xC0000135`). The installer now detects this and installs it; the launcher reports it if a node is started by hand. |
+| `node=down(no ollama)`, exit **69** | `ollama` FAIL: not reachable on `127.0.0.1:11434` | `./gpn_node --setup` (Windows: `gpn_node.exe --setup`) installs ollama, starts `ollama serve`, and pulls `llama3.2:1b`. Manual: `winget install Ollama.Ollama` / `scripts/install-ollama.sh`, then `ollama serve && ollama pull llama3.2:1b`. |
+| Ollama is up but the node still refuses | `ollama` FAIL: serving, **no model present** | `ollama pull llama3.2:1b` (a node with no model cannot serve LLM jobs). |
+| `FATAL: … refusing to start`, exit **3** | `wallet` FAIL: keystore unusable / address does not match its secret | Restore `keystore.json` from backup. Only if you accept a **new payout account**: delete it on purpose and run `gpn_node --ensure-wallet`. |
+| `no keystore`, wallet prompt on a headless box | `wallet` FAIL: no keystore at `…/keystore.json` | `gpn_node --ensure-wallet` — creates this machine's identity without a TTY. |
+| Two boxes fight over the same peer id | `node-key` FAIL: the **shared fleet key** | `gpn-node key generate-node-key --file ~/.gpn/node-key`, set `GPN_NODE_KEY_FILE` to it, unset `GPN_NODE_KEY`, restart. Never copy a node key between machines. |
+| `node=down(not dialable)`, exit **78** | usually all PASS (dialability is no longer a gate by default) | Forward TCP `30333`; see [Make your node dialable](#make-your-node-dialable). `GPN_REQUIRE_BACKBONE=1` restores the hard gate. |
+| Node dies with a port error | `port` FAIL: e.g. `9944 (rpc) is held by another process` | Stop the other program, or move this node with `GPN_RPC_PORT` / `GPN_LISTEN` / `GPN_GUI_LISTEN`. |
+| Chain never syncs; peers reject us | `chain-spec` FAIL: genesis does not match the pinned hash | Delete the spec file and re-run `gpn_node` (it re-fetches the verified spec). Never hand-edit `genesis`. |
+| Chain halts, writes fail | `disk` FAIL: below the **10 %** floor | Free space on the filesystem holding the chain DB / models. |
+
+Every fatal exit is recorded, one JSON object per line, in
+`~/.gpn/last-exit.json`:
+
+```json
+{"ts":"2026-11-03T17:06:00Z","ts_unix":1762189560,"code":69,"kind":"no-ollama",
+ "detail":"ollama is REQUIRED and is not reachable at http://127.0.0.1:11434 — no response",
+ "remediation":"gpn_node --setup …","version":"0.3.12","os":"linux","pid":4242}
+```
+
+The **Windows launcher** reads that file when the supervisor exits non-zero and
+shows the reason in a **message box** (a scheduled task runs hidden, so a
+dialog is the only channel the operator sees), writes the same text to
+`C:\gpn\node.log`, and stops restarting after the **same failure 3 times in 10
+minutes** — an endless crash loop is its own silent failure. On **Linux**, the
+`gpn-node.service` unit carries `OnFailure=gpn-notify@%n.service`: it logs a
+clear `gpn-node` line and, only when a desktop session exists
+(`XDG_SESSION_ID` / `DISPLAY` / `WAYLAND_DISPLAY`), fires `notify-send`. It
+never fails on a headless box.
 
 ## Ollama is a REQUIRED component (bundled installer + hard gate)
 

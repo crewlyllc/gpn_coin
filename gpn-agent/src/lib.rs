@@ -14,6 +14,7 @@ pub mod compute;
 pub mod compute_unit;
 pub mod config;
 pub mod disk;
+pub mod exit_report;
 pub mod firstrun;
 pub mod gov;
 pub mod gpu;

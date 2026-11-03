@@ -69,6 +69,7 @@
 //! - Every `GPN_STATUS_SECS` (default 15) one aggregated line is printed:
 //!   child up/down + the node's best block (read cheaply from its RPC).
 
+use gpn_agent::exit_report::{self, ExitKind};
 use gpn_agent::ollama;
 use gpn_agent::update;
 use serde::Deserialize;
@@ -472,11 +473,14 @@ fn run_ensure_wallet() -> i32 {
     let base_path =
         resolve_effective_base(env_str("GPN_BASE_PATH").map(|s| PathBuf::from(expand_tilde(&s))));
     if let Err(e) = std::fs::create_dir_all(&base_path) {
-        asciieprintln!(
-            "[gpn_node] FATAL: cannot create base path {}: {e}",
-            base_path.display()
+        return exit_report::emit(
+            ExitKind::BASE_PATH,
+            format!("cannot create the node data directory {}: {e}", base_path.display()),
+            format!(
+                "create it by hand and re-run: mkdir -p '{}'  (or set GPN_BASE_PATH to a writable folder)",
+                base_path.display()
+            ),
         );
-        return 4;
     }
     let keystore = env_str("GPN_SIGNER_FILE")
         .map(|s| PathBuf::from(expand_tilde(&s)))
@@ -494,11 +498,12 @@ fn run_ensure_wallet() -> i32 {
     ) {
         Ok(p) => p,
         Err(e) => {
-            asciieprintln!("[gpn_node] FATAL: {e}");
-            asciieprintln!(
-                "[gpn_node] refusing to start: a node that cannot name its payout account must not mine."
+            return exit_report::emit(
+                ExitKind::CORRUPT_KEY,
+                format!("the wallet keystore is not usable: {e}"),
+                "restore the keystore from backup, or (only if you accept a NEW payout account) delete \
+                 it on purpose and re-run `gpn_node --ensure-wallet`",
             );
-            return 3;
         }
     };
     let address = provisioned.address().to_string();
@@ -553,6 +558,389 @@ fn run_ensure_wallet() -> i32 {
         );
     }
     0
+}
+
+/// One line of the `--diagnose` screen.
+struct Check {
+    name: &'static str,
+    pass: bool,
+    detail: String,
+    fix: Option<String>,
+}
+
+impl Check {
+    fn pass(name: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            name,
+            pass: true,
+            detail: detail.into(),
+            fix: None,
+        }
+    }
+    fn fail(name: &'static str, detail: impl Into<String>, fix: impl Into<String>) -> Self {
+        Self {
+            name,
+            pass: false,
+            detail: detail.into(),
+            fix: Some(fix.into()),
+        }
+    }
+}
+
+/// The node key shipped in the fleet template. A box using it advertises the
+/// same peer id as every other box that copied it.
+const SHARED_FLEET_NODE_KEY: &str =
+    "4ecac9dd3ce8f61ac2216dec9c366fb490a0d946db37947e05a4dc4de6ab543c";
+
+/// `gpn_node --diagnose` — re-check every prerequisite, print one PASS/FAIL
+/// screen with the exact fix per line, and exit 0 only when all pass.
+///
+/// Read-only on purpose: it never installs, pulls or probes the network beyond
+/// loopback. This is the first command an operator is told to run when "the
+/// node won't start".
+fn run_diagnose() -> i32 {
+    // Use the configured base path verbatim: `--diagnose` must inspect what the
+    // node will use, and must not silently redirect to a legacy DB directory.
+    let base = env_str("GPN_BASE_PATH")
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| PathBuf::from(expand_tilde(&s)))
+        .unwrap_or_else(gpn_agent::firstrun::default_base_path);
+    let ollama_url = env_str("GPN_OLLAMA")
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| ollama::DEFAULT_ENDPOINT.to_string());
+    let chain = env_str("GPN_CHAIN").unwrap_or_else(|| "testnet".to_string());
+
+    asciiprintln!("gpn_node --diagnose — every prerequisite on one screen");
+    asciiprintln!("  data dir : {}", base.display());
+    asciiprintln!("  chain    : {chain}\n");
+
+    let mut checks = vec![
+        check_ollama(&ollama_url),
+        check_vc_runtime(),
+        check_wallet(&base),
+        check_node_key(),
+    ];
+    checks.extend(check_ports());
+    checks.push(check_chain(&base, &chain));
+    checks.push(check_disk(&base));
+
+    let failed = checks.iter().filter(|c| !c.pass).count();
+    for c in &checks {
+        asciiprintln!(
+            "  [{}] {:<14} {}",
+            if c.pass { "PASS" } else { "FAIL" },
+            c.name,
+            c.detail
+        );
+        if let Some(fix) = &c.fix {
+            for line in wrap_at(fix, 96) {
+                asciiprintln!("         fix: {line}");
+            }
+        }
+    }
+    asciiprintln!("");
+    if failed == 0 {
+        asciiprintln!(
+            "  result: all {} checks passed — the node can start.",
+            checks.len()
+        );
+        0
+    } else {
+        asciiprintln!(
+            "  result: {} passed, {failed} FAILED — the node will not start until every FAIL is fixed.",
+            checks.len() - failed
+        );
+        1
+    }
+}
+
+fn wrap_at(text: &str, width: usize) -> Vec<String> {
+    exit_report::wrap(text, width)
+}
+
+fn check_ollama(endpoint: &str) -> Check {
+    match ollama::probe_endpoint(endpoint) {
+        ollama::Probe::Serving { models } if !models.is_empty() => Check::pass(
+            "ollama",
+            format!("serving at {endpoint} ({} model(s): {})", models.len(), models.join(", ")),
+        ),
+        ollama::Probe::Serving { .. } => Check::fail(
+            "ollama",
+            format!("serving at {endpoint} but NO model is present — a node with no model cannot serve"),
+            "ollama pull llama3.2:1b   (or `gpn_node --setup`, which installs and pulls it)",
+        ),
+        other => Check::fail(
+            "ollama",
+            format!("not reachable at {endpoint} — {}", other.detail()),
+            "gpn_node --setup   (Windows: winget install Ollama.Ollama · Linux: scripts/install-ollama.sh)",
+        ),
+    }
+}
+
+fn check_vc_runtime() -> Check {
+    if !cfg!(windows) {
+        return Check::pass("visual-c++", "not applicable on this OS");
+    }
+    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+    let sys32 = PathBuf::from(root).join("System32");
+    let missing: Vec<&str> = ["vcruntime140.dll", "msvcp140.dll"]
+        .into_iter()
+        .filter(|d| !sys32.join(d).is_file())
+        .collect();
+    if missing.is_empty() {
+        Check::pass(
+            "visual-c++",
+            "the Visual C++ 2015-2022 runtime is installed",
+        )
+    } else {
+        Check::fail(
+            "visual-c++",
+            format!(
+                "missing {} — without it every GPN .exe dies at load with 0xC0000135 and prints nothing",
+                missing.join(", ")
+            ),
+            "winget install --id Microsoft.VCRedist.2015+.x64 -e",
+        )
+    }
+}
+
+fn check_wallet(base: &Path) -> Check {
+    let keystore = env_str("GPN_SIGNER_FILE")
+        .map(|s| PathBuf::from(expand_tilde(&s)))
+        .unwrap_or_else(|| gpn_agent::firstrun::default_keystore_path(base));
+    if keystore.is_file() {
+        return match gpn_agent::firstrun::read_keystore(&keystore) {
+            Ok(ks) => Check::pass(
+                "wallet",
+                format!("{} ({})", keystore.display(), ks.address),
+            ),
+            Err(e) => Check::fail(
+                "wallet",
+                format!("keystore {} is unusable: {e}", keystore.display()),
+                "restore the keystore from backup, or delete it ON PURPOSE and run `gpn_node --ensure-wallet`",
+            ),
+        };
+    }
+    if let Some(signer) = env_str("GPN_SIGNER").filter(|s| !s.trim().is_empty()) {
+        return match gpn_agent::firstrun::ss58_of(&signer) {
+            Ok(a) => Check::pass("wallet", format!("GPN_SIGNER override -> {a}")),
+            Err(e) => Check::fail(
+                "wallet",
+                format!("GPN_SIGNER is unusable: {e}"),
+                "fix GPN_SIGNER (a mnemonic or dev URI), or unset it and run `gpn_node --ensure-wallet`",
+            ),
+        };
+    }
+    Check::fail(
+        "wallet",
+        format!("no keystore at {}", keystore.display()),
+        "gpn_node --ensure-wallet   (creates this machine's payout identity, headless)",
+    )
+}
+
+fn check_node_key() -> Check {
+    if let Some(k) = env_str("GPN_NODE_KEY").filter(|s| !s.trim().is_empty()) {
+        if k.trim().eq_ignore_ascii_case(SHARED_FLEET_NODE_KEY) {
+            return Check::fail(
+                "node-key",
+                "GPN_NODE_KEY is the SHARED fleet key — this box will advertise another box's peer id",
+                "gpn-node key generate-node-key --file ~/.gpn/node-key, then set GPN_NODE_KEY_FILE and unset GPN_NODE_KEY",
+            );
+        }
+        return Check::pass(
+            "node-key",
+            "inline GPN_NODE_KEY set (not the shared fleet key)",
+        );
+    }
+    let path = env_str("GPN_NODE_KEY_FILE")
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| PathBuf::from(expand_tilde(&s)))
+        .unwrap_or_else(|| PathBuf::from(expand_tilde("~/.gpn/node-key")));
+    match std::fs::read_to_string(&path) {
+        Ok(body) if body.trim().len() >= 32 => {
+            if body.trim().eq_ignore_ascii_case(SHARED_FLEET_NODE_KEY) {
+                Check::fail(
+                    "node-key",
+                    format!("{} contains the SHARED fleet key", path.display()),
+                    "delete it and run: gpn-node key generate-node-key --file ~/.gpn/node-key",
+                )
+            } else {
+                Check::pass("node-key", format!("per-machine key at {}", path.display()))
+            }
+        }
+        Ok(_) => Check::fail(
+            "node-key",
+            format!("{} is empty or too short", path.display()),
+            "gpn-node key generate-node-key --file ~/.gpn/node-key",
+        ),
+        Err(_) => Check::fail(
+            "node-key",
+            format!("no node key at {}", path.display()),
+            "gpn-node key generate-node-key --file ~/.gpn/node-key  (then set GPN_NODE_KEY_FILE to that path)",
+        ),
+    }
+}
+
+/// Ports the node needs. `(port, label, http_probe)`.
+const NODE_PORTS: &[(u16, &str)] = &[
+    (9944, "rpc"),
+    (30333, "p2p"),
+    (8093, "heartbeat"),
+    (8094, "node-gui"),
+    (8099, "dashboard"),
+];
+
+fn check_ports() -> Vec<Check> {
+    // `GPN_DIAGNOSE_PORTS=9944,30333,...` narrows the check (used by the test
+    // suite so it never collides with a node that is actually running).
+    let ports: Vec<(u16, &str)> = match env_str("GPN_DIAGNOSE_PORTS") {
+        Some(raw) => raw
+            .split(',')
+            .filter_map(|p| p.trim().parse::<u16>().ok())
+            .map(|p| (p, "port"))
+            .collect(),
+        None => NODE_PORTS.to_vec(),
+    };
+    let rpc_ours = http_contains(
+        9944,
+        "{\"id\":1,\"jsonrpc\":\"2.0\",\"method\":\"system_localPeerId\",\"params\":[]}",
+        "",
+    );
+    let node_running = rpc_ours || http_contains(8099, "GET / HTTP/1.0\r\n\r\n", "gpn");
+
+    ports
+        .iter()
+        .map(|(port, label)| {
+            if port_free(*port) {
+                return Check::pass("port", format!("{port} ({label}) is free"));
+            }
+            let ours = match *port {
+                9944 => rpc_ours,
+                8093 => http_contains(8093, "GET /status HTTP/1.0\r\n\r\n", "gflops"),
+                8099 => http_contains(8099, "GET / HTTP/1.0\r\n\r\n", "gpn"),
+                // No HTTP identity on the p2p / node-gui port: if our node is
+                // already up, these are ours by definition.
+                _ => node_running,
+            };
+            if ours {
+                Check::pass("port", format!("{port} ({label}) held by the running GPN node"))
+            } else {
+                Check::fail(
+                    "port",
+                    format!("{port} ({label}) is held by another process"),
+                    format!(
+                        "stop the other program, or set GPN_RPC_PORT / GPN_LISTEN / GPN_GUI_LISTEN away from {port}"
+                    ),
+                )
+            }
+        })
+        .collect()
+}
+
+fn port_free(port: u16) -> bool {
+    std::net::TcpListener::bind(("0.0.0.0", port)).is_ok()
+}
+
+/// One tiny HTTP request to a loopback port; true when any response contains
+/// `needle` (case-insensitive). Used only for "is this our node?" ownership.
+fn http_contains(port: u16, request: &str, needle: &str) -> bool {
+    use std::io::{Read, Write};
+    let Ok(mut s) = std::net::TcpStream::connect(("127.0.0.1", port)) else {
+        return false;
+    };
+    let _ = s.set_read_timeout(Some(std::time::Duration::from_millis(800)));
+    let _ = s.set_write_timeout(Some(std::time::Duration::from_millis(800)));
+    if s.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut buf = [0u8; 4096];
+    let mut total = Vec::new();
+    while let Ok(n) = s.read(&mut buf) {
+        if n == 0 {
+            break;
+        }
+        total.extend_from_slice(&buf[..n]);
+        if total.len() > 16 * 1024 {
+            break;
+        }
+    }
+    let body = String::from_utf8_lossy(&total).to_ascii_lowercase();
+    body.contains(&needle.to_ascii_lowercase())
+}
+
+fn check_chain(base: &Path, chain: &str) -> Check {
+    let spec_path = if chain.trim().to_ascii_lowercase().ends_with(".json") {
+        Some(PathBuf::from(expand_tilde(chain.trim())))
+    } else if base.join(gpn_agent::firstrun::DEFAULT_SPEC_FILE).is_file() {
+        Some(base.join(gpn_agent::firstrun::DEFAULT_SPEC_FILE))
+    } else {
+        None
+    };
+    let Some(path) = spec_path else {
+        // No downloaded spec: the binary carries the built-in spec, whose
+        // genesis is compiled in. That is a valid, verified identity.
+        return Check::pass(
+            "chain-spec",
+            format!(
+                "built-in `{chain}` spec (pinned genesis {})",
+                &gpn_agent::chainspec::EXPECTED_GENESIS_HASH[..18]
+            ),
+        );
+    };
+    let Ok(body) = std::fs::read_to_string(&path) else {
+        return Check::fail(
+            "chain-spec",
+            format!("cannot read {}", path.display()),
+            "delete it and re-run `gpn_node` (it re-fetches the verified spec), or set GPN_CHAIN=testnet",
+        );
+    };
+    match gpn_agent::chainspec::verify_genesis(&body) {
+        Ok(_) => Check::pass(
+            "chain-spec",
+            format!("{} matches the pinned GPN genesis", path.display()),
+        ),
+        Err(e) => Check::fail(
+            "chain-spec",
+            e,
+            "delete the spec file and re-run `gpn_node` to fetch the verified one; never hand-edit genesis",
+        ),
+    }
+}
+
+fn check_disk(base: &Path) -> Check {
+    // `GPN_DISK_MIN_PERCENT` lets a box with a deliberately small volume set
+    // its own floor (and lets the test suite be hermetic on a full CI disk).
+    let min: u64 = env_str("GPN_DISK_MIN_PERCENT")
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(10);
+    // `df` fails on a path that does not exist yet (a fresh install). Probe the
+    // nearest existing ancestor instead: it is the same filesystem.
+    let mut probe = base;
+    while !probe.exists() {
+        match probe.parent() {
+            Some(p) => probe = p,
+            None => break,
+        }
+    }
+    let space = gpn_agent::disk::disk_space(&probe.to_string_lossy());
+    match space.free_percent() {
+        Some(p) if p >= min => Check::pass(
+            "disk",
+            format!(
+                "{}% free ({} MiB of {} MiB; floor {}%)",
+                p, space.free_mb, space.total_mb, min
+            ),
+        ),
+        Some(p) => Check::fail(
+            "disk",
+            format!(
+                "only {p}% free ({} MiB) — below the {min}% floor; writes will start failing",
+                space.free_mb
+            ),
+            "free space (chain DB + models live here), or lower GPN_DISK_MIN_PERCENT if this volume is intentionally small; `gpn-node purge-chain` only if you accept a re-sync",
+        ),
+        None => Check::pass("disk", "free space could not be probed on this OS (skipped)"),
+    }
 }
 
 /// Testable core of [`resolve_effective_base`].
@@ -2199,8 +2587,6 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
     // into one entry, and neither can be reached reliably. The key below is the
     // one shipped in the fleet template; warn loudly rather than silently
     // running a duplicate identity.
-    const SHARED_FLEET_NODE_KEY: &str =
-        "4ecac9dd3ce8f61ac2216dec9c366fb490a0d946db37947e05a4dc4de6ab543c";
     if let Some(k) = &cfg.node_key {
         if k.trim() == SHARED_FLEET_NODE_KEY {
             asciieprintln!(
@@ -2637,14 +3023,15 @@ fn run_setup(cfg: &Config) -> i32 {
         print_setup_summary(cfg);
         0
     } else {
-        asciieprintln!("\n  [x] SETUP FAILED: {}", outcome.detail);
-        asciieprintln!("      Fix ollama, then re-run:  gpn_node --setup");
-        asciieprintln!(
-            "        Windows :  winget install Ollama.Ollama   (or scripts\\install-ollama.ps1)"
-        );
-        asciieprintln!("        Linux   :  scripts/install-ollama.sh");
-        asciieprintln!("        Then    :  ollama serve   &&   ollama pull llama3.2:1b\n");
-        ollama::EXIT_NO_OLLAMA
+        exit_report::emit(
+            ExitKind::NO_OLLAMA,
+            format!(
+                "ollama is required but not reachable at {} — {}",
+                cfg.ollama, outcome.detail
+            ),
+            "gpn_node --setup  (installs, starts and pulls the baseline model; \
+             Windows: winget install Ollama.Ollama · Linux: scripts/install-ollama.sh)",
+        )
     }
 }
 
@@ -2718,26 +3105,16 @@ fn enforce_ollama_gate(cfg: &Config) -> i32 {
             asciieprintln!("      Fix: gpn_node --setup\n");
             0
         }
-        ollama::GateDecision::Refuse => {
-            asciieprintln!("\n  [x] REFUSING TO START: ollama is REQUIRED and is not reachable.");
-            asciieprintln!("      endpoint: {}", cfg.ollama);
-            asciieprintln!("      reason  : {}", outcome.detail);
-            asciieprintln!(
-                "      A GPN node is miner AND AI provider — a miner-only node is not valid."
-            );
-            asciieprintln!("      Fix it with the one-shot bootstrap:");
-            asciieprintln!("        gpn_node --setup");
-            asciieprintln!("      Manual install:");
-            asciieprintln!(
-                "        Windows : winget install Ollama.Ollama   (or scripts\\install-ollama.ps1)"
-            );
-            asciieprintln!("        Linux   : scripts/install-ollama.sh");
-            asciieprintln!("        then    : ollama serve   &&   ollama pull llama3.2:1b");
-            asciieprintln!("      Docs: docs/run-a-node.md");
-            asciieprintln!("      (special cases only: GPN_REQUIRE_OLLAMA=0 starts degraded)");
-            asciieprintln!("\n      node=down(no ollama)\n");
-            ollama::EXIT_NO_OLLAMA
-        }
+        ollama::GateDecision::Refuse => exit_report::emit(
+            ExitKind::NO_OLLAMA,
+            format!(
+                "ollama is REQUIRED and is not reachable at {} — {}. \
+                 A GPN node is miner AND AI provider; miner-only is not valid.",
+                cfg.ollama, outcome.detail
+            ),
+            "gpn_node --setup  (one-shot install + serve + pull). Special cases only: \
+             GPN_REQUIRE_OLLAMA=0 starts degraded (mining, no LLM serving)",
+        ),
     }
 }
 
@@ -2770,6 +3147,16 @@ async fn main() {
         None => {}
     }
 
+    // ── `--diagnose`: one PASS/FAIL screen with the fix per line. ────────────
+    // Answered before `Config::load()` on purpose: it must run even when the
+    // config is the thing that is broken. Read-only (no install, no fetch).
+    if argv.iter().any(|a| a == "--diagnose") || env_str("GPN_DIAGNOSE").as_deref() == Some("1") {
+        // On a plain thread: the ollama probe uses reqwest's *blocking* client,
+        // which must not be created/dropped inside the tokio runtime.
+        let code = std::thread::spawn(run_diagnose).join().unwrap_or(1);
+        std::process::exit(code);
+    }
+
     // ── `--ensure-wallet` (queue #96): headless money-identity provisioning. ─
     // A service has no TTY, so the wizard cannot run. The launcher calls this
     // before the real start on EVERY start: it reuses an existing keystore,
@@ -2783,10 +3170,12 @@ async fn main() {
 
     let mut cfg = match Config::load() {
         Ok(c) => c,
-        Err(e) => {
-            asciieprintln!("gpn_node: {e}");
-            std::process::exit(2);
-        }
+        Err(e) => exit_report::fatal(
+            ExitKind::BAD_CONFIG,
+            format!("gpn_node could not load its configuration: {e}"),
+            "fix GPN_CONFIG / $GPN_PREFIX/node.toml, or run `gpn_node --diagnose` to see which \
+             prerequisite is missing",
+        ),
     };
 
     asciiprintln!("gpn_node — single-node supervisor (a node is always miner + AI provider)");
@@ -2940,8 +3329,11 @@ async fn main() {
 
     let specs = build_children(&cfg);
     if specs.is_empty() {
-        asciieprintln!("gpn_node: no children to run");
-        std::process::exit(2);
+        exit_report::fatal(
+            ExitKind::NO_CHILDREN,
+            "the supervisor computed an empty child set: nothing would run",
+            "check GPN_DIFFUSION / GPN_ML / GPN_FINETUNE and the bin dir; run `gpn_node --diagnose`",
+        );
     }
     let labels: Vec<&'static str> = specs.iter().map(|s| s.label).collect();
     asciiprintln!("  children: {}", labels.join(", "));

@@ -420,6 +420,33 @@ pub fn ensure(opts: &SetupOpts) -> SetupOutcome {
     ensure_with(opts, &mut hooks)
 }
 
+/// Probe `/api/tags` once and classify the answer — no install, no serve, no
+/// pull. Used by `gpn_node --diagnose`, which must never mutate the machine.
+pub fn probe_endpoint(endpoint: &str) -> Probe {
+    let base = endpoint.trim_end_matches('/');
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(PROBE_TIMEOUT_MS))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return Probe::Unreachable {
+                detail: format!("http client: {e}"),
+            }
+        }
+    };
+    match client.get(format!("{base}/api/tags")).send() {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let body = resp.text().unwrap_or_default();
+            classify(Some(status), Some(&body))
+        }
+        Err(e) => Probe::Unreachable {
+            detail: format!("{e}"),
+        },
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Real system hooks
 // ─────────────────────────────────────────────────────────────────────────────
@@ -496,28 +523,7 @@ impl SystemHooks {
 
 impl Hooks for SystemHooks {
     fn probe(&mut self, endpoint: &str) -> Probe {
-        let base = endpoint.trim_end_matches('/');
-        let client = match reqwest::blocking::Client::builder()
-            .timeout(Duration::from_millis(PROBE_TIMEOUT_MS))
-            .build()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                return Probe::Unreachable {
-                    detail: format!("http client: {e}"),
-                }
-            }
-        };
-        match client.get(format!("{base}/api/tags")).send() {
-            Ok(resp) => {
-                let status = resp.status().as_u16();
-                let body = resp.text().unwrap_or_default();
-                classify(Some(status), Some(&body))
-            }
-            Err(e) => Probe::Unreachable {
-                detail: format!("{e}"),
-            },
-        }
+        probe_endpoint(endpoint)
     }
 
     fn install(&mut self) -> Result<bool, String> {
