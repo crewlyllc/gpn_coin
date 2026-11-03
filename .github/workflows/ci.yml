@@ -210,6 +210,16 @@ jobs:
           CARGO_TARGET_DIR: /home/jeremyg/.ci-cache/gpn-agent-target
         run: nice -n 19 cargo test --release
 
+      # `gpn_update`'s end-to-end tests sign manifests with a throwaway key and
+      # need the debug-only `GPN_UPDATE_PUBKEY` override, so they run in DEBUG.
+      # (Under --release the binary correctly refuses the test key -> 6 failures,
+      # which is what turned CI red on 2026-11-03.)
+      - name: Test gpn_update CLI (debug — throwaway signing key)
+        working-directory: gpn-agent
+        env:
+          CARGO_TARGET_DIR: /home/jeremyg/.ci-cache/gpn-agent-target
+        run: nice -n 19 cargo test --test gpn_update_cli
+
       # Launcher/identity gates (queue #96). Offline, cheap, and they are what
       # stops a shared dev key from being shipped again: the launcher check
       # parses the here-string that release-windows.yml publishes

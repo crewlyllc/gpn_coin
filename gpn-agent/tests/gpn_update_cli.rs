@@ -10,6 +10,12 @@
 //! tests sign with a throwaway key and set it. Release builds ignore that
 //! variable entirely and always trust `update::RELEASE_PUBKEY_HEX`.
 
+// These sign manifests with a THROWAWAY key and rely on `GPN_UPDATE_PUBKEY`,
+// which the binary honours in debug builds only (release always trusts the
+// compiled-in release key). Running them under `--release` therefore fails by
+// design -- CI runs them in debug (see the dedicated step in ci.yml).
+#![cfg(debug_assertions)]
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
