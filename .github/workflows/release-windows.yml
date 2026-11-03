@@ -512,6 +512,26 @@ jobs:
             Write-Host 'GPN_AUTOSTART_NODE=false — binaries deployed; node NOT restarted'
           }
 
+          # ── 5. AUTO-UPDATE: heal boxes installed before GPN-Update existed.
+          #    Without this task a Windows box only checks the signed manifest
+          #    when the supervisor starts, so a machine that never reboots
+          #    never updates (box 1 sat on an old build for days). install.ps1
+          #    owns the task definition; -UpdateTaskOnly writes the wrapper and
+          #    registers the task without touching binaries, ollama or the
+          #    running node. Guarded: a checkout without install.ps1 must not
+          #    fail the deploy.
+          $ErrorActionPreference = 'Continue'
+          if (Test-Path 'install.ps1') {
+            & powershell -NoProfile -ExecutionPolicy Bypass -File 'install.ps1' -UpdateTaskOnly -InstallDir 'C:\gpn'
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host '::warning::GPN-Update could not be registered - this box will not auto-update'
+            } else {
+              Write-Host 'GPN-Update task present: every 6h (+/- 30m), stops GPN-Node, applies, starts it again'
+            }
+          } else {
+            Write-Host '::warning::install.ps1 not found in the checkout - GPN-Update NOT registered'
+          }
+
       - name: publish GitHub Release (rolling 'windows-latest')
         shell: powershell
         env:

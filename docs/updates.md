@@ -801,6 +801,98 @@ WantedBy=timers.target
 `GPN_AUTO_UPDATE=0` (`3`) is not a unit failure; only a real error (`1`) is.
 `RandomizedDelaySec` is what stops a fleet from pulling 300 MB in lockstep.
 
+### The timer the Windows installer ships (`GPN-Update`)
+
+Windows has no systemd, and a Windows node does **not** keep checking the
+manifest between starts the way a Linux one does — a box that never reboots can
+sit on an old build for days (that is exactly what box 1 did). `install.ps1`
+therefore registers a scheduled task, `GPN-Update`, that is the Windows
+equivalent of `gpn-update.timer`:
+
+| | Value |
+|---|---|
+| Task name | `GPN-Update` |
+| Cadence | every **6 hours**, with `<RandomDelay>PT30M</RandomDelay>` (jitter is drawn per repetition, so the fleet drifts apart) |
+| Action | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\gpn\update-and-restart.ps1"` |
+| Concurrency | `MultipleInstancesPolicy = IgnoreNew` **and** an exclusive lock file `C:\gpn\update.lock` |
+| Missing a run (box off) | `StartWhenAvailable = true` |
+| Run level | `HighestAvailable`, as the installing user (`InteractiveToken`) |
+
+The task is registered from XML (`schtasks /Create /TN GPN-Update /XML ... /F`)
+and not from `schtasks /SC DAILY /RI 360`: the CLI cannot express jitter, and
+the ScheduledTasks module's `-RandomDelay` only dithers the *initial*
+StartBoundary, not every repetition. `/F` replaces the task by name, so running
+the installer twice never creates a second task or a duplicate trigger.
+
+#### The wrapper's control flow
+
+```text
+update check started
+  gpn_update --check                 -> 0  up to date        -> log, exit 0   (node NOT restarted)
+                                     -> 2  manifest offline  -> log, exit 0   (node NOT restarted)
+                                     -> 3  update available  -> continue
+                                     -> 1  verification error-> log, message box, exit 1
+  schtasks /End /TN GPN-Node         (Windows locks a running .exe, so the swap
+                                      cannot succeed while the node runs)
+  wait up to 60 s for gpn* to exit; force-stop the stragglers if it does not
+  gpn_update --apply                 (downloads, verifies, swaps, copies to C:\gpn\bin)
+  schtasks /Run /TN GPN-Node         ALWAYS - even if --apply failed
+  only then, if --apply failed, the message box explaining why
+```
+
+Three rules are load-bearing:
+
+* **Stop before apply.** The updater reports a locked `.exe` as an error; the
+  wrapper prevents the case instead of relying on the error.
+* **Always restart.** A failed update must never leave a box with nothing
+  running. The restart happens *before* any dialog, so a modal message box
+  cannot be the reason the node stays down.
+* **No restart when there is nothing to do.** A 6-hourly bounce for no reason
+  looks like instability; exits `0` and `2` return without touching the node.
+
+The restart window is the time the supervisor takes to come back — typically
+**10-30 s** (children stop gracefully, chain sync resumes from the last block,
+no re-sync). `gpn_update --apply` downloads the ~225 MB Windows bundle first,
+so a release day cycle takes minutes, not seconds; the node is only down for
+the swap itself.
+
+#### Checking what happened
+
+```powershell
+Get-Content C:\gpn\update.log -Tail 40
+schtasks /Query /TN GPN-Update /V /FO LIST   # last run time + last result
+schtasks /Run  /TN GPN-Update                # run a cycle now
+```
+
+`C:\gpn\update.log` is append-only and always ends with either
+`up to date - nothing to do (node NOT restarted)`, `update cycle complete`, or
+`FAILED: ...` with the reason. When an update fails, the same text is shown in
+a message box (via the generated `report-exit.ps1`, the only channel a hidden
+task has) and the node is already back up.
+
+Update state lives in `C:\gpn\data\update\` (the same `versions/`, `current`,
+`current.previous` layout the node itself uses); binaries are installed into
+`C:\gpn\bin`. Removing the auto-update is part of the normal uninstall:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall
+```
+
+That stops and deletes `GPN-Node` and `GPN-Update`, and removes
+`update-and-restart.ps1` (the log and the chain data are kept).
+
+Existing boxes heal themselves: the release deploy step runs
+`install.ps1 -UpdateTaskOnly`, which writes the wrapper and registers the task
+without re-copying binaries, touching ollama, or restarting the node. It is
+guarded, so a checkout without `install.ps1` only warns.
+
+The supervisor still has its own in-process auto-update thread. Both paths use
+the same signed manifest, the same `versions/<v>/` trees and the same `current`
+junction, and both are idempotent (an already-installed version is reused, not
+re-downloaded), so they do not fight. If you want exactly one updater on a
+Windows box, set `auto_update = false` in `%USERPROFILE%\.gpn\node.toml` and let
+`GPN-Update` own it.
+
 ### Enabling it on a `gpn_fleet` host
 
 A fleet host's node is owned by `gpn-fleet.service`, not by the installer's

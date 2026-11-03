@@ -214,6 +214,79 @@ else
   ok "negative control rejected as expected (${#CLA_PROBLEMS[@]} problems)"
 fi
 
+echo "== Windows installer: auto-update (GPN-Update) =="
+# The Windows equivalent of the Linux gpn-update.timer. What is guarded here:
+# a box that never reboots never updated, because the node only checked the
+# signed manifest when the supervisor started.
+assert_has "$ps1" "\$UpdateTask = 'GPN-Update'"            "task name is GPN-Update"
+assert_has "$ps1" "update-and-restart.ps1"                  "writes the update wrapper"
+assert_has "$ps1" "every 6h"                                "registers a 6-hour cadence"
+assert_has "$ps1" "<Interval>PT6H</Interval>"               "trigger repeats every 6 hours"
+assert_has "$ps1" "<Duration>P1D</Duration>"                "repetition covers the whole day"
+assert_has "$ps1" "<RandomDelay>PT30M</RandomDelay>"        "trigger has +/- 30 min jitter"
+assert_has "$ps1" "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>" "update task cannot run twice"
+assert_has "$ps1" "the CLI cannot express jitter"           "explains why the task is registered from XML"
+assert_has "$ps1" "'/XML'"                                  "registers through schtasks /XML"
+assert_has "$ps1" "'/F'"                                    "re-registration replaces the task (idempotent)"
+assert_has "$ps1" "-NoProfile -ExecutionPolicy Bypass -File" "the task action runs the wrapper without a profile"
+assert_has "$ps1" ".PARAMETER UpdateTaskOnly"                "deploy step can register only the update task"
+assert_has "$ps1" "update.lock"                              "the wrapper takes a lock (no concurrent updaters)"
+assert_has "$ps1" "@(\$NodeTask, \$OllamaTask, \$UpdateTask)" "uninstall also removes GPN-Update"
+assert_has "$ps1" "removed the auto-update wrapper"           "uninstall removes update-and-restart.ps1"
+assert_has "$ps1" "-Note"                                     "update failures surface through report-exit.ps1"
+
+# Extract the generated wrapper and assert its CONTROL FLOW by line order:
+# stop before apply, always start after, and never start on "nothing to do".
+awk "/^\\\$UpdateWrapperTemplate = @'/{f=1;next} f && /^'@\$/{exit} f" "$ps1" > "$tmp/update-and-restart.ps1"
+assert_file "$tmp/update-and-restart.ps1" "update wrapper template extracted"
+uw="$tmp/update-and-restart.ps1"
+assert_has "$uw" "gpn_update.exe"                  "wrapper runs gpn_update"
+assert_has "$uw" "--check"                         "wrapper checks before doing anything"
+assert_has "$uw" "--apply"                         "wrapper applies the update"
+assert_has "$uw" "schtasks /End /TN \$NodeTask"    "wrapper stops the node (Windows locks a running .exe)"
+assert_has "$uw" "schtasks /Run /TN \$NodeTask"    "wrapper starts the node again"
+assert_has "$uw" "Wait-NodeExit"                   "wrapper waits for the process to exit"
+assert_has "$uw" "[System.IO.FileShare]::None"     "wrapper takes an exclusive lock"
+assert_has "$uw" "release manifest unreachable"    "exit 2 is logged, not treated as a failure"
+assert_has "$uw" "node NOT restarted"              "exit 0/2 do not restart the node"
+already=$(grep -n -e '-ExecutionPolicy Bypass -File \$ReportScript' "$uw" | head -1 | cut -d: -f1)
+if [ -z "$already" ]; then bad "wrapper never reports through report-exit.ps1"; else ok "wrapper reports failures through report-exit.ps1"; fi
+
+line_end=$(grep -n 'schtasks /End /TN \$NodeTask' "$uw" | head -1 | cut -d: -f1)
+line_apply=$(grep -n '\$updater --apply' "$uw" | head -1 | cut -d: -f1)
+line_run=$(grep -n 'schtasks /Run /TN \$NodeTask' "$uw" | head -1 | cut -d: -f1)
+line_fail=$(grep -n 'Show-UpdateFailure \$apply' "$uw" | head -1 | cut -d: -f1)
+[ -n "$line_end" ] && [ -n "$line_apply" ] && [ "$line_end" -lt "$line_apply" ] \
+  && ok "stops the node BEFORE --apply" || bad "--apply is not preceded by schtasks /End"
+[ -n "$line_apply" ] && [ -n "$line_run" ] && [ "$line_apply" -lt "$line_run" ] \
+  && ok "restarts AFTER --apply" || bad "the restart does not follow --apply"
+[ -n "$line_run" ] && [ -n "$line_fail" ] && [ "$line_run" -lt "$line_fail" ] \
+  && ok "restarts before showing a failure dialog (a modal box cannot keep the node down)" \
+  || bad "a failure dialog can be shown before the node is restarted"
+
+# The "nothing to do" branch must return before any stop/start.
+awk '/if \(\$check -eq 0\)/{f=1} f{print} f && /^  \}/{exit}' "$uw" > "$tmp/uptodate.txt"
+if grep -q 'exit 0' "$tmp/uptodate.txt"; then ok "exit 0 returns 0"; else bad "exit 0 does not return 0"; fi
+if grep -qE 'schtasks /(End|Run)|--apply' "$tmp/uptodate.txt"; then
+  bad "exit 0 path touches the node"; else ok "exit 0 does not restart the node"; fi
+## exit 2 must also leave the node alone
+awk '/if \(\$check -eq 2\)/{f=1} f{print} f && /^  \}/{exit}' "$uw" > "$tmp/unreachable.txt"
+if grep -qE 'schtasks /(End|Run)|--apply' "$tmp/unreachable.txt"; then
+  bad "exit 2 path touches the node"; else ok "exit 2 does not restart the node"; fi
+
+if LC_ALL=C grep -q $'[^\x01-\x7F]' "$uw"; then
+  bad "generated update-and-restart.ps1 contains non-ASCII bytes"; else ok "update wrapper is ASCII-only"; fi
+
+# Negative control for the ordering checks: a wrapper that applies before it
+# stops must be rejected, otherwise the assertions above prove nothing.
+{ echo 'x=$updater --apply'; echo 'schtasks /End /TN $NodeTask'; } > "$tmp/bad-order.ps1"
+if [ "$(grep -n 'schtasks /End /TN \$NodeTask' "$tmp/bad-order.ps1" | head -1 | cut -d: -f1)" -lt \
+     "$(grep -n '\$updater --apply' "$tmp/bad-order.ps1" | head -1 | cut -d: -f1)" ]; then
+  bad "negative control PASSED the stop-before-apply check - the check is broken"
+else
+  ok "negative control rejected as expected"
+fi
+
 echo "== Windows installer: wrapper + uninstall =="
 assert_has "$cmd" "-ExecutionPolicy Bypass" "install.cmd bypasses the execution policy"
 assert_has "$cmd" "install.ps1\" %*"        "install.cmd forwards all arguments"
