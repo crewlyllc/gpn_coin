@@ -784,7 +784,21 @@ function Verify-NodeTask {
 function Register-NodeTask {
   Invoke-Step "schtasks /Create /TN $NodeTask /TR `"cmd /c $NodeCmd`" /SC ONLOGON /RL HIGHEST /F" {
     $rc = Invoke-Schtasks @('/Create', '/TN', $NodeTask, '/TR', "cmd /c $NodeCmd", '/SC', 'ONLOGON', '/RL', 'HIGHEST', '/F')
-    if ($rc -ne 0) { throw "schtasks /Create $NodeTask failed (rc=$rc)" }
+    if ($rc -ne 0) {
+      # rc=1 here is almost always "Access is denied": the task already exists and
+      # was registered by a DIFFERENT account (e.g. an earlier install run from an
+      # elevated prompt as Administrator). A standard user cannot replace it, and
+      # a bare "failed (rc=1)" tells nobody that. Diagnose, then say what to do.
+      $owner = ''
+      $q = (& cmd /c "schtasks /Query /TN $NodeTask /FO LIST /V 2>nul") -join "`n"
+      if ($q -match 'Run As User:\s*(\S+)') { $owner = $Matches[1] }
+      if ($owner -and ($owner -notmatch [regex]::Escape($env:USERNAME))) {
+        throw ("$NodeTask already exists and is owned by '$owner', not '$env:USERNAME' -- " +
+               "an earlier install ran elevated. Fix it in an ADMIN prompt: " +
+               "schtasks /Delete /TN $NodeTask /F   then re-run this installer (non-elevated).")
+      }
+      throw "schtasks /Create $NodeTask failed (rc=$rc)"
+    }
   }
   if ($WhatIf) { return }
 

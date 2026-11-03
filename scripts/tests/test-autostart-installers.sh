@@ -119,6 +119,11 @@ assert_has "$ps1" "Test-MissingVCRuntime"                "detects the missing Vi
 # 2026-11-03 box 3: the VC++ check ran before $nodeExe was assigned, so it
 # tested an empty path (Test-Path error) and silently did nothing.
 assert_has "$ps1" "IsNullOrWhiteSpace(\$Exe)"                 "guards an empty exe path before Test-Path"
+# 2026-11-03 box 3: re-running the installer as a normal user hit a GPN-Node task
+# created earlier by Administrator -> schtasks rc=1 "Access is denied" with no
+# explanation. It must name the owner and the fix.
+assert_has "$ps1" "is owned by"                          "explains when GPN-Node belongs to another account"
+assert_has "$ps1" "schtasks /Delete /TN \$NodeTask /F"    "gives the exact admin command to clear it"
 python3 - "$ps1" <<'CHECK'
 import sys, re
 s = open(sys.argv[1]).read()
