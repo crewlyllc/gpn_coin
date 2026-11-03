@@ -118,6 +118,12 @@ jobs:
       - name: spec_version guard (source must not trail the registered network spec)
         run: bash scripts/check-spec-version.sh
 
+      # 2026-11-03: the Windows release build broke on an unguarded
+      # `std::os::unix::PermissionsExt` in gpn_update. Cross-compiling here is not
+      # possible (no mingw/MSVC), so this static check catches the class early.
+      - name: portability guard (no unguarded platform-specific code)
+        run: python3 scripts/check-portability.py
+
       - name: Show toolchain
         run: |
           # Repeated --component: rustup 1.29 rejects a space-separated component
