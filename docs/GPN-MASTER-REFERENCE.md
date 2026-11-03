@@ -453,8 +453,11 @@ warning — startup never fails on this. 18 tests.
 
 **Public HTTPS API (`worker/`) — LIVE.** `https://gpncoin.ai/api/v1/*` proxies to the AP: implemented
 routes are `GET /v1/models`, `POST /v1/chat/completions`, `POST /v1/images/generations`,
-`POST /v1/finetunes`, `GET /v1/finetunes/{id}`. `/v1/providers`, `/v1/jobs/{id}` and `/pricing` are
-**not available publicly** (they 404) — document only what exists. The AP itself speaks plain HTTP on
+`GET /v1/images/generations/{id}`, `GET /v1/images/{id}`, `POST /v1/finetunes`, `GET /v1/finetunes/{id}`,
+`GET /v1/finetunes/{id}/artifact`. Read-only companions sit outside that prefix: `GET /api/providers`,
+`GET /api/jobs/{id}`, `GET /api/network`, `GET /api/health`, `GET /api/mode`. Provider/job lookup are
+**not** at `/api/v1/providers` or `/api/v1/jobs/{id}` (those 404), and there is **no `/api/pricing`**
+(the AP's `GET /pricing` on :8092 is internal, not proxied) — document only what exists. The AP itself speaks plain HTTP on
 8092; the Worker terminates TLS, proxies over `cloudflare:sockets` and adds the Bearer token. Rate limits at the edge: **chat 12 / 10 min / IP**,
 reads 120/min, typed `gpn_rate_limited` errors. **Testnet inference is free.** Measured e2e is tens of
 seconds (34.7 s on 2026-10-22), dominated by the on-chain create-inclusion wait (#49/#52), ~1 s of
