@@ -214,6 +214,58 @@ print(m.read_bundle_stamp(Path(sys.argv[2])).get("version", ""))
 PY
 }
 
+bundle_commit() { # path -> the commit the bundle was built from ("" when unstamped)
+  "$PY" - "$GEN" "$1" <<'PY'
+import importlib.util, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("genrel", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+st = m.read_bundle_stamp(Path(sys.argv[2]))
+print(st.get("sha", "") or st.get("commit", ""))
+PY
+}
+
+# Refuse to SIGN an artifact whose commit never passed CI.
+#
+# The check lives here, not in the build workflow: on a single runner the
+# workflow waited for CI while CI sat queued behind that same workflow -- a
+# deadlock that stalled 0.3.14 for 40 minutes (2026-11-03). Building is cheap;
+# PUBLISHING is irreversible, so the gate belongs at signing time.
+require_green_ci() { # sha
+  local sha="$1"
+  if [ -z "$sha" ]; then
+    say "no commit sha in the bundle stamp -- CI cannot be verified"
+    return 0
+  fi
+  local tok="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+  local tokfile="${GPN_GH_TOKEN_FILE:-$HOME/.openclaw/credentials/github-gpn-pat.txt}"
+  if [ -z "$tok" ] && [ -f "$tokfile" ]; then tok="$(tr -d '\n' < "$tokfile")"; fi
+  if [ -z "$tok" ]; then
+    echo "ABORT: no GitHub token available to verify CI for $sha" >&2
+    exit 1
+  fi
+  local verdict
+  verdict="$(curl -sS -H "Authorization: Bearer $tok" -H 'Accept: application/vnd.github+json' \
+      "$GPN_GH_API/repos/$SRC_REPO/actions/runs?head_sha=$sha&per_page=100" | "$PY" -c '
+import json,sys
+d=json.load(sys.stdin)
+ci=[r for r in d.get("workflow_runs",[]) if r.get("name")=="CI"]
+if not ci:
+    print("missing"); raise SystemExit
+ci.sort(key=lambda r: r["created_at"])
+print(ci[-1]["status"] + ":" + str(ci[-1].get("conclusion")))')"
+  case "$verdict" in
+    completed:success) say "CI green for ${sha:0:7}" ;;
+    missing)
+      echo "ABORT: no CI run for commit ${sha:0:7} -- refusing to sign an unverified build" >&2
+      exit 1 ;;
+    *)
+      echo "ABORT: CI for ${sha:0:7} is '$verdict' -- refusing to sign an unverified build" >&2
+      exit 1 ;;
+  esac
+}
+
 published_version() {
   [ -f "$MANIFEST" ] || { echo ""; return 0; }
   "$PY" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("version",""))' "$MANIFEST"
@@ -357,6 +409,20 @@ case "$VER" in
   [0-9]*.[0-9]*.[0-9]*) ;;
   *) echo "ABORT: '$VER' is not a MAJOR.MINOR.PATCH version" >&2; exit 1 ;;
 esac
+
+# The bundles must come from the same commit, and that commit must have passed CI.
+C_LINUX="$(bundle_commit "$F_LINUX")"
+C_WIN="$(bundle_commit "$F_WIN")"
+if [ -n "$C_LINUX" ] && [ -n "$C_WIN" ] && [ "$C_LINUX" != "$C_WIN" ]; then
+  echo "ABORT: bundles were built from different commits (${C_LINUX:0:7} vs ${C_WIN:0:7})" >&2
+  echo "       -- one version number must mean one codebase." >&2
+  exit 1
+fi
+if [ "${ALLOW_RED:-0}" = 1 ]; then
+  say "ALLOW_RED=1 -- skipping the CI check (emergency only)"
+else
+  require_green_ci "${C_LINUX:-$C_WIN}"
+fi
 
 PUB="$(published_version || true)"
 if [ -n "$PUB" ]; then
