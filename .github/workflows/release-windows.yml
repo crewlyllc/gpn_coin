@@ -19,6 +19,13 @@ jobs:
     runs-on: [self-hosted, Windows]
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}   # build exactly the commit CI verified
+      - name: require green CI for this commit
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/require-green-ci.sh "${{ github.sha }}" 3600
       - name: git config
         run: |
           git config --global core.longpaths true
