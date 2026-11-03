@@ -830,6 +830,7 @@ fn test_fail_after_copies() -> Option<usize> {
 /// crash therefore leaves either the old file or the complete new one, never a
 /// half-written executable.
 fn copy_binaries(source: &Path, target: &Path) -> Result<Vec<String>, String> {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     let rd = std::fs::read_dir(source).map_err(|e| format!("{}: {e}", source.display()))?;
@@ -868,10 +869,16 @@ fn copy_binaries(source: &Path, target: &Path) -> Result<Vec<String>, String> {
             let _ = std::fs::remove_file(&tmp);
             return Err(format!("{} -> {}: {e}", src.display(), dst.display()));
         }
+        // Unix: mark executable before the rename. Windows has no mode bits --
+        // the copied .exe is already runnable, and an unconditional from_mode()
+        // here is what broke the Windows build on 2026-11-03.
+        #[cfg(unix)]
         if let Err(e) = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)) {
             let _ = std::fs::remove_file(&tmp);
             return Err(format!("chmod {}: {e}", tmp.display()));
         }
+        #[cfg(not(unix))]
+        let _ = &tmp;
         if let Err(e) = std::fs::rename(&tmp, &dst) {
             let _ = std::fs::remove_file(&tmp);
             return Err(format!(
