@@ -712,12 +712,15 @@ fn is_public_ip(ip: std::net::IpAddr) -> bool {
         }
         std::net::IpAddr::V6(v6) => {
             let first = v6.segments()[0];
-            !(v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
-                // fc00::/7 unique local, fe80::/10 link local
-                || (first & 0xfe00) == 0xfc00
-                || (first & 0xffc0) == 0xfe80)
+            // Global unicast is 2000::/3 only. Reject link-local, ULA,
+            // loopback/unspecified, multicast, IPv4-mapped, and documentation
+            // (2001:db8::/32) exactly like the node's dialability gate.
+            (first & 0xe000) == 0x2000
+                && !(v6.is_loopback()
+                    || v6.is_unspecified()
+                    || v6.is_multicast()
+                    || v6.to_ipv4_mapped().is_some()
+                    || (v6.segments()[0] == 0x2001 && v6.segments()[1] == 0x0db8))
         }
     }
 }
@@ -955,15 +958,19 @@ fn build_p2p_info(
     public_addr: Option<&str>,
     listen_addrs: Vec<String>,
 ) -> P2pInfo {
-    build_p2p_info_with(peer_id, public_addr, listen_addrs, None, None)
+    build_p2p_info_with(peer_id, public_addr, listen_addrs, &[], None)
 }
 
 /// [`build_p2p_info`] with the extra evidence rungs (node state file + STUN).
+///
+/// `node_evidence` is the node's published endpoint list: the first entry is
+/// the IPv4/base address used by the ladder, and any additional entry (the
+/// IPv6 address) is published **in addition** when it validates.
 fn build_p2p_info_with(
     peer_id: String,
     public_addr: Option<&str>,
     listen_addrs: Vec<String>,
-    node_evidence: Option<&str>,
+    node_evidence: &[String],
     stun: Option<&str>,
 ) -> P2pInfo {
     // Normalise BEFORE anything is published: the node may hand us
@@ -993,11 +1000,32 @@ fn build_p2p_info_with(
     }
 
     let mut notes: Vec<String> = Vec::new();
-    let chosen = choose_public_base(public_addr, &clean_listen, node_evidence, stun, &mut notes);
-    let (bases, source) = match &chosen {
+    let chosen = choose_public_base(
+        public_addr,
+        &clean_listen,
+        node_evidence.first().map(String::as_str),
+        stun,
+        &mut notes,
+    );
+    let (mut bases, source) = match &chosen {
         Some(p) => (vec![p.base.clone()], p.source),
         None => (Vec::new(), AddrSource::None),
     };
+    // Dual-stack: a validated second (IPv6) node-evidence base is published in
+    // addition to the primary one. Never instead of it, and never unvalidated.
+    if !bases.is_empty() {
+        for extra in node_evidence.iter().skip(1) {
+            if let Some(base) = base_multiaddr(extra) {
+                if base_is_dialable(&base) && !bases.contains(&base) {
+                    bases.push(base);
+                }
+            } else {
+                notes.push(format!(
+                    "node dialability state {extra:?} is not a public address — ignoring it"
+                ));
+            }
+        }
+    }
 
     let mut multiaddrs: Vec<String> = bases
         .into_iter()
@@ -1057,13 +1085,13 @@ fn p2p_info_from_rpc(
     rpc: &dyn Fn(&str) -> Option<Value>,
     public_addr: Option<&str>,
 ) -> Option<P2pInfo> {
-    p2p_info_from_rpc_evidence(rpc, public_addr, None, None)
+    p2p_info_from_rpc_evidence(rpc, public_addr, &[], None)
 }
 
 fn p2p_info_from_rpc_evidence(
     rpc: &dyn Fn(&str) -> Option<Value>,
     public_addr: Option<&str>,
-    node_evidence: Option<&str>,
+    node_evidence: &[String],
     stun: Option<&str>,
 ) -> Option<P2pInfo> {
     let peer_id = rpc("system_localPeerId").and_then(|v| v.as_str().map(normalize_peer_id))??;
@@ -1133,24 +1161,42 @@ fn attach_p2p(body: &mut Value, info: Option<&P2pInfo>) {
 /// Accepted shapes: `{"public_endpoint": "/ip4/…/tcp/…"}`, `{"public_addr": …}`
 /// or `{"multiaddrs": ["…"]}`. Anything unreadable is simply absent — the
 /// heartbeat never fails because the node's state file is missing.
-fn read_dialability_state() -> Option<String> {
+fn read_dialability_state() -> Vec<String> {
     let path = std::env::var("GPN_DIALABILITY_STATE").unwrap_or_else(|_| {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
         format!("{home}/.gpn/dialability.json")
     });
-    let text = std::fs::read_to_string(&path).ok()?;
-    let v: Value = serde_json::from_str(&text).ok()?;
-    for key in ["public_endpoint", "public_addr", "public_address"] {
-        if let Some(s) = v.get(key).and_then(|x| x.as_str()) {
-            if !s.trim().is_empty() {
-                return Some(s.trim().to_string());
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    // The canonical list (IPv4 first, IPv6 in addition). Older writers only
+    // emitted a single scalar; keep accepting every historical shape.
+    if let Some(arr) = v.get("multiaddrs").and_then(|x| x.as_array()) {
+        for s in arr.iter().filter_map(|s| s.as_str()) {
+            let s = s.trim();
+            if !s.is_empty() && !out.iter().any(|x| x == s) {
+                out.push(s.to_string());
             }
         }
     }
-    v.get("multiaddrs")
-        .and_then(|x| x.as_array())
-        .and_then(|a| a.iter().filter_map(|s| s.as_str()).next())
-        .map(str::to_string)
+    for key in [
+        "public_endpoint",
+        "public_endpoint_v6",
+        "public_addr",
+        "public_address",
+    ] {
+        if let Some(s) = v.get(key).and_then(|x| x.as_str()) {
+            let s = s.trim();
+            if !s.is_empty() && !out.iter().any(|x| x == s) {
+                out.push(s.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// One STUN binding request from a UDP socket bound to `port` (the node's p2p
@@ -1303,7 +1349,7 @@ fn p2p_info(endpoint: &str, public_addr: Option<&str>) -> Option<P2pInfo> {
         Instant::now(),
         p2p_cache(),
         &|method| rpc_call(endpoint, method, json!([])),
-        evidence.as_deref(),
+        &evidence,
         stun.as_deref(),
     )
 }
@@ -1315,7 +1361,7 @@ fn p2p_info_cached(
     now: Instant,
     cache: &std::sync::Mutex<Option<(Instant, Option<P2pInfo>)>>,
     rpc: &dyn Fn(&str) -> Option<Value>,
-    evidence: Option<&str>,
+    evidence: &[String],
     stun: Option<&str>,
 ) -> Option<P2pInfo> {
     let mut hit: Option<Option<P2pInfo>> = None;
@@ -1543,7 +1589,20 @@ fn push_once(
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() {
+    if let Err(e) = run_main() {
+        let detail = format!("the provider heartbeat/status server could not start: {e}");
+        let kind = gpn_agent::exit_report::kind_for_text(&detail);
+        gpn_agent::exit_report::fatal(
+            kind,
+            detail,
+            "run `gpn_node --diagnose`; the usual cause is another process holding port 8093 \
+             (LISTEN / GPN_LISTEN), or a chain RPC that never answers (GPN_ENDPOINT)",
+        );
+    }
+}
+
+fn run_main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let listen = opt(&args, "--listen")
         .or_else(|| std::env::var("LISTEN").ok())
@@ -2072,12 +2131,12 @@ mod tests {
         let addr = Some("/ip4/203.0.113.9/tcp/30333");
 
         // First read: id A.
-        let first = p2p_info_cached(addr, t0, &cache, &rpc, None, None).unwrap();
+        let first = p2p_info_cached(addr, t0, &cache, &rpc, &[], None).unwrap();
         assert!(first.multiaddrs[0]
             .ends_with("/p2p/12D3KooWRmEpPduYCn29uAAUF7WDnbsTXooPXA7YGRWCC7C7feJm"));
 
         // Inside the TTL the (still valid) cached snapshot is reused.
-        let cached = p2p_info_cached(addr, t0 + P2P_TTL / 2, &cache, &rpc, None, None).unwrap();
+        let cached = p2p_info_cached(addr, t0 + P2P_TTL / 2, &cache, &rpc, &[], None).unwrap();
         assert_eq!(cached.peer_id, first.peer_id);
 
         // Node restarts with a new key; past the TTL we must publish the NEW id.
@@ -2087,7 +2146,7 @@ mod tests {
             t0 + P2P_TTL + Duration::from_secs(1),
             &cache,
             &rpc,
-            None,
+            &[],
             None,
         )
         .unwrap();
@@ -2100,7 +2159,7 @@ mod tests {
         // The node goes away: past the TTL nothing at all is published — never
         // the last known identity.
         rpc_up.store(false, Ordering::SeqCst);
-        let gone = p2p_info_cached(addr, t0 + P2P_TTL * 4, &cache, &rpc, None, None);
+        let gone = p2p_info_cached(addr, t0 + P2P_TTL * 4, &cache, &rpc, &[], None);
         assert!(
             gone.is_none(),
             "a failed read must never resurrect a stale id"
@@ -2356,7 +2415,7 @@ mod tests {
             PID.to_string(),
             Some("/ip4/203.0.113.7/tcp/30333"),
             vec![format!("/ip4/0.0.0.0/tcp/30333/p2p/{PID}")],
-            None,
+            &[],
             None,
         );
         assert_eq!(
@@ -2365,6 +2424,56 @@ mod tests {
         );
         assert_eq!(
             info.multiaddrs,
+            vec![format!("/ip4/203.0.113.7/tcp/30333/p2p/{PID}")]
+        );
+    }
+
+    #[test]
+    fn node_evidence_publishes_ipv6_in_addition_to_ipv4() {
+        let info = build_p2p_info_with(
+            PID.to_string(),
+            None,
+            vec!["/ip4/0.0.0.0/tcp/30333".to_string()],
+            &[
+                "/ip4/203.0.113.7/tcp/30333".to_string(),
+                "/ip6/2606:4700:4700::1111/tcp/30333".to_string(),
+            ],
+            None,
+        );
+        assert_eq!(info.address_source, "node-dialability-state");
+        assert_eq!(
+            info.multiaddrs,
+            vec![
+                format!("/ip4/203.0.113.7/tcp/30333/p2p/{PID}"),
+                format!("/ip6/2606:4700:4700::1111/tcp/30333/p2p/{PID}"),
+            ]
+        );
+
+        // A non-public/invalid v6 entry is dropped, never published.
+        let only_bad_v6 = build_p2p_info_with(
+            PID.to_string(),
+            None,
+            vec!["/ip4/0.0.0.0/tcp/30333".to_string()],
+            &[
+                "/ip4/203.0.113.7/tcp/30333".to_string(),
+                "/ip6/fd00::1/tcp/30333".to_string(),
+            ],
+            None,
+        );
+        assert_eq!(
+            only_bad_v6.multiaddrs,
+            vec![format!("/ip4/203.0.113.7/tcp/30333/p2p/{PID}")]
+        );
+        // IPv4-only evidence still yields exactly today's single entry.
+        let v4_only = build_p2p_info_with(
+            PID.to_string(),
+            None,
+            vec!["/ip4/0.0.0.0/tcp/30333".to_string()],
+            &["/ip4/203.0.113.7/tcp/30333".to_string()],
+            None,
+        );
+        assert_eq!(
+            v4_only.multiaddrs,
             vec![format!("/ip4/203.0.113.7/tcp/30333/p2p/{PID}")]
         );
     }

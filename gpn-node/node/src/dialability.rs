@@ -48,12 +48,28 @@
 //! libp2p peer completed Identify against it inside the grace window, so the
 //! sole authority exited and the chain halted for ~12 minutes.
 //!
-//! # `/dns4` is a first-class public address
+//! # `/dns4`, `/ip6` and `/dns6` are first-class public addresses
 //!
 //! `GPN_PUBLIC_ADDR=/dns4/gpn-testnet.duckdns.org/tcp/30333` is accepted: the
 //! name is **resolved at check time** and *every* resolved IP must classify as
 //! public. Matching against peer observations is done on the **resolved IPs**,
 //! never on the literal hostname (peers only ever report IPs).
+//!
+//! # IPv6 (owner decision 2026-11-02: v6 is the answer to CGNAT)
+//!
+//! Carrier-grade NAT (`100.64.0.0/10`) makes the IPv4 gate unpassable for home
+//! broadband operators. IPv6 has no NAT: when the ISP routes a global prefix,
+//! the only remaining gate is the router **firewall** (a pinhole, not a port
+//! forward). [`detect_public_ipv6`] enumerates interfaces and accepts **only**
+//! global unicast `2000::/3`, rejecting link-local, ULA, loopback, unspecified,
+//! IPv4-mapped and documentation addresses. It prefers a stable address over an
+//! RFC 4941 temporary one and prefers the interface carrying the default route.
+//! The listener gains a `/ip6/::/tcp/<port>` bind and the published endpoint set
+//! gains `/ip6/<addr>/tcp/<port>` **in addition to** the IPv4 entry. The
+//! evidence model is identical for both stacks (inbound peer, observed
+//! address, STUN, TCP probe) — v6 never gets a weaker path. Prefix rotation is
+//! re-detected on the 10-minute loop and republished, dropping the stale
+//! address.
 //!
 //! # The gate may warn but must never halt the chain
 //!
@@ -93,7 +109,7 @@
 use sc_network::multiaddr::{Multiaddr, Protocol};
 use sc_network::network_state::{NetworkState, PeerEndpoint};
 use sc_network::{NetworkStateInfo, NetworkStatusProvider};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::time::{Duration, Instant};
 
 /// Distinct process exit code used when the node is not dialable.
@@ -202,11 +218,38 @@ pub fn classify_ip(ip: &IpAddr) -> IpClass {
                 IpClass::Private
             } else if v6.is_multicast() {
                 IpClass::Multicast
-            } else {
+            } else if v6.to_ipv4_mapped().is_some() {
+                // `::ffff:a.b.c.d` is an IPv4 endpoint wearing a v6 costume.
+                // Not a native v6 address: a peer can never dial it as v6.
+                IpClass::Private
+            } else if is_global_unicast_v6(v6) {
                 IpClass::Public
+            } else {
+                // Reserved, NAT64 (64:ff9b::/96), discard-only (100::/64) and
+                // documentation (2001:db8::/32) space are not reachable.
+                IpClass::Private
             }
         }
     }
+}
+
+/// IPv6 global unicast is `2000::/3`.
+pub fn is_global_unicast_v6(ip: &Ipv6Addr) -> bool {
+    let first = ip.segments()[0];
+    (first & 0xe000) == 0x2000 && !is_documentation_v6(ip)
+}
+
+/// `2001:db8::/32` — documentation space, never a live node address.
+pub fn is_documentation_v6(ip: &Ipv6Addr) -> bool {
+    ip.segments()[0] == 0x2001 && ip.segments()[1] == 0x0db8
+}
+
+/// The /64 prefix of an address, used to detect ISP renumbering.
+pub fn prefix64(ip: &Ipv6Addr) -> [u8; 8] {
+    let o = ip.octets();
+    let mut p = [0u8; 8];
+    p.copy_from_slice(&o[..8]);
+    p
 }
 
 /// The host half of a multiaddress endpoint: a literal IP or a DNS name.
@@ -358,6 +401,32 @@ pub fn inbound_peer_count(state: &NetworkState) -> usize {
         .count()
 }
 
+/// Count peers that dialed us **over IPv6** (the local side of the inbound
+/// connection is a global v6 address). This is v6-specific evidence: a v4
+/// inbound peer must not make a v6 address publishable.
+pub fn inbound_v6_peer_count(state: &NetworkState) -> usize {
+    state
+        .connected_peers
+        .values()
+        .filter(|p| match &p.endpoint {
+            // `local_addr` is the `multiaddr` crate's type; `endpoint_of`
+            // speaks the sc-network type. Round-trip through the text form (a
+            // peer count runs at most every poll, so this is not hot).
+            PeerEndpoint::Listening { local_addr, .. } => local_addr
+                .to_string()
+                .parse::<Multiaddr>()
+                .ok()
+                .and_then(|ma| endpoint_of(&ma))
+                .map(|(ip, _)| match ip {
+                    IpAddr::V6(v6) => is_global_unicast_v6(&v6),
+                    IpAddr::V4(_) => false,
+                })
+                .unwrap_or(false),
+            _ => false,
+        })
+        .count()
+}
+
 /// Everything the pure gate decision needs.
 ///
 /// `resolved` holds the IPs the configured `/dns4`/`/dns6` name resolved to at
@@ -369,6 +438,11 @@ pub fn inbound_peer_count(state: &NetworkState) -> usize {
 pub struct GateInputs<'a> {
     /// Peers that dialed us (see [`inbound_peer_count`]).
     pub inbound_peers: usize,
+    /// Peers that dialed us **over IPv6** (see [`inbound_v6_peer_count`]).
+    ///
+    /// A v4 inbound peer must not satisfy a v6 configured endpoint: that would
+    /// be a weaker path than the one v4 gets (design §5).
+    pub inbound_v6_peers: usize,
     /// Our listen addresses (`NetworkStateInfo::listen_addresses`).
     pub listen: &'a [Multiaddr],
     /// Addresses peers reported for us (`external_addresses`).
@@ -393,6 +467,7 @@ impl<'a> GateInputs<'a> {
     ) -> Self {
         GateInputs {
             inbound_peers,
+            inbound_v6_peers: 0,
             listen,
             observed,
             configured,
@@ -430,6 +505,7 @@ pub fn evaluate(
 pub fn evaluate_with(inputs: &GateInputs) -> Verdict {
     let GateInputs {
         inbound_peers,
+        inbound_v6_peers,
         listen,
         observed,
         configured,
@@ -437,8 +513,9 @@ pub fn evaluate_with(inputs: &GateInputs) -> Verdict {
         stun_mapped,
         tcp_probe_ok,
     } = inputs;
-    let (inbound_peers, listen, observed, resolved, stun_mapped, tcp_probe_ok) = (
+    let (inbound_peers, inbound_v6_peers, listen, observed, resolved, stun_mapped, tcp_probe_ok) = (
         *inbound_peers,
+        *inbound_v6_peers,
         *listen,
         *observed,
         *resolved,
@@ -447,10 +524,21 @@ pub fn evaluate_with(inputs: &GateInputs) -> Verdict {
     );
     let configured = *configured;
 
-    if inbound_peers > 0 {
+    // Inbound evidence must come from the same family as the endpoint it is
+    // meant to prove. For a v6 configured endpoint only a peer that actually
+    // connected over v6 counts; otherwise a v4 dialer would make an unreachable
+    // v6 address look dialable (design §5: "a v4 pass alone does not make a v6
+    // address publishable").
+    let requires_v6 = configured.map(is_v6_endpoint).unwrap_or(false);
+    let (inbound_ok, inbound_desc) = if requires_v6 {
+        (inbound_v6_peers, "over IPv6")
+    } else {
+        (inbound_peers, "")
+    };
+    if inbound_ok > 0 {
         return Verdict::pass(
             Evidence::InboundPeer,
-            format!("{inbound_peers} peer(s) dialed this node (inbound connection)"),
+            format!("{inbound_ok} peer(s) dialed this node (inbound connection{inbound_desc})"),
         );
     }
 
@@ -614,7 +702,7 @@ fn join_ips(ips: &[IpAddr]) -> String {
 fn class_desc(c: IpClass) -> &'static str {
     match c {
         IpClass::Public => "public",
-        IpClass::Private => "private/RFC1918",
+        IpClass::Private => "private/ULA/non-global (RFC1918, CGNAT, fc00::/7, v4-mapped)",
         IpClass::Loopback => "loopback",
         IpClass::LinkLocal => "link-local",
         IpClass::Unspecified => "unspecified",
@@ -740,13 +828,25 @@ pub fn tcp_probe(ip: IpAddr, port: u16, timeout: Duration) -> bool {
     TcpStream::connect_timeout(&SocketAddr::new(ip, port), timeout).is_ok()
 }
 
-/// External STUN binding: what endpoint does the NAT map our socket to?
+/// External STUN binding on the given address family: what endpoint does the
+/// network map our socket to?
 ///
 /// Genuinely external evidence (a third party sees our mapped tuple), unlike a
-/// hairpin connect. Returns `None` on any error/timeout.
-pub async fn stun_probe(server: &str, timeout: Duration) -> Option<(IpAddr, u16)> {
-    let sock = tokio::net::UdpSocket::bind("0.0.0.0:0").await.ok()?;
-    sock.connect(server).await.ok()?;
+/// hairpin connect. Returns `None` on any error/timeout (including no route
+/// for that family).
+pub async fn stun_probe_family(
+    server: &str,
+    want_v6: bool,
+    timeout: Duration,
+) -> Option<(IpAddr, u16)> {
+    use std::net::ToSocketAddrs;
+    let target = server
+        .to_socket_addrs()
+        .ok()?
+        .find(|sa| sa.is_ipv6() == want_v6)?;
+    let bind = if want_v6 { "[::]:0" } else { "0.0.0.0:0" };
+    let sock = tokio::net::UdpSocket::bind(bind).await.ok()?;
+    sock.connect(target).await.ok()?;
     sock.send(&build_stun_binding_request()).await.ok()?;
     let mut buf = [0u8; 512];
     let n = tokio::time::timeout(timeout, sock.recv(&mut buf))
@@ -754,6 +854,17 @@ pub async fn stun_probe(server: &str, timeout: Duration) -> Option<(IpAddr, u16)
         .ok()?
         .ok()?;
     parse_stun_xor_mapped(&buf[..n])
+}
+
+/// External STUN binding, trying IPv4 first and falling back to IPv6.
+///
+/// Kept for the v4-first path; callers that know the configured endpoint's
+/// family use [`stun_probe_family`] directly.
+pub async fn stun_probe(server: &str, timeout: Duration) -> Option<(IpAddr, u16)> {
+    match stun_probe_family(server, false, timeout).await {
+        Some(v) => Some(v),
+        None => stun_probe_family(server, true, timeout).await,
+    }
 }
 
 /// Gather active evidence for a configured public address.
@@ -785,9 +896,13 @@ pub async fn probe_configured_endpoint(
         return (resolved, false, false);
     }
 
+    // IPv6 endpoints must be probed over IPv6: an IPv4 STUN answer can never
+    // confirm a v6 mapping (and a v6-only host has no v4 route at all).
+    let want_v6 = resolved.iter().all(|ip| ip.is_ipv6());
+
     if let Some(server) = stun_server {
         if let Some((ip, mapped_port)) =
-            stun_probe(server, Duration::from_secs(STUN_TIMEOUT_SECS)).await
+            stun_probe_family(server, want_v6, Duration::from_secs(STUN_TIMEOUT_SECS)).await
         {
             if mapped_port == port && resolved.contains(&ip) {
                 return (resolved, true, false);
@@ -1076,6 +1191,458 @@ pub fn listen_port(listen: &[Multiaddr]) -> Option<u16> {
     listen.iter().find_map(|a| endpoint_of(a).map(|(_, p)| p))
 }
 
+// ── IPv6 detection & publication ─────────────────────────────────────────
+
+/// One IPv6 address found on a local interface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IfaceV6 {
+    /// Interface name (`eth0`, `en0`, `Ethernet 2`, …).
+    pub iface: String,
+    /// The address itself.
+    pub addr: Ipv6Addr,
+    /// RFC 4941 temporary/privacy address (`IFA_F_TEMPORARY`).
+    pub temporary: bool,
+}
+
+/// A selected candidate for the public v6 endpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct V6Candidate {
+    pub iface: String,
+    pub addr: Ipv6Addr,
+    pub temporary: bool,
+    /// The kernel picks this address as the source for a global v6 route.
+    pub default_route: bool,
+}
+
+/// Result of [`select_public_v6`]: at most one candidate per interface,
+/// ordered best-first.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct V6Selection {
+    pub candidates: Vec<V6Candidate>,
+    /// A temporary address had to be used (no stable address on that iface).
+    pub used_temporary: bool,
+    /// Interfaces where only a temporary address existed.
+    pub temporary_only_ifaces: Vec<String>,
+}
+
+impl V6Selection {
+    /// The address we publish (default-route interface, stable first).
+    pub fn best(&self) -> Option<&V6Candidate> {
+        self.candidates.first()
+    }
+
+    pub fn addr(&self) -> Option<Ipv6Addr> {
+        self.best().map(|c| c.addr)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.candidates.is_empty()
+    }
+}
+
+/// Pure address selection: one candidate per interface, stable preferred over
+/// temporary, the default-route interface first.
+///
+/// `default_src` is the source address the kernel chooses for a route to a
+/// global v6 destination (see [`default_route_source_v6`]); it is used only as
+/// a tie-break and may be `None` (no v6 route).
+pub fn select_public_v6(ifaces: &[IfaceV6], default_src: Option<Ipv6Addr>) -> V6Selection {
+    use std::collections::BTreeMap;
+
+    // Group by interface. The kernel's chosen default-route source wins on its
+    // own interface; otherwise keep the lexicographically smallest stable
+    // address, falling back to the smallest temporary one.
+    let mut stable: BTreeMap<&str, Ipv6Addr> = BTreeMap::new();
+    let mut temporary: BTreeMap<&str, Ipv6Addr> = BTreeMap::new();
+    for a in ifaces {
+        if !is_global_unicast_v6(&a.addr) {
+            continue;
+        }
+        let slot = if a.temporary {
+            &mut temporary
+        } else {
+            &mut stable
+        };
+        slot.entry(a.iface.as_str())
+            .and_modify(|cur| {
+                // A default-route address is the best possible choice on this
+                // interface; never let a smaller address displace it.
+                if Some(*cur) == default_src {
+                    return;
+                }
+                if Some(a.addr) == default_src || a.addr < *cur {
+                    *cur = a.addr;
+                }
+            })
+            .or_insert(a.addr);
+    }
+
+    let mut candidates: Vec<V6Candidate> = Vec::new();
+    let mut temporary_only_ifaces: Vec<String> = Vec::new();
+    let iface_names: std::collections::BTreeSet<&str> =
+        stable.keys().chain(temporary.keys()).copied().collect();
+    for iface in iface_names {
+        let (addr, temporary) = match (stable.get(iface), temporary.get(iface)) {
+            (Some(a), _) => (*a, false),
+            (None, Some(a)) => {
+                temporary_only_ifaces.push(iface.to_string());
+                (*a, true)
+            }
+            (None, None) => continue,
+        };
+        candidates.push(V6Candidate {
+            iface: iface.to_string(),
+            addr,
+            temporary,
+            default_route: default_src == Some(addr),
+        });
+    }
+
+    // Best first: default-route interface, then stable before temporary, then
+    // a deterministic name/address order.
+    candidates.sort_by(|a, b| {
+        (!a.default_route, a.temporary, &a.iface, a.addr.octets()).cmp(&(
+            !b.default_route,
+            b.temporary,
+            &b.iface,
+            b.addr.octets(),
+        ))
+    });
+
+    let used_temporary = candidates.iter().any(|c| c.temporary);
+    V6Selection {
+        candidates,
+        used_temporary,
+        temporary_only_ifaces,
+    }
+}
+
+/// Source address the kernel would use for a global v6 destination.
+///
+/// No packet is sent: a UDP `connect` only asks the routing table for a source
+/// address. Returns `None` when the host has no IPv6 route at all, which is the
+/// common case for v4-only machines.
+pub fn default_route_source_v6() -> Option<Ipv6Addr> {
+    let sock = std::net::UdpSocket::bind("[::]:0").ok()?;
+    // Documentation space for the *destination*: never routed, but enough for
+    // the kernel to pick the source address of the default v6 route.
+    sock.connect("[2001:db8::1]:9").ok()?;
+    match sock.local_addr().ok()?.ip() {
+        IpAddr::V6(v6) if is_global_unicast_v6(&v6) => Some(v6),
+        _ => None,
+    }
+}
+
+/// Enumerate the host's IPv6 interface addresses.
+///
+/// On Linux the `getifaddrs` flags expose `IFA_F_TEMPORARY`; elsewhere the
+/// address is treated as stable (privacy flags are not portable).
+pub fn interface_v6_addrs() -> Vec<IfaceV6> {
+    #[cfg(target_os = "linux")]
+    {
+        linux_interface_v6_addrs()
+    }
+    #[cfg(windows)]
+    {
+        windows_interface_v6_addrs()
+    }
+    #[cfg(all(not(target_os = "linux"), not(windows)))]
+    {
+        // No portable temporary-flag API: treat every address as stable.
+        Vec::new()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_interface_v6_addrs() -> Vec<IfaceV6> {
+    use std::ffi::CStr;
+    let mut out = Vec::new();
+    // SAFETY: `getifaddrs`/`freeifaddrs` are the documented libc pair; every
+    // pointer is checked for null before dereference and the list is freed
+    // exactly once.
+    unsafe {
+        let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+        if libc::getifaddrs(&mut head) != 0 {
+            return out;
+        }
+        let mut cur = head;
+        while !cur.is_null() {
+            let ifa = &*cur;
+            if !ifa.ifa_addr.is_null() && (*ifa.ifa_addr).sa_family as i32 == libc::AF_INET6 {
+                let sin6 = &*(ifa.ifa_addr as *const libc::sockaddr_in6);
+                let addr = Ipv6Addr::from(sin6.sin6_addr.s6_addr);
+                let iface = CStr::from_ptr(ifa.ifa_name).to_string_lossy().into_owned();
+                let temporary = (ifa.ifa_flags & libc::IFA_F_TEMPORARY as u32) != 0;
+                out.push(IfaceV6 {
+                    iface,
+                    addr,
+                    temporary,
+                });
+            }
+            cur = ifa.ifa_next;
+        }
+        libc::freeifaddrs(head);
+    }
+    out
+}
+
+#[cfg(windows)]
+fn windows_interface_v6_addrs() -> Vec<IfaceV6> {
+    let mut out = Vec::new();
+    let Ok(list) = if_addrs::get_if_addrs() else {
+        return out;
+    };
+    for i in list {
+        if let if_addrs::IfAddr::V6(v6) = i.addr {
+            // getifaddrs on Windows does not expose privacy-address flags.
+            out.push(IfaceV6 {
+                iface: i.name,
+                addr: v6.ip,
+                temporary: false,
+            });
+        }
+    }
+    out
+}
+
+/// Detect the node's public IPv6 endpoint, if the host has one.
+///
+/// Combines [`interface_v6_addrs`] with [`default_route_source_v6`] and
+/// [`select_public_v6`]. `None` means "no usable global unicast v6" — the
+/// caller must then behave exactly as before (v4-only).
+pub fn detect_public_ipv6() -> Option<V6Selection> {
+    let ifaces = interface_v6_addrs();
+    let sel = select_public_v6(&ifaces, default_route_source_v6());
+    if sel.is_empty() {
+        None
+    } else {
+        Some(sel)
+    }
+}
+
+/// True when a multiaddress names an IPv6 endpoint (`/ip6` or `/dns6`).
+pub fn is_v6_endpoint(ma: &Multiaddr) -> bool {
+    ma.iter()
+        .any(|p| matches!(p, Protocol::Ip6(_) | Protocol::Dns6(_)))
+}
+
+/// True when the address list already contains an IPv6 TCP listener.
+pub fn has_v6_listener(addrs: &[Multiaddr]) -> bool {
+    addrs.iter().any(|a| {
+        let mut tcp = false;
+        let mut v6 = false;
+        for p in a.iter() {
+            match p {
+                Protocol::Ip6(_) => v6 = true,
+                Protocol::Tcp(_) => tcp = true,
+                _ => {}
+            }
+        }
+        v6 && tcp
+    })
+}
+
+/// Plan the listen set: keep every existing listener and, when a global v6
+/// address exists, add `/ip6/::/tcp/<port>` (the wildcard survives an ISP
+/// renumber; both libp2p-tcp and litep2p set `IPV6_V6ONLY` so it coexists with
+/// `/ip4/0.0.0.0/tcp/<port>`).
+pub fn plan_listen_addresses(
+    existing: &[Multiaddr],
+    have_global_v6: bool,
+    port: u16,
+) -> Vec<Multiaddr> {
+    let mut out = existing.to_vec();
+    if have_global_v6 && !has_v6_listener(existing) {
+        if let Ok(ma) = format!("/ip6/::/tcp/{port}").parse::<Multiaddr>() {
+            out.push(ma);
+        }
+    }
+    out
+}
+
+/// The `/ip6/<addr>/tcp/<port>` base for publication, or `None` when the
+/// address is not global unicast (never publish a non-dialable address).
+pub fn v6_base(addr: &Ipv6Addr, port: u16) -> Option<Multiaddr> {
+    if !is_global_unicast_v6(addr) {
+        return None;
+    }
+    format!("/ip6/{addr}/tcp/{port}").parse().ok()
+}
+
+/// The full published base set: IPv4 first (unchanged behaviour), then the IPv6
+/// entry when present. De-duplicated, order-preserving.
+pub fn published_bases(v4: Option<&Multiaddr>, v6: Option<&Ipv6Addr>, port: u16) -> Vec<Multiaddr> {
+    let mut out: Vec<Multiaddr> = Vec::new();
+    if let Some(a) = v4 {
+        out.push(a.clone());
+    }
+    if let Some(a) = v6.and_then(|a| v6_base(a, port)) {
+        if !out.contains(&a) {
+            out.push(a);
+        }
+    }
+    out
+}
+
+/// The `Ipv6Addr` inside a `/ip6/...` multiaddress, if any.
+pub fn ip6_of(ma: &Multiaddr) -> Option<Ipv6Addr> {
+    ma.iter().find_map(|p| match p {
+        Protocol::Ip6(v6) => Some(v6),
+        _ => None,
+    })
+}
+
+/// The first global-unicast v6 address peers reported for us on `port`.
+/// This is the strongest v6-specific publication evidence that does not come
+/// from the operator: a stranger actually saw us at that address.
+pub fn observed_v6(observed: &[Multiaddr], port: u16) -> Option<Ipv6Addr> {
+    observed.iter().find_map(|ma| {
+        let (ip, p) = endpoint_of(ma)?;
+        match ip {
+            IpAddr::V6(v6) if p == port && is_global_unicast_v6(&v6) => Some(v6),
+            _ => None,
+        }
+    })
+}
+
+/// What changed between two v6 detections.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrefixChange {
+    /// Neither before nor now.
+    None,
+    /// Identical address.
+    Same,
+    /// Same /64, different host part (privacy address churn).
+    AddressChanged { old: Ipv6Addr, new: Ipv6Addr },
+    /// The /64 prefix changed (ISP renumbering).
+    PrefixRotated { old: Ipv6Addr, new: Ipv6Addr },
+    /// v6 appeared.
+    Appeared(Ipv6Addr),
+    /// v6 disappeared.
+    Disappeared(Ipv6Addr),
+}
+
+impl PrefixChange {
+    /// True when the published endpoint must be replaced.
+    pub fn needs_republish(&self) -> bool {
+        !matches!(self, PrefixChange::None | PrefixChange::Same)
+    }
+}
+
+/// Classify a change between the currently published v6 address and a fresh
+/// detection.
+pub fn prefix_change(current: Option<Ipv6Addr>, detected: Option<Ipv6Addr>) -> PrefixChange {
+    match (current, detected) {
+        (None, None) => PrefixChange::None,
+        (Some(_), None) => PrefixChange::Disappeared(current.expect("checked")),
+        (None, Some(new)) => PrefixChange::Appeared(new),
+        (Some(old), Some(new)) => {
+            if old == new {
+                PrefixChange::Same
+            } else if prefix64(&old) == prefix64(&new) {
+                PrefixChange::AddressChanged { old, new }
+            } else {
+                PrefixChange::PrefixRotated { old, new }
+            }
+        }
+    }
+}
+
+/// Republish action produced by [`rotation_action`].
+pub struct RotationAction {
+    pub change: PrefixChange,
+    /// The new published base set (v4 preserved, stale v6 dropped).
+    pub bases: Vec<Multiaddr>,
+}
+
+/// Decide whether a re-detection requires a republish, and compute the new
+/// base set. `v4` is the unchanged IPv4 base; the old v6 address is dropped
+/// whenever the detection differs.
+pub fn rotation_action(
+    v4: Option<&Multiaddr>,
+    current_v6: Option<Ipv6Addr>,
+    detected_v6: Option<Ipv6Addr>,
+    port: u16,
+) -> Option<RotationAction> {
+    let change = prefix_change(current_v6, detected_v6);
+    if !change.needs_republish() {
+        return None;
+    }
+    let bases = published_bases(v4, detected_v6.as_ref(), port);
+    Some(RotationAction { change, bases })
+}
+
+/// Re-detect the public IPv6 address every [`RECHECK_SECS`] and call
+/// `republish` **once per change** with the new base set.
+///
+/// `evidence_ok` gates the republish: a new address that is not yet
+/// evidence-backed must not be advertised (design §4). When it returns false
+/// the change is logged and the previous address is kept.
+pub async fn watch_ipv6_prefix<F, G>(
+    v4: Option<Multiaddr>,
+    initial_v6: Option<Ipv6Addr>,
+    port: u16,
+    evidence_ok: F,
+    mut republish: G,
+) where
+    F: Fn(&Ipv6Addr) -> bool,
+    G: FnMut(&RotationAction),
+{
+    let mut current = initial_v6;
+    // Log the "changed but unproven" warning once per pending address, not on
+    // every tick (design §6: log the change once).
+    let mut pending_warned: Option<Ipv6Addr> = None;
+    let mut tick = tokio::time::interval(Duration::from_secs(RECHECK_SECS));
+    tick.tick().await; // consume the immediate first tick
+    loop {
+        tick.tick().await;
+        let detected = detect_public_ipv6().and_then(|s| s.addr());
+        let Some(action) = rotation_action(v4.as_ref(), current, detected, port) else {
+            continue;
+        };
+        match detected {
+            Some(new) if evidence_ok(&new) => {
+                log::info!(
+                    "dialability: IPv6 address changed ({:?}); republishing {} — stale address dropped",
+                    action.change,
+                    action
+                        .bases
+                        .iter()
+                        .map(|b| b.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                current = Some(new);
+                pending_warned = None;
+                republish(&action);
+            }
+            Some(new) => {
+                // Keep `current` at the still-published address so the next
+                // tick re-tests this candidate; reverting to it would suppress
+                // the republish when evidence finally arrives.
+                if pending_warned != Some(new) {
+                    log::warn!(
+                        "dialability: IPv6 address changed to {new}, but it is not evidence-backed \
+                         yet; keeping the previous endpoint until a peer observes it"
+                    );
+                    pending_warned = Some(new);
+                }
+            }
+            None => {
+                log::warn!(
+                    "dialability: IPv6 address {} disappeared; dropping it from the published set",
+                    current
+                        .map(|a| a.to_string())
+                        .unwrap_or_else(|| "(none)".into())
+                );
+                current = None;
+                pending_warned = None;
+                republish(&action);
+            }
+        }
+    }
+}
+
 /// The operator-facing degradation notice (design §5.2), or `None` when the
 /// operator opted out of seed publication.
 ///
@@ -1236,14 +1803,15 @@ pub async fn watch_dialability<N>(
     tick.tick().await; // consume the immediate first tick
     loop {
         tick.tick().await;
-        let inbound = match network.network_state().await {
-            Ok(state) => inbound_peer_count(&state),
-            Err(_) => 0,
+        let (inbound, inbound_v6) = match network.network_state().await {
+            Ok(state) => (inbound_peer_count(&state), inbound_v6_peer_count(&state)),
+            Err(_) => (0, 0),
         };
         let listen = network.listen_addresses();
         let observed = network.external_addresses();
         let verdict = full_verdict(
             inbound,
+            inbound_v6,
             &listen,
             &observed,
             cfg.public_addr.as_ref(),
@@ -1287,6 +1855,7 @@ pub async fn watch_dialability<N>(
 /// network-touching step is explicit.
 async fn full_verdict(
     inbound: usize,
+    inbound_v6: usize,
     listen: &[Multiaddr],
     observed: &[Multiaddr],
     configured: Option<&Multiaddr>,
@@ -1294,7 +1863,16 @@ async fn full_verdict(
 ) -> Verdict {
     // Passive evidence is always tried FIRST and for free. Only when it fails
     // do we pay for DNS + STUN + a TCP connect.
-    let passive = evaluate(inbound, listen, observed, configured);
+    let passive = evaluate_with(&GateInputs {
+        inbound_peers: inbound,
+        inbound_v6_peers: inbound_v6,
+        listen,
+        observed,
+        configured,
+        resolved: &[],
+        stun_mapped: false,
+        tcp_probe_ok: false,
+    });
     if passive.dialable {
         return passive;
     }
@@ -1305,6 +1883,7 @@ async fn full_verdict(
         probe_configured_endpoint(cfg_ma, stun_server).await;
     evaluate_with(&GateInputs {
         inbound_peers: inbound,
+        inbound_v6_peers: inbound_v6,
         listen,
         observed,
         configured,
@@ -1333,15 +1912,24 @@ where
     let mut cached_probe: Option<(Instant, Vec<IpAddr>, bool, bool)> = None;
 
     loop {
-        let inbound = match network.network_state().await {
-            Ok(state) => inbound_peer_count(&state),
-            Err(_) => 0,
+        let (inbound, inbound_v6) = match network.network_state().await {
+            Ok(state) => (inbound_peer_count(&state), inbound_v6_peer_count(&state)),
+            Err(_) => (0, 0),
         };
         let listen = network.listen_addresses();
         let observed = network.external_addresses();
 
         // Passive evidence first — free, and it needs no network traffic.
-        verdict = evaluate(inbound, &listen, &observed, cfg.public_addr.as_ref());
+        verdict = evaluate_with(&GateInputs {
+            inbound_peers: inbound,
+            inbound_v6_peers: inbound_v6,
+            listen: &listen,
+            observed: &observed,
+            configured: cfg.public_addr.as_ref(),
+            resolved: &[],
+            stun_mapped: false,
+            tcp_probe_ok: false,
+        });
         if !verdict.dialable {
             if let Some(cfg_ma) = cfg.public_addr.as_ref() {
                 let stale = cached_probe
@@ -1356,6 +1944,7 @@ where
                 if let Some((_, resolved, stun_mapped, tcp_probe_ok)) = cached_probe.as_ref() {
                     verdict = evaluate_with(&GateInputs {
                         inbound_peers: inbound,
+                        inbound_v6_peers: inbound_v6,
                         listen: &listen,
                         observed: &observed,
                         configured: cfg.public_addr.as_ref(),
@@ -1566,6 +2155,7 @@ mod tests {
         let observed = vec![ma("/ip4/142.129.54.88/tcp/30333")];
         let v = evaluate_with(&GateInputs {
             inbound_peers: 0,
+            inbound_v6_peers: 0,
             listen: &[ma("/ip4/0.0.0.0/tcp/30333")],
             observed: &observed,
             configured: Some(&cfg),
@@ -1590,6 +2180,7 @@ mod tests {
         let resolved: Vec<IpAddr> = vec!["142.129.54.88".parse().unwrap()];
         let v = evaluate_with(&GateInputs {
             inbound_peers: 0,
+            inbound_v6_peers: 0,
             listen: &[ma("/ip4/0.0.0.0/tcp/30333")],
             observed: &[],
             configured: Some(&cfg),
@@ -1612,6 +2203,7 @@ mod tests {
         let resolved: Vec<IpAddr> = vec!["192.168.1.5".parse().unwrap()];
         let v = evaluate_with(&GateInputs {
             inbound_peers: 0,
+            inbound_v6_peers: 0,
             listen: &[ma("/ip4/0.0.0.0/tcp/30333")],
             observed: &[],
             configured: Some(&cfg),
@@ -1643,6 +2235,7 @@ mod tests {
         let cfg = ma("/ip4/142.129.54.88/tcp/30333");
         let v = evaluate_with(&GateInputs {
             inbound_peers: 0,
+            inbound_v6_peers: 0,
             listen: &[ma("/ip4/0.0.0.0/tcp/30333")],
             observed: &[],
             configured: Some(&cfg),
@@ -1659,6 +2252,7 @@ mod tests {
         let cfg = ma("/ip4/142.129.54.88/tcp/30333");
         let v = evaluate_with(&GateInputs {
             inbound_peers: 0,
+            inbound_v6_peers: 0,
             listen: &[ma("/ip4/0.0.0.0/tcp/30333")],
             observed: &[],
             configured: Some(&cfg),
@@ -1677,6 +2271,7 @@ mod tests {
         let observed = vec![ma("/ip4/1.2.3.4/tcp/30333")];
         let v = evaluate_with(&GateInputs {
             inbound_peers: 0,
+            inbound_v6_peers: 0,
             listen: &[ma("/ip4/0.0.0.0/tcp/30333")],
             observed: &observed,
             configured: Some(&cfg),
@@ -2114,5 +2709,424 @@ mod tests {
         let v = wait_for_dialability(&net, &cfg).await;
         assert!(!v.dialable);
         assert!(v.evidence.is_none());
+    }
+
+    // ── IPv6: classification ──────────────────────────────────────────
+
+    #[test]
+    fn v6_classification_table() {
+        let global = [
+            "2606:4700:4700::1111",
+            "2001:4860:4860::8888",
+            "2a00:1450:4001:80b::200e",
+            "3fff::1",
+        ];
+        for s in global {
+            let ip: IpAddr = s.parse().unwrap();
+            assert_eq!(classify_ip(&ip), IpClass::Public, "{s}");
+            if let IpAddr::V6(v) = ip {
+                assert!(is_global_unicast_v6(&v));
+            }
+        }
+        let non_public = [
+            ("fd00::1", IpClass::Private),          // ULA fc00::/7
+            ("fc00::1", IpClass::Private),          // ULA
+            ("fe80::1", IpClass::LinkLocal),        // link-local
+            ("::1", IpClass::Loopback),             // loopback
+            ("::", IpClass::Unspecified),           // unspecified
+            ("::ffff:8.8.8.8", IpClass::Private),   // IPv4-mapped
+            ("2001:db8::1", IpClass::Private),      // documentation
+            ("64:ff9b::1.2.3.4", IpClass::Private), // NAT64
+            ("100::1", IpClass::Private),           // discard-only
+            ("ff02::1", IpClass::Multicast),        // multicast
+        ];
+        for (s, want) in non_public {
+            let ip: IpAddr = s.parse().unwrap();
+            assert_eq!(classify_ip(&ip), want, "{s}");
+        }
+    }
+
+    fn iface(name: &str, addr: &str, temporary: bool) -> IfaceV6 {
+        IfaceV6 {
+            iface: name.into(),
+            addr: addr.parse().unwrap(),
+            temporary,
+        }
+    }
+
+    #[test]
+    fn selection_prefers_stable_over_temporary() {
+        let ifaces = [
+            iface("eth0", "2606:4700:1::10", true),
+            iface("eth0", "2606:4700:1::20", false),
+        ];
+        let sel = select_public_v6(&ifaces, None);
+        assert_eq!(sel.candidates.len(), 1);
+        assert_eq!(sel.addr().unwrap().to_string(), "2606:4700:1::20");
+        assert!(!sel.used_temporary);
+        assert!(sel.temporary_only_ifaces.is_empty());
+    }
+
+    #[test]
+    fn temporary_only_is_used_and_flagged() {
+        let ifaces = [iface("wlan0", "2a00:1450:1::99", true)];
+        let sel = select_public_v6(&ifaces, None);
+        assert_eq!(sel.addr().unwrap().to_string(), "2a00:1450:1::99");
+        assert!(sel.used_temporary);
+        assert_eq!(sel.temporary_only_ifaces, vec!["wlan0"]);
+    }
+
+    #[test]
+    fn selection_is_one_per_interface_and_prefers_default_route() {
+        let ifaces = [
+            iface("eth1", "2606:4700:2::1", false),
+            iface("eth0", "2606:4700:3::1", false),
+            iface("eth0", "2606:4700:3::2", false),
+            iface("lo", "::1", false),
+            iface("tun0", "fd00::5", false),
+        ];
+        let default_src = Some("2606:4700:3::2".parse().unwrap());
+        let sel = select_public_v6(&ifaces, default_src);
+        assert_eq!(sel.candidates.len(), 2, "one per interface");
+        assert_eq!(sel.addr().unwrap().to_string(), "2606:4700:3::2");
+        assert!(sel.best().unwrap().default_route);
+        assert_eq!(sel.candidates[1].iface, "eth1");
+    }
+
+    #[test]
+    fn no_global_v6_selects_nothing() {
+        let ifaces = [
+            iface("lo", "::1", false),
+            iface("eth0", "fe80::1", false),
+            iface("eth0", "fd00::1", false),
+        ];
+        assert!(select_public_v6(&ifaces, None).is_empty());
+    }
+
+    // ── IPv6: listen + publish ────────────────────────────────────────
+
+    #[test]
+    fn plan_listen_adds_wildcard_v6_and_is_idempotent() {
+        let v4 = vec![ma("/ip4/0.0.0.0/tcp/30333")];
+        let planned = plan_listen_addresses(&v4, true, 30333);
+        assert_eq!(planned.len(), 2);
+        assert!(planned.contains(&ma("/ip6/::/tcp/30333")));
+        assert!(has_v6_listener(&planned));
+        // Second pass adds nothing.
+        assert_eq!(plan_listen_addresses(&planned, true, 30333), planned);
+        // No v6 ⇒ byte-identical to today.
+        assert_eq!(plan_listen_addresses(&v4, false, 30333), v4);
+    }
+
+    #[test]
+    fn published_bases_include_both_stacks() {
+        let v4 = ma("/ip4/203.0.113.10/tcp/30333");
+        let v6: Ipv6Addr = "2606:4700:4700::1111".parse().unwrap();
+        let bases = published_bases(Some(&v4), Some(&v6), 30333);
+        assert_eq!(
+            bases,
+            vec![v4.clone(), ma("/ip6/2606:4700:4700::1111/tcp/30333")]
+        );
+        // No v6 ⇒ exactly the v4 entry (no behaviour change).
+        assert_eq!(published_bases(Some(&v4), None, 30333), vec![v4.clone()]);
+        // A non-global v6 address is never published.
+        let ula: Ipv6Addr = "fd00::1".parse().unwrap();
+        assert_eq!(published_bases(Some(&v4), Some(&ula), 30333), vec![v4]);
+        // v6-only host publishes just the v6 entry.
+        let v6only = published_bases(None, Some(&v6), 30333);
+        assert_eq!(v6only, vec![ma("/ip6/2606:4700:4700::1111/tcp/30333")]);
+    }
+
+    // ── IPv6: configured endpoints and evidence ───────────────────────
+
+    #[test]
+    fn ip6_public_addr_must_match_observation_exactly() {
+        let cfg = ma("/ip6/2606:4700:4700::1111/tcp/30333");
+        let observed = vec![ma("/ip6/2606:4700:4700::1111/tcp/30333")];
+        let pass = evaluate_with(&GateInputs {
+            inbound_peers: 0,
+            inbound_v6_peers: 0,
+            listen: &[ma("/ip6/::/tcp/30333")],
+            observed: &observed,
+            configured: Some(&cfg),
+            resolved: &[],
+            stun_mapped: false,
+            tcp_probe_ok: false,
+        });
+        assert!(pass.dialable, "{}", pass.detail);
+        assert_eq!(pass.evidence, Some(Evidence::ConfiguredAddrObserved));
+
+        // Same prefix, different host: not the configured endpoint.
+        let wrong = vec![ma("/ip6/2606:4700:4700::2222/tcp/30333")];
+        let fail = evaluate(0, &[ma("/ip6/::/tcp/30333")], &wrong, Some(&cfg));
+        assert!(!fail.dialable, "{}", fail.detail);
+
+        // Right address, wrong port: forward not open on the configured port.
+        let wrong_port = vec![ma("/ip6/2606:4700:4700::1111/tcp/54321")];
+        assert!(!evaluate(0, &[ma("/ip6/::/tcp/30333")], &wrong_port, Some(&cfg)).dialable);
+    }
+
+    #[test]
+    fn v4_inbound_peer_does_not_prove_a_v6_endpoint() {
+        let cfg = ma("/ip6/2606:4700:4700::1111/tcp/30333");
+        let listen = [ma("/ip4/0.0.0.0/tcp/30333"), ma("/ip6/::/tcp/30333")];
+        // Dual-stack host: peers connected, but only over IPv4. A closed v6
+        // firewall must NOT be papered over.
+        let v4_only_inbound = evaluate_with(&GateInputs {
+            inbound_peers: 4,
+            inbound_v6_peers: 0,
+            listen: &listen,
+            observed: &[],
+            configured: Some(&cfg),
+            resolved: &[],
+            stun_mapped: false,
+            tcp_probe_ok: false,
+        });
+        assert!(
+            !v4_only_inbound.dialable,
+            "v4 inbound peers must not prove a v6 endpoint: {}",
+            v4_only_inbound.detail
+        );
+
+        // One peer that actually arrived over v6 is real evidence.
+        let v6_inbound = evaluate_with(&GateInputs {
+            inbound_peers: 4,
+            inbound_v6_peers: 1,
+            listen: &listen,
+            observed: &[],
+            configured: Some(&cfg),
+            resolved: &[],
+            stun_mapped: false,
+            tcp_probe_ok: false,
+        });
+        assert!(v6_inbound.dialable, "{}", v6_inbound.detail);
+        assert_eq!(v6_inbound.evidence, Some(Evidence::InboundPeer));
+
+        // The v4 path is unchanged: a v4 endpoint still accepts v4 inbound.
+        let v4cfg = ma("/ip4/203.0.113.9/tcp/30333");
+        let v4 = evaluate_with(&GateInputs {
+            inbound_peers: 1,
+            inbound_v6_peers: 0,
+            listen: &listen,
+            observed: &[],
+            configured: Some(&v4cfg),
+            resolved: &[],
+            stun_mapped: false,
+            tcp_probe_ok: false,
+        });
+        assert!(v4.dialable, "{}", v4.detail);
+    }
+
+    #[test]
+    fn ip6_private_or_documentation_configured_addr_fails() {
+        for s in [
+            "/ip6/fd00::1/tcp/30333",
+            "/ip6/fe80::1/tcp/30333",
+            "/ip6/2001:db8::1/tcp/30333",
+            "/ip6/::ffff:8.8.8.8/tcp/30333",
+        ] {
+            let cfg = ma(s);
+            let v = evaluate(0, &[ma("/ip6/::/tcp/30333")], &[], Some(&cfg));
+            assert!(!v.dialable, "{s} must not be dialable");
+            assert!(v.detail.contains("NON-public"), "{s}: {}", v.detail);
+        }
+    }
+
+    #[test]
+    fn dns6_is_first_class_and_matches_a_resolved_v6_observation() {
+        assert_eq!(
+            host_port_of(&ma("/dns6/node.example/tcp/30333")),
+            Some((Host::Dns("node.example".into()), 30333))
+        );
+        let cfg = ma("/dns6/node.example/tcp/30333");
+        let resolved: Vec<IpAddr> = vec!["2606:4700:4700::1111".parse().unwrap()];
+        let observed = vec![ma("/ip6/2606:4700:4700::1111/tcp/30333")];
+        let v = evaluate_with(&GateInputs {
+            inbound_peers: 0,
+            inbound_v6_peers: 0,
+            listen: &[ma("/ip6/::/tcp/30333")],
+            observed: &observed,
+            configured: Some(&cfg),
+            resolved: &resolved,
+            stun_mapped: false,
+            tcp_probe_ok: false,
+        });
+        assert!(v.dialable, "{}", v.detail);
+        assert_eq!(v.evidence, Some(Evidence::ConfiguredAddrObserved));
+
+        // A dns6 name resolving to a ULA is never dialable.
+        let ula: Vec<IpAddr> = vec!["fd00::1".parse().unwrap()];
+        let bad = evaluate_with(&GateInputs {
+            inbound_peers: 0,
+            inbound_v6_peers: 0,
+            listen: &[ma("/ip6/::/tcp/30333")],
+            observed: &[],
+            configured: Some(&cfg),
+            resolved: &ula,
+            stun_mapped: true,
+            tcp_probe_ok: true,
+        });
+        assert!(!bad.dialable);
+    }
+
+    #[test]
+    fn observed_v6_on_the_listen_port_passes_without_config() {
+        let listen = [ma("/ip6/::/tcp/30333")];
+        let observed = vec![ma("/ip6/2606:4700:4700::1111/tcp/30333")];
+        let v = evaluate(0, &listen, &observed, None);
+        assert!(v.dialable, "{}", v.detail);
+        assert_eq!(v.evidence, Some(Evidence::ObservedPublicAtListenPort));
+        assert_eq!(
+            observed_v6(&observed, 30333),
+            Some("2606:4700:4700::1111".parse().unwrap())
+        );
+        // A ULA observation is not evidence.
+        assert_eq!(observed_v6(&[ma("/ip6/fd00::1/tcp/30333")], 30333), None);
+    }
+
+    #[test]
+    fn inbound_v6_peer_count_ignores_v4_inbound() {
+        let mut connected_peers = std::collections::HashMap::new();
+        connected_peers.insert(
+            "v6".to_string(),
+            sc_network::network_state::Peer {
+                endpoint: PeerEndpoint::Listening {
+                    local_addr: ma("/ip6/2606:4700:4700::1111/tcp/30333").into(),
+                    send_back_addr: ma("/ip6/2606:4700:4700::2/tcp/4000").into(),
+                },
+                version_string: None,
+                latest_ping_time: None,
+                known_addresses: Default::default(),
+            },
+        );
+        connected_peers.insert(
+            "v4".to_string(),
+            sc_network::network_state::Peer {
+                endpoint: PeerEndpoint::Listening {
+                    local_addr: ma("/ip4/203.0.113.10/tcp/30333").into(),
+                    send_back_addr: ma("/ip4/198.51.100.2/tcp/4000").into(),
+                },
+                version_string: None,
+                latest_ping_time: None,
+                known_addresses: Default::default(),
+            },
+        );
+        let state = NetworkState {
+            peer_id: "local".into(),
+            listened_addresses: Default::default(),
+            external_addresses: Default::default(),
+            connected_peers,
+            not_connected_peers: Default::default(),
+            peerset: serde_json::Value::Null,
+        };
+        assert_eq!(inbound_peer_count(&state), 2);
+        assert_eq!(inbound_v6_peer_count(&state), 1);
+    }
+
+    #[test]
+    fn stun_v6_xor_mapped_address_is_parsed() {
+        let tid = [7u8; 12];
+        // Body = 4-byte attribute header + 20-byte value (family + port + 16
+        // address bytes) = 24.
+        let mut msg = vec![0x01, 0x01, 0x00, 0x18];
+        msg.extend_from_slice(&[0x21, 0x12, 0xA4, 0x42]);
+        msg.extend_from_slice(&tid);
+        msg.extend_from_slice(&[0x00, 0x20, 0x00, 0x14, 0x00, 0x02]);
+        let port: u16 = 30333;
+        msg.extend_from_slice(&(port ^ 0x2112).to_be_bytes());
+        let mut addr = [0u8; 16];
+        addr[0] = 0x26;
+        addr[1] = 0x06;
+        addr[15] = 0x01;
+        let mut mask = [0u8; 16];
+        mask[0..4].copy_from_slice(&[0x21, 0x12, 0xA4, 0x42]);
+        mask[4..16].copy_from_slice(&tid);
+        for i in 0..16 {
+            msg.push(addr[i] ^ mask[i]);
+        }
+        assert_eq!(
+            parse_stun_xor_mapped(&msg),
+            Some((IpAddr::V6(addr.into()), 30333))
+        );
+    }
+
+    // ── IPv6: prefix rotation ────────────────────────────────────────
+
+    #[test]
+    fn prefix_change_classifies_rotation_and_address_churn() {
+        let a: Ipv6Addr = "2606:4700:4700::1".parse().unwrap();
+        let same_prefix: Ipv6Addr = "2606:4700:4700::2".parse().unwrap();
+        let rotated: Ipv6Addr = "2a00:1450:4001::1".parse().unwrap();
+        assert_eq!(prefix_change(None, None), PrefixChange::None);
+        assert_eq!(prefix_change(Some(a), Some(a)), PrefixChange::Same);
+        assert_eq!(
+            prefix_change(Some(a), Some(same_prefix)),
+            PrefixChange::AddressChanged {
+                old: a,
+                new: same_prefix
+            }
+        );
+        assert!(matches!(
+            prefix_change(Some(a), Some(rotated)),
+            PrefixChange::PrefixRotated { .. }
+        ));
+        assert_eq!(prefix_change(None, Some(a)), PrefixChange::Appeared(a));
+        assert_eq!(prefix_change(Some(a), None), PrefixChange::Disappeared(a));
+        assert!(!prefix_change(Some(a), Some(a)).needs_republish());
+        assert!(prefix_change(Some(a), Some(rotated)).needs_republish());
+    }
+
+    #[test]
+    fn prefix_rotation_republishes_and_drops_the_stale_address() {
+        let v4 = ma("/ip4/203.0.113.10/tcp/30333");
+        let old: Ipv6Addr = "2606:4700:4700::1".parse().unwrap();
+        let new: Ipv6Addr = "2a00:1450:4001::9".parse().unwrap();
+
+        let action = rotation_action(Some(&v4), Some(old), Some(new), 30333)
+            .expect("a prefix rotation must republish");
+        assert!(matches!(action.change, PrefixChange::PrefixRotated { .. }));
+        assert_eq!(
+            action.bases,
+            vec![v4, ma("/ip6/2a00:1450:4001::9/tcp/30333")]
+        );
+        // The stale address appears nowhere in the new set.
+        assert!(!action
+            .bases
+            .iter()
+            .any(|b| b.to_string().contains("2606:4700:4700::1")));
+
+        // No change → no republish (edge-triggered, never per tick).
+        assert!(rotation_action(
+            Some(&ma("/ip4/203.0.113.10/tcp/30333")),
+            Some(old),
+            Some(old),
+            30333
+        )
+        .is_none());
+
+        // Disappeared → drop v6, keep v4.
+        let gone = rotation_action(
+            Some(&ma("/ip4/203.0.113.10/tcp/30333")),
+            Some(old),
+            None,
+            30333,
+        )
+        .expect("disappearance must republish");
+        assert_eq!(gone.bases, vec![ma("/ip4/203.0.113.10/tcp/30333")]);
+    }
+
+    #[test]
+    fn no_v6_keeps_todays_v4_only_behaviour() {
+        // The whole v6 surface is a no-op when detection finds nothing.
+        assert!(select_public_v6(&[], None).is_empty());
+        let v4 = ma("/ip4/0.0.0.0/tcp/30333");
+        assert_eq!(
+            plan_listen_addresses(std::slice::from_ref(&v4), false, 30333),
+            vec![v4.clone()]
+        );
+        assert_eq!(published_bases(Some(&v4), None, 30333), vec![v4]);
+        assert!(!crate::dialability::is_v6_endpoint(&ma(
+            "/ip4/203.0.113.10/tcp/30333"
+        )));
     }
 }

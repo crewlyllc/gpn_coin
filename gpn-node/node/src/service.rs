@@ -56,6 +56,7 @@ fn dialability_state_path() -> std::path::PathBuf {
 
 fn publish_dialability_state(
     public: Option<&sc_network::multiaddr::Multiaddr>,
+    public6: Option<&sc_network::multiaddr::Multiaddr>,
     source: &str,
     dialable: bool,
     detail: &str,
@@ -64,8 +65,18 @@ fn publish_dialability_state(
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
+    // `multiaddrs` is the list the provider heartbeat forwards to the access
+    // point: IPv4 first (unchanged), the evidence-backed IPv6 entry in
+    // addition. `public_endpoint` is kept for older readers.
+    let multiaddrs: Vec<String> = [public, public6]
+        .into_iter()
+        .flatten()
+        .map(|a| a.to_string())
+        .collect();
     let body = serde_json::json!({
         "public_endpoint": public.map(|a| a.to_string()),
+        "public_endpoint_v6": public6.map(|a| a.to_string()),
+        "multiaddrs": multiaddrs,
         "source": source,
         "dialable": dialable,
         "detail": detail,
@@ -629,10 +640,83 @@ pub async fn new_full<
     // Consent: on by default (`GPN_UPNP=auto`), never silent (one log line on
     // attempt, one on the result), fully disabled by `GPN_UPNP=off`/`--no-upnp`.
     let mut gate_cfg = crate::dialability::GateConfig::from_env(&config.network.public_addresses);
+
+    // ---- IPv6: listen + announce (owner decision 2026-11-02) -----------
+    // IPv6 is the answer to CGNAT: there is no NAT, so a node behind a
+    // carrier-grade-NATed IPv4 line is still dialable when the ISP routes a
+    // global prefix. Addressing and firewalling are separate gates — a global
+    // address only makes the node a *candidate*; the same evidence gate below
+    // must still pass before the address is published externally.
+    let seed_port = crate::dialability::listen_port(&config.network.listen_addresses)
+        .unwrap_or(crate::dialability::DEFAULT_SEED_PORT);
+    let configured_v6: Option<sc_network::multiaddr::Multiaddr> = gate_cfg
+        .public_addr
+        .as_ref()
+        .filter(|a| crate::dialability::is_v6_endpoint(a))
+        .cloned();
+    let mut detected_v6: Option<crate::dialability::V6Selection> = None;
+    if gate_cfg.require && gate_cfg.discoverable {
+        // An operator-configured `/ip6` or `/dns6` endpoint wins: announce it
+        // verbatim (the gate validates it later). Still bind the wildcard v6
+        // listener so inbound connections can arrive.
+        if configured_v6.is_none() {
+            detected_v6 = crate::dialability::detect_public_ipv6();
+            if let Some(sel) = detected_v6.as_ref() {
+                if sel.used_temporary {
+                    log::warn!(
+                        "dialability: IPv6 has only a TEMPORARY (privacy) address on {}; using \
+                         it (it will rotate with the ISP's privacy timer) — pin a stable address \
+                         or disable privacy extensions for a permanent endpoint",
+                        sel.temporary_only_ifaces.join(", ")
+                    );
+                }
+                if let Some(best) = sel.best() {
+                    log::info!(
+                        "dialability: IPv6 global address {} on '{}' (default-route iface={}, \
+                         temporary={})",
+                        best.addr,
+                        best.iface,
+                        best.default_route,
+                        best.temporary
+                    );
+                }
+            }
+        }
+        let have_v6 = configured_v6.is_some() || detected_v6.is_some();
+        if have_v6 {
+            config.network.listen_addresses = crate::dialability::plan_listen_addresses(
+                &config.network.listen_addresses,
+                true,
+                seed_port,
+            );
+            // Candidate announcement inside libp2p. External publication (the
+            // dialability state file read by the heartbeat) happens only after
+            // the evidence gate below.
+            let candidate = configured_v6.clone().or_else(|| {
+                detected_v6
+                    .as_ref()
+                    .and_then(|s| s.addr())
+                    .and_then(|a| crate::dialability::v6_base(&a, seed_port))
+            });
+            if let Some(addr) = candidate {
+                if !config.network.public_addresses.contains(&addr) {
+                    config.network.public_addresses.push(addr);
+                }
+            }
+        }
+    }
+    // A GPN_PUBLIC_ADDR supplied via the environment is not in
+    // `config.network.public_addresses` (only `--public-addr` is); announce it
+    // so both stacks behave identically.
+    if let Some(cfg_addr) = gate_cfg.public_addr.clone() {
+        if !config.network.public_addresses.contains(&cfg_addr) {
+            config.network.public_addresses.push(cfg_addr);
+        }
+    }
+
     let mut portmap_session: Option<crate::portmap::MappingSession> = None;
     {
-        let listen_port = crate::dialability::listen_port(&config.network.listen_addresses)
-            .unwrap_or(crate::dialability::DEFAULT_SEED_PORT);
+        let listen_port = seed_port;
         let pm_cfg = crate::portmap::PortMapConfig::from_env(Some(listen_port));
         let configured = gate_cfg.public_addr.clone();
         if !gate_cfg.require {
@@ -771,20 +855,118 @@ pub async fn new_full<
                     .unwrap_or_else(|| "unset".into()),
             );
             let verdict = crate::dialability::wait_for_dialability(&network, &gate_cfg).await;
+            let state_source = verdict
+                .evidence
+                .as_ref()
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "none".into());
+
+            // IPv6 publication is evidence-gated exactly like IPv4: configured
+            // by the operator, observed by a peer, or an inbound connection
+            // that arrived over v6. A detected interface address alone is a
+            // candidate, not proof.
+            let observed_now = network.external_addresses();
+            let inbound_v6_now = network
+                .network_state()
+                .await
+                .map(|s| crate::dialability::inbound_v6_peer_count(&s))
+                .unwrap_or(0);
+            let detected_addr = detected_v6.as_ref().and_then(|s| s.addr());
+            let observed_addr = crate::dialability::observed_v6(&observed_now, seed_port);
+            let v6_endpoint: Option<sc_network::multiaddr::Multiaddr> = if let Some(cfg) =
+                configured_v6.clone()
+            {
+                Some(cfg)
+            } else if let Some(o) = observed_addr {
+                // Prefer the detected address when it is the one observed;
+                // otherwise publish what a peer actually saw.
+                let chosen = match detected_addr {
+                    Some(d)
+                        if crate::dialability::prefix64(&d) == crate::dialability::prefix64(&o) =>
+                    {
+                        d
+                    }
+                    _ => o,
+                };
+                crate::dialability::v6_base(&chosen, seed_port)
+            } else if inbound_v6_now > 0 {
+                detected_addr.and_then(|d| crate::dialability::v6_base(&d, seed_port))
+            } else {
+                None
+            };
+
+            let v4_endpoint = gate_cfg
+                .public_addr
+                .clone()
+                .filter(|a| !crate::dialability::is_v6_endpoint(a));
+
             // Publish the outcome for the provider heartbeat (see
             // `publish_dialability_state`). The address is only written when the
             // gate has EVIDENCE for it — never a guess.
             publish_dialability_state(
-                gate_cfg.public_addr.as_ref(),
-                verdict
-                    .evidence
-                    .as_ref()
-                    .map(|e| e.to_string())
-                    .as_deref()
-                    .unwrap_or("none"),
+                v4_endpoint.as_ref(),
+                v6_endpoint.as_ref(),
+                &state_source,
                 verdict.dialable,
                 &verdict.detail,
             );
+
+            // Prefix rotation: ISPs renumber. Re-detect on the existing
+            // 10-minute loop; on a change, drop the stale address and publish
+            // the new one (once). The local libp2p announce set is fixed at
+            // startup in this SDK, so the state file is the live channel.
+            //
+            // Only for auto-detected endpoints: an operator-configured `/ip6`
+            // or `/dns6` endpoint is authoritative and must never be replaced
+            // by an interface guess (a `/dns6` name re-resolves by itself).
+            if gate_cfg.require && gate_cfg.discoverable && configured_v6.is_none() {
+                let watch_net = network.clone();
+                let watch_v4 = v4_endpoint.clone();
+                let watch_initial = v6_endpoint
+                    .as_ref()
+                    .and_then(crate::dialability::ip6_of)
+                    .or(detected_addr);
+                // Continuity is only granted to an endpoint that was itself
+                // proven over v6 at startup — either a peer reported it, or a
+                // peer actually connected to us over v6. "The v4 gate passed"
+                // is not v6 evidence (design §5).
+                let trusted =
+                    watch_initial.is_some() && (observed_addr.is_some() || inbound_v6_now > 0);
+                let source = state_source.clone();
+                let detail = verdict.detail.clone();
+                let dialable = verdict.dialable;
+                task_manager
+                    .spawn_handle()
+                    .spawn("gpn-ipv6-prefix-watch", None, async move {
+                        crate::dialability::watch_ipv6_prefix(
+                            watch_v4,
+                            watch_initial,
+                            seed_port,
+                            move |new| {
+                                // The new address must be observed by a peer,
+                                // or the node must already have a proven v6
+                                // inbound path (same router, same pinhole).
+                                trusted
+                                    || crate::dialability::observed_v6(
+                                        &watch_net.external_addresses(),
+                                        seed_port,
+                                    ) == Some(*new)
+                            },
+                            move |action| {
+                                let v4 = action
+                                    .bases
+                                    .iter()
+                                    .find(|a| !crate::dialability::is_v6_endpoint(a));
+                                let v6 = action
+                                    .bases
+                                    .iter()
+                                    .find(|a| crate::dialability::is_v6_endpoint(a));
+                                publish_dialability_state(v4, v6, &source, dialable, &detail);
+                            },
+                        )
+                        .await;
+                    });
+            }
             if verdict.dialable {
                 log::info!(
                     "✅ dialability: this node IS dialable — {} ({}) [tier: {}]",
