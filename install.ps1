@@ -785,6 +785,17 @@ function Register-NodeTask {
   Invoke-Step "schtasks /Create /TN $NodeTask /TR `"cmd /c $NodeCmd`" /SC ONLOGON /RL HIGHEST /F" {
     $rc = Invoke-Schtasks @('/Create', '/TN', $NodeTask, '/TR', "cmd /c $NodeCmd", '/SC', 'ONLOGON', '/RL', 'HIGHEST', '/F')
     if ($rc -ne 0) {
+      # /RL HIGHEST asks for elevation, so creating the task from a NON-elevated
+      # shell fails with rc=1 "Access is denied" even when no task exists yet
+      # (box 3, 2026-11-03). The node needs no admin rights -- it binds high
+      # ports only -- so retry at normal privilege instead of failing the install.
+      $rc2 = Invoke-Schtasks @('/Create', '/TN', $NodeTask, '/TR', "cmd /c $NodeCmd", '/SC', 'ONLOGON', '/F')
+      if ($rc2 -eq 0) {
+        Warn "created $NodeTask without highest privileges (no elevation available) -- the node needs none"
+        $rc = 0
+      }
+    }
+    if ($rc -ne 0) {
       # rc=1 here is almost always "Access is denied": the task already exists and
       # was registered by a DIFFERENT account (e.g. an earlier install run from an
       # elevated prompt as Administrator). A standard user cannot replace it, and

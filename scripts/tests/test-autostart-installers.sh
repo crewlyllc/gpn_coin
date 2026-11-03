@@ -123,6 +123,10 @@ assert_has "$ps1" "IsNullOrWhiteSpace(\$Exe)"                 "guards an empty e
 # created earlier by Administrator -> schtasks rc=1 "Access is denied" with no
 # explanation. It must name the owner and the fix.
 assert_has "$ps1" "is owned by"                          "explains when GPN-Node belongs to another account"
+# /RL HIGHEST needs elevation; from a normal shell it fails rc=1 even with no
+# existing task. The node needs no admin rights, so the installer must retry
+# without it rather than abort.
+assert_has "$ps1" "without highest privileges"           "falls back when /RL HIGHEST cannot be created"
 assert_has "$ps1" "schtasks /Delete /TN \$NodeTask /F"    "gives the exact admin command to clear it"
 python3 - "$ps1" <<'CHECK'
 import sys, re
