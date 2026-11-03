@@ -253,8 +253,17 @@ pub fn default_base_path() -> PathBuf {
 /// Expand a leading `~` to `$HOME` (no-op when `$HOME` is unset).
 pub fn expand_tilde(p: &str) -> String {
     if let Some(rest) = p.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{home}/{rest}");
+        // Windows has no HOME in a normal shell, so `~` was returned LITERALLY and
+        // every caller then looked for a directory called "~". That made
+        // `--diagnose` report "no node key" on a box whose key existed
+        // (2026-11-03, box 3).
+        for var in ["HOME", "USERPROFILE"] {
+            if let Ok(home) = std::env::var(var) {
+                let home = home.trim_end_matches(['/', '\\']);
+                if !home.is_empty() {
+                    return format!("{home}/{rest}");
+                }
+            }
         }
     }
     p.to_string()
@@ -1788,5 +1797,27 @@ mod tests {
             assert_eq!(expand_tilde("~/.gpn/node"), "/home/tester/.gpn/node");
         }
         assert_eq!(expand_tilde("/abs/path"), "/abs/path");
+    }
+    #[test]
+    fn expand_tilde_uses_userprofile_on_windows() {
+        // Windows shells set USERPROFILE, not HOME. Before this, `~` was returned
+        // literally and callers looked for a directory named "~" -- which made
+        // --diagnose report a missing node key on a box that had one.
+        let key = "HOME";
+        let old_home = std::env::var(key).ok();
+        let old_profile = std::env::var("USERPROFILE").ok();
+        std::env::remove_var(key);
+        std::env::set_var("USERPROFILE", "C:/Users/tester");
+        let got = expand_tilde("~/.gpn/node-key");
+        assert_eq!(got, "C:/Users/tester/.gpn/node-key");
+        // restore so parallel tests are unaffected
+        match old_home {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        match old_profile {
+            Some(v) => std::env::set_var("USERPROFILE", v),
+            None => std::env::remove_var("USERPROFILE"),
+        }
     }
 }
