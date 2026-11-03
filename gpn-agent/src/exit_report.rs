@@ -568,7 +568,7 @@ mod tests {
                 .append(true)
                 .open(&path)
                 .unwrap();
-            write!(f, "{{not json}}\n").unwrap();
+            writeln!(f, "{{not json}}").unwrap();
         }
         record_at(&path, &report(ExitKind::NOT_DIALABLE, 102)).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
