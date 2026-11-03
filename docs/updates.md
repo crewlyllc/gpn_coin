@@ -508,27 +508,32 @@ window, or to force everyone off a bad build.
 
 ---
 
-## 6. Opting in to auto-update
+## 6. Auto-update at setup (ON by default)
 
 ### At setup
 
-`gpn_node --setup` asks once, after the ollama check:
+`gpn_node --setup` asks once, after the ollama check. The prompt is **opt-out**:
+the capital letter marks the default, and `Currently:` echoes what the config
+says at that moment (a fresh node is **ON**):
 
 ```
-  Keep this node auto-updated? [y/N]
+  Keep this node auto-updated? [Y/n]
     yes: verify + install GPN releases automatically (signed manifest,
          ed25519), restarting briefly when one is published. Recommended:
          the network drops nodes that fall below the minimum version, and an
          old node cannot mine.
     no : you update manually. This node will REFUSE TO MINE once its
          version is below the published minimum (it keeps syncing).
-  Currently: off
+  Currently: ON
   >
 ```
 
-`y`/`yes` writes `auto_update = true` into the config file (the answer survives
-restarts; no env var needed). Anything else — including just pressing Enter — is
-**no**.
+`n`/`no` writes `auto_update = false` into the config file; `y`/`yes` writes
+`auto_update = true`; both survive restarts with no env var needed. Pressing
+Enter changes nothing — it keeps the current value, which is **ON** unless you
+previously opted out. With no TTY (systemd, CI) the question is skipped with
+`auto-update: unchanged (ON)` rather than silently disabling updates. The same
+opt-out is available as `GPN_AUTO_UPDATE=0` / `auto_update = false`.
 
 ### Later
 

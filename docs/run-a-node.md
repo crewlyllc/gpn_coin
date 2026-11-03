@@ -268,7 +268,7 @@ After the ollama check, `--setup` asks **one** question about updates:
          old node cannot mine.
     no : you update manually. This node will REFUSE TO MINE once its
          version is below the published minimum (it keeps syncing).
-  Currently: on
+  Currently: ON
   >
 ```
 
