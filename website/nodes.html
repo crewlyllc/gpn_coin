@@ -147,8 +147,8 @@
 
       <div class="stats" id="summary">
         <div class="stat"><div class="v" id="c-live">…</div><div class="l">Peers online</div></div>
-        <div class="stat"><div class="v" id="c-serving">…</div><div class="l">AI providers (registered)</div></div>
-        <div class="stat"><div class="v" id="c-healthy">…</div><div class="l">of those, status reachable now</div></div>
+        <div class="stat"><div class="v" id="c-serving">…</div><div class="l">Serving now (heartbeat &lt; 30 s)</div></div>
+        <div class="stat"><div class="v" id="c-healthy">…</div><div class="l">Registered providers</div></div>
         <div class="stat"><div class="v" id="c-offline">…</div><div class="l">Offline (known)</div></div>
         <div class="stat"><div class="v tiny mono" id="c-generated">…</div><div class="l">Chain read at</div></div>
       </div>
@@ -541,8 +541,12 @@ GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code><
 
   function renderCounts(counts, generatedAt, stale) {
     var live = counts && counts.peers_live != null ? counts.peers_live : null;
+    // "Serving" is an EVIDENCE fact (a heartbeat arrived); "registered" is a
+    // PERMISSION fact (the chain has the provider). Showing only the second made
+    // the page read "4 serving" while the table listed one provider with models.
     var serving = counts && counts.serving_ai != null ? counts.serving_ai : null;
-    var healthy = counts && counts.healthy_now != null ? counts.healthy_now : null;
+    var healthy = counts && (counts.registered_ai != null ? counts.registered_ai : counts.healthy_now) != null
+      ? (counts.registered_ai != null ? counts.registered_ai : counts.healthy_now) : null;
     var offline = counts && counts.offline != null ? counts.offline : null;
     setText($("c-live"), stale ? "?" : live);
     setText($("c-serving"), serving);
