@@ -11,13 +11,14 @@ const SITE = join(HERE, "..");
 const PAGE = readFileSync(join(SITE, "nodes.html"), "utf8");
 const NETWORK = JSON.parse(readFileSync(join(SITE, "..", "network.json"), "utf8"));
 
-test("the headline counts container exists with the three numbers", () => {
+test("the headline counts container exists with the four numbers", () => {
   assert.match(PAGE, /id="summary"/);
-  for (const id of ["c-live", "c-serving", "c-offline"]) {
+  for (const id of ["c-live", "c-serving", "c-healthy", "c-offline"]) {
     assert.match(PAGE, new RegExp(`id="${id}"`));
   }
   assert.match(PAGE, /Peers online/);
   assert.match(PAGE, /AI providers \(registered\)/);
+  assert.match(PAGE, /status reachable now/);
   assert.match(PAGE, /Offline/);
 });
 
@@ -58,9 +59,22 @@ test("the baked cached list matches network.json's bootnodes", () => {
   }
 });
 
-test("the page dedupes rows by peer id and knows the three statuses", () => {
+test("the page dedupes rows by peer id and knows the four statuses", () => {
   assert.match(PAGE, /byPeer\.get/);
-  assert.match(PAGE, /"peer-only"/);
-  assert.match(PAGE, /"serving"/);
-  assert.match(PAGE, /"offline"/);
+  for (const s of ["serving", "registered", "connected", "offline"]) {
+    assert.match(PAGE, new RegExp(`"${s}"`));
+  }
+  // "peer only" was a verdict the product does not have: every GPN node is a
+  // provider, so a live peer with no registration is "connected", not a
+  // peer-only node. Never print it again (audit 2026-11-02 #3).
+  assert.ok(!/peer-only/.test(PAGE), "the page must not have a peer-only status");
+  assert.ok(!/>peer only</i.test(PAGE), "the page must never print \"peer only\"");
+});
+
+test("a registered provider that is not reachable is not counted as non-serving", () => {
+  // serving_ai is the registry count; healthy_now is the reachability sub-count.
+  assert.match(PAGE, /counts\.serving_ai/);
+  assert.match(PAGE, /counts\.healthy_now/);
+  assert.match(PAGE, /mining \+ provider registered/);
+  assert.match(PAGE, /mining \+ serving/);
 });

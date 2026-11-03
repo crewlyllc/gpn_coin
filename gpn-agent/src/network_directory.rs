@@ -139,10 +139,14 @@ pub fn build(
     }
 
     // ---- classify ----------------------------------------------------------
-    let serving_ai = provider_rows
-        .iter()
-        .filter(|p| p["healthy"].as_bool().unwrap_or(false))
-        .count();
+    // `serving_ai` answers the registry question the page actually asks: how
+    // many providers can the access point lease? It is NOT a heartbeat count.
+    // Deriving it from `healthy` (a status-URL reachability fact) undercounted
+    // the fleet and made a NAT'd provider look like a non-provider — audit
+    // 2026-11-02 #3: `/nodes` said "1 serving AI" while the AP registry held 4.
+    // Reachability is published separately as `healthy_now`.
+    let serving_ai = providers.len();
+    let healthy_now = providers.iter().filter(|p| p.healthy).count();
 
     let mut known_offline: std::collections::HashSet<String> = std::collections::HashSet::new();
     for row in &seed_rows {
@@ -169,6 +173,7 @@ pub fn build(
         "counts": {
             "peers_live": if stale { 0 } else { live_set.len() },
             "serving_ai": serving_ai,
+            "healthy_now": healthy_now,
             "offline": known_offline.len(),
         },
         "stale": stale,
@@ -282,12 +287,34 @@ mod tests {
         assert_eq!(doc["seeds"][0]["source"], "compiled-in");
         // Two provider registrations, one machine.
         assert_eq!(doc["providers"].as_array().unwrap().len(), 1);
-        assert_eq!(doc["counts"]["serving_ai"], 1);
+        // `serving_ai` counts leaseable registrations (2 accounts on one
+        // machine), NOT distinct machines and NOT heartbeat reachability.
+        assert_eq!(doc["counts"]["serving_ai"], 2);
+        assert_eq!(doc["counts"]["healthy_now"], 2);
         // Only the stale seed is offline.
         assert_eq!(doc["counts"]["offline"], 1);
         assert_eq!(doc["seeds"][1]["peer_id"], STALE);
         assert_eq!(doc["seeds"][1]["live"], false);
         assert_eq!(doc["stale"], false);
+    }
+
+    #[test]
+    fn a_registered_provider_whose_status_url_is_unreachable_is_still_serving() {
+        // The exact audit finding: one healthy heartbeat, one NAT'd/unreachable
+        // one. Both are leaseable, so the headline must be 2 with healthy_now 1.
+        let live = Ok(vec![BOX1.into(), PEER_B.into()]);
+        let doc = build(
+            "t",
+            None,
+            live,
+            &[
+                provider(PEER_B, true, "http://198.51.100.7:8093"),
+                provider(BOX1, false, "http://23.241.109.255:8093"),
+            ],
+            &[],
+        );
+        assert_eq!(doc["counts"]["serving_ai"], 2);
+        assert_eq!(doc["counts"]["healthy_now"], 1);
     }
 
     #[test]
