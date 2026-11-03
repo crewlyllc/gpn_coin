@@ -23,7 +23,7 @@ Status labels used throughout: **LIVE** · **STAGED (not applied)** · **WORKS-I
 | **Auto-update now ON by default** (opt out: `GPN_AUTO_UPDATE=0` / `auto_update=false`); signed manifest, bundle installs, per-node randomized schedule, install stagger | **LIVE** (shipped in 0.2.0; not yet on every box) | §9.1 |
 | **AP auth token self-generates on first boot** (24 random bytes → 48 hex, `~/.gpn/accesspoint.env` 0600; env > file > generated) | **LIVE** | §6.4 |
 | **Public AI API over HTTPS** (`https://gpncoin.ai/api/v1/*`, Cloudflare Worker → AP raw socket, rate-limited, free on testnet) | **LIVE** | §6.4 |
-| **Curated + VRAM-gated model catalogue** (3 served on an 8 GB node; `tuned-*`/toy/oversized never advertised) | **LIVE** | §6.4 |
+| **Curated + VRAM-gated model catalogue** (3 in the public `/v1/models` on an 8 GB node; VRAM-failing models never advertised, `tuned-*`/toys excluded from the *public* list only — `/status models[]` is the node's real inventory) | **LIVE** | §6.4 |
 | **Provider address publication fixed** (doubled `/p2p/<id>/p2p/<id>` normalized; 4-rung dialability ladder; empty publication logged) | **LIVE** | §6.4 |
 | **Node GUI + Idle mode** (`127.0.0.1:8099`, up to 6 h, auto-resume, sole-authority valve) | **LIVE** | §9.2 |
 | **Derived GPU-hour pricing** in the scheduler + a public economics page | **LIVE** — throughput formula; oracle feed **LIVE** since 2026-10-22 (bonded operator); input metered on the channel path (15%) | §7.1 |

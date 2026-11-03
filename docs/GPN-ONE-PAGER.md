@@ -19,7 +19,7 @@
 - **No switch to manage** — mining is the default and **stops completely** while an AI job runs, then resumes. A USD/hr profitability auto-switch is a **deferred roadmap item**, not a shipped behaviour.
 - **No stake to start** — there is **no staking or delegation prerequisite** to attest, list, or serve. Staking is optional and only raises a reward multiplier.
 - **Routing** — buyers hit one public endpoint (`https://gpncoin.ai/api/v1/*`, OpenAI-compatible, rate-limited); the network picks the **lowest-latency idle** attested GPU. Providers are discovered **on-chain**, and jobs are **pulled** by the provider, so a NAT'd box still serves.
-- **Models** — a **curated, VRAM-gated** catalogue: `llama3.2:1b`, `qwen2.5:0.5b`, `qwen2.5:7b` on the reference 8 GB node (`GET /v1/models` is authoritative; fine-tune artifacts and anything that cannot fit the card's VRAM are never advertised).
+- **Models** — a **curated, VRAM-gated** catalogue: `llama3.2:1b`, `qwen2.5:0.5b`, `qwen2.5:7b` on the reference 8 GB node (`GET /v1/models` is authoritative). A model that cannot fit the card's VRAM is never advertised at all; fine-tune artifacts (`tuned-*`) and sub-0.3 B toys stay out of the **public catalogue** but are still served if a caller names them — `/status models[]` is each node's real inventory, not the catalogue.
 - **Runs on a gaming PC** — a local dashboard (`127.0.0.1:8099`) with an **Idle** switch: hand the GPU back for up to 6 h while the node keeps syncing, peering and serving the chain, then resumes on its own.
 - **Stays current by itself** — signed (ed25519) bundles from `https://gpncoin.ai/releases.json`, **on by default**, installed with a per-node randomized schedule so the fleet never stampedes a release.
 
