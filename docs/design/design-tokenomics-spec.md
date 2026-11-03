@@ -118,7 +118,7 @@ real on-chain feed driving Mining→Compute and serving a paid job.
 | Parameter | Preliminary (synthesis) | Implemented (this spec) | Note |
 |-----------|-------------------------|--------------------------|------|
 | Total supply | 1,000,000,000 | **≈ 520,500,000** | Hard supply cap (420.48M emission + 100M treasury) |
-| Genesis supply | 0 (fair launch) | **100,000,000 (≈19.2%)** | Vested treasury — see §4 |
+| Genesis supply | 0 (fair launch) | **100,000,000 (≈19.2%)** | Vested treasury — see §4 (**mainnet schedule**; the testnet genesis mints 0) |
 | Mining alloc | 65% of initial | **420,480,000 (≈80.8%)** via PoW | Emission path: 2 × 50 GPN × 4,204,800 |
 | Staking rewards | 20% | Fee pool (40% of 5% fee) + attestation | Fee-driven |
 | Treasury | 10% vested (paper) | **10% vested (adopted)** — 70M genesis + 30M vested | See §4 |
@@ -140,12 +140,18 @@ allocation, not a liquid premine.
 Adopted 2026-09-10. A **disclosed, vested** treasury replaces the previous strict
 fair-launch stance. Full design: `design-treasury-vesting.md`.
 
+> **Mainnet schedule, not testnet state.** Every figure in this section describes the
+> **mainnet** genesis. The live testnet genesis mints **nothing** into the treasury:
+> `gpn_treasury status` reports `balance 0, allocation 0 (0 tranches), unlocked 0,
+> spendable 0` (verified 2026-11-03 at block 237,109). Do not quote these numbers as
+> current testnet balances.
+
 | Parameter | Value |
 |---|---|
 | Allocation | **100,000,000 GPN (fixed; ≈19.2% of the ≈520.5M hard cap)** |
 | Account | `gpn/trsy` pallet account (no private key — spendable only via governance) |
 | Counts against cap | **Yes** → max mineable = 420,480,000 GPN; hard cap ≈ 520.5M |
-| Unlock at genesis | **70,000,000 GPN** — immediately spendable |
+| Unlock at genesis | **70,000,000 GPN** — immediately spendable (mainnet; testnet = 0) |
 | Vested | **30,000,000 GPN** over 10 years → 20 × 1,500,000 (6-month) |
 | Governance | Fixed **25-address roster**; **13-of-25** approvals to spend |
 

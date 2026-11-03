@@ -141,7 +141,8 @@ things this campaign funds.
 GPN is a **fair-launch, GPU-mineable proof-of-work coin**. There was **no ICO and no presale**.
 One thing is disclosed rather than hidden: a **100M GPN governance treasury** (≈19% of the
 hard cap — 70M genesis-unlocked plus 30M vesting over 10 years), held by a keyless pallet account
-and spendable only via a **13-of-25 governance roster** — no single admin key. Mining halving is
+and spendable only via a **13-of-25 governance roster** — no single admin key. These are
+**mainnet-launch** figures: the testnet genesis mints **0** into the treasury. Mining halving is
 every ~2 years; the hard supply cap is ≈520M GPN (≈420M emitted + 100M treasury).
 
 **This campaign does not sell GPN, and no tokens are offered as rewards.** GPN has **no live
@@ -347,7 +348,8 @@ pay-eligible by simply producing seal-verified blocks.
 
 **12. What's the governance treasury?**
 A **disclosed 100M GPN (≈19% of the hard cap)** — 70M genesis-unlocked + 30M vesting over 10
-years — held by a keyless pallet account, spendable only via a **13-of-25 roster**. There was no ICO. It's disclosed, not
+years — held by a keyless pallet account, spendable only via a **13-of-25 roster**. That is the
+**mainnet-launch** allocation; the testnet genesis mints **0** into it. There was no ICO. It's disclosed, not
 hidden.
 
 **13. What if the campaign doesn't reach the goal?**

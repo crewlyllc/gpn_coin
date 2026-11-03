@@ -41,7 +41,7 @@ every step.
       **JEREMY/MKT**
 - [ ] Risks section and FAQ reviewed for honest framing. — **MKT/JEREMY**
 - [ ] **Run the pre-publish QA** (6 honesty rules; grep for banned terms; confirm verified figures:
-      ≈520M hard cap (≈420M emission + 100M treasury), ~2yr halving at 15s, 50 GPN/block,
+      ≈520M hard cap (≈420M emission + 100M treasury **at mainnet launch; testnet = 0**), ~2yr halving at 15s, 50 GPN/block,
       $0.14–0.34/hr 4090). — **MKT**
 
 ### Media
