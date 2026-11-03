@@ -930,12 +930,12 @@ fn check_node_key() -> Check {
         Ok(_) => Check::fail(
             "node-key",
             format!("{} is empty or too short", path.display()),
-            &format!("gpn-node key generate-node-key --file \"{}\"", path.display()),
+            format!("gpn-node key generate-node-key --file \"{}\"", path.display()),
         ),
         Err(_) => Check::fail(
             "node-key",
             format!("no node key at {}", path.display()),
-            &format!(
+            format!(
                 "gpn-node key generate-node-key --file \"{}\"  (then set GPN_NODE_KEY_FILE to that path)",
                 path.display()
             ),
