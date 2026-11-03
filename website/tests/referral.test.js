@@ -122,11 +122,12 @@ test("app.js assigns the code with textContent, not innerHTML", () => {
 });
 
 test("the published snippets carry the exact flag order the binary parses", () => {
-  // Windows: `.\bin\gpn_node.exe --setup --ref CODE`  (span appends " --ref CODE")
+  // Windows: the referral is captured by the installer, which then starts the
+  // node -- so `--ref CODE` has to follow install.ps1, not a gpn_node call.
   const index = fs.readFileSync(path.join(SITE, "index.html"), "utf8");
   assert.ok(
-    index.includes(".\\bin\\gpn_node.exe --setup<span data-ref-arg></span>"),
-    "Windows quickstart must append the ref after --setup"
+    index.includes("-File C:\\gpn\\bin\\install.ps1<span data-ref-arg></span>"),
+    "Windows quickstart must append the ref to install.ps1"
   );
   // Linux: `./install.sh --ref CODE`
   const dl = fs.readFileSync(path.join(SITE, "download.html"), "utf8");
@@ -140,6 +141,35 @@ test("the published snippets carry the exact flag order the binary parses", () =
   );
   // The placeholder must render empty when there is no code.
   assert.strictEqual(R.argFor(R.validate("")), "");
+});
+
+/* ---------- the two installers actually accept what the site advertises ----
+ *
+ * The site appends " --ref CODE" to a command. If the program that command
+ * names rejects that flag, the copy button hands the user a failing command --
+ * which is exactly how this check came to exist (index.html moved the Windows
+ * quickstart to install.ps1 while the test still asserted the old gpn_node
+ * snippet, and install.ps1 had no --ref at all). Assert both installers parse
+ * the flag AND record it write-once, so neither can silently drop it again.
+ */
+test("both installers parse --ref and record the code write-once", () => {
+  const ps1 = fs.readFileSync(path.join(SITE, "..", "install.ps1"), "utf8");
+  // parses --ref CODE / --ref=CODE (and GPN_REF)
+  assert.ok(/\^\-\{1,2\}ref\[=:\]\(\.\+\)\$/.test(ps1), "install.ps1 must parse --ref=CODE");
+  assert.ok(/\^\-\{1,2\}ref\$/.test(ps1), "install.ps1 must parse `--ref CODE`");
+  assert.ok(ps1.includes("GPN_REF"), "install.ps1 must honour GPN_REF");
+  // identical validation rule to referral.js / referral.rs
+  assert.ok(ps1.includes("^[A-Za-z0-9_-]+$"), "install.ps1 must use the same code alphabet");
+  assert.ok(ps1.includes("too short (need 4-32 chars)") && ps1.includes("too long (need 4-32 chars)"),
+    "install.ps1 must enforce the 4-32 length rule");
+  // write-once + never fatal: an existing file is kept, a bad code only warns
+  assert.ok(/Test-Path \$file/.test(ps1), "install.ps1 must not overwrite an existing code");
+  assert.ok(ps1.includes("'referral'"), "install.ps1 must write the node's referral file name");
+  assert.ok(ps1.includes("referral code ignored"), "a malformed code must be a warning, not a failure");
+
+  const sh = fs.readFileSync(path.join(SITE, "..", "install.sh"), "utf8");
+  assert.ok(sh.includes("--ref)"), "install.sh must parse --ref CODE");
+  assert.ok(sh.includes("--ref=*)"), "install.sh must parse --ref=CODE");
 });
 
 test("both pages load the referral helper before app.js", () => {

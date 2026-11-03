@@ -48,8 +48,9 @@ If somebody referred you to the testnet, pass their code at install time:
 ./install.sh --ref team-alpha          # or: GPN_REF=team-alpha ./install.sh
 ```
 
-Windows: `.\run-windows-provider.ps1 -Ref team-alpha` (env `GPN_REF` also works),
-or the binary directly: `.\bin\gpn_node.exe --setup --ref team-alpha`.
+Windows: `powershell -ExecutionPolicy Bypass -File install.ps1 --ref team-alpha`
+(env `GPN_REF` also works), or `.\run-windows-provider.ps1 -Ref team-alpha`, or
+the binary directly: `.\bin\gpn_node.exe --setup --ref team-alpha`.
 
 If you installed a prebuilt release and never ran `install.sh`, the node binary
 takes the same flag itself, on first run:
@@ -62,8 +63,10 @@ takes the same flag itself, on first run:
 
 **Share links.** `https://gpncoin.ai/download?ref=team-alpha` (also `?r=`) renders
 the code into the page's copy-paste commands: the Windows block becomes
-`.\bin\gpn_node.exe --setup --ref team-alpha` and the Linux block
-`./install.sh --ref team-alpha`. The page validates the code against
+`powershell ... -File C:\gpn\bin\install.ps1 --ref team-alpha` and the Linux
+block `./install.sh --ref team-alpha`. The Windows installer records the code
+itself (write-once, same file and rule as `install.sh`), so the referral
+survives the first `gpn_node` start. The page validates the code against
 `^[A-Za-z0-9_-]{4,32}$` and silently ignores anything else (that is the XSS
 boundary: the value is written as text, never as markup), and remembers it for
 the browser session so it survives clicking around the site.

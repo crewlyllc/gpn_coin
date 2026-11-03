@@ -54,8 +54,19 @@
 .PARAMETER InstallDir
   Install root (default C:\gpn).
 
+.PARAMETER Ref
+  Referral code of whoever referred you (4-32 chars of [A-Za-z0-9_-]).
+  Recorded ONCE in $GPN_PREFIX\referral (default %USERPROFILE%\.gpn\referral)
+  and never rewritten -- the same file, same rule, as install.sh --ref and
+  `gpn_node --ref CODE`. Data collection for the testnet-participation
+  allocation only: no rewards, no chain writes. A malformed code is a
+  WARNING, never an install failure.
+
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File install.ps1
+
+.EXAMPLE
+  powershell -ExecutionPolicy Bypass -File install.ps1 --ref team-alpha
 
 .EXAMPLE
   install.cmd --remove-autostart
@@ -80,6 +91,9 @@ $NoOllamaInstall = $false
 $Verify     = $false
 $UpdateTaskOnly = $false
 $InstallDir = 'C:\gpn'
+# Referral code (--ref CODE / --ref=CODE / GPN_REF=CODE). Optional; a bad value
+# is a warning, never an install failure -- see Set-Referral below.
+$RefCode    = if ($env:GPN_REF) { [string]$env:GPN_REF } else { '' }
 
 for ($i = 0; $i -lt $args.Count; $i++) {
   $a = [string]$args[$i]
@@ -93,6 +107,10 @@ for ($i = 0; $i -lt $args.Count; $i++) {
     '^-{1,2}install-?dir[=:](.+)$'         { $InstallDir = $Matches[1] }
     '^-{1,2}install-?dir$' {
       if ($i + 1 -lt $args.Count) { $i++; $InstallDir = [string]$args[$i] }
+    }
+    '^-{1,2}ref[=:](.+)$'                  { $RefCode = $Matches[1] }
+    '^-{1,2}ref$' {
+      if ($i + 1 -lt $args.Count) { $i++; $RefCode = [string]$args[$i] } else { $RefCode = '' }
     }
     '^-{1,2}(help|\?)$' { Get-Help $MyInvocation.MyCommand.Path -Detailed; exit 0 }
     default { Write-Host " !  ignoring unknown argument: $a" -ForegroundColor Yellow }
@@ -801,6 +819,72 @@ function Register-NodeTask {
   Say "scheduled task $NodeTask registered (/SC ONLOGON /RL HIGHEST)"
 }
 
+# -------------------------------------------------------------- referral ---
+# `--ref CODE`: record the referring install's code, ONCE, in the same file the
+# node reads ($GPN_PREFIX/referral, default %USERPROFILE%\.gpn\referral -- see
+# gpn-agent/src/referral.rs). Mirrors install.sh --ref exactly: write-once (an
+# existing code is never rewritten, so attribution cannot be changed after the
+# fact), validation identical (4-32 chars of [A-Za-z0-9_-]), and a bad code is a
+# WARNING that never fails the install.
+function Test-ReferralCode {
+  param([string]$Code)
+  # Returns $null when valid, else the reason (same wording as install.sh).
+  if ($null -eq $Code) { return 'empty referral code' }
+  $c = $Code.Trim()
+  if ($c.Length -eq 0) { return 'empty referral code' }
+  if ($c.Length -lt 4)  { return 'referral code too short (need 4-32 chars)' }
+  if ($c.Length -gt 32) { return 'referral code too long (need 4-32 chars)' }
+  if ($c -notmatch '^[A-Za-z0-9_-]+$') {
+    return "referral code may only contain letters, digits, '-' and '_'"
+  }
+  return $null
+}
+
+function Set-Referral {
+  param([string]$Code)
+  if ([string]::IsNullOrWhiteSpace($Code)) { return }
+  $why = Test-ReferralCode $Code
+  if ($why) { Warn "referral code ignored: $why"; return }
+  # Same prefix resolution as the node (gpn-agent/src/referral.rs::prefix_dir):
+  # GPN_PREFIX, else HOME/USERPROFILE + .gpn. NOT $InstallDir -- the node reads
+  # the referral from its prefix, so writing it anywhere else loses it.
+  $prefix = ''
+  if ($env:GPN_PREFIX) { $prefix = $env:GPN_PREFIX }
+  elseif ($env:HOME) { $prefix = Join-Path $env:HOME '.gpn' }
+  elseif ($env:USERPROFILE) { $prefix = Join-Path $env:USERPROFILE '.gpn' }
+  else { $prefix = Join-Path '.' '.gpn' }
+  $file = Join-Path $prefix 'referral'
+  if (Test-Path $file) {
+    $existing = (Get-Content $file -TotalCount 1)
+    Say "[referral] already set to '$existing' in $file -- keeping it (write-once)"
+    return
+  }
+  if ($WhatIf) {
+    Write-Host "[whatif] would record referral code '$($Code.Trim())' in $file" -ForegroundColor Cyan
+    return
+  }
+  try {
+    New-Item -ItemType Directory -Force -Path $prefix | Out-Null
+    # CreateNew = O_EXCL create (same as run-windows-provider.ps1): it throws if
+    # the file appeared since the check above, so a racing run cannot rewrite an
+    # existing code -- the first value always wins.
+    $fs = [System.IO.File]::Open($file, [System.IO.FileMode]::CreateNew,
+                                 [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    try {
+      # UTF-8 without BOM, one line: the node reads this file verbatim.
+      $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes("$($Code.Trim())`n")
+      $fs.Write($bytes, 0, $bytes.Length)
+      $fs.Flush()
+    } finally { $fs.Dispose() }
+    Say "referral code recorded: '$($Code.Trim())' -> $file (write-once)"
+  } catch [System.IO.IOException] {
+    $existing = (Get-Content $file -TotalCount 1)
+    Say "[referral] already set to '$existing' in $file -- keeping it (write-once)"
+  } catch {
+    Warn "[referral] could not write $file ($($_.Exception.Message)) -- continuing without a referral"
+  }
+}
+
 # ----------------------------------------------------------------- install ---
 if ($Uninstall) { Invoke-Uninstall; exit 0 }
 
@@ -817,6 +901,9 @@ if ($UpdateTaskOnly) {
 }
 
 Say "GPN installer -- installing from $Root into $InstallDir"
+# 0. referral: before anything can fail, so a referred operator who hits an
+#    unrelated install error still keeps the attribution.
+Set-Referral $RefCode
 foreach ($needed in @('gpn_node.exe', 'gpn-node.exe')) {
   if (-not (Test-Path (Join-Path $Root $needed))) {
     $msg = "$needed is not next to install.ps1 ($Root). Extract the whole release zip first."
