@@ -91,25 +91,33 @@ From `gpu-attestation` + `compute-marketplace` pallets:
 
 ---
 
-## 5. Incentive Flow (How the three modes earn)
+## 5. Incentive Flow (how a node earns — all at once)
+
+A GPN node is **one entity that is always miner + AI provider**; mining and serving are not
+mutually exclusive modes an owner selects. The GPU mines blocks whenever it is idle and **stops
+mining completely** for an assigned AI job, resuming when the job completes.
 
 ```
 GPU node (gpn-agent)
    │
    ├─ MINING  → seal Ethash PoW block → gpu-pow mints block reward (50 GPN) → miner
+   │             (default state, whenever no AI job is running)
    │
-   ├─ STAKING → deposit ≥1,000 GPN (attestation stake) → attest GPU (GFLOPS proof)
-   │            → staking weight × GPU tier multiplier → paid from staking pool
+   ├─ COMPUTE → register provider → accept marketplace job (min_gflops gate)
+   │            → run real GPU GEMM → submit result → complete → escrow payout
+   │            (provider gets price − 5% fee; fee split per Section 3)
+   │            (preempts mining for the job's duration — the GPU yield)
    │
-   └─ COMPUTE → register provider → accept marketplace job (min_gflops gate)
-                → run real GPU GEMM → submit result → complete → escrow payout
-                (provider gets price − 5% fee; fee split per Section 3)
+   └─ STAKING (optional) → deposit ≥1,000 GPN → attest GPU (GFLOPS proof)
+                → staking weight × GPU tier multiplier → larger reward share
+                (not a mode: it does not stop mining or serving)
 ```
 
-The `profitability-oracle` feed supplies token price / GPU-hour price / utilization / APR;
-the agent's `ProfitabilityCalculator` converts all three modes to USD/hr and
-`decide_switch()` (with 5% hysteresis) picks the highest — verified live (Cycle 31) with a
-real on-chain feed driving Mining→Compute and serving a paid job.
+The `profitability-oracle` feed supplies token price / GPU-hour price / utilization / APR. The
+agent contains a `ProfitabilityCalculator` and a `decide_switch()` heuristic (Mining→Compute with
+5% hysteresis) from Cycle 31, but that USD/hr **mode switch is a deferred roadmap item**: it is
+**not wired into the shipped node's internal miner**. What ships today is the deterministic
+per-job GPU yield described above — no profitability switch to configure.
 
 ---
 

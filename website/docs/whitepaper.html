@@ -4,17 +4,17 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Whitepaper — GPN docs</title>
-<meta name="description" content="GPN whitepaper v0.9 (draft): a GPU-native network for mining and AI compute." />
+<meta name="description" content="GPN whitepaper v0.96 (draft): a GPU-native network for mining and AI compute." />
 <meta name="theme-color" content="#07090f" />
 <link rel="canonical" href="https://gpncoin.ai/docs/whitepaper.html" />
 <meta property="og:site_name" content="GPN" />
 <meta property="og:type" content="article" />
 <meta property="og:url" content="https://gpncoin.ai/docs/whitepaper.html" />
 <meta property="og:title" content="Whitepaper — GPN docs" />
-<meta property="og:description" content="GPN whitepaper v0.9 (draft): a GPU-native network for mining and AI compute." />
+<meta property="og:description" content="GPN whitepaper v0.96 (draft): a GPU-native network for mining and AI compute." />
 <meta name="twitter:card" content="summary" />
 <meta name="twitter:title" content="Whitepaper — GPN docs" />
-<meta name="twitter:description" content="GPN whitepaper v0.9 (draft): a GPU-native network for mining and AI compute." />
+<meta name="twitter:description" content="GPN whitepaper v0.96 (draft): a GPU-native network for mining and AI compute." />
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237c6cff'/%3E%3Ctext x='16' y='22' font-size='16' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%2307090f'%3EG%3C/text%3E%3C/svg%3E" />
 <link rel="stylesheet" href="../assets/style.css" />
 <link rel="stylesheet" href="../assets/docs.css" />
@@ -45,14 +45,14 @@
 <main id="main" class="doc-main">
   <div class="wrap doc-wrap">
     <nav class="crumbs" aria-label="Breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Docs</a> / <span>Whitepaper</span></nav>
-    <div class="doc-notice" role="note">Whitepaper v0.9 is a draft. Section 3 still describes the earlier mined-or-served three-mode model; today a node is always miner + AI provider. See <a href='run-a-node.html'>Run a node</a> for current behavior.</div>
+    <div class="doc-notice" role="note">Whitepaper v0.96 is a draft. A node is always miner + AI provider: mining is the default and the GPU yields to an assigned job. See <a href='technical-overview.html'>Technical overview</a> for the shipped model.</div>
 <article class="prose">
 <h1>GPN — A GPU-Native Network for Mining and AI Compute</h1>
 <p><em>Verified against: chain spec 45 / release 0.3.11 — checked 2026-11-02 at block 236,986.</em></p>
 <p><strong>Whitepaper v0.96 (draft)</strong> · GPN Network · <strong>last updated 2026-10-22</strong></p>
 <hr />
 <h2 id="abstract">Abstract</h2>
-<p>GPN is a <strong>GPU-native blockchain network</strong> that turns a single GPU into an earning machine two ways: it can <strong>mine</strong> the network's proof-of-work token, or it can <strong>serve AI compute</strong> to paying users — and it <strong>auto-switches</strong> between the two based on which pays more. Unlike GPU rental markets and mining pools, which force an owner to pick one and lock into it, GPN watches both markets continuously and moves the GPU to the more profitable one.</p>
+<p>GPN is a <strong>GPU-native blockchain network</strong> that turns a single GPU into an earning machine two ways <strong>at once</strong>: it <strong>mines</strong> the network's proof-of-work token whenever the card is idle, and it <strong>serves AI compute</strong> to paying users when a job is assigned — the GPU yields to the job for its duration and resumes mining when it completes. Unlike GPU rental markets and mining pools, which force an owner to pick one and lock into it, GPN runs both on the same card with no mode to configure.</p>
 <p>The chain does <strong>coordination, escrow, and settlement</strong>; the heavy compute runs <strong>off-chain</strong>. Rewards are <strong>Bitcoin-style</strong>: the node that produces a block keeps that block's reward. Eligibility is <strong>GPU-only</strong>, enforced by proof-of-work and hardware attestation. AI jobs are priced per token against a cost-derived rate, escrowed on-chain (optionally off-chain via payment channels for zero block delay), and routed to the <strong>nearest, least-loaded</strong> attested provider. (Attestation says which GPU is online and what it claims to deliver; it does <strong>not</strong> verify the content of the model's output — see §4.)</p>
 <p>GPN's thesis: the durable value of a commodity GPU is not mining, but <strong>serving real AI demand</strong> — and a network that lets every GPU do both, without friction, captures more of that value than either market alone.</p>
 <hr />
@@ -73,29 +73,30 @@
 <table>
 <thead>
 <tr>
-<th>Mode</th>
+<th>Role</th>
 <th>What the GPU does</th>
 <th>Earns</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td><strong>Mining</strong></td>
-<td>Hashes GPN blocks (Ethash-derived GPU PoW) while idle</td>
+<td><strong>Mining</strong> (default)</td>
+<td>Hashes GPN blocks (Ethash-derived GPU PoW) whenever no AI job is running</td>
 <td>Newly-minted GPN (block reward)</td>
 </tr>
 <tr>
-<td><strong>Compute</strong></td>
-<td>Serves AI jobs (LLM, image, fine-tune) when the access point assigns one</td>
+<td><strong>Compute</strong> (yields to a job)</td>
+<td>Serves an AI job (LLM, image/fine-tune) when the access point assigns one; mining stops for its duration</td>
 <td>GPN from job escrow (paid by requestors)</td>
 </tr>
 <tr>
-<td><strong>Staking</strong></td>
-<td><em>(optional)</em> extra stake raises the tier multiplier</td>
+<td><strong>Staking</strong> <em>(optional add-on)</em></td>
+<td>Extra stake raises the tier multiplier — it is not a mode and does not stop mining or serving</td>
 <td>Larger share of the fee pool</td>
 </tr>
 </tbody>
 </table>
+<p>This is a description of what the single node does, not a menu the owner picks from.</p>
 <p>There is <strong>no profitability switch to configure</strong>: mining is the default state, and when a node accepts an AI job, mining <strong>stops completely</strong> for the job's duration and resumes when it completes. A USD/hr profitability auto-switch (driven by an oracle feed) is a <strong>deferred roadmap item</strong>, not a shipped behaviour — see §6.1 and §12.</p>
 <p><strong>The chain is thin and trust-minimal.</strong> It holds the job lifecycle, escrow, and payouts, enforces capability and eligibility gates, and settles rewards. The compute — inference, generation, training — <strong>never touches the chain</strong>.</p>
 <hr />

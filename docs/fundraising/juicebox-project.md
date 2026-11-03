@@ -14,8 +14,8 @@ securities complications.*
 *A GPU should not have to choose.*
 
 ## Short description (project card)
-GPN turns any GPU into income two ways — it can **mine** the network's proof-of-work token, or **serve
-AI compute** — and **auto-switches** to whichever pays more. Help us ship mainnet, audits, and the
+GPN turns any GPU into income two ways at once — it **mines** the network's proof-of-work token by
+default and **serves AI compute** whenever a job is assigned. Help us ship mainnet, audits, and the
 trusted-setup ceremony. Open-source, trust-minimal, fair-launch.
 
 ## Funding target & cycle
@@ -54,9 +54,10 @@ financial return. GPN is not soliciting an investment."*
 **rent the card** for AI work. Mine and the coin dips → you lose. Rent and nobody books you → $0.
 The card can't see that *the other market is paying more right now* and move.
 
-**The idea.** GPN is a GPU-native network where each node **mines _or_ serves AI — auto-switching** to
-whichever earns more. Same GPU, one install, no manual re-listing. The chain does **coordination +
-escrow + settlement**; the heavy compute runs **off-chain**. Rewards are **Bitcoin-style** (the node
+**The idea.** GPN is a GPU-native network where each node is **always miner + AI provider** — it
+mines by default and yields the card to an assigned AI job, then resumes. Same GPU, one install,
+no manual re-listing. The chain does **coordination + escrow + settlement**; the heavy compute runs
+**off-chain**. Rewards are **Bitcoin-style** (the node
 that produces a block keeps its reward). Eligibility is **GPU-only**, enforced by proof-of-work and
 hardware attestation. AI jobs are priced **per token** against real cost, escrowed trust-minimally,
 and routed to the **nearest, least-loaded** verified GPU.

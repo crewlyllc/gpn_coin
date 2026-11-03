@@ -9,17 +9,17 @@ funds **public goods / open-source**; frame GPN as open-source infrastructure, n
 **GPN — a GPU-native network for mining and AI compute**
 
 ## One-liner
-An open-source, trust-minimal network that lets any GPU **mine _or_ serve AI compute — auto-switching**
-to whichever pays more, so idle GPUs become income and AI compute gets cheaper.
+An open-source, trust-minimal network where any GPU is **always miner _and_ AI provider** — it
+mines by default and yields to an assigned job — so idle GPUs become income and AI compute gets cheaper.
 
 ## What is the project?
 GPN is an open-source **Coordination layer + compute marketplace** built as a Substrate blockchain:
 
 - **Chain = coordination + escrow + settlement; compute = off-chain.** The heavy AI work never touches
   the chain.
-- **One GPU, two modes.** A node **mines** (GPU proof-of-work, Bitcoin-style per-node rewards) **or
-  serves AI** (LLM inference, image/video generation, ML inference, fine-tuning) and **auto-switches**
-  between them based on which pays more.
+- **One GPU, two jobs.** A node **mines** (GPU proof-of-work, Bitcoin-style per-node rewards) by
+  default **and serves AI** (LLM inference, image/video generation, ML inference, fine-tuning) when a
+  job is assigned — mining stops for the job, then resumes. No mode to pick.
 - **Trust-minimal money.** Per-token escrow, optionally via **payment channels** (no per-job block
   delay); either side can force-settle on-chain.
 - **GPU-only, verifiably.** Proof-of-work + hardware attestation + a compute challenge.

@@ -8,7 +8,7 @@
 
 ## Abstract
 
-GPN is a **GPU-native blockchain network** that turns a single GPU into an earning machine two ways: it can **mine** the network's proof-of-work token, or it can **serve AI compute** to paying users — and it **auto-switches** between the two based on which pays more. Unlike GPU rental markets and mining pools, which force an owner to pick one and lock into it, GPN watches both markets continuously and moves the GPU to the more profitable one.
+GPN is a **GPU-native blockchain network** that turns a single GPU into an earning machine two ways **at once**: it **mines** the network's proof-of-work token whenever the card is idle, and it **serves AI compute** to paying users when a job is assigned — the GPU yields to the job for its duration and resumes mining when it completes. Unlike GPU rental markets and mining pools, which force an owner to pick one and lock into it, GPN runs both on the same card with no mode to configure.
 
 The chain does **coordination, escrow, and settlement**; the heavy compute runs **off-chain**. Rewards are **Bitcoin-style**: the node that produces a block keeps that block's reward. Eligibility is **GPU-only**, enforced by proof-of-work and hardware attestation. AI jobs are priced per token against a cost-derived rate, escrowed on-chain (optionally off-chain via payment channels for zero block delay), and routed to the **nearest, least-loaded** attested provider. (Attestation says which GPU is online and what it claims to deliver; it does **not** verify the content of the model's output — see §4.)
 
@@ -37,11 +37,13 @@ Meanwhile, AI compute is expensive and concentrated: buyers pay hyperscaler pric
 
 A GPN node is **one entity** — one identity, one wallet, one GPU — and it does **two jobs at once**:
 
-| Mode | What the GPU does | Earns |
+| Role | What the GPU does | Earns |
 |---|---|---|
-| **Mining** | Hashes GPN blocks (Ethash-derived GPU PoW) while idle | Newly-minted GPN (block reward) |
-| **Compute** | Serves AI jobs (LLM, image, fine-tune) when the access point assigns one | GPN from job escrow (paid by requestors) |
-| **Staking** | *(optional)* extra stake raises the tier multiplier | Larger share of the fee pool |
+| **Mining** (default) | Hashes GPN blocks (Ethash-derived GPU PoW) whenever no AI job is running | Newly-minted GPN (block reward) |
+| **Compute** (yields to a job) | Serves an AI job (LLM, image/fine-tune) when the access point assigns one; mining stops for its duration | GPN from job escrow (paid by requestors) |
+| **Staking** *(optional add-on)* | Extra stake raises the tier multiplier — it is not a mode and does not stop mining or serving | Larger share of the fee pool |
+
+This is a description of what the single node does, not a menu the owner picks from.
 
 There is **no profitability switch to configure**: mining is the default state, and when a node accepts an AI job, mining **stops completely** for the job's duration and resumes when it completes. A USD/hr profitability auto-switch (driven by an oracle feed) is a **deferred roadmap item**, not a shipped behaviour — see §6.1 and §12.
 

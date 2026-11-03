@@ -33,8 +33,8 @@ Status labels used throughout: **LIVE** · **STAGED (not applied)** · **WORKS-I
 
 ## 1. What GPN is (one paragraph)
 
-A **GPU-native network** where each GPU either **mines** (PoW) or **serves AI compute**,
-**auto-switching** between the two. **The chain = coordination + escrow + reward settlement;
+A **GPU-native network** where each GPU is **always miner + AI provider** — it mines (PoW) by
+default and yields the card to an assigned AI job, then resumes. **The chain = coordination + escrow + reward settlement;
 the heavy AI compute runs entirely off-chain.** Anyone with a GPU can earn (mine or serve AI);
 anyone can buy AI compute through one simple REST/OpenAI-compatible interface, paying per token
 at cost-derived prices; on-chain values are salted/opaque so prompts/completions are never
@@ -131,7 +131,7 @@ with **no** `--force-authoring` flag.)
   instant the job completes**.
 - **One job at a time per machine** — provider **capacity = 1** (the scheduler excludes a node already
   running a job).
-- Modes: **Mining · Compute** (Staking = Phase C).
+- Roles on the one node: **Mining (default) · Compute (preempts mining)**; Staking is an optional Phase-C add-on, not a mode.
 
 **Current mechanism = a yield/preempt, NOT economic switching.** What's live is *“mine until a job →
 stop → resume.”* The **profitability auto-switch** — `ModeManager::switch_to` + `decide_switch` over the
@@ -143,7 +143,7 @@ Verified live: mining stops while a job runs and resumes after; capacity=1.
 confirmed a duty-cycle, now replaced by a **full stop** (#24).)*
 
 **⚑ Design intent — a node IS a provider (don't split them):** a GPN node is **one entity** — a GPU
-that mines **OR** serves AI, under **one identity/wallet**, auto-switching between the two. The
+that mines **AND** serves AI, under **one identity/wallet**, with a per-job GPU yield. The
 current split into two separate processes (a `gpn-node` miner + a separate `gpn_provider` agent) and
 the scheduler's registry tracking only provider heartbeats are **transitional implementation
 artifacts, not the design**. The target: a node registers **once**, advertises both mining and
@@ -777,8 +777,8 @@ survive a membership change; no preimage deposits; O(64) prune scan).
   vanish before a slow provider claims them.
 - **GPU contention (transitional):** on the current testnet the node's internal miner and a separate
   provider process can contend for the one GPU (image gen was slow while the miner held the GPU). By
-  design this **shouldn't** happen — a node runs ONE mode at a time and the **auto-switch** (§3.1)
-  stops the miner *before* compute runs. Wiring the node-internal miner into that switch is pending.
+  design this **shouldn't** happen — the **per-job GPU yield** (§3.1) stops the miner *before*
+  compute runs. Wiring the node-internal miner into that yield path is pending.
 - Node peer count takes **~40s to establish after a restart** (0 → 1 peers is normal, not a fault).
 
 ---

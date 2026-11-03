@@ -65,7 +65,7 @@ token/equity/financial-return rewards.
 This package handles that by:
 
 1. **Framing GPN as software + an AI-compute marketplace**, not "a coin." The product is "turn your
-   GPU into income by mining **or** serving AI, auto-switched." The token exists, but it is a
+   GPU into income by mining **and** serving AI on the same card." The token exists, but it is a
    **fair-launch mining coin**, not something sold here.
 2. **Offering only non-financial rewards:** early access, testnet AI-compute credits, swag,
    recognition (a supporter wall, named roles), and onboarding priority. No tokens, no equity, no

@@ -23,18 +23,19 @@ and the tokenomics wording. Aligned to `marketing/brand-voice-and-messaging-guid
 > *A GPU should not have to choose.*
 
 **Short blurb (project card, ~131 chars):**
-> GPN turns one GPU into two income paths: it mines GPN or serves AI compute, auto-switching
-> to whichever pays more. Live on testnet.
+> GPN turns one GPU into two income paths: it mines GPN and serves AI compute — mining by
+> default, yielding the GPU to a job when one is assigned. Live on testnet.
 
 **One-paragraph summary:**
 > Most GPU owners have two ways to earn and are forced to pick one: mine a coin, or rent the
 > card for AI work. Point it at mining and a price dip means mining at a loss; list it for AI
 > and an empty queue means zero. GPN is open-source software that ends the guesswork — the
-> same GPU mines GPN **or** serves AI compute (LLM inference, image/video generation,
-> fine-tuning), **auto-switching** to whichever pays more, with jobs coordinated and settled
-> by a trust-minimal chain. We're funding the last mile to mainnet: finishing the auto-switch,
-> independent security audits, the shielded-pool ceremony, and the seed full nodes that keep
-> the network reachable. The network is already live on a public testnet.
+> same GPU is **always miner *and* AI provider**: it mines GPN whenever the card is idle and
+> serves AI compute (LLM inference, image/video generation, fine-tuning) when a job is
+> assigned, pausing mining for that job and resuming after it. Jobs are coordinated and settled
+> by a trust-minimal chain. We're funding the last mile to mainnet: finishing the per-job GPU
+> yield, independent security audits, the shielded-pool ceremony, and the seed full nodes that
+> keep the network reachable. The network is already live on a public testnet.
 
 ---
 
@@ -62,25 +63,23 @@ block reward thins, there's nothing left but exit.
 
 ### The idea: don't make the owner pick
 
-**GPN is a network where every GPU mines *or* serves AI — and auto-switches to whichever earns
-more.** Same card, one install, no manual re-listing. The chain does coordination, escrow, and
-settlement; the heavy compute runs off-chain.
+**GPN is a network where every GPU mines *and* serves AI — the card mines by default and yields
+to an AI job when one is assigned.** Same card, one install, no manual re-listing. The chain does
+coordination, escrow, and settlement; the heavy compute runs off-chain.
 
-That single idea — **the auto-switch** — is the network's whole thesis. It's the one thing no
+That single idea — **one GPU, both markets** — is the network's whole thesis. It's the one thing no
 GPU-compute competitor does, and it's what turns a coin into a *product*.
 
 ### How it works
 
-**One node, one mode at a time.** A GPN node is one entity — one GPU, one identity, one wallet —
-running in one of three modes: **Mining** (hash blocks, mint new GPN), **Compute** (serve AI
-jobs, paid from job escrow), or *(later)* **Staking**. At launch the practical switch is
-**Mining ⇄ Compute**.
+**One node, two jobs.** A GPN node is one entity — one GPU, one identity, one wallet — and it is
+**always miner + AI provider**. It mines GPN blocks (newly-minted GPN, block reward) whenever the
+GPU is idle, and when the access point assigns an AI job (LLM, image/video, fine-tune) it **stops
+mining completely** for the job's duration, frees the VRAM before the model loads, and resumes
+when the job completes. Nothing is a menu you pick from.
 
-**The switch is a decision, not a guess.** Every cycle the node estimates each mode's revenue in
-**USD/hr**, using an on-chain oracle feed of token price, GPU-hour rental price, utilization, and
-staking APR, and switches **only when the other mode beats the current one by ~5%** (a hysteresis
-margin) — so the GPU doesn't thrash on tiny price crossings. A switch is a real **stop/start of
-GPU work**: entering Compute stops the miner and frees VRAM before the model loads.
+**No profitability switch.** There is no USD/hr mode selector to configure. A USD/hr auto-switch
+driven by an oracle feed is a **deferred roadmap item**, not shipped behaviour.
 
 **The chain is thin and trust-minimal.** It holds the job lifecycle, escrow, and payouts, enforces
 capability and eligibility gates, and settles rewards. Inference, generation, and training
@@ -184,7 +183,7 @@ launch, plus the security work that has to happen first.
 
 | Area | Amount | What it pays for |
 |---|---|---|
-| Engineering & mainnet readiness | $28,000 | Finishing the auto-switch (folding the node's own miner into the switch), client-side RTT, remote-provider end-to-end, video pipeline, mainnet genesis tooling and rehearsal |
+| Engineering & mainnet readiness | $28,000 | Per-job GPU yield (node-internal miner integration), client-side RTT, remote-provider end-to-end, video pipeline, mainnet genesis tooling and rehearsal |
 | Security: audits & red-team remediation | $14,000 | Independent review of the marketplace escrow, eligibility, and shielded pool; remediation of findings; re-review |
 | CRS ceremony (shielded-pool trusted setup) | $7,000 | Coordinating, running, and verifying the multi-party Powers-of-Tau / phase-2 ceremony |
 | Seed full nodes & CI/GPU hardware | $9,000 | Always-on, publicly-reachable full nodes (the network's reachability layer) plus CI GPUs for testing across vendors |
@@ -242,7 +241,7 @@ placeholders for Jeremy to confirm — see `README.md`.)*
 We lead with the catch. Here's what can go wrong and what we're doing about it.
 
 - **It's software, and the network is young.** GPN is live on a **public testnet**, not mainnet.
-  Some features (the node-internal miner folded into the auto-switch, video serving on all
+  Some features (node-internal miner integration with the GPU yield, video serving on all
   platforms, remote-provider end-to-end) are still being finished.
   **Mitigation:** the core chain, marketplace, channels, shielded spends, and discovery already
   run on testnet; we ship in small, reviewed, reversible changes and post milestone updates.
@@ -319,9 +318,10 @@ final integration are done — not on a marketing date. The network is **live on
 today**; you can run it now.
 
 **6. How do I earn?**
-Run a node. Your GPU **mines GPN** when mining pays more, and **serves AI jobs** when compute pays
-more — the auto-switch decides continuously, with a ~5% margin so it doesn't thrash. Miners keep
-the reward of blocks they produce; providers are paid per token for work actually delivered.
+Run a node. Your GPU **mines GPN by default** and **serves an AI job** whenever the access point
+assigns one — mining pauses for the job's duration and resumes when it completes. There is no
+mode to configure. Miners keep the reward of blocks they produce; providers are paid per token
+for work actually delivered. A USD/hr auto-switch is a future roadmap item, not shipped today.
 
 **7. How much can I earn?**
 We don't promise a number — it depends on your GPU, price, and demand. Verified reference: an
@@ -334,13 +334,15 @@ and withdrawals (zero-knowledge spends). Production privacy depends on the **pub
 this campaign funds; until then, testnet proofs rely on on-chain nullifier/root/value checks.
 
 **9. What makes GPN different from NiceHash, Vast, RunPod, Render, Akash, or io.net?**
-Those let a GPU **do one thing** — mine, or rent. None **auto-switches a single card between
-mining and AI serving** based on which pays more. That switch is the whole product.
+Those let a GPU **do one thing** — mine, or rent. GPN runs **both on one card**: it mines between
+AI jobs and yields the GPU to a job the moment one is assigned, with no re-listing and no mode
+choice. That per-job yield is the product.
 
 **10. Is it decentralized?**
 The chain is permissionless and has no validator set; the network finds its own reachable nodes.
-But we're honest: **Phase 1 uses a centralized oracle** for the mining↔compute switch. We name it
-and we're engineering the path off it. "Decentralizing," not "decentralized."
+But we're honest: **Phase 1 uses a centralized oracle** to publish the token and GPU-hour prices
+that set job rates. It does **not** flip the node between mining and serving — that is the
+per-job GPU yield, and it is already automatic. "Decentralizing," not "decentralized."
 
 **11. Do I have to stake?**
 No. Staking is **optional** — it raises your tier and reward multiplier, but a miner becomes
@@ -386,27 +388,28 @@ metric. No hype, no price talk.
 > fine-tuning) with per-token escrow, cost-derived pricing, and least-latency routing; on-chain
 > provider discovery; payment channels; shielded spends; peer discovery; and committee governance.
 >
-> **What this campaign funds:** finishing the auto-switch, independent audits, the shielded-pool
+> **What this campaign funds:** finishing the per-job GPU yield (node-internal miner integration),
+> independent audits, the shielded-pool
 > **CRS ceremony**, and the seed full nodes that keep the network reachable — then the mainnet
 > genesis and launch.
 >
 > **What we won't do:** promise a price, a listing, or an income number. GPN has no live price
 > pre-mainnet, and mining and compute income are variable. We'll report progress, not projections.
 >
-> First technical update lands next week: the auto-switch integration status.
+> First technical update lands next week: the GPU-yield integration status.
 
-### Update 2 — "Auto-switch: folding the miner into the switch" (week 2)
+### Update 2 — "GPU yield: folding the node's miner into the job path" (week 2)
 
-> This week: we wired the node's own miner into the auto-switch so a single card cleanly stops
-> mining and frees VRAM before a compute job loads — the "one GPU, one mode at a time" promise in
+> This week: we wired the node's own miner into the GPU yield so a single card cleanly stops
+> mining and frees VRAM before a compute job loads — the "one GPU, both markets" promise in
 > practice, not just on paper.
 >
 > Also this week: a remote-provider end-to-end test — a job created at an access point, routed to
 > a separate provider machine, completed, and paid. We'll post the outcome (pass or fail) and the
 > fix list if it fails.
 >
-> Reminder of the catch we lead with: Phase 1 uses a **centralized oracle** for the switch. We're
-> naming it while we build the path off it.
+> Reminder of the catch we lead with: Phase 1 uses a **centralized oracle** to publish the token
+> and GPU-hour prices that set job rates. It does not flip the node between mining and serving.
 
 ### Update 3 — "Security first: audits and the ceremony" (week 3)
 

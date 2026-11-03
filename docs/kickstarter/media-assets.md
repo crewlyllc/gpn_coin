@@ -41,7 +41,7 @@ Legend: **✅ have / can capture now** · **🎨 needs design** · **📸 needs 
 
 | Asset | Spec | Used where | Status |
 |---|---|---|---|
-| **Mine ⇄ Serve auto-switch diagram** | **SVG** + PNG 1600×900; one slide explains the whole product | Story hero section + video | 🎨 |
+| **Mine + Serve yield diagram** | **SVG** + PNG 1600×900; one slide explains the whole product | Story hero section + video | 🎨 |
 | **Job lifecycle diagram** (Pending → … → Completed) | SVG + PNG 1600×900 | Story "marketplace" | 🎨 |
 | **Routing diagram** (buyer → access point → nearest verified GPU) | SVG + PNG 1600×900 | Story "routing" | 🎨 |
 | **Escrow / payment-channel diagram** (lock once on-chain, settle off-chain) | SVG + PNG 1600×900 | Story "trust-minimal escrow" | 🎨 |
@@ -89,8 +89,8 @@ Aligned to brand voice: confident, honest, no hype, no price/return claims. Adju
 
 ### X / Twitter — launch thread (short posts, one idea each)
 
-1. **We're live on Kickstarter.** GPN: software that turns one GPU into two income paths — it
-   mines, or it serves AI compute, and auto-switches to whichever pays more. *A GPU should not
+1. **We're live on Kickstarter.** GPN: software that turns one GPU into two income paths at
+   once — it mines by default, and serves AI compute when a job arrives. *A GPU should not
    have to choose.* 🧵
 2. **The problem.** Own a GPU and you must pick one: mine a coin, or rent it for AI work. Mine and
    a dip means mining at a loss. Rent and an empty queue means $0. The card can't move to where
@@ -104,7 +104,7 @@ Aligned to brand voice: confident, honest, no hype, no price/return claims. Adju
 6. **Honest catch.** Our Phase-1 switch oracle is centralized. We say so out loud and we're
    engineering the path off it. Trust is the moat.
 7. **It's live.** The chain, marketplace, channels, and shielded pool run on a public testnet
-   today. This campaign funds the last mile: auto-switch, audits, the shielded-pool ceremony, seed
+   today. This campaign funds the last mile: GPU-yield integration, audits, the shielded-pool ceremony, seed
    nodes — then mainnet.
 8. **What we're *not* doing:** no tokens for sale, no ICO, no price promises. Just a real tool for
    the hardware you already own. Back us → [link]
@@ -115,11 +115,13 @@ Aligned to brand voice: confident, honest, no hype, no price/return claims. Adju
 > rent the card for AI work — but you have to pick one, and the card can't move when the other
 > market pays more.
 >
-> We built GPN so a single GPU does both, auto-switching to whichever pays more, coordinated and
-> settled by a trust-minimal chain. It's open source and live on a public testnet today.
+> We built GPN so a single GPU does both — mining by default, yielding the card to an AI job
+> when one is assigned — coordinated and settled by a trust-minimal chain. It's open source and
+> live on a public testnet today.
 >
-> We're funding the last mile to mainnet on Kickstarter: finishing the auto-switch, independent
-> security audits, the shielded-pool ceremony, and the seed nodes that keep the network reachable.
+> We're funding the last mile to mainnet on Kickstarter: finishing the per-job GPU yield,
+> independent security audits, the shielded-pool ceremony, and the seed nodes that keep the
+> network reachable.
 > Non-financial rewards only — early access, compute credits, swag. No tokens, no price promises.
 >
 > A GPU should not have to choose. [link]
@@ -127,17 +129,18 @@ Aligned to brand voice: confident, honest, no hype, no price/return claims. Adju
 ### Instagram / short-form caption
 
 > Your GPU has two ways to earn. Until now, you had to pick one. GPN doesn't make it choose — it
-> mines, or it serves AI, and switches to whichever pays more. Live on testnet. Back the last mile
-> on Kickstarter. 🔗 in bio. **#GPU #AICompute #OpenSource** *(no price/return claims)*
+> mines by default and serves AI when a job arrives (pausing mining for the job). Live on testnet.
+> Back the last mile on Kickstarter. 🔗 in bio. **#GPU #AICompute #OpenSource** *(no price/return claims)*
 
 ### Community (Reddit / Discord / Telegram) — contributor note
 
 > Hi all — we're the GPN team. Disclosure up front: this is our project.
 >
-> GPN is open-source software that runs one GPU in two markets — it mines GPN or serves AI compute
-> and auto-switches to whichever pays more. The chain does coordination/escrow; compute runs
-> off-chain. It's live on a public testnet. We've launched a Kickstarter to fund the last mile
-> (auto-switch, audits, ceremony, seed nodes) with **non-financial rewards only — no tokens.**
+> GPN is open-source software that runs one GPU in two markets — it mines GPN by default and
+> serves AI compute whenever a job is assigned, no mode to pick. The chain does
+> coordination/escrow; compute runs off-chain. It's live on a public testnet. We've launched a
+> Kickstarter to fund the last mile (GPU-yield integration, audits, ceremony, seed nodes) with
+> **non-financial rewards only — no tokens.**
 >
 > Honest caveats: Phase-1 oracle is centralized (we're moving off it); compute income is
 > demand-dependent and variable; no price/listing promises. Happy to answer anything. [link]
@@ -151,7 +154,7 @@ Aligned to brand voice: confident, honest, no hype, no price/return claims. Adju
   come: [link]."
 - **Stretch goal:** "Stretch goal unlocked: [X]. Extra funds go to [audits/ceremony] first — always
   security before speed."
-- **Final hours:** "Final hours. If we hit $75k, the last mile ships: auto-switch, audits, the
+- **Final hours:** "Final hours. If we hit $75k, the last mile ships: GPU-yield integration, audits, the
   ceremony, seed nodes. Non-financial rewards only. [link]"
 
 ---

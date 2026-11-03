@@ -67,7 +67,7 @@ template = """<!doctype html>
     <div class="kicker">GPN Network · Whitepaper</div>
     <h1>A GPU-Native Network for Mining&nbsp;and&nbsp;AI&nbsp;Compute</h1>
     <div class="rule"></div>
-    <p class="sub">One GPU that mines <em>or</em> serves AI — auto-switching to whichever pays more.</p>
+    <p class="sub">One GPU that mines <em>and</em> serves AI — mining by default, yielding to a job.</p>
     <div class="meta">Version 0.96 (draft) &nbsp;·&nbsp; 2026-11-02<br>Fair-launch, proof-of-work, GPU-only, trust-minimal escrow.<br>Verified against chain spec 45 / release 0.3.11.</div>
   </section>
   <div class="toc">{toc}</div>

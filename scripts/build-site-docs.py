@@ -31,10 +31,10 @@ PAGES = {
     "whitepaper": (
         "GPN-WHITEPAPER.md",
         "Whitepaper",
-        "GPN whitepaper v0.9 (draft): a GPU-native network for mining and AI compute.",
-        "Whitepaper v0.9 is a draft. Section 3 still describes the earlier "
-        "mined-or-served three-mode model; today a node is always miner + AI provider. "
-        "See <a href='run-a-node.html'>Run a node</a> for current behavior.",
+        "GPN whitepaper v0.96 (draft): a GPU-native network for mining and AI compute.",
+        "Whitepaper v0.96 is a draft. A node is always miner + AI provider: mining is the "
+        "default and the GPU yields to an assigned job. See "
+        "<a href='technical-overview.html'>Technical overview</a> for the shipped model.",
     ),
     "technical-overview": (
         "GPN-TECHNICAL-OVERVIEW.md",

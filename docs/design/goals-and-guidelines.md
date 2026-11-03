@@ -3,9 +3,9 @@
 _Living document. Add to it as questions come up. Last updated 2026-10-02._
 
 ## What GPN is
-A GPU-native network where each GPU either **mines** (PoW) or **serves AI compute**,
-auto-switching between them. The chain coordinates, escrows payment, and settles
-rewards; the heavy compute runs **off-chain**.
+A GPU-native network where each GPU is **always miner + AI provider** — it mines (PoW) by
+default and yields the card to an assigned AI job. The chain coordinates, escrows payment, and
+settles rewards; the heavy compute runs **off-chain**.
 
 ## Goals
 1. **Turn idle GPUs into income.** Any GPU owner can earn by mining or serving AI,

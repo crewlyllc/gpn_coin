@@ -48,7 +48,7 @@ every step.
 - [ ] Hero image + logo pack delivered (`media-assets.md`). — **MKT/design**
 - [ ] Screenshots + GIFs captured from the **live testnet** (dashboard, live AI job, the switch,
       explorer, shielded spend); blur any token price. — **PM07/MKT**
-- [ ] Diagrams rendered (auto-switch, job lifecycle, routing, escrow, eligibility). — **MKT**
+- [ ] Diagrams rendered (GPU yield, job lifecycle, routing, escrow, eligibility). — **MKT**
 - [ ] Social cards + swag artwork produced. — **MKT**
 - [ ] **Video** finished (75s master + 30s/15s/6s cut-downs), captioned, muted-safe. — **MKT**
 
@@ -107,7 +107,7 @@ every step.
       provisioning). — **PM07/MKT**
 - [ ] Send backer **surveys** (addresses for swag, account IDs for credits, tier choices). — **MKT**
 - [ ] Track fulfillment milestones in the reward operations doc. — **MKT**
-- [ ] Keep building in public; ship an update per milestone (auto-switch → audits → ceremony →
+- [ ] Keep building in public; ship an update per milestone (GPU yield → audits → ceremony →
       mainnet rehearsal → mainnet). — **PM07**
 
 ### If the goal is NOT reached
