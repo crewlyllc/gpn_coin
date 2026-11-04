@@ -798,6 +798,20 @@ function Register-NodeTask {
   $createArgs = @('/Create', '/TN', $NodeTask, '/TR', "cmd /c $NodeCmd", '/SC', 'ONLOGON', '/F')
   if ($RunHighest) { $createArgs += @('/RL', 'HIGHEST') }
   Invoke-Step "schtasks /Create /TN $NodeTask (/SC ONLOGON$(if ($RunHighest) { ' /RL HIGHEST' }))" {
+    # Reuse an existing task that already runs our launcher. A standard (non-admin)
+    # Windows account gets "Access is denied" from /Create even when the task is
+    # its own (measured 2026-11-04: `schtasks /Create /TN gpntest ... /F` fails on a
+    # fresh box), so recreating what already works is both unnecessary and fatal.
+    $existing = (& cmd /c "schtasks /Query /TN $NodeTask /FO LIST /V 2>nul") -join "`n"
+    if ($existing -match 'Task To Run:\s*(.+?)\r?\n' -and $Matches[1] -match 'start-node\.cmd') {
+      $ownerX = ''
+      if ($existing -match 'Run As User:\s*(\S+)') { $ownerX = $Matches[1] }
+      if (-not $ownerX -or ($ownerX -match [regex]::Escape($env:USERNAME))) {
+        Say "$NodeTask already exists and runs $NodeCmd -- reusing it (not recreating)"
+        return
+      }
+    }
+
     # A leftover task owned by ANOTHER account cannot be replaced by this one.
     # Try to clear it first (works when it is ours or we are elevated).
     $q = (& cmd /c "schtasks /Query /TN $NodeTask /FO LIST /V 2>nul") -join "`n"
@@ -824,7 +838,23 @@ function Register-NodeTask {
                "then run this installer again as $env:USERNAME (NOT elevated).")
       }
       $why = if ($script:LastSchtasksOutput) { ": $script:LastSchtasksOutput" } else { '' }
-      throw "schtasks /Create $NodeTask failed (rc=$rc)$why"
+      # Standard accounts cannot create scheduled tasks at all ("Access is denied").
+      # A Startup-folder shortcut achieves the same "start at logon" without any
+      # privilege, so an install must not die here.
+      $lnk = Join-Path ([Environment]::GetFolderPath('Startup')) 'GPN Node.lnk'
+      try {
+        $ws = New-Object -ComObject WScript.Shell
+        $sc = $ws.CreateShortcut($lnk)
+        $sc.TargetPath = $NodeCmd
+        $sc.WorkingDirectory = $InstallDir
+        $sc.WindowStyle = 7
+        $sc.Description = 'GPN node (started by the Startup folder because Task Scheduler was denied)'
+        $sc.Save()
+        Warn "could not create the scheduled task (rc=$rc$why) -- using a Startup shortcut instead: $lnk"
+        return
+      } catch {
+        throw "schtasks /Create $NodeTask failed (rc=$rc)$why; the Startup shortcut also failed: $($_.Exception.Message)"
+      }
     }
   }
   if ($WhatIf) { return }

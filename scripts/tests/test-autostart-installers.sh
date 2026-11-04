@@ -127,6 +127,12 @@ assert_has "$ps1" "exists and belongs to"                  "explains when GPN-No
 # existing task. The node needs no admin rights, so the installer must retry
 # without it rather than abort.
 assert_has "$ps1" "retrying at normal privilege"         "falls back when /RL HIGHEST is refused"
+# 2026-11-04: a standard Windows account gets "Access is denied" from
+# schtasks /Create at all. Reuse an existing launcher task, and fall back to a
+# Startup shortcut when the Task Scheduler refuses.
+assert_has "$ps1" "reusing it (not recreating)"            "reuses an existing GPN-Node task"
+assert_has "$ps1" "using a Startup shortcut instead"       "falls back to a Startup shortcut when denied"
+assert_has "$ps1" "GetFolderPath('Startup')"               "writes the shortcut to the user Startup folder"
 # The update task must not require elevation either, and the deploy path must
 # never fail the release build when a task cannot be registered.
 assert_has "$ps1" "<RunLevel>LeastPrivilege</RunLevel>"    "update task runs at least privilege"
