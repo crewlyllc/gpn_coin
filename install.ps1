@@ -156,9 +156,14 @@ function Say  { param([string]$m) Write-Host "==> $m" -ForegroundColor Green }
 function Warn { param([string]$m) Write-Host " !  $m" -ForegroundColor Yellow }
 
 # All schtasks calls go through here: stderr is swallowed, rc returned.
+# schtasks messages are the only explanation we get for a failure, so keep them.
+# Discarding this output is why "rc=1" was undiagnosable on box 3 and on the
+# fresh Windows box (2026-11-03/04): "Access is denied" and "cannot find the
+# file specified" are the same number otherwise.
+$script:LastSchtasksOutput = ''
 function Invoke-Schtasks {
   param([string[]]$Args1)
-  & schtasks @Args1 2>&1 | Out-Null
+  $script:LastSchtasksOutput = ((& schtasks @Args1 2>&1) | Out-String).Trim()
   return $LASTEXITCODE
 }
 
@@ -818,7 +823,8 @@ function Register-NodeTask {
                "Open an ADMIN prompt once and run:  schtasks /Delete /TN $NodeTask /F  " +
                "then run this installer again as $env:USERNAME (NOT elevated).")
       }
-      throw "schtasks /Create $NodeTask failed (rc=$rc)"
+      $why = if ($script:LastSchtasksOutput) { ": $script:LastSchtasksOutput" } else { '' }
+      throw "schtasks /Create $NodeTask failed (rc=$rc)$why"
     }
   }
   if ($WhatIf) { return }
