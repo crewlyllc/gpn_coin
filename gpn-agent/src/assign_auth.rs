@@ -45,7 +45,8 @@
 //!
 //! * `both` (**default** during the transition) — a request that presents
 //!   signature headers is verified as signed; a legacy request with no
-//!   signature headers may use `x-gpn-token`.
+//!   signature headers may use `x-gpn-assign-token` (the same name the legacy
+//!   AP already reads, case-insensitively).
 //! * `signature` — signatures only; the legacy token is refused (target state).
 //! * `token` — legacy shared secret only (kept so an old AP/provider pair keeps
 //!   working; deprecated).
@@ -86,7 +87,7 @@ pub const H_TS: &str = "x-gpn-ts";
 pub const H_NONCE: &str = "x-gpn-nonce";
 pub const H_SIG: &str = "x-gpn-sig";
 /// Legacy shared secret (still read in `both`/`token` mode).
-pub const H_TOKEN: &str = "x-gpn-token";
+pub const H_TOKEN: &str = "x-gpn-assign-token";
 
 /// Env var selecting the accepted auth mechanism.
 pub const AUTH_MODE_ENV: &str = "GPN_ASSIGN_AUTH";

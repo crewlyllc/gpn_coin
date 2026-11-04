@@ -58,7 +58,7 @@
 //! nothing has to be distributed to a provider on another machine.
 //!
 //! A provider with no usable signer falls back to the legacy shared
-//! `GPN_ASSIGN_TOKEN` (`X-Gpn-Assign-Token`) and says so once; the token is
+//! `GPN_ASSIGN_TOKEN` (`x-gpn-assign-token`) and says so once; the token is
 //! still sent alongside a signature when configured, so an AP running the
 //! legacy `GPN_ASSIGN_AUTH=token` keeps working during the transition.
 
@@ -733,7 +733,7 @@ pub fn run_loop(cfg: PullConfig, provider_label: String) {
         // Sent alongside a signature too: an AP still running the legacy
         // `GPN_ASSIGN_AUTH=token` ignores the extra headers and keeps working.
         if !cfg.token.is_empty() {
-            req = req.header("x-gpn-token", &cfg.token);
+            req = req.header("x-gpn-assign-token", &cfg.token);
         }
         match req.send() {
             Ok(resp) if resp.status().is_success() => {

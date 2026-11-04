@@ -1184,7 +1184,8 @@ never logged; only the account, method, path and result.
 * `token` — legacy shared `GPN_ASSIGN_TOKEN` only. Deprecated; kept so an old
   AP/provider pair keeps working.
 * `both` — **default**. A request presenting signature headers is verified as
-  signed; a legacy request with no signature headers may use `x-gpn-token`.
+  signed; a legacy request with no signature headers may use `x-gpn-assign-token`
+  (the same header name older access points already read).
 
 A provider with no signer falls back to the legacy token and logs that once.
 Loopback requests stay exempt, so local providers, tests and monitors need no
