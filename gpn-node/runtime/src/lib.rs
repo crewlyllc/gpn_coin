@@ -530,16 +530,17 @@ pub const RUNTIME_REQUIRE_GPU_IDENTITY: bool = true;
 ///
 /// **OWNER-DECIDED, NOT FINAL.** The owner's 2026-11-02 decision is *no
 /// attestation staking*: attestation itself is, and stays, free
-/// (`submit_attestation` never transfers funds). A `testnet-no-stake` build
-/// pins this to **0**, which also makes `submit_attestation` record
-/// `ProviderStake = 0` and skip any transfer. The default build keeps the
-/// legacy 1,000 GPN value as a placeholder only — the real mainnet number is
-/// the owner's to set; this runtime does not invent one.
-#[cfg(feature = "testnet-no-stake")]
+/// (`submit_attestation` never transfers funds) -- on **every** network.
+///
+/// Owner decision 2026-11-04: mainnet is 0 as well. The premise says "no
+/// staking/delegation prerequisite to earn" with no network qualifier, so a
+/// mainnet stake would make the positioning false. Staking still exists as an
+/// OPT-IN that buys a higher tier and staking-pool rewards; it is never a gate
+/// to attesting, registering or serving.
+///
+/// The `testnet-no-stake` feature is kept as a no-op alias so existing build
+/// scripts keep working.
 pub const RUNTIME_MIN_ATTESTATION_STAKE: Balance = 0;
-/// Placeholder for the owner-decided mainnet value (see above).
-#[cfg(not(feature = "testnet-no-stake"))]
-pub const RUNTIME_MIN_ATTESTATION_STAKE: Balance = 1_000_000_000_000_000;
 
 parameter_types! {
     pub const MinAttestationStake: Balance = RUNTIME_MIN_ATTESTATION_STAKE;

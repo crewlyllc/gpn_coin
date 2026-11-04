@@ -61,11 +61,14 @@ fn testnet_build_has_zero_minimum_stake() {
 
 #[cfg(not(feature = "testnet-no-stake"))]
 #[test]
-fn default_build_keeps_a_non_zero_placeholder() {
+fn default_build_attests_with_no_stake() {
+    // Owner decision 2026-11-04: the stake is 0 on every network. The premise
+    // ("no staking prerequisite to earn") has no network qualifier, so a mainnet
+    // stake would make it false. Staking remains opt-in for tier/rewards only.
     assert_eq!(
         <Runtime as pallet_gpu_attestation::Config>::MinAttestationStake::get(),
-        1_000_000_000_000_000,
-        "the mainnet value is owner-decided; the default build keeps the placeholder"
+        0,
+        "attestation must be free on mainnet too"
     );
 }
 
