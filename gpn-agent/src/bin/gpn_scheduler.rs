@@ -787,6 +787,11 @@ struct Provider {
     /// secret (a code is not an identity), it is never used for routing, and it
     /// never changes once recorded — see [`apply_referrals`].
     referral: Option<String>,
+    /// SPEC 47 tier: `"backbone"` | `"leaf"`. A leaf is never published with
+    /// a dialable multiaddr.
+    reachability: String,
+    /// The one dialable machine per LAN/egress (`GPN_SITE_GATEWAY=1`).
+    gateway: bool,
     active: u64,
     capacity: u64,
     latency_ms: u64,
@@ -1003,6 +1008,12 @@ fn provider_from_caps(addr: &str, v: &Value, status_url: String, latency_ms: u64
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(String::from),
+        reachability: v
+            .get("reachability")
+            .and_then(|x| x.as_str())
+            .unwrap_or("backbone")
+            .to_string(),
+        gateway: v.get("gateway").and_then(|x| x.as_bool()).unwrap_or(false),
         active: v.get("active").and_then(|x| x.as_u64()).unwrap_or(0),
         capacity: v
             .get("capacity")
@@ -1211,6 +1222,8 @@ fn apply_push_heartbeats(
                 if p.capacity > 0 {
                     row.capacity = p.capacity;
                 }
+                row.reachability = p.reachability.clone();
+                row.gateway = p.gateway;
                 row.active = p.active_jobs;
                 row.last_seen = Some(now);
                 row.source = "push".to_string();
@@ -1235,6 +1248,8 @@ fn apply_push_heartbeats(
                     p2p_multiaddrs: p.multiaddrs.clone(),
                     p2p_port: None,
                     referral: None,
+                    reachability: p.reachability.clone(),
+                    gateway: p.gateway,
                     active: p.active_jobs,
                     capacity: p.capacity.max(1),
                     latency_ms: pull_default_latency_ms(),
@@ -1434,6 +1449,8 @@ fn refresh(
                     p2p_multiaddrs: vec![],
                     p2p_port: None,
                     referral: None,
+                    reachability: "leaf".to_string(),
+                    gateway: false,
                     active: 0,
                     capacity: 0,
                     latency_ms: 9999,
@@ -3943,6 +3960,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 last_seen_secs: p.last_seen.map(|i| i.elapsed().as_secs()),
                                 status_url: p.status_url.clone(),
                                 source: p.source.clone(),
+                                reachability: p.reachability.clone(),
+                                gateway: p.gateway,
                             })
                             .collect()
                     };
@@ -4007,6 +4026,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "peer_id": p.peer_id, "multiaddrs": p.p2p_multiaddrs,
                     "p2p_port": p.p2p_port,
                     "referral": p.referral,
+                    "reachability": p.reachability,
+                    "gateway": p.gateway,
                     "healthy": p.last_seen.is_some(),
                     "source": p.source
                 })).collect::<Vec<_>>() })
@@ -6700,6 +6721,8 @@ mod tests {
             active_jobs: 1,
             started_at: 0,
             ts: 1_000,
+            reachability: "backbone".to_string(),
+            gateway: false,
             pushed_at: 1_000,
         };
         apply_push_heartbeats(&mut out, &[&pushed]);
@@ -6729,6 +6752,8 @@ mod tests {
             active_jobs: 0,
             started_at: 0,
             ts: 1_000,
+            reachability: "backbone".to_string(),
+            gateway: false,
             pushed_at: 1_000,
         };
         apply_push_heartbeats(&mut out, &[&pushed]);
@@ -6840,6 +6865,8 @@ mod tests {
             p2p_multiaddrs: vec![],
             p2p_port: None,
             referral: None,
+            reachability: "backbone".to_string(),
+            gateway: false,
             active: 0,
             capacity: 4,
             latency_ms,

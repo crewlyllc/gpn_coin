@@ -65,6 +65,12 @@ pub struct Cli {
     #[arg(long = "no-require-backbone")]
     pub no_require_backbone: bool,
 
+    /// Mark this machine as the dialable gateway for its LAN/egress
+    /// (`GPN_SITE_GATEWAY=1`). It always attempts UPnP/manual forwarding and
+    /// publishes a dialable address; other machines on the site stay leaves.
+    #[arg(long = "site-gateway")]
+    pub site_gateway: bool,
+
     /// Never contact the router: disable automatic UPnP-IGD / NAT-PMP port
     /// mapping. The port must then be forwarded manually (or `--public-addr`
     /// used). Mapping is on by default and is logged when it happens.

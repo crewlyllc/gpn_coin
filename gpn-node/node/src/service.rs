@@ -36,66 +36,11 @@ pub(crate) type FullClient = sc_service::TFullClient<
 // The provider heartbeat (`gpn_provider_status`) publishes `multiaddrs` to the
 // access point, but it is a SEPARATE process: it cannot see this node's
 // dialability verdict (an inbound peer observed, a UPnP-IGD/NAT-PMP mapping the
-// router confirmed, a STUN mapping). Without that evidence it can only publish
-// an address it knows itself — which behind NAT is nothing, so the box looks
-// unroutable even though the node proved it is reachable.
-//
-// So the gate writes its conclusion where the heartbeat reads it:
-// `$GPN_DIALABILITY_STATE`, default `$HOME/.gpn/dialability.json`. Purely
-// advisory — a write failure is logged at debug and never affects the node.
-fn dialability_state_path() -> std::path::PathBuf {
-    use std::path::PathBuf;
-    if let Ok(p) = std::env::var("GPN_DIALABILITY_STATE") {
-        if !p.trim().is_empty() {
-            return PathBuf::from(p);
-        }
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".gpn").join("dialability.json")
-}
-
-fn publish_dialability_state(
-    public: Option<&sc_network::multiaddr::Multiaddr>,
-    public6: Option<&sc_network::multiaddr::Multiaddr>,
-    source: &str,
-    dialable: bool,
-    detail: &str,
-) {
-    let path = dialability_state_path();
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    // `multiaddrs` is the list the provider heartbeat forwards to the access
-    // point: IPv4 first (unchanged), the evidence-backed IPv6 entry in
-    // addition. `public_endpoint` is kept for older readers.
-    let multiaddrs: Vec<String> = [public, public6]
-        .into_iter()
-        .flatten()
-        .map(|a| a.to_string())
-        .collect();
-    let body = serde_json::json!({
-        "public_endpoint": public.map(|a| a.to_string()),
-        "public_endpoint_v6": public6.map(|a| a.to_string()),
-        "multiaddrs": multiaddrs,
-        "source": source,
-        "dialable": dialable,
-        "detail": detail,
-        "updated_unix": std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-    });
-    let Ok(text) = serde_json::to_string_pretty(&body) else {
-        return;
-    };
-    let tmp = path.with_extension("json.tmp");
-    if std::fs::write(&tmp, text).is_err() || std::fs::rename(&tmp, &path).is_err() {
-        log::debug!(
-            "dialability: could not write state file {} (heartbeat will fall back to its own evidence)",
-            path.display()
-        );
-    }
-}
+// router confirmed, a STUN mapping). The gate therefore writes its conclusion
+// to the state file the heartbeat reads (see
+// [`crate::dialability::write_state_file`]). It carries the reachability tier
+// too, so the AP can count backbone vs leaf and a leaf never republishes a
+// dialable address.
 type FullBackend = sc_service::TFullBackend<Block>;
 type FullSelectChain = LongestChain<FullBackend, Block>;
 
@@ -715,6 +660,9 @@ pub async fn new_full<
     }
 
     let mut portmap_session: Option<crate::portmap::MappingSession> = None;
+    // SPEC 47: the mapping outcome is carried into the degradation notice so
+    // "the port is not open" always says WHY.
+    let mut portmap_hint = crate::dialability::PortMapHint::Unknown;
     {
         let listen_port = seed_port;
         let pm_cfg = crate::portmap::PortMapConfig::from_env(Some(listen_port));
@@ -725,21 +673,18 @@ pub async fn new_full<
             log::debug!("portmap: skipped (--no-discoverable / GPN_DISCOVERABLE=0)");
         } else if configured.is_some() {
             // Ladder step 1: an explicit address wins; never touch the router.
-            log::debug!(
-                "portmap: skipped - GPN_PUBLIC_ADDR/--public-addr {} is configured",
-                configured
-                    .as_ref()
-                    .map(|a| a.to_string())
-                    .unwrap_or_default()
-            );
+            log::info!("portmap: skipped (public address configured)");
+            portmap_hint = crate::dialability::PortMapHint::Skipped;
         } else if !pm_cfg.enabled {
             // `GPN_UPNP=off` / `--no-upnp`: never contact the router.
             crate::portmap::log_outcome(&crate::portmap::MapOutcome::Disabled, pm_cfg.port);
+            portmap_hint = crate::dialability::PortMapHint::Disabled;
         } else {
             match crate::dialability::detect_lan_ipv4() {
                 Some(lan) => {
                     let session = crate::portmap::start(&pm_cfg, lan).await;
                     crate::portmap::log_outcome(&session.outcome, pm_cfg.port);
+                    portmap_hint = crate::portmap::hint_of(&session.outcome);
                     if let Some(mapping) = session.mapping() {
                         // Advertise the router-reported external ip:port. This
                         // is correct even when external != internal port, and
@@ -767,6 +712,9 @@ pub async fn new_full<
                         "portmap: no private/public LAN IPv4 found - cannot ask the router to \
                          forward TCP {}; skipping automatic mapping",
                         pm_cfg.port
+                    );
+                    portmap_hint = crate::dialability::PortMapHint::Refused(
+                        "no LAN IPv4 address on this host".to_string(),
                     );
                 }
             }
@@ -841,6 +789,12 @@ pub async fn new_full<
     // gate that exits EXIT_NOT_DIALABLE instead.
     {
         if gate_cfg.require {
+            if gate_cfg.site_gateway {
+                log::info!(
+                    "dialability: GPN_SITE_GATEWAY=1 — this machine is the advertised gateway \
+                     for its LAN/egress (it must forward TCP and will publish a dialable address)"
+                );
+            }
             log::info!(
                 "dialability: probing inbound reachability within {}s — seed={} discoverable={} \
                  require_backbone={} (GPN_PUBLIC_ADDR={})",
@@ -900,14 +854,22 @@ pub async fn new_full<
                 .clone()
                 .filter(|a| !crate::dialability::is_v6_endpoint(a));
 
-            // Publish the outcome for the provider heartbeat (see
-            // `publish_dialability_state`). The address is only written when the
-            // gate has EVIDENCE for it — never a guess.
-            publish_dialability_state(
-                v4_endpoint.as_ref(),
-                v6_endpoint.as_ref(),
-                &state_source,
+            // The endpoint set the heartbeat may publish *if* this node is a
+            // backbone. `write_state_file` drops it for a leaf, so the tier
+            // and the address can never disagree.
+            let publication = crate::dialability::StatePublication {
+                public: v4_endpoint.clone(),
+                public6: v6_endpoint.clone(),
+                source: state_source.clone(),
+            };
+
+            // Publish the outcome for the provider heartbeat (SPEC 47: the
+            // reachability tier is part of the verdict, not a separate flag).
+            // The address is only written when the gate has EVIDENCE for it.
+            crate::dialability::write_state_file(
+                &publication,
                 verdict.dialable,
+                gate_cfg.site_gateway,
                 &verdict.detail,
             );
 
@@ -935,6 +897,7 @@ pub async fn new_full<
                 let source = state_source.clone();
                 let detail = verdict.detail.clone();
                 let dialable = verdict.dialable;
+                let gateway = gate_cfg.site_gateway;
                 task_manager
                     .spawn_handle()
                     .spawn("gpn-ipv6-prefix-watch", None, async move {
@@ -961,7 +924,16 @@ pub async fn new_full<
                                     .bases
                                     .iter()
                                     .find(|a| crate::dialability::is_v6_endpoint(a));
-                                publish_dialability_state(v4, v6, &source, dialable, &detail);
+                                crate::dialability::write_state_file(
+                                    &crate::dialability::StatePublication {
+                                        public: v4.cloned(),
+                                        public6: v6.cloned(),
+                                        source: source.clone(),
+                                    },
+                                    dialable,
+                                    gateway,
+                                    &detail,
+                                );
                             },
                         )
                         .await;
@@ -987,6 +959,7 @@ pub async fn new_full<
                     port,
                     gate_cfg.seed,
                     hard,
+                    &portmap_hint,
                 ) {
                     Some(notice) => {
                         for line in notice.lines() {
@@ -1035,15 +1008,18 @@ pub async fn new_full<
                         );
                         let watch_cfg = gate_cfg.clone();
                         let watch_net = network.clone();
+                        let watch_pub = publication.clone();
                         task_manager.spawn_handle().spawn(
                             "gpn-dialability-watch",
                             None,
                             async move {
-                                crate::dialability::watch_dialability(watch_net, watch_cfg, false)
-                                    .await;
+                                crate::dialability::watch_dialability(
+                                    watch_net, watch_cfg, false, watch_pub,
+                                )
+                                .await;
                             },
                         );
-                    } else {
+                    } else if crate::dialability::hard_gate_must_exit(hard, false) {
                         log::error!("   reason: {}", verdict.detail);
                         // Distinct exit code so `gpn_node` can report
                         // `node=down(not dialable)` instead of a generic crash.
@@ -1064,11 +1040,17 @@ pub async fn new_full<
                 let watch_cfg = gate_cfg.clone();
                 let watch_net = network.clone();
                 let start_dialable = verdict.dialable;
+                let watch_pub = publication.clone();
                 task_manager
                     .spawn_handle()
                     .spawn("gpn-dialability-watch", None, async move {
-                        crate::dialability::watch_dialability(watch_net, watch_cfg, start_dialable)
-                            .await;
+                        crate::dialability::watch_dialability(
+                            watch_net,
+                            watch_cfg,
+                            start_dialable,
+                            watch_pub,
+                        )
+                        .await;
                     });
             }
         } else {
@@ -1077,6 +1059,17 @@ pub async fn new_full<
                  reachability is not checked, so require_backbone={} cannot be enforced; \
                  local/single-node testing only",
                 gate_cfg.require_backbone
+            );
+            // No evidence means leaf. Publish that, so a stale backbone verdict
+            // from a previous run cannot keep a non-probed node in seed lists.
+            crate::dialability::write_state_file(
+                &crate::dialability::StatePublication {
+                    source: "probe-disabled".into(),
+                    ..Default::default()
+                },
+                false,
+                gate_cfg.site_gateway,
+                "dialability probe disabled by configuration",
             );
         }
     }

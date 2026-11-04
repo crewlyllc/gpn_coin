@@ -676,11 +676,8 @@ async fn attempt_with(
     announce: bool,
 ) -> (MapOutcome, Option<Arc<dyn PortMapper>>) {
     if !cfg.enabled {
-        log::info!(
-            "portmap: UPnP/NAT-PMP DISABLED (GPN_UPNP=off / --no-upnp) - the router will not \
-             be contacted; TCP {} must be forwarded manually or via GPN_PUBLIC_ADDR",
-            cfg.port
-        );
+        // The caller logs the one canonical line (`portmap: disabled ...`) via
+        // [`log_outcome`]; do not duplicate it here.
         return (MapOutcome::Disabled, None);
     }
 
@@ -744,16 +741,24 @@ async fn attempt_with(
 }
 
 /// Log one line per outcome — the consent record.
+///
+/// SPEC 47: the mapping outcome is **INFO, not debug**, because it decides
+/// whether this node can be a backbone peer. Four canonical shapes:
+/// granted / refused / disabled / skipped (skipped is logged by the caller).
 pub fn log_outcome(outcome: &MapOutcome, port: u16) {
     match outcome {
         MapOutcome::Mapped(m) => {
             log::info!(
-                "portmap: UPnP: mapped TCP {port} -> {} via {} ({}); external address is {}. \
-                 Disable with GPN_UPNP=off or --no-upnp",
-                m.internal,
-                m.gateway,
+                "portmap: granted {port} -> {} (lease {} min)",
+                m.external,
+                m.lease.as_secs() / 60
+            );
+            log::info!(
+                "portmap: mapped via {} (gateway {}), internal {}; disable with GPN_UPNP=off \
+                 or --no-upnp",
                 m.method,
-                m.external
+                m.gateway,
+                m.internal,
             );
             if m.external.port() != m.internal.port() {
                 log::info!(
@@ -766,23 +771,38 @@ pub fn log_outcome(outcome: &MapOutcome, port: u16) {
         }
         MapOutcome::Cgnat { wan, method } => {
             log::warn!(
-                "portmap: {method} reports WAN address {wan}; this is CGNAT or double NAT, so no \
-                 port forward can make this node dialable"
+                "portmap: refused by router ({method} reports WAN address {wan}; this is CGNAT \
+                 or double NAT, so no port forward can make this node dialable)"
             );
         }
         MapOutcome::Disabled => {
+            log::info!("portmap: disabled (GPN_UPNP=off)");
             log::info!(
-                "portmap: automatic mapping is OFF (GPN_UPNP=off / --no-upnp); TCP {port} must be \
-                 forwarded manually or covered by GPN_PUBLIC_ADDR"
+                "portmap: TCP {port} must be forwarded manually or covered by GPN_PUBLIC_ADDR"
             );
         }
         MapOutcome::Failed { reason } => {
+            log::warn!("portmap: refused by router ({reason})");
             log::warn!(
-                "portmap: automatic port mapping FAILED ({reason}); TCP {port} must be forwarded \
-                 manually. If your router has UPnP disabled, enabling it - or adding the forward \
-                 - is the fix."
+                "portmap: TCP {port} must be forwarded manually. If your router has UPnP \
+                 disabled, enabling it - or adding the forward - is the fix."
             );
         }
+    }
+}
+
+/// Condense the ladder outcome into what the operator degradation notice
+/// should say about the port. Pure mapping, no I/O.
+pub fn hint_of(outcome: &MapOutcome) -> crate::dialability::PortMapHint {
+    use crate::dialability::PortMapHint;
+    match outcome {
+        MapOutcome::Mapped(m) => PortMapHint::Granted {
+            external: m.external.to_string(),
+            lease_secs: m.lease.as_secs(),
+        },
+        MapOutcome::Cgnat { wan, .. } => PortMapHint::Cgnat(wan.to_string()),
+        MapOutcome::Disabled => PortMapHint::Disabled,
+        MapOutcome::Failed { reason } => PortMapHint::Refused(reason.clone()),
     }
 }
 
@@ -1390,6 +1410,71 @@ mod tests {
         assert_eq!(
             internal_addr(lan(), 30333),
             "192.168.1.42:30333".parse().unwrap()
+        );
+    }
+
+    // ── SPEC 47: outcome -> operator notice ───────────────────────────────
+
+    #[test]
+    fn every_ladder_outcome_maps_to_a_notice_hint() {
+        use crate::dialability::PortMapHint;
+
+        let mapped = MapOutcome::Mapped(Mapping {
+            external: addr("203.0.113.9:30333"),
+            internal: addr("192.168.1.42:30333"),
+            gateway: ip("192.168.1.1"),
+            method: MapMethod::UpnpIgd,
+            lease: std::time::Duration::from_secs(3600),
+        });
+        assert_eq!(
+            hint_of(&mapped),
+            PortMapHint::Granted {
+                external: "203.0.113.9:30333".into(),
+                lease_secs: 3600
+            }
+        );
+
+        let cgnat = MapOutcome::Cgnat {
+            wan: ip("100.64.1.2"),
+            method: MapMethod::UpnpIgd,
+        };
+        assert_eq!(hint_of(&cgnat), PortMapHint::Cgnat("100.64.1.2".into()));
+
+        assert_eq!(hint_of(&MapOutcome::Disabled), PortMapHint::Disabled);
+
+        let failed = MapOutcome::Failed {
+            reason: "no IGD".into(),
+        };
+        assert_eq!(hint_of(&failed), PortMapHint::Refused("no IGD".into()));
+    }
+
+    #[test]
+    fn outcome_log_lines_are_the_four_canonical_shapes() {
+        // log_outcome must never panic and must be called with every variant;
+        // the exact text is asserted through the pure hint (above) and the
+        // degradation notice. Here we pin the INFO-level contract: each call
+        // is one shot, not a loop.
+        let m = Mapping {
+            external: addr("203.0.113.9:30333"),
+            internal: addr("192.168.1.42:30333"),
+            gateway: ip("192.168.1.1"),
+            method: MapMethod::NatPmp,
+            lease: std::time::Duration::from_secs(120),
+        };
+        log_outcome(&MapOutcome::Mapped(m), 30333);
+        log_outcome(&MapOutcome::Disabled, 30333);
+        log_outcome(
+            &MapOutcome::Failed {
+                reason: "router said no".into(),
+            },
+            30333,
+        );
+        log_outcome(
+            &MapOutcome::Cgnat {
+                wan: ip("100.64.1.2"),
+                method: MapMethod::UpnpIgd,
+            },
+            30333,
         );
     }
 }

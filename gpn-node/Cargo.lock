@@ -3126,7 +3126,7 @@ dependencies = [
 
 [[package]]
 name = "gpn-node"
-version = "0.3.12"
+version = "0.3.14"
 dependencies = [
  "async-trait",
  "attohttpc",
@@ -3192,7 +3192,7 @@ dependencies = [
 
 [[package]]
 name = "gpn-runtime"
-version = "0.3.12"
+version = "0.3.14"
 dependencies = [
  "bls12_381",
  "frame-benchmarking",
@@ -3238,7 +3238,7 @@ dependencies = [
 
 [[package]]
 name = "gpn-shield"
-version = "0.3.12"
+version = "0.3.14"
 dependencies = [
  "bls12_381",
  "ff",
@@ -5791,7 +5791,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-compute-marketplace"
-version = "0.3.12"
+version = "0.3.14"
 dependencies = [
  "frame-benchmarking",
  "frame-support",
@@ -5811,7 +5811,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-gpn-bridge"
-version = "0.3.12"
+version = "0.3.14"
 dependencies = [
  "frame-benchmarking",
  "frame-support",
@@ -5828,7 +5828,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-gpn-governance"
-version = "0.3.12"
+version = "0.3.14"
 dependencies = [
  "frame-benchmarking",
  "frame-support",
@@ -5845,7 +5845,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-gpn-liveness"
-version = "0.3.12"
+version = "0.3.14"
 dependencies = [
  "frame-benchmarking",
  "frame-support",
@@ -5863,7 +5863,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-gpn-token"
-version = "0.3.12"
+version = "0.3.14"
 dependencies = [
  "frame-benchmarking",
  "frame-support",
@@ -5882,7 +5882,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-gpn-treasury"
-version = "0.3.12"
+version = "0.3.14"
 dependencies = [
  "frame-benchmarking",
  "frame-support",
@@ -5900,7 +5900,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-gpu-attestation"
-version = "0.3.12"
+version = "0.3.14"
 dependencies = [
  "frame-benchmarking",
  "frame-support",
@@ -5919,7 +5919,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-gpu-pow"
-version = "0.3.12"
+version = "0.3.14"
 dependencies = [
  "frame-benchmarking",
  "frame-support",
@@ -5951,7 +5951,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-profitability-oracle"
-version = "0.3.12"
+version = "0.3.14"
 dependencies = [
  "frame-benchmarking",
  "frame-support",
@@ -5969,7 +5969,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-shielded-pool"
-version = "0.3.12"
+version = "0.3.14"
 dependencies = [
  "blake2 0.10.6",
  "bls12_381",

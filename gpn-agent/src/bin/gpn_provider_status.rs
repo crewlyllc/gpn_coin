@@ -157,6 +157,33 @@ struct P2pInfo {
     /// Which rung of the evidence ladder produced `multiaddrs` ("none" when
     /// empty) — surfaced in `/status` so an operator can see WHY.
     address_source: String,
+    /// SPEC 47 tier: `"backbone"` or `"leaf"`.
+    reachability: String,
+    /// Site-gateway role (`GPN_SITE_GATEWAY=1`).
+    gateway: bool,
+}
+
+/// The node's dialability state file, parsed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct DialState {
+    /// Evidence-backed public endpoints (no `/p2p/` yet).
+    addrs: Vec<String>,
+    /// `"backbone"` / `"leaf"` when the writer said so.
+    reachability: Option<String>,
+    gateway: bool,
+}
+
+impl DialState {
+    /// The tier to publish. Older writers have no field: infer backbone only
+    /// when they also published a dialable endpoint.
+    fn reachability(&self) -> &'static str {
+        match self.reachability.as_deref() {
+            Some("leaf") => "leaf",
+            Some("backbone") => "backbone",
+            _ if self.addrs.is_empty() => "leaf",
+            _ => "backbone",
+        }
+    }
 }
 
 /// Convert a `ws(s)://` / `http(s)://` endpoint to plain HTTP for JSON-RPC and
@@ -1070,12 +1097,39 @@ fn build_p2p_info_with(
         log_change_once(&msg);
     }
 
+    // Default inference; [`p2p_info`] overwrites this from the node's
+    // dialability state file when a tier was published there.
+    let reachability = if peer_has_dialable(&multiaddrs) {
+        "backbone".to_string()
+    } else {
+        "leaf".to_string()
+    };
     P2pInfo {
         peer_id,
         multiaddrs,
         p2p_port,
         listen_addrs: clean_listen,
         address_source: source.label().to_string(),
+        reachability,
+        gateway: false,
+    }
+}
+
+fn peer_has_dialable(multiaddrs: &[String]) -> bool {
+    !multiaddrs.is_empty()
+}
+
+impl P2pInfo {
+    /// Apply the node's declared tier. A leaf publishes NO dialable address,
+    /// even if the evidence ladder found one (the gate may have demoted after
+    /// this snapshot was built).
+    fn apply_dial(&mut self, dial: &DialState) {
+        self.reachability = dial.reachability().to_string();
+        self.gateway = dial.gateway;
+        if self.reachability == "leaf" {
+            self.multiaddrs.clear();
+            self.p2p_port = None;
+        }
     }
 }
 
@@ -1141,6 +1195,10 @@ fn attach_p2p(body: &mut Value, info: Option<&P2pInfo>) {
             body["p2p_port"] = json!(p2p.p2p_port);
             body["listen_addrs"] = json!(p2p.listen_addrs);
             body["address_source"] = json!(p2p.address_source);
+            body["reachability"] = json!(p2p.reachability);
+            if p2p.gateway {
+                body["gateway"] = json!(true);
+            }
         }
         None => {
             body["peer_id"] = Value::Null;
@@ -1148,6 +1206,7 @@ fn attach_p2p(body: &mut Value, info: Option<&P2pInfo>) {
             body["p2p_port"] = Value::Null;
             body["listen_addrs"] = json!([]);
             body["address_source"] = json!("none");
+            body["reachability"] = json!("leaf");
         }
     }
 }
@@ -1161,25 +1220,32 @@ fn attach_p2p(body: &mut Value, info: Option<&P2pInfo>) {
 /// Accepted shapes: `{"public_endpoint": "/ip4/…/tcp/…"}`, `{"public_addr": …}`
 /// or `{"multiaddrs": ["…"]}`. Anything unreadable is simply absent — the
 /// heartbeat never fails because the node's state file is missing.
-fn read_dialability_state() -> Vec<String> {
+fn read_dialability_state() -> DialState {
     let path = std::env::var("GPN_DIALABILITY_STATE").unwrap_or_else(|_| {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
         format!("{home}/.gpn/dialability.json")
     });
     let Ok(text) = std::fs::read_to_string(&path) else {
-        return Vec::new();
+        return DialState::default();
     };
     let Ok(v) = serde_json::from_str::<Value>(&text) else {
-        return Vec::new();
+        return DialState::default();
     };
-    let mut out: Vec<String> = Vec::new();
+    let mut out = DialState {
+        reachability: v
+            .get("reachability")
+            .and_then(|x| x.as_str())
+            .map(str::to_string),
+        gateway: v.get("gateway").and_then(|x| x.as_bool()).unwrap_or(false),
+        ..Default::default()
+    };
     // The canonical list (IPv4 first, IPv6 in addition). Older writers only
     // emitted a single scalar; keep accepting every historical shape.
     if let Some(arr) = v.get("multiaddrs").and_then(|x| x.as_array()) {
         for s in arr.iter().filter_map(|s| s.as_str()) {
             let s = s.trim();
-            if !s.is_empty() && !out.iter().any(|x| x == s) {
-                out.push(s.to_string());
+            if !s.is_empty() && !out.addrs.iter().any(|x| x == s) {
+                out.addrs.push(s.to_string());
             }
         }
     }
@@ -1191,8 +1257,8 @@ fn read_dialability_state() -> Vec<String> {
     ] {
         if let Some(s) = v.get(key).and_then(|x| x.as_str()) {
             let s = s.trim();
-            if !s.is_empty() && !out.iter().any(|x| x == s) {
-                out.push(s.to_string());
+            if !s.is_empty() && !out.addrs.iter().any(|x| x == s) {
+                out.addrs.push(s.to_string());
             }
         }
     }
@@ -1337,21 +1403,23 @@ fn p2p_cache() -> &'static std::sync::Mutex<Option<(Instant, Option<P2pInfo>)>> 
 /// (key file replaced, or the endpoint reassigned to another node) cannot be
 /// advertised with the old id for longer than one poll.
 fn p2p_info(endpoint: &str, public_addr: Option<&str>) -> Option<P2pInfo> {
-    let evidence = read_dialability_state();
+    let dial = read_dialability_state();
     // The STUN rung needs the node's listen port. Probe the RPC once for it
     // (cheap, and the answer is cached right below with the rest).
     let listen_port = rpc_call(endpoint, "system_localListenAddresses", json!([]))
         .and_then(|v| v.as_array().cloned())
         .and_then(|a| a.iter().filter_map(|x| x.as_str()).find_map(port_of));
     let stun = stun_evidence(listen_port);
-    p2p_info_cached(
+    let mut info = p2p_info_cached(
         public_addr,
         Instant::now(),
         p2p_cache(),
         &|method| rpc_call(endpoint, method, json!([])),
-        &evidence,
+        &dial.addrs,
         stun.as_deref(),
-    )
+    )?;
+    info.apply_dial(&dial);
+    Some(info)
 }
 
 /// The caching/TTL core of [`p2p_info`], with the clock, the cache and the RPC
@@ -1571,6 +1639,11 @@ fn push_once(
         capacity,
         active_jobs,
         started_at,
+        // SPEC 47: publish the tier the node proved at startup. A leaf has
+        // already had its multiaddrs cleared by `apply_dial`, so this can
+        // never advertise a dialable address for a leaf.
+        reachability: Some(peer.reachability.clone()),
+        gateway: if peer.gateway { Some(true) } else { None },
         ts: now_secs(),
         sig: String::new(),
     };
@@ -2830,5 +2903,105 @@ mod tests {
         let after_text = serde_json::to_string(&after).unwrap();
         assert_eq!(before_text, after_text);
         assert!(!after_text.contains("\"ref\""), "{after_text}");
+    }
+
+    // ── SPEC 47: reachability tier publication ───────────────────────────
+
+    static STATE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn the_state_file_tier_defaults_from_published_addrs() {
+        // No tier field (older node): backbone only when an endpoint exists.
+        let with_addr = DialState {
+            addrs: vec!["/ip4/203.0.113.9/tcp/30333".into()],
+            ..Default::default()
+        };
+        assert_eq!(with_addr.reachability(), "backbone");
+        let empty = DialState::default();
+        assert_eq!(empty.reachability(), "leaf");
+        // An explicit tier always wins over inference.
+        let explicit = DialState {
+            addrs: vec!["/ip4/203.0.113.9/tcp/30333".into()],
+            reachability: Some("leaf".into()),
+            gateway: true,
+        };
+        assert_eq!(explicit.reachability(), "leaf");
+    }
+
+    #[test]
+    fn read_dialability_state_carries_the_tier_and_gateway_flag() {
+        let dir = std::env::temp_dir().join(format!(
+            "gpn-spec47-provider-status-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dialability.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "multiaddrs": ["/ip4/203.0.113.9/tcp/30333"],
+                "reachability": "leaf",
+                "gateway": true
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let _guard = STATE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("GPN_DIALABILITY_STATE", &path);
+        let dial = read_dialability_state();
+        assert_eq!(dial.reachability.as_deref(), Some("leaf"));
+        assert!(dial.gateway);
+        assert_eq!(dial.addrs.len(), 1);
+        std::env::remove_var("GPN_DIALABILITY_STATE");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_dial_makes_a_leaf_unadvertisable_even_with_evidence() {
+        let pid = "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo";
+        let mut info = build_p2p_info(
+            pid.into(),
+            Some("/ip4/203.0.113.7/tcp/30333"),
+            vec!["/ip4/0.0.0.0/tcp/30333".into()],
+        );
+        assert!(
+            !info.multiaddrs.is_empty(),
+            "precondition: backbone evidence"
+        );
+        info.apply_dial(&DialState {
+            addrs: vec!["/ip4/203.0.113.7/tcp/30333".into()],
+            reachability: Some("leaf".into()),
+            gateway: false,
+        });
+        assert_eq!(info.reachability, "leaf");
+        assert!(
+            info.multiaddrs.is_empty(),
+            "a leaf must not publish a dialable multiaddr"
+        );
+        assert_eq!(info.p2p_port, None);
+    }
+
+    #[test]
+    fn attach_p2p_publishes_the_tier_and_only_a_true_gateway() {
+        let pid = "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo";
+        let mut info = build_p2p_info(
+            pid.into(),
+            Some("/ip4/203.0.113.7/tcp/30333"),
+            vec!["/ip4/0.0.0.0/tcp/30333".into()],
+        );
+        info.gateway = true;
+        let mut body = json!({});
+        attach_p2p(&mut body, Some(&info));
+        assert_eq!(body["reachability"], "backbone");
+        assert_eq!(body["gateway"], true);
+
+        // A non-gateway omits the flag entirely (no `false` noise on the wire).
+        info.gateway = false;
+        let mut body = json!({});
+        attach_p2p(&mut body, Some(&info));
+        assert!(body.get("gateway").is_none(), "{body}");
+        // The tier is always present, so the AP never has to guess.
+        assert_eq!(body["reachability"], "backbone");
     }
 }

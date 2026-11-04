@@ -86,6 +86,17 @@ pub struct Heartbeat {
     pub address: String,
     #[serde(default)]
     pub multiaddrs: Vec<String>,
+    /// SPEC 47: `"backbone"` when the node proved inbound reachability,
+    /// `"leaf"` otherwise. Absent on pre-SPEC-47 clients; the AP infers it
+    /// from `multiaddrs` in that case. Not covered by the v1 signature, so a
+    /// v2 canonical message is used whenever it is present (old clients keep
+    /// verifying under v1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reachability: Option<String>,
+    /// `true` only for the one dialable machine per LAN/egress
+    /// (`GPN_SITE_GATEWAY=1`). Omitted when false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<bool>,
     #[serde(default)]
     pub models: Vec<String>,
     #[serde(default)]
@@ -114,6 +125,10 @@ pub struct PushedProvider {
     pub active_jobs: u64,
     pub started_at: u64,
     pub ts: u64,
+    /// `"backbone"` or `"leaf"` — see [`Heartbeat::reachability`].
+    pub reachability: String,
+    /// Site-gateway role (SPEC 47).
+    pub gateway: bool,
     /// Local ingest time (not the provider's clock) — drives the TTL.
     pub pushed_at: u64,
 }
@@ -190,6 +205,33 @@ pub fn canonical_message(hb: &Heartbeat) -> String {
     )
 }
 
+/// v2 canonical bytes: the v1 message plus the tier fields (SPEC 47).
+///
+/// Only used when the client actually sent a tier, so every pre-SPEC-47
+/// heartbeat still verifies against [`canonical_message`] — no fleet-wide
+/// signature break on upgrade.
+pub fn canonical_message_v2(hb: &Heartbeat) -> String {
+    format!(
+        "{}|{}|{}",
+        canonical_message(hb),
+        hb.reachability.as_deref().unwrap_or(""),
+        match hb.gateway {
+            Some(true) => "1",
+            Some(false) => "0",
+            None => "",
+        }
+    )
+}
+
+/// Message the sender must sign: v2 when tier metadata is present.
+pub fn signed_message(hb: &Heartbeat) -> String {
+    if hb.reachability.is_some() || hb.gateway.is_some() {
+        canonical_message_v2(hb)
+    } else {
+        canonical_message(hb)
+    }
+}
+
 pub fn sha256_hex(s: &str) -> String {
     let digest = Sha256::digest(s.as_bytes());
     let mut out = String::with_capacity(64);
@@ -202,7 +244,7 @@ pub fn sha256_hex(s: &str) -> String {
 /// Sign `hb` in place with the node's account key.
 pub fn sign_in_place(signer: &crate::chain::signer::Sr25519Signer, hb: &mut Heartbeat) {
     use sp_core::crypto::Pair as _;
-    let sig = signer.pair().sign(canonical_message(hb).as_bytes());
+    let sig = signer.pair().sign(signed_message(hb).as_bytes());
     hb.sig = hex::encode(sig.0);
 }
 
@@ -311,6 +353,18 @@ impl PushRegistry {
             return Err(IngestError::Future);
         }
 
+        // SPEC 47: tier is self-reported metadata, not a consensus fact. A
+        // pre-SPEC-47 client omits it; infer backbone only if it published a
+        // dialable address, otherwise leaf.
+        let reachability = match hb.reachability.as_deref() {
+            Some("backbone") => "backbone",
+            Some("leaf") => "leaf",
+            Some(_) => return Err(IngestError::BadRequest("invalid reachability")),
+            None if hb.multiaddrs.is_empty() => "leaf",
+            None => "backbone",
+        };
+        let gateway = hb.gateway.unwrap_or(false);
+
         let Some(onchain) = resolve(&hb.address) else {
             return Err(IngestError::BadSignature);
         };
@@ -319,7 +373,7 @@ impl PushRegistry {
         if onchain != decoded {
             return Err(IngestError::BadSignature);
         }
-        let msg = canonical_message(&hb);
+        let msg = signed_message(&hb);
         if !verify_signature(&hb.sig, &msg, &onchain) {
             return Err(IngestError::BadSignature);
         }
@@ -342,17 +396,25 @@ impl PushRegistry {
             PushedProvider {
                 peer_id: hb.peer_id,
                 address: hb.address.clone(),
-                multiaddrs: hb
-                    .multiaddrs
-                    .iter()
-                    .filter_map(|m| crate::seedlist::clean_published_multiaddr(m))
-                    .collect(),
+                // A leaf must never be published with a dialable multiaddr
+                // (SPEC 47, step 4). Enforce it at the store, so even a buggy
+                // or malicious client cannot make a leaf look dialable.
+                multiaddrs: if reachability == "leaf" {
+                    Vec::new()
+                } else {
+                    hb.multiaddrs
+                        .iter()
+                        .filter_map(|m| crate::seedlist::clean_published_multiaddr(m))
+                        .collect()
+                },
                 models: hb.models,
                 vram_mb: hb.vram_mb,
                 capacity: hb.capacity,
                 active_jobs: hb.active_jobs,
                 started_at: hb.started_at,
                 ts: hb.ts,
+                reachability: reachability.to_string(),
+                gateway,
                 pushed_at: now,
             },
         );
@@ -627,6 +689,8 @@ mod tests {
             peer_id: PEER.to_string(),
             address: address(),
             multiaddrs: vec![format!("/ip4/203.0.113.7/tcp/30333/p2p/{PEER}")],
+            reachability: None,
+            gateway: None,
             models: vec!["llama3.2:1b".into(), "qwen2.5:1b".into()],
             vram_mb: 8188,
             capacity: 1,
@@ -832,6 +896,8 @@ mod tests {
                     active_jobs: 0,
                     started_at: 0,
                     ts: 1_000,
+                    reachability: "backbone".to_string(),
+                    gateway: false,
                     pushed_at: i as u64,
                 },
             );
@@ -967,5 +1033,83 @@ mod tests {
         assert!(log.len() <= REJECT_LOG_MAX_ADDRS, "len = {}", log.len());
         // And it still reports a fresh offender after pruning.
         assert_eq!(log.record("addr-fresh", 20_000), RejectNotice::First);
+    }
+
+    // ── SPEC 47: reachability tier over the wire ─────────────────────────
+
+    #[test]
+    fn a_tiered_heartbeat_uses_the_v2_signature_and_still_verifies() {
+        let mut hb = payload(1_000);
+        hb.reachability = Some("backbone".into());
+        hb.gateway = Some(true);
+        sign_in_place(&signer(), &mut hb);
+        // It signed the v2 message, not v1.
+        assert!(signed_message(&hb).starts_with("gpn-hb-v1|"));
+        assert!(signed_message(&hb).contains("|backbone|1"));
+        let mut reg = PushRegistry::new();
+        ingest(&mut reg, &hb, 1_000).expect("v2 push must verify");
+        let row = &reg.live(1_000)[0];
+        assert_eq!(row.reachability, "backbone");
+        assert!(row.gateway);
+    }
+
+    #[test]
+    fn a_pre_spec47_heartbeat_still_verifies_under_v1() {
+        // No tier fields: the signature is the old v1 message, byte for byte.
+        let hb = signed(1_000);
+        assert_eq!(signed_message(&hb), canonical_message(&hb));
+        let mut reg = PushRegistry::new();
+        ingest(&mut reg, &hb, 1_000).expect("old clients must keep working");
+        // Inference: it published an endpoint, so it is backbone.
+        assert_eq!(reg.live(1_000)[0].reachability, "backbone");
+    }
+
+    #[test]
+    fn a_leaf_is_never_stored_with_a_dialable_multiaddr() {
+        let mut hb = payload(1_000);
+        hb.reachability = Some("leaf".into());
+        hb.gateway = Some(true);
+        sign_in_place(&signer(), &mut hb);
+        assert!(!hb.multiaddrs.is_empty(), "client claimed an address");
+        let mut reg = PushRegistry::new();
+        ingest(&mut reg, &hb, 1_000).expect("valid signature");
+        let row = &reg.live(1_000)[0];
+        assert_eq!(row.reachability, "leaf");
+        assert!(
+            row.multiaddrs.is_empty(),
+            "a leaf must never be republished with a dialable address"
+        );
+        // The gateway flag is role metadata and survives a leaf tier.
+        assert!(row.gateway);
+    }
+
+    #[test]
+    fn an_unknown_tier_string_is_rejected() {
+        let mut hb = payload(1_000);
+        hb.reachability = Some("supernode".into());
+        sign_in_place(&signer(), &mut hb);
+        let mut reg = PushRegistry::new();
+        assert_eq!(
+            ingest(&mut reg, &hb, 1_000),
+            Err(IngestError::BadRequest("invalid reachability"))
+        );
+        assert!(reg.is_empty());
+    }
+
+    #[test]
+    fn a_wire_heartbeat_carries_the_tier_fields() {
+        let mut hb = payload(1_000);
+        hb.reachability = Some("leaf".into());
+        hb.gateway = Some(true);
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&hb).unwrap()).unwrap();
+        assert_eq!(v["reachability"], "leaf");
+        assert_eq!(v["gateway"], true);
+        // Absent fields don't appear at all (older clients look unchanged).
+        let bare = payload(1_000);
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&bare).unwrap()).unwrap();
+        assert!(v.get("reachability").is_none());
+        assert!(v.get("gateway").is_none());
     }
 }

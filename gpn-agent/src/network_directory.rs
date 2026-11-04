@@ -33,6 +33,10 @@ pub struct DirProvider {
     /// Why the row is healthy: `"push"` (signed heartbeat, works behind NAT)
     /// or `"poll"` (the AP reached `status_url`). Empty when unhealthy.
     pub source: String,
+    /// SPEC 47 tier: `"backbone"` | `"leaf"`.
+    pub reachability: String,
+    /// The one dialable machine per LAN/egress.
+    pub gateway: bool,
 }
 
 /// A dial target the network ships or advertises, with where it came from.
@@ -121,6 +125,8 @@ pub fn build(
             "last_seen_secs": p.last_seen_secs,
             "status_url": p.status_url,
             "source": p.source,
+            "reachability": p.reachability,
+            "gateway": p.gateway,
         });
         match provider_index.get(&key) {
             // Same machine registered twice (e.g. two accounts, pull + push):
@@ -147,6 +153,18 @@ pub fn build(
     // Reachability is published separately as `healthy_now`.
     let serving_ai = providers.len();
     let healthy_now = providers.iter().filter(|p| p.healthy).count();
+    // SPEC 47: separate backbone from leaf. A leaf is a full participant, it is
+    // just not dialable — conflating the two is how a fleet of leaves looked
+    // like zero providers. `gateways` counts the named site dial targets.
+    let backbone_now = providers
+        .iter()
+        .filter(|p| p.reachability == "backbone")
+        .count();
+    let leaf_now = providers
+        .iter()
+        .filter(|p| p.reachability != "backbone")
+        .count();
+    let gateways = providers.iter().filter(|p| p.gateway).count();
 
     let mut known_offline: std::collections::HashSet<String> = std::collections::HashSet::new();
     for row in &seed_rows {
@@ -174,6 +192,9 @@ pub fn build(
             "peers_live": if stale { 0 } else { live_set.len() },
             "serving_ai": serving_ai,
             "healthy_now": healthy_now,
+            "backbone_now": backbone_now,
+            "leaf_now": leaf_now,
+            "gateways": gateways,
             "offline": known_offline.len(),
         },
         "stale": stale,
@@ -237,6 +258,8 @@ mod tests {
             last_seen_secs: Some(3),
             status_url: url.into(),
             source: "poll".into(),
+            reachability: "backbone".into(),
+            gateway: false,
         }
     }
 
@@ -364,5 +387,35 @@ mod tests {
             doc["providers"][0]["multiaddrs"].as_array().unwrap().len(),
             0
         );
+    }
+
+    #[test]
+    fn counts_split_backbone_from_leaf_without_breaking_the_old_fields() {
+        let mut leaf = provider(PEER_C, true, "pull://leaf");
+        leaf.reachability = "leaf".into();
+        leaf.multiaddrs.clear();
+        let mut gateway = provider(BOX1, true, "http://23.241.109.255:8093");
+        gateway.gateway = true;
+        let doc = build(
+            "t",
+            None,
+            Ok(vec![PEER_B.into(), BOX1.into()]),
+            &[provider(PEER_B, true, "pull://backbone"), leaf, gateway],
+            &[],
+        );
+        // Old fields keep their meaning: all three are registered and healthy.
+        assert_eq!(doc["counts"]["serving_ai"], 3);
+        assert_eq!(doc["counts"]["healthy_now"], 3);
+        // New split: two backbone rows, one leaf, one named gateway.
+        assert_eq!(doc["counts"]["backbone_now"], 2);
+        assert_eq!(doc["counts"]["leaf_now"], 1);
+        assert_eq!(doc["counts"]["gateways"], 1);
+        // And the tier is visible per row, so an operator can see who is who.
+        let rows = doc["providers"].as_array().unwrap();
+        let leaf_row = rows.iter().find(|r| r["peer_id"] == PEER_C).unwrap();
+        assert_eq!(leaf_row["reachability"], "leaf");
+        assert!(leaf_row["multiaddrs"].as_array().unwrap().is_empty());
+        let gw_row = rows.iter().find(|r| r["peer_id"] == BOX1).unwrap();
+        assert_eq!(gw_row["gateway"], true);
     }
 }

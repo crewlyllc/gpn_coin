@@ -75,6 +75,9 @@ pub fn apply_membership_flags(cli: &Cli) {
     if cli.no_upnp {
         std::env::set_var("GPN_UPNP", "off");
     }
+    if cli.site_gateway {
+        std::env::set_var("GPN_SITE_GATEWAY", "1");
+    }
 }
 
 /// Parse and run command line arguments

@@ -80,14 +80,30 @@
 //! costs an operator a confusing restart, but exiting the last authoring node
 //! costs the network its chain.
 //!
+//! # Reachability tiers (SPEC 47)
+//!
+//! Three tiers exist, and only the first is expected to be a minority of the
+//! fleet (Bitcoin's "inbound optional" model):
+//!
+//! * **backbone** — proved inbound reachability (an inbound peer, an observed
+//!   address, a STUN mapping, or a TCP hairpin probe). Advertises a dialable
+//!   multiaddr and is eligible for seed listing.
+//! * **gateway** — the one backbone-capable machine per LAN/egress, named by
+//!   `GPN_SITE_GATEWAY=1` (or elected by witnessed uptime when
+//!   `GPN_SITE_ELECT=1`). It is a backbone node with the extra job of being the
+//!   dial target for the other machines on that site.
+//! * **leaf** — everything else. It syncs, mines and serves jobs, but publishes
+//!   **no dialable multiaddr** and claims no seed eligibility.
+//!
 //! # Behaviour (v2.3 — dialable is the goal, never a gate)
 //!
-//! A node is a **backbone node**: it announces its endpoint and accepts inbound
-//! peers. Inbound reachability is what makes it a seed/backbone member, but it
-//! is **never a gate on joining** — dialability cannot be a requirement when
-//! most home connections sit behind NAT or CGNAT and jobs are *pulled* by the
-//! node anyway. A node that cannot be dialled prints the operator notice once
-//! (with the exact port-forward fix) and **keeps syncing, mining and serving**.
+//! A node that can prove reachability is a **backbone node**: it announces its
+//! endpoint and accepts inbound peers. Inbound reachability is what makes it a
+//! seed/backbone member, but it is **never a gate on joining** — dialability
+//! cannot be a requirement when most home connections sit behind NAT or CGNAT
+//! and jobs are *pulled* by the node anyway. A node that cannot be dialled runs
+//! as a **leaf**, prints the operator notice once (with the exact port-forward
+//! fix) and **keeps syncing, mining and serving**.
 //!
 //! * Probe is ON by default. `GPN_REQUIRE_DIALABLE=0` (also `false`/`no`/`off`)
 //!   skips the probe entirely (local/single-node testing).
@@ -118,6 +134,40 @@ use std::time::{Duration, Instant};
 /// supervisor maps it to `down(not dialable)` in the status line instead of a
 /// generic crash.
 pub const EXIT_NOT_DIALABLE: i32 = 78;
+
+/// The reachability tier a node may claim, derived from evidence only.
+///
+/// Never self-assigned: the startup gate (and the 10-minute re-check) produce
+/// it from an inbound peer / observed address / STUN / TCP probe, and the
+/// access point stores what the signed heartbeat reports. The `gateway` flag is
+/// orthogonal metadata for the one dialable machine per site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reachability {
+    /// Proved inbound reachability; may publish a dialable multiaddr.
+    Backbone,
+    /// Not provably reachable; participates but publishes no dialable address.
+    Leaf,
+}
+
+impl Reachability {
+    /// Wire value used by the provider heartbeat and `/providers`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Reachability::Backbone => "backbone",
+            Reachability::Leaf => "leaf",
+        }
+    }
+}
+
+/// The tier for a verdict. A dialable node is backbone; everything else is a
+/// leaf (SPEC 47: "exit 78 on a home router" is why stock installs died).
+pub fn reachability_of(dialable: bool) -> Reachability {
+    if dialable {
+        Reachability::Backbone
+    } else {
+        Reachability::Leaf
+    }
+}
 
 /// Default grace window for evidence of inbound reachability.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 120;
@@ -989,6 +1039,15 @@ pub fn safety_valve(ctx: &SafetyContext) -> Option<SafetyReason> {
     None
 }
 
+/// Decide whether the hard gate must stop the process.
+///
+/// SPEC 47: only an operator-requested hard gate (`--require-backbone` /
+/// `GPN_REQUIRE_BACKBONE=1`) may exit, and never after the sole-authority
+/// safety valve fired. Soft mode (the default) always keeps running as a leaf.
+pub fn hard_gate_must_exit(hard_gate: bool, safety_override: bool) -> bool {
+    hard_gate && !safety_override
+}
+
 /// The prominent warning printed instead of exiting when the valve fires.
 pub fn safety_valve_notice(reason: SafetyReason, detail: &str) -> String {
     format!(
@@ -1063,6 +1122,13 @@ pub struct GateConfig {
     pub stun_server: Option<String>,
     /// `GPN_DIALABILITY_SAFETY`: never let the gate stop the chain.
     pub safety: bool,
+    /// `GPN_SITE_GATEWAY=1`: this machine is the dialable gateway for its
+    /// LAN/egress. It always attempts UPnP/manual forwarding and advertises.
+    pub site_gateway: bool,
+    /// `GPN_SITE_ELECT=1`: allow the witnessed-uptime fallback to promote one
+    /// leaf to gateway automatically. Default off — election needs data the
+    /// peers already publish, and never a new consensus field.
+    pub site_elect: bool,
 }
 
 impl GateConfig {
@@ -1083,7 +1149,11 @@ impl GateConfig {
             .map(|s| s.max(10))
             .unwrap_or(DEFAULT_TIMEOUT_SECS);
 
-        let discoverable = parse_discoverable(std::env::var("GPN_DISCOVERABLE").ok().as_deref());
+        let site_gateway = parse_site_gateway(std::env::var("GPN_SITE_GATEWAY").ok().as_deref());
+        // A site gateway is by definition dialable-capable: forcing the role
+        // upgrades it even if the operator also passed --no-discoverable.
+        let discoverable =
+            site_gateway || parse_discoverable(std::env::var("GPN_DISCOVERABLE").ok().as_deref());
         let seed = discoverable && parse_seed(std::env::var("GPN_SEED").ok().as_deref());
 
         GateConfig {
@@ -1097,6 +1167,8 @@ impl GateConfig {
             public_addr,
             stun_server: stun_server_from_env(),
             safety: parse_safety_enabled(std::env::var("GPN_DIALABILITY_SAFETY").ok().as_deref()),
+            site_gateway,
+            site_elect: parse_site_gateway(std::env::var("GPN_SITE_ELECT").ok().as_deref()),
         }
     }
 
@@ -1111,6 +1183,8 @@ impl GateConfig {
             public_addr,
             stun_server: None,
             safety: true,
+            site_gateway: false,
+            site_elect: false,
         }
     }
 
@@ -1121,6 +1195,12 @@ impl GateConfig {
     pub fn intended_tier(&self, dialable: bool) -> &'static str {
         if !self.discoverable {
             "private"
+        } else if self.site_gateway {
+            if dialable {
+                "gateway"
+            } else {
+                "gateway (unreachable)"
+            }
         } else if dialable {
             if self.seed {
                 "seed-candidate"
@@ -1128,7 +1208,7 @@ impl GateConfig {
                 "backbone"
             }
         } else {
-            "private (degraded)"
+            "leaf"
         }
     }
 }
@@ -1160,7 +1240,7 @@ pub fn parse_discoverable(raw: Option<&str>) -> bool {
 }
 
 /// Parse `GPN_REQUIRE_BACKBONE`. Default **OFF** (soft mode) — a node that
-/// cannot be dialled prints the §5.2 notice once and keeps serving.
+/// cannot be dialled prints the §5.2 notice once and keeps serving as a leaf.
 ///
 /// Only an explicit truth-y value (`1`/`true`/`yes`/`on`) turns the hard gate
 /// back on, in which case a non-dialable node exits [`EXIT_NOT_DIALABLE`].
@@ -1170,6 +1250,129 @@ pub fn parse_require_backbone(raw: Option<&str>) -> bool {
         raw.map(|s| s.trim().to_ascii_lowercase()).as_deref(),
         Some("1" | "true" | "yes" | "on")
     )
+}
+
+/// Parse `GPN_SITE_GATEWAY` / `GPN_SITE_ELECT`. Default **off**; only an
+/// explicit truth-y value enables the role (SPEC 47).
+pub fn parse_site_gateway(raw: Option<&str>) -> bool {
+    matches!(
+        raw.map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+// ── Port-mapping outcome (for the degradation notice) ────────────────────
+
+/// What the automatic port-mapping ladder said, rendered into the operator
+/// notice so "the port is not open" always carries a *why*.
+///
+/// Kept independent of [`crate::portmap::MapOutcome`] so the notice stays a
+/// pure, testable function; the service maps one to the other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PortMapHint {
+    /// A rule exists: `external` is what the internet sees, `lease_secs` what
+    /// the router promised.
+    Granted { external: String, lease_secs: u64 },
+    /// The router answered and said no (disabled UPnP, no IGD, refused).
+    Refused(String),
+    /// `GPN_UPNP=off` / `--no-upnp`: nothing was sent.
+    Disabled,
+    /// An explicit public address is configured, so mapping was skipped.
+    Skipped,
+    /// The WAN address is CGNAT/private: no forward can ever work.
+    Cgnat(String),
+    /// No UPnP attempt was made at all (probe disabled/private mode).
+    Unknown,
+}
+
+impl PortMapHint {
+    /// One line, log-safe, ASCII, shown inside the degradation block.
+    pub fn line(&self) -> String {
+        match self {
+            PortMapHint::Granted {
+                external,
+                lease_secs,
+            } => format!(
+                "portmap: granted -> {external} (lease {} min) - the router DID open the port; if\n     the node is still not dialable, the ISPs/upstream firewall is blocking it",
+                lease_secs / 60
+            ),
+            PortMapHint::Refused(reason) => {
+                format!("portmap: refused by router ({reason})")
+            }
+            PortMapHint::Disabled => "portmap: disabled (GPN_UPNP=off)".to_string(),
+            PortMapHint::Skipped => {
+                "portmap: skipped (public address configured)".to_string()
+            }
+            PortMapHint::Cgnat(wan) => format!(
+                "portmap: refused by router (CGNAT WAN address {wan}: no port forward can work)"
+            ),
+            PortMapHint::Unknown => "portmap: not attempted".to_string(),
+        }
+    }
+}
+
+// ── Site election: witnessed uptime ──────────────────────────────────────
+
+/// What peers observed about one candidate: the window it was *witnessed*
+/// online, and how many independent peers saw it. Self-reported uptime is
+/// deliberately absent — a node cannot vote for itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UptimeSample {
+    pub peer_id: String,
+    /// Unix seconds of the first peer observation in the window.
+    pub first_witnessed_secs: u64,
+    /// Unix seconds of the most recent peer observation.
+    pub last_witnessed_secs: u64,
+    /// Distinct peers that reported seeing it (capped when scoring).
+    pub witnesses: u32,
+}
+
+impl UptimeSample {
+    /// Seconds this peer was continuously witnessed (never negative).
+    pub fn witnessed_secs(&self) -> u64 {
+        self.last_witnessed_secs
+            .saturating_sub(self.first_witnessed_secs)
+    }
+
+    /// Score used for election: witnessed duration, weighted by independent
+    /// witnesses (capped at 4 so one peer cannot dominate by many sessions).
+    pub fn score(&self) -> u64 {
+        self.witnessed_secs()
+            .saturating_mul(u64::from(self.witnesses.min(4)))
+    }
+}
+
+/// Pick the site gateway from peer-observed uptime.
+///
+/// Highest [`UptimeSample::score`] wins; ties break on the lexicographically
+/// smallest peer id so every node computes the same answer without talking to
+/// anyone. Returns `None` for an empty candidate set.
+///
+/// SPEC 47 §5 is deliberately **not wired yet**: the rule ships and is tested,
+/// but gathering peer-witness samples and flipping the role needs a network
+/// loop that the next change adds. Until then the gateway is named explicitly
+/// (`--site-gateway`), and this function exists so the rule cannot drift.
+#[allow(dead_code)]
+pub fn elect_gateway(candidates: &[UptimeSample]) -> Option<&UptimeSample> {
+    candidates.iter().min_by(|a, b| {
+        b.score()
+            .cmp(&a.score())
+            .then_with(|| a.peer_id.cmp(&b.peer_id))
+    })
+}
+
+/// Should this node make itself a gateway because an election ran?
+///
+/// Only when the operator opted in (`GPN_SITE_ELECT=1`) AND this peer id wins
+/// the witnessed-uptime comparison. The public function is separate from the
+/// service so the rule can be tested without a network.
+#[allow(dead_code)] // see [`elect_gateway`]: rule ships, role wiring is next.
+pub fn elected_as_gateway(
+    cfg: &GateConfig,
+    self_peer_id: &str,
+    candidates: &[UptimeSample],
+) -> bool {
+    cfg.site_elect && elect_gateway(candidates).map(|s| s.peer_id.as_str()) == Some(self_peer_id)
 }
 
 /// Best-effort local LAN IPv4 address (no packet is sent: a UDP `connect` only
@@ -1660,6 +1863,7 @@ pub fn degradation_notice(
     port: u16,
     seed: bool,
     hard_gate: bool,
+    portmap: &PortMapHint,
 ) -> Option<String> {
     if !seed {
         return None;
@@ -1689,6 +1893,7 @@ pub fn degradation_notice(
          Soft mode is active (--no-require-backbone / GPN_REQUIRE_BACKBONE=0).\n\
          Run private, silence:      --no-seed   (or GPN_SEED=0)"
     };
+    let portmap_line = portmap.line();
     Some(format!(
         "\
 ================================================================================
@@ -1729,10 +1934,11 @@ To fix it (about 5 minutes):
      Linux (firewalld):
        sudo firewall-cmd --add-port={port}/tcp --permanent && sudo firewall-cmd --reload
 
-  4. UPnP/NAT-PMP: the node already tried this automatically (GPN_UPNP=auto is
-     the default) and keeps retrying every 10 minutes - just enable UPnP on
-     your router and it is picked up without a restart. Or use step 2.
-     Disable the attempt with --no-upnp / GPN_UPNP=off.
+  4. UPnP/NAT-PMP: the node tried this automatically (GPN_UPNP=auto is the
+     default) - result:
+       {portmap_line}
+     The node keeps retrying every 10 minutes, so enabling UPnP on the router is
+     picked up without a restart. Or use step 2. Disable with --no-upnp.
 
   5. CGNAT: if your router's WAN address is in 100.64.0.0/10, no port forward
      can work. {cgnat_tail}
@@ -1760,6 +1966,81 @@ node and is eligible for seed listing. Nothing else to do.
 (This message is shown once.)
 ================================================================================"
     )
+}
+
+/// The endpoint set the node would publish if it is a backbone.
+///
+/// Written to the state file the provider heartbeat reads, on the startup
+/// verdict and on every tier change in the re-check loop. A leaf writes no
+/// multiaddrs, so a leaf can never be republished with a dialable address.
+#[derive(Debug, Clone, Default)]
+pub struct StatePublication {
+    pub public: Option<Multiaddr>,
+    pub public6: Option<Multiaddr>,
+    pub source: String,
+}
+
+/// Path of the dialability state file: `$GPN_DIALABILITY_STATE`, else
+/// `$HOME/.gpn/dialability.json`.
+pub fn dialability_state_path() -> std::path::PathBuf {
+    use std::path::PathBuf;
+    if let Ok(p) = std::env::var("GPN_DIALABILITY_STATE") {
+        if !p.trim().is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(".gpn").join("dialability.json")
+}
+
+/// Publish the verdict where `gpn-provider-status` and the heartbeat read it.
+///
+/// `dialable` is the single source of truth for address publication: a leaf
+/// writes `multiaddrs: []` even if the caller passed endpoints (defence in
+/// depth against a stale address being advertised after a tier downgrade).
+pub fn write_state_file(
+    publication: &StatePublication,
+    dialable: bool,
+    gateway: bool,
+    detail: &str,
+) {
+    let path = dialability_state_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let multiaddrs: Vec<String> = if dialable {
+        [publication.public.as_ref(), publication.public6.as_ref()]
+            .into_iter()
+            .flatten()
+            .map(|a| a.to_string())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let body = serde_json::json!({
+        "public_endpoint": if dialable { publication.public.as_ref().map(|a| a.to_string()) } else { None },
+        "public_endpoint_v6": if dialable { publication.public6.as_ref().map(|a| a.to_string()) } else { None },
+        "multiaddrs": multiaddrs,
+        "source": publication.source,
+        "dialable": dialable,
+        "reachability": reachability_of(dialable).as_str(),
+        "gateway": gateway,
+        "detail": detail,
+        "updated_unix": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    });
+    let Ok(text) = serde_json::to_string_pretty(&body) else {
+        return;
+    };
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, text).is_err() || std::fs::rename(&tmp, &path).is_err() {
+        log::debug!(
+            "dialability: could not write state file {} (heartbeat will fall back to its own evidence)",
+            path.display()
+        );
+    }
 }
 
 /// Edge-triggered state change between two dialability observations.
@@ -1792,6 +2073,31 @@ pub async fn watch_dialability<N>(
     network: std::sync::Arc<N>,
     cfg: GateConfig,
     initial_dialable: bool,
+    publication: StatePublication,
+) where
+    N: NetworkStatusProvider + NetworkStateInfo + Send + Sync + 'static + ?Sized,
+{
+    watch_dialability_with_interval(
+        network,
+        cfg,
+        initial_dialable,
+        publication,
+        Duration::from_secs(RECHECK_SECS),
+    )
+    .await
+}
+
+/// The re-check loop with an injectable interval (tests only).
+///
+/// SPEC 47 promotion lives here: the first tick that observes reachability on a
+/// node that started as a leaf rewrites the state file to `backbone` and logs
+/// exactly one line. The production interval is [`RECHECK_SECS`].
+async fn watch_dialability_with_interval<N>(
+    network: std::sync::Arc<N>,
+    cfg: GateConfig,
+    initial_dialable: bool,
+    publication: StatePublication,
+    interval: Duration,
 ) where
     N: NetworkStatusProvider + NetworkStateInfo + Send + Sync + 'static + ?Sized,
 {
@@ -1799,7 +2105,7 @@ pub async fn watch_dialability<N>(
         return;
     }
     let mut last_dialable = initial_dialable;
-    let mut tick = tokio::time::interval(Duration::from_secs(RECHECK_SECS));
+    let mut tick = tokio::time::interval(interval);
     tick.tick().await; // consume the immediate first tick
     loop {
         tick.tick().await;
@@ -1824,6 +2130,9 @@ pub async fn watch_dialability<N>(
             DialabilityChange::None => {}
             DialabilityChange::BecameDialable => {
                 last_dialable = true;
+                // Promote: rewrite the state file so the heartbeat starts
+                // publishing the dialable endpoint (SPEC 47, step 2).
+                write_state_file(&publication, true, cfg.site_gateway, &verdict.detail);
                 log::info!(
                     "dialability: inbound reachability confirmed ({})",
                     verdict.detail
@@ -1834,11 +2143,19 @@ pub async fn watch_dialability<N>(
             }
             DialabilityChange::BecameUndialable => {
                 last_dialable = false;
+                // Demote: clear the published address immediately.
+                write_state_file(&publication, false, cfg.site_gateway, &verdict.detail);
                 log::warn!(
                     "dialability: lost inbound reachability ({})",
                     verdict.detail
                 );
-                if let Some(notice) = degradation_notice(detect_lan_ipv4(), port, cfg.seed, false) {
+                if let Some(notice) = degradation_notice(
+                    detect_lan_ipv4(),
+                    port,
+                    cfg.seed,
+                    false,
+                    &PortMapHint::Unknown,
+                ) {
                     for line in notice.lines() {
                         log::warn!("{line}");
                     }
@@ -1987,6 +2304,9 @@ mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Serialises tests that touch `GPN_DIALABILITY_STATE` (process-global).
+    static STATE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     // ── address classification ────────────────────────────────────────────
 
@@ -2504,7 +2824,8 @@ mod tests {
     fn intended_tier_labels_dialable_and_degraded() {
         let mut cfg = GateConfig::new(true, Duration::from_secs(10), None);
         assert_eq!(cfg.intended_tier(true), "seed-candidate");
-        assert_eq!(cfg.intended_tier(false), "private (degraded)");
+        // SPEC 47: an unreachable discoverable node is a leaf now, not "degraded".
+        assert_eq!(cfg.intended_tier(false), "leaf");
         cfg.seed = false;
         assert_eq!(cfg.intended_tier(true), "backbone");
     }
@@ -2512,7 +2833,8 @@ mod tests {
     #[test]
     fn degradation_notice_is_actionable_and_suppressed_by_no_seed() {
         let lan: IpAddr = "192.168.1.42".parse().unwrap();
-        let note = degradation_notice(Some(lan), 30333, true, true).expect("notice when seeding");
+        let note = degradation_notice(Some(lan), 30333, true, true, &PortMapHint::Unknown)
+            .expect("notice when seeding");
         assert!(note.contains("YOUR NODE IS NOT DIALABLE"), "{note}");
         assert!(
             note.contains("192.168.1.42"),
@@ -2554,18 +2876,21 @@ mod tests {
         );
 
         // Unknown LAN IP still yields a usable block (placeholder, not a panic).
-        let generic = degradation_notice(None, 30333, true, true).unwrap();
+        let generic = degradation_notice(None, 30333, true, true, &PortMapHint::Unknown).unwrap();
         assert!(generic.contains("LAN IP"), "{generic}");
 
         // The operator asked to be private: never nag.
-        assert!(degradation_notice(Some(lan), 30333, false, true).is_none());
-        assert!(degradation_notice(Some(lan), 30333, false, false).is_none());
+        assert!(degradation_notice(Some(lan), 30333, false, true, &PortMapHint::Unknown).is_none());
+        assert!(
+            degradation_notice(Some(lan), 30333, false, false, &PortMapHint::Unknown).is_none()
+        );
     }
 
     #[test]
     fn soft_mode_notice_promises_recheck_and_continues() {
         let lan: IpAddr = "192.168.1.42".parse().unwrap();
-        let note = degradation_notice(Some(lan), 30333, true, false).expect("notice in soft mode");
+        let note = degradation_notice(Some(lan), 30333, true, false, &PortMapHint::Unknown)
+            .expect("notice in soft mode");
         assert!(note.contains("re-checks every 10 minutes"), "{note}");
         assert!(
             !note.contains("This node will exit"),
@@ -3128,5 +3453,259 @@ mod tests {
         assert!(!crate::dialability::is_v6_endpoint(&ma(
             "/ip4/203.0.113.10/tcp/30333"
         )));
+    }
+
+    // ── SPEC 47: reachability tiers ───────────────────────────────────────
+
+    #[test]
+    fn reachability_is_derived_from_evidence_never_declared() {
+        assert_eq!(reachability_of(true), Reachability::Backbone);
+        assert_eq!(reachability_of(false), Reachability::Leaf);
+        assert_eq!(Reachability::Backbone.as_str(), "backbone");
+        assert_eq!(Reachability::Leaf.as_str(), "leaf");
+    }
+
+    #[test]
+    fn soft_gate_is_the_default_so_a_leaf_does_not_exit() {
+        // Default: no --require-backbone => soft. This is the regression that
+        // made stock installs exit 78 behind a home router.
+        assert!(!parse_require_backbone(None));
+        assert!(!parse_require_backbone(Some("0")));
+        // Opt-in hard gate still parses, and the exit code is unchanged.
+        for v in ["1", "true", "yes", "on"] {
+            assert!(
+                parse_require_backbone(Some(v)),
+                "{v} must enable the hard gate"
+            );
+        }
+        assert_eq!(EXIT_NOT_DIALABLE, 78);
+    }
+
+    #[test]
+    fn only_an_explicit_hard_gate_may_exit_and_never_past_the_safety_valve() {
+        // Default (soft): a leaf keeps running.
+        assert!(!hard_gate_must_exit(false, false));
+        // --require-backbone: still exits 78.
+        assert!(hard_gate_must_exit(true, false));
+        // ...unless the sole-authority valve fired, which always wins.
+        assert!(!hard_gate_must_exit(true, true));
+        assert!(!hard_gate_must_exit(false, true));
+    }
+
+    #[test]
+    fn site_roles_are_off_unless_explicitly_enabled() {
+        assert!(!parse_site_gateway(None));
+        assert!(!parse_site_gateway(Some("")));
+        assert!(parse_site_gateway(Some("1")));
+        assert!(parse_site_gateway(Some(" TRUE ")));
+
+        let mut cfg = GateConfig::new(true, Duration::from_secs(10), None);
+        cfg.site_gateway = false;
+        cfg.site_elect = false;
+        assert_eq!(cfg.intended_tier(false), "leaf");
+        cfg.site_gateway = true;
+        assert_eq!(cfg.intended_tier(true), "gateway");
+        assert_eq!(cfg.intended_tier(false), "gateway (unreachable)");
+    }
+
+    #[test]
+    fn site_gateway_forces_discoverable_even_with_no_discoverable() {
+        // Assemble the config the way `from_env` does, without touching the
+        // process environment (tests run in parallel).
+        let site_gateway = parse_site_gateway(Some("1"));
+        let discoverable = site_gateway || parse_discoverable(Some("0"));
+        assert!(discoverable, "a named gateway must be allowed to advertise");
+    }
+
+    #[test]
+    fn portmap_hint_renders_the_four_canonical_outcomes() {
+        let granted = PortMapHint::Granted {
+            external: "203.0.113.9:30333".into(),
+            lease_secs: 7200,
+        }
+        .line();
+        assert!(
+            granted.contains("granted -> 203.0.113.9:30333"),
+            "{granted}"
+        );
+        assert!(granted.contains("lease 120 min"), "{granted}");
+
+        let refused = PortMapHint::Refused("no IGD found".into()).line();
+        assert!(
+            refused.contains("refused by router (no IGD found)"),
+            "{refused}"
+        );
+
+        let disabled = PortMapHint::Disabled.line();
+        assert_eq!(disabled, "portmap: disabled (GPN_UPNP=off)");
+
+        let skipped = PortMapHint::Skipped.line();
+        assert_eq!(skipped, "portmap: skipped (public address configured)");
+
+        // CGNAT is a refusal with the reason spelled out.
+        let cgnat = PortMapHint::Cgnat("100.64.1.2:30333".into()).line();
+        assert!(cgnat.contains("CGNAT"), "{cgnat}");
+        for line in [&granted, &refused, &cgnat] {
+            assert!(line.is_ascii(), "{line}");
+        }
+    }
+
+    #[test]
+    fn degradation_notice_carries_the_portmap_outcome() {
+        let lan: IpAddr = "192.168.1.42".parse().unwrap();
+        let note = degradation_notice(
+            Some(lan),
+            30333,
+            true,
+            false,
+            &PortMapHint::Refused("UPnP disabled on router".into()),
+        )
+        .expect("soft notice");
+        assert!(
+            note.contains("portmap: refused by router (UPnP disabled on router)"),
+            "the notice must say WHY the port is closed: {note}"
+        );
+        // Exactly one degradation block, not one per attempted rung.
+        assert_eq!(note.matches("YOUR NODE IS NOT DIALABLE").count(), 1);
+        assert!(note.is_ascii(), "{note}");
+    }
+
+    fn sample(peer: &str, first: u64, last: u64, witnesses: u32) -> UptimeSample {
+        UptimeSample {
+            peer_id: peer.into(),
+            first_witnessed_secs: first,
+            last_witnessed_secs: last,
+            witnesses,
+        }
+    }
+
+    #[test]
+    fn election_uses_only_witnessed_uptime_and_is_deterministic() {
+        let a = sample("peer-a", 0, 1000, 2);
+        let b = sample("peer-b", 0, 1000, 2);
+        let c = sample("peer-c", 0, 10, 4);
+        // Equal score breaks on the smallest peer id, independently on every node.
+        assert_eq!(
+            elect_gateway(&[b.clone(), a.clone()]).unwrap().peer_id,
+            "peer-a"
+        );
+        assert_eq!(
+            elect_gateway(&[a.clone(), b.clone()]).unwrap().peer_id,
+            "peer-a"
+        );
+        // Witness duration beats a short window, regardless of witness count.
+        assert_eq!(elect_gateway(&[c, a.clone()]).unwrap().peer_id, "peer-a");
+        assert!(elect_gateway(&[]).is_none());
+
+        // Witness count is capped so many sessions from one peer cannot dominate.
+        let one = sample("x", 0, 100, 1);
+        let spam = sample("y", 0, 100, 1000);
+        assert_eq!(one.score(), 100);
+        assert_eq!(spam.score(), 400);
+    }
+
+    #[test]
+    fn election_requires_opt_in_and_a_won_comparison() {
+        let candidates = vec![sample("me", 0, 500, 2), sample("other", 0, 100, 2)];
+        let mut cfg = GateConfig::new(true, Duration::from_secs(10), None);
+        cfg.site_elect = false;
+        assert!(!elected_as_gateway(&cfg, "me", &candidates));
+        cfg.site_elect = true;
+        assert!(elected_as_gateway(&cfg, "me", &candidates));
+        assert!(!elected_as_gateway(&cfg, "other", &candidates));
+    }
+
+    #[test]
+    fn a_leaf_state_file_never_carries_a_dialable_multiaddr() {
+        // `write_state_file` is the last line of defence: even if a caller
+        // passes endpoints, a leaf writes an empty list.
+        let dir = std::env::temp_dir().join(format!(
+            "gpn-spec47-leaf-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let _guard = STATE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("GPN_DIALABILITY_STATE", dir.join("dialability.json"));
+        let pubn = StatePublication {
+            public: Some(ma("/ip4/203.0.113.9/tcp/30333")),
+            public6: None,
+            source: "test".into(),
+        };
+        write_state_file(&pubn, false, true, "not reachable");
+        let text = std::fs::read_to_string(dir.join("dialability.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["reachability"], "leaf");
+        assert_eq!(v["dialable"], false);
+        assert_eq!(v["multiaddrs"], serde_json::json!([]));
+        assert!(v["public_endpoint"].is_null());
+        // The gateway flag is role metadata, not a dialability claim.
+        assert_eq!(v["gateway"], true);
+
+        // A backbone publishes the endpoint it proved.
+        write_state_file(&pubn, true, false, "inbound peer");
+        let text = std::fs::read_to_string(dir.join("dialability.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["reachability"], "backbone");
+        assert_eq!(
+            v["multiaddrs"],
+            serde_json::json!(["/ip4/203.0.113.9/tcp/30333"])
+        );
+        std::env::remove_var("GPN_DIALABILITY_STATE");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    // The lock is held across the await on purpose: it serialises a
+    // process-global env var against another test, and the guarded region is a
+    // few milliseconds in a test only.
+    #[allow(clippy::await_holding_lock)]
+    async fn the_recheck_promotes_a_leaf_that_becomes_reachable() {
+        // A node that started as a leaf, then gained an inbound peer. The
+        // re-check must republish it as backbone - this is the whole point of
+        // not exiting at startup: NAT can open later.
+        let dir = std::env::temp_dir().join(format!(
+            "gpn-spec47-promote-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = dir.join("dialability.json");
+        let _guard = STATE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("GPN_DIALABILITY_STATE", &state);
+
+        let net = std::sync::Arc::new(StubNet::new(1, vec![ma("/ip4/0.0.0.0/tcp/30333")], vec![]));
+        let cfg = GateConfig::new(true, Duration::from_secs(1), None);
+        let publication = StatePublication {
+            public: Some(ma("/ip4/203.0.113.9/tcp/30333")),
+            public6: None,
+            source: "recheck-test".into(),
+        };
+        let task = tokio::spawn(watch_dialability_with_interval(
+            net,
+            cfg,
+            false,
+            publication,
+            Duration::from_millis(20),
+        ));
+        // Give the loop at least two ticks.
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        task.abort();
+
+        let text = std::fs::read_to_string(&state).expect("re-check must write state");
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            v["reachability"], "backbone",
+            "leaf must be promoted: {text}"
+        );
+        assert_eq!(v["dialable"], true);
+        assert_eq!(
+            v["multiaddrs"],
+            serde_json::json!(["/ip4/203.0.113.9/tcp/30333"]),
+            "promotion must publish the proved endpoint"
+        );
+
+        std::env::remove_var("GPN_DIALABILITY_STATE");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
