@@ -299,7 +299,7 @@ set "GPN_BIN=__INSTALL_DIR__\bin"
 
 REM --- per-machine node identity (a shared key makes boxes collide) ----------
 set "GPN_NODE_KEY="
-set "GPN_NODE_KEY_FILE=%USERPROFILE%\.gpn\node-key"
+set "GPN_NODE_KEY_FILE=__KEYFILE__"
 set "KEYRC=1"
 set "WRC=1"
 REM What the launcher resolved -- printed so a mismatch is visible in the trace
@@ -356,6 +356,7 @@ goto :run
 function Write-Launcher {
   $text = $LauncherTemplate
   $text = $text.Replace('__INSTALL_DIR__', $InstallDir)
+  $text = $text.Replace('__KEYFILE__', (Join-Path $env:USERPROFILE '.gpn\node-key'))
   $text = $text.Replace('__AP_URL__', $ApUrl)
   $text = $text.Replace('__BOOTNODES__', $Boots)
   $text = $text.Replace('__LOG__', $NodeLog)

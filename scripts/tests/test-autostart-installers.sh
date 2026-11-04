@@ -132,6 +132,11 @@ assert_has "$ps1" "retrying at normal privilege"         "falls back when /RL HI
 # Startup shortcut when the Task Scheduler refuses.
 assert_has "$ps1" "reusing it (not recreating)"            "reuses an existing GPN-Node task"
 assert_has "$ps1" "using a Startup shortcut instead"       "falls back to a Startup shortcut when denied"
+# 2026-11-04: the launcher rejected a key that cmd itself reported FOUND. Bake the
+# absolute path at install time instead of resolving %USERPROFILE% at run time.
+assert_has "$ps1" "__KEYFILE__"                            "launcher template carries a key-path placeholder"
+assert_has "$ps1" "Replace('__KEYFILE__'"                  "install substitutes the absolute key path"
+assert_not_has "$ps1" 'set "GPN_NODE_KEY_FILE=%USERPROFILE%'  "launcher no longer depends on %USERPROFILE%"
 assert_has "$ps1" "GetFolderPath('Startup')"               "writes the shortcut to the user Startup folder"
 # The update task must not require elevation either, and the deploy path must
 # never fail the release build when a task cannot be registered.
