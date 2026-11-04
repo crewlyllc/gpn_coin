@@ -48,6 +48,8 @@ pub mod routing;
 pub mod seedlist;
 pub mod settle_policy;
 pub mod strict;
+#[cfg(test)]
+pub mod test_env;
 pub mod update;
 pub mod utils;
 

@@ -122,6 +122,7 @@ mod tests {
 
     #[test]
     fn idle_refuses_a_render_the_box_could_otherwise_run() {
+        let _g = crate::test_env::lock_env();
         match serve_decision(true, "sd-turbo", 8188, 512, 512) {
             ServeDecision::Refund(r) => assert!(r.contains("idle")),
             ServeDecision::Run => panic!("idle must refuse"),
@@ -130,6 +131,9 @@ mod tests {
 
     #[test]
     fn a_render_above_the_vram_estimate_is_refused_not_o_omed() {
+        // `GPN_IMAGE_MAX_PIXELS` is read by every `serve_decision` test, so the
+        // readers and this writer share the crate-wide env lock.
+        let _g = crate::test_env::lock_env();
         // 1536² would exceed the 8 GB card's budget even if the pixel cap were raised.
         std::env::remove_var("GPN_IMAGE_MAX_PIXELS");
         match serve_decision(false, "sd-turbo", 2048, 1024, 1024) {
@@ -140,6 +144,7 @@ mod tests {
 
     #[test]
     fn a_normal_render_runs_on_the_anchor_card() {
+        let _g = crate::test_env::lock_env();
         assert_eq!(
             serve_decision(false, "sd-turbo", 8188, 512, 512),
             ServeDecision::Run
@@ -152,6 +157,7 @@ mod tests {
 
     #[test]
     fn unknown_hardware_is_not_blocked_by_ignorance() {
+        let _g = crate::test_env::lock_env();
         assert_eq!(
             serve_decision(false, "sd-turbo", 0, 512, 512),
             ServeDecision::Run
@@ -160,6 +166,7 @@ mod tests {
 
     #[test]
     fn the_pixel_cap_is_hard() {
+        let _g = crate::test_env::lock_env();
         std::env::set_var("GPN_IMAGE_MAX_PIXELS", "262144");
         match serve_decision(false, "sd-turbo", 8188, 1024, 1024) {
             ServeDecision::Refund(r) => assert!(r.contains("cap")),

@@ -1037,7 +1037,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("install-ollama.sh");
         std::fs::write(&script, "#!/bin/sh\n").unwrap();
-        // SAFETY: tests in this module do not run concurrently on this var.
+        // `GPN_INSTALLER_DIR` is process-global: take the crate-wide env lock.
+        let _g = crate::test_env::lock_env();
         std::env::set_var("GPN_INSTALLER_DIR", &dir);
         let found = find_script("install-ollama.sh");
         std::env::remove_var("GPN_INSTALLER_DIR");

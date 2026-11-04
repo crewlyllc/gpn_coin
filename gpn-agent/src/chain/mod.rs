@@ -136,10 +136,15 @@ pub fn is_connection_lost(msg: &str) -> bool {
 /// node RPC to report a live best block. Bounded and non-fatal — on timeout it
 /// returns the last [`signer::NodeReadiness`] so the caller can log and proceed
 /// (the agent is designed to keep working even when the chain is down).
-async fn gate_rpc_readiness(endpoint: &str) -> signer::NodeReadiness {
-    let enabled = std::env::var("GPN_RPC_READY_GATE")
-        .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off")))
-        .unwrap_or(true);
+async fn gate_rpc_readiness(endpoint: &str, mode: GateMode) -> signer::NodeReadiness {
+    let enabled = match mode {
+        GateMode::Off => false,
+        GateMode::FromEnv => std::env::var("GPN_RPC_READY_GATE")
+            .map(|v| {
+                !(v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off"))
+            })
+            .unwrap_or(true),
+    };
     if !enabled {
         return signer::NodeReadiness {
             reachable: true,
@@ -161,11 +166,36 @@ async fn gate_rpc_readiness(endpoint: &str) -> signer::NodeReadiness {
     .await
 }
 
+/// Whether [`gate_rpc_readiness`] honours `GPN_RPC_READY_GATE`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GateMode {
+    FromEnv,
+    /// Test-only: skip the wait without touching the process environment
+    /// (a `set_var` here would race every other test that builds a client).
+    Off,
+}
+
 impl ChainClient {
     /// Connect to the GPN chain. On failure we log a warning and keep
     /// `client = None` so all reads fall back to placeholder defaults — the
     /// agent must keep working even when the chain is down.
     pub async fn new(endpoint: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_gate(endpoint, GateMode::FromEnv).await
+    }
+
+    /// [`ChainClient::new`] with the readiness gate off, without mutating the
+    /// process-global `GPN_RPC_READY_GATE` the rest of the test binary shares.
+    #[cfg(test)]
+    pub async fn new_without_ready_gate(
+        endpoint: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_gate(endpoint, GateMode::Off).await
+    }
+
+    async fn new_with_gate(
+        endpoint: &str,
+        gate: GateMode,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         log::info!("Connecting to GPN chain at {}", endpoint);
         // Use the robust connection path that tolerates a pruned finalized
         // block on PoW chains without a finality gadget (see
@@ -193,7 +223,7 @@ impl ChainClient {
         // the nonce stream. Wait (bounded, non-fatal) for a live best block
         // before proceeding. Opt out with GPN_RPC_READY_GATE=0; tune with
         // GPN_RPC_READY_TIMEOUT_MS (default 15000).
-        let ready = gate_rpc_readiness(endpoint).await;
+        let ready = gate_rpc_readiness(endpoint, gate).await;
         if ready.is_ready() {
             log::info!(
                 "RPC readiness gate: node ready (head #{}, peers {}, syncing {})",
@@ -2982,10 +3012,11 @@ mod tests {
     /// `HEAL_MIN_INTERVAL`, so a down node cannot become a connect storm).
     #[tokio::test]
     async fn a_client_that_never_connected_tries_to_connect_on_a_read() {
-        // Opt out of the 15 s readiness gate: this test's port is dead on purpose.
-        std::env::set_var("GPN_RPC_READY_GATE", "0");
-        let offline = ChainClient::new("ws://127.0.0.1:1").await.unwrap();
-        std::env::remove_var("GPN_RPC_READY_GATE");
+        // Gate off via the test constructor, not `GPN_RPC_READY_GATE`: a
+        // process-global `set_var` here raced every other client-creating test.
+        let offline = ChainClient::new_without_ready_gate("ws://127.0.0.1:1")
+            .await
+            .unwrap();
         assert!(
             offline.current_client().is_none(),
             "127.0.0.1:1 must not connect"
@@ -3026,10 +3057,10 @@ mod tests {
     /// marketplace while ~6000 jobs existed (change-log 2026-10-20 15:1x).
     #[tokio::test]
     async fn unreadable_next_job_id_is_none_not_zero() {
-        // Opt out of the readiness gate so this test does not wait 15 s on a dead port.
-        std::env::set_var("GPN_RPC_READY_GATE", "0");
-        let offline = ChainClient::new("ws://127.0.0.1:1").await.unwrap();
-        std::env::remove_var("GPN_RPC_READY_GATE");
+        // Gate off via the test constructor so a dead port does not wait 15 s.
+        let offline = ChainClient::new_without_ready_gate("ws://127.0.0.1:1")
+            .await
+            .unwrap();
         assert!(
             offline.current_client().is_none(),
             "127.0.0.1:1 must not connect"

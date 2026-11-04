@@ -252,17 +252,26 @@ pub fn default_base_path() -> PathBuf {
 
 /// Expand a leading `~` to `$HOME` (no-op when `$HOME` is unset).
 pub fn expand_tilde(p: &str) -> String {
+    // Windows has no HOME in a normal shell, so `~` was returned LITERALLY and
+    // every caller then looked for a directory called "~". That made
+    // `--diagnose` report "no node key" on a box whose key existed
+    // (2026-11-03, box 3).
+    let home = ["HOME", "USERPROFILE"]
+        .iter()
+        .filter_map(|var| std::env::var(var).ok())
+        .find(|home| !home.trim_end_matches(['/', '\\']).is_empty());
+    expand_tilde_at(p, home.as_deref())
+}
+
+/// [`expand_tilde`] with the home directory injected, so tests need not mutate
+/// the process-global `HOME` (which raced every other test that resolves a
+/// path through it).
+fn expand_tilde_at(p: &str, home: Option<&str>) -> String {
     if let Some(rest) = p.strip_prefix("~/") {
-        // Windows has no HOME in a normal shell, so `~` was returned LITERALLY and
-        // every caller then looked for a directory called "~". That made
-        // `--diagnose` report "no node key" on a box whose key existed
-        // (2026-11-03, box 3).
-        for var in ["HOME", "USERPROFILE"] {
-            if let Ok(home) = std::env::var(var) {
-                let home = home.trim_end_matches(['/', '\\']);
-                if !home.is_empty() {
-                    return format!("{home}/{rest}");
-                }
+        if let Some(home) = home {
+            let home = home.trim_end_matches(['/', '\\']);
+            if !home.is_empty() {
+                return format!("{home}/{rest}");
             }
         }
     }
@@ -1791,33 +1800,29 @@ mod tests {
 
     #[test]
     fn tilde_expansion() {
-        #[cfg(unix)]
-        {
-            std::env::set_var("HOME", "/home/tester");
-            assert_eq!(expand_tilde("~/.gpn/node"), "/home/tester/.gpn/node");
-        }
-        assert_eq!(expand_tilde("/abs/path"), "/abs/path");
+        // Injected home: never mutates the process-global HOME, which every
+        // path-resolving test in the binary shares.
+        assert_eq!(
+            expand_tilde_at("~/.gpn/node", Some("/home/tester")),
+            "/home/tester/.gpn/node"
+        );
+        // A trailing slash is trimmed, not doubled.
+        assert_eq!(
+            expand_tilde_at("~/.gpn/node", Some("/home/tester/")),
+            "/home/tester/.gpn/node"
+        );
+        // No home at all (and not a `~/` path) leaves the string alone.
+        assert_eq!(expand_tilde_at("~/.gpn/node", None), "~/.gpn/node");
+        assert_eq!(expand_tilde_at("/abs/path", None), "/abs/path");
     }
     #[test]
     fn expand_tilde_uses_userprofile_on_windows() {
         // Windows shells set USERPROFILE, not HOME. Before this, `~` was returned
         // literally and callers looked for a directory named "~" -- which made
         // --diagnose report a missing node key on a box that had one.
-        let key = "HOME";
-        let old_home = std::env::var(key).ok();
-        let old_profile = std::env::var("USERPROFILE").ok();
-        std::env::remove_var(key);
-        std::env::set_var("USERPROFILE", "C:/Users/tester");
-        let got = expand_tilde("~/.gpn/node-key");
-        assert_eq!(got, "C:/Users/tester/.gpn/node-key");
-        // restore so parallel tests are unaffected
-        match old_home {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
-        }
-        match old_profile {
-            Some(v) => std::env::set_var("USERPROFILE", v),
-            None => std::env::remove_var("USERPROFILE"),
-        }
+        assert_eq!(
+            expand_tilde_at("~/.gpn/node-key", Some("C:/Users/tester")),
+            "C:/Users/tester/.gpn/node-key"
+        );
     }
 }

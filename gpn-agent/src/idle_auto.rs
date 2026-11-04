@@ -820,14 +820,11 @@ fn sleep_step(stop: &Arc<AtomicBool>, secs: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
     /// Env vars are process-global; the tests that set them must not overlap.
+    /// The lock is shared crate-wide because other modules resolve paths
+    /// through the same environment.
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static L: OnceLock<Mutex<()>> = OnceLock::new();
-        L.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        crate::test_env::lock_env()
     }
 
     fn cfg() -> AutoIdleConfig {

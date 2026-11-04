@@ -507,35 +507,39 @@ mod tests {
     fn record_roundtrip_and_gc() {
         let dir = std::env::temp_dir().join(format!("gpn-img-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::env::set_var("GPN_IMAGE_DIR", &dir);
-        let id = new_id("roundtrip");
-        let mut job = ImageJob::new(
-            id.clone(),
-            "cat",
-            "sd-turbo",
-            512,
-            512,
-            8,
-            0,
-            1,
-            30.0,
-            0.0076,
+        crate::test_env::with_env(
+            &[("GPN_IMAGE_DIR", Some(dir.clone().into_os_string()))],
+            || {
+                let id = new_id("roundtrip");
+                let mut job = ImageJob::new(
+                    id.clone(),
+                    "cat",
+                    "sd-turbo",
+                    512,
+                    512,
+                    8,
+                    0,
+                    1,
+                    30.0,
+                    0.0076,
+                );
+                save(&job).unwrap();
+                assert_eq!(get(&id).unwrap().status, "pending");
+                put_artifact(&id, 0, b"\x89PNG\r\n\x1a\nREST").unwrap();
+                assert!(artifact_path(&id, 0).exists());
+                job.status = "completed".into();
+                save(&job).unwrap();
+                assert_eq!(get(&id).unwrap().status, "completed");
+                // Expire it: `get` must hide it and `gc` must remove the bytes.
+                job.expires_at = now_secs() - 1;
+                save(&job).unwrap();
+                assert!(get(&id).is_none());
+                let (r, f) = gc();
+                assert!(r >= 1 && f >= 1);
+                assert!(!artifact_path(&id, 0).exists());
+                let _ = std::fs::remove_dir_all(&dir);
+            },
         );
-        save(&job).unwrap();
-        assert_eq!(get(&id).unwrap().status, "pending");
-        put_artifact(&id, 0, b"\x89PNG\r\n\x1a\nREST").unwrap();
-        assert!(artifact_path(&id, 0).exists());
-        job.status = "completed".into();
-        save(&job).unwrap();
-        assert_eq!(get(&id).unwrap().status, "completed");
-        // Expire it: `get` must hide it and `gc` must remove the bytes.
-        job.expires_at = now_secs() - 1;
-        save(&job).unwrap();
-        assert!(get(&id).is_none());
-        let (r, f) = gc();
-        assert!(r >= 1 && f >= 1);
-        assert!(!artifact_path(&id, 0).exists());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

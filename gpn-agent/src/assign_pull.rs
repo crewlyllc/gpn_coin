@@ -942,11 +942,9 @@ mod tests {
 
     #[test]
     fn from_env_applies_the_default_keeps_overrides_and_honours_disable() {
-        // `GPN_AP_URL` is touched only by this test; a lock keeps its three
-        // resolutions from interleaving (the other env-touching test uses
-        // GPN_STATUS_URL).
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _g = LOCK.lock().unwrap();
+        // `GPN_AP_URL`/`GPN_ASSIGN_SOURCE` are process-global: hold the crate-wide
+        // env lock so no other test observes these values mid-test.
+        let _g = crate::test_env::lock_env();
         let me = "5ProviderDefault";
 
         std::env::remove_var(AP_URL_ENV);
@@ -994,13 +992,12 @@ mod tests {
 
     #[test]
     fn poll_state_round_trips_and_feeds_the_dashboard() {
-        // These go through $HOME, which is process-global; serialise against the
-        // other test that writes this file.
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _g = LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("gpn-pollstate-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
-        // Redirect HOME so nothing touches the live ~/.gpn.
+        // Redirect HOME so nothing touches the live ~/.gpn. The lock is
+        // crate-wide: `firstrun` used to point HOME at /home/tester here and
+        // this write silently landed in a nonexistent directory.
+        let _g = crate::test_env::lock_env();
         let old_home = std::env::var_os("HOME");
         std::env::set_var("HOME", &dir);
 
@@ -1040,8 +1037,7 @@ mod tests {
 
     #[test]
     fn serving_status_has_the_documented_shape() {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _g = LOCK.lock().unwrap();
+        let _g = crate::test_env::lock_env();
         let old = std::env::var_os(AP_URL_ENV);
         std::env::set_var(AP_URL_ENV, "");
         let v = serving_status(unix_now());
@@ -1079,6 +1075,7 @@ mod tests {
 
     #[test]
     fn caps_snapshot_always_carries_identity_and_capacity() {
+        let _g = crate::test_env::lock_env();
         // Point at a dead port so the heartbeat fetch fails deterministically.
         std::env::set_var("GPN_STATUS_URL", "http://127.0.0.1:1/status");
         let s = caps_snapshot("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY");

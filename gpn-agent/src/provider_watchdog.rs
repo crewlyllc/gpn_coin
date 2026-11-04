@@ -524,6 +524,7 @@ mod tests {
 
     #[test]
     fn the_operator_knob_is_floored_and_capped() {
+        let _g = crate::test_env::lock_env();
         let keep = std::env::var("GPN_PROVIDER_WATCHDOG_SECS").ok();
         std::env::set_var("GPN_PROVIDER_WATCHDOG_SECS", "1");
         assert_eq!(stale_after_from_env(), Duration::from_secs(MIN_STALE_SECS));

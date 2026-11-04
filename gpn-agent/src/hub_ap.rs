@@ -1009,8 +1009,7 @@ mod tests {
 
     #[test]
     fn hub_env_defaults_and_overrides() {
-        static ENV_LOCK: Mutex<()> = Mutex::new(());;
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::test_env::lock_env();
         for k in [
             "GPN_ESCROW_MODE",
             "GPN_HUB_CHANNEL_TTL",

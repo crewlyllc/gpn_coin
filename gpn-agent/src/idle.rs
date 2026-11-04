@@ -449,6 +449,7 @@ mod tests {
 
     #[test]
     fn the_claim_gate_follows_the_state_file() {
+        let _g = crate::test_env::lock_env();
         let key = "GPN_IDLE_FILE";
         let old = std::env::var(key).ok();
         let n = SystemTime::now()
@@ -473,8 +474,9 @@ mod tests {
 
     #[test]
     fn idle_file_env_override_wins() {
-        // Not a global env mutation test (tests run in parallel): just assert
-        // the resolver prefers a non-empty GPN_IDLE_FILE when it is set.
+        // `GPN_IDLE_FILE` is process-global, so this shares the crate-wide env
+        // lock with every other test that resolves the idle path.
+        let _g = crate::test_env::lock_env();
         let key = "GPN_IDLE_FILE";
         let old = std::env::var(key).ok();
         std::env::set_var(key, "/tmp/gpn-idle-env-override.json");

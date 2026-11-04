@@ -345,15 +345,14 @@ fn try_lock_exclusive(f: &File) -> std::io::Result<bool> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::Arc;
 
     /// These tests mutate process-global env vars, so they must not run in
     /// parallel with each other (cargo test's default is a thread per test).
+    /// The lock is crate-wide because other modules resolve paths through the
+    /// same environment.
     fn serial() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        crate::test_env::lock_env()
     }
 
     struct EnvGuard {
