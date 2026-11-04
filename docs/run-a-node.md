@@ -972,7 +972,7 @@ assign_source = "pull"          # push | pull | both  (default: pull)
 | `GPN_AP_URL` | Access point base URL used for the poll. **Your node serves AI by default**: unset → the canonical AP below. Set it to point at a different AP; set it **empty** (`GPN_AP_URL=`) to disable AI serving (the node warns loudly). | `http://gpn-testnet.duckdns.org:8092` |
 | `GPN_ASSIGN_SOURCE` | `pull` (the only delivery path since #46 Phase 3), `both` (same, kept for config compatibility), `push` (**degraded**: no delivery) | `pull` |
 | `GPN_ASSIGN_WAIT_MS` | Long-poll budget. The AP answers the instant it has work, so this only sets how long an **idle** poll waits before returning empty. | `25000` |
-| `GPN_ASSIGN_TOKEN` | Shared AP↔provider secret for `GET /assignments`; a remote provider must present the AP's token. | _(empty → permissive, warns)_ |
+| `GPN_ASSIGN_TOKEN` | **Legacy** shared AP↔provider secret. Every pull is now signed with your node's own account key (`GPN_SIGNER` / `SIGNER_URI` / `~/.gpn/keystore.json`), so a remote provider needs **no token at all**. The token is only used when this process has no signer, and is still sent alongside a signature so an AP left on `GPN_ASSIGN_AUTH=token` keeps working. | _(empty → no legacy token)_ |
 | `GPN_STATUS_URL` | Local heartbeat read to build the `caps` snapshot each poll (loopback — it does not need to be reachable from outside). | `http://127.0.0.1:8093/status` |
 
 Notes:
@@ -1053,7 +1053,11 @@ AP would reject.
 - Check it worked: the provider log prints
   `[assign] pull transport starting — ap=… since=…` at boot and
   `[assign] pulled #<id> (payload stored)` per assignment. `[assign] AP rejected
-the pull (401)` means `GPN_ASSIGN_TOKEN` does not match the AP's.
+the pull (401): <reason>` names the cause (`unregistered`, `stale_ts`,
+  `replayed_nonce`, `bad_signature`, …). `unregistered` means this node's
+  account is not a registered provider on chain; `stale_ts` almost always
+  means the box's clock is off by more than 90 s. The legacy
+  `GPN_ASSIGN_TOKEN` is **not** needed for a node with a wallet.
 
 ## Off-chain escrow (payment channels) — AI jobs without a block wait
 
@@ -1141,6 +1145,54 @@ change on the next start) — fix the permissions on `~/.gpn` and restart. An
 unparseable file is moved aside as `accesspoint.env.corrupt.<epoch>` rather
 than being overwritten. Set `GPN_AP_TOKEN_FILE` to relocate the file (tests and
 multi-instance hosts).
+
+#### Provider pull auth — signed requests (`GPN_ASSIGN_AUTH`)
+
+`GET /assignments` returns the user's actual prompt, so it stays
+authenticated. The mechanism is a **request signed by the provider's own
+registered account** — the same key that signs the push heartbeat — not a
+shared secret. This is what lets a provider on another machine pull without
+anyone distributing a token to it.
+
+Each poll carries:
+
+| Header | Value |
+|---|---|
+| `x-gpn-account` | the signing account, SS58 |
+| `x-gpn-ts` | unix seconds when the signature was made |
+| `x-gpn-nonce` | 16 random bytes, hex |
+| `x-gpn-sig` | hex sr25519 signature |
+
+The signature covers
+`gpn-assign-v1|<account>|<ts>|<nonce>|<method>|<path>|<sha256(body)>`, where
+`path` is the request target **including the query string** (so `provider`,
+`since` and `caps` cannot be swapped). The AP verifies that the account is a
+**registered provider on chain** (cached 5 min, negative cached 60 s), that
+`|now − ts| ≤ 90 s`, that the nonce is fresh (per-account ring buffer, 180 s
+TTL), and that the signature verifies against the account's on-chain key. It
+also refuses a signed account that differs from the `provider` in the query
+string, so one provider cannot read another's assignments.
+
+Refusals are `401` with a specific `reason` — `unregistered`, `stale_ts`,
+`future_ts`, `replayed_nonce`, `bad_signature`, `provider_mismatch`,
+`missing_credentials`, `bad_token` — never a bare 401. Prompts and bodies are
+never logged; only the account, method, path and result.
+
+`GPN_ASSIGN_AUTH` selects the mode:
+
+* `signature` — signatures only. **Target state**; the shared token is refused.
+* `token` — legacy shared `GPN_ASSIGN_TOKEN` only. Deprecated; kept so an old
+  AP/provider pair keeps working.
+* `both` — **default**. A request presenting signature headers is verified as
+  signed; a legacy request with no signature headers may use `x-gpn-token`.
+
+A provider with no signer falls back to the legacy token and logs that once.
+Loopback requests stay exempt, so local providers, tests and monitors need no
+credentials.
+
+**Operator action: none.** A node with a wallet already signs (the same key is
+used for the heartbeat); an AP left at the default `both` accepts it. Move to
+`GPN_ASSIGN_AUTH=signature` once every provider in the fleet signs.
 
 | Env | Default | Meaning |
 |---|---|---|
@@ -1614,7 +1666,7 @@ author       = "alice"                             # passed as --alice to gpn-no
 node_args    = ["--no-telemetry", "--no-prometheus"]
 
 provider_endpoint = "http://<your-public-ip>:8093/status"   # advertised on-chain
-assign_token      = "<shared AP↔provider secret>"           # GPN_ASSIGN_TOKEN (see below)
+assign_token      = ""                                     # LEGACY GPN_ASSIGN_TOKEN; signed pulls need no token (see below)
 ollama       = "http://127.0.0.1:11434"
 listen       = "0.0.0.0:8093"                      # heartbeat bind
 gflops       = 0                                   # UPPER BOUND, in the measured unit
@@ -1673,7 +1725,8 @@ min_version_enforce = true    # false = mine below the minimum (unsupported)
 | `GPN_AUTHOR` | short authoring key name → `--<name>` | _(none)_ |
 | `GPN_NODE_ARGS` | extra raw args appended to `gpn-node` | _(none)_ |
 | `GPN_PROVIDER_ENDPOINT` | public `/status` URL advertised on-chain | _(none → discovery off)_ |
-| `GPN_ASSIGN_TOKEN` | shared AP↔provider secret (`GET /assignments` auth) | _(empty → legacy-permissive, warns)_ |
+| `GPN_ASSIGN_TOKEN` | **Legacy** shared AP↔provider secret (`GET /assignments`). Superseded by provider-signed pulls — see [`GPN_ASSIGN_AUTH`](#provider-pull-auth--signed-requests-gpn_assign_auth). | _(empty → no legacy token)_ |
+| `GPN_ASSIGN_AUTH` | What the access point accepts on `GET /assignments`: `signature` (provider-signed requests — the target state), `token` (legacy shared secret, deprecated), `both` (either; **default** during the transition). | `both` |
 | `GPN_AP_TOKEN` | access-point bearer token for non-loopback callers. Unset → read from the env file → generate on first boot and print once. | _(generated)_ |
 | `GPN_AP_TOKEN_FILE` | where the AP reads/writes `GPN_AP_TOKEN` | `~/.gpn/accesspoint.env` |
 | `GPN_AP_URL` | access point base URL for the **pull** transport. Unset → the canonical `http://gpn-testnet.duckdns.org:8092`; empty → AI serving disabled (loud warning). | `http://gpn-testnet.duckdns.org:8092` |
@@ -1842,8 +1895,9 @@ the next runtime upgrade (`shared/artifacts/project7/staged/gflops-floor-v1.md`)
 > **Secrets stay out of the config file.** `gpn_node` reads the signer/seed and
 > the assign token from env / the config file and only ever writes a secret when
 > you ask the wizard to create/import a wallet — into `<base>/keystore.json` with
-> owner-only permissions. Put the token in `GPN_ASSIGN_TOKEN` (or the service
-> `EnvironmentFile`), and keep the config file `chmod 600`.
+> owner-only permissions. The legacy token, if you still use one, goes in
+> `GPN_ASSIGN_TOKEN` (or the service `EnvironmentFile`); keep the config file
+> `chmod 600`. Signed pulls need no secret at all — just the wallet key.
 
 ### Sync-robustness defaults (why your node won't wedge)
 

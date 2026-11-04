@@ -3538,6 +3538,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // used to authenticate them. Survives the 5 s poll rebuild, like poll_caps.
     let push_registry: Arc<Mutex<PushRegistry>> = Arc::new(Mutex::new(PushRegistry::new()));
     let account_auth: Arc<Mutex<AccountAuthority>> = Arc::new(Mutex::new(AccountAuthority::new()));
+    // Replay protection for SIGNED pull requests: a per-account ring buffer of
+    // already-used nonces. Shared across handler threads, like account_auth.
+    let assign_replay: Arc<Mutex<gpn_agent::assign_auth::ReplayCache>> =
+        Arc::new(Mutex::new(gpn_agent::assign_auth::ReplayCache::new()));
+    // Pull auth: `signature` is the target state, `token` the legacy shared
+    // secret; `both` (default) accepts either so a fleet mid-upgrade keeps
+    // serving. Resolved once so a bad value cannot warn on every poll.
+    let assign_auth_mode = gpn_agent::assign_auth::AuthMode::from_env();
+    let assign_token_expected = std::env::var("GPN_ASSIGN_TOKEN").unwrap_or_default();
+    println!(
+        "[assign] pull auth mode={} (signature = provider-signed requests; token = legacy shared secret)",
+        assign_auth_mode.as_str()
+    );
     // One journal line per unregistered peer per 10 min, not one per heartbeat:
     // a single mis-keyed box was writing 6,947 identical lines a day and
     // burying the rest of the journal (2026-11-03).
@@ -3612,6 +3625,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let poll_caps = poll_caps.clone();
         let push_registry = push_registry.clone();
         let account_auth = account_auth.clone();
+        let assign_replay = assign_replay.clone();
+        let assign_token_expected = assign_token_expected.clone();
         let reject_log = reject_log.clone();
         let assign_store = assign_store.clone();
         let callback_url = callback_url.clone();
@@ -3714,32 +3729,100 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .remote_addr()
                         .map(|a| a.ip().is_loopback())
                         .unwrap_or(false);
-                    // Providers hold no user token: bind the endpoint to the same
-                    // shared AP↔provider secret the provider's poll presents
-                    // (loopback is
-                    // exempt so local tests/monitors keep working).
-                    let want = std::env::var("GPN_ASSIGN_TOKEN").unwrap_or_default();
-                    if !want.is_empty() && !is_loopback {
-                        let got = req
-                            .headers()
-                            .iter()
-                            .find(|h| h.field.equiv("X-Gpn-Assign-Token"))
-                            .map(|h| h.value.as_str().trim().to_string())
-                            .unwrap_or_default();
-                        if !ct_eq(&want, &got) {
+                    let provider = query_param(&url, "provider")
+                        .map(pct_decode)
+                        .unwrap_or_default();
+                    // Auth: a request SIGNED by the provider's registered
+                    // account (the target state), or the legacy shared token
+                    // (`GPN_ASSIGN_AUTH=token|both`). Loopback stays exempt so
+                    // local providers, tests and monitors keep working.
+                    //
+                    // Signed pulls exist because `/assignments` returns the
+                    // user's prompt: it must be authenticated, and a static
+                    // secret living on the AP has no path to a provider on
+                    // another machine (measured 2026-11-04: box 1 got 401 on
+                    // every poll). The account's on-chain registration is the
+                    // authority; nothing caller-supplied is trusted.
+                    if !is_loopback {
+                        use gpn_agent::assign_auth as aa;
+                        let header = |name: &'static str| {
+                            req.headers()
+                                .iter()
+                                .find(|h| h.field.equiv(name))
+                                .map(|h| h.value.as_str().trim().to_string())
+                                .unwrap_or_default()
+                        };
+                        let account_hdr = header(aa::H_ACCOUNT);
+                        let nonce_hdr = header(aa::H_NONCE);
+                        let sig_hdr = header(aa::H_SIG);
+                        let token_hdr = header(aa::H_TOKEN);
+                        let ts = header(aa::H_TS).parse::<u64>().unwrap_or(0);
+                        let creds = aa::Credentials {
+                            account: &account_hdr,
+                            ts,
+                            nonce: &nonce_hdr,
+                            sig: &sig_hdr,
+                            method: "GET",
+                            target: &url,
+                            body: body.as_bytes(),
+                            token: &token_hdr,
+                        };
+                        let now = now_secs();
+                        // Same 5-minute cache the signed heartbeat uses: a
+                        // negative answer expires sooner so a just-registered
+                        // provider is not locked out for five minutes.
+                        let mut resolve = |addr: &str| -> Option<[u8; 32]> {
+                            match account_auth.lock().unwrap().lookup(addr, now) {
+                                CachedKey::Hit(k) => k,
+                                CachedKey::Miss => {
+                                    let registered =
+                                        rt.block_on(client.is_provider_registered(addr));
+                                    let key = if registered {
+                                        gpn_agent::provider_heartbeat::ss58_to_pubkey(addr)
+                                    } else {
+                                        None
+                                    };
+                                    account_auth.lock().unwrap().store(addr, now, key);
+                                    key
+                                }
+                            }
+                        };
+                        let result = {
+                            let mut replay = assign_replay.lock().unwrap();
+                            aa::authorize(
+                                assign_auth_mode,
+                                &creds,
+                                now,
+                                &assign_token_expected,
+                                &mut resolve,
+                                &mut replay,
+                            )
+                        };
+                        let mut refusal = result.err();
+                        if refusal.is_none()
+                            && !provider.is_empty()
+                            && !aa::same_account(&account_hdr, &provider)
+                        {
+                            // A registered provider must not read ANOTHER
+                            // provider's assignments. Never a bare 401.
+                            refusal = Some(aa::AssignAuthError::ProviderMismatch);
+                        }
+                        if let Some(e) = refusal {
+                            eprintln!(
+                                "[assign] pull rejected account={} method=GET path=/assignments result={}",
+                                gpn_agent::provider_heartbeat::abbreviated(&account_hdr),
+                                e.reason()
+                            );
                             let _ = req.respond(
                                 Response::from_string(
-                                    json!({"error":"invalid assign token"}).to_string(),
+                                    json!({"error":"unauthorized","reason":e.reason()}).to_string(),
                                 )
                                 .with_header(hdr.clone())
-                                .with_status_code(401),
+                                .with_status_code(e.status_code()),
                             );
                             return;
                         }
                     }
-                    let provider = query_param(&url, "provider")
-                        .map(pct_decode)
-                        .unwrap_or_default();
                     if provider.is_empty() {
                         json!({"error": "missing provider"})
                     } else {

@@ -50,9 +50,17 @@
 //!
 //! # Auth
 //!
-//! Providers hold no user token, so the endpoint is bound by the same shared
-//! `GPN_ASSIGN_TOKEN` secret the push path already uses (`X-Gpn-Assign-Token`).
-//! Unset ⇒ legacy/permissive, exactly like `POST /assign`.
+//! Providers hold no user token, so each poll is **signed by the provider's own
+//! registered account** (see [`crate::assign_auth`]): `x-gpn-account`,
+//! `x-gpn-ts`, `x-gpn-nonce`, `x-gpn-sig`, with the signature over
+//! `gpn-assign-v1|<account>|<ts>|<nonce>|<method>|<path>|<sha256(body)>`. The
+//! AP verifies it against the account's on-chain key and registration, so
+//! nothing has to be distributed to a provider on another machine.
+//!
+//! A provider with no usable signer falls back to the legacy shared
+//! `GPN_ASSIGN_TOKEN` (`X-Gpn-Assign-Token`) and says so once; the token is
+//! still sent alongside a signature when configured, so an AP running the
+//! legacy `GPN_ASSIGN_AUTH=token` keeps working during the transition.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -245,7 +253,9 @@ pub struct PullConfig {
     /// This provider's identity, as the AP keyed the assignment record
     /// (hex `0x…` or ss58 — the AP accepts either).
     pub provider: String,
-    /// Shared AP↔provider secret (`GPN_ASSIGN_TOKEN`); empty = permissive.
+    /// Legacy shared AP↔provider secret (`GPN_ASSIGN_TOKEN`); empty = none.
+    /// Only used when this process has no signer (`GPN_SIGNER` /
+    /// `SIGNER_URI` / keystore).
     pub token: String,
     /// Long-poll budget in ms.
     pub wait_ms: u64,
@@ -320,22 +330,30 @@ impl PullConfig {
         self
     }
 
-    /// Build the poll URL for a cursor position, carrying this provider's
-    /// capabilities (`caps`) so the AP can route to us without ever dialling
-    /// our `:8093` (#46 Phase 3 step 2).
-    pub fn poll_url(&self, since: u64, caps: &str) -> String {
-        let mut url = format!(
-            "{}/assignments?provider={}&since={}&wait={}",
-            self.ap_url,
+    /// The request target (path + query) for a cursor position.
+    ///
+    /// This exact string is what the signature covers — it carries `provider`,
+    /// so leaving it out of the signed message would let any caller read
+    /// another provider's assignments.
+    pub fn poll_target(&self, since: u64, caps: &str) -> String {
+        let mut target = format!(
+            "/assignments?provider={}&since={}&wait={}",
             urlencode(&self.provider),
             since,
             self.wait_ms
         );
         if !caps.is_empty() {
-            url.push_str("&caps=");
-            url.push_str(&urlencode(caps));
+            target.push_str("&caps=");
+            target.push_str(&urlencode(caps));
         }
-        url
+        target
+    }
+
+    /// Absolute poll URL, carrying this provider's capabilities (`caps`) so the
+    /// AP can route to us without ever dialling our `:8093` (#46 Phase 3
+    /// step 2).
+    pub fn poll_url(&self, since: u64, caps: &str) -> String {
+        format!("{}{}", self.ap_url, self.poll_target(since, caps))
     }
 }
 
@@ -642,18 +660,49 @@ pub fn run_loop(cfg: PullConfig, provider_label: String) {
     let mut backoff = Duration::from_secs(1);
     let mut announced = false;
     let mut errors: u64 = 0;
+    // Signed pulls: the same key the push heartbeat uses. Resolved once, so a
+    // provider either always signs or always falls back to the legacy token.
+    let signer = crate::assign_auth::signer_from_env();
+    let account = signer
+        .as_ref()
+        .and_then(|_| crate::assign_auth::account_ss58(&cfg.provider));
+    if signer.is_some() && account.is_none() {
+        eprintln!(
+            "[assign] provider {:?} is not a decodable account — cannot sign pulls",
+            short(&provider_label)
+        );
+    }
+    let auth_label = if signer.is_some() && account.is_some() {
+        "signature"
+    } else {
+        if cfg.token.is_empty() {
+            eprintln!(
+                "[assign] no signer (GPN_SIGNER / SIGNER_URI / keystore) and no \
+                 GPN_ASSIGN_TOKEN — a remote AP will reject this pull; run \
+                 `gpn_node --ensure-wallet` or set a signer"
+            );
+        } else {
+            eprintln!(
+                "[assign] no signer — falling back to the legacy GPN_ASSIGN_TOKEN \
+                 (deprecated: signed pulls need GPN_SIGNER / SIGNER_URI / a keystore)"
+            );
+        }
+        "token"
+    };
     println!(
-        "[assign] pull transport starting — ap={} provider={} since={} wait={}ms",
+        "[assign] pull transport starting — ap={} provider={} since={} wait={}ms auth={}",
         cfg.ap_url,
         short(&provider_label),
         since,
-        cfg.wait_ms
+        cfg.wait_ms,
+        auth_label
     );
     loop {
         // Fresh caps every poll: `active` (the one-GPU-one-job lock) and the
         // model list change minute to minute, so a cached snapshot would route
         // work to a box that is mid-job.
-        let url = cfg.poll_url(since, &caps_snapshot_with(&cfg.provider, &cfg.capabilities));
+        let target = cfg.poll_target(since, &caps_snapshot_with(&cfg.provider, &cfg.capabilities));
+        let url = format!("{}{target}", cfg.ap_url);
         let client = match crate::net::ipv4_only_client(Duration::from_millis(cfg.wait_ms + 10_000))
         {
             Ok(c) => c,
@@ -664,8 +713,27 @@ pub fn run_loop(cfg: PullConfig, provider_label: String) {
             }
         };
         let mut req = client.get(&url);
+        // Signed pull: GET with an empty body, over the exact target (query
+        // included) that is about to be sent.
+        if let (Some(signer), Some(account)) = (&signer, &account) {
+            if let Some(nonce) = crate::assign_auth::new_nonce() {
+                for (name, value) in crate::assign_auth::sign_headers(
+                    signer,
+                    account,
+                    "GET",
+                    &target,
+                    b"",
+                    unix_now(),
+                    &nonce,
+                ) {
+                    req = req.header(name, value);
+                }
+            }
+        }
+        // Sent alongside a signature too: an AP still running the legacy
+        // `GPN_ASSIGN_AUTH=token` ignores the extra headers and keeps working.
         if !cfg.token.is_empty() {
-            req = req.header("X-Gpn-Assign-Token", &cfg.token);
+            req = req.header("x-gpn-token", &cfg.token);
         }
         match req.send() {
             Ok(resp) if resp.status().is_success() => {
@@ -705,9 +773,16 @@ pub fn run_loop(cfg: PullConfig, provider_label: String) {
                 // itself, so say it loudly once and then back off hard.
                 errors += 1;
                 if resp.status().as_u16() == 401 {
+                    // The AP names the reason (`unregistered`, `stale_ts`, …);
+                    // surface it — a bare 401 cost a day on box 1.
+                    let body = resp.text().unwrap_or_default();
+                    let reason = serde_json::from_str::<Value>(&body)
+                        .ok()
+                        .and_then(|v| v.get("reason").and_then(|r| r.as_str()).map(String::from))
+                        .unwrap_or_else(|| body.chars().take(80).collect());
                     eprintln!(
-                        "[assign] AP rejected the pull ({}) — check GPN_ASSIGN_TOKEN matches the AP",
-                        resp.status()
+                        "[assign] AP rejected the pull (401): {reason} — this provider's account \
+                         must be a registered provider on chain (and its clock within 90s)"
                     );
                 } else if errors <= 3 || errors % 20 == 0 {
                     eprintln!("[assign] AP answered {} (attempt {errors})", resp.status());
