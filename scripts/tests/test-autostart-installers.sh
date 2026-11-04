@@ -122,7 +122,10 @@ assert_has "$ps1" "IsNullOrWhiteSpace(\$Exe)"                 "guards an empty e
 # 2026-11-03 box 3: re-running the installer as a normal user hit a GPN-Node task
 # created earlier by Administrator -> schtasks rc=1 "Access is denied" with no
 # explanation. It must name the owner and the fix.
-assert_has "$ps1" "exists and belongs to"                  "explains when GPN-Node belongs to another account"
+assert_has "$ps1" "left it alone and"                      "explains when GPN-Node belongs to another account"
+# 2026-11-04 box 1: task owned by 'Jeremy', install as 'Jeremy Guo'. Deleting it
+# needs admin, so the installer must fall back to a Startup shortcut, not abort.
+assert_has "$ps1" "registered a Startup shortcut instead"   "foreign-owned task falls back to Startup"
 # /RL HIGHEST needs elevation; from a normal shell it fails rc=1 even with no
 # existing task. The node needs no admin rights, so the installer must retry
 # without it rather than abort.

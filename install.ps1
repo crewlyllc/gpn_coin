@@ -840,9 +840,29 @@ function Register-NodeTask {
       $owner2 = ''
       if ($q2 -match 'Run As User:\s*(\S+)') { $owner2 = $Matches[1] }
       if ($owner2 -and ($owner2 -notmatch [regex]::Escape($env:USERNAME))) {
-        throw ("$NodeTask exists and belongs to '$owner2', not '$env:USERNAME'. " +
-               "Open an ADMIN prompt once and run:  schtasks /Delete /TN $NodeTask /F  " +
-               "then run this installer again as $env:USERNAME (NOT elevated).")
+        # The task belongs to ANOTHER account (box 1, 2026-11-04: task owned by
+        # 'Jeremy', install run as 'Jeremy Guo'). Deleting it needs elevation,
+        # which we refuse to require -- so fall back to a per-user Startup
+        # shortcut, which needs none and starts this node at logon regardless.
+        $lnk = Join-Path ([Environment]::GetFolderPath('Startup')) 'GPN Node.lnk'
+        try {
+          $ws = New-Object -ComObject WScript.Shell
+          $sc = $ws.CreateShortcut($lnk)
+          $sc.TargetPath = $NodeCmd
+          $sc.WorkingDirectory = $InstallDir
+          $sc.WindowStyle = 7
+          $sc.Description = 'GPN node (Startup shortcut: the scheduled task belongs to another account)'
+          $sc.Save()
+          Warn ("$NodeTask belongs to '$owner2', not '$env:USERNAME' -- left it alone and " +
+                "registered a Startup shortcut instead: $lnk")
+          Warn ("If '$owner2' also logs in here, its task will start a SECOND node on the " +
+                "same ports. Remove it once, in an ADMIN prompt: schtasks /Delete /TN $NodeTask /F")
+          return
+        } catch {
+          throw ("$NodeTask belongs to '$owner2', not '$env:USERNAME', and the Startup " +
+                 "shortcut could not be written: $($_.Exception.Message). " +
+                 "In an ADMIN prompt run: schtasks /Delete /TN $NodeTask /F")
+        }
       }
       $why = if ($script:LastSchtasksOutput) { ": $script:LastSchtasksOutput" } else { '' }
       # Standard accounts cannot create scheduled tasks at all ("Access is denied").
