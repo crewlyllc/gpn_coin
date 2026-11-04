@@ -232,12 +232,22 @@ PY
 # workflow waited for CI while CI sat queued behind that same workflow -- a
 # deadlock that stalled 0.3.14 for 40 minutes (2026-11-03). Building is cheap;
 # PUBLISHING is irreversible, so the gate belongs at signing time.
-require_green_ci() { # sha
+require_green_ci() { # sha (short or full)
   local sha="$1"
   if [ -z "$sha" ]; then
     say "no commit sha in the bundle stamp -- CI cannot be verified"
     return 0
   fi
+  if [ "$sha" = "unknown" ]; then
+    echo "ABORT: the bundle stamp says sha=unknown -- refusing to sign an" >&2
+    echo "       unverified build (rebuild from a git checkout)." >&2
+    exit 1
+  fi
+  case "$sha" in
+    *[!0-9a-f]*) echo "ABORT: bundle stamp carries '$sha', which is not a hex commit" >&2
+                 echo "       sha -- refusing to sign an unverified build." >&2
+                 exit 1 ;;
+  esac
   local tok="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
   local tokfile="${GPN_GH_TOKEN_FILE:-$HOME/.openclaw/credentials/github-gpn-pat.txt}"
   if [ -z "$tok" ] && [ -f "$tokfile" ]; then tok="$(tr -d '\n' < "$tokfile")"; fi
@@ -245,9 +255,35 @@ require_green_ci() { # sha
     echo "ABORT: no GitHub token available to verify CI for $sha" >&2
     exit 1
   fi
+  # `build.rs` stamps the SHORT sha (`gpn-build-v1 … sha=325b0f7`), but the
+  # workflow-runs API's `head_sha` filter only matches a FULL 40-char sha —
+  # asking it with the short form returns zero runs, so every real bundle used
+  # to look like "no CI run" and release-cut could never sign (2026-11-03).
+  # Resolve first; a sha that cannot be resolved is a source problem, and an
+  # unverifiable build is still refused below.
+  local full="$sha"
+  if [ "${#sha}" -lt 40 ]; then
+    full="$(curl -sS -H "Authorization: Bearer $tok" -H 'Accept: application/vnd.github+json' \
+        "$GPN_GH_API/repos/$SRC_REPO/commits/$sha" | "$PY" -c '
+import json,sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    d = {}
+print(d.get("sha") or "")')" || full=""
+    case "$full" in
+      "") echo "ABORT: could not resolve commit ${sha} to a full sha, so its CI" >&2
+          echo "       cannot be verified -- refusing to sign." >&2
+          exit 1 ;;
+      *[!0-9a-f]*) echo "ABORT: commit ${sha} resolved to '$full', which is not a" >&2
+                   echo "       sha -- refusing to sign." >&2
+                   exit 1 ;;
+    esac
+    say "commit ${sha} resolves to ${full}"
+  fi
   local verdict
   verdict="$(curl -sS -H "Authorization: Bearer $tok" -H 'Accept: application/vnd.github+json' \
-      "$GPN_GH_API/repos/$SRC_REPO/actions/runs?head_sha=$sha&per_page=100" | "$PY" -c '
+      "$GPN_GH_API/repos/$SRC_REPO/actions/runs?head_sha=$full&per_page=100" | "$PY" -c '
 import json,sys
 d=json.load(sys.stdin)
 ci=[r for r in d.get("workflow_runs",[]) if r.get("name")=="CI"]
@@ -258,7 +294,8 @@ print(ci[-1]["status"] + ":" + str(ci[-1].get("conclusion")))')"
   case "$verdict" in
     completed:success) say "CI green for ${sha:0:7}" ;;
     missing)
-      echo "ABORT: no CI run for commit ${sha:0:7} -- refusing to sign an unverified build" >&2
+      echo "ABORT: no CI run for commit ${sha:0:7} (${full:0:12}) -- refusing to" >&2
+      echo "       sign an unverified build" >&2
       exit 1 ;;
     *)
       echo "ABORT: CI for ${sha:0:7} is '$verdict' -- refusing to sign an unverified build" >&2

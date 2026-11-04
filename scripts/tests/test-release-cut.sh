@@ -202,6 +202,10 @@ t2_detection_and_dry_run() {
   cut --dry-run
   check '[ "$RC" = 0 ]' "exit 0"
   check 'grep -q "version 0.3.5 inferred from the linux bundle" <<< "$OUT"' "infers 0.3.5 from the bundle stamp"
+  # the stamp carries the SHORT sha; it must be resolved before the runs query
+  # (a short sha in `head_sha=` returns zero runs — the 2026-11-03 stall)
+  check 'grep -q "commit abcdef1 resolves to abcdef1" <<< "$OUT"' "resolves the short stamp sha"
+  check 'grep -q "CI green for abcdef1" <<< "$OUT"' "accepts the resolved commit's green CI"
   check 'grep -q "would replace published 0.3.4" <<< "$OUT"' "knows it supersedes 0.3.4"
   check 'grep -q "dry run complete" <<< "$OUT"' "ends as a dry run"
   check '[ "$(commits)" = "$before" ]' "no commit created"
@@ -296,8 +300,29 @@ t8_skip_mirror() {
   teardown
 }
 
+t9_ci_gate() {
+  CURRENT="t9 CI gate"
+  setup 0.3.4 0.3.5
+  local full="abcdef1$(printf '0%.0s' $(seq 1 33))"
+  # a commit whose CI did not pass must stay unsignable, and must say why
+  set_state "d['ci'] = {'$full': {'status': 'completed', 'conclusion': 'cancelled'}}"
+  cut --dry-run
+  check '[ "$RC" != 0 ]' "refuses a bundle whose CI was cancelled"
+  check 'grep -q "CI for abcdef1 is .completed:cancelled." <<< "$OUT"' "names the failing CI verdict"
+  check '[ -z "$(actions)" ]' "no API writes"
+  check '! grep -q "dry run complete" <<< "$OUT"' "never reached signing"
+  # and a commit GitHub reports no run for at all is refused too
+  set_state "d['ci'] = {'$full': False}"
+  cut --dry-run
+  check '[ "$RC" != 0 ]' "refuses a commit with no CI run"
+  check 'grep -q "no CI run for commit abcdef1" <<< "$OUT"' "says the run is missing"
+  check '[ -z "$(actions)" ]' "still no API writes"
+  teardown
+}
+
 ALL=(t1_nothing_to_do t2_detection_and_dry_run t3_digest_mismatch t4_mirror_failure
-     t5_dirty_manifest t6_full_publish t7_version_assertion t8_skip_mirror)
+     t5_dirty_manifest t6_full_publish t7_version_assertion t8_skip_mirror
+     t9_ci_gate)
 
 want=("$@")
 printf '\nrelease-cut.sh — %d scenario(s)\n' "${#ALL[@]}"

@@ -76,6 +76,11 @@ def side_for(repo: str) -> str:
     return "source" if repo.startswith("src/") else "mirror"
 
 
+def full_sha(short: str) -> str:
+    """Deterministic full sha for an abbreviated one (as GitHub would resolve)."""
+    return (short + "0" * 40)[:40]
+
+
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -112,6 +117,37 @@ class H(BaseHTTPRequestHandler):
             if not p.is_file():
                 return self.send(404, b"not found", "text/plain")
             return self.send(200, p.read_bytes(), "application/json")
+
+        m = re.fullmatch(r"/repos/([^/]+/[^/]+)/commits/([0-9a-fA-F]{4,40})", path)
+        if m:
+            # short sha -> full sha, the way GitHub resolves an abbreviated ref.
+            d = load()
+            short = m[2].lower()
+            known = (d.get("commits") or {}).get(short)
+            if known is False:
+                return self.js(404, {"message": "No commit found for SHA"})
+            return self.js(200, {"sha": known or full_sha(short)})
+
+        m = re.fullmatch(r"/repos/([^/]+/[^/]+)/actions/runs", path)
+        if m:
+            # The signed-manifest gate asks for the CI run of one commit. The
+            # default is a green CI run; `ci` in the state file overrides per
+            # full sha ({"status":…, "conclusion":…} or false for "no run").
+            d = load()
+            want = (parse_qs(u.query).get("head_sha") or [""])[0]
+            entry = (d.get("ci") or {}).get(want, {"status": "completed",
+                                                   "conclusion": "success"})
+            if entry is False:
+                return self.js(200, {"total_count": 0, "workflow_runs": []})
+            if entry is True:
+                entry = {"status": "completed", "conclusion": "success"}
+            return self.js(200, {"total_count": 1, "workflow_runs": [{
+                "name": "CI",
+                "head_sha": want,
+                "status": entry.get("status", "completed"),
+                "conclusion": entry.get("conclusion", "success"),
+                "created_at": "2026-11-03T00:00:00Z",
+            }]})
 
         m = re.fullmatch(r"/repos/([^/]+/[^/]+)/releases/tags/([^/]+)", path)
         if m:
