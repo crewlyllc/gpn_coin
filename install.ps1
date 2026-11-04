@@ -174,6 +174,44 @@ function Invoke-Step {
   & $Action
 }
 
+# ------------------------------------------------------------ detached start --
+# Start the node with NO console of its own.
+#
+# 2026-11-04, box 1: `Start-Process -WindowStyle Hidden` still gives the child a
+# console, and it is the SAME console as the installer's. When that window
+# closed, Windows sent CTRL_CLOSE_EVENT to every attached process: the node and
+# both children died together with 0xC000013A (=
+# -1073741510) after mining for 35 minutes. Hidden is not detached.
+#
+# Win32_Process.Create runs the command through the WMI service, which has no
+# console to inherit. Start-Process is kept only as a fallback for machines
+# where CIM/WMI is unavailable or blocked by policy; it is exactly as fragile as
+# before, so the fallback says so out loud.
+function Start-NodeDetached {
+  param([string]$Command = '', [string]$WorkDir = '')
+  if (-not $Command) { $Command = $NodeCmd }
+  if (-not $WorkDir) { $WorkDir = $InstallDir }
+  try {
+    $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+      CommandLine      = "cmd /c `"$Command`""
+      CurrentDirectory = $WorkDir
+    } -ErrorAction Stop
+    if ($r -and [int]$r.ReturnValue -eq 0) {
+      Say "node started detached (Win32_Process.Create, pid $($r.ProcessId))"
+      return 'cim'
+    }
+    Warn "Win32_Process.Create returned $($r.ReturnValue) -- falling back to Start-Process"
+  } catch {
+    Warn "CIM/WMI is unavailable ($($_.Exception.Message)) -- falling back to Start-Process"
+  }
+  # Last resort. This inherits a console, so a later window close can still take
+  # the node down; the supervisor's console handler and the exit record are the
+  # safety net for exactly this case.
+  Start-Process -FilePath $Command -WorkingDirectory $WorkDir -WindowStyle Hidden
+  Say 'node started with Start-Process (fallback: it may inherit a console)'
+  return 'start-process'
+}
+
 function Test-Ollama {
   try {
     Invoke-RestMethod 'http://127.0.0.1:11434/api/tags' -TimeoutSec 3 | Out-Null
@@ -392,7 +430,32 @@ $reports = Get-Reports
 $last = $null
 if ($reports.Count -gt 0) {
   $candidate = $reports[-1]
-  if ([int]$candidate.code -eq $ExitCode) { $last = $candidate }
+  if ([int]$candidate.code -eq $ExitCode) {
+    $last = $candidate
+  } elseif (([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [int]$candidate.ts_unix) -le 600) {
+    # 2026-11-04: the supervisor can die (or be killed) right after a child
+    # exits, so its own exit code is 1 even though the child's was 0xC000013A.
+    # A record written in the last 10 minutes is still the reason.
+    $last = $candidate
+  }
+}
+
+# Only used when there is no record at all: the last lines of node.log. A
+# dialog that says only "unknown" is a dead end.
+$extra = ''
+if (-not $Note -and -not $last) {
+  if ($Log -and (Test-Path $Log)) {
+    try {
+      $tailLines = @(Get-Content -Path $Log -Tail 5 -ErrorAction Stop)
+      if ($tailLines.Count -gt 0) {
+        $extra = "`nlast log lines:`n"
+        foreach ($l in $tailLines) {
+          if ($l.Length -gt 200) { $l = $l.Substring(0, 200) + '...' }
+          $extra = $extra + "  " + $l + "`n"
+        }
+      }
+    } catch { }
+  }
 }
 
 if ($Note) {
@@ -424,6 +487,16 @@ if ($Note) {
     '69' { $kind='no-ollama'; $detail='ollama is required and was not reachable'; $fix='gpn_node.exe --setup' }
     '78' { $kind='not-dialable'; $detail='the node could not prove it is inbound-reachable'; $fix='forward TCP 30333, or set GPN_REQUIRE_BACKBONE=0' }
     '3'  { $kind='corrupt-key'; $detail='the wallet keystore is unusable'; $fix='restore the keystore from backup, then run gpn_node.exe --ensure-wallet' }
+    '-1073741510' {
+      $kind='console-closed'
+      $detail='the console this node was started from was closed'
+      $fix='start it detached (the installer does this) or run it as a scheduled task'
+    }
+    '3221225786' {
+      $kind='console-closed'
+      $detail='the console this node was started from was closed'
+      $fix='start it detached (the installer does this) or run it as a scheduled task'
+    }
     default {
       $kind='unknown'
       $detail="the node exited $ExitCode without writing a reason"
@@ -449,6 +522,7 @@ GPN node stopped
   found  : $detail
   fix    : $fix
   log    : $Log
+$extra
 "@
 if ($Note) {
   $text = @"
@@ -1234,8 +1308,8 @@ if (-not $NoStart) {
         # another account). Start it directly so the install still ends with a
         # running node -- that is the contract.
         Warn "schtasks /Run $NodeTask failed (rc=$rc) -- starting the node directly"
-        Invoke-Step "Start-Process $NodeCmd" {
-          Start-Process -FilePath $NodeCmd -WorkingDirectory $InstallDir -WindowStyle Hidden
+        Invoke-Step "start node detached: $NodeCmd" {
+          Start-NodeDetached
         }
       }
     }
@@ -1243,8 +1317,8 @@ if (-not $NoStart) {
     # No scheduled task (Startup shortcut only): start it now, or the operator
     # would have to log out and back in before anything runs.
     Say 'no scheduled task -- starting the node directly'
-    Invoke-Step "Start-Process $NodeCmd" {
-      Start-Process -FilePath $NodeCmd -WorkingDirectory $InstallDir -WindowStyle Hidden
+    Invoke-Step "start node detached: $NodeCmd" {
+      Start-NodeDetached
     }
   }
 }

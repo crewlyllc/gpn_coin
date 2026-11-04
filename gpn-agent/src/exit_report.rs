@@ -97,6 +97,18 @@ impl ExitKind {
         code: 66,
         slug: "vc-runtime",
     };
+    /// `0xC000013A` (`STATUS_CONTROL_C_EXIT`) — the console this process was
+    /// attached to was closed, so Windows delivered `CTRL_CLOSE_EVENT` and the
+    /// process terminated. A node started with `Start-Process -WindowStyle
+    /// Hidden` inherits the installer's console and dies with it.
+    ///
+    /// The code is kept as the *signed* i32 Windows reports through
+    /// `%ERRORLEVEL%` (-1073741510); `kind_for_exit_code` accepts both the
+    /// signed and the unsigned spelling.
+    pub const CONSOLE_CLOSED: ExitKind = ExitKind {
+        code: WINDOWS_CONSOLE_CLOSE,
+        slug: "console-closed",
+    };
     /// 75 — the launcher saw the same fatal failure 3 times in 10 minutes and
     /// stopped restarting (a restart loop is its own silent failure).
     pub const CRASH_LOOP: ExitKind = ExitKind {
@@ -114,6 +126,19 @@ impl ExitKind {
         slug: "generic",
     };
 }
+
+/// `0xC000013A` as the signed i32 Windows hands to `%ERRORLEVEL%` and to
+/// `ExitStatus::code()`. The unsigned spelling is 3221225786.
+pub const WINDOWS_CONSOLE_CLOSE: i32 = -1_073_741_510;
+
+/// The truthful one-liner for a console-close exit (shared by the supervisor,
+/// the exit log and the launcher's generated reporter).
+pub const CONSOLE_CLOSED_DETAIL: &str = "the console this node was started from was closed";
+
+/// The fix that actually works: an inherited console is the problem, so stop
+/// inheriting one.
+pub const CONSOLE_CLOSED_REMEDIATION: &str =
+    "start it detached (the installer does this) or run it as a scheduled task";
 
 impl std::fmt::Display for ExitKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -437,6 +462,11 @@ pub fn kind_for_text(msg: &str) -> ExitKind {
 /// The one-line fix that belongs with [`kind_for_text`]'s category.
 pub fn default_fix(kind: ExitKind) -> &'static str {
     match kind {
+        ExitKind::CONSOLE_CLOSED => CONSOLE_CLOSED_REMEDIATION,
+        ExitKind::VC_RUNTIME => {
+            "install the Microsoft Visual C++ runtime: winget install --id \
+             Microsoft.VCRedist.2015+.x64 -e"
+        }
         ExitKind::PORT_IN_USE => {
             "stop the process holding the port, or move this node with GPN_RPC_PORT / \
              GPN_LISTEN / GPN_GUI_LISTEN; `gpn_node --diagnose` names the busy port"
@@ -450,6 +480,35 @@ pub fn default_fix(kind: ExitKind) -> &'static str {
             "restore the keystore from backup, then `gpn_node --ensure-wallet`"
         }
         _ => "run `gpn_node --diagnose` for a PASS/FAIL checklist with the fix per line",
+    }
+}
+
+/// True when `code` is Windows' `0xC000013A` — the process died because the
+/// console it was attached to went away. Both spellings (`-1073741510` and
+/// `3221225786`) are the same 32-bit value.
+pub fn is_console_close(code: i32) -> bool {
+    code as u32 == 0xC000_013A
+}
+
+/// Map a raw process exit status to a known fatal kind, when we can be sure.
+///
+/// Deliberately conservative: an unknown status returns `None` so a caller can
+/// keep its own category (the supervisor uses `provider` for it) instead of
+/// being told the wrong reason. Used to classify a *child's* exit code, which
+/// arrives with no "kind" attached.
+pub fn kind_for_exit_code(code: i32) -> Option<ExitKind> {
+    if is_console_close(code) {
+        return Some(ExitKind::CONSOLE_CLOSED);
+    }
+    match code as u32 {
+        0xC000_0135 => Some(ExitKind::VC_RUNTIME),
+        69 => Some(ExitKind::NO_OLLAMA),
+        78 => Some(ExitKind::NOT_DIALABLE),
+        3 => Some(ExitKind::CORRUPT_KEY),
+        4 => Some(ExitKind::BASE_PATH),
+        2 => Some(ExitKind::BAD_CONFIG),
+        75 => Some(ExitKind::PORT_IN_USE),
+        _ => None,
     }
 }
 
@@ -629,6 +688,46 @@ mod tests {
         );
         assert_eq!(kind_for_text("something else entirely").code, 1);
         assert!(!default_fix(ExitKind::PORT_IN_USE).is_empty());
+    }
+
+    #[test]
+    fn console_close_codes_map_to_console_closed_in_both_spellings() {
+        // 0xC000013A, as PowerShell's %ERRORLEVEL% reports it (signed) and as
+        // log parsers usually print it (unsigned). They are the same i32.
+        assert_eq!(WINDOWS_CONSOLE_CLOSE, -1_073_741_510);
+        assert!(is_console_close(-1_073_741_510));
+        assert!(is_console_close(0xC000_013Au32 as i32));
+        assert!(!is_console_close(1));
+
+        let kind = kind_for_exit_code(-1_073_741_510).expect("console close is classified");
+        assert_eq!(kind.slug, "console-closed");
+        assert_eq!(kind.code, -1_073_741_510);
+        assert_eq!(kind, ExitKind::CONSOLE_CLOSED);
+        assert!(!default_fix(kind).trim().is_empty());
+        assert!(default_fix(kind).contains("detached"));
+
+        // The record text is truthful, not "unknown".
+        let r = new_report(
+            kind,
+            format!("{CONSOLE_CLOSED_DETAIL} while running"),
+            CONSOLE_CLOSED_REMEDIATION,
+        );
+        let text = render(&r);
+        assert!(text.contains("CONSOLE-CLOSED"));
+        assert!(text.contains("console this node was started from was closed"));
+        assert!(text.contains("start it detached"));
+    }
+
+    #[test]
+    fn loader_and_known_codes_are_classified_and_unknown_ones_are_not() {
+        assert_eq!(
+            kind_for_exit_code(0xC000_0135u32 as i32),
+            Some(ExitKind::VC_RUNTIME)
+        );
+        assert_eq!(kind_for_exit_code(69), Some(ExitKind::NO_OLLAMA));
+        assert_eq!(kind_for_exit_code(78), Some(ExitKind::NOT_DIALABLE));
+        assert_eq!(kind_for_exit_code(3), Some(ExitKind::CORRUPT_KEY));
+        assert_eq!(kind_for_exit_code(1_234), None);
     }
 
     #[test]

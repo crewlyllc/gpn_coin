@@ -101,6 +101,21 @@ assert_has "$ps1" "winget install --id Microsoft.VCRedist.2015+.x64 -e" "0xC0000
 assert_has "$ps1" "-1073741515"                 "the signed loader-failure code is recognised"
 assert_has "$ps1" "3221225781"                  "the unsigned loader-failure code is recognised"
 assert_has "$ps1" "function Verify-NodeTask"    "installer can verify autostart"
+# 2026-11-04 box 1: Start-Process -WindowStyle Hidden inherits the installer's
+# console; closing that window killed a 35-minute-old node with 0xC000013A.
+assert_has "$ps1" "function Start-NodeDetached"                  "has a console-less launcher"
+assert_has "$ps1" "Invoke-CimMethod -ClassName Win32_Process -MethodName Create" \
+  "starts the node detached through Win32_Process.Create (no inherited console)"
+assert_has "$ps1" "CommandLine      ="                          "CIM path passes a CommandLine"
+assert_has "$ps1" "Win32_Process.Create returned"                 "reports a failed CIM launch"
+assert_has "$ps1" "CIM/WMI is unavailable"                        "CIM failure falls back instead of aborting"
+assert_has "$ps1" "Start-Process -FilePath \$Command"            "Start-Process fallback is still present"
+assert_has "$ps1" "start node detached: \$NodeCmd"                "both direct-start sites use the detached launcher"
+assert_has "$ps1" "-1073741510"                                  "the signed console-close code is recognised"
+assert_has "$ps1" "3221225786"                                   "the unsigned console-close code is recognised"
+assert_has "$ps1" "console-closed"                               "console close has its own exit kind"
+assert_has "$ps1" "start it detached (the installer does this) or run it as a scheduled task" \
+  "console close names the real fix"
 assert_has "$ps1" "function Wait-NodeUp"        "verification waits for the node to answer"
 assert_has "$ps1" "schtasks /Run"               "verification runs the task"
 assert_has "$ps1" "system_health"               "verification checks the RPC"
@@ -230,6 +245,14 @@ assert_has "$tmp/report-exit.ps1" "MessageBox"           "reporter shows a messa
 assert_has "$tmp/report-exit.ps1" "Add-Content -Path \$Log" "reporter writes the same text to node.log"
 assert_has "$tmp/report-exit.ps1" "ConvertFrom-Json"     "reporter parses the NDJSON exit log"
 assert_has "$tmp/report-exit.ps1" ".Count -ge 3"        "reporter applies the 3-strike rule"
+# A record written by a dying supervisor may not carry the supervisor's own exit
+# code; a recent record is still the reason.
+assert_has "$tmp/report-exit.ps1" "-le 600"             "reporter accepts a recent record whose code differs"
+# Never leave the dialog at "unknown": show what the log last said.
+assert_has "$tmp/report-exit.ps1" "Get-Content -Path \$Log -Tail 5" "no-record path prints the last 5 log lines"
+assert_has "$tmp/report-exit.ps1" "last log lines:"      "the log tail is labelled"
+assert_has "$tmp/report-exit.ps1" "Substring(0, 200)"    "log lines are truncated, not dumped"
+assert_has "$tmp/report-exit.ps1" "console-closed"       "reporter maps a console close itself"
 
 # Sets CLA_PROBLEMS (empty = safe). Deliberately does NOT call ok/bad so it
 # can also be used as a negative control.

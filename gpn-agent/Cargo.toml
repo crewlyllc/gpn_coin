@@ -66,6 +66,8 @@ windows-sys = { version = "0.59", features = [
     # LockFileEx (cross-process GPU lock, src/gpu_yield.rs)
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
+    # SetConsoleCtrlHandler (gpn_node: do not die when a console closes)
+    "Win32_System_Console",
 ] }
 
 [dev-dependencies]

@@ -1516,6 +1516,88 @@ fn set_exit_code(shared: &Shared, label: &'static str, code: Option<i32>) {
 /// `dialability::EXIT_NOT_DIALABLE`.
 const NODE_EXIT_NOT_DIALABLE: i32 = 78;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Console lifetime
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 2026-11-04, box 1: the installer started the node with
+// `Start-Process -WindowStyle Hidden`, so the node inherited the installer's
+// console. When that window closed, Windows delivered `CTRL_CLOSE_EVENT` to
+// every process attached to it and the supervisor and both children died with
+// `0xC000013A` — after 35 minutes of successful mining (`best: #247120`).
+//
+// The real fix is to start console-less (see `install.ps1`'s
+// `Start-NodeDetached`). These handlers are the belt-and-braces half: if a node
+// still ends up attached to a console, it should say so and, where the OS still
+// allows it, keep running.
+
+/// Windows: install a handler for console control events.
+///
+/// - `CTRL_CLOSE_EVENT` (window closed) and `CTRL_LOGOFF_EVENT` (user logged
+///   off): log, record a `console-closed` reason in `last-exit.json` (so the
+///   launcher can explain the stop even if Windows terminates us anyway), and
+///   return TRUE.
+/// - `CTRL_SHUTDOWN_EVENT`: log first, then return TRUE. Windows terminates a
+///   process for this event regardless of the return value; TRUE only stops
+///   further handlers and lets the shutdown proceed promptly.
+/// - Everything else (`CTRL_C_EVENT`, `CTRL_BREAK_EVENT`) is left to the normal
+///   path: Ctrl-C must still stop the node gracefully.
+#[cfg(windows)]
+fn install_console_control_handler() {
+    use windows_sys::Win32::System::Console::{
+        SetConsoleCtrlHandler, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
+    };
+
+    unsafe extern "system" fn handler(event: u32) -> i32 {
+        match event {
+            CTRL_CLOSE_EVENT => {
+                record_console_close("the console this node was started from was closed");
+                asciiprintln!(
+                    "[supervisor] CTRL_CLOSE_EVENT: this node was attached to a console that is \
+                     closing. Start it detached (install.ps1 does) or as a scheduled task."
+                );
+                1
+            }
+            CTRL_LOGOFF_EVENT => {
+                asciiprintln!("[supervisor] CTRL_LOGOFF_EVENT ignored - the node keeps running");
+                1
+            }
+            CTRL_SHUTDOWN_EVENT => {
+                asciiprintln!(
+                    "[supervisor] CTRL_SHUTDOWN_EVENT: the machine is shutting down - allowing \
+                     termination"
+                );
+                1
+            }
+            _ => 0,
+        }
+    }
+
+    // SAFETY: the handler has 'static lifetime and only touches our own state.
+    let ok = unsafe { SetConsoleCtrlHandler(Some(handler), 1) };
+    if ok == 0 {
+        asciieprintln!(
+            "[supervisor] warning: could not install the console-control handler; a closed \
+             window may stop this node - start it detached"
+        );
+    }
+}
+
+/// Leave a reason while the console-close handler still has its few seconds.
+#[cfg(windows)]
+fn record_console_close(detail: &str) {
+    let r = exit_report::new_report(
+        ExitKind::CONSOLE_CLOSED,
+        detail,
+        exit_report::CONSOLE_CLOSED_REMEDIATION,
+    );
+    let _ = exit_report::record_at(&exit_report::default_path(), &r);
+}
+
+/// Nothing to do off Windows: SIGHUP is handled in `wait_for_signal`.
+#[cfg(not(windows))]
+fn install_console_control_handler() {}
+
 /// Send SIGTERM on Unix (taskkill on Windows) so the child can shut down cleanly.
 fn send_term(pid: u32) {
     #[cfg(unix)]
@@ -1559,9 +1641,88 @@ fn build_command(spec: &ChildSpec) -> Command {
     cmd
 }
 
+/// Build the `last-exit.json` record for one unexpected child exit.
+///
+/// The child's name and raw exit code are always in `detail`: that is what was
+/// missing on 2026-11-04, when the launcher could only say "the node exited 1
+/// without writing a reason".
+fn child_exit_report(label: &str, code: Option<i32>, ran_secs: u64) -> exit_report::Report {
+    if let Some(c) = code {
+        if exit_report::is_console_close(c) {
+            return exit_report::new_report(
+                ExitKind::CONSOLE_CLOSED,
+                format!(
+                    "child `{label}` stopped after {ran_secs}s with exit code {c} (0xC000013A): {}",
+                    exit_report::CONSOLE_CLOSED_DETAIL
+                ),
+                exit_report::CONSOLE_CLOSED_REMEDIATION,
+            );
+        }
+        let kind = exit_report::kind_for_exit_code(c).unwrap_or(ExitKind::PROVIDER);
+        return exit_report::new_report(
+            kind,
+            format!(
+                "child `{label}` exited unexpectedly after {ran_secs}s with exit code {c}; \
+                 the supervisor restarts it"
+            ),
+            exit_report::default_fix(kind),
+        );
+    }
+    exit_report::new_report(
+        ExitKind::PROVIDER,
+        format!(
+            "child `{label}` was terminated by a signal after {ran_secs}s; \
+             the supervisor restarts it"
+        ),
+        exit_report::default_fix(ExitKind::PROVIDER),
+    )
+}
+
+/// Write one `last-exit.json` record the first time each child dies unexpectedly
+/// in this supervisor run. Deduplicated per child+code so a crash loop cannot
+/// flood the log; a different failure (or a different child) still gets its own
+/// entry.
+fn record_child_exit_once(
+    label: &'static str,
+    code: Option<i32>,
+    ran_secs: u64,
+    notified: &Arc<Mutex<Vec<(&'static str, Option<i32>)>>>,
+    path: &Path,
+) {
+    let first = {
+        let mut seen = notified.lock().unwrap();
+        if seen.iter().any(|(l, c)| *l == label && *c == code) {
+            false
+        } else {
+            seen.push((label, code));
+            true
+        }
+    };
+    if !first {
+        return;
+    }
+    let r = child_exit_report(label, code, ran_secs);
+    match exit_report::record_at(path, &r) {
+        Ok(()) => log_event(
+            label,
+            &format!(
+                "recorded the exit reason in {} (kind {})",
+                path.display(),
+                r.kind
+            ),
+        ),
+        Err(e) => log_event(label, &format!("could not record the exit reason: {e}")),
+    }
+}
+
 /// Supervise one child until `shutdown` is set: run it, stream its output,
 /// restart on unexpected exit with bounded backoff, and stop it gracefully.
-fn supervise(spec: ChildSpec, shared: Shared, shutdown: Arc<AtomicBool>) {
+fn supervise(
+    spec: ChildSpec,
+    shared: Shared,
+    shutdown: Arc<AtomicBool>,
+    notified: Arc<Mutex<Vec<(&'static str, Option<i32>)>>>,
+) {
     let label = spec.label;
     let prefix = spec.prefix;
     let mut backoff_ms: u64 = 1000;
@@ -1666,6 +1827,14 @@ fn supervise(spec: ChildSpec, shared: Shared, shutdown: Arc<AtomicBool>) {
         );
         set_status(&shared, label, false, 0);
         set_exit_code(&shared, label, code);
+        // Leave a reason a launcher can read after this process is gone.
+        record_child_exit_once(
+            label,
+            code,
+            ran.as_secs(),
+            &notified,
+            &exit_report::default_path(),
+        );
 
         // A child that had been healthy for a while → reset the backoff —
         // EXCEPT for a not-dialable exit, which is a configuration error that
@@ -3283,6 +3452,9 @@ fn enforce_ollama_gate(cfg: &Config) -> i32 {
 #[tokio::main]
 async fn main() {
     env_logger::init();
+    // Before anything can spawn: a console close must not take the node
+    // (and its children) down silently. No-op off Windows.
+    install_console_control_handler();
     let argv: Vec<String> = std::env::args().collect();
     set_ascii_mode(ascii_mode_default(&argv));
 
@@ -3516,14 +3688,17 @@ async fn main() {
 
     let shared: Shared = Arc::new(Mutex::new(BTreeMap::new()));
     let shutdown = Arc::new(AtomicBool::new(false));
+    // (child label, exit code) pairs already written to last-exit.json.
+    let notified: Arc<Mutex<Vec<(&'static str, Option<i32>)>>> = Arc::new(Mutex::new(Vec::new()));
 
     // One supervisor thread per child.
     let mut handles = Vec::new();
     for spec in specs {
         let shared = shared.clone();
         let shutdown = shutdown.clone();
+        let notified = notified.clone();
         handles.push(std::thread::spawn(move || {
-            supervise(spec, shared, shutdown)
+            supervise(spec, shared, shutdown, notified)
         }));
     }
 
@@ -3675,10 +3850,27 @@ async fn wait_for_signal() {
     use tokio::signal::unix::{signal, SignalKind};
     let mut term = signal(SignalKind::terminate()).expect("install SIGTERM handler");
     let mut intr = signal(SignalKind::interrupt()).expect("install SIGINT handler");
-    tokio::select! {
-        _ = term.recv() => {}
-        _ = intr.recv() => {}
-        _ = tokio::signal::ctrl_c() => {}
+    let mut hup = signal(SignalKind::hangup()).expect("install SIGHUP handler");
+    // SIGHUP is *not* a shutdown request: a terminal or SSH session closing must
+    // not stop a node that is mining. Log it and keep waiting. SIGTERM/SIGINT
+    // still stop the node gracefully.
+    loop {
+        tokio::select! {
+            _ = term.recv() => {
+                asciiprintln!("[supervisor] SIGTERM - shutting down gracefully");
+                return;
+            }
+            _ = intr.recv() => {
+                asciiprintln!("[supervisor] SIGINT - shutting down gracefully");
+                return;
+            }
+            _ = tokio::signal::ctrl_c() => return,
+            _ = hup.recv() => {
+                asciiprintln!(
+                    "[supervisor] SIGHUP ignored - a closed terminal does not stop this node"
+                );
+            }
+        }
     }
 }
 
@@ -4062,6 +4254,55 @@ mod tests {
             Some(v) => std::env::set_var("GPN_AP_URL", v),
             None => std::env::remove_var("GPN_AP_URL"),
         }
+    }
+
+    #[test]
+    fn console_close_child_exit_is_recorded_once_with_child_and_code() {
+        let dir = td("exit-record");
+        let path = dir.join("last-exit.json");
+        let notified: Arc<Mutex<Vec<(&'static str, Option<i32>)>>> =
+            Arc::new(Mutex::new(Vec::new()));
+
+        // The measured 2026-11-04 facts: `diffuse` and `heartbeat` both died
+        // with 0xC000013A (signed -1073741510).
+        record_child_exit_once("diffuse", Some(-1_073_741_510), 2_137, &notified, &path);
+        record_child_exit_once("heartbeat", Some(-1_073_741_510), 2_137, &notified, &path);
+        // A restart loop must not append the same reason again.
+        record_child_exit_once("diffuse", Some(-1_073_741_510), 1, &notified, &path);
+
+        let reports = exit_report::read_reports(&path);
+        assert_eq!(
+            reports.len(),
+            2,
+            "one record per child+code, not per restart"
+        );
+        assert_eq!(reports[0].kind, "console-closed");
+        assert_eq!(reports[0].code, -1_073_741_510);
+        assert!(reports[0].detail.contains("diffuse"));
+        assert!(reports[0].detail.contains("-1073741510"));
+        assert!(!reports[0].remediation.trim().is_empty());
+        assert!(reports[0].remediation.contains("detached"));
+        assert_eq!(reports[1].kind, "console-closed");
+        assert!(reports[1].detail.contains("heartbeat"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ordinary_child_death_is_recorded_as_a_provider_failure() {
+        let r = child_exit_report("provider", Some(1), 12);
+        assert_eq!(r.kind, "provider");
+        assert!(r.detail.contains("provider"));
+        assert!(r.detail.contains("exit code 1"));
+        assert!(!r.remediation.trim().is_empty());
+
+        let not_dialable = child_exit_report("node", Some(78), 5);
+        assert_eq!(not_dialable.kind, "not-dialable");
+        assert!(not_dialable.detail.contains("node"));
+
+        let signal = child_exit_report("ml", None, 3);
+        assert_eq!(signal.kind, "provider");
+        assert!(signal.detail.contains("signal"));
     }
 }
 
