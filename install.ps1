@@ -302,7 +302,9 @@ set "GPN_NODE_KEY="
 set "GPN_NODE_KEY_FILE=%USERPROFILE%\.gpn\node-key"
 set "KEYRC=1"
 set "WRC=1"
-if not exist "%USERPROFILE%\.gpn" mkdir "%USERPROFILE%\.gpn" >nul 2>&1
+REM What the launcher resolved -- printed so a mismatch is visible in the trace
+REM instead of only as "could not create a node key".
+echo [gpn] node identity: key=%GPN_NODE_KEY_FILE% userprofile=%USERPROFILE% cwd=%CD%
 if not exist "%GPN_NODE_KEY_FILE%" (
   echo [gpn] generating this machine's node identity: %GPN_NODE_KEY_FILE%
   "%GPN_BIN%\gpn-node.exe" key generate-node-key --file "%GPN_NODE_KEY_FILE%" > "%TEMP%\gpn-keygen.log" 2>&1
