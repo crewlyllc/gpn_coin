@@ -170,8 +170,15 @@ pub enum UpdateError {
     /// ed25519 verification failed: the manifest was edited, or signed by
     /// someone other than the holder of the release key.
     BadSignature,
-    /// Downloaded bytes do not match the manifest's `sha256`/`size`.
+    /// Downloaded bytes do not match the manifest's `sha256`.
     BadDigest { expected: String, actual: String },
+    /// Downloaded bytes are the wrong LENGTH for the manifest asset. Kept
+    /// separate from `BadDigest` on purpose: a size mismatch and a hash
+    /// mismatch are different facts, and telling an operator the wrong one
+    /// sends them looking for the wrong cause (2026-11-03: a 321,604,470-byte
+    /// download was reported as a "hash 321604470", and the manifest/asset
+    /// disagreement was read as a corruption problem).
+    BadSize { expected: u64, actual: u64 },
     /// No asset for this OS/arch.
     NoAsset { os: String, arch: String },
     /// A bundled binary does not carry the build stamp the manifest claims.
@@ -205,6 +212,12 @@ impl fmt::Display for UpdateError {
             UpdateError::BadDigest { expected, actual } => write!(
                 f,
                 "downloaded file hash {actual} does not match the manifest's {expected}"
+            ),
+            UpdateError::BadSize { expected, actual } => write!(
+                f,
+                "downloaded file is {actual} bytes, but the manifest declares {expected} bytes \
+                 — this is a SIZE mismatch (the published asset and releases.json disagree), \
+                 not a corrupted hash; nothing was installed"
             ),
             UpdateError::NoAsset { os, arch } => {
                 write!(f, "manifest has no asset for {os}/{arch}")
@@ -867,9 +880,9 @@ pub fn sha256_file(path: &Path) -> Result<String, UpdateError> {
 /// manifest declares one).
 pub fn verify_bytes(bytes: &[u8], asset: &ReleaseAsset) -> Result<(), UpdateError> {
     if asset.size > 0 && bytes.len() as u64 != asset.size {
-        return Err(UpdateError::BadDigest {
-            expected: format!("{} bytes", asset.size),
-            actual: format!("{} bytes", bytes.len()),
+        return Err(UpdateError::BadSize {
+            expected: asset.size,
+            actual: bytes.len() as u64,
         });
     }
     let actual = sha256_hex(bytes);
@@ -887,9 +900,9 @@ pub fn verify_file(path: &Path, asset: &ReleaseAsset) -> Result<(), UpdateError>
     if asset.size > 0 {
         let len = std::fs::metadata(path)?.len();
         if len != asset.size {
-            return Err(UpdateError::BadDigest {
-                expected: format!("{} bytes", asset.size),
-                actual: format!("{len} bytes"),
+            return Err(UpdateError::BadSize {
+                expected: asset.size,
+                actual: len,
             });
         }
     }
@@ -1088,8 +1101,14 @@ pub fn apply_pending(
         }
     };
     let len = std::fs::metadata(&staged).map(|m| m.len()).unwrap_or(0);
-    let bad = actual != pending.sha256 || (pending.size > 0 && len != pending.size);
-    if bad {
+    if pending.size > 0 && len != pending.size {
+        discard_staged(state_dir, exe);
+        return Err(UpdateError::BadSize {
+            expected: pending.size,
+            actual: len,
+        });
+    }
+    if actual != pending.sha256 {
         discard_staged(state_dir, exe);
         return Err(UpdateError::BadDigest {
             expected: pending.sha256,
@@ -2016,8 +2035,38 @@ mod tests {
         a.size = 1;
         assert!(matches!(
             verify_bytes(bytes, &a),
-            Err(UpdateError::BadDigest { .. })
+            Err(UpdateError::BadSize { .. })
         ));
+    }
+
+    /// 2026-11-03 live shape: a 321,604,470-byte download against a manifest
+    /// declaring 321,766,173. The journal said "downloaded file hash
+    /// 321604470 bytes does not match the manifest's 321766173" — a size
+    /// mismatch described as a hash mismatch. The message must now name bytes
+    /// and must never call a byte count a hash.
+    #[test]
+    fn a_size_mismatch_is_not_reported_as_a_hash_mismatch() {
+        let bytes = vec![0u8; 16];
+        let mut a = sample_asset();
+        a.size = 321_766_173;
+        let err = verify_bytes(&bytes, &a).unwrap_err();
+        assert!(matches!(
+            err,
+            UpdateError::BadSize {
+                expected: 321_766_173,
+                actual: 16
+            }
+        ));
+        let text = err.to_string();
+        assert!(text.contains("16 bytes"), "names the actual length: {text}");
+        assert!(
+            text.contains("321766173 bytes"),
+            "names the declared length: {text}"
+        );
+        assert!(
+            !text.contains("hash") || text.contains("not a corrupted hash"),
+            "a byte count must not be called a hash: {text}"
+        );
     }
 
     #[test]
@@ -2402,7 +2451,9 @@ mod tests {
         let state = dir.join("state");
         let asset = sample_asset(); // sha256 of "new-binary-bytes"
 
-        let err = stage_bytes(&state, &exe, "0.2.0", &asset, b"evil-binary!").unwrap_err();
+        // Same length as the expected payload, different content ⇒ a genuine
+        // hash mismatch (a differing length would be BadSize, tested below).
+        let err = stage_bytes(&state, &exe, "0.2.0", &asset, b"evil-binary-byte").unwrap_err();
         assert!(matches!(err, UpdateError::BadDigest { .. }));
         assert!(!staged_path(&exe).exists(), "nothing staged");
         assert!(read_pending(&state).is_none(), "no marker");
@@ -2424,7 +2475,9 @@ mod tests {
         std::fs::write(staged_path(&exe), b"tampered-after-staging").unwrap();
 
         let err = apply_pending(&state, &exe).unwrap_err();
-        assert!(matches!(err, UpdateError::BadDigest { .. }));
+        // Truncated/bit-rotted bytes are a length disagreement with the marker,
+        // and it must be named as one rather than as a hash mismatch.
+        assert!(matches!(err, UpdateError::BadSize { .. }));
         assert_eq!(
             std::fs::read(&exe).unwrap(),
             b"old-binary",
