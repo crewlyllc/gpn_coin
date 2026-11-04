@@ -430,6 +430,51 @@ routing tie-break, and liveness uptime credit — not income.
 > forward works. The exit-`78` hard gate survives only as the opt-in
 > `--require-backbone` flag; no install sets it.
 
+### Reachability tiers (SPEC 47)
+
+Every node derives one of two tiers from **evidence**, never from a setting:
+
+| Tier | What it means | Publishes a dialable address | Seed-eligible |
+|---|---|---|---|
+| **backbone** | proved inbound reachability (inbound peer, peer-observed public address, STUN mapping, or a TCP hairpin probe) | yes | yes, with `--seed` |
+| **leaf** | everything else — syncs, mines, serves jobs, answers outbound | **no** (empty `multiaddrs`) | no |
+
+**gateway** is role metadata on top of *backbone*: the one machine per LAN or
+home egress that the site's other machines dial. Name it with
+`--site-gateway` / `GPN_SITE_GATEWAY=1`; it always attempts UPnP/manual
+forwarding and advertises. A gateway that currently cannot prove reachability
+reports `leaf` until the evidence returns — the role does not defeat the
+evidence rule.
+
+Invariants enforced in three places (node state file, heartbeat sender, access
+point ingest):
+
+* a leaf **never** publishes a dialable multiaddr — even if a caller passes
+  one, the writer drops it;
+* the tier is not a trust level: it changes who can dial you, not what you may
+  validate, mine, or be paid for;
+* promotion/demotion is logged once, and demotion clears the published address
+  immediately. A leaf that becomes reachable is promoted on the next 10-minute
+  re-check with one line: `dialability: NOW DIALABLE - promoted to backbone`.
+
+The access point counts the two populations separately in `/network`
+(`backbone_now`, `leaf_now`, plus `gateways`) and per provider row
+(`reachability`, `gateway`); the pre-existing `healthy_now` keeps its old
+meaning, so nothing that consumed it changes behaviour.
+
+`GPN_SITE_ELECT=1` enables an **optional** fallback election for sites with no
+named gateway: the candidate with the highest *peer-witnessed* uptime
+(`witnessed_secs × min(witnesses, 4)`, ties broken by smallest peer id) becomes
+the gateway. Self-reported uptime is never used and a node cannot vote for
+itself. Election is off by default and creates no authority; it only decides
+which machine's dialable address the site's other machines prefer. (The scoring
+and selection functions ship with this release and are unit-tested; the wiring
+that gathers peer-witness data and flips the role is not yet enabled, so today
+name the gateway explicitly with `--site-gateway`.)
+
+There is **no relay or hole-punching** in this release: a CGNAT leaf stays a
+leaf and participates fully — it is simply not a dial target.
+
 At startup the node probes inbound reachability for up to **120 s**
 (`GPN_DIALABLE_TIMEOUT_SECS`), in this order:
 
@@ -492,6 +537,8 @@ Only globally routable addresses count — RFC1918 (`10/8`, `172.16/12`,
 | `--discoverable` / `GPN_DISCOVERABLE=1` | Announce endpoint, accept inbound. | **on** |
 | `--no-discoverable` / `GPN_DISCOVERABLE=0` | Privacy mode: no announce, no inbound, not in any list. Implies `--no-seed`. | — |
 | `--no-upnp` / `GPN_UPNP=off` | Never contact the router; no UPnP/NAT-PMP attempt. The attempt is logged when it happens. | `auto` |
+| `--site-gateway` / `GPN_SITE_GATEWAY=1` | Name this machine the dialable gateway for its LAN/egress (implies discoverable + seed intent). Other machines on the site stay leaves. | off |
+| `GPN_SITE_ELECT=1` | Allow the witnessed-uptime fallback to pick the site gateway. Off by default; scoring ships, role wiring is not enabled yet. | off |
 | `--public-addr` / `GPN_PUBLIC_ADDR` | Explicit public multiaddr; always wins over detection. | unset |
 | `--require-backbone` / `GPN_REQUIRE_BACKBONE=1` | Legacy hard gate: exit 78 instead of serving when not dialable. **Deprecated — do not set it.** | **off** |
 | `--no-require-backbone` / `GPN_REQUIRE_BACKBONE=0` | Explicitly select the default soft mode: publish best-effort, keep serving. | **on** (default) |
@@ -548,9 +595,11 @@ To fix it (about 5 minutes):
      Linux (firewalld):
        sudo firewall-cmd --add-port=30333/tcp --permanent && sudo firewall-cmd --reload
 
-  4. UPnP/NAT-PMP: the node already tried this automatically (GPN_UPNP=auto is
-     the default). If your router has UPnP disabled, either enable it and
-     restart, or use step 2. Disable the attempt with --no-upnp / GPN_UPNP=off.
+  4. UPnP/NAT-PMP: the node tried this automatically (GPN_UPNP=auto is the
+     default) - result:
+       portmap: refused by router (no IGD found)
+     The node keeps retrying every 10 minutes, so enabling UPnP on the router is
+     picked up without a restart. Or use step 2. Disable with --no-upnp.
 
   5. CGNAT: if your router's WAN address is in 100.64.0.0/10, no port forward
      can work. Run the node on a cheap VPS with a public IP.
@@ -686,7 +735,8 @@ It is never silent. A successful mapping logs (the log line is the consent
 record):
 
 ```
-portmap: UPnP: mapped TCP 30333 -> 192.168.1.42:30333 via 192.168.1.1 (UPnP-IGD); external address is 23.241.109.255:30333. Disable with GPN_UPNP=off or --no-upnp
+portmap: granted 30333 -> 23.241.109.255:30333 (lease 60 min)
+portmap: mapped via UPnP-IGD (gateway 192.168.1.1), internal 192.168.1.42:30333; disable with GPN_UPNP=off or --no-upnp
 ```
 
 and the router-reported external `ip:port` becomes the node's advertised
@@ -697,8 +747,15 @@ A failed attempt is also logged, and the node falls through to the manual
 instructions in the notice:
 
 ```
-portmap: automatic port mapping FAILED (no gateway: ...); TCP 30333 must be forwarded manually. If your router has UPnP disabled, enabling it - or adding the forward - is the fix.
+portmap: refused by router (no gateway: no IGD found, NAT-PMP unreachable)
+portmap: TCP 30333 must be forwarded manually. If your router has UPnP disabled, enabling it - or adding the forward - is the fix.
 ```
+
+The four canonical outcomes are `granted …`, `refused by router (…)`
+(including the CGNAT case, which names the `100.64/10` WAN address),
+`disabled (GPN_UPNP=off)` and `skipped (public address configured)` — each is
+logged once at INFO and repeated in the not-dialable notice, so "the port is
+closed" always says *why*.
 
 **Turn it off:** `--no-upnp` (or `GPN_UPNP=off`). The node then never sends a
 packet to the router and behaves exactly like a manually-forwarded host. Use
