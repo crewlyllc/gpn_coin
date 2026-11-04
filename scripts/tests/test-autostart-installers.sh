@@ -126,6 +126,12 @@ assert_has "$ps1" "left it alone and"                      "explains when GPN-No
 # 2026-11-04 box 1: task owned by 'Jeremy', install as 'Jeremy Guo'. Deleting it
 # needs admin, so the installer must fall back to a Startup shortcut, not abort.
 assert_has "$ps1" "registered a Startup shortcut instead"   "foreign-owned task falls back to Startup"
+# 2026-11-04: the install must END with a running node even when Task Scheduler is
+# unavailable, and must not claim success it did not achieve.
+assert_has "$ps1" "no scheduled task -- starting the node directly" "starts the node when only a Startup shortcut exists"
+assert_has "$ps1" "starting the node directly"                     "starts directly when schtasks /Run is denied"
+assert_has "$ps1" "NodeAutostart"                                  "tracks which autostart mechanism actually worked"
+assert_not_has "$ps1" 'Say "scheduled task \$NodeTask registered'  "never claims a task succeeded before checking"
 # /RL HIGHEST needs elevation; from a normal shell it fails rc=1 even with no
 # existing task. The node needs no admin rights, so the installer must retry
 # without it rather than abort.
@@ -195,7 +201,7 @@ assert_has "$ps1" "winget install --id Ollama.Ollama -e" "prints the install com
 assert_has "$ps1" "REFUSE TO START"                 "explains why it refuses to continue without ollama"
 
 # ---- the message the operator must see -----------------------------------
-assert_has "$ps1" "Your node will start automatically when you log in." "prints the autostart confirmation"
+assert_has "$ps1" "Autostart: scheduled task"                  "prints the autostart confirmation (task)"
 assert_has "$ps1" "\$Dashboard = 'http://127.0.0.1:8099'" "prints the dashboard URL"
 assert_has "$ps1" "payout address:" "prints the payout address"
 

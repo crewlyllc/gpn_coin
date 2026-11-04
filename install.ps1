@@ -795,6 +795,7 @@ function Verify-NodeTask {
 }
 
 # ------------------------------------------------------------------ tasks ----
+$script:NodeAutostart = 'none'   # 'task' | 'startup' | 'none'
 function Register-NodeTask {
   # Default: create the task at NORMAL privilege. The node binds only high ports
   # (30333/9944/8093/8094/8099), so it needs no admin rights -- and asking for
@@ -815,6 +816,7 @@ function Register-NodeTask {
       if ($existing -match 'Run As User:\s*(\S+)') { $ownerX = $Matches[1] }
       if (-not $ownerX -or ($ownerX -match [regex]::Escape($env:USERNAME))) {
         Say "$NodeTask already exists and runs $NodeCmd -- reusing it (not recreating)"
+        $script:NodeAutostart = 'task'
         return
       }
     }
@@ -835,6 +837,7 @@ function Register-NodeTask {
       $plain = @('/Create', '/TN', $NodeTask, '/TR', "cmd /c $NodeCmd", '/SC', 'ONLOGON', '/F')
       $rc = Invoke-Schtasks $plain
     }
+    if ($rc -eq 0) { $script:NodeAutostart = 'task' }
     if ($rc -ne 0) {
       $q2 = (& cmd /c "schtasks /Query /TN $NodeTask /FO LIST /V 2>nul") -join "`n"
       $owner2 = ''
@@ -853,6 +856,7 @@ function Register-NodeTask {
           $sc.WindowStyle = 7
           $sc.Description = 'GPN node (Startup shortcut: the scheduled task belongs to another account)'
           $sc.Save()
+          $script:NodeAutostart = 'startup'
           Warn ("$NodeTask belongs to '$owner2', not '$env:USERNAME' -- left it alone and " +
                 "registered a Startup shortcut instead: $lnk")
           Warn ("If '$owner2' also logs in here, its task will start a SECOND node on the " +
@@ -877,6 +881,7 @@ function Register-NodeTask {
         $sc.WindowStyle = 7
         $sc.Description = 'GPN node (started by the Startup folder because Task Scheduler was denied)'
         $sc.Save()
+        $script:NodeAutostart = 'startup'
         Warn "could not create the scheduled task (rc=$rc$why) -- using a Startup shortcut instead: $lnk"
         return
       } catch {
@@ -889,6 +894,7 @@ function Register-NodeTask {
   # ONE supervisor only: /Run on an already-running task would fork a second
   # node on the same base path and the same ports (2026-10-23, ~2h lost).
   $miSet = $false
+  if ($script:NodeAutostart -ne 'task') { return }   # nothing registered -> nothing to tune
   try {
     $st = Get-ScheduledTask -TaskName $NodeTask -ErrorAction Stop
     $st.Settings.MultipleInstances = 'IgnoreNew'
@@ -914,7 +920,6 @@ function Register-NodeTask {
     } catch { Warn "could not set MultipleInstances (a manual /Run could fork a second tree): $($_.Exception.Message)" }
   }
   if ($miSet) { Say "$NodeTask MultipleInstances = IgnoreNew" }
-  Say "scheduled task $NodeTask registered (/SC ONLOGON /RL HIGHEST)"
 }
 
 # -------------------------------------------------------------- referral ---
@@ -1219,9 +1224,28 @@ Register-NodeTask
 [void](Register-UpdateTask)
 
 if (-not $NoStart) {
-  Invoke-Step "schtasks /Run /TN $NodeTask" {
-    $rc = Invoke-Schtasks @('/Run', '/TN', $NodeTask)
-    if ($rc -ne 0) { Warn "schtasks /Run $NodeTask failed (rc=$rc)" }
+  if ($script:NodeAutostart -eq 'task') {
+    Invoke-Step "schtasks /Run /TN $NodeTask" {
+      $rc = Invoke-Schtasks @('/Run', '/TN', $NodeTask)
+      if ($rc -eq 0) {
+        Say "node started ($NodeTask)"
+      } else {
+        # The task exists but cannot be started (typical when it belongs to
+        # another account). Start it directly so the install still ends with a
+        # running node -- that is the contract.
+        Warn "schtasks /Run $NodeTask failed (rc=$rc) -- starting the node directly"
+        Invoke-Step "Start-Process $NodeCmd" {
+          Start-Process -FilePath $NodeCmd -WorkingDirectory $InstallDir -WindowStyle Hidden
+        }
+      }
+    }
+  } else {
+    # No scheduled task (Startup shortcut only): start it now, or the operator
+    # would have to log out and back in before anything runs.
+    Say 'no scheduled task -- starting the node directly'
+    Invoke-Step "Start-Process $NodeCmd" {
+      Start-Process -FilePath $NodeCmd -WorkingDirectory $InstallDir -WindowStyle Hidden
+    }
   }
 }
 
@@ -1235,7 +1259,12 @@ if ($Verify) {
 
 # 6. tell the operator exactly what happened
 Write-Host ''
-Write-Host "Your node will start automatically when you log in. Dashboard: $Dashboard"
+switch ($script:NodeAutostart) {
+  'task'    { Write-Host "Autostart: scheduled task $NodeTask (starts at logon)." }
+  'startup' { Write-Host "Autostart: Startup shortcut (no Task Scheduler permission needed; starts at logon)." }
+  default   { Write-Host "Autostart: NOT configured -- run $NodeCmd after each login." }
+}
+Write-Host "Dashboard: $Dashboard"
 Write-Host "  payout address: $payout"
 Write-Host "  log:            $NodeLog"
 Write-Host "  updates:        every 6h (+/- 30 min), log: $UpdateLog"
