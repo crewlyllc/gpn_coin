@@ -300,16 +300,20 @@ set "GPN_BIN=__INSTALL_DIR__\bin"
 REM --- per-machine node identity (a shared key makes boxes collide) ----------
 set "GPN_NODE_KEY="
 set "GPN_NODE_KEY_FILE=%USERPROFILE%\.gpn\node-key"
+set "KEYRC=1"
+set "WRC=1"
 if not exist "%USERPROFILE%\.gpn" mkdir "%USERPROFILE%\.gpn" >nul 2>&1
 if not exist "%GPN_NODE_KEY_FILE%" (
   echo [gpn] generating this machine's node identity: %GPN_NODE_KEY_FILE%
-  "%GPN_BIN%\gpn-node.exe" key generate-node-key --file "%GPN_NODE_KEY_FILE%"
+  "%GPN_BIN%\gpn-node.exe" key generate-node-key --file "%GPN_NODE_KEY_FILE%" > "%TEMP%\gpn-keygen.log" 2>&1
   set "KEYRC=%ERRORLEVEL%"
+  type "%TEMP%\gpn-keygen.log"
 )
 if not exist "%GPN_NODE_KEY_FILE%" (
   echo [gpn] ERROR: could not create a node key at %GPN_NODE_KEY_FILE% (exit %KEYRC%)
   if "%KEYRC%"=="-1073741515" echo [gpn] ERROR: 0xC0000135 = missing Visual C++ runtime -- run: winget install --id Microsoft.VCRedist.2015+.x64 -e
   echo [gpn] ERROR: refusing to start a node with a shared/default identity.
+  if "%KEYRC%"=="" set "KEYRC=1"
   powershell -NoProfile -ExecutionPolicy Bypass -File "__REPORT__" -ExitCode %KEYRC% -Log "__LOG__"
   exit /b 1
 )
