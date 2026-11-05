@@ -113,6 +113,26 @@ pub struct ChainClient {
 /// worse than reading `None` a few times.
 const HEAL_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// Upper bound on one websocket **storage read**.
+///
+/// subxt/jsonrpsee give a request no deadline of their own once the connection's
+/// background task goes quiet: the sender awaits a oneshot that nobody resolves,
+/// so a wedged socket turns into an unkillable await. That is not theoretical —
+/// on 2026-11-04 the access point's first `POST /provider/heartbeat` after a
+/// restart hung on `is_provider_registered` and every later push piled up behind
+/// it (435 blocked threads, one per request, ~17/min). A deadline converts the
+/// silence into an error, and [`is_connection_lost`] treats it as a dead socket
+/// so the existing heal/retry rebuilds the client.
+/// `$GPN_RPC_READ_TIMEOUT_SECS` (default 8 s).
+fn rpc_read_timeout() -> std::time::Duration {
+    std::env::var("GPN_RPC_READ_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(std::time::Duration::from_secs(8))
+}
+
 /// A dropped/closed RPC socket, not a chain-level rejection. jsonrpsee reports a
 /// dead background task as `RestartNeeded` ("The background task closed ...;
 /// restart required"); other variants say the connection closed / is not
@@ -130,6 +150,13 @@ pub fn is_connection_lost(msg: &str) -> bool {
         || m.contains("not connected")
         || m.contains("disconnected")
         || m.contains("broken pipe")
+        // A websocket backend that stops answering is *worse* than one that
+        // closes: jsonrpsee's "background task closed" never arrives, so the
+        // await sits on a oneshot that is never resolved and the caller hangs
+        // forever. [`RPC_READ_TIMEOUT`] turns that silence into this marker so
+        // the heal path can rebuild the socket (2026-11-04: the AP hung every
+        // POST /provider/heartbeat this way and leaked one thread per push).
+        || m.contains("rpc read timeout")
 }
 
 /// Resolve the readiness-gate timeout/poll from the environment and wait for the
@@ -437,7 +464,7 @@ impl ChainClient {
     {
         let client = self.ensure_client().await?;
         let head = self.head_block_hash().await;
-        match Self::fetch_with(&client, addr, head).await {
+        match Self::fetch_with_bounded(&client, addr, head).await {
             Ok(v) => Ok(v),
             Err(e) if is_connection_lost(&e) => {
                 let fresh = self.heal_client().await.ok_or_else(|| {
@@ -447,9 +474,32 @@ impl ChainClient {
                     )
                 })?;
                 let head = self.head_block_hash().await;
-                Self::fetch_with(&fresh, addr, head).await
+                Self::fetch_with_bounded(&fresh, addr, head).await
             }
             Err(e) => Err(e),
+        }
+    }
+
+    /// [`Self::fetch_with`] with a deadline, so a silent websocket cannot hang
+    /// its caller forever (see [`rpc_read_timeout`]).
+    async fn fetch_with_bounded<Addr>(
+        client: &OnlineClient<SubstrateConfig>,
+        addr: &Addr,
+        head: Option<subxt::utils::H256>,
+    ) -> Result<Option<subxt::dynamic::Value>, String>
+    where
+        Addr: subxt::storage::Address<
+            Target = subxt::dynamic::DecodedValueThunk,
+            IsFetchable = subxt::utils::Yes,
+        >,
+    {
+        let limit = rpc_read_timeout();
+        match tokio::time::timeout(limit, Self::fetch_with(client, addr, head)).await {
+            Ok(r) => r,
+            Err(_) => Err(format!(
+                "rpc read timeout after {}s — the websocket backend stopped answering",
+                limit.as_secs()
+            )),
         }
     }
 
