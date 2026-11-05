@@ -3393,12 +3393,7 @@ impl HandlerSlot {
             if cur >= max {
                 return None;
             }
-            match counter.compare_exchange_weak(
-                cur,
-                cur + 1,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ) {
+            match counter.compare_exchange_weak(cur, cur + 1, Ordering::AcqRel, Ordering::Relaxed) {
                 Ok(_) => {
                     let id = next_id.fetch_add(1, Ordering::Relaxed);
                     return Some(HandlerSlot {
@@ -3434,7 +3429,20 @@ impl Drop for HandlerSlot {
 /// request line, at most once per `REPORT_EVERY`. This makes a stranded handler
 /// identify itself in `journalctl` instead of showing up as an anonymous
 /// futex thread.
-fn spawn_handler_watchdog(inflight: InFlight) {
+///
+/// Since 2026-11-04 it also emits an unconditional **liveness line every 60 s**:
+/// thread count, in-flight handlers vs the cap, and the oldest request by age.
+/// The leak that took the AP down (543 threads, 507 CLOSE-WAIT sockets, 0 in
+/// `ep_poll` → every endpoint 503) was invisible until saturation, because the
+/// only existing signal fired *after* a handler was already 20 s stuck and the
+/// old report was rate-limited to non-empty sets. Written with `eprintln!` on
+/// purpose: `env_logger` defaults to `error` here, and a silenced watchdog is
+/// how the 20:29 wedge went unnoticed (change-log 2026-11-04).
+fn spawn_handler_watchdog(
+    inflight: InFlight,
+    counter: Arc<std::sync::atomic::AtomicUsize>,
+    max_handlers: usize,
+) {
     const STUCK_AFTER: Duration = Duration::from_secs(20);
     const REPORT_EVERY: Duration = Duration::from_secs(60);
     std::thread::spawn(move || {
@@ -3444,27 +3452,329 @@ fn spawn_handler_watchdog(inflight: InFlight) {
             if last_report.elapsed() < REPORT_EVERY {
                 continue;
             }
+            last_report = Instant::now();
             let mut stuck: HashMap<String, (usize, u64)> = HashMap::new();
+            let mut oldest: Option<(String, u64)> = None;
+            let mut in_flight = 0usize;
             if let Ok(m) = inflight.lock() {
+                in_flight = m.len();
                 for (line, since) in m.values() {
+                    let age = since.elapsed().as_secs();
+                    if oldest.as_ref().map(|(_, a)| age > *a).unwrap_or(true) {
+                        oldest = Some((line.clone(), age));
+                    }
                     if since.elapsed() >= STUCK_AFTER {
                         let e = stuck.entry(line.clone()).or_insert((0, 0));
                         e.0 += 1;
-                        e.1 = e.1.max(since.elapsed().as_secs());
+                        e.1 = e.1.max(age);
                     }
                 }
             }
-            if stuck.is_empty() {
-                continue;
-            }
-            last_report = Instant::now();
+            let busy = counter.load(std::sync::atomic::Ordering::Relaxed);
+            let (top, age) = match &oldest {
+                Some((line, a)) => (line.as_str(), *a),
+                None => ("-", 0),
+            };
+            eprintln!(
+                "[ap] threads={} handlers={busy}/{max_handlers} in_flight={in_flight} \
+                 oldest={age}s on {top} stuck={}",
+                process_thread_count(),
+                stuck.values().map(|(n, _)| n).sum::<usize>()
+            );
             let mut v: Vec<_> = stuck.into_iter().collect();
             v.sort_by_key(|(_, (n, _))| std::cmp::Reverse(*n));
             for (line, (n, age)) in v.into_iter().take(6) {
-                log::warn!("[ap] {n} handler(s) stuck >{age}s on {line}");
+                eprintln!("[ap] {n} handler(s) stuck >{age}s on {line}");
             }
         }
     });
+}
+
+/// Threads alive in this process. Cheap and dependency-free; 0 where `/proc`
+/// does not exist (the AP itself is a Linux service, but the crate must build
+/// for Windows release).
+fn process_thread_count() -> usize {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(d) = std::fs::read_dir("/proc/self/task") {
+            return d.count();
+        }
+    }
+    0
+}
+
+// ─── Per-request hard deadline (2026-11-04 AP thread leak) ──────────────────
+//
+// Every handler runs on its own thread, so ONE unbounded wait strands a thread
+// *and* its socket forever. Measured: 543 threads / 527 in `futex_do_wait` /
+// 507 CLOSE-WAIT sockets / 0 in `ep_poll` → all endpoints 503 within ~35 min of
+// a restart, threads growing ~12/min.
+//
+// A `Deadline` is created first thing in the request thread and every blocking
+// step is bounded by it: chain calls run under `tokio::time::timeout` with the
+// remaining budget, locks use `lock_bounded` (never `lock()` on a shared mutex),
+// and a long poll is clamped to what is left. On expiry the handler answers
+// `504 {"error":"deadline"}` and its thread exits — the pool slot comes back.
+#[derive(Clone, Copy, Debug)]
+struct Deadline {
+    at: Instant,
+}
+
+impl Deadline {
+    fn after(secs: u64) -> Self {
+        Deadline {
+            at: Instant::now() + Duration::from_secs(secs.max(1)),
+        }
+    }
+
+    /// Time left, or `None` once the budget is spent.
+    fn remaining(&self) -> Option<Duration> {
+        let now = Instant::now();
+        if now >= self.at {
+            None
+        } else {
+            Some(self.at - now)
+        }
+    }
+
+    fn expired(&self) -> bool {
+        self.remaining().is_none()
+    }
+
+    /// Run one blocking chain call with at most the remaining budget.
+    /// `None` means the deadline fired (as opposed to the call's own answer).
+    fn block<F>(&self, rt: &tokio::runtime::Runtime, fut: F) -> Option<F::Output>
+    where
+        F: std::future::Future,
+    {
+        let left = self.remaining()?;
+        rt.block_on(async move { tokio::time::timeout(left, fut).await.ok() })
+    }
+}
+
+/// How long a handler may wait for a shared mutex before it gives up.
+///
+/// The locks this guards (`assign_replay`, `CREATE_LOCK`) are held only for pure
+/// in-memory work — a few microseconds — so 2 s means "something is badly
+/// wrong", not contention. Previously these were `lock().unwrap()` held ACROSS a
+/// chain RPC, which is what convoys every poller behind one cache miss.
+const LOCK_WAIT: Duration = Duration::from_secs(2);
+
+/// `Mutex::lock` with a deadline: returns `None` instead of parking forever.
+fn lock_bounded<'a, T>(m: &'a Mutex<T>, wait: Duration) -> Option<std::sync::MutexGuard<'a, T>> {
+    let give_up = Instant::now() + wait;
+    loop {
+        match m.try_lock() {
+            Ok(g) => return Some(g),
+            Err(std::sync::TryLockError::Poisoned(p)) => return Some(p.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+        if Instant::now() >= give_up {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+// ─── Non-blocking on-chain account identity ────────────────────────────────
+//
+// `is_provider_registered` is a websocket storage read. On a request thread it
+// is both unbounded (jsonrpsee can await a dropped oneshot forever) and, under a
+// global lock, a convoy: one 5-minute `account_auth` cache miss stalled every
+// `/assignments` poller — including the two unregistered peers polling ~1/s.
+//
+// So the read moves to ONE named background thread. Request threads only ever
+// read the cache and, on a miss, queue a refresh and answer a retryable 503
+// `{"error":"unknown","reason":"account_lookup_pending"}`. No chain call, and
+// no lock, is ever held on the request path.
+#[derive(Clone)]
+pub struct AccountResolver {
+    authority: Arc<Mutex<AccountAuthority>>,
+    pending: Arc<Mutex<std::collections::HashSet<String>>>,
+    queue: std::sync::mpsc::SyncSender<String>,
+    /// Identity lookups performed since start (one per queued refresh).
+    lookups: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl AccountResolver {
+    /// `lookup` answers "is this account a registered provider?" — production
+    /// passes a bounded `rt.block_on(client.is_provider_registered(..))`.
+    fn new<F>(lookup: F) -> Self
+    where
+        F: Fn(&str) -> bool + Send + 'static,
+    {
+        let authority = Arc::new(Mutex::new(AccountAuthority::new()));
+        let pending = Arc::new(Mutex::new(std::collections::HashSet::new()));
+        let lookups = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (tx, rx) = std::sync::mpsc::sync_channel::<String>(256);
+        let auth_thread = authority.clone();
+        let pend_thread = pending.clone();
+        let count = lookups.clone();
+        let _ = std::thread::Builder::new()
+            .name("acct-refresh".into())
+            .spawn(move || {
+                while let Ok(addr) = rx.recv() {
+                    let registered = lookup(&addr);
+                    let key = if registered {
+                        gpn_agent::provider_heartbeat::ss58_to_pubkey(&addr)
+                    } else {
+                        None
+                    };
+                    count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if let Ok(mut c) = auth_thread.lock() {
+                        c.store(&addr, now_secs(), key);
+                    }
+                    if let Ok(mut p) = pend_thread.lock() {
+                        p.remove(&addr);
+                    }
+                }
+            });
+        Self {
+            authority,
+            pending,
+            queue: tx,
+            lookups,
+        }
+    }
+
+    /// Cache-only. Never blocks, never touches the chain. `Miss` means
+    /// "unknown — a refresh is queued, ask again shortly".
+    fn resolve(&self, addr: &str, now: u64) -> CachedKey {
+        let cached = match self.authority.lock() {
+            Ok(c) => c.lookup(addr, now),
+            Err(p) => p.into_inner().lookup(addr, now),
+        };
+        if matches!(cached, CachedKey::Hit(_)) {
+            return cached;
+        }
+        self.request_refresh(addr);
+        CachedKey::Miss
+    }
+
+    /// Queue at most one in-flight lookup per address.
+    fn request_refresh(&self, addr: &str) {
+        let first = match self.pending.lock() {
+            Ok(mut p) => p.insert(addr.to_string()),
+            Err(p) => p.into_inner().insert(addr.to_string()),
+        };
+        if !first {
+            return;
+        }
+        if self.queue.try_send(addr.to_string()).is_err() {
+            // Queue full or refresher gone: clear the marker so a later request
+            // can try again instead of blocking this address forever.
+            if let Ok(mut p) = self.pending.lock() {
+                p.remove(addr);
+            }
+        }
+    }
+
+    /// Force a synchronous refresh (used only by tests and boot warm-up).
+    fn refresh_now(&self, addr: &str, registered: Option<bool>) -> CachedKey {
+        if let Some(reg) = registered {
+            let key = if reg {
+                gpn_agent::provider_heartbeat::ss58_to_pubkey(addr)
+            } else {
+                None
+            };
+            if let Ok(mut c) = self.authority.lock() {
+                c.store(addr, now_secs(), key);
+            }
+            return CachedKey::Hit(key);
+        }
+        self.resolve(addr, now_secs())
+    }
+
+    fn cached_len(&self) -> usize {
+        self.authority.lock().map(|c| c.len()).unwrap_or(0)
+    }
+
+    fn lookups(&self) -> u64 {
+        self.lookups.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// Answer `504 {"error":"deadline"}` and let the handler thread exit.
+fn respond_deadline(req: tiny_http::Request, hdr: &Header, what: &str) {
+    let _ = req.respond(
+        Response::from_string(
+            json!({"error": "deadline", "detail": format!("handler deadline exceeded: {what}")})
+                .to_string(),
+        )
+        .with_header(hdr.clone())
+        .with_status_code(504),
+    );
+}
+
+/// Answer a retryable `503` for an identity lookup that has been queued but not
+/// finished yet. Never a bare 401: the caller must be able to tell "unknown yet"
+/// from "not allowed".
+fn respond_unknown(req: tiny_http::Request, hdr: &Header, endpoint: &str) {
+    let _ = req.respond(
+        Response::from_string(
+            json!({
+                "error": "unknown",
+                "reason": "account_lookup_pending",
+                "retry_after": 2,
+                "endpoint": endpoint,
+            })
+            .to_string(),
+        )
+        .with_header(hdr.clone())
+        .with_header(Header::from_bytes(&b"Retry-After"[..], &b"2"[..]).unwrap())
+        .with_status_code(503),
+    );
+}
+
+/// Run one blocking chain call under the request deadline. On expiry the handler
+/// answers `504 {"error":"deadline"}` and returns, releasing its pool slot.
+/// Yields the call's own output (so `Option<u64>` reads keep their `None`).
+macro_rules! chain_or_504 {
+    ($deadline:expr, $rt:expr, $req:expr, $hdr:expr, $what:expr, $fut:expr) => {
+        match $deadline.block($rt, $fut) {
+            Some(v) => v,
+            None => {
+                respond_deadline($req, &$hdr, $what);
+                return;
+            }
+        }
+    };
+}
+
+/// Acquire a shared mutex with the bounded wait, or answer `503 busy` instead of
+/// parking the handler thread forever.
+macro_rules! lock_or_503 {
+    ($mtx:expr, $req:expr, $hdr:expr, $what:expr) => {{
+        let what = $what;
+        match lock_bounded($mtx, LOCK_WAIT) {
+            Some(g) => g,
+            None => {
+                eprintln!(
+                    "[ap] {what}: lock busy >{}s — answering 503",
+                    LOCK_WAIT.as_secs()
+                );
+                let _ = $req.respond(
+                    Response::from_string(
+                        json!({"error": "busy", "detail": format!("{what} busy")}).to_string(),
+                    )
+                    .with_header($hdr.clone())
+                    .with_status_code(503),
+                );
+                return;
+            }
+        }
+    }};
+}
+
+/// Cap a request line for journalling (see `HandlerSlot::note_path`).
+fn truncate_request_line(line: &str) -> String {
+    const MAX: usize = 120;
+    if line.chars().count() <= MAX {
+        return line.to_string();
+    }
+    let mut out: String = line.chars().take(MAX).collect();
+    out.push('…');
+    out
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -3641,7 +3951,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Signed provider pushes (NAT'd boxes) + the 5-minute on-chain account cache
     // used to authenticate them. Survives the 5 s poll rebuild, like poll_caps.
     let push_registry: Arc<Mutex<PushRegistry>> = Arc::new(Mutex::new(PushRegistry::new()));
-    let account_auth: Arc<Mutex<AccountAuthority>> = Arc::new(Mutex::new(AccountAuthority::new()));
+    // On-chain identity, resolved on ONE background thread. Request threads only
+    // read this cache (see `AccountResolver`): a miss queues a refresh and answers
+    // a retryable 503, so no chain RPC — and no lock — ever runs on the request
+    // path (2026-11-04 leak: a `lock()` held across this RPC convoyed every
+    // poller behind one 5-minute cache miss).
+    let account_auth = AccountResolver::new({
+        let rt = rt.clone();
+        let client = client.clone();
+        move |addr: &str| rt.block_on(client.is_provider_registered(addr))
+    });
     // Replay protection for SIGNED pull requests: a per-account ring buffer of
     // already-used nonces. Shared across handler threads, like account_auth.
     let assign_replay: Arc<Mutex<gpn_agent::assign_auth::ReplayCache>> =
@@ -3740,7 +4059,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handlers_inflight: InFlight = Arc::new(Mutex::new(HashMap::new()));
     let handler_ids = Arc::new(std::sync::atomic::AtomicU64::new(1));
     let saturated = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    spawn_handler_watchdog(handlers_inflight.clone());
+    // Per-request hard deadline (2026-11-04 leak). Bounds every blocking step a
+    // handler may take; on expiry it answers 504 and releases its pool slot.
+    let handler_deadline_secs: u64 = std::env::var("GPN_HANDLER_DEADLINE_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(30);
+    spawn_handler_watchdog(
+        handlers_inflight.clone(),
+        handler_slots.clone(),
+        max_handlers,
+    );
     // Handle each request on its OWN thread. Previously the loop handled requests
     // sequentially, so a single blocking handler (e.g. POST /jobs doing a chain
     // RPC, or the OpenAI facade waiting for a job to finish) would wedge EVERY
@@ -3754,18 +4084,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ) {
             Some(s) => s,
             None => {
+                // Backpressure: refuse BEFORE spawning. The slot is acquired here
+                // in the accept loop, so a saturated pool costs one small 503
+                // write and NO thread (the pre-2026-11-04 shape; keep it that
+                // way — spawning first was what turned a stall into an fd leak).
                 let n = saturated.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                // Rate-limited (1 in 50) but always names the endpoint: a
+                // saturation report that does not say WHICH handler is the
+                // flood cannot be acted on.
                 if n % 50 == 1 {
-                    log::warn!(
-                        "[ap] {} handler threads all busy — answering 503 ({} refused so far)",
+                    eprintln!(
+                        "[ap] {} handler threads all busy — answering 503 for {} {} ({} refused so far, threads={})",
                         max_handlers,
-                        n
+                        req.method(),
+                        req.url(),
+                        n,
+                        process_thread_count()
                     );
                 }
                 let _ = req.respond(
-                    Response::from_string(json!({"error":"busy","detail":"handler pool saturated"}).to_string())
-                        .with_header(hdr.clone())
-                        .with_status_code(503),
+                    Response::from_string(
+                        json!({"error":"busy","detail":"handler pool saturated"}).to_string(),
+                    )
+                    .with_header(hdr.clone())
+                    .with_status_code(503),
                 );
                 continue;
             }
@@ -3775,7 +4117,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let registry = registry.clone();
         let poll_caps = poll_caps.clone();
         let push_registry = push_registry.clone();
-        let account_auth = account_auth.clone();
+        let account_auth = account_auth.clone(); // AccountResolver (cache-only reads)
         let assign_replay = assign_replay.clone();
         let assign_token_expected = assign_token_expected.clone();
         let reject_log = reject_log.clone();
@@ -3791,6 +4133,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let pcfg = pcfg.clone();
         std::thread::spawn(move || {
             let slot = slot;
+            // The deadline starts when the handler starts, not when it was
+            // accepted (tiny_http queues between accept and spawn).
+            let deadline = Deadline::after(handler_deadline_secs);
             let url = req.url().to_string();
             let method = req.method().clone();
             let path: Vec<&str> = url
@@ -3798,7 +4143,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .split('/')
                 .filter(|s| !s.is_empty())
                 .collect();
-            slot.note_path(format!("{} /{}", method, path.join("/")));
+            // Truncate: `/assignments?...&caps=<whole capability JSON>` is
+            // routinely 1.5 KB, and the watchdog's 60 s metrics line quotes the
+            // oldest request verbatim — one such line per minute buried the
+            // journal it is supposed to make readable.
+            slot.note_path(truncate_request_line(&format!(
+                "{} /{}",
+                method,
+                path.join("/")
+            )));
             // Refuse an oversized heartbeat from its declared length, BEFORE
             // buffering it. The registry re-checks the actual body too (a liar
             // can omit Content-Length); this only keeps the common case cheap.
@@ -3921,35 +4274,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             token: &token_hdr,
                         };
                         let now = now_secs();
-                        // Same 5-minute cache the signed heartbeat uses: a
-                        // negative answer expires sooner so a just-registered
-                        // provider is not locked out for five minutes.
-                        let mut resolve = |addr: &str| -> Option<[u8; 32]> {
-                            match account_auth.lock().unwrap().lookup(addr, now) {
+                        // ── Identity FIRST, outside every lock (2026-11-04) ──
+                        // This used to be a closure called from INSIDE
+                        // `aa::authorize` while `assign_replay` was held, so the
+                        // `is_provider_registered` RPC ran under a global mutex.
+                        // One 5-minute cache miss then stalled every poller, and
+                        // each stalled poll leaked a thread + a CLOSE-WAIT socket
+                        // until all 512 slots were gone (~35 min). Now the cache
+                        // is read with no lock held, a miss ENQUEUES a refresh on
+                        // the background thread and answers a retryable 503 — the
+                        // request thread never waits on the chain.
+                        let resolved: Option<[u8; 32]> = if creds.has_signature() {
+                            match account_auth.resolve(&account_hdr, now) {
                                 CachedKey::Hit(k) => k,
                                 CachedKey::Miss => {
-                                    let registered =
-                                        rt.block_on(client.is_provider_registered(addr));
-                                    let key = if registered {
-                                        gpn_agent::provider_heartbeat::ss58_to_pubkey(addr)
-                                    } else {
-                                        None
-                                    };
-                                    account_auth.lock().unwrap().store(addr, now, key);
-                                    key
+                                    respond_unknown(req, &hdr, "/assignments");
+                                    return;
                                 }
                             }
+                        } else {
+                            // No signature presented: the legacy token path does
+                            // not consult the chain at all, so do not require it.
+                            None
                         };
-                        let result = {
-                            let mut replay = assign_replay.lock().unwrap();
-                            aa::authorize(
+                        // Pure in-memory work under the lock now: signature
+                        // verify + nonce record. Bounded acquisition, never a
+                        // `lock()` that can park forever.
+                        let result = match lock_bounded(&assign_replay, LOCK_WAIT) {
+                            Some(mut replay) => aa::authorize(
                                 assign_auth_mode,
                                 &creds,
                                 now,
                                 &assign_token_expected,
-                                &mut resolve,
+                                // Cache-only: cannot block, cannot touch the chain.
+                                &mut |_addr: &str| resolved,
                                 &mut replay,
-                            )
+                            ),
+                            None => {
+                                eprintln!(
+                                    "[assign] replay cache busy >{}s — refusing pull",
+                                    LOCK_WAIT.as_secs()
+                                );
+                                let _ = req.respond(
+                                    Response::from_string(
+                                        json!({"error":"busy","detail":"replay cache busy"})
+                                            .to_string(),
+                                    )
+                                    .with_header(hdr.clone())
+                                    .with_status_code(503),
+                                );
+                                return;
+                            }
                         };
                         let mut refusal = result.err();
                         if refusal.is_none()
@@ -4006,13 +4381,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let wait_ms: u64 = query_param(&url, "wait")
                             .and_then(|s| s.parse().ok())
                             .unwrap_or(0)
-                            .min(25_000);
-                        let deadline =
+                            .min(25_000)
+                            // Never outlive the handler budget: the long poll
+                            // must not be the thing that holds the slot past the
+                            // request deadline.
+                            .min(
+                                deadline
+                                    .remaining()
+                                    .map(|d| d.as_millis() as u64)
+                                    .unwrap_or(0),
+                            );
+                        let poll_deadline =
                             std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
                         loop {
                             let leases =
                                 collect_leases(&assign_store, &provider, since, MAX_PULL_LEASES);
-                            if !leases.is_empty() || std::time::Instant::now() >= deadline {
+                            if !leases.is_empty() || std::time::Instant::now() >= poll_deadline {
                                 let seq = leases
                                     .iter()
                                     .filter_map(|l| l.get("job_id").and_then(|x| x.as_u64()))
@@ -4112,19 +4496,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // sooner so a just-registered provider is not locked out
                     // for five minutes.
                     let onchain = {
-                        let cached = account_auth.lock().unwrap().lookup(&claimed, now);
-                        match cached {
+                        // Cache-only, no chain call on the request thread
+                        // (2026-11-04). A miss queues the refresh and answers a
+                        // retryable 503; the provider's push loop retries in
+                        // ~10 s. Previously this was `rt.block_on(...)` inline:
+                        // a dropped jsonrpsee oneshot hung the handler forever
+                        // and every later push piled up behind it.
+                        match account_auth.resolve(&claimed, now) {
                             CachedKey::Hit(k) => k,
                             CachedKey::Miss => {
-                                let registered =
-                                    rt.block_on(client.is_provider_registered(&claimed));
-                                let key = if registered {
-                                    gpn_agent::provider_heartbeat::ss58_to_pubkey(&claimed)
-                                } else {
-                                    None
-                                };
-                                account_auth.lock().unwrap().store(&claimed, now, key);
-                                key
+                                let _ = req.respond(
+                                    Response::from_string(
+                                        json!({
+                                            "error": "unknown",
+                                            "reason": "account_lookup_pending",
+                                            "retry_after": 2,
+                                        })
+                                        .to_string(),
+                                    )
+                                    .with_header(hdr.clone())
+                                    .with_header(
+                                        Header::from_bytes(&b"Retry-After"[..], &b"2"[..]).unwrap(),
+                                    )
+                                    .with_status_code(503),
+                                );
+                                return;
                             }
                         }
                     };
@@ -4234,11 +4630,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             });
                         }
                     }
-                    let (live, self_id) = rt.block_on(async {
-                        let live = client.system_peers().await;
-                        let me = client.system_local_peer_id().await.ok();
-                        (live, me)
-                    });
+                    let (live, self_id) =
+                        chain_or_504!(deadline, &rt, req, hdr, "GET /network", async {
+                            let live = client.system_peers().await;
+                            let me = client.system_local_peer_id().await.ok();
+                            (live, me)
+                        });
                     let ts = gpn_agent::join::iso8601(now_secs());
                     gpn_agent::network_directory::build(
                         &ts,
@@ -4689,12 +5086,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // create + route (hot wallet pays). Id comes from a process-local
                         // allocator so concurrent requests never predict the same job id.
                         // `_create_guard` serializes the create so exactly one is in flight.
-                        let _create_guard = CREATE_LOCK.lock().unwrap();
+                        let _create_guard = lock_or_503!(&CREATE_LOCK, req, hdr, "job create lock");
                         // NextJobId is the id the create will take. An UNREADABLE counter must
                         // never be treated as 0: the pre-fix silent 0 allocated job id 0,
                         // reported `next: 0` on a chain with ~6000 jobs, and mislabelled the
                         // caller's job (change-log 2026-10-20 15:1x). Refuse instead.
-                        let next_before = match rt.block_on(client.try_get_next_job_id()) {
+                        let next_before = match chain_or_504!(
+                            deadline,
+                            &rt,
+                            req,
+                            hdr,
+                            "chain NextJobId",
+                            client.try_get_next_job_id()
+                        ) {
                             Some(n) => n,
                             None => {
                                 let r = Response::from_string(
@@ -4721,20 +5125,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // time, so the process-local prediction IS the real on-chain id (the AP
                         // is the sole creator; the chain assigns ids in submit order).
                         let outcome = submit_create(&rt, &client, next_before, fast_ap, || {
-                            rt.block_on(client.create_job_fast(
-                                8192u32,
-                                75u16,
-                                1u8,
-                                0u32,
-                                150u64,
-                                "LLMInference",
-                                "Spot",
-                                onchain_rate.saturating_mul(onchain_cap as u128),
-                                onchain_rate,
-                                onchain_cap,
-                                1000,
-                                workload_hash,
-                            ))
+                            deadline
+                                .block(
+                                    &rt,
+                                    client.create_job_fast(
+                                        8192u32,
+                                        75u16,
+                                        1u8,
+                                        0u32,
+                                        150u64,
+                                        "LLMInference",
+                                        "Spot",
+                                        onchain_rate.saturating_mul(onchain_cap as u128),
+                                        onchain_rate,
+                                        onchain_cap,
+                                        1000,
+                                        workload_hash,
+                                    ),
+                                )
+                                .unwrap_or_else(|| Err("handler deadline".into()))
                         });
                         if let Some(e) = outcome.err {
                             create_err = Some(e);
@@ -4780,7 +5189,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // Same rule as POST /jobs: never advertise a job whose payload
                             // never landed (the provider would skip it and it would sit
                             // until expiry). Refund, skip the lease, tell the caller.
-                            let refunded = rt.block_on(client.fail_job_fast(id, 0)).is_ok();
+                            let refunded = chain_or_504!(
+                                deadline,
+                                &rt,
+                                req,
+                                hdr,
+                                "chain fail_job",
+                                client.fail_job_fast(id, 0)
+                            )
+                            .is_ok();
                             eprintln!(
                                 "[store] chat job #{id}: payload not persisted — not dispatched ({})",
                                 if refunded { "escrow refunded" } else { "refund pending; on-chain expiry will reclaim it" }
@@ -5345,7 +5762,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .and_then(|x| x.as_f64())
                         .filter(|p| *p > 0.0)
                         .unwrap_or(50.0);
-                    let next_before = match rt.block_on(client.try_get_next_job_id()) {
+                    let next_before = match chain_or_504!(
+                        deadline,
+                        &rt,
+                        req,
+                        hdr,
+                        "chain NextJobId",
+                        client.try_get_next_job_id()
+                    ) {
                         Some(n) => n,
                         None => {
                             let _ = req.respond(
@@ -5379,22 +5803,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     };
                     let escrow = (price_gpn * 1e12) as u128;
                     let fast_ap = fast_ap_enabled();
-                    let _create_guard = CREATE_LOCK.lock().unwrap();
+                    let _create_guard = lock_or_503!(&CREATE_LOCK, req, hdr, "job create lock");
                     let outcome = submit_create(&rt, &client, next_before, fast_ap, || {
-                        rt.block_on(client.create_job_fast(
-                            0,
-                            75,
-                            1,
-                            0,
-                            150,
-                            "FineTuning",
-                            "Spot",
-                            escrow,
-                            0,
-                            0,
-                            1000,
-                            workload_hash,
-                        ))
+                        deadline
+                            .block(
+                                &rt,
+                                client.create_job_fast(
+                                    0,
+                                    75,
+                                    1,
+                                    0,
+                                    150,
+                                    "FineTuning",
+                                    "Spot",
+                                    escrow,
+                                    0,
+                                    0,
+                                    1000,
+                                    workload_hash,
+                                ),
+                            )
+                            .unwrap_or_else(|| Err("handler deadline".into()))
                     });
                     drop(_create_guard);
                     if !outcome.created {
@@ -5418,7 +5847,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if !persist_job_payload(&store, id, &job) {
                         // Same rule as every other create: never advertise an
                         // unrunnable job — refund and say so.
-                        let refunded = rt.block_on(client.fail_job_fast(id, 0)).is_ok();
+                        let refunded = chain_or_504!(
+                            deadline,
+                            &rt,
+                            req,
+                            hdr,
+                            "chain fail_job",
+                            client.fail_job_fast(id, 0)
+                        )
+                        .is_ok();
                         eprintln!(
                             "[store] finetune #{id}: payload not persisted — not dispatched ({})",
                             if refunded {
@@ -5512,7 +5949,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     };
                     let off = gpn_agent::llm::get_job(idn).filter(|j| j.kind == "finetune");
-                    let chain = rt.block_on(client.get_job_state(idn));
+                    let chain = chain_or_504!(
+                        deadline,
+                        &rt,
+                        req,
+                        hdr,
+                        "chain JobState",
+                        client.get_job_state(idn)
+                    );
                     let chain_state = chain.as_ref().map(|(s, _, _, _)| s.clone());
                     if off.is_none() && chain.is_none() {
                         if create_is_pending(idn) {
@@ -5917,7 +6361,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         o[0] |= 1;
                         o
                     };
-                    let next_before = match rt.block_on(client.try_get_next_job_id()) {
+                    let next_before = match chain_or_504!(
+                        deadline,
+                        &rt,
+                        req,
+                        hdr,
+                        "chain NextJobId",
+                        client.try_get_next_job_id()
+                    ) {
                         Some(n) => n,
                         None => {
                             // Never create against an unknown counter (see the
@@ -6028,22 +6479,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // low"), dropping creates outright. With `GPN_FAST_AP` on we also drop the
                     // ~1-block (~15 s, observed up to 27 s) create stall from `POST /jobs`.
                     let fast_ap = fast_ap_enabled();
-                    let _create_guard = CREATE_LOCK.lock().unwrap();
+                    let _create_guard = lock_or_503!(&CREATE_LOCK, req, hdr, "job create lock");
                     let outcome = submit_create(&rt, &client, next_before, fast_ap, || {
-                        rt.block_on(client.create_job_fast(
-                            min_vram_mb as u32,
-                            g("min_compute_capability", 75) as u16,
-                            g("min_gpu_count", 1) as u8,
-                            g("min_cuda_cores", 0) as u32,
-                            min_gflops,
-                            job_type,
-                            "Spot",
-                            escrow,
-                            job_ppt,
-                            job_mtok,
-                            1000,
-                            workload_hash,
-                        ))
+                        deadline
+                            .block(
+                                &rt,
+                                client.create_job_fast(
+                                    min_vram_mb as u32,
+                                    g("min_compute_capability", 75) as u16,
+                                    g("min_gpu_count", 1) as u8,
+                                    g("min_cuda_cores", 0) as u32,
+                                    min_gflops,
+                                    job_type,
+                                    "Spot",
+                                    escrow,
+                                    job_ppt,
+                                    job_mtok,
+                                    1000,
+                                    workload_hash,
+                                ),
+                            )
+                            .unwrap_or_else(|| Err("handler deadline".into()))
                     });
                     drop(_create_guard);
                     match outcome.created {
@@ -6102,7 +6558,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     // escrow now (requestor may fail a Pending job, finding
                                     // #12) and refuse to advertise it, instead of returning a
                                     // fake `ok:true` for a job that can only expire (#41).
-                                    let refunded = rt.block_on(client.fail_job_fast(id, 0)).is_ok();
+                                    let refunded = chain_or_504!(
+                                        deadline,
+                                        &rt,
+                                        req,
+                                        hdr,
+                                        "chain fail_job",
+                                        client.fail_job_fast(id, 0)
+                                    )
+                                    .is_ok();
                                     eprintln!(
                                         "[store] job #{id}: payload not persisted — not dispatched ({})",
                                         if refunded { "escrow refunded" } else { "refund pending; on-chain expiry will reclaim it" }
@@ -6195,14 +6659,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // `next: 0` on a chain with history is the fingerprint of an RPC
                     // outage (the counter is never reset). Say so explicitly instead of
                     // rendering an empty marketplace as fact.
-                    match rt.block_on(client.try_get_next_job_id()) {
+                    match chain_or_504!(
+                        deadline,
+                        &rt,
+                        req,
+                        hdr,
+                        "chain NextJobId",
+                        client.try_get_next_job_id()
+                    ) {
                         Some(next) => {
                             let start = next.saturating_sub(JOBS_LIST_WINDOW);
                             let mut jobs = vec![];
                             for id in start..next {
-                                if let Some((state, _p, _r, prov)) =
-                                    rt.block_on(client.get_job_state(id))
-                                {
+                                if let Some((state, _p, _r, prov)) = chain_or_504!(
+                                    deadline,
+                                    &rt,
+                                    req,
+                                    hdr,
+                                    "chain JobState",
+                                    client.get_job_state(id)
+                                ) {
                                     jobs.push(json!({"id":id,"state":state,"provider":prov}));
                                 }
                             }
@@ -6219,7 +6695,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 (Method::Get, ["job", id]) => {
                     let idn: u64 = id.parse().unwrap_or(0);
-                    match rt.block_on(client.get_job_state(idn)) {
+                    match chain_or_504!(
+                        deadline,
+                        &rt,
+                        req,
+                        hdr,
+                        "chain JobState",
+                        client.get_job_state(idn)
+                    ) {
                         Some((state, price, req_, prov)) => {
                             clear_create_pending(idn);
                             json!({"id":idn,"state":state,"price_base":price.to_string(),"requestor":req_,"provider":prov})
@@ -6467,7 +6950,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .find_map(|kv| kv.strip_prefix("model="))
                         .map(|m| m.replace("%3A", ":").replace("%3a", ":"))
                         .unwrap_or_else(|| "auto".to_string());
-                    let job_state = rt.block_on(client.get_job_state(idn));
+                    let job_state = chain_or_504!(
+                        deadline,
+                        &rt,
+                        req,
+                        hdr,
+                        "chain JobState",
+                        client.get_job_state(idn)
+                    );
                     // Item #22 build-order step 4: enforce the operator denylist over
                     // the client IP AND the job's on-chain requestor/provider.
                     if let Some(ip) = req.remote_addr().map(|a| a.ip().to_string()) {
@@ -8773,5 +9263,156 @@ mod tests {
         // The response must never mention the webhook or a filesystem path.
         let text = resp.to_string();
         assert!(!text.contains("127.0.0.1") && !text.contains("join-applications"));
+    }
+
+    // ── 2026-11-04 access-point thread leak ─────────────────────────────────
+    //
+    // Measured: 543 threads / 527 in `futex_do_wait` / 507 CLOSE-WAIT sockets /
+    // 0 in `ep_poll` → every endpoint 503 within ~35 min of a restart. Cause: a
+    // global mutex (`assign_replay`) held across `is_provider_registered`. These
+    // tests pin the shape: the request path never waits on the chain, and the
+    // OLD shape must reproduce the stranding (negative control).
+
+    /// Negative control — the pre-fix shape: one global mutex held across a
+    /// lookup that never returns. Every later caller is stranded exactly like
+    /// the `/assignments` pollers were: after a generous wait NOT ONE request
+    /// has completed. If this ever starts passing with `done > 0` early, the
+    /// test is no longer modelling the bug and the positive tests are worthless.
+    #[test]
+    fn negative_control_lock_across_lookup_strands_every_caller() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let lock = Arc::new(Mutex::new(()));
+        let release = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let (lock, release, done) = (lock.clone(), release.clone(), done.clone());
+            handles.push(std::thread::spawn(move || {
+                let _guard = lock.lock().unwrap();
+                // "the chain RPC that never returns"
+                while !release.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                done.fetch_add(1, Ordering::Relaxed);
+            }));
+        }
+        std::thread::sleep(Duration::from_millis(600));
+        assert_eq!(
+            done.load(Ordering::Relaxed),
+            0,
+            "the lock-across-lookup shape must strand every caller (negative control)"
+        );
+        release.store(true, Ordering::Relaxed);
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(done.load(Ordering::Relaxed), 8);
+    }
+
+    /// The fix, under the same injected never-returning lookup: 64 concurrent
+    /// requests all answer `Miss` (→ retryable 503) immediately, the chain is
+    /// asked by exactly ONE background thread, and an unrelated handler step
+    /// still completes. Thread count grows only by the request threads under
+    /// test — no thread is stranded waiting for identity.
+    #[test]
+    fn resolver_never_blocks_the_request_path() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let resolver = Arc::new(AccountResolver::new(move |_addr: &str| {
+            c.fetch_add(1, Ordering::Relaxed);
+            loop {
+                // Never returns — the dropped-oneshot socket of 2026-11-04.
+                std::thread::sleep(Duration::from_secs(60));
+            }
+        }));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let started = Instant::now();
+        let mut hs = Vec::new();
+        for i in 0..64 {
+            let r = resolver.clone();
+            hs.push(std::thread::spawn(move || {
+                r.resolve(&format!("peer-{i}"), now_secs())
+            }));
+        }
+        for h in hs {
+            let got = h.join().unwrap();
+            assert!(
+                matches!(got, CachedKey::Miss),
+                "an unresolved account must answer retryable-unknown, got {got:?}"
+            );
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "64 requests must not wait on the lookup (took {elapsed:?})"
+        );
+        // One refresher, not one per request.
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "one in-flight lookup at a time"
+        );
+        // A second, unrelated endpoint step is unaffected by the stuck lookup.
+        let d = Deadline::after(1);
+        assert_eq!(d.block(&rt, async { 42 }), Some(42));
+        assert!(!d.expired());
+    }
+
+    /// A cached answer (positive or negative) is served without ever asking the
+    /// chain again, so a fleet of pollers costs zero RPCs inside the TTL.
+    #[test]
+    fn resolver_serves_cache_without_touching_the_chain() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let resolver = AccountResolver::new(move |_addr: &str| {
+            c.fetch_add(1, Ordering::Relaxed);
+            true
+        });
+        let addr = gpn_agent::provider_heartbeat::pubkey_to_ss58(&[9u8; 32]);
+        resolver.refresh_now(&addr, Some(true));
+        for _ in 0..100 {
+            assert!(matches!(
+                resolver.resolve(&addr, now_secs()),
+                CachedKey::Hit(Some(_))
+            ));
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert_eq!(resolver.cached_len(), 1);
+    }
+
+    /// The deadline actually bounds a blocking call and reports expiry.
+    #[test]
+    fn deadline_bounds_a_blocking_call() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let d = Deadline::after(1);
+        let started = Instant::now();
+        // `tokio::time::sleep`, not `thread::sleep`: the deadline works on
+        // futures that yield (every subxt call does), and a future that blocks
+        // its own worker cannot be interrupted by any timeout.
+        let out: Option<()> = d.block(&rt, async {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        assert!(out.is_none(), "a call past the deadline must report expiry");
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(d.expired());
+        // An already-spent deadline does not start the work at all.
+        assert_eq!(Deadline::after(1).block(&rt, async { 1 }), Some(1));
+    }
+
+    /// Lock acquisition is bounded: a held mutex yields `None` instead of
+    /// parking the handler thread (the mechanism that leaked sockets).
+    #[test]
+    fn lock_bounded_gives_up_instead_of_parking() {
+        let m = Arc::new(Mutex::new(0u32));
+        assert!(lock_bounded(&m, Duration::from_millis(50)).is_some());
+        let held = m.lock().unwrap();
+        let started = Instant::now();
+        assert!(lock_bounded(&m, Duration::from_millis(100)).is_none());
+        assert!(started.elapsed() < Duration::from_secs(1));
+        drop(held);
+        assert!(lock_bounded(&m, Duration::from_millis(50)).is_some());
     }
 }
