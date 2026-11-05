@@ -120,6 +120,12 @@ impl ExitKind {
         code: 1,
         slug: "provider",
     };
+    /// 1 — first-run proof-of-work onboarding (spec 47) did not complete.
+    /// Non-fatal: the node still runs, but it is not a registered provider.
+    pub const ONBOARD: ExitKind = ExitKind {
+        code: 1,
+        slug: "onboard",
+    };
     /// 1 — anything else that must never exit silently.
     pub const GENERIC: ExitKind = ExitKind {
         code: 1,

@@ -87,6 +87,79 @@ the browser session so it survives clicking around the site.
 - A node installed without a code behaves exactly as before (the field is
   omitted entirely).
 
+## First run: joining with zero coins (proof-of-work entry)
+
+A brand-new node has **no GPN** — it cannot pay the attestation or registration
+fee, and on testnet the existential deposit is 0, so the account itself is
+fine. Since **spec 47** the way in is a **proof of work**: you buy your entry
+with computation instead of coins.
+
+**What happens automatically.** On a **testnet** first start, `gpn_node`
+attempts this **once**, in the background (log lines prefixed `[onboard]`):
+
+1. waits for the node's own RPC to answer (the chain node starts at the same
+   time, so this can take a minute on first boot);
+2. reads the account's state on chain — if it is already **registered** it
+   stops there, spending nothing;
+3. derives the GPU hardware fingerprint (driver UUID bound to the chain
+   genesis) and measures FP32 GFLOPS with the same benchmark `gpn_attest` uses;
+4. mines an entry proof against the **live chain difficulty**, then submits
+   **one** extrinsic — `ComputeMarketplace::register_provider_entry(pow, …)` —
+   which proves the work, records the attestation and registers the provider
+   atomically. The transaction pays **0 coins**.
+
+Auto-onboarding is **testnet/dev only**. On mainnet, `gpn_node` never
+registers anything by itself.
+
+**What `--onboard` does.** `gpn_node --onboard` (or `GPN_ONBOARD=1`) runs the
+same flow **now**, on any chain, even if the once-only marker exists. Use it to
+retry after a failure, or to onboard deliberately on a chain that is not
+named `testnet`.
+
+**The standalone command** (same code path, useful without a running
+supervisor, or on another machine):
+
+```bash
+./gpn_register --entry --endpoint ws://127.0.0.1:9944
+```
+
+It is idempotent: an already-registered account prints `already registered`
+and exits 0 without mining or submitting anything. Add `--signer`,
+`--gflops N` or `--gpu-hash <hex32>` if the wallet/benchmark should not be
+probed (see `./gpn_register --help` footer in the source).
+
+**How long the entry proof takes.** Bitcoin-style: expected work is
+`2^256 / target`. At the current testnet target (about `2^228`) that is roughly
+**2.3 × 10⁸ hashes** — typically **1–3 minutes single-threaded**, well under a
+minute on a fast multi-core box. The search reports hash rate and elapsed time
+every ~10 s. Difficulty can move while you mine; the client re-checks the
+live target before submitting and re-mines only if the found proof no longer
+clears it.
+
+**If it fails**, the reason is specific and, on the supervisor, also appended
+to `last-exit.json` (`"kind":"onboard"`):
+
+- **`entry-free-account-used`** — this account already used its one free
+  entry. Fund the wallet and use the paid path:
+  `gpn_register` (no `--entry`).
+- **`entry-free-gpu-used`** — this **GPU's fingerprint** already consumed a
+  free entry (a different account, or an earlier install). Use a different
+  physical GPU, or fund the wallet and use the paid path.
+- **`entry-gpu-already-owned`** — the fingerprint is bound to another
+  account. Use that account or a different GPU.
+- **`entry-free-per-block-cap`** — the chain allows only 2 free entries per
+  block and both are taken right now. Wait one block (~a few seconds) and
+  retry; nothing was consumed by the failed attempt.
+- **`entry-below-eligibility-floor`** — the measured GFLOPS is below the
+  network's floor (250 GFLOPS on testnet). The GPU is too weak to attest.
+- **`entry-gpu-identity-missing`** — no hardware UUID could be read
+  (`nvidia-smi` / `rocm-smi`). Install the driver tools, or pass
+  `--gpu-hash` explicitly.
+- **`entry-pow-cancelled`** — the search was interrupted; just retry.
+
+The node itself keeps running after any of these: it syncs, mines and serves.
+It is simply not a registered provider yet.
+
 ## Fast sync (skip the ~200k-block catch-up)
 
 A fresh node normally verifies ~200k blocks from peers (hours on a PoW testnet).

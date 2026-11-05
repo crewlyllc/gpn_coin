@@ -39,6 +39,7 @@ pub mod network_directory;
 pub mod network_registry;
 pub mod nodestatus;
 pub mod ollama;
+pub mod onboard;
 pub mod pricing;
 pub mod profitability;
 pub mod provider_heartbeat;

@@ -63,6 +63,29 @@ pub struct OnChainChannel {
     pub is_open: bool,
 }
 
+/// Live on-chain state for a proof-of-work entry (spec 47).
+#[derive(Clone, Debug)]
+pub struct EntryChainState {
+    /// `ComputeMarketplace::RegisteredProviders` contains the account.
+    pub registered: bool,
+    /// `GPUAttestation::Attestations` contains the account.
+    pub attested: bool,
+    /// The account already consumed its one permanent fee-free entry.
+    pub free_entry_used: bool,
+    /// The runtime-mutable per-block cap (`FreeEntryLimit`, default 2).
+    pub free_limit: u32,
+    /// Successful free entries recorded for `free_count_block`.
+    pub free_used_this_block: u32,
+    /// Block the free-entry counter was recorded for (`FreeEntryCount.0`).
+    pub free_count_block: u32,
+    /// Current head block number.
+    pub block_number: u32,
+    /// Current `GPUPoW::Difficulty` target, little-endian limbs.
+    pub difficulty: [u64; 4],
+    /// Current `GPUAttestation::AttestationChallenge`.
+    pub challenge: [u8; 32],
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AccountInfo {
     pub address: String,
@@ -507,6 +530,39 @@ impl ChainClient {
     /// (JSON-RPC, ws->http). Needed to judge feed staleness (the pallet stores
     /// `updated_at` as the block number the feed was written at). Returns
     /// `None` if the header can't be read.
+    /// Genesis hash (`chain_getBlockHash(0)`) — the value a GPU fingerprint is
+    /// bound to. `None` if the RPC cannot answer.
+    pub async fn genesis_hash(&self) -> Option<[u8; 32]> {
+        let http_url = self
+            .endpoint
+            .replace("ws://", "http://")
+            .replace("wss://", "https://");
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "chain_getBlockHash",
+            "params": [0]
+        });
+        let resp: serde_json::Value = self
+            .http
+            .post(&http_url)
+            .json(&body)
+            .send()
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        let hex = resp.get("result")?.as_str()?.trim_start_matches("0x");
+        let bytes = hex::decode(hex).ok()?;
+        if bytes.len() != 32 {
+            return None;
+        }
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&bytes);
+        Some(out)
+    }
+
     pub async fn head_block_number(&self) -> Option<u64> {
         let http_url = self
             .endpoint
@@ -2093,6 +2149,106 @@ impl ChainClient {
             .await
             .map(|x| account_id_to_string(&x));
         Some((state, price, requestor, provider))
+    }
+
+    /// Read the live state needed to plan a proof-of-work entry (spec 47).
+    ///
+    /// One read set, one answer: registered / attested / free-entry-used, the
+    /// per-block free-entry counter and cap, the current block, the live
+    /// `GPUPoW::Difficulty` target (little-endian `[u64;4]`) and the current
+    /// attestation challenge. A failure here is a *read* failure and is
+    /// returned as such — the caller must never mistake it for "not
+    /// registered" and then mine for a proof it does not need.
+    pub async fn entry_chain_state(&self, address: &str) -> Result<EntryChainState, String> {
+        let addr32 = address
+            .parse::<subxt::utils::AccountId32>()
+            .map_err(|e| format!("{address} is not a valid SS58/AccountId32 address: {e}"))?;
+        let key = (addr32.as_ref() as &[u8; 32]).to_vec();
+
+        let registered = self
+            .storage_at_head_result(&subxt::dynamic::storage(
+                "ComputeMarketplace",
+                "RegisteredProviders",
+                vec![Value::from_bytes(key.clone())],
+            ))
+            .await?
+            .is_some();
+        let attested = self
+            .storage_at_head_result(&subxt::dynamic::storage(
+                "GPUAttestation",
+                "Attestations",
+                vec![Value::from_bytes(key.clone())],
+            ))
+            .await?
+            .is_some();
+        let free_entry_used = self
+            .storage_at_head_result(&subxt::dynamic::storage(
+                "GPUAttestation",
+                "FreeEntryAccounts",
+                vec![Value::from_bytes(key)],
+            ))
+            .await?
+            .is_some();
+        let free_limit = self
+            .storage_at_head_result(&subxt::dynamic::storage(
+                "GPUAttestation",
+                "FreeEntryLimit",
+                vec![],
+            ))
+            .await?
+            .map(|v| v.as_u128().unwrap_or(0) as u32)
+            .unwrap_or(0);
+        let (free_block, free_used_this_block) = self
+            .storage_at_head_result(&subxt::dynamic::storage(
+                "GPUAttestation",
+                "FreeEntryCount",
+                vec![],
+            ))
+            .await?
+            .map(|v| {
+                use subxt::ext::scale_value::ValueDef;
+                let mut parts = Vec::new();
+                if let ValueDef::Composite(c) = &v.value {
+                    for item in c.values() {
+                        parts.push(item.as_u128().unwrap_or(0));
+                    }
+                }
+                (
+                    parts.first().copied().unwrap_or(0) as u32,
+                    parts.get(1).copied().unwrap_or(0) as u32,
+                )
+            })
+            .unwrap_or((0, 0));
+        let difficulty = self
+            .storage_at_head_result(&subxt::dynamic::storage("GPUPoW", "Difficulty", vec![]))
+            .await?
+            .map(|v| composite_limbs(&v))
+            .unwrap_or([0u64; 4]);
+        let challenge = self
+            .storage_at_head_result(&subxt::dynamic::storage(
+                "GPUAttestation",
+                "AttestationChallenge",
+                vec![],
+            ))
+            .await?
+            .map(|v| composite_to_bytes(&v, 32))
+            .unwrap_or([0u8; 32]);
+
+        Ok(EntryChainState {
+            registered,
+            attested,
+            free_entry_used,
+            free_limit,
+            free_used_this_block,
+            free_count_block: free_block,
+            block_number: self
+                .head_block_number()
+                .await
+                .map(|n| n as u32)
+                .unwrap_or(free_block),
+            difficulty,
+            challenge,
+        })
     }
 
     /// Read whether the account is a registered provider.

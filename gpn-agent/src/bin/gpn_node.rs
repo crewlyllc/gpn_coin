@@ -71,6 +71,9 @@
 
 use gpn_agent::exit_report::{self, ExitKind};
 use gpn_agent::ollama;
+use gpn_agent::onboard::{
+    EntryOutcome, EntryParams, LiveEntryChain, ProviderRequirements, SharedSealer,
+};
 use gpn_agent::update;
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -80,6 +83,9 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// Marker written (once) when an automatic first-run onboarding attempt starts.
+const ONBOARD_ATTEMPTED: &str = "onboard-attempted";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Config
@@ -3449,6 +3455,155 @@ fn enforce_ollama_gate(cfg: &Config) -> i32 {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// First-run proof-of-work onboarding (spec 47)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// True for the public **testnet** and the throwaway local dev chains.
+/// Anything else — mainnet, a custom pinned spec — must never auto-register.
+fn is_testnet_chain(chain: &str) -> bool {
+    let l = chain.trim().to_ascii_lowercase();
+    l == "dev" || l == "local" || l.contains("testnet")
+}
+
+/// Whether this start should attempt onboarding. An explicit `--onboard` /
+/// `GPN_ONBOARD=1` always wins; otherwise only a **testnet** first run (no
+/// marker yet) is auto-onboarded. Mainnet never auto-registers.
+fn should_auto_onboard(chain: &str, marker_exists: bool, explicit: bool) -> bool {
+    explicit || (is_testnet_chain(chain) && !marker_exists)
+}
+
+/// Kick off onboarding in the background: the chain node has not started yet,
+/// so the flow first waits (bounded) for its RPC.
+fn spawn_onboard(cfg: Config, explicit: bool) {
+    std::thread::Builder::new()
+        .name("gpn-onboard".into())
+        .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    asciieprintln!("[onboard] could not start the onboarding runtime: {e}");
+                    return;
+                }
+            };
+            let result = rt.block_on(onboard_flow(&cfg, explicit));
+            match result {
+                Ok(outcome) => {
+                    asciiprintln!("[onboard] {}", outcome.summary());
+                    if matches!(outcome, EntryOutcome::Registered) {
+                        asciiprintln!(
+                            "[onboard] this node is registered — it paid 0 coins and bought its \
+                             entry with computation"
+                        );
+                    }
+                }
+                Err(e) => {
+                    // A failed onboarding must never take the node down: the
+                    // node still syncs, mines and serves. It is just not a
+                    // registered provider, and the reason is recorded loudly.
+                    asciieprintln!("[onboard] ! onboarding did not complete: {e}");
+                    let report = exit_report::new_report(
+                        ExitKind::ONBOARD,
+                        &e,
+                        "gpn_register --entry  (retry manually; `gpn_node --diagnose` shows the \
+                         GPU/identity/chain state). If this account or GPU already used its free \
+                         entry, fund the wallet and use the paid registration path.",
+                    );
+                    let _ = exit_report::record_at(&exit_report::default_path(), &report);
+                }
+            }
+        })
+        .ok();
+}
+
+/// The onboarding flow shared with `gpn_register --entry`.
+async fn onboard_flow(cfg: &Config, explicit: bool) -> Result<EntryOutcome, String> {
+    let say = |m: &str| asciiprintln!("[onboard] {m}");
+
+    if !explicit {
+        // Best-effort once-only marker so a second start does not retry a test
+        // that already ran. An explicit `--onboard` always attempts.
+        let marker = cfg.base_path.join(ONBOARD_ATTEMPTED);
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if let Err(e) = std::fs::write(&marker, format!("{stamp}\n")) {
+            log::warn!("could not write {}: {e}", marker.display());
+        }
+    }
+
+    say(&format!(
+        "waiting for the chain RPC at {} (the node may still be starting; up to 15 min)…",
+        cfg.endpoint
+    ));
+    let ready = gpn_agent::chain::signer::wait_until_ready(
+        &cfg.endpoint,
+        std::time::Duration::from_secs(900),
+        std::time::Duration::from_secs(2),
+    )
+    .await;
+    if !ready.reachable {
+        return Err(format!(
+            "the chain RPC at {} never answered — the node did not start",
+            cfg.endpoint
+        ));
+    }
+    say(&format!(
+        "chain is up at block {} — checking whether this account is registered",
+        ready.head_block
+    ));
+
+    let chain = LiveEntryChain::connect(&cfg.endpoint, &cfg.signer)
+        .await
+        .map_err(|e| format!("could not connect to the chain: {e}"))?;
+    let account = chain.account()?;
+    say(&format!("account: {account}"));
+
+    let state = chain
+        .state(&account)
+        .await
+        .map_err(|e| format!("could not read chain state: {e}"))?;
+    if state.registered {
+        return Ok(EntryOutcome::AlreadyRegistered);
+    }
+
+    let genesis = chain
+        .genesis_hash()
+        .await
+        .ok_or_else(|| "the chain did not report a genesis hash".to_string())?;
+    // `cfg.gflops` is an operator override; 0 means "measure it".
+    let gflops_override = (cfg.gflops > 0).then_some(cfg.gflops);
+    say("probing this machine's GPU identity and FP32 throughput…");
+    let gpu = gpn_agent::onboard::probe_local_gpu_for_genesis(gflops_override, None, &genesis)?;
+    say(&format!(
+        "GPU: {} — {} GFLOPS, fingerprint {}",
+        gpu.gpu_name,
+        gpu.compute_gflops,
+        if gpu.weak_fingerprint {
+            "WEAK (no hardware UUID; the free entry needs a real fingerprint)"
+        } else {
+            "strong (hardware UUID)"
+        }
+    ));
+
+    let params = EntryParams {
+        challenge_response: state.challenge,
+        gpu_info_hash: gpu.gpu_info_hash,
+        gpu_count: gpu.gpu_count.max(1),
+        compute_gflops: gpu.compute_gflops,
+        requirements: ProviderRequirements::default(),
+    };
+    let miner = SharedSealer::default();
+    let mut log = |line: &str| asciiprintln!("[onboard] {line}");
+    // The explicit/auto decision is already made by the caller; both use the
+    // free entry path here.
+    Ok(gpn_agent::onboard::run_entry(&chain, &miner, &account, &params, true, &mut log).await)
+}
+
 #[tokio::main]
 async fn main() {
     env_logger::init();
@@ -3659,6 +3814,29 @@ async fn main() {
     };
     if gate_code != 0 {
         std::process::exit(gate_code);
+    }
+
+    // ── First-run proof-of-work onboarding (spec 47) ────────────────────────
+    // A fresh node has no coins: its first attestation/registration must be
+    // bought with computation. On a **testnet** first run (or an explicit
+    // `--onboard` / `GPN_ONBOARD=1`) a background thread waits for this node's
+    // RPC, then runs the same entry flow as `gpn_register --entry` exactly
+    // once. A mainnet start never auto-registers; the chain node may still be
+    // syncing, so the attempt is bounded and every step is logged.
+    {
+        let explicit_onboard =
+            argv.iter().any(|a| a == "--onboard") || env_str("GPN_ONBOARD").as_deref() == Some("1");
+        let marker_exists = cfg.base_path.join(ONBOARD_ATTEMPTED).exists();
+        let auto_first_run = is_testnet_chain(&cfg.chain) && !marker_exists;
+        if should_auto_onboard(&cfg.chain, marker_exists, explicit_onboard) {
+            if auto_first_run && !explicit_onboard {
+                asciiprintln!(
+                    "  onboarding: testnet first run — a free proof-of-work entry will be \
+                     attempted once in the background (no coins needed)"
+                );
+            }
+            spawn_onboard(cfg.clone(), explicit_onboard);
+        }
     }
 
     let specs = build_children(&cfg);
@@ -4396,6 +4574,30 @@ mod idle_cli_tests {
 
         // Resuming an active node is a no-op success, not an error.
         assert_eq!(run_control_verb(&cfg, &resume), Some(0));
+    }
+
+    #[test]
+    fn testnet_chains_are_recognised_and_mainnet_is_not() {
+        assert!(is_testnet_chain("testnet"));
+        assert!(is_testnet_chain("gpn-testnet"));
+        assert!(is_testnet_chain("/opt/gpn/testnet-spec.json"));
+        assert!(is_testnet_chain("dev"));
+        assert!(!is_testnet_chain("gpn"));
+        assert!(!is_testnet_chain("mainnet"));
+        assert!(!is_testnet_chain("/opt/gpn/mainnet-spec.json"));
+    }
+
+    #[test]
+    fn auto_onboard_is_testnet_only_and_once() {
+        // Testnet first run → attempt.
+        assert!(should_auto_onboard("testnet", false, false));
+        // Second start (marker present) → no attempt.
+        assert!(!should_auto_onboard("testnet", true, false));
+        // Mainnet never auto-registers, marker or not.
+        assert!(!should_auto_onboard("mainnet", false, false));
+        assert!(!should_auto_onboard("gpn", false, false));
+        // Explicit --onboard / GPN_ONBOARD=1 always attempts, even on mainnet.
+        assert!(should_auto_onboard("mainnet", true, true));
     }
 
     #[test]

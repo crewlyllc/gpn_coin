@@ -24,7 +24,7 @@ use subxt::tx::Signer as _;
 
 /// The runtime's current `pallet_gpu_pow::AlgorithmVersion` (see
 /// `gpn-node/runtime/src/lib.rs`). A submitted solution must carry this value.
-const ALGORITHM_VERSION: u32 = 1;
+pub const ALGORITHM_VERSION: u32 = 1;
 
 /// Configuration for the external mining engine.
 #[derive(Clone, Debug)]
@@ -249,7 +249,11 @@ fn mining_loop(cfg: MiningConfig, stop: Arc<AtomicBool>) {
 /// `mix_hash`) for the first whose `blake2(nonce, mix, version)` is below
 /// `difficulty`. Returns the seal (with `result` = the blake2 solution hash)
 /// or `None` if no nonce in this window qualifies.
-fn search_solution(
+///
+/// This is the **same sealer** the block-template loop above uses; the
+/// proof-of-work entry path (spec 47) calls it rather than re-implementing the
+/// hash search.
+pub fn search_solution(
     difficulty: &U256,
     start_nonce: u64,
     batch: usize,
@@ -268,6 +272,66 @@ fn search_solution(
         nonce = nonce.wrapping_add(1);
     }
     None
+}
+
+/// Progress sample from [`mine_entry`].
+pub struct EntryMiningProgress {
+    /// Total nonces searched so far in this run.
+    pub hashes: u64,
+    /// Wall-clock time since the search started.
+    pub elapsed: Duration,
+    /// Average search rate over the whole run (millions of hashes/second).
+    pub hashrate_mhs: f64,
+}
+
+/// Mine an **entry proof** (`EntryPow`, spec 47) against `target`.
+///
+/// Reuses [`search_solution`] — the exact sealer the block-template loop uses —
+/// so the entry proof is priced in precisely the work a block seal is, and the
+/// client cannot drift from the pallet's verification. Runs synchronously and
+/// reports progress every ~2 s; callers run it on a plain (non-async) thread.
+/// Returns `None` only when `stop` is set before a solution is found.
+pub fn mine_entry(
+    target: U256,
+    start_nonce: u64,
+    batch: usize,
+    stop: &AtomicBool,
+    mut progress: impl FnMut(&EntryMiningProgress),
+) -> Option<crate::gpu::ethash_miner::MinedSeal> {
+    let started = Instant::now();
+    let mut nonce = start_nonce;
+    let mut hashes: u64 = 0;
+    let mut last_report = Instant::now();
+
+    while !stop.load(Ordering::SeqCst) {
+        match search_solution(&target, nonce, batch, stop) {
+            Some(seal) => {
+                progress(&EntryMiningProgress {
+                    hashes,
+                    elapsed: started.elapsed(),
+                    hashrate_mhs: rate_mhs(hashes, started.elapsed()),
+                });
+                return Some(seal);
+            }
+            None => nonce = nonce.wrapping_add(batch as u64),
+        }
+        hashes = hashes.saturating_add(batch as u64);
+
+        if last_report.elapsed() >= Duration::from_secs(2) {
+            progress(&EntryMiningProgress {
+                hashes,
+                elapsed: started.elapsed(),
+                hashrate_mhs: rate_mhs(hashes, started.elapsed()),
+            });
+            last_report = Instant::now();
+        }
+    }
+    None
+}
+
+fn rate_mhs(hashes: u64, elapsed: Duration) -> f64 {
+    let secs = elapsed.as_secs_f64().max(1e-9);
+    hashes as f64 / secs / 1e6
 }
 
 /// Sleep for `ms` ms, but return early (true) if `stop` becomes set.
@@ -389,7 +453,7 @@ impl BlockingMinerRpc {
 /// `(nonce, mix_hash, algorithm_version)` with blake2-256 — **not** the ethash
 /// final "result" hash. The SCALE encoding of that 3-tuple is the 44 raw bytes
 /// `nonce_le(8) ++ mix_hash(32) ++ version_le(4)` (no length prefixes).
-fn solution_hash(nonce: u64, mix: &[u8; 32], algorithm_version: u32) -> [u8; 32] {
+pub fn solution_hash(nonce: u64, mix: &[u8; 32], algorithm_version: u32) -> [u8; 32] {
     let mut work = [0u8; 44];
     work[0..8].copy_from_slice(&nonce.to_le_bytes());
     work[8..40].copy_from_slice(mix);
@@ -401,7 +465,7 @@ fn solution_hash(nonce: u64, mix: &[u8; 32], algorithm_version: u32) -> [u8; 32]
 ///
 /// `pallet_gpu_pow::meets_difficulty` treats `difficulty` as a target and
 /// requires `blake2(nonce, mix, version) < difficulty` (higher = easier).
-fn meets_target(nonce: u64, mix: &[u8; 32], algorithm_version: u32, difficulty: &U256) -> bool {
+pub fn meets_target(nonce: u64, mix: &[u8; 32], algorithm_version: u32, difficulty: &U256) -> bool {
     let h = solution_hash(nonce, mix, algorithm_version);
     U256::from_little_endian(&h) < *difficulty
 }
