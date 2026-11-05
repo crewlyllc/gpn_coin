@@ -1,6 +1,6 @@
 [package]
 name = "gpn-agent"
-version = "0.3.20"
+version = "0.3.21"
 edition = "2021"
 description = "GPU Node Agent for GPN Network - manages mining, compute, and staking modes"
 
