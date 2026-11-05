@@ -392,7 +392,14 @@ REM  operator actually sees. report-exit.ps1 reads ~/.gpn/last-exit.json, writes
 REM  the same text to the log, and stops this loop after the SAME failure 3
 REM  times in 10 minutes (an endless restart loop is its own silent failure).
 :run
-powershell -NoProfile -ExecutionPolicy Bypass -Command "& '%GPN_BIN%\gpn_node.exe' *>&1 | Tee-Object -FilePath '__LOG__' -Append; exit $LASTEXITCODE"
+REM  Run the node DIRECTLY -- no PowerShell wrapper, no pipeline.
+REM  The wrapper (`powershell -Command "& node *>&1 | Tee-Object"`) exits 1
+REM  BEFORE the node starts whenever the launcher is spawned without a console
+REM  (installer's Win32_Process.Create, scheduled task), and the operator then
+REM  sees only "the node exited 1 without writing a reason" -- the node never
+REM  ran. Reported on box 4, 2026-11-05: identical command works from an
+REM  interactive shell, fails when detached.
+"%GPN_BIN%\gpn_node.exe" >> "__LOG__" 2>&1
 set "RC=%ERRORLEVEL%"
 if "%RC%"=="0" goto :done
 powershell -NoProfile -ExecutionPolicy Bypass -File "__REPORT__" -ExitCode %RC% -Log "__LOG__"
