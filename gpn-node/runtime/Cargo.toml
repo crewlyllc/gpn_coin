@@ -66,6 +66,10 @@ testnet-no-stake = []
 # running a pre-upgrade agent (legacy model+VRAM digest) keeps attesting while
 # the fleet rolls forward. Mainnet default is `true`.
 testnet-lenient-identity = []
+# Testnet-only (spec 47): `ExistentialDeposit = 0` so a fresh, zero-balance
+# account can exist to receive a proof-of-work entry. Mainnet (feature off)
+# keeps the 1 GPN ED. Chain-parameter decision, not permanent.
+testnet-zero-ed = ["pallet-balances/insecure_zero_ed"]
 std = [
     "codec/std",
     "scale-info/std",

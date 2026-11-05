@@ -116,9 +116,69 @@ pub trait GPUAttestationProvider<AccountId> {
     fn benchmark_set_attestation(_who: &AccountId, _tier: AttestationTier) {}
 }
 
+/// 256-bit target, limb order matches `pallet_gpu_pow::U256`.
+pub type PowTarget = [u64; 4];
+
+/// An Ethash-style proof-of-work solution, as submitted for a **fee-free
+/// entry**. Field-for-field the same shape as `pallet_gpu_pow::EthashSolution`;
+/// it is redeclared here so this pallet does not have to depend on
+/// `pallet-gpu-pow` (which already depends on *this* crate — a cycle).
+#[derive(
+    Clone, Encode, Decode, DecodeWithMemTracking, MaxEncodedLen, PartialEq, Eq, Debug, TypeInfo,
+)]
+pub struct EntryPow {
+    pub nonce: u64,
+    pub mix_hash: [u8; 32],
+    pub solution_hash: [u8; 32],
+    pub algorithm_version: u32,
+}
+
+/// Verifier for the **entry** proof of work.
+///
+/// Implemented by `pallet-gpu-pow` (see the runtime wiring), which owns the
+/// canonical solution-hash binding and the live difficulty target. The default
+/// implementation in tests is a mock.
+pub trait EntryPowVerifier {
+    /// True iff
+    /// `solution_hash == blake2_256(encode(nonce, mix_hash, algorithm_version))`
+    /// **and** `solution_hash < entry_difficulty()`, using the chain's live
+    /// `Difficulty` target (higher target = easier, as in `pallet-gpu-pow`).
+    fn verify_entry_pow(
+        nonce: u64,
+        mix_hash: &[u8; 32],
+        solution_hash: &[u8; 32],
+        algorithm_version: u32,
+    ) -> bool;
+
+    /// The live entry-difficulty target. Exposed for event/debug reporting; the
+    /// authoritative comparison happens inside `verify_entry_pow`.
+    fn entry_difficulty() -> PowTarget;
+}
+
+/// Cross-pallet entry point used by `pallet-compute-marketplace` to make
+/// onboarding **one call**: prove work, attest, and register the provider.
+///
+/// Lives here (rather than in the marketplace) because the attestation state
+/// and the fee-free bounds are owned by this pallet, and because the
+/// marketplace already depends on this crate.
+pub trait GpuEntryProvider<AccountId> {
+    fn attest_with_pow(
+        who: &AccountId,
+        pow: &EntryPow,
+        challenge_response: [u8; 32],
+        gpu_info_hash: [u8; 32],
+        gpu_count: u8,
+        compute_gflops: u64,
+    ) -> frame_support::dispatch::DispatchResult;
+
+    /// True when `who` already consumed its one free entry.
+    fn free_entry_used(who: &AccountId) -> bool;
+}
+
 #[frame_support::pallet]
 pub mod pallet {
     use super::*;
+    use frame_support::dispatch::Pays;
     use frame_support::pallet_prelude::*;
     use frame_support::sp_runtime::traits::{AccountIdConversion, Saturating, Zero};
     use frame_support::traits::{Currency, ExistenceRequirement, StorageVersion};
@@ -176,6 +236,15 @@ pub mod pallet {
         /// keep working. Even when false, a non-zero fingerprint is still
         /// uniqueness-checked.
         type RequireGpuIdentity: Get<bool>;
+        /// Verifier for the **entry** proof of work (spec 47). Wired to
+        /// `pallet-gpu-pow` in the runtime so the existing Ethash solution
+        /// check and live difficulty target are reused verbatim — never a new
+        /// hash here.
+        type EntryPow: EntryPowVerifier;
+        /// Default cap on *successful* fee-free entries per block. Root-mutable
+        /// at runtime through `FreeEntryLimit` / `set_free_entry_limit`.
+        #[pallet::constant]
+        type MaxFreeEntriesPerBlock: Get<u32>;
     }
 
     /// Storage layout version. v1 = `GpuOwner` (spec 43, GPU identity).
@@ -245,6 +314,33 @@ pub mod pallet {
     pub type LastMissBlock<T: Config> =
         StorageMap<_, Blake2_128Concat, T::AccountId, BlockNumberFor<T>, OptionQuery>;
 
+    // ── Proof-of-work entry (spec 47) ────────────────────────────────────
+    // Bounds on the fee-free path. All four are written ONLY after a valid
+    // solution has been verified and the attestation has been recorded, so a
+    // failed call leaves no allowance consumed.
+
+    /// `(block_number, successful_free_entries_in_that_block)`. Keyed by block
+    /// so the per-block cap resets without a hook.
+    #[pallet::storage]
+    pub type FreeEntryCount<T: Config> = StorageValue<_, (BlockNumberFor<T>, u32), ValueQuery>;
+
+    /// Accounts that have ever consumed a fee-free entry (one, permanently).
+    #[pallet::storage]
+    pub type FreeEntryAccounts<T: Config> =
+        StorageMap<_, Blake2_128Concat, T::AccountId, (), OptionQuery>;
+
+    /// GPU fingerprints that have ever been used for a fee-free entry (one,
+    /// permanently, independently of `GpuOwner` so releasing the GPU on
+    /// `withdraw_stake` cannot re-open the free path).
+    #[pallet::storage]
+    pub type FreeEntryGpus<T: Config> = StorageMap<_, Blake2_128Concat, [u8; 32], (), OptionQuery>;
+
+    /// Runtime-mutable cap on successful free entries per block. Falls back to
+    /// `T::MaxFreeEntriesPerBlock` (default 2).
+    #[pallet::storage]
+    pub type FreeEntryLimit<T: Config> =
+        StorageValue<_, u32, ValueQuery, T::MaxFreeEntriesPerBlock>;
+
     // Genesis
 
     #[pallet::genesis_config]
@@ -305,6 +401,15 @@ pub mod pallet {
         ChallengeVerifierSet {
             who: T::AccountId,
         },
+        /// A fee-free entry was granted against a verified proof of work.
+        FreeEntryGranted {
+            who: T::AccountId,
+            gpu_info_hash: [u8; 32],
+        },
+        /// The per-block fee-free entry cap was changed (root-only).
+        FreeEntryLimitSet {
+            limit: u32,
+        },
     }
 
     // Errors
@@ -341,6 +446,15 @@ pub mod pallet {
         /// Attestation carries no GPU identity (zero fingerprint) while
         /// `RequireGpuIdentity` is enabled.
         GpuIdentityMissing,
+        /// The submitted entry proof of work is invalid (hash mismatch or above
+        /// the chain difficulty target).
+        InvalidEntryProof,
+        /// This account already consumed its one fee-free entry.
+        FreeEntryAccountUsed,
+        /// This GPU fingerprint already consumed a fee-free entry.
+        FreeEntryGpuUsed,
+        /// The per-block cap on fee-free entries is exhausted.
+        FreeEntryLimitReached,
     }
 
     // Hooks
@@ -409,147 +523,70 @@ pub mod pallet {
             compute_gflops: u64,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            // Staking is now OPTIONAL (carrot, not gate): a provider no longer needs a
-            // stake to attest. Real GPU verification is enforced by the mining path
-            // (seal-verified PoW) and, in phase 2, by a node-verified challenge. Staking
-            // remains available and raises the reward multiplier via the tier system.
-            // See design-verifiable-gpu-proof-2026-10-06.md.
-
-            // ── Hardware identity / uniqueness ────────────────────────────
-            // `gpu_info_hash` is a hardware fingerprint, not a model hash: it
-            // is derived from the card's driver UUID, so two accounts cannot
-            // attest from the same physical GPU. A missing (all-zero)
-            // fingerprint is rejected while `RequireGpuIdentity` is on; the
-            // zero value is never written to `GpuOwner`, so testnet's legacy
-            // records cannot collide with each other on a shared zero key.
-            let has_identity = gpu_info_hash != [0u8; 32];
-            if !has_identity && T::RequireGpuIdentity::get() {
-                return Err(Error::<T>::GpuIdentityMissing.into());
-            }
-            if has_identity {
-                if let Some(owner) = <GpuOwner<T>>::get(gpu_info_hash) {
-                    ensure!(owner == who, Error::<T>::GpuAlreadyOwned);
-                }
-            }
-
-            // Minimum GPU capability floor (item 19): a CPU/APU integrated GPU
-            // cannot attest — hence cannot earn — unless its *measured* FP32
-            // throughput clears the floor. This is checked FIRST, before any tier
-            // is assigned, so it also covers the stake-free earn path.
-            ensure!(
-                compute_gflops >= T::MinEligibilityGflops::get(),
-                Error::<T>::BelowEligibilityFloor
-            );
-
-            let mut tier = if gpu_count >= 16 {
-                AttestationTier::Gold
-            } else if gpu_count >= 4 {
-                AttestationTier::Silver
-            } else if gpu_count >= 1 {
-                AttestationTier::Bronze
-            } else {
-                return Err(Error::<T>::InvalidGPUCount.into());
-            };
-
-            // GPU count is necessary but not sufficient — the provider must also
-            // prove it can actually deliver the compute throughput for that tier.
-            // A node reporting 16 GPUs that can't muster 5000 GFLOPS is demoted.
-            if compute_gflops < tier.min_gflops() {
-                tier = AttestationTier::Unattested;
-            }
-            if tier == AttestationTier::Unattested {
-                return Err(Error::<T>::InsufficientCompute.into());
-            }
-
-            // Silver/Gold are gated behind being an active, always-on,
-            // publicly-reachable full node with sufficient rolling uptime. A big
-            // GPU box that is hidden / NAT'd / off-and-on is capped at Bronze.
-            tier = Self::apply_fullnode_gate(&who, tier);
-
-            // Only *new* submissions must prove a node-verified capacity
-            // challenge for the higher tiers (design: "only newly-gated tiers
-            // require a verified challenge"); legacy records already on-chain are
-            // left untouched so the live marketplace is not zeroed on upgrade.
-            tier = Self::apply_challenge_gate(&who, tier);
-
-            let now: u32 = frame_system::Pallet::<T>::block_number()
-                .try_into()
-                .unwrap_or(0);
-
-            let mut record = AttestationRecord {
-                submitted_at: now,
-                gpu_info_hash,
+            Self::do_submit_attestation(
+                who,
                 challenge_response,
+                gpu_info_hash,
                 gpu_count,
                 compute_gflops,
-                tier: tier.clone(),
-                missed_count: 0,
-            };
+            )
+        }
 
-            let is_new = !<Attestations<T>>::contains_key(&who);
-            // Captured BEFORE the record is overwritten below: the fingerprint
-            // this account previously claimed (to release if it has changed).
-            let prev_hash = <Attestations<T>>::get(&who).map(|r| r.gpu_info_hash);
-            // RED-TEAM 2026-10-09 (finding #23, gpu-attestation / liveness-incentive
-            // evasion): a RE-submission used to reset `missed_count` to 0 and clear
-            // `LastMissBlock`, so a provider that had gone idle could zero its miss
-            // history simply by re-submitting an attestation. Because the base
-            // (Bronze) attestation's `challenge_response` is NOT verified on-chain,
-            // that re-submission proves nothing about liveness — an offline operator
-            // could therefore dodge the `MaxMissedAttestations` slash (`check_expired`)
-            // indefinitely, defeating the periodic-liveness deterrent. Only a *fresh*
-            // attestation starts a clean miss history; a re-submission preserves the
-            // accumulated miss state, so an honest provider clears it the real way —
-            // via a confirmed liveness window in `gpn-liveness::submit_liveness`
-            // (which sets `missed_count = 0`).
-            let prior_missed = <Attestations<T>>::get(&who)
-                .map(|r| r.missed_count)
-                .unwrap_or(0);
-            record.missed_count = if is_new { 0 } else { prior_missed };
-            <Attestations<T>>::insert(&who, record);
-            // Only a *fresh* attestation starts a clean miss clock. Seed the
-            // miss-window anchor at the fresh attestation so `check_expired`'s
-            // reference is NOT the refreshable `submitted_at`: a later
-            // re-submission must not reset the window (red-team finding #26 —
-            // otherwise an idle but cheaply re-attesting staked provider never
-            // accumulates `MaxMissedAttestations` misses and dodges the slash
-            // forever). The only genuine reset is a confirmed liveness window,
-            // which calls `reset_misses` (see `AttestationLivenessSink`).
-            if is_new {
-                <LastMissBlock<T>>::insert(&who, frame_system::Pallet::<T>::block_number());
-                <AttestedProviderCount<T>>::mutate(|c| *c += 1);
+        /// **Proof-of-work entry (spec 47).** Attest with no coins, paying in
+        /// computation instead.
+        ///
+        /// With `pow = Some(solution)` the call is dispatched `Pays::No`: a
+        /// valid Ethash solution against the chain's live difficulty target
+        /// buys the entry. With `pow = None` the call is dispatched
+        /// `Pays::Yes` and behaves exactly like `submit_attestation` — a
+        /// zero-balance account is rejected for the fee, which is the proof
+        /// that the gate is real rather than a waiver.
+        ///
+        /// Free-path bounds, all enforced below: one free entry per account
+        /// ever, one per GPU fingerprint ever, at most `FreeEntryLimit` per
+        /// block, fingerprint required, and the account must not already be
+        /// attested (this is *entry*, not free re-attestation).
+        #[pallet::call_index(6)]
+        #[pallet::weight((
+            <T as Config>::WeightInfo::submit_attestation()
+                .saturating_add(T::DbWeight::get().reads_writes(5, 3)),
+            if pow.is_some() { Pays::No } else { Pays::Yes },
+        ))]
+        pub fn attest_entry(
+            origin: OriginFor<T>,
+            pow: Option<EntryPow>,
+            challenge_response: [u8; 32],
+            gpu_info_hash: [u8; 32],
+            gpu_count: u8,
+            compute_gflops: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            if let Some(proof) = pow.as_ref() {
+                Self::check_free_entry(&who, proof, &gpu_info_hash)?;
             }
-
-            // Claim the fingerprint. If the same account re-attests with a
-            // *different* one (card swapped, driver changed the UUID), release
-            // the old mapping so the previous card does not stay locked to this
-            // account forever.
-            if has_identity {
-                if let Some(prev) = prev_hash {
-                    if prev != gpu_info_hash
-                        && prev != [0u8; 32]
-                        && <GpuOwner<T>>::get(prev).as_ref() == Some(&who)
-                    {
-                        <GpuOwner<T>>::remove(prev);
-                    }
-                }
-                <GpuOwner<T>>::insert(gpu_info_hash, &who);
-            }
-
-            // Staking is optional and, when the chain's minimum is zero, it is
-            // free: no transfer happens and an explicit zero stake is recorded.
-            // A zero-stake provider is attested, registrable and eligible to
-            // serve; it simply gets no staking-pool share (`reward_weight == 0`).
-            if T::MinAttestationStake::get().is_zero() && !<ProviderStake<T>>::contains_key(&who) {
-                let zero: BalanceOf<T> = Zero::zero();
-                <ProviderStake<T>>::insert(&who, zero);
-            }
-
-            Self::deposit_event(Event::<T>::AttestationSubmitted {
-                who,
+            Self::do_submit_attestation(
+                who.clone(),
+                challenge_response,
+                gpu_info_hash,
                 gpu_count,
-                tier,
-            });
+                compute_gflops,
+            )?;
+            if let Some(proof) = pow.as_ref() {
+                // `proof` is re-verified implicitly: `check_free_entry` passed.
+                let _ = proof;
+                Self::record_free_entry(&who, &gpu_info_hash);
+            }
+            Ok(())
+        }
+
+        /// Root-only: change the per-block cap on *successful* fee-free entries.
+        /// 0 disables the free path (the plain fee-paying calls still work).
+        #[pallet::call_index(7)]
+        #[pallet::weight(T::DbWeight::get().reads_writes(0, 1))]
+        pub fn set_free_entry_limit(origin: OriginFor<T>, limit: u32) -> DispatchResult {
+            ensure_root(origin)?;
+            FreeEntryLimit::<T>::put(limit);
+            Self::deposit_event(Event::<T>::FreeEntryLimitSet { limit });
             Ok(())
         }
 
@@ -716,9 +753,241 @@ pub mod pallet {
         }
     }
 
+    impl<T: Config> Pallet<T> {
+        /// Shared attestation body (fee-paying call and PoW entry both use it).
+        fn do_submit_attestation(
+            who: T::AccountId,
+            challenge_response: [u8; 32],
+            gpu_info_hash: [u8; 32],
+            gpu_count: u8,
+            compute_gflops: u64,
+        ) -> DispatchResult {
+            // Staking is now OPTIONAL (carrot, not gate): a provider no longer needs a
+            // stake to attest. Real GPU verification is enforced by the mining path
+            // (seal-verified PoW) and, in phase 2, by a node-verified challenge. Staking
+            // remains available and raises the reward multiplier via the tier system.
+            // See design-verifiable-gpu-proof-2026-10-06.md.
+
+            // ── Hardware identity / uniqueness ────────────────────────────
+            // `gpu_info_hash` is a hardware fingerprint, not a model hash: it
+            // is derived from the card's driver UUID, so two accounts cannot
+            // attest from the same physical GPU. A missing (all-zero)
+            // fingerprint is rejected while `RequireGpuIdentity` is on; the
+            // zero value is never written to `GpuOwner`, so testnet's legacy
+            // records cannot collide with each other on a shared zero key.
+            let has_identity = gpu_info_hash != [0u8; 32];
+            if !has_identity && T::RequireGpuIdentity::get() {
+                return Err(Error::<T>::GpuIdentityMissing.into());
+            }
+            if has_identity {
+                if let Some(owner) = <GpuOwner<T>>::get(gpu_info_hash) {
+                    ensure!(owner == who, Error::<T>::GpuAlreadyOwned);
+                }
+            }
+
+            // Minimum GPU capability floor (item 19): a CPU/APU integrated GPU
+            // cannot attest — hence cannot earn — unless its *measured* FP32
+            // throughput clears the floor. This is checked FIRST, before any tier
+            // is assigned, so it also covers the stake-free earn path.
+            ensure!(
+                compute_gflops >= T::MinEligibilityGflops::get(),
+                Error::<T>::BelowEligibilityFloor
+            );
+
+            let mut tier = if gpu_count >= 16 {
+                AttestationTier::Gold
+            } else if gpu_count >= 4 {
+                AttestationTier::Silver
+            } else if gpu_count >= 1 {
+                AttestationTier::Bronze
+            } else {
+                return Err(Error::<T>::InvalidGPUCount.into());
+            };
+
+            // GPU count is necessary but not sufficient — the provider must also
+            // prove it can actually deliver the compute throughput for that tier.
+            // A node reporting 16 GPUs that can't muster 5000 GFLOPS is demoted.
+            if compute_gflops < tier.min_gflops() {
+                tier = AttestationTier::Unattested;
+            }
+            if tier == AttestationTier::Unattested {
+                return Err(Error::<T>::InsufficientCompute.into());
+            }
+
+            // Silver/Gold are gated behind being an active, always-on,
+            // publicly-reachable full node with sufficient rolling uptime. A big
+            // GPU box that is hidden / NAT'd / off-and-on is capped at Bronze.
+            tier = Self::apply_fullnode_gate(&who, tier);
+
+            // Only *new* submissions must prove a node-verified capacity
+            // challenge for the higher tiers (design: "only newly-gated tiers
+            // require a verified challenge"); legacy records already on-chain are
+            // left untouched so the live marketplace is not zeroed on upgrade.
+            tier = Self::apply_challenge_gate(&who, tier);
+
+            let now: u32 = frame_system::Pallet::<T>::block_number()
+                .try_into()
+                .unwrap_or(0);
+
+            let mut record = AttestationRecord {
+                submitted_at: now,
+                gpu_info_hash,
+                challenge_response,
+                gpu_count,
+                compute_gflops,
+                tier: tier.clone(),
+                missed_count: 0,
+            };
+
+            let is_new = !<Attestations<T>>::contains_key(&who);
+            // Captured BEFORE the record is overwritten below: the fingerprint
+            // this account previously claimed (to release if it has changed).
+            let prev_hash = <Attestations<T>>::get(&who).map(|r| r.gpu_info_hash);
+            // RED-TEAM 2026-10-09 (finding #23, gpu-attestation / liveness-incentive
+            // evasion): a RE-submission used to reset `missed_count` to 0 and clear
+            // `LastMissBlock`, so a provider that had gone idle could zero its miss
+            // history simply by re-submitting an attestation. Because the base
+            // (Bronze) attestation's `challenge_response` is NOT verified on-chain,
+            // that re-submission proves nothing about liveness — an offline operator
+            // could therefore dodge the `MaxMissedAttestations` slash (`check_expired`)
+            // indefinitely, defeating the periodic-liveness deterrent. Only a *fresh*
+            // attestation starts a clean miss history; a re-submission preserves the
+            // accumulated miss state, so an honest provider clears it the real way —
+            // via a confirmed liveness window in `gpn-liveness::submit_liveness`
+            // (which sets `missed_count = 0`).
+            let prior_missed = <Attestations<T>>::get(&who)
+                .map(|r| r.missed_count)
+                .unwrap_or(0);
+            record.missed_count = if is_new { 0 } else { prior_missed };
+            <Attestations<T>>::insert(&who, record);
+            // Only a *fresh* attestation starts a clean miss clock. Seed the
+            // miss-window anchor at the fresh attestation so `check_expired`'s
+            // reference is NOT the refreshable `submitted_at`: a later
+            // re-submission must not reset the window (red-team finding #26 —
+            // otherwise an idle but cheaply re-attesting staked provider never
+            // accumulates `MaxMissedAttestations` misses and dodges the slash
+            // forever). The only genuine reset is a confirmed liveness window,
+            // which calls `reset_misses` (see `AttestationLivenessSink`).
+            if is_new {
+                <LastMissBlock<T>>::insert(&who, frame_system::Pallet::<T>::block_number());
+                <AttestedProviderCount<T>>::mutate(|c| *c += 1);
+            }
+
+            // Claim the fingerprint. If the same account re-attests with a
+            // *different* one (card swapped, driver changed the UUID), release
+            // the old mapping so the previous card does not stay locked to this
+            // account forever.
+            if has_identity {
+                if let Some(prev) = prev_hash {
+                    if prev != gpu_info_hash
+                        && prev != [0u8; 32]
+                        && <GpuOwner<T>>::get(prev).as_ref() == Some(&who)
+                    {
+                        <GpuOwner<T>>::remove(prev);
+                    }
+                }
+                <GpuOwner<T>>::insert(gpu_info_hash, &who);
+            }
+
+            // Staking is optional and, when the chain's minimum is zero, it is
+            // free: no transfer happens and an explicit zero stake is recorded.
+            // A zero-stake provider is attested, registrable and eligible to
+            // serve; it simply gets no staking-pool share (`reward_weight == 0`).
+            if T::MinAttestationStake::get().is_zero() && !<ProviderStake<T>>::contains_key(&who) {
+                let zero: BalanceOf<T> = Zero::zero();
+                <ProviderStake<T>>::insert(&who, zero);
+            }
+
+            Self::deposit_event(Event::<T>::AttestationSubmitted {
+                who,
+                gpu_count,
+                tier,
+            });
+            Ok(())
+        }
+    }
+
     // Public helpers
 
     impl<T: Config> Pallet<T> {
+        /// Read-only validation of a fee-free entry. Everything here must pass
+        /// before a PoW-gated attestation is dispatched; the corresponding
+        /// accounting is only written by `record_free_entry` **after** the
+        /// attestation has been recorded, so a rejected call consumes nothing.
+        fn check_free_entry(
+            who: &T::AccountId,
+            pow: &EntryPow,
+            gpu_info_hash: &[u8; 32],
+        ) -> DispatchResult {
+            // Verification is delegated to `pallet-gpu-pow`: same solution
+            // hash binding, same live difficulty target. Never a new hash.
+            ensure!(
+                T::EntryPow::verify_entry_pow(
+                    pow.nonce,
+                    &pow.mix_hash,
+                    &pow.solution_hash,
+                    pow.algorithm_version,
+                ),
+                Error::<T>::InvalidEntryProof
+            );
+
+            // The free path always requires a real hardware fingerprint: it is
+            // the physical-uniqueness anchor that makes "one free entry per
+            // GPU" meaningful.
+            ensure!(*gpu_info_hash != [0u8; 32], Error::<T>::GpuIdentityMissing);
+
+            // Entry, not free re-attestation. An account that already holds a
+            // record must use the fee-paying call.
+            ensure!(
+                !<Attestations<T>>::contains_key(who),
+                Error::<T>::FreeEntryAccountUsed
+            );
+            ensure!(
+                !<FreeEntryAccounts<T>>::contains_key(who),
+                Error::<T>::FreeEntryAccountUsed
+            );
+            ensure!(
+                !<FreeEntryGpus<T>>::contains_key(gpu_info_hash),
+                Error::<T>::FreeEntryGpuUsed
+            );
+            // `GpuOwner` is released on `withdraw_stake`; `FreeEntryGpus` is
+            // permanent, so check both to make the per-GPU limit one-shot even
+            // across an unbind/rebind cycle.
+            if let Some(owner) = <GpuOwner<T>>::get(gpu_info_hash) {
+                let _ = owner;
+                return Err(Error::<T>::FreeEntryGpuUsed.into());
+            }
+
+            let limit = FreeEntryLimit::<T>::get();
+            ensure!(limit > 0, Error::<T>::FreeEntryLimitReached);
+            let (block, count) = <FreeEntryCount<T>>::get();
+            let used = if block == frame_system::Pallet::<T>::block_number() {
+                count
+            } else {
+                0
+            };
+            ensure!(used < limit, Error::<T>::FreeEntryLimitReached);
+            Ok(())
+        }
+
+        /// Commit the free-entry allowance **after** the attestation succeeded.
+        fn record_free_entry(who: &T::AccountId, gpu_info_hash: &[u8; 32]) {
+            let now = frame_system::Pallet::<T>::block_number();
+            let (block, count) = <FreeEntryCount<T>>::get();
+            let next = if block == now {
+                count.saturating_add(1)
+            } else {
+                1
+            };
+            <FreeEntryCount<T>>::put((now, next));
+            <FreeEntryAccounts<T>>::insert(who, ());
+            <FreeEntryGpus<T>>::insert(gpu_info_hash, ());
+            Self::deposit_event(Event::<T>::FreeEntryGranted {
+                who: who.clone(),
+                gpu_info_hash: *gpu_info_hash,
+            });
+        }
+
         /// Cap a hardware-claimed tier at Bronze unless the account is an active
         /// full node with sufficient rolling uptime. Bronze stays open so brand
         /// new / NAT'd / intermittent miners can still participate at entry tier;
@@ -807,6 +1076,34 @@ pub mod pallet {
             sp_io::hashing::blake2_256(&seed)
         }
     }
+
+    /// Onboarding in one call: prove work, attest, (the marketplace adds the
+    /// registration). See `crate::GpuEntryProvider`.
+    impl<T: Config> crate::GpuEntryProvider<T::AccountId> for Pallet<T> {
+        fn attest_with_pow(
+            who: &T::AccountId,
+            pow: &EntryPow,
+            challenge_response: [u8; 32],
+            gpu_info_hash: [u8; 32],
+            gpu_count: u8,
+            compute_gflops: u64,
+        ) -> DispatchResult {
+            Self::check_free_entry(who, pow, &gpu_info_hash)?;
+            Self::do_submit_attestation(
+                who.clone(),
+                challenge_response,
+                gpu_info_hash,
+                gpu_count,
+                compute_gflops,
+            )?;
+            Self::record_free_entry(who, &gpu_info_hash);
+            Ok(())
+        }
+
+        fn free_entry_used(who: &T::AccountId) -> bool {
+            <FreeEntryAccounts<T>>::contains_key(who)
+        }
+    }
 }
 
 /// Expose the pallet's attestation records through the shared trait so the
@@ -876,9 +1173,12 @@ mod tests {
 
     use crate::pallet as local_attest;
     use crate::pallet::{
-        AttestationChallenge, Attestations, AttestedProviderCount, ChallengeVerified, GpuOwner,
-        LastMissBlock, ProviderStake, TotalStaked,
+        AttestationChallenge, Attestations, AttestedProviderCount, ChallengeVerified, Error,
+        FreeEntryAccounts, FreeEntryCount, FreeEntryGpus, FreeEntryLimit, GpuOwner, LastMissBlock,
+        ProviderStake, TotalStaked,
     };
+    use crate::EntryPow;
+    use frame_support::dispatch::DispatchResult;
 
     type Block = frame_system::mocking::MockBlock<Test>;
     type Balance = u128;
@@ -938,6 +1238,7 @@ mod tests {
         pub const TestAttestInterval: u64 = 10;
         pub const TestMaxAge: u64 = 50;
         pub const TestMaxMissed: u32 = 3;
+        pub const TestMaxFreeEntries: u32 = 2;
         /// Low floor in tests so the many tier/count cases below stay valid; the
         /// dedicated floor test uses a value under it.
         pub const TestMinEligibilityGflops: u64 = 50;
@@ -986,6 +1287,50 @@ mod tests {
         }
     }
 
+    // ── Mock entry PoW (spec 47) ─────────────────────────────────────────
+    // Real solution-hash binding + target comparison (same formula as
+    // `pallet-gpu-pow`), with a thread-local target so each test can choose
+    // "easy" (mineable in a loop) or "impossible" (zero target).
+    thread_local! {
+        pub static MOCK_POW_TARGET: Cell<[u64; 4]> = Cell::new([0, 0, 0, u64::MAX]);
+    }
+
+    pub struct TestEntryPow;
+    impl crate::EntryPowVerifier for TestEntryPow {
+        fn verify_entry_pow(
+            nonce: u64,
+            mix_hash: &[u8; 32],
+            solution_hash: &[u8; 32],
+            algorithm_version: u32,
+        ) -> bool {
+            if algorithm_version != 1 {
+                return false;
+            }
+            let expected =
+                sp_io::hashing::blake2_256(&(nonce, *mix_hash, algorithm_version).encode());
+            if expected != *solution_hash {
+                return false;
+            }
+            let h = [
+                u64::from_le_bytes(solution_hash[0..8].try_into().unwrap()),
+                u64::from_le_bytes(solution_hash[8..16].try_into().unwrap()),
+                u64::from_le_bytes(solution_hash[16..24].try_into().unwrap()),
+                u64::from_le_bytes(solution_hash[24..32].try_into().unwrap()),
+            ];
+            let target = MOCK_POW_TARGET.with(|c| c.get());
+            for i in (0..4).rev() {
+                if h[i] != target[i] {
+                    return h[i] < target[i];
+                }
+            }
+            false
+        }
+
+        fn entry_difficulty() -> crate::PowTarget {
+            MOCK_POW_TARGET.with(|c| c.get())
+        }
+    }
+
     impl crate::pallet::Config for Test {
         type WeightInfo = ();
         type RuntimeEvent = RuntimeEvent;
@@ -1001,6 +1346,8 @@ mod tests {
         type SilverUptimeBps = TestSilverUptime;
         type GoldUptimeBps = TestGoldUptime;
         type ChallengeVerifier = TestChallengeVerifier;
+        type EntryPow = TestEntryPow;
+        type MaxFreeEntriesPerBlock = TestMaxFreeEntries;
     }
 
     const ALICE: u64 = 1;
@@ -1040,6 +1387,7 @@ mod tests {
         MOCK_UPTIME.with(|c| c.set(10_000));
         MOCK_REQUIRE_IDENTITY.with(|c| c.set(true));
         MOCK_MIN_STAKE.with(|c| c.set(100));
+        MOCK_POW_TARGET.with(|c| c.set([0, 0, 0, u64::MAX]));
         ext.execute_with(|| {
             let cfg = crate::pallet::GenesisConfig::<Test> {
                 initial_challenge: INITIAL_CHALLENGE,
@@ -2187,6 +2535,211 @@ mod tests {
             AttestPallet::check_expired(RuntimeOrigin::signed(BOB), ALICE).unwrap();
             assert_eq!(ProviderStake::<Test>::get(ALICE), Some(0));
             assert_eq!(TotalStaked::<Test>::get(), 0);
+        });
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Proof-of-work entry (spec 47)
+    // ═════════════════════════════════════════════════════════════════════
+
+    const FRESH: u64 = 7; // deliberately NOT endowed in `new_test_ext`
+    const FRESH_GPU: [u8; 32] = [0xF7u8; 32];
+
+    fn entry_pow(nonce: u64) -> EntryPow {
+        let mix_hash = [9u8; 32];
+        let algorithm_version = 1u32;
+        let solution_hash =
+            sp_io::hashing::blake2_256(&(nonce, mix_hash, algorithm_version).encode());
+        EntryPow {
+            nonce,
+            mix_hash,
+            solution_hash,
+            algorithm_version,
+        }
+    }
+
+    fn free_attest(who: u64, fingerprint: [u8; 32]) -> DispatchResult {
+        AttestPallet::attest_entry(
+            RuntimeOrigin::signed(who),
+            Some(entry_pow(0)),
+            [1u8; 32],
+            fingerprint,
+            1,
+            10_000,
+        )
+    }
+
+    #[test]
+    fn test_free_entry_zero_balance_attests() {
+        new_test_ext().execute_with(|| {
+            // The account does not exist and holds nothing.
+            assert_eq!(Balances::free_balance(FRESH), 0);
+            assert!(!frame_system::Account::<Test>::contains_key(FRESH));
+
+            free_attest(FRESH, FRESH_GPU).unwrap();
+
+            assert!(Attestations::<Test>::contains_key(FRESH));
+            assert_eq!(GpuOwner::<Test>::get(FRESH_GPU), Some(FRESH));
+            assert!(FreeEntryAccounts::<Test>::contains_key(FRESH));
+            assert!(FreeEntryGpus::<Test>::contains_key(FRESH_GPU));
+            assert_eq!(FreeEntryCount::<Test>::get(), (1, 1));
+            // Still zero balance: the entry was paid in computation only.
+            assert_eq!(Balances::free_balance(FRESH), 0);
+        });
+    }
+
+    #[test]
+    fn test_free_entry_requires_valid_solution_hash() {
+        new_test_ext().execute_with(|| {
+            let mut bad = entry_pow(0);
+            bad.solution_hash = [0xAB; 32];
+            let err = AttestPallet::attest_entry(
+                RuntimeOrigin::signed(FRESH),
+                Some(bad),
+                [1u8; 32],
+                FRESH_GPU,
+                1,
+                10_000,
+            )
+            .unwrap_err();
+            assert_eq!(err, Error::<Test>::InvalidEntryProof.into());
+            assert!(!Attestations::<Test>::contains_key(FRESH));
+            assert!(!FreeEntryAccounts::<Test>::contains_key(FRESH));
+        });
+    }
+
+    #[test]
+    fn test_free_entry_insufficient_difficulty_rejected() {
+        new_test_ext().execute_with(|| {
+            // Zero target: no hash can be below it ⇒ real difficulty gate.
+            MOCK_POW_TARGET.with(|c| c.set([0u64; 4]));
+            let err = free_attest(FRESH, FRESH_GPU).unwrap_err();
+            assert_eq!(err, Error::<Test>::InvalidEntryProof.into());
+            assert!(!Attestations::<Test>::contains_key(FRESH));
+        });
+    }
+
+    #[test]
+    fn test_free_entry_wrong_algorithm_version_rejected() {
+        new_test_ext().execute_with(|| {
+            let mut bad = entry_pow(0);
+            bad.algorithm_version = 2;
+            let err = AttestPallet::attest_entry(
+                RuntimeOrigin::signed(FRESH),
+                Some(bad),
+                [1u8; 32],
+                FRESH_GPU,
+                1,
+                10_000,
+            )
+            .unwrap_err();
+            assert_eq!(err, Error::<Test>::InvalidEntryProof.into());
+        });
+    }
+
+    #[test]
+    fn test_free_entry_requires_fingerprint() {
+        new_test_ext().execute_with(|| {
+            let err = free_attest(FRESH, [0u8; 32]).unwrap_err();
+            assert_eq!(err, Error::<Test>::GpuIdentityMissing.into());
+        });
+    }
+
+    #[test]
+    fn test_second_free_entry_same_account_rejected() {
+        new_test_ext().execute_with(|| {
+            free_attest(FRESH, FRESH_GPU).unwrap();
+            // Different GPU, same account: still no second free entry.
+            let err = free_attest(FRESH, [0xF8u8; 32]).unwrap_err();
+            assert_eq!(err, Error::<Test>::FreeEntryAccountUsed.into());
+        });
+    }
+
+    #[test]
+    fn test_duplicate_fingerprint_rejected_on_free_path() {
+        new_test_ext().execute_with(|| {
+            free_attest(FRESH, FRESH_GPU).unwrap();
+            // A second account on the same physical GPU: negative control.
+            let err = free_attest(8, FRESH_GPU).unwrap_err();
+            assert_eq!(err, Error::<Test>::FreeEntryGpuUsed.into());
+            // And the plain call still reports GpuAlreadyOwned.
+            let err = AttestPallet::submit_attestation(
+                RuntimeOrigin::signed(8),
+                [1u8; 32],
+                FRESH_GPU,
+                1,
+                10_000,
+            )
+            .unwrap_err();
+            assert_eq!(err, Error::<Test>::GpuAlreadyOwned.into());
+        });
+    }
+
+    #[test]
+    fn test_free_entry_per_block_limit() {
+        new_test_ext().execute_with(|| {
+            assert_eq!(FreeEntryLimit::<Test>::get(), 2);
+            free_attest(7, [0xF7u8; 32]).unwrap();
+            free_attest(8, [0xF8u8; 32]).unwrap();
+            // Third in the same block: rejected even with a valid proof.
+            let err = free_attest(9, [0xF9u8; 32]).unwrap_err();
+            assert_eq!(err, Error::<Test>::FreeEntryLimitReached.into());
+            // Next block: the cap resets.
+            System::set_block_number(2);
+            free_attest(9, [0xF9u8; 32]).unwrap();
+            assert_eq!(FreeEntryCount::<Test>::get(), (2, 1));
+        });
+    }
+
+    #[test]
+    fn test_free_entry_limit_zero_disables_path() {
+        new_test_ext().execute_with(|| {
+            AttestPallet::set_free_entry_limit(RuntimeOrigin::root(), 0).unwrap();
+            let err = free_attest(FRESH, FRESH_GPU).unwrap_err();
+            assert_eq!(err, Error::<Test>::FreeEntryLimitReached.into());
+        });
+    }
+
+    #[test]
+    fn test_attest_entry_without_pow_skips_free_bounds() {
+        new_test_ext().execute_with(|| {
+            // No proof ⇒ the plain (fee-paying) path: dispatch itself succeeds,
+            // no free allowance is consumed, and the fee gate lives in the
+            // runtime transaction-payment test.
+            AttestPallet::attest_entry(
+                RuntimeOrigin::signed(FRESH),
+                None,
+                [1u8; 32],
+                FRESH_GPU,
+                1,
+                10_000,
+            )
+            .unwrap();
+            assert!(Attestations::<Test>::contains_key(FRESH));
+            assert!(!FreeEntryAccounts::<Test>::contains_key(FRESH));
+            assert_eq!(FreeEntryCount::<Test>::get(), (0, 0));
+            // The account can still use its one free entry later? No: it is
+            // already attested, so the free path refuses re-attestation.
+            let err = free_attest(FRESH, [0xFAu8; 32]).unwrap_err();
+            assert_eq!(err, Error::<Test>::FreeEntryAccountUsed.into());
+        });
+    }
+
+    #[test]
+    fn test_gpu_entry_provider_one_call() {
+        new_test_ext().execute_with(|| {
+            <AttestPallet as crate::GpuEntryProvider<u64>>::attest_with_pow(
+                &FRESH,
+                &entry_pow(0),
+                [1u8; 32],
+                FRESH_GPU,
+                1,
+                10_000,
+            )
+            .unwrap();
+            assert!(Attestations::<Test>::contains_key(FRESH));
+            assert!(<AttestPallet as crate::GpuEntryProvider<u64>>::free_entry_used(&FRESH));
+            assert!(!<AttestPallet as crate::GpuEntryProvider<u64>>::free_entry_used(&8));
         });
     }
 }

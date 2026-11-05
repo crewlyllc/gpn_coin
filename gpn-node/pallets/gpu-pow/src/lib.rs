@@ -13,10 +13,9 @@ use codec::{Decode, DecodeWithMemTracking, Encode};
 use core::fmt::Debug;
 use scale_info::TypeInfo;
 
-use sp_runtime::SaturatedConversion;
-
 #[cfg(feature = "std")]
 use serde::{Deserialize, Serialize};
+use sp_runtime::SaturatedConversion;
 
 pub use pallet::*;
 use pallet_gpu_attestation::GPUAttestationProvider;
@@ -507,7 +506,7 @@ pub mod pallet {
             clamped
         }
 
-        fn compute_solution_hash(solution: &EthashSolution) -> [u8; 32] {
+        pub(crate) fn compute_solution_hash(solution: &EthashSolution) -> [u8; 32] {
             // Hash only the proof-relevant fields (exclude solution_hash to avoid circular dependency)
             let work_data = (
                 solution.nonce,
@@ -634,6 +633,38 @@ pub mod pallet {
                 network_hashrate_estimate: 0,
             }
         }
+    }
+}
+
+/// Entry-proof verifier (spec 47): the *same* solution-hash binding and the
+/// *same* live difficulty target used for block seals. Nothing new is hashed
+/// here — `pallet-gpu-attestation` calls this so a fee-free entry is priced in
+/// exactly the work a block is priced in.
+impl<T: Config> pallet_gpu_attestation::EntryPowVerifier for Pallet<T> {
+    fn verify_entry_pow(
+        nonce: u64,
+        mix_hash: &[u8; 32],
+        solution_hash: &[u8; 32],
+        algorithm_version: u32,
+    ) -> bool {
+        use frame_support::traits::Get as _;
+        if algorithm_version != T::AlgorithmVersion::get() {
+            return false;
+        }
+        let solution = EthashSolution {
+            nonce,
+            mix_hash: *mix_hash,
+            solution_hash: *solution_hash,
+            algorithm_version,
+        };
+        if Self::compute_solution_hash(&solution) != *solution_hash {
+            return false;
+        }
+        Self::meets_difficulty(solution_hash, &<Difficulty<T>>::get())
+    }
+
+    fn entry_difficulty() -> U256 {
+        <Difficulty<T>>::get()
     }
 }
 

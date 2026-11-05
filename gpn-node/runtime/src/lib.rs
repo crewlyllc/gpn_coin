@@ -35,7 +35,7 @@ use frame_support::{
     construct_runtime, derive_impl,
     dispatch::DispatchClass,
     parameter_types,
-    traits::{ConstU128, ConstU16, ConstU32, ConstU64, ConstU8, EitherOfDiverse, Everything},
+    traits::{ConstU16, ConstU32, ConstU64, ConstU8, EitherOfDiverse, Everything},
     weights::{constants::WEIGHT_REF_TIME_PER_SECOND, IdentityFee, Weight},
     PalletId,
 };
@@ -123,7 +123,7 @@ pub const VERSION: sp_version::RuntimeVersion = sp_version::RuntimeVersion {
     spec_name: create_runtime_str!("gpn"),
     impl_name: create_runtime_str!("gpn"),
     authoring_version: 1,
-    spec_version: 46,
+    spec_version: 47,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 1,
@@ -241,7 +241,7 @@ impl pallet_balances::Config for Runtime {
     type Balance = Balance;
     type DustRemoval = ();
     type RuntimeEvent = RuntimeEvent;
-    type ExistentialDeposit = ConstU128<1_000_000_000_000>; // 1 GPN in smallest unit
+    type ExistentialDeposit = ExistentialDeposit;
     type AccountStore = System;
     type WeightInfo = ();
     type MaxLocks = ConstU32<50>;
@@ -543,7 +543,18 @@ pub const RUNTIME_REQUIRE_GPU_IDENTITY: bool = true;
 pub const RUNTIME_MIN_ATTESTATION_STAKE: Balance = 0;
 
 parameter_types! {
+    /// Existential deposit (spec 47).
+    ///
+    /// Testnet builds compiled with `testnet-zero-ed` set this to **0** so a
+    /// fresh, unfunded machine can exist as an account long enough to submit
+    /// its proof-of-work entry. Mainnet (feature off) keeps 1 GPN. This is a
+    /// chain-parameter decision, reversible without touching code.
+    pub const ExistentialDeposit: Balance =
+        if cfg!(feature = "testnet-zero-ed") { 0 } else { 1_000_000_000_000 };
     pub const MinAttestationStake: Balance = RUNTIME_MIN_ATTESTATION_STAKE;
+    /// Cap on *successful* fee-free PoW entries per block (spec 47). Root can
+    /// change it at runtime via `GPUAttestation.set_free_entry_limit`.
+    pub const MaxFreeEntriesPerBlock: u32 = 2;
     pub const RequireGpuIdentity: bool = RUNTIME_REQUIRE_GPU_IDENTITY;
     pub const AttestationInterval: BlockNumber = 3600; // ~15 hours at 15s blocks
     pub const MaxAttestationAge: BlockNumber = 14400; // ~60 hours
@@ -592,6 +603,10 @@ impl pallet_gpu_attestation::Config for Runtime {
     type ChallengeVerifier = ChallengeVerifierAccount;
     // Benchmark-derived weights (workplan item 9).
     type WeightInfo = pallet_gpu_attestation::weights::SubstrateWeight<Runtime>;
+    // Proof-of-work entry (spec 47): reuse pallet-gpu-pow's Ethash solution
+    // check and live difficulty target verbatim.
+    type EntryPow = GPUPoW;
+    type MaxFreeEntriesPerBlock = MaxFreeEntriesPerBlock;
 }
 
 parameter_types! {
@@ -687,6 +702,9 @@ impl pallet_compute_marketplace::Config for Runtime {
     // over a channel-settlement state so the chain stays the open/close/settle
     // root of trust (per-job payments stay off-chain).
     type ChannelAuth = Sr25519ChannelAuth;
+    // Proof-of-work onboarding (spec 47): one fee-free call proves work, attests
+    // and registers the provider.
+    type GpuEntry = GPUAttestation;
 }
 
 /// Channel-settlement signature verifier: sr25519 over the domain-separated

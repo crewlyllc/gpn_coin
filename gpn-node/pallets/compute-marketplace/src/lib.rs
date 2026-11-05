@@ -203,11 +203,13 @@ pub trait ChannelSignatureVerifier<AccountId> {
 #[frame_support::pallet]
 pub mod pallet {
     use super::*;
+    use frame_support::dispatch::Pays;
     use frame_support::pallet_prelude::*;
     use frame_support::sp_runtime::traits::{AccountIdConversion, Saturating, Zero};
     use frame_support::traits::{Currency, ExistenceRequirement};
     use frame_system::pallet_prelude::*;
     use pallet_gpn_token::FeeSinkProvider;
+    use pallet_gpu_attestation::GpuEntryProvider;
     use sp_std::vec::Vec;
 
     pub type BalanceOf<T> =
@@ -279,6 +281,9 @@ pub mod pallet {
         /// verifies a party's authorization signature over a channel-settlement
         /// state so the chain stays the root of trust for open/close/settle.
         type ChannelAuth: ChannelSignatureVerifier<Self::AccountId>;
+        /// PoW-gated onboarding (spec 47): proves work, attests and registers in
+        /// one fee-free call. Wired to `pallet-gpu-attestation` in the runtime.
+        type GpuEntry: pallet_gpu_attestation::GpuEntryProvider<Self::AccountId>;
     }
 
     #[pallet::pallet]
@@ -639,6 +644,52 @@ pub mod pallet {
                 !<RegisteredProviders<T>>::contains_key(&who),
                 Error::<T>::ProviderAlreadyRegistered
             );
+            <RegisteredProviders<T>>::insert(&who, requirements);
+            Self::deposit_event(Event::<T>::ProviderRegistered { who });
+            Ok(())
+        }
+
+        /// **Proof-of-work onboarding (spec 47) — one call, no coins.**
+        ///
+        /// With `pow = Some(solution)` this is dispatched `Pays::No`: the caller
+        /// pays in computation, the attestation is recorded, and the provider is
+        /// registered — a fresh zero-balance machine joins in a single
+        /// extrinsic. With `pow = None` it is `Pays::Yes` like any other call.
+        ///
+        /// All free-path bounds (one per account, one per fingerprint, N per
+        /// block, live-difficulty PoW) are enforced by `pallet-gpu-attestation`
+        /// via `GpuEntry::attest_with_pow`; the registration is written only
+        /// after that succeeds.
+        #[pallet::call_index(19)]
+        #[pallet::weight((
+            <T as Config>::WeightInfo::register_provider()
+                .saturating_add(T::DbWeight::get().reads_writes(6, 4)),
+            if pow.is_some() { Pays::No } else { Pays::Yes },
+        ))]
+        pub fn register_provider_entry(
+            origin: OriginFor<T>,
+            pow: Option<pallet_gpu_attestation::EntryPow>,
+            challenge_response: [u8; 32],
+            gpu_info_hash: [u8; 32],
+            gpu_count: u8,
+            compute_gflops: u64,
+            requirements: GPURequirements,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            ensure!(
+                !<RegisteredProviders<T>>::contains_key(&who),
+                Error::<T>::ProviderAlreadyRegistered
+            );
+            if let Some(proof) = pow.as_ref() {
+                T::GpuEntry::attest_with_pow(
+                    &who,
+                    proof,
+                    challenge_response,
+                    gpu_info_hash,
+                    gpu_count,
+                    compute_gflops,
+                )?;
+            }
             <RegisteredProviders<T>>::insert(&who, requirements);
             Self::deposit_event(Event::<T>::ProviderRegistered { who });
             Ok(())
@@ -2136,6 +2187,32 @@ mod tests {
         // Test fee sink: a dedicated account (99) that collects marketplace fees.
         type FeeSink = MockFeeSink;
         type ChannelAuth = MockChannelAuth;
+        type GpuEntry = MockGpuEntry;
+    }
+
+    // Test-only PoW-entry provider: records the (account, fingerprint) it was
+    // asked to attest so the marketplace can prove the combined call delegates
+    // the work-proof + identity to the attestation pallet before registering.
+    thread_local! {
+        static MOCK_ENTRY: std::cell::RefCell<Option<(u64, [u8; 32])>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    pub struct MockGpuEntry;
+    impl pallet_gpu_attestation::GpuEntryProvider<u64> for MockGpuEntry {
+        fn attest_with_pow(
+            who: &u64,
+            _pow: &pallet_gpu_attestation::EntryPow,
+            _challenge_response: [u8; 32],
+            gpu_info_hash: [u8; 32],
+            _gpu_count: u8,
+            _compute_gflops: u64,
+        ) -> frame_support::dispatch::DispatchResult {
+            MOCK_ENTRY.with(|c| *c.borrow_mut() = Some((*who, gpu_info_hash)));
+            Ok(())
+        }
+        fn free_entry_used(_who: &u64) -> bool {
+            MOCK_ENTRY.with(|c| c.borrow().is_some())
+        }
     }
 
     // Test-only channel signature verifier backed by REAL sr25519 keys. Each
@@ -2312,6 +2389,77 @@ mod tests {
             // Duplicate registration fails
             let dup = MarketPallet::register_provider(RuntimeOrigin::signed(BOB), default_reqs());
             assert_eq!(dup, Err(Error::<Test>::ProviderAlreadyRegistered.into()));
+        });
+    }
+
+    // ── Proof-of-work onboarding (spec 47) ─────────────────────────────
+    fn sample_pow() -> pallet_gpu_attestation::EntryPow {
+        pallet_gpu_attestation::EntryPow {
+            nonce: 0,
+            mix_hash: [1u8; 32],
+            solution_hash: [2u8; 32],
+            algorithm_version: 1,
+        }
+    }
+
+    #[test]
+    fn test_register_provider_entry_with_pow_is_one_call() {
+        new_test_ext().execute_with(|| {
+            MOCK_ENTRY.with(|c| *c.borrow_mut() = None);
+            MarketPallet::register_provider_entry(
+                RuntimeOrigin::signed(BOB),
+                Some(sample_pow()),
+                [3u8; 32],
+                [4u8; 32],
+                1,
+                10_000,
+                default_reqs(),
+            )
+            .unwrap();
+            // Registered in the same call…
+            assert!(RegisteredProviders::<Test>::contains_key(BOB));
+            // …and the work proof + identity were delegated to attestation.
+            assert_eq!(MOCK_ENTRY.with(|c| *c.borrow()), Some((BOB, [4u8; 32])));
+        });
+    }
+
+    #[test]
+    fn test_register_provider_entry_without_pow_skips_delegation() {
+        new_test_ext().execute_with(|| {
+            MOCK_ENTRY.with(|c| *c.borrow_mut() = None);
+            MarketPallet::register_provider_entry(
+                RuntimeOrigin::signed(BOB),
+                None,
+                [3u8; 32],
+                [4u8; 32],
+                1,
+                10_000,
+                default_reqs(),
+            )
+            .unwrap();
+            assert!(RegisteredProviders::<Test>::contains_key(BOB));
+            // Negative control: no free entry was consumed.
+            assert_eq!(MOCK_ENTRY.with(|c| *c.borrow()), None);
+        });
+    }
+
+    #[test]
+    fn test_register_provider_entry_rejects_duplicate_before_working() {
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            MOCK_ENTRY.with(|c| *c.borrow_mut() = None);
+            let err = MarketPallet::register_provider_entry(
+                RuntimeOrigin::signed(BOB),
+                Some(sample_pow()),
+                [3u8; 32],
+                [4u8; 32],
+                1,
+                10_000,
+                default_reqs(),
+            )
+            .unwrap_err();
+            assert_eq!(err, Error::<Test>::ProviderAlreadyRegistered.into());
+            assert_eq!(MOCK_ENTRY.with(|c| *c.borrow()), None);
         });
     }
 

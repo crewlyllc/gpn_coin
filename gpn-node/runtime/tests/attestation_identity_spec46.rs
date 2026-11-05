@@ -44,7 +44,7 @@ fn record(hash: [u8; 32]) -> AttestationRecord {
 /// A plain +1 for the new storage item.
 #[test]
 fn spec_version_matches_live_chain() {
-    assert_eq!(VERSION.spec_version, 46);
+    assert_eq!(VERSION.spec_version, 47);
 }
 
 /// `testnet-no-stake` actually flips the runtime constant to zero; the default
