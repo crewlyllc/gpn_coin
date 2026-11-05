@@ -3363,6 +3363,110 @@ fn ct_eq(a: &str, b: &str) -> bool {
     diff == 0
 }
 
+/// One reserved request-handler slot (see the cap comment in `main`).
+///
+/// RAII: the count drops when the handler thread finishes — including the
+/// normal `return` paths inside the closure, so a 401/404 cannot leak a slot.
+///
+/// It also records the request line in a shared in-flight registry while the
+/// handler runs, so a watchdog can name the endpoint that *never returns* —
+/// the thing that could not be named on 2026-11-04 without ptrace (disabled:
+/// yama/ptrace_scope=1), leaving `futex_do_wait` threads anonymous.
+type InFlight = Arc<Mutex<HashMap<u64, (String, Instant)>>>;
+
+struct HandlerSlot {
+    counter: Arc<std::sync::atomic::AtomicUsize>,
+    inflight: InFlight,
+    id: u64,
+}
+
+impl HandlerSlot {
+    fn try_acquire(
+        counter: &Arc<std::sync::atomic::AtomicUsize>,
+        inflight: &InFlight,
+        next_id: &Arc<std::sync::atomic::AtomicU64>,
+        max: usize,
+    ) -> Option<Self> {
+        use std::sync::atomic::Ordering;
+        let mut cur = counter.load(Ordering::Relaxed);
+        loop {
+            if cur >= max {
+                return None;
+            }
+            match counter.compare_exchange_weak(
+                cur,
+                cur + 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    let id = next_id.fetch_add(1, Ordering::Relaxed);
+                    return Some(HandlerSlot {
+                        counter: counter.clone(),
+                        inflight: inflight.clone(),
+                        id,
+                    });
+                }
+                Err(seen) => cur = seen,
+            }
+        }
+    }
+
+    /// Record what this handler is serving (called once the path is parsed).
+    fn note_path(&self, line: String) {
+        if let Ok(mut m) = self.inflight.lock() {
+            m.insert(self.id, (line, Instant::now()));
+        }
+    }
+}
+
+impl Drop for HandlerSlot {
+    fn drop(&mut self) {
+        if let Ok(mut m) = self.inflight.lock() {
+            m.remove(&self.id);
+        }
+        self.counter
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+/// Log any handler that has been running longer than `STUCK_AFTER`, grouped by
+/// request line, at most once per `REPORT_EVERY`. This makes a stranded handler
+/// identify itself in `journalctl` instead of showing up as an anonymous
+/// futex thread.
+fn spawn_handler_watchdog(inflight: InFlight) {
+    const STUCK_AFTER: Duration = Duration::from_secs(20);
+    const REPORT_EVERY: Duration = Duration::from_secs(60);
+    std::thread::spawn(move || {
+        let mut last_report = Instant::now() - REPORT_EVERY;
+        loop {
+            std::thread::sleep(Duration::from_secs(10));
+            if last_report.elapsed() < REPORT_EVERY {
+                continue;
+            }
+            let mut stuck: HashMap<String, (usize, u64)> = HashMap::new();
+            if let Ok(m) = inflight.lock() {
+                for (line, since) in m.values() {
+                    if since.elapsed() >= STUCK_AFTER {
+                        let e = stuck.entry(line.clone()).or_insert((0, 0));
+                        e.0 += 1;
+                        e.1 = e.1.max(since.elapsed().as_secs());
+                    }
+                }
+            }
+            if stuck.is_empty() {
+                continue;
+            }
+            last_report = Instant::now();
+            let mut v: Vec<_> = stuck.into_iter().collect();
+            v.sort_by_key(|(_, (n, _))| std::cmp::Reverse(*n));
+            for (line, (n, age)) in v.into_iter().take(6) {
+                log::warn!("[ap] {n} handler(s) stuck >{age}s on {line}");
+            }
+        }
+    });
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
@@ -3614,11 +3718,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     gpn_agent::ap_token::announce(&ap_auth);
 
     let hdr = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
+    // Bounded handler concurrency (2026-11-04 19:15 outage).
+    //
+    // Threading per request keeps ONE blocking handler from wedging every other
+    // endpoint, but it was unbounded: when a handler blocks forever (chain read
+    // inside subxt that never returns), its thread + socket are never released.
+    // Measured 2026-11-04: 1002 stranded threads / 1003 sockets in one 85 min run
+    // (~9/min, one per provider pull), which hit the 1024-fd unit limit, made the
+    // tiny_http accept thread panic on `RefinedTcpStream` (EMFILE) and left the
+    // AP *not listening while systemd reported it active*.
+    //
+    // The cap does not fix the wedged read; it keeps one from taking the whole
+    // access point down: at the cap we answer 503 instead of spawning another
+    // thread, so fds stay bounded and the listener stays alive.
+    let max_handlers: usize = std::env::var("GPN_AP_MAX_HANDLER_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(512);
+    let handler_slots = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let handlers_inflight: InFlight = Arc::new(Mutex::new(HashMap::new()));
+    let handler_ids = Arc::new(std::sync::atomic::AtomicU64::new(1));
+    let saturated = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    spawn_handler_watchdog(handlers_inflight.clone());
     // Handle each request on its OWN thread. Previously the loop handled requests
     // sequentially, so a single blocking handler (e.g. POST /jobs doing a chain
     // RPC, or the OpenAI facade waiting for a job to finish) would wedge EVERY
     // other endpoint — including GET /health. Threading keeps the AP responsive.
     for mut req in server.incoming_requests() {
+        let slot = match HandlerSlot::try_acquire(
+            &handler_slots,
+            &handlers_inflight,
+            &handler_ids,
+            max_handlers,
+        ) {
+            Some(s) => s,
+            None => {
+                let n = saturated.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                if n % 50 == 1 {
+                    log::warn!(
+                        "[ap] {} handler threads all busy — answering 503 ({} refused so far)",
+                        max_handlers,
+                        n
+                    );
+                }
+                let _ = req.respond(
+                    Response::from_string(json!({"error":"busy","detail":"handler pool saturated"}).to_string())
+                        .with_header(hdr.clone())
+                        .with_status_code(503),
+                );
+                continue;
+            }
+        };
         let rt = rt.clone();
         let client = client.clone();
         let registry = registry.clone();
@@ -3639,6 +3790,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let hub = hub.clone();
         let pcfg = pcfg.clone();
         std::thread::spawn(move || {
+            let slot = slot;
             let url = req.url().to_string();
             let method = req.method().clone();
             let path: Vec<&str> = url
@@ -3646,6 +3798,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .split('/')
                 .filter(|s| !s.is_empty())
                 .collect();
+            slot.note_path(format!("{} /{}", method, path.join("/")));
             // Refuse an oversized heartbeat from its declared length, BEFORE
             // buffering it. The registry re-checks the actual body too (a liar
             // can omit Content-Length); this only keeps the common case cheap.
