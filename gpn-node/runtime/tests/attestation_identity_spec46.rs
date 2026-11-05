@@ -41,10 +41,12 @@ fn record(hash: [u8; 32]) -> AttestationRecord {
     }
 }
 
-/// A plain +1 for the new storage item.
+/// A plain +1 for the spec 48 existential-deposit change (zero on every
+/// network). The on-chain value only moves after enactment; this pins the
+/// source tree so `set_code` cannot be prepared against a stale version.
 #[test]
 fn spec_version_matches_live_chain() {
-    assert_eq!(VERSION.spec_version, 47);
+    assert_eq!(VERSION.spec_version, 48);
 }
 
 /// `testnet-no-stake` actually flips the runtime constant to zero; the default

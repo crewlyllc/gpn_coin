@@ -90,12 +90,19 @@ the browser session so it survives clicking around the site.
 ## First run: joining with zero coins (proof-of-work entry)
 
 A brand-new node has **no GPN** — it cannot pay the attestation or registration
-fee, and on testnet the existential deposit is 0, so the account itself is
-fine. Since **spec 47** the way in is a **proof of work**: you buy your entry
-with computation instead of coins.
+fee. Since **spec 47** the way in is a **proof of work**: you buy your entry
+with computation instead of coins. Since spec 48 the **existential deposit is 0
+on every network** (testnet and mainnet alike), so the account itself needs no
+funding either.
 
-**What happens automatically.** On a **testnet** first start, `gpn_node`
-attempts this **once**, in the background (log lines prefixed `[onboard]`):
+**Testnet and mainnet behave identically**, except for governance: testnet uses
+the sudo key and a 10-block timelock, mainnet uses the 3-of-5 council and a
+3-day timelock. Everything below — the proof-of-work entry, the free-entry
+limits, the zero existential deposit — is the same on both.
+
+**What happens automatically.** On a **first start** (no success marker yet),
+on **any** chain, `gpn_node` attempts this **once**, in the background (log
+lines prefixed `[onboard]`):
 
 1. waits for the node's own RPC to answer (the chain node starts at the same
    time, so this can take a minute on first boot);
@@ -108,13 +115,21 @@ attempts this **once**, in the background (log lines prefixed `[onboard]`):
    which proves the work, records the attestation and registers the provider
    atomically. The transaction pays **0 coins**.
 
-Auto-onboarding is **testnet/dev only**. On mainnet, `gpn_node` never
-registers anything by itself.
+The success marker is written **only after a successful registration** (or when
+the account was already registered). A failed attempt leaves no marker, so the
+next start retries automatically; an explicit `--onboard` always attempts.
+
+**The cost of ED=0, stated honestly.** With a zero existential deposit an
+account can exist with a zero balance, and it stays in state on every node until
+it is reaped. That is extra state every full node carries. The only entry rate
+limits are the free-entry limits: **2 successful free entries per block, 1 per
+account, 1 per GPU** — they are what stops a flood of zero-balance accounts, not
+a deposit.
 
 **What `--onboard` does.** `gpn_node --onboard` (or `GPN_ONBOARD=1`) runs the
-same flow **now**, on any chain, even if the once-only marker exists. Use it to
-retry after a failure, or to onboard deliberately on a chain that is not
-named `testnet`.
+same flow **now**, on any chain, even if the success marker exists. Use it to
+retry after a failure, or to onboard deliberately without waiting for a first
+start.
 
 **The standalone command** (same code path, useful without a running
 supervisor, or on another machine):

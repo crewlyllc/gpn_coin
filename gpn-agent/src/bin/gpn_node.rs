@@ -84,7 +84,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Marker written (once) when an automatic first-run onboarding attempt starts.
+/// Marker written (once) when automatic onboarding has SUCCEEDED (registered,
+/// or found already registered). The file name is historical: before spec 48
+/// it was written at attempt start, which meant a failed attempt never retried.
+/// It is now written only on success; a failure leaves no marker.
 const ONBOARD_ATTEMPTED: &str = "onboard-attempted";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3459,18 +3462,27 @@ fn enforce_ollama_gate(cfg: &Config) -> i32 {
 // First-run proof-of-work onboarding (spec 47)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// True for the public **testnet** and the throwaway local dev chains.
-/// Anything else — mainnet, a custom pinned spec — must never auto-register.
-fn is_testnet_chain(chain: &str) -> bool {
-    let l = chain.trim().to_ascii_lowercase();
-    l == "dev" || l == "local" || l.contains("testnet")
+/// Whether this start should attempt onboarding.
+///
+/// **Owner rule 2026-11-05: testnet and mainnet behave identically** (only
+/// governance may differ). So the rule is chain-independent: attempt whenever
+/// the account is not registered and no success marker exists. `chain` is kept
+/// for diagnostics/symmetry only — behaviour must not depend on it.
+fn should_auto_onboard(_chain: &str, marker_exists: bool, explicit: bool) -> bool {
+    explicit || !marker_exists
 }
 
-/// Whether this start should attempt onboarding. An explicit `--onboard` /
-/// `GPN_ONBOARD=1` always wins; otherwise only a **testnet** first run (no
-/// marker yet) is auto-onboarded. Mainnet never auto-registers.
-fn should_auto_onboard(chain: &str, marker_exists: bool, explicit: bool) -> bool {
-    explicit || (is_testnet_chain(chain) && !marker_exists)
+/// True once onboarding has nothing left to do: registered already, or now.
+/// Only these outcomes write the success marker; a `Failed` or `AlreadyAttested`
+/// attempt leaves no marker, so the next start retries.
+fn onboard_is_done(outcome: &EntryOutcome) -> bool {
+    matches!(
+        outcome,
+        EntryOutcome::AlreadyRegistered
+            | EntryOutcome::Registered
+            | EntryOutcome::RegisteredViaFallback
+            | EntryOutcome::RegisteredPaid
+    )
 }
 
 /// Kick off onboarding in the background: the chain node has not started yet,
@@ -3520,21 +3532,8 @@ fn spawn_onboard(cfg: Config, explicit: bool) {
 }
 
 /// The onboarding flow shared with `gpn_register --entry`.
-async fn onboard_flow(cfg: &Config, explicit: bool) -> Result<EntryOutcome, String> {
+async fn onboard_flow(cfg: &Config, _explicit: bool) -> Result<EntryOutcome, String> {
     let say = |m: &str| asciiprintln!("[onboard] {m}");
-
-    if !explicit {
-        // Best-effort once-only marker so a second start does not retry a test
-        // that already ran. An explicit `--onboard` always attempts.
-        let marker = cfg.base_path.join(ONBOARD_ATTEMPTED);
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        if let Err(e) = std::fs::write(&marker, format!("{stamp}\n")) {
-            log::warn!("could not write {}: {e}", marker.display());
-        }
-    }
 
     say(&format!(
         "waiting for the chain RPC at {} (the node may still be starting; up to 15 min)…",
@@ -3601,7 +3600,23 @@ async fn onboard_flow(cfg: &Config, explicit: bool) -> Result<EntryOutcome, Stri
     let mut log = |line: &str| asciiprintln!("[onboard] {line}");
     // The explicit/auto decision is already made by the caller; both use the
     // free entry path here.
-    Ok(gpn_agent::onboard::run_entry(&chain, &miner, &account, &params, true, &mut log).await)
+    let outcome =
+        gpn_agent::onboard::run_entry(&chain, &miner, &account, &params, true, &mut log).await;
+
+    // Write the once-only marker **only on success**. A failed attempt must
+    // retry on the next start (and an explicit `--onboard` always attempts).
+    if onboard_is_done(&outcome) {
+        let marker = cfg.base_path.join(ONBOARD_ATTEMPTED);
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if let Err(e) = std::fs::write(&marker, format!("{stamp}\n")) {
+            log::warn!("could not write {}: {e}", marker.display());
+        }
+    }
+
+    Ok(outcome)
 }
 
 #[tokio::main]
@@ -3818,21 +3833,22 @@ async fn main() {
 
     // ── First-run proof-of-work onboarding (spec 47) ────────────────────────
     // A fresh node has no coins: its first attestation/registration must be
-    // bought with computation. On a **testnet** first run (or an explicit
-    // `--onboard` / `GPN_ONBOARD=1`) a background thread waits for this node's
-    // RPC, then runs the same entry flow as `gpn_register --entry` exactly
-    // once. A mainnet start never auto-registers; the chain node may still be
-    // syncing, so the attempt is bounded and every step is logged.
+    // bought with computation. **Testnet and mainnet behave identically**
+    // (owner rule 2026-11-05): on any first run without a success marker (or
+    // with an explicit `--onboard` / `GPN_ONBOARD=1`) a background thread
+    // waits for this node's RPC, then runs the same entry flow as
+    // `gpn_register --entry` exactly once. The marker is written only on
+    // success, so a failed attempt retries on the next start. The chain node
+    // may still be syncing, so the attempt is bounded and every step is logged.
     {
         let explicit_onboard =
             argv.iter().any(|a| a == "--onboard") || env_str("GPN_ONBOARD").as_deref() == Some("1");
         let marker_exists = cfg.base_path.join(ONBOARD_ATTEMPTED).exists();
-        let auto_first_run = is_testnet_chain(&cfg.chain) && !marker_exists;
         if should_auto_onboard(&cfg.chain, marker_exists, explicit_onboard) {
-            if auto_first_run && !explicit_onboard {
+            if !marker_exists && !explicit_onboard {
                 asciiprintln!(
-                    "  onboarding: testnet first run — a free proof-of-work entry will be \
-                     attempted once in the background (no coins needed)"
+                    "  onboarding: first run — a free proof-of-work entry will be attempted \
+                     once in the background (no coins needed)"
                 );
             }
             spawn_onboard(cfg.clone(), explicit_onboard);
@@ -4577,27 +4593,59 @@ mod idle_cli_tests {
     }
 
     #[test]
-    fn testnet_chains_are_recognised_and_mainnet_is_not() {
-        assert!(is_testnet_chain("testnet"));
-        assert!(is_testnet_chain("gpn-testnet"));
-        assert!(is_testnet_chain("/opt/gpn/testnet-spec.json"));
-        assert!(is_testnet_chain("dev"));
-        assert!(!is_testnet_chain("gpn"));
-        assert!(!is_testnet_chain("mainnet"));
-        assert!(!is_testnet_chain("/opt/gpn/mainnet-spec.json"));
+    fn onboarding_rule_is_identical_on_testnet_and_mainnet() {
+        // Parity (owner rule 2026-11-05): the chain name must not change the
+        // decision. First run with no success marker → attempt on every chain.
+        for chain in [
+            "testnet",
+            "gpn-testnet",
+            "/opt/gpn/testnet-spec.json",
+            "dev",
+            "mainnet",
+            "gpn",
+            "/opt/gpn/mainnet-spec.json",
+        ] {
+            assert!(
+                should_auto_onboard(chain, false, false),
+                "{chain}: a first run with no success marker must attempt onboarding"
+            );
+            assert!(
+                !should_auto_onboard(chain, true, false),
+                "{chain}: a success marker must suppress the automatic retry"
+            );
+            assert!(
+                should_auto_onboard(chain, true, true),
+                "{chain}: an explicit --onboard always attempts"
+            );
+        }
     }
 
     #[test]
-    fn auto_onboard_is_testnet_only_and_once() {
-        // Testnet first run → attempt.
-        assert!(should_auto_onboard("testnet", false, false));
-        // Second start (marker present) → no attempt.
-        assert!(!should_auto_onboard("testnet", true, false));
-        // Mainnet never auto-registers, marker or not.
-        assert!(!should_auto_onboard("mainnet", false, false));
-        assert!(!should_auto_onboard("gpn", false, false));
-        // Explicit --onboard / GPN_ONBOARD=1 always attempts, even on mainnet.
-        assert!(should_auto_onboard("mainnet", true, true));
+    fn failed_onboarding_leaves_no_success_marker() {
+        use gpn_agent::onboard::{EntryOutcome, FailureReason};
+        // Successes are done: registering them again is pointless.
+        for outcome in [
+            EntryOutcome::Registered,
+            EntryOutcome::RegisteredViaFallback,
+            EntryOutcome::RegisteredPaid,
+            EntryOutcome::AlreadyRegistered,
+        ] {
+            assert!(
+                onboard_is_done(&outcome),
+                "{outcome:?} must write the marker"
+            );
+        }
+        // A failure (and an account that cannot use a free entry) must retry.
+        for outcome in [
+            EntryOutcome::Failed(FailureReason::SubmitRejected, "rejected".into()),
+            EntryOutcome::Failed(FailureReason::PowMiningCancelled, "cancelled".into()),
+            EntryOutcome::AlreadyAttested,
+        ] {
+            assert!(
+                !onboard_is_done(&outcome),
+                "{outcome:?} must NOT write the marker"
+            );
+        }
     }
 
     #[test]

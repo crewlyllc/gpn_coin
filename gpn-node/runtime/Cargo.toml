@@ -23,7 +23,10 @@ frame-system = { workspace = true, default-features = false }
 frame-executive = { workspace = true, default-features = false }
 frame-benchmarking = { workspace = true, default-features = false, optional = true }
 frame-try-runtime = { workspace = true, default-features = false, optional = true }
-pallet-balances = { workspace = true, default-features = false }
+# `insecure_zero_ed` is required *unconditionally*: the runtime sets
+# `ExistentialDeposit = 0` on every network (owner decision 2026-11-05), and
+# pallet-balances refuses zero-ED operation unless this feature is compiled in.
+pallet-balances = { workspace = true, default-features = false, features = ["insecure_zero_ed"] }
 pallet-timestamp = { workspace = true, default-features = false }
 pallet-insecure-randomness-collective-flip = { workspace = true, default-features = false }
 pallet-transaction-payment = { workspace = true, default-features = false }
@@ -66,10 +69,11 @@ testnet-no-stake = []
 # running a pre-upgrade agent (legacy model+VRAM digest) keeps attesting while
 # the fleet rolls forward. Mainnet default is `true`.
 testnet-lenient-identity = []
-# Testnet-only (spec 47): `ExistentialDeposit = 0` so a fresh, zero-balance
-# account can exist to receive a proof-of-work entry. Mainnet (feature off)
-# keeps the 1 GPN ED. Chain-parameter decision, not permanent.
-testnet-zero-ed = ["pallet-balances/insecure_zero_ed"]
+# No-op alias kept so existing build scripts (`--features testnet-zero-ed`)
+# keep working. Since 2026-11-05 `ExistentialDeposit = 0` is UNCONDITIONAL and
+# `pallet-balances/insecure_zero_ed` is always enabled; testnet and mainnet are
+# identical in this respect. No build can produce a non-zero ED.
+testnet-zero-ed = []
 std = [
     "codec/std",
     "scale-info/std",

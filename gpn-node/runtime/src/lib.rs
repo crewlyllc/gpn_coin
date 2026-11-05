@@ -123,7 +123,7 @@ pub const VERSION: sp_version::RuntimeVersion = sp_version::RuntimeVersion {
     spec_name: create_runtime_str!("gpn"),
     impl_name: create_runtime_str!("gpn"),
     authoring_version: 1,
-    spec_version: 47,
+    spec_version: 48,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 1,
@@ -543,14 +543,19 @@ pub const RUNTIME_REQUIRE_GPU_IDENTITY: bool = true;
 pub const RUNTIME_MIN_ATTESTATION_STAKE: Balance = 0;
 
 parameter_types! {
-    /// Existential deposit (spec 47).
+    /// Existential deposit (spec 47, zero on every network since spec 48).
     ///
-    /// Testnet builds compiled with `testnet-zero-ed` set this to **0** so a
-    /// fresh, unfunded machine can exist as an account long enough to submit
-    /// its proof-of-work entry. Mainnet (feature off) keeps 1 GPN. This is a
-    /// chain-parameter decision, reversible without touching code.
-    pub const ExistentialDeposit: Balance =
-        if cfg!(feature = "testnet-zero-ed") { 0 } else { 1_000_000_000_000 };
+    /// **Owner decision 2026-11-05: testnet and mainnet behave identically**
+    /// except for governance. A fresh, unfunded machine must be able to exist
+    /// as an account long enough to submit its proof-of-work entry on *any*
+    /// network, so this is unconditionally **0** — no cargo feature can change
+    /// it. `pallet-balances/insecure_zero_ed` is therefore always enabled (the
+    /// pallet refuses ED=0 otherwise); see `runtime/Cargo.toml`.
+    ///
+    /// Consequence: an account can exist at zero balance, which costs state on
+    /// every node. The free-entry limits (2 per block, 1 per account, 1 per
+    /// GPU) remain the only entry rate limits.
+    pub const ExistentialDeposit: Balance = 0;
     pub const MinAttestationStake: Balance = RUNTIME_MIN_ATTESTATION_STAKE;
     /// Cap on *successful* fee-free PoW entries per block (spec 47). Root can
     /// change it at runtime via `GPUAttestation.set_free_entry_limit`.

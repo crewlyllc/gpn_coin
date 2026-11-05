@@ -7,9 +7,10 @@
 //!   2. **Onboarding is one call**: `register_provider_entry` proves work,
 //!      records the attestation and registers the provider.
 //!
-//! With `--features testnet-zero-ed` it additionally pins that a zero-balance
-//! account can exist and transact a fee-free call; the default build pins that
-//! the 1 GPN existential deposit is still in force.
+//! With spec 48 the existential deposit is **0 on every network** (owner rule
+//! 2026-11-05: testnet and mainnet behave identically except for governance);
+//! the tests below pin that a zero-balance account can exist and register as a
+//! provider, and fail if any build produces a non-zero ED.
 
 use codec::Encode;
 use frame_support::dispatch::{GetDispatchInfo, Pays};
@@ -212,13 +213,27 @@ fn second_free_entry_for_the_same_account_is_rejected() {
     });
 }
 
-// ── Existential deposit: the chain-parameter half ──────────────────────
+// ── Existential deposit: zero on EVERY network (spec 48) ──────────────
 
-#[cfg(feature = "testnet-zero-ed")]
+/// The predicate the ED test pins. A build with a non-zero ED must fail it —
+/// the negative controls below prove this check is not vacuous.
+fn ed_is_zero(ed: u128) -> bool {
+    ed == 0
+}
+
 #[test]
-fn testnet_zero_ed_allows_a_zero_balance_account_to_exist() {
+fn existential_deposit_is_zero_on_every_network_and_every_feature_build() {
+    // This file is compiled once per feature set, so the same assertion runs in
+    // the default build and with `testnet-zero-ed` / `testnet-no-stake` / ...
+    // If any combination could still yield 1 GPN, this fails.
+    assert!(
+        ed_is_zero(ExistentialDeposit::get()),
+        "ExistentialDeposit must be 0 on every network, got {}",
+        ExistentialDeposit::get()
+    );
+    assert_eq!(ExistentialDeposit::get(), 0);
+
     new_test_ext().execute_with(|| {
-        assert_eq!(ExistentialDeposit::get(), 0);
         use frame_support::traits::{Currency, ExistenceRequirement, WithdrawReasons};
         let who = acct(11);
         assert_eq!(Balances::free_balance(&who), 0);
@@ -226,7 +241,7 @@ fn testnet_zero_ed_allows_a_zero_balance_account_to_exist() {
         let _ = <Balances as Currency<AccountId>>::deposit_creating(&who, 1);
         // …and it survives being drained to exactly zero (KeepAlive is legal
         // at zero when the existential deposit is zero).
-        <Balances as Currency<AccountId>>::withdraw(
+        let _ = <Balances as Currency<AccountId>>::withdraw(
             &who,
             1,
             WithdrawReasons::all(),
@@ -241,13 +256,14 @@ fn testnet_zero_ed_allows_a_zero_balance_account_to_exist() {
     });
 }
 
-#[cfg(not(feature = "testnet-zero-ed"))]
+/// The ED=0 test above must not be vacuous: this control feeds it the values a
+/// non-zero-ED build would expose and requires them to fail.
 #[test]
-fn mainnet_keeps_the_one_gpn_existential_deposit() {
-    new_test_ext().execute_with(|| {
-        assert_eq!(ExistentialDeposit::get(), 1_000_000_000_000);
-        let who = acct(11);
-        assert_eq!(Balances::free_balance(&who), 0);
-        assert!(!frame_system::Account::<Runtime>::contains_key(&who));
-    });
+fn negative_control_a_non_zero_ed_would_fail_the_ed_test() {
+    assert!(!ed_is_zero(1), "a 1-unit ED must fail the ED=0 check");
+    assert!(
+        !ed_is_zero(1_000_000_000_000),
+        "the old 1 GPN ED must fail the ED=0 check"
+    );
+    assert!(ed_is_zero(ExistentialDeposit::get()));
 }
