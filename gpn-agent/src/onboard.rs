@@ -642,6 +642,49 @@ impl LiveEntryChain {
     }
 }
 
+/// `ComputeMarketplace::register_provider_entry(pow, …)` as a dynamic payload.
+pub fn register_provider_entry_call(
+    pow: &EntryPow,
+    params: &EntryParams,
+) -> subxt::tx::DynamicPayload {
+    subxt::dynamic::tx(
+        "ComputeMarketplace",
+        "register_provider_entry",
+        vec![
+            some_pow_value(pow),
+            Value::from_bytes(params.challenge_response),
+            Value::from_bytes(params.gpu_info_hash),
+            Value::u128(params.gpu_count as u128),
+            Value::u128(params.compute_gflops as u128),
+            params.requirements.to_value(),
+        ],
+    )
+}
+
+/// `GPUAttestation::attest_entry(pow, …)` as a dynamic payload.
+pub fn attest_entry_call(pow: &EntryPow, params: &EntryParams) -> subxt::tx::DynamicPayload {
+    subxt::dynamic::tx(
+        "GPUAttestation",
+        "attest_entry",
+        vec![
+            some_pow_value(pow),
+            Value::from_bytes(params.challenge_response),
+            Value::from_bytes(params.gpu_info_hash),
+            Value::u128(params.gpu_count as u128),
+            Value::u128(params.compute_gflops as u128),
+        ],
+    )
+}
+
+/// `ComputeMarketplace::register_provider(requirements)` — the paid path.
+pub fn register_provider_call(params: &EntryParams) -> subxt::tx::DynamicPayload {
+    subxt::dynamic::tx(
+        "ComputeMarketplace",
+        "register_provider",
+        vec![params.requirements.to_value()],
+    )
+}
+
 impl EntryChain for LiveEntryChain {
     async fn status(&self, account: &str) -> Result<EntryStatus, String> {
         let state = self.client.entry_chain_state(account).await?;
@@ -662,19 +705,7 @@ impl EntryChain for LiveEntryChain {
         pow: &EntryPow,
         params: &EntryParams,
     ) -> Result<(), String> {
-        let call = subxt::dynamic::tx(
-            "ComputeMarketplace",
-            "register_provider_entry",
-            vec![
-                some_pow_value(pow),
-                Value::from_bytes(params.challenge_response),
-                Value::from_bytes(params.gpu_info_hash),
-                Value::u128(params.gpu_count as u128),
-                Value::u128(params.compute_gflops as u128),
-                params.requirements.to_value(),
-            ],
-        );
-        self.submit(call).await
+        self.submit(register_provider_entry_call(pow, params)).await
     }
 
     async fn submit_attest_entry(
@@ -682,27 +713,11 @@ impl EntryChain for LiveEntryChain {
         pow: &EntryPow,
         params: &EntryParams,
     ) -> Result<(), String> {
-        let call = subxt::dynamic::tx(
-            "GPUAttestation",
-            "attest_entry",
-            vec![
-                some_pow_value(pow),
-                Value::from_bytes(params.challenge_response),
-                Value::from_bytes(params.gpu_info_hash),
-                Value::u128(params.gpu_count as u128),
-                Value::u128(params.compute_gflops as u128),
-            ],
-        );
-        self.submit(call).await
+        self.submit(attest_entry_call(pow, params)).await
     }
 
     async fn submit_register_provider(&self, params: &EntryParams) -> Result<(), String> {
-        let call = subxt::dynamic::tx(
-            "ComputeMarketplace",
-            "register_provider",
-            vec![params.requirements.to_value()],
-        );
-        self.submit(call).await
+        self.submit(register_provider_call(params)).await
     }
 }
 

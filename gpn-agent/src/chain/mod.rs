@@ -2197,7 +2197,11 @@ impl ChainClient {
             ))
             .await?
             .map(|v| v.as_u128().unwrap_or(0) as u32)
-            .unwrap_or(0);
+            // `FreeEntryLimit` is a `ValueQuery` over the runtime constant and
+            // is NOT written at genesis, so an empty key means "use the
+            // runtime default". 2 is that default on this runtime; the chain
+            // enforces the real value, this only shapes the client-side hint.
+            .unwrap_or(2);
         let (free_block, free_used_this_block) = self
             .storage_at_head_result(&subxt::dynamic::storage(
                 "GPUAttestation",

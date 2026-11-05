@@ -151,6 +151,21 @@ fn resolve_signer(a: &Args) -> Result<(String, String), String> {
 #[tokio::main]
 async fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.iter().any(|a| a == "--help" || a == "-h") {
+        println!("gpn_register — register this machine as a GPU provider");
+        println!();
+        println!("  gpn_register --entry [options]   # free in coins: proof-of-work entry");
+        println!("  gpn_register [endpoint] [signer] # paid registration (legacy)");
+        println!();
+        println!("Options:");
+        println!("  --endpoint <url>    chain RPC (default ws://127.0.0.1:9944)");
+        println!("  --signer <uri>      signer URI/seed (default: env, keystore, //Alice)");
+        println!("  --keystore <path>   sr25519 JSON keystore to sign with");
+        println!("  --gflops <n>        skip the FP32 benchmark and use this value");
+        println!("  --gpu-hash <hex32>  skip the GPU probe and use this fingerprint");
+        println!("  --gpu-count <n>     number of GPUs to attest (default: detected)");
+        std::process::exit(0);
+    }
     let args = match parse_args(&argv) {
         Ok(a) => a,
         Err(e) => {

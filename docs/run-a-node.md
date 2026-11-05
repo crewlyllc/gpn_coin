@@ -126,7 +126,7 @@ supervisor, or on another machine):
 It is idempotent: an already-registered account prints `already registered`
 and exits 0 without mining or submitting anything. Add `--signer`,
 `--gflops N` or `--gpu-hash <hex32>` if the wallet/benchmark should not be
-probed (see `./gpn_register --help` footer in the source).
+probed (see `./gpn_register --help`).
 
 **How long the entry proof takes.** Bitcoin-style: expected work is
 `2^256 / target`. At the current testnet target (about `2^228`) that is roughly
