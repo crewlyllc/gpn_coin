@@ -1968,7 +1968,7 @@ fn chain_tip_readable(tip: Option<u64>) -> bool {
 ///
 /// `head == 0` (unreadable) never counts as "old": without a head there is no
 /// evidence of staleness, and a spurious attestation on every start is noise.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum AttestPlan {
     Attest,
     Skip,
@@ -2064,11 +2064,30 @@ fn effective_eligibility_floor(local: u64, chain: Option<u64>) -> u64 {
 /// * better than the record                         → attest
 /// * record above 1.5× the card's estimated FP32 peak → attest (legacy units:
 ///   a value above peak is not this card's capability under any measurement)
+/// * record's own refresh window elapsed, same reading → attest (renewal)
 /// * otherwise                                      → keep (one tx saved)
 ///
 /// `peak_gflops` comes from the model-name estimate (`detect_gpu_capability`);
 /// 0 means "unknown device", in which case no downward correction is attempted.
-fn attest_measurement_useful(measured: u64, on_chain: Option<u64>, peak_gflops: u64) -> bool {
+///
+/// `stale` says the caller's plan chose to attest because the record's refresh
+/// window elapsed. A stale record must be **renewed even when the number is
+/// unchanged**: the window exists so `submitted_at` keeps pace with
+/// `MaxAttestationAge` (`check_expired` counts a miss per window and slashes on
+/// the third). Skipping the identical re-submission is what left this host's
+/// record frozen at block 244,950 while it measured the same 824 GFLOPS — the
+/// box then advertised `gflops_source: "chain attestation"` (so
+/// `gflops_verified: false` at the access point) with no way back except
+/// `GPN_ATTEST_FORCE=1`. "The number is already right" and "nothing to do" are
+/// not the same statement.
+const REFRESH_TOLERANCE_PCT: f64 = 5.0;
+
+fn attest_measurement_useful(
+    measured: u64,
+    on_chain: Option<u64>,
+    peak_gflops: u64,
+    stale: bool,
+) -> bool {
     if measured < ELIGIBILITY_FLOOR_GFLOPS {
         return false;
     }
@@ -2077,6 +2096,16 @@ fn attest_measurement_useful(measured: u64, on_chain: Option<u64>, peak_gflops: 
         return true;
     }
     if measured > record {
+        return true;
+    }
+    // A renewal, not a capability change: the record's window elapsed and the
+    // fresh idle measurement is the same reading (within instrument noise).
+    // Deliberately narrow — a materially weaker reading is still refused, so
+    // the never-downgrade protection (#5) is not weakened by this path.
+    if stale
+        && record > 0
+        && (record as f64 - measured as f64) / record as f64 * 100.0 <= REFRESH_TOLERANCE_PCT
+    {
         return true;
     }
     // A record that cannot be this card's measurement is a legacy artefact, not
@@ -2155,6 +2184,13 @@ async fn maybe_refresh_attestation(client: &ChainClient, addr: &str) -> AttestOu
         .unwrap_or(false);
     let forced = attest_force_from_env();
     let planned = attest_plan(rec, head, refresh);
+    // The window elapsed on a record we already hold a positive value for: this
+    // attempt is a **renewal**, so an unchanged measurement is still worth
+    // submitting (see `attest_measurement_useful`).
+    let stale = match (planned.clone(), rec) {
+        (AttestPlan::Attest, Some((g, at))) => g > 0 && head.saturating_sub(at) > refresh,
+        _ => false,
+    };
     let plan = if forced || (planned == AttestPlan::Skip && legacy_record) {
         AttestPlan::Attest
     } else {
@@ -2314,7 +2350,7 @@ async fn maybe_refresh_attestation(client: &ChainClient, addr: &str) -> AttestOu
             // `peak_gflops` (the model-name estimate, computed before the plan)
             // is only used to recognise an impossible record, never to invent a
             // number.
-            if !attest_measurement_useful(gflops, on_chain, peak_gflops) {
+            if !attest_measurement_useful(gflops, on_chain, peak_gflops, stale) {
                 println!(
                     "[attest] measured {gflops} GFLOPS vs {} on chain (floor {ELIGIBILITY_FLOOR_GFLOPS}, \
                      estimated FP32 peak {peak_gflops}) — keeping the existing record, not re-attesting",
@@ -2335,11 +2371,18 @@ async fn maybe_refresh_attestation(client: &ChainClient, addr: &str) -> AttestOu
                 return AttestOutcome::NotUseful;
             }
             if let Some(rec) = on_chain {
-                if gflops <= rec {
+                if gflops <= rec && gpn_agent::compute_unit::record_implausible(rec, peak_gflops) {
                     println!(
                         "[attest] on-chain {rec} GFLOPS exceeds this card's estimated FP32 peak \
                          ({peak_gflops} GFLOPS) — a legacy-unit record; correcting it to the \
                          measured {gflops} GFLOPS"
+                    );
+                } else if gflops <= rec {
+                    println!(
+                        "[attest] re-attesting the SAME {gflops} GFLOPS (on-chain {rec}): the record \
+                         is past its refresh window, so this is a renewal — it keeps \
+                         `submitted_at` inside `MaxAttestationAge` and lets `/status` report \
+                         `attested-idle` again"
                     );
                 }
             }
@@ -4337,29 +4380,29 @@ mod settled_cache_tests {
         const PEAK: u64 = 15_100;
         // Below the eligibility floor (250 in the MEASURED unit): the chain
         // rejects it (`BelowEligibilityFloor`), so never pay for that tx.
-        assert!(!attest_measurement_useful(0, None, PEAK));
-        assert!(!attest_measurement_useful(249, None, PEAK));
-        assert!(!attest_measurement_useful(249, Some(188), PEAK));
+        assert!(!attest_measurement_useful(0, None, PEAK, false));
+        assert!(!attest_measurement_useful(249, None, PEAK, false));
+        assert!(!attest_measurement_useful(249, Some(188), PEAK, false));
         // At the floor it is eligible...
-        assert!(attest_measurement_useful(250, None, PEAK));
+        assert!(attest_measurement_useful(250, None, PEAK, false));
         // ...but a *plausible* record is never downgraded by a weaker reading.
-        assert!(!attest_measurement_useful(250, Some(800), PEAK));
-        assert!(!attest_measurement_useful(800, Some(800), PEAK));
+        assert!(!attest_measurement_useful(250, Some(800), PEAK, false));
+        assert!(!attest_measurement_useful(800, Some(800), PEAK, false));
         // box1: an old contended 188 record, and a real idle measurement of the
         // 5070 Ti (~2 400 estimated) beats it.
-        assert!(attest_measurement_useful(2_400, Some(188), 44_000));
+        assert!(attest_measurement_useful(2_400, Some(188), 44_000, false));
         // A zeroed record is always repaired by any eligible reading.
-        assert!(attest_measurement_useful(250, Some(0), PEAK));
+        assert!(attest_measurement_useful(250, Some(0), PEAK, false));
         // A record ABOVE the card's FP32 peak is a legacy-unit artefact (this
         // host: 30 000 on a 15.1 TFLOPS card) and an honest measurement may
         // replace it — otherwise the bad record is permanent by construction.
-        assert!(attest_measurement_useful(823, Some(30_000), PEAK));
+        assert!(attest_measurement_useful(823, Some(30_000), PEAK, false));
         // Just-inside-plausible records keep the never-downgrade protection
         // (15 100 × 1.5 = 22 650).
-        assert!(!attest_measurement_useful(823, Some(22_000), PEAK));
-        assert!(attest_measurement_useful(823, Some(22_700), PEAK));
+        assert!(!attest_measurement_useful(823, Some(22_000), PEAK, false));
+        assert!(attest_measurement_useful(823, Some(22_700), PEAK, false));
         // Unknown device (peak 0) → never attempt a downward correction.
-        assert!(!attest_measurement_useful(823, Some(30_000), 0));
+        assert!(!attest_measurement_useful(823, Some(30_000), 0, false));
     }
 
     /// Item #97 migration: a legacy record is **replaced**, never reinterpreted.
@@ -4368,7 +4411,7 @@ mod settled_cache_tests {
     #[test]
     fn a_legacy_record_is_replaced_by_a_measurement_not_converted() {
         const PEAK: u64 = 15_100;
-        assert!(attest_measurement_useful(823, Some(30_000), PEAK));
+        assert!(attest_measurement_useful(823, Some(30_000), PEAK, false));
         // The same measurement against the *converted* interpretation would be
         // a different number and must NOT be what gets submitted.
         assert_ne!(
@@ -4376,7 +4419,31 @@ mod settled_cache_tests {
             (30_000.0 * gpn_agent::compute_unit::MEASURED_FRACTION_OF_PEAK) as u64
         );
         // An already-correct record is left alone (no tx churn).
-        assert!(!attest_measurement_useful(823, Some(825), PEAK));
+        assert!(!attest_measurement_useful(823, Some(825), PEAK, false));
+    }
+
+    /// A record whose own refresh window elapsed is **renewed even when the
+    /// number is unchanged**. Live basis (2026-11-05 12:22): this host measured
+    /// 823/824/824 against an on-chain 824 dated block 244,950 and the loop
+    /// said "keeping the existing record, not re-attesting" — so the record
+    /// kept ageing toward `MaxAttestationAge` (and the 3-miss slash) and the box
+    /// advertised `gflops_source: "chain attestation"`, i.e. `gflops_verified:
+    /// false` at the access point, with no way back short of `GPN_ATTEST_FORCE=1`.
+    #[test]
+    fn a_stale_but_accurate_record_is_renewed_not_left_to_age() {
+        const PEAK: u64 = 15_100;
+        // The live shape: same reading, window elapsed ⇒ submit the renewal.
+        assert!(attest_measurement_useful(824, Some(824), PEAK, true));
+        // Instrument noise on the same card (823 vs 825 ≈ 0.2 %) still counts
+        // as the same reading.
+        assert!(attest_measurement_useful(823, Some(825), PEAK, true));
+        assert!(attest_measurement_useful(823, Some(850), PEAK, true));
+        // A materially weaker reading is NOT a renewal: never-downgrade holds.
+        assert!(!attest_measurement_useful(700, Some(824), PEAK, true));
+        // A stale *young* record is not the case here — no staleness, no churn.
+        assert!(!attest_measurement_useful(824, Some(824), PEAK, false));
+        // Staleness never bypasses the eligibility floor.
+        assert!(!attest_measurement_useful(249, Some(249), PEAK, true));
     }
 
     /// A *low-end but honest* measurement must be accepted once the floor is in
@@ -4385,11 +4452,11 @@ mod settled_cache_tests {
     #[test]
     fn an_honest_measurement_at_the_recalibrated_floor_is_accepted() {
         assert_eq!(ELIGIBILITY_FLOOR_GFLOPS, 250);
-        assert!(!attest_measurement_useful(249, None, 0));
-        assert!(attest_measurement_useful(250, None, 0));
-        assert!(attest_measurement_useful(340, None, 6_500));
+        assert!(!attest_measurement_useful(249, None, 0, false));
+        assert!(attest_measurement_useful(250, None, 0, false));
+        assert!(attest_measurement_useful(340, None, 6_500, false));
         // The reference card's real reading is comfortably inside.
-        assert!(attest_measurement_useful(823, None, 15_100));
+        assert!(attest_measurement_useful(823, None, 15_100, false));
     }
 
     /// Item #104: a submission must clear the floor the **live chain** enforces,
