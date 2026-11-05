@@ -3443,7 +3443,10 @@ fn spawn_handler_watchdog(
     counter: Arc<std::sync::atomic::AtomicUsize>,
     max_handlers: usize,
 ) {
-    const STUCK_AFTER: Duration = Duration::from_secs(20);
+    // Above the 25 s `/assignments` long poll, which is a legitimate wait: at
+    // 20 s the watchdog reported three healthy pollers as "stuck" every window,
+    // which is exactly how a real stuck handler gets ignored.
+    const STUCK_AFTER: Duration = Duration::from_secs(35);
     const REPORT_EVERY: Duration = Duration::from_secs(60);
     std::thread::spawn(move || {
         let mut last_report = Instant::now() - REPORT_EVERY;
