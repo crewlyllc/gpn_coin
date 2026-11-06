@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect x="10" y="10" width="492" height="492" rx="112" fill="#0B1220" stroke="#12203A" stroke-width="4"/>
+  <polygon points="256,74 413,165 413,347 256,438 99,347 99,165"
+           fill="none" stroke="#22D3EE" stroke-width="18" stroke-linejoin="round"/>
+  <text x="256" y="318" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="230"
+        font-weight="700" fill="#F8FAFC" text-anchor="middle">G</text>
+  <circle cx="366" cy="400" r="26" fill="#0B1220"/>
+  <circle cx="366" cy="400" r="15" fill="#22D3EE"/>
+</svg>

@@ -323,6 +323,15 @@ pub trait EntryChain {
         pow: &EntryPow,
         params: &EntryParams,
     ) -> Result<(), String>;
+    /// Spec 50: the unsigned entry. Default delegates to the signed path so
+    /// existing tests/mocks keep working; the live chain overrides it.
+    async fn submit_register_provider_entry_unsigned(
+        &self,
+        pow: &EntryPow,
+        params: &EntryParams,
+    ) -> Result<(), String> {
+        self.submit_register_provider_entry(pow, params).await
+    }
     async fn submit_attest_entry(&self, pow: &EntryPow, params: &EntryParams)
         -> Result<(), String>;
     async fn submit_register_provider(&self, params: &EntryParams) -> Result<(), String>;
@@ -500,11 +509,21 @@ pub async fn run_entry<C: EntryChain, M: PowMiner>(
         };
     }
 
-    log("submitting register_provider_entry (one call: prove work + attest + register)…");
-    match chain.submit_register_provider_entry(&pow, params).await {
+    log("submitting the unsigned entry (proof of work, no account, no fee)…");
+    match chain
+        .submit_register_provider_entry_unsigned(&pow, params)
+        .await
+    {
         Ok(()) => EntryOutcome::Registered,
         Err(e) if is_unknown_call(&e) => {
-            log("combined call is not in the chain metadata — falling back to attest_entry + register");
+            log("unsigned entry is not in the chain metadata — trying the signed entry call");
+            match chain.submit_register_provider_entry(&pow, params).await {
+                Ok(()) => return EntryOutcome::Registered,
+                Err(e2) => {
+                    log(&format!("signed entry also unavailable: {e2}"))
+                }
+            }
+            log("falling back to attest_entry + register");
             if let Err(att) = chain.submit_attest_entry(&pow, params).await {
                 let (reason, detail) = classify_submit_error(&att);
                 return EntryOutcome::Failed(reason, detail);
@@ -629,6 +648,15 @@ impl LiveEntryChain {
         self.client.genesis_hash().await
     }
 
+    async fn submit_unsigned<Call: subxt::tx::Payload>(&self, call: Call) -> Result<(), String> {
+        let client = signer::connect(&self.endpoint)
+            .await
+            .map_err(|e| format!("connect: {e}"))?;
+        signer::submit_unsigned(&client, &self.endpoint, &call)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     async fn submit<Call: subxt::tx::Payload>(&self, call: Call) -> Result<(), String> {
         let client = signer::connect(&self.endpoint)
             .await
@@ -652,6 +680,29 @@ pub fn register_provider_entry_call(
         "register_provider_entry",
         vec![
             some_pow_value(pow),
+            Value::from_bytes(params.challenge_response),
+            Value::from_bytes(params.gpu_info_hash),
+            Value::u128(params.gpu_count as u128),
+            Value::u128(params.compute_gflops as u128),
+            params.requirements.to_value(),
+        ],
+    )
+}
+
+/// `ComputeMarketplace::register_provider_entry_unsigned(...)` as a dynamic
+/// payload (spec 50). Unsigned on purpose: no account, no fee, no deposit —
+/// the proof of work is the authorisation.
+pub fn register_provider_entry_unsigned_call(
+    account: &[u8; 32],
+    pow: &EntryPow,
+    params: &EntryParams,
+) -> subxt::tx::DynamicPayload {
+    subxt::dynamic::tx(
+        "ComputeMarketplace",
+        "register_provider_entry_unsigned",
+        vec![
+            Value::from_bytes(account),
+            pow.to_value(),
             Value::from_bytes(params.challenge_response),
             Value::from_bytes(params.gpu_info_hash),
             Value::u128(params.gpu_count as u128),
@@ -706,6 +757,19 @@ impl EntryChain for LiveEntryChain {
         params: &EntryParams,
     ) -> Result<(), String> {
         self.submit(register_provider_entry_call(pow, params)).await
+    }
+
+    async fn submit_register_provider_entry_unsigned(
+        &self,
+        pow: &EntryPow,
+        params: &EntryParams,
+    ) -> Result<(), String> {
+        let account = self.account()?;
+        let acct = sp_core::crypto::Ss58Codec::from_ss58check(&account)
+            .map_err(|e| format!("account {account}: {e}"))?;
+        let acct: sp_core::sr25519::Public = acct;
+        self.submit_unsigned(register_provider_entry_unsigned_call(&acct.0, pow, params))
+            .await
     }
 
     async fn submit_attest_entry(

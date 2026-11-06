@@ -76,6 +76,14 @@ impl ExitKind {
         code: 2,
         slug: "no-children",
     };
+    /// 67 `EX_NOUSER` — no usable compute GPU was found. A GPN node is
+    /// miner + AI provider on one GPU; with no GPU (or no driver exposing it to
+    /// `nvidia-smi`/`rocm-smi`) the node must say so and stop, instead of
+    /// running with a fabricated device.
+    pub const NO_GPU: ExitKind = ExitKind {
+        code: 67,
+        slug: "no-gpu",
+    };
     /// 75 `EX_TEMPFAIL` — a required port is held by another process.
     pub const PORT_IN_USE: ExitKind = ExitKind {
         code: 75,
@@ -468,6 +476,11 @@ pub fn kind_for_text(msg: &str) -> ExitKind {
 /// The one-line fix that belongs with [`kind_for_text`]'s category.
 pub fn default_fix(kind: ExitKind) -> &'static str {
     match kind {
+        ExitKind::NO_GPU => {
+            "no compute GPU found: check that `nvidia-smi` runs (Windows: the \
+             driver is installed; Linux: the NVIDIA driver is loaded), and that \
+             the card is not disabled in Device Manager"
+        }
         ExitKind::CONSOLE_CLOSED => CONSOLE_CLOSED_REMEDIATION,
         ExitKind::VC_RUNTIME => {
             "install the Microsoft Visual C++ runtime: winget install --id \

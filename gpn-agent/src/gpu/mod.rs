@@ -44,20 +44,13 @@ impl GPUMonitor {
             return Ok(info);
         }
 
-        // Fallback: return default GPU info
-        Ok(GPUInfo {
-            model_name: "Unknown GPU".to_string(),
-            driver_version: "unknown".to_string(),
-            vram_total_bytes: 8 * 1024 * 1024 * 1024, // 8GB default
-            vram_used_mb: 512,
-            temperature_celsius: 50.0,
-            gpu_utilization_percent: 0,
-            current_hashrate_mhs: 0.0,
-            compute_capability: "8.0".to_string(),
-            cuda_version: None,
-            gpu_count: 1,
-            gpu_uuid: None,
-        })
+        // **No fabrication.** This used to return a plausible-looking device
+        // ("Unknown GPU", 8 GB VRAM, compute capability 8.0) when both probes
+        // failed. On box 4 that invented a GPU on a machine that had none, and
+        // any attestation built on it would have been a lie about hardware.
+        // A failed read is an error, never a default (owner rule: Unknown, not
+        // a plausible number).
+        Err("no compute GPU detected: nvidia-smi and rocm-smi both unavailable".into())
     }
 
     fn query_nvidia_smi() -> Result<GPUInfo, Box<dyn std::error::Error>> {

@@ -173,6 +173,16 @@ pub trait GpuEntryProvider<AccountId> {
 
     /// True when `who` already consumed its one free entry.
     fn free_entry_used(who: &AccountId) -> bool;
+
+    /// Read-only pre-check for the **unsigned** entry (spec 50): verify the
+    /// proof against the live target and enforce the entry limits, without
+    /// writing anything. Called from `validate_unsigned`, i.e. before dispatch,
+    /// so a zero-cost extrinsic still cannot spam the block.
+    fn precheck_pow(
+        who: &AccountId,
+        pow: &EntryPow,
+        gpu_info_hash: &[u8; 32],
+    ) -> frame_support::dispatch::DispatchResult;
 }
 
 #[frame_support::pallet]
@@ -1098,6 +1108,15 @@ pub mod pallet {
             )?;
             Self::record_free_entry(who, &gpu_info_hash);
             Ok(())
+        }
+
+        fn precheck_pow(
+            who: &T::AccountId,
+            pow: &EntryPow,
+            gpu_info_hash: &[u8; 32],
+        ) -> DispatchResult {
+            // Shares the exact checks the dispatch path makes; no writes.
+            Self::check_free_entry(who, pow, gpu_info_hash)
         }
 
         fn free_entry_used(who: &T::AccountId) -> bool {

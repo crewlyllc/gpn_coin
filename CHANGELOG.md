@@ -8,6 +8,177 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.23] - 2026-11-05
+
+Zero-balance onboarding that actually works, plus the four Windows bugs that
+made three installs look broken.
+
+### Added
+- **Unsigned proof-of-work entry (chain spec 50/51).** A node with no coins and
+  no on-chain account now registers itself: the PoW is verified in
+  `validate_unsigned`, the account is created at existential deposit 0, and the
+  provider is registered. No signature, no fee, no deposit.
+  Verified live: account with nonce 0, balance 0, `RegisteredProviders = true`.
+
+### Changed
+- The runtime's node-key path on Windows is resolved **at launcher runtime**
+  from `%USERPROFILE%`, not baked at install time; an existing install-time key
+  is used as a fallback so older machines keep their identity.
+- Windows launcher runs `gpn_node.exe` **directly** instead of through
+  `powershell | Tee-Object`, which exited 1 before the node started whenever the
+  launcher was spawned without a console.
+
+### Fixed
+- `gpu::get_gpu_info` no longer **invents** a device ("Unknown GPU", 8 GB,
+  compute 8.0) when both `nvidia-smi` and `rocm-smi` fail; a failed read is now
+  an error (exit 67, `no-gpu`) with a remediation line.
+- Windows installs that cannot create a scheduled task keep their node but lost
+  auto-update; the exit is now reported with its real cause instead of
+  `exit 1 / unknown`.
+
+## [0.3.22] - 2026-11-05
+
+Bumped from 0.3.21 (`scripts/bump-version.py patch`). Describe the release before publishing it.
+
+### Added
+- _TODO_
+
+### Changed
+- _TODO_
+
+### Fixed
+- _TODO_
+
+## [0.3.21] - 2026-11-04
+
+Bumped from 0.3.20 (`scripts/bump-version.py patch`). Describe the release before publishing it.
+
+### Added
+- _TODO_
+
+### Changed
+- _TODO_
+
+### Fixed
+- _TODO_
+
+## [0.3.20] - 2026-11-04
+
+Bumped from 0.3.19 (`scripts/bump-version.py patch`). Describe the release before publishing it.
+
+### Added
+- _TODO_
+
+### Changed
+- _TODO_
+
+### Fixed
+- _TODO_
+
+## [0.3.19] - 2026-11-04
+
+Bumped from 0.3.18 (`scripts/bump-version.py patch`). Describe the release before publishing it.
+
+### Added
+- _TODO_
+
+### Changed
+- _TODO_
+
+### Fixed
+- _TODO_
+
+## [0.3.18] - 2026-11-04
+
+Bumped from 0.3.17 (`scripts/bump-version.py patch`). Describe the release before publishing it.
+
+### Added
+- _TODO_
+
+### Changed
+- _TODO_
+
+### Fixed
+- _TODO_
+
+## [0.3.17] - 2026-11-04
+
+Bumped from 0.3.16 (`scripts/bump-version.py patch`). Describe the release before publishing it.
+
+### Added
+- _TODO_
+
+### Changed
+- _TODO_
+
+### Fixed
+- _TODO_
+
+## [0.3.16] - 2026-11-04
+
+Bumped from 0.3.15 (`scripts/bump-version.py patch`). Describe the release before publishing it.
+
+### Added
+- _TODO_
+
+### Changed
+- _TODO_
+
+### Fixed
+- _TODO_
+
+## [0.3.15] - 2026-11-03
+
+Bumped from 0.3.14 (`scripts/bump-version.py patch`). Describe the release before publishing it.
+
+### Added
+- _TODO_
+
+### Changed
+- _TODO_
+
+### Fixed
+- _TODO_
+
+## [0.3.14] - 2026-11-03
+
+Bumped from 0.3.13 (`scripts/bump-version.py patch`). Describe the release before publishing it.
+
+### Added
+- _TODO_
+
+### Changed
+- _TODO_
+
+### Fixed
+- _TODO_
+
+## [0.3.13] - 2026-11-03
+
+Bumped from 0.3.12 (`scripts/bump-version.py patch`). Describe the release before publishing it.
+
+### Added
+- _TODO_
+
+### Changed
+- _TODO_
+
+### Fixed
+- _TODO_
+
+## [0.3.12] - 2026-11-03
+
+Bumped from 0.3.11 (`scripts/bump-version.py patch`). Describe the release before publishing it.
+
+### Added
+- _TODO_
+
+### Changed
+- _TODO_
+
+### Fixed
+- _TODO_
+
 ## [0.3.11] - 2026-11-02
 
 Bumped from 0.3.10 (`scripts/bump-version.py patch`). Describe the release before publishing it.

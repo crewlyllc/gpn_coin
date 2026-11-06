@@ -210,6 +210,9 @@ pub mod pallet {
     use frame_system::pallet_prelude::*;
     use pallet_gpn_token::FeeSinkProvider;
     use pallet_gpu_attestation::GpuEntryProvider;
+    use sp_runtime::transaction_validity::{
+        InvalidTransaction, TransactionSource, TransactionValidity, ValidTransaction,
+    };
     use sp_std::vec::Vec;
 
     pub type BalanceOf<T> =
@@ -515,6 +518,9 @@ pub mod pallet {
         ProviderComputeInsufficient,
         /// `expire_job` was called before `created_at + max_duration` elapsed.
         JobNotExpired,
+        /// `register_provider_entry` was called without a proof of work. The call
+        /// is fee-free, so the proof — not a fee — is what gates entry (spec 49).
+        EntryProofRequired,
         /// A channel already exists (open) for this (requestor, provider) pair.
         ChannelAlreadyOpen,
         ChannelNotFound,
@@ -554,6 +560,56 @@ pub mod pallet {
     }
 
     // Hooks
+    /// Read-only validation for the unsigned entry (spec 50).
+    ///
+    /// The pool must decide *before* dispatch whether to accept an unsigned
+    /// extrinsic; that is the only place a spammer is charged anything (here,
+    /// nothing but the CPU cost of one hash verification). Everything the
+    /// dispatch would refuse is refused here too, so a rejected entry never
+    /// occupies block weight.
+    #[pallet::validate_unsigned]
+    impl<T: Config> sp_runtime::traits::ValidateUnsigned for Pallet<T> {
+        type Call = Call<T>;
+
+        fn validate_unsigned(
+            _source: TransactionSource,
+            call: &Self::Call,
+        ) -> TransactionValidity {
+            match call {
+                Call::register_provider_entry_unsigned {
+                    account,
+                    pow,
+                    gpu_info_hash,
+                    ..
+                } => {
+                    if <RegisteredProviders<T>>::contains_key(account) {
+                        return InvalidTransaction::Stale.into();
+                    }
+                    // One hash against the live target + the entry limits. This
+                    // is the anti-spam gate: without a valid proof the extrinsic
+                    // is not admitted at all.
+                    T::GpuEntry::precheck_pow(account, pow, gpu_info_hash)
+                        .map_err(|_| InvalidTransaction::BadProof)?;
+                    // An unsigned extrinsic MUST provide at least one tag, or
+                    // the pool rejects it ("No tags provided", 1019). The tag
+                    // also makes a duplicate submission for the same account a
+                    // pool-level duplicate instead of a wasted block slot.
+                    let tag = (b"gpn-entry", account.clone()).encode();
+                    Ok(ValidTransaction {
+                        // Priority above ordinary signed traffic: onboarding is
+                        // rare, bounded and the node has already spent real work.
+                        priority: 1_000,
+                        longevity: 64,
+                        propagate: true,
+                        provides: sp_std::vec![tag],
+                        ..Default::default()
+                    })
+                }
+                _ => InvalidTransaction::Call.into(),
+            }
+        }
+    }
+
     #[pallet::hooks]
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
         /// On-chain expiry sweep. Every block, examine up to
@@ -660,11 +716,21 @@ pub mod pallet {
         /// block, live-difficulty PoW) are enforced by `pallet-gpu-attestation`
         /// via `GpuEntry::attest_with_pow`; the registration is written only
         /// after that succeeds.
+        ///
+        /// **`Pays::No` unconditionally (spec 49).** The transaction pool decides
+        /// `pays_fee` from this call's `DispatchInfo` *before* dispatch — and a
+        /// conditional `Pays` was evaluated as "pays" there, so every
+        /// zero-balance account was rejected with `InvalidTransaction::Payment`
+        /// ("Inability to pay some fees") and the free entry could never happen.
+        /// Evidence: box 4 + a fresh local account, 2026-11-05; the same call
+        /// from an account holding 1 GPN succeeded and was charged 0.
+        /// The proof is therefore required *inside* dispatch instead: without it
+        /// the call fails with `EntryProofRequired` and nothing is registered.
         #[pallet::call_index(19)]
         #[pallet::weight((
             <T as Config>::WeightInfo::register_provider()
                 .saturating_add(T::DbWeight::get().reads_writes(6, 4)),
-            if pow.is_some() { Pays::No } else { Pays::Yes },
+            Pays::No,
         ))]
         pub fn register_provider_entry(
             origin: OriginFor<T>,
@@ -680,18 +746,80 @@ pub mod pallet {
                 !<RegisteredProviders<T>>::contains_key(&who),
                 Error::<T>::ProviderAlreadyRegistered
             );
-            if let Some(proof) = pow.as_ref() {
-                T::GpuEntry::attest_with_pow(
-                    &who,
-                    proof,
-                    challenge_response,
-                    gpu_info_hash,
-                    gpu_count,
-                    compute_gflops,
-                )?;
-            }
+            // The call is fee-free for everyone (see the weight annotation), so
+            // the proof is mandatory here rather than implied by the fee.
+            let proof = pow.ok_or(Error::<T>::EntryProofRequired)?;
+            T::GpuEntry::attest_with_pow(
+                &who,
+                &proof,
+                challenge_response,
+                gpu_info_hash,
+                gpu_count,
+                compute_gflops,
+            )?;
             <RegisteredProviders<T>>::insert(&who, requirements);
             Self::deposit_event(Event::<T>::ProviderRegistered { who });
+            Ok(())
+        }
+
+        /// **Unsigned proof-of-work entry (spec 50) — no account, no coins.**
+        ///
+        /// The signed entry could never work from a zero-balance account: the
+        /// payment extension rejects a signed transaction whose account does not
+        /// exist, before dispatch, with "Inability to pay some fees" — even
+        /// though the call itself is `Pays::No` and charged nothing (proved
+        /// 2026-11-05: dust balance → success, balance unchanged).
+        ///
+        /// An unsigned extrinsic carries no account and no signature, so the pool
+        /// cannot ask it for a fee. The **proof of work is the authorisation**:
+        /// verified in `validate_unsigned` (one hash against the live target,
+        /// plus the per-account / per-GPU / per-block limits) and again in
+        /// dispatch. The named account is created here at existential deposit
+        /// zero, which is what makes "join with nothing" true rather than
+        /// aspirational.
+        ///
+        /// Anyone may submit this for any account: registering somebody else's
+        /// machine grants the submitter nothing, so front-running is harmless.
+        #[pallet::call_index(20)]
+        #[pallet::weight((
+            <T as Config>::WeightInfo::register_provider()
+                .saturating_add(T::DbWeight::get().reads_writes(8, 6)),
+            Pays::No,
+        ))]
+        pub fn register_provider_entry_unsigned(
+            origin: OriginFor<T>,
+            account: T::AccountId,
+            pow: pallet_gpu_attestation::EntryPow,
+            challenge_response: [u8; 32],
+            gpu_info_hash: [u8; 32],
+            gpu_count: u8,
+            compute_gflops: u64,
+            requirements: GPURequirements,
+        ) -> DispatchResult {
+            ensure_none(origin)?;
+            ensure!(
+                !<RegisteredProviders<T>>::contains_key(&account),
+                Error::<T>::ProviderAlreadyRegistered
+            );
+            // Attestation first: it enforces the PoW, the one-per-account and
+            // one-per-GPU rules and the per-block cap. Nothing is written if it
+            // refuses.
+            T::GpuEntry::attest_with_pow(
+                &account,
+                &pow,
+                challenge_response,
+                gpu_info_hash,
+                gpu_count,
+                compute_gflops,
+            )?;
+            // The account must exist for storage maps and payouts. With an
+            // existential deposit of zero this costs nothing; `inc_providers` is
+            // what creates the `System::Account` entry.
+            if !frame_system::Pallet::<T>::account_exists(&account) {
+                frame_system::Pallet::<T>::inc_providers(&account);
+            }
+            <RegisteredProviders<T>>::insert(&account, requirements);
+            Self::deposit_event(Event::<T>::ProviderRegistered { who: account });
             Ok(())
         }
 
@@ -2213,6 +2341,13 @@ mod tests {
         fn free_entry_used(_who: &u64) -> bool {
             MOCK_ENTRY.with(|c| c.borrow().is_some())
         }
+        fn precheck_pow(
+            _who: &u64,
+            _pow: &pallet_gpu_attestation::EntryPow,
+            _gpu_info_hash: &[u8; 32],
+        ) -> frame_support::dispatch::DispatchResult {
+            Ok(())
+        }
     }
 
     // Test-only channel signature verifier backed by REAL sr25519 keys. Each
@@ -2402,6 +2537,45 @@ mod tests {
         }
     }
 
+    /// The transaction POOL decides `pays_fee` from the call's DispatchInfo —
+    /// before dispatch runs. If that says `Yes`, a zero-balance account is
+    /// rejected with "Inability to pay some fees" and the free entry can never
+    /// happen, no matter what dispatch would do. Box 4 (2026-11-05) hit exactly
+    /// that: a valid proof at 7.1 MH/s, still refused for fees.
+    #[test]
+    fn entry_call_is_fee_free_in_its_dispatch_info() {
+        use frame_support::dispatch::{GetDispatchInfo, Pays};
+        use frame_support::pallet_prelude::Weight;
+
+        let free = Call::<Test>::register_provider_entry {
+            pow: Some(sample_pow()),
+            challenge_response: [3u8; 32],
+            gpu_info_hash: [4u8; 32],
+            gpu_count: 1,
+            compute_gflops: 10_000,
+            requirements: default_reqs(),
+        };
+        assert_eq!(
+            free.get_dispatch_info().pays_fee,
+            Pays::No,
+            "entry-with-proof must be Pays::No in DispatchInfo, or the pool rejects zero-balance accounts"
+        );
+
+        // No proof -> still `Pays::No` (the fee is what the pool checks; the
+        // proof is enforced at dispatch), otherwise a zero-balance caller can
+        // not even reach the error.
+        let paid = Call::<Test>::register_provider_entry {
+            pow: None,
+            challenge_response: [3u8; 32],
+            gpu_info_hash: [4u8; 32],
+            gpu_count: 1,
+            compute_gflops: 10_000,
+            requirements: default_reqs(),
+        };
+        assert_eq!(paid.get_dispatch_info().pays_fee, Pays::No);
+        let _ = Weight::zero();
+    }
+
     #[test]
     fn test_register_provider_entry_with_pow_is_one_call() {
         new_test_ext().execute_with(|| {
@@ -2423,11 +2597,14 @@ mod tests {
         });
     }
 
+    /// Spec 49: the call is fee-free for everyone (so the pool never demands a
+    /// balance), which means the proof — not a fee — must gate entry. Without a
+    /// proof the call fails and nothing is registered.
     #[test]
-    fn test_register_provider_entry_without_pow_skips_delegation() {
+    fn test_register_provider_entry_without_pow_is_rejected() {
         new_test_ext().execute_with(|| {
             MOCK_ENTRY.with(|c| *c.borrow_mut() = None);
-            MarketPallet::register_provider_entry(
+            let err = MarketPallet::register_provider_entry(
                 RuntimeOrigin::signed(BOB),
                 None,
                 [3u8; 32],
@@ -2436,9 +2613,9 @@ mod tests {
                 10_000,
                 default_reqs(),
             )
-            .unwrap();
-            assert!(RegisteredProviders::<Test>::contains_key(BOB));
-            // Negative control: no free entry was consumed.
+            .unwrap_err();
+            assert_eq!(err, Error::<Test>::EntryProofRequired.into());
+            assert!(!RegisteredProviders::<Test>::contains_key(BOB));
             assert_eq!(MOCK_ENTRY.with(|c| *c.borrow()), None);
         });
     }

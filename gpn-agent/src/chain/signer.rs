@@ -466,6 +466,77 @@ where
 /// surfacing as "Priority is too low" / "Transaction is outdated". We retry the
 /// submission with an incremented nonce until the tx is accepted or a
 /// non-nonce error is returned.
+/// Submit an **unsigned** extrinsic and wait for inclusion.
+///
+/// Spec-50 entry: no account, no signature, no fee. `subxt`'s unsigned
+/// `submit_and_watch` serialises the bytes as a JSON array, which this node
+/// rejects (`invalid type: sequence, expected a hex string`), so the hex goes
+/// to `author_submitExtrinsic` over plain JSON-RPC and inclusion is confirmed by
+/// watching the pool.
+pub async fn submit_unsigned<Call>(
+    client: &OnlineClient<GpnConfig>,
+    endpoint: &str,
+    call: &Call,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    Call: Payload,
+{
+    let unsigned = client.tx().create_unsigned(call)?;
+    let bytes = unsigned.encoded();
+    if std::env::var("GPN_TRACE_TX").ok().as_deref() == Some("1") {
+        eprintln!("[trace-unsigned] hex={}", hex::encode(bytes));
+    }
+    let hex = format!("0x{}", hex::encode(bytes));
+
+    // Substrate serves HTTP JSON-RPC on the same port as the websocket.
+    let http = endpoint
+        .replacen("ws://", "http://", 1)
+        .replacen("wss://", "https://", 1);
+    let rpc = |method: &'static str, params: serde_json::Value| {
+        let http = http.clone();
+        async move {
+            let body = serde_json::json!({"id":1,"jsonrpc":"2.0","method":method,"params":params});
+            let resp: serde_json::Value = reqwest::Client::new()
+                .post(&http)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| e.to_string())?
+                .json()
+                .await
+                .map_err(|e| e.to_string())?;
+            if let Some(err) = resp.get("error") {
+                return Err(format!("RPC error: {err}"));
+            }
+            Ok::<serde_json::Value, String>(resp)
+        }
+    };
+
+    let submitted = rpc("author_submitExtrinsic", serde_json::json!([hex]))
+        .await
+        .map_err(|e| e.to_string())?;
+    let _hash = submitted.get("result").cloned().unwrap_or_default();
+
+    let started = std::time::Instant::now();
+    loop {
+        if started.elapsed() > std::time::Duration::from_secs(120) {
+            return Err("unsigned extrinsic never left the pool (rejected or dropped)".into());
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let pending = rpc("author_pendingExtrinsics", serde_json::json!([]))
+            .await
+            .map_err(|e| e.to_string())?;
+        let empty = pending
+            .get("result")
+            .and_then(|r| r.as_array())
+            .map(|a| a.is_empty())
+            .unwrap_or(true);
+        if empty {
+            return Ok(());
+        }
+    }
+}
+
 pub async fn submit_signed<Call>(
     client: &OnlineClient<GpnConfig>,
     call: &Call,
@@ -669,6 +740,18 @@ where
     // NOTE: `SubmittableExtrinsic::encoded()` carries the SCALE compact length
     // prefix, while a block-body extrinsic has it stripped — compare the BODIES.
     let our_extrinsic = extrinsic_body(signed.encoded()).to_vec();
+    // GPN_TRACE_TX=1 prints the exact bytes handed to the pool. The pool judge
+    // `pays_fee` from this encoded call BEFORE dispatch, so when a zero-balance
+    // account is refused for fees while dispatch charges nothing, the only way
+    // to tell "wrong bytes" from "wrong runtime" is to look at them.
+    if std::env::var("GPN_TRACE_TX").ok().as_deref() == Some("1") {
+        // `eprintln!` on purpose: log output is filtered unless RUST_LOG is set.
+        eprintln!(
+            "[trace-tx] len={} hex={}",
+            our_extrinsic.len(),
+            hex::encode(&our_extrinsic)
+        );
+    }
     let progress = signed.submit_and_watch().await?;
 
     // Wait for the tx to be included in a **best** block. We deliberately do
