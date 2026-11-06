@@ -393,7 +393,7 @@ REM  the same text to the log, and stops this loop after the SAME failure 3
 REM  times in 10 minutes (an endless restart loop is its own silent failure).
 :run
 REM  Run the node DIRECTLY -- no PowerShell wrapper, no pipeline.
-REM  The wrapper (`powershell -Command "& node *>&1 | Tee-Object"`) exits 1
+REM  The old wrapper (powershell, piping through a file-teeing cmdlet) exited 1
 REM  BEFORE the node starts whenever the launcher is spawned without a console
 REM  (installer's Win32_Process.Create, scheduled task), and the operator then
 REM  sees only "the node exited 1 without writing a reason" -- the node never

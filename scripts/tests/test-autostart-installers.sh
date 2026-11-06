@@ -78,7 +78,13 @@ assert_has "$ps1" "not adding a duplicate entry"       "never duplicates an exis
 assert_has "$ps1" "cmd /c ollama serve"                "ollama autostart runs 'ollama serve'"
 
 # ---- launcher contract ----------------------------------------------------
-assert_has "$ps1" "Tee-Object -FilePath"     "supervisor output is teed to a log"
+# 2026-11-05 box 4: the launcher used to run
+#   powershell -Command "& gpn_node.exe *>&1 | Tee-Object ..."
+# and that wrapper exits 1 BEFORE the node starts whenever the launcher is
+# spawned without a console (installer's Win32_Process.Create, scheduled task).
+# The operator saw "exited 1 without writing a reason" while the node never ran.
+assert_lacks "$ps1" "Tee-Object -FilePath"   "launcher does not wrap the node in a PowerShell pipeline"
+assert_has "$ps1" '>> "__LOG__" 2>&1'        "launcher appends the node's own output to the log"
 assert_has "$ps1" 'set "GPN_BASE_PATH='    "launcher pins GPN_BASE_PATH"
 assert_has "$ps1" 'set "GPN_AP_URL='       "launcher pins GPN_AP_URL"
 assert_has "$ps1" 'set "GPN_BOOTNODES='    "launcher pins GPN_BOOTNODES"
@@ -146,7 +152,7 @@ assert_has "$ps1" "registered a Startup shortcut instead"   "foreign-owned task 
 assert_has "$ps1" "no scheduled task -- starting the node directly" "starts the node when only a Startup shortcut exists"
 assert_has "$ps1" "starting the node directly"                     "starts directly when schtasks /Run is denied"
 assert_has "$ps1" "NodeAutostart"                                  "tracks which autostart mechanism actually worked"
-assert_not_has "$ps1" 'Say "scheduled task \$NodeTask registered'  "never claims a task succeeded before checking"
+assert_lacks "$ps1" 'Say "scheduled task \$NodeTask registered'  "never claims a task succeeded before checking"
 # /RL HIGHEST needs elevation; from a normal shell it fails rc=1 even with no
 # existing task. The node needs no admin rights, so the installer must retry
 # without it rather than abort.
@@ -156,19 +162,23 @@ assert_has "$ps1" "retrying at normal privilege"         "falls back when /RL HI
 # Startup shortcut when the Task Scheduler refuses.
 assert_has "$ps1" "reusing it (not recreating)"            "reuses an existing GPN-Node task"
 assert_has "$ps1" "using a Startup shortcut instead"       "falls back to a Startup shortcut when denied"
-# 2026-11-04: the launcher rejected a key that cmd itself reported FOUND. Bake the
-# absolute path at install time instead of resolving %USERPROFILE% at run time.
-assert_has "$ps1" "__KEYFILE__"                            "launcher template carries a key-path placeholder"
-assert_has "$ps1" "Replace('__KEYFILE__'"                  "install substitutes the absolute key path"
-assert_not_has "$ps1" 'set "GPN_NODE_KEY_FILE=%USERPROFILE%'  "launcher no longer depends on %USERPROFILE%"
+# 2026-11-04 tried baking the absolute key path at install time; 2026-11-05 box 4
+# proved that wrong: installed by one account, run by another -> the baked path
+# pointed into the wrong profile and the launcher printed "refusing to start a
+# node with a shared/default identity". The path is resolved at RUNTIME now, with
+# the install-time path kept only as a fallback for machines that already have a
+# key there.
+assert_has "$ps1" "__KEYFILE__"                            "launcher template still carries the install-time fallback"
+assert_has "$ps1" "Replace('__KEYFILE__'"                  "install substitutes the fallback path"
+assert_has "$ps1" 'set "GPN_NODE_KEY_FILE=%USERPROFILE%'    "launcher resolves the key path from %USERPROFILE% at runtime"
 assert_has "$ps1" "GetFolderPath('Startup')"               "writes the shortcut to the user Startup folder"
 # The update task must not require elevation either, and the deploy path must
 # never fail the release build when a task cannot be registered.
 assert_has "$ps1" "<RunLevel>LeastPrivilege</RunLevel>"    "update task runs at least privilege"
-assert_not_has "$ps1" "<RunLevel>HighestAvailable</RunLevel>" "update task never requests elevation"
+assert_lacks "$ps1" "<RunLevel>HighestAvailable</RunLevel>" "update task never requests elevation"
 assert_has "$ps1" "the release is unaffected"              "deploy mode warns instead of failing the build"
 assert_has "$ps1" "-RunHighest"                          "elevated task creation is opt-in, not the default"
-assert_not_has "$ps1" "'/Create', '/TN', \$NodeTask, '/TR', "cmd /c \$NodeCmd", '/SC', 'ONLOGON', '/RL'" \
+assert_lacks "$ps1" "'/Create', '/TN', \$NodeTask, '/TR', "cmd /c \$NodeCmd", '/SC', 'ONLOGON', '/RL'" \
   "the default create does NOT request elevation"
 assert_has "$ps1" "schtasks /Delete /TN \$NodeTask /F"    "gives the exact admin command to clear it"
 python3 - "$ps1" <<'CHECK'
@@ -210,7 +220,7 @@ while IFS= read -r f; do
     ok "$(basename "$f") is ASCII-only"
   fi
 done < <(find "$repo" -name '*.ps1' -not -path '*/target/*' -not -path '*/.git/*')
-assert_not_has "$ps1" "Install it, then run this installer again:[^\n]*\n[^\n]*winget install[^\n]*\n[^\n]*Nothing was changed" \
+assert_lacks "$ps1" "Install it, then run this installer again:[^\n]*\n[^\n]*winget install[^\n]*\n[^\n]*Nothing was changed" \
   "no longer dead-ends the user on a missing ollama"
 assert_has "$ps1" "winget install --id Ollama.Ollama -e" "prints the install command when ollama is missing"
 assert_has "$ps1" "REFUSE TO START"                 "explains why it refuses to continue without ollama"
@@ -235,7 +245,8 @@ echo "== Windows installer: launcher identity rules =="
 awk "/^\\\$LauncherTemplate = @'/{f=1;next} f && /^'@\$/{exit} f" "$ps1" > "$tmp/launcher.cmd"
 assert_file "$tmp/launcher.cmd" "launcher template extracted"
 assert_has "$tmp/launcher.cmd" "__REPORT__"      "launcher leaves a slot for the reporter path"
-assert_has "$tmp/launcher.cmd" "Tee-Object"      "launcher still tees to one log"
+assert_lacks "$tmp/launcher.cmd" "Tee-Object"    "launcher execs the node directly (no PowerShell wrapper)"
+assert_has "$tmp/launcher.cmd" '>> "__LOG__" 2>&1' "node output goes straight to node.log"
 
 # The reporter is a separate generated script; extract and check it too.
 awk "/^\\\$ReportTemplate = @'/{f=1;next} f && /^'@\$/{exit} f" "$ps1" > "$tmp/report-exit.ps1"
