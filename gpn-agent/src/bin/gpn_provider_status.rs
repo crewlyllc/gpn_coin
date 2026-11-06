@@ -891,7 +891,7 @@ fn choose_public_base(
     configured: Option<&str>,
     listen_addrs: &[String],
     node_evidence: Option<&str>,
-    stun: Option<&str>,
+    stun: impl FnOnce() -> Option<String>,
     notes: &mut Vec<String>,
 ) -> Option<PublicBase> {
     // 1. Operator-configured address.
@@ -954,9 +954,12 @@ fn choose_public_base(
         ));
     }
 
-    // 4. STUN mapping on the listen port.
-    if let Some(raw) = stun {
-        match base_multiaddr(raw) {
+    // 4. STUN mapping on the listen port — probed **lazily**, only now that
+    //    every cheaper rung has failed. Asked eagerly it cost a network round
+    //    trip on every refresh and told healthy, TCP-dialable nodes to publish
+    //    a UDP-derived port.
+    if let Some(raw) = stun() {
+        match base_multiaddr(&raw) {
             Some(base) if base_is_dialable(&base) => {
                 return Some(PublicBase {
                     base,
@@ -985,7 +988,7 @@ fn build_p2p_info(
     public_addr: Option<&str>,
     listen_addrs: Vec<String>,
 ) -> P2pInfo {
-    build_p2p_info_with(peer_id, public_addr, listen_addrs, &[], None)
+    build_p2p_info_with(peer_id, public_addr, listen_addrs, &[], &|| None)
 }
 
 /// [`build_p2p_info`] with the extra evidence rungs (node state file + STUN).
@@ -998,7 +1001,7 @@ fn build_p2p_info_with(
     public_addr: Option<&str>,
     listen_addrs: Vec<String>,
     node_evidence: &[String],
-    stun: Option<&str>,
+    stun: &dyn Fn() -> Option<String>,
 ) -> P2pInfo {
     // Normalise BEFORE anything is published: the node may hand us
     // `/…/tcp/30333/p2p/<id>` (or even `/p2p/<id>/p2p/<id>`). Re-emitting that
@@ -1139,14 +1142,14 @@ fn p2p_info_from_rpc(
     rpc: &dyn Fn(&str) -> Option<Value>,
     public_addr: Option<&str>,
 ) -> Option<P2pInfo> {
-    p2p_info_from_rpc_evidence(rpc, public_addr, &[], None)
+    p2p_info_from_rpc_evidence(rpc, public_addr, &[], &|| None)
 }
 
 fn p2p_info_from_rpc_evidence(
     rpc: &dyn Fn(&str) -> Option<Value>,
     public_addr: Option<&str>,
     node_evidence: &[String],
-    stun: Option<&str>,
+    stun: &dyn Fn() -> Option<String>,
 ) -> Option<P2pInfo> {
     let peer_id = rpc("system_localPeerId").and_then(|v| v.as_str().map(normalize_peer_id))??;
     let listen_addrs = rpc("system_localListenAddresses")
@@ -1343,6 +1346,15 @@ fn stun_binding(port: u16, server: &str, timeout: Duration) -> Option<(std::net:
 /// different port than we listen on, and only the router (UPnP/NAT-PMP) or the
 /// operator can tell us which one. In that case we log the observed mapping and
 /// publish nothing.
+///
+/// **The probe is UDP, the publication is TCP.** NATs rewrite the two
+/// transports independently (this host maps UDP/30333 to a fresh random port on
+/// every probe while TCP/30333 is a working static forward), so a UDP mapping
+/// can never *prove* anything about the TCP address peers dial. It is kept as a
+/// last-resort rung only, and its verdict is worded as what it is — an
+/// observation, not a port to publish. Callers must ask for it lazily (see
+/// `choose_public_base`), so a node that already has verified evidence never
+/// pays for the round trip nor logs a verdict about a port it does not use.
 fn stun_evidence(port: Option<u16>) -> Option<String> {
     if std::env::var("GPN_STUN")
         .map(|v| v.eq_ignore_ascii_case("off"))
@@ -1367,9 +1379,15 @@ fn stun_evidence(port: Option<u16>) -> Option<String> {
                 eprintln!("[p2p] STUN via {server} reports {ip} (not public) — no forward works");
                 None
             } else if mapped_port != port {
+                // Deliberately NOT "set GPN_PUBLIC_ADDR=…:tcp/{mapped_port}": this
+                // number is a UDP mapping, the published address is TCP, and on a
+                // rewriting NAT the value changes per probe. Publishing it would
+                // trade a working static TCP forward for a port nothing forwards.
                 eprintln!(
-                    "[p2p] STUN via {server} maps to {ip}:{mapped_port} but we listen on {port} \
-                     (port-rewriting NAT) — set GPN_PUBLIC_ADDR=/ip4/{ip}/tcp/{mapped_port}"
+                    "[p2p] STUN via {server} observed udp/{port} mapped to {ip}:{mapped_port} \
+                     (port-rewriting NAT) — this describes UDP only, so it is not used as \
+                     evidence for the published tcp/{port}; keep GPN_PUBLIC_ADDR or confirm the \
+                     TCP forward/UPnP instead"
                 );
                 None
             } else {
@@ -1409,14 +1427,16 @@ fn p2p_info(endpoint: &str, public_addr: Option<&str>) -> Option<P2pInfo> {
     let listen_port = rpc_call(endpoint, "system_localListenAddresses", json!([]))
         .and_then(|v| v.as_array().cloned())
         .and_then(|a| a.iter().filter_map(|x| x.as_str()).find_map(port_of));
-    let stun = stun_evidence(listen_port);
+    // Last rung only: probed when the ladder actually reaches it, not on every
+    // refresh (see `stun_evidence` for why an eager UDP verdict is misleading).
+    let stun_probe = || stun_evidence(listen_port);
     let mut info = p2p_info_cached(
         public_addr,
         Instant::now(),
         p2p_cache(),
         &|method| rpc_call(endpoint, method, json!([])),
         &dial.addrs,
-        stun.as_deref(),
+        &stun_probe,
     )?;
     info.apply_dial(&dial);
     Some(info)
@@ -1430,7 +1450,7 @@ fn p2p_info_cached(
     cache: &std::sync::Mutex<Option<(Instant, Option<P2pInfo>)>>,
     rpc: &dyn Fn(&str) -> Option<Value>,
     evidence: &[String],
-    stun: Option<&str>,
+    stun: &dyn Fn() -> Option<String>,
 ) -> Option<P2pInfo> {
     let mut hit: Option<Option<P2pInfo>> = None;
     if let Ok(guard) = cache.lock() {
@@ -2204,12 +2224,12 @@ mod tests {
         let addr = Some("/ip4/203.0.113.9/tcp/30333");
 
         // First read: id A.
-        let first = p2p_info_cached(addr, t0, &cache, &rpc, &[], None).unwrap();
+        let first = p2p_info_cached(addr, t0, &cache, &rpc, &[], &|| None).unwrap();
         assert!(first.multiaddrs[0]
             .ends_with("/p2p/12D3KooWRmEpPduYCn29uAAUF7WDnbsTXooPXA7YGRWCC7C7feJm"));
 
         // Inside the TTL the (still valid) cached snapshot is reused.
-        let cached = p2p_info_cached(addr, t0 + P2P_TTL / 2, &cache, &rpc, &[], None).unwrap();
+        let cached = p2p_info_cached(addr, t0 + P2P_TTL / 2, &cache, &rpc, &[], &|| None).unwrap();
         assert_eq!(cached.peer_id, first.peer_id);
 
         // Node restarts with a new key; past the TTL we must publish the NEW id.
@@ -2220,7 +2240,7 @@ mod tests {
             &cache,
             &rpc,
             &[],
-            None,
+            &|| None,
         )
         .unwrap();
         assert_eq!(
@@ -2232,7 +2252,7 @@ mod tests {
         // The node goes away: past the TTL nothing at all is published — never
         // the last known identity.
         rpc_up.store(false, Ordering::SeqCst);
-        let gone = p2p_info_cached(addr, t0 + P2P_TTL * 4, &cache, &rpc, &[], None);
+        let gone = p2p_info_cached(addr, t0 + P2P_TTL * 4, &cache, &rpc, &[], &|| None);
         assert!(
             gone.is_none(),
             "a failed read must never resurrect a stale id"
@@ -2489,7 +2509,7 @@ mod tests {
             Some("/ip4/203.0.113.7/tcp/30333"),
             vec![format!("/ip4/0.0.0.0/tcp/30333/p2p/{PID}")],
             &[],
-            None,
+            &|| None,
         );
         assert_eq!(
             info.listen_addrs,
@@ -2511,7 +2531,7 @@ mod tests {
                 "/ip4/203.0.113.7/tcp/30333".to_string(),
                 "/ip6/2606:4700:4700::1111/tcp/30333".to_string(),
             ],
-            None,
+            &|| None,
         );
         assert_eq!(info.address_source, "node-dialability-state");
         assert_eq!(
@@ -2531,7 +2551,7 @@ mod tests {
                 "/ip4/203.0.113.7/tcp/30333".to_string(),
                 "/ip6/fd00::1/tcp/30333".to_string(),
             ],
-            None,
+            &|| None,
         );
         assert_eq!(
             only_bad_v6.multiaddrs,
@@ -2543,7 +2563,7 @@ mod tests {
             None,
             vec!["/ip4/0.0.0.0/tcp/30333".to_string()],
             &["/ip4/203.0.113.7/tcp/30333".to_string()],
-            None,
+            &|| None,
         );
         assert_eq!(
             v4_only.multiaddrs,
@@ -2570,7 +2590,7 @@ mod tests {
             "/ip6/fe80::1/tcp/30333",
         ];
         let mut notes = Vec::new();
-        let got = choose_public_base(None, &private.map(String::from), None, None, &mut notes);
+        let got = choose_public_base(None, &private.map(String::from), None, || None, &mut notes);
         assert!(
             got.is_none(),
             "no private address may be published: {got:?}"
@@ -2589,7 +2609,7 @@ mod tests {
             None,
             &["/ip4/142.129.54.88/tcp/30333".to_string()],
             None,
-            None,
+            || None,
             &mut notes,
         )
         .expect("a public listener is dialable");
@@ -2605,7 +2625,7 @@ mod tests {
             Some("/ip4/203.0.113.7/tcp/30333"),
             &listen,
             Some("/ip4/198.51.100.9/tcp/30333"),
-            Some("/ip4/198.51.100.10/tcp/30333"),
+            || Some("/ip4/198.51.100.10/tcp/30333".to_string()),
             &mut notes,
         )
         .unwrap();
@@ -2616,7 +2636,7 @@ mod tests {
             None,
             &listen,
             Some("/ip4/198.51.100.9/tcp/30333"),
-            Some("/ip4/198.51.100.10/tcp/30333"),
+            || Some("/ip4/198.51.100.10/tcp/30333".to_string()),
             &mut notes,
         )
         .unwrap();
@@ -2628,12 +2648,71 @@ mod tests {
             None,
             &listen,
             None,
-            Some("/ip4/198.51.100.10/tcp/30333"),
+            || Some("/ip4/198.51.100.10/tcp/30333".to_string()),
             &mut notes,
         )
         .unwrap();
         assert_eq!(stun.source, AddrSource::Stun);
         assert_eq!(stun.base, "/ip4/198.51.100.10/tcp/30333");
+    }
+
+    /// The STUN probe is the last rung and must stay lazy: eager probing cost a
+    /// network round trip per refresh and, worse, printed a UDP port-rewrite
+    /// verdict (with a port to publish) at nodes that were already TCP-dialable.
+    #[test]
+    fn stun_is_only_probed_when_the_earlier_rungs_fail() {
+        let listen = ["/ip4/192.168.1.20/tcp/30333".to_string()];
+        let probed = std::cell::Cell::new(0u32);
+        let mut notes = Vec::new();
+
+        // Configured address decides ⇒ never probe.
+        let got = choose_public_base(
+            Some("/ip4/203.0.113.7/tcp/30333"),
+            &listen,
+            Some("/ip4/198.51.100.9/tcp/30333"),
+            || {
+                probed.set(probed.get() + 1);
+                Some("/ip4/198.51.100.10/tcp/30333".to_string())
+            },
+            &mut notes,
+        )
+        .unwrap();
+        assert_eq!(got.source, AddrSource::Configured);
+        assert_eq!(
+            probed.get(),
+            0,
+            "a decided ladder must not touch the network"
+        );
+
+        // Node evidence decides ⇒ still never probe.
+        let got = choose_public_base(
+            None,
+            &listen,
+            Some("/ip4/198.51.100.9/tcp/30333"),
+            || {
+                probed.set(probed.get() + 1);
+                None
+            },
+            &mut notes,
+        )
+        .unwrap();
+        assert_eq!(got.source, AddrSource::NodeEvidence);
+        assert_eq!(probed.get(), 0);
+
+        // Nothing else can name a base ⇒ probe exactly once.
+        let got = choose_public_base(
+            None,
+            &listen,
+            None,
+            || {
+                probed.set(probed.get() + 1);
+                Some("/ip4/198.51.100.10/tcp/30333".to_string())
+            },
+            &mut notes,
+        )
+        .unwrap();
+        assert_eq!(got.source, AddrSource::Stun);
+        assert_eq!(probed.get(), 1);
     }
 
     #[test]
@@ -2643,7 +2722,7 @@ mod tests {
             Some("127.0.0.1:30333"),
             &["/ip4/142.129.54.88/tcp/30333".to_string()],
             None,
-            None,
+            || None,
             &mut notes,
         )
         .unwrap();
@@ -2659,7 +2738,7 @@ mod tests {
             None,
             &["/ip4/192.168.1.20/tcp/30333".to_string()],
             None,
-            None,
+            || None,
             &mut notes,
         );
         assert!(got.is_none());
