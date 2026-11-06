@@ -101,13 +101,19 @@ fn fee_error(pow: Option<EntryPow>, who: AccountId) -> Option<TransactionValidit
     .err()
 }
 
+/// Spec 49 changed this: the call is `Pays::No` **unconditionally**, because the
+/// pool decides the fee from the DispatchInfo before dispatch and a conditional
+/// `Pays` was read as "pays" there — so a zero-balance account was refused for
+/// fees on a call that charged none. The proof is now enforced *inside* dispatch
+/// (`EntryProofRequired`), which the test below asserts.
 #[test]
-fn pow_call_is_pays_no_and_plain_call_is_pays_yes() {
+fn entry_call_is_pays_no_with_or_without_a_proof() {
     new_test_ext().execute_with(|| {
-        let free = entry_call(Some(dummy_pow())).get_dispatch_info();
-        assert_eq!(free.pays_fee, Pays::No);
-        let paid = entry_call(None).get_dispatch_info();
-        assert_eq!(paid.pays_fee, Pays::Yes);
+        assert_eq!(
+            entry_call(Some(dummy_pow())).get_dispatch_info().pays_fee,
+            Pays::No
+        );
+        assert_eq!(entry_call(None).get_dispatch_info().pays_fee, Pays::No);
     });
 }
 
@@ -144,19 +150,32 @@ fn zero_balance_account_can_join_in_one_call_when_it_proves_work() {
     });
 }
 
+/// The anti-spam rule that replaced the fee: no proof, no entry. The call is
+/// free for everyone (so a zero-balance account is never refused by the pool),
+/// which means the proof has to be the thing that refuses.
 #[test]
-fn same_call_without_pow_cannot_be_paid_by_a_zero_balance_account() {
+fn same_call_without_pow_is_refused_at_dispatch() {
     new_test_ext().execute_with(|| {
         let who = acct(8);
         assert_eq!(Balances::free_balance(&who), 0);
-        let err = fee_error(None, who);
-        assert_eq!(
-            err,
-            Some(TransactionValidityError::Invalid(
-                InvalidTransaction::Payment
-            )),
-            "without a proof the call must be fee-paying, and the fee must be unpayable"
+        // Validation no longer demands a balance…
+        assert!(fee_error(None, who.clone()).is_none());
+        // …and dispatch refuses the call without a proof.
+        let err = ComputeMarketplace::register_provider_entry(
+            RuntimeOrigin::signed(who.clone()),
+            None,
+            [1u8; 32],
+            [0x47u8; 32],
+            1,
+            1_000,
+            GPURequirements::default(),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("EntryProofRequired"),
+            "expected EntryProofRequired, got {err:?}"
         );
+        assert!(!pallet_compute_marketplace::RegisteredProviders::<Runtime>::contains_key(&who));
     });
 }
 
