@@ -790,6 +790,16 @@ pub fn spawn(mut opts: RunOptions) -> std::thread::JoinHandle<()> {
                         Action::Exit { why } => {
                             idle::clear_at(&opts.idle_path);
                             println!("[idle-auto] resume: {why} — mining and job claiming resume");
+                            // Publish `engaged=false` in the same tick that the
+                            // idle file disappears. Before this, the file was
+                            // cleared here but `engaged` came from
+                            // `machine.engaged()`, which only drops on the next
+                            // step -- so for up to one poll interval an observer
+                            // saw "not idled, file gone" *and* "engaged: true".
+                            // That is the flake in
+                            // idle_auto::sustained_foreign_load_idles_and_quiet_resumes
+                            // (CI 2026-11-05 02:27 and 2026-11-06 09:18).
+                            opts.shared.publish(reading.as_ref(), false, 0);
                         }
                     }
                     opts.shared.publish(

@@ -14,6 +14,12 @@ permissions:
   actions: write    # to prune old artifacts
   contents: write   # to publish downloadable GitHub Releases
 
+# One build per ref at a time. A second dispatch waits instead of racing the
+# first over the same artifact names (2026-11-06: releases are dispatched by sha).
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   windows:
     runs-on: [self-hosted, Windows]

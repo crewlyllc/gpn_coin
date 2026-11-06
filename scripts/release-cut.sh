@@ -123,11 +123,37 @@ scrub() { # never let a credential reach a log, even in an error path
   printf '%s\n' "$s"
 }
 
+# ── release lock ──────────────────────────────────────────────────────────
+# A signed release must span one fixed tree. The queue driver commits to `main`
+# every 30 minutes, so without a marker it can land a commit between "detect the
+# assets" and "publish the manifest" — which is exactly what forced a manual
+# pause on 2026-11-05. The marker is advisory for the driver (it reads the file);
+# the flock makes it authoritative for concurrent release-cuts.
+RELEASE_LOCK="${GPN_RELEASE_LOCK:-$HOME/.gpn/release.lock}"
+LOCK_FD=9
+
+acquire_release_lock() {
+  mkdir -p "$(dirname "$RELEASE_LOCK")"
+  exec 9>"$RELEASE_LOCK.flock"
+  if ! flock -n 9; then
+    echo "REFUSED: another release-cut holds $RELEASE_LOCK.flock" >&2
+    exit 2
+  fi
+  # Same path the driver checks. JSON so a reader can be strict about age.
+  printf '{"pid":%d,"started_unix":%d,"step":"%s"}\n' "$$" "$(date +%s)" "detect" > "$RELEASE_LOCK"
+}
+
+release_lock_step() {
+  [ -f "$RELEASE_LOCK" ] || return 0
+  printf '{"pid":%d,"started_unix":%d,"step":"%s"}\n' "$$" "$(date +%s)" "$1" > "$RELEASE_LOCK"
+}
+
 cleanup() {
   local rc=$?
   [ -n "$TMP" ] && rm -rf "$TMP"
   [ -n "$CFG_SRC" ] && rm -f "$CFG_SRC"
   [ -n "$CFG_DST" ] && rm -f "$CFG_DST"
+  rm -f "$RELEASE_LOCK"
   return $rc
 }
 trap cleanup EXIT
@@ -138,7 +164,7 @@ on_err() {
 }
 trap on_err ERR
 
-step() { STEP="$1"; printf '\n== %s\n' "$1"; }
+step() { STEP="$1"; release_lock_step "$1"; printf '\n== %s\n' "$1"; }
 say()  { printf '   %s\n' "$*"; }
 
 make_curl_cfg() { # pat_file out
@@ -361,6 +387,7 @@ say "published   $(published_version || true)"
 [ "$DRY" = 1 ] && say "mode        DRY RUN (no upload, no commit, no push)"
 
 # ─────────────────────────────────────────────────────────────── 1 detect ──
+acquire_release_lock
 step "1/6 detect the built assets"
 read -r S_LINUX Z_LINUX _ <<< "$(asset_meta "$CFG_SRC" "$SRC_REPO" linux-latest gpn-linux.tar.gz)"
 read -r S_WIN   Z_WIN   _ <<< "$(asset_meta "$CFG_SRC" "$SRC_REPO" windows-latest gpn-windows.zip)"
