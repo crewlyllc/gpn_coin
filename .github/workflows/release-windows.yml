@@ -527,6 +527,39 @@ jobs:
             Write-Host '::warning::install.ps1 not found in the checkout - GPN-Update NOT registered'
           }
 
+      # ── GATE (2026-11-05): the launcher and the key path are the two things
+      #    that broke on every install this week, and both are visible in the
+      #    file we just wrote to C:\gpn. Publishing must not happen unless these
+      #    hold -- three of today's four Windows bugs were only found by a human
+      #    running the installer after the fact.
+      - name: verify the installed launcher (gate before publish)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cmd = 'C:\gpn\start-node.cmd'
+          if (-not (Test-Path $cmd)) { throw "launcher missing: $cmd" }
+          $text = Get-Content $cmd -Raw
+
+          if ($text -match 'Tee-Object') {
+            throw "launcher wraps the node in 'powershell | Tee-Object'; that exits 1 before the node starts when spawned without a console"
+          }
+          if ($text -notmatch 'gpn_node\.exe"?\s*>>') {
+            throw 'launcher does not exec gpn_node.exe directly with >> redirection'
+          }
+          if ($text -notmatch '%USERPROFILE%') {
+            throw 'launcher does not resolve GPN_NODE_KEY_FILE from %USERPROFILE% at runtime'
+          }
+
+          $ver = (& 'C:\gpn\bin\gpn_node.exe' --version 2>&1 | Out-String).Trim()
+          Write-Host "bundle version: $ver"
+          $want = (Select-String -Path (Join-Path $env:GITHUB_WORKSPACE 'network.json') -Pattern '"version"\s*:\s*"([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          if ($want -and ($ver -notmatch [regex]::Escape($want))) {
+            throw "installed binary reports '$ver' but the tree is at $want"
+          }
+
+          & 'C:\gpn\bin\gpn_node.exe' --diagnose 2>&1 | ForEach-Object { Write-Host $_ }
+          Write-Host 'launcher + key path + version: OK (gate passed)'
+
       - name: publish GitHub Release (rolling 'windows-latest')
         shell: powershell
         env:
