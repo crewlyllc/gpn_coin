@@ -8,6 +8,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.24] - 2026-11-06
+
+An update now repairs the launcher it left behind.
+
+### Fixed
+- **Windows: `gpn_update --apply` rewrites a stale `start-node.cmd`.** 0.3.23's
+  installer writes a launcher that execs `gpn_node.exe` directly; before it, the
+  launcher ran a PowerShell pipeline that exits 1 *before the node starts* when
+  spawned without a console. Updates only swap binaries, so every machine
+  installed before 0.3.23 reported the new version and stayed dead — box 1 on
+  2026-11-06: `gpn_node 0.3.23` on disk, `--diagnose` all green, and
+  `last-exit.json` saying `version: launcher, pid: 0`.
+  The repair lives in the binary (not the installer or the wrapper) because the
+  binary is the one thing an update always replaces, including on machines whose
+  update wrapper predates the fix. The old line's own paths are reused, a
+  `.bak-<ts>` copy is kept, and an unparseable line is left untouched and logged.
+
 ## [0.3.23] - 2026-11-05
 
 Zero-balance onboarding that actually works, plus the four Windows bugs that

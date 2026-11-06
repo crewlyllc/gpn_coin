@@ -1080,7 +1080,16 @@ pub fn apply_pending(
     // A bundle install is not an exe swap: it flips `current` to a complete
     // version directory. Nothing about the running image is touched.
     if pending.is_bundle() {
-        return apply_pending_bundle(state_dir, &pending);
+        let applied = apply_pending_bundle(state_dir, &pending)?;
+        if matches!(applied, Ok(Some(_))) {
+            // The binaries just changed; the launcher that starts them may not
+            // have. Repair it here, where every update passes — including on
+            // boxes whose update wrapper predates the fix.
+            if let Some(note) = repair_windows_launcher(exe) {
+                eprintln!("[update] {note}");
+            }
+        }
+        return Ok(applied);
     }
 
     let staged = PathBuf::from(&pending.staged);
@@ -1630,6 +1639,99 @@ pub fn previous_pointer_dir(state_dir: &Path) -> Option<PathBuf> {
         return None;
     }
     Some(p)
+}
+
+/// Repair a Windows launcher that still wraps the node in a PowerShell pipeline.
+///
+/// The 0.3.23 installer writes a launcher that execs `gpn_node.exe` directly;
+/// before it, the launcher ran
+/// `powershell -Command "& node 2>&1 | Tee-Object -FilePath <log> -Append"`,
+/// which exits 1 *before the node starts* whenever the launcher is spawned
+/// without a console. An update only swaps binaries, so every machine that was
+/// installed before 0.3.23 keeps the broken launcher while reporting the new
+/// version — box 1 on 2026-11-06 was exactly that: 0.3.23 on disk, dead in the
+/// water, `last-exit.json` saying `version: launcher, pid: 0`.
+///
+/// Patching here (rather than in the launcher or the installer) is deliberate:
+/// the *binary* is the one thing an update always replaces, including on boxes
+/// whose update wrapper is still the old one. Returns a human-readable note when
+/// a repair happened, so `update.log` records it.
+#[cfg(windows)]
+fn repair_windows_launcher(exe: &std::path::Path) -> Option<String> {
+    let bin = exe.parent()?;
+    let install = bin.parent()?;
+    let launcher = install.join("start-node.cmd");
+    let body = std::fs::read_to_string(&launcher).ok()?;
+    if !body.contains("Tee-Object") {
+        return None; // already direct-exec
+    }
+
+    let between = |s: &str, open: &str, close: char| -> Option<String> {
+        let start = s.find(open)? + open.len();
+        let rest = &s[start..];
+        let end = rest.find(close)?;
+        Some(rest[..end].to_string())
+    };
+
+    let mut out = String::with_capacity(body.len() + 64);
+    let mut changed = false;
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("powershell") && line.contains("Tee-Object") {
+            // Reuse the paths the old line already carries: never invent them.
+            let node = between(line, "& '", '\'').or_else(|| between(line, "& '", '\''));
+            let log = between(line, "FilePath '", '\'');
+            match (node, log) {
+                (Some(node), Some(log)) => {
+                    out.push_str(&format!("\"{node}\" >> \"{log}\" 2>&1"));
+                    changed = true;
+                    continue;
+                }
+                _ => {
+                    // Cannot parse it safely: leave the file alone rather than
+                    // write a launcher with a wrong path.
+                    eprintln!(
+                        "[update] launcher still wraps the node in a PowerShell pipeline, but its \
+                         command line could not be parsed — left unchanged: {line}"
+                    );
+                    out.push_str(line);
+                    continue;
+                }
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+
+    if !changed {
+        return None;
+    }
+    // Back up before replacing: a launcher is the one file that decides whether
+    // the machine starts at all.
+    let backup = install.join(format!(
+        "start-node.cmd.bak-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    ));
+    let _ = std::fs::copy(&launcher, &backup);
+    match std::fs::write(&launcher, out) {
+        Ok(()) => Some(format!(
+            "repaired start-node.cmd: the node is now exec'd directly (no PowerShell pipeline); \
+             previous copy at {}",
+            backup.display()
+        )),
+        Err(e) => {
+            eprintln!("[update] could not rewrite {}: {e}", launcher.display());
+            None
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn repair_windows_launcher(_exe: &std::path::Path) -> Option<String> {
+    None
 }
 
 fn apply_pending_bundle(
