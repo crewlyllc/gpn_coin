@@ -8,6 +8,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.26] - 2026-11-06
+
+Block rewards finally reach the machine that mined them.
+
+### Fixed
+- **The miner now signs seals as the node's own account.** The reward goes to
+  whoever `FindAuthor` recovers from the pre-runtime digest, so a node mining
+  under a shared/dev key pays somebody else. Measured on testnet before this
+  change: **95,454 blocks authored by the dev seed "Alice", 0 by any real box** —
+  every machine's wallet sat at 0 GPN while it mined for days. The supervisor now
+  derives `GPN_MINER_ACCOUNT` from the node's own keystore (`GPN_SIGNER_FILE`)
+  and logs `mining as this machine's account: <ss58>`.
+  Verified: this box went from 0 → 3 authored blocks and +150 GPN in the first
+  minute after the change.
+- `--alice` removed from the fleet launcher: it seeds the node keystore with the
+  dev key, which the miner falls back to when `GPN_MINER_ACCOUNT` is unset.
+
+### Added
+- `firstrun::ss58_to_public` — ss58 → raw 32-byte public key, so the miner can
+  sign as exactly the account the operator sees.
+
 ## [0.3.25] - 2026-11-06
 
 The launcher stops guessing about the key.

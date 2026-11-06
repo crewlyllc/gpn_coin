@@ -3976,6 +3976,48 @@ async fn main() {
         }
     }
 
+    // ── Mining identity: the machine's OWN account ──────────────────────────
+    // The block reward goes to whoever signed the seal (FindAuthor over the
+    // pre-runtime digest), so a node that mines under a shared/dev key pays
+    // somebody else. That is exactly what happened until 2026-11-06: 95,454
+    // blocks authored by the dev seed "Alice" and ZERO by any real box, so every
+    // machine's wallet stayed at 0 GPN while it mined for days.
+    // Children inherit this env var; the chain node resolves GPN_MINER_ACCOUNT
+    // before falling back to its keystore's dev keys.
+    if env_str("GPN_MINER_ACCOUNT")
+        .filter(|s| !s.trim().is_empty())
+        .is_none()
+    {
+        let keystore_path = env_str("GPN_SIGNER_FILE")
+            .map(|s| PathBuf::from(expand_tilde(&s)))
+            .unwrap_or_else(|| gpn_agent::firstrun::default_keystore_path(&cfg.base_path));
+        match gpn_agent::firstrun::read_keystore(&keystore_path) {
+            Ok(ks) => {
+                // The keystore's `address` is the ss58 form; re-derive the raw
+                // 32 bytes so the miner can sign as exactly that account.
+                match gpn_agent::firstrun::ss58_to_public(&ks.address) {
+                    Ok(public) => {
+                        std::env::set_var("GPN_MINER_ACCOUNT", hex::encode(public));
+                        asciiprintln!(
+                            "  mining as this machine's account: {} (block rewards go here)",
+                            ks.address
+                        );
+                    }
+                    Err(e) => asciiprintln!(
+                        "  WARNING: cannot derive the mining account from {}: {e} -- block \
+                         rewards may go to a shared key",
+                        keystore_path.display()
+                    ),
+                }
+            }
+            Err(e) => asciiprintln!(
+                "  WARNING: no readable keystore at {} ({e}) -- the chain node will fall back \
+                 to its own keys and block rewards may not reach this machine",
+                keystore_path.display()
+            ),
+        }
+    }
+
     let specs = build_children(&cfg);
     if specs.is_empty() {
         exit_report::fatal(

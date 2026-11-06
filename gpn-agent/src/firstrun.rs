@@ -613,6 +613,17 @@ pub fn ss58_of(secret: &str) -> Result<String, String> {
 /// `GPUAttestation::Attestations`, and `/status` advertised `gflops: 0` on a box
 /// that had a real attestation (queue #65). Never use this to *create* a wallet —
 /// only to name an account that is already configured.
+/// ss58 → raw 32-byte sr25519 public key.
+///
+/// The block reward is paid to whoever signed the seal, so the miner needs the
+/// raw account bytes (`GPN_MINER_ACCOUNT`), not the display address.
+pub fn ss58_to_public(address: &str) -> Result<[u8; 32], String> {
+    use sp_core::crypto::Ss58Codec;
+    let public = sp_core::sr25519::Public::from_ss58check(address.trim())
+        .map_err(|e| format!("not an ss58 account: {e:?}"))?;
+    Ok(public.0)
+}
+
 pub fn ss58_of_uri(uri: &str) -> Result<String, String> {
     let uri = uri.trim();
     // `sr25519::Pair::from_string("")` is deprecated and returns a default pair
