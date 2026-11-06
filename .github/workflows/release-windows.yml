@@ -423,32 +423,12 @@ jobs:
 
           # ── 2. COPY the freshly built binaries over the (now unlocked) bins. ─
           $ErrorActionPreference = 'Stop'   # strict again: a failed copy MUST fail the job
-          # 2026-11-05: a run died on "The process cannot access the file
-          # 'gpn_diffusion_provider.exe' because it is being used by another
-          # process" -- a child restarted between the stop and the copy, or a
-          # scanner held the image. Retry, then rename-then-copy: Windows lets
-          # you rename a running image even when it refuses to overwrite it.
-          function Copy-BinsWithRetry([string]$Pattern, [string]$Dest, [int]$Tries = 12) {
-            for ($i = 1; $i -le $Tries; $i++) {
-              try {
-                Copy-Item $Pattern $Dest -Force -ErrorAction Stop
-                return
-              } catch {
-                Write-Host "copy attempt $i/$Tries locked: $($_.Exception.Message.Split([Environment]::NewLine)[0])"
-                Start-Sleep -Seconds 3
-              }
-            }
-            Write-Host 'still locked after retries -- renaming the held images aside and copying again'
-            Get-ChildItem $Pattern | ForEach-Object {
-              $target = Join-Path $Dest $_.Name
-              if (Test-Path $target) {
-                try { Rename-Item $target ("$target.old-" + (Get-Date -Format 'HHmmss')) -ErrorAction Stop }
-                catch { Write-Host "could not rename $target : $($_.Exception.Message)" }
-              }
-            }
-            Copy-Item $Pattern $Dest -Force -ErrorAction Stop
-          }
-          Copy-BinsWithRetry 'gpn-agent\target\release\*.exe' $dst
+          # 2026-11-05: a run died on "cannot access gpn_diffusion_provider.exe,
+          # used by another process" -- a child restarted between the stop and
+          # the copy, or a scanner held the image. robocopy retries (10x3s) and
+          # is atomic per file; a hard failure still fails the job (>= 8).
+          robocopy 'gpn-agent\target\release' $dst '*.exe' /R:10 /W:3 /NFL /NDL /NJH /NJS /NP | Out-Null
+          if ($LASTEXITCODE -ge 8) { throw "robocopy of agent binaries failed (rc=$LASTEXITCODE)" }
           Copy-Item 'gpn-node\target\release\gpn-node.exe' $dst -Force
           Write-Host "deployed to $dst :"
           Get-ChildItem $dst -Filter *.exe | ForEach-Object { Write-Host "  $($_.Name)  $([math]::Round($_.Length/1MB,1))MB" }
