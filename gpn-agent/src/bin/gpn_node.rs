@@ -519,10 +519,7 @@ fn run_ensure_node_key(argv: &[String]) -> i32 {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             if let Some(parent) = path.parent() {
                 if let Err(e) = std::fs::create_dir_all(parent) {
-                    asciiprintln!(
-                        "[key] ERROR: cannot create {}: {e}",
-                        parent.display()
-                    );
+                    asciiprintln!("[key] ERROR: cannot create {}: {e}", parent.display());
                     return 3;
                 }
             }
@@ -579,10 +576,7 @@ fn run_ensure_node_key(argv: &[String]) -> i32 {
             // Permission denied, sharing violation, ... — the launcher's
             // `if not exist` used to report this as "no key" and then blame the
             // identity. Name the real error instead.
-            asciiprintln!(
-                "[key] ERROR: cannot read {}: {e}",
-                path.display()
-            );
+            asciiprintln!("[key] ERROR: cannot read {}: {e}", path.display());
             asciiprintln!(
                 "[key]        if another gpn process is running, stop it first \
                  (taskkill /IM gpn_node.exe /F) and try again"
