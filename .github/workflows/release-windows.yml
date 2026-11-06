@@ -409,6 +409,13 @@ jobs:
           # native schtasks writes to stderr when a task is absent; that must not
           # trip $ErrorActionPreference='Stop' — check exit codes explicitly.
           $ErrorActionPreference = 'Continue'
+          # DISABLE before ending. `schtasks /End` stops the instance, not the
+          # task: with RestartOnFailure / StartWhenAvailable the supervisor comes
+          # straight back and re-locks the exe mid-copy -- which is exactly what
+          # failed on 2026-11-05 ("cannot access gpn_diffusion_provider.exe, used
+          # by another process"). Disable first, then stop, then WAIT for the
+          # processes to actually disappear.
+          foreach ($tn in @('GPN-Node','GPNProvider')) { schtasks /Change /TN $tn /DISABLE 2>&1 | Out-Null }
           foreach ($tn in @('GPN-Node','GPNProvider')) { schtasks /End /TN $tn 2>&1 | Out-Null }
           Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
             Where-Object { $_.CommandLine -like '*run-provider.ps1*' } |
@@ -417,7 +424,18 @@ jobs:
             Write-Host "stopping $($_.ProcessName) (pid $($_.Id))"
             Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
           }
-          Start-Sleep -Seconds 2
+          # Wait for the processes to be GONE, not a fixed sleep: stopping is
+          # asynchronous and a 2 s assumption is how a lock survived the kill.
+          for ($i = 1; $i -le 20; $i++) {
+            $left = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like 'gpn*' })
+            if ($left.Count -eq 0) { break }
+            Write-Host "waiting for $($left.Count) gpn process(es): $($left.ProcessName -join ',')"
+            Start-Sleep -Seconds 1
+          }
+          $still = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like 'gpn*' })
+          if ($still.Count -gt 0) {
+            Write-Host "::warning::$($still.Count) gpn process(es) survived the stop: $($still.ProcessName -join ',') -- the copy will retry"
+          }
           schtasks /Query /TN GPNProvider 2>&1 | Out-Null
           if ($LASTEXITCODE -eq 0) { schtasks /Delete /TN GPNProvider /F 2>&1 | Out-Null; Write-Host 'removed legacy GPNProvider task' }
 
