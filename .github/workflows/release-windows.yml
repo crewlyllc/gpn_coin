@@ -320,9 +320,13 @@ jobs:
           :gpn_fast_sync_done
           set "GPN_BOOTNODES=/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo"
           cd /d C:\gpn
-          REM show output live in the console AND append to node.log (Tee), so an
-          REM operator can watch what's happening without tailing the file.
-          powershell -NoProfile -Command "& 'C:\gpn\bin\gpn_node.exe' 2>&1 | Tee-Object -FilePath 'C:\gpn\node.log' -Append"
+          REM Run the node DIRECTLY -- no PowerShell wrapper, no pipeline.
+          REM 2026-11-05 box 4: the wrapped form exits 1 BEFORE the node starts
+          REM whenever the launcher is spawned without a console (installer's
+          REM Win32_Process.Create, scheduled task), and the operator sees only
+          REM "the node exited 1 without writing a reason" while the node never
+          REM ran. Console output moves to node.log; the dashboard shows state.
+          "C:\gpn\bin\gpn_node.exe" >> "C:\gpn\node.log" 2>&1
           '@
           $script = $script.Replace('__CHAIN__', $chain)
 
