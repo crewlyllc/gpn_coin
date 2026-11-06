@@ -191,6 +191,55 @@ fn persist_job_payload(
     false
 }
 
+/// Throttle bookkeeping for a refused `/assignments` pull.
+///
+/// `GET /assignments` is internet-facing by design (a NAT'd provider has no
+/// other way in), so an unregistered or misconfigured box retries forever. The
+/// push path has been throttled since #131; the pull path printed every refusal
+/// — 227 lines in 10 min on 2026-11-05 from three accounts, all refused by the
+/// same in-memory cache. Key on address **and** reason so two offenders (or one
+/// box failing two ways) do not collapse into each other's silence.
+fn pull_refusal_notice(
+    log: &std::sync::Mutex<gpn_agent::provider_heartbeat::RejectLog>,
+    account: &str,
+    reason: &str,
+    now: u64,
+) -> gpn_agent::provider_heartbeat::RejectNotice {
+    let key = format!("{account}|{reason}");
+    match log.lock() {
+        Ok(mut l) => l.record(&key, now),
+        // A poisoned lock must never silence a refusal line entirely.
+        Err(_) => gpn_agent::provider_heartbeat::RejectNotice::First,
+    }
+}
+
+/// Emit the (throttled) journal line for a refused `/assignments` pull.
+fn log_pull_refusal(
+    log: &std::sync::Mutex<gpn_agent::provider_heartbeat::RejectLog>,
+    account: &str,
+    reason: &str,
+    now: u64,
+) {
+    use gpn_agent::provider_heartbeat::{abbreviated, RejectNotice, REJECT_LOG_INTERVAL_SECS};
+    match pull_refusal_notice(log, account, reason, now) {
+        RejectNotice::Suppressed => {}
+        RejectNotice::First => eprintln!(
+            "[assign] pull rejected account={} method=GET path=/assignments result={} \
+             (further notices at most every {}s)",
+            abbreviated(account),
+            reason,
+            REJECT_LOG_INTERVAL_SECS
+        ),
+        RejectNotice::Summary { suppressed } => eprintln!(
+            "[assign] still rejecting pulls account={} method=GET path=/assignments \
+             result={} ({} more since the last notice)",
+            abbreviated(account),
+            reason,
+            suppressed
+        ),
+    }
+}
+
 /// OpenAI-shaped `usage` block for a completed chat job (item #53).
 ///
 /// The counts come from the inference backend (via the provider's store). An
@@ -4339,11 +4388,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             refusal = Some(aa::AssignAuthError::ProviderMismatch);
                         }
                         if let Some(e) = refusal {
-                            eprintln!(
-                                "[assign] pull rejected account={} method=GET path=/assignments result={}",
-                                gpn_agent::provider_heartbeat::abbreviated(&account_hdr),
-                                e.reason()
-                            );
+                            log_pull_refusal(&reject_log, &account_hdr, e.reason(), now);
                             let _ = req.respond(
                                 Response::from_string(
                                     json!({"error":"unauthorized","reason":e.reason()}).to_string(),
@@ -9403,6 +9448,51 @@ mod tests {
         assert!(d.expired());
         // An already-spent deadline does not start the work at all.
         assert_eq!(Deadline::after(1).block(&rt, async { 1 }), Some(1));
+    }
+
+    /// A refused pull is journaled once per window, not once per retry.
+    ///
+    /// `GET /assignments` is internet-facing, so an unregistered box retries
+    /// forever: before this, three accounts produced 227 identical lines in
+    /// 10 min. Addresses and reasons are tracked separately, so a second
+    /// offender (or the same box failing differently) still gets its own line.
+    #[test]
+    fn a_refused_pull_is_logged_once_per_window_not_once_per_retry() {
+        use gpn_agent::provider_heartbeat::{RejectNotice, REJECT_LOG_INTERVAL_SECS};
+        let log = std::sync::Mutex::new(gpn_agent::provider_heartbeat::RejectLog::new());
+        let t = 1_000u64;
+        assert!(matches!(
+            pull_refusal_notice(&log, "5Hgbpi", "unregistered", t),
+            RejectNotice::First
+        ));
+        // Ten retries inside the window say nothing at all.
+        for i in 1..=10 {
+            assert!(matches!(
+                pull_refusal_notice(&log, "5Hgbpi", "unregistered", t + i),
+                RejectNotice::Suppressed
+            ));
+        }
+        // A different account is its own first offender.
+        assert!(matches!(
+            pull_refusal_notice(&log, "5HVtpo", "unregistered", t + 11),
+            RejectNotice::First
+        ));
+        // Same account, different reason: also its own line (a box that fixes
+        // its registration but not its token must not go silent).
+        assert!(matches!(
+            pull_refusal_notice(&log, "5Hgbpi", "missing_credentials", t + 12),
+            RejectNotice::First
+        ));
+        // After the window it speaks once more, with the count it swallowed.
+        match pull_refusal_notice(
+            &log,
+            "5Hgbpi",
+            "unregistered",
+            t + REJECT_LOG_INTERVAL_SECS + 1,
+        ) {
+            RejectNotice::Summary { suppressed } => assert_eq!(suppressed, 10),
+            other => panic!("expected a counted summary, got {other:?}"),
+        };
     }
 
     /// Lock acquisition is bounded: a held mutex yields `None` instead of
