@@ -229,17 +229,11 @@ jobs:
           REM first run and hand the node the FILE (GPN_NODE_KEY_FILE).
           set "GPN_NODE_KEY="
           set "GPN_NODE_KEY_FILE=%USERPROFILE%\.gpn\node-key"
-          if not exist "%USERPROFILE%\.gpn" mkdir "%USERPROFILE%\.gpn" >nul 2>&1
-          if not exist "%GPN_NODE_KEY_FILE%" (
-            echo [gpn] generating this machine's node identity: %GPN_NODE_KEY_FILE%
-            "%GPN_BIN%\gpn-node.exe" key generate-node-key --file "%GPN_NODE_KEY_FILE%"
-          )
-          if not exist "%GPN_NODE_KEY_FILE%" (
-            echo [gpn] ERROR: could not create a node key at %GPN_NODE_KEY_FILE%
-            echo [gpn] ERROR: refusing to start a node with a shared/default identity.
-            echo [gpn] ERROR: create it by hand with:
-            echo [gpn] ERROR:   "%GPN_BIN%\gpn-node.exe" key generate-node-key --file "%GPN_NODE_KEY_FILE%"
-            echo [gpn] ERROR: then re-run this script.
+          REM The binary answers "is there a usable key?" honestly; cmd's
+          REM `if not exist` reported a present file as missing on 2026-11-06.
+          "%GPN_BIN%\gpn_node.exe" --ensure-node-key --file "%GPN_NODE_KEY_FILE%"
+          if errorlevel 1 (
+            echo [gpn] ERROR: no usable node identity - the line above says why.
             exit /b 1
           )
           REM ── Fast sync: weekly snapshot (default; GPN_FAST_SYNC=0 opts out) ────────

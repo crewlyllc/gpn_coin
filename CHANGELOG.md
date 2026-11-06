@@ -8,6 +8,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.25] - 2026-11-06
+
+The launcher stops guessing about the key.
+
+### Added
+- **`gpn_node --ensure-node-key [--file <path>]`.** Opens the key file and
+  reports the truth: creates it when absent (via `gpn-node key
+  generate-node-key`), exits 3 with the OS error when it exists but is
+  unreadable / the wrong size / held open by another process. Also creates the
+  parent directory.
+
+### Changed
+- The Windows launcher's key handling is now **two lines**: set
+  `GPN_NODE_KEY_FILE`, call `--ensure-node-key`, stop if it exits non-zero. The
+  `if not exist` / `copy` / `mkdir` / `keygen` probe chain is gone.
+
+### Fixed
+- **The misleading "refusing to start a node with a shared/default identity"
+  message is gone.** On box 2 (2026-11-06) `cmd`'s `if not exist` reported a
+  64-byte, readable, unlocked key as missing, minutes after `if exist` reported
+  it present; the launcher then blamed the identity. Three wrong diagnoses in a
+  row (ownership, privilege, wallet) traced back to that one probe.
+
 ## [0.3.24] - 2026-11-06
 
 An update now repairs the launcher it left behind.

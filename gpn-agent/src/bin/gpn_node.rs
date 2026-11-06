@@ -478,6 +478,120 @@ fn resolve_effective_base(explicit: Option<PathBuf>) -> PathBuf {
 ///
 /// Exit codes: `0` ok · `3` wallet could not be provisioned · `4` cannot
 /// create the base directory.
+
+/// `--ensure-node-key [--file <path>]` — guarantee a usable per-machine node key.
+///
+/// Exit 0 = a valid key is on disk (created if it was absent).
+/// Exit 3 = the path exists but is not a usable key (wrong size, unreadable,
+///          or held open by another process). The message names the OS error.
+fn run_ensure_node_key(argv: &[String]) -> i32 {
+    let path = argv
+        .iter()
+        .position(|a| a == "--file")
+        .and_then(|i| argv.get(i + 1))
+        .map(|s| PathBuf::from(expand_tilde(s)))
+        .or_else(|| env_str("GPN_NODE_KEY_FILE").map(|s| PathBuf::from(expand_tilde(&s))))
+        .unwrap_or_else(|| PathBuf::from(expand_tilde("~/.gpn/node-key")));
+
+    let looks_valid = |body: &str| {
+        let t = body.trim();
+        t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit())
+    };
+
+    match std::fs::read_to_string(&path) {
+        Ok(body) if looks_valid(&body) => {
+            asciiprintln!("[key] node identity present: {}", path.display());
+            0
+        }
+        Ok(body) => {
+            asciiprintln!(
+                "[key] ERROR: {} exists but is not a 64-hex node key ({} bytes)",
+                path.display(),
+                body.trim().len()
+            );
+            asciiprintln!(
+                "[key]        move it aside to let this machine create a new identity: \
+                 ren \"{}\" node-key.bad",
+                path.display()
+            );
+            3
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(parent) = path.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    asciiprintln!(
+                        "[key] ERROR: cannot create {}: {e}",
+                        parent.display()
+                    );
+                    return 3;
+                }
+            }
+            // Key generation lives in the *chain* binary (`gpn-node`, hyphen);
+            // this supervisor is `gpn_node` (underscore) and has no `key`
+            // subcommand — calling itself would just start a node. Use the
+            // sibling when it is there, and say so plainly when it is not.
+            let self_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("gpn_node"));
+            let sibling = self_exe.with_file_name(if cfg!(windows) {
+                "gpn-node.exe"
+            } else {
+                "gpn-node"
+            });
+            let exe = if sibling.is_file() {
+                sibling
+            } else {
+                asciiprintln!(
+                    "[key] ERROR: no node key at {} and key generation needs the chain binary \
+                     ({}) which is not next to this one",
+                    path.display(),
+                    sibling.display()
+                );
+                return 3;
+            };
+            let out = std::process::Command::new(&exe)
+                .arg("key")
+                .arg("generate-node-key")
+                .arg("--file")
+                .arg(&path)
+                .output();
+            match out {
+                Ok(o) if o.status.success() => {
+                    asciiprintln!(
+                        "[key] created this machine's node identity: {}",
+                        path.display()
+                    );
+                    0
+                }
+                Ok(o) => {
+                    asciiprintln!(
+                        "[key] ERROR: key generation failed ({}): {}",
+                        o.status,
+                        String::from_utf8_lossy(&o.stderr).trim()
+                    );
+                    3
+                }
+                Err(e) => {
+                    asciiprintln!("[key] ERROR: cannot run key generation: {e}");
+                    3
+                }
+            }
+        }
+        Err(e) => {
+            // Permission denied, sharing violation, ... — the launcher's
+            // `if not exist` used to report this as "no key" and then blame the
+            // identity. Name the real error instead.
+            asciiprintln!(
+                "[key] ERROR: cannot read {}: {e}",
+                path.display()
+            );
+            asciiprintln!(
+                "[key]        if another gpn process is running, stop it first \
+                 (taskkill /IM gpn_node.exe /F) and try again"
+            );
+            3
+        }
+    }
+}
+
 fn run_ensure_wallet() -> i32 {
     let base_path =
         resolve_effective_base(env_str("GPN_BASE_PATH").map(|s| PathBuf::from(expand_tilde(&s))));
@@ -3670,6 +3784,19 @@ async fn main() {
         || env_str("GPN_ENSURE_WALLET").as_deref() == Some("1")
     {
         std::process::exit(run_ensure_wallet());
+    }
+
+    // The launcher used to decide "is the node key present?" with cmd's
+    // `if not exist`, which reports a present, readable, unlocked file as
+    // MISSING under some conditions (measured on box 2, 2026-11-06: the same
+    // file answered EXISTS and MISSING within minutes, and the launcher then
+    // printed "refusing to start a node with a shared/default identity" —
+    // three wrong diagnoses in a row). File-system truth belongs here, where we
+    // can open the file and read the actual OS error.
+    if argv.iter().any(|a| a == "--ensure-node-key")
+        || env_str("GPN_ENSURE_NODE_KEY").as_deref() == Some("1")
+    {
+        std::process::exit(run_ensure_node_key(&argv));
     }
 
     let mut cfg = match Config::load() {

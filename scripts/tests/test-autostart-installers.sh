@@ -195,8 +195,14 @@ sys.exit(0 if 0 <= defs < use else 1)
 CHECK
 assert_has "$ps1" "Microsoft.VCRedist.2015+.x64"         "installs the VC++ redistributable"
 assert_has "$ps1" "vc_redist.x64.exe"                    "has a direct redist fallback"
-assert_has "$ps1" "exit %KEYRC%"                         "launcher reports the key-generation exit code"
-assert_has "$ps1" "0xC0000135 = missing Visual C++"      "launcher names the DLL-not-found cause"
+# 2026-11-06: the launcher no longer decides "is the key there?" with cmd's
+# `if not exist` -- that probe reported a present, readable, unlocked key as
+# MISSING on box 2 and produced three wrong "identity" diagnoses. The binary
+# answers instead, because it can open the file and read the real OS error.
+assert_has   "$ps1" "--ensure-node-key"                   "launcher asks the binary whether the key is usable"
+assert_has   "$ps1" 'if not "%KEYRC%"=="0"'               "launcher stops when the binary cannot supply a key"
+assert_lacks "$ps1" 'if not exist "%GPN_NODE_KEY_FILE%" (' "launcher does not probe the key with if-not-exist"
+assert_lacks "$ps1" "refusing to start a node with a shared/default identity" "the misleading identity message is gone"
 assert_has "$ps1" "install-ollama.ps1"                   "delegates to the ollama installer"
 assert_has "$ps1" "OllamaSetup.exe"                      "has a direct-install fallback (winget absent)"
 assert_has "$ps1" "Programs\\Ollama\\ollama.exe"      "refreshes PATH for a per-user ollama install"

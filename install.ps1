@@ -336,41 +336,20 @@ set "GPN_OLLAMA=http://127.0.0.1:11434"
 set "GPN_BIN=__INSTALL_DIR__\bin"
 
 REM --- per-machine node identity (a shared key makes boxes collide) ----------
-REM  Resolve the key path at RUNTIME, from the account that is actually running.
-REM  Baking an absolute path at install time breaks every case where the node
-REM  later runs as a different user (install elevated as admin, then run as the
-REM  normal account): the path points into somebody else's profile and keygen
-REM  fails with "refusing to start ... shared/default identity" -- a message that
-REM  hides the real cause. See box-4 report, 2026-11-05.
+REM  NO cmd-side probing. `if not exist` reported a present, readable, unlocked
+REM  key as MISSING on box 2 (2026-11-06) and the launcher then blamed the
+REM  identity; the same file answered EXISTS minutes later. The binary opens the
+REM  file, so it is the only thing that can answer honestly.
 set "GPN_NODE_KEY="
 if not defined USERPROFILE set "USERPROFILE=%HOMEDRIVE%%HOMEPATH%"
 set "GPN_NODE_KEY_FILE=%USERPROFILE%\.gpn\node-key"
-REM  Fall back to the install-time path ONLY if it already holds a real key
-REM  (machines installed before this fix keep working).
-if not exist "%GPN_NODE_KEY_FILE%" if exist "__KEYFILE__" set "GPN_NODE_KEY_FILE=__KEYFILE__"
 set "KEYRC=1"
-set "WRC=1"
-REM What the launcher resolved -- printed so a mismatch is visible in the trace
-REM instead of only as "could not create a node key".
-echo [gpn] node identity: key=%GPN_NODE_KEY_FILE% userprofile=%USERPROFILE% cwd=%CD%
-if not exist "%GPN_NODE_KEY_FILE%" (
-  echo [gpn] generating this machine's node identity: %GPN_NODE_KEY_FILE%
-  REM  The keygen does not create parent directories; a missing .gpn is the
-  REM  difference between "creates a key" and "refuses to start".
-  if not exist "%USERPROFILE%\.gpn" mkdir "%USERPROFILE%\.gpn" 2>nul
-  if not exist "%GPN_NODE_KEY_FILE%" if exist "__KEYFILE__" copy /y "__KEYFILE__" "%GPN_NODE_KEY_FILE%" >nul 2>&1
-  if not exist "%GPN_NODE_KEY_FILE%" "%GPN_BIN%\gpn-node.exe" key generate-node-key --file "%GPN_NODE_KEY_FILE%" > "%TEMP%\gpn-keygen.log" 2>&1
-  set "KEYRC=%ERRORLEVEL%"
-  type "%TEMP%\gpn-keygen.log"
-)
-if not exist "%GPN_NODE_KEY_FILE%" (
-  echo [gpn] ERROR: could not create a node key at %GPN_NODE_KEY_FILE% (exit %KEYRC%)
-  if "%KEYRC%"=="-1073741515" echo [gpn] ERROR: 0xC0000135 = missing Visual C++ runtime -- run: winget install --id Microsoft.VCRedist.2015+.x64 -e
-  if not exist "%USERPROFILE%\.gpn" echo [gpn] ERROR: cannot create %USERPROFILE%\.gpn -- check that this account can write to its own profile
-  echo [gpn] ERROR: refusing to start a node with a shared/default identity.
-  if "%KEYRC%"=="" set "KEYRC=1"
+"%GPN_BIN%\gpn_node.exe" --ensure-node-key --file "%GPN_NODE_KEY_FILE%"
+set "KEYRC=%ERRORLEVEL%"
+if not "%KEYRC%"=="0" (
+  echo [gpn] ERROR: no usable node identity -- the line above says why.
   powershell -NoProfile -ExecutionPolicy Bypass -File "__REPORT__" -ExitCode %KEYRC% -Log "__LOG__"
-  exit /b 1
+  exit /b %KEYRC%
 )
 
 REM --- ollama is REQUIRED: gpn_node exits 69 without it ----------------------
