@@ -1,0 +1,111 @@
+name: Windows install check
+
+# Why this exists (2026-11-05):
+#   Four Windows fixes shipped in one afternoon (launcher exec, runtime key path,
+#   GPU honesty, named exits) and none of them could be verified on the box that
+#   writes them. The runner set DOES include a Windows machine
+#   (DESKTOP-USBUADL, labels: self-hosted, Windows, X64), so the check that
+#   "only a human can do" can be a workflow instead.
+#
+# Scope: this installs into a SEPARATE directory (C:\gpn-ci) and does NOT start
+# the node, so it cannot disturb the node the machine is already running. It
+# asserts the things that actually broke:
+#   * the launcher must exec gpn_node.exe directly (no PowerShell | Tee wrapper,
+#     which exited 1 before the node started in a console-less context)
+#   * the node-key path must be resolved at runtime from %USERPROFILE%
+#   * the bundle must carry the expected version
+#   * `--diagnose` must run without crashing (port checks may fail on a busy
+#     machine; that is reported, not fatal)
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_url:
+        description: "Windows zip URL (default: latest release)"
+        required: false
+        default: "https://github.com/crewlyllc/gpn_coin/releases/download/windows-latest/gpn-windows.zip"
+      expect_version:
+        description: "Version the bundle must report (e.g. 0.3.23); empty = any"
+        required: false
+        default: ""
+
+jobs:
+  install-check:
+    runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 30
+    steps:
+      - name: Prepare a clean install root
+        shell: pwsh
+        run: |
+          $root = 'C:\gpn-ci'
+          if (Test-Path $root) { Remove-Item -Recurse -Force $root }
+          New-Item -ItemType Directory -Force -Path "$root\bin" | Out-Null
+          Write-Host "install root: $root"
+
+      - name: Download the bundle
+        shell: pwsh
+        run: |
+          $url = '${{ inputs.artifact_url }}'
+          curl.exe -L --fail -o C:\gpn-ci\gpn-windows.zip $url
+          if ($LASTEXITCODE -ne 0) { throw "download failed: $url" }
+          Get-Item C:\gpn-ci\gpn-windows.zip | Select-Object FullName, Length | Format-List
+
+      - name: Expand
+        shell: pwsh
+        run: |
+          Expand-Archive C:\gpn-ci\gpn-windows.zip -DestinationPath C:\gpn-ci\bin -Force
+          Get-ChildItem C:\gpn-ci\bin -Filter *.exe | Select-Object -First 5 Name, Length | Format-Table
+
+      - name: Assert the bundle version
+        shell: pwsh
+        run: |
+          $expect = '${{ inputs.expect_version }}'
+          $out = & C:\gpn-ci\bin\gpn_node.exe --version 2>&1 | Out-String
+          Write-Host $out
+          if ($expect -and ($out -notmatch [regex]::Escape($expect))) {
+            throw "bundle reports '$out', expected $expect"
+          }
+
+      - name: Install (separate dir, do not start)
+        shell: pwsh
+        run: |
+          & powershell -NoProfile -ExecutionPolicy Bypass -File C:\gpn-ci\bin\install.ps1 -InstallDir C:\gpn-ci -NoStart
+          if ($LASTEXITCODE -ne 0) { throw "install.ps1 exited $LASTEXITCODE" }
+          if (-not (Test-Path C:\gpn-ci\start-node.cmd)) { throw "launcher missing" }
+
+      - name: Assert the launcher does not use a PowerShell pipeline
+        shell: pwsh
+        run: |
+          $l = Get-Content C:\gpn-ci\start-node.cmd -Raw
+          if ($l -match 'Tee-Object') {
+            throw "launcher still wraps the node in 'powershell | Tee-Object' (exits 1 before the node starts when spawned without a console)"
+          }
+          if ($l -notmatch 'gpn_node\.exe"?\s*>>') {
+            throw "launcher does not exec gpn_node.exe directly with >> redirection"
+          }
+          Write-Host "launcher: direct exec, no wrapper - OK"
+
+      - name: Assert the key path is resolved at runtime
+        shell: pwsh
+        run: |
+          $l = Get-Content C:\gpn-ci\start-node.cmd -Raw
+          if ($l -notmatch '%USERPROFILE%') {
+            throw "launcher does not resolve GPN_NODE_KEY_FILE from %USERPROFILE% at runtime"
+          }
+          Write-Host "key path: runtime %USERPROFILE% - OK"
+
+      - name: Diagnose (informational; a busy machine may fail port checks)
+        shell: pwsh
+        run: |
+          & C:\gpn-ci\bin\gpn_node.exe --diagnose 2>&1 | Tee-Object -FilePath C:\gpn-ci\diagnose.txt
+          Write-Host "diagnose exit: $LASTEXITCODE"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-install-check
+          path: |
+            C:\gpn-ci\install-log.txt
+            C:\gpn-ci\diagnose.txt
+          if-no-files-found: warn
