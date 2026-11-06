@@ -35,7 +35,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Prepare a clean install root
-        shell: pwsh
+        shell: powershell
         run: |
           $root = 'C:\gpn-ci'
           if (Test-Path $root) { Remove-Item -Recurse -Force $root }
@@ -43,7 +43,7 @@ jobs:
           Write-Host "install root: $root"
 
       - name: Download the bundle
-        shell: pwsh
+        shell: powershell
         run: |
           $url = '${{ inputs.artifact_url }}'
           curl.exe -L --fail -o C:\gpn-ci\gpn-windows.zip $url
@@ -51,13 +51,13 @@ jobs:
           Get-Item C:\gpn-ci\gpn-windows.zip | Select-Object FullName, Length | Format-List
 
       - name: Expand
-        shell: pwsh
+        shell: powershell
         run: |
           Expand-Archive C:\gpn-ci\gpn-windows.zip -DestinationPath C:\gpn-ci\bin -Force
           Get-ChildItem C:\gpn-ci\bin -Filter *.exe | Select-Object -First 5 Name, Length | Format-Table
 
       - name: Assert the bundle version
-        shell: pwsh
+        shell: powershell
         run: |
           $expect = '${{ inputs.expect_version }}'
           $out = & C:\gpn-ci\bin\gpn_node.exe --version 2>&1 | Out-String
@@ -67,14 +67,14 @@ jobs:
           }
 
       - name: Install (separate dir, do not start)
-        shell: pwsh
+        shell: powershell
         run: |
           & powershell -NoProfile -ExecutionPolicy Bypass -File C:\gpn-ci\bin\install.ps1 -InstallDir C:\gpn-ci -NoStart
           if ($LASTEXITCODE -ne 0) { throw "install.ps1 exited $LASTEXITCODE" }
           if (-not (Test-Path C:\gpn-ci\start-node.cmd)) { throw "launcher missing" }
 
       - name: Assert the launcher does not use a PowerShell pipeline
-        shell: pwsh
+        shell: powershell
         run: |
           $l = Get-Content C:\gpn-ci\start-node.cmd -Raw
           if ($l -match 'Tee-Object') {
@@ -86,7 +86,7 @@ jobs:
           Write-Host "launcher: direct exec, no wrapper - OK"
 
       - name: Assert the key path is resolved at runtime
-        shell: pwsh
+        shell: powershell
         run: |
           $l = Get-Content C:\gpn-ci\start-node.cmd -Raw
           if ($l -notmatch '%USERPROFILE%') {
@@ -95,7 +95,7 @@ jobs:
           Write-Host "key path: runtime %USERPROFILE% - OK"
 
       - name: Diagnose (informational; a busy machine may fail port checks)
-        shell: pwsh
+        shell: powershell
         run: |
           & C:\gpn-ci\bin\gpn_node.exe --diagnose 2>&1 | Tee-Object -FilePath C:\gpn-ci\diagnose.txt
           Write-Host "diagnose exit: $LASTEXITCODE"
