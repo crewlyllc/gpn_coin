@@ -365,8 +365,17 @@ impl PullConfig {
 /// read the **local** heartbeat over loopback and ship the same JSON in the
 /// poll, so the AP's registry is fed by the provider's own outbound connection.
 ///
-/// Best-effort by design: if the heartbeat is down we still send the identity
-/// plus a sane capacity, because an address-only entry is still routable.
+/// **Silence, not a negative answer, when the local heartbeat cannot be read.**
+/// An empty return means "this poll carries no capability data" and
+/// `poll_target` then omits the `caps` parameter entirely, so the AP keeps the
+/// record it already has. That is deliberately different from a snapshot whose
+/// capability list is *empty*: `filter_capabilities` marks those
+/// `caps_declared: true`, and the AP treats them as "this box serves none of
+/// the kinds it advertises" (fail closed, #100) and replaces the entry's
+/// `capabilities`/`gflops` with nothing. Before 2026-11-05 a failed fetch
+/// produced exactly that (empty object → declared-empty list), so a `/status`
+/// read slower than the 1.5 s timeout silently un-advertised the box's
+/// capabilities and its attested GFLOPS until the next good poll (#141).
 pub fn caps_snapshot(provider: &str) -> String {
     caps_snapshot_with(provider, &[])
 }
@@ -380,7 +389,12 @@ pub fn caps_snapshot(provider: &str) -> String {
 /// same five capabilities). `own` empty keeps the old behaviour for any caller
 /// that has not declared a capability set.
 pub fn caps_snapshot_with(provider: &str, own: &[String]) -> String {
-    let mut v = fetch_heartbeat(provider);
+    // No local heartbeat = no data. Say nothing rather than "I serve nothing":
+    // the AP must never be told that a failed read is a deliberate empty set.
+    let Some(mut v) = fetch_heartbeat(provider) else {
+        note_caps_unavailable();
+        return String::new();
+    };
     if let Some(o) = v.as_object_mut() {
         // Identity of the polling PROCESS, so the AP can aggregate several
         // co-located providers on one address instead of letting the last
@@ -423,8 +437,38 @@ pub fn filter_capabilities(v: &mut Value, own: &[String]) {
     }
 }
 
-/// Fetch the machine-wide heartbeat JSON (best-effort, empty object on failure).
-fn fetch_heartbeat(provider: &str) -> Value {
+/// Rate-limited note that a poll is going out without capability data.
+///
+/// This used to be silent: the snapshot was built from an empty object, so
+/// nothing said "the local /status did not answer" and the only visible symptom
+/// was an AP that had quietly lost the box's capabilities (#141). One line per
+/// 5 minutes is enough to notice a heartbeat that has stopped answering without
+/// flooding a 2 s poll loop.
+fn note_caps_unavailable() {
+    use std::sync::{Mutex, OnceLock};
+    static LAST: OnceLock<Mutex<Option<std::time::Instant>>> = OnceLock::new();
+    let m = LAST.get_or_init(|| Mutex::new(None));
+    let mut g = match m.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let now = std::time::Instant::now();
+    let due = g
+        .map(|t| now.duration_since(t).as_secs() >= 300)
+        .unwrap_or(true);
+    if due {
+        *g = Some(now);
+        eprintln!(
+            "[assign] local /status unreadable — this poll carries no caps (the AP keeps its \
+             last record; publish nothing rather than a false 'serves nothing')"
+        );
+    }
+}
+
+/// Fetch the machine-wide heartbeat JSON, or `None` when it could not be read
+/// (connection error, timeout, non-JSON body, JSON that is not an object).
+/// `None` is "unknown", which every caller must keep distinct from "empty".
+fn fetch_heartbeat(provider: &str) -> Option<Value> {
     let url = std::env::var("GPN_STATUS_URL")
         .ok()
         .filter(|s| !s.trim().is_empty())
@@ -437,7 +481,7 @@ fn fetch_heartbeat(provider: &str) -> Value {
         .and_then(|r| r.json::<Value>().ok());
     let mut v = match fetched {
         Some(Value::Object(m)) => Value::Object(m),
-        _ => Value::Object(serde_json::Map::new()),
+        _ => return None,
     };
     if let Some(o) = v.as_object_mut() {
         if o.get("address")
@@ -450,7 +494,7 @@ fn fetch_heartbeat(provider: &str) -> Value {
         o.entry("capacity").or_insert(serde_json::json!(1));
         o.insert("poll".into(), serde_json::json!(true));
     }
-    v
+    Some(v)
 }
 
 /// Minimal percent-encoding for a query value (providers are `0x…`/base58, so
@@ -1149,18 +1193,26 @@ mod tests {
     }
 
     #[test]
-    fn caps_snapshot_always_carries_identity_and_capacity() {
+    fn a_failed_local_status_read_publishes_no_caps_at_all() {
         let _g = crate::test_env::lock_env();
         // Point at a dead port so the heartbeat fetch fails deterministically.
         std::env::set_var("GPN_STATUS_URL", "http://127.0.0.1:1/status");
-        let s = caps_snapshot("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY");
-        let v: Value = serde_json::from_str(&s).unwrap();
-        assert_eq!(
-            v.get("address").and_then(|x| x.as_str()),
-            Some("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY")
+        let s = caps_snapshot_with(
+            "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
+            &["FineTuning".to_string()],
         );
-        assert_eq!(v.get("capacity").and_then(|x| x.as_u64()), Some(1));
-        assert_eq!(v.get("poll").and_then(|x| x.as_bool()), Some(true));
+        // (#141) An unreadable heartbeat is UNKNOWN, not "serves nothing":
+        // an empty string makes `poll_target` omit `&caps=` entirely, so the AP
+        // keeps the record it already has instead of replacing 5 capabilities
+        // and an attested 824 GFLOPS with an empty declared set.
+        assert_eq!(
+            s, "",
+            "a failed local read must not be published as a capability declaration"
+        );
+        assert!(
+            !s.contains("caps_declared"),
+            "a failed read must never claim a deliberate empty capability set"
+        );
         std::env::remove_var("GPN_STATUS_URL");
     }
 
