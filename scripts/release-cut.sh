@@ -488,11 +488,20 @@ mirror_one() { # tag name file sha size
   done < <(release_assets "$CFG_DST" "$MIRROR_REPO" "$tag")
 
   say "$tag: uploading $name ($size bytes)…"
-  curl -sS --fail-with-body -K "$CFG_DST" -X POST \
+  # 2026-11-06: one 324 MB upload died here with exit 22 and no visible body
+  # (the output was piped to /dev/null). A 324 MB body takes ~2 min, which is
+  # long enough for the connection to be reset mid-upload, so retry -- and keep
+  # the body, because "exit 22" with nothing else is not a diagnosis.
+  up_body="$(curl -sS --fail-with-body \
+    --retry 3 --retry-delay 5 --retry-all-errors --max-time 1800 \
+    -K "$CFG_DST" -X POST \
     -H 'Content-Type: application/octet-stream' \
     -H 'Accept: application/vnd.github+json' \
     --data-binary "@$file" \
-    "$GPN_GH_UPLOAD/repos/$MIRROR_REPO/releases/$rid/assets?name=$name" 2>&1 | scrub >/dev/null
+    "$GPN_GH_UPLOAD/repos/$MIRROR_REPO/releases/$rid/assets?name=$name" 2>&1)" || {
+    echo "ABORT: upload of $name failed: $(printf '%s' "$up_body" | scrub | head -c 400)" >&2
+    exit 1
+  }
   msha="$(asset_meta "$CFG_DST" "$MIRROR_REPO" "$tag" "$name" | cut -d' ' -f1)"
   [ "$msha" = "$sha" ] || {
     echo "ABORT: mirror digest for $name is $msha, expected $sha" >&2; exit 1; }
