@@ -37,7 +37,12 @@
 //! 4. **Report the conditions.** [`AttestState`] is persisted next to the lock
 //!    (`~/.gpn/attest-state.json`) so `/status` can publish
 //!    `gflops_source: "attested-idle"` with the samples and the spread instead of
-//!    a bare number an operator cannot interpret.
+//!    a bare number an operator cannot interpret. Provenance belongs to the
+//!    *number*, not to the process that wrote the tx: a fresh on-chain record
+//!    that agrees with this box's idle measurement earns `attested-idle` even
+//!    when this process did not submit it ([`SAME_READING_PCT`]) — otherwise a
+//!    shared-`$HOME` writer or a legitimate renewal that re-stamps nothing
+//!    silently costs the box its provenance.
 //!
 //! Everything decision-shaped here is pure and unit-tested; the OS probes live
 //! behind [`AttestProbe`], so the busy path is tested by injection, never by
@@ -54,6 +59,23 @@ pub const SPREAD_THRESHOLD_PCT: f64 = 20.0;
 /// How far the on-chain record may sit from an idle measurement before it is
 /// called out as stale/wrong.
 pub const RECORD_TOLERANCE_PCT: f64 = 30.0;
+/// Two values this close are the *same reading* (824 vs 825 is one measurement,
+/// not two). Used to decide whether an advertised/on-chain value is a number
+/// this box measured — deliberately much tighter than
+/// [`RECORD_TOLERANCE_PCT`], which decides when to *warn*.
+pub const SAME_READING_PCT: f64 = 5.0;
+
+/// `a` and `b` are the same measurement within [`SAME_READING_PCT`].
+pub fn same_reading(a: u64, b: u64) -> bool {
+    if a == b {
+        return true;
+    }
+    if a == 0 || b == 0 {
+        return false;
+    }
+    let (lo, hi) = if a < b { (a, b) } else { (b, a) };
+    (hi - lo) as f64 / hi as f64 * 100.0 <= SAME_READING_PCT
+}
 /// Default settle time after taking the lock, before reading utilisation: the
 /// co-located miner polls its yield flag, and utilisation decays over a few
 /// hundred ms after it stops. Too short and we skip on our own miner's tail.
@@ -565,7 +587,20 @@ pub fn status_gflops_source(
     let Some(st) = state else {
         return ("", None);
     };
-    let matches = st.submitted && st.measured_gflops == advertised;
+    // #143: `submitted` is the strongest signal (this process sent the tx), but
+    // it is not the only one. The state file is shared through `$HOME`, so any
+    // stray provider binary can rewrite it with `submitted: false`, and a
+    // legitimate renewal does not re-stamp an already-running process — in both
+    // cases the chain record still holds *this box's* idle measurement, which
+    // is exactly what "attested-idle" claims. So: the advertised value must be
+    // our reading, and either we submitted it or the chain agrees with it.
+    let chain_agrees = chain
+        .filter(|c| *c > 0)
+        .map(|c| same_reading(c, st.measured_gflops))
+        .unwrap_or(false);
+    let matches = st.measured_gflops != 0
+        && same_reading(advertised, st.measured_gflops)
+        && (st.submitted || chain_agrees);
     let warning = chain
         .filter(|c| *c > 0)
         .and_then(|c| record_divergence(Some(c), st.measured_gflops, RECORD_TOLERANCE_PCT))
@@ -1056,11 +1091,46 @@ mod tests {
         assert!(warn.contains("188") && warn.contains("1300"), "{warn}");
     }
 
+    // #143 — provenance belongs to the number, not to the process that wrote
+    // the tx. Four branches: submitted / chain-equal / chain-differs /
+    // chain-unknown.
+
     #[test]
-    fn status_never_claims_a_measurement_that_was_not_submitted() {
+    fn status_claims_provenance_when_the_chain_agrees_even_after_a_state_overwrite() {
+        // A shared-$HOME writer rewrote attest-state.json with
+        // `submitted: false`, but the chain still carries this box's idle
+        // measurement (824 vs 825 is one reading within SAME_READING_PCT).
+        let st = state(825, false);
+        let (src, warn) = status_gflops_source(824, Some(825), Some(&st));
+        assert_eq!(src, "attested-idle");
+        assert!(warn.is_none());
+    }
+
+    #[test]
+    fn status_stays_quiet_when_the_chain_disagrees_and_we_did_not_submit() {
         let st = state(1_300, false);
-        let (src, _) = status_gflops_source(1_300, Some(1_300), Some(&st));
+        let (src, warn) = status_gflops_source(1_300, Some(188), Some(&st));
         assert_eq!(src, "");
+        let warn = warn.expect("divergence must be reported");
+        assert!(warn.contains("188") && warn.contains("1300"), "{warn}");
+    }
+
+    #[test]
+    fn status_stays_quiet_when_the_chain_record_is_unknown_and_we_did_not_submit() {
+        let st = state(1_300, false);
+        let (src, warn) = status_gflops_source(1_300, None, Some(&st));
+        assert_eq!(src, "");
+        assert!(warn.is_none());
+    }
+
+    #[test]
+    fn same_reading_is_a_tight_band_not_the_divergence_tolerance() {
+        assert!(same_reading(824, 825));
+        assert!(same_reading(1_300, 1_300));
+        assert!(!same_reading(188, 1_300));
+        assert!(!same_reading(900, 1_300));
+        assert!(!same_reading(0, 1_300));
+        assert!(same_reading(0, 0));
     }
 
     #[test]

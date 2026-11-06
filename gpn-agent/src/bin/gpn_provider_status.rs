@@ -678,7 +678,8 @@ fn print_compute_unit() {
 /// box, or one that never attested).
 ///
 /// Fields: `gflops_source` becomes `"attested-idle"` when the advertised value
-/// is exactly what we measured and submitted; `gflops_samples` /
+/// is this box's idle measurement and either we submitted it or the chain record
+/// agrees with it (#143); `gflops_samples` /
 /// `gflops_spread_pct` / `gflops_measured_at` / `gflops_conditions` describe the
 /// measurement; `gflops_stale_warning` names a record that disagrees with it.
 fn attach_attest_conditions(
