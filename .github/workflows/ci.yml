@@ -204,11 +204,16 @@ jobs:
           CARGO_TARGET_DIR: /home/jeremyg/.ci-cache/gpn-agent-target
         run: nice -n 19 cargo build --release
 
+      # `--test-threads=1`: `idle_auto` (and the other wall-clock suites) assert on
+      # elapsed time inside a 30-minute idle window. Run in parallel on a loaded
+      # runner, the "quiet resumes" assertion landed after the window had already
+      # been re-entered -- a real flake, seen in CI 2026-11-05 while passing
+      # serially locally. Deterministic ordering beats a faster but lying suite.
       - name: Test gpn-agent (non-GPU)
         working-directory: gpn-agent
         env:
           CARGO_TARGET_DIR: /home/jeremyg/.ci-cache/gpn-agent-target
-        run: nice -n 19 cargo test --release
+        run: nice -n 19 cargo test --release -- --test-threads=1
 
       # `gpn_update`'s end-to-end tests sign manifests with a throwaway key and
       # need the debug-only `GPN_UPDATE_PUBKEY` override, so they run in DEBUG.
