@@ -571,10 +571,7 @@ pub mod pallet {
     impl<T: Config> sp_runtime::traits::ValidateUnsigned for Pallet<T> {
         type Call = Call<T>;
 
-        fn validate_unsigned(
-            _source: TransactionSource,
-            call: &Self::Call,
-        ) -> TransactionValidity {
+        fn validate_unsigned(_source: TransactionSource, call: &Self::Call) -> TransactionValidity {
             match call {
                 Call::register_provider_entry_unsigned {
                     account,

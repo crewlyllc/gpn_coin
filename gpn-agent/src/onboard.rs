@@ -519,9 +519,7 @@ pub async fn run_entry<C: EntryChain, M: PowMiner>(
             log("unsigned entry is not in the chain metadata — trying the signed entry call");
             match chain.submit_register_provider_entry(&pow, params).await {
                 Ok(()) => return EntryOutcome::Registered,
-                Err(e2) => {
-                    log(&format!("signed entry also unavailable: {e2}"))
-                }
+                Err(e2) => log(&format!("signed entry also unavailable: {e2}")),
             }
             log("falling back to attest_entry + register");
             if let Err(att) = chain.submit_attest_entry(&pow, params).await {
