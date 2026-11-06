@@ -41,12 +41,17 @@ fn record(hash: [u8; 32]) -> AttestationRecord {
     }
 }
 
-/// A plain +1 for the spec 48 existential-deposit change (zero on every
-/// network). The on-chain value only moves after enactment; this pins the
-/// source tree so `set_code` cannot be prepared against a stale version.
+/// Pins the source tree's spec version so a `set_code` cannot be prepared
+/// against a stale build. Bump this **in the same commit** as the runtime
+/// `spec_version`, deliberately.
+///
+/// 48 zero existential deposit · 49 entry call unconditionally `Pays::No`
+/// 50 unsigned proof-of-work entry · 51 `provides` tag on the unsigned entry
+/// (an unsigned extrinsic without a tag is rejected by the pool: "No tags
+/// provided").
 #[test]
 fn spec_version_matches_live_chain() {
-    assert_eq!(VERSION.spec_version, 48);
+    assert_eq!(VERSION.spec_version, 51);
 }
 
 /// `testnet-no-stake` actually flips the runtime constant to zero; the default
