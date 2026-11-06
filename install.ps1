@@ -330,6 +330,12 @@ REM --- access point this node polls for AI work ------------------------------
 set "GPN_AP_URL=__AP_URL__"
 REM --- canonical bootstrap peers --------------------------------------------
 set "GPN_BOOTNODES=__BOOTNODES__"
+REM --- reserved peers: always re-dialled, unlike a plain bootnode -----------
+REM 2026-11-06: two boxes stayed disconnected for 40 min after the seed host
+REM restarted. Bootnodes are dialled at start and then retried on a slow
+REM backoff; a reserved peer keeps a slot and is re-dialled aggressively, so
+REM "always reconnect to the seed" is enforced instead of hoped for.
+set "GPN_RESERVED_PEERS=__BOOTNODES__"
 REM --- local dashboard (loopback only): http://127.0.0.1:8099 ----------------
 set "GPN_GUI=1"
 set "GPN_OLLAMA=http://127.0.0.1:11434"

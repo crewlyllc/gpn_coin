@@ -115,6 +115,13 @@ struct FileConfig {
     /// leaks into a shared `run-fleet.sh`.
     node_key_file: Option<String>,
     bootnodes: Option<Vec<String>>,
+    /// `--reserved-peers`: peers that always keep a connection slot and are
+    /// re-dialled aggressively. Bootnodes alone are dialled at start and then
+    /// retried on a slow backoff; on 2026-11-06 two boxes stayed disconnected
+    /// for 40 minutes after this host restarted, because they had no reason to
+    /// consider the seed special. A reserved peer is the mechanism that makes
+    /// "always reconnect to the seed" true rather than hoped-for.
+    reserved_peers: Option<Vec<String>>,
     /// Published seed-list URLs (`--bootnodes-url`). Empty → the node uses its
     /// built-in default, the live directory at https://gpncoin.ai/seeds.json.
     bootnodes_url: Option<Vec<String>>,
@@ -175,6 +182,7 @@ struct Config {
     node_key: Option<String>,
     node_key_file: Option<String>,
     bootnodes: Vec<String>,
+    reserved_peers: Vec<String>,
     bootnodes_url: Vec<String>,
     public_addr: Option<String>,
     author: Option<String>,
@@ -1460,6 +1468,10 @@ impl Config {
             bootnodes: env_str("GPN_BOOTNODES")
                 .map(|s| split_list(&s))
                 .or(file.bootnodes)
+                .unwrap_or_default(),
+            reserved_peers: env_str("GPN_RESERVED_PEERS")
+                .map(|s| split_list(&s))
+                .or(file.reserved_peers)
                 .unwrap_or_default(),
             bootnodes_url: env_str("GPN_BOOTNODES_URL")
                 .or_else(|| env_str("GPN_SEEDS_URL"))
@@ -3075,6 +3087,10 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
             argv.push("--bootnodes".into());
             argv.push(bn.clone());
         }
+        for rp in &cfg.reserved_peers {
+            argv.push("--reserved-peers".into());
+            argv.push(rp.clone());
+        }
         // Explicit URLs replace the node's built-in default; leaving the list
         // empty lets gpn-node use https://gpncoin.ai/seeds.json on its own.
         for url in &cfg.bootnodes_url {
@@ -3964,9 +3980,23 @@ async fn main() {
     {
         let explicit_onboard =
             argv.iter().any(|a| a == "--onboard") || env_str("GPN_ONBOARD").as_deref() == Some("1");
+        // 2026-11-06: the local `onboard-attempted` marker is NOT evidence that the
+        // account is registered — it is a local file, and registration is chain
+        // state. On box 1 the marker (written 2026-11-04) made the supervisor skip
+        // onboarding silently for two days while the account did not exist on
+        // chain, and the box looked healthy because it was still mining.
+        // Always ask the chain. `spawn_onboard` reads the account's state first and
+        // returns immediately when it is already attested, so this costs one
+        // storage read per start, not a proof of work per start.
         let marker_exists = cfg.base_path.join(ONBOARD_ATTEMPTED).exists();
-        if should_auto_onboard(&cfg.chain, marker_exists, explicit_onboard) {
-            if !marker_exists && !explicit_onboard {
+        if marker_exists && !explicit_onboard {
+            asciiprintln!(
+                "  onboarding: marker present from an earlier run — verifying against the chain \
+                 (the marker alone is not proof of registration)"
+            );
+        }
+        if explicit_onboard || true {
+            if !explicit_onboard && !marker_exists {
                 asciiprintln!(
                     "  onboarding: first run — a free proof-of-work entry will be attempted \
                      once in the background (no coins needed)"
@@ -4275,6 +4305,7 @@ mod tests {
             node_key: None,
             node_key_file: None,
             bootnodes: vec![],
+            reserved_peers: vec![],
             bootnodes_url: vec![],
             public_addr: None,
             author: None,
