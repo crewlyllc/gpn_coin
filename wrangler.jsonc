@@ -19,7 +19,11 @@
       "/releases.json",
       "/chain-spec",
       "/genesis-spec",
-      "/api/*"
+      "/api/*",
+      // `.html` → clean URL as a 301 (see worker.js): the asset layer would answer
+      // 307, which does not consolidate search ranking onto the clean URL.
+      "/*.html",
+      "/docs/*.html"
     ]
   },
   "vars": {

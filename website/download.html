@@ -6,9 +6,9 @@
 <title>Download GPN — installers &amp; release artifacts</title>
 <meta name="description" content="Install GPN with a single command, or download rolling release builds for Windows, Linux and macOS. Prerequisites: a discrete GPU with OpenCL/CUDA; Rust to build from source. Public repository — no account needed for downloads." />
 <meta name="theme-color" content="#07090f" />
-<link rel="canonical" href="https://gpncoin.ai/download.html" />
+<link rel="canonical" href="https://gpncoin.ai/download" />
 <meta property="og:site_name" content="GPN" />
-<meta property="og:url" content="https://gpncoin.ai/download.html" />
+<meta property="og:url" content="https://gpncoin.ai/download" />
 <meta property="og:image" content="https://gpncoin.ai/assets/og.png" />
 <meta name="twitter:card" content="summary_large_image" />
 <meta name="twitter:image" content="https://gpncoin.ai/assets/og.png" />
@@ -25,20 +25,20 @@
 
 <header class="site-header">
   <div class="wrap nav">
-    <a class="brand" href="index.html" aria-label="GPN home"><span class="dot" aria-hidden="true">G</span><span>GPN<br><small>GPU-NATIVE NETWORK</small></span></a>
+    <a class="brand" href="./" aria-label="GPN home"><span class="dot" aria-hidden="true">G</span><span>GPN<br><small>GPU-NATIVE NETWORK</small></span></a>
     <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Toggle navigation">☰</button>
     <nav class="nav-links" id="nav-links" aria-label="Primary">
-      <a href="index.html">Home</a>
-      <a href="download.html" aria-current="page">Download</a>
-      <a href="deploy.html">Deploy</a>
-      <a href="ai.html">AI</a>
-      <a href="chat.html">Chat</a>
-      <a href="access-points.html">Access Points</a>
-      <a href="nodes.html">Nodes</a>
-      <a href="buy.html">Buy GPN</a>
-      <a href="docs/index.html">Docs</a>
-      <a href="contact.html">Contact</a>
-      <a href="index.html#join">Join us</a>
+      <a href="./">Home</a>
+      <a href="download" aria-current="page">Download</a>
+      <a href="deploy">Deploy</a>
+      <a href="ai">AI</a>
+      <a href="chat">Chat</a>
+      <a href="access-points">Access Points</a>
+      <a href="nodes">Nodes</a>
+      <a href="buy">Buy GPN</a>
+      <a href="docs">Docs</a>
+      <a href="contact">Contact</a>
+      <a href="./#join">Join us</a>
     </nav>
     <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
   </div>
@@ -149,7 +149,7 @@ mkdir -p gpn &amp;&amp; tar -xzf gpn-linux.tar.gz -C gpn &amp;&amp; cd gpn
           </div>
           <p class="small muted mb-0">Add <code>GPN_INSTALL_SERVICE=1</code> to install a
             <code>systemd --user</code> unit. Config lands in <code>~/.gpn/accesspoint.env</code> — see the
-            <a href="access-points.html">access-points page</a>.</p>
+            <a href="access-points">access-points page</a>.</p>
         </div>
       </div>
 
@@ -195,7 +195,7 @@ mkdir -p gpn &amp;&amp; tar -xzf gpn-linux.tar.gz -C gpn &amp;&amp; cd gpn
       </div>
       <p class="small muted" style="margin-top:12px">Windows and Linux tags are live and public. Windows: unpack into a
         <code>bin\</code> folder next to <code>run-windows-provider.ps1</code>, then follow the
-        <a href="deploy.html#windows">Windows node path</a> (it installs/starts Ollama for you). Linux/macOS: unpack
+        <a href="deploy#windows">Windows node path</a> (it installs/starts Ollama for you). Linux/macOS: unpack
         and put the binaries on <code>PATH</code>, or just use <code>install.sh</code>.</p>
     </div>
   </section>
@@ -290,8 +290,8 @@ cd gpn_coin</code></pre>
       </div>
       <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:6px">
         <a class="btn" href="https://github.com/crewlyllc/gpn_coin" rel="noopener">Open the repository</a>
-        <a class="btn ghost" href="docs/run-a-node.html">Run-a-node guide →</a>
-        <a class="btn ghost" href="deploy.html">Next: deploy a node →</a>
+        <a class="btn ghost" href="docs/run-a-node">Run-a-node guide →</a>
+        <a class="btn ghost" href="deploy">Next: deploy a node →</a>
       </div>
     </div>
   </section>
@@ -301,12 +301,12 @@ cd gpn_coin</code></pre>
   <div class="wrap">
     <div class="foot-grid">
       <div>
-        <a class="brand" href="index.html" style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a>
+        <a class="brand" href="./" style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a>
         <p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute. <em>Get paid for the GPU time you're wasting.</em></p>
       </div>
-      <div><h4>Product</h4><a href="download.html">Download</a><a href="deploy.html">Deploy</a><a href="ai.html">Access the AI</a><a href="access-points.html">Access Points</a><a href="nodes.html">Live nodes</a></div>
-      <div><h4>Learn</h4><a href="docs/index.html">Documentation</a><a href="docs/whitepaper.html">Whitepaper</a><a href="docs/one-pager.html">One-pager</a><a href="docs/technical-overview.html">Technical overview</a></div>
-      <div><h4>Project</h4><a href="https://x.com/gpn_ai" rel="me noopener">X / Twitter — @gpn_ai</a><a href="https://discord.gg/ANCXERZqz" rel="noopener">Discord community</a><a href="https://github.com/crewlyllc/gpn_coin" rel="noopener">Source on GitHub</a><a href="docs/run-a-node.html">Run a node</a><a href="docs/downloads.html">Releases</a><a href="docs/wallet.html">Wallet</a><a href="index.html#join">Join the team</a></div>
+      <div><h4>Product</h4><a href="download">Download</a><a href="deploy">Deploy</a><a href="ai">Access the AI</a><a href="access-points">Access Points</a><a href="nodes">Live nodes</a></div>
+      <div><h4>Learn</h4><a href="docs">Documentation</a><a href="docs/whitepaper">Whitepaper</a><a href="docs/one-pager">One-pager</a><a href="docs/technical-overview">Technical overview</a></div>
+      <div><h4>Project</h4><a href="https://x.com/gpn_ai" rel="me noopener">X / Twitter — @gpn_ai</a><a href="https://discord.gg/ANCXERZqz" rel="noopener">Discord community</a><a href="https://github.com/crewlyllc/gpn_coin" rel="noopener">Source on GitHub</a><a href="docs/run-a-node">Run a node</a><a href="docs/downloads">Releases</a><a href="docs/wallet">Wallet</a><a href="./#join">Join the team</a></div>
     </div>
     <div class="foot-bottom">
       <p class="small muted">© <span data-year>2026</span> GPN · Public testnet. Not investment advice.</p>

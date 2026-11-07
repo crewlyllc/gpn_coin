@@ -163,6 +163,35 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
 
+    // ── Crawler hygiene: `.html` → clean URL as a PERMANENT redirect ───────
+    // Cloudflare's asset layer answers `/download.html` → `/download` with a
+    // 307, which is "temporary": search engines keep the old URL, split the
+    // ranking signals, and the sitemap's .html entries stay the canonical ones
+    // in their index. A 301 says the clean URL is the real one, once, and every
+    // link and sitemap entry then converges on it (2026-11-07 SEO pass).
+    // `/index.html` → `/` for the same reason.
+    if (request.method === "GET" || request.method === "HEAD") {
+      if (path === "/index.html") {
+        return new Response(null, {
+          status: 301,
+          headers: { location: "/" + url.search, "cache-control": "public, max-age=86400" },
+        });
+      }
+      if (path.endsWith(".html") && path !== "/404.html") {
+        // `/docs/index.html` is the directory's index: send it to `/docs/` so a
+        // crawler lands on the canonical directory URL, not `/docs/index`.
+        const base = path.slice(0, -".html".length);
+        const target = base.endsWith("/index") ? base.slice(0, -"index".length) : base;
+        return new Response(null, {
+          status: 301,
+          headers: {
+            location: (target || "/") + url.search,
+            "cache-control": "public, max-age=86400",
+          },
+        });
+      }
+    }
+
     if (path === "/seeds.json" || path === "/seeds" || path === "/bootnodes.txt" || path === "/seeds.txt") {
       if (request.method === "OPTIONS") return preflight();
       if (request.method !== "GET" && request.method !== "HEAD") {

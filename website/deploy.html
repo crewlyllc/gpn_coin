@@ -6,9 +6,9 @@
 <title>Deploy GPN — run a miner/node, a provider, or an access point</title>
 <meta name="description" content="Step-by-step deployment for GPN: run a miner/node, onboard as an LLM/diffusion provider, or stand up an access point. Covers config, the port map (30333, 9944, 8092, 8093, 8094, 8099), the Windows path, one-GPU-one-job behavior, and dialability." />
 <meta name="theme-color" content="#07090f" />
-<link rel="canonical" href="https://gpncoin.ai/deploy.html" />
+<link rel="canonical" href="https://gpncoin.ai/deploy" />
 <meta property="og:site_name" content="GPN" />
-<meta property="og:url" content="https://gpncoin.ai/deploy.html" />
+<meta property="og:url" content="https://gpncoin.ai/deploy" />
 <meta property="og:image" content="https://gpncoin.ai/assets/og.png" />
 <meta name="twitter:card" content="summary_large_image" />
 <meta name="twitter:image" content="https://gpncoin.ai/assets/og.png" />
@@ -25,20 +25,20 @@
 
 <header class="site-header">
   <div class="wrap nav">
-    <a class="brand" href="index.html" aria-label="GPN home"><span class="dot" aria-hidden="true">G</span><span>GPN<br><small>GPU-NATIVE NETWORK</small></span></a>
+    <a class="brand" href="./" aria-label="GPN home"><span class="dot" aria-hidden="true">G</span><span>GPN<br><small>GPU-NATIVE NETWORK</small></span></a>
     <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Toggle navigation">☰</button>
     <nav class="nav-links" id="nav-links" aria-label="Primary">
-      <a href="index.html">Home</a>
-      <a href="download.html">Download</a>
-      <a href="deploy.html" aria-current="page">Deploy</a>
-      <a href="ai.html">AI</a>
-      <a href="chat.html">Chat</a>
-      <a href="access-points.html">Access Points</a>
-      <a href="nodes.html">Nodes</a>
-      <a href="buy.html">Buy GPN</a>
-      <a href="docs/index.html">Docs</a>
-      <a href="contact.html">Contact</a>
-      <a href="index.html#join">Join us</a>
+      <a href="./">Home</a>
+      <a href="download">Download</a>
+      <a href="deploy" aria-current="page">Deploy</a>
+      <a href="ai">AI</a>
+      <a href="chat">Chat</a>
+      <a href="access-points">Access Points</a>
+      <a href="nodes">Nodes</a>
+      <a href="buy">Buy GPN</a>
+      <a href="docs">Docs</a>
+      <a href="contact">Contact</a>
+      <a href="./#join">Join us</a>
     </nav>
     <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
   </div>
@@ -52,7 +52,7 @@
       <p>A GPN node is always <b>both a miner and an AI provider</b> — no role option. It mines and serves
         AI jobs on the same box, auto-yielding its one GPU to a job while it runs. An access point is the
         public front door. Start with whichever fits your hardware and goals. New here? See
-        <a href="download.html">Download</a> first.</p>
+        <a href="download">Download</a> first.</p>
       <p class="small muted">On this page:
         <a href="#node">Node (mine + serve)</a> ·
         <a href="#provider">How serving works</a> ·
@@ -86,7 +86,7 @@
         entity, one command. It auto-yields the GPU to a job while it runs.</p>
 
       <div class="steps">
-        <div class="step"><h4>Install</h4><p>Run <code>./install.sh</code> (see <a href="download.html">Download</a>). It builds the binaries, generates a wallet, and writes <code>~/.gpn/gpn.env</code>.</p></div>
+        <div class="step"><h4>Install</h4><p>Run <code>./install.sh</code> (see <a href="download">Download</a>). It builds the binaries, generates a wallet, and writes <code>~/.gpn/gpn.env</code>.</p></div>
         <div class="step"><h4>Start the node</h4>
           <pre><code>gpn_node</code></pre>
           <p>One command brings up the chain node/miner, the provider heartbeat, and the AI provider loop
@@ -184,7 +184,7 @@ curl http://127.0.0.1:8092/providers  # live registry (gflops, latency_ms, model
           <code>grep GPN_AP_TOKEN ~/.gpn/accesspoint.env</code>.</p></div>
       </div>
       <p class="small muted" style="margin-top:14px">See the current public entry point and how to add yours
-        on the <a href="access-points.html">Access Points</a> page.</p>
+        on the <a href="access-points">Access Points</a> page.</p>
     </div>
   </section>
 
@@ -307,8 +307,8 @@ GPN_PROVIDERS=http://127.0.0.1:8093
         serves normally. Forwarding 30333 is only for reachability, seed listing and a better routing
         tie-break; 8093 is optional and only for a public health/status URL.
       <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:10px">
-        <a class="btn" href="ai.html">Next: use the AI →</a>
-        <a class="btn ghost" href="docs/run-a-node.html">Full run-a-node guide</a>
+        <a class="btn" href="ai">Next: use the AI →</a>
+        <a class="btn ghost" href="docs/run-a-node">Full run-a-node guide</a>
       </div>
     </div>
   </section>
@@ -317,10 +317,10 @@ GPN_PROVIDERS=http://127.0.0.1:8093
 <footer class="site-footer">
   <div class="wrap">
     <div class="foot-grid">
-      <div><a class="brand" href="index.html" style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a><p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute. <em>Get paid for the GPU time you're wasting.</em></p></div>
-      <div><h4>Product</h4><a href="download.html">Download</a><a href="deploy.html">Deploy</a><a href="ai.html">Access the AI</a><a href="access-points.html">Access Points</a><a href="nodes.html">Live nodes</a></div>
-      <div><h4>Learn</h4><a href="docs/index.html">Documentation</a><a href="docs/whitepaper.html">Whitepaper</a><a href="docs/one-pager.html">One-pager</a><a href="docs/technical-overview.html">Technical overview</a></div>
-      <div><h4>Project</h4><a href="https://x.com/gpn_ai" rel="me noopener">X / Twitter — @gpn_ai</a><a href="https://discord.gg/ANCXERZqz" rel="noopener">Discord community</a><a href="https://github.com/crewlyllc/gpn_coin" rel="noopener">Source on GitHub</a><a href="docs/run-a-node.html">Run a node</a><a href="docs/downloads.html">Releases</a><a href="docs/wallet.html">Wallet</a><a href="index.html#join">Join the team</a></div>
+      <div><a class="brand" href="./" style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a><p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute. <em>Get paid for the GPU time you're wasting.</em></p></div>
+      <div><h4>Product</h4><a href="download">Download</a><a href="deploy">Deploy</a><a href="ai">Access the AI</a><a href="access-points">Access Points</a><a href="nodes">Live nodes</a></div>
+      <div><h4>Learn</h4><a href="docs">Documentation</a><a href="docs/whitepaper">Whitepaper</a><a href="docs/one-pager">One-pager</a><a href="docs/technical-overview">Technical overview</a></div>
+      <div><h4>Project</h4><a href="https://x.com/gpn_ai" rel="me noopener">X / Twitter — @gpn_ai</a><a href="https://discord.gg/ANCXERZqz" rel="noopener">Discord community</a><a href="https://github.com/crewlyllc/gpn_coin" rel="noopener">Source on GitHub</a><a href="docs/run-a-node">Run a node</a><a href="docs/downloads">Releases</a><a href="docs/wallet">Wallet</a><a href="./#join">Join the team</a></div>
     </div>
     <div class="foot-bottom">
       <p class="small muted">© <span data-year>2026</span> GPN · Public testnet. Not investment advice.</p>

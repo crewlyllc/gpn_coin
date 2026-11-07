@@ -246,10 +246,33 @@ test("HTTP parsing: content-length and chunked", () => {
 test("other paths fall through to the asset binding", async () => {
   let seen = null;
   const env = { ASSETS: { fetch: async (r) => (seen = r, new Response("site", { status: 200 })) } };
-  const res = await worker.fetch(new Request("https://gpncoin.ai/docs/index.html"), env, { waitUntil() {} });
+  const res = await worker.fetch(new Request("https://gpncoin.ai/assets/style.css"), env, { waitUntil() {} });
   assert.equal(res.status, 200);
   assert.equal(await res.text(), "site");
-  assert.equal(new URL(seen.url).pathname, "/docs/index.html");
+  assert.equal(new URL(seen.url).pathname, "/assets/style.css");
+});
+
+// 2026-11-07 (SEO): the asset layer answered `.html` with a 307, which does not
+// consolidate ranking onto the clean URL. The Worker now answers 301, and
+// `/…/index.html` goes to the directory rather than to `/…/index`.
+test(".html is a PERMANENT redirect to the clean URL", async () => {
+  const env = { ASSETS: { fetch: async () => new Response("asset", { status: 200 }) } };
+  const ctx = { waitUntil() {} };
+
+  const r1 = await worker.fetch(new Request("https://gpncoin.ai/download.html"), env, ctx);
+  assert.equal(r1.status, 301);
+  assert.equal(r1.headers.get("location"), "/download");
+
+  const r2 = await worker.fetch(new Request("https://gpncoin.ai/docs/index.html"), env, ctx);
+  assert.equal(r2.status, 301);
+  assert.equal(r2.headers.get("location"), "/docs/");
+
+  const r3 = await worker.fetch(new Request("https://gpncoin.ai/index.html"), env, ctx);
+  assert.equal(r3.status, 301);
+  assert.equal(r3.headers.get("location"), "/");
+
+  const r4 = await worker.fetch(new Request("https://gpncoin.ai/buy.html?ref=x"), env, ctx);
+  assert.equal(r4.headers.get("location"), "/buy?ref=x");
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

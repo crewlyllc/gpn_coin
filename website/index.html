@@ -21,28 +21,61 @@
 <meta name="twitter:description" content="Mine GPN and serve AI on the same GPU — one node, one card, one job at a time." />
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237c6cff'/%3E%3Ctext x='16' y='22' font-size='16' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%2307090f'%3EG%3C/text%3E%3C/svg%3E" />
 <link rel="stylesheet" href="assets/style.css" />
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "Organization",
+      "@id": "https://gpncoin.ai/#org",
+      "name": "GPN",
+      "url": "https://gpncoin.ai/",
+      "logo": "https://gpncoin.ai/assets/og.png",
+      "description": "GPN is a GPU-native cryptocurrency network where every node mines and serves AI compute on the same GPU.",
+      "sameAs": ["https://github.com/crewlyllc/gpn_coin", "https://discord.gg/ANCXERZqz"]
+    },
+    {
+      "@type": "WebSite",
+      "@id": "https://gpncoin.ai/#site",
+      "url": "https://gpncoin.ai/",
+      "name": "GPN",
+      "publisher": { "@id": "https://gpncoin.ai/#org" },
+      "inLanguage": "en"
+    },
+    {
+      "@type": "SoftwareApplication",
+      "name": "GPN Node",
+      "applicationCategory": "FinanceApplication",
+      "operatingSystem": "Windows, Linux",
+      "url": "https://gpncoin.ai/download",
+      "description": "Runs a GPN node: mines blocks on your GPU and serves AI inference jobs on the same card.",
+      "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+    }
+  ]
+}
+</script>
 </head>
 <body>
 <a class="skip-link" href="#main">Skip to content</a>
 
 <header class="site-header">
   <div class="wrap nav">
-    <a class="brand" href="index.html" aria-label="GPN home">
+    <a class="brand" href="./" aria-label="GPN home">
       <span class="dot" aria-hidden="true">G</span>
       <span>GPN<br><small>GPU-NATIVE NETWORK</small></span>
     </a>
     <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Toggle navigation">☰</button>
     <nav class="nav-links" id="nav-links" aria-label="Primary">
-      <a href="index.html" aria-current="page">Home</a>
-      <a href="download.html">Download</a>
-      <a href="deploy.html">Deploy</a>
-      <a href="ai.html">AI</a>
-      <a href="chat.html">Chat</a>
-      <a href="access-points.html">Access Points</a>
-      <a href="nodes.html">Nodes</a>
-      <a href="buy.html">Buy GPN</a>
-      <a href="docs/index.html">Docs</a>
-      <a href="contact.html">Contact</a>
+      <a href="./" aria-current="page">Home</a>
+      <a href="download">Download</a>
+      <a href="deploy">Deploy</a>
+      <a href="ai">AI</a>
+      <a href="chat">Chat</a>
+      <a href="access-points">Access Points</a>
+      <a href="nodes">Nodes</a>
+      <a href="buy">Buy GPN</a>
+      <a href="docs">Docs</a>
+      <a href="contact">Contact</a>
       <a href="#join">Join us</a>
     </nav>
     <div class="nav-actions">
@@ -56,7 +89,7 @@
   <!-- ============ HERO ============ -->
   <section class="hero first">
     <div class="wrap inner">
-      <a class="badge" href="nodes.html" title="Open the live node directory" style="text-decoration:none"><span class="live-dot" aria-hidden="true"></span> Public testnet · <b>live network →</b></a>
+      <a class="badge" href="nodes" title="Open the live node directory" style="text-decoration:none"><span class="live-dot" aria-hidden="true"></span> Public testnet · <b>live network →</b></a>
       <h1>Get paid for the GPU time you're <span class="grad">wasting.</span></h1>
       <p class="lede">Mine a coin and you're exposed to its price. Rent the card for AI and it earns nothing
         when nobody books it. GPN removes the choice: <b>every node is both a miner and an AI provider</b> on
@@ -64,8 +97,8 @@
         job, and resumes — one card, one job at a time.</p>
       <div class="hero-cta">
         <a class="btn" href="/ai">Use GPN for AI &rarr;</a>
-        <a class="btn ghost" href="download.html">Download &amp; run a node</a>
-        <a class="btn ghost" href="docs/whitepaper.html">Read the whitepaper</a>
+        <a class="btn ghost" href="download">Download &amp; run a node</a>
+        <a class="btn ghost" href="docs/whitepaper">Read the whitepaper</a>
       </div>
       <p class="hero-note">Just want inference? <a href="/ai"><b>Use GPN for AI</b></a> — an
         OpenAI-compatible endpoint on the live testnet, free, no node and no signup.</p>
@@ -75,7 +108,7 @@
         <div class="qs-head">
           <h2 class="qs-title" id="qs-title">Run a node in one paste
             <span class="qs-badge">copy &middot; paste &middot; mine</span></h2>
-          <a class="qs-link" href="docs/run-a-node.html">Full guide &rarr;</a>
+          <a class="qs-link" href="docs/run-a-node">Full guide &rarr;</a>
         </div>
 
         <p class="qs-alt">Just want to use AI? <a href="/ai"><b>Use GPN for AI &rarr;</b></a>
@@ -143,13 +176,13 @@ mkdir -p ~/gpn &amp;&amp; tar -xzf gpn-linux.tar.gz -C ~/gpn &amp;&amp; cd ~/gpn
           </ul>
           <div class="join-alt">
             <a class="btn ghost small" href="https://github.com/crewlyllc/gpn_coin" rel="noopener">Build from source</a>
-            <a class="btn ghost small" href="docs/run-a-node.html">Read the node guide</a>
+            <a class="btn ghost small" href="docs/run-a-node">Read the node guide</a>
           </div>
         </div>
 
         <div class="qs-foot">
           <span>Behind a router? No inbound port is required — jobs are pulled. For a listing/seed, enable <b>UPnP</b> or forward TCP <b>30333</b>.</span>
-          <a href="docs/run-a-node.html">Full install guide &rarr;</a>
+          <a href="docs/run-a-node">Full install guide &rarr;</a>
         </div>
       </div>
     </div>
@@ -413,9 +446,9 @@ mkdir -p ~/gpn &amp;&amp; tar -xzf gpn-linux.tar.gz -C ~/gpn &amp;&amp; cd ~/gpn
       </div>
 
       <div style="margin-top:24px;display:flex;gap:12px;flex-wrap:wrap">
-        <a class="btn" href="buy.html">How to get GPN</a>
-        <a class="btn ghost" href="docs/whitepaper.html">Whitepaper</a>
-        <a class="btn ghost" href="docs/index.html">All docs</a>
+        <a class="btn" href="buy">How to get GPN</a>
+        <a class="btn ghost" href="docs/whitepaper">Whitepaper</a>
+        <a class="btn ghost" href="docs">All docs</a>
       </div>
     </div>
   </section>
@@ -490,34 +523,34 @@ mkdir -p ~/gpn &amp;&amp; tar -xzf gpn-linux.tar.gz -C ~/gpn &amp;&amp; cd ~/gpn
   <div class="wrap">
     <div class="foot-grid">
       <div>
-        <a class="brand" href="index.html" style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a>
+        <a class="brand" href="./" style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a>
         <p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute.
           <em>Get paid for the GPU time you're wasting.</em></p>
       </div>
       <div>
         <h4>Product</h4>
-        <a href="download.html">Download</a>
-        <a href="deploy.html">Deploy</a>
+        <a href="download">Download</a>
+        <a href="deploy">Deploy</a>
         <a href="/ai">Use GPN for AI</a>
-        <a href="access-points.html">Access Points</a>
-        <a href="nodes.html">Live nodes</a>
+        <a href="access-points">Access Points</a>
+        <a href="nodes">Live nodes</a>
       </div>
       <div>
         <h4>Learn</h4>
-        <a href="docs/index.html">Documentation</a>
-        <a href="docs/whitepaper.html">Whitepaper</a>
-        <a href="docs/one-pager.html">One-pager</a>
-        <a href="docs/technical-overview.html">Technical overview</a>
+        <a href="docs">Documentation</a>
+        <a href="docs/whitepaper">Whitepaper</a>
+        <a href="docs/one-pager">One-pager</a>
+        <a href="docs/technical-overview">Technical overview</a>
       </div>
       <div>
         <h4>Project</h4>
         <a href="https://x.com/gpn_ai" rel="me noopener">X / Twitter — @gpn_ai</a>
         <a href="https://discord.gg/ANCXERZqz" rel="noopener">Discord community</a>
         <a href="https://github.com/crewlyllc/gpn_coin" rel="noopener">Source on GitHub</a>
-        <a href="docs/run-a-node.html">Run a node</a>
-        <a href="docs/downloads.html">Releases</a>
-        <a href="docs/wallet.html">Wallet</a>
-        <a href="index.html#join">Join the team</a>
+        <a href="docs/run-a-node">Run a node</a>
+        <a href="docs/downloads">Releases</a>
+        <a href="docs/wallet">Wallet</a>
+        <a href="./#join">Join the team</a>
       </div>
     </div>
     <div class="foot-bottom">

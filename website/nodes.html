@@ -6,9 +6,9 @@
 <title>GPN live node directory — seeds, providers, and how to join</title>
 <meta name="description" content="The live GPN directory: every seed and provider node the network knows about, read from the same /seeds.json that bootstrapping nodes use. Auto-refreshes every 60 seconds." />
 <meta name="theme-color" content="#07090f" />
-<link rel="canonical" href="https://gpncoin.ai/nodes.html" />
+<link rel="canonical" href="https://gpncoin.ai/nodes" />
 <meta property="og:site_name" content="GPN" />
-<meta property="og:url" content="https://gpncoin.ai/nodes.html" />
+<meta property="og:url" content="https://gpncoin.ai/nodes" />
 <meta property="og:image" content="https://gpncoin.ai/assets/og.png" />
 <meta property="og:image:width" content="1200" />
 <meta property="og:image:height" content="630" />
@@ -96,20 +96,20 @@
 
 <header class="site-header">
   <div class="wrap nav">
-    <a class="brand" href="index.html" aria-label="GPN home"><span class="dot" aria-hidden="true">G</span><span>GPN<br><small>GPU-NATIVE NETWORK</small></span></a>
+    <a class="brand" href="./" aria-label="GPN home"><span class="dot" aria-hidden="true">G</span><span>GPN<br><small>GPU-NATIVE NETWORK</small></span></a>
     <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Toggle navigation">☰</button>
     <nav class="nav-links" id="nav-links" aria-label="Primary">
-      <a href="index.html">Home</a>
-      <a href="download.html">Download</a>
-      <a href="deploy.html">Deploy</a>
-      <a href="ai.html">AI</a>
-      <a href="chat.html">Chat</a>
-      <a href="access-points.html">Access Points</a>
-      <a href="nodes.html" aria-current="page">Nodes</a>
-      <a href="buy.html">Buy GPN</a>
-      <a href="docs/index.html">Docs</a>
-      <a href="contact.html">Contact</a>
-      <a href="index.html#join">Join us</a>
+      <a href="./">Home</a>
+      <a href="download">Download</a>
+      <a href="deploy">Deploy</a>
+      <a href="ai">AI</a>
+      <a href="chat">Chat</a>
+      <a href="access-points">Access Points</a>
+      <a href="nodes" aria-current="page">Nodes</a>
+      <a href="buy">Buy GPN</a>
+      <a href="docs">Docs</a>
+      <a href="contact">Contact</a>
+      <a href="./#join">Join us</a>
     </nav>
     <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
   </div>
@@ -191,9 +191,9 @@
         <span class="ct">Run a node and it shows up here</span>
         <ol class="join-steps">
           <li><b>Download the client</b> for Linux, macOS, or Windows from
-            <a href="download.html">the download page</a>.</li>
+            <a href="download">the download page</a>.</li>
           <li><b>Start it</b> with one of the installers — mining begins by default and the node serves AI
-            work when a job arrives. Steps are in <a href="docs/run-a-node.html">run a node</a>.</li>
+            work when a job arrives. Steps are in <a href="docs/run-a-node">run a node</a>.</li>
           <li><b>Become dialable.</b> Open the P2P port (default <code>30333</code>, or whatever
             <code>listen_addr</code> you set) so other peers can reach you; a node behind NAT is still a
             client, but it cannot be listed as a seed.</li>
@@ -201,8 +201,8 @@
             directory automatically, usually within one TTL (60 s).</li>
         </ol>
         <div style="display:flex;gap:12px;flex-wrap:wrap">
-          <a class="btn small" href="download.html">Download</a>
-          <a class="btn ghost small" href="docs/run-a-node.html">Run a node</a>
+          <a class="btn small" href="download">Download</a>
+          <a class="btn ghost small" href="docs/run-a-node">Run a node</a>
         </div>
       </div>
 
@@ -245,34 +245,34 @@ GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code><
   <div class="wrap">
     <div class="foot-grid">
       <div>
-        <a class="brand" href="index.html" style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a>
+        <a class="brand" href="./" style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a>
         <p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute.
           <em>Get paid for the GPU time you're wasting.</em></p>
       </div>
       <div>
         <h4>Product</h4>
-        <a href="download.html">Download</a>
-        <a href="deploy.html">Deploy</a>
-        <a href="ai.html">Access the AI</a>
-        <a href="access-points.html">Access Points</a>
-        <a href="nodes.html">Live nodes</a>
+        <a href="download">Download</a>
+        <a href="deploy">Deploy</a>
+        <a href="ai">Access the AI</a>
+        <a href="access-points">Access Points</a>
+        <a href="nodes">Live nodes</a>
       </div>
       <div>
         <h4>Learn</h4>
-        <a href="docs/index.html">Documentation</a>
-        <a href="docs/whitepaper.html">Whitepaper</a>
-        <a href="docs/one-pager.html">One-pager</a>
-        <a href="docs/technical-overview.html">Technical overview</a>
+        <a href="docs">Documentation</a>
+        <a href="docs/whitepaper">Whitepaper</a>
+        <a href="docs/one-pager">One-pager</a>
+        <a href="docs/technical-overview">Technical overview</a>
       </div>
       <div>
         <h4>Project</h4>
         <a href="https://x.com/gpn_ai" rel="me noopener">X / Twitter — @gpn_ai</a>
         <a href="https://discord.gg/ANCXERZqz" rel="noopener">Discord community</a>
         <a href="https://github.com/crewlyllc/gpn_coin" rel="noopener">Source on GitHub</a>
-        <a href="docs/run-a-node.html">Run a node</a>
-        <a href="docs/downloads.html">Releases</a>
-        <a href="docs/wallet.html">Wallet</a>
-        <a href="index.html#join">Join the team</a>
+        <a href="docs/run-a-node">Run a node</a>
+        <a href="docs/downloads">Releases</a>
+        <a href="docs/wallet">Wallet</a>
+        <a href="./#join">Join the team</a>
       </div>
     </div>
     <div class="foot-bottom">

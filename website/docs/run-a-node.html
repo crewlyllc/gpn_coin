@@ -6,10 +6,10 @@
 <title>Run a node — GPN docs</title>
 <meta name="description" content="One command runs a GPN node: chain node/miner plus the AI serving stack. Covers install, config, ports, dialability (port-forward / UPnP / CGNAT) and troubleshooting." />
 <meta name="theme-color" content="#07090f" />
-<link rel="canonical" href="https://gpncoin.ai/docs/run-a-node.html" />
+<link rel="canonical" href="https://gpncoin.ai/docs/run-a-node" />
 <meta property="og:site_name" content="GPN" />
 <meta property="og:type" content="article" />
-<meta property="og:url" content="https://gpncoin.ai/docs/run-a-node.html" />
+<meta property="og:url" content="https://gpncoin.ai/docs/run-a-node" />
 <meta property="og:title" content="Run a node — GPN docs" />
 <meta property="og:description" content="One command runs a GPN node: chain node/miner plus the AI serving stack. Covers install, config, ports, dialability (port-forward / UPnP / CGNAT) and troubleshooting." />
 <meta name="twitter:card" content="summary" />
@@ -24,19 +24,19 @@
 
 <header class="site-header">
   <div class="wrap nav">
-    <a class="brand" href="../index.html" aria-label="GPN home"><span class="dot" aria-hidden="true">G</span><span>GPN<br><small>GPU-NATIVE NETWORK</small></span></a>
+    <a class="brand" href=".." aria-label="GPN home"><span class="dot" aria-hidden="true">G</span><span>GPN<br><small>GPU-NATIVE NETWORK</small></span></a>
     <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Toggle navigation">☰</button>
     <nav class="nav-links" id="nav-links" aria-label="Primary">
-      <a href="../index.html">Home</a>
-      <a href="../download.html">Download</a>
-      <a href="../deploy.html">Deploy</a>
-      <a href="../ai.html">AI</a>
-      <a href="../chat.html">Chat</a>
-      <a href="../access-points.html">Access Points</a>
-      <a href="../nodes.html">Nodes</a>
-      <a href="../buy.html">Buy GPN</a>
-      <a href="index.html" aria-current="page">Docs</a>
-      <a href="../index.html#join">Join us</a>
+      <a href="..">Home</a>
+      <a href="../download">Download</a>
+      <a href="../deploy">Deploy</a>
+      <a href="../ai">AI</a>
+      <a href="../chat">Chat</a>
+      <a href="../access-points">Access Points</a>
+      <a href="../nodes">Nodes</a>
+      <a href="../buy">Buy GPN</a>
+      <a href="./" aria-current="page">Docs</a>
+      <a href="..#join">Join us</a>
     </nav>
     <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
   </div>
@@ -44,7 +44,7 @@
 
 <main id="main" class="doc-main">
   <div class="wrap doc-wrap">
-    <nav class="crumbs" aria-label="Breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Docs</a> / <span>Run a node</span></nav>
+    <nav class="crumbs" aria-label="Breadcrumb"><a href="..">Home</a> / <a href="./">Docs</a> / <span>Run a node</span></nav>
     <article class="prose">
 <h1>Run a node (single command)</h1>
 <p><em>Verified against: chain spec 45 / release 0.3.11 — checked 2026-11-02 at block 236,986.</em></p>
@@ -717,7 +717,7 @@ restores the legacy hard gate for a host that must guarantee reachability.</p>
 <blockquote>
 <p>The provider side of this — what the heartbeat publishes (<code>multiaddrs</code>,
 <code>listen_addrs</code>), the VRAM model gate and the public <code>/v1/models</code> catalogue —
-is documented in <a href="provider-address-and-models.html">provider-address-and-models.md</a>.</p>
+is documented in <a href="provider-address-and-models">provider-address-and-models.md</a>.</p>
 </blockquote>
 <p>If the node is not dialable you will see this (exact text, LAN IP and port
 filled in) and it keeps running:</p>
@@ -1645,7 +1645,7 @@ presence is not the gate); the provider pulls/retries and logs a <strong>single<
 actionable warning instead of per-poll <code>pull … failed</code> spam.</p>
 <h2 id="updates-auto-update-and-the-minimum-version-cutoff">Updates — auto-update and the minimum-version cutoff</h2>
 <p>Short version: <strong>opt in and forget it, or update by hand — but a node that falls
-too far behind stops mining.</strong> Full detail: <a href="updates.html"><code>docs/updates.md</code></a>.</p>
+too far behind stops mining.</strong> Full detail: <a href="updates"><code>docs/updates.md</code></a>.</p>
 <pre><code class="language-bash"># (default: on — this line is only needed to opt back in after disabling)
 GPN_AUTO_UPDATE=1 gpn_node
 
@@ -2424,7 +2424,7 @@ authority would halt the chain. The dashboard answers <code>409</code> and the C
 <p>Windows: <code>gpn-agent/windows/gpn-dashboard.cmd</code> starts the supervisor with
 <code>--gui</code> and opens the page — put a shortcut to it on the desktop.</p>
 <p>Full details (endpoints, semantics table, screenshots-in-words, tests):
-<a href="node-gui-and-idle.html"><code>node-gui-and-idle.md</code></a>.</p>
+<a href="node-gui-and-idle"><code>node-gui-and-idle.md</code></a>.</p>
 <h2 id="linux">Linux</h2>
 <pre><code class="language-bash"># foreground (Ctrl-C stops everything) — always miner + provider
 # No GPN_SIGNER: the node uses the wallet on THIS machine (run
@@ -2747,7 +2747,7 @@ best block freezes — while still looking "connected" in the peer list.</p>
 <p><strong>If the node already has a (legacy <code>256</code>) DB</strong>, the pruning mode is locked in
 and <code>archive</code> will hard-fail — re-create the data dir and let it re-sync, or
 import a fresh <strong>archive</strong> DB snapshot (fast — see
-<a href="fast-sync.html"><code>docs/fast-sync.md</code></a>):</p>
+<a href="fast-sync"><code>docs/fast-sync.md</code></a>):</p>
 <pre><code class="language-bash"># option A — re-sync from scratch (keep the node key / config):
 mv ~/.gpn/node/chains/gpn_testnet/db ~/.gpn/node/chains/gpn_testnet/db.old
 #   …then restart gpn_node: it creates a FRESH archive DB and full-syncs.
@@ -2774,7 +2774,7 @@ untouched). Override with <code>--pruning archive|none</code> (e.g.
 finality gadget</strong>. Archive pruning + <code>--sync full</code> are the correct <em>workaround</em>
 and make nodes robust today, but the <em>real</em> fix is to add finality at mainnet
 — see the finality-gadget design cross-reference in
-<a href="mainnet-launch-runbook.html"><code>docs/mainnet-launch-runbook.md</code></a>. Until then,
+<a href="mainnet-launch-runbook"><code>docs/mainnet-launch-runbook.md</code></a>. Until then,
 assume no finality and never rely on <code>finalized #&gt; 0</code>.</p>
 </blockquote>
 <h2 id="troubleshooting-slow-llm-jobs-on-a-dual-stack-aaaa-laggy-host-the-result-stall">Troubleshooting — slow LLM jobs on a dual-stack / AAAA-laggy host (the <code>/result</code> stall)</h2>
@@ -2853,10 +2853,10 @@ binary is tracked separately (task #26, deferred).</p>
 <footer class="site-footer">
   <div class="wrap">
     <div class="foot-grid">
-      <div><a class="brand" href="../index.html" style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a><p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute. <em>Get paid for the GPU time you're wasting.</em></p></div>
-      <div><h4>Product</h4><a href="../download.html">Download</a><a href="../deploy.html">Deploy</a><a href="../ai.html">Access the AI</a><a href="../access-points.html">Access Points</a><a href="../nodes.html">Live nodes</a></div>
-      <div><h4>Learn</h4><a href="index.html">Docs</a><a href="whitepaper.html">Whitepaper</a><a href="one-pager.html">One-pager</a><a href="technical-overview.html">Technical overview</a></div>
-      <div><h4>Project</h4><a href="https://github.com/crewlyllc/gpn_coin" rel="noopener">Source on GitHub</a><a href="run-a-node.html">Run a node</a><a href="wallet.html">Wallet</a><a href="../buy.html">Token &amp; purchasing</a><a href="../index.html#join">Join the team</a></div>
+      <div><a class="brand" href=".." style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a><p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute. <em>Get paid for the GPU time you're wasting.</em></p></div>
+      <div><h4>Product</h4><a href="../download">Download</a><a href="../deploy">Deploy</a><a href="../ai">Access the AI</a><a href="../access-points">Access Points</a><a href="../nodes">Live nodes</a></div>
+      <div><h4>Learn</h4><a href="./">Docs</a><a href="whitepaper">Whitepaper</a><a href="one-pager">One-pager</a><a href="technical-overview">Technical overview</a></div>
+      <div><h4>Project</h4><a href="https://github.com/crewlyllc/gpn_coin" rel="noopener">Source on GitHub</a><a href="run-a-node">Run a node</a><a href="wallet">Wallet</a><a href="../buy">Token &amp; purchasing</a><a href="..#join">Join the team</a></div>
     </div>
     <div class="foot-bottom">
       <p class="small muted">© <span data-year>2026</span> GPN · Public testnet. Not investment advice.</p>
