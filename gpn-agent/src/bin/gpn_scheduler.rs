@@ -1929,6 +1929,45 @@ const MAX_ROUTE_ATTEMPTS: usize = 3;
 /// Ordering: idle before busy, and within a tier by RTT-aware latency (the
 /// caller's own measurement wins over the AP's), with `pull_penalty_ms` added
 /// to a puller's score so a cold download only wins when it is genuinely faster.
+
+/// The models `GET /v1/models` may publish: **only what this fleet can route
+/// right now** (item #149).
+///
+/// The catalogue used to be the union of `models[]` over every registry row,
+/// which publishes promises nobody can keep: on 2026-11-07 the first entry was
+/// `deepseek-r1:14b`, offered only by two 16 GB `pull://` peers whose accounts
+/// hold **0 GPN**, so `route_candidates` excludes them at `base_ok`
+/// (`unfunded == true`, the #146 fix) and the local 8 GB box refuses the weights
+/// (`model_fits_vram`) — a client that picks `data[0]` (or a default set from it)
+/// gets `503 no compatible provider online` in 0.4 ms.
+///
+/// So ask the router instead of the registry: a model is publishable when
+/// `route_candidates` would return at least one candidate for a text job naming
+/// it. That is the same single pipeline every request goes through, so the shop
+/// window cannot drift from the shelf again — funding, health, delivery,
+/// capability, VRAM fit and pullability are all decided in one place.
+fn catalogue_models(registry: &[Provider]) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    let rtt = RttOverrides::new();
+    for p in registry {
+        for m in &p.models {
+            if ids.iter().any(|seen| seen == m) {
+                continue;
+            }
+            let needs = RouteNeeds {
+                model: m.clone(),
+                ..Default::default()
+            };
+            if !route_candidates(registry, JobKind::Text, &needs, &rtt).is_empty() {
+                ids.push(m.clone());
+            }
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    gpn_agent::models::filter_public_models(ids)
+}
+
 fn route_candidates(
     registry: &[Provider],
     kind: JobKind,
@@ -5149,18 +5188,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // replaces the allowlist when an operator wants to publish more.
                 (Method::Get, ["v1", "models"]) => {
                     let reg = registry.lock().unwrap();
-                    let ids = gpn_agent::models::filter_public_models(
-                        reg.iter().flat_map(|p| p.models.clone()),
-                    );
-                    let mut ids = ids;
-                    ids.sort();
-                    ids.dedup();
+                    // Item #149: publish only models this fleet can actually
+                    // ROUTE (health + funding + capability + VRAM fit + pull),
+                    // not the union of every row's `models[]`.
+                    let mut ids = catalogue_models(&reg);
                     if ids.is_empty() {
                         // Never leave an empty catalogue: clients call
                         // /v1/models before anything else and treat [] as an
-                        // outage. Advertise the baseline only when no provider
-                        // is online but a provider COULD serve it.
-                        ids.push("llama3.2:1b".into());
+                        // outage. Nothing is routable, so fall back to the
+                        // allowlisted union of every row (the pre-#149 answer):
+                        // an honest "this is what the network advertises", and
+                        // every request 503s with its per-candidate reasons
+                        // either way.
+                        let mut all = gpn_agent::models::filter_public_models(
+                            reg.iter().flat_map(|p| p.models.clone()),
+                        );
+                        all.sort();
+                        all.dedup();
+                        if all.is_empty() {
+                            all.push("llama3.2:1b".into());
+                        }
+                        ids = all;
                     }
                     json!({"object":"list", "data": ids.iter().map(|m| json!({
                     "id": m, "object": "model", "owned_by": "gpn"
@@ -8043,6 +8091,44 @@ mod tests {
         let published =
             gpn_agent::models::filter_public_models(["tuned-42", "stories260K", "llama3.2:1b"]);
         assert_eq!(published, vec!["llama3.2:1b".to_string()]);
+    }
+
+    #[test]
+    fn the_catalogue_only_publishes_models_the_fleet_can_route() {
+        // Item #149, from the live 2026-11-07 shape: `/v1/models` listed
+        // `deepseek-r1:14b` FIRST because two 16 GB `pull://` peers advertise it,
+        // while both peers are `unfunded` (0 GPN, so `base_ok` excludes them and
+        // they can never claim) and the local 8 GB box cannot hold the weights.
+        // A client that took `data[0]` got `503 no compatible provider online`.
+        let mut local = prov("5Local", "http://local/status", 12, "llama3.2:1b");
+        local.vram_mb = 8188;
+        local.capabilities = vec!["LLMInference".to_string()];
+
+        let mut peer = prov("5Peer", "pull://5Peer", 100, "deepseek-r1:14b");
+        peer.vram_mb = 16303;
+        peer.can_pull = true;
+        peer.unfunded = Some(true);
+
+        let reg = vec![local.clone(), peer.clone()];
+        let ids = catalogue_models(&reg);
+        assert!(ids.contains(&"llama3.2:1b".to_string()), "{ids:?}");
+        assert!(
+            !ids.contains(&"deepseek-r1:14b".to_string()),
+            "an unfunded peer's model must not be advertised: {ids:?}"
+        );
+
+        // Funding the peer is the whole fix the operator has: the same model
+        // becomes publishable with no code or restart, because the catalogue
+        // asks the router and the router reads live funding.
+        let mut funded = reg.clone();
+        funded[1].unfunded = Some(false);
+        assert!(catalogue_models(&funded).contains(&"deepseek-r1:14b".to_string()));
+
+        // A model nobody offers is never invented.
+        assert!(!catalogue_models(&reg).contains(&"qwen2.5:72b".to_string()));
+        // An empty fleet publishes nothing here; the handler keeps its
+        // never-empty floor on top of this.
+        assert!(catalogue_models(&[]).is_empty());
     }
 
     #[test]
