@@ -845,6 +845,15 @@ struct Provider {
     capacity: u64,
     latency_ms: u64,
     last_seen: Option<Instant>,
+    /// Did the AP actually reach this endpoint? `false` only for a configured /
+    /// on-chain-discovered `/status` URL that did not answer.
+    ///
+    /// Such a row has **no identity and no capability claim**: the placeholder
+    /// knows nothing about the box (not its address, not what it serves), so
+    /// publishing `default_capabilities()` on it invented a "serves everything"
+    /// provider that could never be leased (2026-11-07, #147 — two such rows made
+    /// `/providers` show 5 providers where 3 exist).
+    reachable: bool,
     /// Why this provider is considered healthy: `"push"` when a signed
     /// heartbeat arrived within its TTL, `"poll"` when the AP's own
     /// `/status` poll succeeded. Empty when it is not healthy at all.
@@ -865,10 +874,10 @@ struct Provider {
     /// capabilities, 16303 MB VRAM and `healthy: true` at balance 0.0000 GPN /
     /// nonce 0, and job #6551 was leased to it with no way to land).
     ///
-    /// A *fact from the chain*, not a guess: `false` also covers "unknown"
-    /// (an unreadable account), because a failed read must never exclude a
-    /// provider — see `funding_state`.
-    unfunded: bool,
+    /// A *fact from the chain*, not a guess: `None` is "unknown" (an unreadable
+    /// account, or no address to read at all), and unknown must never exclude a
+    /// provider — see `apply_funding`.
+    unfunded: Option<bool>,
 }
 
 fn opt(args: &[String], flag: &str) -> Option<String> {
@@ -1082,9 +1091,10 @@ fn provider_from_caps(addr: &str, v: &Value, status_url: String, latency_ms: u64
             .max(1),
         latency_ms,
         last_seen: Some(Instant::now()),
+        reachable: true,
         source: "poll".to_string(),
         pulled_seen: None,
-        unfunded: false,
+        unfunded: None,
     }
 }
 
@@ -1315,9 +1325,10 @@ fn apply_push_heartbeats(
                     capacity: p.capacity.max(1),
                     latency_ms: pull_default_latency_ms(),
                     last_seen: Some(now),
+                    reachable: true,
                     source: "push".to_string(),
                     pulled_seen: None,
-                    unfunded: false,
+                    unfunded: None,
                 });
             }
         }
@@ -1439,6 +1450,117 @@ fn apply_referrals_at(out: &mut [Provider], path: &std::path::Path) {
     }
 }
 
+/// The registry entry for a configured / chain-discovered endpoint that did not
+/// answer its `/status` poll.
+///
+/// It is a **placeholder, not a provider**: we know a URL is configured and that
+/// nothing answered there. We do not know the box's address, its hardware or
+/// what it serves, so it must make no capability claim at all. The old arm
+/// filled `default_capabilities()`, which `/providers` then published as a
+/// five-capability provider that could never be leased — twice, because these
+/// rows have no address to de-duplicate on (#147, live 2026-11-07).
+fn unreachable_placeholder(status_url: String) -> Provider {
+    Provider {
+        status_url,
+        address: String::new(),
+        gflops: 0,
+        gflops_source: String::new(),
+        models: vec![],
+        can_pull: false,
+        tok_per_s: 40.0,
+        owner_cost_usd_hr: 0.03,
+        mem_bw_gbps: 250.0,
+        vram_mb: 0,
+        ram_mb: 0,
+        gpu_class: "unknown".to_string(),
+        tflops: 0.0,
+        // No declaration, no assumption: an endpoint we could not reach serves
+        // nothing we can prove.
+        capabilities: vec![],
+        peer_id: None,
+        p2p_multiaddrs: vec![],
+        p2p_port: None,
+        referral: None,
+        reachability: "leaf".to_string(),
+        gateway: false,
+        active: 0,
+        capacity: 0,
+        latency_ms: 9999,
+        last_seen: None,
+        reachable: false,
+        source: String::new(),
+        pulled_seen: None,
+        // There is no address to read a balance at: unknown, never `false`.
+        unfunded: None,
+    }
+}
+
+/// The host part of a `http://host:port/status` URL (lowercased, port stripped).
+fn url_host(url: &str) -> Option<String> {
+    let rest = url.split("://").nth(1).unwrap_or(url);
+    let authority = rest.split('/').next()?;
+    let hostport = authority.rsplit('@').next()?;
+    if hostport.is_empty() {
+        return None;
+    }
+    let host = if let Some(stripped) = hostport.strip_prefix('[') {
+        // IPv6 literal: keep it bracketed so it never collides with a port.
+        format!("[{}", stripped.split(']').next().unwrap_or(""))
+    } else {
+        hostport.split(':').next().unwrap_or("").to_string()
+    };
+    Some(host.to_ascii_lowercase()).filter(|h| !h.is_empty())
+}
+
+/// Every host a registry row is known by: its `/status` URL plus the host of
+/// each published p2p multiaddr (`/ip4/<h>/…`, `/ip6/<h>/…`, `/dns4/<h>/…`).
+fn known_hosts(p: &Provider) -> Vec<String> {
+    let mut hosts: Vec<String> = Vec::new();
+    if let Some(h) = url_host(&p.status_url) {
+        hosts.push(h);
+    }
+    for ma in &p.p2p_multiaddrs {
+        let parts: Vec<&str> = ma.split('/').collect();
+        for i in 0..parts.len().saturating_sub(1) {
+            if matches!(parts[i], "ip4" | "ip6" | "dns" | "dns4" | "dns6") {
+                let h = parts[i + 1].to_ascii_lowercase();
+                if !h.is_empty() {
+                    hosts.push(h);
+                }
+                break;
+            }
+        }
+    }
+    hosts
+}
+
+/// Collapse the registry to one row per provider.
+///
+/// Two rules:
+///  * one address is one provider — keep the lowest-latency record (a box
+///    listed both statically and on-chain, or polled and pushed);
+///  * an **address-less placeholder** (an endpoint that never answered) is
+///    dropped when another row already covers the same host, because that is
+///    the same box seen twice — a live entry must never be duplicated by the
+///    placeholder for the URL it is registered under (#147).
+fn dedupe_rows(out: &mut Vec<Provider>) {
+    out.sort_by_key(|p| p.latency_ms);
+    let covered: std::collections::HashSet<String> = out
+        .iter()
+        .filter(|p| !p.address.is_empty())
+        .flat_map(known_hosts)
+        .collect();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    out.retain(|p| {
+        if p.address.is_empty() {
+            // No identity: keep it only as a first-class "this URL is down"
+            // row, never as a second copy of a host we already measure.
+            return !known_hosts(p).iter().any(|h| covered.contains(h));
+        }
+        seen.insert(p.address.clone())
+    });
+}
+
 /// Poll every provider's /status into the shared registry.
 ///
 /// The candidate set is the **union** of (a) any static `--providers` URLs and
@@ -1492,44 +1614,25 @@ fn refresh(
                         .unwrap_or(9999);
                     provider_from_caps(&addr, &v, u.clone(), latency)
                 }
-                None => Provider {
-                    status_url: u.clone(),
-                    address: String::new(),
-                    gflops: 0,
-                    gflops_source: String::new(),
-                    models: vec![],
-                    can_pull: false,
-                    tok_per_s: 40.0,
-                    owner_cost_usd_hr: 0.03,
-                    mem_bw_gbps: 250.0,
-                    vram_mb: 0,
-                    ram_mb: 0,
-                    gpu_class: "unknown".to_string(),
-                    tflops: 0.0,
-                    capabilities: default_capabilities(),
-                    peer_id: None,
-                    p2p_multiaddrs: vec![],
-                    p2p_port: None,
-                    referral: None,
-                    reachability: "leaf".to_string(),
-                    gateway: false,
-                    active: 0,
-                    capacity: 0,
-                    latency_ms: 9999,
-                    last_seen: None,
-                    source: String::new(),
-                    pulled_seen: None,
-                    unfunded: false,
-                },
+                None => {
+                    // One line per endpoint (not per 5 s pass) so a configured
+                    // box that is down is visible without drowning the log.
+                    if warn_once(&format!("unreachable|{u}")) {
+                        eprintln!(
+                            "[route] endpoint {u} did not answer /status — publishing no \
+                             capability or identity for it (an unreachable endpoint is not a \
+                             provider)"
+                        );
+                    }
+                    unreachable_placeholder(u.clone())
+                }
             };
             out.push(p);
         }
 
         // 3. De-duplicate by provider address (a node listed both statically and
         //    on-chain must not be counted twice). Keep the lowest-latency entry.
-        out.sort_by_key(|p| p.latency_ms);
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        out.retain(|p| p.address.is_empty() || seen.insert(p.address.clone()));
+        dedupe_rows(&mut out);
 
         // 4. Merge capabilities delivered by providers' own pull polls (#46
         //    Phase 3 step 2). This is the ONLY way a NAT'd/CGNAT provider can
@@ -1874,8 +1977,8 @@ fn route_candidates(
             && deliverable(p)
             // A provider whose account cannot pay an `accept_job` fee is not a
             // candidate at all: handing it a lease creates a job nobody can
-            // claim (2026-11-07 #6551). `false` also covers "unknown".
-            && !p.unfunded
+            // claim (2026-11-07 #6551). `None` (unknown) still routes.
+            && p.unfunded != Some(true)
             && has_cap(p)
             && hw_ok(p)
             && gpu_ok(p)
@@ -2575,14 +2678,14 @@ fn apply_funding(
                 None => continue,
             },
         };
-        if cannot_pay && !p.unfunded && warn_once(&format!("unfunded|{}", p.address)) {
+        if cannot_pay && p.unfunded != Some(true) && warn_once(&format!("unfunded|{}", p.address)) {
             eprintln!(
                 "[route] provider {} has no free balance on chain — it cannot pay the fee for \
                  accept_job, so no lease will be handed to it until it is funded",
                 gpn_agent::provider_heartbeat::abbreviated(&p.address)
             );
         }
-        p.unfunded = cannot_pay;
+        p.unfunded = Some(cannot_pay);
     }
 }
 
@@ -4882,6 +4985,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "vram_mb": p.vram_mb, "ram_mb": p.ram_mb,
                     "gpu_class": p.gpu_class, "tflops": p.tflops,
                     "capabilities": p.capabilities,
+                    // An endpoint that never answered has no identity and no
+                    // capability claim: `capabilities` is empty and this is
+                    // false, so no consumer can read it as a provider (#147).
+                    "reachable": p.reachable,
                     "peer_id": p.peer_id, "multiaddrs": p.p2p_multiaddrs,
                     "p2p_port": p.p2p_port,
                     "referral": p.referral,
@@ -4890,7 +4997,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "healthy": p.last_seen.is_some(),
                     // A provider the chain says cannot pay an `accept_job` fee is
                     // advertised here (an operator must be able to SEE the box and
-                    // why it gets no work) but is never routed any.
+                    // why it gets no work) but is never routed any. `null` when
+                    // the account could not be read — unknown is not "funded".
                     "unfunded": p.unfunded,
                     "source": p.source
                 })).collect::<Vec<_>>() })
@@ -7801,6 +7909,72 @@ mod tests {
         assert!(p2.capabilities.iter().any(|c| c == "LLMInference"));
     }
 
+    /// #147: an endpoint that never answered its `/status` poll is a
+    /// placeholder, not a provider. It must publish no identity and, above all,
+    /// no capability claim — the old arm filled `default_capabilities()` and
+    /// `/providers` advertised a phantom "serves everything" box (twice on this
+    /// host: the seed DNS name and box #1's IPv4).
+    #[test]
+    fn an_unreachable_endpoint_makes_no_capability_or_identity_claim() {
+        let p = unreachable_placeholder("http://gpn-testnet.duckdns.org:8093/status".into());
+        assert!(!p.reachable, "a failed poll is not a reachable provider");
+        assert!(p.last_seen.is_none(), "and it is not healthy either");
+        assert!(p.address.is_empty(), "we learned nothing about who it is");
+        assert!(
+            p.capabilities.is_empty(),
+            "an unreachable endpoint must not claim any job kind"
+        );
+        assert_eq!(
+            p.unfunded, None,
+            "no address means the balance is UNKNOWN, never 'funded'"
+        );
+        assert_eq!(p.gflops, 0);
+        assert!(p.models.is_empty() && p.peer_id.is_none());
+    }
+
+    /// #147: the placeholder must not survive as a second row for a host we
+    /// already measure — and one address must still be one row.
+    #[test]
+    fn a_placeholder_is_collapsed_onto_the_row_that_covers_its_host() {
+        // A live row for the host the static URL points at (same box, seen via
+        // its push + p2p multiaddr) plus the placeholder for that URL.
+        let mut live = prov("5ENq", "http://142.129.54.88:8093/status", 1, "llama3.2:1b");
+        live.p2p_multiaddrs = vec!["/ip4/142.129.54.88/tcp/30333/p2p/12D3KooWAFt".to_string()];
+        let dup = unreachable_placeholder("http://142.129.54.88:8093/status".into());
+        let mut out = vec![dup, live];
+        dedupe_rows(&mut out);
+        assert_eq!(out.len(), 1, "one host, one row");
+        assert_eq!(out[0].address, "5ENq");
+
+        // A DNS alias of the same box is covered through its multiaddr host too.
+        let mut live2 = prov("5Abc", "pull://5Abc", 1, "llama3.2:1b");
+        live2.p2p_multiaddrs =
+            vec!["/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFt".to_string()];
+        let mut out2 = vec![
+            unreachable_placeholder("http://gpn-testnet.duckdns.org:8093/status".into()),
+            live2,
+        ];
+        dedupe_rows(&mut out2);
+        assert_eq!(out2.len(), 1, "a DNS alias is not a second provider");
+
+        // An unreachable endpoint nobody else covers stays visible as a
+        // first-class "this URL is down" row — and it is the only such row.
+        let mut out3 = vec![unreachable_placeholder(
+            "http://203.0.113.9:8093/status".into(),
+        )];
+        dedupe_rows(&mut out3);
+        assert_eq!(out3.len(), 1);
+        assert!(!out3[0].reachable);
+
+        // Two records for one address still collapse to the faster one.
+        let slow = prov("5Dup", "http://slow/status", 90, "llama3.2:1b");
+        let fast = prov("5Dup", "http://fast/status", 5, "llama3.2:1b");
+        let mut out4 = vec![slow, fast];
+        dedupe_rows(&mut out4);
+        assert_eq!(out4.len(), 1);
+        assert_eq!(out4[0].status_url, "http://fast/status");
+    }
+
     fn prov(addr: &str, url: &str, latency_ms: u64, model: &str) -> Provider {
         Provider {
             status_url: url.to_string(),
@@ -7827,11 +8001,12 @@ mod tests {
             capacity: 4,
             latency_ms,
             last_seen: Some(Instant::now()),
+            reachable: true,
             source: "poll".to_string(),
             // Routing tests describe *deliverable* providers, so the delivery
             // gate (item #55) stays inert for them.
             pulled_seen: Some(Instant::now()),
-            unfunded: false,
+            unfunded: None,
         }
     }
 
@@ -7909,7 +8084,7 @@ mod tests {
         // exactly like the min-VRAM gate, rather than creating an unclaimable job.
         let mut broke = prov("broke", "http://broke/status", 1, "llama3.2:1b");
         broke.vram_mb = 16303;
-        broke.unfunded = true;
+        broke.unfunded = Some(true);
         let funded = prov("funded", "http://funded/status", 90, "llama3.2:1b");
 
         // The broke box would otherwise win on latency and VRAM.
@@ -7932,9 +8107,10 @@ mod tests {
         )
         .is_none());
 
-        // `false` means "funded OR unknown" — an unreadable account must never be
+        // `None` means "funded OR unknown" — an unreadable account must never be
         // excluded on a guess (the #141/#144 three-state rule).
         let unknown = prov("unknown", "http://unknown/status", 1, "llama3.2:1b");
+        assert_eq!(unknown.unfunded, None);
         let reg = vec![unknown];
         assert!(pick(&reg, 0, 0, 0, 0.0, "llama3.2:1b", 0, &RttOverrides::new()).is_some());
     }

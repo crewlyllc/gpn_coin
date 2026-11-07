@@ -107,10 +107,21 @@ pub fn build(
     }
 
     // ---- providers: deduped by peer id, healthy one wins -------------------
+    //
+    // A row with **no address** is not a provider registration: it is the
+    // placeholder for a configured endpoint that never answered (see
+    // `unreachable_placeholder` in the access point). Counting it made `/nodes`
+    // report 5 providers where 3 exist (2026-11-07, #147), so placeholders are
+    // left out of the directory entirely — the AP's own log and `/providers`
+    // are where "this endpoint is down" belongs.
+    let identified: Vec<&DirProvider> = providers
+        .iter()
+        .filter(|p| !p.address.trim().is_empty())
+        .collect();
     let mut provider_rows: Vec<Value> = Vec::new();
     let mut provider_index: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
-    for p in providers {
+    for p in &identified {
         let pid = p.peer_id.as_deref().and_then(clean_peer_id);
         let key = pid
             .clone()
@@ -151,20 +162,20 @@ pub fn build(
     // the fleet and made a NAT'd provider look like a non-provider — audit
     // 2026-11-02 #3: `/nodes` said "1 serving AI" while the AP registry held 4.
     // Reachability is published separately as `healthy_now`.
-    let serving_ai = providers.len();
-    let healthy_now = providers.iter().filter(|p| p.healthy).count();
+    let serving_ai = identified.len();
+    let healthy_now = identified.iter().filter(|p| p.healthy).count();
     // SPEC 47: separate backbone from leaf. A leaf is a full participant, it is
     // just not dialable — conflating the two is how a fleet of leaves looked
     // like zero providers. `gateways` counts the named site dial targets.
-    let backbone_now = providers
+    let backbone_now = identified
         .iter()
         .filter(|p| p.reachability == "backbone")
         .count();
-    let leaf_now = providers
+    let leaf_now = identified
         .iter()
         .filter(|p| p.reachability != "backbone")
         .count();
-    let gateways = providers.iter().filter(|p| p.gateway).count();
+    let gateways = identified.iter().filter(|p| p.gateway).count();
 
     let mut known_offline: std::collections::HashSet<String> = std::collections::HashSet::new();
     for row in &seed_rows {
@@ -319,6 +330,38 @@ mod tests {
         assert_eq!(doc["seeds"][1]["peer_id"], STALE);
         assert_eq!(doc["seeds"][1]["live"], false);
         assert_eq!(doc["stale"], false);
+    }
+
+    #[test]
+    fn an_unidentified_endpoint_is_not_counted_as_a_provider() {
+        // 2026-11-07 (#147): the AP's registry carried a placeholder for every
+        // configured `/status` URL that did not answer — `address: ""`, five
+        // capabilities, `healthy: false`. `/nodes` counted them, so it said 5
+        // providers where 3 exist. A row with no identity is not a provider.
+        let placeholder = DirProvider {
+            address: String::new(),
+            peer_id: None,
+            healthy: false,
+            models: vec![],
+            last_seen_secs: None,
+            status_url: "http://gpn-testnet.duckdns.org:8093/status".into(),
+            ..Default::default()
+        };
+        let live = Ok(vec![PEER_B.into()]);
+        let doc = build(
+            "t",
+            None,
+            live,
+            &[
+                provider(PEER_B, true, "http://198.51.100.7:8093"),
+                placeholder,
+            ],
+            &[],
+        );
+        assert_eq!(doc["providers"].as_array().unwrap().len(), 1);
+        assert_eq!(doc["counts"]["serving_ai"], 1);
+        assert_eq!(doc["counts"]["healthy_now"], 1);
+        assert_eq!(doc["counts"]["leaf_now"], 0, "a placeholder is not a leaf");
     }
 
     #[test]
