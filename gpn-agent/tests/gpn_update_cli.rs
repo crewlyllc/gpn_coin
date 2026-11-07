@@ -77,7 +77,7 @@ fn make_bundle(version: &str) -> Vec<u8> {
     for (name, body) in [
         (
             "gpn_node",
-            format!("#!/bin/sh\necho gpn-build-v1 version={version} sha=cafe spec=1\n")
+            format!("#!/bin/sh\necho gpn-build-v1 version={version} sha=cafe1234 spec=1\n")
                 .into_bytes(),
         ),
         ("gpn-node", b"#!/bin/sh\necho rust-node\n".to_vec()),
@@ -519,4 +519,76 @@ fn apply_up_to_date_is_a_noop() {
     assert_eq!(code, 0, "stdout={out} stderr={err}");
     assert_eq!(feed.hits(), vec!["/releases.json"]);
     assert_eq!(std::fs::read(ctx.target.join("gpn_node")).unwrap(), before);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #148: the signed release must not overwrite a locally deployed build
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The reported incident, exactly: `gpn-update.timer` replaced a locally
+/// deployed `HEAD` build because the *supervisor* in the install dir was still
+/// the previous release. A version comparison sees "0.3.x → 0.3.x+1, go ahead";
+/// only the commit in the stamp shows that one of the binaries is newer code
+/// than the release contains.
+#[test]
+fn apply_refuses_to_replace_a_local_build_of_the_release_version() {
+    let ctx = Ctx::new("apply-local-head");
+    // Mixed install dir: supervisor = old release, scheduler = a local HEAD
+    // build of the *candidate's* version (bundle stamps sha=cafe, this deadbeef).
+    ctx.seed_old();
+    write_exe(&ctx.target, "gpn_scheduler", Some(NEW_VERSION));
+    let local_before = std::fs::read(ctx.target.join("gpn_scheduler")).unwrap();
+    let supervisor_before = std::fs::read(ctx.target.join("gpn_node")).unwrap();
+
+    let (feed, _bundle) = apply_feed();
+    let (code, out, err) = ctx.run(&["--apply", "--json"], &[], &feed.url("/releases.json"));
+    assert_eq!(
+        code, 3,
+        "a refusal is not an error: stdout={out} stderr={err}"
+    );
+    assert!(err.contains("gpn_scheduler"), "names the file: {err}");
+    assert!(err.contains("deadbeef"), "names the installed build: {err}");
+    assert!(err.contains("cafe1234"), "names the release build: {err}");
+    assert!(err.contains("--force"), "names the escape hatch: {err}");
+
+    // Nothing was touched: not the binaries, not `current`.
+    assert_eq!(
+        std::fs::read(ctx.target.join("gpn_scheduler")).unwrap(),
+        local_before
+    );
+    assert_eq!(
+        std::fs::read(ctx.target.join("gpn_node")).unwrap(),
+        supervisor_before
+    );
+    assert!(
+        update::current_version_dir(&ctx.state).is_none(),
+        "a refused install must not flip `current`"
+    );
+
+    // The operator can say yes on purpose.
+    let (code, out, err) = ctx.run(&["--apply", "--force"], &[], &feed.url("/releases.json"));
+    assert_eq!(code, 0, "stdout={out} stderr={err}");
+    let supervisor = std::fs::read_to_string(ctx.target.join("gpn_node")).unwrap();
+    assert!(supervisor.contains(&format!("gpn-build-v1 version={NEW_VERSION}")));
+    assert_eq!(
+        update::installed_version(&ctx.state).as_deref(),
+        Some(NEW_VERSION)
+    );
+}
+
+/// A downgrade of any file in the install dir is refused, even when the
+/// supervisor is older than the release (the mixed-dir shape again).
+#[test]
+fn apply_refuses_a_downgrade() {
+    let ctx = Ctx::new("apply-downgrade");
+    ctx.seed_old();
+    // One binary in the install dir is already newer than anything published.
+    write_exe(&ctx.target, "gpn_scheduler", Some("10.0.0"));
+
+    let (feed, _bundle) = apply_feed();
+    let (code, out, err) = ctx.run(&["--apply"], &[], &feed.url("/releases.json"));
+    assert_eq!(code, 3, "stdout={out} stderr={err}");
+    assert!(err.contains("downgrade"), "stderr={err}");
+    assert!(err.contains("gpn_scheduler"), "names the file: {err}");
+    assert!(update::current_version_dir(&ctx.state).is_none());
 }

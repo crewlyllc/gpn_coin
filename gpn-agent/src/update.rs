@@ -1174,6 +1174,95 @@ fn same_file_name(a: &str, exe: &Path) -> bool {
 /// so the first match cannot be trusted: every occurrence is parsed and the
 /// first well-formed `M.m.p` wins.
 pub fn read_build_stamp(path: &Path) -> Result<Option<String>, UpdateError> {
+    Ok(read_build_stamp_full(path)?.map(|s| s.version))
+}
+
+/// A parsed `gpn-build-v1` stamp: the version *and* the commit the binary was
+/// built from.
+///
+/// The commit matters because a version number alone cannot tell two builds of
+/// the same tree apart — a host that deploys a locally built `HEAD` (version
+/// `0.3.28`, sha `e188444`) and then lets the signed-release updater install
+/// `0.3.28` (sha `0787c8b`) silently replaces newer code with older code and the
+/// version comparison reports "up to date" the whole time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildStamp {
+    /// `M.m.p`, exactly as embedded.
+    pub version: String,
+    /// The `sha=` field, when the build could name its commit.
+    pub sha: Option<String>,
+}
+
+/// What the install guard decided about replacing the installed tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstallVerdict {
+    Allow,
+    /// Refused, with a message that names both builds and the escape hatch.
+    Refuse(String),
+}
+
+/// Should the signed release be allowed to replace the binaries in the install
+/// dir?
+///
+/// Two things are refused, and both are silent today:
+///
+/// * a **downgrade** — the candidate version is older than what is installed;
+/// * **the same version built from a different commit** — i.e. this host runs a
+///   local build of that version and the release does not contain it. That is
+///   the `#148` failure: `gpn-update.timer` replaced a `HEAD` deploy of 0.3.28
+///   with the signed 0.3.28 cut of an *earlier* commit, and nothing noticed,
+///   because `version == version`.
+///
+/// An **unknown** sha on either side is never treated as a mismatch (the
+/// three-state rule: unknown is not evidence). No install at all, or a
+/// candidate with no stamp, is allowed — the caller verifies stamps separately.
+/// `force` is the operator's escape hatch for a deliberate re-install.
+pub fn install_guard(
+    installed: Option<&BuildStamp>,
+    candidate: Option<&BuildStamp>,
+    force: bool,
+) -> InstallVerdict {
+    if force {
+        return InstallVerdict::Allow;
+    }
+    let (Some(installed), Some(candidate)) = (installed, candidate) else {
+        return InstallVerdict::Allow;
+    };
+    match version_cmp(&candidate.version, &installed.version) {
+        Some(Ordering::Less) => {
+            return InstallVerdict::Refuse(format!(
+                "refusing to downgrade {} -> {}: the install dir already runs a newer build{}. \
+                 Re-run with --force if this is deliberate.",
+                installed.version,
+                candidate.version,
+                described_sha(&installed.sha)
+            ))
+        }
+        Some(Ordering::Equal) => {}
+        // Unparseable versions are not evidence of anything.
+        _ => return InstallVerdict::Allow,
+    }
+    match (&installed.sha, &candidate.sha) {
+        (Some(a), Some(b)) if !a.eq_ignore_ascii_case(b) => InstallVerdict::Refuse(format!(
+            "refusing to replace {} with a different build of the same version: the install \
+             dir runs sha {}, the release was built from sha {}. Installing it would swap \
+             newer code for older code and no version comparison could see it. \
+             Re-run with --force if this is deliberate.",
+            installed.version, a, b
+        )),
+        _ => InstallVerdict::Allow,
+    }
+}
+
+fn described_sha(sha: &Option<String>) -> String {
+    match sha {
+        Some(s) => format!(" (sha {s})"),
+        None => String::new(),
+    }
+}
+
+/// Read the full stamp (version + commit) out of a binary.
+pub fn read_build_stamp_full(path: &Path) -> Result<Option<BuildStamp>, UpdateError> {
     use std::io::Read;
     let mut f = std::fs::File::open(path)?;
     let needle = BUILD_STAMP_PREFIX.as_bytes();
@@ -1190,7 +1279,10 @@ pub fn read_build_stamp(path: &Path) -> Result<Option<String>, UpdateError> {
         while let Some(idx) = find_subslice(&window[start..], needle) {
             let at = start + idx + needle.len();
             if let Some(v) = parse_stamp_version(&window[at..]) {
-                return Ok(Some(v));
+                // The remaining fields sit in the same stamp string, right
+                // after the version token.
+                let sha = parse_stamp_sha(&window[at..]);
+                return Ok(Some(BuildStamp { version: v, sha }));
             }
             start = start + idx + 1;
         }
@@ -1235,6 +1327,33 @@ fn parse_stamp_version(tail: &[u8]) -> Option<String> {
         return None;
     }
     Some(token.trim().to_string())
+}
+
+/// Parse the `sha=` field that follows the version token in the same stamp.
+///
+/// `build.rs` writes `sha=unknown` when it cannot see git history, so that value
+/// is rejected like a missing field — "unknown commit" must not become a
+/// mismatch that blocks a legitimate install.
+fn parse_stamp_sha(tail: &[u8]) -> Option<String> {
+    // Generous window: `version=X sha=Y spec=Z ` is far shorter than this.
+    let window = &tail[..tail.len().min(96)];
+    for tok in window.split(|b| b.is_ascii_whitespace() || *b == 0) {
+        let Ok(tok) = std::str::from_utf8(tok) else {
+            continue;
+        };
+        let Some(sha) = tok.strip_prefix("sha=") else {
+            continue;
+        };
+        if sha.eq_ignore_ascii_case("unknown") || !looks_like_sha(sha) {
+            return None;
+        }
+        return Some(sha.to_string());
+    }
+    None
+}
+
+fn looks_like_sha(s: &str) -> bool {
+    (7..=40).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// Prove that the tree in `dir` really is version `version` before it can ever
@@ -3028,6 +3147,121 @@ mod tests {
             Err(UpdateError::BundleShape(_))
         ));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The stamp carries the commit, not just the version — that is what makes
+    /// the `#148` guard possible.
+    #[test]
+    fn a_stamp_names_the_commit_it_was_built_from() {
+        let dir = td("stamp-sha");
+        let p = dir.join("gpn_node");
+        std::fs::write(&p, stamped_binary("0.3.28")).unwrap();
+        let stamp = read_build_stamp_full(&p).unwrap().expect("a stamp");
+        assert_eq!(stamp.version, "0.3.28");
+        assert_eq!(stamp.sha.as_deref(), Some("deadbeef"));
+        // The version-only reader still answers exactly what it did before.
+        assert_eq!(read_build_stamp(&p).unwrap().as_deref(), Some("0.3.28"));
+
+        // `sha=unknown` is a build that cannot name its commit: absent, not a
+        // value that could mismatch.
+        std::fs::write(&p, b"gpn-build-v1 version=0.3.28 sha=unknown spec=51\0").unwrap();
+        let stamp = read_build_stamp_full(&p).unwrap().expect("a stamp");
+        assert_eq!(stamp.version, "0.3.28");
+        assert_eq!(stamp.sha, None);
+
+        // No stamp at all.
+        std::fs::write(&p, b"plain binary").unwrap();
+        assert!(read_build_stamp_full(&p).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn stamp(version: &str, sha: Option<&str>) -> BuildStamp {
+        BuildStamp {
+            version: version.into(),
+            sha: sha.map(|s| s.to_string()),
+        }
+    }
+
+    /// The `#148` decision matrix: a version number alone cannot see a locally
+    /// deployed `HEAD`, and that is exactly how 0.3.28 replaced `e188444`.
+    #[test]
+    fn a_release_may_not_replace_a_different_build_of_the_same_version() {
+        let installed = stamp("0.3.28", Some("e188444"));
+        let release = stamp("0.3.28", Some("0787c8b"));
+
+        // The reported failure: same version, different commit.
+        match install_guard(Some(&installed), Some(&release), false) {
+            InstallVerdict::Refuse(msg) => {
+                assert!(msg.contains("e188444"), "names the installed build: {msg}");
+                assert!(msg.contains("0787c8b"), "names the release build: {msg}");
+                assert!(msg.contains("--force"), "names the escape hatch: {msg}");
+            }
+            other => panic!("same version + different sha must be refused, got {other:?}"),
+        }
+
+        // A real upgrade is allowed, and so is the identical artifact.
+        assert_eq!(
+            install_guard(
+                Some(&installed),
+                Some(&stamp("0.3.29", Some("abc1234"))),
+                false
+            ),
+            InstallVerdict::Allow
+        );
+        assert_eq!(
+            install_guard(
+                Some(&installed),
+                Some(&stamp("0.3.28", Some("e188444"))),
+                false
+            ),
+            InstallVerdict::Allow
+        );
+        // Case-insensitive: the same commit written differently is the same build.
+        assert_eq!(
+            install_guard(
+                Some(&installed),
+                Some(&stamp("0.3.28", Some("E188444"))),
+                false
+            ),
+            InstallVerdict::Allow
+        );
+
+        // A downgrade is refused even when the version is unambiguously older.
+        match install_guard(Some(&stamp("0.3.30", None)), Some(&release), false) {
+            InstallVerdict::Refuse(msg) => assert!(msg.contains("downgrade"), "{msg}"),
+            other => panic!("a downgrade must be refused, got {other:?}"),
+        }
+
+        // Unknown is never treated as a mismatch (the three-state rule): a build
+        // that cannot name its commit must not block its own or anyone's install.
+        assert_eq!(
+            install_guard(Some(&stamp("0.3.28", None)), Some(&release), false),
+            InstallVerdict::Allow
+        );
+        assert_eq!(
+            install_guard(Some(&installed), Some(&stamp("0.3.28", None)), false),
+            InstallVerdict::Allow
+        );
+        // Nothing installed yet, or no candidate stamp: nothing to compare.
+        assert_eq!(
+            install_guard(None, Some(&release), false),
+            InstallVerdict::Allow
+        );
+        assert_eq!(
+            install_guard(Some(&installed), None, false),
+            InstallVerdict::Allow
+        );
+        // Unparseable versions are not evidence either.
+        assert_eq!(
+            install_guard(Some(&stamp("nightly", Some("a"))), Some(&release), false),
+            InstallVerdict::Allow
+        );
+
+        // The operator's escape hatch always wins.
+        assert_eq!(
+            install_guard(Some(&installed), Some(&release), true),
+            InstallVerdict::Allow
+        );
     }
 
     /// Manual validation against a **real** release tree:

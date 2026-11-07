@@ -105,6 +105,9 @@ struct Options {
     state_dir: PathBuf,
     target_dir: PathBuf,
     manifest_url: String,
+    /// `--force`: install even when the guard says the installed tree is a
+    /// different (or newer) build of the same version.
+    force: bool,
 }
 
 impl Options {
@@ -115,6 +118,7 @@ impl Options {
         let mut state_dir = None;
         let mut target_dir = None;
         let mut manifest_url = None;
+        let mut force = false;
 
         let mut it = args.peekable();
         while let Some(a) = it.next() {
@@ -143,6 +147,7 @@ impl Options {
                         it.next().ok_or("--target-dir needs a directory")?,
                     ))
                 }
+                "--force" => force = true,
                 "--url" => manifest_url = Some(it.next().ok_or("--url needs a URL")?),
                 "-h" | "--help" => {
                     print_help();
@@ -164,6 +169,7 @@ impl Options {
             state_dir: state_dir.unwrap_or_else(default_state_dir),
             target_dir: target_dir.unwrap_or_else(default_target_dir),
             manifest_url: manifest_url.unwrap_or_else(default_manifest_url),
+            force,
         }))
     }
 }
@@ -174,13 +180,16 @@ fn print_help() {
 gpn_update {COMPILED_VERSION} — verify and install signed GPN releases
 
 USAGE:
-  gpn_update [--check|--apply] [--json] [--quiet]
+  gpn_update [--check|--apply] [--json] [--quiet] [--force]
              [--state-dir DIR] [--target-dir DIR] [--url URL]
 
   --check        fetch + verify the manifest, print current vs latest.
                  Downloads nothing. Exit 3 when a newer release exists.
   --apply        download, verify, extract, flip `current`, copy the binaries
                  into the target dir, prune old versions.
+  --force        install even when the install dir already runs a different
+                 build of the same version, or a newer one (refused by default:
+                 a version comparison cannot see a locally deployed HEAD).
   --json         one JSON object on stdout (machine-readable).
   --quiet        no stdout noise (the systemd timer uses this).
   --state-dir    where versions/ + current live (default {})
@@ -506,6 +515,81 @@ fn short(hex: &str) -> &str {
 // --apply
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Why an install did not happen.
+///
+/// `Refused` is a *policy* answer (the guard kept a locally deployed build in
+/// place) and exits `3`, the same "a release exists but was not applied" code
+/// the `GPN_AUTO_UPDATE=0` path uses — a timer fire that correctly declines is
+/// not a failure. `Failed` is a real error (exit `1`).
+enum InstallFailure {
+    Refused(String),
+    Failed(String),
+}
+
+impl InstallFailure {
+    fn message(&self) -> &str {
+        match self {
+            InstallFailure::Refused(m) | InstallFailure::Failed(m) => m,
+        }
+    }
+
+    fn exit_code(&self) -> u8 {
+        match self {
+            InstallFailure::Refused(_) => EXIT_UPDATE_AVAILABLE,
+            InstallFailure::Failed(_) => EXIT_ERROR,
+        }
+    }
+}
+
+fn guard_failed(msg: String) -> InstallFailure {
+    InstallFailure::Failed(msg)
+}
+
+/// Every stamped binary in the install dir, with its name.
+///
+/// All of them, not just the supervisor: the `#148` incident was a **mixed**
+/// install dir — `gpn_node` was the old release (so the version comparison saw
+/// "0.3.27 → 0.3.28, go ahead") while `gpn_scheduler` was a locally deployed
+/// `HEAD` build of 0.3.28 that the release did not contain. Looking only at the
+/// supervisor cannot see that.
+fn installed_stamps(target: &Path) -> Vec<(String, update::BuildStamp)> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(target) else {
+        return out;
+    };
+    let mut names: Vec<String> = rd
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_file())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| is_installable_binary(n))
+        .collect();
+    names.sort();
+    for name in names {
+        if let Ok(Some(stamp)) = update::read_build_stamp_full(&target.join(&name)) {
+            out.push((name, stamp));
+        }
+    }
+    out
+}
+
+/// Refuse to replace a build the release does not contain.
+///
+/// Runs **after** the downloaded tree is verified and **before** `current` is
+/// flipped or any file in the install dir is touched, so a refusal leaves the
+/// host exactly as it was.
+fn guard_install(o: &Options, staged: &Path) -> Result<(), InstallFailure> {
+    let candidate = update::read_build_stamp_full(staged)
+        .map_err(|e| InstallFailure::Failed(format!("{}: {e}", staged.display())))?;
+    for (name, installed) in installed_stamps(&o.target_dir) {
+        if let update::InstallVerdict::Refuse(msg) =
+            update::install_guard(Some(&installed), candidate.as_ref(), o.force)
+        {
+            return Err(InstallFailure::Refused(format!("{name}: {msg}")));
+        }
+    }
+    Ok(())
+}
+
 fn run_apply(o: &Options, report: &mut Report) -> u8 {
     let m = match fetch_verified_manifest(&o.manifest_url) {
         Ok(m) => m,
@@ -575,10 +659,11 @@ fn run_apply(o: &Options, report: &mut Report) -> u8 {
 
     match install(o, report, &m, asset, bundle) {
         Ok(()) => {}
-        Err(msg) => {
+        Err(fail) => {
+            let msg = fail.message().to_string();
             report.error = Some(msg.clone());
             emit_error(o, report, &msg);
-            return EXIT_ERROR;
+            return fail.exit_code();
         }
     }
 
@@ -641,9 +726,10 @@ fn install(
     m: &update::ReleaseManifest,
     asset: &update::ReleaseAsset,
     bundle: bool,
-) -> Result<(), String> {
+) -> Result<(), InstallFailure> {
     let state = &o.state_dir;
-    std::fs::create_dir_all(state).map_err(|e| format!("{}: {e}", state.display()))?;
+    std::fs::create_dir_all(state)
+        .map_err(|e| guard_failed(format!("{}: {e}", state.display())))?;
     report.versions_dir = Some(update::versions_root(state).display().to_string());
 
     if !bundle {
@@ -655,8 +741,9 @@ fn install(
     if already {
         // A previous run downloaded and staged this exact version but died in
         // the copy step. Do not pull 300 MB again: re-verify what is on disk.
-        update::verify_bundle_stamps(&vdir, &m.version).map_err(|e| e.to_string())?;
-        update::verify_bundle_files(&vdir, &asset.files).map_err(|e| e.to_string())?;
+        update::verify_bundle_stamps(&vdir, &m.version).map_err(|e| guard_failed(e.to_string()))?;
+        update::verify_bundle_files(&vdir, &asset.files)
+            .map_err(|e| guard_failed(e.to_string()))?;
         if !o.quiet && !o.json {
             println!(
                 "gpn_update: {} is already staged at {} — reusing it",
@@ -679,8 +766,12 @@ fn install(
             update::stage_bundle_file(state, &m.version, asset, &tmp).map_err(|e| e.to_string())
         });
         let _ = std::fs::remove_file(&tmp);
-        staged?;
+        staged.map_err(InstallFailure::Failed)?;
     }
+
+    // The tree is verified; now ask whether it may replace what is installed.
+    // A "no" here leaves `current` and every file in the install dir untouched.
+    guard_install(o, &update::node_bin(&vdir))?;
 
     // Flip `current`. The pending marker is written by stage_bundle_file; when
     // we reused an existing tree there is no marker, so activate it directly.
@@ -697,16 +788,20 @@ fn install(
         match update::apply_pending(state, &std::env::current_exe().unwrap_or_default()) {
             Ok(Ok(Some(_))) | Ok(Ok(None)) => {}
             Ok(Err(deferred)) => {
-                return Err(format!(
+                return Err(InstallFailure::Failed(format!(
                     "could not flip `current` to {}: {}",
                     m.version, deferred.reason
-                ))
+                )))
             }
-            Err(e) => return Err(format!("could not flip `current`: {e}")),
+            Err(e) => {
+                return Err(InstallFailure::Failed(format!(
+                    "could not flip `current`: {e}"
+                )))
+            }
         }
     } else if update::current_version_dir(state).as_deref() != Some(vdir.as_path()) {
         update::activate_version(state, &m.version)
-            .map_err(|e| format!("could not flip `current`: {e}"))?;
+            .map_err(|e| InstallFailure::Failed(format!("could not flip `current`: {e}")))?;
     }
     report.previous = update::previous_pointer_label(state);
     Ok(())
@@ -764,11 +859,11 @@ fn install_single(
     report: &mut Report,
     m: &update::ReleaseManifest,
     asset: &update::ReleaseAsset,
-) -> Result<(), String> {
+) -> Result<(), InstallFailure> {
     let dir = o.state_dir.join("single").join(&m.version);
     let dest = dir.join(update::node_bin_name());
     if dest.is_file() {
-        update::verify_file(&dest, asset).map_err(|e| e.to_string())?;
+        update::verify_file(&dest, asset).map_err(|e| guard_failed(e.to_string()))?;
     } else {
         if !o.quiet && !o.json {
             println!(
@@ -777,20 +872,24 @@ fn install_single(
                 fmt_mb(asset.size)
             );
         }
-        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| guard_failed(format!("{}: {e}", dir.display())))?;
         // Buffered, but a single-layout asset is one binary (not a bundle).
-        let body = fetch(&asset.url).map_err(|e| e.message().to_string())?;
-        update::verify_bytes(&body, asset).map_err(|e| e.to_string())?;
+        let body =
+            fetch(&asset.url).map_err(|e| InstallFailure::Failed(e.message().to_string()))?;
+        update::verify_bytes(&body, asset).map_err(|e| guard_failed(e.to_string()))?;
         let tmp = dir.join(format!(
             ".{}.tmp-{}",
             update::node_bin_name(),
             std::process::id()
         ));
-        std::fs::write(&tmp, &body).map_err(|e| format!("{}: {e}", tmp.display()))?;
-        set_executable(&tmp)?;
-        std::fs::rename(&tmp, &dest).map_err(|e| format!("{}: {e}", dest.display()))?;
-        update::verify_file(&dest, asset).map_err(|e| e.to_string())?;
+        std::fs::write(&tmp, &body).map_err(|e| guard_failed(format!("{}: {e}", tmp.display())))?;
+        set_executable(&tmp).map_err(InstallFailure::Failed)?;
+        std::fs::rename(&tmp, &dest)
+            .map_err(|e| guard_failed(format!("{}: {e}", dest.display())))?;
+        update::verify_file(&dest, asset).map_err(|e| guard_failed(e.to_string()))?;
     }
+    guard_install(o, &dest)?;
     report.previous = None;
     Ok(())
 }

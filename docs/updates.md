@@ -102,6 +102,35 @@ repo raises a cutoff automatically.
 
 `Cargo.lock` is left alone — cargo rewrites it on the next build.
 
+### A release never replaces a newer local build
+
+`gpn_update --apply` compares the commit in the **build stamp**, not just the
+version. The stamp is now linked into every `gpn-agent` binary
+(`firstrun::GPN_BUILD_STAMP`, `#[used]`), not only the ones that print a
+version, so this works for `gpn_scheduler` and the providers too.
+
+Two installs are refused, and the refusal leaves `current` and every file in the
+install dir untouched (exit `3` — "a release exists but was not applied", the
+same code `GPN_AUTO_UPDATE=0` uses, so an hourly timer fire that correctly
+declines is not a failed unit):
+
+| Installed | Release | Verdict |
+|---|---|---|
+| `0.3.28` `sha=e188444` | `0.3.28` `sha=77e3292` | **refused** — same version, different commit |
+| `10.0.0` | `9.9.9` | **refused** — downgrade |
+| `0.3.27` `sha=c59114f` | `0.3.28` `sha=77e3292` | installed |
+| `sha=unknown` (either side) | anything | installed — unknown is not evidence |
+
+Why it exists: a host that deploys a locally built `HEAD` (this testnet does,
+via `scripts/deploy-bin.sh`) is running version `0.3.28` *of a later commit*
+than the signed `0.3.28` cut. A version comparison sees "0.3.28 → 0.3.28, up to
+date" — or, worse, "0.3.27 → 0.3.28, go ahead" when only the **supervisor** is
+older than the release, which is exactly how a timer fire silently replaced a
+newer `gpn_scheduler` (2026-11-07, `#148`).
+
+`--force` is the deliberate override (re-installing the shipped build over a
+local one, or rolling back by hand). Do not put it in the timer.
+
 ## 2. The release manifest
 
 `https://gpncoin.ai/releases.json`

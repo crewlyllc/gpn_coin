@@ -97,6 +97,25 @@ pub fn build_id() -> &'static str {
     option_env!("GPN_BUILD_ID").unwrap_or("gpn-build-v1 version=unknown sha=unknown")
 }
 
+/// The same stamp, **always linked into the binary**.
+///
+/// `build_id()` only embeds the literal in programs that call it, so binaries
+/// that never print a version (`gpn_scheduler`, the providers) shipped with no
+/// stamp at all — which is why a locally deployed `gpn_scheduler` was
+/// indistinguishable from a release binary and `gpn-update.timer` could replace
+/// it silently (#148). Every `gpn-agent` binary now carries the stamp whether it
+/// wants to or not, so "which commit is this file?" is answerable for all of
+/// them, not just the supervisor.
+///
+/// `#[used]` keeps the symbol in the object file and `#[no_mangle]` keeps it
+/// out of the linker's dead-code sweep.
+#[used]
+#[no_mangle]
+pub static GPN_BUILD_STAMP: &str = match option_env!("GPN_BUILD_ID") {
+    Some(s) => s,
+    None => "gpn-build-v1 version=unknown sha=unknown",
+};
+
 /// The git commit this binary was built from, injected by `build.rs`.
 ///
 /// `unknown` when the crate is built outside a git work tree (or git is not
