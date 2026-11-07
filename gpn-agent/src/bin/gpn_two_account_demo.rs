@@ -132,11 +132,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Provider (Alice) registers (idempotent).
     println!("\n[2] {} registers as provider", short(&provider_uri));
-    if !prov.is_provider_registered(&prov_addr).await {
-        prov.register_provider(8_000, 75, 1, 0, min_gflops).await?;
-        println!("    ✅ provider registered");
-    } else {
-        println!("    ✅ already registered (skipped)");
+    // #144: an unreadable registration record is unknown — do not treat it as
+    // "not registered" and submit a duplicate registration tx.
+    match prov.is_provider_registered(&prov_addr).await {
+        Ok(true) => println!("    ✅ already registered (skipped)"),
+        Ok(false) => {
+            prov.register_provider(8_000, 75, 1, 0, min_gflops).await?;
+            println!("    ✅ provider registered");
+        }
+        Err(e) => println!("    ⚠️ registration state unreadable ({e}) — not registering blind"),
     }
 
     // 3. Provider accepts → starts → submits → completes.

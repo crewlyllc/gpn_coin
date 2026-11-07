@@ -247,7 +247,14 @@ fn route(
         }
         ("GET", ["provider", addr]) => {
             let rt = rt_handle;
-            let reg = rt.block_on(async { client.is_provider_registered(addr).await });
+            // #144: an unreadable registration record is unknown, not "false".
+            // The payload keeps its boolean shape, but the failure is stated.
+            let reg = rt
+                .block_on(async { client.is_provider_registered(addr).await })
+                .unwrap_or_else(|e| {
+                    eprintln!("[api] registration read failed for {addr}: {e}");
+                    false
+                });
             let state = rt.block_on(client.get_provider_state_result(addr));
             let att = rt.block_on(client.get_attestation_record_result(addr));
             let challenge = rt

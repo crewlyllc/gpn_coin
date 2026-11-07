@@ -64,11 +64,21 @@ pub const MAX_SKEW_SECS: u64 = 90;
 pub const RATE_LIMIT_SECS: u64 = 3;
 
 /// How long a positive on-chain account lookup is cached.
-pub const ACCOUNT_CACHE_SECS: u64 = 300;
+///
+/// #144: this was 300 s while providers push their heartbeat every ~5 min, so
+/// every push arrived just past expiry, was answered `503 account_lookup_pending`,
+/// and the answer the refresher computed was never seen by a request — a lane
+/// that failed 100 % while every aggregate health check stayed green. A provider
+/// registration is a rare, deliberate event; 15 min is still refreshed well
+/// inside the reject-notice window and keeps a 5-minute pusher on `Hit`.
+pub const ACCOUNT_CACHE_SECS: u64 = 900;
 
 /// Negative lookups expire sooner: a provider that registers immediately after
 /// a rejected push should not have to wait five minutes to be believed.
 pub const ACCOUNT_NEGATIVE_TTL_SECS: u64 = 60;
+
+// Tests cover the TTL boundary arithmetic below; both values are part of the
+// push lane's contract (#144), not an implementation detail.
 
 /// Default push interval (`GPN_HEARTBEAT_PUSH_SECS`).
 pub const DEFAULT_INTERVAL_SECS: u64 = 10;

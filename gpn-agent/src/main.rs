@@ -338,27 +338,44 @@ impl GPUMiningNodeAgent {
         let addr = signer.account_id().to_string();
 
         // 1. Provider must be registered. Register idempotently if not.
-        if !self.chain_client.is_provider_registered(&addr).await {
-            // Advertise the attested compute tier so the marketplace can match us.
-            // Strict read: registering spends a bond and writes an identity
-            // record, so a failed read must NOT become `gpus=1, gflops=0`
-            // (which is what `unwrap_or((1, 0))` did — a registration claiming
-            // compute the chain never measured).
-            match registration_gate(self.chain_client.get_attestation_record_result(&addr).await) {
-                RegistrationGate::Register { gpus, gflops } => {
-                    log::info!("registering as marketplace provider ({}...)", &addr[..10]);
-                    self.chain_client
-                        .register_provider(8_000, 75, gpus, 0, gflops)
-                        .await?;
+        //
+        // #144: a failed read is NOT "unregistered". Registering spends a bond
+        // and writes an identity record, so an unreadable chain must not trigger
+        // a registration attempt (nor be logged as "not registered").
+        match self.chain_client.is_provider_registered(&addr).await {
+            Ok(true) => {}
+            Ok(false) => {
+                // Advertise the attested compute tier so the marketplace can match us.
+                // Strict read: registering spends a bond and writes an identity
+                // record, so a failed read must NOT become `gpus=1, gflops=0`
+                // (which is what `unwrap_or((1, 0))` did — a registration claiming
+                // compute the chain never measured).
+                match registration_gate(
+                    self.chain_client.get_attestation_record_result(&addr).await,
+                ) {
+                    RegistrationGate::Register { gpus, gflops } => {
+                        log::info!("registering as marketplace provider ({}...)", &addr[..10]);
+                        self.chain_client
+                            .register_provider(8_000, 75, gpus, 0, gflops)
+                            .await?;
+                    }
+                    RegistrationGate::SkipUnknown(reason) => {
+                        log::warn!(
+                            "registration skipped: the attestation record for {} could not be read \
+                             ({reason}) — not registering with invented gflops/gpu_count.",
+                            &addr[..addr.len().min(12)]
+                        );
+                        return Ok(0);
+                    }
                 }
-                RegistrationGate::SkipUnknown(reason) => {
-                    log::warn!(
-                        "registration skipped: the attestation record for {} could not be read \
-                         ({reason}) — not registering with invented gflops/gpu_count.",
-                        &addr[..addr.len().min(12)]
-                    );
-                    return Ok(0);
-                }
+            }
+            Err(reason) => {
+                log::warn!(
+                    "registration check skipped: the on-chain registration record for {} could \
+                     not be read ({reason}) — NOT treating that as unregistered.",
+                    &addr[..addr.len().min(12)]
+                );
+                return Ok(0);
             }
         }
 

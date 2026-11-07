@@ -3639,6 +3639,17 @@ fn lock_bounded<'a, T>(m: &'a Mutex<T>, wait: Duration) -> Option<std::sync::Mut
 // read the cache and, on a miss, queue a refresh and answer a retryable 503
 // `{"error":"unknown","reason":"account_lookup_pending"}`. No chain call, and
 // no lock, is ever held on the request path.
+//
+// #144 (2026-11-06): "queue a refresh and answer 503 immediately" made the push
+// lane dead by construction. A provider pushes every 5 min and the positive TTL
+// was 300 s, so EVERY push landed a few seconds past expiry → Miss → 503, and
+// the answer the refresher computed was never seen by a request. Twelve hours
+// of `68/68 pushes failed` while the poll lane stayed green. Two changes:
+//   (a) `resolve_wait` lets a request wait a bounded moment (`IDENTITY_WAIT`)
+//       for the in-flight refresh instead of answering 503 into an empty cache;
+//   (b) the positive TTL is longer than a provider's push interval, so a
+//       healthy 5-minute pusher stays `Hit` between pushes.
+// A read FAILURE is never cached as "unregistered" — it stays unknown.
 #[derive(Clone)]
 pub struct AccountResolver {
     authority: Arc<Mutex<AccountAuthority>>,
@@ -3648,33 +3659,56 @@ pub struct AccountResolver {
     lookups: Arc<std::sync::atomic::AtomicU64>,
 }
 
+/// How long a request may wait for a queued identity lookup before answering
+/// the retryable 503 (#144). Long enough for one bounded storage read, short
+/// enough that a wedged chain cannot tie up a handler thread.
+const IDENTITY_WAIT: Duration = Duration::from_secs(2);
+
 impl AccountResolver {
     /// `lookup` answers "is this account a registered provider?" — production
-    /// passes a bounded `rt.block_on(client.is_provider_registered(..))`.
+    /// passes a bounded `rt.block_on(client.is_provider_registered(..))`, whose
+    /// `Err` is passed through as `None` (unknown) rather than `false` (#144).
     fn new<F>(lookup: F) -> Self
     where
-        F: Fn(&str) -> bool + Send + 'static,
+        F: Fn(&str) -> Option<bool> + Send + 'static,
     {
         let authority = Arc::new(Mutex::new(AccountAuthority::new()));
         let pending = Arc::new(Mutex::new(std::collections::HashSet::new()));
         let lookups = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let errors = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let (tx, rx) = std::sync::mpsc::sync_channel::<String>(256);
         let auth_thread = authority.clone();
         let pend_thread = pending.clone();
         let count = lookups.clone();
+        let errors = errors.clone();
         let _ = std::thread::Builder::new()
             .name("acct-refresh".into())
             .spawn(move || {
                 while let Ok(addr) = rx.recv() {
                     let registered = lookup(&addr);
-                    let key = if registered {
-                        gpn_agent::provider_heartbeat::ss58_to_pubkey(&addr)
-                    } else {
-                        None
-                    };
                     count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if let Ok(mut c) = auth_thread.lock() {
-                        c.store(&addr, now_secs(), key);
+                    if let Some(registered) = registered {
+                        let key = if registered {
+                            gpn_agent::provider_heartbeat::ss58_to_pubkey(&addr)
+                        } else {
+                            None
+                        };
+                        if let Ok(mut c) = auth_thread.lock() {
+                            c.store(&addr, now_secs(), key);
+                        }
+                    } else {
+                        // Unknown stays unknown: nothing is cached, so the next
+                        // request queues a fresh read instead of inheriting a
+                        // "not registered" verdict the chain never gave (#144).
+                        let n = errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        if n == 1 || n % 50 == 0 {
+                            eprintln!(
+                                "[push] identity read failed for {} ({} since start) — treating \
+                                 it as UNKNOWN, not as unregistered",
+                                gpn_agent::provider_heartbeat::abbreviated(&addr),
+                                n
+                            );
+                        }
                     }
                     if let Ok(mut p) = pend_thread.lock() {
                         p.remove(&addr);
@@ -3701,6 +3735,34 @@ impl AccountResolver {
         }
         self.request_refresh(addr);
         CachedKey::Miss
+    }
+
+    /// Cache-first, then wait up to `wait` for the queued refresh (#144).
+    ///
+    /// A request that arrives just after the TTL expires used to be answered
+    /// 503 while the refresher computed an answer nobody read — with a 5-minute
+    /// push interval against a 5-minute TTL that was *every* push. Waiting a
+    /// bounded moment turns that into a served request; if the refresh does not
+    /// land in time the caller still gets the retryable 503.
+    fn resolve_wait(&self, addr: &str, now: u64, wait: Duration) -> CachedKey {
+        let first = self.resolve(addr, now);
+        if !matches!(first, CachedKey::Miss) {
+            return first;
+        }
+        let give_up = Instant::now() + wait;
+        loop {
+            std::thread::sleep(Duration::from_millis(5));
+            let cached = match self.authority.lock() {
+                Ok(c) => c.lookup(addr, now_secs()),
+                Err(p) => p.into_inner().lookup(addr, now_secs()),
+            };
+            if matches!(cached, CachedKey::Hit(_)) {
+                return cached;
+            }
+            if Instant::now() >= give_up {
+                return CachedKey::Miss;
+            }
+        }
     }
 
     /// Queue at most one in-flight lookup per address.
@@ -4011,7 +4073,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let account_auth = AccountResolver::new({
         let rt = rt.clone();
         let client = client.clone();
-        move |addr: &str| rt.block_on(client.is_provider_registered(addr))
+        move |addr: &str| rt.block_on(client.is_provider_registered(addr)).ok()
     });
     // Replay protection for SIGNED pull requests: a per-account ring buffer of
     // already-used nonces. Shared across handler threads, like account_auth.
@@ -4337,7 +4399,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // the background thread and answers a retryable 503 — the
                         // request thread never waits on the chain.
                         let resolved: Option<[u8; 32]> = if creds.has_signature() {
-                            match account_auth.resolve(&account_hdr, now) {
+                            match account_auth.resolve_wait(&account_hdr, now, IDENTITY_WAIT) {
                                 CachedKey::Hit(k) => k,
                                 CachedKey::Miss => {
                                     respond_unknown(req, &hdr, "/assignments");
@@ -4550,7 +4612,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // ~10 s. Previously this was `rt.block_on(...)` inline:
                         // a dropped jsonrpsee oneshot hung the handler forever
                         // and every later push piled up behind it.
-                        match account_auth.resolve(&claimed, now) {
+                        match account_auth.resolve_wait(&claimed, now, IDENTITY_WAIT) {
                             CachedKey::Hit(k) => k,
                             CachedKey::Miss => {
                                 let _ = req.respond(
@@ -9373,6 +9435,8 @@ mod tests {
                 // Never returns — the dropped-oneshot socket of 2026-11-04.
                 std::thread::sleep(Duration::from_secs(60));
             }
+            #[allow(unreachable_code)]
+            None
         }));
         let rt = tokio::runtime::Runtime::new().unwrap();
         let started = Instant::now();
@@ -9408,6 +9472,60 @@ mod tests {
         assert!(!d.expired());
     }
 
+    /// #144: a request that lands on a cold/expired cache entry must be SERVED
+    /// by the refresh it queued, not answered 503 into a cache nobody re-reads.
+    /// This is the exact shape that made the push lane fail 100 %.
+    #[test]
+    fn resolve_wait_serves_a_miss_once_the_refresh_lands() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let resolver = AccountResolver::new(move |_addr: &str| {
+            c.fetch_add(1, Ordering::Relaxed);
+            std::thread::sleep(Duration::from_millis(120));
+            Some(true)
+        });
+        let addr = gpn_agent::provider_heartbeat::pubkey_to_ss58(&[11u8; 32]);
+        let started = Instant::now();
+        let got = resolver.resolve_wait(&addr, now_secs(), IDENTITY_WAIT);
+        assert!(
+            matches!(got, CachedKey::Hit(Some(_))),
+            "the queued refresh must satisfy the waiting request, got {got:?}"
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert!(started.elapsed() < IDENTITY_WAIT + Duration::from_secs(1));
+        // And the answer is cached: the next request costs no lookup.
+        assert!(matches!(
+            resolver.resolve_wait(&addr, now_secs(), IDENTITY_WAIT),
+            CachedKey::Hit(Some(_))
+        ));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    /// An unreadable chain is UNKNOWN, not "unregistered": nothing is cached
+    /// and the caller still gets the retryable 503.
+    #[test]
+    fn a_failed_identity_read_is_unknown_not_unregistered() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c = calls.clone();
+        let resolver = AccountResolver::new(move |_addr: &str| {
+            c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            None
+        });
+        let addr = gpn_agent::provider_heartbeat::pubkey_to_ss58(&[12u8; 32]);
+        assert!(matches!(
+            resolver.resolve(&addr, now_secs()),
+            CachedKey::Miss
+        ));
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(resolver.cached_len(), 0, "unknown must not be cached");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        // A later request queues a fresh read instead of reusing a verdict.
+        let _ = resolver.resolve(&addr, now_secs());
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
     /// A cached answer (positive or negative) is served without ever asking the
     /// chain again, so a fleet of pollers costs zero RPCs inside the TTL.
     #[test]
@@ -9417,7 +9535,7 @@ mod tests {
         let c = calls.clone();
         let resolver = AccountResolver::new(move |_addr: &str| {
             c.fetch_add(1, Ordering::Relaxed);
-            true
+            Some(true)
         });
         let addr = gpn_agent::provider_heartbeat::pubkey_to_ss58(&[9u8; 32]);
         resolver.refresh_now(&addr, Some(true));

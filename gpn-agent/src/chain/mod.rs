@@ -2256,20 +2256,29 @@ impl ChainClient {
     }
 
     /// Read whether the account is a registered provider.
-    pub async fn is_provider_registered(&self, address: &str) -> bool {
+    ///
+    /// Item #144: this used to return `bool`, so a dead socket, a discarded
+    /// block state or an undecodable value were all published as the *fact*
+    /// "not a registered provider". The access point then answered 403 to a
+    /// provider whose on-chain entry existed, and the negative answer was
+    /// cached. A failed read is now an `Err` and callers must treat it as
+    /// unknown — never as "unregistered".
+    pub async fn is_provider_registered(&self, address: &str) -> Result<bool, String> {
         if self.current_client().is_none() {
-            return false;
+            return Err("no chain client".to_string());
         }
-        let Ok(addr32) = address.parse::<subxt::utils::AccountId32>() else {
-            return false;
-        };
+        let addr32 = address
+            .parse::<subxt::utils::AccountId32>()
+            .map_err(|e| format!("{address} is not a valid SS58/AccountId32 address: {e}"))?;
         let key = (addr32.as_ref() as &[u8; 32]).to_vec();
         let addr = subxt::dynamic::storage(
             "ComputeMarketplace",
             "RegisteredProviders",
             vec![Value::from_bytes(key)],
         );
-        self.storage_at_head(&addr).await.is_some()
+        self.storage_at_head_result(&addr)
+            .await
+            .map(|v| v.is_some())
     }
 
     /// Enumerate every provider's **on-chain advertised endpoint** from

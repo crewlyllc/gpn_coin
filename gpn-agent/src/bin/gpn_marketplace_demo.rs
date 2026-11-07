@@ -71,7 +71,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Register as a provider (idempotent: skip entirely if already registered,
     //    so we don't submit a duplicate tx that collides in the pool).
-    let already_registered = client.is_provider_registered(&signer_addr).await;
+    let already_registered = client
+        .is_provider_registered(&signer_addr)
+        .await
+        .unwrap_or(false);
     println!(
         "\n[2] register_provider (vram=8GB, cc=75, gpus=1, min_gflops={}) — already_registered={}",
         min_gflops, already_registered
