@@ -8,6 +8,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.28] - 2026-11-07
+
+Fix a crash loop I introduced in 0.3.26.
+
+### Fixed
+- **`--reserved-peers` is not a flag. The binary takes `--reserved-nodes`.** The
+  supervisor passed the invented name, so every node whose launcher set
+  `GPN_RESERVED_PEERS` started the chain node, had it exit code 2 on the unknown
+  argument, restarted it, and repeated — the dashboard showed "node is down"
+  forever. Box 2 was crash-looping on it (2026-11-07 00:00).
+  Verified against the real CLI: `gpn-node --help` lists `--reserved-nodes`,
+  `--reserved-only`, `--bootnodes`, `--bootnodes-dns`, `--bootnodes-url` — and
+  nothing called `--reserved-peers`.
+
+### Note
+- Nodes that already installed 0.3.26/0.3.27 can be unblocked immediately by
+  clearing the variable (`set "GPN_RESERVED_PEERS="` in start-node.cmd) without
+  waiting for this release.
+
 ## [0.3.27] - 2026-11-06
 
 LAN-aware seed dialling.

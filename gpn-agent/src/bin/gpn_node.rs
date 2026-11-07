@@ -115,7 +115,7 @@ struct FileConfig {
     /// leaks into a shared `run-fleet.sh`.
     node_key_file: Option<String>,
     bootnodes: Option<Vec<String>>,
-    /// `--reserved-peers`: peers that always keep a connection slot and are
+    /// `--reserved-nodes`: peers that always keep a connection slot and are
     /// re-dialled aggressively. Bootnodes alone are dialled at start and then
     /// retried on a slow backoff; on 2026-11-06 two boxes stayed disconnected
     /// for 40 minutes after this host restarted, because they had no reason to
@@ -3166,7 +3166,7 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
             argv.push(bn.clone());
         }
         for rp in &cfg.reserved_peers {
-            argv.push("--reserved-peers".into());
+            argv.push("--reserved-nodes".into());
             argv.push(rp.clone());
         }
         // Explicit URLs replace the node's built-in default; leaving the list
