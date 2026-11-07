@@ -152,6 +152,49 @@ $Boots  = if ($env:GPN_BOOTNODES) { $env:GPN_BOOTNODES } else {
   '/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo,/ip4/142.129.54.88/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo,/ip4/23.241.109.255/tcp/30333/p2p/12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz'
 }
 
+# -- Same-LAN seed -----------------------------------------------------------
+# A node that shares a subnet with the seed should dial it directly. Going out
+# to the public address and back through the router ("hairpin NAT") completes
+# the TCP handshake but libp2p can reject the connection as a self-dial, which
+# is exactly what happened on 2026-11-06: TcpTestSucceeded = True, peer never
+# appeared, and two boxes forked away mining alone.
+#
+# The LAN address is computed HERE, per machine, and only written into THIS
+# machine's launcher -- it must never be published in the bundle: 192.168.1.x
+# on somebody else's home network is a printer, not a seed.
+function Add-SameSubnetBootnode {
+    param([string]$Boots)
+    try {
+        $locals = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
+                    Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' })
+    } catch { return $Boots }
+    if ($locals.Count -eq 0) { return $Boots }
+
+    $entries = $Boots -split ',' | Where-Object { $_.Trim() }
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($e in $entries) {
+        $out.Add($e.Trim())
+        # Only IPv4 literals can be compared to a local subnet. A DNS name may
+        # well resolve to a LAN address, but guessing that here would be worse
+        # than leaving it alone.
+        $m = [regex]::Match($e, '^/ip4/(\d+\.\d+\.\d+\.\d+)/tcp/(\d+)/p2p/(\S+)$')
+        if (-not $m.Success) { continue }
+        $seedIp, $port, $peer = $m.Groups[1].Value, $m.Groups[2].Value, $m.Groups[3].Value
+        $seedPrefix = ($seedIp -split '\.')[0..2] -join '.'
+        foreach ($l in $locals) {
+            $localPrefix = ($l.IPAddress -split '\.')[0..2] -join '.'
+            if ($localPrefix -ne $seedPrefix) { continue }
+            $candidate = "/ip4/$($l.IPAddress)/tcp/$port/p2p/$peer"
+            if (-not ($out -contains $candidate)) {
+                $out.Insert(0, $candidate)   # first = preferred
+                Warn "seed $seedIp shares this subnet -- dialling it at $($l.IPAddress) instead of through the router"
+            }
+            break
+        }
+    }
+    return ($out -join ',')
+}
+
 function Say  { param([string]$m) Write-Host "==> $m" -ForegroundColor Green }
 function Warn { param([string]$m) Write-Host " !  $m" -ForegroundColor Yellow }
 
@@ -403,7 +446,7 @@ function Write-Launcher {
   $text = $text.Replace('__INSTALL_DIR__', $InstallDir)
   $text = $text.Replace('__KEYFILE__', (Join-Path $env:USERPROFILE '.gpn\node-key'))
   $text = $text.Replace('__AP_URL__', $ApUrl)
-  $text = $text.Replace('__BOOTNODES__', $Boots)
+  $text = $text.Replace('__BOOTNODES__', (Add-SameSubnetBootnode $Boots))
   $text = $text.Replace('__LOG__', $NodeLog)
   $text = $text.Replace('__REPORT__', $ReportScript)
   Invoke-Step "write $NodeCmd" {

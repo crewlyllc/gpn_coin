@@ -492,6 +492,58 @@ fn resolve_effective_base(explicit: Option<PathBuf>) -> PathBuf {
 /// Exit 0 = a valid key is on disk (created if it was absent).
 /// Exit 3 = the path exists but is not a usable key (wrong size, unreadable,
 ///          or held open by another process). The message names the OS error.
+
+/// For every `/ip4/<addr>/tcp/<port>/p2p/<id>` bootnode that lives on the SAME
+/// subnet as this machine, return the equivalent multiaddr using our own local
+/// address, so traffic stays on the LAN instead of looping through the router.
+///
+/// "Same subnet" is measured, not assumed: a UDP socket is `connect`ed to the
+/// seed address (no packet is sent for UDP) and the kernel reports which local
+/// address it would use. If that address shares the first three octets with the
+/// seed, the two hosts are on one /24 and the LAN multiaddr is the right one.
+fn same_subnet_bootnodes(bootnodes: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for bn in bootnodes {
+        let parts: Vec<&str> = bn.trim().split('/').collect();
+        // ["", "ip4", "1.2.3.4", "tcp", "30333", "p2p", "<id>"]
+        if parts.len() < 7 || parts[1] != "ip4" || parts[3] != "tcp" || parts[5] != "p2p" {
+            continue;
+        }
+        let (seed, port, peer) = (parts[2], parts[4], parts[6]);
+        let Ok(seed_ip) = seed.parse::<std::net::Ipv4Addr>() else {
+            continue;
+        };
+        if seed_ip.is_loopback() || seed_ip.is_link_local() {
+            continue;
+        }
+        let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") else {
+            continue;
+        };
+        if sock
+            .connect((seed_ip, port.parse::<u16>().unwrap_or(30333)))
+            .is_err()
+        {
+            continue;
+        }
+        let Ok(local) = sock.local_addr() else {
+            continue;
+        };
+        let std::net::IpAddr::V4(local_ip) = local.ip() else {
+            continue;
+        };
+        let s = seed_ip.octets();
+        let l = local_ip.octets();
+        if l[0] == s[0] && l[1] == s[1] && l[2] == s[2] {
+            let lan = format!("/ip4/{local_ip}/tcp/{port}/p2p/{peer}");
+            asciiprintln!(
+                "  seed {seed} is on this subnet -- dialling it at {local_ip} (LAN, not the router)"
+            );
+            out.push(lan);
+        }
+    }
+    out
+}
+
 fn run_ensure_node_key(argv: &[String]) -> i32 {
     let path = argv
         .iter()
@@ -3097,6 +3149,18 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
         // uses, so the guard can never inspect a different dir than the node.
         argv.push("--base-path".into());
         argv.push(cfg.base_path.to_string_lossy().into_owned());
+        // Same-subnet seeds get a LAN address, computed HERE.
+        //
+        // 2026-11-06: two boxes on this LAN dialled the seed's PUBLIC address,
+        // the router looped it back (hairpin NAT), TCP completed, and libp2p
+        // discarded the connection as a self-dial -- so the peer never appeared
+        // and both boxes forked away mining alone. Doing this at runtime (not in
+        // the installer) means auto-updated machines get it too: the launcher's
+        // bootnode list is never rewritten by an update.
+        for bn in same_subnet_bootnodes(&cfg.bootnodes) {
+            argv.push("--bootnodes".into());
+            argv.push(bn);
+        }
         for bn in &cfg.bootnodes {
             argv.push("--bootnodes".into());
             argv.push(bn.clone());

@@ -8,6 +8,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.27] - 2026-11-06
+
+LAN-aware seed dialling.
+
+### Added
+- **Same-subnet seed addresses, computed per machine.** A node that shares a
+  subnet with the seed now dials it on the LAN instead of through the router.
+  Two mechanisms, deliberately independent:
+  * `install.ps1` prepends `/ip4/<my-lan-ip>/tcp/<port>/p2p/<id>` to that
+    machine's launcher when a seed literal is on the same /24 — written only
+    into that machine's `start-node.cmd`, never into the bundle (a private
+    address is meaningless, and possibly harmful, on somebody else's network).
+  * the supervisor does the same at runtime for seeds configured with a private
+    address (UDP-connect probe, no packet sent), so auto-updated machines get it
+    without the launcher being rewritten.
+
+### Known limitation (stated, not hidden)
+- This does **not** solve a seed reached through a *public* address from inside
+  the same LAN (hairpin NAT): the peer cannot derive the seed's private address
+  from its public one, and libp2p may reject the looped connection as a
+  self-dial. That case needs the seed's LAN address configured explicitly on the
+  LAN nodes, or mDNS where the router permits multicast.
+
 ## [0.3.26] - 2026-11-06
 
 Block rewards finally reach the machine that mined them.
