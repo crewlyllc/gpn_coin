@@ -858,6 +858,17 @@ struct Provider {
     /// reachable and reports `healthy: true`, yet no lease can ever reach it —
     /// routing to it black-holes the job until the janitor cancels it (#6237).
     pulled_seen: Option<Instant>,
+    /// The chain says this provider's own account has **no free balance**, so it
+    /// cannot pay the fee for its `accept_job` transaction: every lease handed
+    /// to it is a job nobody can claim, which then sits `Pending` until the
+    /// janitor cancels it (live 2026-11-07: box1's `5Hgbpi…` advertised 5
+    /// capabilities, 16303 MB VRAM and `healthy: true` at balance 0.0000 GPN /
+    /// nonce 0, and job #6551 was leased to it with no way to land).
+    ///
+    /// A *fact from the chain*, not a guess: `false` also covers "unknown"
+    /// (an unreadable account), because a failed read must never exclude a
+    /// provider — see `funding_state`.
+    unfunded: bool,
 }
 
 fn opt(args: &[String], flag: &str) -> Option<String> {
@@ -1073,6 +1084,7 @@ fn provider_from_caps(addr: &str, v: &Value, status_url: String, latency_ms: u64
         last_seen: Some(Instant::now()),
         source: "poll".to_string(),
         pulled_seen: None,
+        unfunded: false,
     }
 }
 
@@ -1305,6 +1317,7 @@ fn apply_push_heartbeats(
                     last_seen: Some(now),
                     source: "push".to_string(),
                     pulled_seen: None,
+                    unfunded: false,
                 });
             }
         }
@@ -1506,6 +1519,7 @@ fn refresh(
                     last_seen: None,
                     source: String::new(),
                     pulled_seen: None,
+                    unfunded: false,
                 },
             };
             out.push(p);
@@ -1549,6 +1563,12 @@ fn refresh(
         // 4c. Referral attribution (data collection for the mainnet airdrop).
         //     First sighting wins, per provider address — see `apply_referrals`.
         apply_referrals(&mut out);
+
+        // 4d. Can each provider pay its own `accept_job` fee? A box with an
+        //     empty account receives leases it can never claim (2026-11-07,
+        //     #6551), so the chain's answer is a routing input. Unknown stays
+        //     routable.
+        apply_funding(&mut out, &rt, &client);
 
         *reg.lock().unwrap() = out;
         std::thread::sleep(Duration::from_secs(5));
@@ -1852,6 +1872,10 @@ fn route_candidates(
     let base_ok = |p: &Provider| {
         p.last_seen.is_some()
             && deliverable(p)
+            // A provider whose account cannot pay an `accept_job` fee is not a
+            // candidate at all: handing it a lease creates a job nobody can
+            // claim (2026-11-07 #6551). `false` also covers "unknown".
+            && !p.unfunded
             && has_cap(p)
             && hw_ok(p)
             && gpu_ok(p)
@@ -2468,6 +2492,98 @@ fn warn_once(addr: &str) -> bool {
         .lock()
         .unwrap()
         .insert(addr.to_string())
+}
+
+/// How long a `System::Account` funding answer is trusted.
+///
+/// The fact we act on — "this account has no free balance" — changes only when
+/// somebody funds the account, so re-reading it every 5 s would be waste. Five
+/// minutes keeps a topped-up box routable within one poll of the top-up.
+const FUNDING_TTL_SECS: u64 = 300;
+
+/// `address -> (read at, cannot pay)` for the funding gate.
+fn funding_cache() -> &'static Mutex<std::collections::HashMap<String, (Instant, bool)>> {
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<String, (Instant, bool)>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Ask the chain whether `addr` can pay a transaction fee.
+///
+/// `Some(true)` = the account has **no free balance** and therefore cannot pay
+/// the fee for its own `accept_job`. `Some(false)` = it has funds. `None` =
+/// the read failed, i.e. **unknown** — the caller must not turn that into a
+/// verdict (the #141/#144 three-state rule: a failed read never caches, never
+/// excludes, and never gets reported as a fact).
+fn account_cannot_pay(
+    rt: &Arc<tokio::runtime::Runtime>,
+    client: &Arc<ChainClient>,
+    addr: &str,
+) -> Option<bool> {
+    match rt.block_on(client.get_account_info_result(addr)) {
+        Ok(info) => Some(info.balance <= 0.0),
+        Err(e) => {
+            if warn_once(&format!("funding-unknown|{addr}")) {
+                eprintln!(
+                    "[route] could not read {}'s account funding ({e}) — leaving it routable ",
+                    gpn_agent::provider_heartbeat::abbreviated(addr)
+                );
+                eprintln!("        (an unreadable account is UNKNOWN, not unfunded)");
+            }
+            None
+        }
+    }
+}
+
+/// Stamp [`Provider::unfunded`] from the chain.
+///
+/// Live 2026-11-07: box1's `5Hgbpi…` was advertised with 5 capabilities, 16303 MB
+/// VRAM and `healthy: true` while its account sat at **0.0000 GPN / nonce 0**, so
+/// it could never send its `accept_job`; job #6551 was leased to it and could
+/// only ever end in a janitor cancel. A provider that cannot pay a fee is not a
+/// routing candidate — but only the *chain* can say so, so this reads it and
+/// says nothing when it cannot.
+fn apply_funding(
+    out: &mut [Provider],
+    rt: &Arc<tokio::runtime::Runtime>,
+    client: &Arc<ChainClient>,
+) {
+    for p in out.iter_mut() {
+        if p.address.is_empty() {
+            continue;
+        }
+        let cached = {
+            let c = funding_cache().lock().unwrap();
+            c.get(&p.address)
+                .filter(|(at, _)| at.elapsed().as_secs() <= FUNDING_TTL_SECS)
+                .map(|(_, v)| *v)
+        };
+        let cannot_pay = match cached {
+            Some(v) => v,
+            None => match account_cannot_pay(rt, client, &p.address) {
+                Some(v) => {
+                    let mut c = funding_cache().lock().unwrap();
+                    // Bounded: this map is keyed by provider address and only
+                    // ever holds currently-advertised boxes plus history; trim
+                    // stale entries rather than growing without limit.
+                    if c.len() > 512 {
+                        c.retain(|_, (at, _)| at.elapsed().as_secs() <= FUNDING_TTL_SECS);
+                    }
+                    c.insert(p.address.clone(), (Instant::now(), v));
+                    v
+                }
+                None => continue,
+            },
+        };
+        if cannot_pay && !p.unfunded && warn_once(&format!("unfunded|{}", p.address)) {
+            eprintln!(
+                "[route] provider {} has no free balance on chain — it cannot pay the fee for \
+                 accept_job, so no lease will be handed to it until it is funded",
+                gpn_agent::provider_heartbeat::abbreviated(&p.address)
+            );
+        }
+        p.unfunded = cannot_pay;
+    }
 }
 
 fn now_secs() -> u64 {
@@ -4772,6 +4888,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "reachability": p.reachability,
                     "gateway": p.gateway,
                     "healthy": p.last_seen.is_some(),
+                    // A provider the chain says cannot pay an `accept_job` fee is
+                    // advertised here (an operator must be able to SEE the box and
+                    // why it gets no work) but is never routed any.
+                    "unfunded": p.unfunded,
                     "source": p.source
                 })).collect::<Vec<_>>() })
                 }
@@ -7711,6 +7831,7 @@ mod tests {
             // Routing tests describe *deliverable* providers, so the delivery
             // gate (item #55) stays inert for them.
             pulled_seen: Some(Instant::now()),
+            unfunded: false,
         }
     }
 
@@ -7775,6 +7896,47 @@ mod tests {
         // instead of black-holing a created, escrowed job.
         let reg = vec![push_only];
         assert!(pick(&reg, 0, 0, 0, 0.0, "llama3.2:1b", 0, &RttOverrides::new()).is_none());
+    }
+
+    #[test]
+    fn a_provider_that_cannot_pay_an_accept_fee_is_not_routable() {
+        // 2026-11-07: box1's `5Hgbpi…` advertised 5 capabilities + 16303 MB VRAM
+        // with `healthy: true` while its account was 0.0000 GPN / nonce 0, so it
+        // could never send its own `accept_job`. Job #6551 was routed to it and
+        // could only ever end in a janitor cancel. The chain's answer is now a
+        // routing input: a broke provider is not a candidate, even when it is the
+        // only one that clears the hardware floor — the AP answers 503 instead,
+        // exactly like the min-VRAM gate, rather than creating an unclaimable job.
+        let mut broke = prov("broke", "http://broke/status", 1, "llama3.2:1b");
+        broke.vram_mb = 16303;
+        broke.unfunded = true;
+        let funded = prov("funded", "http://funded/status", 90, "llama3.2:1b");
+
+        // The broke box would otherwise win on latency and VRAM.
+        let reg = vec![broke.clone(), funded.clone()];
+        let (p, _) = pick(&reg, 0, 0, 0, 0.0, "llama3.2:1b", 0, &RttOverrides::new()).unwrap();
+        assert_eq!(p.address, "funded");
+
+        // It is not a last resort either: a hardware floor only it clears must
+        // now fail closed instead of producing a job nobody can claim.
+        let reg = vec![broke.clone()];
+        assert!(pick(
+            &reg,
+            0,
+            16000,
+            0,
+            0.0,
+            "llama3.2:1b",
+            0,
+            &RttOverrides::new()
+        )
+        .is_none());
+
+        // `false` means "funded OR unknown" — an unreadable account must never be
+        // excluded on a guess (the #141/#144 three-state rule).
+        let unknown = prov("unknown", "http://unknown/status", 1, "llama3.2:1b");
+        let reg = vec![unknown];
+        assert!(pick(&reg, 0, 0, 0, 0.0, "llama3.2:1b", 0, &RttOverrides::new()).is_some());
     }
 
     #[test]
