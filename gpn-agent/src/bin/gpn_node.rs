@@ -2962,6 +2962,20 @@ fn print_dashboard_hint(cfg: &Config) {
     }
 }
 
+/// The chain binary (`gpn-node`, hyphen) owns subcommands this supervisor does
+/// not have. Passing one here must **fail loudly**, never start a stack: an
+/// older `--ensure-node-key` re-exec'd `current_exe()` and left two 4-hour-old
+/// parents blocked on `.output()` plus four duplicate providers each (queue
+/// #145). Returns the verb when argv[1] is one of the chain binary's verbs.
+fn chain_binary_verb(argv: &[String]) -> Option<String> {
+    let first = argv.get(1)?.as_str();
+    matches!(
+        first,
+        "key" | "build-spec" | "check-block" | "purge-chain" | "export-blocks" | "import-blocks"
+    )
+    .then(|| first.to_string())
+}
+
 /// `gpn_node idle <minutes>` / `gpn_node resume` — one-shot operator verbs.
 ///
 /// Returns `Some(exit_code)` when a verb was handled (the caller exits), `None`
@@ -3807,6 +3821,29 @@ async fn main() {
         || env_str("GPN_ENSURE_NODE_KEY").as_deref() == Some("1")
     {
         std::process::exit(run_ensure_node_key(&argv));
+    }
+
+    // ── A chain-binary verb must never start a stack (queue #145). ─────────
+    // `key generate-node-key` (and the other chain verbs) belong to the chain
+    // binary `gpn-node` (hyphen). This supervisor has no subcommands except
+    // `idle`/`resume`, so an unknown verb used to be *ignored* and the whole
+    // node+provider stack started instead. That is how an older
+    // `--ensure-node-key` (which re-exec'd `current_exe()`) left two 4-hour-old
+    // key-provisioning parents blocked on `.output()` with four duplicate
+    // provider processes each on this host — a phantom provider identity on
+    // `/providers` competing for one GPU. Refuse loudly, start nothing.
+    if let Some(verb) = chain_binary_verb(&argv) {
+        exit_report::fatal(
+            ExitKind::BAD_CONFIG,
+            format!(
+                "`{verb}` is a chain-binary verb, not a supervisor verb — this binary always \
+                 starts a node that is miner + AI provider"
+            ),
+            format!(
+                "run it against `gpn-node` (hyphen, not underscore), e.g. `gpn-node {verb} …`. \
+                 Nothing was started and no key was touched."
+            ),
+        );
     }
 
     let mut cfg = match Config::load() {
@@ -4674,6 +4711,30 @@ mod tests {
         assert!(reports[1].detail.contains("heartbeat"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_chain_binary_verb_never_starts_a_stack() {
+        // The exact invocation an old `--ensure-node-key` produced (queue #145).
+        assert_eq!(
+            chain_binary_verb(&args(&[
+                "gpn_node",
+                "key",
+                "generate-node-key",
+                "--file",
+                "x"
+            ]))
+            .as_deref(),
+            Some("key")
+        );
+        // The supervisor's own verbs and flags are untouched.
+        assert_eq!(chain_binary_verb(&args(&["gpn_node", "resume"])), None);
+        assert_eq!(chain_binary_verb(&args(&["gpn_node", "idle", "30"])), None);
+        assert_eq!(
+            chain_binary_verb(&args(&["gpn_node", "--ensure-node-key", "--file", "x"])),
+            None
+        );
+        assert_eq!(chain_binary_verb(&args(&["gpn_node"])), None);
     }
 
     #[test]
