@@ -45,6 +45,15 @@ for r in runs:
 else:
     print("none")
 ' 2>/dev/null || echo unknown)
+  # Only the workflows whose artifacts the signed manifest actually carries
+  # (linux + windows) may gate the pipeline. `release-unix.yml` builds macOS,
+  # which has never been published (releases.json has always been linux +
+  # windows only), and since 2026-11-06 its GitHub-hosted runner dies during
+  # provisioning (started+completed in 3 s, no steps, no log blob) because
+  # hosted-runner minutes on this account are billing-blocked. Counting that
+  # red made every HEAD with a build tag read "PROBLEM" forever, which is the
+  # one shape this script exists to prevent: a check that can never go green.
+  # It is reported separately as `other` instead.
   builds=$(printf '%s' "$runs" | SHA="$head_sha" python3 -c '
 import os, sys, json
 sha = os.environ["SHA"]
@@ -52,18 +61,24 @@ try:
     runs = json.load(sys.stdin)["workflow_runs"]
 except Exception:
     print("unknown"); raise SystemExit
-out = []
+released, other = [], []
 for r in runs:
-    if r.get("head_sha", "").startswith(sha) and "binaries" in (r.get("name") or "").lower():
-        out.append((r.get("name") or "").split()[0].lower() + "=" + str(r.get("status")) + "/" + str(r.get("conclusion")))
-print(" ".join(sorted(set(out))) or "none")
+    name = (r.get("name") or "")
+    if not r.get("head_sha", "").startswith(sha) or "binaries" not in name.lower():
+        continue
+    tag = name.split()[0].lower() + "=" + str(r.get("status")) + "/" + str(r.get("conclusion"))
+    (other if "unix" in name.lower() else released).append(tag)
+print(" ".join(sorted(set(released))) or "none")
+if other:
+    print("other    " + " ".join(sorted(set(other))))
 ' 2>/dev/null || echo unknown)
 fi
 
 say "tree      v$tree_ver @ $head_sha"
 say "site      ${site_ver:-unreachable}"
 say "ci        $ci"
-say "builds    $builds"
+printf 'builds    %s\n' "$(printf '%s\n' "$builds" | head -1)"
+case "$builds" in *$'\n'*) say "$(printf '%s\n' "$builds" | tail -n +2)" ;; esac
 say "lock      $([ -f "$lock" ] && cat "$lock" || echo absent)"
 
 rc=0
@@ -74,9 +89,9 @@ case "$ci" in
   *) say "in flight: CI $ci"; [ $rc -eq 0 ] && rc=1 ;;
 esac
 
-case "$builds" in
-  *"/failure"*) say "PROBLEM: a build workflow failed for HEAD ($builds)"; rc=2 ;;
-  *"/in_progress"*|*"/queued"*) say "in flight: builds $builds"; [ $rc -eq 0 ] && rc=1 ;;
+case "$(printf '%s\n' "$builds" | head -1)" in
+  *"/failure"*) say "PROBLEM: a build workflow failed for HEAD ($(printf '%s\n' "$builds" | head -1))"; rc=2 ;;
+  *"/in_progress"*|*"/queued"*) say "in flight: builds $(printf '%s\n' "$builds" | head -1)"; [ $rc -eq 0 ] && rc=1 ;;
 esac
 
 if [ -n "$site_ver" ] && [ "$site_ver" != "$tree_ver" ]; then
