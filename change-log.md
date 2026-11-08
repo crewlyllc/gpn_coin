@@ -1,5 +1,13 @@
 # GPN change-log
 
+## 2026-11-08 07:3x PT — release 0.3.30 (no source change: the shipped tree must be at or ahead of the install dir)
+
+**WHY:** the 07:20:28 `gpn-update.timer` fire **declined to install 0.3.29** and said so exactly: *"refusing to replace 0.3.29 with a different build of the same version: the install dir runs sha 9c9e82c, the release was built from sha c77c306"* (`exit 3`, unit `Result=success`). The #148 guard was right: last night's #150 fix was deployed locally by `deploy-bin.sh` from HEAD, so `~/.local/bin/gpn_update` is stamped **0.3.29 / 9c9e82c** while the published 0.3.29 asset was built from its parent **c77c306**. Version-equal, sha-newer ⇒ installing it would have swapped the retry-fixed updater for one without it.
+
+**ROOT CAUSE (not the guard):** the version bump to 0.3.29 landed *before* #150, so every local build after the bump carries the version the release also uses. A repo that cuts several builds per version needs the **release** to advance when the tree advances — otherwise the fleet can never take a release again without `--force`.
+
+**FIX:** bump to **0.3.30** (same 15 `Cargo.toml` files as the 0.3.29 cut), no `src/` change, dispatch from the pinned HEAD sha, `release-cut`. `0.3.30 > 0.3.29` ⇒ the guard allows the swap and the retry fix ships inside the bundle instead of only on this box.
+
 ## 2026-10-23 17:00 PT — PM07 #99 **journal flood**: a *state* notice was logged as an *event* (1 808 identical lines/hour)
 
 **WHY (measured):** `journalctl --user -u gpn-provider-heartbeat --since -60min` returned **1 808 lines and every one of them was the same message** — `[status] ⚠ on-chain attestation disagrees with this box's idle measurement …` — **twice per poll**, every 2–6 s. The unit's journal was 100 % this one line, so nothing else the heartbeat says (peer identity, hardware re-measure, model filtering, p2p warnings) survived in a log an operator can read, and the journal grew ~44 k lines/day for no information.

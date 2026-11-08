@@ -8,6 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.30] - 2026-11-08
+
+No source changes: this cut exists so the shipped tree is at or ahead of every
+binary already running in an install directory.
+
+### Fixed
+- **`gpn_update` retries a transient download failure** (#150). The bundle fetch
+  died on a single `HTTP 504` from GitHub's release-asset front end on
+  2026-11-08 00:55 and burned a six-hour update window. 5xx and transport
+  failures now get three attempts (2 s / 4 s backoff, journaled); every 4xx and
+  every hash/size mismatch still fails closed on the first try.
+
 ## [0.3.29] - 2026-11-08
 
 The LAN can finally peer, and the console points at the dashboard.
