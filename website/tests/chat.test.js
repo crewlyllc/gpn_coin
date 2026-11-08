@@ -370,19 +370,29 @@ test("every top-level page links to Chat in the nav", () => {
   for (const page of pages) {
     const html = fs.readFileSync(path.join(SITE, page), "utf8");
     const nav = html.slice(html.indexOf('class="nav-links"'), html.indexOf("</nav>"));
-    assert.ok(/href="chat\.html"[^>]*>Chat</.test(nav), page + " nav must link to Chat");
+    // 2026-11-07 (SEO): internal links use the CLEAN url; `.html` is a 301 now.
+    // Accept either form: the assertion is about the link existing, not about
+    // the redirect hop we deliberately removed.
+    assert.ok(/href="(chat|chat\.html)"[^>]*>Chat</.test(nav), page + " nav must link to Chat");
   }
 });
 
 test("the AI page points at the full chat", () => {
   const html = fs.readFileSync(path.join(SITE, "ai.html"), "utf8");
-  assert.ok(/href="chat\.html"/.test(html));
+  assert.ok(/href="(chat|chat\.html)"/.test(html));
   assert.ok(/full chat/i.test(html));
 });
 
-test("the sitemap lists /chat", () => {
+// 2026-11-07 (SEO): /chat is an interactive app shell (≈6 KB of markup around a
+// JS client) with no indexable content, so it is deliberately NOT in the
+// sitemap — but it is still linked from the nav of every page and reachable.
+// The assertion is therefore about the page existing and being linked, not
+// about it being advertised for crawling.
+test("the chat page exists but is not advertised in the sitemap", () => {
+  assert.ok(fs.existsSync(path.join(SITE, "chat.html")), "chat page must exist");
   const xml = fs.readFileSync(path.join(SITE, "sitemap.xml"), "utf8");
-  assert.ok(xml.includes("https://gpncoin.ai/chat"), "sitemap must list the chat page");
+  assert.ok(!xml.includes("https://gpncoin.ai/chat"),
+    "an app shell with no indexable content must not be in the sitemap");
 });
 
 console.log("\n" + passed + " tests passed");
