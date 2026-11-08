@@ -350,6 +350,121 @@ fn fetch_verified_manifest(url: &str) -> Result<update::ReleaseManifest, Failure
     }
 }
 
+/// Attempts for one download (the first try plus its retries).
+///
+/// Three is deliberate: the failure this exists for (a GitHub-wide `504` on the
+/// release asset, 2026-11-08 00:55 PT) lasted seconds, so a short burst of
+/// retries rides it out, while a genuinely down mirror still fails the unit in
+/// under ten seconds instead of hanging a systemd timer.
+const DOWNLOAD_ATTEMPTS: u32 = 3;
+
+/// First backoff, doubled per retry (2 s, then 4 s). `GPN_UPDATE_RETRY_BASE_MS`
+/// exists so the end-to-end tests do not spend six seconds asleep.
+const DOWNLOAD_BACKOFF_MS: u64 = 2_000;
+
+fn retry_base_ms() -> u64 {
+    std::env::var("GPN_UPDATE_RETRY_BASE_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DOWNLOAD_BACKOFF_MS)
+}
+
+/// Backoff before the next attempt, after `attempt` (1-based) has failed.
+fn retry_backoff_ms(attempt: u32, base_ms: u64) -> u64 {
+    let shift = attempt.saturating_sub(1).min(6);
+    base_ms.saturating_mul(1u64 << shift)
+}
+
+/// The HTTP status this module embedded in a download error, if any.
+fn http_status_in(msg: &str) -> Option<u16> {
+    // Only the shape this module produces: "download <url> -> HTTP 504".
+    let i = msg.rfind("-> HTTP ")?;
+    msg[i + "-> HTTP ".len()..]
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// Is a failed attempt worth repeating?
+///
+/// **5xx only** for anything the mirror answered: a server error is the mirror
+/// having a bad moment, while any 4xx (including 404 and 429) is the mirror
+/// telling us *this request* is wrong — repeating it is how a broken or
+/// mis-pointed mirror becomes a retry storm against a rate-limited host. A
+/// transport failure with no status (timeout, connection reset/closed/aborted,
+/// truncated body) never reached an answer at all, so it is retried too.
+///
+/// **Hash and size mismatches are never retried here by construction**: they are
+/// checked after the bytes are staged (`update::stage_bundle_file` /
+/// `update::verify_bytes`), outside this helper. Retrying a corrupt transfer
+/// would only multiply the bandwidth of an already-suspect asset and would hide
+/// the real signal (a wrong or tampered asset) behind three identical attempts.
+fn download_failure_is_transient(msg: &str) -> bool {
+    if let Some(code) = http_status_in(msg) {
+        return (500..=599).contains(&code);
+    }
+    let m = msg.to_ascii_lowercase();
+    const TRANSIENT: [&str; 9] = [
+        "timed out",
+        "timeout",
+        "connection reset",
+        "connection closed",
+        "connection aborted",
+        "connection refused",
+        "broken pipe",
+        "unexpected eof",
+        "error decoding response body",
+    ];
+    TRANSIENT.iter().any(|needle| m.contains(needle))
+}
+
+/// Run a network step with up to [`DOWNLOAD_ATTEMPTS`] tries, backing off
+/// exponentially, and give up on the first error that is not transient.
+fn with_transient_retry<T>(
+    what: &str,
+    attempt: impl FnMut() -> Result<T, String>,
+) -> Result<T, String> {
+    with_transient_retry_base(what, retry_base_ms(), attempt)
+}
+
+fn with_transient_retry_base<T>(
+    what: &str,
+    base_ms: u64,
+    mut attempt: impl FnMut() -> Result<T, String>,
+) -> Result<T, String> {
+    let mut tries = 1u32;
+    loop {
+        match attempt() {
+            Ok(v) => {
+                if tries > 1 {
+                    eprintln!(
+                        "gpn_update: {what} succeeded on attempt {tries}/{DOWNLOAD_ATTEMPTS}"
+                    );
+                }
+                return Ok(v);
+            }
+            Err(e) => {
+                if tries >= DOWNLOAD_ATTEMPTS || !download_failure_is_transient(&e) {
+                    return Err(if tries > 1 {
+                        format!("{what} failed after {tries} attempts; last error: {e}")
+                    } else {
+                        e
+                    });
+                }
+                let wait = retry_backoff_ms(tries, base_ms);
+                eprintln!(
+                    "gpn_update: {what} attempt {tries}/{DOWNLOAD_ATTEMPTS} failed: {e} \
+                     — retrying in {:.1}s",
+                    wait as f64 / 1000.0
+                );
+                std::thread::sleep(Duration::from_millis(wait));
+                tries += 1;
+            }
+        }
+    }
+}
+
 fn download_to_file(url: &str, dest: &Path, timeout: Duration) -> Result<u64, String> {
     use std::io::Read;
     let client = reqwest::blocking::Client::builder()
@@ -762,7 +877,14 @@ fn install(
             );
         }
         let tmp = update::bundle_temp_path(state, &m.version, asset);
-        let staged = download_to_file(&asset.url, &tmp, Duration::from_secs(3600)).and_then(|_| {
+        let staged = with_transient_retry("download", || {
+            download_to_file(&asset.url, &tmp, Duration::from_secs(3600)).inspect_err(|_| {
+                // A half-written archive must not become the next attempt's
+                // starting point (or be mistaken for a staged asset).
+                let _ = std::fs::remove_file(&tmp);
+            })
+        })
+        .and_then(|_| {
             update::stage_bundle_file(state, &m.version, asset, &tmp).map_err(|e| e.to_string())
         });
         let _ = std::fs::remove_file(&tmp);
@@ -875,8 +997,12 @@ fn install_single(
         std::fs::create_dir_all(&dir)
             .map_err(|e| guard_failed(format!("{}: {e}", dir.display())))?;
         // Buffered, but a single-layout asset is one binary (not a bundle).
-        let body =
-            fetch(&asset.url).map_err(|e| InstallFailure::Failed(e.message().to_string()))?;
+        // The same transient-retry rule applies: a 5xx/timeout is the mirror
+        // having a bad moment, a 4xx or a failed hash check is not.
+        let body = with_transient_retry("download", || {
+            fetch(&asset.url).map_err(|e| e.message().to_string())
+        })
+        .map_err(InstallFailure::Failed)?;
         update::verify_bytes(&body, asset).map_err(|e| guard_failed(e.to_string()))?;
         let tmp = dir.join(format!(
             ".{}.tmp-{}",
@@ -1138,4 +1264,76 @@ fn main() -> ExitCode {
         }
     };
     ExitCode::from(run(&opts))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_errors_and_transport_failures_are_retried_but_client_errors_are_not() {
+        // The exact 2026-11-08 00:55 PT line: a GitHub-wide 504 on the asset.
+        assert!(download_failure_is_transient(
+            "download https://github.com/crewlyllc/gpn_coin/releases/download/\
+             linux-latest/gpn-linux.tar.gz -> HTTP 504 Gateway Timeout"
+        ));
+        assert!(download_failure_is_transient("http://x/a -> HTTP 500"));
+        assert!(download_failure_is_transient("http://x/a -> HTTP 599"));
+
+        // A 4xx is the mirror answering that *this request* is wrong.
+        for code in [400, 401, 403, 404, 408, 410, 429] {
+            assert!(
+                !download_failure_is_transient(&format!("http://x/a -> HTTP {code}")),
+                "HTTP {code} must fail closed"
+            );
+        }
+
+        // No status = the request never completed.
+        for msg in [
+            "download http://x/a: error sending request for url (http://x/a): connection reset by peer",
+            "download body: error decoding response body: end of file before message length reached",
+            "http client: operation timed out",
+            "download http://x/a: connection closed before message completed",
+        ] {
+            assert!(download_failure_is_transient(msg), "{msg}");
+        }
+
+        // An error that is not a transport failure at all stays fatal.
+        assert!(!download_failure_is_transient(
+            "/tmp/x.tar.gz: No space left on device"
+        ));
+    }
+
+    #[test]
+    fn backoff_doubles_and_is_capped() {
+        assert_eq!(retry_backoff_ms(1, 2_000), 2_000);
+        assert_eq!(retry_backoff_ms(2, 2_000), 4_000);
+        assert_eq!(retry_backoff_ms(3, 2_000), 8_000);
+        // No overflow / unbounded sleep if the attempt count ever grows.
+        assert_eq!(retry_backoff_ms(64, 2_000), 128_000);
+    }
+
+    #[test]
+    fn a_permanent_failure_is_reported_once_without_the_attempt_count() {
+        let mut calls = 0;
+        let err = with_transient_retry::<u8>("download", || {
+            calls += 1;
+            Err("http://x/a -> HTTP 404 Not Found".to_string())
+        })
+        .unwrap_err();
+        assert_eq!(calls, 1, "404 must not be retried");
+        assert_eq!(err, "http://x/a -> HTTP 404 Not Found");
+    }
+
+    #[test]
+    fn a_transient_failure_stops_after_the_attempt_budget() {
+        let mut calls = 0;
+        let err = with_transient_retry_base::<u8>("download", 0, || {
+            calls += 1;
+            Err("http://x/a -> HTTP 503".to_string())
+        })
+        .unwrap_err();
+        assert_eq!(calls, DOWNLOAD_ATTEMPTS);
+        assert!(err.contains("after 3 attempts"), "{err}");
+    }
 }

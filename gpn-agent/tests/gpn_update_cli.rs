@@ -131,6 +131,10 @@ fn signed_manifest(
 struct Feed {
     base: String,
     routes: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    /// `path -> (status, remaining failures)`: serve that status instead of the
+    /// body until the count runs out. Used to prove the download path rides out
+    /// a transient 5xx and still fails closed on a 4xx.
+    faults: Arc<Mutex<HashMap<String, (u16, usize)>>>,
     hits: Arc<Mutex<Vec<String>>>,
     stop: Arc<AtomicBool>,
     join: Option<std::thread::JoinHandle<()>>,
@@ -143,7 +147,9 @@ impl Feed {
         let hits = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let routes: Arc<Mutex<HashMap<String, Vec<u8>>>> = Arc::new(Mutex::new(HashMap::new()));
-        let (h, s, r) = (hits.clone(), stop.clone(), routes.clone());
+        let faults: Arc<Mutex<HashMap<String, (u16, usize)>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let (h, s, r, f) = (hits.clone(), stop.clone(), routes.clone(), faults.clone());
         let join = std::thread::spawn(move || {
             while !s.load(Ordering::SeqCst) {
                 let Ok(Some(req)) = server.recv_timeout(Duration::from_millis(50)) else {
@@ -151,6 +157,22 @@ impl Feed {
                 };
                 let url = req.url().to_string();
                 h.lock().unwrap().push(url.clone());
+                // Fault injection first: a route can be told to answer N times
+                // with a status before it starts serving the body.
+                let fault = {
+                    let mut g = f.lock().unwrap();
+                    match g.get_mut(&url) {
+                        Some((status, remaining)) if *remaining > 0 => {
+                            *remaining -= 1;
+                            Some(*status)
+                        }
+                        _ => None,
+                    }
+                };
+                if let Some(status) = fault {
+                    let _ = req.respond(Response::empty(status));
+                    continue;
+                }
                 let body = r.lock().unwrap().get(&url).cloned();
                 match body {
                     Some(body) => {
@@ -167,6 +189,7 @@ impl Feed {
         Feed {
             base,
             routes,
+            faults,
             hits,
             stop,
             join: Some(join),
@@ -183,8 +206,21 @@ impl Feed {
         self.routes.lock().unwrap().insert(path.to_string(), body);
     }
 
+    /// Answer the next `times` requests for `path` with `status`, then serve the
+    /// body as normal.
+    fn fail_first(&self, path: &str, status: u16, times: usize) {
+        self.faults
+            .lock()
+            .unwrap()
+            .insert(path.to_string(), (status, times));
+    }
+
     fn hits(&self) -> Vec<String> {
         self.hits.lock().unwrap().clone()
+    }
+
+    fn hit_count(&self, path: &str) -> usize {
+        self.hits().iter().filter(|h| *h == path).count()
     }
 }
 
@@ -590,5 +626,106 @@ fn apply_refuses_a_downgrade() {
     assert_eq!(code, 3, "stdout={out} stderr={err}");
     assert!(err.contains("downgrade"), "stderr={err}");
     assert!(err.contains("gpn_scheduler"), "names the file: {err}");
+    assert!(update::current_version_dir(&ctx.state).is_none());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Transient mirror failures (#150)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The 2026-11-08 00:55 PT fire: one `HTTP 504` from the release mirror burned a
+/// whole six-hour update cycle. Two 504s then a 200 must still install.
+#[test]
+fn apply_rides_out_transient_5xx_and_still_installs() {
+    let ctx = Ctx::new("apply-504-twice");
+    ctx.seed_old();
+    let (feed, _bundle) = apply_feed();
+    feed.fail_first("/gpn-linux.tar.gz", 504, 2);
+
+    let (code, out, err) = ctx.run(
+        &["--apply", "--json"],
+        &[("GPN_UPDATE_RETRY_BASE_MS", "5")],
+        &feed.url("/releases.json"),
+    );
+    assert_eq!(code, 0, "stdout={out} stderr={err}");
+    let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert_eq!(v["applied"], true);
+
+    // Three attempts against the asset: 504, 504, then the bundle.
+    assert_eq!(
+        feed.hit_count("/gpn-linux.tar.gz"),
+        3,
+        "hits={:?}",
+        feed.hits()
+    );
+    let supervisor = std::fs::read_to_string(ctx.target.join("gpn_node")).unwrap();
+    assert!(
+        supervisor.contains(&format!("gpn-build-v1 version={NEW_VERSION}")),
+        "{supervisor}"
+    );
+    assert_eq!(
+        update::installed_version(&ctx.state).as_deref(),
+        Some(NEW_VERSION)
+    );
+    assert!(
+        err.contains("succeeded on attempt 3/3"),
+        "the retry must be visible in the journal: {err}"
+    );
+}
+
+/// A 4xx is the mirror saying the request is wrong — one attempt, fail closed,
+/// install dir untouched.
+#[test]
+fn apply_does_not_retry_a_404_on_the_asset() {
+    let ctx = Ctx::new("apply-404");
+    ctx.seed_old();
+    let (feed, _bundle) = apply_feed();
+    // Serve the bundle, but as an unavailable asset: a permanent answer.
+    feed.fail_first("/gpn-linux.tar.gz", 404, usize::MAX);
+
+    let (code, out, err) = ctx.run(
+        &["--apply"],
+        &[("GPN_UPDATE_RETRY_BASE_MS", "5")],
+        &feed.url("/releases.json"),
+    );
+    assert_ne!(code, 0, "stdout={out} stderr={err}");
+    assert_eq!(
+        feed.hit_count("/gpn-linux.tar.gz"),
+        1,
+        "a 404 must be attempted exactly once: hits={:?}",
+        feed.hits()
+    );
+    assert!(err.contains("404"), "stderr={err}");
+    assert!(
+        update::current_version_dir(&ctx.state).is_none(),
+        "a failed download must not flip `current`"
+    );
+    // The install dir keeps the old supervisor.
+    let supervisor = std::fs::read_to_string(ctx.target.join("gpn_node")).unwrap();
+    assert!(supervisor.contains(&format!("gpn-build-v1 version={OLD_VERSION}")));
+}
+
+/// A mirror that is down for every attempt gives up in bounded time and names
+/// the attempt count, instead of hanging the systemd timer.
+#[test]
+fn apply_gives_up_after_the_attempt_budget() {
+    let ctx = Ctx::new("apply-503-forever");
+    ctx.seed_old();
+    let (feed, _bundle) = apply_feed();
+    feed.fail_first("/gpn-linux.tar.gz", 503, usize::MAX);
+
+    let (code, out, err) = ctx.run(
+        &["--apply"],
+        &[("GPN_UPDATE_RETRY_BASE_MS", "5")],
+        &feed.url("/releases.json"),
+    );
+    assert_ne!(code, 0, "stdout={out} stderr={err}");
+    assert_eq!(
+        feed.hit_count("/gpn-linux.tar.gz"),
+        3,
+        "exactly three attempts: hits={:?}",
+        feed.hits()
+    );
+    assert!(err.contains("after 3 attempts"), "stderr={err}");
     assert!(update::current_version_dir(&ctx.state).is_none());
 }
