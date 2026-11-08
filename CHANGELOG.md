@@ -8,6 +8,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.29] - 2026-11-08
+
+The LAN can finally peer, and the console points at the dashboard.
+
+### Added
+- **Same-LAN seed address in the bootnode defaults** (`/ip4/192.168.1.20/...`),
+  in `network.json`, the Windows launcher defaults, and `/seeds.json`.
+  Four machines on one LAN could heartbeat to the access point but never peer:
+  they dialled the seed's PUBLIC address, the router looped it back (hairpin
+  NAT), and the connection was dropped as a self-dial. Off-LAN peers fail this
+  dial instantly and use the public entries.
+- **The launcher prints the dashboard URL** (`http://127.0.0.1:8099`). The
+  console only prints failures; status lives on the dashboard.
+
+### Changed
+- `gpncoin.ai/nodes` no longer calls a serving node "offline" just because it is
+  not a libp2p peer of the bootnode: ranking is serving → registered →
+  connected → offline, and a serving-but-unpeered node reads
+  **"mining + serving (not peered)"**.
+
 ## [0.3.28] - 2026-11-07
 
 Fix a crash loop I introduced in 0.3.26.

@@ -149,7 +149,7 @@ if (-not $WhatIf) {
 # wins; nothing here is a secret (never put a key in this file).
 $ApUrl  = if ($env:GPN_AP_URL) { $env:GPN_AP_URL } else { 'http://gpn-testnet.duckdns.org:8092' }
 $Boots  = if ($env:GPN_BOOTNODES) { $env:GPN_BOOTNODES } else {
-  '/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo,/ip4/142.129.54.88/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo,/ip4/23.241.109.255/tcp/30333/p2p/12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz'
+  '/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo,/ip4/142.129.54.88/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo,/ip4/192.168.1.20/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo,/ip4/23.241.109.255/tcp/30333/p2p/12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz'
 }
 
 # -- Same-LAN seed -----------------------------------------------------------
@@ -381,6 +381,9 @@ REM "always reconnect to the seed" is enforced instead of hoped for.
 set "GPN_RESERVED_PEERS=__BOOTNODES__"
 REM --- local dashboard (loopback only): http://127.0.0.1:8099 ----------------
 set "GPN_GUI=1"
+REM --- where to look: the console only prints failures; the dashboard is live ---
+echo [gpn] dashboard: http://127.0.0.1:8099   (status, models, peers, jobs -- keep this open)
+
 set "GPN_OLLAMA=http://127.0.0.1:11434"
 set "GPN_BIN=__INSTALL_DIR__\bin"
 
