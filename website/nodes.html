@@ -487,11 +487,17 @@ GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code><
 
     var rows = [];
     byPeer.forEach(function (r) {
+      // 2026-11-08: "offline" used to mean "not a libp2p peer of this bootnode",
+      // which is NOT the same as offline. A provider that the access point can
+      // reach and lease work to (healthy:true, heartbeats arriving) was shown as
+      // offline merely because it had not peered with this one node — box 1 was
+      // serving jobs while the directory called it offline. Rank by what the
+      // network can actually do with the node, and keep peering as its own flag.
       r.live = live.has(r.peer_id);
-      if (!r.live) r.status = "offline";
-      else if (r.serving) r.status = "serving";
+      if (r.serving) r.status = "serving";
       else if (r.registered) r.status = "registered";
-      else r.status = "connected";
+      else if (r.live) r.status = "connected";
+      else r.status = "offline";
       rows.push(r);
     });
     rows = rows.concat(anonymous);
@@ -519,6 +525,7 @@ GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code><
   // verdict — and "peer only" is deliberately never printed.
   var BADGE = {
     serving: "mining + serving",
+    "serving-unpeered": "mining + serving (not peered)",
     "registered": "mining + provider registered",
     connected: "connected",
     offline: "offline"
@@ -529,9 +536,8 @@ GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code><
     var dot = document.createElement("span");
     dot.className = "d";
     b.appendChild(dot);
-    b.appendChild(document.createTextNode(
-      cached ? "cached" : (BADGE[status] || status)
-    ));
+    var label = cached ? "cached" : (BADGE[status] || status);
+    b.appendChild(document.createTextNode(label));
     if (status === "registered") {
       b.title = "Registered with the access point and leaseable; its status URL is not publicly " +
         "reachable from here, so this count does not include it as reachable-now.";
@@ -573,6 +579,7 @@ GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code><
     rows.forEach(function (r) {
       var tr = document.createElement("tr");
       if (r.status === "offline") tr.className = "offline-row";
+      if (r.status === "serving" && !r.live) r.status = "serving-unpeered";
 
       /* Peer id */
       var peerCell = td("Peer ID");
