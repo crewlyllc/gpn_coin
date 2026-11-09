@@ -147,6 +147,56 @@ const HEAL_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15
 /// silence into an error, and [`is_connection_lost`] treats it as a dead socket
 /// so the existing heal/retry rebuilds the client.
 /// `$GPN_RPC_READ_TIMEOUT_SECS` (default 8 s).
+/// How many times a best-head hash resolution is retried before the read gives
+/// up. A transient stall in the node's RPC (one lost `chain_getBlockHash`) must
+/// not be reported as "the chain has no jobs" — see [`Self::head_block_hash`].
+const HEAD_RESOLVE_ATTEMPTS: usize = 3;
+
+/// Backoff between head-resolution retries (short on purpose: the whole retry
+/// sequence is bounded by [`rpc_read_timeout`]).
+const HEAD_RESOLVE_BACKOFF_MS: u64 = 150;
+
+/// Why a read with no resolvable head is refused instead of being aimed at
+/// `at_latest()`.
+///
+/// subxt's `at_latest()` reads the latest **finalized** block. This chain has no
+/// finality gadget: `chain_getFinalizedHead` is block #0 forever while `best` is
+/// hundreds of thousands of blocks ahead, and genesis state is long discarded by
+/// pruning. So the "fallback" could only ever fail with
+/// `4003 UnknownBlock: State already discarded`, naming a genesis hash the
+/// caller never asked about — which is what made a 10 s RPC stall (2026-11-09
+/// 04:00:29) read like a broken chain read.
+const HEAD_UNRESOLVED_ERR: &str =
+    "head block hash unresolved (node RPC did not answer chain_getBlockHash) — \
+     refusing the finalized-state fallback: this chain has no finality gadget, so \
+     finalized is genesis and its state is pruned";
+
+/// Run `f` up to `attempts` times, sleeping `backoff` between attempts, and
+/// return the first `Some`. `None` when every attempt returned `None`.
+///
+/// Extracted from the head-resolution path so the retry *semantics* (exactly N
+/// calls, no more) are testable without a live node.
+async fn resolve_with_retry<F, Fut, T>(
+    attempts: usize,
+    backoff: std::time::Duration,
+    mut f: F,
+) -> Option<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Option<T>>,
+{
+    let attempts = attempts.max(1);
+    for attempt in 0..attempts {
+        if let Some(v) = f().await {
+            return Some(v);
+        }
+        if attempt + 1 < attempts {
+            tokio::time::sleep(backoff).await;
+        }
+    }
+    None
+}
+
 fn rpc_read_timeout() -> std::time::Duration {
     std::env::var("GPN_RPC_READ_TIMEOUT_SECS")
         .ok()
@@ -321,9 +371,10 @@ impl ChainClient {
 
     /// Resolve the current **best (head)** block hash so storage reads see
     /// unfinalized blocks. `at_latest()` reads the latest *finalized* block,
-    /// which on chains without a finality gadget (dev/single-node PoW) can be
-    /// stuck at genesis while the feed/difficulty live far ahead on the best
-    /// fork. Falls back to `None` (caller falls back to placeholders) on error.
+    /// which on chains without a finality gadget (dev/single-node PoW) is stuck
+    /// at genesis while the feed/difficulty live far ahead on the best fork —
+    /// so there is no correct fallback and a failed resolution must surface as
+    /// an error (see [`HEAD_UNRESOLVED_ERR`]). Returns `None` on error.
     async fn head_block_hash(&self) -> Option<subxt::utils::H256> {
         // Convert ws:// -> http:// for a plain JSON-RPC POST.
         let http_url = self
@@ -438,13 +489,10 @@ impl ChainClient {
             IsFetchable = subxt::utils::Yes,
         >,
     {
-        let fetched = match head {
-            Some(hash) => client.storage().at(hash).fetch(addr).await,
-            None => match client.storage().at_latest().await {
-                Ok(at) => at.fetch(addr).await,
-                Err(e) => return Err(e.to_string()),
-            },
+        let Some(hash) = head else {
+            return Err(HEAD_UNRESOLVED_ERR.to_string());
         };
+        let fetched = client.storage().at(hash).fetch(addr).await;
         match fetched {
             Ok(Some(t)) => Ok(t.to_value().ok().map(|v| v.remove_context())),
             Ok(None) => Ok(None),
@@ -452,8 +500,19 @@ impl ChainClient {
         }
     }
 
-    /// Read a storage value at the current best head block (or fall back to
-    /// finalized via `at_latest` if the head hash can't be resolved).
+    /// [`Self::head_block_hash`] with a short bounded retry: a single stalled
+    /// `chain_getBlockHash` is a transient RPC blip, not a verdict.
+    async fn head_block_hash_bounded(&self) -> Option<subxt::utils::H256> {
+        resolve_with_retry(
+            HEAD_RESOLVE_ATTEMPTS,
+            std::time::Duration::from_millis(HEAD_RESOLVE_BACKOFF_MS),
+            || self.head_block_hash(),
+        )
+        .await
+    }
+
+    /// Read a storage value at the current best head block. A head that cannot
+    /// be resolved is an **error**, never a read at finalized (= genesis).
     ///
     /// Item #80: a **connection-level** failure heals the shared client once and
     /// retries, so a stale websocket no longer makes every read in this process
@@ -486,7 +545,7 @@ impl ChainClient {
         >,
     {
         let client = self.ensure_client().await?;
-        let head = self.head_block_hash().await;
+        let head = self.head_block_hash_bounded().await;
         match Self::fetch_with_bounded(&client, addr, head).await {
             Ok(v) => Ok(v),
             Err(e) if is_connection_lost(&e) => {
@@ -496,7 +555,7 @@ impl ChainClient {
                         self.endpoint
                     )
                 })?;
-                let head = self.head_block_hash().await;
+                let head = self.head_block_hash_bounded().await;
                 Self::fetch_with_bounded(&fresh, addr, head).await
             }
             Err(e) => Err(e),
@@ -3639,6 +3698,62 @@ mod tests {
         assert!((m.utilization - 0.70).abs() < 1e-9);
         assert!((m.staking_apr_percent - 15.0).abs() < 1e-9);
         assert_eq!(m.updated_at_block, 30); // max of {10,20,30}
+    }
+
+    /// The 04:00:29 stall on 2026-11-09 surfaced as `cannot read NextJobId`
+    /// plus `4003 UnknownBlock: State already discarded for 0xb8e4…` — the
+    /// genesis hash — because a failed head resolution fell through to
+    /// `at_latest()` (= finalized = genesis on this no-finality chain). A read
+    /// with no head must fail *explicitly* instead, and a momentary blip must
+    /// be retried before it is called a failure.
+    #[tokio::test]
+    async fn a_head_resolution_blip_is_retried_and_a_persistent_one_is_explicit() {
+        // Transient: two misses, then a hash → success, three calls.
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c = calls.clone();
+        let got = resolve_with_retry(HEAD_RESOLVE_ATTEMPTS, std::time::Duration::ZERO, || {
+            let c = c.clone();
+            async move {
+                let n = c.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                if n < 3 {
+                    None
+                } else {
+                    Some(42u8)
+                }
+            }
+        })
+        .await;
+        assert_eq!(got, Some(42));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+
+        // Persistent: exactly the budget, no more (a hot retry loop would turn
+        // a stalled node into a load amplifier).
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c = calls.clone();
+        let got: Option<u8> =
+            resolve_with_retry(HEAD_RESOLVE_ATTEMPTS, std::time::Duration::ZERO, || {
+                let c = c.clone();
+                async move {
+                    c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    None
+                }
+            })
+            .await;
+        assert_eq!(got, None);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            HEAD_RESOLVE_ATTEMPTS
+        );
+        assert!(HEAD_RESOLVE_ATTEMPTS >= 2, "one blip must not be fatal");
+
+        // The refusal names the reason instead of pointing at genesis: it must
+        // not read like a chain-level answer, and must not mention a fallback
+        // that would silently succeed at the wrong height.
+        let msg = HEAD_UNRESOLVED_ERR.to_lowercase();
+        assert!(msg.contains("unresolved"));
+        assert!(msg.contains("finality"));
+        assert!(msg.contains("genesis"));
+        assert!(!msg.contains("no chain connection"));
     }
 
     #[test]
