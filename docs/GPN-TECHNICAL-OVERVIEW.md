@@ -1,6 +1,6 @@
 # GPN — Technical Overview
 
-*Last updated: 2026-11-02 · See `GPN-WHITEPAPER.md` for the full paper; `GPN-MASTER-REFERENCE.md` for the single-doc reference. Verified against chain spec 45 / release 0.3.11.*
+*Last updated: 2026-11-09 · See `GPN-WHITEPAPER.md` for the full paper; `GPN-MASTER-REFERENCE.md` for the single-doc reference. Verified against chain spec 51 / release 0.3.31 — checked 2026-11-09 at block 271,943.*
 
 ## The model
 A GPN node is **one entity** — one GPU, one identity/wallet — and it is **always miner + AI provider**:
@@ -110,7 +110,7 @@ A **shielded pool** (Sapling-style commitments + nullifiers): **deposit** hides 
 
 ## Governance & upgrades
 - **The design:** a **5-member council with 3-of-5 approvals** governs root calls after a timelock (**3 days on mainnet**). Treasury *spending* is a **different body** — the 13-of-25 treasury spend roster.
-- **LIVE on testnet (spec 45; verified 2026-11-02, block 236144):** 5 members, **3 approvals required** (max 8), **10-block (~2 min) timelock** from the `testnet-fast-timelock` build. Governance hardening (spec 42) is **applied**. There is **no cancel/veto extrinsic** and no referendum / fast-track / preimage pallet track — an approved proposal cannot be recalled in the current runtime. The mainnet sudo key is inert; genesis is immutable; runtime upgrades go forklessly via `set_code`.
+- **LIVE on testnet (spec 51; governance values verified at spec 45, block 236,144, unchanged since):** 5 members, **3 approvals required** (max 8), **10-block (~2 min) timelock** from the `testnet-fast-timelock` build. Governance hardening (spec 42) is **applied**. There is **no cancel/veto extrinsic** and no referendum / fast-track / preimage pallet track — an approved proposal cannot be recalled in the current runtime. The mainnet sudo key is inert; genesis is immutable; runtime upgrades go forklessly via `set_code`.
 - **Testnet governance is a bootstrap, not a security guarantee** — it runs under operator control, and the testnet imposes **no member-count requirement**. Present 5/3-of-5 as the design, not as a rule the chain enforces.
 
 ## Network
@@ -129,4 +129,4 @@ Permissionless, redundant **access points**; **Bitcoin-style peer discovery** (p
 | **Governance hardening (spec 42)** | **APPLIED (testnet)** | 5-member council / 3-of-5 / 10-block testnet timelock; no cancel or referendum track; bootstrap, not a security guarantee |
 
 ---
-*Status (2026-11-02, spec 45 / 0.3.11):* live on a public testnet — chain, LLM/image/fine-tune marketplace, payment channels, shielded spends, on-chain discovery, public HTTPS API, node GUI + Idle, signed auto-update. *Next:* result verification, public CRS ceremony, mainnet (3-day governance timelock), bridge.
+*Status (2026-11-09, spec 51 / 0.3.31):* live on a public testnet — chain, LLM/image/fine-tune marketplace, payment channels, shielded spends, on-chain discovery, public HTTPS API, node GUI + Idle, signed auto-update. *Next:* result verification, public CRS ceremony, mainnet (3-day governance timelock), bridge.

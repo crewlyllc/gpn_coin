@@ -47,7 +47,7 @@
     <nav class="crumbs" aria-label="Breadcrumb"><a href="..">Home</a> / <a href="./">Docs</a> / <span>One-pager</span></nav>
     <article class="prose">
 <h1>GPN — One-Pager</h1>
-<p><em>Verified against: chain spec 45 / release 0.3.11 — checked 2026-11-02 at block 236,986.</em></p>
+<p><em>Verified against: chain spec 51 / release 0.3.31 — checked 2026-11-09 at block 271,943.</em></p>
 <p><em>Last updated: 2026-11-02</em></p>
 <p><strong>What it is.</strong> GPN is a <strong>GPU-native network</strong> where every node is <strong>miner <em>and</em> AI provider at the same time</strong> — it mines between jobs and serves one when it is assigned. One install, no manual re-listing.</p>
 <p><strong>The problem.</strong> A GPU owner has two ways to earn — mine a coin, or rent the card for AI work — and must <strong>pick one</strong>. Mine and the coin dips → you lose. Rent and nobody books you → $0. The card can't move to where the money is.</p>
@@ -81,7 +81,7 @@
 <p><strong>Privacy.</strong> A shielded pool supports private transfers and withdrawals (zero-knowledge spends; nullifier-based double-spend protection).</p>
 <p><strong>Where it is (2026-11-02, testnet — labelled honestly)</strong></p>
 <ul>
-<li><strong>LIVE</strong> — PoW chain with Bitcoin-style per-node rewards (spec 45, release 0.3.11, 15 s); <strong>text/LLM inference</strong> over the public HTTPS API; <strong>image generation</strong> (<code>POST /v1/images/generations</code>); <strong>fine-tuning</strong> (<code>POST /v1/finetunes</code>); per-token escrow + payment channels; on-chain provider discovery; shielded spends; peer discovery; node GUI + Idle; signed auto-update; <strong>free</strong> testnet inference.</li>
+<li><strong>LIVE</strong> — PoW chain with Bitcoin-style per-node rewards (spec 51, release 0.3.31, 15 s); <strong>text/LLM inference</strong> over the public HTTPS API; <strong>image generation</strong> (<code>POST /v1/images/generations</code>); <strong>fine-tuning</strong> (<code>POST /v1/finetunes</code>); per-token escrow + payment channels; on-chain provider discovery; shielded spends; peer discovery; node GUI + Idle; signed auto-update; <strong>free</strong> testnet inference.</li>
 <li><strong>BLOCKED</strong> — video (LTX) is implemented but has never completed: the T5-XXL encoder exceeds 8 GB of VRAM, and there is no public <code>/v1/videos</code> route.</li>
 <li><strong>INTERNAL</strong> — ML inference: an <code>MLInference</code> job type and an ML provider binary exist, but there is no ML-only public route and no completed job to point at.</li>
 <li><strong>GOVERNANCE — design:</strong> a <strong>5-member council with 3-of-5 approvals</strong>; treasury spending is a separate <strong>13-of-25 roster</strong>. <strong>What testnet actually runs (verified 2026-11-02, block 236144):</strong> the same 5 members, 3 approvals, and a <strong>10-block (~2 min) timelock</strong> (the mainnet design is 3 days). There is <strong>no cancel/veto extrinsic</strong> and no referendum track — an approved proposal cannot be recalled. Testnet governance is a <strong>bootstrap under operator control, not a security guarantee</strong>, and imposes <strong>no member-count requirement</strong>.</li>

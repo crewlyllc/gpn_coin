@@ -1,6 +1,6 @@
 # GPN — A GPU-Native Network for Mining and AI Compute
 
-*Verified against: chain spec 45 / release 0.3.11 — checked 2026-11-02 at block 236,986.*
+*Verified against: chain spec 51 / release 0.3.31 — checked 2026-11-09 at block 271,943.*
 
 **Whitepaper v0.96 (draft)** · GPN Network · **last updated 2026-10-22**
 
@@ -195,7 +195,7 @@ GPN includes a **shielded pool** with Sapling-style note commitments and nullifi
 
 ## 8. Governance and Upgrades
 
-### 8.1 What is live on chain today — spec 45
+### 8.1 What is live on chain today — spec 51
 
 - **Council governance.** A council proposes and executes **root** calls (e.g., fee splits, parameters) after a timelock — **no single key acts alone**. The mainnet sudo key is **inert**; governance is the council.
 - **The design: a 5-member council with 3-of-5 approvals.** Treasury *spending* is a separate body — the **13-of-25 treasury spend roster** — and must not be conflated with the council.
@@ -257,7 +257,7 @@ Operators who prefer to update by hand may: a node whose version falls below `mi
 
 ## 11. Roadmap
 
-- **Shipped and live on testnet:** PoW chain (spec 45, 15 s, 50 GPN/block) with Bitcoin-style per-node rewards; GPU-only, stake-free, work-verified eligibility; per-token escrow, cost-derived pricing, least-ms routing to idle providers, on-chain provider discovery, VRAM/RAM gates; payment channels; shielded spends; the liveness layer; peer discovery; the **public HTTPS AI API** (with a curated, VRAM-gated catalogue in the 0.3.11 line); the **node dashboard, Idle mode and signed auto-update**; the **on-chain GPU-hour price oracle feed** (bonded operator, live since 2026-10-22).
+- **Shipped and live on testnet:** PoW chain (spec 51, 15 s, 50 GPN/block) with Bitcoin-style per-node rewards; GPU-only, stake-free, work-verified eligibility; per-token escrow, cost-derived pricing, least-ms routing to idle providers, on-chain provider discovery, VRAM/RAM gates; payment channels; shielded spends; the liveness layer; peer discovery; the **public HTTPS AI API** (with a curated, VRAM-gated catalogue in the 0.3.31 line); the **node dashboard, Idle mode and signed auto-update**; the **on-chain GPU-hour price oracle feed** (bonded operator, live since 2026-10-22).
 - **Blocked:** video (LTX) — implementation exists but no job has completed on this fleet; the encoder exceeds 8 GB of VRAM and there is no public `/v1/videos` route.
 - **Applied on testnet:** the spec-42 governance hardening (§8.2) — 5-member council, 3-of-5, 14-day expiry, preimage proposals, hand-set weights.
 - **Next:** the public **CRS ceremony**; mainnet governance (3-day timelock); **client-side RTT** (user→nearest node); **mainnet** genesis and launch; a **cross-chain bridge** (post-mainnet). **Result verification** — any check that a returned completion is correct — is a roadmap item; nothing verifies output today.

@@ -1,15 +1,16 @@
 # Runtime upgrades on mainnet — the governance pipeline
 
-*Verified against: chain spec 45 / release 0.3.11 — checked 2026-11-02 at block 236,986.*
+*Verified against: chain spec 51 / release 0.3.31 — checked 2026-11-09 at block 271,943.*
 
 **Audience:** the GPN committee (proposers/approvers), the launch operator, and anyone
 verifying an upgrade happened correctly. **Status:** tool + runbook implemented and rehearsed;
 no runtime change has been applied by this work.
 
 > **Status (2026-11-02): everything described below is LIVE.** Governance hardening (spec 42),
-> symmetric retarget + optimistic claim (spec 43), the spec-44 payloads and spec 45 have all been
-> applied on the testnet chain — verified 2026-11-02 at block 236,144; the on-chain
-> `spec_version` is **45**. The separately-built artifacts named in earlier revisions of this page
+> symmetric retarget + optimistic claim (spec 43), the spec-44 payloads, spec 45 and the later
+> spec 46–51 runtimes (GPU identity, PoW entry, zero existential deposit, free entry, unsigned
+> entry) have all been applied on the testnet chain — re-checked 2026-11-09 at block 271,943; the
+> on-chain `spec_version` is **51**. The separately-built artifacts named in earlier revisions of this page
 > (`wasm/gpn_runtime_spec42_gov_hardening.compact.compressed.wasm`,
 > `wasm/gpn_runtime_spec43_retarget_clamp.compact.compressed.wasm`, 519 286 B,
 > `sha256 5604f140…d10cd`) are kept for the audit trail only.
@@ -392,7 +393,7 @@ create still pays one block wait, so the achievable e2e p50 is ~12–15 s. **5 s
 reachable at a 15 s target**; it needs a shorter target block time and/or more sealer capacity.
 
 **Ordering vs spec 42 (historical).** That artifact contained both changes; on the live chain
-(built up to spec 45) the hash-addressed preimage path exists, so `propose --mode inline` is the
+(built up to spec 51) the hash-addressed preimage path exists, so `propose --mode inline` is the
 legacy path rather than the only one. Kept as a record of how the upgrade was sequenced.
 and rebuild this artifact afterwards with `spec_version = 44` — never circulate two artifacts
 claiming the same `spec_version`.

@@ -47,7 +47,7 @@
     <nav class="crumbs" aria-label="Breadcrumb"><a href="..">Home</a> / <a href="./">Docs</a> / <span>Run a node</span></nav>
     <article class="prose">
 <h1>Run a node (single command)</h1>
-<p><em>Verified against: chain spec 45 / release 0.3.11 — checked 2026-11-02 at block 236,986.</em></p>
+<p><em>Verified against: chain spec 51 / release 0.3.31 — checked 2026-11-09 at block 271,943.</em></p>
 <p>GPN ships a <strong>single-node supervisor</strong>, <code>gpn_node</code>, so an operator runs <strong>one
 command</strong> and gets <strong>one node</strong> — the chain node/miner, the provider heartbeat,
 and the provider loop(s) — started, logged (one prefixed stream), monitored
@@ -241,7 +241,7 @@ into a mining rig. <code>./install.sh --no-autostart</code> skips the whole thin
 <p>Uninstalling the autostart never touches the chain DB or <code>keystore.json</code>.</p>
 <h3 id="check-the-version-all-options">Check the version / all options</h3>
 <pre><code>$ ./gpn_node --version
-gpn_node 0.3.11 (spec 45)
+gpn_node 0.3.31 (spec 51)
 
 $ ./gpn_node --help      # usage, --setup/--version/--help, key GPN_* env vars
 </code></pre>
@@ -1670,7 +1670,7 @@ GPN_AUTO_UPDATE=1 gpn_node
 </ul>
 <p><strong>The cutoff</strong> (not optional): every start — auto-update or not — the signed
 manifest's <code>min_version</code> is checked. Below it:</p>
-<pre><code>  !! UPGRADE REQUIRED — this node is 0.3.9, the network requires &gt;= 0.3.11
+<pre><code>  !! UPGRADE REQUIRED — this node is 0.3.28, the network requires &gt;= 0.3.31
   This node will SYNC ... but will NOT MINE and will NOT ANNOUNCE itself.
 </code></pre>
 <p>The supervisor launches the chain node with <code>--no-seed --no-discoverable</code> and

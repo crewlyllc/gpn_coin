@@ -1,6 +1,6 @@
 # GPN — MASTER REFERENCE (single-document review)
 
-*Verified against: chain spec 45 / release 0.3.11 — checked 2026-11-02 at block 236,986.*
+*Verified against: chain spec 51 / release 0.3.31 — checked 2026-11-09 at block 271,943.*
 
 **Project:** Project 7 — GPN, a GPU-native crypto + AI-compute network
 **Last updated:** 2026-10-22 · **Owner:** main / PM07
@@ -683,7 +683,7 @@ relayer/committee). Not yet built; see the artifact for the full design.
   median fallback, since Phase-A operators don't feed the on-chain bonded median); D4 10% slash
   BURNED; D5 fresh offline sudo key (testnet) + separate hot faucet key.
 
-### 11.1 Live governance parameters (spec 45 — verified 2026-11-02, block 236144)
+### 11.1 Live governance parameters (values verified at spec 45, block 236,144; the chain now runs spec 51 — the governance pallet has not changed since, specs 46–51 are identity/entry/ED changes)
 
 **The design:** a **5-member council with 3-of-5 approvals** governs Root calls after a timelock —
 **3 days on mainnet**. The **13-of-25** body is the **treasury spend roster** — a separate body,
@@ -741,7 +741,7 @@ survive a membership change; no preimage deposits; O(64) prune scan).
   `/ip4/23.241.109.255/tcp/30333/p2p/12D3KooW…`. (The old `12D3KooWRWv4…` on `:30334` is the retired
   Windows identity and must not be published.) Runs the **`gpn_node` supervisor** (mine + serve).
   All three multiaddrs come from `https://gpncoin.ai/seeds.json`.
-- **Chain:** on-chain **spec 45** (release 0.3.11; 2026-10-14 sudo-key-leak rotation applied on the
+- **Chain:** on-chain **spec 51** (release 0.3.31; 2026-10-14 sudo-key-leak rotation applied on the
   spec-41 runtime, later upgraded). History: **spec 13** = channels +
   capacity challenge + per-requestor cap + expiry sweep + root-only distributions · **spec 14** =
   block target 4→15 s + reward restored to 50 GPN · **spec 15** = shielded **spend** path (VK + `spend`
@@ -797,7 +797,7 @@ survive a membership change; no preimage deposits; O(64) prune scan).
 
 ## 14. Current state (2026-10-22)
 
-- **Chain:** PoW at **on-chain spec 45**, **15 s cadence**, **50 GPN/block**; hardened by the **red-team sweep** (~31 findings fixed). Public full nodes on the canonical chain — the Linux bootnode (`…:30333`) and a Windows box — registered in `network.json` + the website.
+- **Chain:** PoW at **on-chain spec 51**, **15 s cadence**, **50 GPN/block**; hardened by the **red-team sweep** (~31 findings fixed). Public full nodes on the canonical chain — the Linux bootnode (`…:30333`) and a Windows box — registered in `network.json` + the website.
 - **Node model (locked):** a node is **always miner + provider**. The **`gpn_node` supervisor** (one command) runs node + heartbeat + provider; the node **mines by default** (role forced to authority); **capacity = 1**; an accepted job **fully stops mining** then resumes (the GPU-yield). AMD support in progress (#27).
 - **Marketplace:** LLM **LIVE**; image **LIVE on the public route** (`POST /v1/images/generations`); video (LTX) **BLOCKED** (T5-XXL encoder > 8 GB VRAM); fine-tune **LIVE** (`POST /v1/finetunes`), ML inference internal only. Routing = capability → has-model → fastest-idle (busy excluded), transport **pull** (`GET /assignments` lease + `POST /result`); on-chain provider discovery; VRAM/RAM + min-GPU gates; payment channels; shielded spend; liveness layer; Bitcoin-style peer discovery. **No result verification exists** — output settles on the submitted result hash (roadmap).
 - **Public surface:** `https://gpncoin.ai/api/v1/*` (HTTPS, Worker-proxied, rate-limited, free on testnet). Live e2e is tens of seconds — create-inclusion bound (#49/#52), not inference.

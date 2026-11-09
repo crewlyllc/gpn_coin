@@ -1,6 +1,6 @@
 # Profitability oracle feed — how GPN prices are set (item #68)
 
-*Verified against: chain spec 45 / release 0.3.11 — checked 2026-11-02 at block 236,986.*
+*Verified against: chain spec 51 / release 0.3.31 — checked 2026-11-09 at block 271,943.*
 
 The scheduler turns a USD rate into a GPN charge with `gpn/tok = usd/tok ÷ token_price_usd`
 and (under `GPN_PRICING_MODEL=market`) anchors the GPU-hour price on

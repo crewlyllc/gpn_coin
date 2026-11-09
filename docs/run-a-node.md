@@ -1,6 +1,6 @@
 # Run a node (single command)
 
-*Verified against: chain spec 45 / release 0.3.11 — checked 2026-11-02 at block 236,986.*
+*Verified against: chain spec 51 / release 0.3.31 — checked 2026-11-09 at block 271,943.*
 
 GPN ships a **single-node supervisor**, `gpn_node`, so an operator runs **one
 command** and gets **one node** — the chain node/miner, the provider heartbeat,
@@ -300,7 +300,7 @@ Uninstalling the autostart never touches the chain DB or `keystore.json`.
 
 ```
 $ ./gpn_node --version
-gpn_node 0.3.11 (spec 45)
+gpn_node 0.3.31 (spec 51)
 
 $ ./gpn_node --help      # usage, --setup/--version/--help, key GPN_* env vars
 ```
@@ -1610,7 +1610,7 @@ GPN_AUTO_UPDATE=1 gpn_node
 manifest's `min_version` is checked. Below it:
 
 ```
-  !! UPGRADE REQUIRED — this node is 0.3.9, the network requires >= 0.3.11
+  !! UPGRADE REQUIRED — this node is 0.3.28, the network requires >= 0.3.31
   This node will SYNC ... but will NOT MINE and will NOT ANNOUNCE itself.
 ```
 

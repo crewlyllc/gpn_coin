@@ -1,6 +1,6 @@
 # GPN — One-Pager
 
-*Verified against: chain spec 45 / release 0.3.11 — checked 2026-11-02 at block 236,986.*
+*Verified against: chain spec 51 / release 0.3.31 — checked 2026-11-09 at block 271,943.*
 
 *Last updated: 2026-11-02*
 
@@ -41,7 +41,7 @@
 
 **Where it is (2026-11-02, testnet — labelled honestly)**
 
-- **LIVE** — PoW chain with Bitcoin-style per-node rewards (spec 45, release 0.3.11, 15 s); **text/LLM inference** over the public HTTPS API; **image generation** (`POST /v1/images/generations`); **fine-tuning** (`POST /v1/finetunes`); per-token escrow + payment channels; on-chain provider discovery; shielded spends; peer discovery; node GUI + Idle; signed auto-update; **free** testnet inference.
+- **LIVE** — PoW chain with Bitcoin-style per-node rewards (spec 51, release 0.3.31, 15 s); **text/LLM inference** over the public HTTPS API; **image generation** (`POST /v1/images/generations`); **fine-tuning** (`POST /v1/finetunes`); per-token escrow + payment channels; on-chain provider discovery; shielded spends; peer discovery; node GUI + Idle; signed auto-update; **free** testnet inference.
 - **BLOCKED** — video (LTX) is implemented but has never completed: the T5-XXL encoder exceeds 8 GB of VRAM, and there is no public `/v1/videos` route.
 - **INTERNAL** — ML inference: an `MLInference` job type and an ML provider binary exist, but there is no ML-only public route and no completed job to point at.
 - **GOVERNANCE — design:** a **5-member council with 3-of-5 approvals**; treasury spending is a separate **13-of-25 roster**. **What testnet actually runs (verified 2026-11-02, block 236144):** the same 5 members, 3 approvals, and a **10-block (~2 min) timelock** (the mainnet design is 3 days). There is **no cancel/veto extrinsic** and no referendum track — an approved proposal cannot be recalled. Testnet governance is a **bootstrap under operator control, not a security guarantee**, and imposes **no member-count requirement**.

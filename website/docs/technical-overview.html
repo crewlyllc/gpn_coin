@@ -47,7 +47,7 @@
     <nav class="crumbs" aria-label="Breadcrumb"><a href="..">Home</a> / <a href="./">Docs</a> / <span>Technical overview</span></nav>
     <article class="prose">
 <h1>GPN — Technical Overview</h1>
-<p><em>Last updated: 2026-11-02 · See <code>GPN-WHITEPAPER.md</code> for the full paper; <code>GPN-MASTER-REFERENCE.md</code> for the single-doc reference. Verified against chain spec 45 / release 0.3.11.</em></p>
+<p><em>Last updated: 2026-11-09 · See <code>GPN-WHITEPAPER.md</code> for the full paper; <code>GPN-MASTER-REFERENCE.md</code> for the single-doc reference. Verified against chain spec 51 / release 0.3.31 — checked 2026-11-09 at block 271,943.</em></p>
 <h2 id="the-model">The model</h2>
 <p>A GPN node is <strong>one entity</strong> — one GPU, one identity/wallet — and it is <strong>always miner + AI provider</strong>:
 it mines by default and serves an AI job when the access point assigns one. <em>(An optional </em><em>Staking</em><em>
@@ -176,7 +176,7 @@ conversion reads that bond-weighted median; only an unreadable chain falls back 
 <h2 id="governance-upgrades">Governance &amp; upgrades</h2>
 <ul>
 <li><strong>The design:</strong> a <strong>5-member council with 3-of-5 approvals</strong> governs root calls after a timelock (<strong>3 days on mainnet</strong>). Treasury <em>spending</em> is a <strong>different body</strong> — the 13-of-25 treasury spend roster.</li>
-<li><strong>LIVE on testnet (spec 45; verified 2026-11-02, block 236144):</strong> 5 members, <strong>3 approvals required</strong> (max 8), <strong>10-block (~2 min) timelock</strong> from the <code>testnet-fast-timelock</code> build. Governance hardening (spec 42) is <strong>applied</strong>. There is <strong>no cancel/veto extrinsic</strong> and no referendum / fast-track / preimage pallet track — an approved proposal cannot be recalled in the current runtime. The mainnet sudo key is inert; genesis is immutable; runtime upgrades go forklessly via <code>set_code</code>.</li>
+<li><strong>LIVE on testnet (spec 51; governance values verified at spec 45, block 236,144, unchanged since):</strong> 5 members, <strong>3 approvals required</strong> (max 8), <strong>10-block (~2 min) timelock</strong> from the <code>testnet-fast-timelock</code> build. Governance hardening (spec 42) is <strong>applied</strong>. There is <strong>no cancel/veto extrinsic</strong> and no referendum / fast-track / preimage pallet track — an approved proposal cannot be recalled in the current runtime. The mainnet sudo key is inert; genesis is immutable; runtime upgrades go forklessly via <code>set_code</code>.</li>
 <li><strong>Testnet governance is a bootstrap, not a security guarantee</strong> — it runs under operator control, and the testnet imposes <strong>no member-count requirement</strong>. Present 5/3-of-5 as the design, not as a rule the chain enforces.</li>
 </ul>
 <h2 id="network">Network</h2>
@@ -229,7 +229,7 @@ conversion reads that bond-weighted median; only an unreadable chain falls back 
 </tbody>
 </table>
 <hr />
-<p><em>Status (2026-11-02, spec 45 / 0.3.11):</em> live on a public testnet — chain, LLM/image/fine-tune marketplace, payment channels, shielded spends, on-chain discovery, public HTTPS API, node GUI + Idle, signed auto-update. <em>Next:</em> result verification, public CRS ceremony, mainnet (3-day governance timelock), bridge.</p>
+<p><em>Status (2026-11-09, spec 51 / 0.3.31):</em> live on a public testnet — chain, LLM/image/fine-tune marketplace, payment channels, shielded spends, on-chain discovery, public HTTPS API, node GUI + Idle, signed auto-update. <em>Next:</em> result verification, public CRS ceremony, mainnet (3-day governance timelock), bridge.</p>
     </article>
     <p class="doc-updated small muted">Last generated 2026-11-03 from the project documentation set.</p>
   </div>

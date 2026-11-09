@@ -48,7 +48,7 @@
     <div class="doc-notice" role="note">Whitepaper v0.96 is a draft. A node is always miner + AI provider: mining is the default and the GPU yields to an assigned job. See <a href='technical-overview'>Technical overview</a> for the shipped model.</div>
 <article class="prose">
 <h1>GPN — A GPU-Native Network for Mining and AI Compute</h1>
-<p><em>Verified against: chain spec 45 / release 0.3.11 — checked 2026-11-02 at block 236,986.</em></p>
+<p><em>Verified against: chain spec 51 / release 0.3.31 — checked 2026-11-09 at block 271,943.</em></p>
 <p><strong>Whitepaper v0.96 (draft)</strong> · GPN Network · <strong>last updated 2026-10-22</strong></p>
 <hr />
 <h2 id="abstract">Abstract</h2>
@@ -243,7 +243,7 @@ short completions. Exact two-rate settlement on-chain needs a pallet change (a s
 </ul>
 <hr />
 <h2 id="8-governance-and-upgrades">8. Governance and Upgrades</h2>
-<h3 id="81-what-is-live-on-chain-today-spec-45">8.1 What is live on chain today — spec 45</h3>
+<h3 id="81-what-is-live-on-chain-today-spec-51">8.1 What is live on chain today — spec 51</h3>
 <ul>
 <li><strong>Council governance.</strong> A council proposes and executes <strong>root</strong> calls (e.g., fee splits, parameters) after a timelock — <strong>no single key acts alone</strong>. The mainnet sudo key is <strong>inert</strong>; governance is the council.</li>
 <li><strong>The design: a 5-member council with 3-of-5 approvals.</strong> Treasury <em>spending</em> is a separate body — the <strong>13-of-25 treasury spend roster</strong> — and must not be conflated with the council.</li>
@@ -313,7 +313,7 @@ short completions. Exact two-rate settlement on-chain needs a pallet change (a s
 <hr />
 <h2 id="11-roadmap">11. Roadmap</h2>
 <ul>
-<li><strong>Shipped and live on testnet:</strong> PoW chain (spec 45, 15 s, 50 GPN/block) with Bitcoin-style per-node rewards; GPU-only, stake-free, work-verified eligibility; per-token escrow, cost-derived pricing, least-ms routing to idle providers, on-chain provider discovery, VRAM/RAM gates; payment channels; shielded spends; the liveness layer; peer discovery; the <strong>public HTTPS AI API</strong> (with a curated, VRAM-gated catalogue in the 0.3.11 line); the <strong>node dashboard, Idle mode and signed auto-update</strong>; the <strong>on-chain GPU-hour price oracle feed</strong> (bonded operator, live since 2026-10-22).</li>
+<li><strong>Shipped and live on testnet:</strong> PoW chain (spec 51, 15 s, 50 GPN/block) with Bitcoin-style per-node rewards; GPU-only, stake-free, work-verified eligibility; per-token escrow, cost-derived pricing, least-ms routing to idle providers, on-chain provider discovery, VRAM/RAM gates; payment channels; shielded spends; the liveness layer; peer discovery; the <strong>public HTTPS AI API</strong> (with a curated, VRAM-gated catalogue in the 0.3.31 line); the <strong>node dashboard, Idle mode and signed auto-update</strong>; the <strong>on-chain GPU-hour price oracle feed</strong> (bonded operator, live since 2026-10-22).</li>
 <li><strong>Blocked:</strong> video (LTX) — implementation exists but no job has completed on this fleet; the encoder exceeds 8 GB of VRAM and there is no public <code>/v1/videos</code> route.</li>
 <li><strong>Applied on testnet:</strong> the spec-42 governance hardening (§8.2) — 5-member council, 3-of-5, 14-day expiry, preimage proposals, hand-set weights.</li>
 <li><strong>Next:</strong> the public <strong>CRS ceremony</strong>; mainnet governance (3-day timelock); <strong>client-side RTT</strong> (user→nearest node); <strong>mainnet</strong> genesis and launch; a <strong>cross-chain bridge</strong> (post-mainnet). <strong>Result verification</strong> — any check that a returned completion is correct — is a roadmap item; nothing verifies output today.</li>

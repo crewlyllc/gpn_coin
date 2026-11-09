@@ -1,6 +1,6 @@
 # Updates — auto-update, the minimum-version cutoff, and release signing
 
-*Verified against: chain spec 45 / release 0.3.11 — checked 2026-11-02 at block 236,986.*
+*Verified against: chain spec 51 / release 0.3.31 — checked 2026-11-09 at block 271,943.*
 
 A GPN node is a **consensus participant**, so "run an old binary" is not a
 neutral choice: an out-of-date node can seal blocks that the rest of the network
@@ -738,11 +738,11 @@ verification is re-implemented.
 
 ```text
 $ gpn_update --check
-  current      0.3.11   /home/me/.local/bin/gpn_node
-  latest       0.3.12   published 2026-11-02T18:00:00Z
-  min_version  0.3.11   (supported)
-  asset        linux/x86_64 layout=bundle 317.1 MB sha256=a300453a…
-  -> update available: 0.3.12 (run `gpn_update --apply`)
+  current      0.3.30   /home/me/.local/bin/gpn_node
+  latest       0.3.31   published 2026-11-09T01:22:34Z
+  min_version  0.1.0    (supported)
+  asset        linux/x86_64 layout=bundle 324.2 MB sha256=13ad9e69…
+  -> update available: 0.3.31 (run `gpn_update --apply`)
 ```
 
 The version on the left is read from the **installed** `gpn_node` build stamp
@@ -991,7 +991,7 @@ auto-update is on (a manual updater still needs to be told). If
 
 ```
   ============================================================
-  !! UPGRADE REQUIRED — this node is 0.3.9, the network requires >= 0.3.11
+  !! UPGRADE REQUIRED — this node is 0.3.28, the network requires >= 0.3.31
   ============================================================
   This node will SYNC (so its data stays useful) but will NOT MINE and
   will NOT ANNOUNCE itself. An out-of-date node can otherwise produce blocks
