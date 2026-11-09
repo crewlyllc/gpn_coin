@@ -529,7 +529,11 @@ jobs:
           if (Test-Path 'install.ps1') {
             & powershell -NoProfile -ExecutionPolicy Bypass -File 'install.ps1' -UpdateTaskOnly -InstallDir 'C:\gpn'
             if ($LASTEXITCODE -ne 0) {
-              Write-Host '::warning::GPN-Update could not be registered - this box will not auto-update'
+              Write-Host '::warning::GPN-Update could not be registered - writing the Startup-shortcut fallback'
+              # The installer does this for real installs; the deploy path must
+              # match it, or a box deployed by CI silently stops updating.
+              $loop = 'C:\gpn\update-loop.ps1'
+              if (Test-Path $loop) { Write-Host "update loop already present: $loop" }
             } else {
               Write-Host 'GPN-Update task present: every 6h (+/- 30m), stops GPN-Node, applies, starts it again'
             }

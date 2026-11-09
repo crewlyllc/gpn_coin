@@ -8,17 +8,37 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
-## [0.3.30] - 2026-11-08
+## [0.3.31] - 2026-11-08
 
-No source changes: this cut exists so the shipped tree is at or ahead of every
-binary already running in an install directory.
+Bumped from 0.3.30 (`scripts/bump-version.py patch`). Describe the release before publishing it.
+
+### Added
+- _TODO_
+
+### Changed
+- _TODO_
 
 ### Fixed
-- **`gpn_update` retries a transient download failure** (#150). The bundle fetch
-  died on a single `HTTP 504` from GitHub's release-asset front end on
-  2026-11-08 00:55 and burned a six-hour update window. 5xx and transport
-  failures now get three attempts (2 s / 4 s backoff, journaled); every 4xx and
-  every hash/size mismatch still fails closed on the first try.
+- _TODO_
+
+## [0.3.30] - 2026-11-08
+
+The fleet stops needing a human at the keyboard.
+
+### Added
+- **`gpn_node --stop`** — stops every GPN process on the machine, children
+  included. Stopping the supervisor (or `schtasks /End`) leaves children holding
+  the GPU and ports 8093/8092; the next start then dies with `port-in-use` (75)
+  and looks like a broken node. That trap cost box 1 and box 2 an evening each.
+- **Update fallback without Task Scheduler.** When `schtasks /Create` is refused
+  (a standard account on box 2 and box 4), the installer now writes
+  `update-loop.ps1` plus a Startup shortcut that runs the same wrapper at logon
+  and then every ~6 h (±30 min jitter). A machine that cannot register the task
+  still updates itself.
+
+### Changed
+- The Linux release build reclaims the debug cargo profile after packaging: the
+  cache has filled the root filesystem four times (it halted the chain once).
 
 ## [0.3.29] - 2026-11-08
 

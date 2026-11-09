@@ -544,6 +544,51 @@ fn same_subnet_bootnodes(bootnodes: &[String]) -> Vec<String> {
     out
 }
 
+/// `--stop` — kill every GPN process on this machine, supervisor included.
+///
+/// Deliberately by NAME, not by PID file: a crashed supervisor leaves no usable
+/// pid file, and the whole point is to clean up after exactly that case.
+fn run_stop() -> i32 {
+    // Order matters: children first, so the supervisor cannot respawn them
+    // between two kills.
+    let children = [
+        "gpn_provider",
+        "gpn_provider_heartbeat",
+        "gpn_diffusion_provider",
+        "gpn_finetune",
+        "gpn_ml",
+        "gpn_scheduler",
+        "gpn-node",
+    ];
+    let mut killed = 0;
+    for name in children.iter().chain(["gpn_node"].iter()) {
+        let status = if cfg!(windows) {
+            std::process::Command::new("taskkill")
+                .args(["/F", "/IM", &format!("{name}.exe")])
+                .output()
+        } else {
+            std::process::Command::new("pkill")
+                .args(["-x", name])
+                .output()
+        };
+        match status {
+            Ok(o) if o.status.success() => {
+                asciiprintln!("[stop] {name}: stopped");
+                killed += 1;
+            }
+            Ok(_) => asciiprintln!("[stop] {name}: not running"),
+            Err(e) => asciiprintln!("[stop] {name}: could not signal ({e})"),
+        }
+    }
+    // Give the kernel a moment to release the ports before anyone restarts.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    asciiprintln!(
+        "[stop] done ({killed} process group(s) stopped). Start again with the launcher \
+         (start-node.cmd / systemctl --user start gpn-fleet)."
+    );
+    0
+}
+
 fn run_ensure_node_key(argv: &[String]) -> i32 {
     let path = argv
         .iter()
@@ -3881,6 +3926,16 @@ async fn main() {
     // printed "refusing to start a node with a shared/default identity" —
     // three wrong diagnoses in a row). File-system truth belongs here, where we
     // can open the file and read the actual OS error.
+    // `--stop`: end the WHOLE tree, not just the supervisor.
+    //
+    // Stopping the supervisor (or `schtasks /End`) leaves its children running:
+    // they keep the GPU and ports 9943/8092/8093 bound, so the next start dies
+    // with `port-in-use` (75) and the operator sees a node that "won't start"
+    // for no visible reason. That trap cost box 2 and box 1 an evening each.
+    if argv.iter().any(|a| a == "--stop") {
+        std::process::exit(run_stop());
+    }
+
     if argv.iter().any(|a| a == "--ensure-node-key")
         || env_str("GPN_ENSURE_NODE_KEY").as_deref() == Some("1")
     {

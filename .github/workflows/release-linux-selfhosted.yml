@@ -98,6 +98,20 @@ jobs:
             echo "- canonical wasm: \`$CANON_SHA\` (untouched)"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # 2026-11-08: the debug cache has filled the root filesystem four times
+      # (2026-10-19 it halted the chain). The prune timer exists now, but a
+      # release build is exactly when it grows — clean it as part of the build
+      # that created it, so the next build starts from a sane disk.
+      - name: reclaim the debug profile after packaging
+        if: always()
+        run: |
+          set -uo pipefail
+          df -h / | tail -1
+          for d in "$HOME/.ci-cache"/*/; do
+            [ -d "${d}debug" ] && rm -rf "${d}debug" && echo "removed ${d}debug"
+          done
+          df -h / | tail -1
+
       - name: publish GitHub Release (rolling 'linux-latest')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
