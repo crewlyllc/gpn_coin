@@ -1194,6 +1194,81 @@ fn attach_referral(body: &mut Value, code: Option<&str>) {
     }
 }
 
+/// #W49: the push thread → `/status` handoff. `None` = the last push landed.
+type PushState = std::sync::Arc<std::sync::Mutex<Option<PushBlocked>>>;
+
+/// #W49: why the signed push lane is not landing right now.
+///
+/// Written by the push thread, read by `/status`. Without it a provider whose
+/// heartbeats the access point rejects looks exactly like a provider that is
+/// simply broken (and exactly like one that is healthy, on every aggregate
+/// check that reads the AP's side): the failure only ever appeared as a
+/// rate-limited line in **this** process's journal, which nobody watches.
+#[derive(Clone, Debug, PartialEq)]
+struct PushBlocked {
+    /// Short machine-readable slug (`ap-rejected-unregistered`, …).
+    reason: String,
+    /// The raw error, for the operator.
+    detail: String,
+    /// When the loop will try again (unix secs). `0` = no retry (disabled).
+    retry_at: u64,
+}
+
+/// Map a push error string onto a reason slug.
+///
+/// The AP's status code is the most useful thing we know, so it decides the
+/// slug first: `403` is the "you are not a registered provider" answer, `503`
+/// is the resolver's cache-miss, `429` is the AP's own rate limiter — three
+/// very different operator actions, all of which used to log as the same
+/// generic `push failed`.
+fn classify_push_failure(err: &str) -> &'static str {
+    if let Some(code) = err.rsplit("AP returned ").next().and_then(|t| {
+        t.split(|c: char| !c.is_ascii_digit())
+            .next()
+            .and_then(|d| d.parse::<u16>().ok())
+    }) {
+        return match code {
+            401 | 403 => "ap-rejected-unregistered",
+            404 => "ap-endpoint-missing",
+            429 => "ap-rate-limited",
+            503 => "ap-lookup-pending",
+            500..=599 => "ap-server-error",
+            _ => "ap-rejected",
+        };
+    }
+    if err.contains("no local libp2p identity") {
+        "node-rpc-unreachable"
+    } else if err.contains("does not belong to the signer key") {
+        "address-signer-mismatch"
+    } else if err.contains("invalid JSON") {
+        "ap-rejected-invalid-json"
+    } else {
+        "ap-unreachable"
+    }
+}
+
+/// Render the operator-facing string: `ap-rejected-unregistered (retry in 4m)`.
+fn blocked_reason_text(b: &PushBlocked, now: u64) -> String {
+    if b.retry_at == 0 {
+        return b.reason.clone();
+    }
+    let secs = b.retry_at.saturating_sub(now);
+    let mins = secs.div_ceil(60).max(1);
+    format!("{} (retry in {}m)", b.reason, mins)
+}
+
+/// Attach `blocked_reason` (+ the raw detail) to a `/status` body.
+///
+/// Omitted entirely when the push lane is healthy, so a working provider's
+/// `/status` stays byte-identical — the same rule `attach_referral` follows.
+fn attach_blocked_reason(body: &mut Value, blocked: Option<&PushBlocked>, now: u64) {
+    if let Some(b) = blocked {
+        body["blocked_reason"] = json!(blocked_reason_text(b, now));
+        body["blocked_detail"] = json!(b.detail);
+        body["blocked_retry_at"] = json!(b.retry_at);
+    }
+}
+
 fn attach_p2p(body: &mut Value, info: Option<&P2pInfo>) {
     match info {
         Some(p2p) => {
@@ -1916,15 +1991,35 @@ fn run_main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     };
+    // #W49: shared with `/status` so a provider that is not landing says why.
+    let push_state: PushState = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let disable_push = |reason: &str, detail: String| {
+        eprintln!("[heartbeat] {detail}");
+        if let Ok(mut g) = push_state.lock() {
+            *g = Some(PushBlocked {
+                reason: reason.to_string(),
+                detail,
+                retry_at: 0,
+            });
+        }
+    };
     if !push_settings.enabled {
-        eprintln!("[heartbeat] push disabled (GPN_HEARTBEAT_PUSH)");
+        disable_push(
+            "push-disabled",
+            "push disabled (GPN_HEARTBEAT_PUSH)".to_string(),
+        );
     } else if push_signer.is_none() {
-        eprintln!(
-            "[heartbeat] no signer available (GPN_SIGNER / GPN_SIGNER_FILE) — push disabled, \
+        disable_push(
+            "push-disabled-no-signer",
+            "no signer available (GPN_SIGNER / GPN_SIGNER_FILE) — push disabled, \
              this node is poll-only (inbound :8093 required to be counted)"
+                .to_string(),
         );
     } else if push_ap_url.is_none() {
-        eprintln!("[heartbeat] no access point URL (GPN_AP_URL=) — push disabled");
+        disable_push(
+            "push-disabled-no-ap-url",
+            "no access point URL (GPN_AP_URL=) — push disabled".to_string(),
+        );
     }
     if let (Some(ap), Some(signer), Some(addr)) = (
         push_ap_url.clone(),
@@ -1938,6 +2033,7 @@ fn run_main() -> Result<(), Box<dyn std::error::Error>> {
         let hw_spec = hw_spec.clone();
         let settings = push_settings.clone();
         let interval = settings.interval_secs;
+        let state = push_state.clone();
         eprintln!(
             "[heartbeat] push enabled — ap={ap} interval={interval}s (±{}s jitter)",
             gpn_agent::provider_heartbeat::JITTER_SECS
@@ -1968,10 +2064,24 @@ fn run_main() -> Result<(), Box<dyn std::error::Error>> {
                     let hw = resolve_hardware(&hw_spec);
                     let (models_now, _) = ollama_models(&ollama, &fallback_models);
                     let models_now = vram_filter_logged(&models_now, hw.vram_mb);
-                    push_once(
+                    // #W49: record WHY the last push failed, so `/status` can
+                    // say "ap-rejected-unregistered (retry in 4m)" instead of
+                    // staying silent. Cleared the moment one push lands.
+                    let attempt = push_once(
                         &client, &ap, &signer, &addr, &peer, models_now, hw.vram_mb, capacity,
                         active, started_at,
-                    )
+                    );
+                    if let Ok(mut g) = state.lock() {
+                        *g = match &attempt {
+                            Ok(()) => None,
+                            Err(e) => Some(PushBlocked {
+                                reason: classify_push_failure(e).to_string(),
+                                detail: e.clone(),
+                                retry_at: now_secs().saturating_add(interval),
+                            }),
+                        };
+                    }
+                    attempt
                 },
                 std::thread::sleep,
             );
@@ -2135,6 +2245,10 @@ fn run_main() -> Result<(), Box<dyn std::error::Error>> {
                 // address. Omitted (not null) when unset — an old node's
                 // `/status` must stay byte-identical.
                 attach_referral(&mut body, referral_code.as_deref());
+                // #W49: "not serving" must stop looking identical to "broken".
+                // Omitted when the push lane is healthy (byte-identical JSON).
+                let blocked = push_state.lock().ok().and_then(|g| g.clone());
+                attach_blocked_reason(&mut body, blocked.as_ref(), now_secs());
                 (body, 200)
             }
             (Method::Get, "/health") => (json!({"status":"ok"}), 200),
@@ -2205,6 +2319,93 @@ mod tests {
             "a measured total of {mb} MiB is implausible — 0 is the only \
              allowed 'unknown' value"
         );
+    }
+
+    /// #W49: a provider the AP is rejecting must SAY so on `/status`.
+    #[test]
+    fn blocked_reason_names_the_ap_rejection_and_the_retry_window() {
+        let b = PushBlocked {
+            reason: classify_push_failure("POST http://ap/provider/heartbeat: AP returned 403")
+                .to_string(),
+            detail: "AP returned 403".to_string(),
+            retry_at: 1_000 + 240,
+        };
+        assert_eq!(b.reason, "ap-rejected-unregistered");
+        assert_eq!(
+            blocked_reason_text(&b, 1_000),
+            "ap-rejected-unregistered (retry in 4m)"
+        );
+        // Time passes → the window shrinks, never below 1m.
+        assert_eq!(
+            blocked_reason_text(&b, 1_200),
+            "ap-rejected-unregistered (retry in 1m)"
+        );
+        assert_eq!(
+            blocked_reason_text(&b, 5_000),
+            "ap-rejected-unregistered (retry in 1m)"
+        );
+        let mut body = json!({"address": "5Abc"});
+        attach_blocked_reason(&mut body, Some(&b), 1_000);
+        assert_eq!(
+            body["blocked_reason"],
+            json!("ap-rejected-unregistered (retry in 4m)")
+        );
+        assert_eq!(body["blocked_detail"], json!("AP returned 403"));
+    }
+
+    /// A healthy push lane must leave `/status` byte-identical.
+    #[test]
+    fn a_healthy_push_lane_adds_nothing_to_status() {
+        let mut body = json!({"address": "5Abc"});
+        let before = body.to_string();
+        attach_blocked_reason(&mut body, None, 1_000);
+        assert_eq!(body.to_string(), before);
+        assert_eq!(body.get("blocked_reason"), None);
+    }
+
+    /// Each AP answer is a different operator action, so each gets its own slug.
+    #[test]
+    fn push_failures_are_classified_by_cause() {
+        let cases = [
+            (
+                "POST http://ap/provider/heartbeat: AP returned 403",
+                "ap-rejected-unregistered",
+            ),
+            (
+                "POST http://ap/provider/heartbeat: AP returned 401",
+                "ap-rejected-unregistered",
+            ),
+            (
+                "POST http://ap/provider/heartbeat: AP returned 429",
+                "ap-rate-limited",
+            ),
+            (
+                "POST http://ap/provider/heartbeat: AP returned 503",
+                "ap-lookup-pending",
+            ),
+            (
+                "POST http://ap/provider/heartbeat: AP returned 500",
+                "ap-server-error",
+            ),
+            (
+                "no local libp2p identity yet (node RPC unreachable)",
+                "node-rpc-unreachable",
+            ),
+            (
+                "POST http://ap/provider/heartbeat: error sending request",
+                "ap-unreachable",
+            ),
+        ];
+        for (err, want) in cases {
+            assert_eq!(classify_push_failure(err), want, "{err}");
+        }
+        // A disabled lane has no retry window, so the text carries none.
+        let off = PushBlocked {
+            reason: "push-disabled-no-signer".to_string(),
+            detail: "no signer available".to_string(),
+            retry_at: 0,
+        };
+        assert_eq!(blocked_reason_text(&off, 1_000), "push-disabled-no-signer");
     }
 
     #[test]
