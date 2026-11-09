@@ -58,6 +58,41 @@ pub fn build(
     providers: &[DirProvider],
     seeds: &[KnownSeed],
 ) -> Value {
+    // Without a chain read the registration fact is unknown, not false.
+    build_with_chain(
+        generated_at,
+        self_peer_id,
+        live_peers,
+        providers,
+        seeds,
+        None,
+    )
+}
+
+/// Same as [`build`], but also publishes the **chain** registration fact.
+///
+/// The directory used to have one word for two independent questions:
+/// "registered" meant "the access point has this provider in its registry",
+/// which is *not* the same as "this account is in
+/// `ComputeMarketplace::RegisteredProviders`". A node that registered on chain
+/// and then never reached this access point was invisible, and a node the AP
+/// had seen was published as "registered" whether or not the chain agreed
+/// (2026-11-08, W50). Now every row carries both facts:
+///
+///   * `chain_registered: true|false|null` — chain registry, `null` when the
+///     read failed (never a negative answer out of a dead socket, #141/#144);
+///   * `seen_by_ap: true|false` — this access point holds a heartbeat record.
+///
+/// `onchain` is `None` when no chain read was attempted/allowed, so an older
+/// caller keeps exactly the old document plus `null`s.
+pub fn build_with_chain(
+    generated_at: &str,
+    self_peer_id: Option<&str>,
+    live_peers: Result<Vec<String>, String>,
+    providers: &[DirProvider],
+    seeds: &[KnownSeed],
+    onchain: Option<Result<Vec<String>, String>>,
+) -> Value {
     let stale = live_peers.is_err();
     let mut live_order: Vec<String> = Vec::new();
     let mut live_set = std::collections::HashSet::new();
@@ -118,6 +153,22 @@ pub fn build(
         .iter()
         .filter(|p| !p.address.trim().is_empty())
         .collect();
+    // ---- chain registry: an independent fact, never assumed ---------------
+    let mut onchain_set: Option<std::collections::HashSet<String>> = None;
+    let mut onchain_error: Option<String> = None;
+    match onchain {
+        Some(Ok(addrs)) => {
+            let set: std::collections::HashSet<String> = addrs
+                .iter()
+                .map(|a| crate::abuse::canonical_account(a))
+                .filter(|a| !a.is_empty())
+                .collect();
+            onchain_set = Some(set);
+        }
+        Some(Err(e)) => onchain_error = Some(e),
+        None => {}
+    }
+
     let mut provider_rows: Vec<Value> = Vec::new();
     let mut provider_index: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
@@ -138,6 +189,13 @@ pub fn build(
             "source": p.source,
             "reachability": p.reachability,
             "gateway": p.gateway,
+            // W50: two facts, two fields. `seen_by_ap` is true by construction
+            // (this row exists because the AP has a record), and
+            // `chain_registered` is what the chain says — or null.
+            "seen_by_ap": true,
+            "chain_registered": onchain_set
+                .as_ref()
+                .map(|s| s.contains(&crate::abuse::canonical_account(&p.address))),
         });
         match provider_index.get(&key) {
             // Same machine registered twice (e.g. two accounts, pull + push):
@@ -154,6 +212,41 @@ pub fn build(
             }
         }
     }
+
+    // ---- chain-only rows: registered on chain, never seen by this AP --------
+    //
+    // This is the row the old directory could not express at all. It carries no
+    // identity claim beyond the account (no peer id, no models, no address it
+    // was observed at), so it cannot inflate `serving_ai` — that counter keeps
+    // meaning "leaseable registrations the AP knows".
+    let mut chain_only: Vec<Value> = Vec::new();
+    if let Some(set) = onchain_set.as_ref() {
+        let seen: std::collections::HashSet<String> = identified
+            .iter()
+            .map(|p| crate::abuse::canonical_account(&p.address))
+            .collect();
+        let mut missing: Vec<&String> = set.iter().filter(|a| !seen.contains(*a)).collect();
+        missing.sort();
+        for addr in missing {
+            chain_only.push(json!({
+                "address": addr,
+                "peer_id": null,
+                "healthy": false,
+                "vram_mb": null,
+                "models": Vec::<String>::new(),
+                "multiaddrs": Vec::<String>::new(),
+                "last_seen_secs": null,
+                "status_url": "",
+                "source": "chain",
+                "reachability": "",
+                "gateway": false,
+                "seen_by_ap": false,
+                "chain_registered": true,
+            }));
+        }
+    }
+    let chain_only_count = chain_only.len();
+    provider_rows.extend(chain_only);
 
     // ---- classify ----------------------------------------------------------
     // `serving_ai` answers the registry question the page actually asks: how
@@ -207,9 +300,16 @@ pub fn build(
             "leaf_now": leaf_now,
             "gateways": gateways,
             "offline": known_offline.len(),
+            // W50: the two facts the page used to merge into one word.
+            "ap_seen_now": identified.len(),
+            "chain_registered_now": onchain_set.as_ref().map(|s| s.len()),
+            "chain_only_now": chain_only_count,
         },
         "stale": stale,
     });
+    if let Some(e) = onchain_error {
+        doc["chain_registered_error"] = json!(e);
+    }
     if let Some(e) = rpc_error {
         doc["error"] = json!(format!("chain RPC read failed: {e}"));
     }
@@ -419,6 +519,78 @@ mod tests {
         for s in doc["seeds"].as_array().unwrap() {
             assert_eq!(s["live"], false);
         }
+    }
+
+    #[test]
+    fn chain_registration_and_ap_visibility_are_two_facts() {
+        // W50: the page said "registered" for both. One provider is both
+        // chain-registered and AP-seen; a second account is registered on chain
+        // and has never reached this access point, so it must still be listed —
+        // with `seen_by_ap: false` — instead of vanishing.
+        let ap_addr = "5ENqSp5Q65bxfgryZExQDRnV1rEW1qb2UBztvswLamkoUrqj";
+        let unseen = "5HgbpiTYE27CtBQF7gRWLz6Qt3HBxyi4tR2M75FC1oydH48z";
+        let mut ap = provider(PEER_B, true, "http://198.51.100.7:8093");
+        ap.address = ap_addr.into();
+        let doc = build_with_chain(
+            "t",
+            None,
+            Ok(vec![PEER_B.into()]),
+            &[ap],
+            &[],
+            Some(Ok(vec![ap_addr.to_string(), unseen.to_string()])),
+        );
+        let rows = doc["providers"].as_array().unwrap();
+        assert_eq!(rows.len(), 2, "the chain-only account must be published");
+        let seen_row = rows.iter().find(|r| r["address"] == ap_addr).unwrap();
+        assert_eq!(seen_row["chain_registered"], true);
+        assert_eq!(seen_row["seen_by_ap"], true);
+        let unseen_row = rows.iter().find(|r| r["address"] == unseen).unwrap();
+        assert_eq!(unseen_row["chain_registered"], true);
+        assert_eq!(unseen_row["seen_by_ap"], false);
+        assert_eq!(unseen_row["peer_id"], Value::Null);
+        // Counters stay separate and `serving_ai` keeps its old meaning.
+        assert_eq!(doc["counts"]["serving_ai"], 1);
+        assert_eq!(doc["counts"]["ap_seen_now"], 1);
+        assert_eq!(doc["counts"]["chain_registered_now"], 2);
+        assert_eq!(doc["counts"]["chain_only_now"], 1);
+    }
+
+    #[test]
+    fn unreadable_chain_registry_is_null_never_false() {
+        // #141/#144: a failed read is "unknown", not "unregistered".
+        let mut ap = provider(PEER_B, true, "http://198.51.100.7:8093");
+        ap.address = "5ENqSp5Q65bxfgryZExQDRnV1rEW1qb2UBztvswLamkoUrqj".into();
+        let doc = build_with_chain(
+            "t",
+            None,
+            Ok(vec![PEER_B.into()]),
+            &[ap],
+            &[],
+            Some(Err("rpc timeout".into())),
+        );
+        assert_eq!(doc["providers"][0]["chain_registered"], Value::Null);
+        assert_eq!(doc["providers"][0]["seen_by_ap"], true);
+        assert_eq!(doc["counts"]["chain_registered_now"], Value::Null);
+        assert_eq!(doc["counts"]["chain_only_now"], 0);
+        assert!(doc["chain_registered_error"]
+            .as_str()
+            .unwrap()
+            .contains("rpc timeout"));
+    }
+
+    #[test]
+    fn build_without_a_chain_read_publishes_unknown_not_a_verdict() {
+        // `build` (the old entry point) must not invent a registration fact.
+        let doc = build(
+            "t",
+            None,
+            Ok(vec![]),
+            &[provider(PEER_B, true, "pull://x")],
+            &[],
+        );
+        assert_eq!(doc["providers"][0]["chain_registered"], Value::Null);
+        assert_eq!(doc["providers"][0]["seen_by_ap"], true);
+        assert_eq!(doc["counts"]["chain_registered_now"], Value::Null);
     }
 
     #[test]

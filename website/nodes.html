@@ -53,6 +53,7 @@
   /* Registered with the AP but its status URL is not publicly reachable:
      still leaseable, so still a provider — muted, not "broken". */
   .badge.registered { color: var(--accent-2); border-color: rgba(124,108,255,.4); background: rgba(124,108,255,.08); }
+  .badge.chain { color: var(--amber); border-color: rgba(240,166,58,.4); background: rgba(240,166,58,.05); }
   .badge.peer { color: var(--muted); border-color: var(--line); }
   .badge.offline { color: var(--amber); border-color: rgba(240,166,58,.4); background: rgba(240,166,58,.08); }
   .badge.cached { color: var(--muted); border-color: var(--line); }
@@ -147,23 +148,26 @@
 
       <div class="stats" id="summary">
         <div class="stat"><div class="v" id="c-live">…</div><div class="l">Peers online</div></div>
-        <div class="stat"><div class="v" id="c-serving">…</div><div class="l">AI providers (registered)</div></div>
+        <div class="stat"><div class="v" id="c-serving">…</div><div class="l">AI providers (access-point registry)</div></div>
+        <div class="stat"><div class="v" id="c-chain">…</div><div class="l">AI providers (registered on chain)</div></div>
         <div class="stat"><div class="v" id="c-healthy">…</div><div class="l">of those, status reachable now</div></div>
         <div class="stat"><div class="v" id="c-offline">…</div><div class="l">Offline (known)</div></div>
         <div class="stat"><div class="v tiny mono" id="c-generated">…</div><div class="l">Chain read at</div></div>
       </div>
       <p class="small muted counts-note" id="counts-note">Peers online counts distinct peer ids seen by the
-        network's node. <b>AI providers (registered)</b> counts provider registrations the access point knows
-        and can lease — a heartbeat that is not publicly reachable does not stop a node being a provider, it
-        only removes it from the second number. Offline rows are known seeds/providers that are <b>not</b>
-        connected right now.</p>
+        network's node. <b>Access-point registry</b> counts providers this access point has a heartbeat record
+        for; <b>registered on chain</b> counts accounts in <code>RegisteredProviders</code>. The two disagree on
+        purpose: a node can be registered on chain before any access point has seen it, and an access point can
+        hold a record for an account the chain no longer lists. Offline rows are known seeds/providers that are
+        <b>not</b> connected right now.</p>
 
       <h2 style="margin-top:34px">Nodes</h2>
       <p class="sub">One row per machine, deduped by <code>peer-id</code>: every GPN node is
-        <b>miner + AI provider</b>. A row reads <b>mining + serving</b> when its provider status URL is
-        reachable, <b>mining + provider registered</b> when the access point knows it but its status URL
-        is not publicly reachable, <b>connected</b> for a live peer with no provider registration yet, and
-        <b>offline</b> when a known seed or provider is not connected.</p>
+        <b>miner + AI provider</b>. <b>On chain + serving</b> means the account is in the chain's provider
+        registry <em>and</em> this access point can reach it right now; <b>on chain · AP hasn't seen it</b> means
+        the chain lists the account but no heartbeat has reached an access point yet; <b>AP-seen · not
+        reachable now</b> is the reverse; <b>connected</b> is a live peer with no provider registration yet, and
+        <b>offline</b> is a known seed or provider that is not connected.</p>
 
       <div class="table-wrap">
         <table class="dir-table" id="nodes-table">
@@ -443,7 +447,8 @@ GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code><
         byPeer.set(pid, {
           peer_id: pid, address: null, vram_mb: 0, models: [],
           multiaddrs: [], status_url: null, last_seen_secs: null,
-          registered: false, serving: false, seed: false
+          registered: false, serving: false, seed: false,
+          chain_registered: null, seen_by_ap: false
         });
       }
       return byPeer.get(pid);
@@ -451,6 +456,22 @@ GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code><
 
     (Array.isArray(doc.providers) ? doc.providers : []).forEach(function (p) {
       if (!p || typeof p !== "object") return;
+      // W50: `chain_registered` (chain registry) and `seen_by_ap` (this access
+      // point has a record) are independent. `null` means unknown, never "no".
+      var chainReg = p.chain_registered === true ? true
+        : (p.chain_registered === false ? false : null);
+      if (p.seen_by_ap === false) {
+        // Registered on chain, never seen by an access point: its own row, and
+        // it must not be counted as leaseable until a heartbeat arrives.
+        anonymous.push({
+          peer_id: null, address: p.address || null, vram_mb: 0,
+          models: Array.isArray(p.models) ? p.models : [],
+          multiaddrs: [], status_url: null, last_seen_secs: null,
+          serving: false, registered: false, seeded: false,
+          chain_registered: chainReg, seen_by_ap: false, live: null
+        });
+        return;
+      }
       if (!p.peer_id) {
         // Healthy provider that publishes no peer id: still serving, but it
         // cannot be matched to a peer, so it is its own row.
@@ -460,13 +481,16 @@ GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code><
             models: Array.isArray(p.models) ? p.models : [],
             multiaddrs: [], status_url: p.status_url || null,
             last_seen_secs: p.last_seen_secs != null ? p.last_seen_secs : null,
-            serving: true, registered: true, seed: false, live: null
+            serving: true, registered: true, seed: false, live: null,
+            chain_registered: chainReg, seen_by_ap: true
           });
         }
         return;
       }
       var r = ensure(p.peer_id);
       r.registered = true;
+      r.seen_by_ap = true;
+      if (chainReg !== null) r.chain_registered = chainReg;
       if (p.address) r.address = p.address;
       if (p.vram_mb) r.vram_mb = p.vram_mb;
       if (Array.isArray(p.models) && p.models.length) r.models = p.models;
@@ -497,15 +521,16 @@ GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code><
       r.live = live.has(r.peer_id);
       if (r.serving) r.status = "serving";
       else if (r.registered) r.status = "registered";
+      else if (r.chain_registered === true) r.status = "chain";
       else if (r.live) r.status = "connected";
       else r.status = "offline";
       rows.push(r);
     });
     rows = rows.concat(anonymous);
 
-    // Live rows first, and inside them: reachable provider, registered
-    // provider, plain peer.
-    var order = { serving: 0, registered: 1, connected: 2, offline: 3 };
+    // Live rows first, and inside them: reachable provider, AP-seen provider,
+    // chain-registered but AP-unseen, plain peer.
+    var order = { serving: 0, registered: 1, chain: 2, connected: 3, offline: 4 };
     rows.sort(function (a, b) {
       var d = (order[a.status] == null ? 3 : order[a.status]) - (order[b.status] == null ? 3 : order[b.status]);
       if (d) return d;
@@ -525,10 +550,11 @@ GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code><
   // (a live peer with no provider registration) is a temporary state, never a
   // verdict — and "peer only" is deliberately never printed.
   var BADGE = {
-    serving: "mining + serving",
-    "serving-unpeered": "mining + serving (not peered)",
-    "registered": "mining + provider registered",
-    connected: "connected",
+    serving: "on chain + serving",
+    "serving-unpeered": "on chain + serving (not peered)",
+    "registered": "AP-seen · not reachable now",
+    chain: "on chain · AP hasn't seen it",
+    connected: "connected · no provider registration",
     offline: "offline"
   };
   function statusBadge(status, cached) {
@@ -540,8 +566,12 @@ GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code><
     var label = cached ? "cached" : (BADGE[status] || status);
     b.appendChild(document.createTextNode(label));
     if (status === "registered") {
-      b.title = "Registered with the access point and leaseable; its status URL is not publicly " +
-        "reachable from here, so this count does not include it as reachable-now.";
+      b.title = "The access point holds a heartbeat record for this provider, but its status URL is not " +
+        "publicly reachable from here, so it is not counted as reachable-now.";
+    }
+    if (status === "chain") {
+      b.title = "The account is in the chain's provider registry (ComputeMarketplace::RegisteredProviders), " +
+        "but no heartbeat has reached an access point yet — so it has not been leased any work.";
     }
     return b;
   }
@@ -553,6 +583,10 @@ GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code><
     var offline = counts && counts.offline != null ? counts.offline : null;
     setText($("c-live"), stale ? "?" : live);
     setText($("c-serving"), serving);
+    // W50: the chain registry is its own number, and `null` (unknown/unreadable)
+    // is printed as a dash — never as zero.
+    var chainReg = counts && counts.chain_registered_now != null ? counts.chain_registered_now : null;
+    setText($("c-chain"), chainReg == null ? "—" : chainReg);
     // Older /api/network documents have no healthy_now; show a dash rather
     // than inventing a number.
     setText($("c-healthy"), healthy == null ? "—" : healthy);
@@ -677,6 +711,7 @@ GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code><
 
     setText($("c-live"), "?");
     setText($("c-serving"), "?");
+    setText($("c-chain"), "?");
     setText($("c-healthy"), "?");
     setText($("c-offline"), "?");
     setText($("c-generated"), "unknown");

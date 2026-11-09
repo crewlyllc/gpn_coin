@@ -5004,13 +5004,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let me = client.system_local_peer_id().await.ok();
                             (live, me)
                         });
+                    // W50: the chain's own provider registry — a different fact
+                    // from "this access point has seen a heartbeat". Bounded like
+                    // every other chain read; `None` (timeout) or `Err` publishes
+                    // `chain_registered: null`, never "nobody is registered".
+                    let onchain = deadline.block(&rt, client.list_registered_providers());
                     let ts = gpn_agent::join::iso8601(now_secs());
-                    gpn_agent::network_directory::build(
+                    gpn_agent::network_directory::build_with_chain(
                         &ts,
                         self_id.as_deref(),
                         live,
                         &providers,
                         &seeds,
+                        onchain,
                     )
                 }
                 (Method::Get, ["providers"]) => {

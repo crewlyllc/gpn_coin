@@ -13,11 +13,14 @@ const NETWORK = JSON.parse(readFileSync(join(SITE, "..", "network.json"), "utf8"
 
 test("the headline counts container exists with the four numbers", () => {
   assert.match(PAGE, /id="summary"/);
-  for (const id of ["c-live", "c-serving", "c-healthy", "c-offline"]) {
+  for (const id of ["c-live", "c-serving", "c-chain", "c-healthy", "c-offline"]) {
     assert.match(PAGE, new RegExp(`id="${id}"`));
   }
   assert.match(PAGE, /Peers online/);
-  assert.match(PAGE, /AI providers \(registered\)/);
+  // W50: "registered" is two facts, so the page must not print one number for
+  // both. The old single label is gone on purpose.
+  assert.match(PAGE, /AI providers \(access-point registry\)/);
+  assert.match(PAGE, /AI providers \(registered on chain\)/);
   assert.match(PAGE, /status reachable now/);
   assert.match(PAGE, /Offline/);
 });
@@ -59,9 +62,9 @@ test("the baked cached list matches network.json's bootnodes", () => {
   }
 });
 
-test("the page dedupes rows by peer id and knows the four statuses", () => {
+test("the page dedupes rows by peer id and knows the five statuses", () => {
   assert.match(PAGE, /byPeer\.get/);
-  for (const s of ["serving", "registered", "connected", "offline"]) {
+  for (const s of ["serving", "registered", "chain", "connected", "offline"]) {
     assert.match(PAGE, new RegExp(`"${s}"`));
   }
   // "peer only" was a verdict the product does not have: every GPN node is a
@@ -75,6 +78,8 @@ test("a registered provider that is not reachable is not counted as non-serving"
   // serving_ai is the registry count; healthy_now is the reachability sub-count.
   assert.match(PAGE, /counts\.serving_ai/);
   assert.match(PAGE, /counts\.healthy_now/);
-  assert.match(PAGE, /mining \+ provider registered/);
-  assert.match(PAGE, /mining \+ serving/);
+  // W50: the two registration facts are named separately in the badges.
+  assert.match(PAGE, /AP-seen · not reachable now/);
+  assert.match(PAGE, /on chain \+ serving/);
+  assert.match(PAGE, /chain_registered_now/);
 });

@@ -2281,6 +2281,48 @@ impl ChainClient {
             .map(|v| v.is_some())
     }
 
+    /// Enumerate every account in `ComputeMarketplace::RegisteredProviders`.
+    ///
+    /// This is the **chain** answer to "is this a provider", as opposed to the
+    /// access point's own registry, which only knows providers it has seen
+    /// heartbeats from. W50: the public directory published one word
+    /// ("registered") for both facts, so an account that registered on chain
+    /// and never reached the AP was invisible, and an AP-seen account looked
+    /// registered even if the chain disagreed.
+    ///
+    /// Returns `Err` when the read fails — a dead socket must never be
+    /// published as "nobody is registered" (#141/#144 three-state rule).
+    /// Addresses come back in ss58 (the form every other surface uses).
+    pub async fn list_registered_providers(&self) -> Result<Vec<String>, String> {
+        let Some(client) = self.current_client() else {
+            return Err("no chain client".to_string());
+        };
+        let addr = subxt::dynamic::storage("ComputeMarketplace", "RegisteredProviders", vec![]);
+        let Some(hash) = self.head_block_hash().await else {
+            return Err("no head block hash".to_string());
+        };
+        let mut stream = client
+            .storage()
+            .at(hash)
+            .iter(addr)
+            .await
+            .map_err(|e| format!("RegisteredProviders iter: {e}"))?;
+        let mut out: Vec<String> = Vec::new();
+        while let Some(kv) = stream.next().await {
+            let kv = kv.map_err(|e| format!("RegisteredProviders stream: {e}"))?;
+            let Some(key) = kv.keys.first() else {
+                continue;
+            };
+            let who = crate::abuse::canonical_account(&account_id_to_string(key));
+            if !who.is_empty() {
+                out.push(who);
+            }
+        }
+        out.sort();
+        out.dedup();
+        Ok(out)
+    }
+
     /// Enumerate every provider's **on-chain advertised endpoint** from
     /// `ComputeMarketplace::ProviderEndpoints`, as `(hex account, url)`.
     ///
