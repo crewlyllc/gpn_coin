@@ -90,17 +90,17 @@ set "GPN_FS_TMP=%TEMP%\gpn-fast-sync-%RANDOM%%RANDOM%"
 mkdir "%GPN_FS_TMP%" >nul 2>&1
 where curl.exe >nul 2>&1
 if errorlevel 1 (
-  echo [gpn] fast sync unavailable (curl.exe not found) - falling back to a normal full peer sync.
+  echo [gpn] fast sync unavailable [curl.exe not found] - falling back to a normal full peer sync.
   goto :gpn_fast_sync_cleanup
 )
 curl.exe -fsSL --connect-timeout 15 --max-time 60 -o "%GPN_FS_TMP%\snapshot.json" "%GPN_SNAPSHOT_META_URL%"
 if errorlevel 1 (
-  echo [gpn] fast sync unavailable (snapshot metadata not available) - falling back to a normal full peer sync.
+  echo [gpn] fast sync unavailable [snapshot metadata not available] - falling back to a normal full peer sync.
   goto :gpn_fast_sync_cleanup
 )
 "%GPN_BIN%\gpn_snapshot.exe" verify --meta "%GPN_FS_TMP%\snapshot.json" > "%GPN_FS_TMP%\verify.txt" 2>&1
 if errorlevel 1 (
-  echo [gpn] fast sync unavailable (snapshot metadata failed verification) - falling back to a normal full peer sync.
+  echo [gpn] fast sync unavailable [snapshot metadata failed verification] - falling back to a normal full peer sync.
   goto :gpn_fast_sync_cleanup
 )
 set "GPN_SNAP_SIZE="
@@ -110,35 +110,35 @@ for /f "tokens=1,* delims==" %%A in ('findstr /b "block=" "%GPN_FS_TMP%\verify.t
 echo [gpn] weekly snapshot: block %GPN_SNAP_BLOCK%, %GPN_SNAP_SIZE% bytes - downloading...
 for /f "delims=" %%F in ('powershell -NoProfile -Command "if ((Get-Item '%GPN_BASE_PATH%').PSDrive.Free -lt ([int64]%GPN_SNAP_SIZE% * 3)) { 'low' } else { 'ok' }"') do set "GPN_SPACE=%%F"
 if not "%GPN_SPACE%"=="ok" (
-  echo [gpn] fast sync skipped (free space is less than 3x the snapshot size).
+  echo [gpn] fast sync skipped [free space is less than 3x the snapshot size].
   goto :gpn_fast_sync_cleanup
 )
 curl.exe -fL --retry 2 --retry-delay 2 --connect-timeout 15 --max-time 3600 -o "%GPN_FS_TMP%\snap.tar.gz" "%GPN_SNAPSHOT_URL%"
 if errorlevel 1 (
-  echo [gpn] fast sync unavailable (snapshot download failed) - falling back to a normal full peer sync.
+  echo [gpn] fast sync unavailable [snapshot download failed] - falling back to a normal full peer sync.
   goto :gpn_fast_sync_cleanup
 )
 "%GPN_BIN%\gpn_snapshot.exe" verify --meta "%GPN_FS_TMP%\snapshot.json" --snapshot "%GPN_FS_TMP%\snap.tar.gz"
 if errorlevel 1 (
-  echo [gpn] fast sync unavailable (downloaded bytes failed verification) - falling back to a normal full peer sync.
+  echo [gpn] fast sync unavailable [downloaded bytes failed verification] - falling back to a normal full peer sync.
   goto :gpn_fast_sync_cleanup
 )
 "%GPN_BIN%\gpn_snapshot.exe" import --snapshot "%GPN_FS_TMP%\snap.tar.gz" --base-path "%GPN_FS_TMP%\stage" --pruning archive
 if errorlevel 1 (
-  echo [gpn] fast sync unavailable (snapshot import failed) - falling back to a normal full peer sync.
+  echo [gpn] fast sync unavailable [snapshot import failed] - falling back to a normal full peer sync.
   goto :gpn_fast_sync_cleanup
 )
 if not exist "%GPN_FS_TMP%\stage\chains" (
-  echo [gpn] fast sync unavailable (import produced no chain DB) - falling back to a normal full peer sync.
+  echo [gpn] fast sync unavailable [import produced no chain DB] - falling back to a normal full peer sync.
   goto :gpn_fast_sync_cleanup
 )
 if exist "%GPN_BASE_PATH%\chains" (
-  echo [gpn] fast sync unavailable (a chain DB appeared during import) - not overwriting it.
+  echo [gpn] fast sync unavailable [a chain DB appeared during import] - not overwriting it.
   goto :gpn_fast_sync_cleanup
 )
 move "%GPN_FS_TMP%\stage\chains" "%GPN_BASE_PATH%\chains" >nul
 if errorlevel 1 (
-  echo [gpn] fast sync unavailable (could not move the imported DB) - falling back to a normal full peer sync.
+  echo [gpn] fast sync unavailable [could not move the imported DB] - falling back to a normal full peer sync.
   goto :gpn_fast_sync_cleanup
 )
 if exist "%GPN_FS_TMP%\stage\.gpn-pruning-archive" move "%GPN_FS_TMP%\stage\.gpn-pruning-archive" "%GPN_BASE_PATH%\.gpn-pruning-archive" >nul 2>&1
@@ -158,7 +158,7 @@ REM  A GPN node mines without it, but CANNOT serve LLM jobs until Ollama runs.
 where ollama >nul 2>nul
 if errorlevel 1 (
   echo [gpn] Ollama NOT found - the node will MINE but cannot serve LLM jobs.
-  echo [gpn]   install:  winget install Ollama.Ollama   ^(or: powershell -ExecutionPolicy Bypass -File scripts\install-ollama.ps1^)
+  echo [gpn]   install:  winget install Ollama.Ollama   ^[or: powershell -ExecutionPolicy Bypass -File scripts\install-ollama.ps1^]
   echo [gpn]   then:     ollama serve  ^^&^&  ollama pull llama3.2:1b
 ) else (
   echo [gpn] Ollama found - ensuring it is running...
