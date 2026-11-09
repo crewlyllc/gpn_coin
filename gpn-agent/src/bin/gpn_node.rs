@@ -546,45 +546,86 @@ fn same_subnet_bootnodes(bootnodes: &[String]) -> Vec<String> {
 
 /// `--stop` — kill every GPN process on this machine, supervisor included.
 ///
-/// Deliberately by NAME, not by PID file: a crashed supervisor leaves no usable
-/// pid file, and the whole point is to clean up after exactly that case.
+/// By PREFIX, not by a list of names. The first version enumerated exact names
+/// (`gpn_provider`, `gpn_finetune`, …) and reported "not running" for a tree of
+/// four live children whose real names are `gpn_llm_provider`,
+/// `gpn_finetune_provider`, `gpn_ml_provider`, `gpn_provider_status` — a stop
+/// command that says "nothing to stop" while files stay locked is worse than no
+/// command at all (box 1, 2026-11-09).
 fn run_stop() -> i32 {
-    // Order matters: children first, so the supervisor cannot respawn them
-    // between two kills.
-    let children = [
-        "gpn_provider",
-        "gpn_provider_heartbeat",
-        "gpn_diffusion_provider",
-        "gpn_finetune",
-        "gpn_ml",
-        "gpn_scheduler",
-        "gpn-node",
-    ];
-    let mut killed = 0;
-    for name in children.iter().chain(["gpn_node"].iter()) {
+    let me = std::process::id();
+
+    // Enumerate via the OS, then kill by PID: names are whoever wrote them.
+    let listing = if cfg!(windows) {
+        std::process::Command::new("tasklist")
+            .args(["/FO", "CSV", "/NH"])
+            .output()
+    } else {
+        std::process::Command::new("ps")
+            .args(["-eo", "pid=,comm="])
+            .output()
+    };
+
+    let mut targets: Vec<(u32, String)> = Vec::new();
+    if let Ok(out) = listing {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let (pid_s, name) = if cfg!(windows) {
+                // "gpn_node.exe","22852","Console","1","12,345 K"
+                let cols: Vec<String> = line
+                    .split(',')
+                    .map(|c| c.trim_matches('"').to_string())
+                    .collect();
+                (cols.first().cloned(), cols.get(1).cloned())
+            } else {
+                let mut it = line.split_whitespace();
+                (
+                    it.next().map(|s| s.to_string()),
+                    it.next().map(|s| s.to_string()),
+                )
+            };
+            let (Some(pid_s), Some(name)) = (pid_s, name) else {
+                continue;
+            };
+            if !name.to_ascii_lowercase().starts_with("gpn") {
+                continue;
+            }
+            if let Ok(pid) = pid_s.trim().parse::<u32>() {
+                if pid != me {
+                    targets.push((pid, name));
+                }
+            }
+        }
+    }
+
+    if targets.is_empty() {
+        asciiprintln!("[stop] no gpn* process is running");
+        return 0;
+    }
+
+    // Children first: the supervisor respawns anything it still owns.
+    targets.sort_by_key(|(_, n)| n.to_ascii_lowercase().contains("gpn_node"));
+    for (pid, name) in &targets {
         let status = if cfg!(windows) {
             std::process::Command::new("taskkill")
-                .args(["/F", "/IM", &format!("{name}.exe")])
+                .args(["/F", "/PID", &pid.to_string()])
                 .output()
         } else {
-            std::process::Command::new("pkill")
-                .args(["-x", name])
+            std::process::Command::new("kill")
+                .args(["-9", &pid.to_string()])
                 .output()
         };
         match status {
-            Ok(o) if o.status.success() => {
-                asciiprintln!("[stop] {name}: stopped");
-                killed += 1;
+            Ok(o) if o.status.success() => asciiprintln!("[stop] {name} (pid {pid}): stopped"),
+            Ok(_) => {
+                asciiprintln!("[stop] {name} (pid {pid}): could not stop (in use or not ours)")
             }
-            Ok(_) => asciiprintln!("[stop] {name}: not running"),
-            Err(e) => asciiprintln!("[stop] {name}: could not signal ({e})"),
+            Err(e) => asciiprintln!("[stop] {name} (pid {pid}): could not signal ({e})"),
         }
     }
-    // Give the kernel a moment to release the ports before anyone restarts.
     std::thread::sleep(std::time::Duration::from_millis(1500));
     asciiprintln!(
-        "[stop] done ({killed} process group(s) stopped). Start again with the launcher \
-         (start-node.cmd / systemctl --user start gpn-fleet)."
+        "[stop] {} process(es) stopped. Start again with the launcher.",
+        targets.len()
     );
     0
 }
