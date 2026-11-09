@@ -19,8 +19,11 @@
 //!
 //! `vram_mb`/`ram_mb` advertise this box's hardware so the scheduler can gate a
 //! job that declares a VRAM/RAM floor (item 14 — e.g. video needs a big-VRAM box).
-//! They are auto-detected (nvidia-smi / /proc/meminfo) and can be overridden with
-//! `--vram-mb`/`--ram-mb` (env `VRAM_MB`/`RAM_MB`); 0 = unknown (not advertised).
+//! They are auto-detected (nvidia-smi / /proc/meminfo on Linux, nvidia-smi /
+//! GlobalMemoryStatusEx on Windows) and can be overridden with
+//! `--vram-mb`/`--ram-mb` (env `VRAM_MB`/`RAM_MB`); **0 = unknown and is
+//! published as `null`, never as `0`** — a `0` would read as a measured fact
+//! ("no RAM") and fail every floor, a `null` says "this box did not measure it".
 //!
 //! `gpu_class` (`discrete`|`integrated`|`unknown`) + `tflops` advertise whether
 //! this box has a real (discrete) GPU (item 19 — a CPU/APU integrated GPU must
@@ -366,10 +369,10 @@ fn log_unmeasured(hw: &Hardware) {
         }
     }
     if hw.vram_mb == 0 {
-        note("[status] vram_mb=0 (unmeasurable — not advertised; the VRAM model gate is off)");
+        note("[status] vram_mb=0 (unmeasurable — published as null; the VRAM model gate is off)");
     }
     if hw.ram_mb == 0 {
-        note("[status] ram_mb=0 (unmeasurable — not advertised)");
+        note("[status] ram_mb=0 (unmeasurable — published as null, no RAM floor can be met)");
     }
     if hw.tflops <= 0.0 {
         note("[status] tflops=0 (GPU capability unmeasurable — a job with min_tflops cannot be routed here)");
@@ -1529,8 +1532,38 @@ fn ollama_models_uncached(base: &str, fallback: &[String]) -> (Vec<String>, bool
     }
 }
 
-/// Total system RAM (MiB) from `/proc/meminfo`; 0 if unknown (e.g. Windows).
+/// Total system RAM (MiB); 0 if unknown.
+///
+/// Linux reads `/proc/meminfo`; Windows asks `GlobalMemoryStatusEx`. Before
+/// #W48 this was Linux-only, so every Windows provider published `ram_mb: 0`
+/// — indistinguishable from "this box has no RAM" and enough to fail every
+/// `min_ram_mb` floor. 0 still means *unmeasured*, and the heartbeat now says
+/// `null` for it rather than `0`.
 fn detect_ram_mb() -> u64 {
+    #[cfg(windows)]
+    {
+        return detect_ram_mb_windows();
+    }
+    #[cfg(not(windows))]
+    detect_ram_mb_unix()
+}
+
+#[cfg(windows)]
+fn detect_ram_mb_windows() -> u64 {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut st: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    st.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+    // SAFETY: `st` is a correctly-sized, zeroed MEMORYSTATUSEX and we check the
+    // BOOL result before reading the fields it fills in.
+    let ok = unsafe { GlobalMemoryStatusEx(&mut st) };
+    if ok == 0 {
+        return 0;
+    }
+    st.ullTotalPhys / (1024 * 1024)
+}
+
+#[cfg(not(windows))]
+fn detect_ram_mb_unix() -> u64 {
     if let Ok(s) = std::fs::read_to_string("/proc/meminfo") {
         for line in s.lines() {
             if let Some(rest) = line.strip_prefix("MemTotal:") {
@@ -1545,6 +1578,20 @@ fn detect_ram_mb() -> u64 {
         }
     }
     0
+}
+
+/// `Some(v)` only when the box actually measured `v`.
+///
+/// An unmeasured hardware field must publish `null`, never `0`: `0` reads as a
+/// fact ("this box has no RAM / no GPU memory") and silently fails every
+/// `min_vram_mb`/`min_ram_mb` floor, while `null` says "unknown" — the same
+/// three-state rule as #141 and #147 (#W48).
+fn measured_u64(v: u64) -> Option<u64> {
+    (v > 0).then_some(v)
+}
+
+fn measured_f64(v: f64) -> Option<f64> {
+    (v > 0.0).then_some(v)
 }
 
 /// Drop models that cannot fit this box's VRAM, logging each skip **once** (the
@@ -2059,7 +2106,9 @@ fn run_main() -> Result<(), Box<dyn std::error::Error>> {
                     "can_pull": can_pull, "active": active, "capacity": capacity.max(1),
                     "capabilities": capabilities,
                     "tok_per_s": tok_per_s, "owner_cost_usd_hr": owner_cost_usd_hr,
-                    "mem_bw_gbps": mem_bw, "vram_mb": hw_now.vram_mb, "ram_mb": hw_now.ram_mb,
+                    "mem_bw_gbps": measured_f64(mem_bw),
+                    "vram_mb": measured_u64(hw_now.vram_mb),
+                    "ram_mb": measured_u64(hw_now.ram_mb),
                     "gpu_class": hw_now.gpu_class, "tflops": hw_now.tflops,
                     "disk_free_mb": disk.free_mb, "disk_total_mb": disk.total_mb,
                     "disk_free_pct": disk.free_percent()
@@ -2115,6 +2164,48 @@ mod tests {
     // only delivery surface and it carries its own `GPN_ASSIGN_TOKEN` gate.
 
     use super::*;
+
+    /// #W48: an unmeasured hardware field must leave the JSON as `null`, not
+    /// `0`. `0` was indistinguishable from a real measurement, so every Windows
+    /// provider (which could not read `/proc/meminfo`) advertised `ram_mb: 0`
+    /// and failed every `min_ram_mb` floor while looking healthy.
+    #[test]
+    fn unmeasured_hardware_publishes_null_not_zero() {
+        let body = json!({
+            "vram_mb": measured_u64(0),
+            "ram_mb": measured_u64(0),
+            "mem_bw_gbps": measured_f64(0.0),
+        });
+        assert!(body["vram_mb"].is_null(), "unmeasured vram must be null");
+        assert!(body["ram_mb"].is_null(), "unmeasured ram must be null");
+        assert!(
+            body["mem_bw_gbps"].is_null(),
+            "unmeasured mem_bw must be null"
+        );
+
+        // A real measurement still travels as a number (no behaviour change on
+        // a box that can measure, incl. the new Windows path).
+        let measured = json!({
+            "vram_mb": measured_u64(16_303),
+            "ram_mb": measured_u64(31_983),
+            "mem_bw_gbps": measured_f64(272.0),
+        });
+        assert_eq!(measured["vram_mb"], json!(16_303));
+        assert_eq!(measured["ram_mb"], json!(31_983));
+        assert_eq!(measured["mem_bw_gbps"], json!(272.0));
+    }
+
+    /// #W48: every platform must agree on the "0 means unmeasured" contract,
+    /// and the probe must never invent a number.
+    #[test]
+    fn ram_probe_reports_a_plausible_total_or_zero() {
+        let mb = detect_ram_mb();
+        assert!(
+            mb == 0 || mb >= 128,
+            "a measured total of {mb} MiB is implausible — 0 is the only \
+             allowed 'unknown' value"
+        );
+    }
 
     #[test]
     fn status_json_gets_the_fields_when_the_rpc_answers() {

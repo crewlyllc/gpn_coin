@@ -5021,7 +5021,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "gflops_verified": p.gflops_source.eq_ignore_ascii_case("attested-idle"),
                     "models": p.models,
                     "active": p.active, "capacity": p.capacity, "latency_ms": p.latency_ms,
-                    "vram_mb": p.vram_mb, "ram_mb": p.ram_mb,
+                    "vram_mb": (p.vram_mb > 0).then_some(p.vram_mb),
+                    "ram_mb": (p.ram_mb > 0).then_some(p.ram_mb),
                     "gpu_class": p.gpu_class, "tflops": p.tflops,
                     "capabilities": p.capabilities,
                     // An endpoint that never answered has no identity and no
@@ -7749,6 +7750,36 @@ mod tests {
         assert!(!persist_job_payload(&bad, 8, &job));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #W48: a provider that cannot measure its hardware publishes `null`, and
+    /// the AP must read that as *unknown* (0 internally — "no floor can be
+    /// checked") rather than as a number it can quote. Before the fix the wire
+    /// carried `ram_mb: 0`, which `/providers` republished as a measured fact.
+    #[test]
+    fn null_hardware_fields_are_unknown_not_zero_facts() {
+        let hex = "0xd43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d";
+        let ss58 = hex_to_ss58(hex).unwrap();
+        let caps = json!({
+            "address": hex, "gflops": 900, "models": ["llama3.2:1b"],
+            "can_pull": true, "vram_mb": null, "ram_mb": null,
+            "mem_bw_gbps": null, "tflops": 15.0, "gpu_class": "discrete",
+            "capacity": 1, "active": 0, "capabilities": ["LLMInference"]
+        });
+        let p = provider_from_caps(&ss58, &caps, format!("pull://{ss58}"), 3);
+        assert_eq!(p.vram_mb, 0, "null vram is unknown, never a number");
+        assert_eq!(p.ram_mb, 0, "null ram is unknown, never a number");
+        // The default anchor bandwidth still applies for pricing (it is a
+        // modelling constant, not a claim about the box).
+        assert!(p.mem_bw_gbps > 0.0);
+
+        // And the JSON the AP serves must not turn "unknown" back into "0".
+        let row = json!({
+            "vram_mb": (p.vram_mb > 0).then_some(p.vram_mb),
+            "ram_mb": (p.ram_mb > 0).then_some(p.ram_mb),
+        });
+        assert!(row["vram_mb"].is_null());
+        assert!(row["ram_mb"].is_null());
     }
 
     /// #46 Phase 3 step 2: a provider the AP can never dial (NAT/CGNAT) enters

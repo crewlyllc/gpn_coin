@@ -68,6 +68,8 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_IO",
     # SetConsoleCtrlHandler (gpn_node: do not die when a console closes)
     "Win32_System_Console",
+    # GlobalMemoryStatusEx (total RAM advertised on the /status heartbeat, #W48)
+    "Win32_System_SystemInformation",
 ] }
 
 [dev-dependencies]
