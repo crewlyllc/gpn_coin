@@ -769,37 +769,47 @@ pub fn spawn(mut opts: RunOptions) -> std::thread::JoinHandle<()> {
                     );
                     match action {
                         Action::None => {}
+                        // ORDER MATTERS in both arms below: `idle.json` is the
+                        // contract every other process reads, so the published
+                        // `engaged` flag must be updated *before* the file moves,
+                        // never after. An observer polls the file and then the
+                        // flag; if the file changes first there is a window in
+                        // which it sees the new file state beside the old flag.
+                        // That window is the flake in
+                        // idle_auto::sustained_foreign_load_idles_and_quiet_resumes
+                        // (CI 2026-11-05 02:27, 2026-11-06 09:18, 2026-11-09
+                        // 21:38 on a823e0c): the earlier attempt published
+                        // `engaged=false` *after* `clear_at`, which still left the
+                        // flag one step behind the file. Reverse the pair.
                         Action::Enter {
                             minutes,
                             reason,
                             evidence,
-                        } => match idle::start_at(&opts.idle_path, minutes, &reason, now) {
-                            Ok(st) => {
-                                println!(
-                                    "[idle-auto] idle: foreign GPU load ({}% util): {evidence} \
+                        } => {
+                            opts.shared.publish(
+                                reading.as_ref(),
+                                machine.engaged(),
+                                machine.cooldown_until(),
+                            );
+                            match idle::start_at(&opts.idle_path, minutes, &reason, now) {
+                                Ok(st) => {
+                                    println!(
+                                        "[idle-auto] idle: foreign GPU load ({}% util): {evidence} \
                                          — stepping aside for {minutes} min (until {})",
-                                    reading.as_ref().and_then(|r| r.util_percent).unwrap_or(0),
-                                    st.until
-                                );
+                                        reading.as_ref().and_then(|r| r.util_percent).unwrap_or(0),
+                                        st.until
+                                    );
+                                }
+                                Err(e) => {
+                                    machine.abort_enter(now);
+                                    eprintln!("[idle-auto] cannot enter idle: {e}");
+                                }
                             }
-                            Err(e) => {
-                                machine.abort_enter(now);
-                                eprintln!("[idle-auto] cannot enter idle: {e}");
-                            }
-                        },
+                        }
                         Action::Exit { why } => {
+                            opts.shared.publish(reading.as_ref(), false, 0);
                             idle::clear_at(&opts.idle_path);
                             println!("[idle-auto] resume: {why} — mining and job claiming resume");
-                            // Publish `engaged=false` in the same tick that the
-                            // idle file disappears. Before this, the file was
-                            // cleared here but `engaged` came from
-                            // `machine.engaged()`, which only drops on the next
-                            // step -- so for up to one poll interval an observer
-                            // saw "not idled, file gone" *and* "engaged: true".
-                            // That is the flake in
-                            // idle_auto::sustained_foreign_load_idles_and_quiet_resumes
-                            // (CI 2026-11-05 02:27 and 2026-11-06 09:18).
-                            opts.shared.publish(reading.as_ref(), false, 0);
                         }
                     }
                     opts.shared.publish(
