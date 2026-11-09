@@ -3312,6 +3312,17 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
                 argv.push("archive".into());
             }
             PruningPlan::LeaveAlone => {
+                // A legacy DB was created with the old constrained default; the
+                // node's compiled default is archive, so "pass nothing" makes the
+                // chain child hard-fail with `Incompatible pruning modes
+                // [stored: Constrained(256); requested: ArchiveAll]` and the
+                // supervisor restart-loops (box 1, 2026-11-09).
+                // Ask for the mode that matches what is stored instead: the node
+                // then starts, and the operator can still wipe it deliberately.
+                argv.push("--state-pruning".into());
+                argv.push("256".into());
+                argv.push("--blocks-pruning".into());
+                argv.push("256".into());
                 log_event(
                     "node",
                     &format!(

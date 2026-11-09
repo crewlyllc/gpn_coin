@@ -8,6 +8,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.34] - 2026-11-09
+
+A legacy chain DB starts instead of restart-looping.
+
+### Fixed
+- **`Incompatible pruning modes [stored: Constrained(256); requested: ArchiveAll]`.**
+  For a DB with no archive marker the supervisor passed *no* pruning flags and
+  relied on the node's compiled default — which is archive. A DB created by the
+  old constrained default therefore hard-failed at every start and the supervisor
+  restart-looped it (box 1, 2026-11-09, three kills in 14 s). It now asks for the
+  mode that is actually stored (`--state-pruning 256 --blocks-pruning 256`), so
+  the node starts and the operator can still wipe the DB deliberately.
+
 ## [0.3.33] - 2026-11-09
 
 A node that cannot see the network no longer extends it.
