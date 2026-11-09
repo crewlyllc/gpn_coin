@@ -1085,6 +1085,7 @@ pub async fn new_full<
         });
     {
         let net = network.clone();
+        let base_for_watch = base_path.clone();
         task_manager
             .spawn_handle()
             .spawn("gpn-peer-watch", None, async move {
@@ -1092,12 +1093,26 @@ pub async fn new_full<
                 tick.tick().await; // consume the immediate first tick
                 loop {
                     tick.tick().await;
-                    if net.sync_num_connected() == 0 {
-                        log::warn!(
-                            "⚠️ No peers — this node is NOT connected to the GPN network. \
-                             Network identity is defined by genesis + chain-id, not by peer \
-                             count; mining continues (no 0-peer ban)."
+                    let isolated = net.sync_num_connected() == 0;
+                    if isolated {
+                        // 2026-11-09 (owner decision): a node that cannot see the
+                        // network must not extend it. Box 1 spent days mining a
+                        // 117k-block fork alone -- six healthy children, a green
+                        // dashboard, and a chain nobody else had. "Identity is
+                        // genesis + chain-id" is still true, but extending a
+                        // private chain is indistinguishable from working until
+                        // somebody compares heights, so sealing pauses instead.
+                        let _ = std::fs::write(
+                            base_for_watch.join("gpn-isolated"),
+                            b"no peers: block sealing paused\n",
                         );
+                        log::warn!(
+                            "⚠️ No peers — block sealing is PAUSED. This node is not \
+                             connected to the GPN network; it will resume mining as soon as a \
+                             peer connects. (Marker: <base-path>/gpn-isolated)"
+                        );
+                    } else {
+                        let _ = std::fs::remove_file(base_for_watch.join("gpn-isolated"));
                     }
                 }
             });
@@ -1367,7 +1382,7 @@ pub async fn new_full<
                     idle_file_path().display()
                 );
             }
-            spawn_miner(worker, author);
+            spawn_miner(worker, author, base_path.clone());
         }
     }
 
@@ -1606,7 +1621,7 @@ impl ParkLog {
 /// Tries the **GPU OpenCL miner first** (full dataset on the GPU). If no
 /// OpenCL GPU is available, falls back to the light-cache CPU miner so the
 /// node still produces blocks on machines without a GPU.
-fn spawn_miner(worker: MiningWorker, author: Option<[u8; 32]>) {
+fn spawn_miner(worker: MiningWorker, author: Option<[u8; 32]>, base_path: std::path::PathBuf) {
     log::info!(
         "⛏  miner start: probing GPU (device 0); author={} — will seal every block the proposer builds",
         match author {
@@ -1615,10 +1630,10 @@ fn spawn_miner(worker: MiningWorker, author: Option<[u8; 32]>) {
         }
     );
     match EthashGpuMiner::new(0) {
-        Ok(_) => spawn_gpu_miner(worker, author),
+        Ok(_) => spawn_gpu_miner(worker, author, base_path),
         Err(e) => {
             log::warn!("GPU miner unavailable ({e}); falling back to CPU light-cache miner");
-            spawn_cpu_miner(worker, author);
+            spawn_cpu_miner(worker, author, base_path);
         }
     }
 }
@@ -1662,7 +1677,7 @@ fn mining_account(keystore: &dyn sp_keystore::Keystore) -> Option<[u8; 32]> {
 /// The node's `verify_seal` recomputes with `hashimoto_light`, so the GPU's
 /// full-DAG solution is accepted as long as mix + result match (they do — the
 /// miner self-validates against the `ethash` crate reference).
-fn spawn_gpu_miner(worker: MiningWorker, author: Option<[u8; 32]>) {
+fn spawn_gpu_miner(worker: MiningWorker, author: Option<[u8; 32]>, base_path: std::path::PathBuf) {
     std::thread::Builder::new()
         .name("gpn-gpu-miner".into())
         .spawn(move || {
@@ -1671,7 +1686,7 @@ fn spawn_gpu_miner(worker: MiningWorker, author: Option<[u8; 32]>) {
                 Err(e) => {
                     // Never leave the proposer without a miner: fall back to CPU.
                     log::error!("GPU miner init failed: {e}; falling back to CPU light-cache miner");
-                    spawn_cpu_miner(worker, author);
+                    spawn_cpu_miner(worker, author, base_path.clone());
                     return;
                 }
             };
@@ -1691,7 +1706,7 @@ fn spawn_gpu_miner(worker: MiningWorker, author: Option<[u8; 32]>) {
                     log::error!(
                         "GPU DAG build failed: {e}; falling back to CPU light-cache miner"
                     );
-                    spawn_cpu_miner(worker, author);
+                    spawn_cpu_miner(worker, author, base_path.clone());
                     return;
                 }
             };
@@ -1754,6 +1769,17 @@ fn spawn_gpu_miner(worker: MiningWorker, author: Option<[u8; 32]>) {
                                 last_pre_hash = None;
                                 continue;
                             }
+                            // Owner decision 2026-11-09: never extend a chain we
+                            // cannot see the network on. The peer-watch task writes
+                            // <base-path>/gpn-isolated when connected peers hit 0;
+                            // dropping the seal keeps the work spent (the DAG stays
+                            // warm) without publishing a block into a private fork.
+                            if base_path.join("gpn-isolated").exists() {
+                                log::debug!("isolated (0 peers): not submitting this seal");
+                                last_pre_hash = None;
+                                std::thread::sleep(std::time::Duration::from_secs(5));
+                                continue;
+                            }
                             let seal_bytes = seal_with_author(seal.to_seal_bytes(), author);
                             let ok = futures::executor::block_on(worker.submit(seal_bytes));
                             if ok {
@@ -1794,7 +1820,7 @@ fn spawn_gpu_miner(worker: MiningWorker, author: Option<[u8; 32]>) {
 }
 
 /// Light-cache CPU miner fallback (no GPU available).
-fn spawn_cpu_miner(worker: MiningWorker, author: Option<[u8; 32]>) {
+fn spawn_cpu_miner(worker: MiningWorker, author: Option<[u8; 32]>, _base_path: std::path::PathBuf) {
     std::thread::Builder::new()
         .name("gpn-cpu-miner".into())
         .spawn(move || {

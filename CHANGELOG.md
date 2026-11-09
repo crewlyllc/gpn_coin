@@ -8,6 +8,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.33] - 2026-11-09
+
+A node that cannot see the network no longer extends it.
+
+### Changed
+- **Block sealing pauses at zero peers** (owner decision 2026-11-09). The
+  peer-watch task writes `<base-path>/gpn-isolated` when connected peers reach 0;
+  the miner refuses to submit seals while that marker exists and resumes the
+  moment a peer connects. Rationale, measured: box 1 spent days mining a
+  117k-block fork alone — six healthy children, a green dashboard, blocks
+  sealing — while the network was at 274k. "Identity is genesis + chain-id" is
+  still true, but a private chain is indistinguishable from a working one until
+  somebody compares heights, so the node now stops instead of producing.
+  This supersedes the earlier "explicitly NO 0-peer mining ban" note in
+  `design-network-identity-fork-tolerance.md`.
+
+### Changed (ops)
+- The chain snapshot is built **daily** (was weekly), so a new install boots
+  from a copy of the correct chain at most ~24 h old.
+
 ## [0.3.32] - 2026-11-09
 
 `--stop` actually stops things.
