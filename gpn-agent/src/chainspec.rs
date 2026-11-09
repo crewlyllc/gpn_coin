@@ -42,9 +42,37 @@ pub const EXPECTED_GENESIS_HASH: &str =
 pub const EXPECTED_GENESIS_SHA256: &str =
     "f88403de3027216614184c357a022010bae19baa1e2c6a692b601d1e880cd809";
 
+/// The same-LAN address of the primary seed (0.3.29).
+///
+/// Not part of [`CANONICAL_BOOTNODES`] on purpose: `is_dialable_bootnode`
+/// rejects private addresses, so this must never be *served* in a chain spec.
+/// It is only ever dialled, by a box sitting on the seed's own subnet — where
+/// going out to the public address and back through the router completes the
+/// TCP handshake and is then discarded by libp2p as a self-dial (2026-11-06).
+pub const LAN_SEED_BOOTNODE: &str =
+    "/ip4/192.168.1.20/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo";
+
 /// The canonical bootnodes as owned strings.
 pub fn canonical_bootnodes() -> Vec<String> {
     CANONICAL_BOOTNODES.iter().map(|s| s.to_string()).collect()
+}
+
+/// The seed list the shipped launchers pin (`start-node.cmd`, `install.sh`), in
+/// dial order.
+///
+/// This is [`canonical_bootnodes`] **plus** [`LAN_SEED_BOOTNODE`], and it is the
+/// one reference the updater may rewrite a launcher *to*. It lives here, next to
+/// the canonical list, so there is exactly one Rust answer to "what seeds should
+/// a box dial"; `install.ps1`'s `$Boots` default is pinned to it by
+/// `tests/launcher_bootnodes.rs`, and a future seed change that touches only one
+/// of the two fails the build instead of silently reverting somebody's launcher.
+pub fn launcher_bootnodes() -> Vec<String> {
+    vec![
+        CANONICAL_BOOTNODES[0].to_string(), // DNS name — survives an IP change
+        CANONICAL_BOOTNODES[1].to_string(), // primary seed, public address
+        LAN_SEED_BOOTNODE.to_string(),      // primary seed, same LAN
+        CANONICAL_BOOTNODES[2].to_string(), // second seed box
+    ]
 }
 
 /// Parse a comma/space/semicolon separated bootnode list, keeping only
@@ -443,6 +471,23 @@ mod tests {
             "/ip4/127.0.0.1/tcp/30333/p2p/notapeer"
         ));
         assert!(!is_dialable_bootnode("/ip4/8.8.8.8/tcp/30333")); // no peer id
+    }
+
+    #[test]
+    fn launcher_list_is_a_superset_of_the_canonical_one() {
+        let launcher = launcher_bootnodes();
+        for c in CANONICAL_BOOTNODES {
+            assert!(
+                launcher.iter().any(|l| l == c),
+                "a new canonical bootnode must also reach the launchers: {c}"
+            );
+        }
+        // The LAN entry is dialled but never served.
+        assert!(launcher.iter().any(|l| l == LAN_SEED_BOOTNODE));
+        assert!(!CANONICAL_BOOTNODES.contains(&LAN_SEED_BOOTNODE));
+        assert!(!is_dialable_bootnode(LAN_SEED_BOOTNODE));
+        // Order matters: the first entry has to be the DNS name.
+        assert!(launcher[0].starts_with("/dns4/"));
     }
 
     #[test]

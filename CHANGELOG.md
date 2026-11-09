@@ -8,6 +8,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [Unreleased]
+
+### Fixed
+- **`gpn_update --apply` now refreshes a launcher's stale seed list, not just
+  its broken command line.** 0.3.24 taught the updater to rewrite a
+  `start-node.cmd` that still wrapped the node in a PowerShell pipeline, but it
+  touched exactly one line — so a box whose launcher pinned a retired bootnode
+  address kept dialling it forever, and "auto-update repairs your node" was
+  false for precisely the machines that needed it (0.3.28 shipped a seed change:
+  four boxes on one LAN still had the old list). `update::refresh_launcher_body`
+  is now platform-independent (so it is unit-tested on Linux CI, where the
+  Windows path can never run) and repairs **every provably stale line**: the
+  pipeline, `GPN_BOOTNODES`, and `GPN_RESERVED_PEERS`. Three rules keep it from
+  being a downgrade: a list is only rewritten when every entry dials a peer id
+  *we* publish (an operator's own seed is never touched), an empty list is left
+  alone (empty means "resolve `https://gpncoin.ai/seeds.json` at runtime",
+  which is fresher than any baked-in list), and an already-current list is not
+  rewritten at all — no churn, byte-identical file. One backup, one write.
+- **The launcher seed list has exactly one Rust definition.**
+  `chainspec::launcher_bootnodes()` (canonical bootnodes + the same-LAN seed) is
+  the single answer to "what seeds should a box dial"; `install.ps1`'s `$Boots`
+  default is pinned to it by `gpn-agent/tests/launcher_bootnodes.rs`, which also
+  proves the repair works on the template `install.ps1` really writes and that
+  nothing but the two seed lines changes. A future seed change that touches only
+  one of the two files fails the build instead of silently resetting somebody's
+  launcher.
+
 ## [0.3.31] - 2026-11-08
 
 The fleet stops needing a human at the keyboard.

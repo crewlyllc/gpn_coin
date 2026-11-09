@@ -1760,73 +1760,205 @@ pub fn previous_pointer_dir(state_dir: &Path) -> Option<PathBuf> {
     Some(p)
 }
 
-/// Repair a Windows launcher that still wraps the node in a PowerShell pipeline.
+// ---------------------------------------------------------------------------
+// Launcher repair
+// ---------------------------------------------------------------------------
+//
+// An update only swaps binaries, so every *other* file the installer wrote is
+// frozen at whatever version first installed this box. Two of those files
+// matter operationally:
+//
+//  * the node's command line: before 0.3.23 the launcher ran
+//    `powershell -Command "& node 2>&1 | Tee-Object -FilePath <log> -Append"`,
+//    which exits 1 *before the node starts* whenever the launcher is spawned
+//    without a console. Box 1 on 2026-11-06: 0.3.23 on disk, dead in the water,
+//    `last-exit.json` saying `version: launcher, pid: 0`.
+//  * the seed list it pins: a launcher written before a seed address changed
+//    keeps dialling the old one forever, so "auto-update repairs your node" was
+//    false for exactly the machines that needed it (0.3.24 fixed line 1 only,
+//    which is why a stale `GPN_BOOTNODES` survived every update since).
+//
+// Patching here (rather than in the launcher or the installer) is deliberate:
+// the *binary* is the one thing an update always replaces, including on boxes
+// whose update wrapper is still the old one.
+
+/// Peer id of a `/p2p/<id>` multiaddr, if it has one.
+fn multiaddr_peer_id(ma: &str) -> Option<&str> {
+    let idx = ma.find("/p2p/")?;
+    let id = ma[idx + "/p2p/".len()..].trim();
+    if id.is_empty() {
+        None
+    } else {
+        Some(id)
+    }
+}
+
+/// Split a comma-separated bootnode value, dropping empties, keeping order.
+fn split_bootnodes(value: &str) -> Vec<String> {
+    value
+        .split([',', ';'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// True when every entry dials a peer id *we* publish.
 ///
-/// The 0.3.23 installer writes a launcher that execs `gpn_node.exe` directly;
-/// before it, the launcher ran
-/// `powershell -Command "& node 2>&1 | Tee-Object -FilePath <log> -Append"`,
-/// which exits 1 *before the node starts* whenever the launcher is spawned
-/// without a console. An update only swaps binaries, so every machine that was
-/// installed before 0.3.23 keeps the broken launcher while reporting the new
-/// version — box 1 on 2026-11-06 was exactly that: 0.3.23 on disk, dead in the
-/// water, `last-exit.json` saying `version: launcher, pid: 0`.
+/// This is the line between "a stale copy of our own defaults" (safe to refresh)
+/// and "an operator pinned their own peers" (never touch). Anything we cannot
+/// read a peer id out of counts as the operator's, so it is left alone.
+fn is_our_seed_list(entries: &[String], canonical: &[String]) -> bool {
+    let ours: std::collections::HashSet<&str> = canonical
+        .iter()
+        .filter_map(|c| multiaddr_peer_id(c))
+        .collect();
+    !entries.is_empty()
+        && entries
+            .iter()
+            .all(|e| multiaddr_peer_id(e).is_some_and(|p| ours.contains(p)))
+}
+
+/// The value a stale seed-list line should carry, or `None` to leave it alone.
 ///
-/// Patching here (rather than in the launcher or the installer) is deliberate:
-/// the *binary* is the one thing an update always replaces, including on boxes
-/// whose update wrapper is still the old one. Returns a human-readable note when
-/// a repair happened, so `update.log` records it.
+/// * empty → leave it: an empty `GPN_BOOTNODES` is meaningful (the node then
+///   resolves `https://gpncoin.ai/seeds.json` at runtime — the freshest possible
+///   answer, and nothing an update should overwrite).
+/// * not ours → leave it: operator-supplied peers.
+/// * same set as the current default → nothing to do (no write, no churn).
+/// * ours but different → the stale case this exists for.
+fn refreshed_seed_list(value: &str, canonical: &[String]) -> Option<String> {
+    let entries = split_bootnodes(value);
+    if entries.is_empty() || !is_our_seed_list(&entries, canonical) {
+        return None;
+    }
+    let have: std::collections::BTreeSet<&str> = entries.iter().map(String::as_str).collect();
+    let want: std::collections::BTreeSet<&str> = canonical.iter().map(String::as_str).collect();
+    if have == want {
+        return None;
+    }
+    Some(canonical.join(","))
+}
+
+/// `<value>` of `set "NAME=<value>"`, for a cmd launcher line.
+fn set_line_value<'a>(line: &'a str, name: &str) -> Option<&'a str> {
+    let t = line.trim();
+    let lower = t.to_ascii_lowercase();
+    let prefix = format!("set \"{}=", name.to_ascii_lowercase());
+    if !lower.starts_with(&prefix) {
+        return None;
+    }
+    t[prefix.len()..].strip_suffix('"')
+}
+
+/// `set "NAME=<value>"` → the same line re-quoted with a new value.
+fn rewrite_set_line(line: &str, name: &str, value: &str) -> String {
+    let indent = &line[..line.len() - line.trim_start().len()];
+    format!("{indent}set \"{name}={value}\"")
+}
+
+fn between(s: &str, open: &str, close: char) -> Option<String> {
+    let start = s.find(open)? + open.len();
+    let rest = &s[start..];
+    let end = rest.find(close)?;
+    Some(rest[..end].to_string())
+}
+
+/// Rewrite a launcher body in place: every line that is *provably* stale is
+/// repaired, everything else is preserved byte for byte.
+///
+/// Platform independent (and therefore unit-tested on every OS) — the Windows
+/// half only supplies the file and the backup.
+///
+/// Returns the new body and one human-readable note per repair. An empty note
+/// list means "nothing was stale": callers must not rewrite the file at all.
+pub fn refresh_launcher_body(body: &str, canonical: &[String]) -> (String, Vec<String>) {
+    let mut notes: Vec<String> = Vec::new();
+    let mut out: Vec<String> = Vec::new();
+    let crlf = body.contains("\r\n");
+
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+
+        // (1) The PowerShell pipeline that exits 1 before the node starts.
+        if trimmed.starts_with("powershell") && line.contains("Tee-Object") {
+            // Reuse the paths the old line already carries: never invent them.
+            match (
+                between(line, "& '", '\''),
+                between(line, "FilePath '", '\''),
+            ) {
+                (Some(node), Some(log)) => {
+                    out.push(format!("\"{node}\" >> \"{log}\" 2>&1"));
+                    notes.push(
+                        "the node is now exec'd directly (no PowerShell pipeline)".to_string(),
+                    );
+                    continue;
+                }
+                _ => {
+                    // Cannot parse it safely: leave the line alone rather than
+                    // write a launcher with a wrong path.
+                    eprintln!(
+                        "[update] launcher still wraps the node in a PowerShell pipeline, but its \
+                         command line could not be parsed — left unchanged: {line}"
+                    );
+                }
+            }
+        }
+
+        // (2) A stale seed list pinned by an older installer.
+        let mut replaced = false;
+        for name in ["GPN_BOOTNODES", "GPN_RESERVED_PEERS"] {
+            let Some(value) = set_line_value(line, name) else {
+                continue;
+            };
+            if let Some(new) = refreshed_seed_list(value, canonical) {
+                let before = split_bootnodes(value).len();
+                out.push(rewrite_set_line(line, name, &new));
+                notes.push(format!(
+                    "{name} refreshed: {before} stale entr{} -> {} canonical",
+                    if before == 1 { "y" } else { "ies" },
+                    canonical.len()
+                ));
+                replaced = true;
+            }
+            break;
+        }
+        if replaced {
+            continue;
+        }
+
+        out.push(line.to_string());
+    }
+
+    if notes.is_empty() {
+        return (body.to_string(), notes);
+    }
+
+    let mut text = out.join(if crlf { "\r\n" } else { "\n" });
+    if body.ends_with('\n') {
+        text.push_str(if crlf { "\r\n" } else { "\n" });
+    }
+    (text, notes)
+}
+
+/// Repair `start-node.cmd` next to the installed binary.
+///
+/// Returns a human-readable note when a repair happened, so `update.log` records
+/// it. One backup, one write, however many stale lines there are: a launcher is
+/// the one file that decides whether the machine starts at all, so the file is
+/// replaced atomically-ish (`.bak-<ts>` then a single write) rather than patched
+/// line by line.
 #[cfg(windows)]
 fn repair_windows_launcher(exe: &std::path::Path) -> Option<String> {
     let bin = exe.parent()?;
     let install = bin.parent()?;
     let launcher = install.join("start-node.cmd");
     let body = std::fs::read_to_string(&launcher).ok()?;
-    if !body.contains("Tee-Object") {
-        return None; // already direct-exec
-    }
-
-    let between = |s: &str, open: &str, close: char| -> Option<String> {
-        let start = s.find(open)? + open.len();
-        let rest = &s[start..];
-        let end = rest.find(close)?;
-        Some(rest[..end].to_string())
-    };
-
-    let mut out = String::with_capacity(body.len() + 64);
-    let mut changed = false;
-    for line in body.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("powershell") && line.contains("Tee-Object") {
-            // Reuse the paths the old line already carries: never invent them.
-            let node = between(line, "& '", '\'').or_else(|| between(line, "& '", '\''));
-            let log = between(line, "FilePath '", '\'');
-            match (node, log) {
-                (Some(node), Some(log)) => {
-                    out.push_str(&format!("\"{node}\" >> \"{log}\" 2>&1"));
-                    changed = true;
-                    continue;
-                }
-                _ => {
-                    // Cannot parse it safely: leave the file alone rather than
-                    // write a launcher with a wrong path.
-                    eprintln!(
-                        "[update] launcher still wraps the node in a PowerShell pipeline, but its \
-                         command line could not be parsed — left unchanged: {line}"
-                    );
-                    out.push_str(line);
-                    continue;
-                }
-            }
-        }
-        out.push_str(line);
-        out.push('\n');
-    }
-
-    if !changed {
+    let (out, notes) = refresh_launcher_body(&body, &crate::chainspec::launcher_bootnodes());
+    if notes.is_empty() {
         return None;
     }
-    // Back up before replacing: a launcher is the one file that decides whether
-    // the machine starts at all.
+
     let backup = install.join(format!(
         "start-node.cmd.bak-{}",
         std::time::SystemTime::now()
@@ -1837,8 +1969,8 @@ fn repair_windows_launcher(exe: &std::path::Path) -> Option<String> {
     let _ = std::fs::copy(&launcher, &backup);
     match std::fs::write(&launcher, out) {
         Ok(()) => Some(format!(
-            "repaired start-node.cmd: the node is now exec'd directly (no PowerShell pipeline); \
-             previous copy at {}",
+            "repaired start-node.cmd: {}; previous copy at {}",
+            notes.join("; "),
             backup.display()
         )),
         Err(e) => {
@@ -3560,5 +3692,122 @@ mod tests {
         );
         assert_eq!(previous_pointer_label(&st).as_deref(), Some("0.3.11"));
         std::fs::remove_dir_all(&st).ok();
+    }
+
+    // ── launcher repair ─────────────────────────────────────────────────────
+
+    /// A launcher as an OLD installer wrote it: PowerShell pipeline, and the
+    /// pre-0.3.29 seed list (no LAN entry, box 2 at its previous address).
+    const OLD_LAUNCHER: &str = "@echo off\r\nsetlocal\r\nset \"GPN_CHAIN=testnet\"\r\nset \"GPN_AP_URL=http://gpn-testnet.duckdns.org:8092\"\r\nset \"GPN_BOOTNODES=/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo,/ip4/142.129.54.88/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo,/ip4/203.0.113.9/tcp/30333/p2p/12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz\"\r\nset \"GPN_RESERVED_PEERS=/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo,/ip4/142.129.54.88/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo,/ip4/203.0.113.9/tcp/30333/p2p/12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz\"\r\n:run\r\npowershell -NoProfile -Command \"& 'C:\\gpn\\bin\\gpn_node.exe' 2>&1 | Tee-Object -FilePath 'C:\\gpn\\node.log' -Append\"\r\n";
+
+    #[test]
+    fn a_stale_launcher_is_refreshed_beyond_the_one_pipeline_line() {
+        let canonical = crate::chainspec::launcher_bootnodes();
+        let (out, notes) = refresh_launcher_body(OLD_LAUNCHER, &canonical);
+
+        // Three separate defects repaired in one pass: the pipeline, and the
+        // two seed lists it left behind. A launcher that only fixed the first
+        // still dials a dead address forever — 0.3.24's gap.
+        assert_eq!(notes.len(), 3, "notes: {notes:?}");
+        assert!(notes.iter().any(|n| n.contains("no PowerShell pipeline")));
+        assert!(notes.iter().any(|n| n.contains("GPN_BOOTNODES refreshed")));
+        assert!(notes
+            .iter()
+            .any(|n| n.contains("GPN_RESERVED_PEERS refreshed")));
+
+        assert!(!out.contains("Tee-Object"), "pipeline must be gone");
+        assert!(out.contains("\"C:\\gpn\\bin\\gpn_node.exe\" >> \"C:\\gpn\\node.log\" 2>&1"));
+        assert!(!out.contains("203.0.113.9"), "the dead seed must be gone");
+
+        // Both seed lists now carry exactly the current installer default, so
+        // nothing on this box can dial a retired address.
+        let want = canonical.join(",");
+        assert_eq!(
+            out.matches(&format!("set \"GPN_BOOTNODES={want}\""))
+                .count(),
+            1
+        );
+        assert_eq!(
+            out.matches(&format!("set \"GPN_RESERVED_PEERS={want}\""))
+                .count(),
+            1
+        );
+        // The LAN seed the runtime relies on is part of that list.
+        assert!(out.contains(crate::chainspec::LAN_SEED_BOOTNODE));
+
+        // CRLF is preserved: cmd.exe tolerates LF, but a mixed-ending file is a
+        // nasty thing to hand an operator who opens it in Notepad.
+        assert!(out.contains("\r\n"));
+        assert!(!out.contains("\n\n") && !out.contains("\r\r"));
+        assert!(out.ends_with("\r\n"));
+        // Nothing else was touched.
+        assert!(out.contains("set \"GPN_AP_URL=http://gpn-testnet.duckdns.org:8092\""));
+        assert!(out.contains("set \"GPN_CHAIN=testnet\""));
+        assert!(out.contains("@echo off"));
+    }
+
+    #[test]
+    fn a_launcher_that_is_already_current_is_left_byte_identical() {
+        let canonical = crate::chainspec::launcher_bootnodes();
+        let current = format!(
+            "@echo off\nset \"GPN_BOOTNODES={}\"\nset \"GPN_RESERVED_PEERS={}\"\n\"%GPN_BIN%\\gpn_node.exe\" >> \"%LOG%\" 2>&1\n",
+            canonical.join(","),
+            canonical.join(",")
+        );
+        let (out, notes) = refresh_launcher_body(&current, &canonical);
+        assert!(notes.is_empty(), "no rewrite when nothing is stale");
+        assert_eq!(out, current);
+    }
+
+    #[test]
+    fn an_operators_own_peers_are_never_rewritten() {
+        // A box peering with somebody else's seed: a peer id we do not publish.
+        let custom = "set \"GPN_BOOTNODES=/ip4/198.51.100.7/tcp/30333/p2p/12D3KooWSomebodyElsesPeerIdaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"";
+        let body = format!("@echo off\n{custom}\n");
+        let (out, notes) = refresh_launcher_body(&body, &crate::chainspec::launcher_bootnodes());
+        assert!(notes.is_empty(), "operator config is not ours to change");
+        assert_eq!(out, body);
+    }
+
+    #[test]
+    fn a_mixed_list_of_ours_and_theirs_is_left_alone() {
+        // One of our peers plus an unknown one: cannot tell which entry is the
+        // stale half, so the safe answer is to change nothing.
+        let body = format!(
+            "set \"GPN_BOOTNODES={},/ip4/198.51.100.7/tcp/30333/p2p/12D3KooWTheirsaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+            crate::chainspec::CANONICAL_BOOTNODES[0]
+        );
+        let (out, notes) = refresh_launcher_body(&body, &crate::chainspec::launcher_bootnodes());
+        assert!(notes.is_empty());
+        assert_eq!(out, body);
+    }
+
+    #[test]
+    fn an_empty_seed_list_is_meaningful_and_kept() {
+        // Empty = "let gpn-node resolve https://gpncoin.ai/seeds.json at runtime",
+        // which is fresher than any baked-in list. Overwriting it would be a
+        // regression dressed up as a repair.
+        let body = "set \"GPN_BOOTNODES=\"\nset \"GPN_RESERVED_PEERS=\"\n";
+        let (out, notes) = refresh_launcher_body(body, &crate::chainspec::launcher_bootnodes());
+        assert!(notes.is_empty());
+        assert_eq!(out, body);
+    }
+
+    #[test]
+    fn a_reordered_but_equivalent_seed_list_is_not_rewritten() {
+        let mut canonical = crate::chainspec::launcher_bootnodes();
+        canonical.reverse();
+        let current = format!("set \"GPN_BOOTNODES={}\"\n", canonical.join(","));
+        let (out, notes) = refresh_launcher_body(&current, &canonical);
+        assert!(notes.is_empty(), "same set, nothing to fix");
+        assert_eq!(out, current);
+    }
+
+    #[test]
+    fn an_unparseable_pipeline_line_is_left_alone_and_said_so() {
+        let body = "powershell -Command \"something else entirely\"\nset \"GPN_BOOTNODES=\"\n";
+        let (out, notes) = refresh_launcher_body(body, &crate::chainspec::launcher_bootnodes());
+        assert!(notes.is_empty());
+        assert_eq!(out, body, "never guess a command line");
     }
 }
