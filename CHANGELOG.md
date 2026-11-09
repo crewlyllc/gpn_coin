@@ -10,19 +10,6 @@ the GPN-specific meaning of each level documented in `docs/updates.md`.
 
 ## [0.3.31] - 2026-11-08
 
-Bumped from 0.3.30 (`scripts/bump-version.py patch`). Describe the release before publishing it.
-
-### Added
-- _TODO_
-
-### Changed
-- _TODO_
-
-### Fixed
-- _TODO_
-
-## [0.3.30] - 2026-11-08
-
 The fleet stops needing a human at the keyboard.
 
 ### Added
@@ -39,6 +26,16 @@ The fleet stops needing a human at the keyboard.
 ### Changed
 - The Linux release build reclaims the debug cargo profile after packaging: the
   cache has filled the root filesystem four times (it halted the chain once).
+
+## [0.3.30] - 2026-11-08
+
+Version bump only — no source change.
+
+It existed to escape a real deadlock in the updater guard: this box's installed
+`gpn_update` was stamped `0.3.29/9c9e82c` while the published asset was built
+from `c77c306` — same version, older commit — so #148 correctly refused to swap
+newer local code for an older published build and the fleet stayed on 0.3.28.
+Two builds of one version cannot be told apart by version, hence the bump.
 
 ## [0.3.29] - 2026-11-08
 
