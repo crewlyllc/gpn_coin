@@ -589,8 +589,23 @@ assert_has "$repo/docs/run-a-node.md" "install.ps1" "run-a-node docs point at th
 assert_has "$repo/docs/run-a-node.md" "enable-linger" "run-a-node docs explain linger"
 
 # ---- syntax ---------------------------------------------------------------
+# ---- access point / scheduler unit ----------------------------------------
+# 2026-11-08 (W52): the access point's binary IS `gpn_scheduler`, and its unit is
+# `gpn-accesspoint.service` — which is why a name-based sweep kept reporting
+# "gpn-scheduler has no service, the scheduler runs as a one-off process". It never
+# did. The alias makes the documented name resolve to the SAME unit; a second unit
+# with its own ExecStart would bind :8092 twice and crash-loop. Guard both halves.
+echo "== Linux: install-accesspoint.sh unit =="
+ap="$repo/install-accesspoint.sh"
+assert_file "$ap" "install-accesspoint.sh is present"
+assert_has "$ap" "Alias=gpn-scheduler.service" "AP unit aliases the documented name gpn-scheduler"
+assert_has "$ap" "Restart=always" "AP unit is supervised (Restart=always)"
+assert_has "$ap" "WantedBy=default.target" "AP unit is enabled for login/boot"
+assert_lacks "$ap" "ExecStart=\$BIN_DIR/gpn_scheduler" "no second unit starts gpn_scheduler directly"
+
+# ---- syntax ---------------------------------------------------------------
 echo "== syntax =="
-for f in "$repo/install.sh" "$repo/uninstall.sh" "$helper"; do
+for f in "$repo/install.sh" "$repo/uninstall.sh" "$helper" "$ap"; do
   if bash -n "$f" 2>"$tmp/syn.err"; then ok "bash -n $(basename "$f")"; else
     bad "bash -n $(basename "$f"): $(cat "$tmp/syn.err")"; fi
 done

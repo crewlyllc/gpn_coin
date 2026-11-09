@@ -95,7 +95,7 @@ if [ "${GPN_INSTALL_SERVICE:-0}" = "1" ] && command -v systemctl >/dev/null 2>&1
   mkdir -p "$HOME/.config/systemd/user"
   cat > "$HOME/.config/systemd/user/gpn-accesspoint.service" <<EOF
 [Unit]
-Description=GPN access point (public job API + scheduler)
+Description=GPN access point / scheduler (gpn_scheduler, public job API)
 After=network-online.target
 
 [Service]
@@ -105,6 +105,10 @@ RestartSec=5
 
 [Install]
 WantedBy=default.target
+# The binary this unit runs is `gpn_scheduler`, and docs/scripts often call the unit
+# `gpn-scheduler`. Alias it to THIS unit so that name resolves here instead of
+# encouraging a second unit that would bind the same port twice.
+Alias=gpn-scheduler.service
 EOF
   systemctl --user daemon-reload
   systemctl --user enable --now gpn-accesspoint.service
