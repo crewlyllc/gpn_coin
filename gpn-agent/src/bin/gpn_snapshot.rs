@@ -858,6 +858,16 @@ struct SnapshotMeta {
     size: u64,
     #[serde(default)]
     block: Option<u64>,
+    /// v2: the genesis this snapshot belongs to. A node whose chain spec pins a
+    /// different genesis must refuse the import outright.
+    #[serde(default)]
+    genesis: String,
+    /// v2: the block hash AT `block`. This is the only way a node can tell a
+    /// snapshot of the canonical chain from a snapshot of a fork that shares the
+    /// genesis — the exact failure that cost 2026-11-07/09 (two forks, one
+    /// 117k blocks deep, both "healthy").
+    #[serde(default)]
+    block_hash: String,
     #[serde(default)]
     built: String,
     #[serde(default)]
@@ -866,22 +876,45 @@ struct SnapshotMeta {
     signature: String,
 }
 
-const SNAPSHOT_CANONICAL_PREFIX: &str = "gpn-snapshot-v1";
+const SNAPSHOT_CANONICAL_PREFIX_V1: &str = "gpn-snapshot-v1";
+const SNAPSHOT_CANONICAL_PREFIX: &str = "gpn-snapshot-v2";
 
 impl SnapshotMeta {
     /// The exact bytes that are signed. Field order is fixed and hex is
     /// lower-cased, so a re-serialised document still verifies.
+    ///
+    /// **v1 documents keep verifying forever.** The prefix is part of the signed
+    /// text, so a v1 blob still hashes to its v1 prefix; only v2 adds the two
+    /// checkpoint lines. Changing this function without changing the signer in
+    /// the same commit makes every future snapshot unverifiable — the two sides
+    /// are tested together (see `snapshot_checkpoint_roundtrip`).
     fn canonical_text(&self) -> Vec<u8> {
-        format!(
-            "{SNAPSHOT_CANONICAL_PREFIX}\nurl={}\nsha256={}\nsize={}\nblock={}\nbuilt={}\nsigning_key={}\n",
-            self.url.trim(),
-            self.sha256.trim().to_ascii_lowercase(),
-            self.size,
-            self.block.map(|b| b.to_string()).unwrap_or_default(),
-            self.built.trim(),
-            self.signing_key.trim().to_ascii_lowercase(),
-        )
-        .into_bytes()
+        let is_v2 = self.format.trim() == SNAPSHOT_CANONICAL_PREFIX;
+        let mut out = String::new();
+        if is_v2 {
+            out.push_str(&format!(
+                "{SNAPSHOT_CANONICAL_PREFIX}\nurl={}\nsha256={}\nsize={}\nblock={}\ngenesis={}\nblock_hash={}\nbuilt={}\nsigning_key={}\n",
+                self.url.trim(),
+                self.sha256.trim().to_ascii_lowercase(),
+                self.size,
+                self.block.map(|b| b.to_string()).unwrap_or_default(),
+                self.genesis.trim().to_ascii_lowercase(),
+                self.block_hash.trim().to_ascii_lowercase(),
+                self.built.trim(),
+                self.signing_key.trim().to_ascii_lowercase(),
+            ));
+        } else {
+            out.push_str(&format!(
+                "{SNAPSHOT_CANONICAL_PREFIX_V1}\nurl={}\nsha256={}\nsize={}\nblock={}\nbuilt={}\nsigning_key={}\n",
+                self.url.trim(),
+                self.sha256.trim().to_ascii_lowercase(),
+                self.size,
+                self.block.map(|b| b.to_string()).unwrap_or_default(),
+                self.built.trim(),
+                self.signing_key.trim().to_ascii_lowercase(),
+            ));
+        }
+        out.into_bytes()
     }
 }
 
@@ -928,6 +961,26 @@ fn verify_snapshot_meta(
     }
     if m.size == 0 {
         return Err("snapshot.json has no size".into());
+    }
+    // v2 checkpoint shape: if either field is present, both must be, and both
+    // must be 0x-hex. A half-filled checkpoint is worse than none -- it looks
+    // authoritative and cannot be compared.
+    let v2 = m.format.trim() == SNAPSHOT_CANONICAL_PREFIX;
+    if v2 {
+        for (name, v, want) in [
+            ("genesis", m.genesis.trim(), 32usize),
+            ("block_hash", m.block_hash.trim(), 32usize),
+        ] {
+            let hexpart = v.strip_prefix("0x").unwrap_or("");
+            if hexpart.len() != want * 2 || !hexpart.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(format!(
+                    "snapshot.json v2 has an invalid {name} (want 0x + 64 hex): {v}"
+                ));
+            }
+        }
+        if m.block.is_none() {
+            return Err("snapshot.json v2 declares a checkpoint without a block height".into());
+        }
     }
 
     if let Some(path) = archive {

@@ -8,6 +8,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.35] - 2026-11-09
+
+A snapshot now says WHICH chain it is.
+
+### Added
+- **`snapshot.json` v2 carries a checkpoint**: `genesis` plus the `block_hash` at
+  `block`, both inside the signed canonical text. The signer
+  (`scripts/snapshot-metadata.py`) emits v2 when both are supplied, and the
+  verifier accepts **v1 and v2** — the prefix is part of the signed bytes, so old
+  documents keep verifying forever.
+- `scripts/snapshot-weekly.sh` reads genesis + the block hash from the node's own
+  RPC and **refuses to publish a snapshot without them**. A checkpoint-less
+  snapshot can only say "a chain with the right genesis", which is how a node
+  ends up 117k blocks down a fork (2026-11-09).
+
+### Verified
+- Round-trip test: v2 signs and verifies; v1 still signs and verifies; the
+  checkpoint fields are present in v2 and absent in v1. Half-filled checkpoints
+  are rejected by the verifier rather than silently accepted.
+
 ## [0.3.34] - 2026-11-09
 
 A legacy chain DB starts instead of restart-looping.

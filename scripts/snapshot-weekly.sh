@@ -43,6 +43,23 @@ BLOCK=$(python3 -c 'import json,sys,urllib.request
 url=sys.argv[1]
 r=urllib.request.Request(url,data=json.dumps({"id":1,"jsonrpc":"2.0","method":"chain_getHeader","params":[]}).encode(),headers={"content-type":"application/json"})
 print(int(json.load(urllib.request.urlopen(r,timeout=5))["result"]["number"],16))' "${GPN_RPC:-http://127.0.0.1:9944}" 2>/dev/null || echo "?")
+# ── v2 checkpoint: the two values that let a node prove which chain it got ──
+# Without these, a snapshot is only "some chain with the right genesis" -- which
+# is exactly how box 1 ended up 117k blocks down a fork (2026-11-09).
+rpc() {
+  python3 -c 'import json,sys,urllib.request
+url=sys.argv[1]; method=sys.argv[2]; params=json.loads(sys.argv[3])
+r=urllib.request.Request(url,data=json.dumps({"id":1,"jsonrpc":"2.0","method":method,"params":params}).encode(),headers={"content-type":"application/json"})
+print(json.load(urllib.request.urlopen(r,timeout=8))["result"])' "${GPN_RPC:-http://127.0.0.1:9944}" "$1" "$2" 2>/dev/null
+}
+GENESIS=$(rpc chain_getBlockHash '[0]')
+BLOCK_HASH=$(rpc chain_getBlockHash "[$BLOCK]")
+if [ -z "$GENESIS" ] || [ -z "$BLOCK_HASH" ]; then
+  echo "FATAL: could not read genesis/block hash from RPC — refusing to publish a checkpoint-less snapshot" >&2
+  exit 4
+fi
+echo "[snapshot] checkpoint genesis=$GENESIS block=$BLOCK hash=$BLOCK_HASH"
+
 echo "[snapshot] built $OUT"
 echo "[snapshot] block=$BLOCK size=$SIZE sha256=$SHA"
 
@@ -89,6 +106,7 @@ DL="https://github.com/$REPO/releases/download/$TAG/$ASSET"
 META_OUT="$OUT_DIR/snapshot.json"
 if ! python3 "$(dirname "$0")/snapshot-metadata.py" sign \
       --url "$DL" --sha256 "$SHA" --size "$SIZE" --block "$BLOCK" \
+      --genesis "$GENESIS" --block-hash "$BLOCK_HASH" \
       --built "$STAMP UTC" --out "$META_OUT"; then
   echo "FATAL: could not sign snapshot.json — refusing to publish an unverifiable snapshot" >&2
   exit 4

@@ -39,7 +39,8 @@ import math
 import pathlib
 import sys
 
-CANONICAL_PREFIX = "gpn-snapshot-v1"
+CANONICAL_PREFIX_V1 = "gpn-snapshot-v1"
+CANONICAL_PREFIX_V2 = "gpn-snapshot-v2"
 DEFAULT_KEY = pathlib.Path.home() / ".openclaw/credentials/gpn-release-key.txt"
 DEFAULT_BIN = "gpn_snapshot"
 
@@ -75,17 +76,30 @@ def signing_key(path: pathlib.Path):
 
 
 def canonical_text(meta: dict) -> bytes:
-    """Must match `SnapshotMeta::canonical_text` in gpn_snapshot.rs."""
+    """Must match `SnapshotMeta::canonical_text` in gpn_snapshot.rs.
+
+    v2 adds the checkpoint (genesis + the block hash at `block`). v1 documents
+    keep verifying: the prefix is part of the signed text, so an old blob still
+    hashes to its own layout.
+    """
     block = meta.get("block")
-    return (
-        f"{CANONICAL_PREFIX}\n"
+    fmt = str(meta.get("format") or CANONICAL_PREFIX_V1).strip()
+    body = (
         f"url={str(meta['url']).strip()}\n"
         f"sha256={str(meta['sha256']).strip().lower()}\n"
         f"size={int(meta['size'])}\n"
         f"block={'' if block is None else int(block)}\n"
+    )
+    if fmt == CANONICAL_PREFIX_V2:
+        body += (
+            f"genesis={str(meta.get('genesis', '')).strip().lower()}\n"
+            f"block_hash={str(meta.get('block_hash', '')).strip().lower()}\n"
+        )
+    body += (
         f"built={str(meta.get('built', '')).strip()}\n"
         f"signing_key={str(meta['signing_key']).strip().lower()}\n"
-    ).encode()
+    )
+    return (f"{fmt}\n{body}").encode()
 
 
 def cmd_sign(a) -> int:
@@ -95,8 +109,13 @@ def cmd_sign(a) -> int:
     if a.size <= 0:
         raise SystemExit("--size: must be > 0")
     sk = signing_key(pathlib.Path(a.key))
+    genesis = (getattr(a, "genesis", "") or "").strip().lower()
+    block_hash = (getattr(a, "block_hash", "") or "").strip().lower()
+    # v2 only when the checkpoint is actually supplied: an unsigned/absent
+    # checkpoint must not silently produce a document that claims to have one.
+    fmt = CANONICAL_PREFIX_V2 if (genesis and block_hash) else CANONICAL_PREFIX_V1
     meta = {
-        "format": CANONICAL_PREFIX,
+        "format": fmt,
         "url": a.url,
         "sha256": sha,
         "size": int(a.size),
@@ -104,6 +123,9 @@ def cmd_sign(a) -> int:
         "built": a.built or "",
         "signing_key": bytes(sk.verify_key).hex(),
     }
+    if fmt == CANONICAL_PREFIX_V2:
+        meta["genesis"] = genesis
+        meta["block_hash"] = block_hash
     import nacl.signing  # noqa: F401  (already imported in signing_key)
 
     meta["signature"] = sk.sign(canonical_text(meta)).signature.hex()
@@ -143,6 +165,9 @@ def main(argv=None) -> int:
     s.add_argument("--sha256", required=True)
     s.add_argument("--size", required=True, type=int)
     s.add_argument("--block", type=int)
+    s.add_argument("--genesis", default="", help="v2 checkpoint: chain genesis hash")
+    s.add_argument("--block-hash", dest="block_hash", default="",
+                   help="v2 checkpoint: block hash AT --block")
     s.add_argument("--built", default="")
     s.add_argument("--key", default=str(DEFAULT_KEY))
     s.add_argument("--out", required=True)
