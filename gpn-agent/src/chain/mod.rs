@@ -152,6 +152,10 @@ const HEAL_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15
 /// not be reported as "the chain has no jobs" — see [`Self::head_block_hash`].
 const HEAD_RESOLVE_ATTEMPTS: usize = 3;
 
+// Compile-time invariant: one lost `chain_getBlockHash` must not be fatal, so a
+// single attempt would defeat the retry entirely.
+const _: () = assert!(HEAD_RESOLVE_ATTEMPTS >= 2, "one blip must not be fatal");
+
 /// Backoff between head-resolution retries (short on purpose: the whole retry
 /// sequence is bounded by [`rpc_read_timeout`]).
 const HEAD_RESOLVE_BACKOFF_MS: u64 = 150;
@@ -3744,8 +3748,6 @@ mod tests {
             calls.load(std::sync::atomic::Ordering::SeqCst),
             HEAD_RESOLVE_ATTEMPTS
         );
-        assert!(HEAD_RESOLVE_ATTEMPTS >= 2, "one blip must not be fatal");
-
         // The refusal names the reason instead of pointing at genesis: it must
         // not read like a chain-level answer, and must not mention a fallback
         // that would silently succeed at the wrong height.
