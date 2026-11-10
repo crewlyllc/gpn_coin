@@ -8,6 +8,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.37] - 2026-11-10
+
+A node tells the network how many peers it has, instead of someone guessing.
+
+### Fixed
+- **`/status` publishes the node's own peer count (#W78).** The status service now
+  reads `system_peers` live and reports `peers` as a number (a real `0` for a lone
+  node) or `null` when the node RPC is unreadable — silence is never rewritten as
+  zero. The access point merges it into the provider row, so `/providers` and
+  `/network` carry `peers` too, and `nodes.html` decides "peered" from `peers > 0`
+  when a box reports one, falling back to peer-of-this-node only for older builds.
+  Box 1 was syncing from box 2 while the site labelled it "not peered"; the label
+  was derived from bootnode membership rather than the node's own view.
+
+### Added
+- **`gpn_snapshot checkpoint` exit-code contract documented (#156)** and
+  `scripts/auto-release-if-behind.sh`: publishing what is already cut but
+  unpublished no longer waits for a human to remember the two manual steps.
+
+### Why the patch
+
+0.3.36 was signed from `e7e93d7`, and the peer-count fix landed after it. The
+updater then correctly refused to install 0.3.36 over the locally deployed
+binaries (same version, different build) — a rollback the version number could
+not express. 0.3.37 is the first version that contains everything the fleet is
+actually running.
+
 ## [0.3.36] - 2026-11-09
 
 Peering stops being "whoever answers first".
