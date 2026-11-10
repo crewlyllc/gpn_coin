@@ -1,6 +1,6 @@
 [package]
 name = "pallet-gpu-pow"
-version = "0.3.40"
+version = "0.3.41"
 edition = "2021"
 
 [dependencies]

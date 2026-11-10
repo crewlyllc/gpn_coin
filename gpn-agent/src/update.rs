@@ -3732,8 +3732,8 @@ mod tests {
                 .count(),
             1
         );
-        // The LAN seed the runtime relies on is part of that list.
-        assert!(out.contains(crate::chainspec::LAN_SEED_BOOTNODE));
+        // 2026-11-10: the LAN seed is NOT part of the shipped list any more.
+        assert!(!out.contains(crate::chainspec::LAN_SEED_BOOTNODE));
 
         // CRLF is preserved: cmd.exe tolerates LF, but a mixed-ending file is a
         // nasty thing to hand an operator who opens it in Notepad.

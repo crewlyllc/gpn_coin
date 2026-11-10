@@ -79,7 +79,10 @@ fn the_launcher_list_never_serves_a_private_address() {
     // chain spec serves: `is_dialable_bootnode` rejects private hosts, and a
     // spec that dials one strands every fresh install (2026-10-30).
     let launcher = gpn_agent::chainspec::launcher_bootnodes();
-    assert!(launcher.contains(&gpn_agent::chainspec::LAN_SEED_BOOTNODE.to_string()));
+    // 2026-11-10: the LAN seed must NOT be shipped -- a private address only
+    // means something on the network that owns it (box 1 runs on its own
+    // 192.168.1.0/24 and dialled a stranger's device).
+    assert!(!launcher.contains(&gpn_agent::chainspec::LAN_SEED_BOOTNODE.to_string()));
     for c in gpn_agent::chainspec::canonical_bootnodes() {
         assert!(launcher.contains(&c), "canonical entry dropped: {c}");
         assert!(gpn_agent::chainspec::is_dialable_bootnode(&c));

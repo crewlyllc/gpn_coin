@@ -70,8 +70,11 @@ pub fn launcher_bootnodes() -> Vec<String> {
     vec![
         CANONICAL_BOOTNODES[0].to_string(), // DNS name — survives an IP change
         CANONICAL_BOOTNODES[1].to_string(), // primary seed, public address
-        LAN_SEED_BOOTNODE.to_string(),      // primary seed, same LAN
         CANONICAL_BOOTNODES[2].to_string(), // second seed box
+        // NO LAN entry here (removed 2026-11-10). A private address is only
+        // meaningful on the network that owns it: box 1 runs on a different
+        // 192.168.1.0/24, so shipping one pointed it at a stranger's device.
+        // A LAN seed is computed per machine by the installer / supervisor.
     ]
 }
 
