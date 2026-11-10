@@ -1103,6 +1103,20 @@ mod tests {
     // ── signed snapshot metadata ────────────────────────────────────────────
 
     fn signed_meta(sk: &ed25519_dalek::SigningKey, size: u64) -> (Vec<u8>, [u8; 32]) {
+        signed_meta_with(
+            sk,
+            size,
+            &format!("0x{}", "11".repeat(32)),
+            &format!("0x{}", "22".repeat(32)),
+        )
+    }
+
+    fn signed_meta_with(
+        sk: &ed25519_dalek::SigningKey,
+        size: u64,
+        genesis: &str,
+        block_hash: &str,
+    ) -> (Vec<u8>, [u8; 32]) {
         use ed25519_dalek::Signer;
         let pubkey = sk.verifying_key().to_bytes();
         let mut m = SnapshotMeta {
@@ -1111,6 +1125,10 @@ mod tests {
             sha256: "ab".repeat(32),
             size,
             block: Some(206_860),
+            // v2 checkpoint: a signed doc must carry both, and both must be
+            // 0x + 64 hex, or `verify` refuses it (see the shape check below).
+            genesis: genesis.into(),
+            block_hash: block_hash.into(),
             built: "2026-10-28T18:50:02Z".into(),
             signing_key: hex::encode(pubkey),
             signature: String::new(),
@@ -1118,6 +1136,60 @@ mod tests {
         let sig = sk.sign(&m.canonical_text());
         m.signature = hex::encode(sig.to_bytes());
         (serde_json::to_vec(&m).unwrap(), pubkey)
+    }
+
+    #[test]
+    fn a_v2_checkpoint_must_be_a_real_hash_even_when_correctly_signed() {
+        // The shape check has to run *after* the signature, so a doc that is
+        // genuinely signed but carries a half-filled checkpoint must still be
+        // refused: a forged-looking pair is worse than no pair at all.
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let pk = hex::encode(sk.verifying_key().to_bytes());
+        let good_genesis = format!("0x{}", "11".repeat(32));
+        let good_block = format!("0x{}", "22".repeat(32));
+        for (genesis, block_hash) in [
+            (String::new(), good_block.clone()),
+            (good_genesis.clone(), String::new()),
+            ("0xdeadbeef".to_string(), good_block.clone()),
+            (good_genesis.clone(), "not-hex".to_string()),
+        ] {
+            let (json, _) = signed_meta_with(&sk, 1234, &genesis, &block_hash);
+            let e = verify_snapshot_meta(&json, &pk, None).unwrap_err();
+            assert!(
+                e.contains("invalid genesis") || e.contains("invalid block_hash"),
+                "expected a checkpoint shape refusal, got: {e}"
+            );
+        }
+        // ...and the well-formed pair still verifies.
+        let (json, _) = signed_meta(&sk, 1234);
+        assert!(verify_snapshot_meta(&json, &pk, None).is_ok());
+    }
+
+    #[test]
+    fn a_v1_document_still_verifies_forever() {
+        // The v1 prefix is part of the signed text, so pre-v2 snapshots keep
+        // verifying exactly as they did — the v2 fields must not leak into it.
+        use ed25519_dalek::Signer;
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[4u8; 32]);
+        let pk = hex::encode(sk.verifying_key().to_bytes());
+        let mut m = SnapshotMeta {
+            format: SNAPSHOT_CANONICAL_PREFIX_V1.into(),
+            url: "https://example.invalid/old.tar.gz".into(),
+            sha256: "cd".repeat(32),
+            size: 4321,
+            block: Some(123_456),
+            genesis: String::new(),
+            block_hash: String::new(),
+            built: "2026-10-20T00:00:00Z".into(),
+            signing_key: pk.clone(),
+            signature: String::new(),
+        };
+        let sig = sk.sign(&m.canonical_text());
+        m.signature = hex::encode(sig.to_bytes());
+        let json = serde_json::to_vec(&m).unwrap();
+        let got = verify_snapshot_meta(&json, &pk, None).unwrap();
+        assert_eq!(got.size, 4321);
+        assert_eq!(got.block, Some(123_456));
     }
 
     #[test]
