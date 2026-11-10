@@ -307,11 +307,13 @@ GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code><
   var TICK_MS = 1000;
 
   /* Baked-in copy of network.json's bootnodes: the last-known static list,
-     used ONLY for the clearly-labelled cached fallback. */
+     used ONLY for the clearly-labelled cached fallback. No private/LAN seed
+     here -- it was reverted 2026-11-10: a 192.168.x.x address is only
+     meaningful on the network that owns it, and shipping one pointed a remote
+     box at a stranger's device. */
   var CACHED_BOOTNODES = [
     "/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
     "/ip4/142.129.54.88/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
-    "/ip4/192.168.1.20/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
     "/ip4/23.241.109.255/tcp/30333/p2p/12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz"
   ];
 

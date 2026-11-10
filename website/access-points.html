@@ -111,7 +111,9 @@
                (DNS) and row 2 (IP literal) are the same machine and the same
                peer id — one bootnode, two addresses. Live seed rows in
                `/api/network` and `/seeds.json` are deduped by peer id, so the
-               API reports 2 seeds for these 3 endpoints. -->
+               API reports 2 seeds for these 3 endpoints. There is deliberately
+               NO private/LAN row: a 192.168.x.x seed was reverted 2026-11-10
+               because it pointed remote boxes at a stranger's device. -->
           <tbody id="bootnode-rows">
             <tr>
               <td><b>gpn-testnet.duckdns.org:30333</b><br><span class="small muted">DNS name</span></td>
@@ -123,12 +125,6 @@
               <td><b>142.129.54.88:30333</b><br><span class="small muted">IP literal &mdash; same node as the DNS name above</span></td>
               <td><code>12D3KooWAFt…</code></td>
               <td><code>/ip4/142.129.54.88/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo</code></td>
-              <td><span class="chip up"><span class="d" aria-hidden="true"></span> Live</span></td>
-            </tr>
-            <tr>
-              <td><b>192.168.1.20:30333</b><br><span class="small muted">LAN &mdash; only for machines on the seed's own network (same router)</span></td>
-              <td><code>12D3KooWAFt&hellip;</code></td>
-              <td><code>/ip4/192.168.1.20/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo</code></td>
               <td><span class="chip up"><span class="d" aria-hidden="true"></span> Live</span></td>
             </tr>
             <tr>
