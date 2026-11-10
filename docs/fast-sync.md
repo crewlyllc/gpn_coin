@@ -2,7 +2,7 @@
 
 *Verified against: chain spec 51 / release 0.3.31 — checked 2026-11-09 at block 271,943.*
 
-**Task:** GPN-TASKS #23 · **Status:** snapshot tooling SHIPPED + live-verified; checkpoint DESIGNED (gated).
+**Task:** GPN-TASKS #23 · **Status:** snapshot tooling SHIPPED + live-verified; signed checkpoint v2 SHIPPED (§2b) — the *scheduled* daily check is not installed yet.
 
 A fresh GPN node re-verifies every block, including recomputing its **Ethash seal**
 (`hashimoto_light` on the light cache) for each imported block. So the time to
@@ -77,7 +77,6 @@ A snapshot is only as trustworthy as its **source**:
   corrupt transfer), not **authenticity** (it does not prove who made it).
 
 ### Measured (this node, 2026-10-12)
-
 | Step | Value |
 | --- | --- |
 | DB size (`chains/gpn_testnet/db/full`) | **155 MB** |
@@ -90,6 +89,38 @@ A snapshot is only as trustworthy as its **source**:
 Net: onboarding drops from *minutes-and-growing* (a full re-sync) to *seconds*
 (the copy + import + the last handful of blocks). For a slower box (e.g. the
 Windows provider) the win is larger, since a full sync there is network-bound.
+
+## 2b. Signed checkpoint — how a node knows it is on the right chain
+
+`snapshot.json` **v2** carries `genesis` and `block_hash` *inside the signed
+canonical text* (v1 documents still verify forever; the version prefix is part of
+what is signed). `gpn_snapshot verify` already rejected forged or half-filled
+checkpoints; `gpn_snapshot checkpoint` is the half that compares them to **this
+node**:
+
+```bash
+gpn_snapshot checkpoint --meta snapshot.json          # read-only
+gpn_snapshot checkpoint --meta snapshot.json --stop-unit gpn-fleet
+```
+
+Exit codes — the contract a supervisor keys on:
+
+| exit | meaning | what to do |
+| --- | --- | --- |
+| `0` | our hash at the checkpoint height **is** the signed one, or we are not there yet, or the metadata is v1 (no claim) | nothing |
+| `12` | **wrong chain** — our hash at that height is a different block (or the genesis differs) | stop the node, re-sync from a trusted source; never reorg onto that fork |
+| `1` | could not decide (RPC down, signature invalid, unreadable metadata) | retry; this is *not* evidence of a fork |
+
+Three-state by design: an unreadable RPC or a fresh node that has not reached
+the height is **never** reported as a fork. Only two matching hashes that differ
+are fatal. `--stop-unit` additionally runs `systemctl --user stop <unit>` (best
+effort) so a supervisor that does not watch the exit code still gets the node
+stopped.
+
+**Not installed yet:** nothing schedules this daily, because the check is fatal
+by design and stopping a fleet on a fetched document needs an owner call. Until
+it is wired, run it by hand (or from your own timer) once a snapshot is
+published.
 
 ## 3. Assume-valid checkpoint (stretch) — DESIGN only, gated
 
