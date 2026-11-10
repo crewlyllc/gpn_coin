@@ -1,5 +1,33 @@
 # GPN change-log
 
+## 2026-11-10 03:5x PT — release 0.3.37 (the second time the same wedge cost a release)
+
+**WHY:** the 02:42:38 `gpn-update.timer` fire declined and said so: *"gpn_provider_status: refusing to
+replace 0.3.36 with a different build of the same version: the install dir runs sha f7472a9, the release
+was built from sha e7e93d7"* (`Result=success`, `ExecMainStatus=3`). The #148 guard was **right** — I
+checked instead of forcing: `7667a2f` (W78, the peer-count fix) is **not** an ancestor of `e7e93d7`, so
+the two locally deployed binaries (`gpn_provider_status`, `gpn_scheduler`, both stamped 0.3.36/
+f7472a9) are *newer* than the published release, and `--force` would have reverted W78 everywhere.
+
+**ROOT CAUSE (same shape as 0.3.29 → 0.3.30):** the version was bumped to 0.3.36, the release was
+signed, and *then* work landed in `main` — so the fleet runs code no published version contains, and
+the only two ways forward are a `--force` rollback or a version the tree has not used yet. A second,
+smaller defect masked it: `deploy-bin.sh` builds from a dirty worktree, so a binary carrying W78 was
+stamped with the *base* commit `f7472a9` — the stamp describes the checkout, not the content.
+
+**FIX:** bump to **0.3.37** + both `Cargo.lock`s (`cargo metadata`, no build), CHANGELOG entry naming
+W78; `6fa51fd` pushed, CI green, builds dispatched from tag `build/6fa51fd3c019`, `release-cut
+--version 0.3.37` published `97cb146` (linux 324,433,256 B `b3622738`, windows 239,818,121 B
+`868e0022`, key `78015fab…`). Applied here 03:5x: 57 binaries → 0.3.37/6fa51fd, all 8 units restarted
+(fleet 03:53:59, the rest 03:54:19). Verified: chat **HTTP 200 in 0.10 s** (channel 7, job
+1794311739172), head #277,623 and rising, txpool **empty**, `/providers` push lane 4 rows + `poll` 1,
+`gflops_verified` 3, diffusion pull *active on first poll*, oracle clean, canonical genesis WASM
+byte-intact (`d9d2b536…` / 481,002 B). Disk 15 % free.
+
+**NEXT TIME:** publish *before* the next work item lands, or bump again — `scripts/auto-release-if-behind.sh`
+only ships a version the tree is already ahead on, so it cannot rescue this case. A dirty-worktree build
+stamp (`sha=…-dirty`) would at least stop the guard from believing a sha it was never built from.
+
 ## 2026-11-08 07:3x PT — release 0.3.30 (no source change: the shipped tree must be at or ahead of the install dir)
 
 **WHY:** the 07:20:28 `gpn-update.timer` fire **declined to install 0.3.29** and said so exactly: *"refusing to replace 0.3.29 with a different build of the same version: the install dir runs sha 9c9e82c, the release was built from sha c77c306"* (`exit 3`, unit `Result=success`). The #148 guard was right: last night's #150 fix was deployed locally by `deploy-bin.sh` from HEAD, so `~/.local/bin/gpn_update` is stamped **0.3.29 / 9c9e82c** while the published 0.3.29 asset was built from its parent **c77c306**. Version-equal, sha-newer ⇒ installing it would have swapped the retry-fixed updater for one without it.
