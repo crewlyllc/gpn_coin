@@ -409,7 +409,8 @@ impl Drop for GuiHandle {
 
 /// The one-line hint printed at node startup when the GUI is NOT enabled.
 pub fn startup_hint(_bin: &str) -> String {
-    format!("  dashboard: off — add --gui to serve the local control panel on {DEFAULT_LISTEN}")
+    // Only reached when the dashboard is OFF (opt-out). The default is now on.
+    format!("  dashboard: off (GPN_GUI=0 / --no-gui) — re-enable with --gui on {DEFAULT_LISTEN}")
 }
 
 #[cfg(test)]

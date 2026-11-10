@@ -1656,10 +1656,20 @@ impl Config {
             status_secs: env_u64("GPN_STATUS_SECS")
                 .or(file.status_secs)
                 .unwrap_or(15),
-            // ── Local dashboard (opt-in, loopback only) ─────────────────────
-            gui: env_bool("GPN_GUI").unwrap_or(false)
-                || argv.iter().any(|a| a == "--gui")
-                || file.gui.unwrap_or(false),
+            // ── Local dashboard (ON unless explicitly disabled) ─────────────
+            // 2026-11-10 (owner): the dashboard is the only place a node's state
+            // is visible -- the console just scrolls. Opt-in meant a restart from
+            // a context that forgot GPN_GUI=1 silently produced a node with no
+            // panel, which reads as "the node is broken" (box 1, 2026-11-10).
+            // It binds loopback only, so defaulting it on exposes nothing.
+            //   GPN_GUI=0 / --no-gui  → off
+            //   GPN_GUI=1 / --gui     → on (explicit, wins over config)
+            gui: match env_bool("GPN_GUI") {
+                Some(v) => v,
+                None if argv.iter().any(|a| a == "--no-gui") => false,
+                None if argv.iter().any(|a| a == "--gui") => true,
+                None => file.gui.unwrap_or(true),
+            },
             gui_listen: env_str("GPN_GUI_LISTEN")
                 .or_else(|| flag_value(&argv, "--gui-listen"))
                 .or(file.gui_listen)

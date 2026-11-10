@@ -8,6 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.38] - 2026-11-10
+
+The dashboard is on by default.
+
+### Changed
+- **`GPN_GUI` defaults to ON.** It was opt-in (`--gui` / `GPN_GUI=1`), so any
+  start path that forgot the flag produced a node with no panel — which reads as
+  "the node is broken", because the console only scrolls and the dashboard is the
+  only place state is visible (box 1, 2026-11-10). It binds `127.0.0.1` only, so
+  defaulting it on exposes nothing.
+  Opt out with `GPN_GUI=0` or `--no-gui`; `--gui` and `GPN_GUI=1` still win.
+
 ## [0.3.37] - 2026-11-10
 
 A node tells the network how many peers it has, instead of someone guessing.
