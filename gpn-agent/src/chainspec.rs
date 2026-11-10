@@ -485,8 +485,10 @@ mod tests {
                 "a new canonical bootnode must also reach the launchers: {c}"
             );
         }
-        // The LAN entry is dialled but never served.
-        assert!(launcher.iter().any(|l| l == LAN_SEED_BOOTNODE));
+        // A private LAN seed must never ship in a launcher: it pointed box 1 at
+        // a stranger's device on a different 192.168.1.0/24 (reverted
+        // 2026-11-10). The installer/supervisor computes one per machine.
+        assert!(!launcher.iter().any(|l| l == LAN_SEED_BOOTNODE));
         assert!(!CANONICAL_BOOTNODES.contains(&LAN_SEED_BOOTNODE));
         assert!(!is_dialable_bootnode(LAN_SEED_BOOTNODE));
         // Order matters: the first entry has to be the DNS name.
