@@ -426,7 +426,20 @@ pub async fn prepare_network_config(
     // A reserved peer is exempt from the peer-count cap, is never evicted, and
     // the network layer keeps re-dialling it. Only the compiled-in seeds are
     // tier 0 — a peer learned from a seed list or the chain never is.
-    let oracle_ids = crate::peer_priority::oracle_peer_ids(&registry.bootstrap_seeds);
+    // Our own peer id must never be an oracle seed: a node that reserves a slot
+    // for itself dials itself, wastes the slot, and inflates the "tier-0
+    // connected" count. Observed 2026-11-10 (box 1 listed its own id twice).
+    let own_peer_id = config
+        .network
+        .node_key
+        .clone()
+        .into_keypair()
+        .ok()
+        .map(|k| k.public().to_peer_id().to_string());
+    let oracle_ids: Vec<String> = crate::peer_priority::oracle_peer_ids(&registry.bootstrap_seeds)
+        .into_iter()
+        .filter(|id| own_peer_id.as_deref() != Some(id.as_str()))
+        .collect();
     if config.network.default_peers_set.reserved_nodes.is_empty() && !oracle_ids.is_empty() {
         let reserved: Vec<MultiaddrWithPeerId> = config
             .network

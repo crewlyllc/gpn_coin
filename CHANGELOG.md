@@ -8,6 +8,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.40] - 2026-11-10
+
+A node no longer reserves a slot for itself.
+
+### Fixed
+- **Tier-0 oracle seeds exclude our own peer id.** `network.json`'s bootstrap
+  list contains box 1's address, so box 1 was told to reserve and re-dial *itself*
+  every 60 s — wasting a reserved slot and inflating the "tier-0 connected"
+  count. Observed in box 1's own log (2026-11-10): the reserved list named its
+  own peer id twice.
+
 ## [0.3.39] - 2026-11-10
 
 Remove the LAN seed I added in 0.3.29 — it was wrong for every remote box.
