@@ -10,6 +10,7 @@ use sc_client_api::StorageProvider;
 use sc_consensus::{BlockImport, LongestChain};
 use sc_consensus_pow::{start_mining_worker, PowAlgorithm, PowBlockImport, PowImportQueue};
 use sc_network::config::MultiaddrWithPeerId;
+use sc_network::service::traits::{NotificationEvent, ValidationResult};
 use sc_network::{NetworkPeers, NetworkStateInfo, NetworkStatusProvider};
 use sc_network_sync::SyncingService;
 use sc_service::{error::Error as ServiceError, Configuration, TaskManager};
@@ -747,12 +748,39 @@ pub async fn new_full<
         }
     }
 
-    let net_config = sc_network::config::FullNetworkConfiguration::<
+    let mut net_config = sc_network::config::FullNetworkConfiguration::<
         Block,
         <Block as sp_runtime::traits::Block>::Hash,
         N,
     >::new(&config.network, config.prometheus_registry().cloned());
     let metrics = N::register_notification_metrics(config.prometheus_registry());
+
+    // ---- Peer-exchange notification protocol (GPN #155, design §2) --------
+    // `gpn/peers/1` rides the existing connections, so it needs no dialling of
+    // its own: the ranked re-dial loop below owns who we are connected to, and
+    // this protocol only says who *else* exists. Registration must happen
+    // before `build_network`; the protocol task is spawned after it.
+    let peer_exchange_service: Box<dyn sc_network::NotificationService> = {
+        let (protocol_config, service) = N::notification_config(
+            sc_network::ProtocolName::from(crate::peer_exchange::PEERS_PROTOCOL),
+            Vec::new(),
+            crate::peer_exchange::MAX_GOSSIP_BYTES as u64,
+            None,
+            sc_network::config::SetConfig {
+                // Gossip rides on whatever connections the node already has; a
+                // bounded substream budget keeps a hostile peer from opening
+                // an unbounded number of them.
+                in_peers: 64,
+                out_peers: 64,
+                reserved_nodes: Vec::new(),
+                non_reserved_mode: sc_network::config::NonReservedPeerMode::Accept,
+            },
+            metrics.clone(),
+            net_config.peer_store_handle(),
+        );
+        net_config.add_notification_protocol(protocol_config);
+        service
+    };
 
     let (network, system_rpc_tx, tx_handler_controller, sync_service) =
         sc_service::build_network(sc_service::BuildNetworkParams {
@@ -1149,6 +1177,11 @@ pub async fn new_full<
     // single place that decides dial order, slot usage and backoff.
     let peer_book = std::sync::Arc::new(crate::peer_priority::PeerBook::new());
 
+    // Consecutive dial failures per peer, shared with the gossip policy so an
+    // address that has stopped answering stops being advertised (design §2).
+    let dial_failures: std::sync::Arc<Mutex<std::collections::HashMap<String, u32>>> =
+        Default::default();
+
     // ---- Persistent peer store (Bitcoin-style addrman) -------------------
     // Snapshot the addresses of peers we are *connected to* into
     // `<base-path>/gpn-peers.json`. On the next start these are merged into the
@@ -1328,6 +1361,7 @@ pub async fn new_full<
         let net = network.clone();
         let book = peer_book.clone();
         let base = base_path.clone();
+        let shared_failures = dial_failures.clone();
         let oracle_ids = crate::peer_priority::oracle_peer_ids(
             &crate::network_registry::load_registry().bootstrap_seeds,
         );
@@ -1424,6 +1458,11 @@ pub async fn new_full<
                         last_attempt.insert(c.peer_id.clone(), now);
                         failures.insert(c.peer_id.clone(), f.saturating_add(1).min(8));
                     }
+                    // Publish the failure record for the gossip policy. A peer
+                    // that has failed three dials in a row is not re-advertised.
+                    if let Ok(mut shared) = shared_failures.lock() {
+                        *shared = failures.clone();
+                    }
                     if dialled > 0 {
                         let reserved = plan
                             .dial
@@ -1439,6 +1478,128 @@ pub async fn new_full<
                             plan.skipped.len(),
                             plan.dial.len()
                         );
+                    }
+                }
+            });
+    }
+
+    // ---- Peer-exchange gossip (GPN #155, design §2) ----------------------
+    // A node that only knows the seed pairs off with whoever dials it — that is
+    // exactly how the fleet became two disjoint pairs on 2026-11-09. Every 5 min
+    // we tell each connected peer who else we know (≤32 entries, ≤8 KB), and
+    // anything we learn enters the ranked book as tier 2, so gossip can never
+    // displace a peer the chain vouched for. Best effort by construction: a
+    // malformed message yields nothing, never an error the node acts on.
+    {
+        let book = peer_book.clone();
+        let failures = dial_failures.clone();
+        task_manager
+            .spawn_handle()
+            .spawn("gpn-peer-exchange", None, async move {
+                use crate::peer_exchange as px;
+                let mut service = peer_exchange_service;
+                let mut open: std::collections::HashSet<sc_network::PeerId> = Default::default();
+                let mut learned: std::collections::HashMap<String, u64> = Default::default();
+                let mut ticker =
+                    tokio::time::interval(Duration::from_secs(px::GOSSIP_INTERVAL_SECS));
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                log::info!(
+                    "peer-exchange: {} active — ≤{} entries / {} B every {}s",
+                    px::PEERS_PROTOCOL,
+                    px::MAX_GOSSIP_ENTRIES,
+                    px::MAX_GOSSIP_BYTES,
+                    px::GOSSIP_INTERVAL_SECS
+                );
+                loop {
+                    tokio::select! {
+                        event = service.next_event() => {
+                            let Some(event) = event else {
+                                log::warn!(
+                                    "peer-exchange: notification stream ended — gossip stopped"
+                                );
+                                break;
+                            };
+                            match event {
+                                NotificationEvent::ValidateInboundSubstream {
+                                    result_tx, handshake, ..
+                                } => {
+                                    // Our handshake is empty; a peer sending a
+                                    // large one is not speaking this protocol.
+                                    let _ = result_tx.send(if handshake.len() <= 64 {
+                                        ValidationResult::Accept
+                                    } else {
+                                        ValidationResult::Reject
+                                    });
+                                }
+                                NotificationEvent::NotificationStreamOpened { peer, .. } => {
+                                    open.insert(peer);
+                                    log::debug!(
+                                        "peer-exchange: substream open with {peer} ({} peer(s))",
+                                        open.len()
+                                    );
+                                }
+                                NotificationEvent::NotificationStreamClosed { peer } => {
+                                    open.remove(&peer);
+                                }
+                                NotificationEvent::NotificationReceived {
+                                    peer, notification, ..
+                                } => {
+                                    let now = now_unix();
+                                    let before = book.len();
+                                    let added = px::ingest(
+                                        &notification,
+                                        &book,
+                                        before,
+                                        &mut learned,
+                                        now,
+                                    );
+                                    if added > 0 {
+                                        log::info!(
+                                            "peer-exchange: learned {added} new peer(s) from \
+                                             {peer} ({} known total)",
+                                            book.len()
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        _ = ticker.tick() => {
+                            if open.is_empty() {
+                                continue;
+                            }
+                            let now = now_unix();
+                            let candidates = book.snapshot();
+                            let fail = failures
+                                .lock()
+                                .map(|g| g.clone())
+                                .unwrap_or_default();
+                            let mut sent = 0usize;
+                            for peer in &open {
+                                let who = peer.to_string();
+                                let entries = px::select_entries(
+                                    &candidates,
+                                    &learned,
+                                    &fail,
+                                    Some(who.as_str()),
+                                    now,
+                                );
+                                if entries.is_empty() {
+                                    continue;
+                                }
+                                let bytes = px::encode(&entries, now);
+                                if bytes.is_empty() {
+                                    continue;
+                                }
+                                service.send_sync_notification(peer, bytes);
+                                sent += 1;
+                            }
+                            if sent > 0 {
+                                log::debug!(
+                                    "peer-exchange: gossiped peer list to {sent}/{} peer(s)",
+                                    open.len()
+                                );
+                            }
+                        }
                     }
                 }
             });
