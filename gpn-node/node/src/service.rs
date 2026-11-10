@@ -420,6 +420,32 @@ pub async fn prepare_network_config(
     }
 
     config.network.boot_nodes = bootnodes;
+
+    // ---- Tier 0 (oracle seeds) get reserved slots (design §1, GPN #154) ----
+    // A reserved peer is exempt from the peer-count cap, is never evicted, and
+    // the network layer keeps re-dialling it. Only the compiled-in seeds are
+    // tier 0 — a peer learned from a seed list or the chain never is.
+    let oracle_ids = crate::peer_priority::oracle_peer_ids(&registry.bootstrap_seeds);
+    if config.network.default_peers_set.reserved_nodes.is_empty() && !oracle_ids.is_empty() {
+        let reserved: Vec<MultiaddrWithPeerId> = config
+            .network
+            .boot_nodes
+            .iter()
+            .filter(|m| oracle_ids.iter().any(|id| id == &m.peer_id.to_string()))
+            .cloned()
+            .collect();
+        if !reserved.is_empty() {
+            log::info!(
+                "peer-priority: {} tier-0 oracle seed(s) reserved (never evicted, re-dialled \
+                 every {}s): {}",
+                reserved.len(),
+                crate::peer_priority::REDIAL_INTERVAL_SECS,
+                oracle_ids.join(", ")
+            );
+            config.network.default_peers_set.reserved_nodes = reserved;
+        }
+    }
+
     config
 }
 
@@ -1118,6 +1144,11 @@ pub async fn new_full<
             });
     }
 
+    // ---- Ranked peer book (GPN #154, design §1) --------------------------
+    // Every discovery source writes here; the ranked re-dial loop below is the
+    // single place that decides dial order, slot usage and backoff.
+    let peer_book = std::sync::Arc::new(crate::peer_priority::PeerBook::new());
+
     // ---- Persistent peer store (Bitcoin-style addrman) -------------------
     // Snapshot the addresses of peers we are *connected to* into
     // `<base-path>/gpn-peers.json`. On the next start these are merged into the
@@ -1156,9 +1187,15 @@ pub async fn new_full<
     // Read the full-node registry + provider endpoints from chain and dial
     // them. Bootstrap chicken-and-egg: wait until we have at least one peer
     // (bounded) before the first scan; never blocks startup.
+    //
+    // Since GPN #154 the endpoints are fed into the ranked peer book (tier 1,
+    // "on chain") and dialled by the ranked re-dial loop below — order and cap
+    // are decided in one place. Chain records carry no first-seen block, so
+    // tenure is unknown and peers tie-break on peer id (see `peer_priority`).
     {
         let net = network.clone();
         let client = client.clone();
+        let book = peer_book.clone();
         task_manager
             .spawn_handle()
             .spawn("gpn-chain-discovery", None, async move {
@@ -1178,12 +1215,18 @@ pub async fn new_full<
                     let mut added = 0usize;
                     for ma in endpoints {
                         if let Ok(mw) = ma.parse::<MultiaddrWithPeerId>() {
-                            net.add_known_address(mw.peer_id, mw.multiaddr);
+                            book.upsert(crate::peer_priority::Candidate::new(
+                                &ma,
+                                crate::peer_priority::Tier::Ranked,
+                                None,
+                            ));
                             added += 1;
                         }
                     }
                     if added > 0 {
-                        log::info!("chain-discovery: dialing {added} on-chain peer(s)");
+                        log::info!(
+                            "chain-discovery: {added} on-chain peer(s) added to the ranked list"
+                        );
                     } else {
                         log::debug!("chain-discovery: no dialable on-chain endpoints");
                     }
@@ -1196,13 +1239,20 @@ pub async fn new_full<
     // seed that changes, or a long-running node that drifts down to zero peers
     // would otherwise never re-read it. Refresh at 15 min while short of
     // peers / 1 h otherwise, with ±15 % jitter and a backoff multiplier on
-    // consecutive failures. Newly-published seeds are dialled immediately
-    // (`add_known_address`) and written to the last-good cache.
+    // consecutive failures. Since GPN #154 the results go into the ranked peer
+    // book (tier 0 only for a compiled-in oracle seed, otherwise tier 2) and
+    // are dialled by the ranked re-dial loop — the shuffle is gone, because
+    // two nodes shuffling differently is exactly how the fleet split into two
+    // pairs on 2026-11-09.
     if let Some(sources) = crate::discovery::active_sources() {
         if !(sources.dns.is_empty() && sources.urls.is_empty()) {
             let net = network.clone();
             let base = base_path.clone();
             let sources = sources.clone();
+            let book = peer_book.clone();
+            let oracle_ids = crate::peer_priority::oracle_peer_ids(
+                &crate::network_registry::load_registry().bootstrap_seeds,
+            );
             task_manager
                 .spawn_handle()
                 .spawn("gpn-seed-refresh", None, async move {
@@ -1221,22 +1271,28 @@ pub async fn new_full<
                         tokio::time::sleep(Duration::from_secs(wait)).await;
 
                         match crate::discovery::fetch_all_seeds(&sources).await {
-                            Ok(mut addrs) => {
+                            Ok(addrs) => {
                                 failures = 0;
                                 if let Err(e) = crate::discovery::write_seed_cache(&base, &addrs) {
                                     log::debug!("seed-refresh: cache write failed: {e}");
                                 }
-                                crate::discovery::shuffle_in_place(&mut addrs, sample | 1);
-                                let mut dialled = 0usize;
+                                let mut known = 0usize;
                                 for ma in addrs {
-                                    if let Ok(mw) = ma.parse::<MultiaddrWithPeerId>() {
-                                        net.add_known_address(mw.peer_id, mw.multiaddr);
-                                        dialled += 1;
-                                    }
+                                    let tier = match crate::peer_priority::peer_id_of(&ma) {
+                                        Some(id) if oracle_ids.iter().any(|o| o == id) => {
+                                            crate::peer_priority::Tier::OracleSeed
+                                        }
+                                        Some(_) => crate::peer_priority::Tier::Unknown,
+                                        None => continue,
+                                    };
+                                    book.upsert(crate::peer_priority::Candidate::new(
+                                        &ma, tier, None,
+                                    ));
+                                    known += 1;
                                 }
                                 log::info!(
-                                    "seed-refresh: {dialled} seed(s) re-read from {} source(s) \
-                                     (peers {connected}); next refresh in {}s",
+                                    "seed-refresh: {known} seed(s) re-read from {} source(s) \
+                                     into the ranked list (peers {connected}); next refresh in {}s",
                                     sources.dns.len() + sources.urls.len(),
                                     crate::discovery::refresh_interval_secs_with(
                                         connected, 0, jitter, fast
@@ -1256,6 +1312,136 @@ pub async fn new_full<
                     }
                 });
         }
+    }
+
+    // ---- Ranked peer re-dial (GPN #154, design §1) -----------------------
+    // The one place that decides who to dial and in what order:
+    //   * tier 0 — oracle seeds: every 60 s while disconnected, always dialled,
+    //     never capped and never evicted (also reserved in the network config);
+    //   * tier 1 — on-chain peers, ranked by tenure (unknown tenure last);
+    //   * tier 2 — unknown peers, only while non-reserved slots remain.
+    // A failed dial backs off 30 s → 8 min (capped) but never removes the peer,
+    // because the peer that is down today is the peer that holds the history
+    // tomorrow. Connectivity comes from `network_state()`, so a connected peer
+    // is never re-dialled and a successful one resets its backoff.
+    {
+        let net = network.clone();
+        let book = peer_book.clone();
+        let base = base_path.clone();
+        let oracle_ids = crate::peer_priority::oracle_peer_ids(
+            &crate::network_registry::load_registry().bootstrap_seeds,
+        );
+        task_manager
+            .spawn_handle()
+            .spawn("gpn-peer-redial", None, async move {
+                use crate::peer_priority::{self, Tier};
+                let max_peers = peer_priority::max_peers_from_env();
+                log::info!(
+                    "peer-priority: ranked re-dial active — {max_peers} non-reserved slot(s), \
+                     {} oracle seed(s), {}s tick",
+                    oracle_ids.len(),
+                    peer_priority::REDIAL_INTERVAL_SECS / 2
+                );
+                let mut last_attempt: std::collections::HashMap<String, u64> = Default::default();
+                let mut failures: std::collections::HashMap<String, u32> = Default::default();
+                // Seed the book with what this node already knows, so the very
+                // first tick can rank and dial without waiting for a refresh:
+                // compiled-in bootnodes, the persisted peer store and the
+                // last-good seed cache.
+                let mut known: Vec<crate::peer_priority::Candidate> = Vec::new();
+                for ma in crate::network_registry::load_registry().bootnodes {
+                    let tier = match crate::peer_priority::peer_id_of(&ma) {
+                        Some(id) if oracle_ids.iter().any(|o| o == id) => Tier::OracleSeed,
+                        Some(_) => Tier::Unknown,
+                        None => continue,
+                    };
+                    known.push(crate::peer_priority::Candidate::new(&ma, tier, None));
+                }
+                for ma in crate::discovery::read_persisted_peers(&base)
+                    .into_iter()
+                    .chain(crate::discovery::read_seed_cache(
+                        &base,
+                        crate::discovery::SEED_CACHE_MAX_AGE_SECS,
+                    ))
+                {
+                    known.push(crate::peer_priority::Candidate::new(
+                        &ma,
+                        Tier::Unknown,
+                        None,
+                    ));
+                }
+                book.upsert_all(known);
+                log::debug!("peer-priority: book seeded with {} peer(s)", book.len());
+                let mut tick = tokio::time::interval(Duration::from_secs(
+                    peer_priority::REDIAL_INTERVAL_SECS / 2,
+                ));
+                loop {
+                    tick.tick().await;
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let connected: std::collections::HashSet<String> =
+                        match net.network_state().await {
+                            Ok(state) => state
+                                .connected_peers
+                                .keys()
+                                .map(|p| p.to_string())
+                                .collect(),
+                            Err(_) => Default::default(),
+                        };
+                    // Tier-0 is defined by the compiled-in seed set, not by
+                    // whoever wrote the entry into the book.
+                    let mut candidates = book.snapshot();
+                    for c in candidates.iter_mut() {
+                        if oracle_ids.iter().any(|o| o == &c.peer_id) {
+                            c.tier = Tier::OracleSeed;
+                        }
+                    }
+                    if candidates.is_empty() {
+                        continue;
+                    }
+                    let plan = peer_priority::dial_plan(&candidates, max_peers);
+                    let mut dialled = 0usize;
+                    for c in &plan.dial {
+                        if connected.contains(&c.peer_id) {
+                            last_attempt.insert(c.peer_id.clone(), now);
+                            failures.insert(c.peer_id.clone(), 0);
+                            continue;
+                        }
+                        let since = last_attempt
+                            .get(&c.peer_id)
+                            .map(|t| now.saturating_sub(*t))
+                            .unwrap_or(u64::MAX);
+                        let f = *failures.get(&c.peer_id).unwrap_or(&0);
+                        if !peer_priority::due_for_redial(c.tier, since, f) {
+                            continue;
+                        }
+                        if let Ok(mw) = c.addr.parse::<MultiaddrWithPeerId>() {
+                            net.add_known_address(mw.peer_id, mw.multiaddr);
+                            dialled += 1;
+                        }
+                        last_attempt.insert(c.peer_id.clone(), now);
+                        failures.insert(c.peer_id.clone(), f.saturating_add(1).min(8));
+                    }
+                    if dialled > 0 {
+                        let reserved = plan
+                            .dial
+                            .iter()
+                            .filter(|c| c.tier == Tier::OracleSeed)
+                            .count();
+                        log::info!(
+                            "peer-priority: dialled {dialled}/{} ranked peer(s) — {reserved} \
+                             reserved, {} on-chain/unknown, {} with no slot this round; \
+                             {}/{max_peers} slot(s) filled",
+                            plan.dial.len(),
+                            plan.dial.len() - reserved,
+                            plan.skipped.len(),
+                            plan.dial.len()
+                        );
+                    }
+                }
+            });
     }
 
     if config.offchain_worker.enabled {

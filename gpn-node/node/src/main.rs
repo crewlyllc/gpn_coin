@@ -19,6 +19,7 @@ mod dialability;
 mod discovery;
 mod gpu_miner;
 mod network_registry;
+mod peer_priority;
 mod portmap;
 mod rpc;
 mod service;
