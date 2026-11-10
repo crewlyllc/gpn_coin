@@ -8,6 +8,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.39] - 2026-11-10
+
+Remove the LAN seed I added in 0.3.29 — it was wrong for every remote box.
+
+### Fixed
+- **`/ip4/192.168.1.20/…` is gone from the shipped bootnodes** (network.json, the
+  Windows launcher defaults, `/seeds.json`). A private address only means
+  something on the network that owns it: box 1 runs on a *different* network that
+  also uses `192.168.1.0/24`, so the entry pointed it at a stranger's device while
+  its real route — the public address — was never tried. Measured 2026-11-10:
+  our ARP table shows `192.168.1.46 → FAILED`, i.e. box 1 is not on our wire.
+- Local peers still get a LAN address when it is genuinely useful: the installer
+  computes it per machine from a *private* seed literal on the same /24, and the
+  supervisor does the same at runtime. Neither ships one.
+
 ## [0.3.38] - 2026-11-10
 
 The dashboard is on by default.

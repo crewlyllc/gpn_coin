@@ -73,12 +73,6 @@
 const STATIC_BOOTNODES = [
   "/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
   "/ip4/142.129.54.88/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
-  // Same-LAN seed. Peers sharing the seed's subnet must dial this: going out
-  // to the public address loops back through the router (hairpin NAT) and the
-  // connection is dropped as a self-dial, which is why four machines on one LAN
-  // could heartbeat but never peer (2026-11-07). Off-LAN peers fail this dial
-  // instantly and use the public entries above.
-  "/ip4/192.168.1.20/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
   "/ip4/23.241.109.255/tcp/30333/p2p/12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz",
 ];
 
