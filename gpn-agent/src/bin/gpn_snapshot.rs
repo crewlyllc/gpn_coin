@@ -229,6 +229,10 @@ struct Args {
     /// Explicit pruning mode for `import`: `archive` or `none`. Overrides the
     /// manifest. When absent, import defaults to `archive` (see `import`).
     pruning: Option<String>,
+    /// `checkpoint --stop-unit <unit>`: a systemd **user** unit to stop when the
+    /// signed checkpoint says this node is on the wrong chain. Optional —
+    /// without it the command only reports and sets the exit code.
+    stop_unit: Option<String>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -278,6 +282,7 @@ fn parse_args() -> Result<Args, String> {
         freeze: has("freeze"),
         force: has("force"),
         pruning: get("pruning"),
+        stop_unit: get("stop-unit"),
     })
 }
 
@@ -287,6 +292,9 @@ fn usage() -> String {
   gpn_snapshot export --base-path <node dir> --out <file.tar.gz|.tar.zst> [--chain-dir <dir>] [--meta <json>] [--rpc URL] [--freeze] [--allow-live]
   gpn_snapshot import --snapshot <file> --base-path <dir> [--force] [--pruning archive|none]
   gpn_snapshot verify --meta <snapshot.json> [--snapshot <file>]
+  gpn_snapshot checkpoint --meta <snapshot.json> [--rpc URL] [--stop-unit <unit>]
+     compares this node's own hash at the signed checkpoint height;
+     exit 0 = agree (or not there yet), exit 12 = WRONG CHAIN, exit 1 = could not decide
 ".to_string()
 }
 
@@ -1031,6 +1039,191 @@ fn verify(a: &Args) -> Result<(), String> {
     Ok(())
 }
 
+// -------------------------------------------------------------- checkpoint
+
+/// Exit code for "this node is on a different chain than the signed checkpoint".
+///
+/// 12 is deliberate and is **not** reused anywhere else: `1` already means "a
+/// command failed for some recoverable reason" (including "I could not read the
+/// RPC"), and a supervisor must be able to tell "wrong chain, stop" apart from
+/// "the check itself broke, try again".
+const EXIT_WRONG_CHAIN: i32 = 12;
+
+/// What the local chain says about a signed checkpoint (design §3).
+///
+/// `Unreadable` exists so an *unknown* never becomes a verdict — the same
+/// three-state rule as #141/#144: a failed read is not evidence of a fork, and
+/// a fork must never be inferred from missing data.
+#[derive(Debug, PartialEq, Eq)]
+enum CheckpointVerdict {
+    /// We do not have the checkpoint height yet (fresh node, or still syncing).
+    NotYet {
+        local_height: Option<u64>,
+        block: u64,
+    },
+    /// Our hash at the checkpoint height is the signed one.
+    Match { block: u64 },
+    /// Our hash at that height is a different block: a fork. Fatal.
+    WrongChain {
+        block: u64,
+        expected: String,
+        local: String,
+    },
+}
+
+/// Map a verdict to the process exit code. Split out from the I/O so the
+/// `WrongChain => 12` contract is a test, not a comment.
+fn verdict_exit_code(v: &CheckpointVerdict) -> i32 {
+    match v {
+        CheckpointVerdict::WrongChain { .. } => EXIT_WRONG_CHAIN,
+        _ => 0,
+    }
+}
+
+/// Pure comparison of a signed checkpoint against what the local node reports.
+///
+/// `local_hash_at` is `None` when the local node does not have that height (or
+/// the block hash could not be read) — that is `NotYet`/`Unreadable`, never a
+/// mismatch.
+fn checkpoint_verdict(
+    checkpoint_block: u64,
+    checkpoint_hash: &str,
+    local_height: Option<u64>,
+    local_hash_at: Option<&str>,
+) -> CheckpointVerdict {
+    match (local_height, local_hash_at) {
+        (Some(h), _) if h < checkpoint_block => CheckpointVerdict::NotYet {
+            local_height: Some(h),
+            block: checkpoint_block,
+        },
+        (_, None) => CheckpointVerdict::NotYet {
+            local_height,
+            block: checkpoint_block,
+        },
+        (_, Some(local)) => {
+            let expected = checkpoint_hash.trim().to_ascii_lowercase();
+            let got = local.trim().to_ascii_lowercase();
+            if expected == got {
+                CheckpointVerdict::Match {
+                    block: checkpoint_block,
+                }
+            } else {
+                CheckpointVerdict::WrongChain {
+                    block: checkpoint_block,
+                    expected,
+                    local: got,
+                }
+            }
+        }
+    }
+}
+
+/// `gpn_snapshot checkpoint` — the enforcement half of the signed checkpoint.
+///
+/// The signer (`scripts/snapshot-metadata.py`) and the verifier
+/// (`SnapshotMeta::canonical_text`) already carry `genesis` + `block_hash` in
+/// v2 metadata; this is the part that *compares them to this node*. It is
+/// read-only apart from an optional `systemctl --user stop <unit>`.
+///
+/// Returns the exit code to use (0 = fine, 12 = wrong chain).
+fn checkpoint(a: &Args) -> Result<i32, String> {
+    let meta_path = a
+        .meta
+        .as_ref()
+        .ok_or("checkpoint needs --meta <snapshot.json>")?;
+    let bytes = fs::read(meta_path).map_err(|e| format!("read {}: {e}", meta_path.display()))?;
+    let m = verify_snapshot_meta(&bytes, gpn_agent::update::RELEASE_PUBKEY_HEX, None)?;
+
+    let is_v2 = m.format.trim() == SNAPSHOT_CANONICAL_PREFIX;
+    let (block, block_hash) = match (is_v2, m.block) {
+        (true, Some(b)) if !m.block_hash.trim().is_empty() => (b, m.block_hash.trim().to_string()),
+        _ => {
+            println!("checkpoint: v1 metadata — signed, but it carries no checkpoint; nothing to compare");
+            return Ok(0);
+        }
+    };
+
+    // Genesis first: it is the cheapest way to catch "this is a different
+    // network", and a genesis mismatch can never be a transient.
+    let local_genesis = rpc_call(&a.rpc, "chain_getBlockHash", serde_json::json!([0]))
+        .ok()
+        .and_then(|v| v.as_str().map(|s| s.to_ascii_lowercase()));
+    if let Some(local) = &local_genesis {
+        let want = m.genesis.trim().to_ascii_lowercase();
+        if !want.is_empty() && *local != want {
+            eprintln!("wrong chain (genesis): signed checkpoint is for genesis {want}, this node has {local}");
+            stop_unit_if_requested(a);
+            return Ok(EXIT_WRONG_CHAIN);
+        }
+    }
+
+    let local_height = rpc_call(&a.rpc, "chain_getHeader", serde_json::json!([]))
+        .ok()
+        .and_then(|h| h.get("number").and_then(hex_u64));
+
+    // Only ask for the hash when we could be at that height at all, so a fresh
+    // node does not produce a spurious RPC error.
+    let local_hash = match local_height {
+        Some(h) if h >= block => rpc_call(&a.rpc, "chain_getBlockHash", serde_json::json!([block]))
+            .ok()
+            .and_then(|v| v.as_str().map(String::from)),
+        _ => None,
+    };
+
+    let verdict = checkpoint_verdict(block, &block_hash, local_height, local_hash.as_deref());
+    match &verdict {
+        CheckpointVerdict::Match { block } => {
+            println!("checkpoint: OK — local block {block} matches the signed hash");
+        }
+        CheckpointVerdict::NotYet {
+            local_height: Some(h),
+            block,
+        } => {
+            println!("checkpoint: not there yet — local height {h} < checkpoint {block}");
+        }
+        CheckpointVerdict::NotYet {
+            local_height: None,
+            block,
+        } => {
+            eprintln!(
+                "checkpoint: could not read this node's height ({}) — no verdict, checkpoint {block}",
+                a.rpc
+            );
+            return Ok(1);
+        }
+        CheckpointVerdict::WrongChain {
+            block,
+            expected,
+            local,
+        } => {
+            eprintln!(
+                "wrong chain: signed checkpoint block {block} is {expected}, this node has {local}"
+            );
+            eprintln!(
+                "refusing to reorg onto a fork — stop the node and re-sync from a trusted source"
+            );
+            stop_unit_if_requested(a);
+        }
+    }
+    Ok(verdict_exit_code(&verdict))
+}
+
+/// Stop the configured unit (best effort, and never fatal: the exit code is the
+/// contract, the stop is a convenience for a supervisor that does not watch it).
+fn stop_unit_if_requested(a: &Args) {
+    let Some(unit) = a.stop_unit.as_deref() else {
+        return;
+    };
+    match Command::new("systemctl")
+        .args(["--user", "stop", unit])
+        .status()
+    {
+        Ok(s) if s.success() => eprintln!("stopped {unit}"),
+        Ok(s) => eprintln!("could not stop {unit} (systemctl exit {s})"),
+        Err(e) => eprintln!("could not run systemctl to stop {unit}: {e}"),
+    }
+}
+
 // ------------------------------------------------------------------ main
 
 fn main() {
@@ -1041,6 +1234,17 @@ fn main() {
             std::process::exit(2);
         }
     };
+    // `checkpoint` has its own exit-code contract (0 / 12), so it bypasses the
+    // generic "any Err() = exit 1" path below.
+    if a.cmd == "checkpoint" {
+        match checkpoint(&a) {
+            Ok(code) => std::process::exit(code),
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     let r = match a.cmd.as_str() {
         "export" => export(&a),
         "import" => import(&a),
@@ -1063,6 +1267,91 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── signed checkpoint (design §3 / §5 case 5) ───────────────────────────
+
+    const H_A: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const H_B: &str = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    #[test]
+    fn a_matching_checkpoint_is_ok_and_exits_zero() {
+        let v = checkpoint_verdict(272_654, H_A, Some(280_000), Some(H_A));
+        assert_eq!(v, CheckpointVerdict::Match { block: 272_654 });
+        assert_eq!(verdict_exit_code(&v), 0);
+    }
+
+    #[test]
+    fn a_forked_hash_is_fatal_and_exits_twelve() {
+        // The whole point of the item: a different block at the signed height is
+        // a fork, and it must be fatal rather than a warning.
+        let v = checkpoint_verdict(272_654, H_A, Some(280_000), Some(H_B));
+        assert_eq!(
+            v,
+            CheckpointVerdict::WrongChain {
+                block: 272_654,
+                expected: H_A.into(),
+                local: H_B.into(),
+            }
+        );
+        assert_eq!(verdict_exit_code(&v), EXIT_WRONG_CHAIN);
+        assert_eq!(EXIT_WRONG_CHAIN, 12);
+    }
+
+    #[test]
+    fn below_the_checkpoint_is_not_yet_not_wrong_chain() {
+        // A fresh node that simply has not reached the height must never be
+        // accused of being on a fork.
+        let v = checkpoint_verdict(272_654, H_A, Some(1_000), None);
+        assert_eq!(
+            v,
+            CheckpointVerdict::NotYet {
+                local_height: Some(1_000),
+                block: 272_654
+            }
+        );
+        assert_eq!(verdict_exit_code(&v), 0);
+    }
+
+    #[test]
+    fn an_unreadable_local_value_is_never_a_verdict() {
+        // Three-state rule (#141/#144): no data is not evidence of a fork.
+        let v = checkpoint_verdict(272_654, H_A, Some(280_000), None);
+        assert!(matches!(v, CheckpointVerdict::NotYet { .. }));
+        assert_eq!(verdict_exit_code(&v), 0);
+    }
+
+    #[test]
+    fn checkpoint_hash_comparison_ignores_case_and_whitespace() {
+        let upper = format!("  {}  ", H_A.to_ascii_uppercase());
+        let v = checkpoint_verdict(10, &upper, Some(20), Some(H_A));
+        assert_eq!(v, CheckpointVerdict::Match { block: 10 });
+    }
+
+    #[test]
+    fn a_v1_document_has_no_checkpoint_to_compare() {
+        // v1 keeps verifying forever; it simply makes no chain claim, so the
+        // command must say so instead of inventing a verdict.
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        let mut m = SnapshotMeta {
+            format: SNAPSHOT_CANONICAL_PREFIX_V1.into(),
+            url: "http://x/snap.tar.gz".into(),
+            sha256: "aa".repeat(32),
+            size: 10,
+            block: Some(5),
+            built: "now".into(),
+            signing_key: hex::encode(sk.verifying_key().to_bytes()),
+            signature: String::new(),
+            genesis: String::new(),
+            block_hash: String::new(),
+        };
+        use ed25519_dalek::Signer;
+        m.signature = hex::encode(sk.sign(&m.canonical_text()).to_bytes());
+        let json = serde_json::to_vec(&m).unwrap();
+        let got = verify_snapshot_meta(&json, &hex::encode(sk.verifying_key().to_bytes()), None)
+            .expect("v1 must stay verifiable");
+        assert!(got.block_hash.trim().is_empty());
+        assert_ne!(got.format.trim(), SNAPSHOT_CANONICAL_PREFIX);
+    }
 
     #[test]
     fn import_pruning_defaults_to_archive_for_old_manifest() {

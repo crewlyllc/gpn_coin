@@ -8,6 +8,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.36] - 2026-11-09
+
+Peering stops being "whoever answers first".
+
+### Added
+- **Ranked peer priority (#154).** Tier-0 oracle seeds (up to 5, today the Linux
+  box) hold reserved slots and are re-dialled every 60 s; everything else is
+  ranked by on-chain tenure (first block at which the peer appears as a provider
+  or full node), newest last. Unknown peers fill leftover slots and are evicted
+  first. Design: `design-peer-priority-checkpoints.md` §1.
+- **Peer exchange, `gpn/peers/1` (#155).** Every 5 min a node gossips up to 32
+  known peers, so a node that cannot reach the seed still joins the network
+  instead of pairing off with whoever is left. This is the fix for the
+  2026-11-09 split into `linux ↔ box 2` and `box 1 ↔ box 4`.
+
 ## [0.3.35] - 2026-11-09
 
 A snapshot now says WHICH chain it is.
