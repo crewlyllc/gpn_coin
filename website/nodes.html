@@ -448,7 +448,7 @@ GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code><
           peer_id: pid, address: null, vram_mb: 0, models: [],
           multiaddrs: [], status_url: null, last_seen_secs: null,
           registered: false, serving: false, seed: false,
-          chain_registered: null, seen_by_ap: false
+          chain_registered: null, seen_by_ap: false, peers: null
         });
       }
       return byPeer.get(pid);
@@ -497,6 +497,9 @@ GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code><
       if (Array.isArray(p.multiaddrs)) r.multiaddrs = r.multiaddrs.concat(p.multiaddrs);
       if (p.status_url) r.status_url = p.status_url;
       if (p.last_seen_secs != null) r.last_seen_secs = p.last_seen_secs;
+      // W78: the peer count THIS box reports about itself (null = it did not
+      // say). Used below instead of guessing peering from our own peer list.
+      if (p.peers != null) r.peers = p.peers;
       if (p.healthy === true) r.serving = true;
     });
 
@@ -518,7 +521,12 @@ GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code><
       // offline merely because it had not peered with this one node — box 1 was
       // serving jobs while the directory called it offline. Rank by what the
       // network can actually do with the node, and keep peering as its own flag.
-      r.live = live.has(r.peer_id);
+      // W78: "peered" is a fact about the node, not about whether it happens to
+      // be peered with THIS access point. A box that reports its own peer count
+      // is peered when that count is > 0 (box 1 was syncing from box 2 while
+      // this page called it "not peered"); a box that reports nothing (`null`,
+      // an older build) still falls back to peer-of-this-node.
+      r.live = (r.peers != null) ? r.peers > 0 : live.has(r.peer_id);
       if (r.serving) r.status = "serving";
       else if (r.registered) r.status = "registered";
       else if (r.chain_registered === true) r.status = "chain";

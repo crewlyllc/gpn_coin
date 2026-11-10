@@ -37,6 +37,11 @@ pub struct DirProvider {
     pub reachability: String,
     /// The one dialable machine per LAN/egress.
     pub gateway: bool,
+    /// #W78: how many peers this provider's own node reports (`/status` →
+    /// `peers`). `None` = not reported (unknown); `Some(0)` = the box says it
+    /// has no peers. The page must not infer "peered" from the AP's own peer
+    /// list — a node peered with another member of the mesh is peered.
+    pub peers: Option<u64>,
 }
 
 /// A dial target the network ships or advertises, with where it came from.
@@ -189,6 +194,10 @@ pub fn build_with_chain(
             "source": p.source,
             "reachability": p.reachability,
             "gateway": p.gateway,
+            // #W78: a fact this box reported about itself. `null` = it did not
+            // say (old build / unreadable), which the page treats as unknown
+            // and falls back to peer-of-this-node.
+            "peers": p.peers,
             // W50: two facts, two fields. `seen_by_ap` is true by construction
             // (this row exists because the AP has a record), and
             // `chain_registered` is what the chain says — or null.
@@ -240,6 +249,9 @@ pub fn build_with_chain(
                 "source": "chain",
                 "reachability": "",
                 "gateway": false,
+                // Registered on chain but never seen by this AP: nothing has
+                // measured its peering, so it makes no claim.
+                "peers": null,
                 "seen_by_ap": false,
                 "chain_registered": true,
             }));
@@ -371,6 +383,7 @@ mod tests {
             source: "poll".into(),
             reachability: "backbone".into(),
             gateway: false,
+            peers: None,
         }
     }
 
@@ -553,6 +566,46 @@ mod tests {
         assert_eq!(doc["counts"]["ap_seen_now"], 1);
         assert_eq!(doc["counts"]["chain_registered_now"], 2);
         assert_eq!(doc["counts"]["chain_only_now"], 1);
+    }
+
+    /// #W78: the row publishes the peer count the box reported about ITSELF, so
+    /// the page can answer "is this node peered?" without asking whether it is
+    /// peered with this access point. Unknown stays `null`.
+    #[test]
+    fn a_row_publishes_the_boxes_own_peer_count() {
+        let mut peery = provider(PEER_B, true, "http://198.51.100.7:8093");
+        peery.address = "5ENqSp5Q65bxfgryZExQDRnV1rEW1qb2UBztvswLamkoUrqj".into();
+        peery.peers = Some(2);
+        // A chain-only account was never measured: no claim at all.
+        let unseen = "5HgbpiTYE27CtBQF7gRWLz6Qt3HBxyi4tR2M75FC1oydH48z";
+        let doc = build_with_chain(
+            "t",
+            None,
+            // Peered with nobody this AP knows — the box still says it has 2.
+            Ok(vec![]),
+            &[peery],
+            &[],
+            Some(Ok(vec![
+                "5ENqSp5Q65bxfgryZExQDRnV1rEW1qb2UBztvswLamkoUrqj".to_string(),
+                unseen.to_string(),
+            ])),
+        );
+        let rows = doc["providers"].as_array().unwrap();
+        let seen_row = rows.iter().find(|r| r["source"] != "chain").unwrap();
+        assert_eq!(seen_row["peers"], json!(2), "{seen_row}");
+        let chain_row = rows.iter().find(|r| r["source"] == "chain").unwrap();
+        assert_eq!(
+            chain_row["peers"],
+            Value::Null,
+            "an unmeasured peering fact must be null, not 0: {chain_row}"
+        );
+
+        // A box that reports nothing (older build) is unknown, never "0 peers".
+        let mut old = provider(PEER_C, true, "http://198.51.100.8:8093");
+        old.address = "5ENqSp5Q65bxfgryZExQDRnV1rEW1qb2UBztvswLamkoUrqj".into();
+        old.peers = None;
+        let doc = build_with_chain("t", None, Ok(vec![]), &[old], &[], Some(Ok(vec![])));
+        assert_eq!(doc["providers"][0]["peers"], Value::Null);
     }
 
     #[test]

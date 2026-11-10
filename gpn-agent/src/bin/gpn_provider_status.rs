@@ -1269,6 +1269,29 @@ fn attach_blocked_reason(body: &mut Value, blocked: Option<&PushBlocked>, now: u
     }
 }
 
+/// #W78: how many peers THIS box's node is connected to, read live.
+///
+/// Three-state, like every other published fact here: `Some(n)` is a real
+/// measurement (0 is a legitimate answer for a node with no peers), `None`
+/// means the node RPC could not be read and is published as `null` — never as
+/// `0`, which a consumer would read as "this node is not peered".
+fn live_peer_count(rpc: &dyn Fn(&str) -> Option<Value>) -> Option<u64> {
+    rpc("system_peers").and_then(|v| v.as_array().map(|a| a.len() as u64))
+}
+
+/// Attach the peer count to a `/status` body (`null` when unknown).
+///
+/// The directory used to infer "peered" from membership in THIS node's peer
+/// list, so a node peered to a different member of the mesh (box 1, syncing
+/// from box 2) was rendered "not peered". A count the node reports about
+/// itself is the fact the reader actually wants.
+fn attach_peers(body: &mut Value, peers: Option<u64>) {
+    body["peers"] = match peers {
+        Some(n) => json!(n),
+        None => Value::Null,
+    };
+}
+
 fn attach_p2p(body: &mut Value, info: Option<&P2pInfo>) {
     match info {
         Some(p2p) => {
@@ -2240,6 +2263,12 @@ fn run_main() -> Result<(), Box<dyn std::error::Error>> {
                 attach_p2p(
                     &mut body,
                     p2p_info(&node_endpoint, public_addr.as_deref()).as_ref(),
+                );
+                // #W78: this node's own peer count, read live (uncached — the
+                // number moves as peers come and go, and the read is loopback).
+                attach_peers(
+                    &mut body,
+                    live_peer_count(&|method| rpc_call(&node_endpoint, method, json!([]))),
                 );
                 // Referral attribution: the AP records this once, per provider
                 // address. Omitted (not null) when unset — an old node's
@@ -3375,5 +3404,41 @@ mod tests {
         assert!(body.get("gateway").is_none(), "{body}");
         // The tier is always present, so the AP never has to guess.
         assert_eq!(body["reachability"], "backbone");
+    }
+
+    /// #W78: the peer count is measured live, counted from `system_peers`, and
+    /// a failed read is `null` — never `0`, which reads as "not peered".
+    #[test]
+    fn peer_count_is_measured_and_unknown_is_null() {
+        // Two connected peers ⇒ 2.
+        let rpc = |m: &str| match m {
+            "system_peers" => Some(
+                serde_json::from_str::<Value>(
+                    r#"[{"peerId":"12D3KooWaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+                        {"peerId":"12D3KooWbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]"#,
+                )
+                .unwrap(),
+            ),
+            _ => None,
+        };
+        let mut body = json!({});
+        attach_peers(&mut body, live_peer_count(&rpc));
+        assert_eq!(body["peers"], json!(2), "{body}");
+
+        // A lone node is a real measurement of 0, not an error.
+        let lone = |m: &str| (m == "system_peers").then(|| json!([]));
+        let mut body = json!({});
+        attach_peers(&mut body, live_peer_count(&lone));
+        assert_eq!(body["peers"], json!(0), "{body}");
+
+        // RPC down ⇒ unknown, published as null.
+        let down = |_m: &str| None;
+        let mut body = json!({});
+        attach_peers(&mut body, live_peer_count(&down));
+        assert!(body["peers"].is_null(), "unknown must be null: {body}");
+
+        // A non-array answer is not a count either.
+        let odd = |m: &str| (m == "system_peers").then(|| json!({"error":"boom"}));
+        assert_eq!(live_peer_count(&odd), None);
     }
 }

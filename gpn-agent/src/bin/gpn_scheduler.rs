@@ -878,6 +878,15 @@ struct Provider {
     /// account, or no address to read at all), and unknown must never exclude a
     /// provider — see `apply_funding`.
     unfunded: Option<bool>,
+    /// #W78: how many peers this provider's **own node** reports it is
+    /// connected to (`/status` → `peers`, read from that box's `system_peers`).
+    ///
+    /// The directory used to answer "is this node peered?" from membership in
+    /// the access point's own peer list, which is a different fact: box 1 was
+    /// syncing happily from box 2 while the site called it "not peered".
+    /// `None` = not reported / unreadable (unknown), `Some(0)` = the box says it
+    /// is alone — two different answers, so it is not a `bool`.
+    peers: Option<u64>,
 }
 
 fn opt(args: &[String], flag: &str) -> Option<String> {
@@ -1095,6 +1104,9 @@ fn provider_from_caps(addr: &str, v: &Value, status_url: String, latency_ms: u64
         source: "poll".to_string(),
         pulled_seen: None,
         unfunded: None,
+        // #W78: the box's own peer count, carried on the poll snapshot. Absent
+        // (`null`) on an older build ⇒ unknown, never "0 peers".
+        peers: v.get("peers").and_then(|x| x.as_u64()),
     }
 }
 
@@ -1329,6 +1341,10 @@ fn apply_push_heartbeats(
                     source: "push".to_string(),
                     pulled_seen: None,
                     unfunded: None,
+                    // A signed heartbeat carries no peer count (the poll
+                    // snapshot does); the poll row for this same box supplies
+                    // it, and this merge never clears it.
+                    peers: None,
                 });
             }
         }
@@ -1492,6 +1508,8 @@ fn unreachable_placeholder(status_url: String) -> Provider {
         pulled_seen: None,
         // There is no address to read a balance at: unknown, never `false`.
         unfunded: None,
+        // Nothing answered, so nothing was measured about its peering.
+        peers: None,
     }
 }
 
@@ -4962,6 +4980,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 source: p.source.clone(),
                                 reachability: p.reachability.clone(),
                                 gateway: p.gateway,
+                                peers: p.peers,
                             })
                             .collect()
                     };
@@ -5046,6 +5065,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // why it gets no work) but is never routed any. `null` when
                     // the account could not be read — unknown is not "funded".
                     "unfunded": p.unfunded,
+                    // #W78: this box's own peer count (`null` = unknown). The
+                    // directory shows "peered" from this, not from whether the
+                    // node happens to peer with the access point.
+                    "peers": p.peers,
                     "source": p.source
                 })).collect::<Vec<_>>() })
                 }
@@ -7628,6 +7651,30 @@ mod tests {
         );
     }
 
+    /// #W78: the poll snapshot carries the box's own peer count, and "did not
+    /// say" must stay distinct from "says zero". The directory's "peered"
+    /// verdict is built from this number, so conflating the two would relabel
+    /// every old build as not peered.
+    #[test]
+    fn poll_snapshot_carries_the_boxes_own_peer_count() {
+        let p = provider_from_caps(
+            "5P",
+            &json!({ "gflops": 10, "peers": 2 }),
+            "pull://5P".into(),
+            5,
+        );
+        assert_eq!(p.peers, Some(2));
+        // The box says it is alone: a measurement, not a missing value.
+        let alone = provider_from_caps("5L", &json!({ "peers": 0 }), "pull://5L".into(), 5);
+        assert_eq!(alone.peers, Some(0));
+        // An older build omits the key; an unreadable RPC sends null. Both are
+        // "unknown" and must not become 0.
+        let old = provider_from_caps("5O", &json!({ "gflops": 10 }), "pull://5O".into(), 5);
+        assert_eq!(old.peers, None);
+        let unreadable = provider_from_caps("5U", &json!({ "peers": null }), "pull://5U".into(), 5);
+        assert_eq!(unreadable.peers, None);
+    }
+
     /// The directory bug of 2026-10-20: box #1's status_url host ended up
     /// published with the Linux node's peer id. A poll snapshot carrying a
     /// different peer id for an already-measured endpoint must not replace the
@@ -8092,6 +8139,7 @@ mod tests {
             // gate (item #55) stays inert for them.
             pulled_seen: Some(Instant::now()),
             unfunded: None,
+            peers: None,
         }
     }
 
