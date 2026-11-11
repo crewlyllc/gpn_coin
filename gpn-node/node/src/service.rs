@@ -878,6 +878,30 @@ pub async fn new_full<
             metrics,
         })?;
 
+    // ---- Connection sampler (2026-11-11) -------------------------------
+    // The event stream in this SDK revision delivers nothing for connection
+    // lifecycle, so poll the connected-peer count and log every CHANGE with a
+    // timestamp. A remote box completes TCP and is closed within ~2 s; that
+    // spike must be visible here if libp2p ever counted it.
+    {
+        let net = network.clone();
+        task_manager.spawn_handle().spawn(
+            "gpn-conn-sampler",
+            None,
+            async move {
+                let mut last = usize::MAX;
+                loop {
+                    let n = net.sync_num_connected();
+                    if n != last {
+                        log::info!("conn: connected peers = {n}");
+                        last = n;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+            },
+        );
+    }
+
     // ---- Keep the NAT mapping alive, and re-detect a router when there is
     // none (design §5.5 / §5.3) ------------------------------------------
     // A live rule is renewed at half its lease. When there is **no** rule the

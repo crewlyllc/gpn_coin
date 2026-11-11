@@ -3224,6 +3224,17 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
     // node/miner, the provider heartbeat, and the provider loop(s).
     {
         let mut argv = vec![cfg.resolve("gpn-node"), "--chain".into(), cfg.chain.clone()];
+        // ---- Network backend is PINNED, never left to the platform default.
+        // 2026-11-11: our Linux nodes ran litep2p while the Windows build ran
+        // rust-libp2p. litep2p expects a Noise handshake immediately; libp2p
+        // opens with `/multistream/1.0.0`, so litep2p received 28 bytes it could
+        // not parse and closed the connection after writing nothing. Identical
+        // versions and spec, no log line on either side, and it kept one box
+        // isolated for two days. Pinned on both sides so this cannot recur.
+        if std::env::var_os("GPN_NETWORK_BACKEND").is_none() {
+            argv.push("--network-backend".into());
+            argv.push("libp2p".into());
+        }
         // Mining is structural: `gpn-node` is an authority + authoring miner by
         // default (see service::new_full). We deliberately do NOT pass
         // `--force-authoring` here — a plain node launch must mine on its own.
