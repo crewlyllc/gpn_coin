@@ -334,7 +334,15 @@ jobs:
           choco install -y protoc llvm cmake
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$env:GITHUB_ENV"
 
+      # `shell: bash` is required, not cosmetic. The default shell on this runner
+      # is Windows PowerShell 5.1 (no pwsh installed), which has no `||` or `&&`
+      # operator: step 3 died with "The token '||' is not a valid statement
+      # separator in this version" and never reached cargo. Git Bash is present
+      # (the runner's git is C:\Program Files\Git), so bash resolves fine.
+      # The Windows dependency step above stays on the default shell on purpose:
+      # it appends to `$env:GITHUB_ENV`, which is PowerShell syntax.
       - name: Install Rust toolchain
+        shell: bash
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal || true
           rustup default "$RUST_TOOLCHAIN"
@@ -342,10 +350,12 @@ jobs:
           rustc --version
 
       - name: Build + test gpn-node (release)
+        shell: bash
         working-directory: gpn-node
         run: cargo build --release --workspace && cargo test --release --workspace
 
       - name: Build + test gpn-agent (release)
+        shell: bash
         working-directory: gpn-agent
         run: cargo build --release && cargo test --release
 
