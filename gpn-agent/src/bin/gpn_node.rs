@@ -571,11 +571,17 @@ fn run_stop() -> i32 {
         for line in String::from_utf8_lossy(&out.stdout).lines() {
             let (pid_s, name) = if cfg!(windows) {
                 // "gpn_node.exe","22852","Console","1","12,345 K"
+                // "gpn_node.exe","22852","Console","1","12,345 K"
+                // Column 0 is the IMAGE NAME, column 1 is the PID. The first
+                // version read them the other way round, so it compared
+                // "22852" against the "gpn" prefix, found nothing, and told the
+                // operator "no gpn* process is running" while six were running
+                // (box 1, 2026-11-11).
                 let cols: Vec<String> = line
                     .split(',')
                     .map(|c| c.trim_matches('"').to_string())
                     .collect();
-                (cols.first().cloned(), cols.get(1).cloned())
+                (cols.get(1).cloned(), cols.first().cloned())
             } else {
                 let mut it = line.split_whitespace();
                 (
