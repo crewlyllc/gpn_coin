@@ -11,6 +11,7 @@
 mod exit_report;
 
 mod chain_spec;
+mod chain_state;
 mod challenge;
 mod cli;
 mod clock;

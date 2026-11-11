@@ -39,6 +39,20 @@ fn short_hash<H: std::fmt::Debug>(h: &H) -> String {
     format!("0x{}", s.chars().take(8).collect::<String>())
 }
 
+/// Read our own chain state for the `gpn/chain/1` announcement (GPN #159).
+///
+/// `None` means the tip could not be read as a real 32-byte hash, in which case
+/// the caller announces **nothing** — an unreadable tip must never be published
+/// as a fact, and a stale height would be worse than silence (#141/#144 rule).
+fn local_chain_state(client: &FullClient) -> Option<crate::chain_state::ChainState> {
+    let info = client.chain_info();
+    crate::chain_state::ChainState::new(
+        &format!("{:?}", info.genesis_hash),
+        &format!("{:?}", info.best_hash),
+        u64::from(info.best_number),
+    )
+}
+
 // ── Dialability state publication ────────────────────────────────────────
 //
 // The provider heartbeat (`gpn_provider_status`) publishes `multiaddrs` to the
@@ -768,6 +782,26 @@ pub async fn new_full<
         }
     }
 
+    // ---- Identify carries the network identity (GPN #159) --------------
+    // `identify`'s agent version is `<client_version> (<node_name>)`, fixed at
+    // construction. Putting the chain id + genesis prefix in the node name means
+    // even a peer that never opens a GPN protocol can see at the handshake that
+    // it is talking to a different network — the human-visible half of #159.
+    // The live height cannot live here (identify is not re-pushed per block), so
+    // it travels in `gpn/chain/1` below, where it is always read fresh.
+    {
+        let info = client.chain_info();
+        let registry = crate::network_registry::load_registry();
+        let tag = format!(
+            " [{}:{}]",
+            registry.chain_id,
+            short_hash(&info.genesis_hash)
+        );
+        if !config.network.node_name.ends_with(&tag) {
+            config.network.node_name.push_str(&tag);
+        }
+    }
+
     let mut net_config = sc_network::config::FullNetworkConfiguration::<
         Block,
         <Block as sp_runtime::traits::Block>::Hash,
@@ -790,6 +824,33 @@ pub async fn new_full<
                 // Gossip rides on whatever connections the node already has; a
                 // bounded substream budget keeps a hostile peer from opening
                 // an unbounded number of them.
+                in_peers: 64,
+                out_peers: 64,
+                reserved_nodes: Vec::new(),
+                non_reserved_mode: sc_network::config::NonReservedPeerMode::Accept,
+            },
+            metrics.clone(),
+            net_config.peer_store_handle(),
+        );
+        net_config.add_notification_protocol(protocol_config);
+        service
+    };
+
+    // ---- Chain-state announcement protocol (GPN #159) -------------------
+    // Four facts on the connection itself: genesis + best hash @ height. A
+    // peer on another network is named the moment the substream opens, and a
+    // peer at our height with a different block is the observed fork shape —
+    // both are visible without waiting for the next daily checkpoint refresh.
+    let chain_state_service: Box<dyn sc_network::NotificationService> = {
+        let (protocol_config, service) = N::notification_config(
+            sc_network::ProtocolName::from(crate::chain_state::CHAIN_STATE_PROTOCOL),
+            Vec::new(),
+            crate::chain_state::MAX_BYTES as u64,
+            None,
+            sc_network::config::SetConfig {
+                // One tiny message per peer per announce; a modest substream
+                // budget is enough because we never stream and never keep a
+                // long-lived send open.
                 in_peers: 64,
                 out_peers: 64,
                 reserved_nodes: Vec::new(),
@@ -1687,6 +1748,134 @@ pub async fn new_full<
                             if sent > 0 {
                                 log::debug!(
                                     "peer-exchange: gossiped peer list to {sent}/{} peer(s)",
+                                    open.len()
+                                );
+                            }
+                        }
+                    }
+                }
+            });
+    }
+
+    // ---- Chain-state announcement (GPN #159) -----------------------------
+    // Sent to a peer the moment its substream opens, then again only when our
+    // best height actually advanced: a node that is idle is silent, and a node
+    // that is syncing is never more than `chain_state::TICK_SECS` stale. The
+    // comparison is edge-triggered per peer (`StateLog`), so a peer parked on a
+    // fork produces one loud line, not one per tick.
+    {
+        let client = client.clone();
+        task_manager
+            .spawn_handle()
+            .spawn("gpn-chain-state", None, async move {
+                use crate::chain_state as cs;
+                let mut service = chain_state_service;
+                let mut open: std::collections::HashSet<sc_network::PeerId> = Default::default();
+                let mut announced: std::collections::HashMap<sc_network::PeerId, u64> =
+                    Default::default();
+                let mut log_state = cs::StateLog::default();
+                let mut ticker = tokio::time::interval(Duration::from_secs(cs::TICK_SECS));
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                log::info!(
+                    "chain-state: {} active — genesis:hash@height on connect and on every \
+                     tip advance ({}s tick)",
+                    cs::CHAIN_STATE_PROTOCOL,
+                    cs::TICK_SECS
+                );
+                loop {
+                    tokio::select! {
+                        event = service.next_event() => {
+                            let Some(event) = event else {
+                                log::warn!(
+                                    "chain-state: notification stream ended — announcements stopped"
+                                );
+                                break;
+                            };
+                            match event {
+                                NotificationEvent::ValidateInboundSubstream {
+                                    result_tx, handshake, ..
+                                } => {
+                                    // Our handshake is empty; a peer sending a
+                                    // large one is not speaking this protocol.
+                                    let _ = result_tx.send(if handshake.len() <= 64 {
+                                        ValidationResult::Accept
+                                    } else {
+                                        ValidationResult::Reject
+                                    });
+                                }
+                                NotificationEvent::NotificationStreamOpened { peer, .. } => {
+                                    open.insert(peer);
+                                    // Announce immediately: this is the whole
+                                    // point — no waiting for a checkpoint.
+                                    if let Some(local) = crate::service::local_chain_state(&client) {
+                                        if let Some(bytes) = cs::encode(&local) {
+                                            service.send_sync_notification(&peer, bytes);
+                                            announced.insert(peer, local.height);
+                                        }
+                                    }
+                                    log::debug!(
+                                        "chain-state: substream open with {peer} ({} peer(s))",
+                                        open.len()
+                                    );
+                                }
+                                NotificationEvent::NotificationStreamClosed { peer } => {
+                                    open.remove(&peer);
+                                    announced.remove(&peer);
+                                    log_state.forget(&peer.to_string());
+                                }
+                                NotificationEvent::NotificationReceived {
+                                    peer, notification, ..
+                                } => {
+                                    let Some(remote) = cs::decode(&notification) else {
+                                        log::debug!(
+                                            "chain-state: ignored an undecodable claim from {peer}"
+                                        );
+                                        continue;
+                                    };
+                                    // Read our own tip fresh: an unreadable tip
+                                    // publishes nothing (never a stale fact).
+                                    let Some(local) = crate::service::local_chain_state(&client) else {
+                                        continue;
+                                    };
+                                    let verdict = cs::compare(&local, &remote);
+                                    let who = peer.to_string();
+                                    if log_state.record(&who, verdict, &remote).is_some() {
+                                        let line = cs::describe(&who, &local, &remote, verdict);
+                                        if verdict.is_notable() {
+                                            log::warn!("{line}");
+                                        } else {
+                                            log::info!("{line}");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ = ticker.tick() => {
+                            if open.is_empty() {
+                                continue;
+                            }
+                            let Some(local) = crate::service::local_chain_state(&client) else {
+                                continue;
+                            };
+                            let Some(bytes) = cs::encode(&local) else {
+                                continue;
+                            };
+                            let mut sent = 0usize;
+                            for peer in &open {
+                                if !cs::announce_due(
+                                    announced.get(peer).copied(),
+                                    local.height,
+                                ) {
+                                    continue;
+                                }
+                                service.send_sync_notification(peer, bytes.clone());
+                                announced.insert(*peer, local.height);
+                                sent += 1;
+                            }
+                            if sent > 0 {
+                                log::debug!(
+                                    "chain-state: announced #{} to {sent}/{} peer(s)",
+                                    local.height,
                                     open.len()
                                 );
                             }
