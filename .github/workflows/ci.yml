@@ -334,30 +334,37 @@ jobs:
           choco install -y protoc llvm cmake
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$env:GITHUB_ENV"
 
-      # `shell: bash` is required, not cosmetic. The default shell on this runner
-      # is Windows PowerShell 5.1 (no pwsh installed), which has no `||` or `&&`
-      # operator: step 3 died with "The token '||' is not a valid statement
-      # separator in this version" and never reached cargo. Git Bash is present
-      # (the runner's git is C:\Program Files\Git), so bash resolves fine.
-      # The Windows dependency step above stays on the default shell on purpose:
-      # it appends to `$env:GITHUB_ENV`, which is PowerShell syntax.
+      # PowerShell 5.1 on this runner: NO `||` or `&&` statement separators, and
+      # `shell: bash` is not usable either (C:\WINDOWS\system32\bash.exe is the
+      # WSL launcher, so it cannot execute the Windows-path script GitHub writes:
+      # "/bin/bash: C:actions-runner_work_temp...sh: No such file or directory").
+      # So the steps below are written in 5.1-compatible PowerShell with explicit
+      # $LASTEXITCODE checks instead of POSIX `&&`.
       - name: Install Rust toolchain
-        shell: bash
         run: |
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal || true
-          rustup default "$RUST_TOOLCHAIN"
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          rustup default $env:RUST_TOOLCHAIN
+          if ($LASTEXITCODE -ne 0) { exit 1 }
           rustup target add wasm32-unknown-unknown
+          if ($LASTEXITCODE -ne 0) { exit 1 }
           rustc --version
 
       - name: Build + test gpn-node (release)
-        shell: bash
         working-directory: gpn-node
-        run: cargo build --release --workspace && cargo test --release --workspace
+        run: |
+          cargo build --release --workspace
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          cargo test --release --workspace
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Build + test gpn-agent (release)
-        shell: bash
         working-directory: gpn-agent
-        run: cargo build --release && cargo test --release
+        run: |
+          cargo build --release
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          cargo test --release
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
   # ---------------------------------------------------------------------------
   # Supply-chain audit: RustSec advisories (cargo-audit) + licences/bans/sources
