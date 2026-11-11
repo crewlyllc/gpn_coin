@@ -1709,13 +1709,24 @@ pub async fn new_full<
                                 }
                                 NotificationEvent::NotificationStreamOpened { peer, .. } => {
                                     open.insert(peer);
-                                    log::debug!(
+                                    // INFO on purpose (2026-11-11): the handshake
+                                    // outcome is otherwise invisible. A peer that
+                                    // reaches this line completed Noise + multistream;
+                                    // a peer that never appears here died in the
+                                    // transport upgrade. Release builds compile out
+                                    // DEBUG, so this must be INFO to be observable.
+                                    log::info!(
                                         "peer-exchange: substream open with {peer} ({} peer(s))",
                                         open.len()
                                     );
                                 }
                                 NotificationEvent::NotificationStreamClosed { peer } => {
-                                    open.remove(&peer);
+                                    if open.remove(&peer) {
+                                        log::info!(
+                                            "peer-exchange: substream closed with {peer} ({} peer(s))",
+                                            open.len()
+                                        );
+                                    }
                                 }
                                 NotificationEvent::NotificationReceived {
                                     peer, notification, ..

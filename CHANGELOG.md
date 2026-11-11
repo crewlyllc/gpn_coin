@@ -8,6 +8,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.43] - 2026-11-11
+
+Bumped from 0.3.42 (`scripts/bump-version.py patch`). Describe the release before publishing it.
+
+### Added
+- _TODO_
+
+### Changed
+- _TODO_
+
+### Fixed
+- _TODO_
+
 ## [0.3.42] - 2026-11-10
 
 Bumped from 0.3.41 (`scripts/bump-version.py patch`). Describe the release before publishing it.
