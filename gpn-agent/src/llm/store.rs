@@ -16,24 +16,46 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+/// Identity of one version of the store file: (last-write time in ns, length).
+///
+/// mtime ALONE is not a change detector on Windows: NTFS updates the directory
+/// entry lazily, so a write can be readable while `metadata()` still reports the
+/// **previous** last-write time — and then the cache serves the pre-write map
+/// (seen live: a legacy-file read after a write returned `None`). The length is
+/// free (same `metadata()` call) and changes for any realistic job update.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct FileSig {
+    mtime_ns: u128,
+    len: u64,
+}
+
 /// Process-global cache of the parsed store, keyed by path, invalidated when the
-/// file's mtime changes. Without this, every `get()` re-reads + JSON-parses the
-/// entire `llm_store.json` — the provider's 300ms poll loop called it hundreds of
-/// times/second and pegged the CPU. Multi-process safe: writers update the cache
-/// on save, and a changed mtime forces a reload (so the AP sees the provider's
-/// writes and vice-versa).
-fn store_cache() -> &'static Mutex<HashMap<PathBuf, (u128, HashMap<u64, LlmJob>)>> {
-    static C: OnceLock<Mutex<HashMap<PathBuf, (u128, HashMap<u64, LlmJob>)>>> = OnceLock::new();
+/// file's signature changes. Without this, every `get()` re-reads + JSON-parses
+/// the entire `llm_store.json` — the provider's 300ms poll loop called it
+/// hundreds of times/second and pegged the CPU. Multi-process safe: writers
+/// update the cache on save, and a changed signature forces a reload (so the AP
+/// sees the provider's writes and vice-versa).
+fn store_cache() -> &'static Mutex<HashMap<PathBuf, (FileSig, HashMap<u64, LlmJob>)>> {
+    static C: OnceLock<Mutex<HashMap<PathBuf, (FileSig, HashMap<u64, LlmJob>)>>> = OnceLock::new();
     C.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn file_mtime_ns(path: &PathBuf) -> u128 {
-    std::fs::metadata(path)
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos())
-        .unwrap_or(0)
+fn file_sig(path: &Path) -> FileSig {
+    match std::fs::metadata(path) {
+        Ok(m) => FileSig {
+            mtime_ns: m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+            len: m.len(),
+        },
+        Err(_) => FileSig {
+            mtime_ns: 0,
+            len: 0,
+        },
+    }
 }
 
 /// Default store location (override with env `GPN_LLM_STORE`).
@@ -352,11 +374,11 @@ impl LlmStore {
     }
 
     fn load(&self) -> HashMap<u64, LlmJob> {
-        let mtime = file_mtime_ns(&self.path);
+        let sig = file_sig(&self.path);
         let mut cache = store_cache().lock().unwrap();
-        if let Some((m, map)) = cache.get(&self.path) {
+        if let Some((s, map)) = cache.get(&self.path) {
             // Cache hit: file unchanged since we last parsed it.
-            if *m == mtime && !(mtime == 0 && map.is_empty()) {
+            if *s == sig && !(sig.mtime_ns == 0 && map.is_empty()) {
                 return map.clone();
             }
         }
@@ -364,7 +386,7 @@ impl LlmStore {
             Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
             Err(_) => HashMap::new(),
         };
-        cache.insert(self.path.clone(), (mtime, map.clone()));
+        cache.insert(self.path.clone(), (sig, map.clone()));
         map
     }
 
@@ -383,11 +405,11 @@ impl LlmStore {
         std::fs::write(&tmp, serde_json::to_string_pretty(map).unwrap_or_default())?;
         std::fs::rename(&tmp, &self.path)?;
         // Keep the cache warm + consistent after our own write.
-        let mtime = file_mtime_ns(&self.path);
+        let sig = file_sig(&self.path);
         store_cache()
             .lock()
             .unwrap()
-            .insert(self.path.clone(), (mtime, map.clone()));
+            .insert(self.path.clone(), (sig, map.clone()));
         Ok(())
     }
 
@@ -407,11 +429,11 @@ impl LlmStore {
         // per 300ms pass, so cloning the whole (~4.3k-entry) map each time was a
         // sustained ~90-100% CPU burn that scaled with the ledger. Semantics are
         // unchanged: on a miss (or stale cache) we fall back to load().
-        let mtime = file_mtime_ns(&self.path);
+        let sig = file_sig(&self.path);
         {
             let cache = store_cache().lock().unwrap();
-            if let Some((m, map)) = cache.get(&self.path) {
-                if *m == mtime && !(mtime == 0 && map.is_empty()) {
+            if let Some((s, map)) = cache.get(&self.path) {
+                if *s == sig && !(sig.mtime_ns == 0 && map.is_empty()) {
                     return map.get(&job_id).cloned();
                 }
             }
@@ -442,11 +464,11 @@ impl LlmStore {
             (yes, no)
         }
         let _g = self.lock.lock().unwrap();
-        let mtime = file_mtime_ns(&self.path);
+        let sig = file_sig(&self.path);
         {
             let cache = store_cache().lock().unwrap();
-            if let Some((m, map)) = cache.get(&self.path) {
-                if *m == mtime && !(mtime == 0 && map.is_empty()) {
+            if let Some((s, map)) = cache.get(&self.path) {
+                if *s == sig && !(sig.mtime_ns == 0 && map.is_empty()) {
                     return split(map, pred);
                 }
             }

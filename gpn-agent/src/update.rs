@@ -3135,9 +3135,10 @@ mod tests {
         let state = dir.join("update");
         let bundle = make_bundle(&dir, "0.2.0");
         let mut asset = bundle_asset("https://example/gpn-linux.tar.gz", &read_bytes(&bundle));
-        asset
-            .files
-            .insert("gpn-node".into(), sha256_hex(b"some-other-binary"));
+        asset.files.insert(
+            rust_node_bin_name().into(),
+            sha256_hex(b"some-other-binary"),
+        );
         let err = stage_bundle_file(&state, "0.2.0", &asset, &bundle).unwrap_err();
         assert!(matches!(err, UpdateError::BadDigest { .. }));
         assert!(!version_dir(&state, "0.2.0").exists());
@@ -3670,21 +3671,21 @@ mod tests {
         let old = version_dir(&st, "0.3.11");
         std::fs::create_dir_all(&old).unwrap();
         std::fs::write(
-            old.join("gpn_node"),
+            old.join(node_bin_name()),
             format!("{BUILD_STAMP_PREFIX}0.3.11\n"),
         )
         .unwrap();
-        std::fs::write(old.join("gpn-node"), b"rust").unwrap();
+        std::fs::write(old.join(rust_node_bin_name()), b"rust").unwrap();
         record_previous(&st, &old).unwrap();
 
         let new = version_dir(&st, "0.3.12");
         std::fs::create_dir_all(&new).unwrap();
         std::fs::write(
-            new.join("gpn_node"),
+            new.join(node_bin_name()),
             format!("{BUILD_STAMP_PREFIX}0.3.12\n"),
         )
         .unwrap();
-        std::fs::write(new.join("gpn-node"), b"rust").unwrap();
+        std::fs::write(new.join(rust_node_bin_name()), b"rust").unwrap();
 
         let prev = activate_version(&st, "0.3.12").unwrap();
         assert_eq!(prev, new);
