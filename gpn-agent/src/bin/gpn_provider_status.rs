@@ -1292,6 +1292,84 @@ fn attach_peers(body: &mut Value, peers: Option<u64>) {
     };
 }
 
+// ── #157: self-heal ledger (`gpn_snapshot heal`) ──────────────────────────
+
+/// Where `gpn_snapshot heal` keeps its one-recovery-per-24 h record.
+///
+/// `heal` defaults it to `<base-path>/last-recovery.json`, and the node's base
+/// path is `GPN_NODE_DATA` (else `$HOME/.gpn`) — so this mirrors the writer
+/// exactly. Reading a different path would report "never healed" about a node
+/// that had just healed itself, which is the worst possible answer here.
+fn recovery_state_path() -> String {
+    if let Ok(p) = std::env::var("GPN_RECOVERY_STATE") {
+        return p;
+    }
+    let base = std::env::var("GPN_NODE_DATA").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        format!("{home}/.gpn")
+    });
+    format!("{base}/last-recovery.json")
+}
+
+/// What `/status` can say about a self-heal (#157).
+#[derive(Debug, PartialEq, Eq)]
+enum ForkRecovery {
+    /// No ledger at all: this node has never set a forked chain DB aside.
+    Never,
+    /// A recovery was attempted; the record travels to the operator verbatim.
+    Healed(Value),
+    /// The ledger exists but cannot be read or parsed — publish `null`.
+    Unknown(String),
+}
+
+fn read_fork_recovery(path: &str) -> ForkRecovery {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return ForkRecovery::Never,
+        Err(e) => return ForkRecovery::Unknown(format!("read {path}: {e}")),
+    };
+    let v: Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(e) => return ForkRecovery::Unknown(format!("{path} is not a recovery record: {e}")),
+    };
+    if !v.is_object() {
+        return ForkRecovery::Unknown(format!("{path} is not a recovery record"));
+    }
+    // Only the fields an operator needs; unknown/missing ones stay `null`
+    // rather than being invented.
+    let field = |k: &str| v.get(k).cloned().unwrap_or(Value::Null);
+    ForkRecovery::Healed(json!({
+        "recovered_at_iso": field("recovered_at_iso"),
+        "completed": field("completed"),
+        "checkpoint_block": field("checkpoint_block"),
+        "fork_dir": field("fork_dir"),
+        "detail": field("detail"),
+    }))
+}
+
+/// Attach `recovered_from_fork` to a `/status` body.
+///
+/// Three states, like every other published fact here: `false` is a real
+/// answer (a ledger that does not exist means no repair ever ran), `true`
+/// carries the record — `fork_recovery.completed: false` says the import was
+/// still in flight, i.e. the node is not back up yet — and `null` (plus
+/// `fork_recovery_error`) means the ledger could not be read. A corrupt ledger
+/// must never publish `false`: that is the "no data published as a negative"
+/// mistake (#141/#144), and it would hide a half-finished recovery.
+fn attach_fork_recovery(body: &mut Value, state: &ForkRecovery) {
+    match state {
+        ForkRecovery::Never => body["recovered_from_fork"] = json!(false),
+        ForkRecovery::Healed(rec) => {
+            body["recovered_from_fork"] = json!(true);
+            body["fork_recovery"] = rec.clone();
+        }
+        ForkRecovery::Unknown(why) => {
+            body["recovered_from_fork"] = Value::Null;
+            body["fork_recovery_error"] = json!(why);
+        }
+    }
+}
+
 fn attach_p2p(body: &mut Value, info: Option<&P2pInfo>) {
     match info {
         Some(p2p) => {
@@ -2273,6 +2351,10 @@ fn run_main() -> Result<(), Box<dyn std::error::Error>> {
                 // Referral attribution: the AP records this once, per provider
                 // address. Omitted (not null) when unset — an old node's
                 // `/status` must stay byte-identical.
+                // #157: did this node repair itself after landing on a fork?
+                // Read from the ledger `gpn_snapshot heal` writes; `null` (never
+                // `false`) when that ledger cannot be read.
+                attach_fork_recovery(&mut body, &read_fork_recovery(&recovery_state_path()));
                 attach_referral(&mut body, referral_code.as_deref());
                 // #W49: "not serving" must stop looking identical to "broken".
                 // Omitted when the push lane is healthy (byte-identical JSON).
@@ -2340,6 +2422,108 @@ mod tests {
 
     /// #W48: every platform must agree on the "0 means unmeasured" contract,
     /// and the probe must never invent a number.
+    /// #157: a node that has never healed says `false` — a real answer, and
+    /// byte-identical in shape to the healed case so a reader never has to
+    /// guess whether the field is absent because the box is old or clean.
+    #[test]
+    fn a_missing_recovery_ledger_publishes_false() {
+        let dir = std::env::temp_dir().join(format!(
+            "gpn-157-status-missing-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("last-recovery.json");
+        let mut body = json!({ "address": "5X" });
+        attach_fork_recovery(&mut body, &read_fork_recovery(path.to_str().unwrap()));
+        assert_eq!(body["recovered_from_fork"], json!(false));
+        assert!(
+            body.get("fork_recovery").is_none(),
+            "a clean node carries no recovery record: {body}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #157: a healed node publishes the record — including `completed: false`,
+    /// which is how an operator learns the import did not finish and the unit is
+    /// still down. `true` means "a repair was attempted", not "the node is fine".
+    #[test]
+    fn a_healed_node_publishes_the_record_even_when_the_import_is_unfinished() {
+        let dir = std::env::temp_dir().join(format!(
+            "gpn-157-status-healed-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("last-recovery.json");
+        // Exactly the shape `gpn_snapshot heal` writes.
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "recovered_at": 1_791_000_000u64,
+                "recovered_at_iso": "2026-11-10T16:00:00Z",
+                "checkpoint_block": 279_000u64,
+                "checkpoint_hash": "0xabc",
+                "local_hash": "0xdef",
+                "fork_dir": "/home/x/.gpn/chains-fork-1791000000",
+                "snapshot": "/home/x/snapshot.tar.zst",
+                "completed": false,
+                "detail": "import failed: no space left on device"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut body = json!({});
+        attach_fork_recovery(&mut body, &read_fork_recovery(path.to_str().unwrap()));
+        assert_eq!(body["recovered_from_fork"], json!(true));
+        assert_eq!(body["fork_recovery"]["completed"], json!(false));
+        assert_eq!(body["fork_recovery"]["checkpoint_block"], json!(279_000));
+        assert_eq!(
+            body["fork_recovery"]["detail"],
+            json!("import failed: no space left on device")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #157: a ledger that exists but cannot be parsed is **unknown**, never
+    /// `false`. Publishing `false` there would report a clean bill of health
+    /// about a repair nobody could read — and would hide the one case that
+    /// matters (a crash mid-recovery leaves a half-written record).
+    #[test]
+    fn an_unreadable_ledger_publishes_null_never_false() {
+        let dir = std::env::temp_dir().join(format!(
+            "gpn-157-status-corrupt-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("last-recovery.json");
+        std::fs::write(&path, "{\"recovered_at\": 12, \"trunc").unwrap();
+        let mut body = json!({});
+        attach_fork_recovery(&mut body, &read_fork_recovery(path.to_str().unwrap()));
+        assert!(
+            body["recovered_from_fork"].is_null(),
+            "a corrupt ledger must not read as 'never healed': {body}"
+        );
+        assert!(
+            body["fork_recovery_error"].is_string(),
+            "the reader must be able to tell unknown from clean: {body}"
+        );
+
+        // Non-JSON and non-object bodies are the same answer, not a panic.
+        std::fs::write(&path, "[]").unwrap();
+        assert!(matches!(
+            read_fork_recovery(path.to_str().unwrap()),
+            ForkRecovery::Unknown(_)
+        ));
+        std::fs::write(&path, "not json at all").unwrap();
+        assert!(matches!(
+            read_fork_recovery(path.to_str().unwrap()),
+            ForkRecovery::Unknown(_)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn ram_probe_reports_a_plausible_total_or_zero() {
         let mb = detect_ram_mb();
