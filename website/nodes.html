@@ -528,7 +528,13 @@ GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code><
       // is peered when that count is > 0 (box 1 was syncing from box 2 while
       // this page called it "not peered"); a box that reports nothing (`null`,
       // an older build) still falls back to peer-of-this-node.
-      r.live = (r.peers != null) ? r.peers > 0 : live.has(r.peer_id);
+      /* 2026-11-10: `live` means "peered with the network's node", NOT "this node
+         says it has >=1 peer". Box 1 and box 4 each report peers:1 -- each other --
+         on a fork of their own, so the self-reported count made two diverged nodes
+         vouch for each other and both read as "on chain + serving". A node's own
+         peer count is information, never a health verdict. */
+      r.live = live.has(r.peer_id);
+      if (r.peers != null && r.peers > 0 && !r.live) r.own_peers = r.peers;
       if (r.serving) r.status = "serving";
       else if (r.registered) r.status = "registered";
       else if (r.chain_registered === true) r.status = "chain";
@@ -575,6 +581,11 @@ GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code><
     b.appendChild(dot);
     var label = cached ? "cached" : (BADGE[status] || status);
     b.appendChild(document.createTextNode(label));
+    if (status === "serving-unpeered") {
+      b.title = "This account is in the chain's provider registry and an access point has a recent " +
+        "heartbeat from it, but the network's own node has no p2p session with it. It may be behind " +
+        "NAT, unreachable, or on a different chain -- serving work does not prove it is on this chain.";
+    }
     if (status === "registered") {
       b.title = "The access point holds a heartbeat record for this provider, but its status URL is not " +
         "publicly reachable from here, so it is not counted as reachable-now.";
@@ -684,9 +695,17 @@ GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code><
         setText(aCell, "—");
       }
 
-      /* Last seen */
+      /* Last seen. When the node self-reports peers but has no session with the
+         network's node, say so here instead of silently printing a dash -- the
+         distinction is the whole point of the badge. */
       var lCell = td("Last seen");
-      setText(lCell, r.live ? seenAgo(r.last_seen_secs) : "—");
+      if (r.live) {
+        setText(lCell, seenAgo(r.last_seen_secs));
+      } else if (r.own_peers) {
+        setText(lCell, "self-reports " + r.own_peers + " peer" + (r.own_peers > 1 ? "s" : "") + ", not this node");
+      } else {
+        setText(lCell, "—");
+      }
 
       tr.appendChild(peerCell);
       tr.appendChild(stCell);

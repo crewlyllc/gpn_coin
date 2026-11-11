@@ -84,18 +84,17 @@ test("a registered provider that is not reachable is not counted as non-serving"
   assert.match(PAGE, /chain_registered_now/);
 });
 
-test("peering is read from the node's own peer count, not from our peer list", () => {
-  // W78: a node peered with a DIFFERENT member of the mesh was rendered
-  // "not peered" because the page only asked whether it was a peer of this
-  // access point. The provider row now carries `peers` (that box's own
-  // `system_peers` length) and that is the fact the badge uses.
-  assert.match(PAGE, /p\.peers != null/, "the page must consume the row's peers count");
-  assert.match(PAGE, /r\.peers > 0/, "peered must be decided by the node's own count");
+test("peering means a session with the network's node, not a self-report", () => {
+  // 2026-11-10: W78 made a node's own `peers` count decide the badge. Box 1 and
+  // box 4 each reported peers:1 -- each other -- on a chain of their own, so two
+  // diverged nodes vouched for one another and both rendered "on chain + serving".
+  // Peering must be evidence we can observe: the network node's own `system_peers`.
+  assert.match(PAGE, /r\.live = live\.has\(r\.peer_id\);/, "peering must come from the network node's peer list");
   assert.ok(
-    !/r\.live = live\.has\(r\.peer_id\);/.test(PAGE),
-    "bootnode membership must no longer be the sole peering verdict",
+    !/r\.live = \(r\.peers != null\)/.test(PAGE),
+    "a node's self-reported peer count must never decide the badge",
   );
-  // Unknown (an older build that reports no count) still falls back, so a box
-  // that says nothing is not silently relabelled "not peered".
-  assert.match(PAGE, /live\.has\(r\.peer_id\)/, "the fallback for unknown must survive");
+  // The count is still shown, clearly labelled as a self-report.
+  assert.match(PAGE, /self-reports/, "the self-reported count must stay visible as information");
+  assert.match(PAGE, /own_peers/, "the self-reported count must be carried separately");
 });

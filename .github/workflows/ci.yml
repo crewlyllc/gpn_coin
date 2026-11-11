@@ -301,22 +301,24 @@ jobs:
         run: node --test worker/worker.test.mjs
 
   # ---------------------------------------------------------------------------
-  # Desktop matrix — EXPERIMENTAL and MANUAL ONLY. macOS/Windows need paid
-  # GitHub-hosted minutes which this account cannot use, so a normal push no
-  # longer depends on them. Trigger with `workflow_dispatch` when touching
-  # platform-specific code (a red run is a signal to investigate, not a blocker).
+  # Windows — runs on the SELF-HOSTED Windows runner on every push (2026-11-10).
+  #
+  # It used to be manual-only because windows-latest is a paid GitHub-hosted
+  # runner this account cannot use. That reasoning expired: DESKTOP-USBUADL is a
+  # self-hosted runner with labels [self-hosted, Windows, X64], it is the same
+  # machine that builds the Windows release, and the launcher/parenthesis class of
+  # bug only appears at compile time on Windows. So a Windows break must be caught
+  # here in ~20 min, not at publish time three versions later.
+  #
+  # macOS stays manual: there is no self-hosted macOS runner and the hosted
+  # minutes are still unavailable (billing-blocked).
   # ---------------------------------------------------------------------------
-  build-desktop:
-    name: Build + unit tests (${{ matrix.os }})
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ${{ matrix.os }}
-    continue-on-error: true
+  build-windows:
+    name: Build + unit tests (windows, self-hosted)
+    runs-on: [self-hosted, Windows]
+    # NOT continue-on-error: a red Windows build is a real signal about `main`.
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: macos-latest
-          - os: windows-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -418,3 +420,29 @@ jobs:
       - name: Run two-node GPU p2p testnet
         working-directory: gpn-node
         run: bash scripts/gpn_two_node_testnet.sh --binary /home/jeremyg/.ci-cache/gpn-node-target/release/gpn-node
+
+
+  # Manual only — see the note above build-windows for why macOS is different.
+  build-macos:
+    name: Build + unit tests (macos, manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps (macOS)
+        run: |
+          brew install protobuf cmake llvm || brew upgrade protobuf cmake llvm
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal || true
+          rustup default "$RUST_TOOLCHAIN"
+          rustup target add wasm32-unknown-unknown
+          rustc --version
+
+      - name: Build + test gpn-node (release)
+        working-directory: gpn-node
+        run: cargo build --release --workspace && cargo test --release --workspace
