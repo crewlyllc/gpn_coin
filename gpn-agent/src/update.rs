@@ -2923,7 +2923,9 @@ mod tests {
         let f = std::fs::File::create(&path).unwrap();
         let enc = GzEncoder::new(f, flate2::Compression::fast());
         let mut ar = tar::Builder::new(enc);
-        for name in [NODE_BIN, RUST_NODE_BIN] {
+        // The platform name matters: extraction on Windows requires
+        // `gpn_node.exe`, exactly like a real Windows bundle.
+        for name in [node_bin_name(), rust_node_bin_name()] {
             let body = stamped_binary(version);
             let mut h = tar::Header::new_gnu();
             h.set_size(body.len() as u64);
@@ -3040,7 +3042,7 @@ mod tests {
         );
         m.assets[0]
             .files
-            .insert(NODE_BIN.into(), sha256_hex(&stamped_binary("0.2.0")));
+            .insert(node_bin_name().into(), sha256_hex(&stamped_binary("0.2.0")));
         let body = signed_json(&m, &sk);
         let got = verify_manifest(&body, &pk).expect("bundle manifest must verify");
         let a = select_asset(&got, "linux", "x86_64").unwrap();
@@ -3062,7 +3064,7 @@ mod tests {
         let vdir = version_dir(&state, "0.2.0");
         assert_eq!(pending.version_dir, vdir.display().to_string());
         assert!(node_bin(&vdir).is_file(), "supervisor present");
-        assert!(vdir.join(RUST_NODE_BIN).is_file(), "node present");
+        assert!(vdir.join(rust_node_bin_name()).is_file(), "node present");
         assert!(vdir.join("README").is_file(), "flat layout preserved");
         // No stray staging dirs left behind.
         let leftovers: Vec<_> = std::fs::read_dir(versions_root(&state))

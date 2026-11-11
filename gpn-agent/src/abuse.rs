@@ -247,7 +247,24 @@ pub fn new_report_id() -> String {
             return hex::encode(buf);
         }
     }
-    format!("{:016x}", now_secs())
+    // No `/dev/urandom` (Windows, or a sandbox that hides it). The old fallback
+    // was the epoch in seconds, so two reports filed in the same second got the
+    // *same* id — on Windows that is every paired submission. Mix an OS-seeded
+    // per-instance key (`RandomState`) with a process-wide counter and the
+    // clock instead: distinct on every platform, no new dependency.
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u64(SEQ.fetch_add(1, Ordering::Relaxed));
+    h.write_u128(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+    );
+    h.write_u32(std::process::id());
+    format!("{:016x}", h.finish())
 }
 
 /// The default reports file: `GPN_REPORTS_FILE` or `~/.gpn/reports.jsonl`.
@@ -573,5 +590,9 @@ mod tests {
         let b = new_report_id();
         assert!(!a.is_empty());
         assert_ne!(a, b, "ids should differ across calls");
+        // Burst uniqueness: the Windows fallback used to be a one-second
+        // timestamp, so any two reports in the same second collided.
+        let ids: std::collections::HashSet<String> = (0..1_000).map(|_| new_report_id()).collect();
+        assert_eq!(ids.len(), 1_000, "ids must be unique within one second");
     }
 }

@@ -544,7 +544,15 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&env.yield_flag).unwrap(), "1");
         // The lock file is a different path; the node never touches it.
         assert_ne!(env.yield_flag, env.lock);
-        let _ = std::fs::read(&env.lock).unwrap();
+        // The lock lives in a plain file, but while *we* hold it the bytes are
+        // not readable on every platform: Windows opens the lock without
+        // `FILE_SHARE_READ`, so `fs::read` fails with os error 33 here. The
+        // contract under test is the miner's (`exists()`), not a reader's.
+        assert!(env.lock.exists(), "lock file must exist while held");
+        #[cfg(unix)]
+        {
+            let _ = std::fs::read(&env.lock).unwrap();
+        }
         drop(g);
         assert!(!env.yield_flag.exists());
     }
