@@ -57,6 +57,11 @@ const SUBSTRATE_RUN_FLAGS: &[&str] = &[
     "--state-pruning",
     "--blocks-pruning",
     "--public-addr",
+    // Present in `gpn-node --help` (substrate RunCmd) — verified 2026-11-11 by
+    // running the binary, which logged "Running libp2p network backend" when
+    // given it. It was missing from this list only because nothing used it
+    // before the supervisor started pinning the backend.
+    "--network-backend",
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
