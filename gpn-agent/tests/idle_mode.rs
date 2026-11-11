@@ -58,6 +58,12 @@ fn src(peers: Option<u64>) -> Arc<dyn StatusSource> {
 }
 
 /// Minimal HTTP client (no extra dev-dependency).
+///
+/// Reads to `Content-Length` (or EOF) instead of `read_to_string`, and tolerates a
+/// connection reset after the payload: on Windows the peer's close can surface as
+/// `ECONNRESET` mid-read, and a plain `read_to_string` then fails or returns a
+/// short body — the dashboard test needs the bytes that did arrive, not a panic
+/// in the client.
 fn http(addr: SocketAddr, method: &str, path: &str, body: &str) -> (u16, String) {
     let mut s = TcpStream::connect(addr).expect("connect");
     s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
@@ -67,15 +73,45 @@ fn http(addr: SocketAddr, method: &str, path: &str, body: &str) -> (u16, String)
         body.len()
     );
     s.write_all(req.as_bytes()).unwrap();
-    let mut buf = String::new();
-    s.read_to_string(&mut buf).unwrap();
-    let code = buf
+
+    let mut raw: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 8 * 1024];
+    let mut want: Option<usize> = None; // headers + Content-Length
+    loop {
+        if matches!(want, Some(n) if raw.len() >= n) {
+            break;
+        }
+        match s.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => raw.extend_from_slice(&chunk[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            // Payload already in hand, or the peer reset after writing it.
+            Err(_) => break,
+        }
+        if want.is_none() {
+            if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&raw[..pos]).to_ascii_lowercase();
+                let cl = head
+                    .lines()
+                    .find_map(|l| l.trim().strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                want = Some(pos + 4 + cl);
+            }
+        }
+    }
+
+    let text = String::from_utf8_lossy(&raw).to_string();
+    let code = text
         .lines()
         .next()
         .and_then(|l| l.split_whitespace().nth(1))
         .and_then(|c| c.parse().ok())
         .unwrap_or(0);
-    let body = buf.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+    let body = match text.find("\r\n\r\n") {
+        Some(pos) => text[pos + 4..].to_string(),
+        None => String::new(),
+    };
     (code, body)
 }
 
@@ -165,7 +201,9 @@ fn dashboard_endpoints_over_http() {
     assert_eq!(code, 200);
     assert!(
         body.contains("Idle mode"),
-        "page must render the idle panel"
+        "page must render the idle panel (got {} bytes: {:?})",
+        body.len(),
+        body.chars().take(160).collect::<String>()
     );
     assert!(!body.contains("https://cdn"), "no CDN assets allowed");
 
