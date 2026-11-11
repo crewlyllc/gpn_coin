@@ -11,7 +11,7 @@ use sc_consensus::{BlockImport, LongestChain};
 use sc_consensus_pow::{start_mining_worker, PowAlgorithm, PowBlockImport, PowImportQueue};
 use sc_network::config::MultiaddrWithPeerId;
 use sc_network::service::traits::{NotificationEvent, ValidationResult};
-use sc_network::{NetworkPeers, NetworkStateInfo, NetworkStatusProvider};
+use sc_network::{NetworkPeers, NetworkStateInfo, NetworkStatusProvider, ReputationChange};
 use sc_network_sync::SyncingService;
 use sc_service::{error::Error as ServiceError, Configuration, TaskManager};
 use sc_telemetry::{Telemetry, TelemetryWorker};
@@ -31,6 +31,13 @@ pub(crate) type FullClient = sc_service::TFullClient<
     RuntimeApi,
     sc_executor::WasmExecutor<sp_io::SubstrateHostFunctions>,
 >;
+
+/// First four bytes of a hash, for a log line (`0x1234abcd`).
+fn short_hash<H: std::fmt::Debug>(h: &H) -> String {
+    let s = format!("{:?}", h);
+    let s = s.trim_start_matches("0x");
+    format!("0x{}", s.chars().take(8).collect::<String>())
+}
 
 // ── Dialability state publication ────────────────────────────────────────
 //
@@ -1180,6 +1187,77 @@ pub async fn new_full<
                         );
                     } else {
                         let _ = std::fs::remove_file(base_for_watch.join("gpn-isolated"));
+                    }
+                }
+            });
+    }
+
+    // ---- Fork tolerance (#158): divergence is not misbehaviour -----------
+    // A peer whose best block differs from ours at the SAME height has done
+    // nothing wrong: it is on a side branch (behind, or ahead on a fork it can
+    // reorg off) and the cure is to stay connected and keep serving canonical
+    // blocks, not to drop it. `sc-network-sync` cannot always tell divergence
+    // from a protocol violation -- a block that fails verification is reported
+    // as `BAD_BLOCK`, and about three of those ban a peer -- so this task owns
+    // the local repair: on a detected divergence it credits reputation back, at
+    // most once per window per peer, never above zero (module `fork_tolerance`).
+    // It never disconnects and never changes chain selection.
+    {
+        let sync = sync_service.clone();
+        let net = network.clone();
+        let client = client.clone();
+        task_manager
+            .spawn_handle()
+            .spawn("gpn-fork-tolerance", None, async move {
+                use crate::fork_tolerance::{self, Verdict};
+                let mut guard = fork_tolerance::DivergenceGuard::default();
+                let start = std::time::Instant::now();
+                let mut tick =
+                    tokio::time::interval(Duration::from_secs(fork_tolerance::SCAN_INTERVAL_SECS));
+                tick.tick().await; // consume the immediate first tick
+                loop {
+                    tick.tick().await;
+                    let ours = client.chain_info();
+                    let Ok(peers) = sync.peers_info().await else {
+                        continue;
+                    };
+                    let now_secs = start.elapsed().as_secs();
+                    for (peer_id, info) in peers {
+                        if fork_tolerance::classify(
+                            ours.best_number,
+                            &ours.best_hash,
+                            info.best_number,
+                            &info.best_hash,
+                        ) != Verdict::Diverged
+                        {
+                            continue;
+                        }
+                        let key = peer_id.to_string();
+                        if !guard.should_repair(&key, now_secs) {
+                            continue;
+                        }
+                        let current = net.peer_reputation(&peer_id);
+                        let credit = fork_tolerance::divergence_credit(current);
+                        if credit > 0 {
+                            net.report_peer(
+                                peer_id,
+                                ReputationChange::new(
+                                    credit,
+                                    "chain divergence is not misbehaviour (#158)",
+                                ),
+                            );
+                        }
+                        log::info!(
+                            "fork-tolerance: peer {} is on a different chain at #{} (ours {}, \
+                             theirs {}) -- keeping the link and serving canonical blocks; \
+                             reputation {} -> {} (divergence is not a protocol violation)",
+                            key,
+                            ours.best_number,
+                            crate::service::short_hash(&ours.best_hash),
+                            crate::service::short_hash(&info.best_hash),
+                            current,
+                            current.saturating_add(credit)
+                        );
                     }
                 }
             });

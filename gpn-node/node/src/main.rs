@@ -17,6 +17,7 @@ mod clock;
 mod command;
 mod dialability;
 mod discovery;
+mod fork_tolerance;
 mod gpu_miner;
 mod network_registry;
 mod peer_exchange;
