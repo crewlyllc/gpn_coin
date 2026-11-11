@@ -885,10 +885,9 @@ pub async fn new_full<
     // spike must be visible here if libp2p ever counted it.
     {
         let net = network.clone();
-        task_manager.spawn_handle().spawn(
-            "gpn-conn-sampler",
-            None,
-            async move {
+        task_manager
+            .spawn_handle()
+            .spawn("gpn-conn-sampler", None, async move {
                 let mut last = usize::MAX;
                 loop {
                     let n = net.sync_num_connected();
@@ -898,8 +897,7 @@ pub async fn new_full<
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 }
-            },
-        );
+            });
     }
 
     // ---- Keep the NAT mapping alive, and re-detect a router when there is
