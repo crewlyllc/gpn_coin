@@ -1,15 +1,13 @@
+---
 # Remote operations on the self-hosted Windows node (box 1).
 #
-# Why this exists: box 1 is behind a different network, and every diagnosis so
-# far has been "run this command and paste the output" — a human in the loop for
-# every single probe. This workflow turns that machine into a place CI can run a
-# script and return the output, with no interactive session.
+# Why: box 1 sits behind a different network, and every diagnosis so far needed a
+# human to run a command and paste the output. The self-hosted runner is already
+# on that machine, so this exposes a manual-only job that runs a PowerShell
+# snippet there and returns the output in the job log.
 #
-# Guardrails:
-#   * manual dispatch only (no trigger on push)
-#   * the script runs as the runner's account, in the runner's work directory
-#   * it must NOT stop/start the live node unless the script says so explicitly
-#     and the `allow_service_control` input is true
+# Guardrails: manual dispatch only; process/service control refused unless the
+# caller opts in.
 name: Windows node ops
 
 on:
@@ -20,42 +18,44 @@ on:
         required: true
         type: string
       timeout_minutes:
-        description: "Job timeout"
+        description: "Job timeout (minutes)"
         required: false
         default: "10"
         type: string
       allow_service_control:
-        description: "Permit the script to stop/start gpn services"
+        description: "Permit the script to stop/start gpn processes"
         required: false
         default: false
         type: boolean
 
+permissions:
+  contents: read
+
 jobs:
   run:
-    name: run script on DESKTOP-USBUADL
+    name: run script on the Windows node
     runs-on: [self-hosted, Windows]
     timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
+    env:
+      OPS_SCRIPT: ${{ inputs.script }}
+      ALLOW_CONTROL: ${{ inputs.allow_service_control }}
     steps:
       - name: Policy check
-        if: ${{ !inputs.allow_service_control }}
         shell: pwsh
         run: |
-          $script = @'
-${{ inputs.script }}
-'@
-          if ($script -match '(?i)(stop-process|taskkill|schtasks\s+/end|net\s+stop|Restart-Service|Stop-Service|--stop)') {
-            throw "script tries to control processes/services but allow_service_control is false"
+          $ErrorActionPreference = 'Stop'
+          if ($env:ALLOW_CONTROL -ne 'true') {
+            if ($env:OPS_SCRIPT -match '(?i)(stop-process|taskkill|schtasks\s+/end|net\s+stop|Restart-Service|Stop-Service|--stop)') {
+              throw 'script tries to control processes/services but allow_service_control is false'
+            }
           }
-          Write-Host "policy check passed"
+          Write-Host 'policy check passed'
 
       - name: Run
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          $script = @'
-${{ inputs.script }}
-'@
           Write-Host "=== host ==="
           Write-Host "$env:COMPUTERNAME  $(Get-Date -Format o)"
           Write-Host "=== script ==="
-          Invoke-Expression $script
+          Invoke-Expression $env:OPS_SCRIPT
