@@ -4179,7 +4179,7 @@ mod tests {
                 &cfg,
                 "12D3KooWA",
                 Some("142.129.54.88:30333"),
-                &[a.clone()],
+                std::slice::from_ref(&a),
                 &[],
                 100
             ),
@@ -4240,7 +4240,14 @@ mod tests {
         );
         let mine = claim("1.2.3.4:30333", "me", "v", "9.9.9.9", 100);
         assert_eq!(
-            gateway_role(&cfg, "me", Some("1.2.3.4:30333"), &[mine.clone()], &[], 100),
+            gateway_role(
+                &cfg,
+                "me",
+                Some("1.2.3.4:30333"),
+                std::slice::from_ref(&mine),
+                &[],
+                100
+            ),
             GatewayRole::Gateway
         );
 
