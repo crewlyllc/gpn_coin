@@ -127,6 +127,33 @@ test("a peer id already published elsewhere is not re-synthesised at another hos
   assert.equal(entry.multiaddr, "/ip4/198.51.100.44/tcp/8093");
 });
 
+test("one socket is published under exactly one peer id (live bug 2026-11-12)", () => {
+  // gpncoin.ai/seeds.json published /ip4/172.117.107.91/tcp/30333 twice, once
+  // with the AP's id and once with the static seed's id. sc-network rejects
+  // that (DuplicateBootnode) and every starting node died instantly.
+  const apPid = "12D3KooW9w2nzqHV14oe2mCWutx5FXjLw8a6EfxDxz6Jrpu6H34R";
+  const seedPid = "12D3KooWP1JAFqvEvfsTuefkfQ6jH5vk7xe96A5Soj8o7tN63bm5";
+  const body = __test.buildDirectory([
+    {
+      status_url: "http://172.117.107.91:8093/status",
+      healthy: true,
+      peer_id: apPid,
+      p2p_port: 30333,
+      multiaddrs: [`/ip4/172.117.107.91/tcp/30333/p2p/${apPid}`],
+    },
+    {
+      status_url: "http://172.117.107.91:8093/status-2",
+      healthy: true,
+      peer_id: seedPid,
+      p2p_port: 30333,
+      multiaddrs: [`/ip4/172.117.107.91/tcp/30333/p2p/${seedPid}`],
+    },
+  ]);
+  const addrs = body.multiaddrs.map((m) => m.split("/p2p/")[0]);
+  assert.equal(new Set(addrs).size, addrs.length, "duplicate address in " + JSON.stringify(body.multiaddrs));
+  assert.ok(body.multiaddrs.includes(`/ip4/172.117.107.91/tcp/30333/p2p/${apPid}`), "first claim wins");
+});
+
 test("two providers cannot publish the same peer id at two hosts", () => {
   const pid = "12D3KooWQ8fU4oXcZf3YhU8yTt4cY5q1mS2n8HkWq7jB6xU4aB3c";
   const body = __test.buildDirectory([

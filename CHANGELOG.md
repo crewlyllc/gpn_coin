@@ -8,6 +8,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [Unreleased]
+
+### Fixed
+- **A published seed list could kill a starting node instantly.** `merge_dedupe`
+  deduplicated bootnodes by the full `/p2p/<id>` string, so one socket advertised
+  under two peer ids survived as two bootnodes; `sc-network` then rejects the
+  config with `Error::DuplicateBootnode` and the service aborts ~1 ms after the
+  network backend starts (log: `Essential task 'txpool-background' failed`,
+  panic `SelectNextSome polled after terminated`). Bootnodes are now deduplicated
+  by **address**, first source wins, conflicting entries are dropped with a
+  warning. Seen live 2026-11-12: `https://gpncoin.ai/seeds.json` listed
+  `/ip4/172.117.107.91/tcp/30333` twice (access-point id + static seed id); every
+  node started with a fresh base path died until the list was fixed.
+- `worker/worker.js` (the seeds.json publisher) applies the same rule: one socket
+  is published under exactly one peer id, so the conflict cannot be re-emitted.
+
 ## [0.3.43] - 2026-11-11
 
 Bumped from 0.3.42 (`scripts/bump-version.py patch`). Describe the release before publishing it.

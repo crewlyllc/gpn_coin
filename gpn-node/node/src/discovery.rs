@@ -256,15 +256,40 @@ pub fn bootstrap_seed_addrs(seeds: &[BootstrapSeed]) -> Vec<String> {
 
 /// Flatten several sources into one deduplicated, canonical bootnode list,
 /// preserving first-seen order. Entries that are not dialable are dropped.
+///
+/// Dedupe is by **address**, not by the full `/p2p/<id>` string. Two entries
+/// for the same socket with different peer ids are a hard error in
+/// `sc-network` (`Error::DuplicateBootnode`) that aborts the whole service, so
+/// a remote seed list must never be able to produce that shape. First-seen
+/// wins — callers pass the most trusted source first (chain spec / compiled-in
+/// registry before DNS / URL lists).
 pub fn merge_dedupe(groups: &[Vec<String>]) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
+    let mut by_addr = std::collections::HashMap::<String, String>::new();
     let mut out = Vec::new();
     for group in groups {
         for item in group {
-            if let Some(canonical) = canonical_bootnode(item) {
-                if seen.insert(canonical.clone()) {
-                    out.push(canonical);
+            let Some(canonical) = canonical_bootnode(item) else {
+                continue;
+            };
+            // `canonical_bootnode` already proved this parses.
+            let Ok(mw) = canonical.parse::<MultiaddrWithPeerId>() else {
+                continue;
+            };
+            let addr = mw.multiaddr.to_string();
+            let peer_id = mw.peer_id.to_string();
+            if let Some(first) = by_addr.get(&addr) {
+                if first != &peer_id {
+                    log::warn!(
+                        "peer-discovery: ignoring duplicate bootnode address {addr} \
+                         advertised as peer {peer_id} — already listed as {first}"
+                    );
                 }
+                continue;
+            }
+            if seen.insert(canonical.clone()) {
+                by_addr.insert(addr, peer_id);
+                out.push(canonical);
             }
         }
     }
@@ -831,6 +856,53 @@ mod tests {
         );
         assert_eq!(endpoint_to_multiaddr(""), None);
         assert_eq!(endpoint_to_multiaddr("no-port"), None);
+    }
+
+    // The live conflict observed 2026-11-12: the published seed list
+    // (https://gpncoin.ai/seeds.json) advertised the same socket
+    // /ip4/172.117.107.91/tcp/30333 under two peer ids. sc-network rejects
+    // that with Error::DuplicateBootnode, which killed the node ~1ms after the
+    // network backend started ("Essential task `txpool-background` failed").
+    const CONFLICT_ADDR_A: &str =
+        "/ip4/172.117.107.91/tcp/30333/p2p/12D3KooW9w2nzqHV14oe2mCWutx5FXjLw8a6EfxDxz6Jrpu6H34R";
+    const CONFLICT_ADDR_B: &str =
+        "/ip4/172.117.107.91/tcp/30333/p2p/12D3KooWP1JAFqvEvfsTuefkfQ6jH5vk7xe96A5Soj8o7tN63bm5";
+
+    #[test]
+    fn merge_drops_conflicting_peer_id_for_same_address() {
+        let merged = merge_dedupe(&[
+            vec![CONFLICT_ADDR_A.to_string()],
+            vec![CONFLICT_ADDR_B.to_string()],
+        ]);
+        // First-seen wins; exactly one entry survives, so sc-network's
+        // DuplicateBootnode check can never fire.
+        assert_eq!(merged, vec![CONFLICT_ADDR_A.to_string()]);
+    }
+
+    #[test]
+    fn remote_source_conflict_cannot_abort_startup() {
+        // The real path: static bootnodes first, then a *successful* URL fetch
+        // whose payload contains a conflicting entry for an already-known
+        // address. This must merge to a bootnode set with unique addresses.
+        let merged = merge_sources_lossy(
+            &[CONFLICT_ADDR_A.to_string(), A.to_string()],
+            vec![Ok(vec![CONFLICT_ADDR_B.to_string(), B.to_string()])],
+        );
+        assert_eq!(merged, vec![CONFLICT_ADDR_A.to_string(), A.to_string(), B.to_string()]);
+
+        let mut addrs: Vec<String> = merged
+            .iter()
+            .map(|m| {
+                m.parse::<MultiaddrWithPeerId>()
+                    .expect("canonical bootnode parses")
+                    .multiaddr
+                    .to_string()
+            })
+            .collect();
+        let before = addrs.len();
+        addrs.sort();
+        addrs.dedup();
+        assert_eq!(before, addrs.len(), "merge must never emit one address twice");
     }
 
     #[test]

@@ -696,6 +696,22 @@ function buildDirectory(providers, livePeerIds = null) {
   const seen = new Set();
   /** Peer ids that already have a published, dialable row (one row per node). */
   const emittedPeers = new Set();
+  /**
+   * Socket address (multiaddr without its `/p2p/<id>` suffix) -> the peer id
+   * already published at that address. One socket is one peer: emitting the
+   * same address under two peer ids makes `sc-network` abort with
+   * `DuplicateBootnode` and the node dies ~1ms after the network starts
+   * (seen live 2026-11-12 from 172.117.107.91:30333).
+   */
+  const addrOwner = new Map();
+  /** Claim `ma`'s address for `pid`; false if another peer id already owns it. */
+  const claimAddress = (ma, pid) => {
+    const addr = String(ma).split("/p2p/")[0];
+    const owner = addrOwner.get(addr);
+    if (owner && pid && owner !== pid) return false;
+    if (pid && !owner) addrOwner.set(addr, pid);
+    return true;
+  };
   const liveSet = Array.isArray(livePeerIds) ? new Set(livePeerIds.filter((x) => typeof x === "string")) : null;
   /** Live flags: `null` when the AP could not tell us (never claim "offline"). */
   const isLive = (pid) => (liveSet && pid ? liveSet.has(pid) : null);
@@ -708,6 +724,7 @@ function buildDirectory(providers, livePeerIds = null) {
     const pid = peerIdOf(ma);
     if (pid && sanitizePeerId(pid)) claimEndpoint(claims, pid, ma);
     if (seen.has(ma)) continue;
+    if (!claimAddress(ma, pid)) continue;
     seen.add(ma);
     // One ROW per machine, but keep every dialable address in `multiaddrs`:
     // a DNS name and its IP are two paths to the same node, not two nodes.
@@ -762,6 +779,7 @@ function buildDirectory(providers, livePeerIds = null) {
     if (dialable.length > 0) {
       for (const ma of dialable) {
         if (seen.has(ma)) continue;
+        if (!claimAddress(ma, peerId)) continue;
         seen.add(ma);
         multiaddrs.push(ma);
         // One row per machine: a provider that is already published as a seed
