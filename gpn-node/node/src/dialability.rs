@@ -1348,11 +1348,10 @@ impl UptimeSample {
 /// smallest peer id so every node computes the same answer without talking to
 /// anyone. Returns `None` for an empty candidate set.
 ///
-/// SPEC 47 §5 is deliberately **not wired yet**: the rule ships and is tested,
-/// but gathering peer-witness samples and flipping the role needs a network
-/// loop that the next change adds. Until then the gateway is named explicitly
-/// (`--site-gateway`), and this function exists so the rule cannot drift.
-#[allow(dead_code)]
+/// Uptime never decides **ownership** of a socket — a handshake does
+/// ([`judge_claim`]). It only ranks candidates that already hold a *verified*
+/// claim on **different** sockets behind one public IP (the "one dial target
+/// per LAN" choice). Wired through [`gateway_role`].
 pub fn elect_gateway(candidates: &[UptimeSample]) -> Option<&UptimeSample> {
     candidates.iter().min_by(|a, b| {
         b.score()
@@ -1366,13 +1365,424 @@ pub fn elect_gateway(candidates: &[UptimeSample]) -> Option<&UptimeSample> {
 /// Only when the operator opted in (`GPN_SITE_ELECT=1`) AND this peer id wins
 /// the witnessed-uptime comparison. The public function is separate from the
 /// service so the rule can be tested without a network.
-#[allow(dead_code)] // see [`elect_gateway`]: rule ships, role wiring is next.
 pub fn elected_as_gateway(
     cfg: &GateConfig,
     self_peer_id: &str,
     candidates: &[UptimeSample],
 ) -> bool {
     cfg.site_elect && elect_gateway(candidates).map(|s| s.peer_id.as_str()) == Some(self_peer_id)
+}
+
+// ── Public-socket ownership: one verified gateway per public IP ──────────
+//
+// The governing rule (design-lan-topology §3.0):
+//
+//   An address may be published only by the peer id that a third party
+//   reaches when it dials that address.
+//
+// Election is therefore **not a vote**: it is the outcome of a dial-back. A
+// bare TCP connect is not evidence (two machines behind one NAT both "prove"
+// the same socket that way); only a libp2p handshake that returns the expected
+// peer id is.
+
+/// What a dial-back got back from a socket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DialbackOutcome {
+    /// A handshake completed and the remote peer id is the expected one.
+    Verified { peer_id: String },
+    /// A handshake completed, but somebody **else** answered. This is box B's
+    /// case today: the router forwards the socket to another machine.
+    WrongPeer { expected: String, actual: String },
+    /// No handshake (timeout, refused, protocol error).
+    Unreachable { reason: String },
+    /// Not attempted because the verifier shares the claimant's egress.
+    /// Never a pass: verification from inside the same NAT is what lied.
+    Skipped { reason: String },
+}
+
+impl DialbackOutcome {
+    /// Classify a dial-back result that was performed from a *third-party*
+    /// vantage (the egress check is [`judge_claim`]'s job).
+    pub fn classify(observed_peer_id: Option<&str>, expected: &str) -> Self {
+        match observed_peer_id {
+            None => DialbackOutcome::Unreachable {
+                reason: "no handshake".to_string(),
+            },
+            Some(actual) if actual == expected => DialbackOutcome::Verified {
+                peer_id: actual.to_string(),
+            },
+            Some(actual) => DialbackOutcome::WrongPeer {
+                expected: expected.to_string(),
+                actual: actual.to_string(),
+            },
+        }
+    }
+
+    /// Only [`DialbackOutcome::Verified`] may make an address publishable.
+    pub fn is_verified(&self) -> bool {
+        matches!(self, DialbackOutcome::Verified { .. })
+    }
+
+    /// Stable wire/diagnostic code.
+    pub fn code(&self) -> &'static str {
+        match self {
+            DialbackOutcome::Verified { .. } => "verified",
+            DialbackOutcome::WrongPeer { .. } => "wrong-peer",
+            DialbackOutcome::Unreachable { .. } => "unreachable",
+            DialbackOutcome::Skipped { .. } => "skipped",
+        }
+    }
+
+    /// Human-readable reason. The `WrongPeer` text names the id that actually
+    /// answered — box B's symptom must be diagnosable from one log line.
+    pub fn summary(&self) -> String {
+        match self {
+            DialbackOutcome::Verified { peer_id } => {
+                format!("socket answers as {peer_id}")
+            }
+            DialbackOutcome::WrongPeer { expected, actual } => format!(
+                "socket answers as {actual}, not {expected} — another machine owns this forward"
+            ),
+            DialbackOutcome::Unreachable { reason } => {
+                format!("no libp2p handshake from the public socket ({reason})")
+            }
+            DialbackOutcome::Skipped { reason } => {
+                format!("verification skipped ({reason})")
+            }
+        }
+    }
+}
+
+/// One claim that a public socket answers as `peer_id`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicClaim {
+    /// The socket: `ip:port`, no `/p2p/<id>` suffix.
+    pub socket: String,
+    pub peer_id: String,
+    /// Unix seconds when a verifier saw the handshake.
+    pub verified_at: u64,
+    /// The verifier's own peer id.
+    pub verifier_id: String,
+    /// The verifier's public IP. Equal to the claim's IP ⇒ same egress.
+    pub verifier_egress: String,
+    /// Unix seconds after which the claim must be re-verified.
+    pub expires_at: u64,
+}
+
+impl PublicClaim {
+    pub fn new(
+        socket: impl Into<String>,
+        peer_id: impl Into<String>,
+        verifier_id: impl Into<String>,
+        verifier_egress: impl Into<String>,
+        verified_at: u64,
+        ttl_secs: u64,
+    ) -> Self {
+        PublicClaim {
+            socket: socket.into(),
+            peer_id: peer_id.into(),
+            verified_at,
+            verifier_id: verifier_id.into(),
+            verifier_egress: verifier_egress.into(),
+            expires_at: verified_at.saturating_add(ttl_secs),
+        }
+    }
+
+    pub fn is_live(&self, now: u64) -> bool {
+        now < self.expires_at
+    }
+
+    /// `ip` part of the socket (`"1.2.3.4"` from `"1.2.3.4:30333"`).
+    pub fn socket_ip(&self) -> Option<&str> {
+        match self.socket.rsplit_once(':') {
+            Some((ip, _)) if !ip.is_empty() => Some(ip),
+            _ => None,
+        }
+    }
+}
+
+/// Who is verifying, from where, and what the handshake returned.
+#[derive(Debug, Clone, Copy)]
+pub struct VerifierView<'a> {
+    pub verifier_id: &'a str,
+    /// The verifier's own public IP as an observer on the internet sees it.
+    pub verifier_egress: &'a str,
+    /// The peer id the handshake returned (`None` = no handshake).
+    pub observed_peer_id: Option<&'a str>,
+}
+
+/// Decide one claim from a verifier's view.
+///
+/// Same egress is **never** a pass: if the verifier shares the claimant's
+/// public IP, the check is skipped and the claim stays unverified. This is the
+/// one rule that would have prevented the 2026-11-12 incident even with the
+/// old code.
+pub fn judge_claim(claim: &PublicClaim, view: &VerifierView<'_>) -> DialbackOutcome {
+    if claim.socket_ip() == Some(view.verifier_egress) {
+        return DialbackOutcome::Skipped {
+            reason: "same-egress".to_string(),
+        };
+    }
+    DialbackOutcome::classify(view.observed_peer_id, &claim.peer_id)
+}
+
+/// What the registry did with an offered claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaimDecision {
+    /// The claim now owns its socket.
+    Accepted,
+    /// The claim displaced a **different** peer id on the same socket. The old
+    /// owner must demote itself on its next cycle (it will, from its own
+    /// re-verification returning `WrongPeer`) — no restart, no operator.
+    Superseded { previous: String },
+    /// Refused: the claim is expired, or not verified.
+    Rejected { reason: String },
+}
+
+/// Socket-ownership registry: at most one live verified claim per socket, and
+/// the newest verified claim wins.
+#[derive(Debug, Default, Clone)]
+pub struct SocketRegistry {
+    claims: std::collections::BTreeMap<String, PublicClaim>,
+}
+
+impl SocketRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Offer a claim. Only live, verifier-passing claims are accepted; a newer
+    /// verified claim on the same socket displaces the older one.
+    ///
+    /// `verified` is the outcome the *caller* obtained. A claim that is not
+    /// `Verified` is rejected here, so a caller cannot smuggle one in.
+    pub fn offer(
+        &mut self,
+        claim: PublicClaim,
+        verified: &DialbackOutcome,
+        now: u64,
+    ) -> ClaimDecision {
+        if !claim.is_live(now) {
+            return ClaimDecision::Rejected {
+                reason: "expired".to_string(),
+            };
+        }
+        if !verified.is_verified() {
+            return ClaimDecision::Rejected {
+                reason: verified.code().to_string(),
+            };
+        }
+        match self.claims.get(&claim.socket) {
+            Some(existing) if existing.peer_id != claim.peer_id && existing.is_live(now) => {
+                let previous = existing.peer_id.clone();
+                self.claims.insert(claim.socket.clone(), claim);
+                ClaimDecision::Superseded { previous }
+            }
+            _ => {
+                self.claims.insert(claim.socket.clone(), claim);
+                ClaimDecision::Accepted
+            }
+        }
+    }
+
+    /// The live owner of `socket`, if any.
+    pub fn owner(&self, socket: &str, now: u64) -> Option<&PublicClaim> {
+        self.claims.get(socket).filter(|c| c.is_live(now))
+    }
+
+    /// Does `peer_id` hold a live verified claim on `socket`?
+    pub fn holds(&self, socket: &str, peer_id: &str, now: u64) -> bool {
+        self.owner(socket, now)
+            .map(|c| c.peer_id == peer_id)
+            .unwrap_or(false)
+    }
+
+    /// Drop a claim (an explicit demotion, e.g. our own re-check got WrongPeer).
+    pub fn demote(&mut self, socket: &str, peer_id: &str) {
+        if self
+            .claims
+            .get(socket)
+            .map(|c| c.peer_id == peer_id)
+            .unwrap_or(false)
+        {
+            self.claims.remove(socket);
+        }
+    }
+
+    /// Live claims (used by the verifier loop and by tests).
+    pub fn live_claims(&self, now: u64) -> Vec<&PublicClaim> {
+        self.claims.values().filter(|c| c.is_live(now)).collect()
+    }
+}
+
+/// The tier this node may hold, derived from verified socket ownership.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatewayRole {
+    /// Holds the site's dial target: verified claim + elected among the
+    /// verified claimants behind this public IP.
+    Gateway,
+    /// Verified on its own socket, but not the site's dial target.
+    Backbone,
+    /// No verified claim: publishes nothing.
+    Leaf,
+}
+
+impl GatewayRole {
+    pub fn is_gateway(self) -> bool {
+        matches!(self, GatewayRole::Gateway)
+    }
+    pub fn is_dialable(self) -> bool {
+        !matches!(self, GatewayRole::Leaf)
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GatewayRole::Gateway => "gateway",
+            GatewayRole::Backbone => "backbone",
+            GatewayRole::Leaf => "leaf",
+        }
+    }
+}
+
+/// Compute this node's role.
+///
+/// * `dialable` — the gate's own verdict (evidence that somebody reached us).
+/// * `socket` — our public socket (`ip:port`) as a string, if we have one.
+/// * `claims` — claims from the verifier (see [`read_claims_file`]).
+/// * `samples` — witnessed uptime for the *verified claimants*; used only to
+///   rank several verified sockets behind one public IP.
+///
+/// With election off (`GPN_SITE_ELECT` unset) this is exactly today's rule:
+/// `GPN_SITE_GATEWAY=1` names the gateway, everything else dialable is
+/// backbone. With election on, a node needs a live verified claim on its own
+/// socket, and exactly one claimant per public IP wins.
+pub fn gateway_role(
+    cfg: &GateConfig,
+    self_peer_id: &str,
+    socket: Option<&str>,
+    claims: &[PublicClaim],
+    samples: &[UptimeSample],
+    now: u64,
+) -> GatewayRole {
+    let mut reg = SocketRegistry::new();
+    for c in claims {
+        // Claims that reached us are already verified by the verifier; the
+        // registry re-checks liveness and the socket key.
+        let outcome = DialbackOutcome::Verified {
+            peer_id: c.peer_id.clone(),
+        };
+        let _ = reg.offer(c.clone(), &outcome, now);
+    }
+
+    if !cfg.site_elect {
+        // Explicit naming (today's behaviour): the operator says which machine
+        // is the gateway; everything else is unchanged.
+        return if cfg.site_gateway {
+            GatewayRole::Gateway
+        } else if cfg.discoverable {
+            GatewayRole::Backbone
+        } else {
+            GatewayRole::Leaf
+        };
+    }
+
+    // Election: verification decides, uptime only ranks.
+    let Some(socket) = socket else {
+        return GatewayRole::Leaf;
+    };
+    if !reg.holds(socket, self_peer_id, now) {
+        // No live verified claim for us on our own socket: not publishable.
+        return GatewayRole::Leaf;
+    }
+    // Who else holds a verified claim behind this public IP?
+    let our_ip = claims
+        .iter()
+        .find(|c| c.socket == socket && c.peer_id == self_peer_id)
+        .and_then(|c| c.socket_ip())
+        .map(|s| s.to_string());
+    let mut peers: Vec<String> = reg
+        .live_claims(now)
+        .into_iter()
+        .filter(|c| c.socket_ip() == our_ip.as_deref())
+        .map(|c| c.peer_id.clone())
+        .collect();
+    peers.sort();
+    peers.dedup();
+    if peers.len() <= 1 {
+        return GatewayRole::Gateway;
+    }
+    // Several verified sockets behind one IP: rank by witnessed uptime.
+    let ranked: Vec<UptimeSample> = peers
+        .iter()
+        .map(|pid| {
+            samples
+                .iter()
+                .find(|s| &s.peer_id == pid)
+                .cloned()
+                .unwrap_or(UptimeSample {
+                    peer_id: pid.clone(),
+                    first_witnessed_secs: now,
+                    last_witnessed_secs: now,
+                    witnesses: 0,
+                })
+        })
+        .collect();
+    if elected_as_gateway(cfg, self_peer_id, &ranked) {
+        GatewayRole::Gateway
+    } else {
+        GatewayRole::Backbone
+    }
+}
+
+/// Read verified claims published by the verifier (the AP or a witness).
+///
+/// Contract: a JSON array of
+/// `{socket, peer_id, verified_at, verifier_id, verifier_egress, expires_at}`.
+/// A missing or unreadable file yields no claims — which means, with election
+/// on, Leaf. Never a guess.
+pub fn read_claims_file(path: &std::path::Path) -> Vec<PublicClaim> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let Some(arr) = v.as_array() else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|e| {
+            Some(PublicClaim {
+                socket: e.get("socket")?.as_str()?.trim().to_string(),
+                peer_id: e.get("peer_id")?.as_str()?.trim().to_string(),
+                verified_at: e.get("verified_at")?.as_u64()?,
+                verifier_id: e
+                    .get("verifier_id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                verifier_egress: e
+                    .get("verifier_egress")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                expires_at: e.get("expires_at")?.as_u64()?,
+            })
+        })
+        .filter(|c| !c.socket.is_empty() && !c.peer_id.is_empty())
+        .collect()
+}
+
+/// Where the verifier's claims live: `$GPN_CLAIMS_STATE`, else
+/// `$HOME/.gpn/claims.json`.
+pub fn claims_state_path() -> std::path::PathBuf {
+    use std::path::PathBuf;
+    if let Ok(p) = std::env::var("GPN_CLAIMS_STATE") {
+        if !p.trim().is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(".gpn").join("claims.json")
 }
 
 /// Best-effort local LAN IPv4 address (no packet is sent: a UDP `connect` only
@@ -3623,6 +4033,274 @@ mod tests {
         let spam = sample("y", 0, 100, 1000);
         assert_eq!(one.score(), 100);
         assert_eq!(spam.score(), 400);
+    }
+
+    // ── Socket ownership: one verified gateway per public IP ────────
+
+    fn claim(socket: &str, peer: &str, verifier: &str, egress: &str, at: u64) -> PublicClaim {
+        PublicClaim::new(socket, peer, verifier, egress, at, 600)
+    }
+
+    #[test]
+    fn same_egress_verifier_never_passes() {
+        // The AP runs on the seed box, so it shares the claimant's egress. It
+        // must report `skipped`, never `verified` — that is the one check that
+        // would have prevented the 2026-11-12 double-claim on 142.129.54.88.
+        let c = claim(
+            "142.129.54.88:30333",
+            "12D3KooWA",
+            "12D3KooWAP",
+            "142.129.54.88",
+            100,
+        );
+        let view = VerifierView {
+            verifier_id: "12D3KooWAP",
+            verifier_egress: "142.129.54.88",
+            observed_peer_id: Some("12D3KooWA"),
+        };
+        let out = judge_claim(&c, &view);
+        assert_eq!(out.code(), "skipped");
+        assert!(!out.is_verified(), "same-egress is not proof: {out:?}");
+        assert!(out.summary().contains("same-egress"));
+    }
+
+    #[test]
+    fn wrong_peer_is_never_a_pass_and_reports_the_id() {
+        // Box B dials wan:30333 and reaches box A's libp2p listener: the
+        // handshake succeeds, so a bare TCP check would "prove" dialability.
+        // The peer id is what falsifies the claim.
+        let c = claim(
+            "142.129.54.88:30333",
+            "12D3KooWB",
+            "12D3KooWAP",
+            "23.241.109.255",
+            100,
+        );
+        let view = VerifierView {
+            verifier_id: "12D3KooWAP",
+            verifier_egress: "23.241.109.255",
+            observed_peer_id: Some("12D3KooWA"),
+        };
+        let out = judge_claim(&c, &view);
+        assert_eq!(out.code(), "wrong-peer");
+        assert!(!out.is_verified());
+        // T14: the reason names the id actually reached.
+        assert!(out.summary().contains("12D3KooWA"), "{out:?}");
+        assert!(out.summary().contains("12D3KooWB"), "{out:?}");
+
+        // No handshake at all is `unreachable`, not a pass either.
+        let out = judge_claim(
+            &c,
+            &VerifierView {
+                observed_peer_id: None,
+                ..view
+            },
+        );
+        assert_eq!(out.code(), "unreachable");
+    }
+
+    #[test]
+    fn newest_verified_claim_wins_and_the_loser_demotes_without_a_restart() {
+        // The forward moved A → B. Both claims are verification outcomes; only
+        // one can hold the socket at a time.
+        let mut reg = SocketRegistry::new();
+        let a = claim(
+            "142.129.54.88:30333",
+            "12D3KooWA",
+            "v",
+            "23.241.109.255",
+            100,
+        );
+        let b = claim(
+            "142.129.54.88:30333",
+            "12D3KooWB",
+            "v",
+            "23.241.109.255",
+            110,
+        );
+        let ok = DialbackOutcome::Verified {
+            peer_id: "x".into(),
+        };
+        assert_eq!(reg.offer(a.clone(), &ok, 100), ClaimDecision::Accepted);
+        assert!(reg.holds("142.129.54.88:30333", "12D3KooWA", 100));
+        assert_eq!(
+            reg.offer(b.clone(), &ok, 110),
+            ClaimDecision::Superseded {
+                previous: "12D3KooWA".into()
+            }
+        );
+        assert!(reg.holds("142.129.54.88:30333", "12D3KooWB", 110));
+        assert!(!reg.holds("142.129.54.88:30333", "12D3KooWA", 110));
+
+        // Expiry: no heartbeat ⇒ no owner ⇒ nothing publishable (a lease, not
+        // a fact written once).
+        assert!(reg.owner("142.129.54.88:30333", 710).is_none());
+
+        // An unverified claim is refused outright.
+        let mut reg = SocketRegistry::new();
+        assert_eq!(
+            reg.offer(
+                claim("142.129.54.88:30333", "12D3KooWA", "v", "e", 100),
+                &DialbackOutcome::Skipped {
+                    reason: "same-egress".into()
+                },
+                100
+            ),
+            ClaimDecision::Rejected {
+                reason: "skipped".into()
+            }
+        );
+        assert!(reg.live_claims(100).is_empty());
+    }
+
+    #[test]
+    fn two_boxes_behind_one_nat_cannot_both_be_gateway() {
+        // The live /providers rows: two peer ids, one socket, both backbone.
+        let mut cfg = GateConfig::new(true, Duration::from_secs(10), None);
+        cfg.site_elect = true;
+        let a = claim(
+            "142.129.54.88:30333",
+            "12D3KooWA",
+            "v",
+            "23.241.109.255",
+            100,
+        );
+        let b = claim(
+            "142.129.54.88:30333",
+            "12D3KooWB",
+            "v",
+            "23.241.109.255",
+            110,
+        );
+
+        // Only A's claim is visible: A is the gateway.
+        assert_eq!(
+            gateway_role(
+                &cfg,
+                "12D3KooWA",
+                Some("142.129.54.88:30333"),
+                &[a.clone()],
+                &[],
+                100
+            ),
+            GatewayRole::Gateway
+        );
+        // The forward moved to B: the newest verified claim wins, and B is the
+        // gateway while A has no live claim → Leaf. Neither node restarts.
+        assert_eq!(
+            gateway_role(
+                &cfg,
+                "12D3KooWB",
+                Some("142.129.54.88:30333"),
+                &[a.clone(), b.clone()],
+                &[],
+                110
+            ),
+            GatewayRole::Gateway
+        );
+        assert_eq!(
+            gateway_role(
+                &cfg,
+                "12D3KooWA",
+                Some("142.129.54.88:30333"),
+                &[a, b],
+                &[],
+                110
+            ),
+            GatewayRole::Leaf,
+            "the loser must demote on its own next cycle"
+        );
+    }
+
+    #[test]
+    fn election_requires_a_verified_claim_and_uptime_only_ranks() {
+        let mut cfg = GateConfig::new(true, Duration::from_secs(10), None);
+        cfg.discoverable = true;
+        // Election off: exactly today's rule (explicit naming).
+        assert_eq!(
+            gateway_role(&cfg, "me", Some("1.2.3.4:30333"), &[], &[], 100),
+            GatewayRole::Backbone
+        );
+        cfg.site_gateway = true;
+        assert_eq!(
+            gateway_role(&cfg, "me", Some("1.2.3.4:30333"), &[], &[], 100),
+            GatewayRole::Gateway
+        );
+
+        // Election on: no verified claim ⇒ nothing publishable, even for an
+        // operator who "knows" their address (design §4.1.9).
+        let cfg = GateConfig {
+            site_elect: true,
+            site_gateway: false,
+            ..cfg
+        };
+        assert_eq!(
+            gateway_role(&cfg, "me", Some("1.2.3.4:30333"), &[], &[], 100),
+            GatewayRole::Leaf
+        );
+        let mine = claim("1.2.3.4:30333", "me", "v", "9.9.9.9", 100);
+        assert_eq!(
+            gateway_role(&cfg, "me", Some("1.2.3.4:30333"), &[mine.clone()], &[], 100),
+            GatewayRole::Gateway
+        );
+
+        // Two verified sockets behind one public IP: the witnessed-uptime
+        // winner is the site's dial target; the other stays a verified backbone
+        // (it is dialable, just not the LAN's one target).
+        let other = claim("1.2.3.4:30334", "other", "v", "9.9.9.9", 100);
+        let samples = vec![sample("me", 0, 1000, 2), sample("other", 0, 10, 1)];
+        assert_eq!(
+            gateway_role(
+                &cfg,
+                "me",
+                Some("1.2.3.4:30333"),
+                &[mine.clone(), other.clone()],
+                &samples,
+                100
+            ),
+            GatewayRole::Gateway
+        );
+        assert_eq!(
+            gateway_role(
+                &cfg,
+                "other",
+                Some("1.2.3.4:30334"),
+                &[mine, other],
+                &samples,
+                100
+            ),
+            GatewayRole::Backbone
+        );
+    }
+
+    #[test]
+    fn claims_file_is_parsed_strictly_and_a_missing_file_is_no_claims() {
+        let dir = std::env::temp_dir().join(format!(
+            "gpn-claims-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("claims.json");
+        // Missing file ⇒ no claims (Leaf under election), never a guess.
+        assert!(read_claims_file(&path).is_empty());
+        std::fs::write(
+            &path,
+            serde_json::json!([
+                {"socket": "1.2.3.4:30333", "peer_id": "12D3KooWA",
+                 "verified_at": 100, "verifier_id": "v",
+                 "verifier_egress": "9.9.9.9", "expires_at": 700},
+                {"socket": "", "peer_id": "12D3KooWB",
+                 "verified_at": 100, "expires_at": 700},
+                {"garbage": true}
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        let claims = read_claims_file(&path);
+        assert_eq!(claims.len(), 1, "incomplete entries are dropped");
+        assert_eq!(claims[0].socket, "1.2.3.4:30333");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

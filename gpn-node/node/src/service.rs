@@ -1011,6 +1011,57 @@ pub async fn new_full<
                 .clone()
                 .filter(|a| !crate::dialability::is_v6_endpoint(a));
 
+            // Gateway role (SPEC 47 §5, design-lan-topology §3.1): one
+            // verified public gateway per public IP.
+            //
+            // * `GPN_SITE_ELECT` off (default): exactly the old rule — the
+            //   operator names the gateway with `GPN_SITE_GATEWAY`.
+            // * on: the role requires a LIVE VERIFIED claim on our own socket,
+            //   read from the verifier's claims file. Election only ranks
+            //   verified claimants behind one public IP; it never grants
+            //   ownership. Two boxes behind one NAT therefore cannot both be
+            //   the gateway — the loser demotes on its own next cycle.
+            let self_peer_id = network.local_peer_id().to_string();
+            let self_socket = v4_endpoint.as_ref().and_then(|a| {
+                crate::dialability::host_port_of(a).and_then(|(host, port)| match host {
+                    crate::dialability::Host::Ip(ip) => Some(format!("{ip}:{port}")),
+                    // A /dns name is resolved at check time; the claim names
+                    // the resolved IP, so a name is not a socket here.
+                    crate::dialability::Host::Dns(_) => None,
+                })
+            });
+            let claims =
+                crate::dialability::read_claims_file(&crate::dialability::claims_state_path());
+            let now_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let role = crate::dialability::gateway_role(
+                &gate_cfg,
+                &self_peer_id,
+                self_socket.as_deref(),
+                &claims,
+                &[],
+                now_unix,
+            );
+            let gateway_flag = role.is_gateway();
+            // With election off the gate's verdict is used verbatim (today's
+            // behaviour). With election on an unverified node publishes
+            // nothing, whatever its own evidence says.
+            let dialable = if gate_cfg.site_elect {
+                verdict.dialable && role.is_dialable()
+            } else {
+                verdict.dialable
+            };
+            if gate_cfg.site_elect {
+                log::info!(
+                    "dialability: site election → role={} (verified claims: {}, socket: {})",
+                    role.as_str(),
+                    claims.len(),
+                    self_socket.as_deref().unwrap_or("none")
+                );
+            }
+
             // The endpoint set the heartbeat may publish *if* this node is a
             // backbone. `write_state_file` drops it for a leaf, so the tier
             // and the address can never disagree.
@@ -1018,7 +1069,7 @@ pub async fn new_full<
                 public: v4_endpoint.clone(),
                 public6: v6_endpoint.clone(),
                 source: state_source.clone(),
-                peer_id: Some(network.local_peer_id().to_string()),
+                peer_id: Some(self_peer_id.clone()),
                 probe_peer_id: None,
             };
 
@@ -1027,8 +1078,8 @@ pub async fn new_full<
             // The address is only written when the gate has EVIDENCE for it.
             crate::dialability::write_state_file(
                 &publication,
-                verdict.dialable,
-                gate_cfg.site_gateway,
+                dialable,
+                gateway_flag,
                 &verdict.detail,
             );
 
@@ -1055,9 +1106,11 @@ pub async fn new_full<
                     watch_initial.is_some() && (observed_addr.is_some() || inbound_v6_now > 0);
                 let source = state_source.clone();
                 let detail = verdict.detail.clone();
-                let dialable = verdict.dialable;
-                let gateway = gate_cfg.site_gateway;
-                let peer_id = network.local_peer_id().to_string();
+                // Captured for the `move` closure below; `dialable` and
+                // `gateway_flag` were computed once above and must not change
+                // with a later re-check of the v4 gate.
+                let gateway = gateway_flag;
+                let peer_id = self_peer_id.clone();
                 task_manager
                     .spawn_handle()
                     .spawn("gpn-ipv6-prefix-watch", None, async move {
@@ -1199,9 +1252,16 @@ pub async fn new_full<
                 // Periodic re-check (design §5.3): edge-triggered only. The startup
                 // verdict seeds `last_dialable`, so nothing repeats until the state
                 // actually changes (not dialable -> dialable prints NOW DIALABLE).
-                let watch_cfg = gate_cfg.clone();
+                let watch_cfg = {
+                    let mut c = gate_cfg.clone();
+                    // The re-check loop republishes the same role; with election
+                    // on, that role came from verified claims, not the operator
+                    // flag.
+                    c.site_gateway = gateway_flag;
+                    c
+                };
                 let watch_net = network.clone();
-                let start_dialable = verdict.dialable;
+                let start_dialable = dialable;
                 let watch_pub = publication.clone();
                 task_manager
                     .spawn_handle()
