@@ -888,7 +888,10 @@ mod tests {
             &[CONFLICT_ADDR_A.to_string(), A.to_string()],
             vec![Ok(vec![CONFLICT_ADDR_B.to_string(), B.to_string()])],
         );
-        assert_eq!(merged, vec![CONFLICT_ADDR_A.to_string(), A.to_string(), B.to_string()]);
+        assert_eq!(
+            merged,
+            vec![CONFLICT_ADDR_A.to_string(), A.to_string(), B.to_string()]
+        );
 
         let mut addrs: Vec<String> = merged
             .iter()
@@ -902,7 +905,11 @@ mod tests {
         let before = addrs.len();
         addrs.sort();
         addrs.dedup();
-        assert_eq!(before, addrs.len(), "merge must never emit one address twice");
+        assert_eq!(
+            before,
+            addrs.len(),
+            "merge must never emit one address twice"
+        );
     }
 
     #[test]
