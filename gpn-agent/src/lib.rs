@@ -14,6 +14,7 @@ pub mod cli;
 pub mod compute;
 pub mod compute_unit;
 pub mod config;
+pub mod dialcheck;
 pub mod disk;
 pub mod exit_report;
 pub mod firstrun;

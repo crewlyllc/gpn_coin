@@ -51,6 +51,11 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 # Async utilities
 futures = "0.3"
 
+# Dial-back verification (`gpn_dialcheck`, and the publish gate in
+# gpn-provider-status). Pinned to the libp2p the node's sc-network already uses
+# (0.54 / 0.42 core) so the fleet image links one libp2p stack, not two.
+libp2p = { version = "0.54", features = ["tcp", "noise", "yamux", "dns", "tokio", "websocket"] }
+
 # libc (Unix): AF_INET-only getaddrinfo for the IPv4-only callback resolver
 # (see src/net.rs — avoids the AAAA stall on hosts with an AAAA-laggy resolver)
 [target.'cfg(unix)'.dependencies]

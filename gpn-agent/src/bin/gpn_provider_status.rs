@@ -1641,6 +1641,91 @@ fn p2p_cache() -> &'static std::sync::Mutex<Option<(Instant, Option<P2pInfo>)>> 
 /// only ever reused inside [`P2P_TTL`] (5 s), so a node whose identity changed
 /// (key file replaced, or the endpoint reassigned to another node) cannot be
 /// advertised with the old id for longer than one poll.
+/// Dial-back gate: **an address is not published on the strength of a string**.
+///
+/// Each candidate multiaddr is verified by completing a libp2p handshake and
+/// comparing the peer id that answers. `verify` is injected so the policy is
+/// testable without a network.
+///
+/// Modes (see [`gpn_agent::dialcheck::Mode`]):
+/// * `wrongpeer` (default) — drop an address that **positively** answers as a
+///   different peer id (the 2026-11-12 double-claim), keep an unreachable one
+///   on the old evidence (today's behaviour, so a working node cannot lose its
+///   address because a hairpin failed).
+/// * `strict` — publish only an address whose handshake returned our peer id.
+/// * `off` — no check.
+///
+/// A leaf must never come out of this looking dialable, so when every address
+/// is dropped the tier drops to `leaf` too.
+fn gate_publication(
+    info: &mut P2pInfo,
+    mode: gpn_agent::dialcheck::Mode,
+    verify: &dyn Fn(&str, &str) -> gpn_agent::dialcheck::Outcome,
+) {
+    if mode == gpn_agent::dialcheck::Mode::Off || info.multiaddrs.is_empty() {
+        return;
+    }
+    let peer = info.peer_id.clone();
+    let mut kept: Vec<String> = Vec::new();
+    for ma in std::mem::take(&mut info.multiaddrs) {
+        let out = verify(&ma, &peer);
+        if mode.allows(&out) {
+            kept.push(ma);
+        } else {
+            log_change_once(&format!(
+                "[p2p] NOT publishing {ma}: {}{}",
+                out.summary(),
+                if out.code() == "wrong-peer" {
+                    " — this socket is forwarded to another machine"
+                } else {
+                    ""
+                }
+            ));
+        }
+    }
+    info.multiaddrs = kept;
+    if info.multiaddrs.is_empty() && info.reachability != "leaf" {
+        info.reachability = "leaf".to_string();
+        info.p2p_port = None;
+        info.address_source = "dialback-unverified".to_string();
+        log_change_once(
+            "[p2p] publishing NO public address: no candidate survived dial-back \
+             verification (GPN_DIALCHECK=off disables this check)",
+        );
+    }
+}
+
+/// Cached dial-back for the publish gate.
+///
+/// A handshake per status refresh would be wasteful, and hairpin latency is not
+/// free; a 5-minute cache is far inside the re-check cadence that matters.
+fn dialback_cached(multiaddr: &str, peer_id: &str) -> gpn_agent::dialcheck::Outcome {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    const TTL: Duration = Duration::from_secs(300);
+    static CACHE: OnceLock<Mutex<HashMap<String, (Instant, gpn_agent::dialcheck::Outcome)>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = format!("{multiaddr}|{peer_id}");
+    if let Ok(guard) = cache.lock() {
+        if let Some((at, out)) = guard.get(&key) {
+            if at.elapsed() < TTL {
+                return out.clone();
+            }
+        }
+    }
+    // No `--egress` here on purpose: this is the node's own vantage. Reaching a
+    // *different* peer id disproves the claim; reaching our own is evidence
+    // for it. The same-egress skip belongs to third-party verifiers (the AP).
+    let out = gpn_agent::dialcheck::verify(multiaddr, peer_id, None, Duration::from_secs(3));
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(key, (Instant::now(), out.clone()));
+    }
+    out
+}
+
 fn p2p_info(endpoint: &str, public_addr: Option<&str>) -> Option<P2pInfo> {
     let mut dial = read_dialability_state();
     // Trust gate BEFORE the record is used as evidence, not after: an addrs
@@ -1670,6 +1755,12 @@ fn p2p_info(endpoint: &str, public_addr: Option<&str>) -> Option<P2pInfo> {
         &stun_probe,
     )?;
     info.apply_dial(&dial, &self_peer_id);
+    // Last line before publication: prove the socket answers as THIS peer id.
+    gate_publication(
+        &mut info,
+        gpn_agent::dialcheck::Mode::from_env(),
+        &|ma, peer| dialback_cached(ma, peer),
+    );
     Some(info)
 }
 
@@ -3661,6 +3752,79 @@ mod tests {
             "our own verdict is authoritative"
         );
         assert!(info.multiaddrs.is_empty());
+    }
+
+    // ── Dial-back before publication (2026-11-12 double claim) ──────────
+
+    #[test]
+    fn an_address_that_answers_as_another_peer_id_is_never_published() {
+        use gpn_agent::dialcheck::{Mode, Outcome};
+        let pid = "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo";
+        let mut info = build_p2p_info(
+            pid.into(),
+            Some("/ip4/203.0.113.7/tcp/30333"),
+            vec!["/ip4/0.0.0.0/tcp/30333".into()],
+        );
+        assert_eq!(info.reachability, "backbone", "precondition");
+        assert!(!info.multiaddrs.is_empty());
+        // Box B's situation: the forward answers as box A.
+        gate_publication(&mut info, Mode::WrongPeer, &|_ma, _peer| {
+            Outcome::WrongPeer {
+                expected: pid.into(),
+                actual: "12D3KooWSomeoneElse".into(),
+            }
+        });
+        assert!(info.multiaddrs.is_empty(), "wrong peer must not publish");
+        assert_eq!(info.reachability, "leaf");
+        assert_eq!(info.p2p_port, None);
+        assert_eq!(info.address_source, "dialback-unverified");
+    }
+
+    #[test]
+    fn a_verified_address_stays_and_an_unreachable_one_keeps_todays_behaviour() {
+        use gpn_agent::dialcheck::{Mode, Outcome};
+        let pid = "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo";
+        let build = || {
+            build_p2p_info(
+                pid.into(),
+                Some("/ip4/203.0.113.7/tcp/30333"),
+                vec!["/ip4/0.0.0.0/tcp/30333".into()],
+            )
+        };
+        // Verified ⇒ published.
+        let mut ok = build();
+        gate_publication(&mut ok, Mode::WrongPeer, &|_ma, peer| Outcome::Verified {
+            peer_id: peer.into(),
+        });
+        assert_eq!(ok.reachability, "backbone");
+        assert!(!ok.multiaddrs.is_empty());
+
+        // Unreachable ⇒ default mode keeps the address (a hairpin failure must
+        // not unpublish a working node), `strict` refuses it.
+        let mut down = build();
+        gate_publication(&mut down, Mode::WrongPeer, &|_ma, _p| {
+            Outcome::Unreachable {
+                reason: "timeout".into(),
+            }
+        });
+        assert_eq!(down.reachability, "backbone");
+        assert!(!down.multiaddrs.is_empty());
+
+        let mut strict = build();
+        gate_publication(&mut strict, Mode::Strict, &|_ma, _p| Outcome::Unreachable {
+            reason: "timeout".into(),
+        });
+        assert!(strict.multiaddrs.is_empty());
+        assert_eq!(strict.reachability, "leaf");
+
+        // `off` never looks at the socket at all.
+        let mut off = build();
+        let before = off.multiaddrs.clone();
+        gate_publication(&mut off, Mode::Off, &|_ma, _p| Outcome::WrongPeer {
+            expected: "x".into(),
+            actual: "y".into(),
+        });
+        assert_eq!(off.multiaddrs, before);
     }
 
     #[test]
