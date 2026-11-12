@@ -8,6 +8,38 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.44] - 2026-11-12
+
+Bumped from 0.3.43 (`scripts/bump-version.py patch`).
+
+### Added
+- **Dial-back verification before a public address is published**
+  (`gpn-agent/src/dialcheck.rs`). An address may now only be published by the
+  peer id a third party reaches when it dials it: the checker parses the
+  multiaddr, refuses a `/p2p` tail that disagrees with the claim, skips (never
+  passes) a same-egress verifier, and completes a real noise handshake to read
+  the answering peer id. New `gpn-dialcheck` binary for operators (exit 0/2/3/4,
+  `--json`). Default mode `wrongpeer` fails open on *unreachable* — only positive
+  evidence of a different peer id unpublishes.
+- **`gpn-agent/tests` now cover the publish gate**: an address that answers as
+  another peer id is never published.
+
+### Changed
+- **The gateway election is wired** (it had been `#[allow(dead_code)]`,
+  "deliberately not wired yet"). `DialbackOutcome` distinguishes
+  `Verified` / `WrongPeer{expected,actual}` / `Unreachable` / `Skipped`;
+  same-egress is `Skipped`, never a pass. `SocketRegistry` keeps one live claim
+  per socket, newest verified claim wins, and the loser demotes on its next
+  cycle without a restart. Two boxes behind one NAT can no longer both be
+  gateway. Behaviour is byte-identical while `GPN_SITE_ELECT` is unset.
+
+### Fixed
+- **`dialability.json` is keyed by node.** The record now carries `peer_id` and
+  `probe_peer_id`, and a verdict naming another peer — or a legacy record with
+  no identity — is **Unknown**, never a borrowed leaf/backbone. Live symptom it
+  caused: a dead probe node's "leaf" verdict held the canonical seed at
+  `multiaddrs: []` while its ports were open.
+
 ## [Unreleased]
 
 ### Fixed
