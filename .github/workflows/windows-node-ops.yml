@@ -1,0 +1,61 @@
+# Remote operations on the self-hosted Windows node (box 1).
+#
+# Why this exists: box 1 is behind a different network, and every diagnosis so
+# far has been "run this command and paste the output" — a human in the loop for
+# every single probe. This workflow turns that machine into a place CI can run a
+# script and return the output, with no interactive session.
+#
+# Guardrails:
+#   * manual dispatch only (no trigger on push)
+#   * the script runs as the runner's account, in the runner's work directory
+#   * it must NOT stop/start the live node unless the script says so explicitly
+#     and the `allow_service_control` input is true
+name: Windows node ops
+
+on:
+  workflow_dispatch:
+    inputs:
+      script:
+        description: "PowerShell to run on the Windows node"
+        required: true
+        type: string
+      timeout_minutes:
+        description: "Job timeout"
+        required: false
+        default: "10"
+        type: string
+      allow_service_control:
+        description: "Permit the script to stop/start gpn services"
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  run:
+    name: run script on DESKTOP-USBUADL
+    runs-on: [self-hosted, Windows]
+    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
+    steps:
+      - name: Policy check
+        if: ${{ !inputs.allow_service_control }}
+        shell: pwsh
+        run: |
+          $script = @'
+${{ inputs.script }}
+'@
+          if ($script -match '(?i)(stop-process|taskkill|schtasks\s+/end|net\s+stop|Restart-Service|Stop-Service|--stop)') {
+            throw "script tries to control processes/services but allow_service_control is false"
+          }
+          Write-Host "policy check passed"
+
+      - name: Run
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $script = @'
+${{ inputs.script }}
+'@
+          Write-Host "=== host ==="
+          Write-Host "$env:COMPUTERNAME  $(Get-Date -Format o)"
+          Write-Host "=== script ==="
+          Invoke-Expression $script
