@@ -410,15 +410,23 @@ jobs:
           # native schtasks writes to stderr when a task is absent; that must not
           # trip $ErrorActionPreference='Stop' — check exit codes explicitly.
           $ErrorActionPreference = 'Continue'
-          foreach ($tn in @('GPN-Node','GPNProvider')) { schtasks /End /TN $tn 2>&1 | Out-Null }
-          Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
-            Where-Object { $_.CommandLine -like '*run-provider.ps1*' } |
-            ForEach-Object { Write-Host "stopping supervisor pid=$($_.ProcessId)"; Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-          Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like 'gpn*' } | ForEach-Object {
-            Write-Host "stopping $($_.ProcessName) (pid $($_.Id))"
-            Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+          $stopAll = {
+            foreach ($tn in @('GPN-Node','GPNProvider')) { schtasks /End /TN $tn 2>&1 | Out-Null }
+            Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
+              Where-Object { $_.CommandLine -like '*run-provider.ps1*' } |
+              ForEach-Object { Write-Host "  stopping supervisor pid=$($_.ProcessId)"; Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+            $pids = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like 'gpn*' } | ForEach-Object {
+              Write-Host "  stopping $($_.ProcessName) (pid $($_.Id))"
+              Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+              $_.Id
+            })
+            # Stop-Process -Force returns before the OS has released the image: a process
+            # that is mid-flush keeps its .exe mapped for a while, which is a sharing
+            # violation for the copy. Wait for the pids to actually disappear.
+            foreach ($p in $pids) { Wait-Process -Id $p -Timeout 30 -ErrorAction SilentlyContinue }
+            Start-Sleep -Seconds 3
           }
-          Start-Sleep -Seconds 2
+          & $stopAll
           schtasks /Query /TN GPNProvider 2>&1 | Out-Null
           if ($LASTEXITCODE -eq 0) { schtasks /Delete /TN GPNProvider /F 2>&1 | Out-Null; Write-Host 'removed legacy GPNProvider task' }
 
@@ -426,12 +434,41 @@ jobs:
           $ErrorActionPreference = 'Stop'   # strict again: a failed copy MUST fail the job
           # 2026-11-05: a run died on "cannot access gpn_diffusion_provider.exe,
           # used by another process" -- a child restarted between the stop and
-          # the copy, or a scanner held the image. robocopy retries (10x3s) and
-          # is atomic per file; a hard failure still fails the job (>= 8).
-          robocopy 'gpn-agent\target\release' $dst '*.exe' /R:10 /W:3 /NFL /NDL /NJH /NJS /NP | Out-Null
-          if ($LASTEXITCODE -ge 8) { throw "robocopy of agent binaries failed (rc=$LASTEXITCODE)" }
+          # the copy, or a scanner held the image.
+          # 2026-11-12: the same shape again, but the lock OUTLIVED robocopy's
+          # retries -- rc=11 ("some files could not be copied") after 10x3s on
+          # ~6 files, 183 s total, so the holder was not a 3-second transient: a
+          # child came back after the stop sweep, or Defender latched the new
+          # images. One long wait cannot beat a process that keeps returning, so
+          # the STOP is repeated between bounded copy attempts, and the failing
+          # file names are printed instead of swallowed.
+          $copyLog = Join-Path $env:TEMP 'gpn-robocopy.log'
+          Remove-Item $copyLog -ErrorAction SilentlyContinue
+          $copied = $false
+          $rc = 0
+          for ($attempt = 1; $attempt -le 4; $attempt++) {
+            # /NFL off (keep file names) so a failure names the files it could not replace.
+            robocopy 'gpn-agent\target\release' $dst '*.exe' /R:10 /W:3 /NDL /NJH /NJS /NP /LOG+:$copyLog | Out-Null
+            $rc = $LASTEXITCODE
+            if ($rc -lt 8) { $copied = $true; break }
+            Write-Host "::warning::robocopy attempt $attempt/4 failed (rc=$rc) — re-stopping gpn* before the next attempt"
+            Get-Content $copyLog -ErrorAction SilentlyContinue | Select-String -Pattern 'ERROR' | Select-Object -Last 10 | ForEach-Object { Write-Host "  robocopy: $($_.Line.Trim())" }
+            if ($attempt -lt 4) { & $stopAll }
+          }
+          if (-not $copied) {
+            # Name the holders and let the box come back on the OLD binaries: a failed
+            # deploy must never leave the box with no node at all (2026-11-12: this step
+            # threw and the restart below never ran, so C:\gpn stayed dead).
+            Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like 'gpn*' } | ForEach-Object { Write-Host "  still running: $($_.ProcessName) pid=$($_.Id)" }
+            if ('${{ vars.GPN_AUTOSTART_NODE }}' -ne 'false') {
+              Write-Host '::warning::restarting GPN-Node on the previous binaries so the box is not left dead'
+              schtasks /Create /TN 'GPN-Node' /TR 'cmd /c C:\gpn\start-node.cmd' /SC ONLOGON /RL HIGHEST /F 2>&1 | Out-Null
+              schtasks /Run /TN 'GPN-Node' 2>&1 | Out-Null
+            }
+            throw "robocopy of agent binaries failed after 4 stop+copy cycles (last rc=$rc) — see $copyLog"
+          }
           Copy-Item 'gpn-node\target\release\gpn-node.exe' $dst -Force
-          Write-Host "deployed to $dst :"
+          Write-Host "deployed to $dst (robocopy rc=$rc, attempt $attempt) :"
           Get-ChildItem $dst -Filter *.exe | ForEach-Object { Write-Host "  $($_.Name)  $([math]::Round($_.Length/1MB,1))MB" }
 
           # ── 3+4. RESTART — but only via a mechanism that detaches from the
