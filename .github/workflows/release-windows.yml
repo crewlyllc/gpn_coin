@@ -174,10 +174,8 @@ jobs:
           $dst = 'C:\gpn\bin'
           New-Item -ItemType Directory -Force -Path $dst | Out-Null
 
-          # ── 0. (Re)write the start script the scheduled task runs, so every
-          #      deploy is also a config refresh. chain: prefer the pinned
-          #      genesis spec (AP serves it at /genesis-spec) so a fresh node
-          #      pegs the canonical genesis WASM; fall back to the named chain.
+          # ── 0. (Re)write the task's start script, so every deploy is also a config
+          #      refresh. Prefer the pinned genesis spec; else the named chain.
           $chainSpec = 'C:\gpn\testnet-spec.json'
           $chain = if (Test-Path $chainSpec) { $chainSpec } else { 'testnet' }
           $script = @'
@@ -401,14 +399,11 @@ jobs:
           Assert-LauncherSafe -Text $onDisk -What 'on-disk start-node.cmd'
           Write-Host "wrote C:\gpn\start-node.cmd (chain=$chain)  self-check OK: per-machine node key + per-machine wallet, no dev URI, no pinned account"
 
-          # ── 1. STOP: end the supervisor task(s) + kill every gpn* process so
-          #      the .exe files are not locked. The legacy GPNProvider task +
-          #      run-provider.ps1 supervisor are retired by the dedicated
-          #      'legacy cleanup' step above (belt-and-braces: repeat it here in
-          #      case it was recreated between steps) so exactly ONE supervisor
-          #      runs (two would fight over :8094 + the DB).
-          # native schtasks writes to stderr when a task is absent; that must not
-          # trip $ErrorActionPreference='Stop' — check exit codes explicitly.
+          # ── 1. STOP: end the supervisor task(s) + kill every gpn* process so the
+          #      .exe files are not locked (legacy GPNProvider/run-provider.ps1 are
+          #      retired above, belt-and-braces here — two supervisors fight over :8094
+          #      + the DB). schtasks writes to stderr for an absent task, so exit codes
+          #      are checked explicitly, never $ErrorActionPreference.
           $ErrorActionPreference = 'Continue'
           $stopAll = {
             foreach ($tn in @('GPN-Node','GPNProvider')) { schtasks /End /TN $tn 2>&1 | Out-Null }
@@ -420,9 +415,7 @@ jobs:
               Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
               $_.Id
             })
-            # Stop-Process -Force returns before the OS has released the image: a process
-            # that is mid-flush keeps its .exe mapped for a while, which is a sharing
-            # violation for the copy. Wait for the pids to actually disappear.
+            # -Force returns before the OS unmaps the image; a mid-flush node keeps its .exe.
             foreach ($p in $pids) { Wait-Process -Id $p -Timeout 30 -ErrorAction SilentlyContinue }
             Start-Sleep -Seconds 3
           }
@@ -430,38 +423,27 @@ jobs:
           schtasks /Query /TN GPNProvider 2>&1 | Out-Null
           if ($LASTEXITCODE -eq 0) { schtasks /Delete /TN GPNProvider /F 2>&1 | Out-Null; Write-Host 'removed legacy GPNProvider task' }
 
-          # ── 2. COPY the freshly built binaries over the (now unlocked) bins. ─
-          $ErrorActionPreference = 'Stop'   # strict again: a failed copy MUST fail the job
-          # 2026-11-05: a run died on "cannot access gpn_diffusion_provider.exe,
-          # used by another process" -- a child restarted between the stop and
-          # the copy, or a scanner held the image.
-          # 2026-11-12: the same shape again, but the lock OUTLIVED robocopy's
-          # retries -- rc=11 ("some files could not be copied") after 10x3s on
-          # ~6 files, 183 s total, so the holder was not a 3-second transient: a
-          # child came back after the stop sweep, or Defender latched the new
-          # images. One long wait cannot beat a process that keeps returning, so
-          # the STOP is repeated between bounded copy attempts, and the failing
-          # file names are printed instead of swallowed.
+          # ── 2. COPY over the (now unlocked) bins.
+          $ErrorActionPreference = 'Stop'   # a failed copy MUST fail the job
+          # 2026-11-12: the lock OUTLIVED robocopy's retries (rc=11, ~6 files, 183 s), so the
+          # holder was persistent, not a 3 s transient; -Force also returns before the OS
+          # unmaps the image. Bounded attempts, re-stop between, and name the holders.
           $copyLog = Join-Path $env:TEMP 'gpn-robocopy.log'
           Remove-Item $copyLog -ErrorAction SilentlyContinue
-          $copied = $false
-          $rc = 0
+          $copied = $false; $rc = 0
           for ($attempt = 1; $attempt -le 4; $attempt++) {
-            # /NFL off (keep file names) so a failure names the files it could not replace.
             robocopy 'gpn-agent\target\release' $dst '*.exe' /R:10 /W:3 /NDL /NJH /NJS /NP /LOG+:$copyLog | Out-Null
             $rc = $LASTEXITCODE
             if ($rc -lt 8) { $copied = $true; break }
-            Write-Host "::warning::robocopy attempt $attempt/4 failed (rc=$rc) — re-stopping gpn* before the next attempt"
-            Get-Content $copyLog -ErrorAction SilentlyContinue | Select-String -Pattern 'ERROR' | Select-Object -Last 10 | ForEach-Object { Write-Host "  robocopy: $($_.Line.Trim())" }
+            Write-Host "::warning::robocopy attempt $attempt/4 failed (rc=$rc) — re-stopping gpn*"
+            Get-Content $copyLog -ErrorAction SilentlyContinue | Select-String 'ERROR' | Select-Object -Last 6 | ForEach-Object { Write-Host "  robocopy: $($_.Line.Trim())" }
             if ($attempt -lt 4) { & $stopAll }
           }
           if (-not $copied) {
-            # Name the holders and let the box come back on the OLD binaries: a failed
-            # deploy must never leave the box with no node at all (2026-11-12: this step
-            # threw and the restart below never ran, so C:\gpn stayed dead).
+            # A failed deploy must not leave the box with NO node: bring it back on the old bins.
             Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like 'gpn*' } | ForEach-Object { Write-Host "  still running: $($_.ProcessName) pid=$($_.Id)" }
             if ('${{ vars.GPN_AUTOSTART_NODE }}' -ne 'false') {
-              Write-Host '::warning::restarting GPN-Node on the previous binaries so the box is not left dead'
+              Write-Host '::warning::restarting GPN-Node on the previous binaries'
               schtasks /Create /TN 'GPN-Node' /TR 'cmd /c C:\gpn\start-node.cmd' /SC ONLOGON /RL HIGHEST /F 2>&1 | Out-Null
               schtasks /Run /TN 'GPN-Node' 2>&1 | Out-Null
             }
@@ -471,12 +453,9 @@ jobs:
           Write-Host "deployed to $dst (robocopy rc=$rc, attempt $attempt) :"
           Get-ChildItem $dst -Filter *.exe | ForEach-Object { Write-Host "  $($_.Name)  $([math]::Round($_.Length/1MB,1))MB" }
 
-          # ── 3+4. RESTART — but only via a mechanism that detaches from the
-          #     GitHub runner's job process tree (the runner kills its own
-          #     children at end-of-job). A Scheduled Task launched by the Task
-          #     Scheduler service (schtasks /Run) is NOT a child of the job, so
-          #     it survives teardown — this box IS the self-hosted runner, so a
-          #     plain Start-Process would take the node offline again.
+          # ── 3+4. RESTART via a Scheduled Task: a Task Scheduler child is not the
+          #     runner's child, so it survives end-of-job teardown (this box IS the
+          #     runner — a plain Start-Process would take the node offline again).
           if ('${{ vars.GPN_AUTOSTART_NODE }}' -ne 'false') {
             # ollama is REQUIRED — start it detached; fail the job if it can't serve.
             try {
@@ -505,9 +484,8 @@ jobs:
             schtasks /Create /TN 'GPN-Node' /TR $tr /SC ONLOGON /RL HIGHEST /F 2>&1 | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "schtasks /Create GPN-Node failed (rc=$LASTEXITCODE)" }
 
-            # ── guard: ONE instance only. `schtasks /Run` on an already-running
-            #    task spawns a SECOND supervision tree (two nodes, same base path,
-            #    same ports) - that cost ~2h of confusion on 2026-10-23.
+            # guard: ONE instance only — /Run on a running task forks a SECOND tree
+            # (two nodes, same ports); cost ~2h on 2026-10-23.
             $miSet = $false
             try {
               $st = Get-ScheduledTask -TaskName 'GPN-Node' -ErrorAction Stop
@@ -554,14 +532,11 @@ jobs:
             Write-Host 'GPN_AUTOSTART_NODE=false — binaries deployed; node NOT restarted'
           }
 
-          # ── 5. AUTO-UPDATE: heal boxes installed before GPN-Update existed.
-          #    Without this task a Windows box only checks the signed manifest
-          #    when the supervisor starts, so a machine that never reboots
-          #    never updates (box 1 sat on an old build for days). install.ps1
-          #    owns the task definition; -UpdateTaskOnly writes the wrapper and
-          #    registers the task without touching binaries, ollama or the
-          #    running node. Guarded: a checkout without install.ps1 must not
-          #    fail the deploy.
+          # ── 5. AUTO-UPDATE: without this task a box only checks the signed
+          #    manifest when its supervisor starts, so one that never reboots never
+          #    updates (box 1 sat on an old build for days). install.ps1 owns the
+          #    task; -UpdateTaskOnly writes only the wrapper. Guarded: a checkout
+          #    without install.ps1 must not fail the deploy.
           $ErrorActionPreference = 'Continue'
           if (Test-Path 'install.ps1') {
             & powershell -NoProfile -ExecutionPolicy Bypass -File 'install.ps1' -UpdateTaskOnly -InstallDir 'C:\gpn'
