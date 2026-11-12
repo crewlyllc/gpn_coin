@@ -209,30 +209,74 @@ fn chain_custom_flags() -> BTreeSet<String> {
     out
 }
 
-/// Locate a built chain binary (`gpn-node`, the substrate node).
-fn find_chain_binary() -> Option<PathBuf> {
+/// The executable name of the chain binary on this platform.
+///
+/// `gpn-node` on Unix, but `gpn-node.exe` on Windows — and getting this wrong is
+/// not a cosmetic bug: until 2026-11-11 the probe below asked for the unsuffixed
+/// name, so on the Windows runner it found nothing, fell through to the *pinned
+/// flag list*, and the whole contract check silently degraded from "ask the
+/// binary's own `--help`" to "compare against a hand-written constant". The
+/// constant was missing `--network-backend`, the check still passed there while
+/// failing on Linux, and a release was blocked by a test that was not measuring
+/// what it claimed. Same family as the W47 incident this file exists to prevent.
+fn chain_bin_names() -> Vec<String> {
+    chain_bin_names_for(std::env::consts::EXE_SUFFIX)
+}
+
+/// The suffix is a parameter so both platforms' behaviour is testable *here*.
+/// A test written only against `EXE_SUFFIX` proves nothing on Linux about
+/// Windows — the `.exe` case has to be exercised explicitly.
+fn chain_bin_names_for(suffix: &str) -> Vec<String> {
+    let mut names = vec![format!("gpn-node{suffix}")];
+    // Accept the other spelling too, so a cross-compiled/renamed checkout still
+    // resolves instead of falling back to the weaker check.
+    let other = if suffix.is_empty() {
+        "gpn-node.exe".to_string()
+    } else {
+        "gpn-node".to_string()
+    };
+    if other != names[0] {
+        names.push(other);
+    }
+    names
+}
+
+/// Every path worth probing for a built chain binary, in preference order.
+fn chain_binary_candidates() -> Vec<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(p) = std::env::var("GPN_CHAIN_BIN") {
         candidates.push(PathBuf::from(p));
     }
+    let names = chain_bin_names();
+    let mut dirs: Vec<PathBuf> = Vec::new();
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let repo = manifest.parent().unwrap_or(manifest);
     for prof in ["release", "debug"] {
-        candidates.push(repo.join(format!("target/{prof}/gpn-node")));
-        candidates.push(repo.join(format!("gpn-node/target/{prof}/gpn-node")));
+        dirs.push(repo.join(format!("target/{prof}")));
+        dirs.push(repo.join(format!("gpn-node/target/{prof}")));
     }
     // CI builds the chain crate into a persistent cache dir of its own
     // (`CARGO_TARGET_DIR=/home/.../gpn-agent-target`, chain target next to it).
     if let Ok(td) = std::env::var("CARGO_TARGET_DIR") {
         let td = PathBuf::from(td);
         for prof in ["release", "debug"] {
-            candidates.push(td.join(format!("{prof}/gpn-node")));
+            dirs.push(td.join(prof));
             if let Some(parent) = td.parent() {
-                candidates.push(parent.join(format!("gpn-node-target/{prof}/gpn-node")));
+                dirs.push(parent.join(format!("gpn-node-target/{prof}")));
             }
         }
     }
-    candidates.into_iter().find(|p| p.is_file())
+    for dir in dirs {
+        for name in &names {
+            candidates.push(dir.join(name));
+        }
+    }
+    candidates
+}
+
+/// Locate a built chain binary (`gpn-node`, the substrate node).
+fn find_chain_binary() -> Option<PathBuf> {
+    chain_binary_candidates().into_iter().find(|p| p.is_file())
 }
 
 /// The chain binary's accepted flags. `Some(set)` from the binary's own
@@ -269,8 +313,12 @@ fn chain_flags() -> (BTreeSet<String>, &'static str) {
         eprintln!("[argv-contract] {} did not answer --help", bin.display());
     }
     eprintln!(
-        "[argv-contract] SKIP: no chain binary found — checking node flags against \
-         gpn-node/node/src/cli.rs + the known substrate run flags instead of --help"
+        "[argv-contract] SKIP: no chain binary found (probed `gpn-node{}` in the repo and \
+         CARGO_TARGET_DIR target dirs) — grading node flags against \
+         gpn-node/node/src/cli.rs + the pinned substrate run flags instead of --help. \
+         This is the WEAK check: it cannot see a flag the binary really implements, \
+         which is exactly how `--network-backend` blocked 0.3.43 on Windows (W130).",
+        std::env::consts::EXE_SUFFIX
     );
     let mut flags = chain_custom_flags();
     flags.extend(SUBSTRATE_RUN_FLAGS.iter().map(|s| s.to_string()));
@@ -364,6 +412,62 @@ fn positional_provider_children_get_no_flags() {
             map[child]
         );
     }
+}
+
+/// W130, pinned: the probe must ask for the platform's executable name.
+///
+/// `gpn-node.exe` is what CI's Windows runner actually writes; probing only the
+/// unsuffixed name made the authoritative `--help` path unreachable there, so the
+/// check silently graded the platform that was failing against a hand-written
+/// list instead of the binary.
+#[test]
+fn chain_binary_probe_uses_the_platform_executable_name() {
+    let names = chain_bin_names();
+    let expected = format!("gpn-node{}", std::env::consts::EXE_SUFFIX);
+    assert_eq!(
+        names.first().map(String::as_str),
+        Some(expected.as_str()),
+        "the first thing probed must be `{expected}` (EXE_SUFFIX = {:?}), got {names:?}",
+        std::env::consts::EXE_SUFFIX
+    );
+    assert!(
+        names.len() >= 2 && names.iter().any(|n| n.ends_with(".exe")),
+        "an `.exe` spelling must be among the candidates on every platform, got {names:?}"
+    );
+    // And it must be joined onto real target dirs, not just exist as a string.
+    let cands = chain_binary_candidates();
+    assert!(
+        cands
+            .iter()
+            .any(|p| p.file_name() == Some(std::ffi::OsStr::new(expected.as_str()))),
+        "no candidate path ends in `{expected}`: {cands:?}"
+    );
+}
+
+/// Both platforms, exercised on whichever host runs the test.
+#[test]
+fn windows_probes_the_dot_exe_name_first() {
+    let win = chain_bin_names_for(".exe");
+    assert_eq!(
+        win[0], "gpn-node.exe",
+        "Windows must probe `gpn-node.exe` first"
+    );
+    assert!(
+        win.contains(&"gpn-node".to_string()),
+        "…and tolerate an unsuffixed binary: {win:?}"
+    );
+    let unix = chain_bin_names_for("");
+    assert_eq!(unix[0], "gpn-node", "Unix must probe `gpn-node` first");
+    assert!(
+        unix.contains(&"gpn-node.exe".to_string()),
+        "…and tolerate the `.exe` spelling: {unix:?}"
+    );
+    // The regression itself: the old, broken probe asked for the unsuffixed name
+    // on Windows, so `gpn-node.exe` was never a candidate and the check degraded.
+    assert_ne!(
+        win[0], "gpn-node",
+        "the W130 regression is back: Windows probes the unsuffixed name"
+    );
 }
 
 /// The incident, pinned: the real chain flag is accepted, the invented one is not.
