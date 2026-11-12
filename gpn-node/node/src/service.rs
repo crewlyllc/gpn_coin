@@ -1018,6 +1018,8 @@ pub async fn new_full<
                 public: v4_endpoint.clone(),
                 public6: v6_endpoint.clone(),
                 source: state_source.clone(),
+                peer_id: Some(network.local_peer_id().to_string()),
+                probe_peer_id: None,
             };
 
             // Publish the outcome for the provider heartbeat (SPEC 47: the
@@ -1055,6 +1057,7 @@ pub async fn new_full<
                 let detail = verdict.detail.clone();
                 let dialable = verdict.dialable;
                 let gateway = gate_cfg.site_gateway;
+                let peer_id = network.local_peer_id().to_string();
                 task_manager
                     .spawn_handle()
                     .spawn("gpn-ipv6-prefix-watch", None, async move {
@@ -1086,6 +1089,8 @@ pub async fn new_full<
                                         public: v4.cloned(),
                                         public6: v6.cloned(),
                                         source: source.clone(),
+                                        peer_id: Some(peer_id.clone()),
+                                        probe_peer_id: None,
                                     },
                                     dialable,
                                     gateway,
@@ -1222,6 +1227,7 @@ pub async fn new_full<
             crate::dialability::write_state_file(
                 &crate::dialability::StatePublication {
                     source: "probe-disabled".into(),
+                    peer_id: Some(network.local_peer_id().to_string()),
                     ..Default::default()
                 },
                 false,

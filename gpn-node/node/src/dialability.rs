@@ -1978,6 +1978,19 @@ pub struct StatePublication {
     pub public: Option<Multiaddr>,
     pub public6: Option<Multiaddr>,
     pub source: String,
+    /// The peer id this verdict belongs to.
+    ///
+    /// Written to the state file so a consumer can tell whose verdict it is. A
+    /// node may only use a verdict that names **its own** peer id; a record
+    /// without one (legacy) or naming another peer is Unknown and must be
+    /// re-measured. Before this field existed the file held one unowned verdict
+    /// and a short-lived probe's `leaf` was published as the live seed's own.
+    pub peer_id: Option<String>,
+    /// The identity of the process that produced the verdict (the probe).
+    ///
+    /// Normally the same as [`Self::peer_id`]; recorded separately because a
+    /// verdict may in future be produced by a verifier that is not the node.
+    pub probe_peer_id: Option<String>,
 }
 
 /// Path of the dialability state file: `$GPN_DIALABILITY_STATE`, else
@@ -2022,6 +2035,14 @@ pub fn write_state_file(
         "public_endpoint_v6": if dialable { publication.public6.as_ref().map(|a| a.to_string()) } else { None },
         "multiaddrs": multiaddrs,
         "source": publication.source,
+        // Identity key (2026-11-12): the verdict belongs to exactly this peer
+        // id. A consumer that is not this peer must treat the record as
+        // Unknown, never as its own.
+        "peer_id": publication.peer_id,
+        "probe_peer_id": publication
+            .probe_peer_id
+            .as_ref()
+            .or(publication.peer_id.as_ref()),
         "dialable": dialable,
         "reachability": reachability_of(dialable).as_str(),
         "gateway": gateway,
@@ -3631,6 +3652,8 @@ mod tests {
             public: Some(ma("/ip4/203.0.113.9/tcp/30333")),
             public6: None,
             source: "test".into(),
+            peer_id: Some("12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo".into()),
+            probe_peer_id: None,
         };
         write_state_file(&pubn, false, true, "not reachable");
         let text = std::fs::read_to_string(dir.join("dialability.json")).unwrap();
@@ -3641,6 +3664,12 @@ mod tests {
         assert!(v["public_endpoint"].is_null());
         // The gateway flag is role metadata, not a dialability claim.
         assert_eq!(v["gateway"], true);
+        // The verdict names its owner, and the probe identity defaults to it.
+        assert_eq!(
+            v["peer_id"],
+            "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo"
+        );
+        assert_eq!(v["probe_peer_id"], v["peer_id"]);
 
         // A backbone publishes the endpoint it proved.
         write_state_file(&pubn, true, false, "inbound peer");
@@ -3680,6 +3709,8 @@ mod tests {
             public: Some(ma("/ip4/203.0.113.9/tcp/30333")),
             public6: None,
             source: "recheck-test".into(),
+            peer_id: Some("12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo".into()),
+            probe_peer_id: None,
         };
         let task = tokio::spawn(watch_dialability_with_interval(
             net,

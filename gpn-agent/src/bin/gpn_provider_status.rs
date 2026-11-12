@@ -174,9 +174,24 @@ struct DialState {
     /// `"backbone"` / `"leaf"` when the writer said so.
     reachability: Option<String>,
     gateway: bool,
+    /// The peer id this verdict belongs to (`peer_id` in the record).
+    ///
+    /// `None` for a legacy file written before 2026-11-12, which is treated as
+    /// **Unknown**: it may not decide any node's tier. A verdict that belongs
+    /// to one node must never be published by another — that is exactly how
+    /// the live seed came to report `leaf` with `multiaddrs: []` while holding
+    /// `GPN_PUBLIC_ADDR` and an open, forwarded port.
+    owner_peer_id: Option<String>,
 }
 
 impl DialState {
+    /// May this record decide `self_peer_id`'s tier?
+    ///
+    /// Only when the record names that peer. An unkeyed legacy record is
+    /// Unknown, never a borrowed verdict.
+    fn trusts(&self, self_peer_id: &str) -> bool {
+        self.owner_peer_id.as_deref() == Some(self_peer_id)
+    }
     /// The tier to publish. Older writers have no field: infer backbone only
     /// when they also published a dialable endpoint.
     fn reachability(&self) -> &'static str {
@@ -1127,10 +1142,29 @@ fn peer_has_dialable(multiaddrs: &[String]) -> bool {
 }
 
 impl P2pInfo {
-    /// Apply the node's declared tier. A leaf publishes NO dialable address,
-    /// even if the evidence ladder found one (the gate may have demoted after
-    /// this snapshot was built).
-    fn apply_dial(&mut self, dial: &DialState) {
+    /// Apply the node's declared tier — **only if the record names this node**.
+    ///
+    /// A record that does not carry our peer id is Unknown: it is ignored
+    /// entirely (no tier, no address, no gateway flag), and the caller's own
+    /// evidence ladder stands. A leaf publishes NO dialable address, even if
+    /// the evidence ladder found one (the gate may have demoted after this
+    /// snapshot was built).
+    fn apply_dial(&mut self, dial: &DialState, self_peer_id: &str) {
+        if !dial.trusts(self_peer_id) {
+            // Unknown — never a borrowed verdict. Say so once per change so an
+            // operator can see why the file was not used.
+            let why = match dial.owner_peer_id.as_deref() {
+                Some(owner) => format!(
+                    "[p2p] ignoring dialability state written by peer {owner} — it is not this \
+                     node ({self_peer_id}); re-measuring from the node's own evidence"
+                ),
+                None => "[p2p] ignoring UNKEYED dialability state (no peer_id) — re-measuring \
+                         from the node's own evidence"
+                    .to_string(),
+            };
+            log_change_once(&why);
+            return;
+        }
         self.reachability = dial.reachability().to_string();
         self.gateway = dial.gateway;
         if self.reachability == "leaf" {
@@ -1420,6 +1454,13 @@ fn read_dialability_state() -> DialState {
             .and_then(|x| x.as_str())
             .map(str::to_string),
         gateway: v.get("gateway").and_then(|x| x.as_bool()).unwrap_or(false),
+        // The record's owner. Absent on legacy writers (pre-2026-11-12): those
+        // are Unknown and may not decide any node's tier.
+        owner_peer_id: v
+            .get("peer_id")
+            .and_then(|x| x.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
         ..Default::default()
     };
     // The canonical list (IPv4 first, IPv6 in addition). Older writers only
@@ -1601,7 +1642,17 @@ fn p2p_cache() -> &'static std::sync::Mutex<Option<(Instant, Option<P2pInfo>)>> 
 /// (key file replaced, or the endpoint reassigned to another node) cannot be
 /// advertised with the old id for longer than one poll.
 fn p2p_info(endpoint: &str, public_addr: Option<&str>) -> Option<P2pInfo> {
-    let dial = read_dialability_state();
+    let mut dial = read_dialability_state();
+    // Trust gate BEFORE the record is used as evidence, not after: an addrs
+    // list from someone else's record must never reach the ladder either.
+    let self_peer_id = rpc_call(endpoint, "system_localPeerId", json!([]))
+        .and_then(|v| v.as_str().and_then(normalize_peer_id))?;
+    if !dial.trusts(&self_peer_id) {
+        dial = DialState {
+            owner_peer_id: dial.owner_peer_id.take(),
+            ..Default::default()
+        };
+    }
     // The STUN rung needs the node's listen port. Probe the RPC once for it
     // (cheap, and the answer is cached right below with the rest).
     let listen_port = rpc_call(endpoint, "system_localListenAddresses", json!([]))
@@ -1618,7 +1669,7 @@ fn p2p_info(endpoint: &str, public_addr: Option<&str>) -> Option<P2pInfo> {
         &dial.addrs,
         &stun_probe,
     )?;
-    info.apply_dial(&dial);
+    info.apply_dial(&dial, &self_peer_id);
     Some(info)
 }
 
@@ -3509,6 +3560,7 @@ mod tests {
             addrs: vec!["/ip4/203.0.113.9/tcp/30333".into()],
             reachability: Some("leaf".into()),
             gateway: true,
+            owner_peer_id: None,
         };
         assert_eq!(explicit.reachability(), "leaf");
     }
@@ -3525,6 +3577,7 @@ mod tests {
         std::fs::write(
             &path,
             serde_json::json!({
+                "peer_id": "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
                 "multiaddrs": ["/ip4/203.0.113.9/tcp/30333"],
                 "reachability": "leaf",
                 "gateway": true
@@ -3538,8 +3591,76 @@ mod tests {
         assert_eq!(dial.reachability.as_deref(), Some("leaf"));
         assert!(dial.gateway);
         assert_eq!(dial.addrs.len(), 1);
+        assert_eq!(
+            dial.owner_peer_id.as_deref(),
+            Some("12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo"),
+            "the record must carry its owner"
+        );
+        assert!(dial.trusts("12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo"));
+        assert!(!dial.trusts("12D3KooWCy8vfsWwj8spm3vJA5skDUWq2htZM1EKQ3XnAtm4sD4q"));
         std::env::remove_var("GPN_DIALABILITY_STATE");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unkeyed_legacy_state_file_is_unknown_not_a_borrowed_verdict() {
+        // 2026-11-12: the live seed published `leaf` + `multiaddrs: []` because
+        // `~/.gpn/dialability.json` was written by a DIFFERENT node on the same
+        // host (peer WCy8vfs, port 30367) and contained no identity at all.
+        // A record that does not name this node is Unknown — never a borrowed
+        // verdict, in either direction.
+        let pid = "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo";
+        let mut info = build_p2p_info(
+            pid.into(),
+            Some("/ip4/203.0.113.7/tcp/30333"),
+            vec!["/ip4/0.0.0.0/tcp/30333".into()],
+        );
+        assert!(info.reachability == "backbone", "precondition");
+        // Legacy/unkeyed record: no `peer_id` field.
+        info.apply_dial(&DialState::default(), pid);
+        assert_eq!(
+            info.reachability, "backbone",
+            "an unkeyed verdict must not be applied to any node"
+        );
+        assert!(
+            !info.multiaddrs.is_empty(),
+            "an unkeyed verdict must not erase this node's own evidence"
+        );
+    }
+
+    #[test]
+    fn a_state_file_written_by_another_node_is_ignored() {
+        let pid = "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo";
+        let mut info = build_p2p_info(
+            pid.into(),
+            Some("/ip4/203.0.113.7/tcp/30333"),
+            vec!["/ip4/0.0.0.0/tcp/30333".into()],
+        );
+        // The exact live defect: another peer's `leaf` verdict on the same host.
+        let foreign = DialState {
+            addrs: Vec::new(),
+            reachability: Some("leaf".into()),
+            gateway: false,
+            owner_peer_id: Some("12D3KooWCy8vfsWwj8spm3vJA5skDUWq2htZM1EKQ3XnAtm4sD4q".into()),
+        };
+        info.apply_dial(&foreign, pid);
+        assert_eq!(
+            info.reachability, "backbone",
+            "a foreign leaf verdict is not ours"
+        );
+        assert!(!info.multiaddrs.is_empty());
+
+        // The same verdict IS applied when it names this node.
+        let mine = DialState {
+            owner_peer_id: Some(pid.into()),
+            ..foreign.clone()
+        };
+        info.apply_dial(&mine, pid);
+        assert_eq!(
+            info.reachability, "leaf",
+            "our own verdict is authoritative"
+        );
+        assert!(info.multiaddrs.is_empty());
     }
 
     #[test]
@@ -3554,11 +3675,15 @@ mod tests {
             !info.multiaddrs.is_empty(),
             "precondition: backbone evidence"
         );
-        info.apply_dial(&DialState {
-            addrs: vec!["/ip4/203.0.113.7/tcp/30333".into()],
-            reachability: Some("leaf".into()),
-            gateway: false,
-        });
+        info.apply_dial(
+            &DialState {
+                addrs: vec!["/ip4/203.0.113.7/tcp/30333".into()],
+                reachability: Some("leaf".into()),
+                gateway: false,
+                owner_peer_id: Some(pid.into()),
+            },
+            pid,
+        );
         assert_eq!(info.reachability, "leaf");
         assert!(
             info.multiaddrs.is_empty(),
