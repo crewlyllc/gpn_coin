@@ -20,7 +20,10 @@ param(
   [Parameter(Mandatory = $true)][string]$NodeExe,
   [Parameter(Mandatory = $true)][string]$Dest,
   [int]$Attempts = 4,
-  [switch]$RestartOnFailure,
+  # 1/0, not [switch]: `powershell -File` passes every argument as a STRING, and a
+  # SwitchParameter refuses "True" ("accept only Boolean values and numbers" — the
+  # 2026-11-12 failure). Numbers convert cleanly.
+  [int]$RestartOnFailure = 0,
   [string]$StartScript = 'C:\gpn\start-node.cmd'
 )
 
@@ -72,7 +75,7 @@ for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
 if (-not $copied) {
   Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like 'gpn*' } |
     ForEach-Object { Write-Host "  still running: $($_.ProcessName) pid=$($_.Id)" }
-  if ($RestartOnFailure) {
+  if ($RestartOnFailure -ne 0) {
     Write-Host '::warning::restarting GPN-Node on the previous binaries so the box is not left dead'
     schtasks /Create /TN 'GPN-Node' /TR "cmd /c $StartScript" /SC ONLOGON /RL HIGHEST /F 2>&1 | Out-Null
     schtasks /Run /TN 'GPN-Node' 2>&1 | Out-Null

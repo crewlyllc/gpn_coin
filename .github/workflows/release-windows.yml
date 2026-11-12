@@ -407,7 +407,7 @@ jobs:
           & powershell -NoProfile -ExecutionPolicy Bypass -File 'scripts\deploy-windows-binaries.ps1' `
             -AgentDir 'gpn-agent\target\release' `
             -NodeExe 'gpn-node\target\release\gpn-node.exe' `
-            -Dest $dst -RestartOnFailure:$autostart
+            -Dest $dst -RestartOnFailure $(if ($autostart) { 1 } else { 0 })
           if ($LASTEXITCODE -ne 0) { throw "binary deploy failed (rc=$LASTEXITCODE) - see the robocopy log above" }
 
           # ── 3+4. RESTART via a Scheduled Task: a Task Scheduler child is not the
