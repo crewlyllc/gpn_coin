@@ -779,7 +779,7 @@ finally {
 # the CLI cannot express jitter. The ScheduledTasks module's
 # `New-ScheduledTaskTrigger -RandomDelay` only dithers the INITIAL StartBoundary;
 # `<RandomDelay>` inside `<Repetition>` is what Task Scheduler applies to every
-# 6-hour repetition. Writing the XML directly works on stock Windows 10/11,
+# repetition (hourly during the 2026-11-12 review window). Writing the XML directly works on stock Windows 10/11,
 # needs no module, and (with /F) replaces the task wholesale, so re-running the
 # installer cannot leave a second task or a duplicate trigger behind.
 $UpdateTaskXml = @'

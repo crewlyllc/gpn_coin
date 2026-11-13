@@ -312,10 +312,10 @@ echo "== Windows installer: auto-update (GPN-Update) =="
 # signed manifest when the supervisor started.
 assert_has "$ps1" "\$UpdateTask = 'GPN-Update'"            "task name is GPN-Update"
 assert_has "$ps1" "update-and-restart.ps1"                  "writes the update wrapper"
-assert_has "$ps1" "every 6h"                                "registers a 6-hour cadence"
-assert_has "$ps1" "<Interval>PT6H</Interval>"               "trigger repeats every 6 hours"
+assert_has "$ps1" "every hour"                             "registers the hourly review cadence (#161)"
+assert_has "$ps1" "<Interval>PT1H</Interval>"              "trigger repeats every hour"
 assert_has "$ps1" "<Duration>P1D</Duration>"                "repetition covers the whole day"
-assert_has "$ps1" "<RandomDelay>PT30M</RandomDelay>"        "trigger has +/- 30 min jitter"
+assert_has "$ps1" "<RandomDelay>PT10M</RandomDelay>"       "trigger has +/- 10 min jitter"
 assert_has "$ps1" "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>" "update task cannot run twice"
 assert_has "$ps1" "the CLI cannot express jitter"           "explains why the task is registered from XML"
 assert_has "$ps1" "'/XML'"                                  "registers through schtasks /XML"
@@ -531,6 +531,74 @@ assert_has "$GPN_TEST_LOG" "--user disable --now gpn-node.service" "disables the
 assert_has "$GPN_TEST_LOG" "disable-linger" "disables linger"
 [ -f "$home/.gpn/node/keystore.json" ] && ok "keystore untouched by remove" || bad "remove deleted the keystore!"
 [ -d "$home/.gpn/ollama" ] && ok "ollama install untouched by remove" || bad "remove deleted the ollama install"
+
+# ---- the update hook must cover every unit that runs installed code ---------
+# 2026-11-12: it named only the supervisor, so on a host whose provider stack is
+# a set of sibling units every update left them executing the deleted previous
+# image. A file on disk and the code a process runs are two different facts.
+echo "== Linux: update hook covers the whole stack =="
+hookhome="$tmp/hookhome"; hookunits="$hookhome/.config/systemd/user"
+mkdir -p "$hookunits" "$hookhome/.gpn/fleet" "$hookhome/.local/bin"
+for b in gpn_node gpn_update gpn_scheduler gpn_provider_status; do
+  printf '#!/bin/sh\n' > "$hookhome/.local/bin/$b"; chmod +x "$hookhome/.local/bin/$b"
+done
+# the supervisor runs a launcher script under the prefix; two siblings run
+# shipped binaries directly; one unit runs something unrelated; one is an alias.
+printf '[Service]\nExecStart=%s/.gpn/fleet/run-fleet.sh\n' "$hookhome" > "$hookunits/gpn-fleet.service"
+printf '[Service]\nExecStart=%s/.local/bin/gpn_scheduler --listen 0.0.0.0:8092\n' "$hookhome" > "$hookunits/gpn-accesspoint.service"
+ln -sf "$hookunits/gpn-accesspoint.service" "$hookunits/gpn-scheduler.service"
+printf '[Service]\nExecStart=%s/.local/bin/gpn_provider_status\n' "$hookhome" > "$hookunits/gpn-provider-heartbeat.service"
+# the oracle shape: shell-wrapped, home-relative binary path (%h specifier)
+printf "[Service]\nExecStart=/bin/sh -c 'exec %%h/.local/bin/gpn_operate_oracle ws://127.0.0.1:9944 %%h/x.toml 1800 \"\$SIGNER\"'\n" > "$hookunits/gpn-oracle.service"
+printf '[Service]\nExecStart=/usr/bin/ollama serve\n' > "$hookunits/gpn-ollama.service"
+# an INACTIVE standalone node: `restart` here would start a second supervisor
+printf '[Service]\nExecStart=%s/.local/bin/gpn_node --alice --force-authoring\n' "$hookhome" > "$hookunits/gpn-node.service"
+HOME="$hookhome" PATH="$stub:$PATH" GPN_TEST_LOG="$GPN_TEST_LOG" \
+  bash "$helper" install-updater --prefix "$hookhome/.gpn" --bin-dir "$hookhome/.local/bin" \
+  >>"$tmp/hook.log" 2>&1 && ok "install-updater exits 0" || bad "install-updater failed: $(cat "$tmp/hook.log")"
+upd="$hookunits/gpn-update.service"
+assert_file "$upd" "gpn-update.service written by install-updater"
+assert_has "$upd" "GPN_UPDATE_RESTART_CMD=systemctl --user try-restart" "hook uses try-restart, never restart"
+for u in gpn-fleet.service gpn-accesspoint.service gpn-provider-heartbeat.service gpn-oracle.service; do
+  grep -Fq "$u" "$upd" && ok "hook names $u" \
+    || bad "hook does not name $u (an update would leave it on the old image)"
+done
+assert_lacks "$upd" "gpn-ollama.service"  "hook leaves units outside bin dir/prefix alone"
+assert_lacks "$upd" "gpn-scheduler.service" "hook skips the gpn-scheduler alias (same unit twice)"
+assert_lacks "$upd" "restart gpn-update" "hook never restarts itself"
+grep -Fq " ; " "$upd" && bad "hook still chains two commands with ;" || ok "hook is a single systemctl call"
+# a stopped unit must not be started by the hook (try-restart only restarts ACTIVE units)
+grep -Fq "systemctl --user restart " "$upd" && bad "hook contains a plain restart" \
+  || ok "hook contains no plain restart"
+# the duplicate-node guard: fleet and node share one chain DB, and try-restart
+# was empirically able to start a disabled+inactive gpn-node.service on
+# 2026-11-12, which took the RocksDB lock and killed the real node.
+if grep -Fq "gpn-node.service" "$upd"; then
+  bad "hook names gpn-node.service while gpn-fleet.service exists (shared chain DB)"
+else
+  ok "hook never touches the duplicate gpn-node.service when the fleet exists"
+fi
+# fault injection: siblings whose ExecStart is elsewhere drop out of the hook.
+printf '[Service]\nExecStart=/usr/bin/true\n' > "$hookunits/gpn-accesspoint.service"
+printf '[Service]\nExecStart=/usr/bin/true\n' > "$hookunits/gpn-fleet.service"
+HOME="$hookhome" PATH="$stub:$PATH" GPN_TEST_LOG="$GPN_TEST_LOG" \
+  bash "$helper" install-updater --prefix "$hookhome/.gpn" --bin-dir "$hookhome/.local/bin" \
+  >>"$tmp/hook.log" 2>&1
+if grep -Fq "gpn-accesspoint.service" "$upd" || grep -Fq "gpn-fleet.service" "$upd"; then
+  bad "hook names a unit that does not run installed code"
+else
+  ok "hook only names units that run bin-dir/prefix code"
+fi
+grep -Fq "gpn-provider-heartbeat.service" "$upd" && ok "hook keeps the sibling that still qualifies" \
+  || bad "hook dropped a qualifying sibling"
+# a plain single-node host has no fleet unit, so gpn-node.service IS the stack
+rm -f "$hookunits/gpn-fleet.service"
+printf '[Service]\nExecStart=%s/.local/bin/gpn_node --chain testnet\n' "$hookhome" > "$hookunits/gpn-node.service"
+HOME="$hookhome" PATH="$stub:$PATH" GPN_TEST_LOG="$GPN_TEST_LOG" \
+  bash "$helper" install-updater --prefix "$hookhome/.gpn" --bin-dir "$hookhome/.local/bin" \
+  >>"$tmp/hook.log" 2>&1
+grep -Fq "try-restart gpn-node.service" "$upd" && ok "single-node host: the node unit is restarted" \
+  || bad "single-node host: the node unit was left on the old image"
 
 # ---- install.sh integration ----------------------------------------------
 echo "== Linux: install.sh integration =="

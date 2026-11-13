@@ -32,8 +32,9 @@
 #   GPN_AP_URL         access point     (default: canonical testnet AP)
 #   GPN_BOOTNODES      bootstrap peers  (default: canonical 3)
 #   GPN_AUTOSTART_DIR  unit dir         (default ~/.config/systemd/user)
-#   GPN_UPDATE_RESTART_CMD  command the 6-hourly updater runs after a swap
-#                      (default `systemctl --user restart gpn-node.service`)
+#   GPN_UPDATE_RESTART_CMD  command the hourly updater runs after a swap
+#                      (default: restart the supervisor, then `try-restart` every
+#                      other gpn-* unit whose ExecStart is under the bin dir)
 #   GPN_NO_LINGER=1    do not enable-linger (containers / CI; node then only
 #                      starts at login — say so out loud)
 #
@@ -268,15 +269,75 @@ EOF
   } > "$MARKER"
 }
 
+# Units that execute something the updater is about to replace.
+#
+# WHY THIS EXISTS (2026-11-12). The hook used to name ONE unit — the supervisor
+# (gpn-fleet, else gpn-node) — on the reasoning that restarting the supervisor
+# restarts the stack. That is true on Windows, where the launcher spawns every
+# provider as a child, and false on a Linux host whose provider stack is a set
+# of SIBLING units: fleet came back on the new build while accesspoint,
+# provider, heartbeat, diffusion, finetune, oracle and faucet kept executing the
+# deleted 0.3.42 image out of a 0.3.43 install dir — for a day, with nothing in
+# any journal saying so. A file on disk and the code a process runs are two
+# different facts; only a restart changes the second one.
+#
+# A unit qualifies when its ExecStart points into the bin dir (a shipped binary)
+# or into the prefix (a launcher script that spawns those binaries, e.g.
+# gpn-fleet). Aliases are skipped: gpn-scheduler.service is a symlink to
+# gpn-accesspoint.service, and naming both would restart the same unit twice.
+units_that_run_installed_code() {
+  local u name line
+  for u in "$UNIT_DIR"/gpn-*.service; do
+    [ -f "$u" ] || continue
+    [ -L "$u" ] && continue
+    name="$(basename "$u")"
+    case "$name" in
+      "$UPDATE_UNIT"|gpn-update@*|gpn-notify@*) continue ;;
+    esac
+    # Mutual exclusion: gpn-fleet.service and gpn-node.service both open the
+    # SAME chain DB ($PREFIX/node/chains/.../db/full). When the fleet supervisor
+    # is installed, gpn-node.service is the duplicate and must never be touched
+    # — and `try-restart` is not the safety net its man page implies: on
+    # 2026-11-12 19:47:18 it started a unit that was disabled AND inactive, that
+    # unit took the RocksDB LOCK, the fleet's own node then died with "lock
+    # file: Resource temporarily unavailable", and the chain went down for
+    # ~7 minutes until the duplicate was stopped by hand.
+    if [ -f "$UNIT_DIR/gpn-fleet.service" ] && [ "$name" = "$NODE_UNIT" ]; then
+      continue
+    fi
+    line="$(grep -m1 '^ExecStart=' "$u" || true)"
+    [ -n "$line" ] || continue
+    # Expand %h (the user's home) so a shell-wrapped ExecStart is recognised:
+    # gpn-oracle runs `/bin/sh -c 'exec %h/.local/bin/gpn_operate_oracle …'`, and
+    # a strict `ExecStart=$BIN_DIR/` prefix test never saw it. A unit was
+    # "covered" only if its ExecStart *began* with the bin dir, which is the
+    # narrower question, not the right one.
+    line="${line//%h/$HOME}"
+    case "$line" in
+      *"$BIN_DIR/"*|*"$PREFIX/"*) printf '%s\n' "$name" ;;
+    esac
+  done
+}
+
+# Build the restart hook. `try-restart`, never `restart`: a unit the operator
+# deliberately stopped must stay stopped, and on this kind of host
+# `gpn-node.service` can be an INACTIVE standalone authoring node — `restart`
+# would start a second supervisor against the same chain data.
+restart_cmd_for_host() {
+  local u list=""
+  for u in $(units_that_run_installed_code); do
+    list="$list $u"
+  done
+  [ -n "$list" ] || return 0
+  printf 'systemctl --user try-restart%s' "$list"
+}
+
 # Enable ONLY the updater. Refuses to touch node/ollama units: on a fleet host
-# enabling a second gpn-node.service would run two supervisors on one base path.
+# enabling a second gpn-node.service would run two supervisors against one base
+# path.
 cmd_install_updater() {
-  local default_restart=""
-  if [ -f "$UNIT_DIR/gpn-fleet.service" ]; then
-    default_restart="systemctl --user restart gpn-fleet.service"
-  elif [ -f "$UNIT_DIR/$NODE_UNIT" ]; then
-    default_restart="systemctl --user restart $NODE_UNIT"
-  fi
+  local default_restart
+  default_restart="$(restart_cmd_for_host)"
   write_update_units "$default_restart" || return 1
   sc daemon-reload
   sc enable --now "$UPDATE_TIMER"
