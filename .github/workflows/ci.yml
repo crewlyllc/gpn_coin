@@ -264,6 +264,17 @@ jobs:
       - name: Autostart installers (Windows + Linux, reversible)
         run: bash scripts/tests/test-autostart-installers.sh
 
+      # One release at a time (W145, 2026-11-12). release-cut's flock only
+      # guards the *signing* step, so two dispatchers could each read "no builds
+      # running" and queue ~40 min of duplicate runner time for one tag. The
+      # guard in dispatch-release.sh now refuses on a held flock, a running
+      # release-cut, or an in-flight build for the same commit — and the suite
+      # proves it refuses *before* any workflow_dispatch call, that a finished
+      # build does not block, and that --force still works. Fake API + throwaway
+      # git remote: no GitHub, no runner lane, no real bundles.
+      - name: Release dispatch in-flight guard
+        run: bash scripts/tests/test-dispatch-guard.sh
+
       # Referral download links (`?ref=CODE`): the page-side half. Pure Node,
       # no browser: validation rule, URL parsing, and the XSS boundary (the
       # code is only ever written as text, never as markup).

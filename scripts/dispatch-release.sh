@@ -14,9 +14,16 @@
 # Usage:
 #   scripts/dispatch-release.sh              # current HEAD
 #   scripts/dispatch-release.sh <sha>        # a specific commit
+#   scripts/dispatch-release.sh --force <sha>  # ignore an in-flight cut/build
 set -uo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+
+# --force is the documented escape hatch for the in-flight guard below; keep it
+# out of the positional-argument slot so `dispatch-release.sh --force` still
+# means "dispatch HEAD".
+FORCE="${GPN_RELEASE_FORCE:-0}"
+if [ "${1:-}" = "--force" ]; then FORCE=1; shift; fi
 sha="${1:-$(git -C "$repo_root" rev-parse HEAD)}"
 
 # Must be a full 40-hex sha: `ref` accepts branches, tags and SHAs, and a typo
@@ -31,7 +38,90 @@ tok_file="${GPN_GITHUB_TOKEN_FILE:-$HOME/.openclaw/credentials/github-gpn-pat.tx
 tok="$(tr -d '\r\n' < "$tok_file")"
 
 repo="${GPN_REPO:-jeremyzguo/gpn_coin}"
-api="https://api.github.com/repos/$repo/actions/workflows"
+# Same override release-cut.sh takes, so the guard below can be exercised against
+# a fake API instead of the real one.
+GPN_GH_API="${GPN_GH_API:-https://api.github.com}"
+api="$GPN_GH_API/repos/$repo/actions/workflows"
+
+# ── one release at a time ─────────────────────────────────────────────────
+# W145 (2026-11-12): the flock in release-cut.sh only protects the *signing*
+# step, and release.lock does not exist until a cut has actually started — so
+# two dispatchers could each read "no builds running", both dispatch, and queue
+# ~40 minutes of duplicate runner time for the same tag (that is what W142's
+# stand-down only avoided by luck). Three independent checks, all of them
+# strictly before the first `workflow_dispatch` call:
+#
+#   1. the flock itself — race-free, and a cut holds it from `acquire_release_lock`
+#      onwards even when the JSON lock has not been rewritten yet;
+#   2. a release-cut process on this host — catches a cut started by a wrapper
+#      that has not reached the lock yet;
+#   3. an in-flight build run for THIS commit on GitHub — covers the case (1) and
+#      (2) cannot see, a dispatch already made from another session or machine.
+#
+# A clean dispatch — no cut, no build — behaves exactly as before.
+refuse() { echo "REFUSED: $*" >&2; exit 3; }
+
+RELEASE_LOCK="${GPN_RELEASE_LOCK:-$HOME/.gpn/release.lock}"
+
+inflight_builds_for() { # sha -> "file:status ..." (empty = none)
+  curl -s --max-time 20 -H "Authorization: token $tok" \
+    "$GPN_GH_API/repos/$repo/actions/runs?per_page=40" \
+    | SHA="$1" python3 -c '
+import os, sys, json
+sha = os.environ["SHA"]
+want = {"release-linux-selfhosted.yml", "release-windows.yml"}
+try:
+    runs = json.load(sys.stdin).get("workflow_runs", [])
+except Exception:
+    sys.exit(1)   # unreadable: caller decides, do not invent "none"
+hits = []
+for r in runs:
+    if not (r.get("head_sha") or "").startswith(sha):
+        continue
+    path = (r.get("path") or "").rsplit("/", 1)[-1]
+    if path not in want:
+        continue
+    if r.get("status") in ("queued", "in_progress"):
+        hits.append("%s:%s" % (path, r["status"]))
+print(" ".join(hits))
+' 2>/dev/null
+}
+
+release_in_flight_guard() {
+  if [ "$FORCE" = "1" ]; then
+    echo "   ! --force: skipping the in-flight guard for $sha"
+    return 0
+  fi
+
+  if command -v flock >/dev/null 2>&1; then
+    mkdir -p "$(dirname "$RELEASE_LOCK")"
+    # fd 8, deliberately not fd 9: release-cut owns 9 for its own lock.
+    if ! exec 8>"$RELEASE_LOCK.flock"; then
+      refuse "cannot open $RELEASE_LOCK.flock"
+    fi
+    if ! flock -n 8; then
+      exec 8>&-
+      refuse "another release-cut holds $RELEASE_LOCK.flock — wait for it to finish (or --force)"
+    fi
+    exec 8>&-
+  fi
+
+  # Bracket the dot so pgrep cannot match its own command line (TOOLS.md).
+  cut_pids="$(pgrep -f 'release-cut[.]sh' 2>/dev/null | grep -vx "$$" | tr '\n' ' ' || true)"
+  if [ -n "$cut_pids" ]; then
+    refuse "release-cut.sh is already running (pid ${cut_pids% }) — wait for it to finish (or --force)"
+  fi
+
+  if builds="$(inflight_builds_for "$sha")"; then
+    if [ -n "$builds" ]; then
+      refuse "release builds are already running for $sha ($builds) — wait, do not queue duplicates (or --force)"
+    fi
+  else
+    echo "   ! could not read run history for $sha — proceeding (GitHub will reject a duplicate)" >&2
+  fi
+}
+
+release_in_flight_guard
 
 # Linux lives in its own self-hosted workflow; release-unix.yml builds macOS
 # only. Discovering that cost a release cycle on 2026-11-05 — keep them named.
