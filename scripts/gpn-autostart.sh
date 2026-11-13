@@ -38,7 +38,8 @@
 #                      starts at login — say so out loud)
 #
 # Units written: gpn-node.service, gpn-ollama.service, gpn-update.service and
-# gpn-update.timer (a signed-manifest check every 6 h, ±30 min).
+# gpn-update.timer (a signed-manifest check every hour, ±10 min — temporary
+# review cadence, 2026-11-12).
 #
 # Safety:
 #   * idempotent — install twice == install once (unit files are rewritten,
@@ -107,7 +108,7 @@ write_update_units() {
   # Auto-update lives in gpn_node for installer deployments, but a host that
   # runs `gpn_fleet`, a hand-started node, or anything else would never check
   # the signed manifest and would freeze on its tarball. gpn_update is the
-  # deployment-mode-independent check; the timer runs it every 6 h.
+  # deployment-mode-independent check; the timer runs it every hour.
   #
   # Restart hook: never guessed by the binary. Here the default is the unit the
   # caller owns; GPN_UPDATE_RESTART_CMD overrides it, and an empty default
@@ -150,11 +151,13 @@ EOF
   cat > "$UNIT_DIR/$UPDATE_TIMER" <<EOF
 # Written by gpn-autostart.sh — do not edit; re-run install to regenerate.
 [Unit]
-Description=Check for GPN releases every 6 hours (randomized across the fleet)
+Description=Check for GPN releases every hour (temporary review cadence, randomized across the fleet)
 
 [Timer]
 OnBootSec=10min
-OnUnitActiveSec=6h
+# TEMPORARY hourly cadence (review window, 2026-11-12); reverts together with
+# DEFAULT_CHECK_HOURS in gpn-agent/src/update.rs.
+OnUnitActiveSec=1h
 # A fleet that installs together must not download 300 MB together.
 RandomizedDelaySec=30min
 AccuracySec=1min
