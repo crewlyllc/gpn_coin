@@ -2,7 +2,8 @@
 """Bump the GPN version across every crate, consistently, and start a changelog entry.
 
 The version is carried in **many** `Cargo.toml` files (the agent, the chain
-workspace, every pallet, the runtime, the shield crate). A release is only
+workspace, every pallet, the runtime, the shield crate), and in `network.json`
+(`latest_version`, which is compiled into the binary). A release is only
 coherent if they all agree, and a hand-edited bump always misses one. This
 script is the one place that knows the whole set.
 
@@ -49,6 +50,14 @@ SKIP_DIRS = {".git", "target", "node_modules", "__pycache__", ".cargo"}
 #: metadata: `update::is_newer` compares numerically, and a `-rc1` suffix would
 #: silently sort *below* the release it precedes.
 SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+
+#: The shipped network registry. Its `latest_version` is *derived*: it must be
+#: the same string this tree builds, because the registry is `include_str!`d
+#: into the binary and `network_registry::classify` prints it as "registry
+#: latest" to every operator. It sat at 0.3.11 for 33 releases (found
+#: 2026-11-13) precisely because nothing tied it to the crate versions.
+REGISTRY = "network.json"
+LATEST_VERSION_LINE = re.compile(r'("latest_version"\s*:\s*)"([^"]*)"')
 
 CHANGELOG = "CHANGELOG.md"
 CHANGELOG_HEADER = """# Changelog
@@ -163,6 +172,36 @@ def reference(manifests: list[Manifest]) -> Manifest:
         if str(m.path) == REFERENCE:
             return m
     raise SystemExit(f"{REFERENCE} not found — is --repo the repo root?")
+
+
+def registry_version(root: Path) -> str | None:
+    """`latest_version` from the shipped registry (None when there is no file).
+
+    A registry that exists but has no `latest_version` is a schema bug, not a
+    "nothing to check": fail loudly rather than skip the audit.
+    """
+    path = root / REGISTRY
+    if not path.exists():
+        return None
+    m = LATEST_VERSION_LINE.search(path.read_text(encoding="utf-8"))
+    if not m:
+        raise SystemExit(f"{path}: no \"latest_version\" field to audit")
+    return m.group(2)
+
+
+def write_registry_version(root: Path, new: str) -> bool:
+    """Set `latest_version` in the registry, preserving every other byte."""
+    path = root / REGISTRY
+    if not path.exists():
+        return False
+    text = path.read_text(encoding="utf-8")
+    new_text = LATEST_VERSION_LINE.sub(
+        lambda m: f'{m.group(1)}"{new}"', text, count=1
+    )
+    if new_text == text:
+        return False
+    path.write_text(new_text, encoding="utf-8")
+    return True
 
 
 def write_version(root: Path, m: Manifest, new: str) -> None:
@@ -283,18 +322,32 @@ def main(argv=None) -> int:
         for m in manifests:
             mark = "ok  " if m.version == ref.version else "DRIFT"
             print(f"  {mark} {m.version:<10} {m.path} [{m.table}]")
-        if drifted:
+        reg = registry_version(root)
+        reg_drift = reg is not None and reg != ref.version
+        if reg is not None:
+            mark = "ok  " if not reg_drift else "DRIFT"
+            print(f"  {mark} {reg:<10} {REGISTRY} [latest_version]")
+        if drifted or reg_drift:
             print(
                 f"\nDRIFT: {len(drifted)} of {len(manifests)} manifest(s) are out of "
-                f"lockstep with {ref.path} ({ref.version}) and disagree with it."
-                f"\nFix with: scripts/bump-version.py --set {ref.version}",
+                f"lockstep with {ref.path} ({ref.version}) and disagree with it.",
                 file=sys.stderr,
+            )
+            if reg_drift:
+                print(
+                    f"  {REGISTRY} latest_version is {reg!r}, this tree builds "
+                    f"{ref.version!r} — the registry is shipped inside the binary, "
+                    "so it reports a version nobody can install.",
+                    file=sys.stderr,
+                )
+            print(
+                f"Fix with: scripts/bump-version.py --set {ref.version}", file=sys.stderr
             )
         else:
             print(f"lockstep: {len(manifests)} manifest(s) agree")
         # Always last, and always parseable: `gpn version: <x.y.z>`.
         print(f"gpn version: {ref.version}")
-        return 1 if drifted else 0
+        return 1 if (drifted or reg_drift) else 0
 
     if bool(args.level) == bool(args.set):
         ap.error("give exactly one of {major,minor,patch} or --set X.Y.Z")
@@ -332,6 +385,9 @@ def main(argv=None) -> int:
     print(f"{old} -> {new}" + (f"  ({level})" if level else "  (--set)"))
     for m in selected:
         print(f"  {m.path} [{m.table}]  {m.version} -> {new}")
+    reg_now = registry_version(root)
+    if reg_now is not None and reg_now != new:
+        print(f"  {REGISTRY} [latest_version]  {reg_now} -> {new}")
 
     if args.dry_run:
         print(f"\n--dry-run: no file written (would set {len(selected)} manifest(s) to {new})")
@@ -340,6 +396,8 @@ def main(argv=None) -> int:
     for m in selected:
         write_version(root, m, new)
     print(f"updated {len(selected)} manifest(s) -> {new}")
+    if write_registry_version(root, new):
+        print(f"updated {REGISTRY} latest_version -> {new}")
 
     if not args.no_changelog:
         if update_changelog(root, new, old, level):

@@ -221,6 +221,44 @@ class BumpVersionTests(unittest.TestCase):
         self.assertEqual(self.repo.run("minor").returncode, 0)
         self.assertIn("version.workspace = true", (self.repo.root / "gpn-node/elsewhere/Cargo.toml").read_text())
 
+    # ── network.json `latest_version` is part of the version set ──
+
+    def write_registry(self, latest: str) -> Path:
+        return self.repo.write(
+            "network.json",
+            '{\n  "network": "GPN Public Testnet",\n  "spec_version": 51,\n'
+            f'  "latest_version": "{latest}"\n}}\n',
+        )
+
+    def registry_latest(self) -> str:
+        return json.loads((self.repo.root / "network.json").read_text())["latest_version"]
+
+    def test_registry_latest_version_follows_the_bump(self) -> None:
+        # The 0.3.11-for-33-releases shape: nothing was writing this field.
+        self.write_registry("0.1.0")
+        self.assertEqual(self.repo.run("--check").returncode, 0)
+        self.assertEqual(self.repo.run("patch").returncode, 0)
+        self.assertEqual(self.registry_latest(), "0.1.1")
+        self.assertEqual(self.repo.run("--check").returncode, 0)
+
+    def test_registry_drift_fails_the_check(self) -> None:
+        self.write_registry("0.0.9")
+        r = self.repo.run("--check")
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn("DRIFT", r.stderr)
+        self.assertIn("network.json", r.stderr)
+
+    def test_missing_registry_is_not_an_error(self) -> None:
+        # Fake repos (and non-registry checkouts) must keep working.
+        self.assertFalse((self.repo.root / "network.json").exists())
+        self.assertEqual(self.repo.run("--check").returncode, 0)
+
+    def test_registry_without_the_field_is_an_error(self) -> None:
+        self.repo.write("network.json", '{\n  "network": "x"\n}\n')
+        r = self.repo.run("--check")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("latest_version", r.stderr)
+
 
 class RealRepoVersionTests(unittest.TestCase):
     """The repo itself must be self-consistent after this change."""
@@ -236,6 +274,14 @@ class RealRepoVersionTests(unittest.TestCase):
         self.assertRegex(version, r"^\d+\.\d+\.\d+$")
         changelog = (REPO / "CHANGELOG.md").read_text()
         self.assertIn(f"## [{version}]", changelog, "the current version needs a changelog entry")
+
+    def test_repo_registry_latest_version_agrees(self) -> None:
+        # D5: network.json said 0.3.11 while the tree built 0.3.44. The registry
+        # is include_str!d into the binary, so that string is what operators see.
+        latest = json.loads((REPO / "network.json").read_text())["latest_version"]
+        r = subprocess.run([PY, str(BUMP), "--check"], capture_output=True, text=True)
+        version = r.stdout.strip().splitlines()[-1].split(": ", 1)[1].strip()
+        self.assertEqual(latest, version, f"network.json latest_version is stale")
 
     def test_build_stamp_prefix_matches_the_generator(self) -> None:
         build_rs = (REPO / "gpn-agent" / "build.rs").read_text()

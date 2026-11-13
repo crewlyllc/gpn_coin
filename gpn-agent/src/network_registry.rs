@@ -123,3 +123,53 @@ pub fn classify(genesis_hex: &str, spec_version: u32, running_version: &str) -> 
         summary,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn embedded() -> Registry {
+        serde_json::from_str(EMBEDDED_REGISTRY).expect("embedded network.json must parse")
+    }
+
+    /// D5: `latest_version` is compiled into the binary and printed to
+    /// operators as "registry latest", so a stale value tells every node to
+    /// install a release that does not exist. It drifted to 0.3.11 and stayed
+    /// there for 33 releases because nothing compared it to this build.
+    /// `scripts/bump-version.py` now writes it with the crates; this test is
+    /// the gate that fails when the two disagree.
+    #[test]
+    fn embedded_latest_version_is_this_build() {
+        let r = embedded();
+        assert_eq!(
+            r.latest_version,
+            env!("CARGO_PKG_VERSION"),
+            "network.json latest_version is stale — run scripts/bump-version.py --set {}",
+            env!("CARGO_PKG_VERSION")
+        );
+    }
+
+    /// Every shipped bootnode must name the transport the seed actually listens
+    /// on (`/ws`). A bare `/tcp/...` entry is dialled with raw Noise against a
+    /// websocket listener and dies after ~62 bytes (D1, fixed 5a227fc).
+    #[test]
+    fn shipped_bootnodes_and_seeds_name_a_transport() {
+        let r = embedded();
+        assert!(!r.bootnodes.is_empty(), "network.json ships no bootnodes");
+        for ma in &r.bootnodes {
+            assert!(
+                ma.contains("/tcp/") && (ma.contains("/ws") || ma.contains("/wss")),
+                "bootnode {ma} does not name /ws — a raw-TCP dialler will be rejected"
+            );
+            assert!(ma.contains("/p2p/"), "bootnode {ma} has no peer id");
+        }
+        for s in &r.bootstrap_seeds {
+            assert!(!s.peer_id.is_empty(), "seed {} has no peer id", s.id);
+            assert!(
+                !s.ip4.is_empty() || !s.dns4.is_empty(),
+                "seed {} is unreachable",
+                s.id
+            );
+        }
+    }
+}

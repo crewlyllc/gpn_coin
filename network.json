@@ -5,8 +5,7 @@
   "spec_version": 51,
   "bootnodes": [
     "/dns4/gpn-testnet.duckdns.org/tcp/30333/ws/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
-    "/ip4/142.129.54.88/tcp/30333/ws/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
-    "/ip4/23.241.109.255/tcp/30333/ws/p2p/12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz"
+    "/ip4/142.129.54.88/tcp/30333/ws/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo"
   ],
   "bootstrap_seeds": [
     {
@@ -16,18 +15,10 @@
       "peer_id": "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
       "dns4": "gpn-testnet.duckdns.org",
       "operator": "gpn-core"
-    },
-    {
-      "id": "seed-2",
-      "ip4": "23.241.109.255",
-      "port": 30333,
-      "peer_id": "12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz",
-      "dns4": "",
-      "operator": "gpn-core"
     }
   ],
   "bootstrap_urls": [
     "https://gpncoin.ai/seeds.json"
   ],
-  "latest_version": "0.3.11"
+  "latest_version": "0.3.44"
 }
