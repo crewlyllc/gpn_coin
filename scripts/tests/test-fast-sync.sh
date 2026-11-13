@@ -68,12 +68,22 @@ sign "$WWW/snapshot-badhash.json" "00$(printf 'ab%.0s' $(seq 1 31))" "$SIZE"
 # ── local HTTP server ─────────────────────────────────────────────────────────
 /usr/bin/python3 -u -m http.server 0 --bind 127.0.0.1 --directory "$WWW" >"$ROOT/http.log" 2>&1 &
 SRV_PID=$!
-for _ in $(seq 1 50); do
+# Budget 30 s of wall clock, not 5: on a loaded self-hosted runner python can take
+# several seconds just to import and print the port line, and a 5 s window turned
+# into a flaky "did not start" with an empty log (2026-11-13 CI on ba0baf0).
+for _ in $(seq 1 300); do
   PORT=$(sed -n 's/.*port \([0-9]\+\).*/\1/p' "$ROOT/http.log" | head -1)
   [ -n "${PORT:-}" ] && break
+  kill -0 "$SRV_PID" 2>/dev/null \
+    || { echo "FATAL: local HTTP server exited before listening" >&2; cat "$ROOT/http.log"; exit 2; }
   sleep 0.1
 done
-[ -n "${PORT:-}" ] || { echo "FATAL: local HTTP server did not start" >&2; cat "$ROOT/http.log"; exit 2; }
+[ -n "${PORT:-}" ] || {
+  echo "FATAL: local HTTP server did not start within 30 s" >&2
+  kill "$SRV_PID" 2>/dev/null
+  cat "$ROOT/http.log"
+  exit 2
+}
 
 # ── a prefix that satisfies every non-fast-sync step of install.sh ────────────
 make_prefix() { # make_prefix <dir>
