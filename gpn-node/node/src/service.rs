@@ -782,6 +782,14 @@ pub async fn new_full<
         }
     }
 
+    // Every announced public address must name the transport this node listens
+    // on: `/public-addr`, UPnP and Identify all describe a bare host:port, and
+    // a `/ws` listener never answers a raw Noise prologue (2026-11-13).
+    crate::dialability::align_public_addresses(
+        &mut config.network.public_addresses,
+        &config.network.listen_addresses,
+    );
+
     // ---- Identify carries the network identity (GPN #159) --------------
     // `identify`'s agent version is `<client_version> (<node_name>)`, fixed at
     // construction. Putting the chain id + genesis prefix in the node name means

@@ -121,18 +121,29 @@ pub fn clean_published_multiaddr(raw: &str) -> Option<String> {
     }
     let mut i = 0;
     let mut has_p2p = false;
-    while i + 1 < parts.len() {
+    let mut has_port = false;
+    while i < parts.len() {
         let proto = parts[i];
-        let value = parts[i + 1];
         if !P2P_PROTOCOLS.contains(&proto) {
             return None;
         }
+        // `/ws` and `/wss` are valueless markers: they name the transport the
+        // socket speaks and are followed by the next protocol, not a value.
+        // Treating them as valued made this gate drop every address a full
+        // node publishes (2026-11-13: the emitter and the gate disagreed again,
+        // exactly like the doubled-`/p2p/` bug before it).
+        if proto == "ws" || proto == "wss" || proto == "tls" {
+            i += 1;
+            continue;
+        }
+        let value = *parts.get(i + 1)?;
         match proto {
             "tcp" | "udp" => {
                 let port: u32 = value.parse().ok()?;
                 if !(1..=65535).contains(&port) {
                     return None;
                 }
+                has_port = true;
             }
             "p2p" => {
                 // Must be the last component, and a real peer id.
@@ -145,7 +156,7 @@ pub fn clean_published_multiaddr(raw: &str) -> Option<String> {
         }
         i += 2;
     }
-    if i != parts.len() || !has_p2p {
+    if !has_p2p || !has_port {
         return None;
     }
     Some(s.to_string())
@@ -336,6 +347,31 @@ mod tests {
         assert_eq!(again, ranked);
         // Cap is honoured.
         assert_eq!(rank(&nodes, 11, MIN_WITNESSES, MIN_UPTIME_BPS, 1).len(), 1);
+    }
+
+    #[test]
+    fn the_gate_accepts_the_ws_addresses_full_nodes_publish() {
+        // 2026-11-13: a full node listens on /ws and now publishes
+        // `/tcp/<port>/ws/p2p/<id>`. The valueless `/ws` marker used to make
+        // this gate return None, so the access point silently discarded every
+        // provider address and they all looked peer-less.
+        for ma in [
+            "/ip4/198.51.100.22/tcp/30333/ws/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
+            "/dns4/node.example.org/tcp/30333/ws/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
+            "/ip6/2606:4700:4700::1111/tcp/30333/wss/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
+        ] {
+            assert_eq!(
+                clean_published_multiaddr(ma).as_deref(),
+                Some(ma),
+                "a ws-published address must pass the AP gate: {ma}"
+            );
+        }
+        // A transport marker does not excuse a missing peer id or port.
+        assert!(clean_published_multiaddr("/ip4/198.51.100.22/tcp/30333/ws").is_none());
+        assert!(clean_published_multiaddr(
+            "/ip4/198.51.100.22/ws/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo"
+        )
+        .is_none());
     }
 
     #[test]

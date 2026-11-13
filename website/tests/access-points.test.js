@@ -30,12 +30,12 @@ const CANONICAL = NETWORK.bootnodes;
 
 /** Every libp2p multiaddr that appears anywhere in a page. */
 function multiaddrsIn(html) {
-  const re = /\/(?:dns4|dns6|ip4|ip6)\/[^/\s"'<>]+(?:\/udp\/\d+\/quic-v1|\/tcp\/\d+)\/p2p\/[A-Za-z0-9]+/g;
+  const re = /\/(?:dns4|dns6|ip4|ip6)\/[^/\s"'<>]+(?:\/udp\/\d+\/quic-v1|\/tcp\/\d+(?:\/ws|\/wss)?)\/p2p\/[A-Za-z0-9]+/g;
   return [...new Set(html.match(re) || [])];
 }
 
 function peerAndPort(ma) {
-  const m = /^\/[^/]+\/[^/]+\/(?:tcp|udp)\/(\d+)\/p2p\/([A-Za-z0-9]+)$/.exec(ma);
+  const m = /^\/[^/]+\/[^/]+\/(?:tcp|udp)\/(\d+)(?:\/(?:ws|wss))?\/p2p\/([A-Za-z0-9]+)$/.exec(ma);
   return m ? { port: m[1], peer: m[2] } : null;
 }
 
@@ -123,5 +123,11 @@ test("describe() parses the shapes the seed list actually uses", () => {
     { host: "142.129.54.88:30333", port: "30333", peer: "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo", kind: "IP literal" },
   );
   for (const ma of CANONICAL) assert.ok(describe(ma), `cannot describe live multiaddr ${ma}`);
+  // 2026-11-13: full nodes listen with websocket framing, so the seed list
+  // carries /ws. The describer must render it, not reject it as non-libp2p.
+  assert.deepEqual(
+    { ...describe("/ip4/142.129.54.88/tcp/30333/ws/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo") },
+    { host: "142.129.54.88:30333", port: "30333", peer: "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo", kind: "IP literal" },
+  );
   assert.equal(describe("/ip4/1.2.3.4/tcp/30333"), null, "a non-libp2p address must not be published as a node");
 });

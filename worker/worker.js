@@ -71,9 +71,9 @@
  * asserts the two lists stay identical.
  */
 const STATIC_BOOTNODES = [
-  "/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
-  "/ip4/142.129.54.88/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
-  "/ip4/23.241.109.255/tcp/30333/p2p/12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz",
+  "/dns4/gpn-testnet.duckdns.org/tcp/30333/ws/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
+  "/ip4/142.129.54.88/tcp/30333/ws/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
+  "/ip4/23.241.109.255/tcp/30333/ws/p2p/12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz",
 ];
 
 const GENESIS = "0xb8e4636a65d0c812abb437c38dd7e937bd7c3355c54c54d63060f26a33519a5c";
@@ -679,7 +679,7 @@ function indexOfCrlf(buf, from) {
  *     emitted when it cannot contradict those claims.
  *
  * That is what prevents the 2026-10-20 directory bug:
- * `/ip4/23.241.109.255/tcp/30333/p2p/12D3KooWAFtUNxc…` = box #1's status_url
+ * `/ip4/23.241.109.255/tcp/30333/ws/p2p/12D3KooWAFtUNxc…` = box #1's status_url
  * host paired with the Linux node's peer id. A peer id is one node, so it may
  * not be invented at a second host; and an `ip:port` belongs to one node, so
  * it may not be re-used for a different peer id.
@@ -895,6 +895,27 @@ function endpointOfMultiaddr(ma) {
 }
 
 /**
+ * The transport this provider's node actually listens on, from its
+ * `listen_addrs` (published by `gpn_provider_status` straight from
+ * `system_localListenAddresses`). Empty when unknown or raw TCP.
+ *
+ * A full node listens with websocket framing (`/ws`); a validator-mode node
+ * listens on raw TCP. Publishing the wrong one is a socket that accepts and
+ * then goes silent, so it is derived rather than assumed.
+ * @param {object} p
+ * @returns {string}
+ */
+function transportOfProvider(p) {
+  const list = Array.isArray(p.listen_addrs) ? p.listen_addrs : [];
+  for (const ma of list) {
+    if (typeof ma !== "string") continue;
+    const m = /\/tcp\/\d{1,5}(\/(?:ws|wss))(?:\/|$)/.exec(ma);
+    if (m) return m[1];
+  }
+  return "";
+}
+
+/**
  * Multiaddrs for a provider that published its peer id. Prefers the addresses
  * the provider's heartbeat reported; when those are absent (a box listening on
  * 0.0.0.0 cannot know its own public IP) it synthesises one from the host the
@@ -939,7 +960,7 @@ function dialableMultiaddrs(p, statusUrl, peerId, claims) {
   const owner = ownerByEndpoint?.get(endpoint);
   if (owner && owner !== peerId) return [];
 
-  const ma = `${endpoint}/p2p/${peerId}`;
+  const ma = `${endpoint}${transportOfProvider(p)}/p2p/${peerId}`;
   return sanitizeMultiaddr(ma) ? [ma] : [];
 }
 
@@ -974,24 +995,36 @@ function sanitizeMultiaddr(raw) {
   if (!s.startsWith("/") || s.length > 256) return null;
   if (/[\s"\\]/.test(s)) return null;
   const parts = s.split("/").slice(1);
-  if (parts.length < 4 || parts.length % 2 !== 0 || parts.some((p) => p === "")) return null;
+  if (parts.length < 4 || parts.some((p) => p === "")) return null;
   let hasP2p = false;
-  for (let i = 0; i + 1 < parts.length; i += 2) {
+  let hasPort = false;
+  let i = 0;
+  while (i < parts.length) {
     const proto = parts[i];
-    const value = parts[i + 1];
     if (!P2P_PROTOCOLS.has(proto)) return null;
+    // `/ws`, `/wss` and `/tls` are valueless markers: the next component is the
+    // next protocol, not a value. Treating them as valued made this gate
+    // reject every address a full node publishes (2026-11-13).
+    if (proto === "ws" || proto === "wss" || proto === "tls") {
+      i += 1;
+      continue;
+    }
+    const value = parts[i + 1];
+    if (value === undefined) return null;
     if (proto === "tcp" || proto === "udp") {
       if (!/^\d{1,5}$/.test(value)) return null;
       const n = Number(value);
       if (n < 1 || n > 65535) return null;
+      hasPort = true;
     }
     if (proto === "p2p") {
       if (i + 2 !== parts.length) return null; // must be last
       if (!sanitizePeerId(value)) return null;
       hasP2p = true;
     }
+    i += 2;
   }
-  return hasP2p ? s : null;
+  return hasP2p && hasPort ? s : null;
 }
 
 /** @param {string} ma */

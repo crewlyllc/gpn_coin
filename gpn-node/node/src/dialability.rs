@@ -125,6 +125,7 @@
 use sc_network::multiaddr::{Multiaddr, Protocol};
 use sc_network::network_state::{NetworkState, PeerEndpoint};
 use sc_network::{NetworkStateInfo, NetworkStatusProvider};
+use std::borrow::Cow;
 use std::net::{IpAddr, Ipv6Addr};
 use std::time::{Duration, Instant};
 
@@ -2055,6 +2056,61 @@ pub fn has_v6_listener(addrs: &[Multiaddr]) -> bool {
     })
 }
 
+/// The transport the node listens on, if it is one that must be named in an
+/// address (`/ws`, `/wss`). `None` = raw TCP.
+pub fn listen_transport(listen: &[Multiaddr]) -> Option<Protocol<'static>> {
+    for ma in listen {
+        for p in ma.iter() {
+            match p {
+                Protocol::Ws(_) => return Some(Protocol::Ws(Cow::Borrowed("/"))),
+                Protocol::Wss(_) => return Some(Protocol::Wss(Cow::Borrowed("/"))),
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+fn names_transport(ma: &Multiaddr) -> bool {
+    ma.iter()
+        .any(|p| matches!(p, Protocol::Ws(_) | Protocol::Wss(_)))
+}
+
+/// Make every announced public address name the transport this node actually
+/// listens on.
+///
+/// `--public-addr` / `GPN_PUBLIC_ADDR` / UPnP / Identify all describe a
+/// `host:tcp:port` socket. A full node listens with websocket framing there
+/// (polkadot-sdk picks `/ws` for non-validator mode), so announcing the bare
+/// form hands every peer an address that accepts the connection and then goes
+/// silent — the 2026-11-13 "second box off the network" symptom. The transport
+/// is copied from the listen set, never assumed, so a validator-mode node
+/// (raw TCP) is untouched.
+pub fn align_public_addresses(public: &mut Vec<Multiaddr>, listen: &[Multiaddr]) {
+    let Some(transport) = listen_transport(listen) else {
+        return;
+    };
+    for ma in public.iter_mut() {
+        if names_transport(ma) {
+            continue;
+        }
+        let mut out = Multiaddr::empty();
+        let mut inserted = false;
+        for p in ma.iter() {
+            if matches!(p, Protocol::P2p(_)) && !inserted {
+                out.push(transport.clone());
+                inserted = true;
+            }
+            out.push(p);
+        }
+        if !inserted {
+            out.push(transport.clone());
+        }
+        *ma = out;
+    }
+    public.dedup();
+}
+
 /// Plan the listen set: keep every existing listener and, when a global v6
 /// address exists, add `/ip6/::/tcp/<port>` (the wildcard survives an ISP
 /// renumber; both libp2p-tcp and litep2p set `IPV6_V6ONLY` so it coexists with
@@ -3572,6 +3628,40 @@ mod tests {
         assert_eq!(plan_listen_addresses(&planned, true, 30333), planned);
         // No v6 ⇒ byte-identical to today.
         assert_eq!(plan_listen_addresses(&v4, false, 30333), v4);
+    }
+
+    // ── announced addresses name the listened transport ───────────────
+
+    /// 2026-11-13: `--public-addr` is `host:tcp:port`, but a full node listens
+    /// on `/ws`. Announcing the bare form gave every peer an address that
+    /// accepts a connection and then goes silent.
+    #[test]
+    fn announced_addresses_name_the_transport_we_listen_on() {
+        let listen = vec![ma("/ip4/0.0.0.0/tcp/30333/ws"), ma("/ip6/::/tcp/30333/ws")];
+        let mut public = vec![
+            ma("/dns4/gpn-testnet.duckdns.org/tcp/30333"),
+            ma("/ip6/2606:4700:4700::1111/tcp/30333"),
+        ];
+        align_public_addresses(&mut public, &listen);
+        assert_eq!(
+            public,
+            vec![
+                ma("/dns4/gpn-testnet.duckdns.org/tcp/30333/ws"),
+                ma("/ip6/2606:4700:4700::1111/tcp/30333/ws"),
+            ]
+        );
+        // Idempotent: a second pass must not double the marker.
+        align_public_addresses(&mut public, &listen);
+        assert_eq!(public[0], ma("/dns4/gpn-testnet.duckdns.org/tcp/30333/ws"));
+    }
+
+    /// A validator-mode node listens on raw TCP; it must stay untouched.
+    #[test]
+    fn announced_addresses_stay_raw_for_a_tcp_listener() {
+        let listen = vec![ma("/ip4/0.0.0.0/tcp/30333")];
+        let mut public = vec![ma("/ip4/203.0.113.10/tcp/30333")];
+        align_public_addresses(&mut public, &listen);
+        assert_eq!(public, vec![ma("/ip4/203.0.113.10/tcp/30333")]);
     }
 
     #[test]

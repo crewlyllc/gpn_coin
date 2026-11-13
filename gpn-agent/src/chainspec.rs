@@ -26,9 +26,9 @@ use sha2::{Digest, Sha256};
 /// are the current seed boxes. Peer ids are part of the multiaddr and are
 /// checked to be well-formed by [`is_dialable_bootnode`].
 pub const CANONICAL_BOOTNODES: &[&str] = &[
-    "/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
-    "/ip4/142.129.54.88/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
-    "/ip4/23.241.109.255/tcp/30333/p2p/12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz",
+    "/dns4/gpn-testnet.duckdns.org/tcp/30333/ws/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
+    "/ip4/142.129.54.88/tcp/30333/ws/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
+    "/ip4/23.241.109.255/tcp/30333/ws/p2p/12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz",
 ];
 
 /// Genesis block hash of the canonical GPN Public Testnet.
@@ -50,7 +50,7 @@ pub const EXPECTED_GENESIS_SHA256: &str =
 /// going out to the public address and back through the router completes the
 /// TCP handshake and is then discarded by libp2p as a self-dial (2026-11-06).
 pub const LAN_SEED_BOOTNODE: &str =
-    "/ip4/192.168.1.20/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo";
+    "/ip4/192.168.1.20/tcp/30333/ws/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo";
 
 /// The canonical bootnodes as owned strings.
 pub fn canonical_bootnodes() -> Vec<String> {
@@ -476,6 +476,25 @@ mod tests {
         assert!(!is_dialable_bootnode("/ip4/8.8.8.8/tcp/30333")); // no peer id
     }
 
+    /// 2026-11-13: every shipped bootnode now names the transport its node
+    /// listens on. A raw `/tcp/<port>` bootnode against a full node (which
+    /// listens on `/ws` by default) accepts the socket and then goes silent —
+    /// the failure that kept a second box off the network.
+    #[test]
+    fn canonical_bootnodes_name_the_transport_their_nodes_listen_on() {
+        for ma in CANONICAL_BOOTNODES {
+            assert!(
+                ma.contains("/tcp/30333/ws/p2p/"),
+                "bootnode {ma} does not name /ws — a full node listens on websocket framing"
+            );
+        }
+        assert!(LAN_SEED_BOOTNODE.contains("/tcp/30333/ws/p2p/"));
+        // The sanitizer must keep accepting the ws form (it is what we serve).
+        let (kept, dropped) = sanitize_bootnodes(&canonical_bootnodes());
+        assert_eq!(kept.len(), CANONICAL_BOOTNODES.len());
+        assert!(dropped.is_empty(), "dropped: {dropped:?}");
+    }
+
     #[test]
     fn launcher_list_is_a_superset_of_the_canonical_one() {
         let launcher = launcher_bootnodes();
@@ -553,7 +572,7 @@ mod tests {
     #[test]
     fn bootnodes_from_str_parses_and_falls_back() {
         let parsed = bootnodes_from_str(Some(
-            "/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo, /ip4/127.0.0.1/tcp/30333/p2p/12D3KooWaaaa",
+            "/dns4/gpn-testnet.duckdns.org/tcp/30333/ws/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo, /ip4/127.0.0.1/tcp/30333/p2p/12D3KooWaaaa",
         ));
         assert_eq!(parsed.len(), 1);
         assert_eq!(bootnodes_from_str(Some("")), canonical_bootnodes());

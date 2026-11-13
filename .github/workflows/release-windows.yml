@@ -316,7 +316,7 @@ jobs:
           :gpn_fast_sync_cleanup
           if exist "%GPN_FS_TMP%" rmdir /s /q "%GPN_FS_TMP%" >nul 2>&1
           :gpn_fast_sync_done
-          set "GPN_BOOTNODES=/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo"
+          set "GPN_BOOTNODES=/dns4/gpn-testnet.duckdns.org/tcp/30333/ws/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo"
           set "GPN_RESERVED_PEERS=%GPN_BOOTNODES%"
           cd /d C:\gpn
           REM Run the node DIRECTLY -- no PowerShell wrapper, no pipeline.

@@ -158,68 +158,30 @@ pub fn verify(
             };
         }
     }
-    // GPN nodes listen with **websocket** framing on their TCP port (the
-    // transport is `WS.or_transport(TCP)` in sc-network, and the live nodes
-    // answer only `/ws`: a raw `/tcp/` dial hangs in the upgrade). Try the
-    // address as published, then the same socket with `/ws` inserted, so the
-    // verdict is about the SOCKET and its owner, not about which transport
-    // spelling reached it first.
-    let mut candidates = vec![addr.clone()];
-    let has_ws = addr.iter().any(|p| {
-        matches!(
-            p,
-            libp2p::multiaddr::Protocol::Ws(_) | libp2p::multiaddr::Protocol::Wss(_)
-        )
-    });
-    if !has_ws {
-        if let Some(ws) = with_ws(&addr) {
-            candidates.push(ws);
-        }
-    }
-    let mut last = Outcome::Unreachable {
-        reason: "no candidate address".to_string(),
+    // The address is dialled EXACTLY as published. There is deliberately no
+    // "try the other transport too" fallback: a node that listens on `/ws`
+    // publishes `/ws` (derived from its own listen addresses), so an address
+    // without it is a bug in the publisher — and this function's whole job is
+    // to notice that, not to paper over it. Until 2026-11-13 it retried every
+    // bare `/tcp/` address as `/ws`, which meant a publisher could keep
+    // emitting an undialable string and still pass verification: the dialer
+    // (sc-network, `WsConfig.or_transport(Tcp)`) has no such fallback, so the
+    // verdict was about a different address than the one peers received.
+    dial_once(&addr, expected_peer_id, timeout)
+}
+
+fn dial_once(addr: &Multiaddr, expected: &str, timeout: Duration) -> Outcome {
+    // Dial by peer id as well as address: libp2p then checks the identity
+    // obtained by noise against the expected one and reports `WrongPeerId`.
+    let dial = match addr.iter().find_map(|p| match p {
+        libp2p::multiaddr::Protocol::P2p(id) => Some(id),
+        _ => None,
+    }) {
+        Some(peer) => DialOpts::peer_id(peer)
+            .addresses(vec![addr.clone()])
+            .build(),
+        None => DialOpts::unknown_peer_id().address(addr.clone()).build(),
     };
-    for cand in candidates {
-        // Dial by peer id as well as address: libp2p then checks the identity
-        // obtained by noise against the expected one and reports `WrongPeerId`.
-        let dial = match cand.iter().find_map(|p| match p {
-            libp2p::multiaddr::Protocol::P2p(id) => Some(id),
-            _ => None,
-        }) {
-            Some(peer) => DialOpts::peer_id(peer)
-                .addresses(vec![cand.clone()])
-                .build(),
-            None => DialOpts::unknown_peer_id().address(cand.clone()).build(),
-        };
-        last = dial_once(dial, &cand, expected_peer_id, timeout);
-        // `Verified` and `WrongPeer` are both answers about the owner — stop.
-        // Only "nothing answered" is worth a second transport.
-        if !matches!(last, Outcome::Unreachable { .. }) {
-            return last;
-        }
-    }
-    last
-}
-
-/// Insert `/ws` immediately before the `/p2p/<id>` tail (or append it).
-fn with_ws(addr: &Multiaddr) -> Option<Multiaddr> {
-    use libp2p::multiaddr::Protocol;
-    let mut out = Multiaddr::empty();
-    let mut inserted = false;
-    for p in addr.iter() {
-        if matches!(p, Protocol::P2p(_)) && !inserted {
-            out.push(Protocol::Ws(std::borrow::Cow::Borrowed("/")));
-            inserted = true;
-        }
-        out.push(p);
-    }
-    if !inserted {
-        out.push(Protocol::Ws(std::borrow::Cow::Borrowed("/")));
-    }
-    Some(out)
-}
-
-fn dial_once(dial: DialOpts, addr: &Multiaddr, expected: &str, timeout: Duration) -> Outcome {
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -473,10 +435,9 @@ mod tests {
 mod selftest {
     use super::*;
 
-    /// End-to-end: the dialer really completes a handshake and reads the peer
-    /// id, on both transports GPN uses. This is the property the whole
-    /// "publish only what a third party reaches" rule rests on.
-    fn dial_a_listener(ws: bool) {
+    /// Start a real libp2p listener on an ephemeral loopback port and return
+    /// its address (with `/p2p/<id>`) and peer id.
+    fn spawn_listener(ws: bool) -> (String, String) {
         use futures::StreamExt;
         use std::sync::mpsc;
         let (tx, rx) = mpsc::channel::<(String, String)>();
@@ -533,11 +494,19 @@ mod selftest {
             });
         });
         let (addr, peer) = rx.recv_timeout(Duration::from_secs(10)).unwrap();
-        let mut target = addr.clone();
-        if !target.to_string().contains("/p2p/") {
-            target = format!("{target}/p2p/{peer}").parse().unwrap();
+        if addr.contains("/p2p/") {
+            (addr, peer)
+        } else {
+            (format!("{addr}/p2p/{peer}"), peer)
         }
-        let out = verify(&target.to_string(), &peer, None, Duration::from_secs(6));
+    }
+
+    /// End-to-end: the dialer really completes a handshake and reads the peer
+    /// id, on both transports GPN uses. This is the property the whole
+    /// "publish only what a third party reaches" rule rests on.
+    fn dial_a_listener(ws: bool) {
+        let (target, peer) = spawn_listener(ws);
+        let out = verify(&target, &peer, None, Duration::from_secs(6));
         assert!(out.is_verified(), "{target}: {out:?}");
     }
 
@@ -548,8 +517,30 @@ mod selftest {
 
     #[test]
     fn dials_a_websocket_listener() {
-        // GPN nodes listen with websocket framing; this is the path that works
-        // against a real deployment (verified live 2026-11-12).
+        // GPN full nodes listen with websocket framing; this is the path that
+        // works against a real deployment (verified live 2026-11-12).
         dial_a_listener(true);
+    }
+
+    /// The verifier must not silently repair a publisher that forgot `/ws`.
+    /// Before 2026-11-13 `verify` retried every bare `/tcp/` address as `/ws`,
+    /// so exactly this address — the one every provider published — was
+    /// reported `verified` while no third party could dial it. Maps to the
+    /// 2026-11-13 "TCP connects, ~62 bytes, then silence" incident.
+    #[test]
+    fn a_missing_ws_is_a_failure_not_a_retry() {
+        let (target, peer) = spawn_listener(true);
+        let bare = target.replace("/ws/p2p/", "/p2p/");
+        assert!(bare.contains("/tcp/") && !bare.contains("/ws"), "{bare}");
+        let out = verify(&bare, &peer, None, Duration::from_secs(3));
+        assert_eq!(
+            out.code(),
+            "unreachable",
+            "a /tcp address against a /ws listener must not verify: {out:?}"
+        );
+        // And the same socket WITH the transport still verifies, proving the
+        // failure is the address and not the listener.
+        let ok = verify(&target, &peer, None, Duration::from_secs(6));
+        assert!(ok.is_verified(), "{target}: {ok:?}");
     }
 }

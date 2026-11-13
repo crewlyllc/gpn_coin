@@ -102,6 +102,38 @@ test("a NATed provider synthesises a dialable address from the host the AP reach
   assert.deepEqual(body.multiaddrs.slice(-1), [`/ip4/203.0.113.7/tcp/30333/p2p/${pid}`]);
 });
 
+test("a synthesised address carries the transport the provider listens on", () => {
+  // 2026-11-13: every full node listens on /ws, but the synthesised address was
+  // /tcp/<port> — a dialer connects, sends ~62 bytes of Noise and waits. The
+  // transport comes from the provider's own listen_addrs, never hardcoded.
+  const wsPid = "12D3KooWQ8fU4oXcZf3YhU8yTt4cY5q1mS2n8HkWq7jB6xU4aB3c";
+  const wsBody = __test.buildDirectory([
+    {
+      status_url: "http://203.0.113.7:8093/status",
+      healthy: true,
+      peer_id: wsPid,
+      p2p_port: 30333,
+      multiaddrs: [],
+      listen_addrs: ["/ip4/0.0.0.0/tcp/30333/ws", "/ip6/::/tcp/30333/ws"],
+    },
+  ]);
+  assert.deepEqual(wsBody.multiaddrs.slice(-1), [`/ip4/203.0.113.7/tcp/30333/ws/p2p/${wsPid}`]);
+
+  // A validator-mode provider listens on raw TCP and must stay raw.
+  const tcpPid = "12D3KooWP1JAFqvEvfsTuefkfQ6jH5vk7xe96A5Soj8o7tN63bm5";
+  const tcpBody = __test.buildDirectory([
+    {
+      status_url: "http://203.0.113.8:8093/status",
+      healthy: true,
+      peer_id: tcpPid,
+      p2p_port: 30333,
+      multiaddrs: [],
+      listen_addrs: ["/ip4/0.0.0.0/tcp/30333"],
+    },
+  ]);
+  assert.deepEqual(tcpBody.multiaddrs.slice(-1), [`/ip4/203.0.113.8/tcp/30333/p2p/${tcpPid}`]);
+});
+
 test("a peer id already published elsewhere is not re-synthesised at another host", () => {
   // The 2026-10-20 directory bug: box #1's status_url host (23.241.109.255)
   // was published paired with the Linux node's peer id, which is already
@@ -241,6 +273,14 @@ test("multiaddr / peer-id sanitising rejects junk", () => {
   assert.equal(__test.sanitizeMultiaddr("/ip4/1.2.3.4/tcp/30333"), null);
   assert.equal(__test.sanitizeMultiaddr(`/ip4/1.2.3.4/tcp/30333/p2p/${pid}/http/evil`), null);
   assert.equal(__test.sanitizeMultiaddr("http://1.2.3.4:30333"), null);
+  // 2026-11-13: full nodes publish `/ws`. The valueless marker used to make the
+  // structural check fail, so the directory dropped every provider address.
+  assert.equal(
+    __test.sanitizeMultiaddr(`/ip4/1.2.3.4/tcp/30333/ws/p2p/${pid}`),
+    `/ip4/1.2.3.4/tcp/30333/ws/p2p/${pid}`,
+  );
+  assert.ok(__test.sanitizeMultiaddr(`/dns4/node.example/tcp/30333/wss/p2p/${pid}`));
+  assert.equal(__test.sanitizeMultiaddr(`/ip4/1.2.3.4/tcp/30333/ws`), null);
 });
 
 test("GET /seeds.json is 200 JSON even with no AP configured", async () => {

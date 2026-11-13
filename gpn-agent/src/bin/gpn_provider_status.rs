@@ -771,18 +771,23 @@ fn is_public_ip(ip: std::net::IpAddr) -> bool {
     }
 }
 
-/// `/ip4/1.2.3.4/tcp/30333` | `/dns4/node.example/tcp/30333` | `1.2.3.4:30333`
-/// → a base multiaddr (no peer id). Returns `None` for anything that is not a
-/// single host + TCP port.
+/// `/ip4/1.2.3.4/tcp/30333` | `/dns4/node.example/tcp/30333` |
+/// `/ip4/1.2.3.4/tcp/30333/ws` | `1.2.3.4:30333` → a base multiaddr (no peer
+/// id). Returns `None` for anything that is not a single host + TCP port
+/// (optionally followed by the `/ws` or `/wss` transport).
+///
+/// The transport is part of the address, not decoration: a node listening with
+/// websocket framing does not answer a raw Noise prologue, so `/tcp/<port>`
+/// alone describes a socket that accepts then goes silent (2026-11-13).
 fn base_multiaddr(raw: &str) -> Option<String> {
     let s = raw.trim();
     if s.is_empty() {
         return None;
     }
     if s.starts_with('/') {
-        // expected /<proto>/<host>/tcp/<port>
+        // expected /<proto>/<host>/tcp/<port>[/ws|/wss]
         let parts: Vec<&str> = s.split('/').filter(|p| !p.is_empty()).collect();
-        if parts.len() != 4 || parts[2] != "tcp" {
+        if !(parts.len() == 4 || parts.len() == 5) || parts[2] != "tcp" {
             return None;
         }
         if !matches!(parts[0], "ip4" | "ip6" | "dns" | "dns4" | "dns6") {
@@ -792,7 +797,18 @@ fn base_multiaddr(raw: &str) -> Option<String> {
         if !(1..=65535).contains(&port) {
             return None;
         }
-        return Some(format!("/{}/{}/tcp/{port}", parts[0], parts[1]));
+        let transport = match parts.get(4).copied() {
+            None => "",
+            Some("ws") => "/ws",
+            Some("wss") => "/wss",
+            Some(_) => return None,
+        };
+        let host = if matches!(parts[0], "dns" | "dns4" | "dns6") {
+            parts[1].to_lowercase()
+        } else {
+            parts[1].to_string()
+        };
+        return Some(format!("/{}/{host}/tcp/{port}{transport}", parts[0]));
     }
     // bare `host:port` (optionally with a scheme — stripped off)
     let text = s.rsplit_once("://").map(|(_, rest)| rest).unwrap_or(s);
@@ -821,6 +837,33 @@ fn base_multiaddr(raw: &str) -> Option<String> {
     Some(format!("/{kind}/{}/tcp/{port}", host.to_lowercase()))
 }
 
+/// The transport a base address names beyond TCP, if any (`/ws`, `/wss`).
+fn transport_of(base: &str) -> Option<&'static str> {
+    match base.rsplit('/').next()? {
+        "ws" => Some("/ws"),
+        "wss" => Some("/wss"),
+        _ => None,
+    }
+}
+
+/// Append `transport` to a base that does not already name one.
+fn with_transport(base: &str, transport: Option<&str>) -> String {
+    match (transport_of(base), transport) {
+        (None, Some(t)) => format!("{base}{t}"),
+        _ => base.to_string(),
+    }
+}
+
+/// The transport the node actually listens on, derived from its own
+/// `system_localListenAddresses` — never assumed. `None` means either the node
+/// reported nothing or it listens on raw TCP, in which case a base address is
+/// published as-is (a validator-mode node listens on raw TCP by design:
+/// polkadot-sdk `network_params.rs` picks `/tcp` for validator/dev and `/ws`
+/// otherwise).
+fn listen_transport(listen: &[String]) -> Option<&'static str> {
+    listen.iter().find_map(|ma| transport_of(ma))
+}
+
 fn port_of(multiaddr: &str) -> Option<u16> {
     let (_, rest) = multiaddr.split_once("/tcp/")?;
     let port: u32 = rest.split('/').next()?.parse().ok()?;
@@ -833,8 +876,9 @@ fn port_of(multiaddr: &str) -> Option<u16> {
 
 /// Normalise one `system_localListenAddresses` entry to a base address, dropping
 /// any `/p2p/<peer-id>` suffix the node already appended (litep2p does, and
-/// some builds emit it **twice**). Returns `None` for an address we cannot
-/// express as `<proto>/<host>/tcp/<port>` (e.g. a `/ws` transport or WebRTC).
+/// some builds emit it **twice**). Keeps the transport (`/ws`, `/wss`) — see
+/// [`base_multiaddr`]. Returns `None` for an address we cannot express as
+/// `<proto>/<host>/tcp/<port>[/ws]` (e.g. WebRTC).
 fn base_of_listen_addr(raw: &str) -> Option<String> {
     let s = raw.trim();
     if s.is_empty() {
@@ -1076,9 +1120,16 @@ fn build_p2p_info_with(
         }
     }
 
+    // The published address must name the transport this node actually listens
+    // on. A node bound to `/ip4/…/tcp/<port>/ws` never answers a raw Noise
+    // prologue, so a dialer handed the `/tcp/<port>` form connects, sends ~62
+    // bytes and waits forever — the 2026-11-13 "second box off the network"
+    // symptom. Derived from the listen addresses, so a validator-mode node that
+    // listens on raw TCP keeps publishing raw TCP.
+    let node_transport = listen_transport(&clean_listen);
     let mut multiaddrs: Vec<String> = bases
         .into_iter()
-        .map(|b| format!("{b}/p2p/{peer_id}"))
+        .map(|b| format!("{}/p2p/{peer_id}", with_transport(&b, node_transport)))
         .collect();
     // Fail closed on identity/address disagreement. Normally a no-op (we append
     // `peer_id` ourselves), but it also covers an operator-supplied base that
@@ -3039,6 +3090,118 @@ mod tests {
         assert!(base_multiaddr("host-without-port").is_none());
         assert!(base_multiaddr("1.2.3.4:0").is_none());
         assert!(base_multiaddr("").is_none());
+
+        // The transport is preserved, and an unknown one is refused.
+        assert_eq!(
+            base_multiaddr("/ip4/1.2.3.4/tcp/30333/ws").as_deref(),
+            Some("/ip4/1.2.3.4/tcp/30333/ws")
+        );
+        assert_eq!(
+            base_multiaddr("/dns4/Node.Example.org/tcp/30333/wss").as_deref(),
+            Some("/dns4/node.example.org/tcp/30333/wss")
+        );
+        assert!(base_multiaddr("/ip4/1.2.3.4/tcp/30333/webrtc").is_none());
+    }
+
+    // ── 2026-11-13: published /tcp vs listened /ws ───────────────────────────
+
+    /// THE regression test for the "second box off the network" symptom: the
+    /// node listens on `/ws`, `GPN_PUBLIC_ADDR` names the bare TCP socket, and
+    /// the address we published was `/tcp/30333/p2p/<id>` — which a dialer
+    /// connects to, sends ~62 bytes of Noise prologue into, and then waits.
+    /// The published form must carry the transport the node actually listens
+    /// on.
+    #[test]
+    fn published_address_carries_the_transport_the_node_listens_on() {
+        let info = build_p2p_info(
+            PID.to_string(),
+            Some("/ip4/203.0.113.7/tcp/30333"),
+            vec![
+                "/ip4/0.0.0.0/tcp/30333/ws".into(),
+                "/ip6/::/tcp/30333/ws".into(),
+            ],
+        );
+        assert_eq!(
+            info.multiaddrs,
+            vec![format!("/ip4/203.0.113.7/tcp/30333/ws/p2p/{PID}")]
+        );
+        // listen_addrs keep the transport too: they are the evidence for it.
+        assert_eq!(
+            info.listen_addrs,
+            vec![
+                "/ip4/0.0.0.0/tcp/30333/ws".to_string(),
+                "/ip6/::/tcp/30333/ws".to_string(),
+            ]
+        );
+    }
+
+    /// Not hardcoded: a validator-mode node listens on raw TCP and must keep
+    /// publishing the raw form (polkadot-sdk picks the transport by role).
+    #[test]
+    fn a_raw_tcp_listener_still_publishes_without_ws() {
+        let info = build_p2p_info(
+            PID.to_string(),
+            Some("/ip4/203.0.113.7/tcp/30333"),
+            vec!["/ip4/0.0.0.0/tcp/30333".into()],
+        );
+        assert_eq!(
+            info.multiaddrs,
+            vec![format!("/ip4/203.0.113.7/tcp/30333/p2p/{PID}")]
+        );
+    }
+
+    /// A configured address that already names `/ws` is neither stripped nor
+    /// doubled, and the node-evidence (IPv6) sibling gets the same transport.
+    #[test]
+    fn a_configured_ws_is_kept_and_applied_to_node_evidence() {
+        let configured = build_p2p_info(
+            PID.to_string(),
+            Some("/ip4/203.0.113.7/tcp/30333/ws"),
+            vec!["/ip4/0.0.0.0/tcp/30333/ws".into()],
+        );
+        assert_eq!(
+            configured.multiaddrs,
+            vec![format!("/ip4/203.0.113.7/tcp/30333/ws/p2p/{PID}")]
+        );
+
+        let dual = build_p2p_info_with(
+            PID.to_string(),
+            None,
+            vec!["/ip4/0.0.0.0/tcp/30333/ws".into()],
+            &[
+                "/ip4/203.0.113.7/tcp/30333".to_string(),
+                "/ip6/2606:4700:4700::1111/tcp/30333".to_string(),
+            ],
+            &|| None,
+        );
+        assert_eq!(
+            dual.multiaddrs,
+            vec![
+                format!("/ip4/203.0.113.7/tcp/30333/ws/p2p/{PID}"),
+                format!("/ip6/2606:4700:4700::1111/tcp/30333/ws/p2p/{PID}"),
+            ]
+        );
+    }
+
+    /// The listen-transport normaliser must survive the same doubled-`/p2p/`
+    /// litep2p bug the address normaliser already handles.
+    #[test]
+    fn a_listen_address_keeps_its_ws_and_loses_its_identity() {
+        let info = build_p2p_info_with(
+            PID.to_string(),
+            Some("/ip4/203.0.113.7/tcp/30333"),
+            vec![format!("/ip4/0.0.0.0/tcp/30333/ws/p2p/{PID}/p2p/{PID}")],
+            &[],
+            &|| None,
+        );
+        assert_eq!(
+            info.listen_addrs,
+            vec!["/ip4/0.0.0.0/tcp/30333/ws".to_string()]
+        );
+        assert_eq!(
+            info.multiaddrs,
+            vec![format!("/ip4/203.0.113.7/tcp/30333/ws/p2p/{PID}")]
+        );
     }
 
     #[test]
