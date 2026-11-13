@@ -8,6 +8,36 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.45] - 2026-11-13
+
+Bumped from 0.3.44.
+
+### Fixed
+- **Published addresses now name the transport the node actually listens on.** A
+  node listens on `/ws` in every non-validator mode, but every published
+  multiaddr named raw TCP, so a dialler sent a Noise prologue to a websocket
+  listener and the connection died after ~62 bytes with nothing logged. That is
+  the whole of the "TCP connects, then silence" symptom that kept a second
+  machine off the network for two days.
+  The transport is now **derived** from the node's own listen set
+  (`listen_transport` → `with_transport`) rather than hardcoded, so a
+  validator-mode node still publishes raw TCP. Consumers were repaired too:
+  `seedlist::clean_published_multiaddr` and the Worker's `sanitizeMultiaddr`
+  both treated `/ws` as an unexpected protocol and **discarded every ws
+  address**; the access point's own public announcements were bare sockets.
+  `dialcheck` no longer retries a bare socket as `/ws` — it dials exactly the
+  published string, so a wrong one now fails visibly instead of passing.
+
+- **`network.json` no longer carries a dead seed or a stale `latest_version`.**
+  `23.241.109.255` (peer `WFqZ2…`) is gone — TCP 30333/8093/22 all time out —
+  and `latest_version` is derived instead of hand-edited, so it cannot sit seven
+  releases behind the site.
+
+- Update checks run **hourly** instead of every 6 h (temporary, owner request,
+  2026-11-12): in-process, the Windows `GPN-Update` task, its Startup fallback
+  loop, and the Linux `gpn-update.timer`. Revert together — see task #161.
+
+
 ## [0.3.44] - 2026-11-12
 
 Bumped from 0.3.43 (`scripts/bump-version.py patch`).

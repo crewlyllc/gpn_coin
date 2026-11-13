@@ -810,6 +810,13 @@ pub async fn new_full<
         }
     }
 
+    // ---- Same-LAN discovery (D3) ---------------------------------------
+    // mDNS is the mechanism (a private bogus seed is not), and whether it can
+    // deliver depends on the backend: the libp2p backend drops the discovered
+    // (peer, address) pairs on this rev, so "mdns = on" there is a silent
+    // no-op. Say so once, out loud, before the network is built.
+    crate::lan_discovery::log_posture(&config.network);
+
     let mut net_config = sc_network::config::FullNetworkConfiguration::<
         Block,
         <Block as sp_runtime::traits::Block>::Hash,

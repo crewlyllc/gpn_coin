@@ -20,6 +20,7 @@ mod dialability;
 mod discovery;
 mod fork_tolerance;
 mod gpu_miner;
+mod lan_discovery;
 mod network_registry;
 mod peer_exchange;
 mod peer_priority;
