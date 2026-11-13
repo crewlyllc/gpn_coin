@@ -84,17 +84,35 @@ test("no retired identity is published as a dial target", () => {
   }
 });
 
-test("/nodes' baked fallback list also matches network.json", () => {
-  const start = NODES.indexOf("var CACHED_BOOTNODES");
-  assert.ok(start > -1, "CACHED_BOOTNODES must exist");
-  const block = NODES.slice(start, NODES.indexOf("];", start));
-  for (const ma of multiaddrsIn(block)) {
-    assert.ok(CANONICAL.includes(ma), `stale multiaddr in /nodes' cached list: ${ma}`);
-  }
-  for (const ma of CANONICAL) {
-    assert.ok(block.includes(ma), `/nodes' cached list is missing ${ma}`);
-  }
-});
+/** Slice a named literal out of /nodes: from `var NAME` to its closing `];`/`};` line. */
+function blockAfter(source, name) {
+  const start = source.indexOf(name);
+  assert.ok(start > -1, `${name} must exist in nodes.html`);
+  const rest = source.slice(start);
+  // The literal closes on a line of its own (`  ];` for arrays, `  };` for the
+  // MOCK object). Inner closers carry a trailing comma, so this cannot stop at
+  // `peer_ids`/`seeds` and leave half the block unchecked.
+  const end = /\n\s*(?:\];|\};)/.exec(rest);
+  assert.ok(end, `${name} must be closed by a ]; or }; line`);
+  return rest.slice(0, end.index);
+}
+
+// Both hand-maintained copies on /nodes are checked: the cached fallback list
+// renders to every reader whose fetch failed, and `MOCK` (?mock=1) renders to
+// anyone previewing the page. The guard used to scan only CACHED_BOOTNODES, so
+// the dead 23.241.109.255 / WFqZ2… row sat in MOCK.seeds with `live: true` —
+// test green, stale identity still shipped (queue D10, 2026-11-13).
+for (const name of ["var CACHED_BOOTNODES", "var MOCK"]) {
+  test(`/nodes' ${name} also matches network.json`, () => {
+    const block = blockAfter(NODES, name);
+    for (const ma of multiaddrsIn(block)) {
+      assert.ok(CANONICAL.includes(ma), `stale multiaddr in /nodes' ${name}: ${ma}`);
+    }
+    for (const ma of CANONICAL) {
+      assert.ok(block.includes(ma), `/nodes' ${name} is missing ${ma}`);
+    }
+  });
+}
 
 test("the table is generated from /seeds.json, not from a copied snapshot", () => {
   assert.match(PAGE, /fetch\("\/seeds\.json"/);
