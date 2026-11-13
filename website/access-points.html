@@ -111,8 +111,12 @@
                (DNS) and row 2 (IP literal) are the same machine and the same
                peer id — one bootnode, two addresses. Live seed rows in
                `/api/network` and `/seeds.json` are deduped by peer id, so the
-               API reports 2 seeds for these 3 endpoints. There is deliberately
-               NO private/LAN row: a 192.168.x.x seed was reverted 2026-11-10
+               API reports 1 seed for these 2 endpoints. The former seed-2 row
+               (23.241.109.255, 12D3KooWFqZ2…) was dropped 2026-11-13 with the
+               registry entry it came from: the host answers no dial from the
+               seed network, and a page that publishes it sends new operators
+               to an address that can only time out. There is deliberately NO
+               private/LAN row: a 192.168.x.x seed was reverted 2026-11-10
                because it pointed remote boxes at a stranger's device. -->
           <tbody id="bootnode-rows">
             <tr>
@@ -127,15 +131,9 @@
               <td><code>/ip4/142.129.54.88/tcp/30333/ws/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo</code></td>
               <td><span class="chip up"><span class="d" aria-hidden="true"></span> Live</span></td>
             </tr>
-            <tr>
-              <td><b>23.241.109.255:30333</b><br><span class="small muted">IP literal</span></td>
-              <td><code>12D3KooWFqZ2…</code></td>
-              <td><code>/ip4/23.241.109.255/tcp/30333/ws/p2p/12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz</code></td>
-              <td><span class="chip up"><span class="d" aria-hidden="true"></span> Live</span></td>
-            </tr>
           </tbody>
         </table>
-        <p class="muted" id="bootnode-source" style="margin:14px 0 0">Three dial addresses, <b>two machines</b> and two peer ids: the bootnode's DNS name and IP literal are one node. Source of truth: <a href="/seeds.json" rel="noopener">seeds.json</a> — read at page load; the rows above are the last-known fallback from <code>network.json</code>.</p>
+        <p class="muted" id="bootnode-source" style="margin:14px 0 0">Two dial addresses, <b>one machine</b>, one peer id: the bootnode's DNS name and IP literal are the same node. Source of truth: <a href="/seeds.json" rel="noopener">seeds.json</a> — read at page load; the rows above are the last-known fallback from <code>network.json</code>.</p>
       </div>
 
       <div class="grid cols-2" style="margin-top:22px">

@@ -41,7 +41,18 @@ function peerAndPort(ma) {
 
 test("every multiaddr published on /access-points is in the live seed list", () => {
   const published = multiaddrsIn(PAGE);
-  assert.ok(published.length >= 3, `expected the bootnode table, found ${published.length} multiaddrs`);
+  // The guard used to be `>= 3`, a magic number that encoded "three endpoints
+  // on two machines". It is now tied to the registry: the seed list is the
+  // single source of truth, and a page that publishes a different number of
+  // endpoints than the registry holds has either lost the table or invented a
+  // row. Tying it to CANONICAL keeps this check honest when the registry is
+  // legitimately trimmed (seed-2 was dropped 2026-11-13) instead of turning a
+  // correct registry into a permanent build failure.
+  assert.equal(
+    published.length,
+    CANONICAL.length,
+    `expected ${CANONICAL.length} bootnode endpoints (network.json), found ${published.length}`,
+  );
   for (const ma of published) {
     assert.ok(
       CANONICAL.includes(ma),

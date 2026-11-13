@@ -1157,15 +1157,21 @@ test("seeds.json dedupes one machine published as a seed and a provider", () => 
 });
 
 test("seeds.json marks a stale seed not live and exposes it in `seeds`", () => {
-  const body = __test.buildDirectory(null, [LIVE_A, LIVE_B]);
-  const byPeer = new Map(body.seeds.map((s) => [s.peer_id, s]));
-  // The Linux box's own seed (dns4) is not in the live set here → false.
+  // The compiled-in list is the only thing that can be "stale" here: a seed is
+  // stale when the AP's live peer set does not contain it. Since 2026-11-13 the
+  // registry holds one machine (two endpoints, one peer id), so the live set is
+  // exercised in both directions against that peer instead of a hard-coded id
+  // that may not be in the seed list at all.
   const selfPid = __test.peerIdOf(network.bootnodes[0]);
-  assert.equal(byPeer.get(selfPid).live, false);
-  // Box #1 is live.
-  assert.equal(byPeer.get(LIVE_A).live, true);
+  const stale = __test.buildDirectory(null, [LIVE_B]);
+  const staleByPeer = new Map(stale.seeds.map((s) => [s.peer_id, s]));
+  assert.equal(staleByPeer.get(selfPid).live, false);
+  // When the AP does report that peer live, the same row flips to true.
+  const live = __test.buildDirectory(null, [selfPid]);
+  const liveByPeer = new Map(live.seeds.map((s) => [s.peer_id, s]));
+  assert.equal(liveByPeer.get(selfPid).live, true);
   // Every published seed has a real multiaddr and a peer id.
-  for (const s of body.seeds) {
+  for (const s of stale.seeds) {
     assert.ok(s.multiaddr.startsWith("/"));
     assert.match(s.multiaddr, /\/p2p\/12D3Koo/);
   }
