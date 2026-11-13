@@ -41,7 +41,7 @@ jobs:
       ALLOW_CONTROL: ${{ inputs.allow_service_control }}
     steps:
       - name: Policy check
-        shell: pwsh
+        shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           if ($env:ALLOW_CONTROL -ne 'true') {
@@ -52,7 +52,7 @@ jobs:
           Write-Host 'policy check passed'
 
       - name: Run
-        shell: pwsh
+        shell: powershell
         run: |
           $ErrorActionPreference = 'Continue'
           Write-Host "=== host ==="
