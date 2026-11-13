@@ -690,10 +690,19 @@ pub fn auto_update_enabled(raw: Option<&str>) -> bool {
     }
 }
 
+/// TEMPORARY CADENCE (owner decision, 2026-11-12): the fleet checks **hourly**
+/// instead of every 6 h, so a release can be reviewed within the hour and a bad
+/// one is caught the same day. This is deliberately short-lived.
+///
+/// REVERT: set [`DEFAULT_CHECK_HOURS`] back to `6` after the review window
+/// (tracked in `GPN-TASKS.md` as `GPN-UPDATE-CADENCE-REVERT`). Operators can
+/// override either way with `GPN_UPDATE_CHECK_HOURS`.
+pub const DEFAULT_CHECK_HOURS: u64 = 1;
+
 /// `GPN_UPDATE_CHECK_HOURS` → a duration, clamped to a sane range so a typo
 /// cannot turn into a request storm (min 1 h) or an never-checking node.
 pub fn check_interval(hours: Option<u64>) -> Duration {
-    Duration::from_secs(hours.unwrap_or(6).clamp(1, 168) * 3600)
+    Duration::from_secs(hours.unwrap_or(DEFAULT_CHECK_HOURS).clamp(1, 168) * 3600)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2494,7 +2503,13 @@ mod tests {
 
     #[test]
     fn check_interval_is_clamped() {
-        assert_eq!(check_interval(None), Duration::from_secs(6 * 3600));
+        // Temporary hourly cadence (2026-11-12); reverts with DEFAULT_CHECK_HOURS.
+        assert_eq!(
+            check_interval(None),
+            Duration::from_secs(DEFAULT_CHECK_HOURS * 3600)
+        );
+        assert_eq!(check_interval(None), Duration::from_secs(3600));
+        assert_eq!(check_interval(Some(6)), Duration::from_secs(6 * 3600));
         assert_eq!(check_interval(Some(0)), Duration::from_secs(3600));
         assert_eq!(check_interval(Some(12)), Duration::from_secs(12 * 3600));
         assert_eq!(check_interval(Some(99999)), Duration::from_secs(168 * 3600));
