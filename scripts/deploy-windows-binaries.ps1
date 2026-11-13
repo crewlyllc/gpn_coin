@@ -1,4 +1,4 @@
-# deploy-windows-binaries.ps1 — stop the node, replace C:\gpn\bin, never leave the box dead.
+# deploy-windows-binaries.ps1 - stop the node, replace C:\gpn\bin, never leave the box dead.
 #
 # Why this is a file and not inline (2026-11-12): the release-windows workflow step that
 # does this reached 22,234 characters and GitHub refused to parse the workflow at all
@@ -7,12 +7,12 @@
 #
 # Why the retry loop exists (same day, 0.3.43): the deploy failed with robocopy rc=11
 # ("some files could not be copied") after robocopy's WHOLE 10x3s retry window on ~6
-# files — 183 s — so the lock holder was not a 3-second transient. Two things a single
+# files - 183 s - so the lock holder was not a 3-second transient. Two things a single
 # long wait cannot handle:
 #   * a process that comes back after the stop sweep (so the stop is repeated between
 #     bounded copy attempts, not done once);
 #   * Stop-Process -Force returns before the OS unmaps the image, and a node killed
-#     mid-flush keeps its .exe mapped — hence Wait-Process before copying.
+#     mid-flush keeps its .exe mapped - hence Wait-Process before copying.
 # And a failed copy must not leave the box with no node at all: the step used to throw
 # before the restart block ran, so C:\gpn stayed dead until someone noticed.
 param(
@@ -21,7 +21,7 @@ param(
   [Parameter(Mandatory = $true)][string]$Dest,
   [int]$Attempts = 4,
   # 1/0, not [switch]: `powershell -File` passes every argument as a STRING, and a
-  # SwitchParameter refuses "True" ("accept only Boolean values and numbers" — the
+  # SwitchParameter refuses "True" ("accept only Boolean values and numbers" - the
   # 2026-11-12 failure). Numbers convert cleanly.
   [int]$RestartOnFailure = 0,
   [string]$StartScript = 'C:\gpn\start-node.cmd'

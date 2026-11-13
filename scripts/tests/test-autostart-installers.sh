@@ -221,7 +221,7 @@ assert_has "$repo/scripts/install-ollama.ps1" "no progress bar"                 
 # "The string is missing the terminator". Keep every shipped script pure ASCII.
 while IFS= read -r f; do
   if LC_ALL=C grep -q $'[^\x01-\x7F]' "$f"; then
-    fail "$f contains non-ASCII bytes (breaks Windows PowerShell 5.1 parsing)"
+    bad "$f contains non-ASCII bytes (breaks Windows PowerShell 5.1 parsing)"
   else
     ok "$(basename "$f") is ASCII-only"
   fi
