@@ -14,7 +14,7 @@
 #     * makes ollama autostart too (GPN-Ollama) without duplicating an
 #       autostart entry that already exists
 #     * generates the launcher with the canonical env (BASE_PATH, AP_URL,
-#       3 bootnodes, GUI=1, NODE_KEY_FILE) and Tee-Object -> node.log
+#       every network.json bootnode, GUI=1, NODE_KEY_FILE) and Tee-Object -> node.log
 #     * waits for ollama /api/tags and stops with an install command when
 #       ollama is missing
 #     * -Uninstall / --remove-autostart removes its own tasks only
@@ -129,8 +129,15 @@ assert_has "$ps1" "'^-{1,2}(verify|v)\$'"       "installer accepts -Verify"
 
 # canonical values, not placeholders left behind
 assert_has "$ps1" "http://gpn-testnet.duckdns.org:8092" "canonical AP default"
+# The count is not a constant: it is whatever network.json ships. Hard-coding
+# "3" is how this gate kept passing while the third entry was a dead host (D11).
+want_boots=$(python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["bootnodes"]))' "$repo/network.json")
 boots=$(grep -o "/p2p/12D3KooW" "$ps1" | wc -l)
-if [ "${boots:-0}" -ge 3 ]; then ok "canonical 3 bootstrap peers"; else bad "expected 3 bootnode multiaddrs (found ${boots:-0})"; fi
+if [ "${boots:-0}" -eq "${want_boots:-0}" ]; then
+  ok "canonical ${want_boots} bootstrap peers (matches network.json)"
+else
+  bad "expected ${want_boots} bootnode multiaddrs from network.json (found ${boots:-0})"
+fi
 
 # ---- ollama is a hard prerequisite ---------------------------------------
 assert_has "$ps1" "http://127.0.0.1:11434/api/tags" "waits on ollama /api/tags"

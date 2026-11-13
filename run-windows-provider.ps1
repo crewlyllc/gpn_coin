@@ -172,8 +172,7 @@ $env:GPN_LISTEN  = "0.0.0.0:$ListenPort"
 if ([string]::IsNullOrWhiteSpace($env:GPN_BOOTNODES)) {
   $env:GPN_BOOTNODES = (
     "/dns4/gpn-testnet.duckdns.org/tcp/30333/ws/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo," +
-    "/ip4/142.129.54.88/tcp/30333/ws/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo," +
-    "/ip4/23.241.109.255/tcp/30333/ws/p2p/12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz"
+    "/ip4/142.129.54.88/tcp/30333/ws/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo"
   )
 }
 Write-Host "      bootnodes: $($env:GPN_BOOTNODES)"

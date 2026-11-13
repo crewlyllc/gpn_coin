@@ -104,8 +104,11 @@ fn a_stale_installer_list_is_actually_rewritten() {
     let canonical = gpn_agent::chainspec::launcher_bootnodes();
     let mut stale: Vec<String> = split(&boots);
     stale.pop();
+    // Same peer id as a live canonical seed, different address: "ours, but
+    // stale". A *foreign* peer id is deliberately left alone by the updater
+    // (operator-supplied list), so it cannot exercise this path.
     stale.push(
-        "/ip4/203.0.113.9/tcp/30333/p2p/12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz"
+        "/ip4/203.0.113.9/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo"
             .into(),
     );
     let body = format!(
@@ -151,7 +154,7 @@ fn the_real_installer_launcher_is_repaired_without_collateral_edits() {
     // Substitute the placeholders the way Write-Launcher does, but with an
     // OLD seed list — exactly the file a box installed before the last seed
     // change is still running.
-    let stale = "/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo,/ip4/203.0.113.9/tcp/30333/p2p/12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz";
+    let stale = "/dns4/gpn-testnet.duckdns.org/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo,/ip4/203.0.113.9/tcp/30333/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo";
     let body = template
         .replace("__INSTALL_DIR__", "C:\\gpn")
         .replace("__AP_URL__", "http://gpn-testnet.duckdns.org:8092")

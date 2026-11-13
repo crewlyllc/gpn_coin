@@ -22,13 +22,16 @@ use sha2::{Digest, Sha256};
 
 /// Bootnodes every node must be able to dial, in the order they are served.
 ///
-/// The first entry is the DNS name (survives an IP change); the two IP entries
-/// are the current seed boxes. Peer ids are part of the multiaddr and are
-/// checked to be well-formed by [`is_dialable_bootnode`].
+/// The first entry is the DNS name (survives an IP change); the IP entry is the
+/// current seed box's public address. Peer ids are part of the multiaddr and
+/// are checked to be well-formed by [`is_dialable_bootnode`].
+///
+/// `23.241.109.255` was dropped on 2026-11-13 (dead host since 18:42Z: TCP
+/// 30333/8093/22 all time out, `ping` 100 % loss); its replacement must be a
+/// **measured** address + peer id, not a guess.
 pub const CANONICAL_BOOTNODES: &[&str] = &[
     "/dns4/gpn-testnet.duckdns.org/tcp/30333/ws/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
     "/ip4/142.129.54.88/tcp/30333/ws/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
-    "/ip4/23.241.109.255/tcp/30333/ws/p2p/12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz",
 ];
 
 /// Genesis block hash of the canonical GPN Public Testnet.
@@ -71,11 +74,9 @@ pub fn launcher_bootnodes() -> Vec<String> {
     // meaningful on the network that owns it: box 1 runs on a different
     // 192.168.1.0/24, so shipping one pointed it at a stranger's device.
     // A LAN seed is computed per machine by the installer / supervisor.
-    vec![
-        CANONICAL_BOOTNODES[0].to_string(), // DNS name — survives an IP change
-        CANONICAL_BOOTNODES[1].to_string(), // primary seed, public address
-        CANONICAL_BOOTNODES[2].to_string(), // second seed box
-    ]
+    // Iterate rather than index: a hand-written `[2]` panicked the last time a
+    // seed was dropped from the canonical list (2026-11-13, D11).
+    CANONICAL_BOOTNODES.iter().map(|s| s.to_string()).collect()
 }
 
 /// Parse a comma/space/semicolon separated bootnode list, keeping only
@@ -466,9 +467,9 @@ mod tests {
         let (kept, dropped) = sanitize_bootnodes(&local);
         assert!(kept.is_empty());
         assert_eq!(dropped.len(), 5);
-        assert!(is_dialable_bootnode(CANONICAL_BOOTNODES[0]));
-        assert!(is_dialable_bootnode(CANONICAL_BOOTNODES[1]));
-        assert!(is_dialable_bootnode(CANONICAL_BOOTNODES[2]));
+        for ma in CANONICAL_BOOTNODES {
+            assert!(is_dialable_bootnode(ma), "not dialable: {ma}");
+        }
         assert!(!is_dialable_bootnode("/ip4/127.0.0.1/tcp/30333"));
         assert!(!is_dialable_bootnode(
             "/ip4/127.0.0.1/tcp/30333/p2p/notapeer"
@@ -546,7 +547,10 @@ mod tests {
             "",
         );
         assert!(!stripped.contains("bootNodes"));
-        let envlist = vec![CANONICAL_BOOTNODES[2].to_string()];
+        let envlist = vec![CANONICAL_BOOTNODES
+            .last()
+            .expect("at least one canonical bootnode")
+            .to_string()];
         let out = prepared_with_fixture(&stripped, &envlist).unwrap();
         assert!(out.used_fallback);
         assert_eq!(out.bootnodes, envlist);

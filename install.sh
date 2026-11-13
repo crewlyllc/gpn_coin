@@ -49,7 +49,7 @@ GPN_BASE_PATH="$PREFIX/node"
 # Canonical bootstrap peers, passed explicitly as belt and braces: even a stale
 # or hijacked chain spec cannot strand this node on a loopback bootnode. An
 # operator-supplied GPN_BOOTNODES wins (comma-separated multiaddrs).
-GPN_BOOTNODES="${GPN_BOOTNODES:-/dns4/gpn-testnet.duckdns.org/tcp/30333/ws/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo,/ip4/142.129.54.88/tcp/30333/ws/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo,/ip4/23.241.109.255/tcp/30333/ws/p2p/12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz}"
+GPN_BOOTNODES="${GPN_BOOTNODES:-/dns4/gpn-testnet.duckdns.org/tcp/30333/ws/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo,/ip4/142.129.54.88/tcp/30333/ws/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo}"
 export GPN_BOOTNODES
 # Access point the node polls for AI work. Defaults to the canonical testnet AP
 # so a fresh install serves AI out of the box; set it (or set it EMPTY to opt
