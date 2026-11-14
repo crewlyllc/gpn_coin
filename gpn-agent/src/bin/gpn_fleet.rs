@@ -27,7 +27,7 @@ use serde_json::Value;
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn env_or(k: &str, d: &str) -> String {
     std::env::var(k).unwrap_or_else(|_| d.to_string())
@@ -223,7 +223,22 @@ fn main() {
         println!("{}", gpn_agent::gui::startup_hint("gpn_fleet"));
     }
 
-    let mut child: Option<Child> = None;
+    // The node child, shared with the self-heal watchdog (it must be able to
+    // stop the node before moving a DB, and the loop must not respawn it into
+    // the middle of that move).
+    let child_slot: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
+    let hold = Arc::new(AtomicBool::new(false));
+
+    // Self-heal (#157): ON by default, every node, no launcher line required.
+    // See `gpn_agent::selfheal` and the same watchdog in `gpn_node`.
+    spawn_self_heal(
+        &node_data,
+        rpc_port,
+        child_slot.clone(),
+        hold.clone(),
+        node_up.clone(),
+    );
+
     // Remember the last network actually applied (survives restarts) so we only
     // PURGE on a real network change — never on the first start.
     let mut current: Option<String> = std::fs::read_to_string(&state_file)
@@ -236,6 +251,12 @@ fn main() {
         });
 
     loop {
+        // A self-heal is swapping the chain DB: do not restart the node.
+        if hold.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(500));
+            continue;
+        }
+
         let target = match fetch_directive(&directive_src) {
             Ok(v) => v
                 .get("target_network")
@@ -252,7 +273,7 @@ fn main() {
         let start_needed = if !target.is_empty() && Some(&target) != current.as_ref() {
             println!("[fleet] ► target network = {target}");
             // stop the current node
-            if let Some(mut c) = child.take() {
+            if let Some(mut c) = take_child(&child_slot) {
                 node_up.store(false, Ordering::SeqCst);
                 let _ = c.kill();
                 let _ = c.wait();
@@ -274,7 +295,7 @@ fn main() {
             true
         } else {
             // No directive change — (re)start only if the node isn't running.
-            child.is_none()
+            child_slot.lock().unwrap().is_none()
         };
 
         if start_needed {
@@ -286,32 +307,208 @@ fn main() {
             match start_node(&node_bin, &node_data, &chain, &bootnodes, &node_args) {
                 Ok(c) => {
                     node_up.store(true, Ordering::SeqCst);
-                    child = Some(c);
+                    *child_slot.lock().unwrap() = Some(c);
                 }
                 Err(e) => println!("[fleet] ERROR {e}"),
             }
         }
 
         // supervise: restart if the node exited
-        if let Some(c) = child.as_mut() {
-            match c.try_wait() {
-                Ok(Some(status)) => {
-                    println!("[fleet] node exited ({status}) — restarting");
-                    node_up.store(false, Ordering::SeqCst);
-                    let net = current.clone().unwrap_or_default();
-                    let (chain, bootnodes) = net_of(&networks, &net);
-                    if let Ok(c2) =
-                        start_node(&node_bin, &node_data, &chain, &bootnodes, &node_args)
-                    {
-                        node_up.store(true, Ordering::SeqCst);
-                        child = Some(c2);
-                    }
-                }
-                Ok(None) => {}
+        let exited = {
+            let mut slot = child_slot.lock().unwrap();
+            match slot.as_mut() {
+                Some(c) => match c.try_wait() {
+                    Ok(Some(status)) => Some(Ok(status)),
+                    Ok(None) => None,
+                    Err(e) => Some(Err(e.to_string())),
+                },
+                None => None,
+            }
+        };
+        if let Some(res) = exited {
+            match res {
+                Ok(status) => println!("[fleet] node exited ({status}) — restarting"),
                 Err(e) => println!("[fleet] try_wait error: {e}"),
             }
+            node_up.store(false, Ordering::SeqCst);
+            *child_slot.lock().unwrap() = None;
         }
 
         std::thread::sleep(Duration::from_secs(poll));
+    }
+}
+
+/// Take the child out of the shared slot (leaving `None`).
+fn take_child(slot: &Arc<Mutex<Option<Child>>>) -> Option<Child> {
+    slot.lock().unwrap().take()
+}
+
+/// The fleet supervisor's half of a self-heal: stop the node we own, and let the
+/// main loop start a fresh one when the repair is done.
+struct FleetNode {
+    slot: Arc<Mutex<Option<Child>>>,
+    hold: Arc<AtomicBool>,
+}
+
+impl gpn_agent::selfheal::NodeControl for FleetNode {
+    fn stop(&self) -> Result<(), String> {
+        // Hold first: the main loop respawns on exit, and a respawn during the
+        // rename would reopen the DB we are moving.
+        self.hold.store(true, Ordering::SeqCst);
+        let child = take_child(&self.slot);
+        let Some(mut c) = child else {
+            return Ok(());
+        };
+        let pid = c.id();
+        let _ = c.kill();
+        // Escalate: a node that ignores the kill must not let us rename a live DB.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            match c.try_wait() {
+                Ok(Some(_)) => return Ok(()),
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                Ok(None) => {
+                    self.hold.store(false, Ordering::SeqCst);
+                    return Err(format!(
+                        "node child (pid {pid}) did not stop within 60s — refusing to move a live DB"
+                    ));
+                }
+                Err(e) => {
+                    self.hold.store(false, Ordering::SeqCst);
+                    return Err(format!("try_wait (pid {pid}): {e}"));
+                }
+            }
+        }
+    }
+    fn start(&self) -> Result<(), String> {
+        // The main loop starts the node on its next pass (≤ one poll interval).
+        self.hold.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// Run the divergence self-heal for a fleet-supervised node.
+fn spawn_self_heal(
+    base: &str,
+    rpc_port: u16,
+    slot: Arc<Mutex<Option<Child>>>,
+    hold: Arc<AtomicBool>,
+    node_up: Arc<AtomicBool>,
+) {
+    let enabled = !matches!(
+        std::env::var("GPN_SELF_HEAL")
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("0") | Some("false") | Some("off") | Some("no")
+    );
+    if !enabled {
+        println!("[fleet] self-heal disabled (GPN_SELF_HEAL=0)");
+        return;
+    }
+    let base = if base.trim().is_empty() {
+        {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+            std::path::PathBuf::from(home).join(".gpn/node")
+        }
+    } else {
+        std::path::PathBuf::from(base)
+    };
+    let Some(snap) = snapshot_bin() else {
+        println!(
+            "[fleet] self-heal DISABLED: gpn_snapshot is not next to this binary, so a fork              could not be repaired (set GPN_SNAPSHOT_BIN)"
+        );
+        return;
+    };
+    let meta_src = std::env::var("GPN_SNAPSHOT_META_URL")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| gpn_agent::selfheal::DEFAULT_SNAPSHOT_META_URL.to_string());
+    let interval = std::env::var("GPN_SELF_HEAL_CHECK_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(gpn_agent::selfheal::CHECK_INTERVAL_SECS)
+        .max(60);
+    let start_delay = std::env::var("GPN_SELF_HEAL_START_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(120);
+
+    let wc = gpn_agent::selfheal::WatchConfig {
+        check: gpn_agent::selfheal::CheckConfig {
+            rpc: format!("http://127.0.0.1:{rpc_port}"),
+            base: base.clone(),
+            meta_src,
+            pubkey_hex: gpn_agent::update::RELEASE_PUBKEY_HEX.to_string(),
+            ledger: None,
+        },
+        snapshot_dir: base.join("snapshots"),
+        interval_secs: interval,
+        start_delay_secs: start_delay,
+    };
+    let control = FleetNode {
+        slot: slot.clone(),
+        hold: hold.clone(),
+    };
+    let import = move |snapshot: &std::path::Path, b: &std::path::Path| {
+        let mut cmd = std::process::Command::new(&snap);
+        cmd.arg("import")
+            .arg("--snapshot")
+            .arg(snapshot)
+            .arg("--base-path")
+            .arg(b)
+            .arg("--pruning")
+            .arg(if b.join(".gpn-pruning-archive").is_file() {
+                "archive"
+            } else {
+                "none"
+            });
+        let out = cmd
+            .output()
+            .map_err(|e| format!("spawn {}: {e}", snap.display()))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "{} import exited {}: {}",
+                snap.display(),
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))
+        }
+    };
+    let up = move || node_up.load(Ordering::SeqCst);
+    let busy = || gpn_agent::selfheal::job_in_flight();
+    let stop = Arc::new(AtomicBool::new(false));
+    let sleep = |secs: u64| std::thread::sleep(Duration::from_secs(secs));
+    let log = |line: &str| {
+        let line = line.strip_prefix("self-heal: ").unwrap_or(line);
+        println!("[fleet] self-heal: {line}");
+    };
+    std::thread::spawn(move || {
+        gpn_agent::selfheal::watch(wc, &control, &import, &up, &busy, &stop, &sleep, &log);
+    });
+}
+
+/// `gpn_snapshot` next to this executable (the release ships them together).
+fn snapshot_bin() -> Option<std::path::PathBuf> {
+    if let Some(p) = std::env::var("GPN_SNAPSHOT_BIN")
+        .ok()
+        .filter(|v| !v.is_empty())
+    {
+        return Some(std::path::PathBuf::from(p));
+    }
+    let mut p = std::env::current_exe().ok()?;
+    p.set_file_name(if cfg!(windows) {
+        "gpn_snapshot.exe"
+    } else {
+        "gpn_snapshot"
+    });
+    if p.is_file() {
+        Some(p)
+    } else {
+        None
     }
 }

@@ -183,7 +183,7 @@ _fast_sync_try() {
   # nothing to undo except our own temp dir.
   local stage="$work/stage"
   log "importing snapshot (archive pruning) — a few minutes…"
-  if ! "$snap_bin" import --snapshot "$arch" --base-path "$stage" --pruning archive >>"$work/import.log" 2>&1; then
+  if ! "$snap_bin" import --snapshot "$arch" --base-path "$stage" >>"$work/import.log" 2>&1; then
     fast_sync_fallback "snapshot import failed: $(tail -n1 "$work/import.log" 2>/dev/null)"; return 0
   fi
   if [ ! -d "$stage/chains" ]; then fast_sync_fallback "import produced no chains/ dir"; return 0; fi

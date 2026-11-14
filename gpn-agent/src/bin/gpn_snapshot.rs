@@ -542,7 +542,16 @@ fn export(a: &Args) -> Result<(), String> {
         chain_dir: chain_dir.clone(),
         db_relative_path: format!("chains/{chain_dir}/db"),
         live_export,
-        pruning: read_pruning_marker(base),
+        // Record the truth about the source DB. Absence of the archive marker is
+        // not "unknown": every `gpn_node` before 2026-10 creates its DB with the
+        // legacy constrained default (256 blocks), and a marker is only written
+        // by a fresh archive import. Saying "none" here is what stops an importer
+        // from stamping `archive` on a 256 DB — the mismatch that left box 1
+        // unable to start after its first heal (2026-11-13).
+        pruning: Some(match read_pruning_marker(base) {
+            Some(p) => p,
+            None => "none".to_string(),
+        }),
         ..Default::default()
     };
     m.created_at_iso = iso8601(m.created_at);
@@ -774,10 +783,18 @@ fn import(a: &Args) -> Result<(), String> {
             }
         }
         "none" => {
-            println!(
-                "   pruning:      left as-is (no {} marker written \u{2014} gpn_node will not force archive)",
-                PRUNING_MARKER
-            );
+            if defaulted {
+                println!(
+                    "   pruning:      left as-is ({} carries no pruning field \u{2014} not guessing: \
+                     a marker is a claim about the DB, so none is written)",
+                    MANIFEST_NAME
+                );
+            } else {
+                println!(
+                    "   pruning:      left as-is (no {} marker written \u{2014} gpn_node will not force archive)",
+                    PRUNING_MARKER
+                );
+            }
         }
         other => {
             return Err(format!("--pruning {other}: expected 'archive' or 'none'"));
@@ -787,10 +804,18 @@ fn import(a: &Args) -> Result<(), String> {
 }
 
 /// Resolve the pruning mode an `import` should stamp, in priority order:
-/// explicit `--pruning` value, else the manifest's `pruning` field, else the
-/// **archive** default (a `gpn_snapshot` export from a modern `gpn-node` is
-/// archive; older manifests carry no field). The returned value is
-/// lower-cased/trimmed; validation happens in the caller.
+/// explicit `--pruning` value, else the manifest's `pruning` field, else
+/// **none** — leave the imported DB's stored mode alone and claim nothing.
+///
+/// The default used to be `archive`, on the theory that "a modern export is an
+/// archive node". That theory was wrong for this fleet: `gpn_node` never creates
+/// an archive DB unless it imports one, so nearly every DB in existence is
+/// constrained to 256 blocks. Stamping `archive` on such a DB makes the node
+/// refuse to start (`Incompatible pruning modes [stored: Constrained(256)];
+/// requested: ArchiveAll]`) — a self-heal that heals a fork into a crash loop.
+/// A marker is a *claim* about the bytes; without the manifest saying so, we do
+/// not make it. Exports written since 2026-11-13 always carry the field.
+/// The returned value is lower-cased/trimmed; validation happens in the caller.
 fn effective_import_pruning(explicit: Option<&str>, manifest: Option<&str>) -> String {
     let norm = |s: &str| s.trim().to_ascii_lowercase();
     if let Some(e) = explicit {
@@ -799,7 +824,7 @@ fn effective_import_pruning(explicit: Option<&str>, manifest: Option<&str>) -> S
     if let Some(m) = manifest {
         return norm(m);
     }
-    "archive".to_string()
+    "none".to_string()
 }
 
 fn extract<R: Read>(
@@ -1318,9 +1343,10 @@ mod tests {
     }
 
     #[test]
-    fn import_pruning_defaults_to_archive_for_old_manifest() {
-        // Pre-marker export: manifest has NO pruning field → assume archive.
-        assert_eq!(effective_import_pruning(None, None), "archive");
+    fn import_pruning_defaults_to_none_for_old_manifest() {
+        // Pre-marker export: manifest has NO pruning field. Claiming `archive`
+        // would make a 256-constrained DB unstartable; leave it alone instead.
+        assert_eq!(effective_import_pruning(None, None), "none");
     }
 
     #[test]

@@ -884,13 +884,22 @@ pub fn plan_recovery(
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("gpn-snapshot-{block}.tar.gz"));
             let dest = download_dir.join(name);
-            log(&format!(
-                "self-heal: downloading {} -> {}",
-                meta.url,
-                dest.display()
-            ));
-            download_snapshot(&meta.url, &dest)?;
-            dest
+            if meta.url.starts_with("http://") || meta.url.starts_with("https://") {
+                log(&format!(
+                    "self-heal: downloading {} -> {}",
+                    meta.url,
+                    dest.display()
+                ));
+                download_snapshot(&meta.url, &dest)?;
+                dest
+            } else {
+                // A local mirror (`file://` or a bare path) is legitimate for an
+                // air-gapped node: the digest check below is what makes it
+                // trustworthy, not the transport.
+                let src = meta.url.trim_start_matches("file://");
+                log(&format!("self-heal: using local snapshot {src}"));
+                PathBuf::from(src)
+            }
         }
     };
     // Trust the bytes before we trust the import (size + sha256 vs the signed
@@ -997,6 +1006,111 @@ pub fn now_unix() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+// ------------------------------------------------------------------ schedule
+
+/// Everything the periodic check needs. Built by a supervisor from the node's
+/// own config — never from a launcher line that could be missing.
+pub struct WatchConfig {
+    pub check: CheckConfig,
+    /// Where a downloaded archive is kept (`<base>/snapshots` in production).
+    pub snapshot_dir: PathBuf,
+    /// Seconds between checks (design: 5 minutes).
+    pub interval_secs: u64,
+    /// Seconds to wait before the first (startup) check, so a booting node's RPC
+    /// is answering before "unreadable" is even possible.
+    pub start_delay_secs: u64,
+}
+
+/// One tick of the schedule: run the check and, if it scheduled a recovery,
+/// perform it. Returns `Ok(true)` when a recovery was attempted.
+///
+/// Split out from [`watch`] so the whole production sequence is callable once —
+/// the supervisor's loop and the integration test both go through here.
+pub fn tick(
+    cfg: &WatchConfig,
+    control: &dyn NodeControl,
+    import: &dyn Fn(&Path, &Path) -> Result<(), String>,
+    log: Log,
+) -> Result<bool, String> {
+    let out = check(&cfg.check, now_unix(), log);
+    let Some((obs, fork_dir)) = out.recovery() else {
+        return Ok(false);
+    };
+    // Re-read the document: the archive's size/sha256 must be verified against
+    // the same bytes `check` decided on, not a re-fetch that could differ.
+    let meta_src = &cfg.check.meta_src;
+    let meta_bytes =
+        load_meta_bytes(meta_src).map_err(|e| format!("cannot reload metadata: {e}"))?;
+    let meta = verify_snapshot_meta(&meta_bytes, &cfg.check.pubkey_hex, None)
+        .map_err(|e| format!("metadata re-verify failed: {e}"))?;
+    let ledger = cfg
+        .check
+        .ledger
+        .clone()
+        .unwrap_or_else(|| ledger_path(&cfg.check.base));
+    let plan = plan_recovery(
+        &meta,
+        &meta_bytes,
+        &cfg.check.pubkey_hex,
+        &cfg.check.base,
+        &ledger,
+        None,
+        &cfg.snapshot_dir,
+        obs.local_hash.clone().unwrap_or_default(),
+        now_unix(),
+        log,
+    )
+    .map_err(|e| format!("recovery NOT started ({e}) — node left running"))?;
+    let plan = RecoveryPlan {
+        fork_dir: fork_dir.clone(),
+        ..plan
+    };
+    perform_recovery(&plan, control, import, log)?;
+    Ok(true)
+}
+
+/// The schedule: check at startup, then every `interval_secs`, until `stop`.
+///
+/// Skips a tick (and says why) when the node child is down — a restarting node
+/// is not a diverged one — or when a GPU job is in flight: an automatic repair
+/// must never interrupt work that is being paid for.
+pub fn watch(
+    cfg: WatchConfig,
+    control: &dyn NodeControl,
+    import: &dyn Fn(&Path, &Path) -> Result<(), String>,
+    node_up: &dyn Fn() -> bool,
+    busy: &dyn Fn() -> bool,
+    stop: &std::sync::atomic::AtomicBool,
+    sleep: &dyn Fn(u64),
+    log: Log,
+) {
+    use std::sync::atomic::Ordering;
+    log(&format!(
+        "armed: signed checkpoint {} every {}s (base {})",
+        cfg.check.meta_src,
+        cfg.interval_secs,
+        cfg.check.base.display()
+    ));
+    let mut delay = cfg.start_delay_secs;
+    loop {
+        if delay > 0 {
+            sleep(delay);
+        }
+        if stop.load(Ordering::SeqCst) {
+            break;
+        }
+        if !node_up() {
+            log("divergence check skipped: node child is down");
+        } else if busy() {
+            log("divergence check skipped: a GPU job is in flight");
+        } else if let Err(e) = tick(&cfg, control, import, log) {
+            log(&format!("recovery failed: {e}"));
+        }
+        delay = cfg.interval_secs;
+    }
+    log("watchdog exiting");
 }
 
 #[cfg(test)]

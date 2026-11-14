@@ -293,7 +293,7 @@ jobs:
           echo [gpn] fast sync unavailable [downloaded bytes failed verification] - falling back to a normal full peer sync.
           goto :gpn_fast_sync_cleanup
           )
-          "%GPN_BIN%\gpn_snapshot.exe" import --snapshot "%GPN_FS_TMP%\snap.tar.gz" --base-path "%GPN_FS_TMP%\stage" --pruning archive
+          "%GPN_BIN%\gpn_snapshot.exe" import --snapshot "%GPN_FS_TMP%\snap.tar.gz" --base-path "%GPN_FS_TMP%\stage"
           if errorlevel 1 (
           echo [gpn] fast sync unavailable [snapshot import failed] - falling back to a normal full peer sync.
           goto :gpn_fast_sync_cleanup

@@ -3081,6 +3081,9 @@ fn spawn_self_heal_watchdog(
     shutdown: Arc<AtomicBool>,
     hold: Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<()> {
+    // ON by default. There is no launcher line, flag or env var required for a
+    // node to be able to repair itself: the signed snapshot URL is compiled in,
+    // and `GPN_SELF_HEAL=0` exists only so a debugger can park the loop.
     let enabled = !matches!(
         env_or_lower("GPN_SELF_HEAL").as_deref(),
         Some("0") | Some("false") | Some("off") | Some("no")
@@ -3094,153 +3097,88 @@ fn spawn_self_heal_watchdog(
         .max(60);
     let start_delay = env_u64("GPN_SELF_HEAL_START_SECS").unwrap_or(120);
     let snap = snapshot_bin();
+    let snapshot_dir = base.join("snapshots");
 
     std::thread::spawn(move || {
         if !enabled {
             log_event("self-heal", "disabled (GPN_SELF_HEAL=0)");
             return;
         }
-        log_event(
-            "self-heal",
-            &format!(
-                "armed: signed checkpoint {} every {check_secs}s (base {})",
+        let Some(bin) = snap else {
+            // Not a silent no-op: a node that cannot import a snapshot cannot
+            // heal itself, and the operator must know before the fork happens.
+            log_event(
+                "self-heal",
+                "DISABLED: gpn_snapshot is not next to this binary, so a fork could not be \
+                 repaired (set GPN_SNAPSHOT_BIN; the release bundle ships it alongside)",
+            );
+            return;
+        };
+
+        let wc = gpn_agent::selfheal::WatchConfig {
+            check: gpn_agent::selfheal::CheckConfig {
+                rpc,
+                base: base.clone(),
                 meta_src,
-                base.display()
-            ),
-        );
-        // Give the node time to answer RPC before the first (startup) check.
-        sleep_steps(&shutdown, start_delay * 1000);
-        loop {
-            if shutdown.load(Ordering::SeqCst) {
-                break;
-            }
-            let (up, _) = {
-                let m = shared.lock().unwrap();
-                m.get("node").map(|s| (s.up, s.pid)).unwrap_or((false, 0))
-            };
-            let busy = gpn_agent::selfheal::job_in_flight();
-            if !up || busy {
-                log_event(
-                    "self-heal",
-                    &format!(
-                        "divergence check skipped: {}",
-                        if !up {
-                            "node child is down"
-                        } else {
-                            "a GPU job is in flight"
-                        }
-                    ),
-                );
+                pubkey_hex: gpn_agent::update::RELEASE_PUBKEY_HEX.to_string(),
+                ledger: None,
+            },
+            snapshot_dir,
+            interval_secs: check_secs,
+            start_delay_secs: start_delay,
+        };
+        let control = SupervisedNode {
+            shared: shared.clone(),
+            hold: hold.clone(),
+        };
+        let import = move |snapshot: &Path, base: &Path| {
+            // The pruning mode is decided by the snapshot's own manifest; what
+            // we must NOT do is let a default claim a mode the DB does not have
+            // (box 1, 2026-11-13: import stamped `archive` on a 256-constrained
+            // DB and the node could never start again).
+            let mut cmd = std::process::Command::new(&bin);
+            cmd.arg("import")
+                .arg("--snapshot")
+                .arg(snapshot)
+                .arg("--base-path")
+                .arg(base)
+                .arg("--pruning")
+                .arg(if base.join(".gpn-pruning-archive").is_file() {
+                    "archive"
+                } else {
+                    "none"
+                });
+            let out = cmd
+                .output()
+                .map_err(|e| format!("spawn {}: {e}", bin.display()))?;
+            if out.status.success() {
+                Ok(())
             } else {
-                let cfg = gpn_agent::selfheal::CheckConfig {
-                    rpc: rpc.clone(),
-                    base: base.clone(),
-                    meta_src: meta_src.clone(),
-                    pubkey_hex: gpn_agent::update::RELEASE_PUBKEY_HEX.to_string(),
-                    ledger: None,
-                };
-                let log = |line: &str| {
-                    // The lib's lines already name themselves (`self-heal: …`,
-                    // `divergence …`); do not stutter the tag.
-                    let line = line.strip_prefix("self-heal: ").unwrap_or(line);
-                    log_event("self-heal", line)
-                };
-                let out = gpn_agent::selfheal::check(&cfg, gpn_agent::selfheal::now_unix(), &log);
-                if let Some((obs, fork_dir)) = out.recovery() {
-                    let Some(bin) = snap.clone() else {
-                        log_event(
-                            "self-heal",
-                            "FORK CONFIRMED but gpn_snapshot is not next to this binary — \
-                             cannot heal (set GPN_SNAPSHOT_BIN). Needs a human.",
-                        );
-                        sleep_steps(&shutdown, check_secs * 1000);
-                        continue;
-                    };
-                    // Re-resolve the archive against the signed bytes: check()
-                    // verified the document, plan_recovery() verifies the file.
-                    let meta_bytes = match gpn_agent::selfheal::load_meta_bytes(&meta_src) {
-                        Ok(b) => b,
-                        Err(e) => {
-                            log_event("self-heal", &format!("cannot reload metadata: {e}"));
-                            sleep_steps(&shutdown, check_secs * 1000);
-                            continue;
-                        }
-                    };
-                    let meta = match gpn_agent::selfheal::verify_snapshot_meta(
-                        &meta_bytes,
-                        gpn_agent::update::RELEASE_PUBKEY_HEX,
-                        None,
-                    ) {
-                        Ok(m) => m,
-                        Err(e) => {
-                            log_event("self-heal", &format!("metadata re-verify failed: {e}"));
-                            sleep_steps(&shutdown, check_secs * 1000);
-                            continue;
-                        }
-                    };
-                    let ledger = gpn_agent::selfheal::ledger_path(&base);
-                    let plan = gpn_agent::selfheal::plan_recovery(
-                        &meta,
-                        &meta_bytes,
-                        gpn_agent::update::RELEASE_PUBKEY_HEX,
-                        &base,
-                        &ledger,
-                        None,
-                        &base.join("snapshots"),
-                        obs.local_hash.clone().unwrap_or_default(),
-                        gpn_agent::selfheal::now_unix(),
-                        &log,
-                    );
-                    match plan {
-                        Err(e) => log_event(
-                            "self-heal",
-                            &format!("recovery NOT started ({e}) — node left running"),
-                        ),
-                        Ok(plan) => {
-                            let plan = gpn_agent::selfheal::RecoveryPlan {
-                                fork_dir: fork_dir.clone(),
-                                ..plan
-                            };
-                            let control = SupervisedNode {
-                                shared: shared.clone(),
-                                hold: hold.clone(),
-                            };
-                            let base_for_import = base.clone();
-                            let bin_for_import = bin.clone();
-                            let import = move |snapshot: &Path, _base: &Path| {
-                                let out = std::process::Command::new(&bin_for_import)
-                                    .arg("import")
-                                    .arg("--snapshot")
-                                    .arg(snapshot)
-                                    .arg("--base-path")
-                                    .arg(&base_for_import)
-                                    .output()
-                                    .map_err(|e| {
-                                        format!("spawn {}: {e}", bin_for_import.display())
-                                    })?;
-                                if out.status.success() {
-                                    Ok(())
-                                } else {
-                                    Err(format!(
-                                        "{} import exited {}: {}",
-                                        bin_for_import.display(),
-                                        out.status,
-                                        String::from_utf8_lossy(&out.stderr).trim()
-                                    ))
-                                }
-                            };
-                            if let Err(e) = gpn_agent::selfheal::perform_recovery(
-                                &plan, &control, &import, &log,
-                            ) {
-                                log_event("self-heal", &format!("recovery failed: {e}"));
-                            }
-                        }
-                    }
-                }
+                Err(format!(
+                    "{} import exited {}: {}",
+                    bin.display(),
+                    out.status,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ))
             }
-            sleep_steps(&shutdown, check_secs * 1000);
-        }
-        log_event("self-heal", "watchdog exiting");
+        };
+        let node_up = {
+            let shared = shared.clone();
+            move || {
+                let m = shared.lock().unwrap();
+                m.get("node").map(|s| s.up).unwrap_or(false)
+            }
+        };
+        let busy = || gpn_agent::selfheal::job_in_flight();
+        let stop = shutdown.clone();
+        let sleep = |secs: u64| sleep_steps(&shutdown, secs * 1000);
+        let log = |line: &str| {
+            // The lib's lines already name themselves (`self-heal: …`,
+            // `divergence …`); do not stutter the tag.
+            let line = line.strip_prefix("self-heal: ").unwrap_or(line);
+            log_event("self-heal", line)
+        };
+        gpn_agent::selfheal::watch(wc, &control, &import, &node_up, &busy, &stop, &sleep, &log);
     })
 }
 
