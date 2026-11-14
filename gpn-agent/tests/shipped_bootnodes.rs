@@ -163,6 +163,11 @@ fn a_crlf_checkout_parses_to_the_same_lists() {
         let Some(lf) = read(surface.file) else {
             continue;
         };
+        // Normalise first: on a Windows checkout `read` already returns CRLF, and
+        // `"\r\n".replace('\n', "\r\n")` yields `"\r\r\n"`, which normalises back to
+        // CRLF — the test then panics on the same LF-shaped end marker it exists to
+        // guard. Both arms must start from the same LF text to mean anything.
+        let lf = normalise_newlines(&lf);
         let crlf = lf.replace('\n', "\r\n");
         assert!(
             crlf.contains('\r'),
