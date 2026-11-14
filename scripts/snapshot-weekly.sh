@@ -65,8 +65,9 @@ echo "[snapshot] checkpoint genesis=$GENESIS block=$BLOCK hash=$BLOCK_HASH"
 # node never reaches (box 1 was 117k behind and sat there indefinitely). Publish
 # anchors every ANCHOR_STEP blocks back ANCHOR_DEPTH blocks, so any node inside
 # that window is judged at the newest anchor it actually holds. Spacing/depth are
-# env-overridable; the defaults cover ~17 days at 10 s blocks in ~5 KB.
-ANCHOR_STEP="${GPN_SNAPSHOT_ANCHOR_STEP:-2000}"
+# env-overridable; the defaults cover ~17 days at 10 s blocks in ~12 KB (1,000
+# blocks ≈ 2.8 h of ground, so a recent fork is caught on the first check).
+ANCHOR_STEP="${GPN_SNAPSHOT_ANCHOR_STEP:-1000}"
 ANCHOR_DEPTH="${GPN_SNAPSHOT_ANCHOR_DEPTH:-150000}"
 ANCHOR_ARGS=""
 case "$BLOCK" in
