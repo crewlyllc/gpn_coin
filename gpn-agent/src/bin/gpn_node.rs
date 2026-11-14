@@ -2954,6 +2954,29 @@ fn spawn_stall_watchdog(
     })
 }
 
+/// Unconditional kill, used only after a graceful stop was ignored. The DB being
+/// discarded is a fork we are about to set aside, so an unclean exit costs
+/// nothing we keep.
+fn force_kill(pid: u32) {
+    #[cfg(unix)]
+    {
+        let _ = Command::new("kill")
+            .arg("-KILL")
+            .arg(pid.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/F", "/PID", &pid.to_string(), "/T"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
 // --------------------------------------------------------------- self-heal
 
 /// `gpn_snapshot` next to this executable (the release ships them together).
@@ -2999,7 +3022,14 @@ impl gpn_agent::selfheal::NodeControl for SupervisedNode {
         if up && pid != 0 {
             send_term(pid);
         }
+        // Escalate once, then give up. Windows `taskkill` without `/F` posts
+        // WM_CLOSE, which a console process with no window never sees (box 1,
+        // 2026-11-13: the node was still alive 60 s later, so the DB was left
+        // alone and the run recorded no recovery). Recovery must never rename a
+        // live RocksDB, so the choice is force-kill or refuse.
+        let soft = Instant::now() + Duration::from_secs(20);
         let deadline = Instant::now() + Duration::from_secs(60);
+        let mut forced = false;
         loop {
             let (up_now, _) = self.node_state();
             if !up_now {
@@ -3010,6 +3040,14 @@ impl gpn_agent::selfheal::NodeControl for SupervisedNode {
                 return Err(format!(
                     "node child (pid {pid}) did not stop within 60s — refusing to move a live DB"
                 ));
+            }
+            if !forced && Instant::now() >= soft {
+                log_event(
+                    "self-heal",
+                    &format!("node child (pid {pid}) ignored a graceful stop — forcing"),
+                );
+                force_kill(pid);
+                forced = true;
             }
             std::thread::sleep(Duration::from_millis(250));
         }
@@ -3101,7 +3139,12 @@ fn spawn_self_heal_watchdog(
                     pubkey_hex: gpn_agent::update::RELEASE_PUBKEY_HEX.to_string(),
                     ledger: None,
                 };
-                let log = |line: &str| log_event("self-heal", line);
+                let log = |line: &str| {
+                    // The lib's lines already name themselves (`self-heal: …`,
+                    // `divergence …`); do not stutter the tag.
+                    let line = line.strip_prefix("self-heal: ").unwrap_or(line);
+                    log_event("self-heal", line)
+                };
                 let out = gpn_agent::selfheal::check(&cfg, gpn_agent::selfheal::now_unix(), &log);
                 if let Some((obs, fork_dir)) = out.recovery() {
                     let Some(bin) = snap.clone() else {

@@ -910,9 +910,10 @@ pub fn plan_recovery(
 
 /// The recovery sequence (design §"Recovery sequence"), unchanged in order:
 ///
-/// 1. write the record with `completed: false` — the window is consumed *before*
+/// 1. stop the node (fatal if it fails, and nothing is written: a stop that
+///    failed has not touched the DB and must not consume the window);
+/// 2. write the record with `completed: false` — the window is consumed *before*
 ///    the destructive step, so a crash mid-repair can never loop;
-/// 2. stop the node (fatal if it fails);
 /// 3. `chains/` → `chains-fork-<ts>` (rename, never delete, never reuse);
 /// 4. import the archive (caller's closure — no duplicate extractor);
 /// 5. mark the record complete and start the node.
@@ -936,9 +937,16 @@ pub fn perform_recovery(
         completed: false,
         detail: "started".into(),
     };
+
+    // Stop FIRST. Nothing has been touched yet, so a stop that fails must not
+    // consume the 24 h window: the node is still serving its (wrong) chain and
+    // the next tick may well succeed (a job finishing, a slow shutdown). The
+    // window is written below, before the first destructive step.
+    control.stop()?;
+
+    // From here the window is consumed even if the process dies mid-repair.
     write_recovery(&plan.ledger, &rec)?;
 
-    control.stop()?;
     let chains = plan.base.join("chains");
     if chains.exists() {
         fs::rename(&chains, &plan.fork_dir).map_err(|e| {
@@ -1412,6 +1420,45 @@ mod tests {
         let rec = read_recovery(&ledger).unwrap().unwrap();
         assert!(rec.completed);
         assert_eq!(rec.checkpoint_block, 297_000);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_stop_writes_no_ledger_and_touches_nothing() {
+        // Box 1, 2026-11-13: `taskkill` without /F left the node alive, the
+        // recovery refused to move a live DB — correctly — but had already
+        // written the ledger, which would have locked the box out of healing
+        // for 24 h over an attempt that touched nothing.
+        let dir = tmpdir("stopfail");
+        let chains = dir.join("chains");
+        fs::create_dir_all(chains.join("gpn_testnet")).unwrap();
+        let ledger = ledger_path(&dir);
+        let plan = RecoveryPlan {
+            base: dir.clone(),
+            ledger: ledger.clone(),
+            fork_dir: fork_dir_for(&dir, 7),
+            snapshot: dir.join("snap.tar.gz"),
+            checkpoint_block: 297_000,
+            checkpoint_hash: CANON.into(),
+            local_hash: FORK.into(),
+            now: 7,
+        };
+        struct Stuck;
+        impl NodeControl for Stuck {
+            fn stop(&self) -> Result<(), String> {
+                Err("node child did not stop within 60s".into())
+            }
+            fn start(&self) -> Result<(), String> {
+                panic!("must not start what was never stopped")
+            }
+        }
+        let (_, log) = log_sink();
+        assert!(perform_recovery(&plan, &Stuck, &|_, _| Ok(()), &log).is_err());
+        assert!(
+            read_recovery(&ledger).unwrap().is_none(),
+            "no ledger on a failed stop"
+        );
+        assert!(chains.join("gpn_testnet").exists(), "DB untouched");
         let _ = fs::remove_dir_all(&dir);
     }
 
