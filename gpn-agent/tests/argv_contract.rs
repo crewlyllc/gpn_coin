@@ -125,6 +125,14 @@ fn supervisor_child_flags() -> BTreeMap<String, BTreeSet<String>> {
         if is_comment(line) {
             continue;
         }
+        // A `has_flag(&cfg.node_args, "--x")` line INSPECTS the operator's args;
+        // it never pushes a flag into the child. Counting it made this test
+        // report `--pruning` (an alias the supervisor only *recognises*, it
+        // always pushes `--state-pruning`/`--blocks-pruning`) as an invented
+        // child flag — a false red on 2026-11-14 that held up a release.
+        if line.contains("has_flag(") {
+            continue;
+        }
         if line.contains("let mut argv = vec![") || line.contains("argv: vec![") {
             pending.clear();
         }
