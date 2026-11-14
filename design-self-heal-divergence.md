@@ -96,6 +96,47 @@ gap. The complete cure is a block server that caps repeated-request reputation
 instead of failing fatally (see the D8 report); this change makes the node stop
 classifying such a peer as healthy-behind and stop evicting it.
 
+## Checkpoint history (2026-11-13, late) — the stranded-node gap
+
+The single checkpoint was the snapshot's **own height**, and a stranded node
+is always *behind* it (box 1: `#280 614` vs `#294 496`). `NotYet` meant "behind
+is not forked", so nothing happened; box 1 only healed because a test
+checkpoint was hand-signed at its exact height. In production a stranded node
+never healed.
+
+The signed document now carries `checkpoints: [{block, hash}, ...]`, oldest
+first, and the comparison height is the **newest anchor at or below this node's
+height**:
+
+| position | verdict |
+|---|---|
+| hash at the selected anchor matches | `Match` → `Nothing` |
+| hash differs | `WrongChain` → `Recover`, however far behind |
+| node is below every anchor | `NotYet` — genuinely unjudgeable |
+
+Rules that keep it sound:
+
+- **Only the signed document decides.** No peer is consulted; an unverifiable
+  document yields no verdict and no repair.
+- The `checkpoints=` line is part of the canonical signed text **only when the
+  list is non-empty**, so every v2 document published before this change still
+  verifies byte-for-byte, and v1 documents are untouched. Removing a history
+  from a document that has one breaks the signature.
+- The list must be strictly ascending, every hash `0x` + 64 hex, and must
+  contain the document's own `block`/`block_hash`. Anchors **above** `block` are
+  allowed: they describe the signed branch, not the archive, so a node at the
+  tip is judged at the tip instead of at the archive's height.
+- A tampered list fails verification: nothing is healed and the DB is untouched.
+
+The publisher (`scripts/snapshot-weekly.sh`) gathers anchors from the local
+chain every 1,000 blocks back 150,000 (~17 days, ~12 KB) and refuses to publish
+if any historical hash is unreadable.
+
+Remaining limit, stated plainly: a node whose fork begins **above** the newest
+signed anchor cannot be judged until a newer document is published. Anchors
+bound detection to the last signed height; they do not remove the staleness of
+the weekly cadence.
+
 ## Scheduled (2026-11-13) — the part this design said was missing
 
 The section above ends with "Not in this change: wiring into a schedule". That
