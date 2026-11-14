@@ -26,13 +26,25 @@
 //! ## What changes, and what deliberately does not
 //!
 //! We serve the block protocol ourselves instead of letting the SDK's handler
-//! do it, and change **one** decision: the reputation change for the third and
-//! later identical request.
+//! do it, and change **one** decision: what a repeated identical request
+//! costs. The answer, from any peer on any branch, is **nothing fatal** — the
+//! ban for repeats is removed entirely (owner decision, 2026-11-14) and
+//! replaced with throttling.
 //!
-//! | repeated request from… | penalty |
-//! |---|---|
-//! | a peer whose claimed tip **is** a block we hold (it is on our chain) | unchanged: `SAME_REQUEST` (fatal) for a full request, `SAME_SMALL_REQUEST` (−1024) for a header/justification-only one |
-//! | a peer whose claimed tip we do **not** hold, or that never claimed one | `DIVERGED_SAME_REQUEST` (−1024), never fatal |
+//! | repeated request from… | reputation | service |
+//! |---|---|---|
+//! | a peer whose claimed tip **is** a block we hold (on our chain) | `PEER_ON_CHAIN_SAME_REQUEST` (−1024) | normal until the throttle window trips |
+//! | a peer whose claimed tip we do **not** hold, or that never claimed one | `DIVERGED_SAME_REQUEST` (−1024) | normal until the throttle window trips |
+//!
+//! Two independent bounds keep that from ever becoming a slow ban. First, the
+//! repeat penalty is charged against a **per-peer lifetime budget**
+//! ([`REPEAT_PENALTY_BUDGET`], 2^20 reputation units) which is ~1,450× smaller
+//! than the peer store's ban threshold (~71% of `i32::MIN`, −1.5e9): no number
+//! of repeats can accumulate into a ban, because after the budget is spent we
+//! simply stop reporting. Second, a peer that repeats itself more than
+//! [`MAX_REPEATS_PER_WINDOW`] times in [`THROTTLE_WINDOW`] stops being served
+//! the *full* request for the rest of that window — no data, no ban, no
+//! disconnect — and service resumes by itself when the window expires.
 //!
 //! Everything else is byte-for-byte the protocol's semantics: the same wire
 //! format, the same attributes check, the same 128-block / 16 MiB response
@@ -60,13 +72,12 @@
 //! ban, and neither invents data — the download side either asks the real peer
 //! or declines to ask at all.
 //!
-//! The leniency is bounded on purpose: the repeated full request is never
-//! answered (no bandwidth amplification), and each repeat still costs −1024, so
-//! a peer that hammers us is throttled and visible in the logs. The peer
-//! store's own ban threshold is 71% of `i32::MIN` (~−1.5e9), so −1024 can never
-//! accumulate into a ban by itself — that is the point: what is removed is the
-//! *instant* fatal ban that made a diverged peer unreachable forever, and it is
-//! not replaced with a slower one.
+//! The leniency is bounded on purpose, and the bound is the throttle, not a
+//! slower ban: the peer store's ban threshold is 71% of `i32::MIN` (~−1.5e9),
+//! the repeat penalty is −1024 charged against a 2^20 lifetime budget, and
+//! past the throttle window the full request is not answered at all (no
+//! bandwidth amplification). Nothing in this module ever disconnects, evicts,
+//! or reports `fatal` for a repeat.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -103,23 +114,55 @@ const MAX_BLOCKS_IN_RESPONSE: usize = 128;
 /// Unchanged from the SDK: the first delivery plus one repeat.
 const MAX_SAME_REQUESTS: usize = 2;
 
-/// Reputation changes, mirroring the SDK's names so an operator reading both
-/// logs sees the same vocabulary.
+/// How many identical requests for one range a peer may make inside one
+/// [`THROTTLE_WINDOW`] before we stop serving that full request.
+///
+/// Four is deliberately generous: a peer gap-filling across a fork re-asks a
+/// handful of times while it re-orgs its own view, and those repeats cost us
+/// nothing but 128 headers. A fifth identical request inside a minute is not a
+/// sync loop working itself out; it is a peer that is not going to be helped by
+/// more data this minute either.
+pub const MAX_REPEATS_PER_WINDOW: usize = 4;
+
+/// How long a throttled peer is left unserved for that range before normal
+/// service resumes on its own. There is no un-throttle event and no disconnect:
+/// the state is just the window's start instant.
+pub const THROTTLE_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Per-peer lifetime cap on the reputation this module will ever report for
+/// repeated block requests, in absolute units (2^20 = 1,048,576).
+///
+/// The peer store bans at 71% of `i32::MIN` (≈ −1.52e9), so this whole budget
+/// is ~1,450× below the threshold: a repeat can never accumulate into a ban,
+/// however many times it happens, and however long the peer stays connected.
+/// Once the budget is spent the repeats are simply not reported at all — the
+/// throttle is what limits the peer, not a growing reputation debt.
+pub const REPEAT_PENALTY_BUDGET: u32 = 1 << 20;
+
+/// Reputation changes, named so an operator reading the log and the SDK docs
+/// sees the same vocabulary.
 mod rep {
     use sc_network::ReputationChange as Rep;
 
-    /// A peer we know is on our chain keeps asking for the same blocks.
-    /// Fatal, exactly as upstream: this is not divergence.
+    /// The upstream rule, kept here only so the change is legible next to it:
+    /// `sc-network-sync` reports this (`Rep::new_fatal`) for the third
+    /// identical request, from every peer. This module no longer emits it —
+    /// the owner decision of 2026-11-14 removed the ban for repeats entirely.
+    #[allow(dead_code)]
     pub const SAME_REQUEST: Rep = Rep::new_fatal("Same block request multiple times");
 
-    /// The header/justification-only variant, unchanged from upstream.
-    pub const SAME_SMALL_REQUEST: Rep =
-        Rep::new(-(1 << 10), "same small block request multiple times");
+    /// A peer we know is on our chain keeps asking for the same blocks. It is
+    /// not divergence, but it is also not misbehaviour: it is worth −1024, the
+    /// same small report as the diverged case, and it is charged against
+    /// [`super::REPEAT_PENALTY_BUDGET`] so it can never reach the ban threshold.
+    pub const PEER_ON_CHAIN_SAME_REQUEST: Rep = Rep::new(
+        -(1 << 10),
+        "repeated block request from a peer on our chain",
+    );
 
     /// A peer whose best block we do not hold repeats itself. This is the
     /// gap-fill-across-a-fork shape, not misbehaviour: small, bounded, and
-    /// **never** fatal. The peer still walks toward a normal ban if it keeps
-    /// hammering, it just is not cut off in the first three seconds.
+    /// **never** fatal.
     pub const DIVERGED_SAME_REQUEST: Rep = Rep::new(
         -(1 << 10),
         "repeated block request from a peer on a branch we do not hold",
@@ -128,36 +171,59 @@ mod rep {
     /// Undecodable payload, unknown attribute bits, unencodable response:
     /// a genuine protocol violation. Upstream simply drops the response and
     /// reports nothing; we name it, because a peer that cannot speak the
-    /// protocol has nothing to do on this connection.
+    /// protocol has nothing to do on this connection. These stay fatal on
+    /// purpose: unlike a repeat, a payload we cannot decode carries no request
+    /// at all, so there is nothing to throttle and nothing to answer — leniency
+    /// here would only mean parsing garbage forever.
     pub const MALFORMED_REQUEST: Rep = Rep::new_fatal("Malformed block request");
 }
 
-/// The whole divergence policy for a repeated request, in one pure place so
-/// the tests exercise the same code the server runs.
+/// The whole policy for a repeated request, in one pure place so the tests
+/// exercise the same code the server runs.
 ///
 /// `peer_tip_known` is the client's answer to "is the asking peer's best block
 /// a block we hold?": `Some(true)` = yes (peer is on our chain), `Some(false)`
-/// = no, `None` = it never told us or the lookup failed. Only `Some(true)`
-/// earns the upstream fatal penalty; everything else is divergence-shaped and
-/// capped at a small, non-fatal report.
-pub fn repeat_penalty(
-    repeats: usize,
-    small_request: bool,
-    peer_tip_known: Option<bool>,
-) -> Option<ReputationChange> {
-    if repeats <= MAX_SAME_REQUESTS {
-        return None;
-    }
-    Some(match peer_tip_known {
-        Some(true) => {
-            if small_request {
-                rep::SAME_SMALL_REQUEST
-            } else {
-                rep::SAME_REQUEST
-            }
-        }
+/// = no, `None` = it never told us or the lookup failed. **Neither answer is
+/// fatal.** The two cases are distinguished only so the log and the metrics
+/// keep telling divergence from an ordinary repeat.
+pub fn repeat_penalty(peer_tip_known: Option<bool>) -> ReputationChange {
+    match peer_tip_known {
+        Some(true) => rep::PEER_ON_CHAIN_SAME_REQUEST,
         _ => rep::DIVERGED_SAME_REQUEST,
-    })
+    }
+}
+
+/// Lifetime reputation budget for one peer's repeat penalties.
+///
+/// This is the guarantee behind "never enough to reach the ban threshold no
+/// matter how many times it happens": the total we can ever report is bounded
+/// by [`REPEAT_PENALTY_BUDGET`], independent of the number of repeats.
+#[derive(Debug, Default)]
+pub struct RepeatBudget {
+    spent: u32,
+}
+
+impl RepeatBudget {
+    /// Charge `amount` (negative units) if the budget allows it.
+    ///
+    /// Returns `None` once the budget is spent — the caller then reports no
+    /// reputation change at all, and the throttle does the limiting.
+    pub fn charge(&mut self, amount: ReputationChange) -> Option<ReputationChange> {
+        let want = amount.value.unsigned_abs();
+        let remaining = REPEAT_PENALTY_BUDGET.saturating_sub(self.spent);
+        let actual = want.min(remaining);
+        self.spent = self.spent.saturating_add(actual);
+        if actual == 0 {
+            None
+        } else {
+            Some(ReputationChange::new(-(actual as i32), amount.reason))
+        }
+    }
+
+    /// Total charged so far, in absolute units (for tests and a status line).
+    pub fn spent(&self) -> u32 {
+        self.spent
+    }
 }
 
 /// Per-peer chain-state claims, shared with the `gpn/chain/1` task.
@@ -287,12 +353,83 @@ impl<B: BlockT> std::hash::Hash for SeenRequestsKey<B> {
     }
 }
 
-/// How many times we have answered this exact request for this peer.
+/// Per (peer, request) repeat and throttle state, in one pure type so the
+/// tests can drive the same state machine the server runs, clock included.
+#[derive(Debug)]
+pub struct RepeatState {
+    /// Deliveries of this exact request to this peer since the window opened
+    /// (the first delivery counts as 1).
+    repeats: usize,
+    /// When the current throttle window opened.
+    window_start: std::time::Instant,
+    /// Set when we printed the throttle line for this window, so a peer that
+    /// keeps asking produces one INFO line per window, not one per request.
+    logged: bool,
+}
+
+/// What to do with a request we have answered before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepeatDecision {
+    /// Answer normally, no penalty (the repeat allowance is not exhausted).
+    Fresh,
+    /// Answer normally, small non-fatal penalty. `first_in_streak` is true for
+    /// the first penalised repeat of a window, so the warning is printed once.
+    Repeat { first_in_streak: bool },
+    /// Stop answering the **full** request for the rest of the window. `count`
+    /// is how many identical requests this window has seen; `log` is true on
+    /// the request that trips the throttle, so the INFO line is printed once.
+    Throttled { count: usize, log: bool },
+}
+
+impl RepeatState {
+    /// State after the first delivery of a request.
+    pub fn new(now: std::time::Instant) -> Self {
+        Self {
+            repeats: 1,
+            window_start: now,
+            logged: false,
+        }
+    }
+
+    /// How many identical requests this window has seen.
+    pub fn repeats(&self) -> usize {
+        self.repeats
+    }
+
+    /// Observe one more identical request at `now`.
+    pub fn observe(&mut self, now: std::time::Instant) -> RepeatDecision {
+        // A window that has run out simply restarts: normal service resumes by
+        // itself, with no un-ban event and no disconnect to forget.
+        if now.saturating_duration_since(self.window_start) >= THROTTLE_WINDOW {
+            self.repeats = 0;
+            self.window_start = now;
+            self.logged = false;
+        }
+        self.repeats = self.repeats.saturating_add(1);
+
+        if self.repeats > MAX_REPEATS_PER_WINDOW {
+            let log = !self.logged;
+            self.logged = true;
+            RepeatDecision::Throttled {
+                count: self.repeats,
+                log,
+            }
+        } else if self.repeats > MAX_SAME_REQUESTS {
+            RepeatDecision::Repeat {
+                first_in_streak: self.repeats == MAX_SAME_REQUESTS + 1,
+            }
+        } else {
+            RepeatDecision::Fresh
+        }
+    }
+}
+
+/// One entry of the "have we seen this exact request before" map.
 enum SeenRequestsValue {
     /// Seen once, not (yet) answered with data.
     First,
-    /// Answered with data `n` times.
-    Fulfilled(usize),
+    /// Answered with data at least once; carries the repeat/throttle state.
+    Fulfilled(RepeatState),
 }
 
 /// The serving side of the block protocol.
@@ -301,6 +438,9 @@ pub struct DivergenceTolerantBlockServer<B: BlockT, Client> {
     request_receiver: Receiver<IncomingRequest>,
     seen_requests: LruMap<SeenRequestsKey<B>, SeenRequestsValue>,
     tips: Arc<PeerTips>,
+    /// Lifetime repeat-penalty budget per peer: the hard guarantee that no
+    /// number of identical requests can ever reach the ban threshold.
+    repeat_budgets: HashMap<PeerId, RepeatBudget>,
     /// Last time we printed the divergence line per peer, so a peer that keeps
     /// asking produces one line a minute instead of one per request.
     explained: HashMap<PeerId, std::time::Instant>,
@@ -345,6 +485,7 @@ where
             request_receiver,
             seen_requests,
             tips,
+            repeat_budgets: HashMap::new(),
             explained: HashMap::new(),
         };
         Ok((Box::new(server), protocol_config))
@@ -424,28 +565,61 @@ where
             small_request,
         } = parsed;
 
-        let mut reputation_change: Option<ReputationChange> = None;
-        let mut just_crossed = None;
+        let now = std::time::Instant::now();
+        let peer_tip_known = self.peer_tip_known(peer);
+        // `Some(count)` when the throttle is in force: the full request is not
+        // answered for the rest of the window.
+        let mut throttle: Option<(usize, bool)> = None;
+        let mut just_crossed: Option<ReputationChange> = None;
+        let mut penalise = false;
+
+        // The decision is made (and the state advanced) under one borrow of the
+        // map; the reputation charge happens after it, because it needs `self`
+        // mutably for the budget table.
         match self.seen_requests.get(&key) {
             Some(SeenRequestsValue::First) => {}
-            Some(SeenRequestsValue::Fulfilled(ref mut requests)) => {
-                *requests = requests.saturating_add(1);
-                let repeats = *requests;
-                reputation_change =
-                    repeat_penalty(repeats, small_request, self.peer_tip_known(peer));
-                if repeats == MAX_SAME_REQUESTS + 1 {
-                    just_crossed = reputation_change;
+            Some(SeenRequestsValue::Fulfilled(state)) => match state.observe(now) {
+                RepeatDecision::Fresh => {}
+                RepeatDecision::Repeat { first_in_streak } => {
+                    penalise = true;
+                    if first_in_streak {
+                        just_crossed = Some(repeat_penalty(peer_tip_known));
+                    }
                 }
-            }
+                RepeatDecision::Throttled { count, log } => {
+                    penalise = true;
+                    throttle = Some((count, log));
+                }
+            },
             None => {
                 self.seen_requests
                     .insert(key.clone(), SeenRequestsValue::First);
             }
         }
 
-        // The one place the policy change is visible in the log. Repeated
-        // *servable* requests from a known-good peer stay quiet (upstream is
-        // quiet too); a diverged peer is named once per streak.
+        // Still charged while throttled (and still bounded by the lifetime
+        // budget), but the answer is what changes: nothing, until the window
+        // expires.
+        let reputation_change = if penalise {
+            self.charge_repeat_budget(peer, repeat_penalty(peer_tip_known))
+        } else {
+            None
+        };
+
+        if let Some((count, true)) = throttle {
+            info!(
+                "block-serving: throttling {peer} — {count} identical requests for \
+                 {from_block_id:?} (up to {max_blocks} blocks, {direction:?}) inside {} s. \
+                 Answering nothing for this range until the window expires; no ban, no \
+                 disconnect, and the link keeps serving other ranges.",
+                THROTTLE_WINDOW.as_secs(),
+            );
+        }
+
+        // The one place the policy change is visible in the log: a diverged
+        // peer is named once per streak, with the facts the decision used.
+        // A peer on our chain gets the throttle line above instead, because
+        // that is the only thing that happens to it.
         if let Some(rep) = just_crossed {
             let now = std::time::Instant::now();
             let due = self
@@ -453,7 +627,7 @@ where
                 .get(peer)
                 .map(|last| now.duration_since(*last) >= std::time::Duration::from_secs(60))
                 .unwrap_or(true);
-            if rep.value != i32::MIN && due {
+            if peer_tip_known != Some(true) && due {
                 self.explained.insert(*peer, now);
                 info!(
                     "block-serving: peer {peer} is re-asking for a block range it cannot \
@@ -471,13 +645,18 @@ where
         debug!(
             "block-serving: request from {peer} from `{from_block_id:?}` max {max_blocks} \
              dir {direction:?} attrs {attributes:?} small {small_request} \
-             penalty {reputation_change:?}"
+             penalty {reputation_change:?} throttled {throttle:?}"
         );
 
-        // Upstream rule kept verbatim: once a peer is spamming we stop
-        // answering the *full* request (no bandwidth amplification) but still
-        // answer the cheap header-only one.
-        let maybe_block_response = if reputation_change.is_none() || small_request {
+        // Punishment is replaced by throttling: a repeat is *answered* — with
+        // the same blocks as before — right up to the throttle. Then, for the
+        // rest of the window, the full request gets no data at all (no
+        // bandwidth amplification, and no reason for the peer's own sync loop
+        // to spin). Header/justification-only requests stay answered: they are
+        // 128 headers, bounded, and refusing them would only make a peer that
+        // is trying to find the common ancestor wander blind. Service resumes
+        // by itself when the window expires.
+        let maybe_block_response = if throttle.is_none() || small_request {
             let block_response = self.get_block_response(
                 attributes,
                 from_block_id,
@@ -495,7 +674,7 @@ where
             {
                 if let Some(value) = self.seen_requests.get(&key) {
                     if let SeenRequestsValue::First = value {
-                        *value = SeenRequestsValue::Fulfilled(1);
+                        *value = SeenRequestsValue::Fulfilled(RepeatState::new(now));
                     }
                 }
             }
@@ -519,6 +698,21 @@ where
                 sent_feedback: None,
             })
             .map_err(|_| HandleRequestError::SendResponse)
+    }
+
+    /// Charge a repeat penalty against `peer`'s lifetime budget.
+    ///
+    /// Returns the (possibly clamped, possibly zero) change to report, or
+    /// `None` once the budget is spent. This is the mechanism, not a comment:
+    /// no sequence of repeats can report more than
+    /// [`REPEAT_PENALTY_BUDGET`] for one peer, and that budget is ~1,450× below
+    /// the peer store's ban threshold.
+    fn charge_repeat_budget(
+        &mut self,
+        peer: &PeerId,
+        rep: ReputationChange,
+    ) -> Option<ReputationChange> {
+        self.repeat_budgets.entry(*peer).or_default().charge(rep)
     }
 
     /// Decode the wire request into the fields the serving loop needs.
@@ -713,8 +907,9 @@ struct ParsedRequest<B: BlockT> {
     direction: Direction,
     attributes: BlockAttributes,
     support_multiple_justifications: bool,
-    /// Header/justification only — the response is cheap, so it is always
-    /// answered even when the peer is being penalised.
+    /// Header/justification only — the response is cheap, so it is still
+    /// answered while the peer is throttled (upstream sends it while the peer
+    /// is penalised, for the same reason).
     small_request: bool,
 }
 
@@ -1169,35 +1364,123 @@ mod tests {
     /// function the server calls.
     #[test]
     fn a_repeated_request_from_a_diverged_peer_is_never_fatal() {
-        for repeats in [3usize, 4, 50] {
-            let rep = repeat_penalty(repeats, false, Some(false)).expect("penalised");
-            assert_ne!(rep.value, i32::MIN, "diverged peer must not be banned");
-            assert!(rep.value < 0, "divergence is still noticed");
-            assert_eq!(rep.reason, rep::DIVERGED_SAME_REQUEST.reason);
-        }
+        let rep = repeat_penalty(Some(false));
+        assert_ne!(rep.value, i32::MIN, "diverged peer must not be banned");
+        assert!(rep.value < 0, "divergence is still noticed");
+        assert_eq!(rep.reason, rep::DIVERGED_SAME_REQUEST.reason);
         // A peer that never claimed a tip is treated the same way: an
         // unanswered question is not evidence of good behaviour either.
-        let unknown = repeat_penalty(3, false, None).expect("penalised");
+        let unknown = repeat_penalty(None);
         assert_ne!(unknown.value, i32::MIN);
     }
 
+    /// Owner decision 2026-11-14: the ban for repeated block requests is gone
+    /// for **every** peer, not only diverged ones. A known-good peer's repeat
+    /// costs the same small, non-fatal report.
     #[test]
-    fn a_repeated_request_from_a_peer_on_our_chain_keeps_the_normal_penalty() {
-        let full = repeat_penalty(3, false, Some(true)).expect("penalised");
-        assert_eq!(full.value, i32::MIN, "still a ban for a known-good peer");
-        assert_eq!(full.reason, "Same block request multiple times");
-
-        let small = repeat_penalty(3, true, Some(true)).expect("penalised");
-        assert_eq!(small.value, -(1 << 10));
-        assert_ne!(small.value, i32::MIN);
+    fn a_repeated_request_from_a_peer_on_our_chain_is_never_fatal() {
+        let rep = repeat_penalty(Some(true));
+        assert_ne!(rep.value, i32::MIN, "a known-good peer is never banned");
+        assert_eq!(rep.value, -(1 << 10));
+        assert_eq!(rep.reason, rep::PEER_ON_CHAIN_SAME_REQUEST.reason);
+        assert_eq!(
+            rep.value,
+            repeat_penalty(Some(false)).value,
+            "both branches are capped at the same small value"
+        );
     }
 
+    /// The first two deliveries are answered with no penalty at all — that part
+    /// of the upstream rule is kept, because a repeat is only a repeat after
+    /// the peer has had the answer twice.
     #[test]
     fn the_first_two_deliveries_are_not_penalised_at_all() {
-        for repeats in 0..=MAX_SAME_REQUESTS {
-            assert!(repeat_penalty(repeats, false, Some(true)).is_none());
-            assert!(repeat_penalty(repeats, false, Some(false)).is_none());
+        let now = std::time::Instant::now();
+        // The first delivery creates the state; the second is a repeat that is
+        // still within the allowance.
+        let mut state = RepeatState::new(now);
+        assert_eq!(state.observe(now), RepeatDecision::Fresh);
+        // …and the third request is where the small report starts.
+        assert_eq!(
+            state.observe(now),
+            RepeatDecision::Repeat {
+                first_in_streak: true
+            }
+        );
+    }
+
+    /// No number of repeats can ever be enough to ban, because the penalty is
+    /// charged against a per-peer lifetime budget that is ~1,450× below the
+    /// peer store's threshold (71% of `i32::MIN`).
+    #[test]
+    fn repeats_can_never_accumulate_to_the_ban_threshold() {
+        let ban_threshold = (-(i32::MIN / 100)) as i64 * 71; // ≈ −1.52e9
+        let mut budget = RepeatBudget::default();
+        // Far more repeats than a peer could ever make in one connection's
+        // lifetime, charged at the same rate the server charges them.
+        for _ in 0..1_000_000 {
+            let _ = budget.charge(repeat_penalty(Some(true)));
+            let _ = budget.charge(repeat_penalty(Some(false)));
         }
+        assert_eq!(budget.spent(), REPEAT_PENALTY_BUDGET);
+        assert!(
+            (budget.spent() as i64) < ban_threshold / 1000,
+            "the whole lifetime budget stays three orders of magnitude below the threshold"
+        );
+        // Once spent, nothing more is reported at all.
+        assert!(budget.charge(repeat_penalty(Some(true))).is_none());
+    }
+
+    /// Throttling: the fifth identical request inside the window gets no data,
+    /// the peer is still there, and service resumes when the window expires —
+    /// with no ban and no disconnect anywhere in between.
+    #[test]
+    fn the_throttle_trips_after_n_repeats_and_lifts_after_the_window() {
+        let t0 = std::time::Instant::now();
+        let mut state = RepeatState::new(t0);
+
+        // Deliveries 2, 3 and 4 inside the window are served.
+        assert_eq!(state.observe(t0), RepeatDecision::Fresh);
+        assert_eq!(
+            state.observe(t0),
+            RepeatDecision::Repeat {
+                first_in_streak: true
+            }
+        );
+        assert_eq!(
+            state.observe(t0),
+            RepeatDecision::Repeat {
+                first_in_streak: false
+            }
+        );
+
+        // The fifth trips the throttle, and the line is printed exactly once.
+        assert_eq!(
+            state.observe(t0),
+            RepeatDecision::Throttled {
+                count: MAX_REPEATS_PER_WINDOW + 1,
+                log: true
+            }
+        );
+        for _ in 0..10 {
+            assert_eq!(
+                state.observe(t0),
+                RepeatDecision::Throttled {
+                    count: state.repeats(),
+                    log: false
+                }
+            );
+        }
+
+        // One window later the same request is served normally again: no
+        // un-ban event, no reconnect, no state to clear.
+        let later = t0 + THROTTLE_WINDOW + std::time::Duration::from_secs(1);
+        assert_eq!(state.observe(later), RepeatDecision::Fresh);
+        assert_eq!(
+            state.observe(later),
+            RepeatDecision::Fresh,
+            "the counter restarted with the window"
+        );
     }
 
     #[test]
@@ -1275,30 +1558,27 @@ mod tests {
         assert_eq!(inner.calls.lock().unwrap().len(), 1);
     }
 
-    /// The SDK's rule — unchanged — is `Rep::new_fatal` for the third identical
-    /// request *regardless of whose chain the asking peer is on*. That is the
-    /// exact decision that banned box 1 two seconds after every connect
-    /// (2026-11-13 20:04:43). Pinned so the fix cannot silently revert.
+    /// Pinned: the upstream value this module used to return, and no longer
+    /// does. If this test ever fails, `SAME_REQUEST` stopped being the ban.
     #[test]
-    fn the_old_rule_would_have_banned_the_diverged_peer() {
+    fn the_old_fatal_rule_is_never_selected_by_this_module() {
         assert_eq!(rep::SAME_REQUEST.value, i32::MIN);
-        assert_ne!(
-            repeat_penalty(MAX_SAME_REQUESTS + 1, false, Some(false))
-                .expect("penalised")
-                .value,
-            rep::SAME_REQUEST.value
-        );
+        for tip in [Some(true), Some(false), None] {
+            assert_ne!(repeat_penalty(tip).value, rep::SAME_REQUEST.value);
+        }
     }
 
     #[test]
     fn the_divergence_penalty_can_never_accumulate_into_a_ban() {
         // The peer store's ban threshold is 71% of `i32::MIN`, ~−1.5e9: a
-        // −1024 repeat report cannot get there on its own, so this is a
-        // throttle, not a slow ban — and the repeated *full* request is not
-        // answered, so there is no bandwidth amplification either.
+        // −1024 repeat report cannot get there on its own, and the lifetime
+        // budget caps the total at 2^20 anyway — this is a throttle, not a
+        // slow ban. The repeated *full* request is also not answered once the
+        // throttle trips, so there is no bandwidth amplification.
         let per_repeat = rep::DIVERGED_SAME_REQUEST.value;
         assert!(per_repeat < 0);
         assert!((-(i32::MIN / 100) * 71) / -per_repeat > 100_000);
+        assert!(REPEAT_PENALTY_BUDGET as i64 * 1000 < (-(i32::MIN / 100)) as i64 * 71);
     }
 
     fn claim(height: u64, hash: &str) -> ChainState {
