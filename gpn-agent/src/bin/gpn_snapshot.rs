@@ -875,169 +875,18 @@ fn info(a: &Args) -> Result<(), String> {
 
 // ------------------------------------------------------------------ verify
 
-/// Signed metadata for the public weekly snapshot (`snapshot.json`).
-///
-/// The release body (what a human reads on GitHub) is **not** a trust anchor:
-/// anyone who can serve a page can edit text. This document is signed with the
-/// same ed25519 release key that `gpn_node` uses for `releases.json`, over a
-/// canonical text blob, so an installer can verify the expected digest before
-/// it downloads (or imports) a single byte of chain data.
-#[derive(Serialize, Deserialize, Debug, Default, Clone)]
-struct SnapshotMeta {
-    #[serde(default)]
-    format: String,
-    url: String,
-    sha256: String,
-    size: u64,
-    #[serde(default)]
-    block: Option<u64>,
-    /// v2: the genesis this snapshot belongs to. A node whose chain spec pins a
-    /// different genesis must refuse the import outright.
-    #[serde(default)]
-    genesis: String,
-    /// v2: the block hash AT `block`. This is the only way a node can tell a
-    /// snapshot of the canonical chain from a snapshot of a fork that shares the
-    /// genesis — the exact failure that cost 2026-11-07/09 (two forks, one
-    /// 117k blocks deep, both "healthy").
-    #[serde(default)]
-    block_hash: String,
-    #[serde(default)]
-    built: String,
-    #[serde(default)]
-    signing_key: String,
-    #[serde(default)]
-    signature: String,
-}
-
-const SNAPSHOT_CANONICAL_PREFIX_V1: &str = "gpn-snapshot-v1";
-const SNAPSHOT_CANONICAL_PREFIX: &str = "gpn-snapshot-v2";
-
-impl SnapshotMeta {
-    /// The exact bytes that are signed. Field order is fixed and hex is
-    /// lower-cased, so a re-serialised document still verifies.
-    ///
-    /// **v1 documents keep verifying forever.** The prefix is part of the signed
-    /// text, so a v1 blob still hashes to its v1 prefix; only v2 adds the two
-    /// checkpoint lines. Changing this function without changing the signer in
-    /// the same commit makes every future snapshot unverifiable — the two sides
-    /// are tested together (see `snapshot_checkpoint_roundtrip`).
-    fn canonical_text(&self) -> Vec<u8> {
-        let is_v2 = self.format.trim() == SNAPSHOT_CANONICAL_PREFIX;
-        let mut out = String::new();
-        if is_v2 {
-            out.push_str(&format!(
-                "{SNAPSHOT_CANONICAL_PREFIX}\nurl={}\nsha256={}\nsize={}\nblock={}\ngenesis={}\nblock_hash={}\nbuilt={}\nsigning_key={}\n",
-                self.url.trim(),
-                self.sha256.trim().to_ascii_lowercase(),
-                self.size,
-                self.block.map(|b| b.to_string()).unwrap_or_default(),
-                self.genesis.trim().to_ascii_lowercase(),
-                self.block_hash.trim().to_ascii_lowercase(),
-                self.built.trim(),
-                self.signing_key.trim().to_ascii_lowercase(),
-            ));
-        } else {
-            out.push_str(&format!(
-                "{SNAPSHOT_CANONICAL_PREFIX_V1}\nurl={}\nsha256={}\nsize={}\nblock={}\nbuilt={}\nsigning_key={}\n",
-                self.url.trim(),
-                self.sha256.trim().to_ascii_lowercase(),
-                self.size,
-                self.block.map(|b| b.to_string()).unwrap_or_default(),
-                self.built.trim(),
-                self.signing_key.trim().to_ascii_lowercase(),
-            ));
-        }
-        out.into_bytes()
-    }
-}
-
-/// Verify a `snapshot.json` against `pubkey_hex`; optionally also check a
-/// downloaded archive's size and sha256 against it.
-///
-/// A parameter (not the constant) so tests can use their own key.
-fn verify_snapshot_meta(
-    meta_bytes: &[u8],
-    pubkey_hex: &str,
-    archive: Option<&Path>,
-) -> Result<SnapshotMeta, String> {
-    let m: SnapshotMeta =
-        serde_json::from_slice(meta_bytes).map_err(|e| format!("snapshot.json: {e}"))?;
-    if m.signature.trim().is_empty() || m.signing_key.trim().is_empty() {
-        return Err("snapshot.json is UNSIGNED — refusing to trust it".into());
-    }
-    let embedded = pubkey_hex.trim().to_ascii_lowercase();
-    if m.signing_key.trim().to_ascii_lowercase() != embedded {
-        return Err(format!(
-            "snapshot.json was signed by a different key ({}) than the one built into this node ({embedded})",
-            m.signing_key.trim()
-        ));
-    }
-    let key = hex::decode(&embedded).map_err(|e| format!("embedded key: {e}"))?;
-    let key_arr: [u8; 32] = key
-        .as_slice()
-        .try_into()
-        .map_err(|_| "embedded key is not 32 bytes".to_string())?;
-    let vk = ed25519_dalek::VerifyingKey::from_bytes(&key_arr)
-        .map_err(|e| format!("verifying key: {e}"))?;
-    let sig_raw = hex::decode(m.signature.trim()).map_err(|e| format!("signature hex: {e}"))?;
-    let sig_arr: [u8; 64] = sig_raw
-        .as_slice()
-        .try_into()
-        .map_err(|_| "signature is not 64 bytes".to_string())?;
-    let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
-    use ed25519_dalek::Verifier;
-    vk.verify(&m.canonical_text(), &sig)
-        .map_err(|_| "snapshot.json signature does NOT verify (edited or forged)".to_string())?;
-
-    if m.sha256.trim().len() != 64 || !m.sha256.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err("snapshot.json has no valid sha256".into());
-    }
-    if m.size == 0 {
-        return Err("snapshot.json has no size".into());
-    }
-    // v2 checkpoint shape: if either field is present, both must be, and both
-    // must be 0x-hex. A half-filled checkpoint is worse than none -- it looks
-    // authoritative and cannot be compared.
-    let v2 = m.format.trim() == SNAPSHOT_CANONICAL_PREFIX;
-    if v2 {
-        for (name, v, want) in [
-            ("genesis", m.genesis.trim(), 32usize),
-            ("block_hash", m.block_hash.trim(), 32usize),
-        ] {
-            let hexpart = v.strip_prefix("0x").unwrap_or("");
-            if hexpart.len() != want * 2 || !hexpart.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Err(format!(
-                    "snapshot.json v2 has an invalid {name} (want 0x + 64 hex): {v}"
-                ));
-            }
-        }
-        if m.block.is_none() {
-            return Err("snapshot.json v2 declares a checkpoint without a block height".into());
-        }
-    }
-
-    if let Some(path) = archive {
-        let got_len = fs::metadata(path)
-            .map_err(|e| format!("stat {}: {e}", path.display()))?
-            .len();
-        if got_len != m.size {
-            return Err(format!(
-                "size mismatch for {}: expected {} bytes, got {got_len}",
-                path.display(),
-                m.size
-            ));
-        }
-        let got_sha = sha256_file(path).map_err(|e| format!("hash {}: {e}", path.display()))?;
-        if got_sha != m.sha256.trim().to_ascii_lowercase() {
-            return Err(format!(
-                "sha256 mismatch for {}: expected {}, got {got_sha}",
-                path.display(),
-                m.sha256.trim()
-            ));
-        }
-    }
-    Ok(m)
-}
+// `SnapshotMeta`, its signed canonical text, and the verifier all live in
+// `gpn_agent::selfheal` now: the supervisors schedule the same check, and two
+// copies of "what counts as a signed checkpoint" is exactly how the signer and
+// verifier drift apart.
+pub use gpn_agent::selfheal::{
+    checkpoint_verdict, fork_dir_for, heal_decision, ledger_path, local_chain_state, read_recovery,
+    set_unit, verdict_exit_code, write_recovery, CheckpointVerdict, HealDecision, NodeControl,
+    RecoveryRecord, SnapshotMeta, SystemctlUnit, EXIT_HEAL_REFUSED, EXIT_WRONG_CHAIN,
+    RECOVERY_STATE_NAME, RECOVERY_WINDOW_SECS, SNAPSHOT_CANONICAL_PREFIX,
+    SNAPSHOT_CANONICAL_PREFIX_V1,
+};
+use gpn_agent::selfheal::{perform_recovery, plan_recovery, verify_snapshot_meta};
 
 fn verify(a: &Args) -> Result<(), String> {
     let meta_path = a
@@ -1065,83 +914,6 @@ fn verify(a: &Args) -> Result<(), String> {
 }
 
 // -------------------------------------------------------------- checkpoint
-
-/// Exit code for "this node is on a different chain than the signed checkpoint".
-///
-/// 12 is deliberate and is **not** reused anywhere else: `1` already means "a
-/// command failed for some recoverable reason" (including "I could not read the
-/// RPC"), and a supervisor must be able to tell "wrong chain, stop" apart from
-/// "the check itself broke, try again".
-const EXIT_WRONG_CHAIN: i32 = 12;
-
-/// What the local chain says about a signed checkpoint (design §3).
-///
-/// `Unreadable` exists so an *unknown* never becomes a verdict — the same
-/// three-state rule as #141/#144: a failed read is not evidence of a fork, and
-/// a fork must never be inferred from missing data.
-#[derive(Debug, PartialEq, Eq)]
-enum CheckpointVerdict {
-    /// We do not have the checkpoint height yet (fresh node, or still syncing).
-    NotYet {
-        local_height: Option<u64>,
-        block: u64,
-    },
-    /// Our hash at the checkpoint height is the signed one.
-    Match { block: u64 },
-    /// Our hash at that height is a different block: a fork. Fatal.
-    WrongChain {
-        block: u64,
-        expected: String,
-        local: String,
-    },
-}
-
-/// Map a verdict to the process exit code. Split out from the I/O so the
-/// `WrongChain => 12` contract is a test, not a comment.
-fn verdict_exit_code(v: &CheckpointVerdict) -> i32 {
-    match v {
-        CheckpointVerdict::WrongChain { .. } => EXIT_WRONG_CHAIN,
-        _ => 0,
-    }
-}
-
-/// Pure comparison of a signed checkpoint against what the local node reports.
-///
-/// `local_hash_at` is `None` when the local node does not have that height (or
-/// the block hash could not be read) — that is `NotYet`/`Unreadable`, never a
-/// mismatch.
-fn checkpoint_verdict(
-    checkpoint_block: u64,
-    checkpoint_hash: &str,
-    local_height: Option<u64>,
-    local_hash_at: Option<&str>,
-) -> CheckpointVerdict {
-    match (local_height, local_hash_at) {
-        (Some(h), _) if h < checkpoint_block => CheckpointVerdict::NotYet {
-            local_height: Some(h),
-            block: checkpoint_block,
-        },
-        (_, None) => CheckpointVerdict::NotYet {
-            local_height,
-            block: checkpoint_block,
-        },
-        (_, Some(local)) => {
-            let expected = checkpoint_hash.trim().to_ascii_lowercase();
-            let got = local.trim().to_ascii_lowercase();
-            if expected == got {
-                CheckpointVerdict::Match {
-                    block: checkpoint_block,
-                }
-            } else {
-                CheckpointVerdict::WrongChain {
-                    block: checkpoint_block,
-                    expected,
-                    local: got,
-                }
-            }
-        }
-    }
-}
 
 /// `gpn_snapshot checkpoint` — the enforcement half of the signed checkpoint.
 ///
@@ -1251,206 +1023,31 @@ fn stop_unit_if_requested(a: &Args) {
 
 // ------------------------------------------------------------------ heal (#157)
 
-/// A heal already happened and the node still disagrees with the checkpoint.
-/// Refusing is the whole point: an automatic repair that can run in a loop turns
-/// a forked node into a churning one, and the second attempt has no new evidence.
-const EXIT_HEAL_REFUSED: i32 = 13;
-
-/// At most one automatic recovery per window, then stop and explain.
-const RECOVERY_WINDOW_SECS: u64 = 24 * 60 * 60;
-
-const RECOVERY_STATE_NAME: &str = "last-recovery.json";
-
-/// Durable record of the last self-heal. Written **before** anything destructive
-/// so a crash mid-repair still consumes the window (never a loop).
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
-struct RecoveryRecord {
-    /// Unix seconds when the recovery started.
-    recovered_at: u64,
-    recovered_at_iso: String,
-    checkpoint_block: u64,
-    checkpoint_hash: String,
-    local_hash: String,
-    /// Where the forked DB was set aside (`<base>/chains-fork-<ts>`).
-    fork_dir: String,
-    snapshot: String,
-    /// False while the import is in flight; the refusal rule ignores this flag on
-    /// purpose — a half-finished recovery still consumes the window.
-    completed: bool,
-    /// Short human line: what happened, or why it stopped.
-    detail: String,
-}
-
-/// What `heal` decided to do. Pure, so every branch is a test rather than a
-/// comment: the destructive path must be reachable only from `Recover`.
-#[derive(Debug, PartialEq, Eq)]
-enum HealDecision {
-    /// No fork: matching, behind the checkpoint, or a v1 doc with no claim.
-    Nothing { reason: String },
-    /// A recovery was already attempted inside the window — stop and explain.
-    Refused { age_secs: u64 },
-    /// A fork with no recent attempt: set `fork_dir` aside and import.
-    Recover { fork_dir: PathBuf },
-}
-
-fn heal_decision(
-    verdict: &CheckpointVerdict,
-    last: Option<&RecoveryRecord>,
-    now: u64,
-    window_secs: u64,
-    fork_dir: &Path,
-) -> HealDecision {
-    match verdict {
-        CheckpointVerdict::Match { block } => HealDecision::Nothing {
-            reason: format!("local block {block} matches the signed checkpoint"),
-        },
-        CheckpointVerdict::NotYet { .. } => HealDecision::Nothing {
-            reason: "this node is behind the signed checkpoint (not a fork)".into(),
-        },
-        CheckpointVerdict::WrongChain { .. } => match last {
-            Some(rec) => {
-                // A clock that jumped backwards must not unlock a second heal.
-                let age = now.saturating_sub(rec.recovered_at);
-                if age < window_secs {
-                    HealDecision::Refused { age_secs: age }
-                } else {
-                    HealDecision::Recover {
-                        fork_dir: fork_dir.to_path_buf(),
-                    }
-                }
-            }
-            None => HealDecision::Recover {
-                fork_dir: fork_dir.to_path_buf(),
-            },
-        },
-    }
-}
-
-/// Read the recovery record. `Ok(None)` = never healed. A file that exists but
-/// cannot be read or parsed is an **error**, not "no record": a corrupt ledger
-/// must fail closed, or it would license an unbounded repair loop.
-fn read_recovery(path: &Path) -> Result<Option<RecoveryRecord>, String> {
-    match fs::read(path) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("read {}: {e}", path.display())),
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|e| format!("{} is not a valid recovery record: {e}", path.display())),
-    }
-}
-
-/// Atomic write (temp + rename): a torn ledger is worse than none.
-fn write_recovery(path: &Path, rec: &RecoveryRecord) -> Result<(), String> {
-    let tmp = path.with_extension("tmp");
-    let body = serde_json::to_vec_pretty(rec).map_err(|e| format!("serialise record: {e}"))?;
-    fs::write(&tmp, &body).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-    fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", tmp.display()))?;
-    Ok(())
-}
-
-/// A free `chains-fork-<ts>` path: never overwrite an earlier fork's DB — it is
-/// the only evidence of what this node was on.
-fn fork_dir_for(base: &Path, stamp: u64) -> PathBuf {
-    let mut candidate = base.join(format!("chains-fork-{stamp}"));
-    let mut n = 1u32;
-    while candidate.exists() {
-        candidate = base.join(format!("chains-fork-{stamp}-{n}"));
-        n += 1;
-    }
-    candidate
-}
-
-/// Read this node's height, its hash at `block`, and its genesis — the same
-/// three-state read `checkpoint` does, factored out for `heal`.
-fn local_chain_state(a: &Args, block: u64) -> (Option<u64>, Option<String>, Option<String>) {
-    let genesis = rpc_call(&a.rpc, "chain_getBlockHash", serde_json::json!([0]))
-        .ok()
-        .and_then(|v| v.as_str().map(|s| s.to_ascii_lowercase()));
-    let height = rpc_call(&a.rpc, "chain_getHeader", serde_json::json!([]))
-        .ok()
-        .and_then(|h| h.get("number").and_then(hex_u64));
-    let hash = match height {
-        Some(h) if h >= block => rpc_call(&a.rpc, "chain_getBlockHash", serde_json::json!([block]))
-            .ok()
-            .and_then(|v| v.as_str().map(String::from)),
-        _ => None,
-    };
-    (height, hash, genesis)
-}
-
-fn download_snapshot(url: &str, dest: &Path) -> Result<(), String> {
-    if url.trim().is_empty() {
-        return Err("snapshot.json carries no url — pass --snapshot <file>".into());
-    }
-    if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
-    }
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(600))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let mut resp = client
-        .get(url)
-        .send()
-        .map_err(|e| format!("GET {url}: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("GET {url}: HTTP {}", resp.status()));
-    }
-    let part = dest.with_extension("part");
-    {
-        let mut f = File::create(&part).map_err(|e| format!("create {}: {e}", part.display()))?;
-        io::copy(&mut resp, &mut f).map_err(|e| format!("download {url}: {e}"))?;
-        f.sync_all()
-            .map_err(|e| format!("sync {}: {e}", part.display()))?;
-    }
-    fs::rename(&part, dest).map_err(|e| format!("rename {}: {e}", part.display()))?;
-    Ok(())
-}
-
-/// Stop (or start) a unit and treat a failure as fatal — the opposite of the
-/// best-effort `stop_unit_if_requested` used by the read-only `checkpoint`.
-fn set_unit(unit: &str, verb: &str) -> Result<(), String> {
-    let st = Command::new("systemctl")
-        .args(["--user", verb, unit])
-        .status()
-        .map_err(|e| format!("systemctl --user {verb} {unit}: {e}"))?;
-    if st.success() {
-        Ok(())
-    } else {
-        Err(format!("systemctl --user {verb} {unit} exited {st}"))
-    }
-}
-
 /// `gpn_snapshot heal` — the recovery half of the signed checkpoint (#157).
 ///
-/// Read-only unless `--apply`. With `--apply` the order is fixed and each step is
-/// predicated on the previous one:
+/// Read-only unless `--apply`. The decision rules, the ledger and the recovery
+/// sequence live in [`gpn_agent::selfheal`] — the same code the node supervisor
+/// schedules every 5 minutes — so the manual path and the automatic path cannot
+/// disagree. What is local to this binary is the *import*: `import()` above is
+/// the only extractor in the tree.
 ///
-/// 1. write the recovery record (`completed: false`) — consumes the 24 h window
-///    *before* anything destructive, so a crash mid-repair cannot loop;
-/// 2. stop the unit (fatal if it fails: importing under a live node corrupts);
-/// 3. rename `chains/` to `chains-fork-<ts>` (never deleted, never overwritten);
-/// 4. verify the signed snapshot's size+sha256, then import it (no `--force`, so a
-///    rename that did not happen is caught, not papered over);
-/// 5. mark the record complete and start the unit again.
+/// With `--apply` the order is fixed and each step is predicated on the previous:
+/// write the record (`completed: false`, consuming the 24 h window) → stop the
+/// unit → rename `chains/` → import → mark complete → start the unit.
 fn heal(a: &Args) -> Result<i32, String> {
     let meta_path = a.meta.as_ref().ok_or("heal needs --meta <snapshot.json>")?;
     let base = a.base_path.as_ref().ok_or("heal needs --base-path")?;
     let bytes = fs::read(meta_path).map_err(|e| format!("read {}: {e}", meta_path.display()))?;
     let m = verify_snapshot_meta(&bytes, gpn_agent::update::RELEASE_PUBKEY_HEX, None)?;
 
-    let is_v2 = m.format.trim() == SNAPSHOT_CANONICAL_PREFIX;
-    let (block, block_hash) = match (is_v2, m.block) {
-        (true, Some(b)) if !m.block_hash.trim().is_empty() => (b, m.block_hash.trim().to_string()),
-        _ => {
-            println!(
-                "heal: v1 metadata — signed, but it carries no checkpoint; nothing to compare"
-            );
-            return Ok(0);
-        }
-    };
+    if m.checkpoint().is_none() {
+        println!("heal: v1 metadata — signed, but it carries no checkpoint; nothing to compare");
+        return Ok(0);
+    }
+    let (block, block_hash) = m.checkpoint().expect("checked above");
+    let block_hash = block_hash.to_string();
 
-    let (height, local_hash, local_genesis) = local_chain_state(a, block);
+    let (height, local_hash, local_genesis) = local_chain_state(&a.rpc, block);
 
     // A genesis mismatch is a different network, not a fork: there is no correct
     // automatic repair for "this box is pointed at another chain".
@@ -1465,14 +1062,8 @@ fn heal(a: &Args) -> Result<i32, String> {
     }
 
     let verdict = checkpoint_verdict(block, &block_hash, height, local_hash.as_deref());
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let state_path = a
-        .state
-        .clone()
-        .unwrap_or_else(|| base.join(RECOVERY_STATE_NAME));
+    let now = gpn_agent::selfheal::now_unix();
+    let state_path = a.state.clone().unwrap_or_else(|| ledger_path(base));
     let last = read_recovery(&state_path)?;
     let fork_dir = fork_dir_for(base, now);
     let decision = heal_decision(
@@ -1517,7 +1108,10 @@ fn heal(a: &Args) -> Result<i32, String> {
             println!("heal: fork detected at block {block}");
             println!("      signed {expected}");
             println!("      local  {local}");
-            println!("      plan: stop unit -> move chains/ to {} -> import signed snapshot -> start unit", fork_dir.display());
+            println!(
+                "      plan: stop unit -> move chains/ to {} -> import signed snapshot -> start unit",
+                fork_dir.display()
+            );
 
             if !a.apply {
                 println!("heal: dry run — nothing changed. Re-run with --apply to heal.");
@@ -1529,101 +1123,56 @@ fn heal(a: &Args) -> Result<i32, String> {
                 .as_deref()
                 .ok_or("heal --apply needs --unit <systemd user unit that runs the node>")?;
 
-            // Resolve the archive before touching anything, so a missing/broken
-            // download cannot leave us with the node stopped and its DB moved.
-            let snapshot = match a.snapshot.clone() {
-                Some(p) => p,
-                None => {
-                    let dir = a.download_dir.clone().unwrap_or_else(std::env::temp_dir);
-                    let name = m
-                        .url
-                        .rsplit('/')
-                        .find(|s| s.contains('.'))
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| format!("gpn-snapshot-{block}.tar.gz"));
-                    let dest = dir.join(name);
-                    println!("heal: downloading {} -> {}", m.url, dest.display());
-                    download_snapshot(&m.url, &dest)?;
-                    dest
-                }
-            };
-            // Trust the bytes before we trust the import (size + sha256 vs the
-            // signed document, the same check a fresh installer does).
-            verify_snapshot_meta(
+            // Resolve (and verify) the archive before touching anything.
+            let download_dir = a.download_dir.clone().unwrap_or_else(std::env::temp_dir);
+            let plan = plan_recovery(
+                &m,
                 &bytes,
                 gpn_agent::update::RELEASE_PUBKEY_HEX,
-                Some(&snapshot),
+                base,
+                &state_path,
+                a.snapshot.clone(),
+                &download_dir,
+                local,
+                now,
+                &|line| println!("{line}"),
             )?;
-
-            let mut rec = RecoveryRecord {
-                recovered_at: now,
-                recovered_at_iso: iso8601(now),
-                checkpoint_block: block,
-                checkpoint_hash: expected.clone(),
-                local_hash: local.clone(),
-                fork_dir: fork_dir.display().to_string(),
-                snapshot: snapshot.display().to_string(),
-                completed: false,
-                detail: "started".into(),
+            let plan = gpn_agent::selfheal::RecoveryPlan {
+                fork_dir: fork_dir.clone(),
+                ..plan
             };
-            write_recovery(&state_path, &rec)?;
 
-            // From here the window is consumed: every failure below is reported
-            // with the fork DB left where a human can find it.
-            set_unit(unit, "stop")?;
-            let chains = base.join("chains");
-            if chains.exists() {
-                fs::rename(&chains, &fork_dir).map_err(|e| {
-                    format!("move {} -> {}: {e}", chains.display(), fork_dir.display())
-                })?;
-                println!("heal: moved forked DB to {}", fork_dir.display());
-            } else {
-                println!(
-                    "heal: no chains/ dir at {} — importing into a fresh layout",
-                    chains.display()
-                );
-            }
-
-            let import_args = Args {
-                cmd: "import".into(),
-                base_path: Some(base.clone()),
-                out: None,
-                snapshot: Some(snapshot.clone()),
-                chain_dir: None,
-                meta: None,
-                rpc: a.rpc.clone(),
-                allow_live: false,
-                freeze: false,
-                // No --force: if the rename above did not clear the DB, refusing
-                // is the correct outcome.
-                force: false,
-                pruning: a.pruning.clone(),
-                stop_unit: None,
-                unit: None,
-                state: None,
-                apply: false,
-                download_dir: None,
+            let control = SystemctlUnit {
+                unit: unit.to_string(),
             };
-            if let Err(e) = import(&import_args) {
-                rec.detail = format!("import failed: {e}");
-                let _ = write_recovery(&state_path, &rec);
-                eprintln!(
-                    "heal: import FAILED ({e}). Unit {unit} is stopped; forked DB is at {}. \
-                     Not restarting — the node would come back on the fork.",
-                    fork_dir.display()
-                );
-                return Err(e);
-            }
-
-            rec.completed = true;
-            rec.detail = "healed: forked DB set aside and signed snapshot imported".into();
-            write_recovery(&state_path, &rec)?;
-            set_unit(unit, "start")?;
-            println!(
-                "heal: done — imported signed snapshot from block {block}; {unit} started; \
-                 fork DB kept at {} (delete when the node is verified healthy)",
-                fork_dir.display()
-            );
+            perform_recovery(
+                &plan,
+                &control,
+                &|snapshot, base| {
+                    let import_args = Args {
+                        cmd: "import".into(),
+                        base_path: Some(base.to_path_buf()),
+                        out: None,
+                        snapshot: Some(snapshot.to_path_buf()),
+                        chain_dir: None,
+                        meta: None,
+                        rpc: a.rpc.clone(),
+                        allow_live: false,
+                        freeze: false,
+                        // No --force: if the rename above did not clear the DB,
+                        // refusing is the correct outcome.
+                        force: false,
+                        pruning: a.pruning.clone(),
+                        stop_unit: None,
+                        unit: None,
+                        state: None,
+                        apply: false,
+                        download_dir: None,
+                    };
+                    import(&import_args)
+                },
+                &|line| println!("{line}"),
+            )?;
             Ok(0)
         }
     }

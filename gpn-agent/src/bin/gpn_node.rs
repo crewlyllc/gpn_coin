@@ -2005,6 +2005,7 @@ fn supervise(
     shared: Shared,
     shutdown: Arc<AtomicBool>,
     notified: Arc<Mutex<Vec<(&'static str, Option<i32>)>>>,
+    hold: Arc<AtomicBool>,
 ) {
     let label = spec.label;
     let prefix = spec.prefix;
@@ -2012,6 +2013,14 @@ fn supervise(
     const BACKOFF_MAX_MS: u64 = 30_000;
 
     while !shutdown.load(Ordering::SeqCst) {
+        // Self-heal holds this while it moves `chains/` (a restart in the middle
+        // of that rename would come back on a half-moved DB).
+        while hold.load(Ordering::SeqCst) && !shutdown.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        if shutdown.load(Ordering::SeqCst) {
+            break;
+        }
         let mut cmd = build_command(&spec);
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -2130,6 +2139,12 @@ fn supervise(
         // tight 1-2 s ramp that would hammer the router/NAT.
         if code == Some(NODE_EXIT_NOT_DIALABLE) {
             backoff_ms = backoff_ms.max(30_000);
+        }
+        // A child that exited because self-heal stopped it must not be
+        // respawned into the middle of a DB swap: wait for the repair to finish
+        // (it clears `hold` right before the import completes).
+        while hold.load(Ordering::SeqCst) && !shutdown.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(200));
         }
         sleep_or_shutdown(&shutdown, backoff_ms);
         backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
@@ -2937,6 +2952,261 @@ fn spawn_stall_watchdog(
         }
         log_event("watchdog", "stall watchdog exiting");
     })
+}
+
+// --------------------------------------------------------------- self-heal
+
+/// `gpn_snapshot` next to this executable (the release ships them together).
+fn snapshot_bin() -> Option<PathBuf> {
+    if let Some(p) = env_str("GPN_SNAPSHOT_BIN") {
+        return Some(PathBuf::from(p));
+    }
+    let mut p = std::env::current_exe().ok()?;
+    p.set_file_name(if cfg!(windows) {
+        "gpn_snapshot.exe"
+    } else {
+        "gpn_snapshot"
+    });
+    if p.is_file() {
+        Some(p)
+    } else {
+        None
+    }
+}
+
+/// Stops/starts the node **child this supervisor owns**.
+///
+/// The CLI's `--apply` path stops a systemd unit instead; both go through
+/// `selfheal::perform_recovery`, so the sequence and the ledger are one.
+struct SupervisedNode {
+    shared: Shared,
+    hold: Arc<AtomicBool>,
+}
+
+impl SupervisedNode {
+    fn node_state(&self) -> (bool, u32) {
+        let m = self.shared.lock().unwrap();
+        m.get("node").map(|s| (s.up, s.pid)).unwrap_or((false, 0))
+    }
+}
+
+impl gpn_agent::selfheal::NodeControl for SupervisedNode {
+    fn stop(&self) -> Result<(), String> {
+        // Hold first: the supervise thread respawns on exit, and a respawn
+        // between the stop and the rename would reopen the DB we are moving.
+        self.hold.store(true, Ordering::SeqCst);
+        let (up, pid) = self.node_state();
+        if up && pid != 0 {
+            send_term(pid);
+        }
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let (up_now, _) = self.node_state();
+            if !up_now {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                self.hold.store(false, Ordering::SeqCst);
+                return Err(format!(
+                    "node child (pid {pid}) did not stop within 60s — refusing to move a live DB"
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+    fn start(&self) -> Result<(), String> {
+        // Nothing to spawn: the supervisor thread is parked on `hold` and starts
+        // the child the moment it clears.
+        self.hold.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// Divergence self-heal (#157): check the signed checkpoint at startup and every
+/// [`gpn_agent::selfheal::CHECK_INTERVAL_SECS`], and repair a fork by importing
+/// the signed snapshot.
+///
+/// Why the supervisor owns this: it owns the node process, so it can stop it
+/// (recovery must never rename a live RocksDB), and it is the only component
+/// that exists on every platform — a Windows box has no systemd unit to stop.
+///
+/// Gates, in order (all of them default to *doing nothing*):
+/// * `GPN_SELF_HEAL=0` disables it outright;
+/// * no readable RPC ⇒ no verdict (a starting node is not a forked node);
+/// * a GPU job in flight ⇒ skip this tick (never interrupt a job to heal);
+/// * unverifiable/unfetchable metadata ⇒ no verdict, reason logged;
+/// * genesis mismatch ⇒ never repaired (different network, not a fork);
+/// * ledger inside 24 h ⇒ refuse and log (a loop is worse than a fork).
+fn spawn_self_heal_watchdog(
+    cfg: &Config,
+    shared: Shared,
+    shutdown: Arc<AtomicBool>,
+    hold: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    let enabled = !matches!(
+        env_or_lower("GPN_SELF_HEAL").as_deref(),
+        Some("0") | Some("false") | Some("off") | Some("no")
+    );
+    let meta_src = env_str("GPN_SNAPSHOT_META_URL")
+        .unwrap_or_else(|| gpn_agent::selfheal::DEFAULT_SNAPSHOT_META_URL.to_string());
+    let base = cfg.base_path.clone();
+    let rpc = format!("http://127.0.0.1:{}", cfg.rpc_port);
+    let check_secs = env_u64("GPN_SELF_HEAL_CHECK_SECS")
+        .unwrap_or(gpn_agent::selfheal::CHECK_INTERVAL_SECS)
+        .max(60);
+    let start_delay = env_u64("GPN_SELF_HEAL_START_SECS").unwrap_or(120);
+    let snap = snapshot_bin();
+
+    std::thread::spawn(move || {
+        if !enabled {
+            log_event("self-heal", "disabled (GPN_SELF_HEAL=0)");
+            return;
+        }
+        log_event(
+            "self-heal",
+            &format!(
+                "armed: signed checkpoint {} every {check_secs}s (base {})",
+                meta_src,
+                base.display()
+            ),
+        );
+        // Give the node time to answer RPC before the first (startup) check.
+        sleep_steps(&shutdown, start_delay * 1000);
+        loop {
+            if shutdown.load(Ordering::SeqCst) {
+                break;
+            }
+            let (up, _) = {
+                let m = shared.lock().unwrap();
+                m.get("node").map(|s| (s.up, s.pid)).unwrap_or((false, 0))
+            };
+            let busy = gpn_agent::selfheal::job_in_flight();
+            if !up || busy {
+                log_event(
+                    "self-heal",
+                    &format!(
+                        "divergence check skipped: {}",
+                        if !up {
+                            "node child is down"
+                        } else {
+                            "a GPU job is in flight"
+                        }
+                    ),
+                );
+            } else {
+                let cfg = gpn_agent::selfheal::CheckConfig {
+                    rpc: rpc.clone(),
+                    base: base.clone(),
+                    meta_src: meta_src.clone(),
+                    pubkey_hex: gpn_agent::update::RELEASE_PUBKEY_HEX.to_string(),
+                    ledger: None,
+                };
+                let log = |line: &str| log_event("self-heal", line);
+                let out = gpn_agent::selfheal::check(&cfg, gpn_agent::selfheal::now_unix(), &log);
+                if let Some((obs, fork_dir)) = out.recovery() {
+                    let Some(bin) = snap.clone() else {
+                        log_event(
+                            "self-heal",
+                            "FORK CONFIRMED but gpn_snapshot is not next to this binary — \
+                             cannot heal (set GPN_SNAPSHOT_BIN). Needs a human.",
+                        );
+                        sleep_steps(&shutdown, check_secs * 1000);
+                        continue;
+                    };
+                    // Re-resolve the archive against the signed bytes: check()
+                    // verified the document, plan_recovery() verifies the file.
+                    let meta_bytes = match gpn_agent::selfheal::load_meta_bytes(&meta_src) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            log_event("self-heal", &format!("cannot reload metadata: {e}"));
+                            sleep_steps(&shutdown, check_secs * 1000);
+                            continue;
+                        }
+                    };
+                    let meta = match gpn_agent::selfheal::verify_snapshot_meta(
+                        &meta_bytes,
+                        gpn_agent::update::RELEASE_PUBKEY_HEX,
+                        None,
+                    ) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            log_event("self-heal", &format!("metadata re-verify failed: {e}"));
+                            sleep_steps(&shutdown, check_secs * 1000);
+                            continue;
+                        }
+                    };
+                    let ledger = gpn_agent::selfheal::ledger_path(&base);
+                    let plan = gpn_agent::selfheal::plan_recovery(
+                        &meta,
+                        &meta_bytes,
+                        gpn_agent::update::RELEASE_PUBKEY_HEX,
+                        &base,
+                        &ledger,
+                        None,
+                        &base.join("snapshots"),
+                        obs.local_hash.clone().unwrap_or_default(),
+                        gpn_agent::selfheal::now_unix(),
+                        &log,
+                    );
+                    match plan {
+                        Err(e) => log_event(
+                            "self-heal",
+                            &format!("recovery NOT started ({e}) — node left running"),
+                        ),
+                        Ok(plan) => {
+                            let plan = gpn_agent::selfheal::RecoveryPlan {
+                                fork_dir: fork_dir.clone(),
+                                ..plan
+                            };
+                            let control = SupervisedNode {
+                                shared: shared.clone(),
+                                hold: hold.clone(),
+                            };
+                            let base_for_import = base.clone();
+                            let bin_for_import = bin.clone();
+                            let import = move |snapshot: &Path, _base: &Path| {
+                                let out = std::process::Command::new(&bin_for_import)
+                                    .arg("import")
+                                    .arg("--snapshot")
+                                    .arg(snapshot)
+                                    .arg("--base-path")
+                                    .arg(&base_for_import)
+                                    .output()
+                                    .map_err(|e| {
+                                        format!("spawn {}: {e}", bin_for_import.display())
+                                    })?;
+                                if out.status.success() {
+                                    Ok(())
+                                } else {
+                                    Err(format!(
+                                        "{} import exited {}: {}",
+                                        bin_for_import.display(),
+                                        out.status,
+                                        String::from_utf8_lossy(&out.stderr).trim()
+                                    ))
+                                }
+                            };
+                            if let Err(e) = gpn_agent::selfheal::perform_recovery(
+                                &plan, &control, &import, &log,
+                            ) {
+                                log_event("self-heal", &format!("recovery failed: {e}"));
+                            }
+                        }
+                    }
+                }
+            }
+            sleep_steps(&shutdown, check_secs * 1000);
+        }
+        log_event("self-heal", "watchdog exiting");
+    })
+}
+
+/// Lower-cased env value (`None` when unset/empty).
+fn env_or_lower(k: &str) -> Option<String> {
+    std::env::var(k)
+        .ok()
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| !v.is_empty())
 }
 
 fn status_line(cfg: &Config, shared: &Shared) -> String {
@@ -4314,13 +4584,16 @@ async fn main() {
     let notified: Arc<Mutex<Vec<(&'static str, Option<i32>)>>> = Arc::new(Mutex::new(Vec::new()));
 
     // One supervisor thread per child.
+    // `hold` keeps a child from being respawned while self-heal swaps its DB.
+    let hold = Arc::new(AtomicBool::new(false));
     let mut handles = Vec::new();
     for spec in specs {
         let shared = shared.clone();
         let shutdown = shutdown.clone();
         let notified = notified.clone();
+        let hold = hold.clone();
         handles.push(std::thread::spawn(move || {
-            supervise(spec, shared, shutdown, notified)
+            supervise(spec, shared, shutdown, notified, hold)
         }));
     }
 
@@ -4413,6 +4686,12 @@ async fn main() {
     // Sync-stall watchdog (auto-recover a silently wedged node).
     let watchdog_handle = spawn_stall_watchdog(&cfg, shared.clone(), shutdown.clone());
 
+    // Divergence self-heal (#157): a node on a fork cannot sync out of it, and
+    // being banned by peers does not fix it either. Check the signed checkpoint
+    // at startup and every 5 minutes; repair only on a verified mismatch.
+    let selfheal_handle =
+        spawn_self_heal_watchdog(&cfg, shared.clone(), shutdown.clone(), hold.clone());
+
     // Auto-update thread — only when the operator opted in.
     let restart = Arc::new(AtomicBool::new(false));
     let updater_handle = if cfg.auto_update {
@@ -4450,6 +4729,7 @@ async fn main() {
     let _ = auto_idle_handle.join();
     let _ = status_handle.join();
     let _ = watchdog_handle.join();
+    let _ = selfheal_handle.join();
     if let Some(h) = updater_handle {
         let _ = h.join();
     }
