@@ -209,7 +209,14 @@ jobs:
           set "GPN_SIGNER_FILE=%GPN_BASE_PATH%\keystore.json"
           set "GPN_OLLAMA=http://127.0.0.1:11434"
           set "GPN_LISTEN=0.0.0.0:8093"
-          set "GPN_BIN=C:\gpn\bin"
+          REM ── which binaries to run ─────────────────────────────────────────
+          REM  The updater stages a complete tree under data\update\versions and
+          REM  flips the `current` junction to select one. Run THAT supervisor:
+          REM  a running .exe is locked on Windows, so copying over bin is the
+          REM  one thing an in-place update cannot do (box 3, 2026-11-14). bin\
+          REM  stays as the fallback for a first install or a broken link.
+          set "GPN_BIN=C:\gpn\data\update\current"
+          if not exist "%GPN_BIN%\gpn_node.exe" set "GPN_BIN=C:\gpn\bin"
           REM ── Money identity: create once, then NEVER replace ──────────────
           REM Fails loudly (and the node does not start) if the keystore is
           REM corrupt: silently generating a new one would move this node's
@@ -325,7 +332,10 @@ jobs:
           REM Win32_Process.Create, scheduled task), and the operator sees only
           REM "the node exited 1 without writing a reason" while the node never
           REM ran. Console output moves to node.log; the dashboard shows state.
-          "C:\gpn\bin\gpn_node.exe" >> "C:\gpn\node.log" 2>&1
+          REM GPN_BIN is the versioned tree when the updater has installed one
+          REM (see above), so this line must NOT hard-code bin\: that literal is
+          REM what kept box 1 on the old build after a staged update.
+          "%GPN_BIN%\gpn_node.exe" >> "C:\gpn\node.log" 2>&1
           '@
           $script = $script.Replace('__CHAIN__', $chain)
 

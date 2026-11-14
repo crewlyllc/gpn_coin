@@ -729,3 +729,295 @@ fn apply_gives_up_after_the_attempt_budget() {
     assert!(err.contains("after 3 attempts"), "stderr={err}");
     assert!(update::current_version_dir(&ctx.state).is_none());
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Confirmation and rollback: "installed" is not "running"
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A JSON-RPC answer from the node the updater just restarted.
+fn rpc_body(version: &str) -> Vec<u8> {
+    serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": version })
+        .to_string()
+        .into_bytes()
+}
+
+#[test]
+fn confirm_sees_the_version_that_is_actually_running() {
+    let ctx = Ctx::new("confirm-ok");
+    let feed = Feed::start();
+    feed.add("/rpc", rpc_body(NEW_VERSION));
+    let rpc = feed.url("/rpc");
+
+    let (code, out, err) = ctx.run(
+        &[
+            "--confirm",
+            "--expect",
+            NEW_VERSION,
+            "--timeout",
+            "5",
+            "--rpc",
+            &rpc,
+        ],
+        &[],
+        "http://127.0.0.1:1/releases.json",
+    );
+    assert_eq!(code, 0, "stdout={out} stderr={err}");
+    assert!(out.contains("confirmed"), "stdout={out}");
+}
+
+/// The box-3 shape: the tree is installed, the OLD build is still the one
+/// answering. That must be a failure, not an ambiguity.
+#[test]
+fn confirm_fails_when_the_old_version_is_still_running() {
+    let ctx = Ctx::new("confirm-stale");
+    let feed = Feed::start();
+    feed.add("/rpc", rpc_body(OLD_VERSION));
+    let rpc = feed.url("/rpc");
+
+    let (code, out, err) = ctx.run(
+        &[
+            "--confirm",
+            "--expect",
+            NEW_VERSION,
+            "--timeout",
+            "2",
+            "--rpc",
+            &rpc,
+        ],
+        &[],
+        "http://127.0.0.1:1/releases.json",
+    );
+    assert_eq!(code, 4, "stdout={out} stderr={err}");
+    assert!(err.contains(NEW_VERSION), "stderr={err}");
+    assert!(err.contains(OLD_VERSION), "names what it saw: {err}");
+    assert!(err.contains("not running"), "stderr={err}");
+}
+
+/// Nothing listening at all is the same answer: not confirmed, in bounded time.
+#[test]
+fn confirm_is_bounded_when_nothing_is_listening() {
+    let ctx = Ctx::new("confirm-down");
+    let started = std::time::Instant::now();
+    let (code, _out, err) = ctx.run(
+        &[
+            "--confirm",
+            "--expect",
+            NEW_VERSION,
+            "--timeout",
+            "1",
+            "--rpc",
+            "http://127.0.0.1:1/rpc",
+        ],
+        &[],
+        "http://127.0.0.1:1/releases.json",
+    );
+    assert_eq!(code, 4, "stderr={err}");
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "must give up in bounded time, took {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn confirm_requires_an_expected_version() {
+    let ctx = Ctx::new("confirm-noexpect");
+    let (code, _out, err) = ctx.run(&["--confirm"], &[], "http://127.0.0.1:1/releases.json");
+    assert_eq!(code, 1, "stderr={err}");
+    assert!(err.contains("--expect"), "stderr={err}");
+}
+
+/// `--rollback` is one link flip: `current` goes back to `current.previous`.
+#[test]
+fn rollback_flips_current_back_one_version() {
+    let ctx = Ctx::new("rollback");
+    for v in [OLD_VERSION, NEW_VERSION] {
+        write_exe(
+            &update::version_dir(&ctx.state, v),
+            update::NODE_BIN,
+            Some(v),
+        );
+        write_exe(&update::version_dir(&ctx.state, v), "gpn-node", None);
+    }
+    update::record_previous(&ctx.state, &update::version_dir(&ctx.state, OLD_VERSION)).unwrap();
+    update::activate_version(&ctx.state, NEW_VERSION).unwrap();
+    assert_eq!(
+        update::installed_version(&ctx.state).as_deref(),
+        Some(NEW_VERSION)
+    );
+
+    let (code, out, err) = ctx.run(&["--rollback"], &[], "http://127.0.0.1:1/releases.json");
+    assert_eq!(code, 0, "stdout={out} stderr={err}");
+    assert_eq!(
+        update::installed_version(&ctx.state).as_deref(),
+        Some(OLD_VERSION),
+        "current must point at the previous tree again"
+    );
+    // One step means one step: the forward direction is now the rollback target.
+    assert_eq!(
+        update::previous_pointer_label(&ctx.state).as_deref(),
+        Some(NEW_VERSION)
+    );
+    // Both trees survive — nothing was deleted to make the flip work.
+    assert!(update::node_bin(&update::version_dir(&ctx.state, NEW_VERSION)).is_file());
+}
+
+#[test]
+fn rollback_without_a_target_fails_without_touching_anything() {
+    let ctx = Ctx::new("rollback-none");
+    let (code, _out, err) = ctx.run(&["--rollback"], &[], "http://127.0.0.1:1/releases.json");
+    assert_eq!(code, 1, "stderr={err}");
+    assert!(err.contains("no rollback target"), "stderr={err}");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The whole loop: apply → restart → confirm → (rollback)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn apply_restarts_confirms_and_records_the_winning_version() {
+    let ctx = Ctx::new("loop-ok");
+    ctx.seed_old();
+    let (feed, _bundle) = apply_feed();
+    feed.add("/rpc", rpc_body(NEW_VERSION));
+    let rpc = feed.url("/rpc");
+
+    let (code, out, err) = ctx.run(
+        &["--apply", "--json"],
+        &[
+            ("GPN_UPDATE_RESTART_CMD", "true"),
+            ("GPN_BOOT_ID", "boot-ok"),
+            ("GPN_RPC_URL", &rpc),
+        ],
+        &feed.url("/releases.json"),
+    );
+    assert_eq!(code, 0, "stdout={out} stderr={err}");
+    let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert_eq!(v["applied"], true);
+    assert_eq!(v["confirmed_version"], NEW_VERSION);
+    assert_eq!(
+        update::installed_version(&ctx.state).as_deref(),
+        Some(NEW_VERSION)
+    );
+
+    // And it is the running build that was asked, not the file on disk.
+    assert_eq!(feed.hit_count("/rpc"), 1, "hits={:?}", feed.hits());
+    let ledger = update::load_attempts(&ctx.state);
+    let last = ledger.attempts.last().expect("an attempt is recorded");
+    assert_eq!(last.version, NEW_VERSION);
+    assert_eq!(last.boot_id, "boot-ok");
+    assert_eq!(last.outcome, update::OUTCOME_CONFIRMED);
+}
+
+/// The requirement in one test: if the new build does not report itself after
+/// the restart, `current` goes back, the old build is started again, and the
+/// machine is left running — not dark.
+#[test]
+fn a_release_that_does_not_come_up_is_rolled_back_and_restarted() {
+    let ctx = Ctx::new("loop-rollback");
+    ctx.seed_old();
+    let (feed, _bundle) = apply_feed();
+    // The node keeps answering the OLD version: the new build did not take.
+    feed.add("/rpc", rpc_body(OLD_VERSION));
+    let rpc = feed.url("/rpc");
+
+    let (code, out, err) = ctx.run(
+        &["--apply", "--json", "--timeout", "2"],
+        &[
+            ("GPN_UPDATE_RESTART_CMD", "true"),
+            ("GPN_BOOT_ID", "boot-bad"),
+            ("GPN_RPC_URL", &rpc),
+        ],
+        &feed.url("/releases.json"),
+    );
+    assert_eq!(code, 1, "stdout={out} stderr={err}");
+    assert!(err.contains("did not come up"), "stderr={err}");
+    assert!(err.contains("rolled"), "stderr={err}");
+
+    // 1. `current` is back on the previous version.
+    assert_eq!(
+        update::installed_version(&ctx.state).as_deref(),
+        Some(OLD_VERSION)
+    );
+    // 2. The previous tree is intact — the rollback did not delete it.
+    assert!(update::node_bin(&update::version_dir(&ctx.state, OLD_VERSION)).is_file());
+    // 3. The restart ran a second time (once for the new build, once after the
+    //    rollback), so the node is up on *something*.
+    let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert_eq!(v["restart_ran"], true);
+    assert_eq!(v["rolled_back_to"], OLD_VERSION);
+    // 4. The failure is on the record: this boot must not retry it.
+    let ledger = update::load_attempts(&ctx.state);
+    let last = ledger.attempts.last().unwrap();
+    assert_eq!(last.outcome, update::OUTCOME_ROLLED_BACK);
+    assert!(update::attempt_blocks(last));
+}
+
+/// One attempt per version per boot: the second run of the same release on the
+/// same boot refuses before downloading anything.
+#[test]
+fn a_failed_release_is_not_retried_on_the_same_boot() {
+    let ctx = Ctx::new("loop-once");
+    ctx.seed_old();
+    let (feed, _bundle) = apply_feed();
+    feed.add("/rpc", rpc_body(OLD_VERSION));
+    let rpc = feed.url("/rpc");
+    let url = feed.url("/releases.json");
+
+    let env = [
+        ("GPN_UPDATE_RESTART_CMD", "true"),
+        ("GPN_BOOT_ID", "boot-once"),
+        ("GPN_RPC_URL", rpc.as_str()),
+    ];
+    let (code, _out, err) = ctx.run(&["--apply", "--timeout", "1"], &env, &url);
+    assert_eq!(code, 1, "first attempt fails: {err}");
+    let downloads_after_first = feed.hit_count("/gpn-linux.tar.gz");
+
+    let (code2, out2, err2) = ctx.run(&["--apply", "--json", "--timeout", "1"], &env, &url);
+    assert_eq!(
+        code2, 3,
+        "refusal is not an error: stdout={out2} stderr={err2}"
+    );
+    assert!(err2.contains("already attempted"), "stderr={err2}");
+    let v: serde_json::Value = serde_json::from_str(&out2).expect("json");
+    assert!(
+        v["attempt_blocked"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(NEW_VERSION),
+        "the refusal names the release: {out2}"
+    );
+    // The rollback also put the OLD binaries back, so the install dir agrees
+    // with `current` instead of advertising the failed build as installed.
+    assert_eq!(
+        update::installed_version(&ctx.state).as_deref(),
+        Some(OLD_VERSION)
+    );
+    assert_eq!(
+        feed.hit_count("/gpn-linux.tar.gz"),
+        downloads_after_first,
+        "a blocked retry must not download the bundle again"
+    );
+
+    // A reboot is the documented way out: the same release is attempted again.
+    let env2 = [
+        ("GPN_UPDATE_RESTART_CMD", "true"),
+        ("GPN_BOOT_ID", "boot-next"),
+        ("GPN_RPC_URL", rpc.as_str()),
+    ];
+    let (code3, _out3, err3) = ctx.run(&["--apply", "--timeout", "1"], &env2, &url);
+    assert_eq!(
+        code3, 1,
+        "it was attempted again (and failed again): {err3}"
+    );
+    // The verified tree is reused, not re-downloaded: the retry is cheap.
+    assert!(!err3.contains("already attempted"), "stderr={err3}");
+    let ledger = update::load_attempts(&ctx.state);
+    assert!(
+        ledger
+            .attempts
+            .iter()
+            .any(|a| a.boot_id == "boot-next" && a.outcome == update::OUTCOME_ROLLED_BACK),
+        "the new boot's attempt is recorded: {ledger:?}"
+    );
+}

@@ -726,7 +726,11 @@ node:
 
 ```text
 gpn_update --check    # default: fetch + verify the manifest, download NOTHING
-gpn_update --apply    # download, verify, install, copy, (optionally) restart
+gpn_update --apply    # download, verify, install, copy, restart, CONFIRM
+                      # (rolls back by itself when the new build does not come up)
+gpn_update --confirm --expect 0.3.31   # wait for the RUNNING node to report it
+gpn_update --rollback                  # flip `current` back one version
+gpn_update --repair-launcher           # Windows: aim start-node.cmd at `current`
 ```
 
 It reuses `gpn_agent::update` — the same manifest parser, the same ed25519
@@ -745,9 +749,11 @@ $ gpn_update --check
   -> update available: 0.3.31 (run `gpn_update --apply`)
 ```
 
-The version on the left is read from the **installed** `gpn_node` build stamp
-(falling back to the updater's own version), so an updater that is itself one
-release ahead still reports what the box is actually running.
+The version on the left is read from the **`current` junction** when one
+exists, else from the **installed** `gpn_node` build stamp (falling back to the
+updater's own version). If the two disagree — a mid-copy failure leaves
+`current` new and the install dir mixed — the **lower** version is reported, so
+the next `--apply` repairs it instead of hiding it.
 
 | Exit | Meaning |
 |---|---|
@@ -755,6 +761,7 @@ release ahead still reports what the box is actually running.
 | `1` | error: bad signature/key, no asset for this platform, I/O |
 | `2` | the manifest could not be fetched, or the body was not a manifest (offline, DNS, HTTP ≠ 2xx, captive portal) |
 | `3` | a **newer verified** release exists — the scriptable "update me" signal |
+| `4` | `--confirm` did not see the expected version running before its deadline |
 
 ### `--apply`
 
@@ -841,11 +848,12 @@ equivalent of `gpn-update.timer`:
 | | Value |
 |---|---|
 | Task name | `GPN-Update` |
-| Cadence | every **6 hours**, with `<RandomDelay>PT30M</RandomDelay>` (jitter is drawn per repetition, so the fleet drifts apart) |
+| Cadence | every **1 hour**, with `<RandomDelay>PT10M</RandomDelay>` (jitter is drawn per repetition, so the fleet drifts apart). TEMPORARY review-window cadence, 2026-11-12 — reverts with `DEFAULT_CHECK_HOURS`. |
 | Action | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\gpn\update-and-restart.ps1"` |
 | Concurrency | `MultipleInstancesPolicy = IgnoreNew` **and** an exclusive lock file `C:\gpn\update.lock` |
 | Missing a run (box off) | `StartWhenAvailable = true` |
 | Run level | `HighestAvailable`, as the installing user (`InteractiveToken`) |
+| Task Scheduler refuses | a per-user Startup shortcut runs `C:\gpn\update-loop.ps1` (same wrapper, hourly ±10 min, single-instance). Standard accounts on boxes 1/2/4 cannot create the task at all — without this fallback those boxes had **no** updater. |
 
 The task is registered from XML (`schtasks /Create /TN GPN-Update /XML ... /F`)
 and not from `schtasks /SC DAILY /RI 360`: the CLI cannot express jitter, and
@@ -857,33 +865,59 @@ the installer twice never creates a second task or a duplicate trigger.
 
 ```text
 update check started
+  repair start-node.cmd             idempotent: the launcher must run the tree
+                                    the updater selects, not bin\gpn_node.exe
   gpn_update --check                 -> 0  up to date        -> log, exit 0   (node NOT restarted)
                                      -> 2  manifest offline  -> log, exit 0   (node NOT restarted)
                                      -> 3  update available  -> continue
                                      -> 1  verification error-> log, message box, exit 1
-  schtasks /End /TN GPN-Node         (Windows locks a running .exe, so the swap
+  schtasks /End /TN GPN-Node         (Windows locks a running .exe, so the copy
                                       cannot succeed while the node runs)
   wait up to 60 s for gpn* to exit; force-stop the stragglers if it does not
-  gpn_update --apply                 (downloads, verifies, swaps, copies to C:\gpn\bin)
+  gpn_update --apply                 (download, verify, extract, flip `current`,
+                                      copy into C:\gpn\bin, prune)
   schtasks /Run /TN GPN-Node         ALWAYS - even if --apply failed
-  only then, if --apply failed, the message box explaining why
+  CONFIRM                            poll JSON-RPC system_version for up to
+                                     120 s; it must equal the version in
+                                     data\update\current
+    confirmed                      -> log CONFIRMED, exit 0
+    not confirmed                  -> roll the junction back one version,
+                                      restart, confirm the old build,
+                                      message box, exit 1
 ```
 
-Three rules are load-bearing:
+Four rules are load-bearing:
 
 * **Stop before apply.** The updater reports a locked `.exe` as an error; the
   wrapper prevents the case instead of relying on the error.
 * **Always restart.** A failed update must never leave a box with nothing
   running. The restart happens *before* any dialog, so a modal message box
   cannot be the reason the node stays down.
-* **No restart when there is nothing to do.** A 6-hourly bounce for no reason
-  looks like instability; exits `0` and `2` return without touching the node.
+* **Confirm before calling it done.** "Applied" describes files on disk. Until
+  2026-11-14 nothing asked the running process what build it was, and box 3 sat
+  on 0.3.45 for eight hours with 0.3.46 staged, verified and "installed".
+* **Roll back, never leave it down.** If the new build does not report itself
+  within the window, `current` goes back one version, the node is restarted on
+  it, and that is confirmed too. One attempt per release per boot is recorded
+  in `data\update\update-attempts.json`, so a broken release cannot
+  restart-loop a machine — a reboot (or `--force`) re-arms it.
+
+#### What actually gets run: `current`, not `bin`
+
+The launcher starts `%GPN_BIN%\gpn_node.exe`, and `GPN_BIN` is
+`C:\gpn\data\update\current` — a junction the updater flips — with
+`C:\gpn\bin` as the fallback for a first install or a broken link. That is why
+an update needs no locked-file write at all: the swap is a directory-entry
+change, and the next start picks the new tree. The copy into `bin` still
+happens (it is what Linux runs, and the fallback), but it is no longer the
+mechanism the update depends on.
 
 The restart window is the time the supervisor takes to come back — typically
 **10-30 s** (children stop gracefully, chain sync resumes from the last block,
 no re-sync). `gpn_update --apply` downloads the ~225 MB Windows bundle first,
 so a release day cycle takes minutes, not seconds; the node is only down for
-the swap itself.
+the swap itself plus the confirmation poll (which normally answers on the
+first request).
 
 #### Checking what happened
 

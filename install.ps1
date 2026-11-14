@@ -387,7 +387,16 @@ REM --- where to look: the console only prints failures; the dashboard is live -
 echo [gpn] dashboard: http://127.0.0.1:8099   (status, models, peers, jobs -- keep this open)
 
 set "GPN_OLLAMA=http://127.0.0.1:11434"
-set "GPN_BIN=__INSTALL_DIR__\bin"
+REM --- which binaries to run ------------------------------------------------
+REM  The updater installs a complete version tree under data\update\versions
+REM  and flips the `current` junction to select one. Run THAT supervisor when it
+REM  is there: Windows locks a running .exe, so "copy the new build over bin" is
+REM  exactly the step that cannot work while the node is up (box 3, 2026-11-14:
+REM  0.3.46 staged and verified while 0.3.45 kept running for 8 h). Selecting a
+REM  directory through the junction needs no locked-file write at all.
+REM  bin\ stays as the fallback for a first install or a broken link.
+set "GPN_BIN=__INSTALL_DIR__\data\update\current"
+if not exist "%GPN_BIN%\gpn_node.exe" set "GPN_BIN=__INSTALL_DIR__\bin"
 
 REM --- per-machine node identity (a shared key makes boxes collide) ----------
 REM  NO cmd-side probing. `if not exist` reported a present, readable, unlocked
@@ -651,6 +660,11 @@ $LogPath      = Join-Path $InstallDir 'update.log'
 $LockPath     = Join-Path $InstallDir 'update.lock'
 $ReportScript = Join-Path $InstallDir 'report-exit.ps1'
 $NodeTask     = 'GPN-Node'
+$Launcher     = Join-Path $InstallDir 'start-node.cmd'
+$CurrentLink  = Join-Path $InstallDir 'data\update\current'
+$RpcUrl       = if ($env:GPN_RPC_URL) { $env:GPN_RPC_URL } else { 'http://127.0.0.1:9944' }
+# How long the new build gets to come up and answer before we roll it back.
+$ConfirmSecs  = if ($env:GPN_UPDATE_CONFIRM_SECS) { [int]$env:GPN_UPDATE_CONFIRM_SECS } else { 120 }
 
 function Write-Log {
   param([string]$Message)
@@ -672,6 +686,135 @@ function Show-UpdateFailure {
   } catch {
     Write-Log ('could not show the failure dialog: ' + $_.Exception.Message)
   }
+}
+
+# The version `current` names, i.e. the one the launcher will run next.
+function Get-ExpectedVersion {
+  try {
+    $item = Get-Item -LiteralPath $CurrentLink -Force -ErrorAction Stop
+    $t = @($item.Target) | Select-Object -First 1
+    if (-not $t) { return $null }
+    return (Split-Path -Leaf $t)
+  } catch { return $null }
+}
+
+# Ask the RUNNING node what version it is. This is the only evidence that an
+# update actually took: everything before it describes files on disk.
+# Returns a message on success, $null on failure (reason in $script:ConfirmReason).
+function Confirm-Running {
+  param([string]$Expect, [int]$Seconds = 120)
+  $script:ConfirmReason = 'no answer'
+  if (-not $Expect) { $script:ConfirmReason = 'no expected version to confirm'; return $null }
+  $deadline = (Get-Date).AddSeconds($Seconds)
+  $body = '{"jsonrpc":"2.0","id":1,"method":"system_version","params":[]}'
+  while ((Get-Date) -lt $deadline) {
+    try {
+      $r = Invoke-RestMethod -Uri $RpcUrl -Method Post -Body $body -ContentType 'application/json' -TimeoutSec 3
+      $got = ([string]$r.result).Trim()
+      if ($got -eq $Expect.Trim()) { return ('{0} is running (rpc {1})' -f $got, $RpcUrl) }
+      $script:ConfirmReason = ('the node reports ' + $got + ', expected ' + $Expect)
+    } catch {
+      $script:ConfirmReason = ('rpc ' + $RpcUrl + ': ' + $_.Exception.Message)
+    }
+    Start-Sleep -Seconds 2
+  }
+  $script:ConfirmReason = ('not confirmed within ' + $Seconds + ' s: ' + $script:ConfirmReason)
+  return $null
+}
+
+# Make the NEXT start run the version tree the updater selects, instead of the
+# locked bin\gpn_node.exe. Idempotent: a launcher that already points at the
+# junction is left byte-identical, and only one backup is ever taken.
+function Repair-Launcher {
+  if (-not (Test-Path -LiteralPath $Launcher)) { return }
+  $body = Get-Content -LiteralPath $Launcher -Raw
+  $new = $body
+  $notes = @()
+
+  # 1. The selection line. Only a line that IS `set "GPN_BIN=<bin>"`: matching
+  #    the text anywhere also hits the fallback line the repair itself writes,
+  #    which turned a second run into a duplicated, nested pair (box 1).
+  $binPattern = '(?m)^[ \t]*set "GPN_BIN=' + [regex]::Escape($BinDir) + '"[ \t]*\r?$'
+  if ($new -match $binPattern) {
+    $replacement = 'set "GPN_BIN=' + $CurrentLink + '"' + "`r`n" +
+                   'if not exist "%GPN_BIN%\gpn_node.exe" set "GPN_BIN=' + $BinDir + '"'
+    $new = [regex]::Replace($new, $binPattern, $replacement)
+    $notes += ('runs ' + $CurrentLink + ' (falls back to ' + $BinDir + ')')
+  }
+
+  # 2. A hard-coded exec line. The release workflow's launcher used to start
+  #    `"C:\gpn\bin\gpn_node.exe"` literally, so fixing GPN_BIN alone changed
+  #    nothing: the supervisor (and every child it spawns) still came from bin
+  #    (box 1, 2026-11-14).
+  $literal = [regex]::Escape('"' + (Join-Path $BinDir 'gpn_node.exe') + '"')
+  $execPattern = '(?m)^[ \t]*' + $literal
+  if ($new -match $execPattern) {
+    $new = [regex]::Replace($new, $execPattern, '"%GPN_BIN%\gpn_node.exe"')
+    $notes += 'the supervisor is started through %GPN_BIN%, not a hard-coded bin path'
+  }
+
+  if ($new -eq $body) { return }
+  $backup = Join-Path $InstallDir ('start-node.cmd.bak-' + (Get-Date -Format 'yyyyMMddHHmmss'))
+  try {
+    Copy-Item -LiteralPath $Launcher -Destination $backup -ErrorAction Stop
+    Set-Content -LiteralPath $Launcher -Value $new -Encoding ascii -NoNewline -ErrorAction Stop
+    Write-Log ('launcher repaired: ' + ($notes -join '; ') + '; backup ' + $backup)
+  } catch {
+    Write-Log ('could not repair the launcher: ' + $_.Exception.Message)
+  }
+}
+
+# Flip `current` back one version: the updater's own verb when it has one, the
+# junction itself when the installed updater predates it. The launcher runs
+# `current`, so this is what makes a rollback actually take effect.
+function Invoke-Rollback {
+  # Not `$updater`: that is assigned later in the cycle, and the self-test path
+  # reaches this function before it exists (box 3, 2026-11-14: "The expression
+  # after '&' ... produced an object that was not valid").
+  $updaterExe = Join-Path $BinDir 'gpn_update.exe'
+  $lines = @()
+  if (Test-Path -LiteralPath $updaterExe) {
+    $lines = @(& $updaterExe --rollback 2>&1 | ForEach-Object { [string]$_ })
+    if ($LASTEXITCODE -eq 0) { return @{ Ok = $true; Lines = $lines } }
+  }
+
+  $prevFile = Join-Path $InstallDir 'data\update\current.previous'
+  if (-not (Test-Path -LiteralPath $prevFile)) { return @{ Ok = $false; Lines = $lines } }
+  $prev = (Get-Content -LiteralPath $prevFile -Raw).Trim()
+  if (-not (Test-Path -LiteralPath (Join-Path $prev 'gpn_node.exe'))) {
+    return @{ Ok = $false; Lines = ($lines + 'rollback target ' + $prev + ' is not a version tree') }
+  }
+  $nowDir = $null
+  try { $nowDir = @((Get-Item -LiteralPath $CurrentLink -Force).Target) | Select-Object -First 1 } catch { }
+
+  # A junction is removed with rmdir: the target's contents are untouched.
+  & cmd /c rmdir "$CurrentLink" 2>&1 | Out-Null
+  & cmd /c mklink /J "$CurrentLink" "$prev" 2>&1 | Out-Null
+  $ok = ($LASTEXITCODE -eq 0) -and (Test-Path -LiteralPath (Join-Path $CurrentLink 'gpn_node.exe'))
+  if ($ok -and $nowDir) {
+    Set-Content -LiteralPath $prevFile -Value ($nowDir + "`r`n") -Encoding ascii
+  }
+  return @{ Ok = $ok; Lines = ($lines + ('current -> ' + $prev)) }
+}
+
+# Optional ops self-test, never used by the scheduled task (which passes no
+# arguments). It exists so the confirm/rollback half of the loop can be proven
+# on a box that has nothing new to install:
+#   update-and-restart.ps1 -SelfTest 0.3.46   -> confirm 0.3.46 is running
+#   update-and-restart.ps1 -SelfTestRollback  -> flip `current` back one step
+#     (no restart; the caller restarts and confirms, so a test can be undone)
+if ($args.Count -ge 1 -and $args[0] -eq '-SelfTest') {
+  $want = if ($args.Count -ge 2) { [string]$args[1] } else { Get-ExpectedVersion }
+  $m = Confirm-Running -Expect $want -Seconds $ConfirmSecs
+  if ($m) { Write-Log ('SELFTEST CONFIRMED: ' + $m); exit 0 }
+  Write-Log ('SELFTEST NOT CONFIRMED: ' + $script:ConfirmReason)
+  exit 4
+}
+if ($args.Count -ge 1 -and $args[0] -eq '-SelfTestRollback') {
+  $rb = Invoke-Rollback
+  foreach ($l in $rb.Lines) { if ($l.Trim()) { Write-Log ('selftest rollback: ' + $l.Trim()) } }
+  Write-Log ('SELFTEST ROLLBACK ok=' + $rb.Ok + ' now=' + (Get-ExpectedVersion))
+  if ($rb.Ok) { exit 0 } else { exit 1 }
 }
 
 # True once no GPN node process is left. gpn_update is excluded on purpose: this
@@ -703,6 +846,18 @@ try {
 
 try {
   Write-Log 'update check started'
+
+  # Identity of this boot, for the updater's once-per-release attempt record.
+  # Empty on failure, which makes the record fail open rather than block forever.
+  try {
+    $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+    $env:GPN_BOOT_ID = 'win-' + $os.LastBootUpTime.ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
+  } catch { $env:GPN_BOOT_ID = '' }
+
+  # Heal the launcher first: a box whose launcher still execs bin\gpn_node.exe
+  # would apply this update and then keep running the old build (box 3,
+  # 2026-11-14). Idempotent, so doing it every cycle is free.
+  Repair-Launcher
 
   $updater = Join-Path $BinDir 'gpn_update.exe'
   if (-not (Test-Path $updater)) {
@@ -763,11 +918,41 @@ try {
     Show-UpdateFailure $runRc 'start GPN-Node' 'the node was stopped for the update but could not be started again'
   }
 
-  if ($apply -eq 0) {
+  if ($apply -eq 3) {
+    Write-Log 'update declined (policy, or already attempted on this boot) - node restarted on the current build'
+    exit 0
+  }
+  if ($apply -ne 0) {
+    Show-UpdateFailure $apply 'gpn_update --apply' 'the new release was not installed; the node is back on the previous build'
+    exit 1
+  }
+
+  # "Applied" is a statement about files on disk. The update is DONE only when
+  # the running node reports the installed version -- download, verify, stop,
+  # switch, start, CONFIRM is the whole cycle.
+  $expect = Get-ExpectedVersion
+  $confirm = Confirm-Running -Expect $expect -Seconds $ConfirmSecs
+  if ($confirm) {
+    Write-Log ('CONFIRMED: ' + $confirm)
     Write-Log 'update cycle complete'
     exit 0
   }
-  Show-UpdateFailure $apply 'gpn_update --apply' 'the new release was not installed; the node is back on the previous build'
+
+  Write-Log ('NOT CONFIRMED: ' + $script:ConfirmReason)
+  Write-Log 'rolling back to the previous version and restarting it - a box must not be left on a build that does not come up'
+  $rb = Invoke-Rollback
+  foreach ($l in $rb.Lines) { if ($l.Trim()) { Write-Log ('rollback: ' + $l.Trim()) } }
+  if (-not $rb.Ok) {
+    Write-Log 'rollback failed - restarting whatever is installed'
+  }
+  & schtasks /End /TN $NodeTask 2>&1 | Out-Null
+  if (Wait-NodeExit 60) { Write-Log 'node stopped for the rollback' }
+  & schtasks /Run /TN $NodeTask 2>&1 | Out-Null
+  $back = Get-ExpectedVersion
+  $backMsg = Confirm-Running -Expect $back -Seconds $ConfirmSecs
+  if ($backMsg) { Write-Log ('CONFIRMED after rollback: ' + $backMsg) }
+  else { Write-Log ('WARNING: even the previous build did not confirm: ' + $script:ConfirmReason) }
+  Show-UpdateFailure 1 'confirm the new version' $script:ConfirmReason
   exit 1
 }
 finally {
@@ -894,6 +1079,18 @@ function Write-UpdateFallback {
 $wrapper = Join-Path $PSScriptRoot 'update-and-restart.ps1'
 $log = Join-Path $PSScriptRoot 'update-loop.log'
 function Note($m) { try { Add-Content -Path $log -Value ((Get-Date).ToString('yyyy-MM-dd HH:mm:ss') + ' ' + $m) } catch { } }
+# The Startup shortcut can start this at logon while one is already running
+# (the box was fixed by hand / an older loop survived). One loop is the point:
+# two would double the checks and the restarts.
+try {
+  $me = [System.Diagnostics.Process]::GetCurrentProcess().Id
+  $other = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction Stop |
+    Where-Object { $_.CommandLine -like '*update-loop.ps1*' -and $_.ProcessId -ne $me })
+  if ($other.Count -gt 0) {
+    Note ('another update loop is already running (pid ' + $other[0].ProcessId + ') - exiting')
+    exit 0
+  }
+} catch { }
 Note 'update loop started (Startup shortcut; Task Scheduler unavailable)'
 while ($true) {
   try {
@@ -1182,6 +1379,15 @@ if ($UpdateTaskOnly) {
   Say "registering only the auto-update task in $InstallDir"
   Write-UpdateWrapper
   $ok = Register-UpdateTask
+  if (-not $ok) {
+    # Task Scheduler refuses a standard account ("Access is denied", seen on
+    # boxes 1/2/4) and cannot be asked for an interactive token from an SSH
+    # session. A per-user Startup shortcut needs no privileges and runs the
+    # same wrapper on the same cadence, so the box must not be left with no
+    # updater at all -- that is how box 3 sat on 0.3.45 for eight hours.
+    Say 'falling back to the Startup-shortcut update loop'
+    $ok = Write-UpdateFallback
+  }
   if ($WhatIf) { Write-Host '[whatif] would not start or stop the node' -ForegroundColor Cyan }
   try { Stop-Transcript | Out-Null } catch { }
   # This mode is best-effort BY DESIGN: it runs inside the release build, whose

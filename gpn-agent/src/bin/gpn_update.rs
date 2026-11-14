@@ -82,6 +82,8 @@ const EXIT_OK: u8 = 0;
 const EXIT_ERROR: u8 = 1;
 const EXIT_UNREACHABLE: u8 = 2;
 const EXIT_UPDATE_AVAILABLE: u8 = 3;
+/// `--confirm` could not see the expected version running before the deadline.
+const EXIT_NOT_CONFIRMED: u8 = 4;
 
 /// The binary this crate compiles. Reported as `current` only when the install
 /// directory carries no readable build stamp (a hand-built dev tree).
@@ -95,6 +97,13 @@ const COMPILED_VERSION: &str = env!("CARGO_PKG_VERSION");
 enum Action {
     Check,
     Apply,
+    /// Wait for the running node to report a specific version.
+    Confirm,
+    /// Flip `current` back to the version it pointed at before the last switch.
+    Rollback,
+    /// Repair `start-node.cmd` in place (Windows), so the next start runs the
+    /// version the updater selected. Idempotent.
+    RepairLauncher,
 }
 
 #[derive(Debug, Clone)]
@@ -106,8 +115,15 @@ struct Options {
     target_dir: PathBuf,
     manifest_url: String,
     /// `--force`: install even when the guard says the installed tree is a
-    /// different (or newer) build of the same version.
+    /// different (or newer) build of the same version, and ignore the
+    /// once-per-boot attempt record.
     force: bool,
+    /// `--expect V`: the version `--confirm` waits for.
+    expect_version: Option<String>,
+    /// `--timeout SECS`: how long `--confirm` waits (default 120).
+    timeout_secs: u64,
+    /// `--rpc URL`: where to ask the running node what version it is.
+    rpc_url: String,
 }
 
 impl Options {
@@ -119,22 +135,37 @@ impl Options {
         let mut target_dir = None;
         let mut manifest_url = None;
         let mut force = false;
+        let mut expect_version = None;
+        let mut timeout_secs = 120u64;
+        let mut rpc_url = default_rpc_url();
+
+        let set_action = |a: Action, action: &mut Option<Action>| -> Result<(), String> {
+            if action.is_some() {
+                return Err("only one of --check, --apply, --confirm, --rollback, \
+                     --repair-launcher may be given"
+                    .into());
+            }
+            *action = Some(a);
+            Ok(())
+        };
 
         let mut it = args.peekable();
         while let Some(a) = it.next() {
             match a.as_str() {
-                "--check" => {
-                    if action == Some(Action::Apply) {
-                        return Err("--check and --apply are mutually exclusive".into());
-                    }
-                    action = Some(Action::Check);
+                "--check" => set_action(Action::Check, &mut action)?,
+                "--apply" => set_action(Action::Apply, &mut action)?,
+                "--confirm" => set_action(Action::Confirm, &mut action)?,
+                "--rollback" => set_action(Action::Rollback, &mut action)?,
+                "--repair-launcher" => set_action(Action::RepairLauncher, &mut action)?,
+                "--expect" => expect_version = Some(it.next().ok_or("--expect needs a version")?),
+                "--timeout" => {
+                    let v = it.next().ok_or("--timeout needs seconds")?;
+                    timeout_secs = v
+                        .parse::<u64>()
+                        .map_err(|_| format!("--timeout {v:?} is not a number of seconds"))?
+                        .clamp(1, 3600);
                 }
-                "--apply" => {
-                    if action == Some(Action::Check) {
-                        return Err("--check and --apply are mutually exclusive".into());
-                    }
-                    action = Some(Action::Apply);
-                }
+                "--rpc" => rpc_url = it.next().ok_or("--rpc needs a URL")?,
                 "--json" => json = true,
                 "--quiet" | "-q" => quiet = true,
                 "--state-dir" => {
@@ -161,15 +192,22 @@ impl Options {
             }
         }
 
+        let action = action.unwrap_or(Action::Check);
+        if action == Action::Confirm && expect_version.is_none() {
+            return Err("--confirm needs --expect <version>".into());
+        }
+
         Ok(Some(Options {
-            // No flag = --check: the safe, side-effect-free default.
-            action: action.unwrap_or(Action::Check),
+            action,
             json,
             quiet,
             state_dir: state_dir.unwrap_or_else(default_state_dir),
             target_dir: target_dir.unwrap_or_else(default_target_dir),
             manifest_url: manifest_url.unwrap_or_else(default_manifest_url),
             force,
+            expect_version,
+            timeout_secs,
+            rpc_url,
         }))
     }
 }
@@ -180,32 +218,57 @@ fn print_help() {
 gpn_update {COMPILED_VERSION} — verify and install signed GPN releases
 
 USAGE:
-  gpn_update [--check|--apply] [--json] [--quiet] [--force]
+  gpn_update [--check|--apply|--confirm|--rollback|--repair-launcher]
+             [--json] [--quiet] [--force]
              [--state-dir DIR] [--target-dir DIR] [--url URL]
+             [--expect VERSION] [--timeout SECS] [--rpc URL]
 
   --check        fetch + verify the manifest, print current vs latest.
                  Downloads nothing. Exit 3 when a newer release exists.
   --apply        download, verify, extract, flip `current`, copy the binaries
-                 into the target dir, prune old versions.
+                 into the target dir, prune old versions. When a restart
+                 command is configured it also restarts, CONFIRMS the running
+                 node reports the new version, and rolls back if it does not.
+  --confirm      wait (up to --timeout, default 120 s) for the running node to
+                 report --expect <version>. Exit 0 confirmed, 4 not confirmed.
+  --rollback     flip `current` back to `current.previous` (one step).
+  --repair-launcher  rewrite start-node.cmd so the next start runs the
+                 versioned tree the updater selects (Windows; idempotent).
   --force        install even when the install dir already runs a different
                  build of the same version, or a newer one (refused by default:
                  a version comparison cannot see a locally deployed HEAD).
+                 Also ignores the once-per-boot attempt record.
   --json         one JSON object on stdout (machine-readable).
   --quiet        no stdout noise (the systemd timer uses this).
   --state-dir    where versions/ + current live (default {})
   --target-dir   where the binaries are installed (default {})
   --url          manifest URL (default {})
+  --expect       the version --confirm waits for
+  --timeout      --confirm's deadline in seconds (default 120)
+  --rpc          JSON-RPC endpoint of the running node (default {})
 
-EXIT CODES: 0 up to date / applied, 1 error, 2 manifest unreachable,
-            3 newer verified release available (or not applied by policy)
+EXIT CODES: 0 up to date / applied / confirmed, 1 error, 2 manifest unreachable,
+            3 newer verified release available (or not applied by policy),
+            4 --confirm did not see the expected version running
 
 ENV: GPN_AUTO_UPDATE=0 disables --apply.
      GPN_UPDATE_RESTART_CMD is run after a successful swap; when unset the
-     command to run is printed instead (nothing is restarted by default).",
+     command to run is printed instead (nothing is restarted by default).
+     GPN_BOOT_ID identifies the current boot for the once-per-release attempt
+     record (Windows passes it; Linux defaults to the kernel boot id).",
         default_state_dir().display(),
         default_target_dir().display(),
         update::MANIFEST_URL,
+        default_rpc_url(),
     );
+}
+
+/// Where to ask the running node what version it is. The chain node's HTTP
+/// JSON-RPC (`system_version`), which is the same port `--rpc-port` configures.
+fn default_rpc_url() -> String {
+    non_empty_env("GPN_RPC_URL")
+        .or_else(|| non_empty_env("GPN_RPC_PORT").map(|p| format!("http://127.0.0.1:{p}")))
+        .unwrap_or_else(|| "http://127.0.0.1:9944".to_string())
 }
 
 fn home_dir() -> PathBuf {
@@ -286,6 +349,12 @@ struct Report {
     previous: Option<String>,
     restart_command: Option<String>,
     restart_ran: Option<bool>,
+    /// `--confirm`: the version the running node actually reported.
+    confirmed_version: Option<String>,
+    /// `--rollback`: the version `current` was flipped back to.
+    rolled_back_to: Option<String>,
+    /// Why an install was skipped by the once-per-boot attempt record.
+    attempt_blocked: Option<String>,
     error: Option<String>,
 }
 
@@ -506,19 +575,51 @@ fn fmt_mb(bytes: u64) -> String {
 /// `CARGO_PKG_VERSION` matters: an updater that is itself one release ahead
 /// (it was shipped inside the bundle) must still see the box as "0.3.11" until
 /// the copy step runs.
-fn installed_version(target: &Path) -> (String, String) {
-    for name in [update::NODE_BIN, update::RUST_NODE_BIN] {
-        let p = target.join(name);
-        if p.is_file() {
-            if let Ok(Some(v)) = update::read_build_stamp(&p) {
-                return (v, p.display().to_string());
+fn installed_version(o: &Options) -> (String, String) {
+    // Two sources of truth, and they can disagree:
+    //  * `current` is what the launcher on a Windows box will run next;
+    //  * the install dir is what runs on Linux *and* what `--apply` copies into.
+    //
+    // A mid-copy failure leaves `current` on the new version and the install dir
+    // mixed, so answering "up to date" from `current` alone would hide a broken
+    // install forever. Report the LOWER version when they disagree: that can
+    // only cause work (a re-apply), never hide some.
+    let from_stamp = [update::node_bin_name(), update::rust_node_bin_name()]
+        .iter()
+        .find_map(|name| {
+            let p = o.target_dir.join(name);
+            update::read_build_stamp(&p).ok().flatten().map(|v| (v, p))
+        });
+    let from_current = update::installed_version(&o.state_dir);
+
+    match (from_current, from_stamp) {
+        (Some(cur), Some((stamp, path))) => match update::version_cmp(&cur, &stamp) {
+            Some(std::cmp::Ordering::Equal) => {
+                (cur, format!("current -> {}", o.state_dir.display()))
             }
-        }
+            Some(std::cmp::Ordering::Less) => (
+                cur,
+                format!(
+                    "current -> (lower than the install dir's {stamp} at {})",
+                    path.display()
+                ),
+            ),
+            _ => (
+                stamp,
+                format!(
+                    "{} (lower than current -> {cur}; the install and the version \
+                     tree disagree, so an apply will repair them)",
+                    path.display()
+                ),
+            ),
+        },
+        (Some(cur), None) => (cur, format!("current -> {}", o.state_dir.display())),
+        (None, Some((stamp, path))) => (stamp, path.display().to_string()),
+        (None, None) => (
+            COMPILED_VERSION.to_string(),
+            "compiled-in (no build stamp in the install dir)".to_string(),
+        ),
     }
-    (
-        COMPILED_VERSION.to_string(),
-        "compiled-in (no build stamp in the install dir)".to_string(),
-    )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -766,6 +867,29 @@ fn run_apply(o: &Options, report: &mut Report) -> u8 {
             return EXIT_ERROR;
         }
     };
+
+    // Once per version per boot. A release that installs but does not come up
+    // must not be retried every hour on the same boot: that is a restart loop
+    // with a 300 MB download attached. The record is written before the install
+    // and updated with its outcome, so a crash mid-update also counts.
+    let boot = update::boot_id();
+    if !o.force {
+        if let Some(prev) = update::attempt_for_this_boot(&o.state_dir, &m.version, &boot) {
+            if update::attempt_blocks(&prev) {
+                let msg = format!(
+                    "{} was already attempted on this boot ({}, at {} unix) and did not confirm \
+                     — not retrying. The previous build stays running. Rebooting is the \
+                     documented way to re-arm; `--force` overrides this.",
+                    m.version, prev.outcome, prev.at
+                );
+                report.attempt_blocked = Some(msg.clone());
+                report.error = Some(msg.clone());
+                emit_error(o, report, &msg);
+                return EXIT_UPDATE_AVAILABLE;
+            }
+        }
+    }
+
     let bundle = update::is_bundle(asset);
     report.layout = Some(update::asset_layout(asset));
     report.asset_url = Some(asset.url.clone());
@@ -819,17 +943,296 @@ fn run_apply(o: &Options, report: &mut Report) -> u8 {
         );
     }
 
+    // The install is done; from here on the only question that matters is
+    // whether the *running* process becomes the new build.
+    let _ = update::record_attempt(&o.state_dir, &m.version, &boot, update::OUTCOME_STARTED);
+
     match restart(o, report) {
         Ok(()) => {
+            if report.restart_ran == Some(true) {
+                match wait_for_version(o, &m.version) {
+                    Ok(got) => {
+                        report.confirmed_version = Some(got.clone());
+                        let _ = update::record_attempt(
+                            &o.state_dir,
+                            &m.version,
+                            &boot,
+                            update::OUTCOME_CONFIRMED,
+                        );
+                        if !o.quiet && !o.json {
+                            println!("  confirmed: {got} is running");
+                        }
+                    }
+                    Err(reason) => {
+                        return roll_back_after_failed_confirm(
+                            o, report, &m.version, &boot, &reason,
+                        )
+                    }
+                }
+            } else {
+                // No restart command: the new binaries are on disk and the old
+                // ones are still running. "Installed" is the honest outcome —
+                // not a confirmation, and not a failure.
+                let _ = update::record_attempt(
+                    &o.state_dir,
+                    &m.version,
+                    &boot,
+                    update::OUTCOME_INSTALLED,
+                );
+            }
             if o.json {
                 emit_json(report);
             }
             EXIT_OK
         }
         Err(msg) => {
+            let _ = update::record_attempt(&o.state_dir, &m.version, &boot, update::OUTCOME_FAILED);
             report.error = Some(msg.clone());
             emit_error(o, report, &msg);
             EXIT_ERROR
+        }
+    }
+}
+
+/// The new build did not come up: put the previous one back, start it, and
+/// record the failure so this boot does not try the same release again.
+///
+/// The node is never left down: if the rollback itself fails we still run the
+/// restart command, because a box running the previous build is the floor, and
+/// a box with nothing running is worse than the bug we are reacting to.
+fn roll_back_after_failed_confirm(
+    o: &Options,
+    report: &mut Report,
+    version: &str,
+    boot: &str,
+    reason: &str,
+) -> u8 {
+    eprintln!("gpn_update: NOT CONFIRMED — {reason}");
+    let rolled = update::rollback_bundle(&o.state_dir);
+    let (msg, prev_label) = match rolled {
+        Ok(Some(prev)) => {
+            // A rollback that leaves the install dir on the new binaries is not
+            // a rollback: on Linux (and on any launcher that runs `bin`) the
+            // restart would start the build that just failed. Best effort — the
+            // `current` flip is what matters on Windows, where the launcher
+            // runs the versioned tree.
+            if let Err(e) = copy_binaries(&prev, &o.target_dir) {
+                eprintln!(
+                    "gpn_update: `current` is back on {}, but refreshing {} failed: {e}",
+                    prev.display(),
+                    o.target_dir.display()
+                );
+            }
+            let label = prev
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| prev.display().to_string());
+            (
+                format!("{version} did not come up ({reason}); rolled `current` back to {label}"),
+                Some(label),
+            )
+        }
+        Ok(None) => (
+            format!(
+                "{version} did not come up ({reason}); there is no rollback target, so the \
+                 previous build is still the one on disk"
+            ),
+            None,
+        ),
+        Err(e) => (
+            format!("{version} did not come up ({reason}); the rollback also failed: {e}"),
+            None,
+        ),
+    };
+
+    // Restart whatever is now selected. Never end with the node down.
+    match restart(o, report) {
+        Ok(()) => {}
+        Err(e) => eprintln!("gpn_update: could not restart after the rollback: {e}"),
+    }
+
+    let _ = update::record_attempt(&o.state_dir, version, boot, update::OUTCOME_ROLLED_BACK);
+    report.rolled_back_to = prev_label;
+    report.error = Some(msg.clone());
+    emit_error(o, report, &msg);
+    EXIT_ERROR
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// --confirm / --rollback / --repair-launcher
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Ask the running node what version it is, via the same JSON-RPC the operator
+/// and the dashboard use.
+///
+/// Short per-request timeout: `--confirm` polls, so one slow answer must not
+/// consume the whole deadline.
+fn rpc_system_version(url: &str, timeout: Duration) -> Result<String, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+    let body = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "system_version", "params": []
+    });
+    let bytes = serde_json::to_vec(&body).map_err(|e| e.to_string())?;
+    let resp = client
+        .post(url)
+        .header("content-type", "application/json")
+        .body(bytes)
+        .send()
+        .map_err(|e| format!("{url}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("{url} -> HTTP {}", resp.status()));
+    }
+    let v: serde_json::Value = resp
+        .json()
+        .map_err(|e| format!("{url}: response is not JSON: {e}"))?;
+    if let Some(err) = v.get("error") {
+        return Err(format!("{url}: RPC error {err}"));
+    }
+    v.get("result")
+        .and_then(|r| r.as_str())
+        .map(|s| s.trim().to_string())
+        .ok_or_else(|| format!("{url}: no string `result` in {v}"))
+}
+
+/// Poll the running node until it reports `version`, or the deadline passes.
+fn wait_for_version(o: &Options, version: &str) -> Result<String, String> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(o.timeout_secs);
+    let mut last: Option<String> = None;
+    loop {
+        match rpc_system_version(&o.rpc_url, Duration::from_secs(3)) {
+            Ok(got) if update::version_matches(version, &got) => return Ok(got),
+            Ok(got) => last = Some(format!("the node reports {got}")),
+            Err(e) => last = Some(e),
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
+    Err(format!(
+        "{version} is not running after {} s: {} (asked {})",
+        o.timeout_secs,
+        last.unwrap_or_else(|| "no answer yet".to_string()),
+        o.rpc_url
+    ))
+}
+
+/// Wait until the *running* node reports `expect`.
+fn run_confirm(o: &Options, report: &mut Report) -> u8 {
+    let expect = o.expect_version.as_deref().unwrap_or("").trim().to_string();
+    if expect.is_empty() {
+        report.error = Some("--confirm needs --expect <version>".into());
+        emit_error(o, report, "--confirm needs --expect <version>");
+        return EXIT_ERROR;
+    }
+    match wait_for_version(o, &expect) {
+        Ok(got) => {
+            report.confirmed_version = Some(got.clone());
+            if o.json {
+                emit_json(report);
+            } else if !o.quiet {
+                println!("gpn_update: confirmed {got} is running ({})", o.rpc_url);
+            }
+            EXIT_OK
+        }
+        Err(msg) => {
+            report.error = Some(msg.clone());
+            emit_error(o, report, &msg);
+            EXIT_NOT_CONFIRMED
+        }
+    }
+}
+
+/// Flip `current` back one step. The caller restarts whatever needs restarting.
+fn run_rollback(o: &Options, report: &mut Report) -> u8 {
+    // The version being abandoned: recorded as a failed attempt on this boot so
+    // the next cycle does not walk into the same release again.
+    let from = update::installed_version(&o.state_dir);
+    match update::rollback_bundle(&o.state_dir) {
+        Ok(Some(prev)) => {
+            // Keep the install dir in step with `current`. On Linux the unit
+            // execs `<target>/gpn-node`, so a rollback that only flipped the
+            // link would restart the NEW build and undo itself.
+            match copy_binaries(&prev, &o.target_dir) {
+                Ok(n) => {
+                    if !o.quiet {
+                        println!(
+                            "  restored {} binaries in {}",
+                            n.len(),
+                            o.target_dir.display()
+                        );
+                    }
+                }
+                Err(e) => eprintln!(
+                    "gpn_update: `current` is back on the previous version, but refreshing {} \
+                     failed: {e}",
+                    o.target_dir.display()
+                ),
+            }
+            let v = prev
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| prev.display().to_string());
+            report.rolled_back_to = Some(v.clone());
+            if let Some(from) = from.as_deref() {
+                let _ = update::record_attempt(
+                    &o.state_dir,
+                    from,
+                    &update::boot_id(),
+                    update::OUTCOME_ROLLED_BACK,
+                );
+            }
+            if o.json {
+                emit_json(report);
+            } else if !o.quiet {
+                println!("gpn_update: rolled back to {v} ({})", prev.display());
+            }
+            EXIT_OK
+        }
+        Ok(None) => {
+            let msg = format!(
+                "no rollback target: {} does not exist (nothing to roll back to)",
+                update::previous_pointer(&o.state_dir).display()
+            );
+            report.error = Some(msg.clone());
+            emit_error(o, report, &msg);
+            EXIT_ERROR
+        }
+        Err(e) => {
+            let msg = format!("rollback failed: {e}");
+            report.error = Some(msg.clone());
+            emit_error(o, report, &msg);
+            EXIT_ERROR
+        }
+    }
+}
+
+/// Rewrite the launcher so the next start runs the selected version tree.
+fn run_repair_launcher(o: &Options) -> u8 {
+    // `--target-dir` is the install dir's `bin`; the launcher lives one up.
+    let install = o
+        .target_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| o.target_dir.clone());
+    match update::repair_launcher_in_dir(&install) {
+        Some(note) => {
+            if !o.quiet {
+                println!("gpn_update: {note}");
+            }
+            EXIT_OK
+        }
+        None => {
+            if !o.quiet {
+                println!(
+                    "gpn_update: {} needs no repair (or does not exist on this platform)",
+                    install.join("start-node.cmd").display()
+                );
+            }
+            EXIT_OK
         }
     }
 }
@@ -1235,11 +1638,14 @@ fn emit_error(o: &Options, report: &Report, msg: &str) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn run(o: &Options) -> u8 {
-    let (current, source) = installed_version(&o.target_dir);
+    let (current, source) = installed_version(o);
     let mut report = Report {
         mode: match o.action {
             Action::Check => "check",
             Action::Apply => "apply",
+            Action::Confirm => "confirm",
+            Action::Rollback => "rollback",
+            Action::RepairLauncher => "repair-launcher",
         },
         manifest_url: o.manifest_url.clone(),
         state_dir: o.state_dir.display().to_string(),
@@ -1251,6 +1657,9 @@ fn run(o: &Options) -> u8 {
     match o.action {
         Action::Check => run_check(o, &mut report),
         Action::Apply => run_apply(o, &mut report),
+        Action::Confirm => run_confirm(o, &mut report),
+        Action::Rollback => run_rollback(o, &mut report),
+        Action::RepairLauncher => run_repair_launcher(o),
     }
 }
 

@@ -560,7 +560,8 @@ pub fn node_bin_name() -> &'static str {
     }
 }
 
-fn rust_node_bin_name() -> &'static str {
+/// File name of the Rust node binary for the platform we are building for.
+pub fn rust_node_bin_name() -> &'static str {
     if cfg!(windows) {
         "gpn-node.exe"
     } else {
@@ -1093,9 +1094,17 @@ pub fn apply_pending(
         if matches!(applied, Ok(Some(_))) {
             // The binaries just changed; the launcher that starts them may not
             // have. Repair it here, where every update passes — including on
-            // boxes whose update wrapper predates the fix.
-            if let Some(note) = repair_windows_launcher(exe) {
-                eprintln!("[update] {note}");
+            // boxes whose update wrapper predates the fix. The install dir is
+            // derived from the state dir when it has the standard layout, and
+            // from the calling binary otherwise.
+            let install = install_dir_for_state(state_dir).or_else(|| {
+                let bin = exe.parent()?;
+                bin.parent().map(Path::to_path_buf)
+            });
+            if let Some(install) = install {
+                if let Some(note) = repair_launcher_in_dir(&install) {
+                    eprintln!("[update] {note}");
+                }
             }
         }
         return Ok(applied);
@@ -1888,6 +1897,21 @@ fn between(s: &str, open: &str, close: char) -> Option<String> {
 /// Returns the new body and one human-readable note per repair. An empty note
 /// list means "nothing was stale": callers must not rewrite the file at all.
 pub fn refresh_launcher_body(body: &str, canonical: &[String]) -> (String, Vec<String>) {
+    refresh_launcher_body_with_install(body, canonical, None)
+}
+
+/// [`refresh_launcher_body`], plus the Windows-layout rewrite that makes the
+/// launcher run the updater-selected version tree instead of the locked
+/// `bin` copy.
+///
+/// `install_dir` is `Some(C:\gpn)` on an installed Windows host. Only the exact
+/// `set "GPN_BIN=<install>\bin"` line is rewritten; a launcher that already
+/// points at `data\update\current`, or has no such line, is left alone.
+pub fn refresh_launcher_body_with_install(
+    body: &str,
+    canonical: &[String],
+    install_dir: Option<&Path>,
+) -> (String, Vec<String>) {
     let mut notes: Vec<String> = Vec::new();
     let mut out: Vec<String> = Vec::new();
     let crlf = body.contains("\r\n");
@@ -1920,7 +1944,46 @@ pub fn refresh_launcher_body(body: &str, canonical: &[String]) -> (String, Vec<S
             }
         }
 
-        // (2) A stale seed list pinned by an older installer.
+        // (2) The launcher starts `bin\gpn_node.exe` directly, which is the
+        // locked file an update cannot replace while the node runs. Point it at
+        // the versioned tree the updater flips, keeping bin as the fallback.
+        if let Some(install) = install_dir {
+            if let Some(value) = bin_dir_value(line) {
+                if same_path(&value, &install.join("bin")) {
+                    for l in versioned_bin_lines(install) {
+                        out.push(l);
+                    }
+                    notes.push(format!(
+                        "the launcher now runs {}\\data\\update\\{CURRENT_LINK} \
+                         (falls back to {}\\bin)",
+                        install.display(),
+                        install.display()
+                    ));
+                    continue;
+                }
+            }
+
+            // A hard-coded exec line is the same defect one step later: the
+            // release workflow's launcher ran `"C:\gpn\bin\gpn_node.exe"`
+            // literally, so repairing GPN_BIN alone changed nothing — the
+            // supervisor, and every child it spawns, still came from bin
+            // (box 1, 2026-11-14).
+            let literal = format!(
+                "\"{}\\bin\\gpn_node.exe\"",
+                install.display().to_string().trim_end_matches(['\\', '/'])
+            );
+            if trimmed.starts_with(&literal) {
+                let rest = &trimmed[literal.len()..];
+                out.push(format!("\"%GPN_BIN%\\gpn_node.exe\"{rest}"));
+                notes.push(
+                    "the supervisor is started through %GPN_BIN%, not a hard-coded bin path"
+                        .to_string(),
+                );
+                continue;
+            }
+        }
+
+        // (3) A stale seed list pinned by an older installer.
         let mut replaced = false;
         for name in ["GPN_BOOTNODES", "GPN_RESERVED_PEERS"] {
             let Some(value) = set_line_value(line, name) else {
@@ -1967,9 +2030,24 @@ pub fn refresh_launcher_body(body: &str, canonical: &[String]) -> (String, Vec<S
 fn repair_windows_launcher(exe: &std::path::Path) -> Option<String> {
     let bin = exe.parent()?;
     let install = bin.parent()?;
+    repair_launcher_in_dir(install)
+}
+
+/// Repair `start-node.cmd` inside `install`, whatever binary triggered it.
+///
+/// Separated from [`repair_windows_launcher`] because the process that notices
+/// the need to repair is not always installed in `<install>/bin` — an update
+/// applied from `data\update\current` would otherwise derive the wrong parent
+/// and edit nothing.
+#[cfg(windows)]
+pub fn repair_launcher_in_dir(install: &Path) -> Option<String> {
     let launcher = install.join("start-node.cmd");
     let body = std::fs::read_to_string(&launcher).ok()?;
-    let (out, notes) = refresh_launcher_body(&body, &crate::chainspec::launcher_bootnodes());
+    let (out, notes) = refresh_launcher_body_with_install(
+        &body,
+        &crate::chainspec::launcher_bootnodes(),
+        Some(install),
+    );
     if notes.is_empty() {
         return None;
     }
@@ -1996,7 +2074,15 @@ fn repair_windows_launcher(exe: &std::path::Path) -> Option<String> {
 }
 
 #[cfg(not(windows))]
+#[allow(dead_code)] // only the Windows half calls it; kept so both cfgs compile alike
 fn repair_windows_launcher(_exe: &std::path::Path) -> Option<String> {
+    None
+}
+
+/// No-op off Windows: the launcher (and the locked-executable problem) is a
+/// Windows shape. Returns `None` so callers treat it as "nothing to do".
+#[cfg(not(windows))]
+pub fn repair_launcher_in_dir(_install: &Path) -> Option<String> {
     None
 }
 
@@ -2078,6 +2164,252 @@ pub fn rollback_bundle(state_dir: &Path) -> Result<Option<PathBuf>, UpdateError>
         let _ = write_previous_pointer(state_dir, &now);
     }
     Ok(Some(prev))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Confirmation: "the release is running", not "the release is on disk"
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 2026-11-14 (box 3): `versions/0.3.46` was staged and stamp-verified while the
+// node kept running 0.3.45 for eight hours. Every layer reported success —
+// staging verified the bytes, the flip moved `current`, the copy reported the
+// files it wrote — and nothing asked the one question that matters: *is the
+// process that is running that build?* These helpers close that gap.
+
+/// Compare the version a running node reports with the one we installed.
+///
+/// Exact equality, not `>=`: after a rollback the old build is running, and a
+/// `>=`-style check would call a half-finished upgrade a success. An answer
+/// that does not parse is never a match — "I could not read the version" must
+/// not be indistinguishable from "it is the right version".
+pub fn version_matches(expected: &str, reported: &str) -> bool {
+    match (parse_version(expected), parse_version(reported)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Where the once-per-boot attempt ledger lives.
+pub const ATTEMPTS_FILE: &str = "update-attempts.json";
+
+/// An install was started for this version but no outcome has been recorded.
+pub const OUTCOME_STARTED: &str = "started";
+/// The new build came up and reported the installed version.
+pub const OUTCOME_CONFIRMED: &str = "confirmed";
+/// The binaries were installed but nothing was restarted (a hand-run
+/// `--apply`), so there is nothing to confirm yet.
+pub const OUTCOME_INSTALLED: &str = "installed";
+/// The new build did not confirm, `current` was flipped back and the previous
+/// build was started again.
+pub const OUTCOME_ROLLED_BACK: &str = "rolled-back";
+/// The install or the restart failed outright.
+pub const OUTCOME_FAILED: &str = "failed";
+
+/// How many attempts are kept. One entry per release is all that matters, and a
+/// node updates a few dozen times in its life; the cap stops a pathological
+/// retry loop from growing the file without bound.
+const MAX_ATTEMPTS: usize = 64;
+
+/// One recorded install attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateAttempt {
+    pub version: String,
+    /// Identity of the boot this attempt happened in (see [`boot_id`]).
+    pub boot_id: String,
+    /// Unix seconds.
+    #[serde(default)]
+    pub at: u64,
+    /// One of the `OUTCOME_*` constants.
+    pub outcome: String,
+}
+
+/// `update-attempts.json`: the small history behind the once-per-boot rule.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptLedger {
+    #[serde(default)]
+    pub attempts: Vec<UpdateAttempt>,
+}
+
+pub fn attempts_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(ATTEMPTS_FILE)
+}
+
+/// Read the ledger; an unreadable/corrupt file is an empty ledger (the guard
+/// must never be the reason a node refuses to update).
+pub fn load_attempts(state_dir: &Path) -> AttemptLedger {
+    std::fs::read(attempts_path(state_dir))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_attempts(state_dir: &Path, l: &AttemptLedger) -> Result<(), UpdateError> {
+    std::fs::create_dir_all(state_dir)?;
+    let body = serde_json::to_vec_pretty(l).map_err(|e| UpdateError::Io(e.to_string()))?;
+    let target = attempts_path(state_dir);
+    let tmp = PathBuf::from(format!("{}.tmp-{}", target.display(), std::process::id()));
+    std::fs::write(&tmp, &body)?;
+    std::fs::rename(&tmp, &target)?;
+    Ok(())
+}
+
+/// Choose the boot identity from its two sources (pure, so it is testable).
+///
+/// `GPN_BOOT_ID` wins: on Windows the scheduled-task wrapper knows the machine's
+/// boot time and passes it, because there is no `/proc` to read.
+pub fn pick_boot_id(env_value: Option<&str>, proc_boot_id: Option<&str>) -> String {
+    for candidate in [env_value, proc_boot_id] {
+        if let Some(v) = candidate {
+            let v = v.trim();
+            if !v.is_empty() {
+                return v.to_string();
+            }
+        }
+    }
+    // Unknown is honest: the attempt is still recorded, but it cannot be used to
+    // block a retry (see `attempt_blocks`). Blocking on an identity we do not
+    // have would strand a machine on a broken release forever.
+    "unknown".to_string()
+}
+
+/// The identity of the current boot: `GPN_BOOT_ID`, else the kernel's boot id.
+pub fn boot_id() -> String {
+    let env = std::env::var("GPN_BOOT_ID").ok();
+    #[cfg(target_os = "linux")]
+    let proc_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok();
+    #[cfg(not(target_os = "linux"))]
+    let proc_id: Option<String> = None;
+    pick_boot_id(env.as_deref(), proc_id.as_deref())
+}
+
+/// The attempt recorded for `version` on this boot, if any.
+pub fn attempt_for_this_boot(
+    state_dir: &Path,
+    version: &str,
+    boot_id: &str,
+) -> Option<UpdateAttempt> {
+    load_attempts(state_dir)
+        .attempts
+        .into_iter()
+        .rev()
+        .find(|a| a.version.trim() == version.trim() && a.boot_id == boot_id)
+}
+
+/// Does a recorded attempt forbid trying again on this boot?
+///
+/// Only a *failed* or *rolled-back* attempt does. `started` blocks too, so a
+/// machine that dies mid-update does not retry the same build every hour on the
+/// same boot; `confirmed`/`installed` are the successful outcomes.
+///
+/// An `unknown` boot id never blocks: we cannot tell "same boot" from "new
+/// boot", and treating them as the same would exile a box from every future
+/// update.
+pub fn attempt_blocks(prev: &UpdateAttempt) -> bool {
+    if prev.boot_id == "unknown" {
+        return false;
+    }
+    matches!(
+        prev.outcome.as_str(),
+        OUTCOME_STARTED | OUTCOME_ROLLED_BACK | OUTCOME_FAILED
+    )
+}
+
+/// Record (or replace) the attempt for `version` on `boot_id`.
+pub fn record_attempt(
+    state_dir: &Path,
+    version: &str,
+    boot_id: &str,
+    outcome: &str,
+) -> Result<(), UpdateError> {
+    let mut ledger = load_attempts(state_dir);
+    ledger
+        .attempts
+        .retain(|a| !(a.version.trim() == version.trim() && a.boot_id == boot_id));
+    ledger.attempts.push(UpdateAttempt {
+        version: version.trim().to_string(),
+        boot_id: boot_id.to_string(),
+        at: now_unix(),
+        outcome: outcome.to_string(),
+    });
+    if ledger.attempts.len() > MAX_ATTEMPTS {
+        let drop = ledger.attempts.len() - MAX_ATTEMPTS;
+        ledger.attempts.drain(0..drop);
+    }
+    save_attempts(state_dir, &ledger)
+}
+
+/// The install directory a state dir belongs to, for the launcher repair.
+///
+/// The standard layout is `<install>/data/update`, so the install dir is two
+/// levels up. Anything else (a hand-set `GPN_UPDATE_DIR`) returns `None` and
+/// callers fall back to their own heuristic.
+pub fn install_dir_for_state(state_dir: &Path) -> Option<PathBuf> {
+    // Split on both separators: this runs on the Windows host but is unit-tested
+    // (and reasoned about) on Linux, where `C:\gpn\data\update` is one path
+    // component and `Path::file_name` answers the whole string.
+    let s = state_dir.display().to_string();
+    let sep = if s.contains('\\') { '\\' } else { '/' };
+    let trimmed = s.trim_end_matches(['\\', '/']);
+    let mut parts: Vec<&str> = trimmed.split(['\\', '/']).collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    let update = parts.pop()?;
+    let data = parts.pop()?;
+    if !update.eq_ignore_ascii_case("update") || !data.eq_ignore_ascii_case("data") {
+        return None;
+    }
+    let rest = parts.join(&sep.to_string());
+    if rest.trim().is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(rest))
+}
+
+/// The launcher lines that make the *next start* run the version the updater
+/// selected, with the install dir's own copy as a fallback.
+///
+/// On Windows the running image is locked, so "replace `bin\gpn_node.exe`" is
+/// exactly the step that cannot work while the node is up. Pointing the
+/// launcher at `data\update\current` (a junction the updater flips atomically)
+/// removes the locked-file copy from the critical path entirely: the new build
+/// is selected by the link, and `bin` stays as the fallback for a fresh install
+/// or a broken link.
+pub fn versioned_bin_lines(install_dir: &Path) -> Vec<String> {
+    // Built as text, not with `Path::join`: this is a cmd.exe launcher, so it
+    // must carry Windows separators and `gpn_node.exe` no matter which platform
+    // the string was produced on (the tests run on Linux).
+    let install = install_dir
+        .display()
+        .to_string()
+        .trim_end_matches(['\\', '/'])
+        .to_string();
+    vec![
+        format!("set \"GPN_BIN={install}\\data\\update\\{CURRENT_LINK}\""),
+        format!("if not exist \"%GPN_BIN%\\gpn_node.exe\" set \"GPN_BIN={install}\\bin\""),
+    ]
+}
+
+/// `set "GPN_BIN=<value>"` → the value, for a cmd launcher line.
+fn bin_dir_value(line: &str) -> Option<String> {
+    let t = line.trim();
+    let rest = t.strip_prefix("set \"")?;
+    let rest = rest.strip_suffix('"')?;
+    let (name, value) = rest.split_once('=')?;
+    if !name.trim().eq_ignore_ascii_case("GPN_BIN") {
+        return None;
+    }
+    Some(value.trim().to_string())
+}
+
+fn same_path(a: &str, b: &Path) -> bool {
+    let norm = |s: &str| {
+        s.trim()
+            .trim_end_matches(['\\', '/'])
+            .replace('/', "\\")
+            .to_ascii_lowercase()
+    };
+    norm(a) == norm(&b.display().to_string())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3873,5 +4205,196 @@ mod tests {
         let (out, notes) = refresh_launcher_body(body, &crate::chainspec::launcher_bootnodes());
         assert!(notes.is_empty());
         assert_eq!(out, body, "never guess a command line");
+    }
+
+    // ── the swap actually being run: launcher → versioned tree ─────────────
+
+    /// The box-3 failure in one assertion: an update that only stages leaves the
+    /// launcher exec'ing `bin\gpn_node.exe`, so the next start is the old build.
+    /// The repair must point the launcher at the tree the updater flips.
+    #[test]
+    fn the_launcher_is_pointed_at_the_versioned_tree() {
+        let install = Path::new("C:\\gpn");
+        let body = "@echo off\r\nset \"GPN_CHAIN=testnet\"\r\nset \"GPN_BIN=C:\\gpn\\bin\"\r\n\"%GPN_BIN%\\gpn_node.exe\" >> \"C:\\gpn\\node.log\" 2>&1\r\n";
+        let (out, notes) = refresh_launcher_body_with_install(
+            body,
+            &crate::chainspec::launcher_bootnodes(),
+            Some(install),
+        );
+        assert_eq!(notes.len(), 1, "notes: {notes:?}");
+        assert!(notes[0].contains("launcher now runs"), "{notes:?}");
+
+        // The selected version, and the fallback for a fresh install.
+        assert!(
+            out.contains("set \"GPN_BIN=C:\\gpn\\data\\update\\current\""),
+            "{out}"
+        );
+        assert!(
+            out.contains("if not exist \"%GPN_BIN%\\gpn_node.exe\" set \"GPN_BIN=C:\\gpn\\bin\""),
+            "{out}"
+        );
+        // The exec line is untouched: it now resolves through the new GPN_BIN.
+        assert!(out.contains("\"%GPN_BIN%\\gpn_node.exe\""), "{out}");
+        assert!(!out.contains("set \"GPN_BIN=C:\\gpn\\bin\"\r\n") || out.contains("if not exist"));
+        // CRLF and everything else survive.
+        assert!(out.contains("set \"GPN_CHAIN=testnet\""));
+        assert!(!out.contains("\n\n"));
+
+        // Idempotent: a second pass changes nothing at all.
+        let (again, notes2) = refresh_launcher_body_with_install(
+            &out,
+            &crate::chainspec::launcher_bootnodes(),
+            Some(install),
+        );
+        assert!(notes2.is_empty(), "notes: {notes2:?}");
+        assert_eq!(again, out);
+    }
+
+    #[test]
+    fn a_hard_coded_exec_line_is_pointed_at_the_versioned_tree() {
+        // The release workflow's launcher (box 1) ran this literal, so fixing
+        // GPN_BIN alone left the supervisor — and every child — in bin.
+        let install = Path::new("C:\\gpn");
+        let body = "@echo off\r\nset \"GPN_BIN=C:\\gpn\\bin\"\r\nset \"GPN_CHAIN=testnet\"\r\n\"C:\\gpn\\bin\\gpn_node.exe\" >> \"C:\\gpn\\node.log\" 2>&1\r\n";
+        let (out, notes) = refresh_launcher_body_with_install(
+            body,
+            &crate::chainspec::launcher_bootnodes(),
+            Some(install),
+        );
+        assert!(
+            out.contains("\"%GPN_BIN%\\gpn_node.exe\" >> \"C:\\gpn\\node.log\" 2>&1"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("\"C:\\gpn\\bin\\gpn_node.exe\""),
+            "the bin literal must be gone: {out}"
+        );
+        assert_eq!(notes.len(), 2, "both repairs reported: {notes:?}");
+
+        // Idempotent.
+        let (again, notes2) = refresh_launcher_body_with_install(
+            &out,
+            &crate::chainspec::launcher_bootnodes(),
+            Some(install),
+        );
+        assert!(notes2.is_empty(), "{notes2:?}");
+        assert_eq!(again, out);
+    }
+
+    /// A launcher already on the versioned tree must not be "repaired" into a
+    /// duplicate pair of lines on every update.
+    #[test]
+    fn a_versioned_launcher_is_not_rewritten_again() {
+        let install = Path::new("C:\\gpn");
+        let body = "set \"GPN_BIN=C:\\gpn\\data\\update\\current\"\nif not exist \"%GPN_BIN%\\gpn_node.exe\" set \"GPN_BIN=C:\\gpn\\bin\"\n";
+        let (out, notes) = refresh_launcher_body_with_install(
+            body,
+            &crate::chainspec::launcher_bootnodes(),
+            Some(install),
+        );
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(out, body);
+    }
+
+    /// The install dir derivation the update path relies on: `<install>/data/update`.
+    #[test]
+    fn the_install_dir_is_derived_from_the_state_dir() {
+        assert_eq!(
+            install_dir_for_state(Path::new("C:\\gpn\\data\\update")),
+            Some(PathBuf::from("C:\\gpn"))
+        );
+        assert_eq!(
+            install_dir_for_state(Path::new("/home/op/.gpn/update")),
+            None,
+            "a per-user update dir has no install dir to repair"
+        );
+        assert_eq!(install_dir_for_state(Path::new("/tmp/state")), None);
+    }
+
+    // ── confirmation and the once-per-boot attempt ledger ──────────────────
+
+    /// "Running 0.3.46" is not evidence that the update to 0.3.47 worked.
+    #[test]
+    fn confirmation_requires_the_exact_version() {
+        assert!(version_matches("0.3.46", "0.3.46"));
+        assert!(version_matches("v0.3.46", " 0.3.46 "));
+        assert!(version_matches("0.3.46", "0.3.46-rc1"));
+        assert!(
+            !version_matches("0.3.47", "0.3.46"),
+            "the old build is not a confirmation"
+        );
+        assert!(!version_matches("0.3.46", "0.3.460"));
+        assert!(!version_matches("0.3.46", ""));
+        assert!(
+            !version_matches("0.3.46", "unknown"),
+            "unreadable is not a match"
+        );
+    }
+
+    #[test]
+    fn the_boot_id_prefers_the_environment() {
+        assert_eq!(pick_boot_id(Some(" env-id "), Some("proc-id")), "env-id");
+        assert_eq!(pick_boot_id(None, Some("proc-id")), "proc-id");
+        assert_eq!(pick_boot_id(Some(""), Some("proc-id")), "proc-id");
+        assert_eq!(pick_boot_id(None, None), "unknown");
+    }
+
+    /// The rule that stops a broken release restart-looping a machine: one
+    /// attempt per version per boot, and the record says what happened.
+    #[test]
+    fn a_failed_release_is_attempted_once_per_boot() {
+        let dir = td("attempts");
+        let st = dir.join("update");
+        std::fs::create_dir_all(&st).unwrap();
+
+        assert!(attempt_for_this_boot(&st, "0.3.47", "boot-a").is_none());
+        record_attempt(&st, "0.3.47", "boot-a", OUTCOME_STARTED).unwrap();
+        let prev = attempt_for_this_boot(&st, "0.3.47", "boot-a").expect("recorded");
+        assert_eq!(prev.outcome, OUTCOME_STARTED);
+        assert!(
+            attempt_blocks(&prev),
+            "an unfinished attempt blocks a retry"
+        );
+
+        // Recording the outcome replaces the entry, it does not append.
+        record_attempt(&st, "0.3.47", "boot-a", OUTCOME_ROLLED_BACK).unwrap();
+        let prev = attempt_for_this_boot(&st, "0.3.47", "boot-a").unwrap();
+        assert_eq!(prev.outcome, OUTCOME_ROLLED_BACK);
+        assert!(
+            attempt_blocks(&prev),
+            "a rolled-back release is not retried"
+        );
+        assert_eq!(load_attempts(&st).attempts.len(), 1);
+
+        // A new boot is a new attempt: rebooting is the documented way out.
+        assert!(attempt_for_this_boot(&st, "0.3.47", "boot-b").is_none());
+        // A different release is unaffected.
+        assert!(attempt_for_this_boot(&st, "0.3.48", "boot-a").is_none());
+
+        // Success is not a reason to block anything.
+        record_attempt(&st, "0.3.48", "boot-a", OUTCOME_CONFIRMED).unwrap();
+        assert!(!attempt_blocks(
+            &attempt_for_this_boot(&st, "0.3.48", "boot-a").unwrap()
+        ));
+
+        // An unknown boot identity fails open: never strand a machine.
+        record_attempt(&st, "0.3.49", "unknown", OUTCOME_ROLLED_BACK).unwrap();
+        assert!(!attempt_blocks(
+            &attempt_for_this_boot(&st, "0.3.49", "unknown").unwrap()
+        ));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The ledger is a file a human may edit and a crash may truncate. Neither
+    /// may turn into a refusal to update.
+    #[test]
+    fn a_corrupt_attempt_ledger_reads_as_empty() {
+        let dir = td("attempts-corrupt");
+        std::fs::write(attempts_path(&dir), b"{not json").unwrap();
+        assert_eq!(load_attempts(&dir), AttemptLedger::default());
+        record_attempt(&dir, "0.3.47", "boot-a", OUTCOME_STARTED).unwrap();
+        assert_eq!(load_attempts(&dir).attempts.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
