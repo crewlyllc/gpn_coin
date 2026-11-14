@@ -8,6 +8,41 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.46] - 2026-11-14
+
+Bumped from 0.3.45. One theme: a peer doing something unusual but recoverable is
+no longer exiled.
+
+### Fixed
+- **Repeated block requests are never fatal, from any peer, on any branch.** The
+  SDK rule (`SAME_REQUEST = Rep::new_fatal`, −2^31, disconnect) is replaced by a
+  small penalty with a lifetime budget ~1,450x below the ban threshold, so no
+  number of repeats can accumulate into a ban. Excess repeats are **throttled**
+  (full request withheld, bounded 8-block prefix for header requests, service
+  resumes after the window) with no disconnect and no eviction. Malformed
+  payloads, unknown attribute bits and unencodable responses remain fatal.
+- **A peer behind on a branch we do not hold is divergence, not health.** The
+  fork-tolerance check is now driven by the client ("do we hold their tip?"),
+  not by comparing heights, and a protected peer is re-dialled every tick with
+  no backoff so a ban cannot become a permanent eviction.
+- **Self-heal actually runs.** The divergence check is scheduled in the node
+  supervisor (startup + every 5 min) for `gpn_node` and `gpn_fleet`; a stranded
+  node stops, renames `chains/` to `chains-fork-<ts>`, imports the signed
+  snapshot and restarts. The 24 h ledger is written **after** a successful stop,
+  so a failed stop cannot burn the day's single recovery.
+- **Signed checkpoint history** in `snapshot.json`: a list of anchors, newest at
+  or below the node's height is compared, so a node that is *behind* the weekly
+  checkpoint — the common stranded case — can be judged and healed.
+- **Pruning mode is resolved per spawn**, not once at supervisor start. A heal
+  replaces the DB, and the next respawn previously asked for the old mode,
+  producing a permanent `Incompatible pruning modes` restart loop.
+
+### Added
+- `DivergenceTolerantBlockServer` and `PoliteDownloader` (we never send a third
+  identical request, and never ask a peer on a branch we do not hold).
+- `gpn_snapshot` is required by both installers: a missing heal binary now fails
+  the install instead of producing a node that silently cannot heal.
+
 ## [0.3.45] - 2026-11-13
 
 Bumped from 0.3.44.
