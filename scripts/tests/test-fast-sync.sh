@@ -131,9 +131,35 @@ P="$ROOT/p1"; make_prefix "$P"
 run_install "$P" "http://127.0.0.1:$PORT/snapshot.json"
 check "success: installer exit 0"                    test "$(cat "$P/rc")" = 0
 check "success: chain DB imported into \$GPN_BASE_PATH" test -f "$P/node/chains/gpn_testnet/db/full/000001.sst"
-check "success: archive-pruning marker written"      test -f "$P/node/.gpn-pruning-archive"
+# The marker is a CLAIM about the DB. Since f7c92cd it is stamped by the import
+# from the manifest's own `pruning` field (which `export` derives from the
+# source's marker) — the installer never invents it. This fixture's source has
+# no marker, so the manifest says "none" and the install must not claim archive.
+check "success: no archive claim (manifest says none)" test ! -e "$P/node/.gpn-pruning-archive"
 check "success: says it bootstrapped (with block)"   grep -q "bootstrapped from the weekly snapshot at block 4242" "$P/out.log"
 check "success: no temp dir left behind"             bash -c '! ls -d "$1"/.fast-sync.* >/dev/null 2>&1' _ "$P"
+
+# 1b ── an archive-pruned source keeps its marker through the round trip ──────
+# This is the case the marker exists for: `gpn_node` may only ask for `archive`
+# on a DB that carries it. Box 1 was bricked on 2026-11-13 by an import that
+# claimed archive on a 256 DB, which is why the claim now travels with the
+# archive instead of being hard-coded in the installer.
+touch "$SRC_BASE/.gpn-pruning-archive"
+"$SNAP_BIN" export --base-path "$SRC_BASE" --out "$WWW/snap-archive.tar.gz" \
+  --rpc http://127.0.0.1:1 >/dev/null 2>&1 \
+  || { echo "FATAL: archive fixture export failed" >&2; exit 2; }
+ARCH_SIZE=$(stat -c %s "$WWW/snap-archive.tar.gz")
+ARCH_SHA=$(sha256sum "$WWW/snap-archive.tar.gz" | cut -d' ' -f1)
+/usr/bin/python3 "$REPO/scripts/snapshot-metadata.py" sign \
+  --url "$URL" --sha256 "$ARCH_SHA" --size "$ARCH_SIZE" --block 4242 \
+  --built "20261028-000000 UTC" --out "$WWW/snapshot-archive.json" >/dev/null
+rm -f "$SRC_BASE/.gpn-pruning-archive"   # leave the fixture as case 1 found it
+P="$ROOT/p1b"; make_prefix "$P"
+run_install "$P" "http://127.0.0.1:$PORT/snapshot-archive.json" \
+  GPN_SNAPSHOT_URL="http://127.0.0.1:$PORT/snap-archive.tar.gz"
+check "archive source: installer exit 0"                test "$(cat "$P/rc")" = 0
+check "archive source: marker carried into \$GPN_BASE_PATH" test -f "$P/node/.gpn-pruning-archive"
+check "archive source: chain DB imported"               test -f "$P/node/chains/gpn_testnet/db/full/000001.sst"
 
 # 2 ── hash mismatch: signed metadata describes other bytes ───────────────────
 P="$ROOT/p2"; make_prefix "$P"
@@ -196,7 +222,7 @@ guard_seq() { # guard_seq <file> -> "1:2:...:8" if the guard sequence appears in
     'verify --meta "%GPN_FS_TMP%\snapshot.json" >'
     'GPN_SNAP_SIZE% * 3'
     'verify --meta "%GPN_FS_TMP%\snapshot.json" --snapshot'
-    '--pruning archive'
+    'import --snapshot "%GPN_FS_TMP%\snap.tar.gz"'
     'move "%GPN_FS_TMP%\stage\chains"'
   )
   for m in "${markers[@]}"; do
@@ -224,7 +250,15 @@ for f in "$WIN_GEN" "$REPO/scripts/run-windows.cmd"; do
   check "windows/$n: signed metadata verify"            grep -q 'gpn_snapshot.exe" verify --meta' "$f"
   check "windows/$n: archive verify (hash+size)"        grep -q 'verify --meta "%GPN_FS_TMP%\\snapshot.json" --snapshot' "$f"
   check "windows/$n: 3x disk guard"                     grep -q 'GPN_SNAP_SIZE% \* 3' "$f"
-  check "windows/$n: import --pruning archive"          grep -q 'import --snapshot "%GPN_FS_TMP%\\snap.tar.gz" --base-path "%GPN_FS_TMP%\\stage" --pruning archive' "$f"
+  # Since f7c92cd the import takes NO --pruning flag: the manifest decides, and
+  # the marker is carried out of the staging dir on the next line. Passing one
+  # here is exactly the "installer claims archive on a 256 DB" bug that kept
+  # box 1 from starting after its first self-heal (2026-11-13).
+  check "windows/$n: import leaves pruning to the manifest" \
+    grep -q 'import --snapshot "%GPN_FS_TMP%\\snap.tar.gz" --base-path "%GPN_FS_TMP%\\stage"' "$f"
+  check "windows/$n: import passes no --pruning"        bash -c '! grep -q "import --snapshot.*--pruning" "$1"' _ "$f"
+  check "windows/$n: archive marker carried from staging" \
+    grep -q 'if exist "%GPN_FS_TMP%\\stage\\.gpn-pruning-archive" move "%GPN_FS_TMP%\\stage\\.gpn-pruning-archive" "%GPN_BASE_PATH%\\.gpn-pruning-archive"' "$f"
   check "windows/$n: staging, not the real base path"   grep -q 'move "%GPN_FS_TMP%\\stage\\chains" "%GPN_BASE_PATH%\\chains"' "$f"
   check "windows/$n: fallback is never fatal"           grep -q 'falling back to a normal full peer sync' "$f"
   check "windows/$n: reports the bootstrapped block"    grep -q 'bootstrapped from the weekly snapshot at block' "$f"
