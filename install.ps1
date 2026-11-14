@@ -1198,7 +1198,10 @@ Say "GPN installer -- installing from $Root into $InstallDir"
 # 0. referral: before anything can fail, so a referred operator who hits an
 #    unrelated install error still keeps the attribution.
 Set-Referral $RefCode
-foreach ($needed in @('gpn_node.exe', 'gpn-node.exe')) {
+# `gpn_snapshot.exe` is not optional: the node supervisor uses it to repair a
+# forked chain by itself (#157). An install without it produces a node that
+# cannot heal and only says so in a log line, so refuse it here instead.
+foreach ($needed in @('gpn_node.exe', 'gpn-node.exe', 'gpn_snapshot.exe')) {
   if (-not (Test-Path (Join-Path $Root $needed))) {
     $msg = "$needed is not next to install.ps1 ($Root). Extract the whole release zip first."
     # -WhatIf is for dry runs (and for CI on non-Windows hosts), so it reports

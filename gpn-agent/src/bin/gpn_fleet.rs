@@ -458,13 +458,7 @@ fn spawn_self_heal(
             .arg("--snapshot")
             .arg(snapshot)
             .arg("--base-path")
-            .arg(b)
-            .arg("--pruning")
-            .arg(if b.join(".gpn-pruning-archive").is_file() {
-                "archive"
-            } else {
-                "none"
-            });
+            .arg(b);
         let out = cmd
             .output()
             .map_err(|e| format!("spawn {}: {e}", snap.display()))?;

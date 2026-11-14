@@ -1758,6 +1758,17 @@ struct ChildSpec {
     prefix: &'static str,
     argv: Vec<String>,
     envs: Vec<(String, String)>,
+    /// For the chain node only: the base path whose pruning mode must be read
+    /// **at every spawn**, not once at startup.
+    ///
+    /// Substrate locks the pruning mode into the DB at creation. A self-heal
+    /// replaces that DB, so the mode that was right at 09:00 can be the mode that
+    /// crash-loops at 09:05 (box 1, 2026-11-13: startup planned `archive`, the
+    /// heal imported a 256-constrained snapshot, and the next respawn asked for
+    /// archive forever). Recomputing per spawn is what makes a heal survivable.
+    prune_base: Option<PathBuf>,
+    /// The operator passed explicit pruning flags (`node_args`): never touch them.
+    explicit_pruning: bool,
 }
 
 /// Live status for one labeled child, shared with the status printer.
@@ -1917,11 +1928,55 @@ fn pump<R: std::io::Read + Send + 'static>(r: R, prefix: &'static str) {
 
 fn build_command(spec: &ChildSpec) -> Command {
     let mut cmd = Command::new(&spec.argv[0]);
-    cmd.args(&spec.argv[1..]);
+    let mut args: Vec<String> = spec.argv[1..].to_vec();
+    if let Some(base) = &spec.prune_base {
+        if !spec.explicit_pruning {
+            apply_pruning(&mut args, base);
+        }
+    }
+    cmd.args(&args);
     for (k, v) in &spec.envs {
         cmd.env(k, v);
     }
     cmd
+}
+
+/// Decide the node's pruning flags **now**, from the DB that exists now.
+///
+/// Substrate locks the pruning mode into the DB at creation: asking for a mode
+/// the DB does not have is a hard start failure (`Incompatible pruning modes`),
+/// not a fallback. The old code decided this once at supervisor startup, so a
+/// self-heal that replaced the DB left the next respawn asking for the previous
+/// DB's mode — a fork repaired into a crash loop (box 1, 2026-11-13).
+fn apply_pruning(args: &mut Vec<String>, base: &Path) {
+    let plan = pruning_plan(&[], base);
+    match plan {
+        PruningPlan::Archive | PruningPlan::ArchiveKeep => {
+            if matches!(plan, PruningPlan::Archive) {
+                write_archive_marker(base);
+            }
+            args.push("--state-pruning".into());
+            args.push("archive".into());
+            args.push("--blocks-pruning".into());
+            args.push("archive".into());
+        }
+        PruningPlan::LeaveAlone => {
+            // A legacy 256 DB cannot be asked for archive; ask for what it stores.
+            args.push("--state-pruning".into());
+            args.push("256".into());
+            args.push("--blocks-pruning".into());
+            args.push("256".into());
+            log_event(
+                "node",
+                &format!(
+                    "existing DB at {} has no archive marker — leaving its pruning mode untouched \
+                     (requesting archive would hard-fail: Substrate locks pruning at DB creation)",
+                    base.display()
+                ),
+            );
+        }
+        PruningPlan::Explicit => {}
+    }
 }
 
 /// Build the `last-exit.json` record for one unexpected child exit.
@@ -3141,13 +3196,7 @@ fn spawn_self_heal_watchdog(
                 .arg("--snapshot")
                 .arg(snapshot)
                 .arg("--base-path")
-                .arg(base)
-                .arg("--pruning")
-                .arg(if base.join(".gpn-pruning-archive").is_file() {
-                    "archive"
-                } else {
-                    "none"
-                });
+                .arg(base);
             let out = cmd
                 .output()
                 .map_err(|e| format!("spawn {}: {e}", bin.display()))?;
@@ -3574,46 +3623,14 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
         //    request NO pruning flags (fall back to the node's compiled defaults,
         //    which match the stored mode) and warn — the node must never
         //    crash-loop on `Incompatible pruning modes`.
-        let plan = pruning_plan(&cfg.node_args, &cfg.base_path);
+        // Pruning is applied in `build_command`, at every spawn, against the DB
+        // that exists then (see `ChildSpec::prune_base`).
+        let explicit_pruning = has_flag(&cfg.node_args, "--state-pruning")
+            || has_flag(&cfg.node_args, "--blocks-pruning")
+            || has_flag(&cfg.node_args, "--pruning");
         if !has_flag(&cfg.node_args, "--sync") {
             argv.push("--sync".into());
             argv.push("full".into());
-        }
-        match plan {
-            PruningPlan::Archive | PruningPlan::ArchiveKeep => {
-                if matches!(plan, PruningPlan::Archive) {
-                    write_archive_marker(&cfg.base_path);
-                }
-                argv.push("--state-pruning".into());
-                argv.push("archive".into());
-                argv.push("--blocks-pruning".into());
-                argv.push("archive".into());
-            }
-            PruningPlan::LeaveAlone => {
-                // A legacy DB was created with the old constrained default; the
-                // node's compiled default is archive, so "pass nothing" makes the
-                // chain child hard-fail with `Incompatible pruning modes
-                // [stored: Constrained(256); requested: ArchiveAll]` and the
-                // supervisor restart-loops (box 1, 2026-11-09).
-                // Ask for the mode that matches what is stored instead: the node
-                // then starts, and the operator can still wipe it deliberately.
-                argv.push("--state-pruning".into());
-                argv.push("256".into());
-                argv.push("--blocks-pruning".into());
-                argv.push("256".into());
-                log_event(
-                    "node",
-                    &format!(
-                        "existing DB at {} has no archive marker — leaving its pruning mode untouched \
-                         (requesting archive would hard-fail: Substrate locks pruning at DB creation). \
-                         A legacy 256-pruned DB cannot serve state on a finality-less chain; re-create it \
-                         (wipe chains/, or import a fresh *archive* snapshot) for stall-proof syncing — see \
-                         docs/run-a-node.md",
-                        cfg.base_path.display()
-                    ),
-                );
-            }
-            PruningPlan::Explicit => {}
         }
 
         argv.extend(cfg.node_args.iter().cloned());
@@ -3632,6 +3649,8 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
             prefix: "[node]",
             argv,
             envs,
+            prune_base: Some(cfg.base_path.clone()),
+            explicit_pruning,
         });
     }
 
@@ -3690,6 +3709,8 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
             prefix: "[heartbeat]",
             argv,
             envs,
+            prune_base: None,
+            explicit_pruning: false,
         });
 
         // Provider loop: claims + runs + settles assigned jobs.
@@ -3716,6 +3737,8 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
                 cfg.poll_ms.to_string(),
             ],
             envs: penvs,
+            prune_base: None,
+            explicit_pruning: false,
         });
 
         if cfg.diffusion {
@@ -3733,6 +3756,8 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
                         ("SIGNER_URI".to_string(), cfg.signer.clone()),
                         ("GPN_AP_URL".to_string(), ap_env.clone()),
                     ],
+                    prune_base: None,
+                    explicit_pruning: false,
                 });
             } else {
                 log_event(
@@ -3759,6 +3784,8 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
                         ("OLLAMA_URL".to_string(), cfg.ollama.clone()),
                         ("GPN_AP_URL".to_string(), ap_env.clone()),
                     ],
+                    prune_base: None,
+                    explicit_pruning: false,
                 });
             } else {
                 log_event(
@@ -3784,6 +3811,8 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
                         ("SIGNER_URI".to_string(), cfg.signer.clone()),
                         ("GPN_AP_URL".to_string(), ap_env.clone()),
                     ],
+                    prune_base: None,
+                    explicit_pruning: false,
                 });
             } else {
                 log_event(
@@ -4936,6 +4965,36 @@ mod tests {
         // force archive (that would crash-loop 'Incompatible pruning modes').
         assert_eq!(pruning_plan(&[], &b), PruningPlan::LeaveAlone);
         let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn pruning_flags_are_chosen_from_the_db_that_exists_now() {
+        // The heal replaces the DB, so the mode that was right at startup can be
+        // wrong at the next spawn. `apply_pruning` is called per spawn for exactly
+        // that reason (box 1, 2026-11-13: fork healed into a 256 DB while the
+        // supervisor still asked for archive, and the node never started again).
+        let legacy = td("spawn-legacy");
+        mk_db(&legacy);
+        let mut args = Vec::new();
+        apply_pruning(&mut args, &legacy);
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--state-pruning" && w[1] == "256"),
+            "a marker-less DB must be asked for 256, got {args:?}"
+        );
+        assert!(!args.iter().any(|a| a == "archive"));
+
+        // …and once the base carries the archive marker (fresh or imported
+        // archive DB), the same call asks for archive.
+        std::fs::write(legacy.join(".gpn-pruning-archive"), b"archive\n").unwrap();
+        let mut args = Vec::new();
+        apply_pruning(&mut args, &legacy);
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--state-pruning" && w[1] == "archive"),
+            "a marked DB must be asked for archive, got {args:?}"
+        );
+        let _ = std::fs::remove_dir_all(&legacy);
     }
 
     #[test]

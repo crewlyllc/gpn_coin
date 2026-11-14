@@ -766,40 +766,7 @@ fn import(a: &Args) -> Result<(), String> {
     let manifest_mode = manifest.as_ref().and_then(|m| m.pruning.as_deref());
     let defaulted = explicit.is_none() && manifest_mode.is_none();
     let mode = effective_import_pruning(explicit, manifest_mode);
-    match mode.as_str() {
-        "archive" => {
-            write_pruning_marker(base);
-            if defaulted {
-                println!(
-                    "   pruning:      archive (no marker in the manifest \u{2014} assuming a modern \
-                     gpn-node export; marked {} for gpn_node)",
-                    PRUNING_MARKER
-                );
-            } else {
-                println!(
-                    "   pruning:      archive (marked {} for gpn_node)",
-                    PRUNING_MARKER
-                );
-            }
-        }
-        "none" => {
-            if defaulted {
-                println!(
-                    "   pruning:      left as-is ({} carries no pruning field \u{2014} not guessing: \
-                     a marker is a claim about the DB, so none is written)",
-                    MANIFEST_NAME
-                );
-            } else {
-                println!(
-                    "   pruning:      left as-is (no {} marker written \u{2014} gpn_node will not force archive)",
-                    PRUNING_MARKER
-                );
-            }
-        }
-        other => {
-            return Err(format!("--pruning {other}: expected 'archive' or 'none'"));
-        }
-    }
+    stamp_pruning(base, &mode, defaulted)?;
     Ok(())
 }
 
@@ -825,6 +792,55 @@ fn effective_import_pruning(explicit: Option<&str>, manifest: Option<&str>) -> S
         return norm(m);
     }
     "none".to_string()
+}
+
+/// Write (or clear) the archive marker to match the DB we just imported.
+///
+/// The marker describes `<base>/chains`. `import` replaces that, so:
+/// * `archive` → create it (the node may then ask for archive);
+/// * `none` → **remove** it if present. Leaving a stale `archive` marker on a
+///   freshly imported 256 DB is what stopped box 1 from ever starting again
+///   after its first self-heal (2026-11-13: `Incompatible pruning modes
+///   [stored: Constrained(256); requested: ArchiveAll]`).
+fn stamp_pruning(base: &Path, mode: &str, defaulted: bool) -> Result<(), String> {
+    match mode {
+        "archive" => {
+            write_pruning_marker(base);
+            if defaulted {
+                println!(
+                    "   pruning:      archive (no pruning field in the manifest — marked {} for gpn_node)",
+                    PRUNING_MARKER
+                );
+            } else {
+                println!(
+                    "   pruning:      archive (marked {} for gpn_node)",
+                    PRUNING_MARKER
+                );
+            }
+        }
+        "none" => {
+            if base.join(PRUNING_MARKER).is_file() {
+                let _ = fs::remove_file(base.join(PRUNING_MARKER));
+                println!(
+                    "   pruning:      left as-is — removed the stale {} marker (it described the DB \
+                     we just replaced)",
+                    PRUNING_MARKER
+                );
+            } else if defaulted {
+                println!(
+                    "   pruning:      left as-is (the manifest carries no pruning field — not \
+                     guessing: a marker is a claim about the DB, so none is written)"
+                );
+            } else {
+                println!(
+                    "   pruning:      left as-is (no {} marker written — gpn_node will not force archive)",
+                    PRUNING_MARKER
+                );
+            }
+        }
+        other => return Err(format!("--pruning {other}: expected 'archive' or 'none'")),
+    }
+    Ok(())
 }
 
 fn extract<R: Read>(
@@ -1347,6 +1363,30 @@ mod tests {
         // Pre-marker export: manifest has NO pruning field. Claiming `archive`
         // would make a 256-constrained DB unstartable; leave it alone instead.
         assert_eq!(effective_import_pruning(None, None), "none");
+    }
+
+    #[test]
+    fn import_none_clears_a_stale_archive_marker() {
+        // The marker describes `<base>/chains`. After importing a 256 snapshot
+        // into a base that used to be archive, leaving the old marker behind is a
+        // lie the node acts on: it asks for archive on a 256 DB and never starts
+        // (box 1, 2026-11-13).
+        let base = std::env::temp_dir().join(format!("gpn-snap-marker-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        fs::write(base.join(PRUNING_MARKER), b"archive\n").unwrap();
+        // The manifest has no pruning field → import decides "none".
+        let mode = effective_import_pruning(None, None);
+        assert_eq!(mode, "none");
+        stamp_pruning(&base, &mode, true).unwrap();
+        assert!(
+            !base.join(PRUNING_MARKER).exists(),
+            "a stale archive marker must not survive a 256 import"
+        );
+        // …and `archive` still stamps it.
+        stamp_pruning(&base, "archive", false).unwrap();
+        assert!(base.join(PRUNING_MARKER).is_file());
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]

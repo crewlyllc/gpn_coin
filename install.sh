@@ -349,6 +349,8 @@ else
   done
 fi
 [ -x "$BIN_DIR/gpn_node" ] || die "gpn_node is missing from $BIN_DIR — the install cannot continue"
+# Same reason: without it the node cannot repair a forked chain by itself (#157).
+[ -x "$BIN_DIR/gpn_snapshot" ] || die "gpn_snapshot is missing from $BIN_DIR — the node could not self-heal a forked chain; reinstall from a full release bundle"
 
 # 4b ── ollama (AI-compute models, REQUIRED to serve LLMs, user-local) ─────────
 # A node mines without ollama, but cannot serve LLM jobs until ollama runs (the
