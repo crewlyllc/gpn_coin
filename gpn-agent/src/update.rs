@@ -1812,15 +1812,21 @@ fn split_bootnodes(value: &str) -> Vec<String> {
         .collect()
 }
 
-/// True when every entry dials a peer id *we* publish.
+/// True when every entry dials a peer id *we* publish — now or in the past.
 ///
 /// This is the line between "a stale copy of our own defaults" (safe to refresh)
 /// and "an operator pinned their own peers" (never touch). Anything we cannot
 /// read a peer id out of counts as the operator's, so it is left alone.
+///
+/// Retired ids count as ours on purpose: a launcher that still carries a seed we
+/// have stopped shipping is exactly the stale copy this repair exists for, and
+/// treating it as foreign left the dead host in place (D11 residual).
 fn is_our_seed_list(entries: &[String], canonical: &[String]) -> bool {
     let ours: std::collections::HashSet<&str> = canonical
         .iter()
-        .filter_map(|c| multiaddr_peer_id(c))
+        .map(String::as_str)
+        .filter_map(multiaddr_peer_id)
+        .chain(crate::chainspec::RETIRED_PEER_IDS.iter().copied())
         .collect();
     !entries.is_empty()
         && entries
@@ -3803,6 +3809,28 @@ mod tests {
         let (out, notes) = refresh_launcher_body(&body, &crate::chainspec::launcher_bootnodes());
         assert!(notes.is_empty(), "operator config is not ours to change");
         assert_eq!(out, body);
+    }
+
+    #[test]
+    fn a_list_of_only_retired_seeds_is_ours_and_gets_refreshed() {
+        // The exact D11 residual: an existing box whose launcher still pins the
+        // retired seed. Its peer id is no longer canonical, but it is still a
+        // GPN default, so the repair must replace the whole line rather than
+        // decide it belongs to the operator and leave a dead host dialling.
+        let retired = format!(
+            "/ip4/203.0.113.9/tcp/30333/p2p/{}",
+            crate::chainspec::RETIRED_PEER_IDS[0]
+        );
+        let body = format!(
+            "@echo off\nset \"GPN_BOOTNODES={retired}\"\nset \"GPN_RESERVED_PEERS={retired}\"\n"
+        );
+        let canonical = crate::chainspec::launcher_bootnodes();
+        let (out, notes) = refresh_launcher_body(&body, &canonical);
+        assert_eq!(notes.len(), 2, "notes: {notes:?}");
+        assert!(!out.contains(crate::chainspec::RETIRED_PEER_IDS[0]));
+        let want = canonical.join(",");
+        assert!(out.contains(&format!("set \"GPN_BOOTNODES={want}\"")));
+        assert!(out.contains(&format!("set \"GPN_RESERVED_PEERS={want}\"")));
     }
 
     #[test]

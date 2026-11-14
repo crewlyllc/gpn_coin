@@ -34,6 +34,23 @@ pub const CANONICAL_BOOTNODES: &[&str] = &[
     "/ip4/142.129.54.88/tcp/30333/ws/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
 ];
 
+/// Peer ids GPN itself shipped in a previous seed list and has since retired.
+///
+/// A launcher carrying one of these is a stale copy of **our** defaults, not an
+/// operator-supplied peer list, so `gpn_update` may rewrite it. Recognition by
+/// *current* peer id alone was not enough: on 2026-11-13 D11 removed the dead
+/// `23.241.109.255` seed, which made every launcher still holding it look
+/// "foreign" — and the repair skipped the whole line, dead host included
+/// (the D11 residual, proven red by
+/// `update::tests::a_stale_launcher_is_refreshed_beyond_the_one_pipeline_line`).
+///
+/// Only ids we ourselves published belong here; anything else must stay the
+/// operator's (`update::is_our_seed_list`).
+pub const RETIRED_PEER_IDS: &[&str] = &[
+    // Box 1's old shared identity; host 23.241.109.255 died 2026-11-13 (D11).
+    "12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz",
+];
+
 /// Genesis block hash of the canonical GPN Public Testnet.
 pub const EXPECTED_GENESIS_HASH: &str =
     "0xb8e4636a65d0c812abb437c38dd7e937bd7c3355c54c54d63060f26a33519a5c";
