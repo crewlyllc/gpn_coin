@@ -109,6 +109,19 @@ pub struct SnapshotMeta {
     /// from one taken on a fork that shares the genesis.
     #[serde(default)]
     pub block_hash: String,
+    /// v2, additive: signed checkpoint **history**, oldest first, `block` last.
+    ///
+    /// The single `block`/`block_hash` pair can only judge a node that has
+    /// reached the snapshot's own height. A stranded node is *always* behind
+    /// that height (box 1: 117k behind), so it was judged `NotYet` — "behind is
+    /// not forked" — and never healed. These anchors let the same signed
+    /// document judge a node at whatever height it actually holds: compare at
+    /// the newest anchor at or below it.
+    ///
+    /// Empty = an older v2 document; it still verifies and behaves exactly as
+    /// before (the field is absent from the canonical text, not empty in it).
+    #[serde(default)]
+    pub checkpoints: Vec<CheckpointAnchor>,
     #[serde(default)]
     pub built: String,
     #[serde(default)]
@@ -117,21 +130,48 @@ pub struct SnapshotMeta {
     pub signature: String,
 }
 
+/// One signed anchor in the checkpoint history: a height and the canonical
+/// block hash at it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct CheckpointAnchor {
+    pub block: u64,
+    pub hash: String,
+}
+
 impl SnapshotMeta {
     /// The exact bytes signed. v1 documents keep verifying forever (the prefix
     /// is part of the signed text); only v2 adds the two checkpoint lines.
+    ///
+    /// The `checkpoints=` line is emitted **only when the list is non-empty**,
+    /// so a v2 document signed before history existed still hashes to its own
+    /// layout. Removing the list from a document that has one changes the text
+    /// and breaks the signature — absence and presence are both covered.
     pub fn canonical_text(&self) -> Vec<u8> {
         let is_v2 = self.format.trim() == SNAPSHOT_CANONICAL_PREFIX;
         let mut out = String::new();
         if is_v2 {
             out.push_str(&format!(
-                "{SNAPSHOT_CANONICAL_PREFIX}\nurl={}\nsha256={}\nsize={}\nblock={}\ngenesis={}\nblock_hash={}\nbuilt={}\nsigning_key={}\n",
+                "{SNAPSHOT_CANONICAL_PREFIX}\nurl={}\nsha256={}\nsize={}\nblock={}\ngenesis={}\nblock_hash={}\n",
                 self.url.trim(),
                 self.sha256.trim().to_ascii_lowercase(),
                 self.size,
                 self.block.map(|b| b.to_string()).unwrap_or_default(),
                 self.genesis.trim().to_ascii_lowercase(),
                 self.block_hash.trim().to_ascii_lowercase(),
+            ));
+            // Opt-in line: a v2 document signed before history existed has no
+            // checkpoints and keeps hashing to its original layout.
+            if !self.checkpoints.is_empty() {
+                let list = self
+                    .checkpoints
+                    .iter()
+                    .map(|c| format!("{}:{}", c.block, c.hash.trim().to_ascii_lowercase()))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                out.push_str(&format!("checkpoints={list}\n"));
+            }
+            out.push_str(&format!(
+                "built={}\nsigning_key={}\n",
                 self.built.trim(),
                 self.signing_key.trim().to_ascii_lowercase(),
             ));
@@ -161,6 +201,39 @@ impl SnapshotMeta {
         }
         Some((block, hash))
     }
+
+    /// Every signed anchor, oldest first — the history when the document has
+    /// one, otherwise just the single checkpoint (a pre-history v2 doc).
+    pub fn anchors(&self) -> Vec<(u64, String)> {
+        if self.format.trim() != SNAPSHOT_CANONICAL_PREFIX {
+            return Vec::new();
+        }
+        if !self.checkpoints.is_empty() {
+            let mut v: Vec<(u64, String)> = self
+                .checkpoints
+                .iter()
+                .map(|c| (c.block, c.hash.trim().to_ascii_lowercase()))
+                .collect();
+            v.sort_by_key(|(b, _)| *b);
+            v.dedup_by_key(|(b, _)| *b);
+            return v;
+        }
+        self.checkpoint()
+            .map(|(b, h)| vec![(b, h.trim().to_ascii_lowercase())])
+            .unwrap_or_default()
+    }
+}
+
+/// The anchor a node at `local_height` must be judged against: the **newest**
+/// signed checkpoint at or below that height. `None` means the node is below
+/// every anchor — genuinely too far behind (or too new) to judge, which stays
+/// `NotYet`: missing evidence is never a fork.
+pub fn anchor_to_compare(anchors: &[(u64, String)], local_height: u64) -> Option<(u64, String)> {
+    anchors
+        .iter()
+        .filter(|(b, _)| *b <= local_height)
+        .max_by_key(|(b, _)| *b)
+        .cloned()
 }
 
 /// sha256 of a file, hex lower-case.
@@ -238,6 +311,52 @@ pub fn verify_snapshot_meta(
         }
         if m.block.is_none() {
             return Err("snapshot.json v2 declares a checkpoint without a block height".into());
+        }
+        // Checkpoint history, when present: every entry must be a real pair,
+        // strictly ascending, and the last one must be the document's own
+        // checkpoint. A list that disagrees with `block`/`block_hash` is not a
+        // history we can reason about, and silently ignoring it would let a
+        // signed doc claim two different things.
+        if !m.checkpoints.is_empty() {
+            if m.checkpoints.len() > 4096 {
+                return Err("snapshot.json v2 carries an implausible checkpoint list".into());
+            }
+            let mut prev: Option<u64> = None;
+            for c in &m.checkpoints {
+                let hexpart = c.hash.trim().strip_prefix("0x").unwrap_or("");
+                if hexpart.len() != 64 || !hexpart.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Err(format!(
+                        "snapshot.json v2 has an invalid checkpoint hash at block {}: {}",
+                        c.block, c.hash
+                    ));
+                }
+                if let Some(p) = prev {
+                    if c.block <= p {
+                        return Err(
+                            "snapshot.json v2 checkpoint list is not strictly ascending".into()
+                        );
+                    }
+                }
+                prev = Some(c.block);
+            }
+            // The document's own `block`/`block_hash` must appear in the list:
+            // the archive's checkpoint is part of the signed branch, and a list
+            // that omits or contradicts it is saying two different things.
+            let own_block = m.block.expect("checked above");
+            let found = m.checkpoints.iter().find(|c| c.block == own_block);
+            match found {
+                Some(c) if c.hash.trim().eq_ignore_ascii_case(m.block_hash.trim()) => {}
+                Some(_) => {
+                    return Err(
+                        "snapshot.json v2 checkpoint list contradicts block_hash at `block`".into(),
+                    )
+                }
+                None => {
+                    return Err(format!(
+                        "snapshot.json v2 checkpoint list does not contain block {own_block}"
+                    ))
+                }
+            }
         }
     }
 
@@ -563,6 +682,8 @@ pub struct Observation {
     pub local_hash: Option<String>,
     pub local_genesis: Option<String>,
     pub expected_genesis: String,
+    /// How many signed anchors the document carried (1 = single-checkpoint doc).
+    pub anchor_count: usize,
     pub verdict: CheckpointVerdict,
 }
 
@@ -586,13 +707,14 @@ impl Observation {
             .map(short_hash)
             .unwrap_or_else(|| "unreadable".to_string());
         format!(
-            "divergence check: local {} @ #{} vs signed checkpoint {} @ #{}",
+            "divergence check: local {} @ #{} vs signed checkpoint {} @ #{} (newest of {} anchor(s) at or below local height)",
             local,
             self.local_height
                 .map(|h| h.to_string())
                 .unwrap_or_else(|| "?".into()),
             short_hash(&self.checkpoint_hash),
-            self.block
+            self.block,
+            self.anchor_count
         )
     }
 
@@ -619,12 +741,35 @@ pub fn short_hash(h: &str) -> String {
 }
 
 /// Build the observation from one metadata document + one RPC read.
+///
+/// The comparison height is **not** the document's newest block: it is the
+/// newest signed anchor at or below this node's height. A node stranded behind
+/// the snapshot (the whole reason this exists) is judged at the nearest anchor
+/// it actually holds, so a fork is recoverable from the first check instead of
+/// waiting for a checkpoint to be hand-signed at its exact height.
 pub fn observe(meta: &SnapshotMeta, rpc: &str) -> Result<Observation, String> {
-    let (block, hash) = meta
-        .checkpoint()
-        .ok_or("metadata carries no checkpoint (v1)")?;
-    let block_hash = hash.to_string();
-    let (height, local_hash, local_genesis) = local_chain_state(rpc, block);
+    let anchors = meta.anchors();
+    if anchors.is_empty() {
+        return Err("metadata carries no checkpoint (v1)".to_string());
+    }
+    let anchor_count = anchors.len();
+    let height = rpc_call(rpc, "chain_getHeader", serde_json::json!([]))
+        .ok()
+        .and_then(|h| h.get("number").and_then(hex_u64));
+    // Below every anchor (or unreadable height) keeps the document's own
+    // lowest anchor as the stated reference — and the verdict stays NotYet.
+    let (block, block_hash) = height
+        .and_then(|h| anchor_to_compare(&anchors, h))
+        .unwrap_or_else(|| anchors[0].clone());
+    let local_hash = match height {
+        Some(h) if h >= block => rpc_call(rpc, "chain_getBlockHash", serde_json::json!([block]))
+            .ok()
+            .and_then(|v| v.as_str().map(String::from)),
+        _ => None,
+    };
+    let local_genesis = rpc_call(rpc, "chain_getBlockHash", serde_json::json!([0]))
+        .ok()
+        .and_then(|v| v.as_str().map(|s| s.to_ascii_lowercase()));
     let verdict = checkpoint_verdict(block, &block_hash, height, local_hash.as_deref());
     Ok(Observation {
         block,
@@ -633,6 +778,7 @@ pub fn observe(meta: &SnapshotMeta, rpc: &str) -> Result<Observation, String> {
         local_hash,
         local_genesis,
         expected_genesis: meta.genesis.clone(),
+        anchor_count,
         verdict,
     })
 }
@@ -1123,6 +1269,8 @@ mod tests {
         "0xdeadbeef00000000000000000000000000000000000000000000000000000002";
     const CANON: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const FORK: &str = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const CANON_LATE: &str = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    const TOP: &str = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 
     fn signed(
         sk: &ed25519_dalek::SigningKey,
@@ -1138,6 +1286,7 @@ mod tests {
             block: Some(block),
             genesis: genesis.into(),
             block_hash: block_hash.into(),
+            checkpoints: Vec::new(),
             built: "2026-11-13T00:00:00Z".into(),
             signing_key: hex::encode(sk.verifying_key().to_bytes()),
             signature: String::new(),
@@ -1155,6 +1304,41 @@ mod tests {
             recovered_at_iso: iso8601(ts),
             ..Default::default()
         }
+    }
+
+    /// A signed document carrying checkpoint history, newest last and ending at
+    /// `block`/`block_hash` (the shape the signer emits).
+    fn signed_with_history(
+        sk: &ed25519_dalek::SigningKey,
+        block: u64,
+        block_hash: &str,
+        genesis: &str,
+        anchors: &[(u64, &str)],
+    ) -> (Vec<u8>, [u8; 32]) {
+        let mut m = SnapshotMeta {
+            format: SNAPSHOT_CANONICAL_PREFIX.into(),
+            url: "https://example.invalid/snap.tar.gz".into(),
+            sha256: "ab".repeat(32),
+            size: 1234,
+            block: Some(block),
+            genesis: genesis.into(),
+            block_hash: block_hash.into(),
+            checkpoints: anchors
+                .iter()
+                .map(|(b, h)| CheckpointAnchor {
+                    block: *b,
+                    hash: (*h).into(),
+                })
+                .collect(),
+            built: "2026-11-13T00:00:00Z".into(),
+            signing_key: hex::encode(sk.verifying_key().to_bytes()),
+            signature: String::new(),
+        };
+        m.signature = hex::encode(sk.sign(&m.canonical_text()).to_bytes());
+        (
+            serde_json::to_vec(&m).unwrap(),
+            sk.verifying_key().to_bytes(),
+        )
     }
 
     /// A one-shot JSON-RPC stub: answers exactly the three calls `observe` makes
@@ -1334,6 +1518,289 @@ mod tests {
         );
         assert!(out.recovery().is_none(), "behind is not forked");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── signed checkpoint HISTORY (the stranded-node gap) ──────────────────
+
+    #[test]
+    fn a_stranded_node_heals_from_the_signed_history_alone() {
+        // The live gap: box 1 held #280,614 while the snapshot was #294,496 and
+        // the *only* signed checkpoint was the snapshot's own height. The node
+        // was therefore "behind", never judged, never healed. With history, the
+        // anchor at #272,654 is at or below the node's height and decides it.
+        let dir = tmpdir("history-fork");
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[21u8; 32]);
+        let (json, pk) = signed_with_history(
+            &sk,
+            294_496,
+            CANON_LATE,
+            GENESIS,
+            &[(272_654, CANON), (294_496, CANON_LATE)],
+        );
+        let meta_path = dir.join("snapshot.json");
+        fs::write(&meta_path, &json).unwrap();
+        let rpc = rpc_stub(280_614, FORK); // behind the snapshot, wrong branch
+        let (lines, log) = log_sink();
+        let out = check(
+            &cfg(&dir, rpc, meta_path.display().to_string(), &pk),
+            now_unix(),
+            &log,
+        );
+        let (obs, _fork_dir) = out
+            .recovery()
+            .expect("a stranded, forked node must heal from history alone");
+        assert_eq!(obs.block, 272_654, "must compare at the anchor it holds");
+        assert_eq!(obs.anchor_count, 2);
+        assert_eq!(obs.verdict.slug(), "wrong-chain");
+        let lines = lines.lock().unwrap();
+        assert!(
+            lines.iter().any(|l| l.starts_with("divergence check:")
+                && l.contains("@ #280614")
+                && l.contains("@ #272654")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("divergence verdict: wrong-chain")),
+            "{lines:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stranded_node_matching_its_anchor_does_nothing() {
+        let dir = tmpdir("history-match");
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[22u8; 32]);
+        let (json, pk) = signed_with_history(
+            &sk,
+            294_496,
+            CANON_LATE,
+            GENESIS,
+            &[(272_654, CANON), (294_496, CANON_LATE)],
+        );
+        let meta_path = dir.join("snapshot.json");
+        fs::write(&meta_path, &json).unwrap();
+        let rpc = rpc_stub(280_614, CANON);
+        let (_, log) = log_sink();
+        let out = check(
+            &cfg(&dir, rpc, meta_path.display().to_string(), &pk),
+            now_unix(),
+            &log,
+        );
+        assert!(out.recovery().is_none());
+        match (&out.observation, out.decision) {
+            (Some(obs), Some(HealDecision::Nothing { .. })) => {
+                assert_eq!(obs.block, 272_654);
+                assert_eq!(obs.verdict, CheckpointVerdict::Match { block: 272_654 });
+            }
+            other => panic!("expected a match at the anchor, got {other:?}"),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_node_below_every_anchor_is_still_not_yet() {
+        // The genuinely-unjudgeable case: no signed anchor at or below the
+        // node's height. It must stay NotYet — a fresh node is never a fork.
+        let dir = tmpdir("history-below");
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[23u8; 32]);
+        let (json, pk) = signed_with_history(
+            &sk,
+            294_496,
+            CANON_LATE,
+            GENESIS,
+            &[(272_654, CANON), (294_496, CANON_LATE)],
+        );
+        let meta_path = dir.join("snapshot.json");
+        fs::write(&meta_path, &json).unwrap();
+        let rpc = rpc_stub(5_000, FORK); // below both anchors
+        let (_, log) = log_sink();
+        let out = check(
+            &cfg(&dir, rpc, meta_path.display().to_string(), &pk),
+            now_unix(),
+            &log,
+        );
+        assert!(out.recovery().is_none());
+        let obs = out.observation.expect("the check still ran");
+        assert!(
+            matches!(obs.verdict, CheckpointVerdict::NotYet { .. }),
+            "{obs:?}"
+        );
+        match out.decision {
+            Some(HealDecision::Nothing { reason }) => {
+                assert!(reason.contains("behind"), "{reason}")
+            }
+            other => panic!("expected Nothing, got {other:?}"),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_document_without_a_history_verifies_and_behaves_as_before() {
+        // Pre-history v2 docs are not deprecated: they keep verifying, they fall
+        // back to their single checkpoint, and a node behind it is still NotYet.
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[24u8; 32]);
+        let (json, _pk) = signed(&sk, 297_000, CANON, GENESIS);
+        let m = verify_snapshot_meta(&json, &hex::encode(sk.verifying_key().to_bytes()), None)
+            .expect("a v2 doc with no history must verify");
+        assert_eq!(m.anchors(), vec![(297_000u64, CANON.to_string())]);
+        assert!(!String::from_utf8(m.canonical_text())
+            .unwrap()
+            .contains("checkpoints="));
+    }
+
+    #[test]
+    fn anchors_above_the_archive_height_are_usable() {
+        // The live shape: the archive is at 294,496 but the signed branch is
+        // known up to the current tip. Anchors above `block` describe the
+        // branch (not the archive), so a node at the tip is judged at the tip
+        // anchor rather than at the archive's height.
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[27u8; 32]);
+        let (json, pk) = signed_with_history(
+            &sk,
+            294_496,
+            CANON_LATE,
+            GENESIS,
+            &[(280_496, CANON), (294_496, CANON_LATE), (298_500, TOP)],
+        );
+        let m = verify_snapshot_meta(&json, &hex::encode(pk), None)
+            .expect("anchors above the archive height must verify");
+        assert_eq!(
+            anchor_to_compare(&m.anchors(), 298_551),
+            Some((298_500, TOP.to_string()))
+        );
+        // ...and a node at the tip whose tip anchor differs is a fork.
+        let dir = tmpdir("history-top");
+        fs::write(dir.join("snapshot.json"), &json).unwrap();
+        let rpc = rpc_stub(298_551, FORK);
+        let (_, log) = log_sink();
+        let out = check(
+            &cfg(
+                &dir,
+                rpc,
+                dir.join("snapshot.json").display().to_string(),
+                &pk,
+            ),
+            now_unix(),
+            &log,
+        );
+        let (obs, _) = out.recovery().expect("must heal at the tip anchor");
+        assert_eq!(obs.block, 298_500);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_canonical_text_keeps_the_old_layout_and_signs_the_list() {
+        // A v2 document without history must hash exactly as it did before this
+        // feature, or every published snapshot stops verifying.
+        let mut m = SnapshotMeta {
+            format: SNAPSHOT_CANONICAL_PREFIX.into(),
+            url: "https://e/x".into(),
+            sha256: "AB".repeat(32),
+            size: 1,
+            block: Some(10),
+            genesis: "0x11".into(),
+            block_hash: "0x22".into(),
+            checkpoints: Vec::new(),
+            built: "b".into(),
+            signing_key: "K".into(),
+            signature: String::new(),
+        };
+        let base = String::from_utf8(m.canonical_text()).unwrap();
+        assert_eq!(
+            base,
+            format!(
+                "gpn-snapshot-v2\nurl=https://e/x\nsha256={}\nsize=1\nblock=10\n\
+                 genesis=0x11\nblock_hash=0x22\nbuilt=b\nsigning_key=k\n",
+                "ab".repeat(32)
+            )
+        );
+        m.checkpoints = vec![
+            CheckpointAnchor {
+                block: 5,
+                hash: CANON.to_uppercase(), // normalised in the signed text
+            },
+            CheckpointAnchor {
+                block: 10,
+                hash: "0x22".into(),
+            },
+        ];
+        let with = String::from_utf8(m.canonical_text()).unwrap();
+        assert_eq!(
+            with,
+            base.replace(
+                "built=b\n",
+                &format!("checkpoints=5:{CANON},10:0x22\nbuilt=b\n")
+            )
+        );
+    }
+
+    #[test]
+    fn a_tampered_history_is_refused_and_never_heals() {
+        let dir = tmpdir("history-tamper");
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[25u8; 32]);
+        let (json, pk) = signed_with_history(
+            &sk,
+            294_496,
+            CANON_LATE,
+            GENESIS,
+            &[(272_654, CANON), (294_496, CANON_LATE)],
+        );
+        // Rewrite the older anchor's hash: the signature covers the list.
+        let tampered = String::from_utf8(json).unwrap().replacen(
+            &format!("\"hash\":\"{CANON}\""),
+            &format!("\"hash\":\"{FORK}\""),
+            1,
+        );
+        assert!(tampered.contains(FORK), "the test must actually tamper");
+        assert!(verify_snapshot_meta(tampered.as_bytes(), &hex::encode(pk), None).is_err());
+        let meta_path = dir.join("snapshot.json");
+        fs::write(&meta_path, tampered).unwrap();
+        let rpc = rpc_stub(280_614, FORK);
+        let (lines, log) = log_sink();
+        let out = check(
+            &cfg(&dir, rpc, meta_path.display().to_string(), &pk),
+            now_unix(),
+            &log,
+        );
+        assert!(out.recovery().is_none(), "tampered bytes never heal");
+        assert!(out.decision.is_none());
+        assert!(!ledger_path(&dir).exists(), "DB/ledger untouched");
+        assert!(lines
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|l| l.contains("does not verify")));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_history_that_contradicts_the_single_checkpoint_is_refused() {
+        // A signed doc must not be able to say two different things: the list
+        // must contain `block` with `block_hash` in it, or verification fails.
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[26u8; 32]);
+        let pk = hex::encode(sk.verifying_key().to_bytes());
+        let mut m = SnapshotMeta {
+            format: SNAPSHOT_CANONICAL_PREFIX.into(),
+            url: "https://example.invalid/snap.tar.gz".into(),
+            sha256: "ab".repeat(32),
+            size: 1234,
+            block: Some(294_496),
+            genesis: GENESIS.into(),
+            block_hash: CANON_LATE.into(),
+            checkpoints: vec![CheckpointAnchor {
+                block: 272_654,
+                hash: CANON.into(),
+            }],
+            built: "2026-11-13T00:00:00Z".into(),
+            signing_key: pk.clone(),
+            signature: String::new(),
+        };
+        m.signature = hex::encode(sk.sign(&m.canonical_text()).to_bytes());
+        let json = serde_json::to_vec(&m).unwrap();
+        let e = verify_snapshot_meta(&json, &pk, None).unwrap_err();
+        assert!(e.contains("does not contain block"), "{e}");
     }
 
     // ── (c) unverifiable metadata never triggers one ────────────────────────

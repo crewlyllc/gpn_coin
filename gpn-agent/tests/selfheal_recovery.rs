@@ -88,6 +88,7 @@ fn signed_meta(
         block: Some(block),
         genesis: GENESIS.into(),
         block_hash: block_hash.into(),
+        checkpoints: Vec::new(),
         built: "2026-11-13T00:00:00Z integration-test".into(),
         signing_key: pk.clone(),
         signature: String::new(),

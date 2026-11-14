@@ -921,11 +921,11 @@ fn info(a: &Args) -> Result<(), String> {
 // copies of "what counts as a signed checkpoint" is exactly how the signer and
 // verifier drift apart.
 pub use gpn_agent::selfheal::{
-    checkpoint_verdict, fork_dir_for, heal_decision, ledger_path, local_chain_state, read_recovery,
-    set_unit, verdict_exit_code, write_recovery, CheckpointVerdict, HealDecision, NodeControl,
-    RecoveryRecord, SnapshotMeta, SystemctlUnit, EXIT_HEAL_REFUSED, EXIT_WRONG_CHAIN,
-    RECOVERY_STATE_NAME, RECOVERY_WINDOW_SECS, SNAPSHOT_CANONICAL_PREFIX,
-    SNAPSHOT_CANONICAL_PREFIX_V1,
+    anchor_to_compare, checkpoint_verdict, fork_dir_for, heal_decision, ledger_path,
+    local_chain_state, read_recovery, set_unit, verdict_exit_code, write_recovery,
+    CheckpointVerdict, HealDecision, NodeControl, RecoveryRecord, SnapshotMeta, SystemctlUnit,
+    EXIT_HEAL_REFUSED, EXIT_WRONG_CHAIN, RECOVERY_STATE_NAME, RECOVERY_WINDOW_SECS,
+    SNAPSHOT_CANONICAL_PREFIX, SNAPSHOT_CANONICAL_PREFIX_V1,
 };
 use gpn_agent::selfheal::{perform_recovery, plan_recovery, verify_snapshot_meta};
 
@@ -973,13 +973,13 @@ fn checkpoint(a: &Args) -> Result<i32, String> {
     let m = verify_snapshot_meta(&bytes, gpn_agent::update::RELEASE_PUBKEY_HEX, None)?;
 
     let is_v2 = m.format.trim() == SNAPSHOT_CANONICAL_PREFIX;
-    let (block, block_hash) = match (is_v2, m.block) {
-        (true, Some(b)) if !m.block_hash.trim().is_empty() => (b, m.block_hash.trim().to_string()),
-        _ => {
-            println!("checkpoint: v1 metadata — signed, but it carries no checkpoint; nothing to compare");
-            return Ok(0);
-        }
-    };
+    let anchors = m.anchors();
+    if !is_v2 || anchors.is_empty() {
+        println!(
+            "checkpoint: v1 metadata — signed, but it carries no checkpoint; nothing to compare"
+        );
+        return Ok(0);
+    }
 
     // Genesis first: it is the cheapest way to catch "this is a different
     // network", and a genesis mismatch can never be a transient.
@@ -998,6 +998,12 @@ fn checkpoint(a: &Args) -> Result<i32, String> {
     let local_height = rpc_call(&a.rpc, "chain_getHeader", serde_json::json!([]))
         .ok()
         .and_then(|h| h.get("number").and_then(hex_u64));
+
+    // Compare at the newest signed anchor this node has reached, not at the
+    // document's own height: a stranded node is always behind that.
+    let (block, block_hash) = local_height
+        .and_then(|h| anchor_to_compare(&anchors, h))
+        .unwrap_or_else(|| anchors[0].clone());
 
     // Only ask for the hash when we could be at that height at all, so a fresh
     // node does not produce a spurious RPC error.
@@ -1081,12 +1087,21 @@ fn heal(a: &Args) -> Result<i32, String> {
     let bytes = fs::read(meta_path).map_err(|e| format!("read {}: {e}", meta_path.display()))?;
     let m = verify_snapshot_meta(&bytes, gpn_agent::update::RELEASE_PUBKEY_HEX, None)?;
 
-    if m.checkpoint().is_none() {
+    let anchors = m.anchors();
+    if anchors.is_empty() {
         println!("heal: v1 metadata — signed, but it carries no checkpoint; nothing to compare");
         return Ok(0);
     }
-    let (block, block_hash) = m.checkpoint().expect("checked above");
-    let block_hash = block_hash.to_string();
+
+    // Judge at the newest signed anchor this node has reached. The document's
+    // own height is the recovery target, not the comparison point — a stranded
+    // node never has it.
+    let height = rpc_call(&a.rpc, "chain_getHeader", serde_json::json!([]))
+        .ok()
+        .and_then(|h| h.get("number").and_then(hex_u64));
+    let (block, block_hash) = height
+        .and_then(|h| anchor_to_compare(&anchors, h))
+        .unwrap_or_else(|| anchors[0].clone());
 
     let (height, local_hash, local_genesis) = local_chain_state(&a.rpc, block);
 
@@ -1348,6 +1363,7 @@ mod tests {
             signature: String::new(),
             genesis: String::new(),
             block_hash: String::new(),
+            checkpoints: Vec::new(),
         };
         use ed25519_dalek::Signer;
         m.signature = hex::encode(sk.sign(&m.canonical_text()).to_bytes());
@@ -1448,6 +1464,7 @@ mod tests {
             // 0x + 64 hex, or `verify` refuses it (see the shape check below).
             genesis: genesis.into(),
             block_hash: block_hash.into(),
+            checkpoints: Vec::new(),
             built: "2026-10-28T18:50:02Z".into(),
             signing_key: hex::encode(pubkey),
             signature: String::new(),
@@ -1499,6 +1516,7 @@ mod tests {
             block: Some(123_456),
             genesis: String::new(),
             block_hash: String::new(),
+            checkpoints: Vec::new(),
             built: "2026-10-20T00:00:00Z".into(),
             signing_key: pk.clone(),
             signature: String::new(),
