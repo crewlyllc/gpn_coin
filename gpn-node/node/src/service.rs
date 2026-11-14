@@ -879,6 +879,76 @@ pub async fn new_full<
         service
     };
 
+    // Peer tips outlive the connection and the process: a peer's own repeat
+    // counter does, and we must not send a request blind after a restart (see
+    // `block_serving::PeerTips`).
+    let peer_tips = crate::block_serving::PeerTips::loaded(base_path.join("peer-tips.json"));
+
+    // ---- Block serving (GPN #158 enforcement point) ---------------------
+    // The SDK's handler calls the third identical block request from a peer
+    // `Rep::new_fatal` — which is how a peer that is merely *behind on a
+    // branch we do not hold* (box 1, D8) got banned 2 s after every connect,
+    // before it could sync or be healed. We keep the SDK's downloader and the
+    // protocol's wire format verbatim and replace only the serving side, so
+    // that a repeat from a peer whose tip we do not hold costs a small,
+    // non-fatal report instead of a ban. See `block_serving.rs` for the rule
+    // and for what is deliberately left alone.
+    //
+    // The SDK downloader needs a network handle before the network exists, so
+    // it gets one from a provider we drive ourselves once `build_network`
+    // returns (queued requests are delivered then; the channel is unbounded).
+    let block_relay = {
+        use sc_network_sync::block_relay_protocol::BlockRelayParams;
+
+        let net_service_provider = sc_network_sync::service::network::NetworkServiceProvider::new();
+        let protocol_id = config.protocol_id();
+        let fork_id = config.chain_spec.fork_id().map(|s| s.to_string());
+        let peers_hint = config.network.default_peers_set.in_peers as usize
+            + config.network.default_peers_set.out_peers as usize;
+
+        let sdk = sc_network_sync::block_request_handler::BlockRequestHandler::new::<N>(
+            net_service_provider.handle(),
+            &protocol_id,
+            fork_id.as_deref(),
+            client.clone(),
+            peers_hint,
+        );
+        // Keep only the download half: its server and its protocol config are
+        // for a queue nobody will read, and ours replaces them.
+        //
+        // The downloader is wrapped so we never send the same block request to
+        // one peer three times on a connection: the receiving side bans on the
+        // third, and our own ancestor search was doing exactly that to box 1.
+        let downloader: std::sync::Arc<
+            dyn sc_network_sync::block_relay_protocol::BlockDownloader<Block>,
+        > = std::sync::Arc::new(crate::block_serving::PoliteDownloader::new(
+            sdk.downloader,
+            crate::block_serving::ChainTipSource::<Block, FullClient>::new(
+                client.clone(),
+                peer_tips.clone(),
+            ),
+        ));
+        drop(sdk.server);
+        drop(sdk.request_response_config);
+
+        let (server, request_response_config) =
+            crate::block_serving::DivergenceTolerantBlockServer::<Block, FullClient>::build::<N>(
+                client.clone(),
+                &protocol_id,
+                fork_id.as_deref(),
+                peers_hint,
+                peer_tips.clone(),
+            )?;
+
+        let params = BlockRelayParams {
+            server,
+            downloader,
+            request_response_config,
+        };
+        (params, net_service_provider)
+    };
+    let (block_relay_params, block_relay_provider) = block_relay;
+
     let (network, system_rpc_tx, tx_handler_controller, sync_service) =
         sc_service::build_network(sc_service::BuildNetworkParams {
             config: &config,
@@ -890,9 +960,21 @@ pub async fn new_full<
             import_queue,
             block_announce_validator_builder: None,
             warp_sync_config: None,
-            block_relay: None,
+            block_relay: Some(block_relay_params),
             metrics,
         })?;
+
+    // Drive the provider the block downloader talks through. Without this the
+    // downloader's requests would sit in an unbounded queue forever, so this
+    // is essential, not decorative.
+    {
+        let net = network.clone();
+        task_manager
+            .spawn_handle()
+            .spawn("gpn-block-download-provider", None, async move {
+                block_relay_provider.run(std::sync::Arc::new(net)).await;
+            });
+    }
 
     // ---- Connection sampler (2026-11-11) -------------------------------
     // The event stream in this SDK revision delivers nothing for connection
@@ -1967,6 +2049,11 @@ pub async fn new_full<
     // fork produces one loud line, not one per tick.
     {
         let client = client.clone();
+        // The block server (GPN #158) asks this registry one question when a
+        // peer repeats itself: is that peer's claimed tip a block we hold? The
+        // claim is already decoded and compared here, so it is recorded here
+        // and nowhere else.
+        let peer_tips = peer_tips.clone();
         task_manager
             .spawn_handle()
             .spawn("gpn-chain-state", None, async move {
@@ -2040,6 +2127,7 @@ pub async fn new_full<
                                         continue;
                                     };
                                     let verdict = cs::compare(&local, &remote);
+                                    peer_tips.set(peer, remote.clone());
                                     let who = peer.to_string();
                                     if log_state.record(&who, verdict, &remote).is_some() {
                                         let line = cs::describe(&who, &local, &remote, verdict);

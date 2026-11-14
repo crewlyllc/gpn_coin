@@ -25,6 +25,7 @@ sc-consensus-pow = { workspace = true }
 sc-offchain = { workspace = true }
 sc-executor = { workspace = true }
 sc-network = { workspace = true }
+sc-network-common = { workspace = true }
 sc-network-sync = { workspace = true }
 sc-rpc = { workspace = true }
 sc-service = { workspace = true }
@@ -56,6 +57,14 @@ futures = "0.3"
 jsonrpsee = { version = "0.24", features = ["server", "macros"] }
 serde_json = "1"
 hex = "0.4"
+# Block serving (`block_serving.rs`) needs the SDK's protocol plumbing types.
+# These are already in the dependency tree at these exact versions (they are
+# what `sc-network-sync` itself compiles against), so nothing new is fetched.
+async-channel = "1.9"
+async-trait = "0.1"
+prost = "0.12"
+schnellru = "0.2"
+thiserror = "1"
 
 # Peer discovery: Bitcoin-style DNS seeds (TXT multiaddrs) + HTTP(S) seed lists.
 # hickory-resolver is already in the dependency graph via litep2p, so this adds
@@ -97,7 +106,6 @@ if-addrs = "0.15"
 [dev-dependencies]
 # Used by the dialability gate's stub-network tests (implements the async
 # sc-network traits).
-async-trait = "0.1"
 
 [features]
 default = []

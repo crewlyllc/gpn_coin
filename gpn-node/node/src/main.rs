@@ -10,6 +10,7 @@
 #[path = "../../../gpn-agent/src/exit_report.rs"]
 mod exit_report;
 
+mod block_serving;
 mod chain_spec;
 mod chain_state;
 mod challenge;

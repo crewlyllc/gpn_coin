@@ -3126,8 +3126,9 @@ dependencies = [
 
 [[package]]
 name = "gpn-node"
-version = "0.3.44"
+version = "0.3.45"
 dependencies = [
+ "async-channel",
  "async-trait",
  "attohttpc",
  "clap",
@@ -3152,6 +3153,7 @@ dependencies = [
  "pallet-transaction-payment",
  "pallet-transaction-payment-rpc-runtime-api",
  "parity-scale-codec 3.7.5",
+ "prost 0.12.6",
  "rustls",
  "sc-basic-authorship",
  "sc-chain-spec",
@@ -3161,6 +3163,7 @@ dependencies = [
  "sc-consensus-pow",
  "sc-executor",
  "sc-network",
+ "sc-network-common",
  "sc-network-sync",
  "sc-offchain",
  "sc-rpc",
@@ -3169,6 +3172,7 @@ dependencies = [
  "sc-tracing",
  "sc-transaction-pool",
  "sc-transaction-pool-api",
+ "schnellru",
  "serde",
  "serde_json",
  "sp-api",
@@ -3184,6 +3188,7 @@ dependencies = [
  "sp-timestamp",
  "sp-transaction-pool",
  "substrate-prometheus-endpoint",
+ "thiserror 1.0.69",
  "tokio",
  "tokio-rustls",
  "url",
@@ -3192,7 +3197,7 @@ dependencies = [
 
 [[package]]
 name = "gpn-runtime"
-version = "0.3.44"
+version = "0.3.45"
 dependencies = [
  "bls12_381",
  "frame-benchmarking",
@@ -3238,7 +3243,7 @@ dependencies = [
 
 [[package]]
 name = "gpn-shield"
-version = "0.3.44"
+version = "0.3.45"
 dependencies = [
  "bls12_381",
  "ff",
@@ -5791,7 +5796,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-compute-marketplace"
-version = "0.3.44"
+version = "0.3.45"
 dependencies = [
  "frame-benchmarking",
  "frame-support",
@@ -5811,7 +5816,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-gpn-bridge"
-version = "0.3.44"
+version = "0.3.45"
 dependencies = [
  "frame-benchmarking",
  "frame-support",
@@ -5828,7 +5833,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-gpn-governance"
-version = "0.3.44"
+version = "0.3.45"
 dependencies = [
  "frame-benchmarking",
  "frame-support",
@@ -5845,7 +5850,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-gpn-liveness"
-version = "0.3.44"
+version = "0.3.45"
 dependencies = [
  "frame-benchmarking",
  "frame-support",
@@ -5863,7 +5868,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-gpn-token"
-version = "0.3.44"
+version = "0.3.45"
 dependencies = [
  "frame-benchmarking",
  "frame-support",
@@ -5882,7 +5887,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-gpn-treasury"
-version = "0.3.44"
+version = "0.3.45"
 dependencies = [
  "frame-benchmarking",
  "frame-support",
@@ -5900,7 +5905,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-gpu-attestation"
-version = "0.3.44"
+version = "0.3.45"
 dependencies = [
  "frame-benchmarking",
  "frame-support",
@@ -5919,7 +5924,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-gpu-pow"
-version = "0.3.44"
+version = "0.3.45"
 dependencies = [
  "frame-benchmarking",
  "frame-support",
@@ -5951,7 +5956,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-profitability-oracle"
-version = "0.3.44"
+version = "0.3.45"
 dependencies = [
  "frame-benchmarking",
  "frame-support",
@@ -5969,7 +5974,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-shielded-pool"
-version = "0.3.44"
+version = "0.3.45"
 dependencies = [
  "blake2 0.10.6",
  "bls12_381",

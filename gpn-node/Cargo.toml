@@ -69,6 +69,7 @@ sc-consensus-pow = { git = "https://github.com/paritytech/polkadot-sdk.git", rev
 sc-offchain = { git = "https://github.com/paritytech/polkadot-sdk.git", rev = "da5c966029ce352120d5928d789ee3df0f97db46" }
 sc-executor = { git = "https://github.com/paritytech/polkadot-sdk.git", rev = "da5c966029ce352120d5928d789ee3df0f97db46" }
 sc-network = { git = "https://github.com/paritytech/polkadot-sdk.git", rev = "da5c966029ce352120d5928d789ee3df0f97db46" }
+sc-network-common = { git = "https://github.com/paritytech/polkadot-sdk.git", rev = "da5c966029ce352120d5928d789ee3df0f97db46" }
 sc-network-sync = { git = "https://github.com/paritytech/polkadot-sdk.git", rev = "da5c966029ce352120d5928d789ee3df0f97db46" }
 sc-rpc = { git = "https://github.com/paritytech/polkadot-sdk.git", rev = "da5c966029ce352120d5928d789ee3df0f97db46" }
 sc-service = { git = "https://github.com/paritytech/polkadot-sdk.git", rev = "da5c966029ce352120d5928d789ee3df0f97db46" }
