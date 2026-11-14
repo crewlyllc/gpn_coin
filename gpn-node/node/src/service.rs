@@ -889,10 +889,16 @@ pub async fn new_full<
     // `Rep::new_fatal` — which is how a peer that is merely *behind on a
     // branch we do not hold* (box 1, D8) got banned 2 s after every connect,
     // before it could sync or be healed. We keep the SDK's downloader and the
-    // protocol's wire format verbatim and replace only the serving side, so
-    // that a repeat from a peer whose tip we do not hold costs a small,
-    // non-fatal report instead of a ban. See `block_serving.rs` for the rule
-    // and for what is deliberately left alone.
+    // protocol's wire format verbatim and replace only the serving side.
+    //
+    // Owner decision 2026-11-14: the ban for repeated block requests is gone
+    // for **every** peer, not only diverged ones. A repeat now costs a small
+    // report charged against a per-peer lifetime budget (~1,450× below the
+    // peer store's ban threshold), and a peer that keeps asking the same range
+    // is *throttled* — unanswered for that range until a 60 s window expires —
+    // never banned, never disconnected. Protocol violations (undecodable
+    // payload, unknown attribute bits, unencodable response) stay fatal. See
+    // `block_serving.rs` for the rule and for what is deliberately left alone.
     //
     // The SDK downloader needs a network handle before the network exists, so
     // it gets one from a provider we drive ourselves once `build_network`
