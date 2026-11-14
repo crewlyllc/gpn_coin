@@ -60,6 +60,35 @@ if [ -z "$GENESIS" ] || [ -z "$BLOCK_HASH" ]; then
 fi
 echo "[snapshot] checkpoint genesis=$GENESIS block=$BLOCK hash=$BLOCK_HASH"
 
+# ── checkpoint HISTORY: anchors a *behind* node can be judged at ─────────────
+# The single checkpoint above is the snapshot's own height, which a stranded
+# node never reaches (box 1 was 117k behind and sat there indefinitely). Publish
+# anchors every ANCHOR_STEP blocks back ANCHOR_DEPTH blocks, so any node inside
+# that window is judged at the newest anchor it actually holds. Spacing/depth are
+# env-overridable; the defaults cover ~17 days at 10 s blocks in ~5 KB.
+ANCHOR_STEP="${GPN_SNAPSHOT_ANCHOR_STEP:-2000}"
+ANCHOR_DEPTH="${GPN_SNAPSHOT_ANCHOR_DEPTH:-150000}"
+ANCHOR_ARGS=""
+case "$BLOCK" in
+  ''|*[!0-9]*) echo "[snapshot] WARN: block is not numeric — publishing WITHOUT history" >&2 ;;
+  *)
+    H=$BLOCK
+    STEPS=$((ANCHOR_DEPTH / ANCHOR_STEP))
+    N=0
+    while [ "$H" -gt 0 ] && [ "$N" -le "$STEPS" ]; do
+      HH=$(rpc chain_getBlockHash "[$H]")
+      if [ -z "$HH" ] || [ "$HH" = "null" ]; then
+        echo "FATAL: could not read block hash at $H for the checkpoint history" >&2
+        exit 4
+      fi
+      ANCHOR_ARGS="$ANCHOR_ARGS --checkpoint $H:$HH"
+      H=$((H - ANCHOR_STEP))
+      N=$((N + 1))
+    done
+    echo "[snapshot] checkpoint history: $N anchor(s), every $ANCHOR_STEP blocks back $ANCHOR_DEPTH"
+    ;;
+esac
+
 echo "[snapshot] built $OUT"
 echo "[snapshot] block=$BLOCK size=$SIZE sha256=$SHA"
 
@@ -107,6 +136,7 @@ META_OUT="$OUT_DIR/snapshot.json"
 if ! python3 "$(dirname "$0")/snapshot-metadata.py" sign \
       --url "$DL" --sha256 "$SHA" --size "$SIZE" --block "$BLOCK" \
       --genesis "$GENESIS" --block-hash "$BLOCK_HASH" \
+      $ANCHOR_ARGS \
       --built "$STAMP UTC" --out "$META_OUT"; then
   echo "FATAL: could not sign snapshot.json — refusing to publish an unverifiable snapshot" >&2
   exit 4

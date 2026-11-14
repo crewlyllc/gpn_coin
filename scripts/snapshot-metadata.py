@@ -78,9 +78,11 @@ def signing_key(path: pathlib.Path):
 def canonical_text(meta: dict) -> bytes:
     """Must match `SnapshotMeta::canonical_text` in gpn_snapshot.rs.
 
-    v2 adds the checkpoint (genesis + the block hash at `block`). v1 documents
-    keep verifying: the prefix is part of the signed text, so an old blob still
-    hashes to its own layout.
+    v2 adds the checkpoint (genesis + the block hash at `block`) and — when the
+    signer supplied one — the checkpoint history: one `checkpoints=` line,
+    oldest first, `block:hash` pairs comma-separated with no spaces. The line is
+    emitted ONLY when the list is non-empty, so a pre-history v2 document keeps
+    hashing to its original layout.
     """
     block = meta.get("block")
     fmt = str(meta.get("format") or CANONICAL_PREFIX_V1).strip()
@@ -95,11 +97,39 @@ def canonical_text(meta: dict) -> bytes:
             f"genesis={str(meta.get('genesis', '')).strip().lower()}\n"
             f"block_hash={str(meta.get('block_hash', '')).strip().lower()}\n"
         )
+        anchors = meta.get("checkpoints") or []
+        if anchors:
+            body += "checkpoints=" + ",".join(
+                f"{int(c['block'])}:{str(c['hash']).strip().lower()}"
+                for c in anchors
+            ) + "\n"
     body += (
         f"built={str(meta.get('built', '')).strip()}\n"
         f"signing_key={str(meta['signing_key']).strip().lower()}\n"
     )
     return (f"{fmt}\n{body}").encode()
+
+
+def parse_anchors(specs: list[str]) -> list[dict]:
+    """`--checkpoint BLOCK:0xHASH` (repeatable) -> ascending, deduped list."""
+    seen: dict[int, str] = {}
+    for spec in specs or []:
+        blk, sep, h = spec.partition(":")
+        if not sep:
+            raise SystemExit(f"--checkpoint: want BLOCK:0xHASH, got {spec!r}")
+        try:
+            b = int(blk)
+        except ValueError:
+            raise SystemExit(f"--checkpoint: block is not a number: {blk!r}")
+        h = h.strip().lower()
+        if not h.startswith("0x"):
+            h = "0x" + h
+        if len(h) != 66 or any(c not in "0123456789abcdef" for c in h[2:]):
+            raise SystemExit(f"--checkpoint: hash at {b} is not 0x + 64 hex: {h!r}")
+        if b in seen and seen[b] != h:
+            raise SystemExit(f"--checkpoint: two different hashes for block {b}")
+        seen[b] = h
+    return [{"block": b, "hash": seen[b]} for b in sorted(seen)]
 
 
 def cmd_sign(a) -> int:
@@ -114,6 +144,18 @@ def cmd_sign(a) -> int:
     # v2 only when the checkpoint is actually supplied: an unsigned/absent
     # checkpoint must not silently produce a document that claims to have one.
     fmt = CANONICAL_PREFIX_V2 if (genesis and block_hash) else CANONICAL_PREFIX_V1
+    anchors = parse_anchors(getattr(a, "checkpoint", None))
+    if anchors:
+        if fmt != CANONICAL_PREFIX_V2 or a.block is None:
+            raise SystemExit(
+                "--checkpoint history needs --genesis, --block-hash and --block"
+            )
+        own = [c for c in anchors if c["block"] == int(a.block)]
+        if not own or own[0]["hash"] != block_hash:
+            raise SystemExit(
+                "--checkpoint history must contain --block/--block-hash "
+                f"({int(a.block)}:{block_hash}); anchors above it are allowed"
+            )
     meta = {
         "format": fmt,
         "url": a.url,
@@ -126,6 +168,8 @@ def cmd_sign(a) -> int:
     if fmt == CANONICAL_PREFIX_V2:
         meta["genesis"] = genesis
         meta["block_hash"] = block_hash
+    if anchors:
+        meta["checkpoints"] = anchors
     import nacl.signing  # noqa: F401  (already imported in signing_key)
 
     meta["signature"] = sk.sign(canonical_text(meta)).signature.hex()
@@ -168,6 +212,12 @@ def main(argv=None) -> int:
     s.add_argument("--genesis", default="", help="v2 checkpoint: chain genesis hash")
     s.add_argument("--block-hash", dest="block_hash", default="",
                    help="v2 checkpoint: block hash AT --block")
+    s.add_argument("--checkpoint", action="append", default=[],
+                   metavar="BLOCK:0xHASH",
+                   help="v2 checkpoint HISTORY anchor (repeatable). A node is judged at the "
+                        "newest anchor at or below its height; anchors may sit above "
+                        "--block (they describe the branch, not the archive), but --block "
+                        "itself must be present")
     s.add_argument("--built", default="")
     s.add_argument("--key", default=str(DEFAULT_KEY))
     s.add_argument("--out", required=True)
