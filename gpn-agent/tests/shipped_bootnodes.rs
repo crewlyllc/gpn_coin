@@ -28,6 +28,17 @@ fn read(rel: &str) -> Option<String> {
     std::fs::read_to_string(repo_root().join(rel)).ok()
 }
 
+/// Line endings are a checkout artifact, not a shipped value.
+///
+/// Git for Windows checks these files out with CRLF (`core.autocrlf=true` is the
+/// default there), so a marker written as `"\n}\n"` never matches and the Windows
+/// runner fails the same assertion the Linux runner passes — that is exactly how
+/// this test reddened CI on `14b797a` while the Linux job was green. The values are
+/// what is under test, so normalise before parsing and assert on values only.
+fn normalise_newlines(text: &str) -> String {
+    text.replace("\r\n", "\n")
+}
+
 /// The registry list every shipped default is supposed to mirror.
 fn network_bootnodes() -> BTreeSet<String> {
     let raw = read("network.json").expect("network.json must exist next to gpn-agent");
@@ -114,6 +125,13 @@ fn multiaddrs(block: &str) -> Vec<String> {
 
 fn default_list(surface: &Surface) -> Option<Vec<String>> {
     let text = read(surface.file)?;
+    Some(list_in(&text, surface))
+}
+
+/// Parse one surface out of the given file text (line endings normalised here, so
+/// every caller — and every future caller — is CRLF-safe by construction).
+fn list_in(text: &str, surface: &Surface) -> Vec<String> {
+    let text = normalise_newlines(text);
     let at = text.find(surface.start).unwrap_or_else(|| {
         panic!(
             "{} no longer contains its seed-list marker {:?} — update this test with the new shape, \
@@ -128,7 +146,41 @@ fn default_list(surface: &Surface) -> Option<Vec<String>> {
             surface.file, surface.start, surface.end
         )
     });
-    Some(multiaddrs(&rest[..end]))
+    multiaddrs(&rest[..end])
+}
+
+/// A CRLF checkout must extract the same peers as an LF one.
+///
+/// Regression for the `14b797a` Windows-only CI red: the end marker for
+/// `install.ps1` is a LF shape, so `"\n}\n"` was never found in a CRLF checkout and
+/// the test panicked before it compared anything. The Windows runner is the only
+/// place this shows up, so it needs a test that fails without the normalisation on
+/// any platform.
+#[test]
+fn a_crlf_checkout_parses_to_the_same_lists() {
+    let mut seen = 0;
+    for surface in SURFACES {
+        let Some(lf) = read(surface.file) else {
+            continue;
+        };
+        let crlf = lf.replace('\n', "\r\n");
+        assert!(
+            crlf.contains('\r'),
+            "{}: could not build a CRLF variant",
+            surface.file
+        );
+        assert_eq!(
+            list_in(&crlf, surface),
+            list_in(&lf, surface),
+            "{} parses differently with CRLF line endings (Windows checkout)",
+            surface.file
+        );
+        seen += 1;
+    }
+    assert!(
+        seen >= 2,
+        "only {seen} surface(s) seen — not the tree this test expects"
+    );
 }
 
 #[test]
