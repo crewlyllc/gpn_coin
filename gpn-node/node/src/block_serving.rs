@@ -129,6 +129,35 @@ pub const MAX_REPEATS_PER_WINDOW: usize = 4;
 /// the state is just the window's start instant.
 pub const THROTTLE_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// How many blocks a throttled request is still answered with, when it is a
+/// header/justification-only request.
+///
+/// Zero would be simpler, but every real peer on this network asks for one
+/// header at a time while it hunts for the common ancestor (`Number(298659)
+/// max 1 Ascending HEADER | JUSTIFICATION`, 2026-11-14 00:32). Answering
+/// nothing would leave such a peer blind rather than throttled. Eight headers
+/// is bounded work — a few hundred bytes — and the full request (body,
+/// receipts, indexed body, up to 128 blocks and 16 MiB) still gets nothing at
+/// all.
+pub const THROTTLE_PREFIX_BLOCKS: usize = 8;
+
+/// How many blocks to answer a request with, given the throttle state.
+///
+/// * not throttled — the request's own maximum, as always;
+/// * throttled, header-only — a bounded prefix ([`THROTTLE_PREFIX_BLOCKS`]);
+/// * throttled, full — 0, i.e. no data at all.
+///
+/// Pure, so the tests exercise the same function the server calls.
+pub fn served_max_blocks(max_blocks: usize, small_request: bool, throttled: bool) -> usize {
+    if !throttled {
+        max_blocks
+    } else if small_request {
+        std::cmp::min(max_blocks, THROTTLE_PREFIX_BLOCKS)
+    } else {
+        0
+    }
+}
+
 /// Per-peer lifetime cap on the reputation this module will ever report for
 /// repeated block requests, in absolute units (2^20 = 1,048,576).
 ///
@@ -650,18 +679,18 @@ where
 
         // Punishment is replaced by throttling: a repeat is *answered* — with
         // the same blocks as before — right up to the throttle. Then, for the
-        // rest of the window, the full request gets no data at all (no
-        // bandwidth amplification, and no reason for the peer's own sync loop
-        // to spin). Header/justification-only requests stay answered: they are
-        // 128 headers, bounded, and refusing them would only make a peer that
-        // is trying to find the common ancestor wander blind. Service resumes
-        // by itself when the window expires.
-        let maybe_block_response = if throttle.is_none() || small_request {
+        // rest of the window, a full request gets no data at all (no bandwidth
+        // amplification, and no reason for the peer's own sync loop to spin),
+        // and a header-only request gets a bounded prefix so a peer that is
+        // looking for the common ancestor can still make some progress.
+        // Service resumes by itself when the window expires.
+        let served = served_max_blocks(max_blocks, small_request, throttle.is_some());
+        let maybe_block_response = if served > 0 {
             let block_response = self.get_block_response(
                 attributes,
                 from_block_id,
                 direction,
-                max_blocks,
+                served,
                 support_multiple_justifications,
             )?;
 
@@ -1431,7 +1460,7 @@ mod tests {
         assert!(budget.charge(repeat_penalty(Some(true))).is_none());
     }
 
-    /// Throttling: the fifth identical request inside the window gets no data,
+    /// Throttling: the fifth identical request inside the window is throttled,
     /// the peer is still there, and service resumes when the window expires —
     /// with no ban and no disconnect anywhere in between.
     #[test]
@@ -1481,6 +1510,26 @@ mod tests {
             RepeatDecision::Fresh,
             "the counter restarted with the window"
         );
+    }
+
+    /// While throttled a full request is not answered at all, and a header-only
+    /// one still gets a bounded prefix — the latter is what every real peer on
+    /// this network sends while hunting for the common ancestor.
+    #[test]
+    fn a_throttled_request_gets_nothing_or_a_bounded_prefix() {
+        assert_eq!(served_max_blocks(128, false, false), 128);
+        assert_eq!(served_max_blocks(128, true, false), 128);
+        assert_eq!(
+            served_max_blocks(128, false, true),
+            0,
+            "no data for a full request"
+        );
+        assert_eq!(
+            served_max_blocks(128, true, true),
+            THROTTLE_PREFIX_BLOCKS,
+            "headers only, and only a handful"
+        );
+        assert_eq!(served_max_blocks(1, true, true), 1, "never more than asked");
     }
 
     #[test]
