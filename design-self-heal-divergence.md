@@ -95,3 +95,33 @@ which the peer must make import progress is still too short for a 16 000-block
 gap. The complete cure is a block server that caps repeated-request reputation
 instead of failing fatally (see the D8 report); this change makes the node stop
 classifying such a peer as healthy-behind and stop evicting it.
+
+## Scheduled (2026-11-13) — the part this design said was missing
+
+The section above ends with "Not in this change: wiring into a schedule". That
+wiring now exists, and it is **on by default for every node**:
+
+- `gpn-agent/src/selfheal.rs` holds the whole capability: fetch + verify the
+  signed `snapshot.json`, observe this node, decide, and run the recovery
+  sequence through a `NodeControl`. `gpn_snapshot` (the CLI) and both
+  supervisors call the same code — `selfheal::check` / `selfheal::tick` /
+  `selfheal::watch`.
+- Both supervisors that exist in this fleet run it at startup and every 5
+  minutes: `gpn_node` (Windows boxes) and `gpn_fleet` (Linux boxes). No launcher
+  line, flag or env var is needed; `GPN_SELF_HEAL=0` only exists for debugging
+  and is set by nothing. `GPN_SNAPSHOT_META_URL` defaults to the published
+  document.
+- The import cannot lie about pruning. `export` records the source DB's mode
+  (`archive` / `none`); `import` no longer defaults a field-less manifest to
+  `archive`; `none` removes a stale `.gpn-pruning-archive`; and `gpn_node`
+  recomputes its pruning flags **at every spawn**, because a heal replaces the
+  DB that the flags described.
+- Gate that skips a tick: a GPU job in flight (`gpu-yield`), a node child that
+  is down, unverifiable metadata, an unreachable snapshot host, a different
+  genesis, or a recovery inside 24 h. Each leaves the DB untouched and says why
+  in one INFO line.
+- Evidence: `tests/selfheal_recovery.rs` builds a synthetic forked node (real
+  base path, real child process, stub JSON-RPC, signed metadata) and heals it
+  through `watch()`, plus the four must-not-wipe modes. Box 1 healed for real
+  from `#280 614` on a fork to the canonical chain and was back within one block
+  of the fleet within minutes.
