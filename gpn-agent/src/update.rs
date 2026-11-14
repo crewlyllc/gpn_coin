@@ -2258,12 +2258,10 @@ pub fn save_attempts(state_dir: &Path, l: &AttemptLedger) -> Result<(), UpdateEr
 /// `GPN_BOOT_ID` wins: on Windows the scheduled-task wrapper knows the machine's
 /// boot time and passes it, because there is no `/proc` to read.
 pub fn pick_boot_id(env_value: Option<&str>, proc_boot_id: Option<&str>) -> String {
-    for candidate in [env_value, proc_boot_id] {
-        if let Some(v) = candidate {
-            let v = v.trim();
-            if !v.is_empty() {
-                return v.to_string();
-            }
+    for v in [env_value, proc_boot_id].into_iter().flatten() {
+        let v = v.trim();
+        if !v.is_empty() {
+            return v.to_string();
         }
     }
     // Unknown is honest: the attempt is still recorded, but it cannot be used to
