@@ -923,7 +923,7 @@ pub async fn new_full<
             dyn sc_network_sync::block_relay_protocol::BlockDownloader<Block>,
         > = std::sync::Arc::new(crate::block_serving::PoliteDownloader::new(
             sdk.downloader,
-            crate::block_serving::ChainTipSource::<Block, FullClient>::new(
+            crate::block_serving::ChainTipSource::<Block, FullClient>::arc(
                 client.clone(),
                 peer_tips.clone(),
             ),

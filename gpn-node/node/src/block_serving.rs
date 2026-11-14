@@ -648,10 +648,7 @@ where
             };
 
             let indexed_body = if get_indexed_body {
-                match self.client.block_indexed_body(hash)? {
-                    Some(transactions) => transactions,
-                    None => Vec::new(),
-                }
+                self.client.block_indexed_body(hash)?.unwrap_or_default()
             } else {
                 Vec::new()
             };
@@ -1026,7 +1023,10 @@ impl<Block: BlockT, Client> ChainTipSource<Block, Client>
 where
     Client: HeaderBackend<Block> + Send + Sync + 'static,
 {
-    pub fn new(client: Arc<Client>, tips: Arc<PeerTips>) -> Arc<dyn PeerTipSource> {
+    /// Named `arc` rather than `new`: it returns a trait object and clippy's
+    /// `new_ret_no_self` is right that a constructor called `new` should build
+    /// `Self`. The honest name costs exactly one call site.
+    pub fn arc(client: Arc<Client>, tips: Arc<PeerTips>) -> Arc<dyn PeerTipSource> {
         Arc::new(Self {
             client,
             tips,
@@ -1204,7 +1204,7 @@ mod tests {
     fn a_malformed_request_is_still_fatal() {
         // Undecodable protobuf: the server reports MALFORMED_REQUEST, which is
         // fatal, and never reaches the divergence rule.
-        let garbage = vec![0xff, 0xff, 0xff, 0xff];
+        let garbage = [0xffu8; 4];
         assert!(BlockRequestSchema::decode(&garbage[..]).is_err());
         assert_eq!(rep::MALFORMED_REQUEST.value, i32::MIN);
         assert_eq!(rep::MALFORMED_REQUEST.reason, "Malformed block request");
@@ -1234,8 +1234,10 @@ mod tests {
     #[tokio::test]
     async fn a_far_behind_peer_on_another_branch_is_never_asked_for_blocks() {
         let inner = Arc::new(CountingDownloader::default());
-        let mut source = HonestSource::default();
-        source.our_best = 297_825;
+        let mut source = HonestSource {
+            our_best: 297_825,
+            ..Default::default()
+        };
         let peer = PeerId::random();
         source
             .peers
@@ -1260,8 +1262,10 @@ mod tests {
     #[tokio::test]
     async fn a_peer_on_our_chain_is_always_asked() {
         let inner = Arc::new(CountingDownloader::default());
-        let mut source = HonestSource::default();
-        source.our_best = 297_825;
+        let mut source = HonestSource {
+            our_best: 297_825,
+            ..Default::default()
+        };
         let peer = PeerId::random();
         source.peers.lock().unwrap().insert(peer, (100, Some(true)));
         let polite = PoliteDownloader::new(inner.clone(), Arc::new(source));
