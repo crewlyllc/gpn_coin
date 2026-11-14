@@ -236,6 +236,91 @@ pub fn due_for_redial(tier: Tier, seconds_since_last_attempt: u64, failures: u32
     }
 }
 
+/// How long a peer stays "divergence-protected" after it was last seen on a
+/// branch we do not have. Long enough to outlive a repeat-request ban (the
+/// peerstore decays `i32::MIN` out of the ban band in ~70 s) with room for a
+/// few failed dials; short enough that a peer which never comes back does not
+/// hold a slot forever.
+pub const PROTECTION_TTL_SECS: u64 = 30 * 60;
+
+/// Is a divergence-protected peer due for a re-dial?
+///
+/// Every tick, and never backed off: a peer that is on a fork we do not have is
+/// the one peer whose link must not be given up on, because it can only get
+/// back onto the canonical chain through us. Counting its failed dials (the
+/// ban refuses dials for ~70 s) would push it out to an 8-minute backoff and
+/// turn a 70-second ban into a permanent eviction.
+pub fn due_for_redial_protected(seconds_since_last_attempt: u64) -> bool {
+    seconds_since_last_attempt >= REDIAL_INTERVAL_SECS / 2
+}
+
+/// The set of peers currently known to be *diverged* (on a branch we do not
+/// have), shared by the fork-tolerance task (writer) and the ranked re-dial
+/// loop (reader).
+///
+/// Entries expire after [`PROTECTION_TTL_SECS`] so a scripted `protect()` can
+/// never keep a dead peer in the table indefinitely.
+#[derive(Debug, Default)]
+pub struct DivergenceProtection {
+    inner: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+}
+
+impl DivergenceProtection {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Mark a peer as diverged as of `now_secs` (unix seconds).
+    pub fn protect(&self, peer_id: &str, now_secs: u64) {
+        if peer_id.is_empty() {
+            return;
+        }
+        let mut guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.insert(peer_id.to_string(), now_secs);
+    }
+
+    /// Drop the protection (the peer is back on our chain, or the operator
+    /// decided it is not worth a slot).
+    pub fn clear(&self, peer_id: &str) {
+        let mut guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.remove(peer_id);
+    }
+
+    /// True while the peer is protected and its protection has not expired.
+    pub fn is_protected(&self, peer_id: &str, now_secs: u64) -> bool {
+        let mut guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        match guard.get(peer_id) {
+            Some(&seen) if now_secs.saturating_sub(seen) <= PROTECTION_TTL_SECS => true,
+            Some(_) => {
+                guard.remove(peer_id);
+                false
+            }
+            None => false,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        let guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// The set of peers this node knows about, shared by the discovery tasks
 /// (writers) and the ranked re-dial loop (reader).
 ///
@@ -475,6 +560,41 @@ mod tests {
         // A tier-1 peer is not retried before its backoff elapses.
         assert!(!due_for_redial(Tier::Ranked, 59, 3));
         assert!(due_for_redial(Tier::Ranked, 120, 3));
+    }
+
+    #[test]
+    fn a_diverged_peer_is_redialled_every_tick_and_never_backed_off() {
+        // 30 s ticks; a ban refuses dials for ~70 s, so a protected peer fails
+        // a couple of dials and must still be retried on the next tick.
+        assert!(!due_for_redial_protected(29));
+        assert!(due_for_redial_protected(30));
+        assert!(due_for_redial_protected(3_600));
+        // Contrast: an unprotected tier-2 peer after 3 failures waits 120 s.
+        assert!(!due_for_redial(Tier::Unknown, 30, 3));
+    }
+
+    #[test]
+    fn protection_is_per_peer_and_expires() {
+        let p = DivergenceProtection::new();
+        assert!(p.is_empty());
+        p.protect("12D3KooA", 1_000);
+        assert!(p.is_protected("12D3KooA", 1_001));
+        assert!(!p.is_protected("12D3KooB", 1_001));
+        // Still protected at the edge of the TTL, gone one second later.
+        assert!(p.is_protected("12D3KooA", 1_000 + PROTECTION_TTL_SECS));
+        assert!(!p.is_protected("12D3KooA", 1_001 + PROTECTION_TTL_SECS));
+        assert!(p.is_empty());
+        // An empty id is never a peer.
+        p.protect("", 5);
+        assert!(p.is_empty());
+    }
+
+    #[test]
+    fn protection_can_be_cleared() {
+        let p = DivergenceProtection::new();
+        p.protect("12D3KooA", 10);
+        p.clear("12D3KooA");
+        assert!(!p.is_protected("12D3KooA", 11));
     }
 
     #[test]

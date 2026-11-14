@@ -66,3 +66,32 @@ back on the fork looks healthier than it is.
   exists.
 - Handshake announcement of `genesis:hash@height` (#159), which lets both sides heal without
   a signed document in the loop.
+
+## D8 — a peer *behind* on a branch we do not have (2026-11-13)
+
+`classify` used to call a peer diverged only when both nodes were at the **same
+height** with different hashes. Box 1 sat 16 000 blocks behind on its own fork
+(`#280580` = `0xbbca…599d`, our `#280580` = `0xaa9e…a17f`, `chain_getHeader`
+returns `null` for its hash), so it was classified *behind*, given no credit,
+never protected — and our own block-request handler killed it 2 s after every
+connect with a **fatal** `Same block request multiple times`
+(`-(1 << 31)`, `sc-network-sync`'s repeat-request guard). It could never reorg,
+because reorging needs us and we kept banning it.
+
+Now: `classify_with_tip` promotes `PeerBehind` to `Diverged` when the client
+says the peer's best hash is **not** one of ours (`classify` stays pure; the
+membership lookup lives in `service.rs` and is skipped for every non-behind
+shape). `decide_repair` is the task's one decision point — credit + keep the
+link. The task also records the peer in `DivergenceProtection`, and the ranked
+re-dial loop dials a protected peer **every tick, without backoff**, instead of
+letting a 70 s ban accumulate into an 8-minute hole.
+
+Honest limit: reputation credit **cannot** stop the fatal report — the
+disconnect happens inside `sc-network-sync`'s block server before any credit
+applies, and a banned peer disappears from `peers_info()`, so the 30 s scan
+usually never sees it. Keeping the link therefore depends on the ban expiring
+(~70 s of peerstore decay) and the re-dial succeeding; the 2-second window in
+which the peer must make import progress is still too short for a 16 000-block
+gap. The complete cure is a block server that caps repeated-request reputation
+instead of failing fatally (see the D8 report); this change makes the node stop
+classifying such a peer as healthy-behind and stop evicting it.

@@ -21,7 +21,14 @@
 //! 1. `classify` decides, from the two tips only, whether there is anything to
 //!    say at all (same height + different hash = divergence; anything else is
 //!    not a verdict).
-//! 2. `divergence_credit` gives reputation back for that case, **never above
+//! 2. `classify_with_tip` adds the one fact the numbers cannot carry: whether
+//!    the peer's best block is a block *we hold*. A peer that is thousands of
+//!    blocks **behind on a branch we do not have** is not "just behind" — it
+//!    is diverged, and it is exactly the peer that needs us to stay connected
+//!    (D8: box 1 at #280576 on its own fork, banned 2 s after every connect).
+//! 3. `decide_repair` turns a verdict into the task's action (credit + keep the
+//!    link), so the task and its tests share one code path.
+//! 4. `divergence_credit` gives reputation back for that case, **never above
 //!    zero** and never more than the peer had lost, so a genuinely bad peer is
 //!    not laundered — only a peer that did nothing wrong is pulled back out of
 //!    the ban band, at most once per window per peer.
@@ -65,10 +72,11 @@ pub enum Verdict {
 
 /// Classify from the two tips alone.
 ///
-/// Deliberately a *same-height* comparison: a peer one block behind is not
-/// diverged, and answering "is their hash on our chain?" for every height would
-/// mean a database read per peer per tick for a case that needs no action. The
-/// shape that stranded nodes was always "both nodes at #N, different hashes".
+/// Deliberately a *same-height* comparison and nothing else: a peer one block
+/// behind is not diverged by this function's lights, and asking "is their hash
+/// on our chain?" for every height would mean a database read per peer per tick
+/// for a case that needs no action. That question is `classify_with_tip`'s job,
+/// and only it is allowed to consult the client.
 pub fn classify<H: PartialEq>(
     our_number: u32,
     our_hash: &H,
@@ -85,6 +93,76 @@ pub fn classify<H: PartialEq>(
         Verdict::SameChain
     } else {
         Verdict::Diverged
+    }
+}
+
+/// The client's answer to "do we hold this peer's best block?":
+/// `Some(true)` = yes, `Some(false)` = no, `None` = the client could not say
+/// (an error, or the lookup was not attempted).
+pub type TipKnown = Option<bool>;
+
+/// `classify` plus the one fact the two numbers cannot carry.
+///
+/// A peer whose tip is *numerically behind* is only "just behind" if its best
+/// block is a block we hold — then it is on our chain and syncing will catch it
+/// up. If its best block is **unknown to our client**, it is on a branch we do
+/// not have: it can never make progress by downloading past its own tip, and it
+/// will re-ask for the same blocks until the sync layer's repeat-request guard
+/// bans it. That is divergence, and the remedy is the same as for the
+/// same-height case: keep the link, keep serving canonical blocks.
+///
+/// `None` never promotes: an unanswered question is not evidence of a fork.
+pub fn classify_with_tip<H: PartialEq>(
+    our_number: u32,
+    our_hash: &H,
+    their_number: u32,
+    their_hash: &H,
+    their_tip_known: TipKnown,
+) -> Verdict {
+    match classify(our_number, our_hash, their_number, their_hash) {
+        Verdict::PeerBehind if their_tip_known == Some(false) => Verdict::Diverged,
+        v => v,
+    }
+}
+
+/// What the fork-tolerance task should do about one peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Repair {
+    pub verdict: Verdict,
+    /// Reputation to hand back (0 = nothing to do).
+    pub credit: i32,
+    /// True when this peer must not be let go: keep the link, keep re-dialling.
+    pub keep_link: bool,
+}
+
+/// The task's whole per-peer decision, in one pure place so tests exercise the
+/// same code the task runs. `client` supplies `their_tip_known`.
+pub fn decide_repair<H: PartialEq>(
+    our_number: u32,
+    our_hash: &H,
+    their_number: u32,
+    their_hash: &H,
+    their_tip_known: TipKnown,
+    current_reputation: i32,
+) -> Repair {
+    let verdict = classify_with_tip(
+        our_number,
+        our_hash,
+        their_number,
+        their_hash,
+        their_tip_known,
+    );
+    match verdict {
+        Verdict::Diverged => Repair {
+            verdict,
+            credit: divergence_credit(current_reputation),
+            keep_link: true,
+        },
+        _ => Repair {
+            verdict,
+            credit: 0,
+            keep_link: false,
+        },
     }
 }
 
@@ -161,6 +239,63 @@ mod tests {
     fn same_height_different_hash_is_divergence() {
         // The exact shape that stranded box 1: both at #N, different hashes.
         assert_eq!(classify(117_000, &A, 117_000, &B), Verdict::Diverged);
+    }
+
+    #[test]
+    fn behind_on_an_unknown_branch_is_divergence() {
+        // D8: box 1 is #280576 on its own fork while we are #297056. Its best
+        // block is not in our database, so it is not "just behind" — it can
+        // never catch up by downloading from its own tip.
+        assert_eq!(
+            classify_with_tip(297_056, &A, 280_576, &B, Some(false)),
+            Verdict::Diverged
+        );
+    }
+
+    #[test]
+    fn behind_on_our_own_chain_is_not_divergence() {
+        // Its best block at #900 is ours: an ordinary lagging peer, and sync
+        // will catch it up. Must NOT be treated as a fork.
+        assert_eq!(
+            classify_with_tip(1_000, &A, 900, &B, Some(true)),
+            Verdict::PeerBehind
+        );
+        // Same for the same-height / ahead shapes: membership cannot promote.
+        assert_eq!(
+            classify_with_tip(1_000, &A, 1_000, &A, Some(false)),
+            Verdict::SameChain
+        );
+        assert_eq!(
+            classify_with_tip(1_000, &A, 1_001, &B, Some(false)),
+            Verdict::PeerAhead
+        );
+    }
+
+    #[test]
+    fn an_unanswered_membership_question_never_promotes() {
+        // The client errored or we did not ask: not evidence of a fork.
+        assert_eq!(
+            classify_with_tip(1_000, &A, 900, &B, None),
+            Verdict::PeerBehind
+        );
+    }
+
+    #[test]
+    fn behind_and_diverged_earns_credit_and_link_keeping() {
+        // The task's decision for D8's peer: it has lost reputation to the
+        // repeat-request guard, so it gets a bounded credit and is protected.
+        let r = decide_repair(297_056, &A, 280_576, &B, Some(false), -(1 << 29));
+        assert_eq!(r.verdict, Verdict::Diverged);
+        assert_eq!(r.credit, DIVERGENCE_CREDIT);
+        assert!(r.keep_link);
+    }
+
+    #[test]
+    fn a_lagging_peer_on_our_chain_earns_nothing() {
+        let r = decide_repair(297_056, &A, 280_576, &B, Some(true), -(1 << 29));
+        assert_eq!(r.verdict, Verdict::PeerBehind);
+        assert_eq!(r.credit, 0);
+        assert!(!r.keep_link);
     }
 
     #[test]

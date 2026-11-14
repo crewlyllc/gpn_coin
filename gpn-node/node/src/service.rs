@@ -16,6 +16,7 @@ use sc_network_sync::SyncingService;
 use sc_service::{error::Error as ServiceError, Configuration, TaskManager};
 use sc_telemetry::{Telemetry, TelemetryWorker};
 use sc_transaction_pool_api::OffchainTransactionPoolFactory;
+use sp_blockchain::HeaderBackend;
 use sp_consensus_pow::{Seal, POW_ENGINE_ID};
 use sp_core::storage::StorageKey;
 use sp_core::U256;
@@ -1356,24 +1357,46 @@ pub async fn new_full<
             });
     }
 
-    // ---- Fork tolerance (#158): divergence is not misbehaviour -----------
-    // A peer whose best block differs from ours at the SAME height has done
-    // nothing wrong: it is on a side branch (behind, or ahead on a fork it can
-    // reorg off) and the cure is to stay connected and keep serving canonical
-    // blocks, not to drop it. `sc-network-sync` cannot always tell divergence
-    // from a protocol violation -- a block that fails verification is reported
-    // as `BAD_BLOCK`, and about three of those ban a peer -- so this task owns
-    // the local repair: on a detected divergence it credits reputation back, at
-    // most once per window per peer, never above zero (module `fork_tolerance`).
+    // ---- Ranked peer book (GPN #154, design §1) --------------------------
+    // Every discovery source writes here; the ranked re-dial loop below is the
+    // single place that decides dial order, slot usage and backoff.
+    // Declared before the fork-tolerance task because that task protects a
+    // diverged peer in the book (D8) and the re-dial loop honours the flag.
+    let peer_book = std::sync::Arc::new(crate::peer_priority::PeerBook::new());
+
+    // Peers whose tip is on a branch we do not have, as last seen by the
+    // fork-tolerance task. Read by the ranked re-dial loop, which refuses to
+    // back them off into an 8-minute hole after a repeat-request ban.
+    let divergence_protection =
+        std::sync::Arc::new(crate::peer_priority::DivergenceProtection::new());
+
+    // Consecutive dial failures per peer, shared with the gossip policy so an
+    // address that has stopped answering stops being advertised (design §2).
+    let dial_failures: std::sync::Arc<Mutex<std::collections::HashMap<String, u32>>> =
+        Default::default();
+
+    // ---- Fork tolerance (#158, D8): divergence is not misbehaviour ------
+    // A peer whose best block is not on our chain has done nothing wrong: it
+    // is on a side branch (at the same height, or *behind* on a branch we do
+    // not have) and the cure is to stay connected and keep serving canonical
+    // blocks, not to drop it. `sc-network-sync` cannot tell that apart from a
+    // protocol violation -- a repeated block request is a *fatal* report
+    // (`-(1 << 31)`) that disconnects on the spot -- so this task owns the
+    // local repair: on a detected divergence it credits reputation back, at
+    // most once per window per peer, never above zero (module `fork_tolerance`),
+    // and it marks the peer as protection-worthy so the ranked re-dial loop
+    // keeps dialling it after the ban drops instead of backing it off to 8 min.
     // It never disconnects and never changes chain selection.
     {
         let sync = sync_service.clone();
         let net = network.clone();
         let client = client.clone();
+        let book = peer_book.clone();
+        let protection = divergence_protection.clone();
         task_manager
             .spawn_handle()
             .spawn("gpn-fork-tolerance", None, async move {
-                use crate::fork_tolerance::{self, Verdict};
+                use crate::fork_tolerance;
                 let mut guard = fork_tolerance::DivergenceGuard::default();
                 let start = std::time::Instant::now();
                 let mut tick =
@@ -1386,56 +1409,101 @@ pub async fn new_full<
                         continue;
                     };
                     let now_secs = start.elapsed().as_secs();
+                    let now_unix = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
                     for (peer_id, info) in peers {
-                        if fork_tolerance::classify(
+                        // The numbers alone cannot tell a lagging peer on our
+                        // chain from one stuck behind its own fork: for the
+                        // behind shape, ask the client whether we hold its
+                        // best block. One header lookup per behind peer per
+                        // 30 s tick -- and none for the equal-height case,
+                        // which needs no lookup.
+                        let tip_known = if info.best_number < ours.best_number
+                            && info.best_hash != ours.best_hash
+                        {
+                            // Behind on some branch: do we hold its best block?
+                            Some(
+                                client
+                                    .number(info.best_hash)
+                                    .map(|n| n.is_some())
+                                    .unwrap_or(false),
+                            )
+                        } else {
+                            // Not a behind peer: the answer is irrelevant to
+                            // the verdict, so do not guess one.
+                            None
+                        };
+                        let key = peer_id.to_string();
+                        let current = net.peer_reputation(&peer_id);
+                        let repair = fork_tolerance::decide_repair(
                             ours.best_number,
                             &ours.best_hash,
                             info.best_number,
                             &info.best_hash,
-                        ) != Verdict::Diverged
-                        {
+                            tip_known,
+                            current,
+                        );
+                        if !repair.keep_link {
+                            // Back on (or ahead of) our chain: no longer
+                            // protection-worthy. Re-dial backoff applies again.
+                            protection.clear(&key);
                             continue;
                         }
-                        let key = peer_id.to_string();
+                        // Remember the address while it is still connected, so
+                        // the re-dial loop has something to dial after the
+                        // disconnect. Best effort: no state, no address.
+                        if let Ok(state) = net.network_state().await {
+                            if let Some(p) = state
+                                .connected_peers
+                                .iter()
+                                .find(|(id, _)| id.to_string() == key)
+                                .map(|(_, p)| p)
+                            {
+                                if let Some(addr) = p.known_addresses.iter().next() {
+                                    book.upsert(crate::peer_priority::Candidate::new(
+                                        &format!("{addr}/p2p/{key}"),
+                                        crate::peer_priority::Tier::Unknown,
+                                        None,
+                                    ));
+                                }
+                            }
+                        }
+                        protection.protect(&key, now_unix);
                         if !guard.should_repair(&key, now_secs) {
                             continue;
                         }
-                        let current = net.peer_reputation(&peer_id);
-                        let credit = fork_tolerance::divergence_credit(current);
-                        if credit > 0 {
+                        if repair.credit > 0 {
                             net.report_peer(
                                 peer_id,
                                 ReputationChange::new(
-                                    credit,
+                                    repair.credit,
                                     "chain divergence is not misbehaviour (#158)",
                                 ),
                             );
                         }
                         log::info!(
-                            "fork-tolerance: peer {} is on a different chain at #{} (ours {}, \
-                             theirs {}) -- keeping the link and serving canonical blocks; \
-                             reputation {} -> {} (divergence is not a protocol violation)",
+                            "fork-tolerance: peer {} is on a different chain (#{}, ours #{}, \
+                             their tip {} is {}) -- keeping the link, protecting it from \
+                             backoff and serving canonical blocks; reputation {} -> {} \
+                             (divergence is not a protocol violation)",
                             key,
+                            info.best_number,
                             ours.best_number,
-                            crate::service::short_hash(&ours.best_hash),
                             crate::service::short_hash(&info.best_hash),
+                            if info.best_number < ours.best_number {
+                                "behind on a branch we do not have"
+                            } else {
+                                "a same-height fork"
+                            },
                             current,
-                            current.saturating_add(credit)
+                            current.saturating_add(repair.credit)
                         );
                     }
                 }
             });
     }
-
-    // ---- Ranked peer book (GPN #154, design §1) --------------------------
-    // Every discovery source writes here; the ranked re-dial loop below is the
-    // single place that decides dial order, slot usage and backoff.
-    let peer_book = std::sync::Arc::new(crate::peer_priority::PeerBook::new());
-
-    // Consecutive dial failures per peer, shared with the gossip policy so an
-    // address that has stopped answering stops being advertised (design §2).
-    let dial_failures: std::sync::Arc<Mutex<std::collections::HashMap<String, u32>>> =
-        Default::default();
 
     // ---- Persistent peer store (Bitcoin-style addrman) -------------------
     // Snapshot the addresses of peers we are *connected to* into
@@ -1617,6 +1685,7 @@ pub async fn new_full<
         let book = peer_book.clone();
         let base = base_path.clone();
         let shared_failures = dial_failures.clone();
+        let protection = divergence_protection.clone();
         let oracle_ids = crate::peer_priority::oracle_peer_ids(
             &crate::network_registry::load_registry().bootstrap_seeds,
         );
@@ -1698,12 +1767,24 @@ pub async fn new_full<
                             failures.insert(c.peer_id.clone(), 0);
                             continue;
                         }
+                        // A peer on a branch we do not have is the one peer
+                        // we must not give up on: it can only rejoin the
+                        // canonical chain through us. The repeat-request ban
+                        // refuses its dials for ~70 s; if those failures
+                        // counted, backoff would push the next attempt to 8
+                        // min and the fork would never heal (D8).
+                        let protected = protection.is_protected(&c.peer_id, now);
                         let since = last_attempt
                             .get(&c.peer_id)
                             .map(|t| now.saturating_sub(*t))
                             .unwrap_or(u64::MAX);
                         let f = *failures.get(&c.peer_id).unwrap_or(&0);
-                        if !peer_priority::due_for_redial(c.tier, since, f) {
+                        let due = if protected {
+                            peer_priority::due_for_redial_protected(since)
+                        } else {
+                            peer_priority::due_for_redial(c.tier, since, f)
+                        };
+                        if !due {
                             continue;
                         }
                         if let Ok(mw) = c.addr.parse::<MultiaddrWithPeerId>() {
@@ -1711,7 +1792,14 @@ pub async fn new_full<
                             dialled += 1;
                         }
                         last_attempt.insert(c.peer_id.clone(), now);
-                        failures.insert(c.peer_id.clone(), f.saturating_add(1).min(8));
+                        failures.insert(
+                            c.peer_id.clone(),
+                            if protected {
+                                f
+                            } else {
+                                f.saturating_add(1).min(8)
+                            },
+                        );
                     }
                     // Publish the failure record for the gossip policy. A peer
                     // that has failed three dials in a row is not re-advertised.
