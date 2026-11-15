@@ -2260,14 +2260,35 @@ fn wait_ring() -> &'static Mutex<WaitRing> {
     RING.get_or_init(|| Mutex::new(WaitRing::default()))
 }
 
+/// One **provider account** per list: the registry holds one row per provider
+/// *process* (this host runs llm + finetune + diffusion, all under one public
+/// address), so the same box can appear several times. A lease is addressed to
+/// the account, not the process, which means a repeated address is the same
+/// provider twice: it burns one of the `MAX_ROUTE_ATTEMPTS` slots on a box that
+/// has already refused, and it makes the log say "candidate #1 and #2 are the
+/// same box" (2026-11-15 00:45:18: `5HVtpoz…` twice in one failover walk).
+///
+/// Keep the FIRST occurrence so the FCFS order (and the ready-vs-puller tier
+/// order that preceded it) is untouched for everything else. An empty address
+/// is not a provider and is collapsed too — a lease to it can never be
+/// delivered.
+fn dedupe_candidates(candidates: Vec<RouteCandidate>) -> Vec<RouteCandidate> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    candidates
+        .into_iter()
+        .filter(|c| seen.insert(c.provider.address.to_ascii_lowercase()))
+        .collect()
+}
+
 /// [`WaitRing::order`] against the process-wide queue.
 fn fcfs_order(candidates: Vec<RouteCandidate>) -> Vec<RouteCandidate> {
-    match wait_ring().lock() {
+    let ordered = match wait_ring().lock() {
         Ok(mut ring) => ring.order(candidates, Instant::now()),
         // A poisoned queue must not stop the network: fall back to "any
         // eligible provider" rather than refusing the job.
         Err(_) => candidates,
-    }
+    };
+    dedupe_candidates(ordered)
 }
 
 /// Log (once per box+floor) that a provider was admitted to / withheld from a
@@ -9724,6 +9745,57 @@ mod tests {
         ring.note_poll("c", later);
         ring.leave("c");
         assert!(ring.entries.is_empty());
+    }
+
+    /// The registry holds one row per provider *process*, so one public address
+    /// can appear several times (this host runs llm + finetune + diffusion under
+    /// one address). A failover walk must not spend two of its three attempts on
+    /// the same box: 2026-11-15 00:45:18 logged `5HVtpoz…` as both candidate #1
+    /// and candidate #2 in one chat request. Dedupe keeps the FIRST occurrence,
+    /// so FCFS order survives untouched.
+    #[test]
+    fn one_provider_address_is_one_candidate() {
+        let a1 = prov("5Dup", "http://a1/status", 10, "llama3.2:1b");
+        let other = prov("5Other", "http://b/status", 10, "llama3.2:1b");
+        // Same account, different case and a second row: still one provider.
+        let a2 = prov("5dup", "http://a2/status", 10, "llama3.2:1b");
+        let reg = vec![a1, other, a2];
+        let needs = RouteNeeds {
+            model: "llama3.2:1b".into(),
+            ..Default::default()
+        };
+        let cands = route_candidates(&reg, JobKind::Text, &needs);
+        assert_eq!(
+            cands.len(),
+            3,
+            "the registry really does hold one row per process"
+        );
+        // Through the real entry point every caller uses, so deleting the
+        // dedupe from `fcfs_order` fails this test rather than passing it.
+        let deduped = fcfs_order(cands);
+        assert_eq!(deduped.len(), 2, "one address, one attempt");
+        assert_eq!(
+            deduped[0].provider.status_url, "http://a1/status",
+            "the first occurrence keeps its place"
+        );
+        assert_eq!(deduped[1].provider.address, "5Other");
+        // A list with no duplicates is returned in the same order.
+        let once = route_candidates(
+            &[
+                prov("5B", "http://b/status", 1, "m"),
+                prov("5C", "http://c/status", 2, "m"),
+            ],
+            JobKind::Text,
+            &RouteNeeds {
+                model: "m".into(),
+                ..Default::default()
+            },
+        );
+        let same: Vec<String> = fcfs_order(once)
+            .iter()
+            .map(|c| c.provider.address.clone())
+            .collect();
+        assert_eq!(same, vec!["5B".to_string(), "5C".to_string()]);
     }
 
     /// Hardware gates: VRAM floor, model-fits-VRAM, and gflops — all applied to
