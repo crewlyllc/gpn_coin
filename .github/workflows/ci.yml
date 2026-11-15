@@ -283,6 +283,13 @@ jobs:
       - name: Lane check patterns (timestamp vs HTTP 503)
         run: bash scripts/tests/test-lane-check.sh
 
+      # W170: the weekly snapshot job must refuse a STALE verifier before it
+      # exports or swaps the published asset (2026-11-14: asset swapped, then
+      # `verify` refused). Stubbed snapshot binary + RPC + curl, so the ordering
+      # is observed rather than asserted.
+      - name: Snapshot weekly preflight (stale verifier, verify-before-swap)
+        run: bash scripts/tests/test-snapshot-weekly.sh
+
       # Referral download links (`?ref=CODE`): the page-side half. Pure Node,
       # no browser: validation rule, URL parsing, and the XSS boundary (the
       # code is only ever written as text, never as markup).

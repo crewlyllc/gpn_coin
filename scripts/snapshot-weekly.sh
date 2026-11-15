@@ -4,7 +4,7 @@
 # in minutes instead of syncing ~200k blocks.
 #
 # Usage: scripts/snapshot-weekly.sh [--no-upload] [--out DIR]
-# Exit codes: 0 ok · 2 usage · 3 export failed · 4 upload failed
+# Exit codes: 0 ok · 2 usage · 3 export failed · 4 upload failed · 5 preflight refused
 set -euo pipefail
 
 REPO="crewlyllc/gpn_coin"
@@ -23,13 +23,35 @@ while [ $# -gt 0 ]; do
 done
 
 TOKEN_FILE="$HOME/.openclaw/credentials/github-crewlyllc-pat.txt"
-SNAP_BIN="$HOME/.local/bin/gpn_snapshot"
+# One knob for both halves (export and verify): a verifier that is not the
+# exporter would let the two disagree about canonical text, which is exactly the
+# class of drift the preflight below exists to stop.
+SNAP_BIN="${GPN_SNAPSHOT_BIN:-$HOME/.local/bin/gpn_snapshot}"
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
 OUT="$OUT_DIR/gpn-testnet-snapshot-$STAMP.tar.gz"
 META="$OUT.meta.json"
 
 [ -x "$SNAP_BIN" ] || { echo "FATAL: $SNAP_BIN not found" >&2; exit 3; }
 [ -d "$BASE_PATH/chains" ] || { echo "FATAL: no chain data under $BASE_PATH" >&2; exit 3; }
+
+# ── preflight: refuse a stale binary BEFORE anything is exported or swapped ───
+# 2026-11-14: the weekly job exported, deleted the previous release asset and
+# uploaded a new archive, and only then refused at `verify` — the installed
+# gpn_snapshot predated the `checkpoints=` canonical-text change by 39 minutes.
+# The mirror was inconsistent for ~3 minutes because the refusal came after the
+# swap. Ordering is the fix: every reason to refuse is checked here, while the
+# published archive is still the old one.
+SRC_DIR="${GPN_SNAPSHOT_SRC:-$(cd "$(dirname "$0")/.." && pwd)/gpn-agent/src}"
+if [ -d "$SRC_DIR" ]; then
+  NEWER=$(find "$SRC_DIR" -name 'gpn_snapshot*' -newer "$SNAP_BIN" -print -quit 2>/dev/null || true)
+  if [ -n "$NEWER" ]; then
+    echo "FATAL: $SNAP_BIN is STALE — $NEWER is newer than the binary that will verify the snapshot." >&2
+    echo "       The verifier and the signer must agree on canonical text; a stale binary is the" >&2
+    echo "       2026-11-14 incident (asset swapped, then verify refused). Refusing before the export." >&2
+    echo "       Rebuild it: cargo build --release -p gpn-agent --bin gpn_snapshot && cp target/release/gpn_snapshot ~/.local/bin/" >&2
+    exit 5
+  fi
+fi
 
 echo "[snapshot] exporting from $BASE_PATH (freeze: mining pauses for consistency)"
 mkdir -p "$OUT_DIR"
@@ -94,6 +116,36 @@ echo "[snapshot] built $OUT"
 echo "[snapshot] block=$BLOCK size=$SIZE sha256=$SHA"
 
 if [ "$UPLOAD" -eq 0 ]; then echo "[snapshot] --no-upload: done"; exit 0; fi
+
+DL="https://github.com/$REPO/releases/download/$TAG/$ASSET"
+
+# ── Signed metadata (the ONLY trust anchor an installer may use) ─────────────
+# An installer must not scrape this release body: text on a page is not signed.
+# Publish a small ed25519-signed `snapshot.json` as an asset next to the archive,
+# over the same URL the installer will download — that is what
+# `gpn_snapshot verify --meta snapshot.json` checks before importing anything.
+META_OUT="$OUT_DIR/snapshot.json"
+if ! python3 "$(dirname "$0")/snapshot-metadata.py" sign \
+      --url "$DL" --sha256 "$SHA" --size "$SIZE" --block "$BLOCK" \
+      --genesis "$GENESIS" --block-hash "$BLOCK_HASH" \
+      $ANCHOR_ARGS \
+      --built "$STAMP UTC" --out "$META_OUT"; then
+  echo "FATAL: could not sign snapshot.json — refusing to publish an unverifiable snapshot" >&2
+  exit 4
+fi
+
+# Cross-check with the verifier a node actually ships (catches signer/verifier drift).
+# (This runs BEFORE any upload or asset deletion — see the preflight comment.)
+if "$SNAP_BIN" verify --meta "$META_OUT" --snapshot "$OUT" > /tmp/snap-verify.out 2>&1; then
+  echo "[snapshot] signed metadata self-check OK"
+else
+  echo "FATAL: gpn_snapshot verify rejected the signed metadata (nothing was published):" >&2
+  cat /tmp/snap-verify.out >&2
+  exit 4
+fi
+
+# Nothing has touched the mirror yet: the signed document is built and checked
+# against the binary a node will use. Only now does the archive get swapped.
 [ -r "$TOKEN_FILE" ] || { echo "FATAL: no mirror PAT at $TOKEN_FILE" >&2; exit 4; }
 TOKEN="$(tr -d '\n' < "$TOKEN_FILE")"
 API="https://api.github.com/repos/$REPO"
@@ -126,39 +178,9 @@ if [ "$CODE" != "201" ] && [ "$CODE" != "200" ]; then
   exit 4
 fi
 
-DL="https://github.com/$REPO/releases/download/$TAG/$ASSET"
-
-# ── Signed metadata (the ONLY trust anchor an installer may use) ─────────────
-# An installer must not scrape this release body: text on a page is not signed.
-# Publish a small ed25519-signed `snapshot.json` as an asset next to the archive,
-# over the same URL the installer will download — that is what
-# `gpn_snapshot verify --meta snapshot.json` checks before importing anything.
-META_OUT="$OUT_DIR/snapshot.json"
-if ! python3 "$(dirname "$0")/snapshot-metadata.py" sign \
-      --url "$DL" --sha256 "$SHA" --size "$SIZE" --block "$BLOCK" \
-      --genesis "$GENESIS" --block-hash "$BLOCK_HASH" \
-      $ANCHOR_ARGS \
-      --built "$STAMP UTC" --out "$META_OUT"; then
-  echo "FATAL: could not sign snapshot.json — refusing to publish an unverifiable snapshot" >&2
-  exit 4
-fi
-
-# Cross-check with the verifier a node actually ships (catches signer/verifier drift).
-VERIFY_BIN="${GPN_SNAPSHOT_BIN:-$HOME/.local/bin/gpn_snapshot}"
-if [ -x "$VERIFY_BIN" ]; then
-  if "$VERIFY_BIN" verify --meta "$META_OUT" --snapshot "$OUT" > /tmp/snap-verify.out 2>&1; then
-    echo "[snapshot] signed metadata self-check OK"
-  else
-    echo "FATAL: gpn_snapshot verify rejected the signed metadata:" >&2
-    cat /tmp/snap-verify.out >&2
-    exit 4
-  fi
-else
-  echo "[snapshot] WARN: $VERIFY_BIN not found — publishing WITHOUT the local verify self-check" >&2
-fi
-
-# Upload the metadata first, then (re)point the release at it: an installer that
-# races the weekly job must never see new bytes with the previous digest.
+# Upload the archive first, then the metadata it describes. A racing installer
+# therefore sees new bytes with the OLD digest for a few seconds and fails
+# closed (digest mismatch) rather than accepting unverified bytes.
 OLD_META=$(curl -sf -H "Authorization: Bearer $TOKEN" "$API/releases/$REL_ID/assets?per_page=100" \
   | python3 -c "import sys,json;print(next((a['id'] for a in json.load(sys.stdin) if a['name']=='snapshot.json'),''))" 2>/dev/null || true)
 if [ -n "${OLD_META:-}" ]; then
