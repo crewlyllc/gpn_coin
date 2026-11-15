@@ -26,7 +26,7 @@ use gpn_agent::jobkind::{admit, model_kind, JobKind};
 use gpn_agent::pricing::{self, params_b_for, roofline_tok_per_s, PricingConfig};
 use gpn_agent::profitability::{classify_feed_read, FeedRead};
 use gpn_agent::provider_heartbeat::{AccountAuthority, CachedKey, PushRegistry, MAX_BODY_BYTES};
-use gpn_agent::routing::{self, RttOverrides};
+use gpn_agent::routing::RttOverrides;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::Read;
@@ -1891,12 +1891,11 @@ struct RouteNeeds {
     min_vram_mb: u64,
     min_ram_mb: u64,
     min_tflops: f64,
-    /// Cost of a cold pull, used only to rank pullers against ready boxes.
-    pull_penalty_ms: u64,
 }
 
-/// One ordered routing candidate. `needs_pull` means the box must download the
-/// model before it can run the job.
+/// One **eligible** routing candidate. `needs_pull` means the box must download
+/// the model before it can run the job. The list order is not a preference —
+/// see `route_candidates`.
 #[derive(Clone, Debug)]
 struct RouteCandidate {
     provider: Provider,
@@ -1907,9 +1906,6 @@ struct RouteCandidate {
     /// at `accept_job`; this flag exists so the caller/log can say so.
     gflops_unverified: bool,
 }
-
-/// Penalty added to a busy provider's score so every idle box outranks it.
-const BUSY_PENALTY_MS: u64 = 10_000;
 
 /// How many providers one request may try before giving up (item #70).
 const MAX_ROUTE_ATTEMPTS: usize = 3;
@@ -1944,9 +1940,33 @@ const MAX_ROUTE_ATTEMPTS: usize = 3;
 ///     busy boxes are kept as last-resort candidates so the job QUEUES instead
 ///     of being refused (the long-standing behaviour).
 ///
-/// Ordering: idle before busy, and within a tier by RTT-aware latency (the
-/// caller's own measurement wins over the AP's), with `pull_penalty_ms` added
-/// to a puller's score so a cold download only wins when it is genuinely faster.
+/// **Ordering: none.** This function only answers *who may serve this job* (the
+/// capability/safety filter above). The order it returns is the registry's, and
+/// it carries **no preference** — the caller must not read it as a ranking. Who
+/// actually gets the job is decided first-come-first-served by [`fcfs_order`],
+/// from the queue of providers whose pull poll arrived first.
+///
+/// # Why there is no score any more (owner rule, 2026-11-15)
+///
+/// This used to sort by
+/// `unverified + busy_tier + active*100 + effective_latency_ms + pull_penalty_ms`.
+/// The cost of that was measured live: with four eligible providers all
+/// advertising `llama3.2:1b`, six concurrent requests were served **6/6 by the
+/// provider running on the access point's own host**, because loopback latency
+/// (~0 ms) beats every remote box (tens of ms) on every single request. No gate
+/// was wrong — the *score* was: it silently turned "reachable from here" into
+/// "preferred", so a co-hosted node starved the rest of the fleet and the
+/// network could never show more than one working provider.
+///
+/// Latency, proximity/affinity, busy penalties and active-count penalties are
+/// therefore **removed from the decision**, not merely de-weighted. The access
+/// point filters by capability and hands out work in arrival order; whether a
+/// box *can* take the job right now is the box's own call (it stops taking
+/// leases when it is busy — see `gpn_agent::assign_pull::serve_gate`).
+///
+/// `pull_penalty_ms` and the client RTT hints are gone too: a cold puller is now
+/// simply eligible or not (`needs_pull` is still reported so the caller can say
+/// so), and the client's RTT is not a routing input at all.
 
 /// The models `GET /v1/models` may publish: **only what this fleet can route
 /// right now** (item #149).
@@ -1966,7 +1986,6 @@ const MAX_ROUTE_ATTEMPTS: usize = 3;
 /// capability, VRAM fit and pullability are all decided in one place.
 fn catalogue_models(registry: &[Provider]) -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
-    let rtt = RttOverrides::new();
     for p in registry {
         for m in &p.models {
             if ids.iter().any(|seen| seen == m) {
@@ -1976,7 +1995,7 @@ fn catalogue_models(registry: &[Provider]) -> Vec<String> {
                 model: m.clone(),
                 ..Default::default()
             };
-            if !route_candidates(registry, JobKind::Text, &needs, &rtt).is_empty() {
+            if !route_candidates(registry, JobKind::Text, &needs).is_empty() {
                 ids.push(m.clone());
             }
         }
@@ -1990,7 +2009,6 @@ fn route_candidates(
     registry: &[Provider],
     kind: JobKind,
     needs: &RouteNeeds,
-    rtt: &RttOverrides,
 ) -> Vec<RouteCandidate> {
     let cap = kind.capability();
     let has_cap = |p: &Provider| p.capabilities.iter().any(|c| c.eq_ignore_ascii_case(cap));
@@ -2075,51 +2093,181 @@ fn route_candidates(
     }
 
     // Free capacity is a filter when anything has it; otherwise queue on the
-    // least-loaded boxes rather than turning a busy fleet into a 503.
+    // least-loaded boxes rather than turning a busy fleet into a 503. This is a
+    // capability/safety gate ("this box has a free slot"), NOT a ranking: every
+    // survivor below carries the same weight.
     let any_free = eligible.iter().any(|(p, _)| has_free(p));
     let live: Vec<(&Provider, bool)> = eligible
         .into_iter()
         .filter(|(p, _)| !any_free || has_free(p))
         .collect();
 
-    let eff = |p: &Provider| {
-        routing::effective_latency_ms(
-            p.latency_ms,
-            routing::lookup_override(rtt, &p.address, &p.status_url),
-        )
-    };
-
-    // Score = busy tier + latency (+ pull cost). Lower is better. Verified
-    // candidates always outrank unverified ones (the flag is part of the score,
-    // so an unverified box can never displace a measured one).
-    let mut scored: Vec<(u64, bool, Provider, bool)> = live
+    // No score. Verified candidates first only because an unverified GFLOPS
+    // number is a documented last resort (#97) — that is an evidence tier, not a
+    // preference between two measured boxes. Within a tier the order is the
+    // registry's, which means nothing: `fcfs_order` decides.
+    let mut suited: Vec<(bool, Provider, bool)> = Vec::with_capacity(live.len());
+    for (p, unverified) in live {
+        let ready = !kind.gates_on_model() || has_model(p, &needs.model);
+        // A puller is not penalised: `needs_pull` is a fact for the caller, and
+        // the provider itself decides whether it wants to download the model.
+        let pull = kind.gates_on_model() && !ready;
+        suited.push((unverified, (*p).clone(), pull));
+    }
+    suited.sort_by_key(|(unverified, _, _)| *unverified);
+    suited
         .into_iter()
-        .map(|(p, unverified)| {
-            let ready = !kind.gates_on_model() || has_model(p, &needs.model);
-            // A puller (text only) pays the download penalty; without a model
-            // gate there is nothing to pull.
-            let pull = kind.gates_on_model() && !ready;
-            let score = if unverified { 1_000_000 } else { 0 }
-                + if p.active == 0 { 0 } else { BUSY_PENALTY_MS }
-                + p.active.min(9) * 100
-                + eff(p)
-                + if pull { needs.pull_penalty_ms } else { 0 };
-            (score, pull, (*p).clone(), unverified)
+        .map(|(unverified, provider, needs_pull)| RouteCandidate {
+            provider,
+            needs_pull,
+            gflops_unverified: unverified,
         })
-        .collect();
-    // Stable tie-break on address so two otherwise-identical boxes always
-    // produce the same order (reproducible tests, no route flapping).
-    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.address.cmp(&b.2.address)));
-    scored
-        .into_iter()
-        .map(
-            |(_, needs_pull, provider, gflops_unverified)| RouteCandidate {
-                provider,
-                needs_pull,
-                gflops_unverified,
-            },
-        )
         .collect()
+}
+
+/// How long a provider's place in the waiting queue survives without a fresh
+/// pull poll. Longer than one long poll (25 s) so a provider that is merely
+/// waiting is never dropped, and short enough that a box which stopped polling
+/// (crash, network loss, operator idle) leaves the queue instead of being handed
+/// work nobody will run.
+const WAIT_ENTRY_TTL_SECS: u64 = 90;
+
+/// The access point's **first-come-first-served** queue of providers that have
+/// asked for work and have not been served yet (owner rule, 2026-11-15).
+///
+/// A provider's place is set by when its `GET /assignments` poll *arrived* —
+/// that is the only ordering the access point is allowed to use any more. The
+/// old RTT/latency/busy/active score is gone: it made a co-hosted provider
+/// (0 ms loopback) win 6/6 concurrent requests against three healthy remote
+/// boxes, so the fleet could never show more than one working provider.
+///
+/// Rules:
+/// * a poll **adds** a provider that is not queued (back of the line) and never
+///   moves one that already is — waiting does not cost your place;
+/// * a provider that stops taking work (`take=0`: busy / GPU locked / operator
+///   idle) is **removed** — it decided for itself that it cannot serve, and the
+///   AP must not queue it;
+/// * the provider served by a job goes to the **back** of the line, so a fast
+///   box cannot take two jobs in a row while others are waiting;
+/// * entries with no poll for [`WAIT_ENTRY_TTL_SECS`] are pruned.
+#[derive(Debug, Default)]
+struct WaitRing {
+    /// `(provider address, when its poll arrived)`, oldest first.
+    entries: Vec<(String, Instant)>,
+}
+
+impl WaitRing {
+    /// Record a pull poll from `addr` (only when that poll may take work).
+    fn note_poll(&mut self, addr: &str, now: Instant) {
+        if addr.is_empty() {
+            return;
+        }
+        self.prune(now);
+        if self
+            .entries
+            .iter()
+            .any(|(a, _)| a.eq_ignore_ascii_case(addr))
+        {
+            return; // already waiting: keep the original arrival time
+        }
+        self.entries.push((addr.to_string(), now));
+    }
+
+    /// Drop a provider that has told us it cannot serve right now.
+    fn leave(&mut self, addr: &str) {
+        self.entries.retain(|(a, _)| !a.eq_ignore_ascii_case(addr));
+    }
+
+    /// Forget providers that stopped polling.
+    fn prune(&mut self, now: Instant) {
+        self.entries.retain(|(_, seen)| {
+            now.saturating_duration_since(*seen).as_secs() <= WAIT_ENTRY_TTL_SECS
+        });
+    }
+
+    /// Send `addr` to the back of the line after it was handed a job.
+    fn served(&mut self, addr: &str, now: Instant) {
+        if let Some(pos) = self
+            .entries
+            .iter()
+            .position(|(a, _)| a.eq_ignore_ascii_case(addr))
+        {
+            let (a, _) = self.entries.remove(pos);
+            self.entries.push((a, now));
+        }
+    }
+
+    /// Order `candidates` the way work must be handed out: waiting providers in
+    /// the order their polls arrived, then the rest (which did not wait, e.g. a
+    /// provider whose poll is older than the TTL) in the order given.
+    ///
+    /// The first element is `None`-free: if the queue is empty or nobody in it
+    /// is eligible for this job, the list is returned unchanged — the caller then
+    /// falls back to any eligible provider, which is exactly what "capability
+    /// only, no ranking" means.
+    fn order(&mut self, candidates: Vec<RouteCandidate>, now: Instant) -> Vec<RouteCandidate> {
+        self.prune(now);
+        let mut waiting: Vec<RouteCandidate> = Vec::new();
+        let mut rest: Vec<Option<RouteCandidate>> = candidates.into_iter().map(Some).collect();
+        for (addr, _) in self.entries.clone() {
+            if let Some(pos) = rest.iter().position(|c| {
+                c.as_ref()
+                    .map(|c| c.provider.address.eq_ignore_ascii_case(&addr))
+                    .unwrap_or(false)
+            }) {
+                if let Some(c) = rest[pos].take() {
+                    waiting.push(c);
+                }
+            }
+        }
+        waiting.extend(rest.into_iter().flatten());
+        let from_queue = !waiting.is_empty();
+        if let Some(first) = waiting.first() {
+            // Item #97: never silent about an unverified GFLOPS measurement
+            // carrying a job — this is the one tier distinction left in the
+            // router, and it must be visible when it decides anything.
+            if first.gflops_unverified {
+                println!(
+                    "[route] {} is serving on an unverified GFLOPS measurement (no attested-idle \
+                     candidate cleared the floor) — last resort, item #97",
+                    first.provider.address
+                );
+            }
+            if from_queue {
+                println!(
+                    "[route] handing job to {} — next in line ({} provider(s) waiting)",
+                    first.provider.address,
+                    self.entries.len()
+                );
+            } else {
+                println!(
+                    "[route] handing job to {} — nobody was waiting (capability-only fallback, \
+                     no ranking applied)",
+                    first.provider.address
+                );
+            }
+            let addr = first.provider.address.clone();
+            self.served(&addr, now);
+        }
+        waiting
+    }
+}
+
+/// The process-wide waiting queue. One per access point process: the AP is the
+/// only thing that hands out work, so first-come is decided in one place.
+fn wait_ring() -> &'static Mutex<WaitRing> {
+    static RING: std::sync::OnceLock<Mutex<WaitRing>> = std::sync::OnceLock::new();
+    RING.get_or_init(|| Mutex::new(WaitRing::default()))
+}
+
+/// [`WaitRing::order`] against the process-wide queue.
+fn fcfs_order(candidates: Vec<RouteCandidate>) -> Vec<RouteCandidate> {
+    match wait_ring().lock() {
+        Ok(mut ring) => ring.order(candidates, Instant::now()),
+        // A poisoned queue must not stop the network: fall back to "any
+        // eligible provider" rather than refusing the job.
+        Err(_) => candidates,
+    }
 }
 
 /// Log (once per box+floor) that a provider was admitted to / withheld from a
@@ -3007,11 +3155,14 @@ fn pricing_public_json(pcfg: &PricingConfig, f: FeedSnapshot) -> Value {
 }
 
 /// Legacy single-shot selector. Thin wrapper over [`route_candidates`] so the
-/// chat, generation and native-job paths all share ONE filter/ordering rule
-/// (queue item #70). Returns `(provider, needs_pull)` for the best candidate.
+/// chat, generation and native-job paths all share ONE filter rule (queue item
+/// #70). Returns `(provider, needs_pull)` for the first **eligible** candidate.
 ///
-/// Kept (rather than deleted) because it is the most direct expression of "text
-/// routing" and the existing routing tests are written against it.
+/// It deliberately has **no ordering of its own** (the 2026-11-15 rule): the
+/// `_pull_penalty_ms` / `_rtt` parameters stay in the signature only so the
+/// historical call sites and tests keep compiling, and are ignored. Real
+/// selection is first-come-first-served via [`fcfs_order`]; `pick` is a helper
+/// for tests and diagnostics that only ask "is anyone eligible?".
 #[allow(dead_code)]
 fn pick(
     registry: &[Provider],
@@ -3020,8 +3171,8 @@ fn pick(
     min_ram_mb: u64,
     min_tflops: f64,
     model: &str,
-    pull_penalty_ms: u64,
-    rtt: &RttOverrides,
+    _pull_penalty_ms: u64,
+    _rtt: &RttOverrides,
 ) -> Option<(Provider, bool)> {
     let needs = RouteNeeds {
         model: model.to_string(),
@@ -3029,9 +3180,8 @@ fn pick(
         min_vram_mb,
         min_ram_mb,
         min_tflops,
-        pull_penalty_ms,
     };
-    route_candidates(registry, JobKind::Text, &needs, rtt)
+    route_candidates(registry, JobKind::Text, &needs)
         .into_iter()
         .next()
         .map(|c| (c.provider, c.needs_pull))
@@ -3380,19 +3530,6 @@ fn respond_image(mut req: tiny_http::Request, id: &str, index: u32) -> bool {
     true
 }
 
-/// Client-side RTT hints from a request body: `{"rtt": {"<addr-or-url>": <ms>}}`.
-///
-/// The client measures its OWN round-trip to the provider endpoints (from
-/// `GET /providers`) and/or the access point (via `GET /ping`) and passes them
-/// here so routing reflects the **user→provider** path, not just AP→provider.
-/// Absent/malformed hints are ignored → routing falls back to the AP-measured
-/// latency (identical to the old behaviour).
-fn rtt_overrides(v: &Value) -> RttOverrides {
-    v.get("rtt")
-        .map(routing::parse_rtt_overrides)
-        .unwrap_or_default()
-}
-
 /// Rewrite a wildcard bind address (`0.0.0.0:8092`, `[::]:8092`) to its loopback
 /// equivalent (`127.0.0.1:8092`, `[::1]:8092`) for use as an advertised callback,
 /// so a co-located provider reaches the AP without any public-DNS lookup.
@@ -3546,6 +3683,36 @@ fn assignment_token(store: &str, job_id: u64) -> Option<String> {
         .and_then(|t| t.as_str())
         .map(str::to_string)
         .filter(|t| !t.is_empty())
+}
+
+/// Every off-chain lease the AP has written: `job id → provider address`.
+///
+/// This is the AP's own record of **who was actually handed which job** (#146
+/// follow-up, 2026-11-15). The chain's `Jobs` row carries the provider only once
+/// the provider's `accept_job` lands, so `GET /jobs` reported `provider: null`
+/// for every freshly leased job — which made it impossible to show, or even
+/// argue about, fairness between providers. Read once per request.
+fn lease_providers(store: &str) -> std::collections::HashMap<u64, String> {
+    let mut out = std::collections::HashMap::new();
+    let Ok(s) = std::fs::read_to_string(store) else {
+        return out;
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&s) else {
+        return out;
+    };
+    if let Some(map) = v.as_object() {
+        for (k, rec) in map {
+            if let (Ok(id), Some(p)) = (
+                k.parse::<u64>(),
+                rec.get("provider").and_then(|x| x.as_str()),
+            ) {
+                if !p.is_empty() {
+                    out.insert(id, p.to_string());
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Split a raw request URL into path segments, ignoring the query string.
@@ -4246,12 +4413,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         || std::env::var("GPN_ALLOW_HOT_WALLET")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-    // Estimated cost (ms) of downloading a model on demand, used only for the
-    // "download + be faster than a ready-but-slow provider" tie-break.
-    let pull_penalty_ms: u64 = opt(&args, "--pull-penalty-ms")
-        .or_else(|| std::env::var("GPN_PULL_PENALTY_MS").ok())
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(120_000);
+    // `--pull-penalty-ms` / `GPN_PULL_PENALTY_MS` is accepted and IGNORED since
+    // 2026-11-15 (it used to price a cold download into the route score). Say so
+    // once: silently accepting an option that no longer does anything is how an
+    // operator ends up tuning a knob that is not connected.
+    if let Some(ms) =
+        opt(&args, "--pull-penalty-ms").or_else(|| std::env::var("GPN_PULL_PENALTY_MS").ok())
+    {
+        eprintln!(
+            "[route] --pull-penalty-ms/GPN_PULL_PENALTY_MS={ms} ignored: routing carries no cost \
+             score any more (capability filter + first-come-first-served)"
+        );
+    }
     // Rate card: price the AI in USD (cost of compute + margin), then convert to GPN.
     //   rental-fraction-bps: target = clamp(frac × market_rental, owner_cost, market).
     //                        5000 = 50% of the market rental (Jeremy's rule).
@@ -4774,6 +4947,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     "[assign] ignoring malformed caps from {}: {e}",
                                     pct_decode(&provider)
                                 ),
+                            }
+                        }
+                        // ── first-come-first-served (owner rule 2026-11-15) ──
+                        // This poll IS the provider asking for the next job. A
+                        // poll that may take work joins the back of the waiting
+                        // queue (and keeps its place while it waits); the poll's
+                        // arrival time is the ONLY ordering used to hand out
+                        // work. `take=0` means the
+                        // node has decided it cannot serve right now (serving a
+                        // job at capacity, GPU locked by a mining seal or another
+                        // local workload, operator dashboard set to idle) and
+                        // removes it from the queue — the node decides, not us.
+                        let take = query_param(&url, "take").map(|v| v != "0").unwrap_or(true);
+                        let wait_addr = if provider.starts_with("0x") || provider.starts_with("0X")
+                        {
+                            hex_to_ss58(&provider).unwrap_or_else(|| provider.clone())
+                        } else {
+                            provider.clone()
+                        };
+                        let now_wait = Instant::now();
+                        if let Ok(mut ring) = wait_ring().lock() {
+                            if take {
+                                ring.note_poll(&wait_addr, now_wait);
+                            } else {
+                                ring.leave(&wait_addr);
                             }
                         }
                         let since: u64 = query_param(&url, "since")
@@ -5335,11 +5533,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // uses, the whole list feeds the channel failover below.
                     let needs = RouteNeeds {
                         model: model.clone(),
-                        pull_penalty_ms,
                         ..Default::default()
                     };
-                    let candidates =
-                        route_candidates(&reg, JobKind::Text, &needs, &rtt_overrides(&v));
+                    // Capability filter, then first-come-first-served: the
+                    // provider whose pull poll arrived first is `candidates[0]`.
+                    let candidates = fcfs_order(route_candidates(&reg, JobKind::Text, &needs));
                     let (provider, needs_pull) = match candidates.first() {
                         Some(c) => (c.provider.clone(), c.needs_pull),
                         None => {
@@ -5456,10 +5654,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Failover::Served {
                                 value: out,
                                 attempted,
+                                provider,
                                 ..
                             } => {
+                                // Per-job attribution (2026-11-15): which provider
+                                // actually served this request, so fairness is
+                                // provable from the AP log alone.
                                 println!(
-                                    "[chat] channel settle: job {} on channel {} in {} ms (attempt {})",
+                                    "[chat] served by {} — channel settle: job {} on channel {} in {} ms \
+                                     (attempt {})",
+                                    provider.address,
                                     out.job_id,
                                     out.channel_id,
                                     _t0.elapsed().as_millis(),
@@ -5850,8 +6054,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         model: model.clone(),
                         ..Default::default()
                     };
-                    let candidates =
-                        route_candidates(&reg, JobKind::Image, &needs, &rtt_overrides(&v));
+                    let candidates = fcfs_order(route_candidates(&reg, JobKind::Image, &needs));
                     if candidates.is_empty() {
                         let empty = reg.iter().all(|p| p.last_seen.is_none());
                         let mut r = Response::from_string(json!({
@@ -6159,8 +6362,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         model: model.clone(),
                         ..Default::default()
                     };
-                    let candidates =
-                        route_candidates(&reg, JobKind::Finetune, &needs, &rtt_overrides(&v));
+                    let candidates = fcfs_order(route_candidates(&reg, JobKind::Finetune, &needs));
                     let provider = match candidates.first() {
                         Some(c) => c.provider.clone(),
                         None => {
@@ -6663,9 +6865,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         min_vram_mb,
                         min_ram_mb,
                         min_tflops,
-                        pull_penalty_ms,
                     };
-                    let candidates = route_candidates(&reg, kind, &needs, &rtt_overrides(&v));
+                    let candidates = fcfs_order(route_candidates(&reg, kind, &needs));
                     let (provider, needs_pull) = match candidates.first() {
                         Some(c) => (c.provider.clone(), c.needs_pull),
                         None => {
@@ -7100,6 +7301,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ) {
                         Some(next) => {
                             let start = next.saturating_sub(JOBS_LIST_WINDOW);
+                            // Who the AP actually leased each job to. The chain
+                            // only knows a provider after its `accept_job`, so this
+                            // is the attribution that exists from the first second
+                            // of a job's life (and the only way to prove that work
+                            // is spread across the fleet).
+                            let leases = lease_providers(&assign_store);
                             let mut jobs = vec![];
                             for id in start..next {
                                 if let Some((state, _p, _r, prov)) = chain_or_504!(
@@ -7110,7 +7317,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     "chain JobState",
                                     client.get_job_state(id)
                                 ) {
-                                    jobs.push(json!({"id":id,"state":state,"provider":prov}));
+                                    let lease = leases.get(&id).cloned();
+                                    // `provider` is the on-chain truth when it
+                                    // exists, else the lease the AP wrote. They
+                                    // agree once the job is accepted.
+                                    let provider = prov.clone().or_else(|| lease.clone());
+                                    jobs.push(json!({
+                                        "id": id,
+                                        "state": state,
+                                        "provider": provider,
+                                        "lease_provider": lease,
+                                    }));
                                 }
                             }
                             json!({"jobs":jobs, "from":start, "next":next})
@@ -7460,15 +7677,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 // request (item #70).
                                 let needs = RouteNeeds {
                                     model: qmodel.clone(),
-                                    pull_penalty_ms,
                                     ..Default::default()
                                 };
-                                let cands = route_candidates(
-                                    &reg,
-                                    kind,
-                                    &needs,
-                                    &rtt_overrides(&route_body),
-                                );
+                                let cands = fcfs_order(route_candidates(&reg, kind, &needs));
                                 match cands.first() {
                                     Some(c) => {
                                         let p = c.provider.clone();
@@ -8383,53 +8594,48 @@ mod tests {
         );
     }
 
+    /// **The owner rule, 2026-11-15**: latency is not a routing input.
+    ///
+    /// This replaces `ap_view_picks_nearest_to_the_access_point_by_default` and
+    /// the two client-RTT tests, which asserted the exact behaviour that broke
+    /// the fleet live: a 5 ms box was "preferred" over a 50 ms box, so the
+    /// provider co-hosted with the access point (0 ms loopback) took 6/6
+    /// concurrent jobs while three healthy remote boxes sat idle.
     #[test]
-    fn ap_view_picks_nearest_to_the_access_point_by_default() {
-        // A is 5ms from the AP, B is 50ms. No client hints -> A wins.
+    fn latency_and_proximity_do_not_choose_the_provider() {
         let reg = vec![
             prov("A", "http://a:8093", 5, "llama3.2:1b"),
             prov("B", "http://b:8093", 50, "llama3.2:1b"),
         ];
-        let (p, _) = pick(
-            &reg,
-            0,
-            0,
-            0,
-            0.0,
-            "llama3.2:1b",
-            120_000,
-            &RttOverrides::new(),
-        )
-        .unwrap();
-        assert_eq!(p.address, "A");
-    }
-
-    #[test]
-    fn client_rtt_hint_flips_routing_to_the_user_nearest_provider() {
-        // Same registry, but the client (user) is much closer to B.
-        let reg = vec![
-            prov("A", "http://a:8093", 5, "llama3.2:1b"),
-            prov("B", "http://b:8093", 50, "llama3.2:1b"),
-        ];
-        let mut rtt = RttOverrides::new();
-        rtt.insert("a".into(), 120); // user is far from A
-        rtt.insert("b".into(), 8); // user is near B
-        let (p, _) = pick(&reg, 0, 0, 0, 0.0, "llama3.2:1b", 120_000, &rtt).unwrap();
-        assert_eq!(
-            p.address, "B",
-            "client-measured RTT must override AP-measured latency"
+        // Both are eligible, and eligibility is all the filter says.
+        let needs = RouteNeeds {
+            model: "llama3.2:1b".into(),
+            ..Default::default()
+        };
+        let got = route_candidates(&reg, JobKind::Text, &needs);
+        assert_eq!(got.len(), 2, "latency must not exclude anyone");
+        // Whatever order the filter returns, one FCFS pick moves A to the back:
+        // the queue, not the clock, decides.
+        let mut ring = WaitRing::default();
+        let t0 = Instant::now();
+        ring.note_poll("A", t0);
+        ring.note_poll("B", t0 + std::time::Duration::from_millis(1));
+        let first = ring.order(
+            route_candidates(&reg, JobKind::Text, &needs),
+            t0 + std::time::Duration::from_millis(2),
         );
-    }
-
-    #[test]
-    fn rtt_hint_can_be_keyed_by_status_url() {
-        let reg = vec![
-            prov("A", "http://a:8093", 5, "llama3.2:1b"),
-            prov("B", "http://b:8093", 50, "llama3.2:1b"),
-        ];
-        let rtt = routing::parse_rtt_overrides(&json!({"http://b:8093/status": 2}));
-        let (p, _) = pick(&reg, 0, 0, 0, 0.0, "llama3.2:1b", 120_000, &rtt).unwrap();
-        assert_eq!(p.address, "B");
+        assert_eq!(
+            first[0].provider.address, "A",
+            "first to ask is served first"
+        );
+        let second = ring.order(
+            route_candidates(&reg, JobKind::Text, &needs),
+            t0 + std::time::Duration::from_millis(3),
+        );
+        assert_eq!(
+            second[0].provider.address, "B",
+            "the box that was served goes to the back of the line"
+        );
     }
 
     #[test]
@@ -8669,18 +8875,6 @@ mod tests {
     }
 
     #[test]
-    fn zero_override_does_not_disturb_ap_ordering() {
-        let reg = vec![
-            prov("A", "http://a:8093", 5, "llama3.2:1b"),
-            prov("B", "http://b:8093", 50, "llama3.2:1b"),
-        ];
-        let mut rtt = RttOverrides::new();
-        rtt.insert("b".into(), 0); // "not measured"
-        let (p, _) = pick(&reg, 0, 0, 0, 0.0, "llama3.2:1b", 120_000, &rtt).unwrap();
-        assert_eq!(p.address, "A");
-    }
-
-    #[test]
     fn pick_gates_on_advertised_vram() {
         // item 14: a video-class job (min_vram 16 GB) must skip the 8 GB node.
         let mk = |addr: &str, url: &str, lat: u64, vram: u64| {
@@ -8733,13 +8927,14 @@ mod tests {
         .unwrap();
         assert_eq!(p.address, "hi", "32GB RAM floor must skip the 8GB-RAM node");
 
-        // No floor -> the gate is inert (the faster unadvertised node still wins).
+        // No floor -> the gate is inert, and *order is not a preference*: whoever
+        // the registry lists first comes first, at any latency (2026-11-15).
         let reg3 = vec![
             prov("s2", "http://s2", 50, "ltx-video"),
             prov("u2", "http://u2", 5, "ltx-video"),
         ];
         let (p2, _) = pick(&reg3, 0, 0, 0, 0.0, "ltx-video", 0, &RttOverrides::new()).unwrap();
-        assert_eq!(p2.address, "u2");
+        assert_eq!(p2.address, "s2", "no latency sort any more");
     }
 
     #[test]
@@ -8762,7 +8957,7 @@ mod tests {
             p.address, "dgpu",
             "3 TFLOPS job must skip the integrated GPU"
         );
-        // No floor -> the faster integrated node wins (gate inert).
+        // No floor -> the gate is inert (registry order, not speed).
         let (p2, _) = pick(&reg, 0, 0, 0, 0.0, "llama3.2:1b", 0, &RttOverrides::new()).unwrap();
         assert_eq!(p2.address, "apu");
 
@@ -9084,7 +9279,6 @@ mod tests {
                 model: "llama3.2:1b".into(),
                 ..Default::default()
             },
-            &RttOverrides::new(),
         );
         assert_eq!(text.len(), 1);
         assert_eq!(text[0].provider.address, "llm");
@@ -9108,7 +9302,7 @@ mod tests {
                 },
                 ..Default::default()
             };
-            let got = route_candidates(&reg, kind, &needs, &RttOverrides::new());
+            let got = route_candidates(&reg, kind, &needs);
             assert_eq!(got.len(), 1, "{kind:?} must match exactly one box");
             assert_eq!(
                 got[0].provider.address, want,
@@ -9122,7 +9316,7 @@ mod tests {
             model: "resnet152".into(),
             ..Default::default()
         };
-        assert!(route_candidates(&reg, JobKind::Ml, &missing, &RttOverrides::new()).is_empty());
+        assert!(route_candidates(&reg, JobKind::Ml, &missing).is_empty());
 
         // A fine-tune's base model is a HuggingFace id (`HuggingFaceTB/…`), which
         // no box lists in `models[]`; the FineTuning capability alone must make it
@@ -9131,7 +9325,7 @@ mod tests {
             model: "HuggingFaceTB/SmolLM2-135M-Instruct".into(),
             ..Default::default()
         };
-        let ft_only = route_candidates(&reg, JobKind::Finetune, &hf, &RttOverrides::new());
+        let ft_only = route_candidates(&reg, JobKind::Finetune, &hf);
         assert_eq!(ft_only.len(), 1);
         assert_eq!(ft_only[0].provider.address, "ft");
     }
@@ -9278,15 +9472,17 @@ mod tests {
         assert_eq!(finetune_public_status(None, None), "queued");
     }
 
-    /// Ordering: idle before busy, then RTT-aware latency (the client's own
-    /// measurement wins over the AP-measured value).
+    /// The candidate list is a **filter**, not a ranking: a busy box is excluded
+    /// (it has no free slot) and every survivor is equally eligible, whatever its
+    /// latency. Ranking by latency is what starved three remote providers in
+    /// favour of the one co-hosted with the access point (2026-11-15).
     #[test]
-    fn candidates_are_ordered_idle_first_then_by_client_rtt() {
+    fn candidates_are_a_filter_not_a_ranking() {
         let mut a = prov_caps("a", "http://a", 10, "m", &["LLMInference"]);
         let mut b = prov_caps("b", "http://b", 50, "m", &["LLMInference"]);
         let busy = {
             let mut p = prov_caps("busy", "http://busy", 1, "m", &["LLMInference"]);
-            p.active = 1;
+            p.active = p.capacity; // every slot taken: one GPU = one job
             p
         };
         a.models = vec!["m".into()];
@@ -9296,41 +9492,171 @@ mod tests {
             model: "m".into(),
             ..Default::default()
         };
-        let got = route_candidates(&reg, JobKind::Text, &needs, &RttOverrides::new());
-        assert_eq!(
-            got.iter()
-                .map(|c| c.provider.address.as_str())
-                .collect::<Vec<_>>(),
-            vec!["a", "b", "busy"],
-            "idle boxes first (by latency), the busy one last"
-        );
-        // The client measured a fast path to `b`: it now outranks `a`.
-        let mut rtt = RttOverrides::new();
-        rtt.insert("b".to_string(), 1);
-        let got2 = route_candidates(&reg, JobKind::Text, &needs, &rtt);
-        assert_eq!(got2[0].provider.address, "b");
+        let got = route_candidates(&reg, JobKind::Text, &needs);
+        let addrs: Vec<&str> = got.iter().map(|c| c.provider.address.as_str()).collect();
+        assert_eq!(addrs.len(), 2, "the busy box has no free slot");
+        assert!(!addrs.contains(&"busy"));
+        assert!(addrs.contains(&"a") && addrs.contains(&"b"));
+        // The 10 ms box does not outrank the 50 ms box: the order is the
+        // registry's, and FCFS decides who actually gets the job.
+        assert_eq!(addrs, vec!["b", "a"], "registry order, no latency sort");
     }
 
-    /// A cold puller is ranked against a ready box by latency + pull cost: on a
-    /// slow link the ready box wins, on a fast one the puller can win.
+    /// A provider that must download the model is **eligible**, not penalised:
+    /// the download cost no longer ranks it against a ready box. `needs_pull`
+    /// stays a fact for the caller/provider.
     #[test]
-    fn a_puller_only_wins_when_the_download_still_finishes_sooner() {
+    fn a_cold_puller_is_eligible_and_pull_cost_no_longer_ranks() {
         let ready = prov_caps("ready", "http://ready", 100, "m", &["LLMInference"]);
         let mut puller = prov_caps("puller", "http://puller", 5, "other", &["LLMInference"]);
         puller.can_pull = true;
         let reg = vec![ready, puller];
-        let needs = |penalty| RouteNeeds {
+        let needs = RouteNeeds {
             model: "m".into(),
-            pull_penalty_ms: penalty,
             ..Default::default()
         };
-        let cheap = route_candidates(&reg, JobKind::Text, &needs(10), &RttOverrides::new());
-        assert_eq!(cheap[0].provider.address, "puller");
-        assert!(cheap[0].needs_pull);
-        let expensive =
-            route_candidates(&reg, JobKind::Text, &needs(120_000), &RttOverrides::new());
-        assert_eq!(expensive[0].provider.address, "ready");
-        assert!(!expensive[0].needs_pull);
+        let got = route_candidates(&reg, JobKind::Text, &needs);
+        assert_eq!(got.len(), 2, "both are capable of serving the model");
+        let puller_c = got
+            .iter()
+            .find(|c| c.provider.address == "puller")
+            .expect("the puller must be a candidate");
+        assert!(puller_c.needs_pull, "it must be flagged as a cold pull");
+        let ready_c = got
+            .iter()
+            .find(|c| c.provider.address == "ready")
+            .expect("the ready box must be a candidate");
+        assert!(!ready_c.needs_pull);
+    }
+
+    /// **The incident, as a test.** Two eligible providers, one with a
+    /// deliberately absurd latency (and physical address) advantage: N jobs must
+    /// still alternate first-come-first-served instead of all landing on the
+    /// "near" box.
+    #[test]
+    fn two_eligible_providers_alternate_regardless_of_latency() {
+        // `local` is the co-hosted box from the incident: 0 ms loopback.
+        let local = prov_caps("local", "http://127.0.0.1:8093", 0, "m", &["LLMInference"]);
+        let remote = prov_caps(
+            "remote",
+            "http://10.9.9.9:8093",
+            5000,
+            "m",
+            &["LLMInference"],
+        );
+        let reg = vec![local, remote];
+        let needs = RouteNeeds {
+            model: "m".into(),
+            ..Default::default()
+        };
+        let t0 = Instant::now();
+        let mut ring = WaitRing::default();
+        // Both polls arrive; `local` asked first (the incident's shape: the
+        // co-hosted provider polls over loopback and is always first).
+        ring.note_poll("local", t0);
+        ring.note_poll("remote", t0 + std::time::Duration::from_millis(1));
+        let mut served: Vec<String> = Vec::new();
+        for i in 0..6u64 {
+            let ordered = ring.order(
+                route_candidates(&reg, JobKind::Text, &needs),
+                t0 + std::time::Duration::from_millis(10 + i),
+            );
+            served.push(ordered[0].provider.address.clone());
+            // A real provider re-polls after taking work: keep both queued, the
+            // ring has already moved the served one to the back.
+            ring.note_poll("local", t0 + std::time::Duration::from_millis(20 + i));
+            ring.note_poll("remote", t0 + std::time::Duration::from_millis(21 + i));
+        }
+        assert_eq!(
+            served,
+            vec!["local", "remote", "local", "remote", "local", "remote"],
+            "6 concurrent jobs must alternate, not all go to the 0 ms box"
+        );
+    }
+
+    /// Capability-only means capability-only: a provider that asks **first** but
+    /// cannot serve the job (wrong model / too little VRAM / unfunded account) is
+    /// never chosen, and its early poll does not hold up the eligible box.
+    #[test]
+    fn an_ineligible_provider_is_never_chosen_even_when_it_asks_first() {
+        let mut wrong_model = prov_caps("wrong", "http://wrong", 0, "other", &["LLMInference"]);
+        wrong_model.can_pull = false;
+        let mut too_small = prov_caps("small", "http://small", 0, "m", &["LLMInference"]);
+        too_small.vram_mb = 2_000;
+        let mut broke = prov_caps("broke", "http://broke", 0, "m", &["LLMInference"]);
+        broke.unfunded = Some(true);
+        let mut good = prov_caps("good", "http://good", 9000, "m", &["LLMInference"]);
+        good.vram_mb = 24_576;
+        let reg = vec![wrong_model, too_small, broke, good];
+
+        let t0 = Instant::now();
+        let mut ring = WaitRing::default();
+        // All three unsuitable boxes polled BEFORE the good one.
+        for (i, addr) in ["wrong", "small", "broke"].iter().enumerate() {
+            ring.note_poll(addr, t0 + std::time::Duration::from_millis(i as u64));
+        }
+        ring.note_poll("good", t0 + std::time::Duration::from_millis(10));
+
+        let needs = RouteNeeds {
+            model: "m".into(),
+            min_vram_mb: 8_000,
+            ..Default::default()
+        };
+        let ordered = ring.order(
+            route_candidates(&reg, JobKind::Text, &needs),
+            t0 + std::time::Duration::from_millis(11),
+        );
+        assert_eq!(
+            ordered.first().map(|c| c.provider.address.as_str()),
+            Some("good"),
+            "only the capable, funded box may serve, however late it asked"
+        );
+        assert_eq!(
+            ordered.len(),
+            1,
+            "no unsuitable box may even be a candidate"
+        );
+    }
+
+    /// Attribution: the lease the AP writes names the provider, and `GET /jobs`
+    /// can therefore say who served each job (it used to report `null` for every
+    /// row until the chain's `accept_job` landed).
+    #[test]
+    fn each_lease_records_the_provider_and_is_readable_back() {
+        let dir = std::env::temp_dir().join(format!("gpn-lease-attr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = dir.join("assignments.json");
+        let store_s = store.to_str().unwrap();
+        write_assignment(store_s, 41, "5ProviderA", "m", true, "http://ap", "t1").unwrap();
+        write_assignment(store_s, 42, "5ProviderB", "m", true, "http://ap", "t2").unwrap();
+        let leases = lease_providers(store_s);
+        assert_eq!(leases.get(&41).map(String::as_str), Some("5ProviderA"));
+        assert_eq!(leases.get(&42).map(String::as_str), Some("5ProviderB"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The waiting queue is a queue: waiting does not lose your place, a served
+    /// provider goes to the back, and a box that stopped polling ages out.
+    #[test]
+    fn the_wait_ring_is_fifo_and_forgets_dead_pollers() {
+        let t0 = Instant::now();
+        let mut ring = WaitRing::default();
+        ring.note_poll("a", t0);
+        ring.note_poll("b", t0 + std::time::Duration::from_millis(1));
+        // A second poll from `a` must not move it behind `b`.
+        ring.note_poll("a", t0 + std::time::Duration::from_millis(2));
+        assert_eq!(ring.entries[0].0, "a");
+        ring.served("a", t0 + std::time::Duration::from_millis(3));
+        assert_eq!(ring.entries[0].0, "b", "served box goes to the back");
+        // A box that stops polling (crash / idle) leaves the queue.
+        let later = t0 + std::time::Duration::from_secs(WAIT_ENTRY_TTL_SECS + 5);
+        ring.prune(later);
+        assert!(ring.entries.is_empty(), "stale entries must be pruned");
+        // And a node that says it cannot serve is dropped immediately.
+        ring.note_poll("c", later);
+        ring.leave("c");
+        assert!(ring.entries.is_empty());
     }
 
     /// Hardware gates: VRAM floor, model-fits-VRAM, and gflops — all applied to
@@ -9347,7 +9673,7 @@ mod tests {
             min_vram_mb: 16000,
             ..Default::default()
         };
-        let got = route_candidates(&reg, JobKind::Video, &needs, &RttOverrides::new());
+        let got = route_candidates(&reg, JobKind::Video, &needs);
         assert_eq!(
             got.len(),
             1,
@@ -9365,7 +9691,7 @@ mod tests {
             min_gflops: 20_000,
             ..Default::default()
         };
-        let got2 = route_candidates(&reg2, JobKind::Image, &needs2, &RttOverrides::new());
+        let got2 = route_candidates(&reg2, JobKind::Image, &needs2);
         assert_eq!(got2.len(), 1);
         assert_eq!(got2[0].provider.address, "strong");
     }
@@ -9383,7 +9709,7 @@ mod tests {
         // Verified and strong enough: routed, flagged verified.
         let mut good = prov_caps("good", "http://good", 5, "", &["ImageGeneration"]);
         good.gflops = 823;
-        let got = route_candidates(&[good.clone()], JobKind::Image, &needs, &rtt);
+        let got = route_candidates(&[good.clone()], JobKind::Image, &needs);
         assert_eq!(got.len(), 1);
         assert!(!got[0].gflops_unverified);
 
@@ -9395,16 +9721,11 @@ mod tests {
         hand_typed.address = "typed".into();
         hand_typed.gflops = 30_000;
         hand_typed.gflops_source = "--gflops (chain attestation unreadable)".into();
-        let got = route_candidates(
-            &[good.clone(), hand_typed.clone()],
-            JobKind::Image,
-            &needs,
-            &rtt,
-        );
+        let got = route_candidates(&[good.clone(), hand_typed.clone()], JobKind::Image, &needs);
         assert_eq!(got.len(), 1, "the unverified box is not a normal candidate");
         assert_eq!(got[0].provider.address, "good");
 
-        let only = route_candidates(&[hand_typed.clone()], JobKind::Image, &needs, &rtt);
+        let only = route_candidates(&[hand_typed.clone()], JobKind::Image, &needs);
         assert_eq!(only.len(), 1, "never silently exclude a capable box");
         assert!(
             only[0].gflops_unverified,
@@ -9416,10 +9737,10 @@ mod tests {
         let mut weak = good.clone();
         weak.address = "weak".into();
         weak.gflops = 300;
-        assert!(route_candidates(&[weak], JobKind::Image, &needs, &rtt).is_empty());
+        assert!(route_candidates(&[weak], JobKind::Image, &needs).is_empty());
 
         // Ungated jobs (`min_gflops: 0`) never care about the source at all.
-        let open = route_candidates(&[hand_typed], JobKind::Image, &RouteNeeds::default(), &rtt);
+        let open = route_candidates(&[hand_typed], JobKind::Image, &RouteNeeds::default());
         assert_eq!(open.len(), 1);
         assert!(!open[0].gflops_unverified);
     }
@@ -9435,7 +9756,7 @@ mod tests {
             model: "llama3.2:1b".into(),
             ..Default::default()
         };
-        let got = route_candidates(&[p], JobKind::Text, &needs, &RttOverrides::new());
+        let got = route_candidates(&[p], JobKind::Text, &needs);
         assert_eq!(got.len(), 1);
         assert!(!got[0].gflops_unverified);
     }
@@ -9455,7 +9776,7 @@ mod tests {
             model: "m".into(),
             ..Default::default()
         };
-        assert!(route_candidates(&reg, JobKind::Text, &needs, &RttOverrides::new()).is_empty());
+        assert!(route_candidates(&reg, JobKind::Text, &needs).is_empty());
     }
 
     /// Free capacity is preferred; when NO box has any, busy boxes are still
@@ -9470,15 +9791,10 @@ mod tests {
             model: "m".into(),
             ..Default::default()
         };
-        let got = route_candidates(
-            &[busy.clone(), idle],
-            JobKind::Text,
-            &needs,
-            &RttOverrides::new(),
-        );
+        let got = route_candidates(&[busy.clone(), idle], JobKind::Text, &needs);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].provider.address, "idle");
-        let only_busy = route_candidates(&[busy], JobKind::Text, &needs, &RttOverrides::new());
+        let only_busy = route_candidates(&[busy], JobKind::Text, &needs);
         assert_eq!(only_busy.len(), 1, "a busy fleet queues, it does not 503");
     }
 
@@ -9503,7 +9819,6 @@ mod tests {
                 model: "sd-turbo".into(),
                 ..Default::default()
             },
-            &RttOverrides::new(),
         );
         assert_eq!(cands[0].provider.address, "first");
         let mut tried = Vec::new();
@@ -9547,7 +9862,6 @@ mod tests {
                 model: "m".into(),
                 ..Default::default()
             },
-            &RttOverrides::new(),
         );
         let mut tried = Vec::new();
         let out: Failover<String> = failover("test-text", &cands, |p| {
@@ -9589,7 +9903,6 @@ mod tests {
                 model: "m".into(),
                 ..Default::default()
             },
-            &RttOverrides::new(),
         );
         assert_eq!(cands.len(), 5);
         let mut tried = 0;
@@ -9659,7 +9972,6 @@ mod tests {
                 model: "sd-turbo".into(),
                 ..Default::default()
             },
-            &RttOverrides::new(),
         );
         assert_eq!(text.unwrap().0.address, "llm");
         assert_eq!(img[0].provider.address, "diff");
@@ -9672,8 +9984,7 @@ mod tests {
             &RouteNeeds {
                 model: "sd-turbo".into(),
                 ..Default::default()
-            },
-            &RttOverrides::new()
+            }
         )
         .is_empty());
     }

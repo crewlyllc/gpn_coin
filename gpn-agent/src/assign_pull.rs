@@ -335,13 +335,20 @@ impl PullConfig {
     /// This exact string is what the signature covers — it carries `provider`,
     /// so leaving it out of the signed message would let any caller read
     /// another provider's assignments.
-    pub fn poll_target(&self, since: u64, caps: &str) -> String {
+    ///
+    /// `take=false` adds `take=0`: "refresh my capabilities and hand me any lease
+    /// you already wrote for me, but do not consider me for new work". The
+    /// provider sends it when it cannot serve right now — see [`serve_gate`].
+    pub fn poll_target(&self, since: u64, caps: &str, take: bool) -> String {
         let mut target = format!(
             "/assignments?provider={}&since={}&wait={}",
             urlencode(&self.provider),
             since,
             self.wait_ms
         );
+        if !take {
+            target.push_str("&take=0");
+        }
         if !caps.is_empty() {
             target.push_str("&caps=");
             target.push_str(&urlencode(caps));
@@ -352,8 +359,8 @@ impl PullConfig {
     /// Absolute poll URL, carrying this provider's capabilities (`caps`) so the
     /// AP can route to us without ever dialling our `:8093` (#46 Phase 3
     /// step 2).
-    pub fn poll_url(&self, since: u64, caps: &str) -> String {
-        format!("{}{}", self.ap_url, self.poll_target(since, caps))
+    pub fn poll_url(&self, since: u64, caps: &str, take: bool) -> String {
+        format!("{}{}", self.ap_url, self.poll_target(since, caps, take))
     }
 }
 
@@ -389,11 +396,26 @@ pub fn caps_snapshot(provider: &str) -> String {
 /// same five capabilities). `own` empty keeps the old behaviour for any caller
 /// that has not declared a capability set.
 pub fn caps_snapshot_with(provider: &str, own: &[String]) -> String {
+    snapshot(provider, own)
+        .map(|v| v.to_string())
+        .unwrap_or_default()
+}
+
+/// The local heartbeat snapshot the poll carries, or `None` when it cannot be
+/// read (see [`caps_snapshot_with`] for why silence ≠ "serves nothing").
+///
+/// Public because the poll loop needs the SAME read to decide whether it can
+/// serve: `active`/`capacity` come out of this very JSON, and fetching it twice
+/// per poll would let the two reads disagree.
+pub fn snapshot(provider: &str, own: &[String]) -> Option<Value> {
     // No local heartbeat = no data. Say nothing rather than "I serve nothing":
     // the AP must never be told that a failed read is a deliberate empty set.
-    let Some(mut v) = fetch_heartbeat(provider) else {
-        note_caps_unavailable();
-        return String::new();
+    let mut v = match fetch_heartbeat(provider) {
+        Some(v) => v,
+        None => {
+            note_caps_unavailable();
+            return None;
+        }
     };
     if let Some(o) = v.as_object_mut() {
         // Identity of the polling PROCESS, so the AP can aggregate several
@@ -405,7 +427,43 @@ pub fn caps_snapshot_with(provider: &str, own: &[String]) -> String {
         );
     }
     filter_capabilities(&mut v, own);
-    v.to_string()
+    Some(v)
+}
+
+/// Why this provider must **not** take new work right now (owner rule,
+/// 2026-11-15): "the node decides for itself whether to pull".
+///
+/// The access point is no longer allowed to rank providers (no latency, no busy
+/// penalty, no active-count penalty), so the *only* thing standing between a
+/// busy box and a second job is the box itself. This is that decision:
+///
+/// * `at-capacity` — the local heartbeat says `active >= capacity` (one GPU =
+///   one job unless the operator raised capacity).
+/// * `gpu-busy` — the cross-process GPU lock is held, i.e. a job, a diffusion
+///   render or another local workload is using the GPU (`gpu_yield`). The
+///   miner's yield flag is *not* this: only a real GPU section takes the lock.
+/// * `operator-idle` — `~/.gpn/idle.json` says the operator wants the GPU back
+///   (dashboard idle / "gaming"), which also stops the claim loop; pulling
+///   work the claim loop would refuse is how a job gets leased to a box that
+///   will never accept it.
+///
+/// Pure so it is testable: the caller supplies the three facts.
+pub fn serve_gate(
+    active: u64,
+    capacity: u64,
+    claims_allowed: bool,
+    gpu_locked: bool,
+) -> Option<&'static str> {
+    if !claims_allowed {
+        return Some("operator-idle");
+    }
+    if gpu_locked {
+        return Some("gpu-busy");
+    }
+    if capacity > 0 && active >= capacity {
+        return Some("at-capacity");
+    }
+    None
 }
 
 /// Keep only the capabilities this process declared, and mark the list as
@@ -462,6 +520,33 @@ fn note_caps_unavailable() {
             "[assign] local /status unreadable — this poll carries no caps (the AP keeps its \
              last record; publish nothing rather than a false 'serves nothing')"
         );
+    }
+}
+
+/// Say it when the serve gate **changes**, and only then: one line when the box
+/// stops taking work and one when it resumes. A 2 s poll loop must not flood the
+/// journal, and an operator needs to see the transition ("my box stopped
+/// getting jobs" is otherwise invisible from this side).
+fn note_serve_gate(blocked: Option<&'static str>) {
+    use std::sync::{Mutex, OnceLock};
+    static LAST: OnceLock<Mutex<Option<Option<&'static str>>>> = OnceLock::new();
+    let m = LAST.get_or_init(|| Mutex::new(None));
+    let mut g = match m.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    if *g == Some(blocked) {
+        return;
+    }
+    let first = g.is_none();
+    *g = Some(blocked);
+    match blocked {
+        Some(why) => println!(
+            "[assign] not taking new work: {why} — polling with take=0 (caps still refreshed; \
+             leases already written for this provider are still delivered)"
+        ),
+        None if !first => println!("[assign] taking work again (serve gate clear)"),
+        None => {}
     }
 }
 
@@ -745,7 +830,28 @@ pub fn run_loop(cfg: PullConfig, provider_label: String) {
         // Fresh caps every poll: `active` (the one-GPU-one-job lock) and the
         // model list change minute to minute, so a cached snapshot would route
         // work to a box that is mid-job.
-        let target = cfg.poll_target(since, &caps_snapshot_with(&cfg.provider, &cfg.capabilities));
+        //
+        // The same read decides whether WE are willing to take work (owner rule,
+        // 2026-11-15): since the AP no longer ranks providers by load, a busy
+        // box that keeps polling would be handed jobs it cannot run. The gate is
+        // evaluated here, on the node, and its verdict travels in the poll
+        // (`take=0`), so the AP learns our decision without having to guess.
+        let snap = snapshot(&cfg.provider, &cfg.capabilities);
+        let caps = snap.as_ref().map(|v| v.to_string()).unwrap_or_default();
+        let field = |v: &Value, k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+        let (active, capacity) = snap
+            .as_ref()
+            .map(|v| (field(v, "active"), field(v, "capacity")))
+            .unwrap_or((0, 0));
+        let blocked = serve_gate(
+            active,
+            capacity,
+            crate::idle::claims_allowed(),
+            crate::gpu_yield::lock_is_held(),
+        );
+        let take = blocked.is_none();
+        note_serve_gate(blocked);
+        let target = cfg.poll_target(since, &caps, take);
         let url = format!("{}{target}", cfg.ap_url);
         let client = match crate::net::ipv4_only_client(Duration::from_millis(cfg.wait_ms + 10_000))
         {
@@ -1181,15 +1287,57 @@ mod tests {
             capabilities: Vec::new(),
         };
         assert_eq!(
-            cfg.poll_url(42, ""),
+            cfg.poll_url(42, "", true),
             "http://ap:8092/assignments?provider=5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY&since=42&wait=25000"
         );
         // #46 Phase 3 step 2: caps ride the poll, percent-encoded.
         assert_eq!(
-            cfg.poll_url(42, r#"{"gflops":2500}"#),
+            cfg.poll_url(42, r#"{"gflops":2500}"#, true),
             "http://ap:8092/assignments?provider=5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY&since=42&wait=25000&caps=%7B%22gflops%22%3A2500%7D"
         );
         assert_eq!(urlencode("0xab/cd+ef"), "0xab%2Fcd%2Bef");
+    }
+
+    /// The node-side decision the owner rule puts in the provider's hands: since
+    /// the access point no longer ranks by load or busy state (2026-11-15), a box
+    /// that cannot serve is the only thing that can keep it from being handed
+    /// work. Each of the three reasons is separate and testable.
+    #[test]
+    fn a_provider_that_cannot_serve_does_not_ask_for_work() {
+        // Idle (healthy, empty GPU, free slot) -> may take work.
+        assert_eq!(serve_gate(0, 4, true, false), None);
+        // Capacity reached: one GPU, one job.
+        assert_eq!(serve_gate(1, 1, true, false), Some("at-capacity"));
+        // Unknown capacity (0) is NOT "full" — fail open, the AP's own capacity
+        // gate still applies.
+        assert_eq!(serve_gate(3, 0, true, false), None);
+        // GPU held by a mining seal / another local workload.
+        assert_eq!(serve_gate(0, 4, true, true), Some("gpu-busy"));
+        // Operator set the dashboard to idle / not accepting work.
+        assert_eq!(serve_gate(0, 4, false, false), Some("operator-idle"));
+        // Operator idle wins the reason even if the GPU also looks busy: the
+        // operator's intent is the more useful line in the log.
+        assert_eq!(serve_gate(4, 4, false, true), Some("operator-idle"));
+    }
+
+    /// A blocked provider's poll says so (`take=0`), and an unblocked one does
+    /// not — the flag is what removes it from the AP's waiting queue.
+    #[test]
+    fn the_poll_carries_whether_this_box_will_take_work() {
+        let cfg = PullConfig {
+            ap_url: "http://ap:8092".into(),
+            provider: "5Test".into(),
+            token: String::new(),
+            wait_ms: 1000,
+            max_backoff: Duration::from_secs(30),
+            capabilities: Vec::new(),
+        };
+        assert!(!cfg.poll_target(7, "", true).contains("take=0"));
+        assert!(cfg.poll_target(7, "", false).contains("&take=0"));
+        // Caps still ride a blocked poll: the AP must keep an accurate view of a
+        // box that is temporarily unavailable (it is not offline).
+        let blocked = cfg.poll_target(7, r#"{"active":1}"#, false);
+        assert!(blocked.contains("take=0") && blocked.contains("caps="));
     }
 
     #[test]

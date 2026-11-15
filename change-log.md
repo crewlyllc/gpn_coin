@@ -1,5 +1,38 @@
 # GPN change-log
 
+## 2026-11-15 01:0x PT — routing: capability filter only, first-come-first-served (the co-hosted provider took 6/6)
+
+**WHY:** the owner's rule — *the access point filters by capability only and hands out work
+first-come-first-served; the node decides for itself whether to pull.* The old router violated it:
+`route_candidates` sorted eligible providers by
+`unverified + busy_tier + active*100 + effective_latency_ms + pull_penalty_ms`, so the provider
+running on the access point's own host (0 ms loopback) beat every remote box (tens of ms) on every
+request. Measured on the old binary just now: **6 concurrent `llama3.2:1b` jobs (6571–6576) were
+leased 6/6 to `5ENq…`, the co-hosted provider**, while three other eligible providers sat idle.
+
+**FIX:**
+* `route_candidates` is now a **filter only** (capability for the kind, local model or pullable,
+  VRAM/RAM fit, GFLOPS floor with the #97 unverified-source rule, unfunded≠true, recent pull,
+  free slot). Latency, client RTT hints, busy tier, active-count penalty, address tie-break and
+  `pull_penalty_ms` are **removed**, not de-weighted (the flag is still parsed and says it is
+  ignored).
+* New `WaitRing`: the AP's queue of providers whose `GET /assignments` poll asked for work. FIFO by
+  poll arrival; a provider keeps its place while it waits, goes to the back when served, and is
+  dropped when it polls `take=0` (busy / GPU locked / operator idle) or stops polling (90 s TTL).
+  `fcfs_order` puts the first waiter first and logs which box was picked and how many were waiting.
+* Node side (`assign_pull`): `serve_gate(active, capacity, claims_allowed, gpu_locked)` — a provider
+  at capacity, holding the cross-process GPU lock, or with `idle.json` engaged polls with `take=0`,
+  so the AP never queues (and never leases to) a box that cannot serve. Caps still ride that poll.
+* Attribution: `GET /jobs` reports `provider` from the chain or, before `accept_job` lands, the
+  AP's own lease (`lease_provider`), and the chat channel path logs `served by <address>`.
+
+**VERIFIED (same 6 concurrent requests, new binary, 00:55:04 PT):** 6565→`5Hgb`, 6566→`5FCw`,
+6567→`5HVt`, 6568→`5ENq`, 6570→`5ENq`, 6569→`5Hgb` — **four providers, round-robin in queue order**
+(`5 provider(s) waiting` in the AP log), not 6/6 local. Provider-side: `gpn-provider` here pulled
+#6568/#6570, box 1 pulled and completed #6565/#6569, box 4 pulled #6567. `cargo fmt --check` clean,
+677 lib + 92 scheduler tests green (new: alternation under a 5 s latency handicap, ineligible-first
+poll never wins, no-pull-while-busy, attribution, wait-ring FIFO/TTL). No version bump, no release.
+
 ## 2026-11-10 03:5x PT — release 0.3.37 (the second time the same wedge cost a release)
 
 **WHY:** the 02:42:38 `gpn-update.timer` fire declined and said so: *"gpn_provider_status: refusing to
