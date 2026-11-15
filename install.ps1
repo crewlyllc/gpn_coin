@@ -985,8 +985,17 @@ $UpdateTaskXml = @'
         <Interval>PT1H</Interval>
         <Duration>P1D</Duration>
         <StopAtDurationEnd>false</StopAtDurationEnd>
-        <RandomDelay>PT10M</RandomDelay>
       </Repetition>
+      <!-- Per-repetition jitter is NOT expressible in Task Scheduler XML.
+           `<RandomDelay>` is only legal directly under a trigger, and the
+           schema rejects it inside `<Repetition>`:
+             (18,11):RandomDelay:  ->  "the task XML contains an unexpected node"
+           That single element is why GPN-Update answered "Access is denied /
+           task XML is malformed" and never registered on any box, so every
+           box fell back to the logon-time PowerShell loop. The jitter that
+           matters (spreading downloads) is done by the node's own spread seed,
+           so this only needs to dither the daily activation. -->
+      <RandomDelay>PT10M</RandomDelay>
     </CalendarTrigger>
   </Triggers>
   <Principals>
@@ -1432,6 +1441,43 @@ Invoke-Step "create $BinDir and copy the release binaries" {
   }
 }
 Say "binaries installed in $BinDir"
+
+# 1a. version pointer: `data\update\current` is what the launcher runs and what
+#     the updater flips to apply a release. An install that leaves it absent (or
+#     dangling) makes every later update start the WRONG tree, and makes
+#     `gpn_update` answer "what is installed" from a compiled-in constant.
+#     Healed here, where a fresh install and a repair both pass. A version tree
+#     that is present and complete wins; otherwise the launcher keeps using
+#     bin\ (its documented fallback) and nothing is invented on disk.
+function Repair-VersionPointer {
+  $updateRoot = Join-Path $DataDir 'update'
+  $versions   = Join-Path $updateRoot 'versions'
+  $link       = Join-Path $updateRoot 'current'
+  if (-not (Test-Path $versions)) { return }
+  $trees = @(Get-ChildItem -LiteralPath $versions -Directory -ErrorAction SilentlyContinue |
+    Where-Object { Test-Path (Join-Path $_.FullName 'gpn_node.exe') } |
+    Sort-Object -Property @{ Expression = { try { [version]$_.Name } catch { [version]'0.0.0' } } })
+  if ($trees.Count -eq 0) {
+    Say 'no version tree yet -- the launcher runs bin\ until the first update installs one'
+    return
+  }
+  $newest = $trees[-1].FullName
+  $now = $null
+  try { $now = @((Get-Item -LiteralPath $link -Force).Target) | Select-Object -First 1 } catch { }
+  if ($now -and (Test-Path (Join-Path $link 'gpn_node.exe'))) { return }  # already good
+  if ($WhatIf) {
+    Write-Host "[whatif] point $link at $newest" -ForegroundColor Cyan
+    return
+  }
+  if (Test-Path $link) { & cmd /c rmdir "$link" 2>&1 | Out-Null }
+  & cmd /c mklink /J "$link" "$newest" 2>&1 | Out-Null
+  if (Test-Path (Join-Path $link 'gpn_node.exe')) {
+    Say "version pointer repaired: current -> $newest"
+  } else {
+    Warn "could not point $link at $newest -- the launcher will use bin\"
+  }
+}
+Repair-VersionPointer
 
 $gpnNode = Join-Path $BinDir 'gpn_node.exe'
 $nodeExe = Join-Path $BinDir 'gpn-node.exe'

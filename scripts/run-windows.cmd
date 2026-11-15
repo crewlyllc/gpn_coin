@@ -64,6 +64,17 @@ if not exist "%GPN_NODE_KEY_FILE%" (
   exit /b 1
 )
 set "GPN_BIN=%~dp0..\gpn-agent\target\release"
+REM ---- which binaries to run -------------------------------------------------
+REM  This is the DEVELOPER runner: it runs the tree it was built in, which is
+REM  what a dev wants. An installed node is different -- its launcher runs
+REM  <install>\data\update\current (a junction the updater flips) so a release
+REM  can be applied without overwriting a locked .exe. That launcher lives next
+REM  to the install (C:\gpn\start-node.cmd), not here. Set
+REM  GPN_USE_INSTALLED_UPDATE=1 to exercise an installed version tree from this
+REM  script; it falls back to the local build when the junction is absent.
+if "%GPN_USE_INSTALLED_UPDATE%"=="1" (
+  if exist "C:\gpn\data\update\current\gpn_node.exe" set "GPN_BIN=C:\gpn\data\update\current"
+)
 REM ---- Fast sync: weekly snapshot (default; GPN_FAST_SYNC=0 opts out) ----------------
 REM  A fresh node otherwise verifies ~200k blocks from peers (hours). The
 REM  default imports the published weekly snapshot, but only after checking the

@@ -602,14 +602,82 @@ pub fn bundle_installed(state_dir: &Path, version: &str) -> bool {
 }
 
 /// The version directory `current` points at, if any.
+///
+/// Two readers, because Windows has two link shapes and `read_link` is not the
+/// same call for both:
+///
+/// * a **symlink** (Linux, and Windows Developer Mode) — `read_link` is exact;
+/// * a **directory junction** (what `switch_current` creates on Windows, since
+///   it needs no privilege) — a reparse point, which the Rust std walker may
+///   refuse. `canonicalize` resolves the junction through the filesystem and is
+///   the fallback. Without it, `current` reads as "no version": the updater
+///   cannot name what is installed, `flip_to` records no rollback target, and
+///   `prune_versions` would then delete the tree it was supposed to keep.
+///
+/// The result is only accepted when it is a real directory under
+/// `versions/`, so a stray file called `current` cannot be mistaken for a
+/// pointer.
 pub fn current_version_dir(state_dir: &Path) -> Option<PathBuf> {
     let link = current_link(state_dir);
-    let target = std::fs::read_link(&link).ok()?;
-    Some(if target.is_absolute() {
-        target
-    } else {
-        state_dir.join(target)
-    })
+    let resolved = std::fs::read_link(&link)
+        .ok()
+        .map(|t| {
+            if t.is_absolute() {
+                t
+            } else {
+                state_dir.join(t)
+            }
+        })
+        .or_else(|| std::fs::canonicalize(&link).ok())?;
+    // `canonicalize` on Windows hands back a `\\?\` verbatim path; comparing
+    // directory names works either way, but callers print it, so strip the
+    // prefix when it is present.
+    let dir = strip_verbatim(resolved);
+    if !dir.is_dir() {
+        return None;
+    }
+    // Only a tree the updater owns: the target's parent must be
+    // `<state>/versions`. Compared after canonicalising both sides and again
+    // as text (case-insensitively), because they come from different sources
+    // (an env var and the filesystem) and `D:\gpn` vs `d:\gpn` must not read
+    // as "a different tree".
+    let root = versions_root(state_dir);
+    let same_dir = |a: &Path, b: &Path| {
+        let norm = |p: &Path| {
+            p.display()
+                .to_string()
+                .replace('/', "\\")
+                .trim_end_matches('\\')
+                .to_ascii_lowercase()
+        };
+        norm(a) == norm(b)
+    };
+    let parent_ok = dir
+        .parent()
+        .map(|p| {
+            same_dir(p, &root)
+                || match (std::fs::canonicalize(p), std::fs::canonicalize(&root)) {
+                    (Ok(pc), Ok(rc)) => same_dir(&pc, &rc),
+                    _ => false,
+                }
+        })
+        .unwrap_or(false);
+    if !parent_ok {
+        return None;
+    }
+    Some(dir)
+}
+
+/// Drop Windows' `\\?\` (and the UNC `\\?\UNC\`) prefix from a path.
+fn strip_verbatim(p: PathBuf) -> PathBuf {
+    let s = p.display().to_string();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!("\\\\{rest}"));
+    }
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    p
 }
 
 /// The version `current` names (its directory's file name), if any.
