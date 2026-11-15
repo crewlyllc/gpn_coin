@@ -1852,33 +1852,174 @@ fn p2p_info_cached(
     answer
 }
 
-fn models_cache() -> &'static std::sync::Mutex<Option<(Vec<String>, bool, std::time::Instant)>> {
-    static C: std::sync::OnceLock<
-        std::sync::Mutex<Option<(Vec<String>, bool, std::time::Instant)>>,
-    > = std::sync::OnceLock::new();
-    C.get_or_init(|| std::sync::Mutex::new(None))
+/// The Ollama call's own budget. It must stay **below** the budget of the one
+/// reader that polls `/status` (`assign_pull::fetch_heartbeat`, 1500 ms) — see
+/// [`ModelsCache`]. A read that can outlive its reader is indistinguishable
+/// from an outage, and it costs the caller the whole poll.
+pub(crate) const OLLAMA_TAGS_TIMEOUT_MS: u64 = 1200;
+
+/// What `/status` should do about the model inventory on this request.
+///
+/// Split out from the cache so the decision is testable without a server: the
+/// 2026-11-14 defect (#175) was a *timing* decision, not a parsing bug.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ModelsRead {
+    /// Cached and young enough — answer with it, touch nothing.
+    Fresh(Vec<String>, bool),
+    /// Cached but stale — answer with this **now** and refresh behind the
+    /// request, so a slow Ollama can never blank the box's capabilities.
+    Stale(Vec<String>, bool),
+    /// Nothing to serve yet — this request has to read it (bounded).
+    Cold,
 }
 
-/// Live model inventory from Ollama, cached for [`MODELS_TTL`]. Returns
-/// (models, can_pull).
-fn ollama_models(base: &str, fallback: &[String]) -> (Vec<String>, bool) {
-    if let Ok(guard) = models_cache().lock() {
-        if let Some((models, can_pull, at)) = guard.as_ref() {
-            if gpn_agent::llm::infer::cache_is_fresh(*at, std::time::Instant::now(), MODELS_TTL) {
-                return (models.clone(), *can_pull);
+/// Decide from the cache's present contents alone.
+pub(crate) fn plan_models_read(
+    last: Option<&(Vec<String>, bool, Instant)>,
+    now: Instant,
+    ttl: Duration,
+) -> ModelsRead {
+    match last {
+        Some((models, can_pull, at)) if gpn_agent::llm::infer::cache_is_fresh(*at, now, ttl) => {
+            ModelsRead::Fresh(models.clone(), *can_pull)
+        }
+        Some((models, can_pull, _)) => ModelsRead::Stale(models.clone(), *can_pull),
+        None => ModelsRead::Cold,
+    }
+}
+
+/// Stale-while-revalidate cache for the Ollama model inventory (#175).
+///
+/// Why this shape: the status server serves `:8093/status` from a
+/// **single-threaded** loop, and the inventory read used to happen inline with
+/// a 2500 ms timeout. The reader gives up at 1500 ms, so a 2 s Ollama stall
+/// made every provider polling in that window publish *no caps* — measured
+/// live on 2026-11-14 23:31:48, when the LLM, finetune **and** diffusion
+/// providers all logged `local /status unreadable` in the same second, i.e.
+/// exactly when the GPU was busy and the marketplace most wanted an answer.
+///
+/// With this cache the request never waits for Ollama once a good answer
+/// exists; a refresh runs on its own thread and is single-flighted, so N
+/// concurrent polls still cause one `/api/tags` call per TTL rather than N.
+#[derive(Clone)]
+pub(crate) struct ModelsCache {
+    // `Arc` so a background refresh can own a handle instead of a `'static`
+    // pointer to the global.
+    inner: std::sync::Arc<std::sync::Mutex<ModelsInner>>,
+}
+
+#[derive(Default)]
+struct ModelsInner {
+    last: Option<(Vec<String>, bool, Instant)>,
+    /// When a background refresh started, so a thread that dies before storing
+    /// cannot wedge the cache in "refreshing forever".
+    refreshing_since: Option<Instant>,
+}
+
+impl ModelsCache {
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: std::sync::Arc::new(std::sync::Mutex::new(ModelsInner::default())),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, ModelsInner> {
+        match self.inner.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        }
+    }
+
+    pub(crate) fn cached(&self) -> Option<(Vec<String>, bool, Instant)> {
+        self.lock().last.clone()
+    }
+
+    fn plan(&self, now: Instant, ttl: Duration) -> ModelsRead {
+        let last = self.lock().last.clone();
+        plan_models_read(last.as_ref(), now, ttl)
+    }
+
+    /// Should *this* caller start the refresh? Single-flighted: while one is in
+    /// flight (and younger than `ttl`), nobody else starts another.
+    fn begin_refresh(&self, now: Instant, ttl: Duration) -> bool {
+        let mut g = self.lock();
+        match g.refreshing_since {
+            Some(t) if gpn_agent::llm::infer::cache_is_fresh(t, now, ttl) => false,
+            _ => {
+                g.refreshing_since = Some(now);
+                true
             }
         }
     }
-    let answer = ollama_models_uncached(base, fallback);
-    if let Ok(mut guard) = models_cache().lock() {
-        *guard = Some((answer.0.clone(), answer.1, std::time::Instant::now()));
+
+    /// Store a read. A **failed** read never erases a real inventory: the names
+    /// from the last successful read are still installed, so they stay, while
+    /// `can_pull` drops to `false` — which is exactly the honest claim ("I know
+    /// what is on disk; I cannot confirm pulling right now").
+    fn store(&self, models: Vec<String>, can_pull: bool, now: Instant) {
+        let mut g = self.lock();
+        g.refreshing_since = None;
+        if !can_pull {
+            if let Some((prev, _, _)) = g.last.as_ref() {
+                if !prev.is_empty() {
+                    let kept = prev.clone();
+                    g.last = Some((kept, false, now));
+                    return;
+                }
+            }
+        }
+        g.last = Some((models, can_pull, now));
     }
-    answer
+
+    /// Serve an answer for one `/status` request.
+    ///
+    /// `fetch` is only ever called on the cold path (this thread, bounded by
+    /// [`OLLAMA_TAGS_TIMEOUT_MS`]) or on the background thread — never on the
+    /// request path once a good answer exists.
+    pub(crate) fn answer<F>(&self, now: Instant, ttl: Duration, fetch: F) -> (Vec<String>, bool)
+    where
+        F: FnOnce() -> (Vec<String>, bool) + Send + 'static,
+    {
+        match self.plan(now, ttl) {
+            ModelsRead::Fresh(models, can_pull) => (models, can_pull),
+            ModelsRead::Stale(models, can_pull) => {
+                if self.begin_refresh(now, ttl) {
+                    let me = self.clone();
+                    std::thread::spawn(move || {
+                        let (m, c) = fetch();
+                        me.store(m, c, Instant::now());
+                    });
+                }
+                (models, can_pull)
+            }
+            ModelsRead::Cold => {
+                let (m, c) = fetch();
+                self.store(m.clone(), c, Instant::now());
+                (m, c)
+            }
+        }
+    }
+}
+
+fn models_cache() -> &'static ModelsCache {
+    static C: std::sync::OnceLock<ModelsCache> = std::sync::OnceLock::new();
+    C.get_or_init(ModelsCache::new)
+}
+
+/// Live model inventory from Ollama, cached for [`MODELS_TTL`]. Returns
+/// (models, can_pull). Never blocks a request on a slow Ollama once a good
+/// answer exists (#175).
+fn ollama_models(base: &str, fallback: &[String]) -> (Vec<String>, bool) {
+    let base = base.to_string();
+    let fallback = fallback.to_vec();
+    models_cache().answer(Instant::now(), MODELS_TTL, move || {
+        ollama_models_uncached(&base, &fallback)
+    })
 }
 
 fn ollama_models_uncached(base: &str, fallback: &[String]) -> (Vec<String>, bool) {
     let cli = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_millis(2500))
+        .timeout(Duration::from_millis(OLLAMA_TAGS_TIMEOUT_MS))
         .build();
     match cli.and_then(|c| c.get(format!("{base}/api/tags")).send()) {
         Ok(r) => {
@@ -2597,6 +2738,239 @@ mod tests {
     // only delivery surface and it carries its own `GPN_ASSIGN_TOKEN` gate.
 
     use super::*;
+
+    /// #175: the `:8093/status` handler must never make a request wait on a
+    /// slow Ollama once it has a good inventory. Ladder: fresh ⇒ serve;
+    /// stale ⇒ serve now + refresh behind; nothing ⇒ this request must read.
+    #[test]
+    fn the_models_read_is_decided_by_age_not_by_asking_ollama() {
+        let now = Instant::now();
+        let ttl = Duration::from_secs(10);
+        assert_eq!(plan_models_read(None, now, ttl), ModelsRead::Cold);
+
+        let fresh = Some((vec!["a:1b".to_string()], true, now - Duration::from_secs(3)));
+        assert_eq!(
+            plan_models_read(fresh.as_ref(), now, ttl),
+            ModelsRead::Fresh(vec!["a:1b".to_string()], true)
+        );
+
+        // One second past the TTL is stale, and stale must NOT mean "block".
+        let stale = Some((
+            vec!["a:1b".to_string()],
+            true,
+            now - ttl - Duration::from_secs(1),
+        ));
+        assert_eq!(
+            plan_models_read(stale.as_ref(), now, ttl),
+            ModelsRead::Stale(vec!["a:1b".to_string()], true)
+        );
+    }
+
+    /// #175: a first-ever read that fails publishes the configured models with
+    /// `can_pull: false` — a statement about our inability to confirm, never a
+    /// silent claim that the box serves them.
+    #[test]
+    fn a_cold_read_failure_is_honest_and_not_repeated_on_the_next_request() {
+        let cache = ModelsCache::new();
+        let (models, can_pull) = cache.answer(Instant::now(), MODELS_TTL, || {
+            (vec!["configured:1b".to_string()], false)
+        });
+        assert_eq!(models, vec!["configured:1b".to_string()]);
+        assert!(!can_pull, "an unread inventory must not claim can_pull");
+        // It is now cached, so the next request does not stall a second time.
+        assert!(matches!(
+            cache.plan(Instant::now(), MODELS_TTL),
+            ModelsRead::Fresh(_, _)
+        ));
+    }
+
+    /// #175: a failed refresh must never erase a real inventory — the names
+    /// were measured, and a slow Ollama does not uninstall models. Only
+    /// `can_pull` drops, which is the honest half.
+    #[test]
+    fn a_failed_refresh_keeps_the_measured_names_and_drops_only_can_pull() {
+        let cache = ModelsCache::new();
+        cache.store(
+            vec!["qwen2.5:0.5b".to_string()],
+            true,
+            Instant::now() - MODELS_TTL - Duration::from_secs(5),
+        );
+        let (models, can_pull) = cache.answer(Instant::now(), MODELS_TTL, || {
+            (vec!["fallback:1b".to_string()], false)
+        });
+        assert_eq!(models, vec!["qwen2.5:0.5b".to_string()]);
+        assert!(
+            can_pull,
+            "the stale answer still carries its original claim"
+        );
+        // Give the background thread a moment, then check what it stored.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let last = cache.cached().expect("cache keeps a record");
+            if !last.1 {
+                assert_eq!(last.0, vec!["qwen2.5:0.5b".to_string()]);
+                break;
+            }
+            assert!(Instant::now() < deadline, "refresh never stored a failure");
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    /// A stub Ollama whose `/api/tags` takes `delay` to answer — the shape that
+    /// made all three local providers go blind at the same second.
+    struct StubOllama {
+        port: u16,
+        hits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl StubOllama {
+        fn start(delay: Duration, models: Vec<String>) -> Self {
+            let server = tiny_http::Server::http("127.0.0.1:0").expect("bind stub ollama");
+            let port = server.server_addr().to_ip().expect("ip addr").port();
+            let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let body = serde_json::json!({
+                "models": models
+                    .iter()
+                    .map(|m| serde_json::json!({ "name": m }))
+                    .collect::<Vec<_>>()
+            })
+            .to_string();
+            let (h, s) = (hits.clone(), stop.clone());
+            let handle = std::thread::spawn(move || {
+                while !s.load(std::sync::atomic::Ordering::SeqCst) {
+                    match server.recv_timeout(Duration::from_millis(50)) {
+                        Ok(Some(req)) => {
+                            h.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            std::thread::sleep(delay);
+                            let _ = req.respond(tiny_http::Response::from_string(body.clone()));
+                        }
+                        Ok(None) => {}
+                        Err(_) => break,
+                    }
+                }
+            });
+            Self {
+                port,
+                hits,
+                stop,
+                handle: Some(handle),
+            }
+        }
+
+        fn base(&self) -> String {
+            format!("http://127.0.0.1:{}", self.port)
+        }
+
+        fn hits(&self) -> usize {
+            self.hits.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for StubOllama {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(h) = self.handle.take() {
+                let _ = h.join();
+            }
+        }
+    }
+
+    /// #175 acceptance: with a slow `/api/tags` and a stale cache, one `/status`
+    /// request answers well inside the reader's 1500 ms budget, keeps the last
+    /// known inventory, and still kicks off a refresh.
+    #[test]
+    fn a_slow_ollama_never_delays_a_status_that_has_a_last_good_answer() {
+        let stub = StubOllama::start(Duration::from_millis(2500), vec!["slow:1b".to_string()]);
+        let cache = ModelsCache::new();
+        cache.store(
+            vec!["good:1b".to_string()],
+            true,
+            Instant::now() - MODELS_TTL - Duration::from_secs(2),
+        );
+        let base = stub.base();
+        let started = Instant::now();
+        let (models, can_pull) = cache.answer(Instant::now(), MODELS_TTL, move || {
+            ollama_models_uncached(&base, &[])
+        });
+        let elapsed = started.elapsed();
+        assert_eq!(models, vec!["good:1b".to_string()]);
+        assert!(can_pull);
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "/status waited {elapsed:?} on a 2500 ms Ollama — that is the #175 defect"
+        );
+        // The refresh really went out (it will time out at OLLAMA_TAGS_TIMEOUT_MS
+        // — that is the failure path, and it must not blank the inventory).
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while stub.hits() == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(stub.hits() >= 1, "no background refresh was attempted");
+        // The refresh will time out at OLLAMA_TAGS_TIMEOUT_MS; wait for it to
+        // store that failure (it must keep the names and drop `can_pull`).
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let last = cache.cached().expect("record");
+            assert_eq!(last.0, vec!["good:1b".to_string()]);
+            if !last.1 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "a timed-out refresh must not keep claiming can_pull"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    /// #175: the background refresh actually lands, and N concurrent polls cost
+    /// **one** `/api/tags` call — the single-flight half.
+    #[test]
+    fn a_background_refresh_lands_and_is_single_flighted() {
+        let stub = StubOllama::start(Duration::from_millis(100), vec!["fresh:7b".to_string()]);
+        let cache = ModelsCache::new();
+        cache.store(
+            vec!["old:1b".to_string()],
+            true,
+            Instant::now() - MODELS_TTL - Duration::from_secs(2),
+        );
+        for _ in 0..4 {
+            let base = stub.base();
+            let (models, _) = cache.answer(Instant::now(), MODELS_TTL, move || {
+                ollama_models_uncached(&base, &[])
+            });
+            assert_eq!(models, vec!["old:1b".to_string()], "stale answer served");
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some((models, can_pull, _)) = cache.cached() {
+                if models == vec!["fresh:7b".to_string()] {
+                    assert!(can_pull);
+                    break;
+                }
+            }
+            assert!(Instant::now() < deadline, "refresh never landed");
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert_eq!(
+            stub.hits(),
+            1,
+            "4 polls must single-flight to one /api/tags"
+        );
+    }
+
+    /// #175: the reader's budget and the writer's must not be inverted again.
+    #[test]
+    fn the_ollama_budget_fits_inside_the_reader_budget() {
+        // `assign_pull::fetch_heartbeat` gives up at 1500 ms.
+        assert!(
+            OLLAMA_TAGS_TIMEOUT_MS < 1500,
+            "an Ollama read that outlives its reader is an outage by construction"
+        );
+    }
 
     /// 2026-11-14 (live): `GET /status?ts=1` answered 404 because the route was
     /// matched against the raw request target including the query. The AP polls
