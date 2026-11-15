@@ -68,6 +68,7 @@ run_script() { # cache -> stdout in $OUT, exit in $RC
   OUT=$(PATH="$TMPROOT/bin:$PATH" \
         FAKE_USED_PCT="$USED" \
         GPN_CI_CACHE="$1" \
+        GPN_TARGET_ROOTS="${2:-$TMPROOT/no-such-checkout}" \
         MIN_AGE_HOURS=0 \
         FREE_FLOOR_PCT=15 \
         bash "$SCRIPT" 2>&1)
@@ -113,6 +114,30 @@ run_script "$CACHE"
 
 check '[ "$RC" -eq 0 ]' "exits 0"
 check 'printf "%s" "$OUT" | grep -q "nothing to reclaim"' "treats 'at the floor' as healthy"
+
+# ───────────────────────────── t5: a checkout's own target/ dir (#184) ─────
+# The guard used to look only inside ~/.ci-cache. Checkouts build into
+# <crate>/target, which is a different tree entirely: 66 G of it went unseen on
+# 2026-11-15 while the cache was pruned and the disk still hit the floor.
+CURRENT="t5 (92% used + checkout target dirs => prune debug, keep release)"
+note "$CURRENT"
+USED=92
+CHECKOUT="$TMPROOT/t5-checkout"
+rm -rf "$CHECKOUT"
+mkdir -p "$CHECKOUT/gpn-agent/target/debug/deps" "$CHECKOUT/gpn-agent/target/release/deps"
+mkdir -p "$CHECKOUT/gpn-node/target/debug"
+mkdir -p "$CHECKOUT/not-a-target/debug"   # decoy: name only, never a Cargo profile
+printf 'x' > "$CHECKOUT/gpn-agent/target/debug/deps/blob.o"
+printf 'keep' > "$CHECKOUT/gpn-agent/target/release/deps/keep.o"
+printf 'keep' > "$CHECKOUT/not-a-target/debug/keep.txt"
+run_script "$TMPROOT/t5-cache-absent" "$CHECKOUT"
+
+check '[ "$RC" -eq 0 ]' "exits 0 with no cache dir at all"
+check 'printf "%s" "$OUT" | grep -q "pruning debug caches"' "still prunes when only a checkout exists"
+check '[ ! -d "$CHECKOUT/gpn-agent/target/debug" ]' "removed the checkout's debug tree"
+check '[ ! -d "$CHECKOUT/gpn-node/target/debug" ]' "removed the second crate's debug tree"
+check '[ -d "$CHECKOUT/gpn-agent/target/release" ]' "left the checkout's release tree alone"
+check '[ -d "$CHECKOUT/not-a-target/debug" ]' "left a directory that is only *named* debug"
 
 # ────────────────────────────────────────────── t4: no cache dir => quiet ─
 CURRENT="t4 (no cache directory)"
