@@ -127,6 +127,27 @@ fn lease_delivered_secs(id: u64, now: Instant) -> Option<u64> {
     map.get(&id).map(|t| now.duration_since(*t).as_secs())
 }
 
+/// A lease we handed out without a payload is not a delivery: the provider
+/// cannot run the job, so nothing is in flight and the janitor's
+/// `CLAIM_IN_FLIGHT_SECS` veto must not apply (item #183). Say so once per job —
+/// `collect_leases` runs on every poll, ~3×/s per waiting provider.
+fn note_payload_missing(id: u64) {
+    static SEEN: OnceLock<Mutex<std::collections::HashSet<u64>>> = OnceLock::new();
+    let mut seen = SEEN
+        .get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+        .lock()
+        .unwrap();
+    if seen.len() > 4096 {
+        seen.clear(); // bounded: this only exists to stop the log repeating
+    }
+    if seen.insert(id) {
+        eprintln!(
+            "[assign] lease #{id} has no payload — store miss at dispatch, so it is NOT counted as \
+             delivered (the provider cannot run it: #183)"
+        );
+    }
+}
+
 /// Is a claim for this job plausibly in flight (its lease was delivered within
 /// [`CLAIM_IN_FLIGHT_SECS`])?
 fn claim_in_flight_now(id: u64, now: Instant) -> bool {
@@ -3847,6 +3868,22 @@ const MAX_PULL_LEASES: usize = 20;
 /// Ordered by job id ascending and capped, so a provider that has been away
 /// catches up over a few polls instead of receiving an unbounded backlog.
 fn collect_leases(store: &str, provider: &str, since: u64, limit: usize) -> Vec<Value> {
+    collect_leases_with(store, provider, since, limit, &gpn_agent::llm::get_job)
+}
+
+/// [`collect_leases`] with the payload lookup injected, so the #183 rule (stamp
+/// only a lease the provider can actually run) is testable without mutating the
+/// shared `~/.gpn/llm_store.json` of the test process.
+fn collect_leases_with<F>(
+    store: &str,
+    provider: &str,
+    since: u64,
+    limit: usize,
+    payload: &F,
+) -> Vec<Value>
+where
+    F: Fn(u64) -> Option<gpn_agent::llm::LlmJob>,
+{
     let Ok(s) = std::fs::read_to_string(store) else {
         return vec![];
     };
@@ -3874,30 +3911,39 @@ fn collect_leases(store: &str, provider: &str, since: u64, limit: usize) -> Vec<
     ids.truncate(limit);
     // Item #91: this response IS the delivery — stamp it so the janitor knows a
     // claim may be in flight before it decides the job is abandoned.
+    //
+    // #183 (2026-11-15): but a payload-less lease is not a delivery. The payload
+    // (prompt/model) is what the provider needs in order to RUN the job, and a
+    // store miss here used to be dropped silently *and* stamped, which granted
+    // an unrunnable lease the full `CLAIM_IN_FLIGHT_SECS=240 s` shelter: the
+    // provider's #41 gate correctly refused it, nothing re-routed it, and the
+    // caller got a `Cancelled` job four minutes after a 200. Measured on box 4:
+    // `(payload stored)=0 / (payload missing)=24` while every one of those
+    // leases had been stamped. Stamp only what the provider can execute.
     let now = Instant::now();
-    for id in &ids {
-        note_lease_delivered(*id, now);
-    }
-    ids.into_iter()
-        .map(|id| {
-            let rec = map.get(&id.to_string()).cloned().unwrap_or(json!({}));
-            let mut lease = json!({
-                "job_id": id,
-                "provider": provider,
-                "model": rec.get("model").and_then(|x| x.as_str()).unwrap_or(""),
-                "pull": rec.get("pull").and_then(|x| x.as_bool()).unwrap_or(false),
-                "callback": rec.get("callback").and_then(|x| x.as_str()).unwrap_or(""),
-                "callback_token": rec.get("callback_token").and_then(|x| x.as_str()).unwrap_or(""),
-                "lease_ms": 60_000,
-            });
-            if let Some(job) = gpn_agent::llm::get_job(id) {
-                if let Ok(jv) = serde_json::to_value(&job) {
-                    lease["job"] = jv;
-                }
+    let mut leases = Vec::with_capacity(ids.len());
+    for id in ids {
+        let rec = map.get(&id.to_string()).cloned().unwrap_or(json!({}));
+        let mut lease = json!({
+            "job_id": id,
+            "provider": provider,
+            "model": rec.get("model").and_then(|x| x.as_str()).unwrap_or(""),
+            "pull": rec.get("pull").and_then(|x| x.as_bool()).unwrap_or(false),
+            "callback": rec.get("callback").and_then(|x| x.as_str()).unwrap_or(""),
+            "callback_token": rec.get("callback_token").and_then(|x| x.as_str()).unwrap_or(""),
+            "lease_ms": 60_000,
+        });
+        // A payload that fails to serialise is as unrunnable as a missing one.
+        match payload(id).and_then(|job| serde_json::to_value(&job).ok()) {
+            Some(jv) => {
+                lease["job"] = jv;
+                note_lease_delivered(id, now);
             }
-            lease
-        })
-        .collect()
+            None => note_payload_missing(id),
+        }
+        leases.push(lease);
+    }
+    leases
 }
 
 /// Constant-time string equality (avoid leaking the token via timing).
@@ -9290,8 +9336,16 @@ mod tests {
             r#"{"7001":{"provider":"0xabc","model":"m","pull":true},"7002":{"provider":"0xdef","model":"m","pull":true}}"#,
         )
         .unwrap();
-        let leases = collect_leases(store.to_str().unwrap(), "0xabc", 0, 20);
+        // The payload store is injected: 7001's payload is durable, which is the
+        // only case that may be stamped (see the #183 test below).
+        let with_payload =
+            |id: u64| (id == 7001).then(|| gpn_agent::llm::LlmJob::new_llm("m", "prompt", 0.7, 16));
+        let leases = collect_leases_with(store.to_str().unwrap(), "0xabc", 0, 20, &with_payload);
         assert_eq!(leases.len(), 1, "only 7001 belongs to this provider");
+        assert!(
+            leases[0]["job"]["prompt"] == "prompt",
+            "payload travels with the lease"
+        );
         let now = Instant::now();
         assert!(
             claim_in_flight_now(7001, now),
@@ -9301,6 +9355,50 @@ mod tests {
             !claim_in_flight_now(7002, now),
             "another provider's lease was not delivered to anyone"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #183(a)+(b): a lease whose payload is missing must still be *sent* (the
+    /// provider may pick the payload up on a later delivery) but must NOT be
+    /// stamped as delivered — otherwise the janitor's 240 s `CLAIM_IN_FLIGHT`
+    /// veto shelters a job no provider can run, and the caller waits out a
+    /// Cancelled job. Both halves are asserted, because the old code did one
+    /// (send) and also the other (stamp) and that pair was the defect.
+    #[test]
+    fn a_payload_less_lease_is_sent_but_never_counted_as_delivered() {
+        let dir = std::env::temp_dir().join(format!(
+            "gpn-lease-nopayload-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = dir.join("assignments.json");
+        std::fs::write(
+            &store,
+            r#"{"8101":{"provider":"5NoPay","model":"m","pull":true},"8102":{"provider":"5NoPay","model":"m","pull":true}}"#,
+        )
+        .unwrap();
+        // Only 8102's payload is in the store; 8101 is the box-4 case.
+        let only_8102 = |id: u64| {
+            (id == 8102).then(|| gpn_agent::llm::LlmJob::new_llm("m", "runnable", 0.7, 16))
+        };
+        let leases = collect_leases_with(store.to_str().unwrap(), "5NoPay", 0, 20, &only_8102);
+        assert_eq!(
+            leases.len(),
+            2,
+            "the lease is still advertised — nothing is hidden"
+        );
+        let now = Instant::now();
+        assert!(
+            !claim_in_flight_now(8101, now),
+            "a lease the provider cannot run must not buy the janitor's veto"
+        );
+        assert!(
+            claim_in_flight_now(8102, now),
+            "the runnable lease in the same response is still a delivery"
+        );
+        assert!(leases[0].get("job").is_none(), "no invented payload");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
