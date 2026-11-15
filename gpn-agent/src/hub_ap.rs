@@ -215,6 +215,44 @@ pub fn channel_endpoint(status_url: &str) -> Option<String> {
     ))
 }
 
+/// Why [`channel_endpoint`] could not produce a dialable URL (#181).
+///
+/// The two cases are **not** the same failure and must not read the same way in
+/// the log. A `pull://` status URL means the box publishes no inbound port at
+/// all: it pulls its work from the AP, so it can never be dialled. That is
+/// structural — the box did not refuse anything, it is unreachable by design —
+/// and an operator who reads "refused" will go looking for a firewall.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelEndpointFailure {
+    /// `status_url` is a `pull://` scheme: pull-only box, no dialable endpoint.
+    PullOnly,
+    /// The URL is not `pull://` but carries no usable `host:port`.
+    Undialable,
+}
+
+pub fn channel_endpoint_failure(status_url: &str) -> ChannelEndpointFailure {
+    let u = status_url.trim();
+    if u.starts_with("pull://") {
+        ChannelEndpointFailure::PullOnly
+    } else {
+        ChannelEndpointFailure::Undialable
+    }
+}
+
+/// One honest line per pull-only box, instead of one per routed job.
+///
+/// Returns `true` the first time it is called for `provider` in this process.
+/// The set is keyed by provider address so it is bounded by the number of
+/// providers the AP has ever routed to, not by the job rate.
+fn note_pull_only_once(provider: &str) -> bool {
+    static NOTED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    let set = NOTED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    set.lock()
+        .map(|mut s| s.insert(provider.to_string()))
+        .unwrap_or(false)
+}
+
 /// Ask the provider whether it serves the channel protocol, **before** the AP
 /// opens (and funds) a channel. A provider on an older build 404s here, so no
 /// deposit is ever locked against a peer that cannot use it.
@@ -449,7 +487,29 @@ fn run_channel_job(
         return no("provider does not speak /channel (recently refused)");
     }
     let Some(endpoint) = endpoint.or_else(|| channel_endpoint(status_url)) else {
-        return no("cannot derive the provider's channel endpoint from its status URL");
+        // #181: say which kind of unreachable this is. A pull-only box is not
+        // refusing the job — it has no address to refuse from — so the old
+        // "cannot derive the … channel endpoint" wording sent an operator
+        // hunting for a fault that does not exist.
+        return match channel_endpoint_failure(status_url) {
+            ChannelEndpointFailure::PullOnly => {
+                if note_pull_only_once(provider_addr_hex) {
+                    eprintln!(
+                        "[hub] provider {provider_addr_hex} is pull-only (status_url {status_url}) — \
+                         channel mode is dial-only, so this box cannot be sent a channel job at all. \
+                         Not a refusal: it publishes no inbound endpoint. Channel-mode requests fall \
+                         back to on-chain for it (#181). Logged once per box."
+                    );
+                }
+                no("pull-only box (no dialable endpoint — channel mode is dial-only, not a refusal; #181)")
+            }
+            ChannelEndpointFailure::Undialable => {
+                let msg = format!(
+                    "cannot derive the provider's channel endpoint from its status URL ({status_url} has no usable host:port)"
+                );
+                no(&msg)
+            }
+        };
     };
     // Only pay for a channel open when the provider actually speaks the
     // protocol. Existing channels skip the probe (they already worked), which is
@@ -1065,6 +1125,44 @@ mod tests {
         ] {
             std::env::remove_var(k);
         }
+    }
+
+    /// #181: a pull-only box is not a box that refused. `channel_endpoint`
+    /// returns `None` for both kinds of undialable status URL, so the caller
+    /// used to blame the provider for a structural limit of channel mode.
+    #[test]
+    fn a_pull_only_status_url_is_classified_as_pull_only_not_undialable() {
+        // The live shape: remote boxes publish `pull://<provider address>`.
+        assert_eq!(
+            channel_endpoint_failure("pull://5HVtpozGCNDMxHqYhm4DfSHgMVdnExampleAddr"),
+            ChannelEndpointFailure::PullOnly
+        );
+        assert_eq!(
+            channel_endpoint("pull://5HVtpozGCNDMxHqYhm4DfSHgMVdnExampleAddr"),
+            None
+        );
+        // Missing port / no scheme: broken URL, not a pull-only box.
+        assert_eq!(
+            channel_endpoint_failure("http://host/status"),
+            ChannelEndpointFailure::Undialable
+        );
+        assert_eq!(
+            channel_endpoint_failure("garbage"),
+            ChannelEndpointFailure::Undialable
+        );
+        // Guard the precondition: the dialable form must never reach the
+        // failure classifier, or the message would be wrong for a good box.
+        assert!(channel_endpoint("http://127.0.0.1:8093/status").is_some());
+    }
+
+    /// The once-per-box notice must fire exactly once per provider, and not
+    /// swallow a second, different provider.
+    #[test]
+    fn the_pull_only_notice_is_emitted_once_per_box() {
+        assert!(note_pull_only_once("5AAA-pull-only-first"));
+        assert!(!note_pull_only_once("5AAA-pull-only-first"));
+        assert!(!note_pull_only_once("5AAA-pull-only-first"));
+        assert!(note_pull_only_once("5BBB-pull-only-second"));
     }
 
     /// The periodic settle must not fire before its interval, and must fire
