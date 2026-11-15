@@ -7,7 +7,7 @@ use sc_basic_authorship::ProposerFactory;
 use sc_client_api::Backend;
 use sc_client_api::BlockBackend;
 use sc_client_api::StorageProvider;
-use sc_consensus::{BlockImport, LongestChain};
+use sc_consensus::{BlockImport, ImportQueue, LongestChain};
 use sc_consensus_pow::{start_mining_worker, PowAlgorithm, PowBlockImport, PowImportQueue};
 use sc_network::config::MultiaddrWithPeerId;
 use sc_network::service::traits::{NotificationEvent, ValidationResult};
@@ -946,7 +946,7 @@ pub async fn new_full<
                 peer_tips.clone(),
             )?;
 
-        let params = BlockRelayParams {
+        let params: BlockRelayParams<Block, N> = BlockRelayParams {
             server,
             downloader,
             request_response_config,
@@ -955,20 +955,99 @@ pub async fn new_full<
     };
     let (block_relay_params, block_relay_provider) = block_relay;
 
-    let (network, system_rpc_tx, tx_handler_controller, sync_service) =
-        sc_service::build_network(sc_service::BuildNetworkParams {
-            config: &config,
+    // ---- Syncing strategy (release 0.3.48 item F) -----------------------
+    // `sc_service::build_network` builds the sync strategy itself, with no
+    // way to wrap it, so we spell out the same construction here: stock
+    // `sc_service` pieces, stock block downloader, and our own decorator
+    // ([`crate::sync_tolerance::TolerantSyncStrategy`]) around the strategy.
+    //
+    // The decorator removes exactly one fatal report: the SDK's "Peer
+    // disconnected with inflight after backoffs", which banned a healthy peer
+    // on its third mid-flight disconnect (66 such bans in our journal on
+    // 2026-11-14). Everything else — bad message, malformed block request,
+    // invalid justification, genesis mismatch — still goes through `DropPeer`
+    // untouched. Nothing about chain selection, repeat accounting or the
+    // downloader changes; we only filter the strategy's output actions.
+    //
+    // This mirrors `build_network` (`sc-service/src/builder.rs:1040-1140`) so
+    // the network itself is still built by the SDK.
+    let (network, system_rpc_tx, tx_handler_controller, sync_service) = {
+        use sc_network_sync::strategy::SyncingStrategy;
+
+        let protocol_id = config.protocol_id();
+        let fork_id = config.chain_spec.fork_id();
+        let metrics_registry = config.prometheus_config.as_ref().map(|c| &c.registry);
+        let block_announce_validator =
+            Box::new(sp_consensus::block_validation::DefaultBlockAnnounceValidator);
+
+        // Same two steps `build_network` performs on the relay params: install
+        // the request-response protocol and spawn the serving side.
+        let sc_network_sync::block_relay_protocol::BlockRelayParams {
+            mut server,
+            downloader,
+            request_response_config,
+        } = block_relay_params;
+        net_config.add_request_response_protocol(request_response_config);
+        task_manager.spawn_handle().spawn(
+            "block-request-handler",
+            Some("networking"),
+            async move { server.run().await },
+        );
+
+        let inner = sc_service::build_polkadot_syncing_strategy(
+            protocol_id.clone(),
+            fork_id,
+            &mut net_config,
+            None, // no warp sync, same as `warp_sync_config: None`
+            downloader,
+            client.clone(),
+            &task_manager.spawn_handle(),
+            metrics_registry,
+            config.blocks_pruning.is_archive(),
+        )?;
+        let strategy: Box<dyn SyncingStrategy<Block>> =
+            Box::new(crate::sync_tolerance::TolerantSyncStrategy::new(inner));
+
+        let network_service_provider =
+            sc_network_sync::service::network::NetworkServiceProvider::new();
+        let (syncing_engine, sync_service, block_announce_config) =
+            sc_network_sync::engine::SyncingEngine::new(
+                sc_network::config::Roles::from(&config.role),
+                client.clone(),
+                metrics_registry,
+                metrics.clone(),
+                &net_config,
+                protocol_id.clone(),
+                fork_id,
+                block_announce_validator,
+                strategy,
+                network_service_provider.handle(),
+                import_queue.service(),
+                net_config.peer_store_handle(),
+            )?;
+        task_manager
+            .spawn_handle()
+            .spawn_blocking("syncing", None, syncing_engine.run());
+
+        sc_service::build_network_advanced(sc_service::BuildNetworkAdvancedParams {
+            role: config.role,
+            protocol_id,
+            fork_id,
+            announce_block: config.announce_block,
             net_config,
             client: client.clone(),
             transaction_pool: transaction_pool.clone(),
             spawn_handle: task_manager.spawn_handle(),
             spawn_essential_handle: task_manager.spawn_essential_handle(),
             import_queue,
-            block_announce_validator_builder: None,
-            warp_sync_config: None,
-            block_relay: Some(block_relay_params),
+            sync_service,
+            block_announce_config,
+            network_service_provider,
+            metrics_registry,
             metrics,
-        })?;
+            blocks_pruning: config.blocks_pruning,
+        })?
+    };
 
     // Drive the provider the block downloader talks through. Without this the
     // downloader's requests would sit in an unbounded queue forever, so this
