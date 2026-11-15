@@ -20,8 +20,21 @@ set -uo pipefail
 MIN_AGE_HOURS="${MIN_AGE_HOURS:-12}"
 FREE_FLOOR_PCT="${FREE_FLOOR_PCT:-15}"   # prune when free space is below this
 cache="${GPN_CI_CACHE:-$HOME/.ci-cache}"
+# Checkouts carry their own `target/` trees, and they are NOT under the cache
+# root, so the first version of this guard never saw them: 2026-11-15 the cache
+# was 88 G while the worktree added another 66 G (`gpn-agent/target` alone was
+# 48 G, 44 G of it debug) and the root FS still hit the 10 % floor. Space-separated
+# list of checkout roots to scan for `<crate>/target/debug` (item #184).
+target_roots="${GPN_TARGET_ROOTS-$HOME/.openclaw/workspace/projectmanager07}"
 
-[ -d "$cache" ] || exit 0
+# Measure the filesystem that actually holds the trees; the cache may be absent
+# on a host that only has checkouts.
+measure=""
+[ -d "$cache" ] && measure="$cache"
+if [ -z "$measure" ]; then
+  for r in $target_roots; do [ -d "$r" ] && measure="$r" && break; done
+fi
+[ -n "$measure" ] || exit 0
 
 say() { echo "[prune-ci-cache] $*"; }
 
@@ -36,7 +49,7 @@ fi
 # guard, so it pruned while there was plenty of space and declined exactly when
 # the disk was full (2026-11-14: `df` 92% used, script said "8% used (below 15%
 # floor) — nothing to reclaim").
-used_pct=$(df --output=pcent "$cache" 2>/dev/null | tail -1 | tr -dc '0-9')
+used_pct=$(df --output=pcent "$measure" 2>/dev/null | tail -1 | tr -dc '0-9')
 used_pct=${used_pct:-0}
 free_pct=$((100 - used_pct))
 
@@ -48,7 +61,23 @@ fi
 say "disk at ${used_pct}% used (${free_pct}% free, below the ${FREE_FLOOR_PCT}% floor) — pruning debug caches older than ${MIN_AGE_HOURS}h"
 
 freed_kb=0
-while IFS= read -r -d '' dir; do
+# Candidate trees: the cache root's debug/incremental dirs, plus every
+# `<something>/target/debug` under each checkout root. The `*/target/debug`
+# pattern is deliberate — a directory that merely happens to be named `debug`
+# is never removed, only a Cargo target profile.
+candidates=()
+if [ -d "$cache" ]; then
+  while IFS= read -r -d '' d; do candidates+=("$d"); done \
+    < <(find "$cache" -maxdepth 3 -type d \( -name debug -o -name incremental \) -print0 2>/dev/null)
+fi
+for r in $target_roots; do
+  [ -d "$r" ] || continue
+  while IFS= read -r -d '' d; do candidates+=("$d"); done \
+    < <(find "$r" -maxdepth 5 -type d -path '*/target/debug' -print0 2>/dev/null)
+done
+
+for dir in "${candidates[@]+"${candidates[@]}"}"; do
+  [ -n "$dir" ] || continue
   # Skip anything touched recently: it may be the base layer of an active build.
   if [ -n "$(find "$dir" -maxdepth 0 -mmin -$((MIN_AGE_HOURS * 60)) 2>/dev/null)" ]; then
     say "keeping $dir (touched recently)"
@@ -61,7 +90,7 @@ while IFS= read -r -d '' dir; do
   else
     say "could not remove $dir"
   fi
-done < <(find "$cache" -maxdepth 3 -type d \( -name debug -o -name incremental \) -print0 2>/dev/null)
+done
 
-say "reclaimed $((freed_kb / 1024)) MiB; now $(df --output=pcent "$cache" | tail -1 | tr -d ' ') used"
+say "reclaimed $((freed_kb / 1024)) MiB; now $(df --output=pcent "$measure" 2>/dev/null | tail -1 | tr -d ' ') used"
 exit 0
