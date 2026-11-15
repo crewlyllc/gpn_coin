@@ -2963,13 +2963,25 @@ mod tests {
     }
 
     /// #175: the reader's budget and the writer's must not be inverted again.
+    ///
+    /// The check is a **compile-time** assertion on purpose: if someone raises
+    /// [`OLLAMA_TAGS_TIMEOUT_MS`] past the reader's budget this file stops
+    /// compiling, which is louder than a red test nobody reads. (CI caught the
+    /// first version of this as `clippy::assertions_on_constants` — the lint was
+    /// right: a `assert!` on two constants can never be a runtime observation.)
+    ///
+    /// The 1500 ms is `assign_pull::fetch_heartbeat`'s client timeout
+    /// (`gpn-agent/src/assign_pull.rs:562`); it is a literal there, so this is a
+    /// copy of that number, not a link to it — see #178.
+    const _READER_BUDGET_GUARD: () = assert!(
+        OLLAMA_TAGS_TIMEOUT_MS < 1500,
+        "an Ollama read that outlives its reader is an outage by construction"
+    );
+
     #[test]
     fn the_ollama_budget_fits_inside_the_reader_budget() {
-        // `assign_pull::fetch_heartbeat` gives up at 1500 ms.
-        assert!(
-            OLLAMA_TAGS_TIMEOUT_MS < 1500,
-            "an Ollama read that outlives its reader is an outage by construction"
-        );
+        // Touching the guard forces its evaluation in this test's name.
+        let _ = _READER_BUDGET_GUARD;
     }
 
     /// 2026-11-14 (live): `GET /status?ts=1` answered 404 because the route was
