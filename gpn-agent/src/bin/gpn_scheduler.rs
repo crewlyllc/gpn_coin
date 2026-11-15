@@ -3548,6 +3548,25 @@ fn assignment_token(store: &str, job_id: u64) -> Option<String> {
         .filter(|t| !t.is_empty())
 }
 
+/// Split a raw request URL into path segments, ignoring the query string.
+///
+/// `tiny_http` hands us the request target verbatim (`/jobs?limit=256`), so
+/// splitting on `/` without dropping `?…` makes **every** route 404 as soon as
+/// a caller appends a query — including `/health`, which monitors routinely
+/// hit with a cache-buster. Worse, a query value containing `/` (the provider
+/// pull path sends a whole capability JSON: `/assignments?caps={"a":"b/c"}`)
+/// used to add phantom segments. The query is not part of the path: strip it
+/// once, here, and read it with `query_param`.
+fn path_segments(url: &str) -> Vec<&str> {
+    url.split('?')
+        .next()
+        .unwrap_or(url)
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 /// Read a raw query-string value (no decoding) from a request URL.
 fn query_param<'a>(url: &'a str, key: &str) -> Option<&'a str> {
     let (_, q) = url.split_once('?')?;
@@ -4528,11 +4547,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let deadline = Deadline::after(handler_deadline_secs);
             let url = req.url().to_string();
             let method = req.method().clone();
-            let path: Vec<&str> = url
-                .trim_start_matches('/')
-                .split('/')
-                .filter(|s| !s.is_empty())
-                .collect();
+            let path: Vec<&str> = path_segments(&url);
             // Truncate: `/assignments?...&caps=<whole capability JSON>` is
             // routinely 1.5 KB, and the watchdog's 60 s metrics line quotes the
             // oldest request verbatim — one such line per minute buried the
@@ -4620,7 +4635,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // holding it up to `wait` ms (max 25 s) costs nothing elsewhere;
                 // it returns the moment there is work. A healthy idle provider
                 // therefore makes one request per 25 s.
-                (Method::Get, [first, ..]) if first.split('?').next() == Some("assignments") => {
+                (Method::Get, [first, ..]) if *first == "assignments" => {
                     let is_loopback = req
                         .remote_addr()
                         .map(|a| a.ip().is_loopback())
@@ -7251,8 +7266,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Serves the provider's on-disk file over HTTP so remote clients can
                 // fetch it (the AP has no other way to hand back the bytes).
                 (Method::Get, ["artifact", id]) => {
-                    let idp = id.split('?').next().unwrap_or(id);
-                    let idn: u64 = idp.parse().unwrap_or(0);
+                    let idn: u64 = id.parse().unwrap_or(0);
                     let rec = gpn_agent::llm::get_job(idn);
                     let path = rec.as_ref().and_then(|j| j.artifact_path.clone());
                     match path {
@@ -7357,13 +7371,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Client-side signing: the caller already created + escrowed the job
                 // with THEIR OWN wallet; they just ask us to ROUTE it to a provider.
                 (Method::Post, ["route", id]) => {
-                    // optional ?model=<m> in the query string
-                    let (idp, query) = id.split_once('?').unwrap_or((id, ""));
-                    let idn: u64 = idp.parse().unwrap_or(0);
+                    // optional ?model=<m> in the query string (read from the same
+                    // place every other handler reads it — the path no longer
+                    // carries the query, see `path_segments`)
+                    let idn: u64 = id.parse().unwrap_or(0);
                     let route_body: Value = serde_json::from_str(&body).unwrap_or(json!({}));
-                    let qmodel = query
-                        .split('&')
-                        .find_map(|kv| kv.strip_prefix("model="))
+                    let qmodel = query_param(&url, "model")
                         .map(|m| m.replace("%3A", ":").replace("%3a", ":"))
                         .unwrap_or_else(|| "auto".to_string());
                     let job_state = chain_or_504!(
@@ -8922,6 +8935,31 @@ mod tests {
         let (code, msg) = model_resolution_status(&reg, err);
         assert_eq!(code, 400);
         assert_eq!(msg, err);
+    }
+
+    #[test]
+    fn the_query_string_is_not_part_of_the_path() {
+        // Live defect 2026-11-14: `GET /jobs?limit=256` (and `/health?ts=1`)
+        // answered 404 because the router split the raw request target on `/`
+        // and kept `jobs?limit=256` as the segment.
+        assert_eq!(path_segments("/jobs?limit=256"), vec!["jobs"]);
+        assert_eq!(path_segments("/health?ts=1"), vec!["health"]);
+        assert_eq!(
+            path_segments("/v1/chat/completions?trace=1"),
+            vec!["v1", "chat", "completions"]
+        );
+        // No query: unchanged behaviour, including the trailing slash and root.
+        assert_eq!(path_segments("/job/12"), vec!["job", "12"]);
+        assert_eq!(path_segments("/job/12/"), vec!["job", "12"]);
+        assert!(path_segments("/").is_empty());
+        // A query VALUE containing `/` must not become a segment: the provider
+        // pull path sends a whole capability JSON in `caps`.
+        assert_eq!(
+            path_segments("/assignments?caps={\"a\":\"b/c\"}&since=1"),
+            vec!["assignments"]
+        );
+        // A bare `?` is a query too (empty), not a path character.
+        assert_eq!(path_segments("/network?"), vec!["network"]);
     }
 
     #[test]

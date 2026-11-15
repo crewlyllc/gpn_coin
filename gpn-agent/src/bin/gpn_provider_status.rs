@@ -1993,6 +1993,15 @@ fn vram_filter_logged(models: &[String], vram_mb: u64) -> Vec<String> {
     out
 }
 
+/// The route path of a request target: everything before the query string.
+///
+/// `tiny_http` hands us the raw target (`/status?ts=1`), and this server matches
+/// routes by exact string, so without this a caller that appends any query gets
+/// a 404 — including from the AP's own reachability poll.
+fn request_path(url: &str) -> &str {
+    url.split('?').next().unwrap_or(url)
+}
+
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2477,7 +2486,13 @@ fn run_main() -> Result<(), Box<dyn std::error::Error>> {
 
     let hdr = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
     for req in server.incoming_requests() {
-        let (body, code) = match (req.method(), req.url()) {
+        // A query string is not part of the path. `tiny_http` hands us the raw
+        // request target, so an exact `== "/status"` match 404s any caller
+        // that appends one (`/status?ts=1`, a monitor's cache-buster) — and
+        // this route is what the access point polls to decide whether this box
+        // is reachable at all. Strip the query once, here.
+        let path = request_path(req.url());
+        let (body, code) = match (req.method(), path) {
             (Method::Get, "/status") => {
                 // Hardware is re-measured at most every HARDWARE_TTL — never
                 // carried over from a previous machine/process lifetime.
@@ -2582,6 +2597,22 @@ mod tests {
     // only delivery surface and it carries its own `GPN_ASSIGN_TOKEN` gate.
 
     use super::*;
+
+    /// 2026-11-14 (live): `GET /status?ts=1` answered 404 because the route was
+    /// matched against the raw request target including the query. The AP polls
+    /// this route to decide whether the box is reachable, so a proxy or monitor
+    /// that appends anything would have made a healthy provider look down.
+    #[test]
+    fn the_query_string_is_not_part_of_the_route_path() {
+        assert_eq!(request_path("/status"), "/status");
+        assert_eq!(request_path("/status?ts=1"), "/status");
+        assert_eq!(request_path("/health?cache=0"), "/health");
+        assert_eq!(request_path("/status?"), "/status");
+        // A query value containing `/` must not invent a path.
+        assert_eq!(request_path("/status?next=/health"), "/status");
+        // Unknown routes stay unknown — the fix must not turn 404s into 200s.
+        assert_eq!(request_path("/modelz?x=1"), "/modelz");
+    }
 
     /// #W48: an unmeasured hardware field must leave the JSON as `null`, not
     /// `0`. `0` was indistinguishable from a real measurement, so every Windows
