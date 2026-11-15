@@ -31,16 +31,21 @@ if pgrep -x cargo >/dev/null 2>&1 || pgrep -x rustc >/dev/null 2>&1; then
   exit 0
 fi
 
-free_pct=$(df --output=pcent "$cache" 2>/dev/null | tail -1 | tr -dc '0-9')
-free_pct=${free_pct:-0}
-used_pct=$((100 - free_pct))
+# `df --output=pcent` prints the USED percentage. Keep the two numbers apart:
+# reading it into a variable called free_pct and then subtracting inverted the
+# guard, so it pruned while there was plenty of space and declined exactly when
+# the disk was full (2026-11-14: `df` 92% used, script said "8% used (below 15%
+# floor) — nothing to reclaim").
+used_pct=$(df --output=pcent "$cache" 2>/dev/null | tail -1 | tr -dc '0-9')
+used_pct=${used_pct:-0}
+free_pct=$((100 - used_pct))
 
-if [ "$used_pct" -lt "$FREE_FLOOR_PCT" ]; then
-  say "disk at ${used_pct}% used (below ${FREE_FLOOR_PCT}% floor) — nothing to reclaim"
+if [ "$free_pct" -ge "$FREE_FLOOR_PCT" ]; then
+  say "disk at ${used_pct}% used (${free_pct}% free, at/above the ${FREE_FLOOR_PCT}% floor) — nothing to reclaim"
   exit 0
 fi
 
-say "disk at ${used_pct}% used — pruning debug caches older than ${MIN_AGE_HOURS}h"
+say "disk at ${used_pct}% used (${free_pct}% free, below the ${FREE_FLOOR_PCT}% floor) — pruning debug caches older than ${MIN_AGE_HOURS}h"
 
 freed_kb=0
 while IFS= read -r -d '' dir; do
