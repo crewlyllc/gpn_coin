@@ -275,6 +275,14 @@ jobs:
       - name: Release dispatch in-flight guard
         run: bash scripts/tests/test-dispatch-guard.sh
 
+      # Lane check (W172, 2026-11-14). The maintainer sweep grepped bare `503`,
+      # so millisecond timestamps (`...:46.503`) counted as faults — 438 false
+      # hits and 0 real HTTP 503s in one hour. scripts/lane-check.sh matches
+      # only HTTP-shaped statuses and prose faults; this plants both kinds of
+      # line and asserts which way they land.
+      - name: Lane check patterns (timestamp vs HTTP 503)
+        run: bash scripts/tests/test-lane-check.sh
+
       # Referral download links (`?ref=CODE`): the page-side half. Pure Node,
       # no browser: validation rule, URL parsing, and the XSS boundary (the
       # code is only ever written as text, never as markup).
