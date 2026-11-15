@@ -502,6 +502,16 @@ fn serve_channel_job(
     // The diffusion provider shares this account's channel; the AP's signed
     // `state_before` is canonical, so follow it whenever our mirror lags.
     ch.sync_to_assignment(&a);
+    // Item #188: refuse a model this box cannot serve BEFORE `accept`, so the
+    // requestor is never charged for a job we would answer with a different
+    // model. The AP can hand this job to a box that has it instead.
+    let model_r = match choose_model(&a.model, &installed_models(node_vram_mb()), node_vram_mb()) {
+        Ok(m) => m,
+        Err(why) => {
+            eprintln!("[channel] job {} refused before accept — {why}", a.job_id);
+            return (409, serde_json::json!({"ok": false, "error": why}));
+        }
+    };
     if let Err(e) = ch.accept(&a) {
         return (
             409,
@@ -511,8 +521,6 @@ fn serve_channel_job(
     // Persist the accepted (pre-paid) state BEFORE running the work, so a crash
     // mid-inference cannot lose the requestor's signed payment.
     save_provider_channels(&ctx.state_path, &chans);
-
-    let model_r = resolve_model(&a.model);
     let temp = (a.temperature_milli as f32) / 1000.0;
     // Item #75: this lane is the DOMINANT path (an off-chain escrowed chat is
     // served here, not through the chain claim loop) and it ran inference with
@@ -717,7 +725,20 @@ fn handle_infer_request(
     let prompt = v.get("prompt").and_then(|x| x.as_str()).unwrap_or("");
     let temp = v.get("temperature").and_then(|x| x.as_f64()).unwrap_or(0.7) as f32;
     let max_tokens = v.get("max_tokens").and_then(|x| x.as_u64()).unwrap_or(256) as u32;
-    let model_r = resolve_model(model);
+    let model_r = match choose_model(model, &installed_models(node_vram_mb()), node_vram_mb()) {
+        Ok(m) => m,
+        Err(why) => {
+            // Item #188: a pinned model this box cannot serve is an error, not a
+            // silent substitution (this endpoint never bills, but a caller who
+            // asked for `deepseek-r1:32b` must not be told `llama3.2:1b` answered).
+            let hdr = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                .unwrap();
+            let body = serde_json::json!({"ok": false, "error": why});
+            let _ =
+                req.respond(tiny_http::Response::from_string(body.to_string()).with_header(hdr));
+            return;
+        }
+    };
     // One GPU = one job, on this path too: the passthrough `/infer`
     // endpoint drives the same GPU as the chain/channel lanes and as
     // gpn_diffusion_provider, so it must take the same cross-process
@@ -1043,18 +1064,10 @@ fn node_vram_mb() -> u64 {
     *VRAM.get_or_init(gpn_agent::gpu::detect_vram_mb)
 }
 
-/// Resolve a requested model to a concrete one. `auto`/empty means "pick any
-/// model this machine has" — choose the first from the local Ollama, falling
-/// back to the guaranteed baseline model.
-///
-/// Item 3: models whose weights cannot fit this box's VRAM are removed from the
-/// candidate set, so a job requesting `deepseek-r1:14b` on an 8 GB card is
-/// served by a model that actually runs instead of OOMing mid-inference (or
-/// silently crawling on CPU). Internal/toy models stay usable — this filters
-/// on *fit*, not on the public catalogue.
-fn resolve_model(requested: &str) -> String {
+/// The models this box's runtime actually has, minus the ones whose weights
+/// cannot fit its VRAM (item 3: never advertise what we would OOM on).
+fn installed_models(vram_mb: u64) -> Vec<String> {
     let base = gpn_agent::llm::infer::default_ollama_url();
-    let vram_mb = node_vram_mb();
     let installed: Vec<String> = reqwest::blocking::Client::builder()
         .timeout(Duration::from_millis(2500))
         .build()
@@ -1069,7 +1082,7 @@ fn resolve_model(requested: &str) -> String {
             })
         })
         .unwrap_or_default();
-    let installed: Vec<String> = installed
+    installed
         .into_iter()
         .filter(|m| {
             let fit = gpn_agent::models::check_model_vram(m, vram_mb);
@@ -1080,25 +1093,32 @@ fn resolve_model(requested: &str) -> String {
                 true
             }
         })
-        .collect();
+        .collect()
+}
+
+/// Resolve a requested model to a concrete one. `auto`/empty means "pick any
+/// model this machine has" — choose the first from the local Ollama, falling
+/// back to the guaranteed baseline model.
+///
+/// Item 3: models whose weights cannot fit this box's VRAM are removed from the
+/// candidate set, so a job requesting `deepseek-r1:14b` on an 8 GB card is
+/// served by a model that actually runs instead of OOMing mid-inference (or
+/// silently crawling on CPU). Internal/toy models stay usable — this filters
+/// on *fit*, not on the public catalogue.
+///
+/// **Item #188:** the *substituting* half of that is gone. This function is the
+/// "the box picks" resolver; a **pinned** model the box cannot serve is refused
+/// by [`choose_model`] before we get here, because a caller who asked for
+/// `deepseek-r1:32b` and was billed for `llama3.2:1b` has been lied to. The
+/// completion-vs-honesty argument that justified the old fallback (a job for an
+/// unservable model sat `Running` until its on-chain deadline) is now handled by
+/// failing the job on-chain with a reason — refunded, slot freed, caller told.
+fn resolve_model(requested: &str, installed: &[String]) -> String {
     let has = |name: &str| {
         installed
             .iter()
             .any(|n| n == name || n.split(':').next() == Some(name))
     };
-    if !requested.is_empty() && requested != "auto" {
-        if let Some(reason) =
-            gpn_agent::models::check_model_vram(requested, vram_mb).skip_reason(requested)
-        {
-            println!("[provider] {reason} — falling back to a model that fits");
-            return installed
-                .iter()
-                .find(|n| n.as_str() == "llama3.2:1b")
-                .or_else(|| installed.first())
-                .cloned()
-                .unwrap_or_else(|| "llama3.2:1b".to_string());
-        }
-    }
     if !requested.is_empty() && requested != "auto" && has(requested) {
         // Prefer the exact installed tag when a bare name was requested.
         if let Some(exact) = installed.iter().find(|n| n.as_str() == requested) {
@@ -1112,16 +1132,35 @@ fn resolve_model(requested: &str) -> String {
         }
         return requested.to_string();
     }
-    // Requested model unavailable (or `auto`/empty) → fall back to an INSTALLED
-    // model so the job COMPLETES instead of orphaning forever (which saturates
-    // the on-chain MaxActiveJobs cap — 2026-10-05 incident). Prefer llama3.2:1b.
+    // `auto`/empty → pick an INSTALLED model so the job completes. Prefer the
+    // guaranteed baseline. (A *pinned* request never reaches this arm: #188's
+    // `choose_model` refuses it first, naming the model.)
     if installed.iter().any(|n| n == "llama3.2:1b") {
         return "llama3.2:1b".to_string();
     }
     installed
-        .into_iter()
-        .next()
+        .first()
+        .cloned()
         .unwrap_or_else(|| "llama3.2:1b".to_string())
+}
+
+/// Item #188: the model this job must run on, or the reason this box refuses it.
+///
+/// `Ok(model)` — a concrete installed model to run (the requested one when this
+/// box has it, or the box's own pick for `auto`/empty).
+/// `Err(reason)` — the job names a model this box cannot serve. The caller must
+/// **not** run a different model under that name: that is a silent substitution
+/// the requestor pays for.
+fn choose_model(requested: &str, installed: &[String], vram_mb: u64) -> Result<String, String> {
+    if let Some(why) = gpn_agent::models::model_unservable(
+        requested,
+        installed,
+        vram_mb,
+        gpn_agent::models::vram_headroom(),
+    ) {
+        return Err(why);
+    }
+    Ok(resolve_model(requested, installed))
 }
 
 fn assignment_store_path() -> String {
@@ -3680,7 +3719,34 @@ async fn run_job(
             return Ok(());
         }
     }
-    let model = resolve_model(&job.model);
+    // Item #188: a job that names a model this box cannot serve must fail fast,
+    // naming the model — never run a different installed model and settle the
+    // job under the requested name (measured live: `deepseek-r1:32b` → HTTP 200
+    // answered by `llama3.2:1b`, billed as the requested model). The failure is
+    // on-chain (`fail_job`), so escrow refunds and the slot frees at once rather
+    // than the job sitting `Running` until its deadline.
+    let vram_mb = node_vram_mb();
+    let model = match choose_model(&job.model, &installed_models(vram_mb), vram_mb) {
+        Ok(m) => m,
+        Err(why) => {
+            eprintln!("[job {id}] cannot be run here: {why}");
+            let _ = LlmStore::new().set_error(id, &format!("gpn_model_unservable: {why}"));
+            let r = if fast {
+                client.fail_job_fast(id, FAIL_CANNOT_RUN).await
+            } else {
+                client.fail_job(id, FAIL_CANNOT_RUN).await
+            };
+            match r {
+                Ok(()) => println!(
+                    "[job {id}] failed on-chain — the requested model is not servable here, \
+                     escrow refunded (#188)"
+                ),
+                Err(e) if is_benign_state_err(&e.to_string()) => {}
+                Err(e) => eprintln!("[job {id}] fail_job (model unservable) failed: {e}"),
+            }
+            return Ok(());
+        }
+    };
     let preview: String = job.prompt.chars().take(60).collect();
     println!(
         "[job {id}] running inference — model={} prompt=\"{}\"",
@@ -4724,5 +4790,47 @@ mod item101_panic_isolation {
         let hit = Cell::new(false);
         assert!(with_panic_guard("request handler", || hit.set(true)));
         assert!(hit.get());
+    }
+}
+
+#[cfg(test)]
+mod item188_model_refusal {
+    use super::choose_model;
+
+    fn inst(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The wiring, not just the predicate: a pinned model this box lacks must
+    /// come back as `Err` naming the model, so every call site (channel `/job`,
+    /// on-chain `run_job`, `/infer`) refuses instead of substituting.
+    #[test]
+    fn a_pinned_model_the_box_lacks_is_an_error_at_the_call_site() {
+        let installed = inst(&["llama3.2:1b", "qwen2.5:0.5b"]);
+        let card = 8 * 1024;
+
+        let err = choose_model("deepseek-r1:32b", &installed, card)
+            .expect_err("a model this box does not have must not resolve");
+        assert!(err.contains("deepseek-r1:32b"), "{err}");
+
+        let err = choose_model("deepseek-r1:14b", &installed, card)
+            .expect_err("a 14B model on an 8 GB card must not resolve");
+        assert!(err.contains("deepseek-r1:14b"), "{err}");
+
+        // The models it does have still resolve, exact tag or bare name.
+        assert_eq!(
+            choose_model("llama3.2:1b", &installed, card).unwrap(),
+            "llama3.2:1b"
+        );
+        assert_eq!(
+            choose_model("qwen2.5", &installed, card).unwrap(),
+            "qwen2.5:0.5b"
+        );
+        // `auto`/empty still means "you pick" — that is not a pinned request.
+        assert_eq!(
+            choose_model("auto", &installed, card).unwrap(),
+            "llama3.2:1b"
+        );
+        assert_eq!(choose_model("", &installed, card).unwrap(), "llama3.2:1b");
     }
 }

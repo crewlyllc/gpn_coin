@@ -258,6 +258,62 @@ pub fn model_fits_vram(model: &str, vram_mb: u64) -> bool {
     check_model_vram(model, vram_mb).allowed()
 }
 
+/// Why a job that asks for `model` cannot be served on **this** box, if it cannot.
+///
+/// `installed` is what the local runtime actually has (`/api/tags`); `vram_mb`
+/// is this box's VRAM (0 = unknown, which is never a reason to refuse).
+///
+/// `None` means "serve it" — either the box has the model, or the request is
+/// empty/`auto` and the box picks. `Some(reason)` is the refusal text.
+///
+/// # Why a refusal and not a substitution (item #188)
+///
+/// The provider used to answer a request for a model it did not have by running
+/// a different installed model and settling the job under the requested name.
+/// Measured live 2026-11-15 09:3x PT: `{"model":"deepseek-r1:32b"}` on an 8 GB
+/// box returned **HTTP 200 in 109 ms** with `grapes`, served by `llama3.2:1b` —
+/// the caller was billed for a model that never ran, and nothing anywhere said
+/// so. A pinned model is a contract, not a hint: if this box cannot honour it,
+/// the honest answer is a named refusal the caller can route around.
+///
+/// The "cannot fit" case is checked only when the model is **absent** — a model
+/// already installed here is the runtime's business, and the VRAM table only
+/// guards a download we decide to attempt.
+pub fn model_unservable(
+    model: &str,
+    installed: &[String],
+    vram_mb: u64,
+    headroom: f64,
+) -> Option<String> {
+    let want = model.trim();
+    if want.is_empty() || want == "auto" {
+        return None;
+    }
+    let has = installed
+        .iter()
+        .any(|n| n == want || n.split(':').next() == Some(want));
+    if has {
+        return None;
+    }
+    if let Some(reason) =
+        check_model_vram_with(want, vram_mb, &VramOverride::default(), headroom).skip_reason(want)
+    {
+        return Some(format!(
+            "{reason} — this box cannot serve '{want}', so it will not run (or bill) a \
+             different model under that name (#188)"
+        ));
+    }
+    let has_txt = if installed.is_empty() {
+        "no models installed".to_string()
+    } else {
+        format!("it has {}", installed.join(", "))
+    };
+    Some(format!(
+        "'{want}' is not installed on this box ({has_txt}) — refusing rather than \
+         substituting another model under the requested name (#188)"
+    ))
+}
+
 /// Drop the models that cannot fit, preserving order. `log` emits the
 /// operator-facing `skipping …` line on stderr (the heartbeat's stdout is the
 /// service log, so both are visible in `journalctl --user -u …`).
@@ -393,6 +449,60 @@ mod tests {
 
     fn names(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Item #188: a pinned model this box cannot serve is a REFUSAL, never an
+    /// invitation to substitute. The live shape this fixes: `deepseek-r1:32b`
+    /// asked of an 8 GB box answered HTTP 200 from `llama3.2:1b`.
+    #[test]
+    fn a_model_this_box_cannot_serve_is_refused_not_substituted() {
+        let installed = names(&["llama3.2:1b", "qwen2.5:0.5b"]);
+        let card = 8 * 1024;
+
+        // Installed → serve, exact tag or bare name.
+        assert_eq!(
+            model_unservable("llama3.2:1b", &installed, card, 1.15),
+            None
+        );
+        assert_eq!(model_unservable("llama3.2", &installed, card, 1.15), None);
+        // "let the box pick" is not a pinned request.
+        assert_eq!(model_unservable("", &installed, card, 1.15), None);
+        assert_eq!(model_unservable("auto", &installed, card, 1.15), None);
+        assert_eq!(model_unservable("  auto \n", &installed, card, 1.15), None);
+
+        // Absent and too large → refuse, naming the model and the size gap.
+        // (`deepseek-r1:32b` is not in the deliberately small VRAM table, so it
+        // lands on the "not installed" arm — see the unknown-size case below.)
+        let big = model_unservable("deepseek-r1:14b", &installed, card, 1.15)
+            .expect("a 14B model on an 8 GB card must be refused");
+        assert!(big.contains("deepseek-r1:14b"), "{big}");
+        assert!(big.contains("GB"), "{big}");
+        assert!(big.contains("#188"), "{big}");
+
+        // Absent and of unknown size (the live 32B shape) → refused as absent,
+        // never waved through on a missing table entry.
+        let unknown = model_unservable("deepseek-r1:32b", &installed, card, 1.15)
+            .expect("an unknown-size model must never be substituted silently");
+        assert!(unknown.contains("deepseek-r1:32b"), "{unknown}");
+        assert!(unknown.contains("not installed"), "{unknown}");
+
+        // Absent but small enough → still a refusal (we do not silently run
+        // something else), and the reason says what IS here.
+        let absent = model_unservable("gemma2:2b", &installed, card, 1.15)
+            .expect("an uninstalled model must be refused even when it would fit");
+        assert!(absent.contains("gemma2:2b"), "{absent}");
+        assert!(absent.contains("llama3.2:1b"), "{absent}");
+        assert!(absent.contains("not installed"), "{absent}");
+
+        // Unknown VRAM (0) must never be the reason to refuse: an unprobed box
+        // still refuses a missing model, but never on a size guess.
+        let unprobed = model_unservable("gemma2:2b", &installed, 0, 1.15).unwrap();
+        assert!(unprobed.contains("not installed"), "{unprobed}");
+        assert!(!unprobed.contains("GB"), "{unprobed}");
+
+        // A box with nothing installed says so plainly.
+        let empty = model_unservable("llama3.2:1b", &[], card, 1.15).unwrap();
+        assert!(empty.contains("no models installed"), "{empty}");
     }
 
     #[test]
