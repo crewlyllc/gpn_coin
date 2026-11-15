@@ -3743,6 +3743,24 @@ fn query_param<'a>(url: &'a str, key: &str) -> Option<&'a str> {
     })
 }
 
+/// Resolve the `GET /jobs` id window from `next`, `since` and `limit`.
+///
+/// Returns `(start, end)`; the handler reads `start..end`. `since` is a hard
+/// floor a caller can ask for, `limit` is the number of **newest** ids to
+/// return (absent or `0` = the whole window), and neither may exceed
+/// [`JOBS_LIST_WINDOW`] — the window is the ceiling, not a default that
+/// silently becomes the cost. Saturating: `since` past the head yields an
+/// empty range rather than an inverted one.
+fn jobs_window(next: u64, since: u64, limit: Option<u64>) -> (u64, u64) {
+    let limit = limit
+        .filter(|n| *n > 0)
+        .unwrap_or(JOBS_LIST_WINDOW)
+        .min(JOBS_LIST_WINDOW);
+    let oldest = next.saturating_sub(JOBS_LIST_WINDOW).max(since);
+    let start = next.saturating_sub(limit).max(oldest).min(next);
+    (start, next)
+}
+
 /// Percent-decode a query value (`%2F`, `%3A`, `+`). Providers send hex/ss58,
 /// so this only has to undo what an HTTP client may have escaped.
 fn pct_decode(s: &str) -> String {
@@ -7300,7 +7318,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         client.try_get_next_job_id()
                     ) {
                         Some(next) => {
-                            let start = next.saturating_sub(JOBS_LIST_WINDOW);
+                            // Honour `limit`/`since`: they were documented and
+                            // requested from day one but never read, so every
+                            // `?limit=3` walked the whole 256-id window, and each
+                            // id costs a `chain JobState` read.
+                            let limit = query_param(&url, "limit").and_then(|s| s.parse().ok());
+                            let since = query_param(&url, "since")
+                                .and_then(|s| s.parse().ok())
+                                .unwrap_or(0);
+                            let (start, _end) = jobs_window(next, since, limit);
                             // Who the AP actually leased each job to. The chain
                             // only knows a provider after its `accept_job`, so this
                             // is the attribution that exists from the first second
@@ -7308,7 +7334,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // is spread across the fleet).
                             let leases = lease_providers(&assign_store);
                             let mut jobs = vec![];
-                            for id in start..next {
+                            // Newest first while reading, so a small `limit` is
+                            // cheap and not merely short; restored to ascending
+                            // order before the response so the payload shape a
+                            // caller already parses does not change.
+                            for id in (start..next).rev() {
                                 if let Some((state, _p, _r, prov)) = chain_or_504!(
                                     deadline,
                                     &rt,
@@ -7330,6 +7360,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }));
                                 }
                             }
+                            jobs.reverse();
                             json!({"jobs":jobs, "from":start, "next":next})
                         }
                         None => json!({
@@ -9155,6 +9186,42 @@ mod tests {
         );
         // A bare `?` is a query too (empty), not a path character.
         assert_eq!(path_segments("/network?"), vec!["network"]);
+    }
+
+    #[test]
+    fn the_jobs_window_honours_limit_and_since() {
+        // Live defect 2026-11-15: `GET /jobs?limit=3` returned 256 rows and
+        // performed 256 `chain JobState` reads, because the handler ignored the
+        // query and walked the whole window. A small limit must be cheap.
+        assert_eq!(jobs_window(1000, 0, Some(3)), (997, 1000));
+        assert_eq!(jobs_window(1000, 0, Some(10)), (990, 1000));
+        // No limit (or the documented `256`) still means the whole window.
+        assert_eq!(jobs_window(1000, 0, None), (744, 1000));
+        assert_eq!(jobs_window(1000, 0, Some(256)), (744, 1000));
+        // The window is the ceiling: a greedy caller cannot make it cost more.
+        assert_eq!(jobs_window(1000, 0, Some(99_999)), (744, 1000));
+        // `limit=0` is not "no jobs"; it means "unset" — never a silent blank.
+        assert_eq!(jobs_window(1000, 0, Some(0)), (744, 1000));
+        // `since` is a floor, and wins over `limit` when it is more recent.
+        assert_eq!(jobs_window(1000, 995, Some(50)), (995, 1000));
+        // Below the head: no underflow, and the range can never invert.
+        assert_eq!(jobs_window(10, 0, Some(3)), (7, 10));
+        assert_eq!(jobs_window(2, 0, Some(50)), (0, 2));
+        // `since` past the head is an empty window, not a panic or a wrap.
+        let (s, e) = jobs_window(1000, 5000, Some(50));
+        assert_eq!(s, e);
+        assert_eq!(jobs_window(0, 0, Some(3)), (0, 0));
+        // The values the handler feeds in come from the raw target verbatim.
+        let url = "/jobs?limit=3&since=990";
+        assert_eq!(
+            query_param(url, "limit").and_then(|v| v.parse().ok()),
+            Some(3u64)
+        );
+        assert_eq!(
+            query_param(url, "since").and_then(|v| v.parse().ok()),
+            Some(990u64)
+        );
+        assert_eq!(query_param("/jobs", "limit"), None);
     }
 
     #[test]
