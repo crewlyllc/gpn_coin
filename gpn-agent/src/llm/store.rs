@@ -58,6 +58,33 @@ fn file_sig(path: &Path) -> FileSig {
     }
 }
 
+/// Rate-limited notice that the ledger exists but could not be read.
+///
+/// The provider poll loop calls `get_job` ~128 times per 300 ms pass, so a
+/// damaged file must not print a line per lookup. One line per 10 s names the
+/// path and the reason; recovery is silent, because the next read simply
+/// succeeds. Nothing here fabricates an empty store (item #183(a)).
+fn note_store_read_failure(path: &Path, why: &str) {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static LAST_NOTICE: AtomicI64 = AtomicI64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let last = LAST_NOTICE.load(Ordering::Relaxed);
+    if now.saturating_sub(last) >= 10
+        && LAST_NOTICE
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        eprintln!(
+            "[store] {} is UNKNOWN, not empty ({why}) — serving the last good ledger, \
+             rewriting nothing, and retrying on the next read",
+            path.display()
+        );
+    }
+}
+
 /// Default store location (override with env `GPN_LLM_STORE`).
 ///
 /// Defaults to a PERSISTENT, shared path (`~/.gpn/llm_store.json`) so the API and
@@ -373,6 +400,25 @@ impl LlmStore {
         }
     }
 
+    /// Read + parse the ledger, keeping "absent" and "unreadable" apart.
+    ///
+    /// `Ok(None)` = the file genuinely does not exist (a fresh host — an empty
+    /// store is the truth). `Err` = the file exists but could not be read or
+    /// parsed, which is UNKNOWN, never an empty store (item #183(a)): the AP
+    /// published "no payload" for a job whose entry was still on disk, and a
+    /// mutator that treated an unparseable read as `{}` would rewrite the whole
+    /// 4.5k-entry ledger down to the single job it was adding.
+    fn read_map(&self) -> Result<Option<HashMap<u64, LlmJob>>, String> {
+        match std::fs::read_to_string(&self.path) {
+            Ok(s) => match serde_json::from_str::<HashMap<u64, LlmJob>>(&s) {
+                Ok(map) => Ok(Some(map)),
+                Err(e) => Err(format!("unparseable: {e}")),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("unreadable: {e}")),
+        }
+    }
+
     fn load(&self) -> HashMap<u64, LlmJob> {
         let sig = file_sig(&self.path);
         let mut cache = store_cache().lock().unwrap();
@@ -382,21 +428,45 @@ impl LlmStore {
                 return map.clone();
             }
         }
-        let map: HashMap<u64, LlmJob> = match std::fs::read_to_string(&self.path) {
-            Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
-            Err(_) => HashMap::new(),
-        };
-        cache.insert(self.path.clone(), (sig, map.clone()));
-        map
+        match self.read_map() {
+            Ok(Some(map)) => {
+                cache.insert(self.path.clone(), (sig, map.clone()));
+                map
+            }
+            Ok(None) => {
+                cache.insert(self.path.clone(), (sig, HashMap::new()));
+                HashMap::new()
+            }
+            Err(why) => {
+                // Do NOT cache an empty map here: cache it once and every
+                // lookup in this process answers "no payload" until the file
+                // happens to change again. Serve the last good map instead and
+                // retry the file on the next call.
+                let last = cache.get(&self.path).map(|(_, m)| m.clone());
+                note_store_read_failure(&self.path, &why);
+                last.unwrap_or_default()
+            }
+        }
     }
 
     /// Always read the store from disk, bypassing the process cache. Used by the
     /// mutators *under the cross-process lock* so a stale in-memory map can never
     /// overwrite another process's concurrent write.
-    fn load_fresh(&self) -> HashMap<u64, LlmJob> {
-        match std::fs::read_to_string(&self.path) {
-            Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
-            Err(_) => HashMap::new(),
+    ///
+    /// Returns `Err` rather than an empty map when the file exists but cannot be
+    /// parsed: a read-modify-write that started from `{}` would persist that
+    /// empty map and delete every other job in the ledger.
+    fn load_fresh(&self) -> std::io::Result<HashMap<u64, LlmJob>> {
+        match self.read_map() {
+            Ok(Some(map)) => Ok(map),
+            Ok(None) => Ok(HashMap::new()),
+            Err(why) => {
+                note_store_read_failure(&self.path, &why);
+                Err(std::io::Error::other(format!(
+                    "refusing to rewrite {}: {why}",
+                    self.path.display()
+                )))
+            }
         }
     }
 
@@ -416,7 +486,7 @@ impl LlmStore {
     pub fn put(&self, job_id: u64, job: LlmJob) -> std::io::Result<()> {
         let _g = self.lock.lock().unwrap();
         let _x = StoreLock::acquire(&self.path)?;
-        let mut map = self.load_fresh();
+        let mut map = self.load_fresh()?;
         map.insert(job_id, job);
         self.save(&map)
     }
@@ -479,7 +549,7 @@ impl LlmStore {
     pub fn set_status(&self, job_id: u64, status: &str) -> std::io::Result<()> {
         let _g = self.lock.lock().unwrap();
         let _x = StoreLock::acquire(&self.path)?;
-        let mut map = self.load_fresh();
+        let mut map = self.load_fresh()?;
         if let Some(j) = map.get_mut(&job_id) {
             j.status = status.to_string();
             self.save(&map)?;
@@ -519,7 +589,7 @@ impl LlmStore {
     ) -> std::io::Result<()> {
         let _g = self.lock.lock().unwrap();
         let _x = StoreLock::acquire(&self.path)?;
-        let mut map = self.load_fresh();
+        let mut map = self.load_fresh()?;
         if let Some(j) = map.get_mut(&job_id) {
             j.response = Some(response.to_string());
             j.result_hash = Some(result_hash.to_string());
@@ -546,7 +616,7 @@ impl LlmStore {
     ) -> std::io::Result<()> {
         let _g = self.lock.lock().unwrap();
         let _x = StoreLock::acquire(&self.path)?;
-        let mut map = self.load_fresh();
+        let mut map = self.load_fresh()?;
         if let Some(j) = map.get_mut(&job_id) {
             j.prompt_tokens = prompt_tokens;
             j.completion_tokens = completion_tokens;
@@ -565,7 +635,7 @@ impl LlmStore {
     ) -> std::io::Result<()> {
         let _g = self.lock.lock().unwrap();
         let _x = StoreLock::acquire(&self.path)?;
-        let mut map = self.load_fresh();
+        let mut map = self.load_fresh()?;
         if let Some(j) = map.get_mut(&job_id) {
             j.artifact_path = Some(artifact_path.to_string());
             j.artifact_media_type = Some(media_type.to_string());
@@ -579,7 +649,7 @@ impl LlmStore {
     pub fn set_error(&self, job_id: u64, err: &str) -> std::io::Result<()> {
         let _g = self.lock.lock().unwrap();
         let _x = StoreLock::acquire(&self.path)?;
-        let mut map = self.load_fresh();
+        let mut map = self.load_fresh()?;
         if let Some(j) = map.get_mut(&job_id) {
             j.error = Some(err.to_string());
             j.status = "error".to_string();
@@ -765,6 +835,65 @@ mod tests {
         for i in 0..100u64 {
             assert!(s.get(i).is_some(), "entry {i} lost to a concurrent write");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unparseable_store_is_unknown_not_empty_and_is_never_truncated() {
+        // Item #183(a): `/assignments` handed out leases with no payload because
+        // the store read collapsed an unreadable file to an empty map. Two
+        // consequences were live: every lookup answered "no payload" for the
+        // whole process (the cached empty map), and a mutator would have saved
+        // that empty map over a 4.5k-entry ledger.
+        let dir = std::env::temp_dir().join(format!("gpn-unknown-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("llm_store.json");
+        let s = LlmStore::with_path(p.clone());
+        for id in 1..=3u64 {
+            s.put(id, LlmJob::new_llm("m", "p", 0.7, 16)).unwrap();
+        }
+        let good = std::fs::read_to_string(&p).unwrap();
+
+        // Damage the file the way a torn/partial write would.
+        std::fs::write(&p, &good[..good.len() / 2]).unwrap();
+
+        // A read is UNKNOWN, not empty: the last good map is still served, so a
+        // lease does not lose its payload just because the file is mid-repair.
+        assert!(
+            s.get(1).is_some(),
+            "an unparseable store must not read as 'this job has no payload'"
+        );
+
+        // A write must refuse rather than persist an empty map + one job.
+        let err = s.put(99, LlmJob::new_llm("m", "p", 0.7, 16));
+        assert!(err.is_err(), "put() rewrote a ledger it could not read");
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            &good[..good.len() / 2],
+            "a failed read must leave the file byte-identical"
+        );
+
+        // Once the file is valid again the same handle sees the items.
+        std::fs::write(&p, &good).unwrap();
+        assert!(s.get(2).is_some());
+        s.put(99, LlmJob::new_llm("m", "p", 0.7, 16)).unwrap();
+        for id in [1u64, 2, 3, 99] {
+            assert!(s.get(id).is_some(), "entry {id} lost after a damaged read");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_store_is_genuinely_empty() {
+        // Absent is not unreadable: a fresh host has no ledger and must still be
+        // able to write the first job (otherwise #183's fix would deadlock it).
+        let dir = std::env::temp_dir().join(format!("gpn-absent-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("llm_store.json");
+        let s = LlmStore::with_path(p);
+        assert!(s.get(1).is_none());
+        s.put(1, LlmJob::new_llm("m", "p", 0.7, 16)).unwrap();
+        assert!(s.get(1).is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
