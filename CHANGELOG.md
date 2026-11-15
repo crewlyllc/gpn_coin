@@ -8,6 +8,100 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.48] - 2026-11-15
+
+Bumped from 0.3.47. Twenty-one commits, one theme: **the network stops lying about what it
+did.** A provider that cannot run the model refuses by name, a job that dies says so, a box
+that is pull-only is not a refusal, and a fairness claim is verifiable from `/jobs`.
+
+### Changed
+- **Routing is a capability filter, first-come-first-served.** `route_candidates` no longer
+  scores busy tier, active count, measured latency or pull penalty — it filters on capability,
+  model present (or pullable), VRAM/RAM, the GFLOPS floor with "unknown is not a pass",
+  funded, deliverable and a free slot. The queue is a `WaitRing`: FIFO by `/assignments`
+  poll arrival, the served provider goes to the back, a 90 s silence drops it, and a provider
+  at capacity (GPU locked or `idle.json` set) polls with `take=0` instead of asking for work it
+  cannot run. Why: with four healthy providers advertising `llama3.2:1b`, six concurrent jobs
+  were leased **6/6** to the provider co-hosted with the access point (0 ms loopback beat every
+  remote box).
+- `GET /jobs` reports the lease provider, so fairness is observable instead of inferred.
+- **One provider address is one candidate.** The registry holds a row per provider *process*
+  and a lease is addressed to the account, so one box could fill the candidate list twice and
+  burn two of three attempts on a box that had just refused.
+
+### Added
+- **A pinned model this box cannot serve is a refusal, not a substitution.** Serving
+  `deepseek-r1:32b` on an 8 GB box returned HTTP 200 in 109 ms with `grapes`, produced by
+  `llama3.2:1b`; the caller was billed for a model that never ran. `models::model_unservable()`
+  now names the reason (absent, with what *is* installed; or too large for the card), wired at
+  all three entry points — the channel lane refuses **before** `ch.accept` (409, nothing
+  charged, the AP re-leases it), on-chain `run_job` fails `FAIL_CANNOT_RUN` so escrow refunds
+  immediately, and `/infer` returns `{ok:false,error}`.
+- `GET /jobs` honours `limit` and `since`: `?limit=3` returned 256 rows and cost 256 chain
+  reads; it now reads newest-first with `JOBS_LIST_WINDOW` as the ceiling and still responds in
+  the ascending shape callers already parse.
+
+### Fixed
+- **A job that can no longer be served stops the wait.** `/v1/chat/completions` blocked in a
+  fixed 360 s loop and never asked the chain, so a janitor-cancelled job looked like a slow one
+  (measured: `cancelled stale Pending #6582` at 08:01:16 while the AP logged handlers stuck
+  >336 s). One chain read every ~5 s now stops at once on Cancelled/Failed, or when a budget
+  derived from the janitor's own windows is spent, and the answer says "cancelled on chain",
+  "failed on chain" or "still <state> after Ns" — never "timeout" when it was a cancel.
+- **A pull-only candidate does not consume an attempt.** `failover()` spent all three attempts
+  on pull-only Windows boxes (structurally undialable: `pull://`, no inbound port) and never
+  dialled the healthy local provider sitting fourth in the list. Only dialable attempts count,
+  and an all-pull-only list now says that instead of reporting an empty refusal list.
+- **A pull-only box is not a provider that refused.** `channel_endpoint()` returns `None` for
+  both a pull-only box and a malformed URL and the caller printed one sentence for both. Now
+  `ChannelEndpointFailure{PullOnly,Undialable}` states the structural fact by name.
+- **A payload-less lease is not a delivery.** `collect_leases` dropped a failed payload lookup
+  silently while still stamping the delivery, so the janitor's 240 s veto sheltered a job no
+  provider could run (box 4: `(payload stored)=0 / (payload missing)=24`, every lease stamped)
+  and the caller got a Cancelled job four minutes after HTTP 200. Only a lease that carries a
+  payload stamps the delivery; the omission is logged once per job.
+- **An unreadable ledger is UNKNOWN, not empty.** `load_fresh()` used
+  `unwrap_or_default()`, so one failed read made the process answer "this job has no payload"
+  *and* let a read-modify-write truncate a 4.5k-entry ledger to the single job being added.
+  `read_map()` now separates absent (a fresh host is empty) from unreadable (UNKNOWN);
+  `load()` serves the last good map without caching the failure and `load_fresh()` returns `Err`.
+- **A Windows task gets no `HOME`.** Every `~/.gpn/...` resolver fell back to `.`, which for a
+  Task-Scheduler process is `C:\Windows\System32` — unwritable for the limited token — so from
+  the 01:06 update restart the provider persisted nothing and every pulled lease came back
+  "payload missing". `firstrun::state_home()` resolves `HOME` then `USERPROFILE`, and `main`
+  adopts `USERPROFILE` once before any child spawns and logs it.
+- **The progress tick follows the state home too** — the one resolver #185 missed still used
+  `HOME.unwrap_or(".")`, so box 1's `provider-tick.json` froze for five hours about a healthy
+  process while the runbook tells operators to diagnose a wedge by watching exactly that file.
+- **A slow Ollama can no longer blank the inventory.** `:8093/status` read the model inventory
+  inline with a 2500 ms timeout while the reader gives up at 1500 ms, so any stall >1.5 s made
+  every provider publish no capabilities — observed live when the LLM, finetune and diffusion
+  providers all logged "local /status unreadable" in the same second. The read is
+  stale-while-revalidate (1200 ms budget, single-flighted refresh) and a failed read keeps the
+  installed names, dropping only `can_pull`.
+- **The Ollama budget is a compile-time assertion** at module scope, so `cargo build --release`
+  and `cargo clippy --bin` fail if a read is allowed to outlive its reader.
+- **A query string is not part of the route path.** `GET /jobs?limit=256` and even
+  `GET /health?ts=1` returned "not found" because the router kept `jobs?limit=256` as a segment
+  (`tiny_http` hands the target verbatim). Same defect on the `:8093` status routes — the path
+  the access point polls to decide whether a box is reachable, so any cache-buster would have
+  made a healthy provider look down.
+- **The disk guard declined exactly when the disk was full.** `df --output=pcent` prints *used*
+  percent and the script treated it as free, so it pruned with plenty of space and did nothing
+  at 92 % used. The chain halted on a full root FS on 2026-10-19; the guard was silent then.
+  Used is used, free is free, and both are reported.
+- **The prune guard can see the checkout's own target trees.** It reclaimed 0 MiB while 66 G sat
+  in `gpn-agent/target` + `gpn-node/target` that it never scanned, and the root FS hit the 10 %
+  floor. It now scans `<crate>/target/debug` under `GPN_TARGET_ROOTS` too, never removes a
+  directory merely *named* `debug`, and leaves release profiles and recently-touched trees alone.
+- **The snapshot job refuses a stale verifier before it exports**, not after it has deleted the
+  previous asset and uploaded a new one; sign + self-verify now precede touching the mirror, so
+  the mirror cannot carry bytes with an unverifiable digest.
+- **The lane check cannot mistake a timestamp for a fault.** A bare `503` grep counted
+  `Nov 14 23:16:34.503` as an HTTP error: 438 "hits" against 0 real 503s. It matches only
+  HTTP-shaped statuses and prose faults, and takes `--file` so a saved journal can be replayed
+  as evidence.
+
 ## [0.3.47] - 2026-11-14
 
 Bumped from 0.3.46. An update now has to prove it happened.
