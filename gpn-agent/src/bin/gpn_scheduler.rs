@@ -2382,7 +2382,27 @@ where
 {
     use gpn_agent::hub_ap::ChannelFail;
     let mut reasons: Vec<String> = Vec::new();
-    for (i, cand) in candidates.iter().take(MAX_ROUTE_ATTEMPTS).enumerate() {
+    // A pull-only box (`status_url` `pull://…`: no inbound port at all) cannot be
+    // dialled for a channel job, and the channel walk refuses it BEFORE opening a
+    // socket — it costs no work, so it must not consume one of the
+    // `MAX_ROUTE_ATTEMPTS` slots. Counting them did exactly that on 2026-11-15
+    // 07:57:10: three pull-only Windows boxes filled all three slots (candidate
+    // #4 was the healthy local provider, which advertises the requested model and
+    // is dialable), the request fell back to on-chain escrow, the lease went to a
+    // box whose payload store is broken (#185), and the caller hung for 4 minutes
+    // to a Cancelled job. Budget bounds *work*; a structural refusal is not work.
+    // The skip is logged once per box by `hub_ap` ("is pull-only"), so it is not
+    // silent.
+    let mut tried = 0usize;
+    for cand in candidates.iter() {
+        if gpn_agent::hub_ap::channel_endpoint(&cand.provider.status_url).is_none() {
+            continue;
+        }
+        if tried >= MAX_ROUTE_ATTEMPTS {
+            break;
+        }
+        let i = tried;
+        tried += 1;
         match attempt(&cand.provider) {
             Ok(value) => {
                 if i > 0 {
@@ -2420,6 +2440,20 @@ where
                 };
             }
         }
+    }
+    // Every candidate was structurally undialable: no attempt was made and no
+    // work was spent, so say exactly that instead of an empty refusal list, which
+    // would read as "three providers refused" all over again.
+    if reasons.is_empty()
+        && candidates
+            .iter()
+            .all(|c| gpn_agent::hub_ap::channel_endpoint(&c.provider.status_url).is_none())
+        && !candidates.is_empty()
+    {
+        reasons.push(format!(
+            "no channel-capable provider: all {} candidate(s) are pull-only (no dialable endpoint — channel mode is dial-only; #181)",
+            candidates.len()
+        ));
     }
     Failover::Exhausted { reasons }
 }
@@ -10041,10 +10075,16 @@ mod tests {
     #[test]
     fn a_refusal_moves_to_the_next_candidate_and_the_second_provider_serves() {
         use gpn_agent::hub_ap::ChannelFail;
-        let first = prov_caps("first", "http://first", 1, "sd-turbo", &["ImageGeneration"]);
+        let first = prov_caps(
+            "first",
+            "http://first:8093/status",
+            1,
+            "sd-turbo",
+            &["ImageGeneration"],
+        );
         let second = prov_caps(
             "second",
-            "http://second",
+            "http://second:8093/status",
             50,
             "sd-turbo",
             &["ImageGeneration"],
@@ -10090,8 +10130,8 @@ mod tests {
     #[test]
     fn an_ambiguous_failure_never_fails_over() {
         use gpn_agent::hub_ap::ChannelFail;
-        let a = prov_caps("a", "http://a", 1, "m", &["LLMInference"]);
-        let b = prov_caps("b", "http://b", 2, "m", &["LLMInference"]);
+        let a = prov_caps("a", "http://a:8093/status", 1, "m", &["LLMInference"]);
+        let b = prov_caps("b", "http://b:8093/status", 2, "m", &["LLMInference"]);
         let cands = route_candidates(
             &[a, b],
             JobKind::Text,
@@ -10126,7 +10166,7 @@ mod tests {
             .map(|i| {
                 prov_caps(
                     &format!("p{i}"),
-                    &format!("http://p{i}"),
+                    &format!("http://p{i}:8093/status"),
                     i as u64,
                     "m",
                     &["LLMInference"],
@@ -10165,6 +10205,91 @@ mod tests {
             MAX_ROUTE_ATTEMPTS
         );
         assert!(body["error"]["message"].as_str().unwrap().contains("image"));
+    }
+
+    /// #186: a structurally undialable candidate must not consume a failover slot.
+    ///
+    /// Live shape (2026-11-15 07:57:10): three pull-only Windows boxes were
+    /// candidates #1–#3, the healthy local provider advertising the requested
+    /// model was #4, and `take(MAX_ROUTE_ATTEMPTS)` meant it was never dialled —
+    /// the request fell back to on-chain escrow and the lease went to a box that
+    /// cannot store a payload (#185), so the caller hung to a Cancelled job.
+    #[test]
+    fn a_pull_only_candidate_never_consumes_an_attempt_slot() {
+        let pull_only = |i: usize| RouteCandidate {
+            provider: prov_caps(
+                &format!("pull{i}"),
+                &format!("pull://pull{i}"),
+                0,
+                "m",
+                &["LLMInference"],
+            ),
+            needs_pull: true,
+            gflops_unverified: false,
+        };
+        let dialable = |i: usize| RouteCandidate {
+            provider: prov_caps(
+                &format!("box{i}"),
+                &format!("http://box{i}:8093/status"),
+                50,
+                "m",
+                &["LLMInference"],
+            ),
+            needs_pull: false,
+            gflops_unverified: false,
+        };
+
+        // The live shape: pull-only boxes first, the dialable box last.
+        let cands = vec![pull_only(1), pull_only(2), pull_only(3), dialable(4)];
+        let mut tried: Vec<String> = Vec::new();
+        let out = failover("test-text", &cands, |p| {
+            tried.push(p.address.clone());
+            Ok(p.address.clone())
+        });
+        assert_eq!(
+            tried,
+            vec!["box4"],
+            "pull-only boxes are structurally undialable — they must be skipped, not counted"
+        );
+        match out {
+            Failover::Served {
+                value, attempted, ..
+            } => {
+                assert_eq!(value, "box4");
+                assert_eq!(attempted, 1, "the dialable attempt is attempt #1");
+            }
+            other => panic!("expected the dialable provider to serve, got {other:?}"),
+        }
+
+        // The cap still bounds real work: five dialable boxes => three attempts.
+        let all_dialable: Vec<RouteCandidate> = (0..5).map(dialable).collect();
+        let mut tried = 0;
+        let out: Failover<String> = failover("test-cap", &all_dialable, |_| {
+            tried += 1;
+            Err(gpn_agent::hub_ap::ChannelFail::NotAttempted("down".into()))
+        });
+        assert_eq!(tried, MAX_ROUTE_ATTEMPTS);
+        match out {
+            Failover::Exhausted { reasons } => assert_eq!(reasons.len(), MAX_ROUTE_ATTEMPTS),
+            other => panic!("expected Exhausted, got {other:?}"),
+        }
+
+        // A fleet of nothing but pull-only boxes still refuses honestly, and the
+        // reason says why rather than an empty list.
+        let only_pull: Vec<RouteCandidate> = (0..2).map(pull_only).collect();
+        let out: Failover<String> = failover("test-pull", &only_pull, |_| {
+            panic!("an undialable candidate must never be attempted")
+        });
+        match out {
+            Failover::Exhausted { reasons } => {
+                assert_eq!(reasons.len(), 1);
+                assert!(
+                    reasons[0].contains("pull-only") && reasons[0].contains("2 candidate"),
+                    "reason must name the structural cause: {reasons:?}"
+                );
+            }
+            other => panic!("expected Exhausted, got {other:?}"),
+        }
     }
 
     /// Item #109: the refresher used to collapse *every* unsuccessful read into
