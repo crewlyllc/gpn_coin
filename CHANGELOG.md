@@ -8,6 +8,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.47] - 2026-11-14
+
+Bumped from 0.3.46. An update now has to prove it happened.
+
+### Fixed
+- **An update is not done until the running node reports the new version.** After
+  the swap the supervisor restarts the node, queries the version that is actually
+  running, and only then marks the update complete. If the new build does not
+  report the expected version within the bounded window, it rolls back to the
+  previous version and leaves the node running rather than down.
+- One attempt per version per boot is recorded, so a broken release cannot
+  restart-loop a machine.
+
+### Why
+On 2026-11-14 box 3 sat on 0.3.45 for eight hours with 0.3.46 unpacked in
+`versions/`: the updater derived its "current" version from the install
+directory, found no build stamp, reported `update_available: false`, and in any
+case could not overwrite a running executable. Configured is not working.
+
 ## [0.3.46] - 2026-11-14
 
 Bumped from 0.3.45. One theme: a peer doing something unusual but recoverable is
