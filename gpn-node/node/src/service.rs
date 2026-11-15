@@ -976,6 +976,13 @@ pub async fn new_full<
 
         let protocol_id = config.protocol_id();
         let fork_id = config.chain_spec.fork_id();
+        // The block-announces notification protocol name, needed by the
+        // decorator's terminal action (`disconnect_peer`) — computed exactly as
+        // `SyncingEngine::new` does (`get_block_announce_proto_config`), from
+        // the genesis hash and fork id.
+        let announce_protocol: sc_network::ProtocolName =
+            sc_network_sync::block_announces_protocol_name(client.info().genesis_hash, fork_id)
+                .into();
         let metrics_registry = config.prometheus_config.as_ref().map(|c| &c.registry);
         let block_announce_validator =
             Box::new(sp_consensus::block_validation::DefaultBlockAnnounceValidator);
@@ -1005,8 +1012,9 @@ pub async fn new_full<
             metrics_registry,
             config.blocks_pruning.is_archive(),
         )?;
-        let strategy: Box<dyn SyncingStrategy<Block>> =
-            Box::new(crate::sync_tolerance::TolerantSyncStrategy::new(inner));
+        let strategy: Box<dyn SyncingStrategy<Block>> = Box::new(
+            crate::sync_tolerance::TolerantSyncStrategy::new(inner, announce_protocol),
+        );
 
         let network_service_provider =
             sc_network_sync::service::network::NetworkServiceProvider::new();

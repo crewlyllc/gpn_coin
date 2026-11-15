@@ -47,12 +47,32 @@
 //!   lifetime budget ([`INFLIGHT_PENALTY_BUDGET`], 2^16 units) which is
 //!   ~23,000× below `BANNED_THRESHOLD` (71% of `i32::MIN`), so no amount of
 //!   repetition can add up to a ban.
+//!
+//! ## The terminal state the exception still needs (task #189)
+//!
+//! Removing the SDK's ban also removed its *only* terminal action for this
+//! condition, and the SDK's counter is not a usable exit condition: an entry is
+//! forgotten after `backoff × count` (60 s × 1), so a peer whose retry cadence
+//! is *longer* than that (measured in production: 70 s) resets to `1` on every
+//! observation and can never reach 3. A peer stuck at one block was therefore
+//! served a fresh substream every 70 s indefinitely, and the penalty budget
+//! (64 aborts) would eventually run out and hide it from the log as well.
+//!
+//! So the exit condition here is **progress**, not a count: we remember the
+//! highest block number the peer has told us about ([`InflightTolerance::note_peer`],
+//! fed by `add_peer` and block announces). If the peer abandons
+//! [`STALL_ABORTS`] requests and its best number has not advanced for
+//! [`STALL_HORIZON`], it is treated as wedged: we disconnect it (once per
+//! observation, logged once) instead of feeding it more work. A peer that
+//! announces a higher block clears the state and starts again from zero — that
+//! is the difference between "slow" and "stuck".
 
-use sc_network::{PeerId, ReputationChange};
+use sc_network::{PeerId, ProtocolName, ReputationChange};
 use sc_network_sync::service::network::NetworkServiceHandle;
 use sc_network_sync::strategy::{StrategyKey, SyncingAction, SyncingStrategy};
 use sc_network_sync::types::BadPeer;
 use sp_runtime::traits::Block as BlockT;
+use sp_runtime::traits::{Header, UniqueSaturatedInto};
 use std::any::Any;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -84,6 +104,18 @@ pub const INFLIGHT_PENALTY_BUDGET: u32 = 1 << 16;
 /// At most this many peers are tracked (the SDK uses 512 for the same table).
 pub const MAX_TRACKED_PEERS: usize = 512;
 
+/// Aborts, without progress, before a peer is treated as wedged rather than
+/// flaky. Ten is roughly the 47 observed in 75 min on 2026-11-15 divided by
+/// five, so a genuinely flaky-but-syncing peer (which resets on every announce)
+/// is nowhere near it, while a stuck one reaches it in ~12 min.
+pub const STALL_ABORTS: u64 = 10;
+
+/// How long a peer may make no progress at all before the abort count above
+/// means "wedged". Long enough that a slow-but-moving peer (announce every few
+/// minutes) is never mistaken for a stuck one; short enough that a caller
+/// waiting on sync does not lose more than a few minutes to a dead peer.
+pub const STALL_HORIZON: Duration = Duration::from_secs(12 * 60);
+
 /// The SDK's ban threshold for this condition
 /// (`disconnected_peers.rs:43`, `const MAX_NUM_DISCONNECTS: u64 = 3`). Used
 /// only to make the log line read "3/3" — the count no longer bans anything.
@@ -109,8 +141,17 @@ pub struct Observed {
     /// The SDK would have banned at 3.
     pub count: u64,
     /// What we report instead of `i32::MIN`. `None` once the lifetime budget
-    /// is spent.
+    /// is spent, or when the peer is judged wedged (the disconnect is then the
+    /// whole response).
     pub charge: Option<ReputationChange>,
+    /// Aborts accumulated since the peer last made progress.
+    pub aborts: u64,
+    /// This peer is wedged: no progress for [`STALL_HORIZON`] across
+    /// [`STALL_ABORTS`] aborts. The caller must stop serving it.
+    pub stalled: bool,
+    /// True only for the observation that first reached the verdict, so the
+    /// caller can log it once instead of once per retry cycle.
+    pub first_stall: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -118,6 +159,15 @@ struct Entry {
     count: u64,
     last: Instant,
     spent: u32,
+    /// Aborts since the peer last advanced; unlike `count` this is *not* reset
+    /// by the SDK's `backoff × count` expiry, which is the defect #189 names.
+    aborts: u64,
+    /// Highest block number this peer has reported (0 = never heard from).
+    best: u64,
+    /// When `best` last advanced (or when the peer was first seen).
+    progress_at: Instant,
+    /// Verdict already reached; cleared by progress.
+    stalled: bool,
 }
 
 /// Bounded, self-expiring per-peer accounting for abandoned requests.
@@ -130,6 +180,8 @@ struct Entry {
 pub struct InflightTolerance {
     peers: HashMap<PeerId, Entry>,
     backoff: Duration,
+    stall_aborts: u64,
+    stall_horizon: Duration,
 }
 
 impl Default for InflightTolerance {
@@ -143,6 +195,8 @@ impl InflightTolerance {
         Self {
             peers: HashMap::new(),
             backoff: DISCONNECTED_PEER_BACKOFF,
+            stall_aborts: STALL_ABORTS,
+            stall_horizon: STALL_HORIZON,
         }
     }
 
@@ -152,6 +206,52 @@ impl InflightTolerance {
         Self {
             peers: HashMap::new(),
             backoff,
+            stall_aborts: STALL_ABORTS,
+            stall_horizon: STALL_HORIZON,
+        }
+    }
+
+    /// Record that the peer answered something. A completed response breaks an
+    /// abort streak, so a peer that serves us and occasionally abandons a
+    /// request is never mistaken for a wedged one.
+    pub fn note_activity(&mut self, peer: PeerId, now: Instant) {
+        if let Some(e) = self.peers.get_mut(&peer) {
+            e.aborts = 0;
+            e.stalled = false;
+            e.progress_at = now;
+        }
+    }
+
+    /// Record the peer's reported best block number. Called from `add_peer`
+    /// (the baseline) and from block announces (the progress signal). An
+    /// increase clears the abort streak and any stall verdict.
+    pub fn note_peer(&mut self, peer: PeerId, best: u64, now: Instant) {
+        if self.peers.len() >= MAX_TRACKED_PEERS && !self.peers.contains_key(&peer) {
+            self.evict_oldest(now);
+        }
+        match self.peers.get_mut(&peer) {
+            Some(e) if best > e.best => {
+                e.best = best;
+                e.progress_at = now;
+                e.aborts = 0;
+                e.stalled = false;
+            }
+            Some(_) => {}
+            None => {
+                self.peers.insert(
+                    peer,
+                    Entry {
+                        // Not an abort: `observe` starts the SDK's count at 1.
+                        count: 0,
+                        last: now,
+                        spent: 0,
+                        aborts: 0,
+                        best,
+                        progress_at: now,
+                        stalled: false,
+                    },
+                );
+            }
         }
     }
 
@@ -163,17 +263,32 @@ impl InflightTolerance {
 
     /// Record one abort for `peer` and decide what to report.
     pub fn observe(&mut self, peer: PeerId, now: Instant) -> Observed {
-        let (count, spent) = match self.peers.get(&peer) {
+        let (count, spent, aborts, best, progress_at, stalled) = match self.peers.get(&peer) {
             // The SDK would have forgotten this entry after `backoff × count`.
-            Some(e) if now.saturating_duration_since(e.last) < self.backoff * e.count as u32 => {
-                (e.count.saturating_add(1), e.spent)
-            }
-            Some(e) => (1, e.spent),
-            None => (1, 0),
+            Some(e) if now.saturating_duration_since(e.last) < self.backoff * e.count as u32 => (
+                e.count.saturating_add(1),
+                e.spent,
+                e.aborts,
+                e.best,
+                e.progress_at,
+                e.stalled,
+            ),
+            Some(e) => (1, e.spent, e.aborts, e.best, e.progress_at, e.stalled),
+            None => (1, 0, 0, 0, now, false),
         };
 
+        let aborts = aborts.saturating_add(1);
+        let first_stall = !stalled
+            && aborts >= self.stall_aborts
+            && now.saturating_duration_since(progress_at) >= self.stall_horizon;
+        let stalled = stalled || first_stall;
+
         let remaining = INFLIGHT_PENALTY_BUDGET.saturating_sub(spent);
-        let actual = INFLIGHT_PENALTY.unsigned_abs().min(remaining);
+        let actual = if stalled {
+            0
+        } else {
+            INFLIGHT_PENALTY.unsigned_abs().min(remaining)
+        };
         let charge = if actual == 0 {
             None
         } else {
@@ -192,10 +307,20 @@ impl InflightTolerance {
                 count,
                 last: now,
                 spent: spent.saturating_add(actual),
+                aborts,
+                best,
+                progress_at,
+                stalled,
             },
         );
 
-        Observed { count, charge }
+        Observed {
+            count,
+            charge,
+            aborts,
+            stalled,
+            first_stall,
+        }
     }
 
     /// Forget everything the SDK's backoff would have forgotten by `now`.
@@ -223,13 +348,18 @@ impl InflightTolerance {
 pub struct TolerantSyncStrategy<B: BlockT> {
     inner: Box<dyn SyncingStrategy<B>>,
     inflight: InflightTolerance,
+    /// The block-announces notification protocol, needed by
+    /// `NetworkServiceHandle::disconnect_peer` — the only terminal action this
+    /// wrapper can take on its own without banning the peer.
+    announce_protocol: ProtocolName,
 }
 
 impl<B: BlockT> TolerantSyncStrategy<B> {
-    pub fn new(inner: Box<dyn SyncingStrategy<B>>) -> Self {
+    pub fn new(inner: Box<dyn SyncingStrategy<B>>, announce_protocol: ProtocolName) -> Self {
         Self {
             inner,
             inflight: InflightTolerance::new(),
+            announce_protocol,
         }
     }
 
@@ -240,11 +370,12 @@ impl<B: BlockT> TolerantSyncStrategy<B> {
         net: &NetworkServiceHandle,
         now: Instant,
     ) -> Vec<SyncingAction<B>> {
+        let protocol = self.announce_protocol.clone();
         let mut kept = Vec::with_capacity(actions.len());
         for action in actions {
             match &action {
                 SyncingAction::DropPeer(BadPeer(peer, rep)) => {
-                    if self.screen(*peer, rep, net, now) {
+                    if screen(&mut self.inflight, *peer, rep, net, now, &protocol) {
                         kept.push(action);
                     }
                 }
@@ -253,32 +384,19 @@ impl<B: BlockT> TolerantSyncStrategy<B> {
         }
         kept
     }
-
-    /// The single decision, split out and generic-free so the tests exercise
-    /// the exact code the engine runs.
-    ///
-    /// Returns `true` when the peer must still be dropped (every other fatal
-    /// report), `false` when the action is neutralised.
-    fn screen(
-        &mut self,
-        peer: PeerId,
-        rep: &ReputationChange,
-        net: &NetworkServiceHandle,
-        now: Instant,
-    ) -> bool {
-        screen(&mut self.inflight, peer, rep, net, now)
-    }
 }
 
 /// The policy itself, on plain types so it is directly testable.
 ///
-/// See [`TolerantSyncStrategy::screen`].
+/// The single decision lives here, generic-free, so the tests exercise the
+/// exact code the engine runs.
 pub fn screen(
     inflight: &mut InflightTolerance,
     peer: PeerId,
     rep: &ReputationChange,
     net: &NetworkServiceHandle,
     now: Instant,
+    protocol: &ProtocolName,
 ) -> bool {
     if !is_inflight_abandon(rep) {
         // Everything else stays fatal, and is named in the log so a
@@ -288,6 +406,26 @@ pub fn screen(
     }
 
     let observed = inflight.observe(peer, now);
+    if observed.stalled {
+        // No progress while costing us a request every retry cycle. Item F's
+        // whole point was "do not ban"; the honest terminal action is "stop
+        // serving this peer", not "keep serving it forever". Disconnect it
+        // (no reputation change at all) and say so once per stall, then once
+        // more if it reconnects and stalls again.
+        if observed.first_stall {
+            log::warn!(
+                "sync: peer {peer} abandoned {} requests over {:?} without announcing a \
+                 single new block — wedged, not flaky: disconnecting it instead of serving it \
+                 again (no ban; it may return and will be judged from zero if it makes \
+                 progress) (#189)",
+                observed.aborts,
+                STALL_HORIZON,
+            );
+        }
+        net.disconnect_peer(peer, protocol.clone());
+        return false;
+    }
+
     if let Some(charge) = observed.charge {
         // Report, but do NOT disconnect: the peer keeps its connection, its
         // requests and its place in the peer set.
@@ -295,10 +433,11 @@ pub fn screen(
     }
     log::info!(
         "sync: peer {peer} abandoned a request mid-flight {}/{} — would have been \
-         banned by the SDK, kept connected (penalty {}, budget spent)",
+         banned by the SDK, kept connected (penalty {}, budget spent; {} without progress)",
         observed.count,
         MAX_REPORTED_ABORTS,
         observed.charge.map(|c| c.value).unwrap_or(0),
+        observed.aborts,
     );
     false
 }
@@ -310,6 +449,8 @@ impl<B: BlockT> SyncingStrategy<B> for TolerantSyncStrategy<B> {
         best_hash: B::Hash,
         best_number: sp_runtime::traits::NumberFor<B>,
     ) {
+        self.inflight
+            .note_peer(peer_id, best_number.unique_saturated_into(), Instant::now());
         self.inner.add_peer(peer_id, best_hash, best_number)
     }
 
@@ -323,6 +464,13 @@ impl<B: BlockT> SyncingStrategy<B> for TolerantSyncStrategy<B> {
         peer_id: PeerId,
         announce: &sc_network_common::sync::message::BlockAnnounce<B::Header>,
     ) -> Option<(B::Hash, sp_runtime::traits::NumberFor<B>)> {
+        // The only progress signal available to this wrapper: a peer that
+        // announces a higher block is alive, whatever its retry behaviour.
+        self.inflight.note_peer(
+            peer_id,
+            (*announce.header.number()).unique_saturated_into(),
+            Instant::now(),
+        );
         self.inner
             .on_validated_block_announce(is_best, peer_id, announce)
     }
@@ -360,6 +508,10 @@ impl<B: BlockT> SyncingStrategy<B> for TolerantSyncStrategy<B> {
         protocol_name: sc_network::ProtocolName,
         response: Box<dyn Any + Send>,
     ) {
+        // A response means the peer answered: progress, whatever its announces
+        // say. Without this, a peer serving blocks while re-announcing the same
+        // best number could look silent (#189).
+        self.inflight.note_activity(*peer_id, Instant::now());
         self.inner
             .on_generic_response(peer_id, key, protocol_name, response)
     }
@@ -435,6 +587,10 @@ mod tests {
         InflightTolerance::new()
     }
 
+    fn proto() -> ProtocolName {
+        "/gpn-test/block-announces/1".into()
+    }
+
     fn channel() -> (
         NetworkServiceHandle,
         sc_utils::mpsc::TracingUnboundedReceiver<ToServiceCommand>,
@@ -460,6 +616,7 @@ mod tests {
                 &sdk_inflight(),
                 &net,
                 now + Duration::from_secs(i),
+                &proto(),
             );
             assert!(!keep, "abort {} must not drop the peer", i + 1);
         }
@@ -498,7 +655,7 @@ mod tests {
             Rep::new_fatal("Genesis mismatch"),
         ] {
             assert!(
-                screen(&mut tol, peer, &rep, &net, Instant::now()),
+                screen(&mut tol, peer, &rep, &net, Instant::now(), &proto()),
                 "{rep:?} must still drop the peer"
             );
         }
@@ -593,6 +750,169 @@ mod tests {
             "tracked {} > {MAX_TRACKED_PEERS}",
             tol.tracked()
         );
+    }
+
+    /// #189: the SDK's own exit condition cannot fire at the cadence observed in
+    /// production. Measured on 2026-11-15: one peer abandoned a request 47 times
+    /// in 75 min — median gap 70 s — and `sync_tolerance` logged `1/3` every
+    /// time, because an entry expires after `backoff × count` = 60 s × 1.
+    /// This is the negative control for the count rule: at 70 s the count never
+    /// grows, so "it would be banned eventually" was never true.
+    #[test]
+    fn a_seventy_second_cadence_never_reaches_the_sdk_ban_count() {
+        let mut tol = InflightTolerance::new();
+        let peer = PeerId::random();
+        let mut now = Instant::now();
+
+        for i in 0..47u64 {
+            let o = tol.observe(peer, now);
+            assert_eq!(
+                o.count,
+                1,
+                "abort {}: a 70 s cadence must keep resetting the SDK's count — \
+                 if this ever reaches 3 the premise of #189 changed",
+                i + 1
+            );
+            now += Duration::from_secs(70);
+        }
+
+        // ... and with the count neutralised, the progress rule is what fires.
+        let o = tol.observe(peer, now);
+        assert!(
+            o.stalled,
+            "a peer with no progress must eventually be judged wedged"
+        );
+    }
+
+    /// #189, the behaviour itself: at the measured cadence a peer that never
+    /// announces a new block is disconnected instead of served, and never
+    /// banned. Every abort is answered exactly once.
+    #[test]
+    fn a_wedged_peer_is_disconnected_not_banned() {
+        let mut tol = InflightTolerance::new();
+        let (net, mut rx) = channel();
+        let peer = PeerId::random();
+        let t0 = Instant::now();
+
+        // 47 aborts, 70 s apart, no announcement: the live shape from #189.
+        for i in 0..47u64 {
+            let keep = screen(
+                &mut tol,
+                peer,
+                &sdk_inflight(),
+                &net,
+                t0 + Duration::from_secs(70 * i),
+                &proto(),
+            );
+            assert!(!keep, "abort {} must not be handed to the SDK's ban", i + 1);
+        }
+
+        drop(net);
+        let mut reports = 0;
+        let mut disconnects = 0;
+        while let Ok(cmd) = rx.try_recv() {
+            match cmd {
+                ToServiceCommand::ReportPeer(_, rep) => {
+                    assert_ne!(rep.value, i32::MIN, "never fatal");
+                    reports += 1;
+                }
+                ToServiceCommand::DisconnectPeer(p, _) => {
+                    assert_eq!(p, peer);
+                    disconnects += 1;
+                }
+                other => panic!("unexpected command {other:?}"),
+            }
+        }
+        assert!(disconnects > 0, "a wedged peer must stop being served");
+        assert_eq!(
+            reports + disconnects,
+            47,
+            "every abort is answered exactly once (report before the verdict, \
+             disconnect after) — reports {reports}, disconnects {disconnects}"
+        );
+    }
+
+    /// #189: progress is the exit from the verdict. One higher announce clears
+    /// it, so a slow-but-moving peer is never cut off.
+    #[test]
+    fn progress_clears_the_stall_and_a_moving_peer_is_never_cut_off() {
+        let mut tol = InflightTolerance::new();
+        let (net, mut rx) = channel();
+        let peer = PeerId::random();
+        let t0 = Instant::now();
+
+        tol.note_peer(peer, 306_604, t0);
+
+        // Nine aborts inside the horizon: noisy, not wedged.
+        for i in 0..9u64 {
+            let o = tol.observe(peer, t0 + Duration::from_secs(70 * i));
+            assert!(!o.stalled, "abort {} is below the verdict", i + 1);
+        }
+
+        // It announces a new block: the streak is cleared...
+        tol.note_peer(peer, 306_700, t0 + Duration::from_secs(700));
+        let o = tol.observe(peer, t0 + Duration::from_secs(770));
+        assert!(!o.stalled, "a peer that makes progress is never wedged");
+        assert_eq!(o.aborts, 1, "progress resets the abort streak");
+
+        // ... and eight more aborts after that are still only noise.
+        for i in 1..9u64 {
+            let o = tol.observe(peer, t0 + Duration::from_secs(770 + 70 * i));
+            assert!(
+                !o.stalled,
+                "abort {} after progress is below the verdict",
+                i + 1
+            );
+        }
+
+        drop(net);
+        while let Ok(cmd) = rx.try_recv() {
+            assert!(
+                !matches!(cmd, ToServiceCommand::DisconnectPeer(..)),
+                "a moving peer must never be disconnected"
+            );
+        }
+    }
+
+    /// #189, the narrowed window: the verdict needs BOTH the abort count and a
+    /// silent horizon, so a burst of aborts from a peer that just joined is not
+    /// mistaken for a wedge.
+    #[test]
+    fn aborts_alone_inside_the_horizon_do_not_wedge_a_peer() {
+        let mut tol = InflightTolerance::new();
+        let peer = PeerId::random();
+        let t0 = Instant::now();
+        for i in 0..50u64 {
+            let o = tol.observe(peer, t0 + Duration::from_millis(100 * i));
+            assert!(
+                !o.stalled,
+                "abort {} inside the horizon must not be a verdict",
+                i + 1
+            );
+        }
+    }
+
+    /// #189, the safety valve: a peer that answers requests is making progress
+    /// even when it re-announces the same best number, so it must not be judged
+    /// wedged on the announce stream alone.
+    #[test]
+    fn a_peer_that_answers_is_never_wedged() {
+        let mut tol = InflightTolerance::new();
+        let peer = PeerId::random();
+        let mut now = Instant::now();
+
+        tol.note_peer(peer, 306_604, now);
+        for _ in 0..12u64 {
+            now += Duration::from_secs(70);
+            // It serves a response between aborts, as a working peer does.
+            tol.note_activity(peer, now);
+            let o = tol.observe(peer, now);
+            assert!(!o.stalled, "an answering peer is not wedged");
+            assert!(
+                o.charge.is_some(),
+                "still answers every abort with a report"
+            );
+        }
     }
 
     /// The reason literal above is the whole match. If the SDK is bumped and
