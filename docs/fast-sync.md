@@ -218,3 +218,54 @@ catches up only the last few blocks.
 chain dir and let it re-sync from scratch
 (`Rename-Item "$BP\chains" "$BP\chains.old"` and restart) — slower, but with
 the new defaults it syncs all the way to the tip without stalling.
+
+---
+
+## 4. Automatic catch-up — the 20,000-block rule (2026-11-15)
+
+On 2026-11-15 a brand-new peer sat at block **69,295** while the tip was about
+**307,300**. A node that far behind is not "catching up in a minute": at the
+measured ~250–300 blocks/s it is hours of Ethash re-verification that the weekly
+snapshot already did — and a node that crawls is also the node most likely to
+settle on another laggard (box 1 did exactly that at 13:00 that day).
+
+So the rule is now enforced in two places, both **snapshot-first, fall back to
+peer sync**:
+
+| where | fresh install | far behind an existing DB |
+| --- | --- | --- |
+| `install.sh` (Linux) | imports the signed snapshot unless `--no-fast-sync` / `GPN_FAST_SYNC=0` | refuses to touch an existing DB (never corrupts a working install) |
+| `install.ps1` (Windows) | **added 2026-11-15** — same flow, same opt-out (`--no-fast-sync`, `GPN_FAST_SYNC=0`) | refuses to touch an existing DB |
+| `gpn_fleet` / `gpn_node` self-heal | — | re-bootstraps at the next check (5 min cadence) |
+
+**How far behind is "far behind":** `SNAPSHOT_BEHIND_BLOCKS = 20_000`
+(`gpn_agent::selfheal`). A node more than 20,000 blocks behind the *signed*
+snapshot imports it; anything closer is left to normal peer sync (re-importing a
+~460 MiB archive to save a few thousand blocks is the worse trade). Override
+with `GPN_SNAPSHOT_CATCHUP_MIN_BLOCKS` (zero/unparseable → default). The same
+24 h one-recovery ledger a fork repair uses applies, so a failing catch-up
+cannot loop, and the lagging DB is set aside as `chains-behind-<ts>` (never
+deleted, and named differently from `chains-fork-<ts>` so an operator can tell
+the two apart).
+
+**An unreadable node is never wiped:** a catch-up needs the node to *answer*
+with a height. RPC down, or a node not yet up, is `None` — not evidence of being
+behind — so nothing is touched.
+
+Every failure of the snapshot path is one log line, not an install failure:
+
+```
+fast sync unavailable (snapshot metadata not available at <url> (Connection refused)) — falling back to a normal full peer sync (slower, still correct).
+```
+
+### Signed anchors are handed to the node
+
+The node binary carries no signer key, so it cannot verify `snapshot.json`.
+`gpn_fleet` can (it has the release pubkey and verifies the document every
+5 min), and after each successful verification it writes the checkpoints to
+`<base-path>/verified-anchors.json`. The node reads that file at startup and uses
+it for **peer selection**: a peer whose claimed tip contradicts an anchor, or
+whose tip is below our best and is not a block we hold, is logged once per state
+change and **never used as a sync source** (the link stays up so it can be served
+canonical blocks). Absent or unreadable anchors mean "unknown" for every peer —
+nothing is rejected on a guess.

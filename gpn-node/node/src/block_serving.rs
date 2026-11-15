@@ -275,6 +275,10 @@ pub struct PeerTips {
     /// 1 at 20:43:30. A peer's last announced tip is a durable fact, so it
     /// outlives the connection *and* the process.
     path: Option<std::path::PathBuf>,
+    /// Peers whose own claim contradicts a signed anchor (see
+    /// [`crate::sync_source`]). Not persisted: an anchor verdict is about a
+    /// claim on a connection, and a restart re-learns both.
+    mismatched: Mutex<std::collections::HashSet<PeerId>>,
 }
 
 /// Claims remembered across restarts; a few dozen peers at most, and an old
@@ -305,6 +309,7 @@ impl PeerTips {
         Arc::new(Self {
             inner: Mutex::new(inner),
             path: Some(path),
+            mismatched: Mutex::new(Default::default()),
         })
     }
 
@@ -344,6 +349,29 @@ impl PeerTips {
     /// The last claim we saw from `peer`, if any.
     pub fn get(&self, peer: &PeerId) -> Option<ChainState> {
         self.inner.lock().ok()?.get(peer).cloned()
+    }
+
+    /// Record or clear "this peer's claim contradicts the signed anchor".
+    ///
+    /// Writing `false` rather than leaving a stale entry matters: a peer that
+    /// was healed onto the canonical chain must be askable again without a
+    /// restart.
+    pub fn set_anchor_mismatch(&self, peer: PeerId, mismatched: bool) {
+        if let Ok(mut set) = self.mismatched.lock() {
+            if mismatched {
+                set.insert(peer);
+            } else {
+                set.remove(&peer);
+            }
+        }
+    }
+
+    /// Does this peer's claim contradict a signed anchor?
+    pub fn anchor_mismatch(&self, peer: &PeerId) -> bool {
+        self.mismatched
+            .lock()
+            .map(|s| s.contains(peer))
+            .unwrap_or(false)
     }
 
     /// Peers with a live claim (for tests / a status line).
@@ -998,6 +1026,25 @@ pub fn may_ask_for_blocks(our_best: u64, peer_height: u64, peer_tip_known: Optio
     }
 }
 
+/// The same question once a signed anchor is available: a peer that contradicts
+/// it is **never** a source, however far ahead it claims to be.
+///
+/// This is the enforcement half of "a newcomer must never inherit a fork"
+/// (`crate::sync_source`). `anchor_mismatch` is `true` only when the peer's own
+/// claim contradicts a signed checkpoint, so an unverifiable peer is still asked
+/// exactly as before.
+pub fn may_ask_for_blocks_anchored(
+    our_best: u64,
+    peer_height: u64,
+    peer_tip_known: Option<bool>,
+    anchor_mismatch: bool,
+) -> bool {
+    if anchor_mismatch {
+        return false;
+    }
+    may_ask_for_blocks(our_best, peer_height, peer_tip_known)
+}
+
 /// One request's history with one peer.
 struct SentRecord {
     sends: usize,
@@ -1045,6 +1092,12 @@ pub trait PeerTipSource: Send + Sync {
     fn peer_claim(&self, who: &PeerId) -> Option<(u64, String)>;
     /// Our own best block number.
     fn our_best(&self) -> u64;
+    /// Does this peer's claim contradict a signed anchor? Default `false`: an
+    /// implementation that knows nothing about anchors must not change what is
+    /// asked.
+    fn anchor_mismatch(&self, _who: &PeerId) -> bool {
+        false
+    }
 }
 
 impl<Block: BlockT> PoliteDownloader<Block> {
@@ -1084,7 +1137,8 @@ impl<Block: BlockT> PoliteDownloader<Block> {
         };
         let our_best = self.source.our_best();
         let tip_known = self.source.peer_tip_known(who);
-        if may_ask_for_blocks(our_best, height, tip_known) {
+        let mismatch = self.source.anchor_mismatch(who);
+        if may_ask_for_blocks_anchored(our_best, height, tip_known, mismatch) {
             // One line per peer per process, with the facts the decision used:
             // without it there is no way to tell "we asked because we had to"
             // from "we asked because the gate did not fire".
@@ -1108,6 +1162,15 @@ impl<Block: BlockT> PoliteDownloader<Block> {
             .map(|mut m| m.insert(*who, ()).is_none())
             .unwrap_or(false);
         if first {
+            if mismatch {
+                info!(
+                    "block-serving: not asking {who} for blocks — its claim (tip #{height}) \
+                     is not on our canonical chain (a signed anchor or a block we hold says \
+                     otherwise), so it is a fork and never a source of truth. The link stays \
+                     up so it can be served canonical blocks (#158)."
+                );
+                return false;
+            }
             info!(
                 "block-serving: not asking {who} for blocks — its tip #{height} is not on our \
                  chain and it is {} blocks behind our #{our_best}. Nothing it holds can extend \
@@ -1279,6 +1342,10 @@ where
     fn our_best(&self) -> u64 {
         number_to_u64(self.client.info().best_number)
     }
+
+    fn anchor_mismatch(&self, who: &PeerId) -> bool {
+        self.tips.anchor_mismatch(who)
+    }
 }
 
 /// Why a request could not be answered. Every variant is reported to the peer
@@ -1316,6 +1383,8 @@ mod tests {
     struct HonestSource {
         our_best: u64,
         peers: std::sync::Mutex<HashMap<PeerId, (u64, Option<bool>)>>,
+        /// Peers whose claim contradicts the signed anchor.
+        mismatched: std::sync::Mutex<std::collections::HashSet<PeerId>>,
     }
 
     impl PeerTipSource for HonestSource {
@@ -1332,6 +1401,9 @@ mod tests {
         }
         fn our_best(&self) -> u64 {
             self.our_best
+        }
+        fn anchor_mismatch(&self, who: &PeerId) -> bool {
+            self.mismatched.lock().unwrap().contains(who)
         }
     }
 
@@ -1589,6 +1661,64 @@ mod tests {
             0,
             "nothing went on the wire"
         );
+    }
+
+    /// 2026-11-15: a newcomer must never inherit a fork. A peer whose own claim
+    /// contradicts a signed anchor is never asked for blocks, however far ahead
+    /// it says it is.
+    #[test]
+    fn a_peer_that_mismatches_the_signed_anchor_is_never_asked_for_blocks() {
+        // Ahead of us, on our chain by the height rule — still refused.
+        assert!(!may_ask_for_blocks_anchored(180_000, 307_300, None, true));
+        assert!(!may_ask_for_blocks_anchored(
+            180_000,
+            69_295,
+            Some(true),
+            true
+        ));
+        // No mismatch: the old rules apply unchanged.
+        assert!(may_ask_for_blocks_anchored(180_000, 307_300, None, false));
+        assert!(!may_ask_for_blocks_anchored(
+            297_825,
+            280_600,
+            Some(false),
+            false
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_gate_refuses_a_forked_peer_on_the_wire() {
+        let inner = Arc::new(CountingDownloader::default());
+        let mut source = HonestSource {
+            our_best: 180_000,
+            ..Default::default()
+        };
+        let fork = PeerId::random();
+        let honest = PeerId::random();
+        source.peers.lock().unwrap().insert(fork, (307_300, None));
+        source.peers.lock().unwrap().insert(honest, (307_300, None));
+        source.mismatched.lock().unwrap().insert(fork);
+        let polite = PoliteDownloader::new(inner.clone(), Arc::new(source));
+
+        let out = polite.download_blocks(fork, request_at(1, 0)).await;
+        assert!(matches!(out, Ok(Err(RequestFailure::Refused))));
+        let out = polite.download_blocks(honest, request_at(2, 0)).await;
+        assert!(matches!(out, Ok(Ok(_))));
+        let calls = inner.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "only the canonical peer was asked");
+        assert_eq!(calls[0].0, honest);
+    }
+
+    #[test]
+    fn a_peer_tip_mismatch_flag_survives_and_clears() {
+        let tips = PeerTips::shared();
+        let peer = PeerId::random();
+        assert!(!tips.anchor_mismatch(&peer));
+        tips.set_anchor_mismatch(peer, true);
+        assert!(tips.anchor_mismatch(&peer));
+        // A healed peer must be askable again without a restart.
+        tips.set_anchor_mismatch(peer, false);
+        assert!(!tips.anchor_mismatch(&peer));
     }
 
     #[tokio::test]

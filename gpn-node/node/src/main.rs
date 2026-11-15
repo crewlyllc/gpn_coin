@@ -28,6 +28,7 @@ mod peer_priority;
 mod portmap;
 mod rpc;
 mod service;
+mod sync_source;
 mod sync_tolerance;
 
 fn main() {

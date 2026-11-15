@@ -1,5 +1,51 @@
 # GPN change-log
 
+## 2026-11-15 13:2x PT — onboarding a stranger: snapshot-first, and peer choice by canonical progress
+
+**WHY (live, 13:00):** a brand-new peer `12D3KooWS3…` sat at block **69,295** while the tip was
+~**307,300**. Box 1 latched onto it and we dropped box 1 in the same second:
+
+```
+13:00:49 chain-state: peer WP1JAF is behind
+13:00:50 sync: peer WP1JAF abandoned a request mid-flight   ← the SDK abandons it
+13:00:51 substream closed
+```
+
+Two classes, not one box: a node far behind crawled block-by-block, and a laggard preferred whichever
+peer answered first (another laggard) over the canonical peer.
+
+**FIX:**
+* **Snapshot-first on Windows.** `install.ps1` had no fast sync at all, so a fresh Windows install
+  re-verified the whole chain from genesis. It now mirrors `install.sh`: fetch → verify the *signed*
+  `snapshot.json` → download → verify bytes → import into a staging dir → move `chains/`. Every
+  failure is one line (`fast sync unavailable (…) — falling back to a normal full peer sync
+  (slower, still correct).`) and never an install failure. An existing DB is never touched.
+* **Automatic catch-up** (`gpn_agent::selfheal`): `SNAPSHOT_BEHIND_BLOCKS = 20_000` (override
+  `GPN_SNAPSHOT_CATCHUP_MIN_BLOCKS`). A node that *answers* with a height more than 20k blocks behind
+  the signed snapshot imports it instead of crawling; the lagging DB is set aside as
+  `chains-behind-<ts>` and the existing 24 h one-recovery ledger prevents loops. An unreadable node
+  (RPC down, `None`) is never treated as "behind" — nothing is wiped on a guess.
+* **Signed anchors reach the node.** After each verification, the supervisor writes
+  `<base>/verified-anchors.json` (151 checkpoints today); the node reads it at startup.
+* **Peer choice by canonical progress** (`node/src/sync_source.rs`, new): a peer's claim is judged
+  against the signed anchors *and* against "is its tip a block we hold?". A peer on another branch is
+  `FORK` and is **never a sync source** — the link stays up so it can be served canonical blocks — and
+  the ranked re-dial now orders by anchor match then best block, not by tenure/first-answer. A
+  behind-but-canonical peer is kept, never rejected.
+* **One INFO line per peer per state change:**
+  `peer X best=#N vs ours #M; canonical/anchor-match=<bool>; using/not using as sync source`.
+
+**Live (our fleet node, new binary, 13:24–13:26):** `151 signed anchor(s)`;
+`… best=#307415 … anchor-match=true; using as sync source`; the 69k newcomer at #270,377
+`anchor-match=true; not using as sync source (behind us, canonical)` (it climbed 69k→270k in ~25 min);
+box 1 at #306,650 `anchor-match=false; not using as sync source (FORK: its tip is not on our canonical
+chain)` — and our side logged `would have been banned by the SDK, kept connected`.
+
+**STILL OPEN:** box 1 runs the pre-0.3.48 binary and bans *us* ~2 s into every reconnect
+(`Banned, disconnecting … Peer disconnected with inflight after backoffs`), so it keeps returning to
+its own branch. The fix for that side is already in the tree (0cb9d7e, `sync_tolerance`) but needs a
+Windows build to reach the box; nothing was released or version-bumped here.
+
 ## 2026-11-15 01:0x PT — routing: capability filter only, first-come-first-served (the co-hosted provider took 6/6)
 
 **WHY:** the owner's rule — *the access point filters by capability only and hands out work
@@ -5436,6 +5482,55 @@ pruning race, not a provider defect. No action; provider serves fine (e2e 0.53s,
 **ROOT CAUSE (evidence):** the AP was restarted out from under it, deliberately, by dev work — not a fault and not unattended. Timestamps line up exactly: `gpn-agent/src/network_directory.rs` modified **22:29:00** → build artefact `gpn-agent/target/.rustc_info.json` **22:30:41** → `Stopping/Stopped/Started gpn-accesspoint` all at **22:30:53** (`Consumed 4h53m CPU`, `NRestarts=0`, provider itself untouched since 04:32:40) → commit **7667a2f "fix(directory): publish the node's own peer count (W78)"** at **22:31:19**. The provider's pull hit the AP in the same second it was down, retried, and succeeded — the 20:41 `cannot read NextJobId` item stays explained by the earlier outward fleet restart.
 **FIX:** none applied — no restart, no code/env change, no job deletion; `GPN_FAST_CLAIM`/`GPN_FAST_AP` untouched.
 **RESULT:** probe `qwen2.5:0.5b` ~500-char = **0.65 s e2e / 200 tok ≈ 307 tok/s** (channel 7, gpu-wait 0.0 s); `/jobs` 256-window **243 Completed / 8 Cancelled / 5 Failed (6504/6518/6519/6532/6552 — all pre-existing) / 0 Pending ⇒ no orphans**, max id 6553, 1 claim per request, no storm.
+
+## 2026-11-15 04:0x PT — PM07 maintainer: **the live node is running an UNDOCUMENTED local build stamped as released 0.3.47**, and I did not revert it (owner call)
+
+**What was observed (all in this run, commands + output below).**
+`~/.local/bin/gpn-node` has mtime **03:59** (today) and sha256 **5c68c8a0…**, while the updater's
+installed release artifact `~/.gpn/update/versions/0.3.47/gpn-node` (what `current` points at) is
+sha256 **26212c99…** — *different bytes, same version string*: both print
+`gpn_node 0.3.47 (spec 51, 9f3c220)`. The live one also contains code that exists in **no release**:
+
+```
+$ strings -a ~/.local/bin/gpn-node | grep -c 'would have been banned by the SDK'      -> 1
+$ strings -a ~/.local/bin/gpn-node | grep -c 'sync_tolerance\|TolerantSyncStrategy'   -> 25
+$ strings -a ~/.gpn/update/versions/0.3.47/gpn-node | grep -c 'sync_tolerance\|TolerantSyncStrategy' -> 0
+```
+
+i.e. the running node carries **0.3.48 item F** (`sync_tolerance.rs`, commit `0cb9d7e`, committed
+04:00:27 — the binary predates the commit by a minute). No `.bak-*` was written for this install,
+which `scripts/deploy-bin.sh` always does (line 203-205), so the binary was copied in by hand, not
+deployed by the script. `git status` in the repo shows no marker or note about it, and neither
+`GPN-TASKS.md` nor this change-log row set records the deployment → **undocumented, unaudited, and
+self-reporting the released version**.
+
+**Consequence.** `gpn_update --check` sees 0.3.47 and says *up to date*; `release-status.sh` and
+`deploy-drift` compare stamps, not digests, so every drift check reads clean while production runs
+code no signed manifest has ever covered. This is the #148/#151 guard class ("same version, different
+build") arriving from the opposite direction: not the updater refusing a local build, but a local
+build wearing the release's version.
+
+**What I did, and what I deliberately did not.** Snapshotted the running binary to
+`~/.openclaw/workspace/state/bin-snapshots/gpn-node.live-20261115T0400Z-itemF-5c68c8a0` (hash
+recorded in `MANIFEST.txt`) and the released artifact's hash beside it, so either state is one `cp`
+away and auditable. I did **not** restart the fleet or revert to the release binary: restarting the
+production node is a disruptive action and the author of the item-F deploy may still want it live for
+its live verification. **Owner/driver decision, please:** revert (`cp ~/.gpn/update/versions/0.3.47/gpn-node
+~/.local/bin/gpn-node` + `systemctl --user restart gpn-fleet`) or keep item F live until 0.3.48 ships
+and record it in the task row. Either way the deploy needs to be written down: *who* built it, from
+which tree, and why it bypassed `deploy-bin.sh`.
+
+**Fleet otherwise healthy at 04:0x:** head #305,270 advancing, 3 peers (4 live per `/network`),
+0 non-terminal jobs in the last 50, chat e2e HTTP 200 in 4.7 s (channel 7), disk `/` 94 G free (78 %
+used), CI run 43707670189 for `504dcac` still legitimately building (windows job in
+`Build + test gpn-agent (release)`, cargo+rustc alive on box 1 — not stuck).
+
+**Also measured, not new:** 50 `Essential task 'txpool-background' failed` lines in 7 days (17 on
+Nov 11, 14 on Nov 13). Today's 03:59:34 instance is *teardown noise* — `systemd: Stopping
+gpn-fleet.service` is logged one line earlier — consistent with the 2026-11-05 conclusion; the
+recurring unknown remains *who* issues the stop, and systemd does not name the requester. The 4
+`local /status unreadable` lane lines in 40 min are the #175 residual (fix `8f1beef` is in the tree,
+not in any published artifact).
 
 ## 2026-11-15 08:1x PT — the channel walk was spending its 3 attempts on boxes it could never dial, and chat hung for it (#186)
 **SYMPTOM:** `POST /v1/chat/completions` for `llama3.2:1b` returned nothing for 4 minutes, then the job was `Cancelled`. 07:57:10 PT: `[route] handing job to 5HVtpoz…`, candidate #1/#2/#3 all `not attempted: cannot derive the provider's channel endpoint`, `[chat] every channel candidate refused (3); falling back to on-chain escrow`, lease → job **#6582** on box 4.

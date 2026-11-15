@@ -32,6 +32,7 @@
 //! field, which is a runtime change (review-first) and is filed separately.
 
 use crate::network_registry::BootstrapSeed;
+use crate::sync_source::AnchorClass;
 
 /// Design §1: no more than five oracle seeds (a sixth requires retiring one).
 pub const MAX_ORACLE_SEEDS: usize = 5;
@@ -65,6 +66,14 @@ pub struct Candidate {
     pub tier: Tier,
     /// First-seen block, when known (see the module note).
     pub tenure: Option<u64>,
+    /// The peer's last announced best block, when it claimed one. This is the
+    /// *progress* half of the ranking: a peer that answered first is not the
+    /// peer that is furthest along (2026-11-15: a newcomer at #69,295 was
+    /// preferred over the canonical fleet node at #307,300).
+    pub best: Option<u64>,
+    /// Whether the peer's claim matches a signed anchor. `Mismatch` sorts last:
+    /// a fork is never a better place to dial than a canonical peer.
+    pub anchor: AnchorClass,
 }
 
 impl Candidate {
@@ -75,7 +84,16 @@ impl Candidate {
             peer_id: peer_id_of(addr).unwrap_or_default().to_string(),
             tier,
             tenure,
+            best: None,
+            anchor: AnchorClass::Unknown,
         }
+    }
+
+    /// Attach what the peer claims about its chain (from `gpn/chain/1`).
+    pub fn with_progress(mut self, best: Option<u64>, anchor: AnchorClass) -> Self {
+        self.best = best;
+        self.anchor = anchor;
+        self
     }
 
     /// A candidate without a peer id can never be dialled (the handshake has
@@ -138,12 +156,16 @@ pub fn tier_for(peer_id: &str, oracle_ids: &[String], on_chain: bool) -> Tier {
     }
 }
 
-/// Deterministic rank order: tier ascending, then tenure **descending** (older
-/// first, unknown tenure last), then peer id ascending.
+/// Deterministic rank order: tier ascending, then anchor match (a peer that
+/// contradicts the signed anchor sorts last), then best block **descending**
+/// (furthest along first, unknown last), then tenure **descending**, then peer id
+/// ascending.
 ///
-/// The peer-id tie-break is what makes the order identical on every machine
-/// when tenure is unknown — the design's "two nodes never disagree" property,
-/// achieved without a random shuffle.
+/// Why progress before tenure: on 2026-11-15 a laggard preferred whichever peer
+/// answered first and settled on a newcomer at #69,295 while a canonical peer at
+/// #307,300 was reachable. Arrival order is not a fact about the chain; the best
+/// block a peer claims *is*. The peer-id tie-break keeps the order identical on
+/// every machine when nothing else differs.
 pub fn rank(candidates: &[Candidate]) -> Vec<Candidate> {
     let mut out: Vec<Candidate> = candidates
         .iter()
@@ -153,6 +175,13 @@ pub fn rank(candidates: &[Candidate]) -> Vec<Candidate> {
     out.sort_by(|a, b| {
         a.tier
             .cmp(&b.tier)
+            .then_with(|| b.anchor.cmp(&a.anchor))
+            .then_with(|| match (a.best, b.best) {
+                (Some(x), Some(y)) => y.cmp(&x),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            })
             .then_with(|| match (a.tenure, b.tenure) {
                 (Some(x), Some(y)) => y.cmp(&x),
                 (Some(_), None) => std::cmp::Ordering::Less,
@@ -351,6 +380,15 @@ impl PeerBook {
             if candidate.tier < existing.tier {
                 existing.tier = candidate.tier;
             }
+            // Conservative merge: a mismatch is never cleared by a discovery
+            // refresh (which carries no claim). Only `set_progress`, fed by the
+            // chain-state claim, may move a peer out of `Mismatch`.
+            existing.anchor = existing.anchor.min(candidate.anchor);
+            existing.best = match (existing.best, candidate.best) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (Some(a), None) => Some(a),
+                (None, b) => b,
+            };
             existing.tenure = match (existing.tenure, candidate.tenure) {
                 (Some(a), Some(b)) => Some(a.min(b)),
                 (Some(a), None) => Some(a),
@@ -378,6 +416,29 @@ impl PeerBook {
         match self.inner.lock() {
             Ok(g) => g.clone(),
             Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    /// Record what a peer claims about its chain (from a `gpn/chain/1` claim).
+    ///
+    /// This is the only writer of `best`/`anchor`, so a claim always replaces an
+    /// older one — including clearing a `Mismatch` once the peer is back on the
+    /// canonical chain. Returns `true` when the peer was already in the book.
+    pub fn set_progress(&self, peer_id: &str, best: Option<u64>, anchor: AnchorClass) -> bool {
+        if peer_id.is_empty() {
+            return false;
+        }
+        let mut guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        match guard.iter_mut().find(|c| c.peer_id == peer_id) {
+            Some(existing) => {
+                existing.best = best.or(existing.best);
+                existing.anchor = anchor;
+                true
+            }
+            None => false,
         }
     }
 
@@ -624,5 +685,75 @@ mod tests {
     fn max_peers_parsing_is_total() {
         // Env is process-global; assert only the pure default path here.
         assert_eq!(DEFAULT_MAX_PEERS, 8);
+    }
+
+    // 2026-11-15 onboarding bug: a laggard preferred another laggard because it
+    // answered first. Progress, not arrival order, must decide.
+    #[test]
+    fn a_further_along_canonical_peer_outranks_a_newcomer_that_answered_first() {
+        let cands = vec![
+            // Insertion order = arrival order: the #69,295 newcomer first.
+            Candidate::new(&seed("12D3KooWS3newcomer"), Tier::Ranked, None)
+                .with_progress(Some(69_295), AnchorClass::Unknown),
+            Candidate::new(&seed("12D3KooWcanonical"), Tier::Ranked, Some(400_000))
+                .with_progress(Some(307_300), AnchorClass::Match),
+            Candidate::new(&seed("12D3KooWfork"), Tier::Ranked, Some(1))
+                .with_progress(Some(307_300), AnchorClass::Mismatch),
+        ];
+        let order: Vec<String> = rank(&cands).iter().map(|c| c.peer_id.clone()).collect();
+        assert_eq!(order[0], "12D3KooWcanonical");
+        // It also outranks the newcomer despite the newcomer's older-looking
+        // slot: progress beats tenure, and a fork is a last resort even when it
+        // claims the same height as the canonical peer.
+        assert_eq!(order[1], "12D3KooWS3newcomer");
+        assert_eq!(order[2], "12D3KooWfork");
+
+        // Both are still dialled: a laggard must not cut off its only peer.
+        let plan = dial_plan(&cands, 8);
+        assert_eq!(plan.dial.len(), 3);
+    }
+
+    #[test]
+    fn rank_reaches_furthest_first_within_a_tier_whatever_the_tenure() {
+        let cands = vec![
+            Candidate::new(&seed("12D3KooOLDoldership"), Tier::Ranked, Some(10))
+                .with_progress(Some(180_000), AnchorClass::Unknown),
+            Candidate::new(&seed("12D3KooNEW"), Tier::Ranked, Some(900_000))
+                .with_progress(Some(307_300), AnchorClass::Unknown),
+        ];
+        let order: Vec<String> = rank(&cands).iter().map(|c| c.peer_id.clone()).collect();
+        assert_eq!(order, vec!["12D3KooNEW", "12D3KooOLDoldership"]);
+    }
+
+    #[test]
+    fn eviction_drops_a_fork_peer_before_a_canonical_one() {
+        let connected = vec![
+            Candidate::new(&seed("12D3KooAAAcanonical"), Tier::Unknown, None)
+                .with_progress(Some(100), AnchorClass::Match),
+            Candidate::new(&seed("12D3KooBBBfork"), Tier::Unknown, None)
+                .with_progress(Some(9_000_000), AnchorClass::Mismatch),
+        ];
+        assert_eq!(evictions(&connected, 1), vec!["12D3KooBBBfork".to_string()]);
+    }
+
+    #[test]
+    fn a_chain_claim_updates_progress_and_can_clear_a_mismatch() {
+        let book = PeerBook::new();
+        book.upsert(
+            Candidate::new(&seed("12D3KooA"), Tier::Unknown, None)
+                .with_progress(Some(69_295), AnchorClass::Mismatch),
+        );
+        // A discovery refresh (no claim) must not clear the mismatch.
+        book.upsert(Candidate::new(&seed("12D3KooA"), Tier::Unknown, None));
+        let snap = book.snapshot();
+        assert_eq!(snap[0].anchor, AnchorClass::Mismatch);
+        assert_eq!(snap[0].best, Some(69_295));
+        // A fresh claim from the chain-state task can: it is newer evidence.
+        assert!(book.set_progress("12D3KooA", Some(307_300), AnchorClass::Match));
+        let snap = book.snapshot();
+        assert_eq!(snap[0].anchor, AnchorClass::Match);
+        assert_eq!(snap[0].best, Some(307_300));
+        // An unknown peer is not invented into the book by a claim.
+        assert!(!book.set_progress("12D3KooUNKNOWN", Some(1), AnchorClass::Unknown));
     }
 }

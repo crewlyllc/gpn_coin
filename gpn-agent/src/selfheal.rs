@@ -82,6 +82,41 @@ pub const DEFAULT_SNAPSHOT_META_URL: &str =
 pub const SNAPSHOT_CANONICAL_PREFIX_V1: &str = "gpn-snapshot-v1";
 pub const SNAPSHOT_CANONICAL_PREFIX: &str = "gpn-snapshot-v2";
 
+/// How far behind the **signed snapshot** a node must be before the supervisor
+/// re-bootstraps it from that snapshot instead of letting it crawl.
+///
+/// Measured need, 2026-11-15: a stranger's node sat at #69,295 against a network
+/// tip of ~#307,300 — hours of Ethash re-verification, and a laggard whose only
+/// peer became another laggard. An import of the (~460 MiB) signed archive ends
+/// that in minutes. A gap under this threshold is left to normal peer sync,
+/// because re-importing the archive to save a few thousand blocks is the worse
+/// trade.
+pub const SNAPSHOT_BEHIND_BLOCKS: u64 = 20_000;
+
+/// Operator override for [`SNAPSHOT_BEHIND_BLOCKS`].
+pub const SNAPSHOT_BEHIND_ENV: &str = "GPN_SNAPSHOT_CATCHUP_MIN_BLOCKS";
+
+/// Parse a catch-up threshold. Unset, unparseable or zero yields the default
+/// (zero would mean "always re-import", which is never what an operator means).
+pub fn snapshot_behind_blocks_from(raw: Option<&str>) -> u64 {
+    raw.and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(SNAPSHOT_BEHIND_BLOCKS)
+}
+
+/// Should this node re-bootstrap from the snapshot instead of crawling?
+///
+/// * `local` is the height the *node answered with* — `None` (RPC unreadable,
+///   node not up yet) is never evidence of being behind, so it never triggers a
+///   catch-up. That is the safety rule: an unreadable node must not be wiped.
+/// * `snapshot_block` is the height the verified document describes.
+pub fn should_catch_up(local: Option<u64>, snapshot_block: u64, threshold: u64) -> bool {
+    match local {
+        Some(h) => snapshot_block.saturating_sub(h) > threshold,
+        None => false,
+    }
+}
+
 /// A logging sink. The supervisors each have their own line discipline
 /// (`[watchdog] …`, `[self-heal] …`), so the module composes text and the caller
 /// decides where it goes.
@@ -591,6 +626,46 @@ pub fn fork_dir_for(base: &Path, stamp: u64) -> PathBuf {
     candidate
 }
 
+/// Where a ledger-adjacent artifact is written for a catch-up. Deliberately a
+/// different name from `chains-fork-*`: an operator reading `ls ~/.gpn/node`
+/// must be able to tell "this box was on a fork" from "this box was simply
+/// behind". Same never-overwrite rule.
+pub fn catch_up_dir_for(base: &Path, stamp: u64) -> PathBuf {
+    let mut candidate = base.join(format!("chains-behind-{stamp}"));
+    let mut n = 1u32;
+    while candidate.exists() {
+        candidate = base.join(format!("chains-behind-{stamp}-{n}"));
+        n += 1;
+    }
+    candidate
+}
+
+/// Name of the node-readable anchor file (relative to the node base path).
+/// Keep in sync with `gpn_node`'s `service::ANCHORS_FILE`.
+pub const ANCHORS_FILE_NAME: &str = "verified-anchors.json";
+
+/// Persist the *verified* signed checkpoints where the node can read them.
+///
+/// The node binary carries no signer key, so it cannot verify `snapshot.json`
+/// itself. This process can: it has `RELEASE_PUBKEY_HEX` and it just verified
+/// the document. Writing the anchors here turns "a signed document we checked"
+/// into "a local file the node may act on" without giving the node a key or a
+/// network dependency. Written atomically; a failure is not fatal (the node
+/// then has no anchors, which means it rejects nobody).
+pub fn write_anchors_file(base: &Path, meta: &SnapshotMeta) -> std::io::Result<PathBuf> {
+    let anchors: Vec<serde_json::Value> = meta
+        .anchors()
+        .into_iter()
+        .map(|(h, hash)| serde_json::json!([h, hash]))
+        .collect();
+    let doc = serde_json::json!({ "genesis": meta.genesis, "anchors": anchors });
+    let path = base.join(ANCHORS_FILE_NAME);
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, doc.to_string())?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(path)
+}
+
 /// Where the ledger lives: `<base>/last-recovery.json` unless the caller
 /// overrides it (the CLI's `--state`).
 pub fn ledger_path(base: &Path) -> PathBuf {
@@ -805,6 +880,10 @@ pub struct CheckConfig {
 pub struct CheckOutcome {
     pub observation: Option<Observation>,
     pub decision: Option<HealDecision>,
+    /// True when the decision is a *snapshot catch-up* (this node is simply far
+    /// behind the signed checkpoint) rather than a fork repair. The recovery
+    /// sequence is identical; only the wording and the directory name differ.
+    pub catch_up: bool,
 }
 
 impl CheckOutcome {
@@ -818,11 +897,13 @@ impl CheckOutcome {
 }
 
 /// Run the design's check: fetch → verify → observe → decide, logging both the
-/// check and the verdict. Read-only; recovery is the caller's next step.
+/// check and the verdict. Read-only with respect to the chain DB (it does write
+/// the verified anchors next to it); recovery is the caller's next step.
 pub fn check(cfg: &CheckConfig, now: u64, log: Log) -> CheckOutcome {
     let none = CheckOutcome {
         observation: None,
         decision: None,
+        catch_up: false,
     };
 
     let bytes = match load_meta_bytes(&cfg.meta_src) {
@@ -853,6 +934,15 @@ pub fn check(cfg: &CheckConfig, now: u64, log: Log) -> CheckOutcome {
             return none;
         }
     };
+    // Hand the *verified* anchors to the node (it has no signer key). Best
+    // effort: a node without anchors rejects nobody, which is the safe default.
+    if let Err(e) = write_anchors_file(&cfg.base, &meta) {
+        log(&format!(
+            "divergence check: could not write {} ({e}) — the node will run without \
+             signed anchors and therefore reject no peer on that basis",
+            ANCHORS_FILE_NAME
+        ));
+    }
     log(&obs.check_line());
 
     // Genesis first: a different network is not a fork, and no automatic
@@ -866,6 +956,7 @@ pub fn check(cfg: &CheckConfig, now: u64, log: Log) -> CheckOutcome {
         return CheckOutcome {
             observation: Some(obs),
             decision: Some(HealDecision::Nothing { reason }),
+            catch_up: false,
         };
     }
 
@@ -881,11 +972,60 @@ pub fn check(cfg: &CheckConfig, now: u64, log: Log) -> CheckOutcome {
             return CheckOutcome {
                 observation: Some(obs),
                 decision: None,
+                catch_up: false,
             };
         }
     };
 
     let fork_dir = fork_dir_for(&cfg.base, now);
+
+    // Snapshot-first bootstrap (2026-11-15). A node that is far behind the
+    // *signed* snapshot is not sorted by crawling: every block of the gap is
+    // Ethash work the snapshot already did, and a laggard that crawls is also
+    // the node most likely to settle on another laggard. The 24 h window and
+    // the ledger are the same ones a fork repair uses, so a failed catch-up
+    // cannot loop.
+    let threshold = snapshot_behind_blocks_from(std::env::var(SNAPSHOT_BEHIND_ENV).ok().as_deref());
+    if should_catch_up(obs.local_height, obs.block, threshold) {
+        let local = obs.local_height.unwrap_or(0);
+        let catch_dir = catch_up_dir_for(&cfg.base, now);
+        let decision = match last.as_ref() {
+            Some(rec) => {
+                let age = now.saturating_sub(rec.recovered_at);
+                if age < RECOVERY_WINDOW_SECS {
+                    HealDecision::Refused { age_secs: age }
+                } else {
+                    HealDecision::Recover {
+                        fork_dir: catch_dir,
+                    }
+                }
+            }
+            None => HealDecision::Recover {
+                fork_dir: catch_dir,
+            },
+        };
+        let what = match &decision {
+            HealDecision::Nothing { reason } => reason.clone(),
+            HealDecision::Refused { age_secs } => format!(
+                "a snapshot import was already attempted {}h ago (max one per 24 h) — NEEDS A HUMAN",
+                age_secs / 3600
+            ),
+            HealDecision::Recover { fork_dir } => format!(
+                "local block #{local} is {} blocks behind the signed snapshot #{} — importing the \
+                 signed snapshot instead of crawling; the lagging DB will move to {}",
+                obs.block.saturating_sub(local),
+                obs.block,
+                fork_dir.display()
+            ),
+        };
+        log(&obs.verdict_line(&what));
+        return CheckOutcome {
+            observation: Some(obs),
+            decision: Some(decision),
+            catch_up: true,
+        };
+    }
+
     let decision = heal_decision(
         &obs.verdict,
         last.as_ref(),
@@ -907,6 +1047,7 @@ pub fn check(cfg: &CheckConfig, now: u64, log: Log) -> CheckOutcome {
     CheckOutcome {
         observation: Some(obs),
         decision: Some(decision),
+        catch_up: false,
     }
 }
 
@@ -1000,6 +1141,9 @@ pub struct RecoveryPlan {
     pub checkpoint_hash: String,
     pub local_hash: String,
     pub now: u64,
+    /// True for a snapshot catch-up (this node was behind, not forked). Only the
+    /// wording of the log lines and the set-aside directory name differ.
+    pub catch_up: bool,
 }
 
 /// Resolve (and verify) the archive for a decided recovery. Downloads only when
@@ -1060,6 +1204,7 @@ pub fn plan_recovery(
         checkpoint_hash: hash.to_string(),
         local_hash,
         now,
+        catch_up: false,
     })
 }
 
@@ -1112,7 +1257,8 @@ pub fn perform_recovery(
             )
         })?;
         log(&format!(
-            "self-heal: moved forked DB to {}",
+            "self-heal: moved {} DB to {}",
+            if plan.catch_up { "lagging" } else { "forked" },
             plan.fork_dir.display()
         ));
     } else {
@@ -1139,8 +1285,9 @@ pub fn perform_recovery(
     control.start()?;
     log(&format!(
         "self-heal: done — imported signed snapshot from block {}; node started; \
-         fork DB kept at {} (delete when the node is verified healthy)",
+         {} DB kept at {} (delete when the node is verified healthy)",
         plan.checkpoint_block,
+        if plan.catch_up { "lagging" } else { "forked" },
         plan.fork_dir.display()
     ));
     Ok(())
@@ -1211,6 +1358,7 @@ pub fn tick(
     .map_err(|e| format!("recovery NOT started ({e}) — node left running"))?;
     let plan = RecoveryPlan {
         fork_dir: fork_dir.clone(),
+        catch_up: out.catch_up,
         ..plan
     };
     perform_recovery(&plan, control, import, log)?;
@@ -1435,6 +1583,133 @@ mod tests {
 
     // ── (a) a fork schedules a heal ─────────────────────────────────────────
 
+    /// 2026-11-15: snapshot-first bootstrap. A node far behind the signed
+    /// snapshot imports it instead of crawling — that is what turns a stranger's
+    /// hours of Ethash work into minutes.
+    #[test]
+    fn a_far_behind_node_is_a_catch_up_not_a_fork() {
+        let dir = tmpdir("catchup");
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        let (json, pk) = signed(&sk, 307_300, CANON, GENESIS);
+        let meta_path = dir.join("snapshot.json");
+        fs::write(&meta_path, &json).unwrap();
+        // The 69,295-block newcomer from the incident report.
+        let rpc = rpc_stub(69_295, FORK);
+        let (lines, log) = log_sink();
+        let out = check(
+            &cfg(&dir, rpc, meta_path.display().to_string(), &pk),
+            now_unix(),
+            &log,
+        );
+        assert!(out.catch_up, "a node 238k blocks behind must re-bootstrap");
+        let (obs, dir_to_move) = out.recovery().expect("a catch-up must be scheduled");
+        assert_eq!(obs.verdict.slug(), "not-yet");
+        assert!(
+            dir_to_move
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("chains-behind-"),
+            "{dir_to_move:?}"
+        );
+        let lines = lines.lock().unwrap();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("blocks behind the signed snapshot")),
+            "{lines:?}"
+        );
+        // The verified anchors were handed to the node.
+        let anchors = fs::read_to_string(dir.join(ANCHORS_FILE_NAME)).expect("anchors written");
+        assert!(anchors.contains("307300"), "{anchors}");
+    }
+
+    #[test]
+    fn a_node_close_to_the_snapshot_is_left_to_crawl() {
+        let dir = tmpdir("close");
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[11u8; 32]);
+        let (json, pk) = signed(&sk, 307_300, CANON, GENESIS);
+        let meta_path = dir.join("snapshot.json");
+        fs::write(&meta_path, &json).unwrap();
+        let rpc = rpc_stub(307_300 - 9_000, CANON);
+        let (lines, log) = log_sink();
+        let out = check(
+            &cfg(&dir, rpc, meta_path.display().to_string(), &pk),
+            now_unix(),
+            &log,
+        );
+        assert!(!out.catch_up);
+        assert!(out.recovery().is_none());
+        let lines = lines.lock().unwrap();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("behind the signed checkpoint (not a fork)")),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_node_never_triggers_a_catch_up() {
+        // RPC unreadable → local height unknown → never evidence of being
+        // behind. Wiping a node because it could not answer is the one failure
+        // this rule exists to prevent.
+        assert!(!should_catch_up(None, 307_300, SNAPSHOT_BEHIND_BLOCKS));
+        assert!(should_catch_up(
+            Some(69_295),
+            307_300,
+            SNAPSHOT_BEHIND_BLOCKS
+        ));
+        // At the threshold: crawl. Past it: import.
+        let at = 307_300 - SNAPSHOT_BEHIND_BLOCKS;
+        assert!(!should_catch_up(Some(at), 307_300, SNAPSHOT_BEHIND_BLOCKS));
+        assert!(should_catch_up(
+            Some(at - 1),
+            307_300,
+            SNAPSHOT_BEHIND_BLOCKS
+        ));
+    }
+
+    #[test]
+    fn the_threshold_override_refuses_a_zero() {
+        assert_eq!(snapshot_behind_blocks_from(None), SNAPSHOT_BEHIND_BLOCKS);
+        assert_eq!(
+            snapshot_behind_blocks_from(Some("0")),
+            SNAPSHOT_BEHIND_BLOCKS
+        );
+        assert_eq!(
+            snapshot_behind_blocks_from(Some("x")),
+            SNAPSHOT_BEHIND_BLOCKS
+        );
+        assert_eq!(snapshot_behind_blocks_from(Some(" 2500 ")), 2_500);
+        assert_eq!(SNAPSHOT_BEHIND_ENV, "GPN_SNAPSHOT_CATCHUP_MIN_BLOCKS");
+    }
+
+    #[test]
+    fn a_catch_up_never_overwrites_an_earlier_one() {
+        let dir = tmpdir("catchup-dir");
+        let first = catch_up_dir_for(&dir, 42);
+        fs::create_dir_all(&first).unwrap();
+        let second = catch_up_dir_for(&dir, 42);
+        assert_ne!(first, second);
+        assert!(second.to_string_lossy().ends_with("chains-behind-42-1"));
+    }
+
+    #[test]
+    fn the_anchor_file_is_atomic_and_parsable() {
+        let dir = tmpdir("anchors");
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[13u8; 32]);
+        let (json, _pk) = signed(&sk, 297_000, CANON, GENESIS);
+        let meta: SnapshotMeta = serde_json::from_slice(&json).unwrap();
+        let path = write_anchors_file(&dir, &meta).unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(doc["genesis"], serde_json::json!(GENESIS));
+        assert_eq!(doc["anchors"][0][0], serde_json::json!(297_000));
+        assert_eq!(doc["anchors"][0][1], serde_json::json!(CANON));
+        assert!(!dir.join("verified-anchors.json.tmp").exists());
+    }
+
     #[test]
     fn a_node_whose_hash_differs_at_the_checkpoint_schedules_a_heal() {
         let dir = tmpdir("fork");
@@ -1603,6 +1878,12 @@ mod tests {
     fn a_node_below_every_anchor_is_still_not_yet() {
         // The genuinely-unjudgeable case: no signed anchor at or below the
         // node's height. It must stay NotYet — a fresh node is never a fork.
+        //
+        // 2026-11-15: it is, however, far *behind*, so the decision is now a
+        // snapshot catch-up rather than "nothing". That is the whole point of
+        // snapshot-first bootstrap: a node at #5,000 against a #294,496
+        // checkpoint has ~290k blocks of re-verification to skip. The verdict
+        // stays `NotYet` (not `WrongChain`), which is what this test is about.
         let dir = tmpdir("history-below");
         let sk = ed25519_dalek::SigningKey::from_bytes(&[23u8; 32]);
         let (json, pk) = signed_with_history(
@@ -1621,17 +1902,17 @@ mod tests {
             now_unix(),
             &log,
         );
-        assert!(out.recovery().is_none());
         let obs = out.observation.expect("the check still ran");
         assert!(
             matches!(obs.verdict, CheckpointVerdict::NotYet { .. }),
             "{obs:?}"
         );
+        assert!(out.catch_up, "far behind → snapshot catch-up, not a fork");
         match out.decision {
-            Some(HealDecision::Nothing { reason }) => {
-                assert!(reason.contains("behind"), "{reason}")
+            Some(HealDecision::Recover { fork_dir }) => {
+                assert!(fork_dir.to_string_lossy().contains("chains-behind-"))
             }
-            other => panic!("expected Nothing, got {other:?}"),
+            other => panic!("expected a catch-up, got {other:?}"),
         }
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1978,6 +2259,7 @@ mod tests {
             checkpoint_hash: CANON.into(),
             local_hash: FORK.into(),
             now: 1_700_000_000,
+            catch_up: false,
         };
         let control = Recorder::new();
         let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
@@ -2023,6 +2305,7 @@ mod tests {
             checkpoint_hash: CANON.into(),
             local_hash: FORK.into(),
             now: 7,
+            catch_up: false,
         };
         struct Stuck;
         impl NodeControl for Stuck {
@@ -2058,6 +2341,7 @@ mod tests {
             checkpoint_hash: CANON.into(),
             local_hash: FORK.into(),
             now: 42,
+            catch_up: false,
         };
         let control = Recorder::new();
         let (_, log) = log_sink();

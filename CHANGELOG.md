@@ -8,6 +8,54 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.49] - 2026-11-15
+
+Bumped from 0.3.48. One theme: **a node that joins late must not inherit a fork, and a peer that
+was merely unlucky must not be banned for it.** A newcomer is bootstrapped from the signed
+snapshot instead of crawling, a peer on another branch is never used as a sync source, and the
+SDK's third-strike ban for a request that was in flight is replaced by a small, bounded report.
+
+### Added
+- **Snapshot-first onboarding on Windows.** `install.ps1` had no fast sync at all, so a fresh
+  Windows install re-verified the chain from genesis. It now mirrors `install.sh`: fetch the
+  signed `snapshot.json` → verify the signature → download → verify the bytes → import into a
+  staging directory → move `chains/`. Every failure is one line (`fast sync unavailable (…) —
+  falling back to a normal full peer sync (slower, still correct).`) and never an install
+  failure; an existing database is never touched.
+- **Automatic catch-up from the signed snapshot** (`gpn_agent::selfheal`).
+  `SNAPSHOT_BEHIND_BLOCKS = 20_000`, override `GPN_SNAPSHOT_CATCHUP_MIN_BLOCKS`. A node that
+  *answers* with a height more than 20k blocks behind the signed snapshot imports it instead of
+  crawling; the lagging database is set aside as `chains-behind-<ts>` and the existing 24 h
+  one-recovery ledger prevents loops. An unreadable node (RPC down, no answer) is never treated
+  as "behind" — nothing is wiped on a guess.
+- **Signed anchors reach the node.** After each verification the supervisor writes
+  `<base>/verified-anchors.json` (151 checkpoints) and the node reads it at startup.
+- **Peer choice by canonical progress** (`node/src/sync_source.rs`). A peer's claim is judged
+  against the signed anchors *and* against "is its tip a block we hold?". A peer on another
+  branch is `FORK`: it is never a sync source, while the link stays up so it can still be served
+  canonical blocks. A behind-but-canonical peer is kept, never rejected.
+- **`start-node.cmd --task`** — the scheduled task's headless worker mode, so closing the start
+  window does not stop the node (Windows release bundle).
+
+### Changed
+- **Peer re-dial order is anchor match, then best block, then tenure.** On 2026-11-15 a laggard
+  preferred whichever peer answered first and settled on a newcomer at #69,295 while a canonical
+  peer at #307,300 was reachable. Arrival order is not a fact about the chain; the best block a
+  peer claims is. The peer-id tie-break keeps the order identical on every machine.
+- The block server asks an anchor-mismatched peer for nothing, and logs one INFO line per peer
+  per state change: `peer X best=#N vs ours #M; canonical/anchor-match=<bool>; using/not using
+  as sync source`.
+
+### Fixed
+- **An abandoned sync request no longer bans the peer.** `sc-network-sync` bans a peer on the
+  third disconnect that happens with a request in flight; our journal for 2026-11-14 has 66 of
+  those in one day against peers that had done nothing wrong. `sync_tolerance::TolerantSyncStrategy`
+  wraps the stock strategy and replaces exactly that one `DropPeer` action — which carries the
+  SDK's inflight reason — with a small report (-1024) charged against a per-peer lifetime budget
+  ~23,000x below the ban threshold, an INFO line naming the peer and the count, and no
+  `disconnect_peer`. Every other `DropPeer` (undecodable payload, bad signature, forged
+  justification, genesis mismatch) still passes through untouched and stays fatal.
+
 ## [0.3.48] - 2026-11-15
 
 Bumped from 0.3.47. Twenty-one commits, one theme: **the network stops lying about what it

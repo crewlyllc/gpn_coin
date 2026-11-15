@@ -27,6 +27,15 @@ use std::{sync::Arc, sync::Mutex, sync::OnceLock, time::Duration};
 
 use crate::gpu_miner::EthashGpuMiner;
 
+/// Where the *verified* signed checkpoints live, relative to the node base path.
+///
+/// Written by `gpn_fleet`'s self-heal after it verifies `snapshot.json` with the
+/// compiled-in release key (see `gpn_agent::selfheal`), so the node reads a file
+/// whose contents were checked by a process that has the key — the node itself
+/// does not carry the signer. An absent or unreadable file yields no anchors,
+/// which means every peer is `Unknown`: nothing is rejected on a guess.
+pub const ANCHORS_FILE: &str = "verified-anchors.json";
+
 pub(crate) type FullClient = sc_service::TFullClient<
     Block,
     RuntimeApi,
@@ -2139,22 +2148,34 @@ pub async fn new_full<
         // claim is already decoded and compared here, so it is recorded here
         // and nowhere else.
         let peer_tips = peer_tips.clone();
+        // Two more consumers of the same claim, added 2026-11-15:
+        //  * the ranked re-dial reads `best`/`anchor` so a laggard prefers the
+        //    furthest *canonical* peer instead of whoever answered first;
+        //  * the download gate refuses a peer whose claim contradicts a signed
+        //    anchor, so a newcomer never inherits a fork.
+        let peer_book = peer_book.clone();
+        let anchors = crate::sync_source::Anchors::from_json(
+            &std::fs::read_to_string(base_path.join(ANCHORS_FILE)).unwrap_or_default(),
+        );
         task_manager
             .spawn_handle()
             .spawn("gpn-chain-state", None, async move {
                 use crate::chain_state as cs;
+                use crate::sync_source as ss;
                 let mut service = chain_state_service;
                 let mut open: std::collections::HashSet<sc_network::PeerId> = Default::default();
                 let mut announced: std::collections::HashMap<sc_network::PeerId, u64> =
                     Default::default();
                 let mut log_state = cs::StateLog::default();
+                let mut decisions = ss::DecisionLog::default();
                 let mut ticker = tokio::time::interval(Duration::from_secs(cs::TICK_SECS));
                 ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 log::info!(
                     "chain-state: {} active — genesis:hash@height on connect and on every \
-                     tip advance ({}s tick)",
+                     tip advance ({}s tick); {} signed anchor(s) for source selection",
                     cs::CHAIN_STATE_PROTOCOL,
-                    cs::TICK_SECS
+                    cs::TICK_SECS,
+                    anchors.len()
                 );
                 loop {
                     tokio::select! {
@@ -2196,6 +2217,11 @@ pub async fn new_full<
                                     open.remove(&peer);
                                     announced.remove(&peer);
                                     log_state.forget(&peer.to_string());
+                                    decisions.forget(&peer.to_string());
+                                    // A closed connection's fork verdict is not a
+                                    // fact about the next one: the gate re-learns
+                                    // it from the next claim.
+                                    peer_tips.set_anchor_mismatch(peer, false);
                                 }
                                 NotificationEvent::NotificationReceived {
                                     peer, notification, ..
@@ -2213,13 +2239,70 @@ pub async fn new_full<
                                     };
                                     let verdict = cs::compare(&local, &remote);
                                     peer_tips.set(peer, remote.clone());
+                                    // The one fact the numbers cannot carry: does
+                                    // this peer's claimed tip exist in OUR chain?
+                                    // `None` when the hash will not decode or the
+                                    // lookup fails — never evidence.
+                                    let held = {
+                                        let hex = remote.best_hash.trim_start_matches("0x");
+                                        hex::decode(hex).ok().and_then(|bytes| {
+                                            <Block as BlockT>::Hash::decode(&mut &bytes[..])
+                                                .ok()
+                                                .map(|hash| {
+                                                    client.header(hash).ok().flatten().is_some()
+                                                })
+                                        })
+                                    };
+                                    // Which of the two roles is this peer fit
+                                    // for? (no claim above = nothing to say)
+                                    let (use_, anchor) = ss::decide_with_tip(
+                                        local.height,
+                                        &local.genesis,
+                                        Some(&remote),
+                                        &anchors,
+                                        held,
+                                    );
+                                    // Only a proven contradiction with a signed
+                                    // anchor closes the sync link. A peer that is
+                                    // merely behind stays askable per #158.
+                                    peer_tips.set_anchor_mismatch(peer, use_ == ss::Use::Fork);
+                                    // Feed the dial ranking: furthest canonical
+                                    // peer first, a fork never as a source.
+                                    peer_book.set_progress(
+                                        &peer.to_string(),
+                                        Some(remote.height),
+                                        anchor,
+                                    );
                                     let who = peer.to_string();
-                                    if log_state.record(&who, verdict, &remote).is_some() {
-                                        let line = cs::describe(&who, &local, &remote, verdict);
-                                        if verdict.is_notable() {
-                                            log::warn!("{line}");
+                                    // A loud line only when the claim is
+                                    // actionable (divergence, wrong network, a
+                                    // peer ahead); otherwise the decision line is
+                                    // the whole record.
+                                    if verdict.is_notable()
+                                        && log_state.record(&who, verdict, &remote).is_some()
+                                    {
+                                        log::warn!(
+                                            "{}",
+                                            cs::describe(&who, &local, &remote, verdict)
+                                        );
+                                    }
+                                    // The decision line: once per peer per state
+                                    // change (2026-11-15 owner requirement).
+                                    if decisions
+                                        .record(&who, use_, anchor, &remote)
+                                        .is_some()
+                                    {
+                                        let decision = ss::decision_line(
+                                            &who,
+                                            local.height,
+                                            &remote,
+                                            use_,
+                                            anchor,
+                                        );
+                                        if use_.is_notable() {
+                                            log::warn!("{decision}");
                                         } else {
-                                            log::info!("{line}");
+                                            log::info!("{decision}");
                                         }
                                     }
                                 }
