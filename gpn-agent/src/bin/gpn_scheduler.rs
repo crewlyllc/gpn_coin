@@ -337,6 +337,59 @@ fn is_terminal_state(state: &str) -> bool {
     matches!(state, "Completed" | "Cancelled" | "Failed")
 }
 
+/// Why a synchronous `/v1/chat/completions` wait must stop (#187).
+///
+/// The wait exists because OpenAI clients are synchronous, but continuing it can
+/// be pointless for two reasons the local job store never reports: the on-chain
+/// job reached a terminal state under us (the janitor's requestor
+/// `cancel_job`, a provider failure, an expiry), or the wait has spent the
+/// budget after which the janitor is entitled to cancel the job anyway.
+/// Observed 2026-11-15 07:57–08:02 PT: job #6582 was `cancelled stale Pending`
+/// at 08:01:16 and the handler kept logging `stuck >336s` **after** the cancel
+/// and after its client disconnected — a socket held for a job that could no
+/// longer be served.
+#[derive(Debug, PartialEq, Eq)]
+enum ChatWaitStop {
+    /// The chain says the job was cancelled — nothing will ever complete it.
+    Cancelled,
+    /// The chain says the job failed.
+    Failed,
+    /// No terminal state, but the budget is spent. Carries the last state seen
+    /// (if any) so the answer can say what the job was doing.
+    BudgetSpent(Option<String>),
+}
+
+/// How long a synchronous chat handler waits at most, derived from the same
+/// windows the janitor uses so the two cannot disagree: a lease nobody claims
+/// is vetoed for [`CLAIM_IN_FLIGHT_SECS`], and a job is cancelled once
+/// [`stale_secs_for_kind`] has passed. Whichever is longer is the last moment
+/// the job could still be legitimately served; the extra 60 s covers one
+/// janitor pass so a cancel that lands right at the boundary is observed as a
+/// cancel rather than as a timeout.
+fn chat_wait_budget(max_tokens: u64) -> Duration {
+    let secs = CLAIM_IN_FLIGHT_SECS.max(stale_secs_for_kind("llm", max_tokens)) + 60;
+    Duration::from_secs(secs)
+}
+
+/// Should the chat wait stop now? `None` = keep waiting.
+fn chat_wait_stop(
+    chain_state: Option<&str>,
+    spent: Duration,
+    budget: Duration,
+) -> Option<ChatWaitStop> {
+    match chain_state {
+        Some("Cancelled") => return Some(ChatWaitStop::Cancelled),
+        Some("Failed") => return Some(ChatWaitStop::Failed),
+        _ => {}
+    }
+    if spent >= budget {
+        return Some(ChatWaitStop::BudgetSpent(
+            chain_state.map(|s| s.to_string()),
+        ));
+    }
+    None
+}
+
 /// Extra slack added to a job's token-scaled stale window before an *unreadable*
 /// chain record is treated as "the job is gone".
 ///
@@ -5982,7 +6035,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Err(e) => text = format!("[gpn error] {e} (job #{id})"),
                                 // block until the provider finishes (OpenAI calls are synchronous)
                                 Ok(()) => {
-                                    for _ in 0..1200 {
+                                    // #187: bounded and cancel-aware. The local store
+                                    // never learns about a requestor-side `cancel_job`
+                                    // or an expiry, so the loop also asks the chain
+                                    // (one storage read every ~5 s, not every poll) and
+                                    // stops as soon as the job can no longer be served.
+                                    let budget = chat_wait_budget(chat_max_tokens as u64);
+                                    let started = Instant::now();
+                                    let mut last_state: Option<String> = None;
+                                    let mut poll = 0u32;
+                                    loop {
                                         if let Some(j) = gpn_agent::llm::get_job(id) {
                                             if j.status == "done" {
                                                 text = j.response.clone().unwrap_or_default();
@@ -6001,6 +6063,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 break;
                                             }
                                         }
+                                        // Every 17th pass ≈ 5.1 s. A chain read per
+                                        // 300 ms poll would be 17× the RPC load for
+                                        // no earlier answer than this.
+                                        if poll % 17 == 0 {
+                                            if let Some((state, _, _, _)) =
+                                                rt.block_on(client.get_job_state(id))
+                                            {
+                                                last_state = Some(state.clone());
+                                            }
+                                            if let Some(stop) = chat_wait_stop(
+                                                last_state.as_deref(),
+                                                started.elapsed(),
+                                                budget,
+                                            ) {
+                                                let waited = started.elapsed().as_secs();
+                                                text = match &stop {
+                                                    ChatWaitStop::Cancelled => format!(
+                                                        "[gpn error] job #{id} was cancelled on chain after {waited}s \
+                                                         — it was never completed and this access point stopped waiting for it (no further retry is implied; create a new request)"
+                                                    ),
+                                                    ChatWaitStop::Failed => format!(
+                                                        "[gpn error] job #{id} failed on chain after {waited}s"
+                                                    ),
+                                                    ChatWaitStop::BudgetSpent(state) => format!(
+                                                        "[gpn error] job #{id} was still {} after {waited}s — this access point stopped waiting; it may still complete on chain (GET /job/{id})",
+                                                        state.as_deref().unwrap_or("unreadable on chain")
+                                                    ),
+                                                };
+                                                eprintln!(
+                                                    "[chat] stopped waiting for #{id} after {waited}s: {}",
+                                                    match &stop {
+                                                        ChatWaitStop::Cancelled => "cancelled on chain".to_string(),
+                                                        ChatWaitStop::Failed => "failed on chain".to_string(),
+                                                        ChatWaitStop::BudgetSpent(s) => format!(
+                                                            "budget {}s spent, last state {}",
+                                                            budget.as_secs(),
+                                                            s.as_deref().unwrap_or("unknown")
+                                                        ),
+                                                    }
+                                                );
+                                                break;
+                                            }
+                                        }
+                                        poll = poll.wrapping_add(1);
                                         std::thread::sleep(Duration::from_millis(300));
                                     }
                                 }
@@ -8865,6 +8971,65 @@ mod tests {
         // Item #91: a lease delivered moments ago is a claim in flight — the
         // janitor must wait for it even though the job is old and unusable-looking.
         assert!(!should_cancel_stale("Pending", 361, 120, false, true));
+    }
+
+    /// #187: the synchronous chat wait stops when the job can no longer be
+    /// served, not when an arbitrary iteration count runs out.
+    ///
+    /// The pre-fix loop was `for _ in 0..1200 { … sleep(300ms) }` with no chain
+    /// read at all, so a job the janitor cancelled at 248 s kept its handler (and
+    /// the caller's socket) busy for the full 360 s — measured on #6582.
+    #[test]
+    fn the_chat_wait_stops_on_a_cancel_not_after_a_fixed_360s() {
+        let budget = chat_wait_budget(8);
+        // The live shape: a small chat job's budget is the janitor's own, not an
+        // unrelated constant — 240 s veto vs 120 s stale floor ⇒ 240 + 60.
+        assert_eq!(budget, Duration::from_secs(CLAIM_IN_FLIGHT_SECS + 60));
+        // Cancelled is terminal *immediately*, well inside the budget: the caller
+        // gets "cancelled", not "timeout", and gets it at once.
+        assert_eq!(
+            chat_wait_stop(Some("Cancelled"), Duration::from_secs(1), budget),
+            Some(ChatWaitStop::Cancelled)
+        );
+        assert_eq!(
+            chat_wait_stop(Some("Failed"), Duration::from_secs(1), budget),
+            Some(ChatWaitStop::Failed)
+        );
+        // Still legitimately in flight → keep waiting, however long the budget.
+        assert_eq!(
+            chat_wait_stop(Some("Pending"), Duration::from_secs(239), budget),
+            None
+        );
+        assert_eq!(
+            chat_wait_stop(Some("Running"), Duration::from_secs(1), budget),
+            None
+        );
+        // Budget spent with no terminal state: stop, and say what it was doing.
+        assert_eq!(
+            chat_wait_stop(Some("Pending"), budget, budget),
+            Some(ChatWaitStop::BudgetSpent(Some("Pending".to_string())))
+        );
+        assert_eq!(
+            chat_wait_stop(None, budget + Duration::from_secs(1), budget),
+            Some(ChatWaitStop::BudgetSpent(None))
+        );
+        // A big generation the janitor will NOT cancel yet must not be cut short:
+        // 4096 tokens ⇒ 60 + 409 s of stale window is longer than the 240 s veto.
+        let big = chat_wait_budget(4096);
+        assert_eq!(
+            big,
+            Duration::from_secs(stale_secs_for_kind("llm", 4096) + 60)
+        );
+        assert!(big > Duration::from_secs(CLAIM_IN_FLIGHT_SECS));
+        assert_eq!(
+            chat_wait_stop(Some("Running"), Duration::from_secs(300), big),
+            None
+        );
+        // And the hard boundary is exclusive: one second short is still a wait.
+        assert_eq!(
+            chat_wait_stop(None, budget - Duration::from_secs(1), budget),
+            None
+        );
     }
 
     /// Item #91: delivery arms a bounded veto, and the veto lapses so a dead
