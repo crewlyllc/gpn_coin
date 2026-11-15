@@ -150,15 +150,49 @@ pub fn now_unix() -> u64 {
 }
 
 /// Where the tick lives.
+///
+/// The home directory comes from [`crate::firstrun::state_home`], the same
+/// resolver every other `~/.gpn/...` path uses (#185). Before that, this was a
+/// bare `HOME`-or-`"."` lookup, so on a Windows box started by Task Scheduler —
+/// no `HOME`, working directory `C:\Windows\System32` — the tick was written to
+/// a path the process cannot create. The write failure is silent by design
+/// (a read-only home must not kill the provider), so the file simply froze: on
+/// box 1 it read `updated_unix` from 00:55 while the provider ran healthily for
+/// five hours. `docs/run-a-node.md` tells an operator to diagnose a wedge by
+/// `cat ~/.gpn/provider-tick.json` and watching `loops` grow, so a frozen file
+/// is a false stall report about a healthy process.
+///
+/// The watchdog *decision* never reads this file (it polls the in-process
+/// [`Progress`] cell), so this is an observability path only — which is exactly
+/// why a silent failure here stayed invisible for a day.
 pub fn tick_path() -> PathBuf {
-    if let Ok(p) = std::env::var("GPN_PROVIDER_TICK") {
+    tick_path_from(
+        std::env::var("GPN_PROVIDER_TICK").ok().as_deref(),
+        crate::firstrun::state_home(),
+    )
+}
+
+/// [`tick_path`] with both inputs injected, so a test needs no process-global
+/// environment (mutating `HOME` here used to race every path-resolving test).
+pub(crate) fn tick_path_from(override_path: Option<&str>, home: Option<PathBuf>) -> PathBuf {
+    if let Some(p) = override_path {
         let p = p.trim();
         if !p.is_empty() {
             return PathBuf::from(p);
         }
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(format!("{home}/.gpn/provider-tick.json"))
+    match home {
+        Some(h) => h.join(".gpn/provider-tick.json"),
+        // No home at all: "the working directory" is the last-resort anchor, and
+        // saying so once is cheaper than another silent freeze.
+        None => {
+            eprintln!(
+                "[watchdog] no HOME/USERPROFILE — the progress tick is written relative to the \
+                 working directory; `cat ~/.gpn/provider-tick.json` will NOT see it"
+            );
+            PathBuf::from(".gpn/provider-tick.json")
+        }
+    }
 }
 
 /// Default-phase budget from the environment (floor 60 s, cap 24 h).
@@ -600,5 +634,30 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_tick_follows_the_state_home_not_the_working_directory() {
+        // An explicit GPN_PROVIDER_TICK always wins.
+        assert_eq!(
+            tick_path_from(Some("/tmp/explicit.json"), Some(PathBuf::from("/home/u"))),
+            PathBuf::from("/tmp/explicit.json")
+        );
+        // A blank override is not an override.
+        assert_eq!(
+            tick_path_from(Some("   "), Some(PathBuf::from("/home/u"))),
+            PathBuf::from("/home/u/.gpn/provider-tick.json")
+        );
+        // #185: the state home is asked for, not the raw HOME env var, so a
+        // Task-Scheduler-started Windows box resolves under USERPROFILE instead
+        // of writing into C:\Windows\System32 and failing silently.
+        let tick = tick_path_from(None, Some(PathBuf::from(r"C:\Users\Jeremy Guo")));
+        assert!(tick.ends_with(".gpn/provider-tick.json"));
+        assert!(tick.to_string_lossy().contains("Jeremy Guo"), "{tick:?}");
+        // No home at all still yields a path — relative, and now announced.
+        assert_eq!(
+            tick_path_from(None, None),
+            PathBuf::from(".gpn/provider-tick.json")
+        );
     }
 }
