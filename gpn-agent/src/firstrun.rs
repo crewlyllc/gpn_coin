@@ -293,6 +293,35 @@ pub fn expand_tilde(p: &str) -> String {
     expand_tilde_at(p, home.as_deref())
 }
 
+/// The state-directory anchor every `~/.gpn/*` path is built from.
+///
+/// `$HOME` first (the POSIX convention the rest of the crate uses), then
+/// `$USERPROFILE`. The second half is not a nicety: a Windows process started by
+/// the Task Scheduler has **no** `HOME`, and the `HOME`-or-`"."` fallback every
+/// module used to carry then resolved state to the *current working directory*.
+/// On box 1 (2026-11-15) that directory was `C:\Windows\System32`, so the
+/// provider wrote to `C:\Windows\System32\.gpn\llm_store.json` — write-denied
+/// for a limited token — every write failed silently, and every pulled lease
+/// looked payload-less (#185). See `gpn_node::main`, which adopts
+/// `USERPROFILE` as `HOME` once so children inherit it too.
+pub fn state_home() -> Option<PathBuf> {
+    state_home_at(
+        std::env::var("HOME").ok().as_deref(),
+        std::env::var("USERPROFILE").ok().as_deref(),
+    )
+}
+
+/// [`state_home`] with both candidates injected, so tests need not mutate the
+/// process-global environment.
+pub(crate) fn state_home_at(home: Option<&str>, userprofile: Option<&str>) -> Option<PathBuf> {
+    [home, userprofile]
+        .into_iter()
+        .flatten()
+        .map(|h| h.trim().trim_end_matches(['/', '\\']))
+        .find(|h| !h.is_empty())
+        .map(PathBuf::from)
+}
+
 /// [`expand_tilde`] with the home directory injected, so tests need not mutate
 /// the process-global `HOME` (which raced every other test that resolves a
 /// path through it).
@@ -1865,5 +1894,29 @@ mod tests {
             expand_tilde_at("~/.gpn/node-key", Some("C:/Users/tester")),
             "C:/Users/tester/.gpn/node-key"
         );
+    }
+
+    #[test]
+    fn state_home_prefers_home_then_userprofile() {
+        // POSIX wins when both exist.
+        assert_eq!(
+            state_home_at(Some("/home/tester"), Some("C:/Users/tester")),
+            Some(std::path::PathBuf::from("/home/tester"))
+        );
+        // A Windows task-started process has USERPROFILE only (#185).
+        assert_eq!(
+            state_home_at(None, Some("C:\\Users\\tester")),
+            Some(std::path::PathBuf::from("C:\\Users\\tester"))
+        );
+        // Empty / whitespace / trailing-slash values are not usable anchors; a
+        // trailing slash is trimmed rather than doubled.
+        assert_eq!(state_home_at(Some("  "), None), None);
+        assert_eq!(state_home_at(Some(""), Some("")), None);
+        assert_eq!(
+            state_home_at(Some("/home/tester/"), None),
+            Some(std::path::PathBuf::from("/home/tester"))
+        );
+        // Nothing at all: the caller decides the fallback, and store.rs warns.
+        assert_eq!(state_home_at(None, None), None);
     }
 }

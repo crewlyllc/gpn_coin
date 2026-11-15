@@ -93,9 +93,19 @@ fn note_store_read_failure(path: &Path, why: &str) {
 pub fn default_store_path() -> PathBuf {
     std::env::var("GPN_LLM_STORE")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-            PathBuf::from(format!("{home}/.gpn/llm_store.json"))
+        .unwrap_or_else(|_| match crate::firstrun::state_home() {
+            Some(home) => PathBuf::from(format!("{}/.gpn/llm_store.json", home.display())),
+            None => {
+                eprintln!(
+                    "[store] neither HOME nor USERPROFILE is set - falling back to a RELATIVE \
+                     store path (.gpn/llm_store.json under the working directory {}); job \
+                     payloads written from here are invisible to other processes",
+                    std::env::current_dir()
+                        .map(|d| d.display().to_string())
+                        .unwrap_or_else(|_| "?".into())
+                );
+                PathBuf::from(".gpn/llm_store.json")
+            }
         })
 }
 
@@ -391,6 +401,12 @@ impl LlmStore {
             path: default_store_path(),
             lock: Mutex::new(()),
         }
+    }
+
+    /// Where this handle persists. Named in write-failure logs so an operator
+    /// can see *which* file the process believes in (#185).
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     pub fn with_path(path: PathBuf) -> Self {

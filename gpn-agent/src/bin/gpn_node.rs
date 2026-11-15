@@ -2222,6 +2222,19 @@ fn log_event(label: &str, msg: &str) {
     asciiprintln!("[supervisor {ts}] {label}: {msg}");
 }
 
+/// The value `HOME` should take, or `None` when it already points somewhere.
+///
+/// Pure so the decision is testable without touching the process environment.
+fn adopt_home_from_userprofile(home: Option<&str>, userprofile: Option<&str>) -> Option<String> {
+    let home_usable = home.map(|h| !h.trim().is_empty()).unwrap_or(false);
+    if home_usable {
+        return None;
+    }
+    userprofile
+        .map(|u| u.trim_end_matches(['/', '\\']).to_string())
+        .filter(|u| !u.trim().is_empty())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Updates: signed manifest, opt-in auto-update, minimum-version cutoff
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4231,6 +4244,27 @@ async fn main() {
     // Before anything can spawn: a console close must not take the node
     // (and its children) down silently. No-op off Windows.
     install_console_control_handler();
+
+    // ── State anchor: adopt USERPROFILE as HOME when HOME is absent. ────────
+    // A Task-Scheduler-started process on Windows gets no HOME (verified on
+    // box 1: `[Environment]::GetEnvironmentVariable('HOME','User')` empty, and
+    // the task action carries no WorkingDirectory). Every module that builds
+    // `~/.gpn/...` then fell back to "." — the CWD — which for a task is
+    // `C:\Windows\System32`, where a limited token cannot write. The LLM
+    // ledger silently stopped accepting payloads and every pulled lease was
+    // "payload missing" (#185, 2026-11-15). Resolve it ONCE here, before any
+    // child is spawned, so node + providers + heartbeat agree on one absolute
+    // directory.
+    if let Some(home) = adopt_home_from_userprofile(
+        std::env::var("HOME").ok().as_deref(),
+        std::env::var("USERPROFILE").ok().as_deref(),
+    ) {
+        std::env::set_var("HOME", &home);
+        log_event(
+            "node",
+            &format!("HOME is unset - using USERPROFILE ({home}) as the state anchor for this node and every provider it starts"),
+        );
+    }
     let argv: Vec<String> = std::env::args().collect();
     set_ascii_mode(ascii_mode_default(&argv));
 
@@ -4815,6 +4849,28 @@ mod tests {
     }
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn home_is_adopted_from_userprofile_only_when_missing() {
+        // Already set: leave it alone (a POSIX box must keep its HOME).
+        assert_eq!(
+            adopt_home_from_userprofile(Some("/home/tester"), Some("C:\\U")),
+            None
+        );
+        // The Windows task case (#185): no HOME, USERPROFILE present.
+        assert_eq!(
+            adopt_home_from_userprofile(None, Some("C:\\Users\\Jeremy Guo")),
+            Some("C:\\Users\\Jeremy Guo".to_string())
+        );
+        // Empty HOME counts as missing; a trailing separator is trimmed.
+        assert_eq!(
+            adopt_home_from_userprofile(Some(""), Some("C:\\Users\\tester\\")),
+            Some("C:\\Users\\tester".to_string())
+        );
+        // Nothing to adopt: unchanged behaviour, and no spurious log line.
+        assert_eq!(adopt_home_from_userprofile(None, None), None);
+        assert_eq!(adopt_home_from_userprofile(Some(" "), Some("  ")), None);
     }
 
     /// A fully-populated config for tests that must not touch the real

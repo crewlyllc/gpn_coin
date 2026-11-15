@@ -63,7 +63,7 @@
 //! legacy `GPN_ASSIGN_AUTH=token` keeps working during the transition.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -684,7 +684,14 @@ pub fn apply_lease_to(
         // (it carries the response/status this provider wrote). A re-delivered
         // lease must not reset a finished job to `queued`.
         if store.get(lease.job_id).is_none() {
-            stored_job = store.put(lease.job_id, job.clone()).is_ok();
+            match store.put(lease.job_id, job.clone()) {
+                Ok(()) => stored_job = true,
+                // Never silent: the caller treats `false` as "no payload" and
+                // skips the job, so the reason has to be in the log or the
+                // failure looks like a routing bug (#185, box 1: every write
+                // to a write-denied store path was discarded here).
+                Err(e) => eprintln!("{}", put_failure_note(lease.job_id, store.path(), &e)),
+            }
         } else {
             stored_job = true;
         }
@@ -699,15 +706,34 @@ pub fn apply_lease_to(
     let _ = merge_json_object(assignment_store, &lease.job_id.to_string(), rec);
     stored_job
 }
+/// The one line printed when a lease payload cannot be persisted.
+///
+/// Split out so the wording (which names the *file*, not just the failure) is
+/// covered by a test: #185 was hours of work because the write error was thrown
+/// away and the only symptom was "payload missing".
+pub fn put_failure_note(job_id: u64, path: &Path, err: &std::io::Error) -> String {
+    format!(
+        "[assign] job #{job_id} could not be stored to {} ({err}) - the provider cannot run it \
+         and will leave it Pending",
+        path.display()
+    )
+}
+
 /// Path of the shared assignments file (`$HOME/.gpn/assignments.json`).
+///
+/// Resolved through [`crate::firstrun::state_home`] so a Windows task-started
+/// process without `HOME` still lands in `%USERPROFILE%\.gpn` instead of the
+/// working directory (#185).
 pub fn assignment_store_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(format!("{home}/.gpn/assignments.json"))
+    crate::firstrun::state_home()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".gpn/assignments.json")
 }
 
 fn cursor_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(format!("{home}/.gpn/assign-cursor.json"))
+    crate::firstrun::state_home()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".gpn/assign-cursor.json")
 }
 
 /// Read the persisted cursor for `provider`. `None` when no cursor exists yet
@@ -1475,6 +1501,43 @@ mod tests {
         let after = payload_store.get(9).expect("record survives");
         assert_eq!(after.status, "done");
         assert_eq!(after.response.as_deref(), Some("answer"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_store_write_is_reported_not_treated_as_a_delivery() {
+        // #185, box 1: the provider's store path was write-denied
+        // (C:\Windows\System32\.gpn), `put` failed, the error was discarded and
+        // the caller then said "assigned but no local payload" - which reads
+        // like a routing bug and hid the real cause for hours. The contract:
+        // an unwritable payload store yields `false` (job is NOT runnable).
+        let dir = std::env::temp_dir().join(format!("gpn-assign-denied-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        // A regular FILE where a directory must be: every write under it fails.
+        let blocker = dir.join("blocker");
+        std::fs::write(&blocker, b"not a dir").unwrap();
+        let payload_store = LlmStore::with_path(blocker.join("sub/llm_store.json"));
+        let assignments = dir.join("assignments.json");
+        let lease = Lease {
+            job_id: 6580,
+            model: "deepseek-r1:14b".into(),
+            pull: true,
+            callback: String::new(),
+            callback_token: String::new(),
+            job: Some(LlmJob::new_llm("deepseek-r1:14b", "hi", 0.1, 32)),
+        };
+        assert!(
+            !apply_lease_to(&lease, "5Hgbpi", &assignments, &payload_store),
+            "a payload that could not be stored must not be reported as stored"
+        );
+        assert!(payload_store.get(6580).is_none());
+        // And the failure line names the file the process believed in - the
+        // fact that was missing when #185 was first diagnosed.
+        let err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Access is denied.");
+        let note = put_failure_note(6580, payload_store.path(), &err);
+        assert!(note.contains("#6580"), "{note}");
+        assert!(note.contains("llm_store.json"), "{note}");
+        assert!(note.contains("Access is denied"), "{note}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
