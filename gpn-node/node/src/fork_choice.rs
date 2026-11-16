@@ -199,14 +199,14 @@ impl Decision {
     /// refusal does **not** pause: our chain is the canonical one by decree and
     /// the network needs it to keep producing blocks.
     pub fn pauses_sealing(self) -> bool {
-        match self {
-            Decision::Reorg { .. } => true,
-            Decision::Refused {
-                reason: RefuseReason::DeepFork,
-                ..
-            } => true,
-            _ => false,
-        }
+        matches!(
+            self,
+            Decision::Reorg { .. }
+                | Decision::Refused {
+                    reason: RefuseReason::DeepFork,
+                    ..
+                }
+        )
     }
 
     /// Did the bootstrap stance decide against an otherwise-heavier peer? Logged
@@ -522,7 +522,9 @@ mod tests {
     #[test]
     fn constants_are_pinned() {
         assert_eq!(MAX_REORG_DEPTH, 288);
-        assert!(PRIMARY_AUTHORITATIVE);
+        // A constant assertion belongs at compile time, not in a test body —
+        // `assertions_on_constants` is denied in CI (W58, again in 0.3.50).
+        const _: () = assert!(PRIMARY_AUTHORITATIVE);
         assert_eq!(PRIMARY_PEER_ID.len(), 52); // 12D3KooW + 44 base58
     }
 }

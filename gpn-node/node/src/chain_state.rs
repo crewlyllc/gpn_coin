@@ -195,10 +195,8 @@ pub fn decode(bytes: &[u8]) -> Option<ChainState> {
     let text = std::str::from_utf8(bytes).ok()?.trim();
     let (v2, rest) = if let Some(rest) = text.strip_prefix(WIRE_PREFIX_V2) {
         (true, rest)
-    } else if let Some(rest) = text.strip_prefix(WIRE_PREFIX) {
-        (false, rest)
     } else {
-        return None;
+        (false, text.strip_prefix(WIRE_PREFIX)?)
     };
     let (genesis, tail) = rest.split_once(':')?;
     let (best_hash, tail) = tail.rsplit_once('@')?;
