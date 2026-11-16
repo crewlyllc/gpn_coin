@@ -290,6 +290,13 @@ jobs:
       - name: Snapshot weekly preflight (stale verifier, verify-before-swap)
         run: bash scripts/tests/test-snapshot-weekly.sh
 
+      # #190: release-status.sh read an absent CI run (local HEAD never pushed)
+      # as "in flight" and blocked four consecutive maintainer ticks. Fake git +
+      # fake curl + throwaway repo: success / running / none-with-origin-green /
+      # none-with-origin-red / API-unreadable / no-run-anywhere / lock.
+      - name: Release status reads `ci none` honestly
+        run: bash scripts/tests/test-release-status.sh
+
       # Referral download links (`?ref=CODE`): the page-side half. Pure Node,
       # no browser: validation rule, URL parsing, and the XSS boundary (the
       # code is only ever written as text, never as markup).
