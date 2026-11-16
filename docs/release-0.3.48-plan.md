@@ -103,3 +103,20 @@ deliberate limitation, not a defect to fix later without asking.
 5. B — runtime change, its own release with a spec bump
 
 G is out of scope by owner decision.
+
+## Consensus stance for this bootstrap (owner decision, 2026-11-16)
+
+**The Linux host is the primary chain for now** (`12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo`).
+Its chain is authoritative; every other node follows it.
+
+- Heaviest-chain applies **among non-primary peers**. A branch that does not contain the
+  primary's chain never displaces it while this stance is in force.
+- The rule is explicit and reversible: a documented constant (default = primary authoritative),
+  with a comment stating it exists because a single-writer bootstrap is safer than a two-IP
+  network electing itself, and that it should be removed once independent operators exist.
+- Log one line whenever the bootstrap rule overrode an otherwise-heavier peer, so its use is
+  visible rather than assumed.
+- Not doing now (deferred by owner): a diversity-based sealing gate — with two public IPs it
+  would stop mining. Revisit when there are more machines.
+- Authoring stays **proof-of-work only**; GPU attestation stays informational (pricing,
+  routing) and becomes a gate only if the owner decides so before mainnet.

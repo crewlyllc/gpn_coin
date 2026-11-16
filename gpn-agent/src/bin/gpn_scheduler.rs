@@ -4525,6 +4525,42 @@ fn truncate_request_line(line: &str) -> String {
     out
 }
 
+/// This access point's own public IPv4, as an observer sees it — used only to
+/// tell the dial-back verifier when a check is meaningless ("you share the
+/// claimant's egress, your handshake proves nothing"). Read from the operator's
+/// declaration or the node's own dialability record; `None` means unknown, and
+/// an unknown egress never blocks a verification.
+fn ap_public_ipv4() -> Option<String> {
+    fn host_of(ma: &str) -> Option<String> {
+        let parts: Vec<&str> = ma.split('/').filter(|p| !p.is_empty()).collect();
+        match parts.first().copied() {
+            Some("ip4") => parts.get(1).map(|h| h.to_string()),
+            Some("ip6") => parts.get(1).map(|h| h.to_string()),
+            _ => None,
+        }
+    }
+    if let Ok(addr) = std::env::var("GPN_PUBLIC_ADDR") {
+        if let Some(h) = host_of(addr.trim()) {
+            return Some(h);
+        }
+    }
+    let path = std::env::var("GPN_DIALABILITY_STATE").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        format!("{home}/.gpn/dialability.json")
+    });
+    let text = std::fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    // Prefer the IPv4 endpoint; fall back to whichever endpoint is recorded.
+    for key in ["public_endpoint", "public_endpoint_v6", "public_addr"] {
+        if let Some(h) = v.get(key).and_then(|x| x.as_str()).and_then(host_of) {
+            return Some(h);
+        }
+    }
+    v.get("multiaddrs")
+        .and_then(|x| x.as_array())
+        .and_then(|a| a.iter().filter_map(|s| s.as_str()).find_map(host_of))
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
@@ -4698,6 +4734,84 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let registry = Arc::new(Mutex::new(Vec::<Provider>::new()));
+
+    // ── dial-back verification of published addresses ─────────────────────
+    //
+    // The directory may only publish what a third party actually reaches
+    // (2026-11-16, owner priority). Until now the access point believed each
+    // node's own `reachability: "backbone"` string, so two machines behind one
+    // router both claimed backbone and one of them advertised a socket that
+    // answers as somebody else. A background thread performs the handshake
+    // (`dialcheck::verify`) for every provider's primary IPv4 socket and the
+    // `/network` document consumes the verdict. Never on the request path: a
+    // dial can take seconds and /network is polled continuously.
+    let dialbacks: Arc<Mutex<std::collections::HashMap<String, gpn_agent::network_directory::Dialback>>> =
+        Arc::new(Mutex::new(std::collections::HashMap::new()));
+    {
+        let registry = registry.clone();
+        let dialbacks = dialbacks.clone();
+        std::thread::spawn(move || {
+            let egress = ap_public_ipv4();
+            println!(
+                "[network] dial-back verifier started (egress={:?}, every 60s)",
+                egress
+            );
+            loop {
+                let targets: Vec<(String, String)> = {
+                    let reg = registry.lock().unwrap();
+                    reg.iter()
+                        .filter_map(|p| {
+                            let pid = p.peer_id.clone()?;
+                            let ma = gpn_agent::network_directory::primary_ipv4(&p.p2p_multiaddrs)?;
+                            Some((pid, ma))
+                        })
+                        .collect()
+                };
+                for (pid, ma) in targets {
+                    let previous = dialbacks.lock().unwrap().get(&pid).cloned();
+                    let out = gpn_agent::dialcheck::verify(
+                        &ma,
+                        &pid,
+                        egress.as_deref(),
+                        std::time::Duration::from_secs(5),
+                    );
+                    let record = match (&out, &previous) {
+                        // A timeout is not new information: keep the last
+                        // verdict rather than flapping a working backbone off
+                        // the page for one slow probe.
+                        (gpn_agent::dialcheck::Outcome::Unreachable { .. }, Some(prev))
+                            if prev.verified() =>
+                        {
+                            prev.clone()
+                        }
+                        _ => gpn_agent::network_directory::Dialback {
+                            socket: ma.clone(),
+                            // Keep the reason a skip happened: "skipped:same-egress"
+                            // is an operator explanation, "skipped" is not.
+                            outcome: match &out {
+                                gpn_agent::dialcheck::Outcome::Skipped { reason } => {
+                                    format!("skipped:{reason}")
+                                }
+                                other => other.code().to_string(),
+                            },
+                            verifier: "ap".to_string(),
+                        },
+                    };
+                    let changed = previous.as_ref() != Some(&record);
+                    dialbacks.lock().unwrap().insert(pid.clone(), record.clone());
+                    if changed {
+                        println!(
+                            "[network] dial-back {}: {} ({})",
+                            gpn_agent::provider_heartbeat::abbreviated(&pid),
+                            record.outcome,
+                            out.summary()
+                        );
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_secs(60));
+            }
+        });
+    }
     // #46 Phase 3 step 2: capabilities delivered by providers' own pull polls.
     // Kept beside the registry (not in it) because it must survive the 5 s
     // `/status` rebuild, and it is keyed by canonical address.
@@ -4869,6 +4983,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let rt = rt.clone();
         let client = client.clone();
         let registry = registry.clone();
+        let dialbacks = dialbacks.clone();
         let poll_caps = poll_caps.clone();
         let push_registry = push_registry.clone();
         let account_auth = account_auth.clone(); // AccountResolver (cache-only reads)
@@ -5366,6 +5481,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 reachability: p.reachability.clone(),
                                 gateway: p.gateway,
                                 peers: p.peers,
+                                dialback: dialbacks
+                                    .lock()
+                                    .unwrap()
+                                    .get(p.peer_id.as_deref().unwrap_or(""))
+                                    .cloned(),
                             })
                             .collect()
                     };
@@ -5414,13 +5534,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // `chain_registered: null`, never "nobody is registered".
                     let onchain = deadline.block(&rt, client.list_registered_providers());
                     let ts = gpn_agent::join::iso8601(now_secs());
-                    gpn_agent::network_directory::build_with_chain(
+                    // The network's own dial port breaks ties between several
+                    // machines behind one egress that the AP cannot verify
+                    // (same-egress). It is read from the shipped bootnodes.
+                    let canonical_port = gpn_agent::network_registry::load_registry()
+                        .bootnodes
+                        .first()
+                        .and_then(|ma| gpn_agent::network_directory::tcp_port_of(ma))
+                        .unwrap_or(30333);
+                    gpn_agent::network_directory::build_full(
                         &ts,
                         self_id.as_deref(),
                         live,
                         &providers,
                         &seeds,
                         onchain,
+                        canonical_port,
                     )
                 }
                 (Method::Get, ["providers"]) => {

@@ -164,6 +164,11 @@ struct P2pInfo {
     reachability: String,
     /// Site-gateway role (`GPN_SITE_GATEWAY=1`).
     gateway: bool,
+    /// The only published path is IPv6. An explicit marker instead of an
+    /// implied "dialable by anyone": an IPv4-only peer cannot reach this box
+    /// (2026-11-16 — both machines behind one router published IPv6-only and
+    /// half the fleet could not dial that LAN).
+    v6_only: bool,
 }
 
 /// The node's dialability state file, parsed.
@@ -995,20 +1000,33 @@ fn choose_public_base(
         );
     }
 
-    // 3. A listen address on a public IP.
+    // 3. A listen address on a public IP. RFC 6724 sorts IPv6 first, so a
+    //    dual-stack box would otherwise publish the address half its peers
+    //    cannot use: IPv4 wins when both are available.
     let mut saw_private = Vec::new();
+    let mut v6_public: Option<String> = None;
     for ma in listen_addrs {
         let Some(base) = base_of_listen_addr(ma) else {
             notes.push(format!("listen address {ma:?} is not a dialable TCP base"));
             continue;
         };
         if base_is_dialable(&base) {
+            if base.starts_with("/ip6/") {
+                v6_public.get_or_insert(base);
+                continue;
+            }
             return Some(PublicBase {
                 base,
                 source: AddrSource::PublicListen,
             });
         }
         saw_private.push(base);
+    }
+    if let Some(base) = v6_public {
+        return Some(PublicBase {
+            base,
+            source: AddrSource::PublicListen,
+        });
     }
     if !saw_private.is_empty() {
         notes.push(format!(
@@ -1091,6 +1109,18 @@ fn build_p2p_info_with(
              litep2p bug) — normalised before publication",
         );
     }
+
+    // IPv4 first. A node with a working IPv4 forward must publish the IPv4
+    // form: IPv6 is an additional path, never the only one implied dialable.
+    // The node's state file lists whichever endpoint it saw first, which on a
+    // dual-stack host was the IPv6 one.
+    let ordered_evidence: Vec<String> = {
+        let is_v6 = |ma: &String| ma.trim_start().starts_with("/ip6/");
+        let mut v: Vec<String> = node_evidence.iter().filter(|m| !is_v6(m)).cloned().collect();
+        v.extend(node_evidence.iter().filter(|m| is_v6(m)).cloned());
+        v
+    };
+    let node_evidence: &[String] = &ordered_evidence;
 
     let mut notes: Vec<String> = Vec::new();
     let chosen = choose_public_base(
@@ -1177,6 +1207,16 @@ fn build_p2p_info_with(
     } else {
         "leaf".to_string()
     };
+    let v6_only = !multiaddrs.is_empty()
+        && multiaddrs
+            .iter()
+            .all(|ma| ma.trim_start().starts_with("/ip6/"));
+    if v6_only {
+        log_change_once(&format!(
+            "[p2p] publishing ONLY IPv6 for peer {peer_id} — an IPv4-only peer cannot dial this \
+             box. Set GPN_PUBLIC_ADDR=/ip4/<wan-ip>/tcp/<port> to publish the forward."
+        ));
+    }
     P2pInfo {
         peer_id,
         multiaddrs,
@@ -1185,6 +1225,7 @@ fn build_p2p_info_with(
         address_source: source.label().to_string(),
         reachability,
         gateway: false,
+        v6_only,
     }
 }
 
@@ -1464,6 +1505,9 @@ fn attach_p2p(body: &mut Value, info: Option<&P2pInfo>) {
             body["listen_addrs"] = json!(p2p.listen_addrs);
             body["address_source"] = json!(p2p.address_source);
             body["reachability"] = json!(p2p.reachability);
+            if p2p.v6_only {
+                body["v6_only"] = json!(true);
+            }
             if p2p.gateway {
                 body["gateway"] = json!(true);
             }
@@ -3563,6 +3607,82 @@ mod tests {
                 "/ip6/::/tcp/30333/ws".to_string(),
             ]
         );
+    }
+
+    // ── 2026-11-16: IPv4 first, IPv6 as an additional path ────────────────
+
+    /// The 2026-11-16 fleet: two boxes behind one router published IPv6-only,
+    /// so no IPv4-only peer could reach that LAN. When the node's evidence
+    /// names an IPv4 endpoint at all, that is the address we publish — even if
+    /// the state file listed the IPv6 one first.
+    #[test]
+    fn a_dual_stack_node_publishes_ipv4_first() {
+        let info = build_p2p_info_with(
+            PID.to_string(),
+            None,
+            vec![],
+            &[
+                "/ip6/2603:8002:e400:204f:c9b5:3fe4:ddb7:504/tcp/30333/ws".into(),
+                "/ip4/172.117.107.91/tcp/30333/ws".into(),
+            ],
+            &|| None,
+        );
+        assert_eq!(info.multiaddrs.len(), 2, "{:?}", info.multiaddrs);
+        assert!(
+            info.multiaddrs[0].starts_with("/ip4/172.117.107.91/"),
+            "IPv4 must be primary: {:?}",
+            info.multiaddrs
+        );
+        assert!(
+            info.multiaddrs[1].starts_with("/ip6/"),
+            "IPv6 stays as an additional path: {:?}",
+            info.multiaddrs
+        );
+        assert!(!info.v6_only);
+        assert_eq!(info.reachability, "backbone");
+    }
+
+    /// A public IPv6 *listen* address must not beat a public IPv4 one.
+    #[test]
+    fn the_listen_rung_prefers_ipv4_over_ipv6() {
+        let info = build_p2p_info(
+            PID.to_string(),
+            None,
+            vec![
+                "/ip6/2603:8002:e400:204f:c9b5:3fe4:ddb7:504/tcp/30333/ws".into(),
+                "/ip4/172.117.107.91/tcp/30333/ws".into(),
+            ],
+        );
+        assert!(
+            info.multiaddrs[0].starts_with("/ip4/"),
+            "{:?}",
+            info.multiaddrs
+        );
+    }
+
+    /// When IPv6 is genuinely all there is, say so explicitly instead of
+    /// implying an ordinary peer can dial the box.
+    #[test]
+    fn an_ipv6_only_node_is_marked_as_such() {
+        let info = build_p2p_info(
+            PID.to_string(),
+            None,
+            vec!["/ip6/2603:8002:e400:204f:6c31:c9a2:4af2:2085/tcp/30333/ws".into()],
+        );
+        assert!(info.v6_only, "{:?}", info.multiaddrs);
+        let mut body = json!({});
+        attach_p2p(&mut body, Some(&info));
+        assert_eq!(body["v6_only"], json!(true));
+        assert_eq!(body["reachability"], json!("backbone"));
+        // And a dual-stack node carries no marker at all (absent, not false).
+        let dual = build_p2p_info(
+            PID.to_string(),
+            Some("/ip4/203.0.113.7/tcp/30333"),
+            vec!["/ip4/0.0.0.0/tcp/30333/ws".into()],
+        );
+        let mut body2 = json!({});
+        attach_p2p(&mut body2, Some(&dual));
+        assert!(body2.get("v6_only").is_none(), "{body2}");
     }
 
     /// Not hardcoded: a validator-mode node listens on raw TCP and must keep

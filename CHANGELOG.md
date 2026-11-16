@@ -8,6 +8,35 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.51] - 2026-11-16
+
+Bumped from 0.3.50. One subject: a LAN behind one public IP can be reached, and the
+directory stops repeating what nodes say about themselves.
+
+### Fixed
+- **One verified backbone per public IP, advertised over IPv4.** Box 1 and box 3 share
+  `172.117.107.91`; one holds the 30333 forward, yet both published **IPv6-only**
+  multiaddrs, so a peer without IPv6 could not reach that LAN at all. The access point
+  now attaches its **own dial-back verdict** per row and decides publication from it:
+  `wrong-peer` and `unreachable` disqualify a claim outright, the winner publishes
+  `/ip4/…/tcp/30333/ws/p2p/<id>` with IPv6 as an *additional* path, and every loser
+  becomes a leaf with `multiaddrs: []`. An IPv6-only node is marked `v6_only` instead of
+  implying dialability.
+  Proof of the old misclaim: `gpn_dialcheck /ip4/172.117.107.91/tcp/30333/ws/p2p/W9w2nz…`
+  answered as `12D3KooWP1JAF…` — a `wrong-peer` verdict.
+- **Counters now equal the rows they describe.** `backbone_now`, `leaf_now`, `serving_ai`,
+  `healthy_now`, `gateways`, `ap_seen_now` (and the new `v6_only_now`) are computed over
+  the **deduped** non-chain rows, the same list that is rendered. The directory had
+  reported `backbone_now: 5` beside four rows.
+- **IPv4-first listen/public address selection** (`gpn_provider_status`): RFC 6724 ordering
+  was choosing the IPv6 listen address; a public IPv4 path is now preferred, with a
+  one-line warning when only IPv6 is available.
+
+### Verified
+`/api/network` 2026-11-16T23:12Z — `backbone_now 2` (two rows), `leaf_now 2`,
+`gateways 2`, `v6_only_now 1`, and a dial-back-verified IPv4 backbone on
+`172.117.107.91`. Tests: 695 lib, 97 scheduler, 65 provider-status.
+
 ## [0.3.50] - 2026-11-16
 
 Bumped from 0.3.49. One theme: **fork choice stops being a height comparison.** On 2026-11-16

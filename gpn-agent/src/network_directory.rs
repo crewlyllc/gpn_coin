@@ -42,6 +42,241 @@ pub struct DirProvider {
     /// has no peers. The page must not infer "peered" from the AP's own peer
     /// list — a node peered with another member of the mesh is peered.
     pub peers: Option<u64>,
+    /// The access point's **own** dial-back of this row's primary IPv4 socket
+    /// (`dialcheck::verify`). `None` = never attempted (no IPv4 socket, or no
+    /// verifier). This — never `reachability` — decides who may claim
+    /// backbone: a self-reported tier is not evidence (2026-11-16).
+    pub dialback: Option<Dialback>,
+}
+
+/// One dial-back verdict, as measured by the access point (not by the node).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dialback {
+    /// The socket that was dialled, exactly as it will be published.
+    pub socket: String,
+    /// `verified` | `wrong-peer` | `unreachable` | `skipped`.
+    pub outcome: String,
+    /// Who measured it (verifier peer id, or `ap`).
+    pub verifier: String,
+}
+
+impl Dialback {
+    pub fn verified(&self) -> bool {
+        self.outcome == "verified"
+    }
+    pub fn wrong_peer(&self) -> bool {
+        self.outcome == "wrong-peer"
+    }
+    /// `skipped:<reason>` / `unreachable` — everything that is not a pass.
+    pub fn skipped(&self) -> bool {
+        self.outcome.starts_with("skipped")
+    }
+}
+
+/// What the directory decided to publish for one registration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Publication {
+    /// `backbone` (publishes a dialable public address) or `leaf`.
+    pub role: &'static str,
+    /// The site's dial target for this public IP (one per IP at most).
+    pub gateway: bool,
+    /// Addresses to publish, IPv4 first. Empty for a leaf.
+    pub multiaddrs: Vec<String>,
+    /// The only address this box has is IPv6: a marker, not a dialability
+    /// claim. Such a row never holds backbone.
+    pub v6_only: bool,
+    /// One line for the operator log.
+    pub why: String,
+}
+
+/// `ip4` | `ip6` | `dns` plus the host, from a cleaned multiaddr.
+fn family_of(ma: &str) -> Option<(&'static str, String)> {
+    let parts: Vec<&str> = ma.split('/').filter(|p| !p.is_empty()).collect();
+    let fam = match parts.first().copied()? {
+        "ip4" => "ip4",
+        "ip6" => "ip6",
+        "dns" | "dns4" | "dns6" => "dns",
+        _ => return None,
+    };
+    Some((fam, parts.get(1)?.to_string()))
+}
+
+/// The IPv4 (or `/dns`) multiaddr a row would publish first — the socket the
+/// access point's dial-back verifies. `None` when the row has no IPv4 path.
+pub fn primary_ipv4(mas: &[String]) -> Option<String> {
+    dialable_list(mas).into_iter().find(|ma| {
+        !matches!(family_of(ma).map(|(f, _)| f), None | Some("ip6"))
+    })
+}
+
+/// The `/tcp/<port>` of a multiaddr, if it names one.
+pub fn tcp_port_of(ma: &str) -> Option<u16> {
+    let parts: Vec<&str> = ma.split('/').filter(|p| !p.is_empty()).collect();
+    let i = parts.iter().position(|p| *p == "tcp")?;
+    parts.get(i + 1)?.parse().ok()
+}
+
+/// Decide, for every deduped registration, what may be published and what tier
+/// it holds. Pure: the dial-back verdicts are inputs.
+///
+/// The rules (2026-11-16, owner priority):
+///
+/// 1. **One backbone per public IP.** Exactly one node behind an egress may
+///    claim backbone — the one a third party actually reaches. Ranked by the
+///    access point's own dial-back, then by canonical dial port, then by peer
+///    id (deterministic, so the answer does not flap between polls). A row
+///    whose dial-back returned another peer id can never win.
+/// 2. **IPv4 first.** A row that has an IPv4 (or `/dns`) address publishes it
+///    as the primary address; IPv6 is an *additional* path. A row whose only
+///    address is IPv6 is a leaf carrying `v6_only: true` — an explicit marker,
+///    never an implied dialability claim.
+/// 3. A leaf publishes **no** public address (SPEC 47 step 4).
+/// 4. The gateway is the backbone whose socket is the canonical dial port.
+pub fn plan_publication(rows: &[&DirProvider], canonical_port: u16) -> Vec<Publication> {
+    struct Cand {
+        ip: String,
+        primary: String,
+        extras: Vec<String>,
+        rank: (u8, u8, u16, String),
+        verifier: Option<String>,
+        verdict: String,
+    }
+    let mut out: Vec<Publication> = vec![Publication::default(); rows.len()];
+    let mut groups: std::collections::BTreeMap<String, Vec<(usize, Cand)>> =
+        std::collections::BTreeMap::new();
+
+    for (i, p) in rows.iter().enumerate() {
+        let addrs = dialable_list(&p.multiaddrs);
+        let mut v4: Vec<String> = Vec::new();
+        let mut v6: Vec<String> = Vec::new();
+        for ma in addrs {
+            match family_of(&ma).map(|(f, _)| f) {
+                Some("ip6") => v6.push(ma),
+                Some(_) => v4.push(ma),
+                None => {}
+            }
+        }
+        if v4.is_empty() {
+            // No IPv4 path at all: a leaf. If there is an IPv6 path we say so
+            // instead of pretending the box is dialable by ordinary peers.
+            out[i] = Publication {
+                role: "leaf",
+                gateway: false,
+                multiaddrs: Vec::new(),
+                v6_only: !v6.is_empty(),
+                why: if v6.is_empty() {
+                    "no public address published by the node".to_string()
+                } else {
+                    "IPv6-only: no IPv4 path was published or verified".to_string()
+                },
+            };
+            continue;
+        }
+        let primary = v4.remove(0);
+        let ip = family_of(&primary).map(|(_, h)| h).unwrap_or_default();
+        let port = tcp_port_of(&primary).unwrap_or(0);
+        // Rank: verified < unknown/skipped < unreachable. A wrong-peer verdict
+        // is positive disproof and disqualifies the row entirely.
+        let (tier, verifier, why) = match &p.dialback {
+            Some(d) if d.verified() => (0u8, Some(d.verifier.clone()), "verified".to_string()),
+            Some(d) if d.wrong_peer() => (9u8, Some(d.verifier.clone()), "wrong-peer".to_string()),
+            // Any non-verdict that is not "I could not tell" is a failure:
+            // an unreachable socket from a different egress is evidence that
+            // the public address does not work, and a node may not hold a
+            // tier on evidence that contradicts it.
+            Some(d) if d.outcome == "unreachable" => (
+                9u8,
+                Some(d.verifier.clone()),
+                "unreachable".to_string(),
+            ),
+            Some(d) => (
+                2u8,
+                Some(d.verifier.clone()),
+                if d.skipped() {
+                    d.outcome.clone()
+                } else {
+                    format!("skipped:{}", d.outcome)
+                },
+            ),
+            None => (1u8, None, "skipped:no-verifier".to_string()),
+        };
+        let port_rank = if port == canonical_port { 0u8 } else { 1u8 };
+        let peer = p.peer_id.clone().unwrap_or_default();
+        groups.entry(ip.clone()).or_default().push((
+            i,
+            Cand {
+                ip,
+                primary,
+                extras: v4.into_iter().chain(v6).collect(),
+                rank: (tier, port_rank, port, peer),
+                verifier,
+                verdict: why.clone(),
+            },
+        ));
+        out[i].why = why; // overwritten by the winner/loser decision below
+    }
+
+    for (_ip, mut cands) in groups {
+        cands.sort_by(|a, b| a.1.rank.cmp(&b.1.rank));
+        // The first row that is not positively disproved wins the IP. If every
+        // claimant failed verification, nobody holds backbone: an egress with
+        // no working forward must publish no backbone at all rather than
+        // promote the least-bad claim.
+        let winner = cands.iter().position(|(_, c)| c.rank.0 < 9);
+        for (n, (i, c)) in cands.iter().enumerate() {
+            if Some(n) == winner {
+                let port = tcp_port_of(&c.primary).unwrap_or(0);
+                let mut addrs = vec![c.primary.clone()];
+                addrs.extend(c.extras.iter().cloned());
+                let verified = c.rank.0 == 0;
+                out[*i] = Publication {
+                    role: "backbone",
+                    gateway: port == canonical_port,
+                    multiaddrs: addrs,
+                    v6_only: false,
+                    why: if verified {
+                        format!("verified by {}", c.verifier.clone().unwrap_or_default())
+                    } else if c.rank.0 == 2 {
+                        format!(
+                            "skipped:{} (elected by canonical port)",
+                            c.verdict.trim_start_matches("skipped:")
+                        )
+                    } else {
+                        "skipped:no-verifier (elected by canonical port)".to_string()
+                    },
+                };
+            } else {
+                out[*i] = Publication {
+                    role: "leaf",
+                    gateway: false,
+                    multiaddrs: Vec::new(),
+                    v6_only: false,
+                    why: if c.rank.0 == 9 {
+                        if c.verdict == "wrong-peer" {
+                            format!("failed dial-back on {}: another peer answers", c.ip)
+                        } else {
+                            format!("failed dial-back on {}: {}", c.ip, c.verdict)
+                        }
+                    } else {
+                        format!("another node owns the forward on {}", c.ip)
+                    },
+                };
+            }
+        }
+    }
+    out
+}
+
+impl Default for Publication {
+    fn default() -> Self {
+        Publication {
+            role: "leaf",
+            gateway: false,
+            multiaddrs: Vec::new(),
+            v6_only: false,
+            why: String::new(),
+        }
+    }
 }
 
 /// A dial target the network ships or advertises, with where it came from.
@@ -97,6 +332,33 @@ pub fn build_with_chain(
     providers: &[DirProvider],
     seeds: &[KnownSeed],
     onchain: Option<Result<Vec<String>, String>>,
+) -> Value {
+    build_full(
+        generated_at,
+        self_peer_id,
+        live_peers,
+        providers,
+        seeds,
+        onchain,
+        30333,
+    )
+}
+
+/// The full document builder: every row's publication decision is made here,
+/// from the dial-back verdicts the caller attached to each `DirProvider`.
+///
+/// `canonical_port` is the port the network's own dial targets use (the
+/// `network.json` bootnode port). It only breaks ties between several
+/// unverifiable machines behind one egress, where the one listening on the
+/// canonical port is the one the forward was made for.
+pub fn build_full(
+    generated_at: &str,
+    self_peer_id: Option<&str>,
+    live_peers: Result<Vec<String>, String>,
+    providers: &[DirProvider],
+    seeds: &[KnownSeed],
+    onchain: Option<Result<Vec<String>, String>>,
+    canonical_port: u16,
 ) -> Value {
     let stale = live_peers.is_err();
     let mut live_order: Vec<String> = Vec::new();
@@ -174,7 +436,13 @@ pub fn build_with_chain(
         None => {}
     }
 
-    let mut provider_rows: Vec<Value> = Vec::new();
+    // ---- dedupe FIRST, then decide ---------------------------------------
+    //
+    // The counters must be computed over the same list the page renders; until
+    // 2026-11-16 they were computed over the pre-dedupe list, so `/network`
+    // said "5 backbone / 0 leaf" while the page showed 4 rows (and every row
+    // said backbone, including two machines on one egress).
+    let mut chosen: Vec<&DirProvider> = Vec::new();
     let mut provider_index: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     for p in &identified {
@@ -182,18 +450,59 @@ pub fn build_with_chain(
         let key = pid
             .clone()
             .unwrap_or_else(|| format!("url:{}", p.status_url.trim_end_matches('/')));
+        match provider_index.get(&key) {
+            // Same machine registered twice (e.g. two accounts, pull + push):
+            // keep one row, preferring the healthy record.
+            Some(&i) => {
+                if p.healthy && !chosen[i].healthy {
+                    chosen[i] = p;
+                }
+            }
+            None => {
+                provider_index.insert(key, chosen.len());
+                chosen.push(p);
+            }
+        }
+    }
+
+    // What each row may publish and which tier it holds. Verification is the
+    // caller's dial-back (never the node's own `reachability` claim).
+    let decisions = plan_publication(&chosen, canonical_port);
+
+    let mut provider_rows: Vec<Value> = Vec::new();
+    for (p, d) in chosen.iter().zip(decisions.iter()) {
+        let pid = p.peer_id.as_deref().and_then(clean_peer_id);
+        // One INFO line per decision, naming the evidence. The access point
+        // polls this every few seconds, so it is deduped on the exact line —
+        // an unchanged decision is not news.
+        log_decision(&format!(
+            "reachability: publish {} ({}); role={}",
+            if d.multiaddrs.is_empty() {
+                "-".to_string()
+            } else {
+                d.multiaddrs.join(",")
+            },
+            d.why,
+            d.role
+        ), pid.as_deref());
         let row = json!({
             "address": p.address,
             "peer_id": pid,
             "healthy": p.healthy,
             "vram_mb": p.vram_mb,
             "models": p.models,
-            "multiaddrs": dialable_list(&p.multiaddrs),
+            // What the directory decided, not what the node claimed.
+            "multiaddrs": d.multiaddrs,
             "last_seen_secs": p.last_seen_secs,
             "status_url": p.status_url,
             "source": p.source,
-            "reachability": p.reachability,
-            "gateway": p.gateway,
+            "reachability": d.role,
+            "gateway": d.gateway,
+            // A node whose only address is IPv6: an explicit marker, so the
+            // page never implies it is reachable by an IPv4-only peer.
+            "v6_only": d.v6_only,
+            "decision": d.why,
+            "self_declared": p.reachability,
             // #W78: a fact this box reported about itself. `null` = it did not
             // say (old build / unreadable), which the page treats as unknown
             // and falls back to peer-of-this-node.
@@ -206,20 +515,7 @@ pub fn build_with_chain(
                 .as_ref()
                 .map(|s| s.contains(&crate::abuse::canonical_account(&p.address))),
         });
-        match provider_index.get(&key) {
-            // Same machine registered twice (e.g. two accounts, pull + push):
-            // keep one row, preferring the healthy record.
-            Some(&i) => {
-                let existing_healthy = provider_rows[i]["healthy"].as_bool().unwrap_or(false);
-                if p.healthy && !existing_healthy {
-                    provider_rows[i] = row;
-                }
-            }
-            None => {
-                provider_index.insert(key, provider_rows.len());
-                provider_rows.push(row);
-            }
-        }
+        provider_rows.push(row);
     }
 
     // ---- chain-only rows: registered on chain, never seen by this AP --------
@@ -267,20 +563,16 @@ pub fn build_with_chain(
     // the fleet and made a NAT'd provider look like a non-provider — audit
     // 2026-11-02 #3: `/nodes` said "1 serving AI" while the AP registry held 4.
     // Reachability is published separately as `healthy_now`.
-    let serving_ai = identified.len();
-    let healthy_now = identified.iter().filter(|p| p.healthy).count();
-    // SPEC 47: separate backbone from leaf. A leaf is a full participant, it is
-    // just not dialable — conflating the two is how a fleet of leaves looked
-    // like zero providers. `gateways` counts the named site dial targets.
-    let backbone_now = identified
-        .iter()
-        .filter(|p| p.reachability == "backbone")
-        .count();
-    let leaf_now = identified
-        .iter()
-        .filter(|p| p.reachability != "backbone")
-        .count();
-    let gateways = identified.iter().filter(|p| p.gateway).count();
+    //
+    // Every counter below is computed over `chosen` / `decisions` — the exact
+    // rows the document renders. Counting anything else is how "5 backbone"
+    // was published for 4 rows (2026-11-16).
+    let serving_ai = chosen.len();
+    let healthy_now = chosen.iter().filter(|p| p.healthy).count();
+    let backbone_now = decisions.iter().filter(|d| d.role == "backbone").count();
+    let leaf_now = decisions.iter().filter(|d| d.role == "leaf").count();
+    let gateways = decisions.iter().filter(|d| d.gateway).count();
+    let v6_only_now = decisions.iter().filter(|d| d.v6_only).count();
 
     let mut known_offline: std::collections::HashSet<String> = std::collections::HashSet::new();
     for row in &seed_rows {
@@ -311,9 +603,10 @@ pub fn build_with_chain(
             "backbone_now": backbone_now,
             "leaf_now": leaf_now,
             "gateways": gateways,
+            "v6_only_now": v6_only_now,
             "offline": known_offline.len(),
             // W50: the two facts the page used to merge into one word.
-            "ap_seen_now": identified.len(),
+            "ap_seen_now": chosen.len(),
             "chain_registered_now": onchain_set.as_ref().map(|s| s.len()),
             "chain_only_now": chain_only_count,
         },
@@ -345,6 +638,27 @@ fn dialable_list(mas: &[String]) -> Vec<String> {
     out
 }
 
+/// Emit one INFO line per publication decision, deduped on the exact text so
+/// a 5-second poll does not turn the journal into noise. The line is the
+/// operator's audit trail: which address was published, on what evidence, and
+/// in which tier.
+fn log_decision(line: &str, peer: Option<&str>) {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static LAST: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+    let key = peer.unwrap_or("-").to_string();
+    let mut guard = match LAST.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let map = guard.get_or_insert_with(HashMap::new);
+    if map.get(&key).map(|v| v == line).unwrap_or(false) {
+        return;
+    }
+    map.insert(key, line.to_string());
+    eprintln!("[network] {line}");
+}
+
 /// The peer id at the end of a multiaddr, if it is a plausible one.
 pub fn peer_id_of(ma: &str) -> Option<String> {
     let (_, raw) = ma.rsplit_once("/p2p/")?;
@@ -370,6 +684,11 @@ mod tests {
         format!("/ip4/{host}/tcp/{port}/p2p/{pid}")
     }
 
+    /// The websocket form GPN nodes actually listen on.
+    fn maws(host: &str, port: u16, pid: &str) -> String {
+        format!("/ip4/{host}/tcp/{port}/ws/p2p/{pid}")
+    }
+
     fn provider(peer: &str, healthy: bool, url: &str) -> DirProvider {
         DirProvider {
             address: "5Addr".into(),
@@ -384,6 +703,7 @@ mod tests {
             reachability: "backbone".into(),
             gateway: false,
             peers: None,
+            dialback: None,
         }
     }
 
@@ -432,12 +752,15 @@ mod tests {
         assert_eq!(doc["seeds"][0]["peer_id"], SELF);
         assert_eq!(doc["seeds"][0]["live"], true);
         assert_eq!(doc["seeds"][0]["source"], "compiled-in");
-        // Two provider registrations, one machine.
+        // Two provider registrations, one machine → one row.
         assert_eq!(doc["providers"].as_array().unwrap().len(), 1);
-        // `serving_ai` counts leaseable registrations (2 accounts on one
-        // machine), NOT distinct machines and NOT heartbeat reachability.
-        assert_eq!(doc["counts"]["serving_ai"], 2);
-        assert_eq!(doc["counts"]["healthy_now"], 2);
+        // 2026-11-16: every counter is computed over the *rendered* rows, so
+        // one deduped row is one registration. This used to say 2 — twice the
+        // rows the page showed, and the same class of bug that published
+        // "5 backbone / 0 leaf" for 4 rows.
+        assert_eq!(doc["counts"]["serving_ai"], 1);
+        assert_eq!(doc["counts"]["ap_seen_now"], 1);
+        assert_eq!(doc["counts"]["healthy_now"], 1);
         // Only the stale seed is offline.
         assert_eq!(doc["counts"]["offline"], 1);
         assert_eq!(doc["seeds"][1]["peer_id"], STALE);
@@ -664,6 +987,9 @@ mod tests {
         leaf.multiaddrs.clear();
         let mut gateway = provider(BOX1, true, "http://23.241.109.255:8093");
         gateway.gateway = true;
+        // A different egress, so it is a second site's backbone (two machines
+        // on ONE public IP may not both be backbone — see the election tests).
+        gateway.multiaddrs = vec![ma("23.241.109.255", 30333, BOX1)];
         let doc = build(
             "t",
             None,
@@ -674,10 +1000,12 @@ mod tests {
         // Old fields keep their meaning: all three are registered and healthy.
         assert_eq!(doc["counts"]["serving_ai"], 3);
         assert_eq!(doc["counts"]["healthy_now"], 3);
-        // New split: two backbone rows, one leaf, one named gateway.
+        // New split: two backbone rows (one per egress), one leaf. The
+        // gateway is a *per-egress* dial target, so two sites with a backbone
+        // on the canonical port are two gateways.
         assert_eq!(doc["counts"]["backbone_now"], 2);
         assert_eq!(doc["counts"]["leaf_now"], 1);
-        assert_eq!(doc["counts"]["gateways"], 1);
+        assert_eq!(doc["counts"]["gateways"], 2);
         // And the tier is visible per row, so an operator can see who is who.
         let rows = doc["providers"].as_array().unwrap();
         let leaf_row = rows.iter().find(|r| r["peer_id"] == PEER_C).unwrap();
@@ -685,5 +1013,174 @@ mod tests {
         assert!(leaf_row["multiaddrs"].as_array().unwrap().is_empty());
         let gw_row = rows.iter().find(|r| r["peer_id"] == BOX1).unwrap();
         assert_eq!(gw_row["gateway"], true);
+    }
+
+    // ── 2026-11-16: the directory stops counting self-claims ──────────────
+
+    fn dialback(socket: &str, outcome: &str) -> Dialback {
+        Dialback {
+            socket: socket.to_string(),
+            outcome: outcome.to_string(),
+            verifier: "12D3KooWVerifier".to_string(),
+        }
+    }
+
+    /// A node with BOTH a working IPv4 forward and an IPv6 address publishes
+    /// the IPv4 form as its primary address and keeps IPv6 as an extra path.
+    /// Before this, a dual-stack box published whichever address the node's
+    /// listen list happened to name first — on the 2026-11-16 fleet that was
+    /// IPv6-only for both machines behind 172.117.107.91, so no peer without
+    /// IPv6 could reach that LAN at all.
+    #[test]
+    fn ipv4_forward_is_published_first_and_ipv6_only_is_marked() {
+        let mut dual = provider(PEER_B, true, "pull://dual");
+        dual.address = "5ENqSp5Q65bxfgryZExQDRnV1rEW1qb2UBztvswLamkoUrqj".into();
+        // Deliberately list IPv6 first, as the boxes did.
+        dual.multiaddrs = vec![
+            "/ip6/2603:8002:e400:204f:c9b5:3fe4:ddb7:504/tcp/30333/ws/p2p/12D3KooWRfKQbKnynFsKVyi76FjFDWLQqQPTKZFrMFF6Zt7zoZ2o".into(),
+            maws("172.117.107.91", 30333, PEER_B),
+        ];
+        dual.dialback = Some(dialback("/ip4/172.117.107.91/tcp/30333", "verified"));
+        let v6only = DirProvider {
+            address: "5HgbpiTYE27CtBQF7gRWLz6Qt3HBxyi4tR2M75FC1oydH48z".into(),
+            peer_id: Some(PEER_C.into()),
+            healthy: true,
+            vram_mb: 8188,
+            models: vec!["llama3.2:1b".into()],
+            multiaddrs: vec![format!(
+                "/ip6/2603:8002:e400:204f:6c31:c9a2:4af2:2085/tcp/30333/ws/p2p/{PEER_C}"
+            )],
+            last_seen_secs: Some(1),
+            status_url: "pull://v6".into(),
+            source: "push".into(),
+            reachability: "backbone".into(),
+            gateway: false,
+            peers: Some(2),
+            dialback: None,
+        };
+        let doc = build_full(
+            "t",
+            None,
+            Ok(vec![]),
+            &[dual, v6only],
+            &[],
+            None,
+            30333,
+        );
+        let rows = doc["providers"].as_array().unwrap();
+        let d = rows.iter().find(|r| r["peer_id"] == PEER_B).unwrap();
+        assert_eq!(d["reachability"], "backbone", "{d}");
+        let addrs = d["multiaddrs"].as_array().unwrap();
+        assert_eq!(addrs.len(), 2, "IPv6 stays as an additional path: {d}");
+        assert!(
+            addrs[0].as_str().unwrap().starts_with("/ip4/172.117.107.91/"),
+            "the IPv4 forward must be the primary address: {d}"
+        );
+        assert!(addrs[1].as_str().unwrap().starts_with("/ip6/"), "{d}");
+        assert_eq!(d["v6_only"], false);
+
+        // The IPv6-only box is explicitly marked, never implied dialable.
+        let v = rows.iter().find(|r| r["peer_id"] == PEER_C).unwrap();
+        assert_eq!(v["v6_only"], true, "{v}");
+        assert_eq!(v["reachability"], "leaf", "{v}");
+        assert!(v["multiaddrs"].as_array().unwrap().is_empty(), "{v}");
+        assert_eq!(doc["counts"]["v6_only_now"], 1);
+    }
+
+    /// Two machines behind one public IP: exactly one is backbone, the other
+    /// is a leaf whose row carries no public address. The forward holder is
+    /// decided by dial-back, never by the node's own `reachability` string.
+    #[test]
+    fn one_backbone_per_public_ip_and_the_loser_publishes_nothing() {
+        let mut owner = provider(PEER_B, true, "pull://owner");
+        owner.address = "5ENqSp5Q65bxfgryZExQDRnV1rEW1qb2UBztvswLamkoUrqj".into();
+        owner.multiaddrs = vec![maws("172.117.107.91", 30333, PEER_B)];
+        owner.dialback = Some(dialback("/ip4/172.117.107.91/tcp/30333", "verified"));
+        // The other machine self-declares backbone and even advertises the same
+        // public socket (the 2026-11-12 duplicate-bootnode bug).
+        let mut loser = provider(PEER_C, true, "pull://loser");
+        loser.address = "5HgbpiTYE27CtBQF7gRWLz6Qt3HBxyi4tR2M75FC1oydH48z".into();
+        loser.multiaddrs = vec![maws("172.117.107.91", 30333, PEER_C)];
+        loser.reachability = "backbone".into();
+        loser.dialback = Some(dialback("/ip4/172.117.107.91/tcp/30333", "wrong-peer"));
+
+        let doc = build_full("t", None, Ok(vec![]), &[loser, owner], &[], None, 30333);
+        let rows = doc["providers"].as_array().unwrap();
+        let o = rows.iter().find(|r| r["peer_id"] == PEER_B).unwrap();
+        let l = rows.iter().find(|r| r["peer_id"] == PEER_C).unwrap();
+        assert_eq!(o["reachability"], "backbone", "{o}");
+        assert_eq!(o["gateway"], true, "the canonical-port backbone is the dial target: {o}");
+        assert_eq!(l["reachability"], "leaf", "{l}");
+        assert!(
+            l["multiaddrs"].as_array().unwrap().is_empty(),
+            "a leaf publishes no public address: {l}"
+        );
+        assert_eq!(l["self_declared"], "backbone", "the claim is kept for audit");
+        assert_eq!(doc["counts"]["backbone_now"], 1);
+        assert_eq!(doc["counts"]["leaf_now"], 1);
+        assert_eq!(
+            doc["counts"]["backbone_now"].as_u64().unwrap(),
+            rows.iter()
+                .filter(|r| r["reachability"] == "backbone")
+                .count() as u64,
+            "the counter must equal the number of backbone rows"
+        );
+    }
+
+    /// A node that names itself backbone but fails the dial-back is demoted —
+    /// including when the verdict is merely "unreachable" and another box on
+    /// the same egress was verified.
+    #[test]
+    fn a_self_declared_backbone_that_fails_dialback_is_demoted() {
+        let mut bragger = provider(PEER_B, true, "pull://bragger");
+        bragger.multiaddrs = vec![maws("203.0.113.9", 30333, PEER_B)];
+        bragger.reachability = "backbone".into();
+        bragger.dialback = Some(dialback("/ip4/203.0.113.9/tcp/30333", "unreachable"));
+        let doc = build_full("t", None, Ok(vec![]), &[bragger], &[], None, 30333);
+        let r = &doc["providers"][0];
+        assert_eq!(r["reachability"], "leaf", "{r}");
+        assert!(r["multiaddrs"].as_array().unwrap().is_empty(), "{r}");
+        assert_eq!(doc["counts"]["backbone_now"], 0);
+    }
+
+    /// Regression: the counters used to be computed from the pre-dedupe list
+    /// (`identified`) while the page rendered the deduped rows — 5 backbone
+    /// for 4 rows. Every counter must equal the number of matching rows.
+    #[test]
+    fn counters_equal_matching_deduped_rows() {
+        // Two accounts on one machine (same peer id, both push), plus one
+        // chain-only placeholder.
+        let a = provider(PEER_B, true, "pull://a");
+        let mut b = provider(PEER_B, true, "pull://a");
+        b.address = "5HgbpiTYE27CtBQF7gRWLz6Qt3HBxyi4tR2M75FC1oydH48z".into();
+        let mut a = a;
+        a.address = "5ENqSp5Q65bxfgryZExQDRnV1rEW1qb2UBztvswLamkoUrqj".into();
+        let doc = build_with_chain(
+            "t",
+            None,
+            Ok(vec![PEER_B.into()]),
+            &[a, b],
+            &[],
+            Some(Ok(vec![
+                "5ENqSp5Q65bxfgryZExQDRnV1rEW1qb2UBztvswLamkoUrqj".to_string(),
+                "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY".to_string(),
+            ])),
+        );
+        let rows = doc["providers"].as_array().unwrap();
+        let seen: Vec<&Value> = rows.iter().filter(|r| r["source"] != "chain").collect();
+        assert_eq!(seen.len(), 1, "one machine, one row: {rows:?}");
+        for key in ["serving_ai", "ap_seen_now", "healthy_now", "backbone_now"] {
+            assert_eq!(
+                doc["counts"][key].as_u64().unwrap(),
+                1,
+                "{key} must count rows, not pre-dedupe entries: {rows:?}"
+            );
+        }
+        assert_eq!(
+            doc["counts"]["leaf_now"].as_u64().unwrap(),
+            seen.iter().filter(|r| r["reachability"] == "leaf").count() as u64
+        );
+        // The chain placeholders are listed but never counted as providers.
+        assert_eq!(doc["counts"]["chain_only_now"], 1);
     }
 }
