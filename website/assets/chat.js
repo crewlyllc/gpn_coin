@@ -853,7 +853,10 @@
         model: conv.model || state.model,
         messages: history,
         stream: !!stream,
-        max_tokens: 1024
+        // 1024 tokens is ~35-45 s of generation on a single 4060 at 7B, which read
+        // as "the network is slow". 320 is a full chat answer and roughly a third
+        // of the wait; "continue" in the UI extends it if the answer is cut short.
+        max_tokens: 320
       };
     }
 
