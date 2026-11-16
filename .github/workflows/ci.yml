@@ -297,6 +297,14 @@ jobs:
       - name: Snapshot weekly preflight (stale verifier, verify-before-swap)
         run: bash scripts/tests/test-snapshot-weekly.sh
 
+      # W182: the daily disk-guard regression test ran by hand only. The guard
+      # must prune when the disk is FULL and stay quiet when it is not (2026-11-14:
+      # `df --output=pcent` reports USED, it was stored as free, so the guard
+      # declined exactly when the disk was full — a no-op guard). `df` and
+      # `pgrep` are stubbed on PATH: nothing real is measured or deleted.
+      - name: Disk guard prunes iff full (no-op guard regression)
+        run: bash scripts/tests/test-prune-ci-cache.sh
+
       # #190: release-status.sh read an absent CI run (local HEAD never pushed)
       # as "in flight" and blocked four consecutive maintainer ticks. Fake git +
       # fake curl + throwaway repo: success / running / none-with-origin-green /
