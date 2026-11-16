@@ -140,6 +140,13 @@ jobs:
           git ls-files --error-unmatch gpn-node/Cargo.lock
           git ls-files --error-unmatch gpn-agent/Cargo.lock
 
+      # Tracking the file is not the same as it being current: a lock left at the
+      # previous label builds fine (cargo rewrites it silently, dirtying the
+      # checkout) and only breaks a `--locked` build. 0.3.43 and 0.3.49 both
+      # shipped that way. This is 0.1 s of python and no network.
+      - name: Version lockstep (Cargo.toml + Cargo.lock + network.json)
+        run: python3 scripts/bump-version.py --check
+
       - name: rustfmt (check)
         run: nice -n 19 cargo fmt --all -- --check
         working-directory: gpn-node

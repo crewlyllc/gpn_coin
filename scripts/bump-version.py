@@ -59,6 +59,17 @@ SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 REGISTRY = "network.json"
 LATEST_VERSION_LINE = re.compile(r'("latest_version"\s*:\s*)"([^"]*)"')
 
+#: Cargo lockfiles also carry the release label for every first-party crate.
+#: They are *derived* (cargo rewrites them on the next build), which is exactly
+#: why a stale one hides: the worktree goes dirty instead of failing, and only
+#: a clean checkout with `--locked` reports it. It has been missed twice by
+#: hand — `5ee8632` synced 0.3.43 -> 0.3.44 after the fact, and 0.3.49 shipped
+#: with gpn-agent/Cargo.lock still saying 0.3.48 — so the audit covers them.
+LOCKFILE = "Cargo.lock"
+LOCK_NAME_LINE = re.compile(r'^name\s*=\s*"([^"]*)"\s*$')
+LOCK_VERSION_LINE = re.compile(r'^version\s*=\s*"([^"]*)"\s*$')
+PKG_NAME_LINE = re.compile(r'^\s*name\s*=\s*"([^"]*)"\s*$')
+
 CHANGELOG = "CHANGELOG.md"
 CHANGELOG_HEADER = """# Changelog
 
@@ -172,6 +183,78 @@ def reference(manifests: list[Manifest]) -> Manifest:
         if str(m.path) == REFERENCE:
             return m
     raise SystemExit(f"{REFERENCE} not found — is --repo the repo root?")
+
+
+class LockEntry:
+    """One first-party crate's version inside a `Cargo.lock`."""
+
+    __slots__ = ("path", "name", "version", "lineno")
+
+    def __init__(self, path: Path, name: str, version: str, lineno: int):
+        self.path = path
+        self.name = name
+        self.version = version
+        self.lineno = lineno  # 0-based index into the file's lines
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<{self.path}:{self.name} {self.version}>"
+
+
+def package_names(root: Path) -> set[str]:
+    """Every crate this tree defines (so a same-named crates.io crate is left alone)."""
+    names: set[str] = set()
+    for p in sorted(root.rglob("Cargo.toml")):
+        if any(part in SKIP_DIRS for part in p.relative_to(root).parts):
+            continue
+        table = ""
+        for line in p.read_text(encoding="utf-8").splitlines():
+            m = TABLE_LINE.match(line)
+            if m:
+                table = m.group(1).strip()
+                continue
+            if table != "package":
+                continue
+            m = PKG_NAME_LINE.match(line)
+            if m:
+                names.add(m.group(1))
+                break
+    return names
+
+
+def lock_entries(root: Path) -> list[LockEntry]:
+    """First-party crate versions recorded in every `Cargo.lock` in the tree."""
+    ours = package_names(root)
+    entries: list[LockEntry] = []
+    for p in sorted(root.rglob(LOCKFILE)):
+        rel = p.relative_to(root)
+        if any(part in SKIP_DIRS for part in rel.parts):
+            continue
+        name = None
+        for i, line in enumerate(p.read_text(encoding="utf-8").splitlines()):
+            if line.strip() == "[[package]]":
+                name = None
+                continue
+            if name is None:
+                m = LOCK_NAME_LINE.match(line)
+                if m:
+                    name = m.group(1) if m.group(1) in ours else None
+                continue
+            m = LOCK_VERSION_LINE.match(line)
+            if m:
+                entries.append(LockEntry(rel, name, m.group(1), i))
+                name = None
+    return entries
+
+
+def write_lock_version(root: Path, e: LockEntry, new: str) -> None:
+    """Rewrite one lockfile version line, preserving every other byte."""
+    path = root / e.path
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    old_line = lines[e.lineno]
+    eol = "\n" if old_line.endswith("\n") else ""
+    body = old_line.rstrip("\r\n")
+    lines[e.lineno] = LOCK_VERSION_LINE.sub(lambda _: f'version = "{new}"', body) + eol
+    path.write_text("".join(lines), encoding="utf-8")
 
 
 def registry_version(root: Path) -> str | None:
@@ -327,10 +410,16 @@ def main(argv=None) -> int:
         if reg is not None:
             mark = "ok  " if not reg_drift else "DRIFT"
             print(f"  {mark} {reg:<10} {REGISTRY} [latest_version]")
-        if drifted or reg_drift:
+        locks = lock_entries(root)
+        lock_drift = [e for e in locks if e.version != ref.version]
+        for e in locks:
+            mark = "ok  " if e.version == ref.version else "DRIFT"
+            print(f"  {mark} {e.version:<10} {e.path}:{e.lineno + 1} [{e.name}]")
+        if drifted or reg_drift or lock_drift:
             print(
-                f"\nDRIFT: {len(drifted)} of {len(manifests)} manifest(s) are out of "
-                f"lockstep with {ref.path} ({ref.version}) and disagree with it.",
+                f"\nDRIFT: the tree is not in lockstep with {ref.path} "
+                f"({ref.version}): {len(drifted)} of {len(manifests)} manifest(s) "
+                f"disagree, {len(lock_drift)} lockfile entr(ies) disagree.",
                 file=sys.stderr,
             )
             if reg_drift:
@@ -340,14 +429,26 @@ def main(argv=None) -> int:
                     "so it reports a version nobody can install.",
                     file=sys.stderr,
                 )
+            if lock_drift:
+                print(
+                    "  "
+                    + ", ".join(f"{e.path}:{e.name}={e.version}" for e in lock_drift)
+                    + f" — a lockfile still records an older label, so a clean "
+                    f"checkout built with `--locked` fails and any other build "
+                    f"silently rewrites the file ({ref.version} expected).",
+                    file=sys.stderr,
+                )
             print(
                 f"Fix with: scripts/bump-version.py --set {ref.version}", file=sys.stderr
             )
         else:
-            print(f"lockstep: {len(manifests)} manifest(s) agree")
+            print(
+                f"lockstep: {len(manifests)} manifest(s) and {len(locks)} lockfile "
+                "entr(ies) agree"
+            )
         # Always last, and always parseable: `gpn version: <x.y.z>`.
         print(f"gpn version: {ref.version}")
-        return 1 if (drifted or reg_drift) else 0
+        return 1 if (drifted or reg_drift or lock_drift) else 0
 
     if bool(args.level) == bool(args.set):
         ap.error("give exactly one of {major,minor,patch} or --set X.Y.Z")
@@ -377,8 +478,21 @@ def main(argv=None) -> int:
         selected = manifests
 
     new = render(target)
-    if new == ref.version:
+    stale_locks = [e for e in lock_entries(root) if e.version != new]
+    if new == ref.version and not stale_locks:
         print(f"already at {new} — nothing to do")
+        return 0
+    if new == ref.version:
+        # Repair path: the manifests already agree, only a derived lockfile lags.
+        print(f"{new} — manifests agree, syncing {len(stale_locks)} lockfile entr(ies)")
+        for e in stale_locks:
+            print(f"  {e.path}:{e.name}  {e.version} -> {new}")
+        if args.dry_run:
+            print("\n--dry-run: no file written")
+            return 0
+        for e in stale_locks:
+            write_lock_version(root, e, new)
+        print(f"updated {len(stale_locks)} lockfile entr(ies) -> {new}")
         return 0
 
     old = ref.version
@@ -388,6 +502,8 @@ def main(argv=None) -> int:
     reg_now = registry_version(root)
     if reg_now is not None and reg_now != new:
         print(f"  {REGISTRY} [latest_version]  {reg_now} -> {new}")
+    for e in stale_locks:
+        print(f"  {e.path}:{e.name}  {e.version} -> {new}")
 
     if args.dry_run:
         print(f"\n--dry-run: no file written (would set {len(selected)} manifest(s) to {new})")
@@ -398,6 +514,14 @@ def main(argv=None) -> int:
     print(f"updated {len(selected)} manifest(s) -> {new}")
     if write_registry_version(root, new):
         print(f"updated {REGISTRY} latest_version -> {new}")
+    relocked = stale_locks
+    for e in relocked:
+        write_lock_version(root, e, new)
+    if relocked:
+        print(
+            f"updated {len(relocked)} lockfile entr(ies) -> {new} "
+            f"({', '.join(f'{e.path}:{e.name}' for e in relocked)})"
+        )
 
     if not args.no_changelog:
         if update_changelog(root, new, old, level):

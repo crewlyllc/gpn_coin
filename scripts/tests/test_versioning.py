@@ -72,6 +72,21 @@ version.workspace = true
 edition = "2021"
 """
 
+AGENT_LOCK = """version = 3
+
+[[package]]
+name = "gpn-agent"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "serde"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+"""
+
 
 class FakeRepo:
     def __init__(self) -> None:
@@ -96,6 +111,13 @@ class FakeRepo:
             if line.startswith("version = "):
                 return line.split('"')[1]
         raise AssertionError(f"no version in {rel}")
+
+    def lock_version_of(self, rel: str, name: str) -> str:
+        lines = (self.root / rel).read_text().splitlines()
+        for i, line in enumerate(lines):
+            if line.strip() == "[[package]]" and lines[i + 1] == f'name = "{name}"':
+                return lines[i + 2].split('"')[1]
+        raise AssertionError(f"no {name} in {rel}")
 
     def run(self, *args: str) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -258,6 +280,54 @@ class BumpVersionTests(unittest.TestCase):
         r = self.repo.run("--check")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("latest_version", r.stderr)
+
+    # ── lockfiles ──
+    # 0.3.43 shipped with gpn-agent/Cargo.lock still at 0.3.42 and 0.3.49 with
+    # it at 0.3.48. Both were harmless only because nothing builds `--locked`;
+    # the stale label is invisible in a dirty worktree (cargo rewrites it).
+
+    def test_lockfile_follows_the_bump(self) -> None:
+        self.repo.write("gpn-agent/Cargo.lock", AGENT_LOCK)
+        self.assertEqual(self.repo.run("--check").returncode, 0)
+        self.assertEqual(self.repo.run("patch").returncode, 0)
+        self.assertEqual(self.repo.lock_version_of("gpn-agent/Cargo.lock", "gpn-agent"), "0.1.1")
+        # and a third-party entry in the same file is not rewritten
+        self.assertEqual(self.repo.lock_version_of("gpn-agent/Cargo.lock", "serde"), "1.0.0")
+        self.assertEqual(self.repo.run("--check").returncode, 0)
+
+    def test_lockfile_drift_fails_the_check(self) -> None:
+        self.repo.write(
+            "gpn-agent/Cargo.lock",
+            AGENT_LOCK.replace('version = "0.1.0"', 'version = "0.0.9"', 1),
+        )
+        r = self.repo.run("--check")
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn("DRIFT", r.stderr)
+        self.assertIn("Cargo.lock", r.stderr)
+
+    def test_lockfile_repair_when_manifests_already_agree(self) -> None:
+        # The `--set <current>` repair path: nothing to bump, one lock to sync.
+        self.repo.write(
+            "gpn-agent/Cargo.lock",
+            AGENT_LOCK.replace('version = "0.1.0"', 'version = "0.0.9"', 1),
+        )
+        self.assertEqual(self.repo.run("--set", "0.1.0").returncode, 0)
+        self.assertEqual(self.repo.lock_version_of("gpn-agent/Cargo.lock", "gpn-agent"), "0.1.0")
+        self.assertEqual(self.repo.run("--check").returncode, 0)
+
+    def test_lockfile_entry_for_a_foreign_crate_is_ignored(self) -> None:
+        # Only crates this tree defines are sources of truth; a crates.io package
+        # that happens to start with `gpn-` must not be rewritten or reported.
+        self.repo.write(
+            "gpn-agent/Cargo.lock",
+            AGENT_LOCK
+            + '\n[[package]]\nname = "gpn-elsewhere"\nversion = "9.9.9"\n',
+        )
+        self.assertEqual(self.repo.run("--check").returncode, 0)
+        self.assertEqual(self.repo.run("patch").returncode, 0)
+        self.assertEqual(
+            self.repo.lock_version_of("gpn-agent/Cargo.lock", "gpn-elsewhere"), "9.9.9"
+        )
 
 
 class RealRepoVersionTests(unittest.TestCase):

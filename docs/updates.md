@@ -96,11 +96,20 @@ repo raises a cutoff automatically.
 | `gpn-agent/Cargo.toml` | `[package] version` → `CARGO_PKG_VERSION` of the node/agents | `bump-version.py` |
 | `gpn-node/Cargo.toml` | `[workspace.package] version` | `bump-version.py` |
 | `gpn-node/{runtime,node,gpn-shield,pallets/*}/Cargo.toml` | `[package] version` (literal, not inherited) | `bump-version.py` |
+| `gpn-agent/Cargo.lock`, `gpn-node/Cargo.lock` | `version` of every first-party `[[package]]` | `bump-version.py` (and audited by `--check`) |
 | `CHANGELOG.md` | newest `## [x.y.z]` heading | `bump-version.py` (stub) then a human |
 | artifact bytes | `gpn-build-v1 version=x.y.z sha=<sha> spec=<n>` | `gpn-agent/build.rs` at compile time |
 | `website/releases.json` | `version` / `min_version` | `gen-release-manifest.py` (reads the artifact stamp) |
 
-`Cargo.lock` is left alone — cargo rewrites it on the next build.
+`Cargo.lock` used to be left alone on the theory that "cargo rewrites it on the
+next build". It does — which is why a stale lock hides: the worktree goes dirty
+instead of failing, and nothing in CI builds with `--locked`. Twice the label
+was published behind the tree that way (`0.3.43`, then `0.3.49` shipping
+`gpn-agent/Cargo.lock` at `0.3.48`), and `cargo metadata --locked` fails on a
+clean checkout. `bump-version.py` now writes those lines too and `--check`
+fails if any first-party entry disagrees. Only crates this tree defines are
+touched — a crates.io package whose name merely starts with `gpn-` is left as
+cargo resolved it.
 
 ### A release never replaces a newer local build
 
