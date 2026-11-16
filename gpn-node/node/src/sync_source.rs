@@ -35,7 +35,7 @@
 //! * [`rank_sources`] — the same comparison for many peers, best first.
 //! * [`DecisionLog`] — the INFO line, **once per peer per state change**, as
 //!   2026-11-15's incident made necessary: the operator must be able to read
-//!    *why* a peer was used, and read it once, not once per 30 s tick.
+//!   *why* a peer was used, and read it once, not once per 30 s tick.
 //! * the bootstrap decision — snapshot-first or crawl — with the threshold that
 //!   actually decides it, and the one line logged when the snapshot is
 //!   unreadable. It lives in `gpn_agent::selfheal` (`should_catch_up`), in the
