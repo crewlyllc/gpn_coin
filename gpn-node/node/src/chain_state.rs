@@ -12,7 +12,14 @@
 //!
 //! ```text
 //! gpncs/1 0x<b8e4636a…>:0x<best hash…>@<height>
+//! gpncs/2 0x<b8e4636a…>:0x<best hash…>@<height> work=<u128>
 //! ```
+//!
+//! v2 adds **cumulative work** for the heaviest-chain rule (2026-11-16). It is
+//! additive: [`encode`] still emits v1 so 0.3.49 peers keep parsing our claim,
+//! and an upgraded node sends v2 as a second message on the same substream.
+//! A v1 claim decodes with `work = None`, which fork choice treats as
+//! "not comparable" — never as a reason to reorg (owner rule).
 //!
 //! * **genesis** — a different genesis is a *different network*, not a fork.
 //!   It is checked first, at every height, so a rogue chain is named the moment
@@ -36,6 +43,9 @@ pub const CHAIN_STATE_PROTOCOL: &str = "/gpn/chain/1";
 /// Wire format prefix + version. A future v2 must stay decodable by this
 /// decoder (it is not, deliberately: an unknown version yields nothing).
 pub const WIRE_PREFIX: &str = "gpncs/1 ";
+/// v2 prefix. Same body as v1 plus ` work=<u128>`; understood only by nodes
+/// that have fork choice, ignored (as undecodable) by older ones.
+pub const WIRE_PREFIX_V2: &str = "gpncs/2 ";
 /// Hard cap on a payload we will even look at. A real message is ~150 bytes;
 /// the bound exists so a hostile peer cannot make us parse a megabyte.
 pub const MAX_BYTES: usize = 1024;
@@ -54,6 +64,11 @@ pub struct ChainState {
     pub best_hash: String,
     /// Best block number.
     pub height: u64,
+    /// Cumulative proof-of-work of the announced branch (`gpncs/2` only).
+    /// `None` for a v1 claim — work unavailable, fork choice keeps current
+    /// behaviour.
+    #[serde(default)]
+    pub work: Option<u128>,
 }
 
 /// What the two claims say about the connection.
@@ -115,7 +130,14 @@ impl ChainState {
             genesis: normalise_hash(genesis)?,
             best_hash: normalise_hash(best_hash)?,
             height,
+            work: None,
         })
+    }
+
+    /// Attach cumulative work, for a `gpncs/2` announcement.
+    pub fn with_work(mut self, work: Option<u128>) -> Self {
+        self.work = work;
+        self
     }
 
     /// Short `0x1234abcd` form for log lines.
@@ -143,6 +165,27 @@ pub fn encode(state: &ChainState) -> Option<Vec<u8>> {
     Some(body.into_bytes())
 }
 
+/// Encode a `gpncs/2` claim: v1 body plus ` work=<u128>`.
+/// `None` when the state is malformed or has no work to announce (then only
+/// [`encode`] applies — a node must never fabricate a work figure).
+pub fn encode_with_work(state: &ChainState) -> Option<Vec<u8>> {
+    let work = state.work?;
+    if !is_hash(&state.genesis) || !is_hash(&state.best_hash) {
+        return None;
+    }
+    let body = format!(
+        "{WIRE_PREFIX_V2}{}:{}@{} work={}",
+        normalise_hash(&state.genesis)?,
+        normalise_hash(&state.best_hash)?,
+        state.height,
+        work
+    );
+    if body.len() > MAX_BYTES {
+        return None;
+    }
+    Some(body.into_bytes())
+}
+
 /// Tolerant decoder: anything malformed, oversized or from a future version
 /// yields `None`. A peer must never be able to make us act on garbage.
 pub fn decode(bytes: &[u8]) -> Option<ChainState> {
@@ -150,11 +193,24 @@ pub fn decode(bytes: &[u8]) -> Option<ChainState> {
         return None;
     }
     let text = std::str::from_utf8(bytes).ok()?.trim();
-    let rest = text.strip_prefix(WIRE_PREFIX)?;
+    let (v2, rest) = if let Some(rest) = text.strip_prefix(WIRE_PREFIX_V2) {
+        (true, rest)
+    } else if let Some(rest) = text.strip_prefix(WIRE_PREFIX) {
+        (false, rest)
+    } else {
+        return None;
+    };
     let (genesis, tail) = rest.split_once(':')?;
-    let (best_hash, height) = tail.rsplit_once('@')?;
+    let (best_hash, tail) = tail.rsplit_once('@')?;
+    let (height, work) = if v2 {
+        let (height, work) = tail.split_once(' ')?;
+        let work = work.strip_prefix("work=")?.parse::<u128>().ok()?;
+        (height, Some(work))
+    } else {
+        (tail, None)
+    };
     let height: u64 = height.parse().ok()?;
-    ChainState::new(genesis, best_hash, height)
+    ChainState::new(genesis, best_hash, height).map(|s| s.with_work(work))
 }
 
 /// Compare a peer's claim with ours. Genesis wins over height: a chain with a
@@ -285,6 +341,26 @@ mod tests {
     }
 
     #[test]
+    fn a_v2_claim_carries_work_and_v1_still_decodes() {
+        let with = state(GENESIS, H1, 280_000).with_work(Some(123_456_789));
+        let bytes = encode_with_work(&with).expect("encodes");
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        assert_eq!(
+            text,
+            format!("gpncs/2 {GENESIS}:{H1}@280000 work=123456789")
+        );
+        assert_eq!(decode(&bytes), Some(with));
+        // A v1 claim has no work and never invents one.
+        let v1 = encode(&state(GENESIS, H1, 280_000)).unwrap();
+        assert_eq!(decode(&v1).unwrap().work, None);
+        // v2 without a work token, or with a bad one, is undecodable.
+        assert!(decode(format!("gpncs/2 {GENESIS}:{H1}@1").as_bytes()).is_none());
+        assert!(decode(format!("gpncs/2 {GENESIS}:{H1}@1 work=x").as_bytes()).is_none());
+        // No work to announce => no v2 frame (never fabricate).
+        assert!(encode_with_work(&state(GENESIS, H1, 1)).is_none());
+    }
+
+    #[test]
     fn hashes_are_normalised_and_non_hashes_are_refused() {
         let upper = state(GENESIS, &H1.to_ascii_uppercase(), 1);
         assert_eq!(upper.best_hash, H1);
@@ -295,6 +371,7 @@ mod tests {
             genesis: GENESIS.into(),
             best_hash: "short".into(),
             height: 5,
+            work: None,
         })
         .is_none());
     }

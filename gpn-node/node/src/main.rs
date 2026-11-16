@@ -19,6 +19,7 @@ mod clock;
 mod command;
 mod dialability;
 mod discovery;
+mod fork_choice;
 mod fork_tolerance;
 mod gpu_miner;
 mod lan_discovery;

@@ -11,7 +11,9 @@ use sc_consensus::{BlockImport, ImportQueue, LongestChain};
 use sc_consensus_pow::{start_mining_worker, PowAlgorithm, PowBlockImport, PowImportQueue};
 use sc_network::config::MultiaddrWithPeerId;
 use sc_network::service::traits::{NotificationEvent, ValidationResult};
-use sc_network::{NetworkPeers, NetworkStateInfo, NetworkStatusProvider, ReputationChange};
+use sc_network::{
+    NetworkPeers, NetworkStateInfo, NetworkStatusProvider, NetworkSyncForkRequest, ReputationChange,
+};
 use sc_network_sync::SyncingService;
 use sc_service::{error::Error as ServiceError, Configuration, TaskManager};
 use sc_telemetry::{Telemetry, TelemetryWorker};
@@ -61,6 +63,153 @@ fn local_chain_state(client: &FullClient) -> Option<crate::chain_state::ChainSta
         &format!("{:?}", info.best_hash),
         u64::from(info.best_number),
     )
+}
+
+// ── Heaviest-chain fork choice (owner decision 2026-11-16) ──────────────────
+//
+// Pure policy lives in [`crate::fork_choice`]. This section is the wiring: the
+// cumulative-work index over our own chain, the shared "we are forked" state
+// that pauses sealing, and the `gpn-forked` marker the miner loops read (the
+// same mechanism as the existing `gpn-isolated` guard).
+
+/// The file the miner checks before submitting a seal while a heavier chain is
+/// known but not applied. Same shape and intent as `gpn-isolated`.
+pub const FORKED_MARKER: &str = "gpn-forked";
+/// The file the cumulative-work index is cached in (restart cost is otherwise a
+/// full header walk; the cache is validated against the canonical chain first).
+pub const WORK_CACHE_FILE: &str = "chain-work.json";
+
+/// State shared by the work tracker, the chain-state task and the miner loops.
+#[derive(Default)]
+struct ForkShared {
+    /// Cumulative work of our canonical chain, once the index is ready.
+    our_work: Option<u128>,
+    /// Peer -> reason, for every announced heavier chain we have not applied
+    /// (pending reorg, or refused as deeper than the bound). Non-empty means
+    /// sealing is paused.
+    pending: std::collections::HashMap<String, &'static str>,
+}
+
+/// Persisted cumulative-work checkpoint.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct WorkCache {
+    genesis: String,
+    height: u64,
+    hash: String,
+    work: u128,
+}
+
+/// Parse a `0x…` block hash, as printed by `Debug`.
+fn parse_block_hash(s: &str) -> Option<<Block as BlockT>::Hash> {
+    let hex = s.trim_start_matches("0x");
+    hex::decode(hex)
+        .ok()
+        .and_then(|b| <Block as BlockT>::Hash::decode(&mut &b[..]).ok())
+}
+
+/// The stored difficulty **target** at one block (None if unreadable).
+fn difficulty_target_at(client: &FullClient, hash: <Block as BlockT>::Hash) -> Option<U256> {
+    let data = client
+        .storage(hash, &difficulty_storage_key())
+        .ok()
+        .flatten()?;
+    let limbs = <[u64; 4]>::decode(&mut &data.0[..]).ok()?;
+    Some(limbs_to_u256(limbs))
+}
+
+/// `LastAdjustmentBlock` at one block: the most recent difficulty-retarget
+/// boundary at or below it. `None` if unreadable.
+fn last_adjustment_at(client: &FullClient, hash: <Block as BlockT>::Hash) -> Option<u64> {
+    let mut key = Vec::with_capacity(32);
+    key.extend_from_slice(&twox_128(GPU_POW_PREFIX));
+    key.extend_from_slice(&twox_128(b"LastAdjustmentBlock"));
+    let data = client.storage(hash, &StorageKey(key)).ok().flatten()?;
+    let limb = u32::decode(&mut &data.0[..]).ok()?;
+    Some(u64::from(limb))
+}
+
+/// How many recent blocks the announced cumulative work covers.
+///
+/// The ideal metric is work from genesis, but `--state-pruning` discards old
+/// state (the `Difficulty` value lives in state, not in the header), so only the
+/// most recent blocks are readable. This window is **512** blocks: larger than
+/// [`crate::fork_choice::MAX_REORG_DEPTH`] (288), so the entire divergent region
+/// of any reorg this rule is allowed to apply is inside the window and the
+/// comparison is exact on the part that decides. It is real per-block
+/// difficulty accounting (never height), and every upgraded node computes it the
+/// same way, so the figures are comparable.
+pub const WORK_WINDOW: u64 = 512;
+
+/// Exact cumulative work of the last [`WORK_WINDOW`] blocks ending at
+/// `best_height`.
+///
+/// `pallet-gpu-pow` stores a **target** and only rewrites it on a retarget
+/// boundary (`LastAdjustmentBlock`), so work is constant between boundaries.
+/// We walk boundaries backwards and multiply each constant-target span by its
+/// length. A block's PoW is sealed against the target stored at its PARENT, so
+/// the sum is over parent heights.
+fn chain_work(client: &FullClient, best_height: u64) -> Option<u128> {
+    let base = best_height.saturating_sub(WORK_WINDOW);
+    let mut work = 0u128;
+    let Some(mut p) = best_height.checked_sub(1) else {
+        return Some(0);
+    };
+    loop {
+        let hash_p = client.hash(u32::try_from(p).ok()?).ok().flatten()?;
+        let target_p = difficulty_target_at(client, hash_p)?;
+        let boundary = last_adjustment_at(client, hash_p).unwrap_or(0);
+        let lo = boundary.max(base);
+        let count = p - lo + 1;
+        work = work
+            .saturating_add(crate::fork_choice::block_work(target_p).saturating_mul(count as u128));
+        if boundary <= base || boundary == 0 {
+            break;
+        }
+        p = boundary - 1;
+    }
+    Some(work)
+}
+
+/// Write (or clear) `<base-path>/gpn-forked` from the shared pending map. The
+/// content names the peer and reason, so an operator reading the file learns
+/// *why* sealing stopped without grepping the journal.
+fn refresh_forked_marker(base_path: &std::path::Path, shared: &ForkShared) {
+    let path = base_path.join(FORKED_MARKER);
+    if shared.pending.is_empty() {
+        let _ = std::fs::remove_file(path);
+        return;
+    }
+    let mut text = String::from("block sealing paused: a heavier canonical chain is known\n");
+    for (peer, reason) in &shared.pending {
+        text.push_str(&format!("  peer={peer} reason={reason}\n"));
+    }
+    let _ = std::fs::write(path, text);
+}
+
+/// Compute the cumulative work of our canonical chain and persist the last
+/// figure to `<base>/chain-work.json` (observability only; the value is cheap
+/// enough to recompute every tick from the retarget boundaries).
+fn compute_chain_work(client: &FullClient, base: &std::path::Path) -> Option<(u128, WorkCache)> {
+    let info = client.chain_info();
+    let genesis = format!("{:?}", info.genesis_hash);
+    let best_height = u64::from(info.best_number);
+    let best_hash = format!("{:?}", info.best_hash);
+    let started = std::time::Instant::now();
+    let work = chain_work(client, best_height)?;
+    let cache = WorkCache {
+        genesis,
+        height: best_height,
+        hash: best_hash,
+        work,
+    };
+    if let Ok(text) = serde_json::to_string(&cache) {
+        let _ = std::fs::write(base.join(WORK_CACHE_FILE), text);
+    }
+    log::info!(
+        "chain-work: cumulative work {work} at #{best_height} (retarget-boundary scan, {} ms)",
+        started.elapsed().as_millis()
+    );
+    Some((work, cache))
 }
 
 // ── Dialability state publication ────────────────────────────────────────
@@ -892,6 +1041,35 @@ pub async fn new_full<
     // counter does, and we must not send a request blind after a restart (see
     // `block_serving::PeerTips`).
     let peer_tips = crate::block_serving::PeerTips::loaded(base_path.join("peer-tips.json"));
+
+    // ---- Cumulative-work index (heaviest-chain fork choice, 2026-11-16) ---
+    // Our own chain's work is computed from the real per-block difficulty
+    // targets (never height). It is rebuilt from a cached checkpoint on start
+    // and extended in the background; until the first pass completes we
+    // announce only `gpncs/1` (work unavailable), so fork choice simply keeps
+    // current behaviour. See `fork_choice` for the policy and its bounds.
+    let fork_shared = Arc::new(Mutex::new(ForkShared::default()));
+    {
+        let client = client.clone();
+        let shared = fork_shared.clone();
+        let base = base_path.clone();
+        task_manager
+            .spawn_handle()
+            .spawn("gpn-chain-work", None, async move {
+                loop {
+                    let c = client.clone();
+                    let b = base.clone();
+                    let computed = tokio::task::spawn_blocking(move || compute_chain_work(&c, &b))
+                        .await
+                        .ok()
+                        .flatten();
+                    if let Some((work, _cache)) = computed {
+                        shared.lock().unwrap().our_work = Some(work);
+                    }
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                }
+            });
+    }
 
     // ---- Block serving (GPN #158 enforcement point) ---------------------
     // The SDK's handler calls the third identical block request from a peer
@@ -2154,6 +2332,15 @@ pub async fn new_full<
         //  * the download gate refuses a peer whose claim contradicts a signed
         //    anchor, so a newcomer never inherits a fork.
         let peer_book = peer_book.clone();
+        // Heaviest-chain fork choice (2026-11-16): the shared work figure, the
+        // pending-fork map / sealing marker, the primary's last claim, and the
+        // sync handle used to request a heavier branch.
+        let fork_shared = fork_shared.clone();
+        let sync = sync_service.clone();
+        let base_for_fork = base_path.clone();
+        let local_peer_id = network.local_peer_id().to_string();
+        let primary_claim: std::sync::Arc<Mutex<Option<crate::chain_state::ChainState>>> =
+            std::sync::Arc::new(Mutex::new(None));
         let anchors = crate::sync_source::Anchors::from_json(
             &std::fs::read_to_string(base_path.join(ANCHORS_FILE)).unwrap_or_default(),
         );
@@ -2168,6 +2355,9 @@ pub async fn new_full<
                     Default::default();
                 let mut log_state = cs::StateLog::default();
                 let mut decisions = ss::DecisionLog::default();
+                // Edge-trigger for fork-choice actions/lines: (result, their work).
+                let mut fork_log: std::collections::HashMap<String, (String, Option<u128>)> =
+                    Default::default();
                 let mut ticker = tokio::time::interval(Duration::from_secs(cs::TICK_SECS));
                 ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 log::info!(
@@ -2207,6 +2397,15 @@ pub async fn new_full<
                                             service.send_sync_notification(&peer, bytes);
                                             announced.insert(peer, local.height);
                                         }
+                                        // v2 carries cumulative work for fork choice;
+                                        // sent in addition to v1 so 0.3.49 peers keep
+                                        // parsing our claim.
+                                        let work = fork_shared.lock().unwrap().our_work;
+                                        if let Some(bytes) =
+                                            cs::encode_with_work(&local.clone().with_work(work))
+                                        {
+                                            service.send_sync_notification(&peer, bytes);
+                                        }
                                     }
                                     log::debug!(
                                         "chain-state: substream open with {peer} ({} peer(s))",
@@ -2218,6 +2417,15 @@ pub async fn new_full<
                                     announced.remove(&peer);
                                     log_state.forget(&peer.to_string());
                                     decisions.forget(&peer.to_string());
+                                    fork_log.remove(&peer.to_string());
+                                    {
+                                        let mut f = fork_shared.lock().unwrap();
+                                        f.pending.remove(&peer.to_string());
+                                    }
+                                    refresh_forked_marker(&base_for_fork, &fork_shared.lock().unwrap());
+                                    if peer.to_string() == crate::fork_choice::PRIMARY_PEER_ID {
+                                        *primary_claim.lock().unwrap() = None;
+                                    }
                                     // A closed connection's fork verdict is not a
                                     // fact about the next one: the gate re-learns
                                     // it from the next claim.
@@ -2274,6 +2482,107 @@ pub async fn new_full<
                                         anchor,
                                     );
                                     let who = peer.to_string();
+                                    // ---- heaviest-chain fork choice (2026-11-16) ----
+                                    // Pure policy in `crate::fork_choice`; here we
+                                    // apply it: request the heavier branch through
+                                    // the sync engine's sanctioned fork request, and
+                                    // pause sealing while it is pending or refused.
+                                    {
+                                        use crate::fork_choice as fc;
+                                        let ours = fc::Tip {
+                                            genesis: local.genesis.clone(),
+                                            height: local.height,
+                                            hash: local.best_hash.clone(),
+                                            work: fork_shared.lock().unwrap().our_work,
+                                        };
+                                        let theirs = fc::Tip {
+                                            genesis: remote.genesis.clone(),
+                                            height: remote.height,
+                                            hash: remote.best_hash.clone(),
+                                            work: remote.work,
+                                        };
+                                        let peer_is_primary = who == fc::PRIMARY_PEER_ID;
+                                        if peer_is_primary {
+                                            *primary_claim.lock().unwrap() = Some(remote.clone());
+                                        }
+                                        // Are we on the primary's chain? Checked
+                                        // live: its last claim may have moved on.
+                                        let primary_tip_held = primary_claim
+                                            .lock()
+                                            .unwrap()
+                                            .as_ref()
+                                            .and_then(|c| parse_block_hash(&c.best_hash))
+                                            .map(|h| {
+                                                client.header(h).ok().flatten().is_some()
+                                            })
+                                            .unwrap_or(false);
+                                        let decision = fc::evaluate(
+                                            &ours,
+                                            &theirs,
+                                            fc::Context {
+                                                is_primary_node: local_peer_id
+                                                    == fc::PRIMARY_PEER_ID,
+                                                primary_tip_held,
+                                                peer_is_primary,
+                                            },
+                                        );
+                                        {
+                                            let mut f = fork_shared.lock().unwrap();
+                                            if decision.pauses_sealing() {
+                                                f.pending.insert(
+                                                    who.clone(),
+                                                    decision.result_slug(),
+                                                );
+                                            } else {
+                                                f.pending.remove(&who);
+                                            }
+                                        }
+                                        refresh_forked_marker(
+                                            &base_for_fork,
+                                            &fork_shared.lock().unwrap(),
+                                        );
+                                        let key =
+                                            (decision.result_slug().to_string(), theirs.work);
+                                        if fork_log.get(&who) != Some(&key) {
+                                            fork_log.insert(who.clone(), key);
+                                            if !matches!(decision, fc::Decision::Keep(_)) {
+                                                log::info!(
+                                                    "fork-choice: {}",
+                                                    fc::line(&ours, &theirs, &who, decision)
+                                                );
+                                                if decision.is_primary_override() {
+                                                    log::warn!(
+                                                        "fork-choice: {}",
+                                                        fc::primary_override_line(
+                                                            &ours, &theirs, &who
+                                                        )
+                                                    );
+                                                }
+                                                if let fc::Decision::Reorg { depth } = decision {
+                                                    if let Some(hash) =
+                                                        parse_block_hash(&remote.best_hash)
+                                                    {
+                                                        log::info!(
+                                                            "fork-choice: requesting heavier branch 
+                                                             from {who} at #{} (provable depth {depth})",
+                                                            remote.height
+                                                        );
+                                                        sync.set_sync_fork_request(
+                                                            vec![peer],
+                                                            hash,
+                                                            (remote.height as u32).into(),
+                                                        );
+                                                    } else {
+                                                        log::warn!(
+                                                            "fork-choice: peer {who} announced more 
+                                                             work but its tip hash did not decode; 
+                                                             not requesting that branch"
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                     // A loud line only when the claim is
                                     // actionable (divergence, wrong network, a
                                     // peer ahead); otherwise the decision line is
@@ -2318,6 +2627,7 @@ pub async fn new_full<
                             let Some(bytes) = cs::encode(&local) else {
                                 continue;
                             };
+                            let work = fork_shared.lock().unwrap().our_work;
                             let mut sent = 0usize;
                             for peer in &open {
                                 if !cs::announce_due(
@@ -2327,6 +2637,9 @@ pub async fn new_full<
                                     continue;
                                 }
                                 service.send_sync_notification(peer, bytes.clone());
+                                if let Some(v2) = cs::encode_with_work(&local.clone().with_work(work)) {
+                                    service.send_sync_notification(peer, v2);
+                                }
                                 announced.insert(*peer, local.height);
                                 sent += 1;
                             }
@@ -2865,6 +3178,19 @@ fn spawn_gpu_miner(worker: MiningWorker, author: Option<[u8; 32]>, base_path: st
                                 std::thread::sleep(std::time::Duration::from_secs(5));
                                 continue;
                             }
+                            // Heaviest-chain rule (2026-11-16): a node must
+                            // never extend a branch it knows is losing. While a
+                            // heavier canonical chain is pending or refused as
+                            // too deep, `gpn-forked` exists and the seal is
+                            // dropped after a short pause and re-read.
+                            if base_path.join(FORKED_MARKER).exists() {
+                                log::debug!(
+                                    "forked (heavier chain known, not applied): not submitting this seal"
+                                );
+                                last_pre_hash = None;
+                                std::thread::sleep(std::time::Duration::from_secs(5));
+                                continue;
+                            }
                             let seal_bytes = seal_with_author(seal.to_seal_bytes(), author);
                             let ok = futures::executor::block_on(worker.submit(seal_bytes));
                             if ok {
@@ -2905,7 +3231,7 @@ fn spawn_gpu_miner(worker: MiningWorker, author: Option<[u8; 32]>, base_path: st
 }
 
 /// Light-cache CPU miner fallback (no GPU available).
-fn spawn_cpu_miner(worker: MiningWorker, author: Option<[u8; 32]>, _base_path: std::path::PathBuf) {
+fn spawn_cpu_miner(worker: MiningWorker, author: Option<[u8; 32]>, base_path: std::path::PathBuf) {
     std::thread::Builder::new()
         .name("gpn-cpu-miner".into())
         .spawn(move || {
@@ -2963,6 +3289,15 @@ fn spawn_cpu_miner(worker: MiningWorker, author: Option<[u8; 32]>, _base_path: s
                             ) {
                                 log::debug!(
                                     "superseded while solving (pre_hash={pre_hash:?}, nonce={nonce_found}); restarting on the current template"
+                                );
+                                break;
+                            }
+                            // Never extend a losing branch (same rule as GPU).
+                            if base_path.join("gpn-isolated").exists()
+                                || base_path.join(FORKED_MARKER).exists()
+                            {
+                                log::debug!(
+                                    "isolated or forked: not submitting this CPU seal"
                                 );
                                 break;
                             }
