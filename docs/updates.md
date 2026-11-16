@@ -416,6 +416,18 @@ That single command is the whole former 30-minute last mile:
 3. **reads the version out of the bundles** (`gpn-build-v1 version=…`); it never
    guesses. `--version X.Y.Z` is accepted as an *assertion* and a mismatch
    aborts before anything is uploaded;
+3b. **proves the bundles carry the code, not just the version** —
+   `scripts/verify-release-artifact.py` extracts `gpn-node`/`gpn-node.exe` and
+   requires the marker strings of the feature being released (default: the
+   heaviest-chain fork choice — `fork-choice`, `gpn-forked`, `deep-fork`,
+   `primary-authoritative`, `gpncs/2`) plus the `gpn-node/<version>` User-Agent
+   stamp, and reads `MAX_REORG_DEPTH = 288` out of the source of the build
+   commit (a `const` is folded to an immediate, so it cannot be grepped out of
+   the image — see below). A build from the wrong tree has the right version
+   and the wrong code, so this refuses *before* the asset reaches the public
+   repo. `0.3.50` shipped fork-choice code that existed in git and in no
+   published build (queue #192/#193); this step is what makes that
+   unrepeatable;
 4. **mirrors** both assets into the public repo `crewlyllc/gpn_coin`, renaming
    the previous asset aside first so a failed upload leaves a complete mirror
    rather than a 404 for every auto-updating node, then verifies the mirror's
@@ -437,6 +449,35 @@ the live manifest, default 300).
 
 It refuses to run at all if `website/releases.json` is dirty in the working
 tree — that is somebody else's edit, and signing it would launder it.
+
+#### The artifact-content gate, on its own
+
+```bash
+# after the fact: does what the world downloads still carry the code?
+scripts/verify-release-artifact.py            # live manifest, both platforms
+scripts/verify-release-artifact.py --os windows --version 0.3.50
+
+# in a release, before signing: the bundles release-cut already downloaded
+scripts/verify-release-artifact.py --no-manifest \
+    --bundle linux=/cache/gpn-linux.tar.gz \
+    --bundle windows=/cache/gpn-windows.zip --version 0.3.51
+
+# a new feature: state the strings that prove it is in the image
+scripts/verify-release-artifact.py --marker 'my-feature=log line it emits'
+```
+
+Exit codes: `0` verified, `2` manifest/signature, `3` asset digest, `4` missing
+marker, `5` version stamp, `6` source constant. Modes: the default verifies the
+**signed** manifest first (an unsigned manifest can describe any digest), then
+the downloaded bytes, then the binary. `--bundle` skips the download and checks
+a local archive against the manifest's digest when one is available.
+
+What it deliberately does *not* claim: a `const` has no runtime string, so
+`MAX_REORG_DEPTH` is verified in `gpn-node/node/src/fork_choice.rs` at
+`--source-rev` (default: the `sha=` in the bundle's build stamp). The
+binary-visible consequences of that bound are `deep-fork` and `gpn-forked`,
+which are scanned. The behaviour itself — a shallow fork reorgs, a >288-block
+fork is refused — is a live test (queue #194), not something a grep can prove.
 
 **Cron does this for you.** An OpenClaw job runs `scripts/release-cut.sh` every
 30 minutes in an isolated session and announces only when it publishes or

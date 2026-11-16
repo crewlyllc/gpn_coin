@@ -13,6 +13,12 @@
 #   2. DOWNLOAD both assets (resumable), verify sha256 against the API digest.
 #   3. VERSION  read from the `gpn-build-v1 version=…` stamp INSIDE the bundles;
 #               --version is an assertion, never a silent guess.
+#  3b. CONTENT  scan the bundles' node binary for the marker strings the
+#               version is supposed to contain (scripts/verify-release-
+#               artifact.py, queue #193). A build from the wrong tree usually
+#               has the right version and the wrong code; this is the only
+#               step that looks inside the executable, and it runs BEFORE the
+#               asset is mirrored or signed, so a wrong tree is never published.
 #   4. MIRROR   replace both assets on the public repo (crewlyllc/gpn_coin),
 #               rename-then-upload then verify the mirror's digest.
 #   5. SIGN     gen-release-manifest.py with the local ed25519 key; self-verify.
@@ -498,6 +504,22 @@ sys.exit(0 if b > a else 1)
 PY
   say "would replace published $PUB with $VER"
 fi
+
+# ──────────────────────────────────────────────── 3b artifact content ──
+# The version stamp says what the build *called* itself; only the executable
+# says what it *contains*. 0.3.50 shipped fork-choice code that existed in the
+# tree but in no published build (queue #192), so "the strings are in git" is
+# not evidence. This gate reads the bytes release-cut already downloaded, and
+# refuses before mirroring: once an asset is on the public repo, nodes can
+# download it, so the check must be *upstream* of that upload.
+step "3b/6 artifact carries the code"
+"$PY" "$SCRIPT_DIR/verify-release-artifact.py" --no-manifest \
+  --bundle "linux=$F_LINUX" --bundle "windows=$F_WIN" \
+  --version "$VER" --source-rev "${C_LINUX:-${C_WIN:-HEAD}}" || {
+    echo "ABORT: the bundles do not carry the code for $VER (see the markers above)" >&2
+    echo "       a release that ships the wrong tree is worse than no release." >&2
+    exit 1
+  }
 
 # ─────────────────────────────────────────────────────────────── 4 mirror ──
 step "4/6 mirror the assets to $MIRROR_REPO"

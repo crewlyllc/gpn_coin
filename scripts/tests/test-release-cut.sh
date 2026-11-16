@@ -33,7 +33,11 @@ make_bundle() { # file version
 import sys, tarfile, zipfile, io, os
 path, ver = sys.argv[1], sys.argv[2]
 stamp = f"gpn-build-v1 version={ver} sha=abcdef1 spec=41\n".encode()
-payload = stamp + b"fake node bytes " + os.urandom(64)
+# A bundle that passes the item-#193 content gate: the marker strings the
+# fork-choice work compiles in, plus the `gpn-node/<version>` User-Agent stamp.
+markers = (b"fork-choice gpn-forked deep-fork primary-authoritative gpncs/2 "
+           + f"gpn-node/{ver} ".encode())
+payload = stamp + b"fake node bytes " + markers + os.urandom(24)
 if path.endswith(".zip"):
     with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as z:
         z.writestr("gpn_node.exe", stamp)
@@ -45,6 +49,25 @@ else:
     with tarfile.open(path, "w:gz") as t:
         for name, data in (("gpn_node", stamp), ("gpn-node", payload),
                            ("README.txt", payload)):
+            ti = tarfile.TarInfo(name)
+            ti.size = len(data)
+            t.addfile(ti, io.BytesIO(data))
+PY
+}
+
+make_wrongtree_bundle() { # file version — right version, no feature code
+  "$PY" - "$1" "$2" <<'PY'
+import sys, tarfile, zipfile, io, os
+path, ver = sys.argv[1], sys.argv[2]
+stamp = f"gpn-build-v1 version={ver} sha=abcdef1 spec=41\n".encode()
+payload = stamp + b"fake node bytes " + f"gpn-node/{ver} ".encode() + os.urandom(24)
+if path.endswith(".zip"):
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as z:
+        z.writestr("gpn_node.exe", stamp)
+        z.writestr("gpn-node.exe", payload)
+else:
+    with tarfile.open(path, "w:gz") as t:
+        for name, data in (("gpn_node", stamp), ("gpn-node", payload)):
             ti = tarfile.TarInfo(name)
             ti.size = len(data)
             t.addfile(ti, io.BytesIO(data))
@@ -75,7 +98,8 @@ setup() { # published_version built_version [--no-published]
   R="$T/repo"
   mkdir -p "$T/state" "$R/website" "$R/scripts"
   cp "$REPO_ROOT/scripts/release-cut.sh" "$REPO_ROOT/scripts/gen-release-manifest.py" \
-     "$REPO_ROOT/scripts/commit-paths.sh" "$R/scripts/"
+     "$REPO_ROOT/scripts/commit-paths.sh" "$REPO_ROOT/scripts/verify-release-artifact.py" \
+     "$R/scripts/"
   chmod +x "$R/scripts/"*
   PUB_VER="$1"; BUILT_VER="$2"; NO_PUB="${3:-}"
 
@@ -320,9 +344,26 @@ t9_ci_gate() {
   teardown
 }
 
+t10_wrong_tree_aborts() {
+  CURRENT="t10 wrong tree aborts before mirroring"
+  setup 0.3.4 0.3.5
+  # The built assets carry version 0.3.5 but none of the fork-choice code —
+  # the exact shape of the incident #193 was filed for. The gate must refuse
+  # BEFORE the asset is renamed/uploaded, so nothing undownloadable is public.
+  make_wrongtree_bundle "$T/src-linux.tar.gz" 0.3.5
+  make_wrongtree_bundle "$T/src-windows.zip" 0.3.5
+  cut
+  check '[ "$RC" != 0 ]' "exits non-zero"
+  check 'grep -q "do not carry the code" <<< "$OUT"' "says the bundles lack the code"
+  check 'grep -q "MISS\|does not carry the code" <<< "$OUT"' "names the missing markers"
+  check '! grep -qE "^(UPLOAD|RENAME|DELETE)" "$T/state/actions.log"' \
+        "no upload/rename/delete reached the mirror"
+  teardown
+}
+
 ALL=(t1_nothing_to_do t2_detection_and_dry_run t3_digest_mismatch t4_mirror_failure
      t5_dirty_manifest t6_full_publish t7_version_assertion t8_skip_mirror
-     t9_ci_gate)
+     t9_ci_gate t10_wrong_tree_aborts)
 
 want=("$@")
 printf '\nrelease-cut.sh — %d scenario(s)\n' "${#ALL[@]}"

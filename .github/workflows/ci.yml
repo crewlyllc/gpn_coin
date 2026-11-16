@@ -312,6 +312,13 @@ jobs:
       - name: Release status reads `ci none` honestly
         run: bash scripts/tests/test-release-status.sh
 
+      # #193: a release whose version, sha256 and signature are all right can
+      # still ship the wrong tree. The gate scans the released node binary for
+      # the marker strings of the feature and refuses otherwise — synthetic
+      # bundles here, so nothing downloads 300 MB.
+      - name: Release artifact carries the code (wrong-tree gate)
+        run: python3 scripts/tests/test_verify_release_artifact.py
+
       # Referral download links (`?ref=CODE`): the page-side half. Pure Node,
       # no browser: validation rule, URL parsing, and the XSS boundary (the
       # code is only ever written as text, never as markup).
