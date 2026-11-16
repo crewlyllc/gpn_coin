@@ -1,130 +1,89 @@
-# Update checklist — every release, in order
+# Update checklist — every release, in this order
 
-Nothing here is optional. Each line exists because skipping it caused a specific failure this
-month; the failure is named so the line reads as a reason, not a ritual.
+Order matters: **test first, then implement, then build, then publish, then prove.** Each line
+names the failure it prevents. Copy this file to `docs/releases/<version>.md` when a release
+starts and tick the boxes as they are actually satisfied — an untickable box means the release
+is not ready.
 
-## Before the build
+---
 
-- [ ] **The tree contains the change.** `git log --oneline -3 -- <file>` and confirm the file is
-      actually there. *Failure it prevents: `fork_choice.rs` released in 0.3.50 while the shipped
-      binaries contained none of its strings.*
-- [ ] **Bump in the same commit as the change.** `scripts/bump-version.py patch` then write
-      CHANGELOG (no `_TODO_`) then `--check` → `lockstep: 15 manifest(s) agree`.
-      *A fix without a bump is invisible to every version comparison.*
-- [ ] **The changelog says what a user would notice**, not what files changed.
-- [ ] **Tests exist and fail without the change.** Paste the before/after output in the row.
+## 1. Test first (before any code is written)
 
-## Push
+- [ ] Name the behaviour in one sentence, and the machine-observable thing that proves it.
+- [ ] **Write the test that fails now.** Paste the failing output. No fix starts without this.
+- [ ] If the change cannot be tested, **stop and tell Jeremy** — what it is, why it cannot be
+      tested, and what would be needed. Never proceed silently.
 
-- [ ] **One push.** Never push while CI is running for HEAD — it cancels the run and wastes 40–75
-      minutes of the Windows job.
-- [ ] **CI green on that exact SHA:** fmt, clippy `-D warnings`, secret-scan, Linux build,
-      **Windows build on box 1's runner**.
-- [ ] If CI is red, fix the cause; do not release around it.
+## 2. Implement
 
-## Build
+- [ ] The test passes.
+- [ ] `cargo fmt --check` clean; clippy with CI's `-D warnings` clean.
+- [ ] Full affected suites run, not just the new test.
+- [ ] **A call site exists** for anything new — grep the caller, not the definition.
+      *Election and self-heal were both "implemented" with no caller.*
+- [ ] Nothing new is off by default behind a flag nobody sets.
+- [ ] The change is in the tree you are about to release:
+      `git log --oneline -3 -- <file>` *(`fork_choice.rs` shipped in 0.3.50 while the binaries
+      contained none of its strings.)*
 
-- [ ] Dispatch **both**: `release-linux-selfhosted.yml` and `release-windows.yml`.
-- [ ] Confirm both workflows report `success` **for the same SHA you pushed**.
+## 3. Bump and record
 
-## Verify the artifact — before it goes anywhere
+- [ ] `scripts/bump-version.py patch`
+- [ ] CHANGELOG section written — what a user notices, no `_TODO_`
+- [ ] `scripts/bump-version.py --check` → `lockstep: 15 manifest(s) agree`
+- [ ] Seed lists still agree across `network.json`, `seeds.json`, `install.ps1`, `install.sh`,
+      `run-windows.cmd`, the launcher template and the release workflow (parity test green).
 
-- [ ] **Scan the built binary for the strings the change added.** PowerShell:
-      `$s=[IO.File]::ReadAllText($p); [regex]::Matches($s,'reorg=').Count`
-      Use literals that appear in **code**, never in comments — `reorg=`, `work ours=`,
-      `gpn-forked`, not the constant or module name.
-      *This check is the one that caught a release shipping a tree without the code.*
-- [ ] Confirm the version the binary reports matches the manifest.
+## 4. Push (once)
 
-## Cut
+- [ ] Nothing else pushed in the same window; no push while CI runs for HEAD.
+- [ ] CI green on that exact SHA: fmt, clippy, secret-scan, Linux build, **Windows build**.
 
-- [ ] `scripts/release-cut.sh --timeout 300` — mirrors, signs, publishes, and re-downloads both
-      assets anonymously to verify.
-- [ ] Poll `releases.json` **twice** for the new version (defeats cache).
+## 5. Build both platforms
 
-## Deploy and confirm
+- [ ] `release-linux-selfhosted.yml` → `gpn-linux.tar.gz` on `linux-latest`
+- [ ] `release-windows.yml` on box 1's runner → `gpn-windows.zip` on `windows-latest`
+- [ ] **Same SHA on both runs.** macOS is not required and is not in the manifest.
 
-- [ ] Let **one** node update itself; do not copy files by hand.
-- [ ] The **running process** reports the new version:
-      `(Get-Process gpn-node).Path` → the versioned path, then `--version` from that path.
-- [ ] Its log shows `check → apply → copied N binaries → CONFIRMED <version> is running`.
-- [ ] If the update fails, it **rolls back and stays up**; a down node is a failed release.
+## 6. Verify the artifact BEFORE publishing
 
-## Prove it works
+- [ ] **Scan the built binaries for strings the change added.** Use literals from *code*:
+      `reorg=`, `work ours=`, `gpn-forked` — never module or constant names.
+- [ ] The binary's `--version` matches the version being released.
 
-- [ ] The observable behaviour of the change, on a real machine, pasted with timestamps —
-      not "should now work".
-- [ ] Peers stay connected for >5 minutes after the deploy.
-- [ ] `grep -c "Reason:"` over the deploy window shows no new bans.
-- [ ] No new `gpn-isolated` / `gpn-forked` markers where there were none.
+## 7. Cut and publish
 
-## Record
+- [ ] `scripts/release-cut.sh --timeout 300` — mirrors both assets into `crewlyllc/gpn_coin`,
+      signs `website/releases.json`, publishes, re-downloads to verify.
+- [ ] `network.json` `latest_version` equals the published version.
+- [ ] `releases.json` serves the new version **twice**, ten seconds apart.
 
-- [ ] Mark the task row `DONE (date)` with the version string, the commit sha, and the log line.
-- [ ] If something could not be tested, say so in the row and tell Jeremy — before calling it done.
+## 8. Verify as a stranger would
 
-## Things that must never regress
+- [ ] Anonymous download of **both** assets from `gpncoin.ai` succeeds.
+- [ ] **sha256 and size match** the manifest for both.
+- [ ] Docs stamp and `downloads.md` show the same version; the live URL was polled, not the repo.
+
+## 9. Deploy and confirm
+
+- [ ] One node updates **itself** — no hand-copying.
+- [ ] The **running process** reports the new version (check `(Get-Process gpn-node).Path` first).
+- [ ] Log shows `check → stop → download → swap → start → CONFIRMED <version> running`.
+- [ ] Previous version retained for rollback; a failed update leaves the node **running**, not down.
+
+## 10. Prove the behaviour
+
+- [ ] The change observed on a real machine, with timestamps and the actual output.
+- [ ] Peers hold >5 minutes; no new `Reason:` bans; no unexpected `gpn-isolated`/`gpn-forked`.
+- [ ] Mark the task row `DONE (date)` with version, commit sha and the evidence line.
+
+---
+
+## Must never regress
 
 - Private/LAN addresses in shipped defaults (0.3.29 broke every remote box)
-- Loopback advertised in listen addresses (caused box 1's self-dial storm)
-- The launcher execing a stale `bin\` copy instead of `versions/current`
-- Unset env flags that silently disable a feature (`GPN_SITE_ELECT`, `GPN_SELF_HEAL`)
-- A mechanism with no caller (heal, election) — grep for a call site, not just a definition
-
-## Both platforms, every time
-
-- [ ] **Linux build** — `release-linux-selfhosted.yml` → `gpn-linux.tar.gz` uploaded to the
-      `linux-latest` release of the build repo.
-- [ ] **Windows build** — `release-windows.yml` on box 1's self-hosted runner → `gpn-windows.zip`
-      uploaded to `windows-latest`.
-- [ ] **Same SHA on both.** Two builds of different commits is a broken release even if each
-      succeeds; check `head_sha` on both workflow runs.
-- [ ] **macOS is not required** (billing-blocked) and is not in the manifest. Do not wait for it,
-      and do not treat its failure as a release failure.
-
-## Mirrored and published
-
-- [ ] `release-cut` **mirrors both assets** into the public repo `crewlyllc/gpn_coin`, renaming
-      them to the versioned filenames the manifest points at.
-- [ ] **`website/releases.json` is signed** with the release key (`78015fab…`) and the signature
-      verifies — the updater refuses an unsigned manifest, so a bad signature ships nothing.
-- [ ] **`network.json`'s `latest_version` matches** the published version (it is `include_str!`d
-      into the node; a stale value makes "UPGRADE REQUIRED" unreachable).
-- [ ] If the change touched seed lists: `seeds.json`, `network.json`, `install.ps1`,
-      `install.sh`, `run-windows.cmd`, the `start-node.cmd` template and the release workflow
-      template **all agree** — the parity test enforces this; run it.
-
-## Downloadable — test as a stranger would
-
-- [ ] **Anonymous download of both assets from `gpncoin.ai`** succeeds (no auth, no redirect to a
-      login): `curl -fL -o /tmp/x https://gpncoin.ai/dl/<file> && sha256sum /tmp/x`.
-- [ ] **The sha256 matches the manifest** for both platforms.
-- [ ] **The size matches** the manifest for both platforms.
-- [ ] **`releases.json` serves the new version twice**, ten seconds apart (cache check).
-- [ ] The **docs stamp** (`/docs/run-a-node`) and `downloads.md` show the same version.
-- [ ] Site deploy actually ran — Cloudflare Git integration, not a manual push that skipped it;
-      poll the live URL, never the repo file.
-
-## Version consistency, everywhere at once
-
-- [ ] `gpn-agent/Cargo.toml` version
-- [ ] the binary's `--version` output and its embedded build stamp
-- [ ] `releases.json` `version` and both asset names
-- [ ] `network.json` `latest_version`
-- [ ] `CHANGELOG.md` section for that version, no `_TODO_`
-- [ ] `scripts/bump-version.py --check` → `lockstep: 15 manifest(s) agree`
-
-## Update path (the part users see)
-
-- [ ] `current` pointer written to the new version (a 1-byte empty file has happened before).
-- [ ] Launcher execs `versions/current`, **not** a stale `bin\` copy.
-- [ ] Update cycle: `check → stop → download → verify → swap → start → CONFIRMED <version> running`.
-- [ ] **Rollback retained**: the previous version stays in `versions/` so a failed update can go back.
-- [ ] A failed update leaves the node **running the old build**, never down.
-
-## After the fact
-
-- [ ] One node updated itself and reported the new version from the **running process**.
-- [ ] The change's own behaviour observed live, with timestamps.
-- [ ] Peer count recovered and held >5 minutes; `grep -c "Reason:"` shows no new bans.
-- [ ] Task row marked `DONE (date)` with version, commit sha and the evidence line.
+- Loopback in advertised listen addresses (caused box 1's self-dial storm)
+- Launcher execing a stale `bin\` copy instead of `versions/current`
+- Env flags that silently disable a feature (`GPN_SITE_ELECT`, `GPN_SELF_HEAL`)
+- Mechanisms with no caller — grep for a call site, not a definition
+- A version that moves in `Cargo.toml` but not in `releases.json`, or vice versa
