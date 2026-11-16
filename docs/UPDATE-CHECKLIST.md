@@ -1,5 +1,18 @@
 # Update checklist — every release, in this order
 
+## Release policy (owner, 2026-11-16)
+
+- **A version combines everything that is finished but unreleased.** Never cut a release for a
+  single change while others are sitting in the tree — the fleet then has to update twice for
+  what is one batch, and each update is a restart, a risk and a wait.
+- **Anything designed or started after that point goes into the NEXT version.** Once a release
+  is cut, the batch is closed: new work accumulates for the following one. Do not reopen a
+  release that is already published.
+- **"Finished" means tested** (see the gate below), not merely committed. A change that cannot be
+  tested stays out of the batch and is reported, not smuggled in.
+- **One bump, one changelog entry, one push, one cut per batch.**
+
+
 Order matters: **test first, then implement, then build, then publish, then prove.** Each line
 names the failure it prevents. Copy this file to `docs/releases/<version>.md` when a release
 starts and tick the boxes as they are actually satisfied — an untickable box means the release
