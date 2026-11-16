@@ -1614,7 +1614,7 @@ function Set-Referral {
 
 # ----------------------------------------------------------------- install ---
 
-# ── Fast sync (weekly snapshot) ──────────────────–--------------------------
+# -- Fast sync (weekly snapshot) ----------------------------------------------
 # Mirrors install.sh. A fresh Windows install otherwise re-verifies every block
 # from genesis including its Ethash seal (hours on a growing chain), and a node
 # that crawls is also the node most likely to settle on another laggard
@@ -1633,12 +1633,12 @@ $SnapshotMetaUrl = if ($env:GPN_SNAPSHOT_META_URL) { $env:GPN_SNAPSHOT_META_URL 
 
 function Invoke-FastSyncFallback {
   param([string]$Reason)
-  Warn "fast sync unavailable ($Reason) — falling back to a normal full peer sync (slower, still correct)."
+  Warn "fast sync unavailable ($Reason) -- falling back to a normal full peer sync (slower, still correct)."
 }
 
 function Invoke-FastSync {
   if (-not $FastSync) {
-    Say 'fast sync disabled (--no-fast-sync) — the node will sync from peers.'
+    Say 'fast sync disabled (--no-fast-sync) -- the node will sync from peers.'
     return
   }
   # Never touch an existing chain DB: a DB made with a different pruning mode
@@ -1647,9 +1647,9 @@ function Invoke-FastSync {
   $chains = Join-Path $DataDir 'chains'
   if ((Test-Path $chains) -and (Get-ChildItem -LiteralPath $chains -Force -ErrorAction SilentlyContinue)) {
     if (Test-Path (Join-Path $DataDir '.gpn-pruning-archive')) {
-      Say "found an existing chain DB at $DataDir — fast sync not needed (leaving it untouched)."
+      Say "found an existing chain DB at $DataDir -- fast sync not needed (leaving it untouched)."
     } else {
-      Warn "found an existing chain DB at $DataDir with no archive-pruning marker — NOT touching it; fast sync skipped."
+      Warn "found an existing chain DB at $DataDir with no archive-pruning marker -- NOT touching it; fast sync skipped."
     }
     return
   }
@@ -1683,7 +1683,7 @@ function Invoke-FastSync {
     if (-not ($snapSize -as [int64])) { Invoke-FastSyncFallback 'signed metadata has no usable size'; return }
     $snapSize = [int64]$snapSize
 
-    Say "weekly snapshot: block $(if ($snapBlock) { $snapBlock } else { '?' }), $([math]::Round($snapSize/1MB,0)) MiB — downloading..."
+    Say "weekly snapshot: block $(if ($snapBlock) { $snapBlock } else { '?' }), $([math]::Round($snapSize/1MB,0)) MiB -- downloading..."
 
     # Disk guard: the archive plus the unpacked DB needs room; require 3x.
     try {
@@ -1715,18 +1715,18 @@ function Invoke-FastSync {
     # Import into a STAGING dir, never over the real base path: a failure then
     # has nothing to undo except our own temp dir.
     $stage = Join-Path $work 'stage'
-    Say 'importing snapshot — the manifest decides the pruning mode — a few minutes...'
+    Say 'importing snapshot -- the manifest decides the pruning mode -- a few minutes...'
     $out = & $snap import --snapshot $arch --base-path $stage 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path (Join-Path $stage 'chains'))) {
       Invoke-FastSyncFallback "snapshot import failed: $(($out -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 1))"
       return
     }
     New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
-    if (Test-Path $chains) { Invoke-FastSyncFallback "$chains appeared during import — not overwriting it"; return }
+    if (Test-Path $chains) { Invoke-FastSyncFallback "$chains appeared during import -- not overwriting it"; return }
     Move-Item -LiteralPath (Join-Path $stage 'chains') -Destination $chains
     $marker = Join-Path $stage '.gpn-pruning-archive'
     if (Test-Path $marker) { Copy-Item -LiteralPath $marker -Destination $DataDir -Force }
-    Say "bootstrapped from the weekly snapshot at block $(if ($snapBlock) { $snapBlock } else { '?' }) — skipping the full peer sync."
+    Say "bootstrapped from the weekly snapshot at block $(if ($snapBlock) { $snapBlock } else { '?' }) -- skipping the full peer sync."
   } catch {
     Invoke-FastSyncFallback "unexpected error: $($_.Exception.Message)"
   } finally {
