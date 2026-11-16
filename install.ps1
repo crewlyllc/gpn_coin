@@ -808,20 +808,31 @@ if ($Log) { Add-Content -Path $Log -Value $text }
 # is its own silent failure.
 $cutoff = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - 600
 $same = @($reports | Where-Object { $_.kind -eq $kind -and [int]$_.ts_unix -ge $cutoff })
+# A dialog is a courtesy, not a gate. On a box nobody is sitting at, a modal
+# MessageBox never returns, so the process that called us (and any lock it holds)
+# leaks for ever. Show it in a job and give up after the timeout: the answer is
+# already in the log, which is what an operator reads anyway.
+function Show-Box {
+  param([string]$Body, [string]$Title)
+  try {
+    $job = Start-Job -ScriptBlock {
+      param($t, $ti)
+      Add-Type -AssemblyName System.Windows.Forms
+      [System.Windows.Forms.MessageBox]::Show($t, $ti, 'OK', 'Error') | Out-Null
+    } -ArgumentList $Body, $Title
+    if (-not (Wait-Job $job -Timeout 120)) { Stop-Job $job -ErrorAction SilentlyContinue }
+    Remove-Job $job -Force -ErrorAction SilentlyContinue
+  } catch { }
+}
+
 if ($same.Count -ge 3) {
   $loopText = "$text`nThe SAME failure happened $($same.Count) times in 10 minutes - NOT restarting. Fix the reason above, then start GPN-Node again (schtasks /Run /TN GPN-Node)."
   if ($Log) { Add-Content -Path $Log -Value $loopText }
-  try {
-    Add-Type -AssemblyName System.Windows.Forms
-    [System.Windows.Forms.MessageBox]::Show($loopText, 'GPN node: crash loop', 'OK', 'Error') | Out-Null
-  } catch { }
+  Show-Box $loopText 'GPN node: crash loop'
   exit 3
 }
 
-try {
-  Add-Type -AssemblyName System.Windows.Forms
-  [System.Windows.Forms.MessageBox]::Show($text, 'GPN node stopped', 'OK', 'Error') | Out-Null
-} catch { }
+Show-Box $text 'GPN node stopped'
 exit 0
 '@
 
@@ -887,8 +898,15 @@ function Show-UpdateFailure {
   Write-Log ('FAILED: ' + $What + ' (exit ' + $Code + ') - ' + $Detail)
   if (-not (Test-Path $ReportScript)) { return }
   $note = 'auto-update: ' + $What + ' failed (exit ' + $Code + ') - ' + $Detail + '. See ' + $LogPath
+  # DETACHED on purpose, never `&`: report-exit.ps1 ends in a modal MessageBox.
+  # A synchronous call waits for a human to click it, so on an unattended box the
+  # cycle never returns, `finally` never runs, and update.lock stays held for
+  # ever -- every later cycle then logs "another GPN-Update run is still in
+  # progress" and quietly stops checking (box 3, 2026-11-15: 23 hours of no
+  # update checks, 0.3.48/0.3.49 never seen, current stuck on a directory).
   try {
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $ReportScript -ExitCode $Code -Log $LogPath -Note $note
+    Start-Process -FilePath 'powershell' -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',
+      ('"' + $ReportScript + '"'),'-ExitCode',[string]$Code,'-Log',('"' + $LogPath + '"'),'-Note',('"' + $note + '"')) -WindowStyle Hidden | Out-Null
   } catch {
     Write-Log ('could not show the failure dialog: ' + $_.Exception.Message)
   }
@@ -1065,10 +1083,29 @@ try {
   # 2026-11-14). Idempotent, so doing it every cycle is free.
   Repair-Launcher
 
-  $updater = Join-Path $BinDir 'gpn_update.exe'
-  if (-not (Test-Path $updater)) {
+  # Run the updater from a private copy OUTSIDE the install dir. Windows locks a
+  # running .exe, so an updater executed as C:\gpn\bin\gpn_update.exe can never
+  # rename the new gpn_update.exe into place: apply failed on that last file,
+  # `current` had already moved so the node ran the new build while the install
+  # dir stayed MIXED, and the cycle reported FAILED every hour (box 3, 2026-11-15).
+  # From a copy, every file in the target dir is replaceable.
+  $updaterSrc = Join-Path $BinDir 'gpn_update.exe'
+  if (-not (Test-Path -LiteralPath $updaterSrc)) {
     Show-UpdateFailure 1 'update check' ('gpn_update.exe is missing from ' + $BinDir)
     exit 1
+  }
+  $RunDir = Join-Path $InstallDir 'data\update\run'
+  New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
+  $updater = Join-Path $RunDir 'gpn_update.exe'
+  try {
+    Copy-Item -LiteralPath $updaterSrc -Destination $updater -Force -ErrorAction Stop
+  } catch {
+    # A copy that cannot be refreshed is still usable if one is already there.
+    if (-not (Test-Path -LiteralPath $updater)) {
+      Show-UpdateFailure 1 'update check' ('could not stage the updater into ' + $RunDir + ': ' + $_.Exception.Message)
+      exit 1
+    }
+    Write-Log ('could not refresh the updater copy (' + $_.Exception.Message + ') - using the existing one')
   }
 
   # Install into C:\gpn\bin and keep the version trees beside the node's own
