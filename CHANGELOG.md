@@ -8,6 +8,44 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.50] - 2026-11-16
+
+Bumped from 0.3.49. One theme: **fork choice stops being a height comparison.** On 2026-11-16
+box 1 was found mining its own branch at `#306,633` while the fleet was at `#309,96x`, and nothing
+could see it — the newest *signed* checkpoint (`#305,244`) sat below the fork, so every existing
+guard looked at a chain that was internally consistent. Two branches at the same height are
+indistinguishable to a fork choice that only counts blocks.
+
+### Added
+- **Heaviest-chain fork choice** (`node/src/fork_choice.rs`, owner decision 2026-11-16). A branch's
+  weight is the sum of `2^256 / Difficulty` over its blocks, using the real per-block targets the
+  runtime stores and retargets — height is never used as a proxy for work. A same-genesis peer
+  announcing strictly greater cumulative work, at or below our height, is requested through the
+  sync engine's fork path and sealing pauses (`gpn-forked`) until it lands. Equal work, or a peer
+  whose work cannot be computed (a 0.3.49 peer's `gpncs/1` claim carries none), keeps the previous
+  behaviour exactly, so this release inter-operates with 0.3.49 peers in both directions.
+- **`gpncs/2`, an additive chain-state frame** carrying cumulative work. `gpncs/1` is still
+  emitted, so an older peer keeps parsing our claim; the new frame is what makes a fork visible.
+- **A bounded reorg with a named refusal.** `MAX_REORG_DEPTH = 288` blocks (6.4 retarget windows,
+  ~72 min at the 15 s target): deeper reorgs are *refused* with `reorg=refused:deep-fork`, logged
+  loudly, sealing stays paused, and the snapshot/catch-up path is what must do the work — an
+  automatic deep reorg would silently erase hours of sealed, rewarded blocks.
+- **Bootstrap stance as a greppable constant.** `PRIMARY_AUTHORITATIVE` (default `true`) says the
+  Linux host is the primary chain while the network is a single-writer bootstrap: a branch that
+  does not contain the primary's chain never displaces it, and when that rule is what decides, it
+  is logged as a separate override line rather than becoming an invisible special case. Set it to
+  `false` for pure heaviest-chain once there are independent operators.
+
+### Changed
+- `gpn-forked` pauses both the GPU and CPU sealers, exactly like the existing `gpn-isolated`
+  zero-peer guard, so a node never seals a branch it already knows is losing.
+
+### Fixed
+- **A fork above the newest signed checkpoint is now detectable at all.** The anchor gate in
+  `sync_source` could only judge history it had signed; cumulative work is computed from this
+  chain's own difficulty records, so a 4,700-block unanchored tail is now a decision, not a blind
+  spot.
+
 ## [0.3.49] - 2026-11-15
 
 Bumped from 0.3.48. One theme: **a node that joins late must not inherit a fork, and a peer that
