@@ -70,3 +70,61 @@ month; the failure is named so the line reads as a reason, not a ritual.
 - The launcher execing a stale `bin\` copy instead of `versions/current`
 - Unset env flags that silently disable a feature (`GPN_SITE_ELECT`, `GPN_SELF_HEAL`)
 - A mechanism with no caller (heal, election) — grep for a call site, not just a definition
+
+## Both platforms, every time
+
+- [ ] **Linux build** — `release-linux-selfhosted.yml` → `gpn-linux.tar.gz` uploaded to the
+      `linux-latest` release of the build repo.
+- [ ] **Windows build** — `release-windows.yml` on box 1's self-hosted runner → `gpn-windows.zip`
+      uploaded to `windows-latest`.
+- [ ] **Same SHA on both.** Two builds of different commits is a broken release even if each
+      succeeds; check `head_sha` on both workflow runs.
+- [ ] **macOS is not required** (billing-blocked) and is not in the manifest. Do not wait for it,
+      and do not treat its failure as a release failure.
+
+## Mirrored and published
+
+- [ ] `release-cut` **mirrors both assets** into the public repo `crewlyllc/gpn_coin`, renaming
+      them to the versioned filenames the manifest points at.
+- [ ] **`website/releases.json` is signed** with the release key (`78015fab…`) and the signature
+      verifies — the updater refuses an unsigned manifest, so a bad signature ships nothing.
+- [ ] **`network.json`'s `latest_version` matches** the published version (it is `include_str!`d
+      into the node; a stale value makes "UPGRADE REQUIRED" unreachable).
+- [ ] If the change touched seed lists: `seeds.json`, `network.json`, `install.ps1`,
+      `install.sh`, `run-windows.cmd`, the `start-node.cmd` template and the release workflow
+      template **all agree** — the parity test enforces this; run it.
+
+## Downloadable — test as a stranger would
+
+- [ ] **Anonymous download of both assets from `gpncoin.ai`** succeeds (no auth, no redirect to a
+      login): `curl -fL -o /tmp/x https://gpncoin.ai/dl/<file> && sha256sum /tmp/x`.
+- [ ] **The sha256 matches the manifest** for both platforms.
+- [ ] **The size matches** the manifest for both platforms.
+- [ ] **`releases.json` serves the new version twice**, ten seconds apart (cache check).
+- [ ] The **docs stamp** (`/docs/run-a-node`) and `downloads.md` show the same version.
+- [ ] Site deploy actually ran — Cloudflare Git integration, not a manual push that skipped it;
+      poll the live URL, never the repo file.
+
+## Version consistency, everywhere at once
+
+- [ ] `gpn-agent/Cargo.toml` version
+- [ ] the binary's `--version` output and its embedded build stamp
+- [ ] `releases.json` `version` and both asset names
+- [ ] `network.json` `latest_version`
+- [ ] `CHANGELOG.md` section for that version, no `_TODO_`
+- [ ] `scripts/bump-version.py --check` → `lockstep: 15 manifest(s) agree`
+
+## Update path (the part users see)
+
+- [ ] `current` pointer written to the new version (a 1-byte empty file has happened before).
+- [ ] Launcher execs `versions/current`, **not** a stale `bin\` copy.
+- [ ] Update cycle: `check → stop → download → verify → swap → start → CONFIRMED <version> running`.
+- [ ] **Rollback retained**: the previous version stays in `versions/` so a failed update can go back.
+- [ ] A failed update leaves the node **running the old build**, never down.
+
+## After the fact
+
+- [ ] One node updated itself and reported the new version from the **running process**.
+- [ ] The change's own behaviour observed live, with timestamps.
+- [ ] Peer count recovered and held >5 minutes; `grep -c "Reason:"` shows no new bans.
+- [ ] Task row marked `DONE (date)` with version, commit sha and the evidence line.
