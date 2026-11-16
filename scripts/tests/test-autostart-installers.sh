@@ -348,8 +348,18 @@ assert_has "$uw" "Wait-NodeExit"                   "wrapper waits for the proces
 assert_has "$uw" "[System.IO.FileShare]::None"     "wrapper takes an exclusive lock"
 assert_has "$uw" "release manifest unreachable"    "exit 2 is logged, not treated as a failure"
 assert_has "$uw" "node NOT restarted"              "exit 0/2 do not restart the node"
-already=$(grep -n -e '-ExecutionPolicy Bypass -File \$ReportScript' "$uw" | head -1 | cut -d: -f1)
-if [ -z "$already" ]; then bad "wrapper never reports through report-exit.ps1"; else ok "wrapper reports failures through report-exit.ps1"; fi
+# The reporter must be started DETACHED, never `&`-invoked: report-exit.ps1 ends in a
+# modal MessageBox, so a synchronous call waits for a click that never comes on an
+# unattended box -- the cycle never returns, its finally{} never runs, update.lock
+# stays held for ever (box 3, 2026-11-15: 23 hours of no update checks, 0.3.48/0.3.49
+# never seen). Assert the mechanism we now rely on *and* the one that broke it.
+assert_has "$uw" "Start-Process"                    "wrapper starts the failure reporter detached"
+assert_has "$uw" "report-exit.ps1"                  "wrapper reports failures through report-exit.ps1"
+sync_call=$(grep -nE '(^|[^[:alnum:]_])&[[:space:]]*powershell.*-File[[:space:]]*(\"?\$ReportScript|\"\$ReportScript)' "$uw" | head -1 | cut -d: -f1)
+if [ -n "$sync_call" ]; then bad "wrapper calls report-exit.ps1 synchronously (line $sync_call): a modal MessageBox would hold update.lock for ever"; else ok "wrapper never blocks on the failure dialog"; fi
+# Negative control: the synchronous shape must be REJECTED by the check above.
+printf '%s\n' '& powershell -NoProfile -ExecutionPolicy Bypass -File $ReportScript -ExitCode 1' > "$tmp/sync-report.ps1"
+if grep -qE '(^|[^[:alnum:]_])&[[:space:]]*powershell.*-File[[:space:]]*(\"?\$ReportScript|\"\$ReportScript)' "$tmp/sync-report.ps1"; then ok "negative control: synchronous reporter call detected"; else bad "negative control PASSED - the synchronous-reporter check is broken"; fi
 
 line_end=$(grep -n 'schtasks /End /TN \$NodeTask' "$uw" | head -1 | cut -d: -f1)
 line_apply=$(grep -n '\$updater --apply' "$uw" | head -1 | cut -d: -f1)
