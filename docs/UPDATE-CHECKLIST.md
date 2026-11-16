@@ -79,6 +79,39 @@ is not ready.
 
 ---
 
+## 11. If a step is stuck — escalate, do not wait
+
+Every step has a budget. **Exceeding it is a signal to stop and review that step, not to keep
+waiting.** Waiting is what turned a 20-minute CI run into eight hours of silence.
+
+| Step | Budget | When exceeded |
+|---|---|---|
+| 1-2 tests/implement | 2 h | the change is bigger than the row; split it or report |
+| 3 bump/lockstep | 15 min | a manifest disagrees — find which one, do not bypass |
+| 4 CI green | 60 min | read the failing job, or check the runner is online; a queued run with 0 jobs for 10 min is stuck |
+| 5 both builds | 40 min | check the runner claimed the job; Windows cold build is 40-75 min, so re-check before declaring stuck |
+| 6 artifact scan | 5 min | if the strings are missing, **stop the release** — do not publish a build without the change |
+| 7 cut | 15 min | `release-cut` is idempotent; re-run with `--dry-run` first and read what it refuses |
+| 8 anonymous download | 10 min | Cloudflare cache or a missing mirror; poll again, then check the asset exists |
+| 9 deploy/confirm | 15 min | read `update.log` and `last-exit.json`; a failed update must have rolled back |
+| 10 prove behaviour | 60 min | if it cannot be observed, say so and mark the row BLOCKED with the reason |
+
+**When a budget is exceeded, do this — in order, and no guessing:**
+
+1. **Read that step's own logs** (job log, `update.log`, `release-cut` output, node log). The
+   step is failing for a reason it has already recorded.
+2. **Check the version history around it** — did this step ever work, and what changed since?
+3. **State the blocker in one line** in the release's checklist copy, with the timestamp.
+4. **Choose a path**: retry once, work around it, or escalate to Jeremy with that one line.
+5. **Never repeat the same attempt twice without new information.** A second identical try is a
+   guess wearing a uniform.
+
+**Escalate to Jeremy when**: a step is stuck past its budget twice, a decision is needed
+(publish anyway? accept a degraded artifact?), or a step cannot be performed at all. One line:
+what is stuck, since when, what it needs.
+
+---
+
 ## Must never regress
 
 - Private/LAN addresses in shipped defaults (0.3.29 broke every remote box)
