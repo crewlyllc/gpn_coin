@@ -11,10 +11,13 @@
 
   This script:
     1. copies the binaries to C:\gpn\bin (the extracted folder can be deleted)
-    2. creates C:\gpn\start-node.cmd (all env in one place, one log file)
+    2. creates C:\gpn\start-node.cmd (all env in one place, one log file) and
+       C:\gpn\hidden-launch.vbs (wscript host: the node runs with NO console
+       window, so there is no window whose close could kill it)
     3. makes sure ollama is installed AND serving (it is a hard prerequisite)
-    4. registers the scheduled task  GPN-Node   (/SC ONLOGON /RL HIGHEST,
-       MultipleInstances=IgnoreNew)  -- the node starts when you log in
+    4. registers the scheduled task  GPN-Node   (/SC ONLOGON, runs
+       wscript.exe hidden-launch.vbs, MultipleInstances=IgnoreNew) -- the node
+       starts hidden when you log in
     5. makes ollama autostart as well (task GPN-Ollama, or reuses the existing
        ollama autostart entry instead of adding a duplicate)
     6. starts the node now
@@ -131,6 +134,7 @@ $Root      = Split-Path -Parent $MyInvocation.MyCommand.Path
 $BinDir    = Join-Path $InstallDir 'bin'
 $DataDir   = Join-Path $InstallDir 'data'
 $NodeCmd   = Join-Path $InstallDir 'start-node.cmd'
+$HiddenLaunch = Join-Path $InstallDir 'hidden-launch.vbs'
 $NodeLog   = Join-Path $InstallDir 'node.log'
 $ReportScript = Join-Path $InstallDir 'report-exit.ps1'
 $NodeTask  = 'GPN-Node'
@@ -234,32 +238,33 @@ function Invoke-Step {
 # both children died together with 0xC000013A (=
 # -1073741510) after mining for 35 minutes. Hidden is not detached.
 #
-# Win32_Process.Create runs the command through the WMI service, which has no
-# console to inherit. Start-Process is kept only as a fallback for machines
-# where CIM/WMI is unavailable or blocked by policy; it is exactly as fragile as
-# before, so the fallback says so out loud.
+# 2026-11-16: Win32_Process.Create has no console to inherit, but it still put a
+# console window on the desktop when this ran from the user's interactive
+# session, which is what the owner saw. Both paths now go through
+# hidden-launch.vbs (wscript + window style 0), so the node has a hidden console
+# and no visible window, whichever way it is started.
 function Start-NodeDetached {
   param([string]$Command = '', [string]$WorkDir = '')
-  if (-not $Command) { $Command = $NodeCmd }
   if (-not $WorkDir) { $WorkDir = $InstallDir }
+  $hidden = Join-Path $WorkDir 'hidden-launch.vbs'
+  if (-not (Test-Path -LiteralPath $hidden)) { $hidden = $HiddenLaunch }
   try {
     $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
-      CommandLine      = "cmd /c `"$Command`" --task"
+      CommandLine      = "wscript.exe `"$hidden`""
       CurrentDirectory = $WorkDir
     } -ErrorAction Stop
     if ($r -and [int]$r.ReturnValue -eq 0) {
-      Say "node started detached (Win32_Process.Create, pid $($r.ProcessId))"
+      Say "node started detached, hidden (wscript, pid $($r.ProcessId))"
       return 'cim'
     }
     Warn "Win32_Process.Create returned $($r.ReturnValue) -- falling back to Start-Process"
   } catch {
     Warn "CIM/WMI is unavailable ($($_.Exception.Message)) -- falling back to Start-Process"
   }
-  # Last resort. This inherits a console, so a later window close can still take
-  # the node down; the supervisor's console handler and the exit record are the
-  # safety net for exactly this case.
-  Start-Process -FilePath $Command -ArgumentList '--task' -WorkingDirectory $WorkDir -WindowStyle Hidden
-  Say 'node started with Start-Process (fallback: it may inherit a console)'
+  # Last resort: still the hidden launcher, so the node gets no visible window;
+  # wscript itself is a GUI host and has none either.
+  Start-Process -FilePath 'wscript.exe' -ArgumentList "`"$hidden`"" -WorkingDirectory $WorkDir -WindowStyle Hidden
+  Say 'node started via wscript hidden launcher (fallback path)'
   return 'start-process'
 }
 
@@ -374,9 +379,11 @@ REM                            (via the GPN-Node task, or Win32_Process.Create
 REM                            when there is no task), prints a one-time startup
 REM                            summary and stays open. Closing that window does
 REM                            NOT stop the node.
-REM    start-node.cmd --task   the GPN-Node scheduled task's headless worker.
-REM                            Runs the supervisor in the foreground, where a
-REM                            task-owned process has no user console to lose.
+REM    start-node.cmd --task   the worker the hidden launcher (hidden-launch.vbs)
+REM                            starts for the GPN-Node task. It runs the
+REM                            supervisor in the foreground of a HIDDEN console:
+REM                            wscript gives the task no console at all, so there
+REM                            is no window to see and none to close.
 REM ============================================================================
 if /I "%~1"=="--task" goto :gpn_worker
 if exist "%~dp0start-gpn.cmd" (
@@ -477,6 +484,55 @@ goto :run
 :done
 '@
 
+# ------------------------------------------------------- hidden launcher ---
+# The GPN-Node task must run the node with NO console window. It used to run
+# `cmd /c C:\gpn\start-node.cmd --task` directly: Task Scheduler owns that
+# console, so the node's stdout appeared in a window the user could see, and
+# closing that window killed the node (exit -1073741510 = STATUS_CONTROL_C_EXIT,
+# 'console-closed').
+#
+# wscript.exe is a GUI-subsystem host: Task Scheduler gives it no console at all.
+# WScript.Shell.Run(..., 0, True) then starts the worker with a HIDDEN console,
+# so there is no window to close -- and no admin rights, stored password or S4U
+# logon type is involved (a hidden task is still an ordinary ONLOGON task run
+# with the interactive token).
+#
+# Wait = True is deliberate: wscript stays alive for as long as the node runs, so
+#   * MultipleInstances=IgnoreNew still prevents a second /Run from forking a
+#     second supervisor onto the same ports + chain DB, and
+#   * `schtasks /End /TN GPN-Node` still has a task process to end.
+# The node's stdout/stderr are unaffected: start-node.cmd still redirects them to
+# node.log itself, so a hidden console loses nothing.
+$HiddenLaunchTemplate = @'
+' hidden-launch.vbs -- generated by install.ps1; do not hand-edit.
+' Runs the GPN node worker with NO console window (window style 0 = hidden).
+' Task Scheduler gives wscript.exe no console, so nothing of the node is visible
+' and there is no window whose close could kill it.
+Option Explicit
+Dim fso, sh, q, here, worker, wmi, procs
+Set fso = CreateObject("Scripting.FileSystemObject")
+Set sh  = CreateObject("WScript.Shell")
+q = Chr(34)
+here = fso.GetParentFolderName(WScript.ScriptFullName)
+
+' One supervisor only: an /End can leave a node behind, and a second /Run would
+' then put two supervisors on the same ports and the same chain database.
+Set wmi = GetObject("winmgmts:\\.\root\cimv2")
+Set procs = wmi.ExecQuery("SELECT ProcessId FROM Win32_Process WHERE Name='gpn_node.exe'")
+If procs.Count > 0 Then WScript.Quit 0
+
+worker = "cmd /c " & q & q & here & "\start-node.cmd" & q & " --task" & q
+' 0 = hidden, True = wait (keeps this task instance alive while the node runs).
+sh.Run worker, 0, True
+'@
+
+function Write-HiddenLaunch {
+  Invoke-Step "write $HiddenLaunch" {
+    Set-Content -Path $HiddenLaunch -Value $HiddenLaunchTemplate -Encoding ascii
+  }
+  Say "hidden launcher written: $HiddenLaunch"
+}
+
 function Write-Launcher {
   $text = $LauncherTemplate
   $text = $text.Replace('__INSTALL_DIR__', $InstallDir)
@@ -551,17 +607,21 @@ if (-not $wasRunning) {
     & schtasks /Run /TN $TaskName 2>&1 | Out-Null
     $rc = $LASTEXITCODE
   }
+  # Every fallback goes through the hidden launcher too: Win32_Process.Create and
+  # Start-Process both hand a console app a console window when the caller is the
+  # user's interactive session, which is the whole problem this solves.
+  $hidden = Join-Path $InstallDir 'hidden-launch.vbs'
   if ($rc -ne 0) {
     try {
       $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
-        CommandLine      = "cmd /c `"$NodeCmd`" --task"
+        CommandLine      = "wscript.exe `"$hidden`""
         CurrentDirectory = $InstallDir
       } -ErrorAction Stop
       if ($r -and [int]$r.ReturnValue -eq 0) { $rc = 0 }
     } catch { }
   }
   if ($rc -ne 0) {
-    Start-Process -FilePath $NodeCmd -ArgumentList '--task' -WorkingDirectory $InstallDir -WindowStyle Hidden
+    Start-Process -FilePath 'wscript.exe' -ArgumentList "`"$hidden`"" -WorkingDirectory $InstallDir -WindowStyle Hidden
   }
 }
 
@@ -1436,7 +1496,7 @@ function Register-NodeTask {
   # non-elevated shell, which is what broke the stock install on box 3. Elevated
   # installs used to also produce a task owned by Administrator that never fires
   # for the user who actually logs in. Opt in with -RunHighest if you want it.
-  $createArgs = @('/Create', '/TN', $NodeTask, '/TR', "cmd /c $NodeCmd --task", '/SC', 'ONLOGON', '/F')
+  $createArgs = @('/Create', '/TN', $NodeTask, '/TR', "wscript.exe `"$HiddenLaunch`"", '/SC', 'ONLOGON', '/F')
   if ($RunHighest) { $createArgs += @('/RL', 'HIGHEST') }
   Invoke-Step "schtasks /Create /TN $NodeTask (/SC ONLOGON$(if ($RunHighest) { ' /RL HIGHEST' }))" {
     # Reuse an existing task that already runs our launcher. A standard (non-admin)
@@ -1446,37 +1506,41 @@ function Register-NodeTask {
     $existing = (& cmd /c "schtasks /Query /TN $NodeTask /FO LIST /V 2>nul") -join "`n"
     $existingTr = ''
     if ($existing -match 'Task To Run:\s*(.+?)\r?\n') { $existingTr = $Matches[1] }
-    if ($existingTr -match 'start-node\.cmd') {
+    if ($existingTr -match 'hidden-launch\.vbs' -or $existingTr -match 'start-node\.cmd') {
       $ownerX = ''
       if ($existing -match 'Run As User:\s*(\S+)') { $ownerX = $Matches[1] }
       if (-not $ownerX -or ($ownerX -match [regex]::Escape($env:USERNAME))) {
-        if ($existingTr -match '--task') {
-          Say "$NodeTask already exists and runs $NodeCmd --task -- reusing it (not recreating)"
+        if ($existingTr -match 'hidden-launch\.vbs') {
+          Say "$NodeTask already exists and runs the hidden launcher -- reusing it (not recreating)"
           $script:NodeAutostart = 'task'
           return
         }
-        # Older task without the --task marker. Retarget it to the headless
-        # worker: without it the task would run the user-facing entry, which
-        # starts a detached node and prints a summary, so `schtasks /End` would
-        # no longer stop the node.
+        # An older task runs `cmd /c start-node.cmd --task` directly, which puts
+        # a VISIBLE console on the user's desktop and dies when it is closed
+        # (exit -1073741510). Retarget it at wscript.exe + hidden-launch.vbs.
         $retargeted = $false
         if (-not $WhatIf) {
+          $tr = "wscript.exe `"$HiddenLaunch`""
           try {
-            $a = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument "/c `"$NodeCmd`" --task"
+            $a = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument "`"$HiddenLaunch`""
             Set-ScheduledTask -TaskName $NodeTask -Action $a -ErrorAction Stop | Out-Null
             $retargeted = $true
           } catch { }
           if (-not $retargeted) {
-            $rc2 = Invoke-Schtasks @('/Create', '/TN', $NodeTask, '/TR', "cmd /c $NodeCmd --task", '/SC', 'ONLOGON', '/F')
+            $rc2 = Invoke-Schtasks @('/Change', '/TN', $NodeTask, '/TR', $tr)
+            $retargeted = ($rc2 -eq 0)
+          }
+          if (-not $retargeted) {
+            $rc2 = Invoke-Schtasks @('/Create', '/TN', $NodeTask, '/TR', $tr, '/SC', 'ONLOGON', '/F')
             $retargeted = ($rc2 -eq 0)
           }
         }
         if ($retargeted -or $WhatIf) {
-          Say "$NodeTask retargeted to the headless worker (--task)"
+          Say "$NodeTask retargeted to the hidden launcher (no console window)"
           $script:NodeAutostart = 'task'
           return
         }
-        Warn "could not retarget $NodeTask to the headless worker -- leaving it as-is"
+        Warn "could not retarget $NodeTask to the hidden launcher -- leaving it as-is"
       }
     }
 
@@ -1493,7 +1557,7 @@ function Register-NodeTask {
     if ($rc -ne 0 -and $RunHighest) {
       # Elevation was requested but is unavailable: the node does not need it.
       Warn "/RL HIGHEST was refused (no elevation) -- retrying at normal privilege"
-      $plain = @('/Create', '/TN', $NodeTask, '/TR', "cmd /c $NodeCmd", '/SC', 'ONLOGON', '/F')
+      $plain = @('/Create', '/TN', $NodeTask, '/TR', "wscript.exe `"$HiddenLaunch`"", '/SC', 'ONLOGON', '/F')
       $rc = Invoke-Schtasks $plain
     }
     if ($rc -eq 0) { $script:NodeAutostart = 'task' }
@@ -2027,6 +2091,7 @@ if (Test-Ollama) {
 Write-ReportScript
 Write-UpdateWrapper
 Write-StartGpn
+Write-HiddenLaunch
 
 # 4. wallet (so the payout address can be printed now) + node identity
 $payout = 'unknown'

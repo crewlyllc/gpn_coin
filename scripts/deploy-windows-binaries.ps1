@@ -77,7 +77,17 @@ if (-not $copied) {
     ForEach-Object { Write-Host "  still running: $($_.ProcessName) pid=$($_.Id)" }
   if ($RestartOnFailure -ne 0) {
     Write-Host '::warning::restarting GPN-Node on the previous binaries so the box is not left dead'
-    schtasks /Create /TN 'GPN-Node' /TR "cmd /c $StartScript" /SC ONLOGON /RL HIGHEST /F 2>&1 | Out-Null
+    # Hidden launcher (wscript + window style 0): a visible console is what the
+    # owner saw, and closing it killed the node. /RL HIGHEST is kept exactly as
+    # this fallback always registered the task -- dropping it would silently
+    # demote an existing elevated GPN-Node on the failure path. If the launcher
+    # is missing, register what was registered before, unchanged.
+    $hidden = Join-Path (Split-Path -Parent $StartScript) 'hidden-launch.vbs'
+    if (Test-Path -LiteralPath $hidden) {
+      schtasks /Create /TN 'GPN-Node' /TR "wscript.exe `"$hidden`"" /SC ONLOGON /RL HIGHEST /F 2>&1 | Out-Null
+    } else {
+      schtasks /Create /TN 'GPN-Node' /TR "cmd /c $StartScript" /SC ONLOGON /RL HIGHEST /F 2>&1 | Out-Null
+    }
     schtasks /Run /TN 'GPN-Node' 2>&1 | Out-Null
   }
   Write-Host "::error::robocopy of agent binaries failed after $Attempts stop+copy cycles (last rc=$rc) - see $log"

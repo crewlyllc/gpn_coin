@@ -1,5 +1,36 @@
 # GPN change-log
 
+## 2026-11-16 15:4x PT — the node runs with NO console window (no window to close)
+
+**WHY (owner, live):** the GPN-Node task ran `cmd /c C:\gpn\start-node.cmd --task`, and Task
+Scheduler owns that console, so the node's stdout sat in a visible window on the desktop. Closing
+it killed the node: `console-closed`, exit **-1073741510** (0xC000013A = STATUS_CONTROL_C_EXIT).
+
+**FIX — `hidden-launch.vbs` + `wscript.exe`:**
+* `install.ps1` now writes `C:\gpn\hidden-launch.vbs` next to the launcher and registers the task as
+  `wscript.exe "C:\gpn\hidden-launch.vbs"`. wscript is a GUI-subsystem host: Task Scheduler gives
+  it no console at all, and `WScript.Shell.Run(cmd, 0, True)` gives the worker a **hidden** console.
+  No admin, no stored password, no S4U — the task is still an ordinary ONLOGON task on the
+  interactive token.
+* `Wait = True` on purpose: the task instance stays `Running` while the node runs, so
+  `MultipleInstances=IgnoreNew` still stops a second `/Run` from forking a second tree, and
+  `schtasks /End` still has a task process to end (measured: /End took the whole gpn* tree down).
+* The vbs also refuses to start when `gpn_node.exe` is already running — a guard for the case
+  where an /End left a node behind.
+* `start-node.cmd` is unchanged: it still redirects stdout/stderr to `node.log` itself, so a hidden
+  console loses nothing. `start-gpn.cmd` is still the only window a user ever sees: it prints the
+  summary (version, paths, chain, wallet, key, ollama, peers, head, **Live status
+  http://127.0.0.1:8099**, log file) and exits; closing it does not touch the node.
+* Every other start path follows: `Start-NodeDetached` (installer) and the two fallbacks in
+  `start-gpn.ps1` now go through the vbs, and `scripts/deploy-windows-binaries.ps1` recreates the
+  task the same way. `release-windows.yml` carries its own launcher copy and now writes the vbs and
+  points the task at it too.
+
+**Evidence (both boxes, 2026-11-16):** `wscript → cmd → conhost MainWindowHandle=0, Title=[]`; task
+`Status: Running`; RPC `system_version` 0.3.50, peers 3 (each box sees the other's peer id);
+`node.log` still growing; closing the `start-gpn.cmd` window left the supervisor pid unchanged
+(box 1 25424, box 4 13092).
+
 ## 2026-11-15 13:2x PT — onboarding a stranger: snapshot-first, and peer choice by canonical progress
 
 **WHY (live, 13:00):** a brand-new peer `12D3KooWS3…` sat at block **69,295** while the tip was
