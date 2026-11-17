@@ -1116,7 +1116,11 @@ fn build_p2p_info_with(
     // dual-stack host was the IPv6 one.
     let ordered_evidence: Vec<String> = {
         let is_v6 = |ma: &String| ma.trim_start().starts_with("/ip6/");
-        let mut v: Vec<String> = node_evidence.iter().filter(|m| !is_v6(m)).cloned().collect();
+        let mut v: Vec<String> = node_evidence
+            .iter()
+            .filter(|m| !is_v6(m))
+            .cloned()
+            .collect();
         v.extend(node_evidence.iter().filter(|m| is_v6(m)).cloned());
         v
     };
@@ -1496,13 +1500,63 @@ fn attach_fork_recovery(body: &mut Value, state: &ForkRecovery) {
     }
 }
 
+/// The subset of the node's listen addresses that a **remote** peer may use.
+///
+/// Queue #195 (2026-11-15): litep2p reports a wildcard bind as
+/// `/ip4/127.0.0.1/tcp/30333` + `/ip6/::1/tcp/30333`, and the heartbeat
+/// republished both verbatim. Every consumer persisted them as a dialable peer
+/// and dialled them, which on the dialling box means its OWN local node —
+/// box 1 logged 2,833 self-dial lines in a 4,000-line window. The wildcard
+/// forms `0.0.0.0` / `::` are dropped for the same reason: on Linux dialling
+/// `0.0.0.0:30333` reaches the local stack.
+///
+/// Private RFC1918 addresses are kept: a LAN peer is a real peer.
+fn published_listen_addrs(addrs: &[String]) -> Vec<String> {
+    addrs
+        .iter()
+        .filter(|ma| !addr_is_self(ma))
+        .cloned()
+        .collect()
+}
+
+/// Loopback, link-local or wildcard — never an address a peer can reach.
+fn addr_is_self(multiaddr: &str) -> bool {
+    let parts: Vec<&str> = multiaddr.split('/').filter(|p| !p.is_empty()).collect();
+    for (i, part) in parts.iter().enumerate() {
+        match *part {
+            "ip4" => {
+                let Some(host) = parts.get(i + 1) else {
+                    return false;
+                };
+                let Ok(ip) = host.parse::<std::net::Ipv4Addr>() else {
+                    return false;
+                };
+                return ip.is_loopback() || ip.is_unspecified() || ip.is_link_local();
+            }
+            "ip6" => {
+                let Some(host) = parts.get(i + 1) else {
+                    return false;
+                };
+                let Ok(ip) = host.parse::<std::net::Ipv6Addr>() else {
+                    return false;
+                };
+                return ip.is_loopback()
+                    || ip.is_unspecified()
+                    || (ip.segments()[0] & 0xffc0) == 0xfe80;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 fn attach_p2p(body: &mut Value, info: Option<&P2pInfo>) {
     match info {
         Some(p2p) => {
             body["peer_id"] = json!(p2p.peer_id);
             body["multiaddrs"] = json!(p2p.multiaddrs);
             body["p2p_port"] = json!(p2p.p2p_port);
-            body["listen_addrs"] = json!(p2p.listen_addrs);
+            body["listen_addrs"] = json!(published_listen_addrs(&p2p.listen_addrs));
             body["address_source"] = json!(p2p.address_source);
             body["reachability"] = json!(p2p.reachability);
             if p2p.v6_only {
@@ -3311,7 +3365,47 @@ mod tests {
             body["multiaddrs"],
             json!([format!("/ip4/203.0.113.7/tcp/30333/p2p/{pid}")])
         );
-        assert_eq!(body["listen_addrs"][0], json!("/ip4/0.0.0.0/tcp/30333"));
+        // #195: the wildcard listen address is evidence, not a published
+        // address — a peer dialling 0.0.0.0 reaches its own local stack.
+        assert_eq!(body["listen_addrs"], json!([]));
+    }
+
+    /// #195: the heartbeat used to republish every entry of
+    /// `system_localListenAddresses`, including the loopback/link-local ones
+    /// litep2p reports for a `0.0.0.0` bind. Every peer then learned them,
+    /// persisted them as a dialable peer and re-dialled them — box 1's self-dial
+    /// storm (2,833 lines). What is *published* must be reachable by a remote
+    /// peer; anything else is not an address a peer can use.
+    #[test]
+    fn published_listen_addrs_exclude_self_addresses() {
+        let pid = "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo";
+        let rpc = |method: &str| -> Option<Value> {
+            match method {
+                "system_localPeerId" => Some(json!(pid)),
+                "system_localListenAddresses" => Some(json!([
+                    "/ip4/127.0.0.1/tcp/30333",
+                    "/ip6/::1/tcp/30333",
+                    "/ip4/169.254.13.9/tcp/30333",
+                    "/ip6/fe80::1/tcp/30333",
+                    "/ip4/0.0.0.0/tcp/30333",
+                    "/ip4/203.0.113.7/tcp/30333"
+                ])),
+                _ => None,
+            }
+        };
+        let info = p2p_info_from_rpc(&rpc, Some("/ip4/203.0.113.7/tcp/30333")).unwrap();
+        // The transport evidence keeps every entry (it is what tells us the
+        // node speaks /ws); only what is PUBLISHED is filtered.
+        assert_eq!(info.listen_addrs.len(), 6);
+        let mut body = json!({});
+        attach_p2p(&mut body, Some(&info));
+        let published: Vec<&str> = body["listen_addrs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(published, vec!["/ip4/203.0.113.7/tcp/30333"]);
     }
 
     #[test]

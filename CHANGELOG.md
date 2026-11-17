@@ -8,6 +8,41 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.52] - 2026-11-16
+
+Bumped from 0.3.51. One subject: **self-addresses stop being advertised, persisted or
+dialled**, plus the rustfmt repair 0.3.51 needed (that release's CI verdict was cancelled by a
+later push, leaving three agent files unformatted; `cargo fmt --all --check` is red at 0.3.51
+and green here).
+
+### Fixed
+- **Loopback and link-local addresses are never announced, persisted or dialled (#195).**
+  litep2p reports a `0.0.0.0` bind as `/ip4/127.0.0.1/tcp/30333` and `/ip6/::1/tcp/30333`, and
+  the heartbeat republished every entry of `system_localListenAddresses` verbatim. Peers
+  learned those, kept them as a *dialable* peer in `gpn-peers.json`, and re-dialled them —
+  which on the dialling box reaches its OWN listener: box 1 logged **2,833 self-dial lines in a
+  4,000-line window** on 2026-11-15. Three changes, one rule:
+  - `gpn_provider_status` publishes only addresses a remote peer can reach
+    (`/status.listen_addrs`); the raw list is still used internally as *transport evidence*,
+    so a `/ws` node keeps publishing `/ws`. Private RFC1918 addresses are kept — a LAN peer is
+    a real peer.
+  - `gpn-node`'s peer store rejects loopback/link-local/unspecified on **write and read**, so a
+    file poisoned by an older build self-heals instead of needing to be deleted by hand.
+  - Every bootnode source (static, persisted, DNS, URL, on-chain) is filtered before use, so no
+    publisher can inject a self-address.
+
+### Verified
+Live, same node RPC, two binaries: the deployed 0.3.51 heartbeat on `:18093` published
+`['/ip6/::1/tcp/30333/ws', '/ip6/fe80::769e:…/tcp/30333/ws', '/ip4/127.0.0.1/tcp/30333/ws',
+'/ip4/192.168.1.20/tcp/30333/ws']`; this build on `:18094` publishes
+`['/ip4/192.168.1.20/tcp/30333/ws']` — loopback and link-local gone, the LAN peer and the
+public multiaddr `142.129.54.88` unchanged. Node side: with a poisoned store and a loopback
+`--bootnodes` entry, the deployed binary merged **11** bootnodes silently; this build logged
+`peer-store: dropped 4 self-address(es) … never dialled (#195)` and `peer-discovery: dropped 1
+self-address(es) … from the bootnode set` and merged 7. Tests: `discovery` 46 (3 new,
+incl. the predicate's edges), `gpn_provider_status` 66 (1 new + 1 assertion inverted on
+purpose), full `gpn-node` workspace and both clippy lanes clean.
+
 ## [0.3.51] - 2026-11-16
 
 Bumped from 0.3.50. One subject: a LAN behind one public IP can be reached, and the

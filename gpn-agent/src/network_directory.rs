@@ -104,9 +104,9 @@ fn family_of(ma: &str) -> Option<(&'static str, String)> {
 /// The IPv4 (or `/dns`) multiaddr a row would publish first — the socket the
 /// access point's dial-back verifies. `None` when the row has no IPv4 path.
 pub fn primary_ipv4(mas: &[String]) -> Option<String> {
-    dialable_list(mas).into_iter().find(|ma| {
-        !matches!(family_of(ma).map(|(f, _)| f), None | Some("ip6"))
-    })
+    dialable_list(mas)
+        .into_iter()
+        .find(|ma| !matches!(family_of(ma).map(|(f, _)| f), None | Some("ip6")))
 }
 
 /// The `/tcp/<port>` of a multiaddr, if it names one.
@@ -184,11 +184,9 @@ pub fn plan_publication(rows: &[&DirProvider], canonical_port: u16) -> Vec<Publi
             // an unreachable socket from a different egress is evidence that
             // the public address does not work, and a node may not hold a
             // tier on evidence that contradicts it.
-            Some(d) if d.outcome == "unreachable" => (
-                9u8,
-                Some(d.verifier.clone()),
-                "unreachable".to_string(),
-            ),
+            Some(d) if d.outcome == "unreachable" => {
+                (9u8, Some(d.verifier.clone()), "unreachable".to_string())
+            }
             Some(d) => (
                 2u8,
                 Some(d.verifier.clone()),
@@ -475,16 +473,19 @@ pub fn build_full(
         // One INFO line per decision, naming the evidence. The access point
         // polls this every few seconds, so it is deduped on the exact line —
         // an unchanged decision is not news.
-        log_decision(&format!(
-            "reachability: publish {} ({}); role={}",
-            if d.multiaddrs.is_empty() {
-                "-".to_string()
-            } else {
-                d.multiaddrs.join(",")
-            },
-            d.why,
-            d.role
-        ), pid.as_deref());
+        log_decision(
+            &format!(
+                "reachability: publish {} ({}); role={}",
+                if d.multiaddrs.is_empty() {
+                    "-".to_string()
+                } else {
+                    d.multiaddrs.join(",")
+                },
+                d.why,
+                d.role
+            ),
+            pid.as_deref(),
+        );
         let row = json!({
             "address": p.address,
             "peer_id": pid,
@@ -1058,22 +1059,17 @@ mod tests {
             peers: Some(2),
             dialback: None,
         };
-        let doc = build_full(
-            "t",
-            None,
-            Ok(vec![]),
-            &[dual, v6only],
-            &[],
-            None,
-            30333,
-        );
+        let doc = build_full("t", None, Ok(vec![]), &[dual, v6only], &[], None, 30333);
         let rows = doc["providers"].as_array().unwrap();
         let d = rows.iter().find(|r| r["peer_id"] == PEER_B).unwrap();
         assert_eq!(d["reachability"], "backbone", "{d}");
         let addrs = d["multiaddrs"].as_array().unwrap();
         assert_eq!(addrs.len(), 2, "IPv6 stays as an additional path: {d}");
         assert!(
-            addrs[0].as_str().unwrap().starts_with("/ip4/172.117.107.91/"),
+            addrs[0]
+                .as_str()
+                .unwrap()
+                .starts_with("/ip4/172.117.107.91/"),
             "the IPv4 forward must be the primary address: {d}"
         );
         assert!(addrs[1].as_str().unwrap().starts_with("/ip6/"), "{d}");
@@ -1109,13 +1105,19 @@ mod tests {
         let o = rows.iter().find(|r| r["peer_id"] == PEER_B).unwrap();
         let l = rows.iter().find(|r| r["peer_id"] == PEER_C).unwrap();
         assert_eq!(o["reachability"], "backbone", "{o}");
-        assert_eq!(o["gateway"], true, "the canonical-port backbone is the dial target: {o}");
+        assert_eq!(
+            o["gateway"], true,
+            "the canonical-port backbone is the dial target: {o}"
+        );
         assert_eq!(l["reachability"], "leaf", "{l}");
         assert!(
             l["multiaddrs"].as_array().unwrap().is_empty(),
             "a leaf publishes no public address: {l}"
         );
-        assert_eq!(l["self_declared"], "backbone", "the claim is kept for audit");
+        assert_eq!(
+            l["self_declared"], "backbone",
+            "the claim is kept for audit"
+        );
         assert_eq!(doc["counts"]["backbone_now"], 1);
         assert_eq!(doc["counts"]["leaf_now"], 1);
         assert_eq!(

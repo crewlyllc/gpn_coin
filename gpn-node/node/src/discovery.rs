@@ -317,19 +317,94 @@ pub fn merge_sources_lossy(
 // Persistent peer store (addrman)
 // ---------------------------------------------------------------------------
 
+/// True when this address points at **us** — loopback, link-local or the
+/// unspecified address — so dialling it either reaches our own listener or
+/// nothing at all.
+///
+/// Why this exists (queue #195, 2026-11-15): litep2p reports a `0.0.0.0` bind as
+/// `/ip4/127.0.0.1/tcp/30333` and `/ip6/::1/tcp/30333`, and every peer that
+/// learned those kept them as a *dialable* peer and re-dialled forever — box 1
+/// logged 2,833 self-dial lines in a 4,000-line window. `0.0.0.0` is included
+/// because dialling it reaches the local stack on every platform we ship.
+///
+/// RFC1918 / CGNAT addresses are deliberately **kept**: the LAN seed
+/// (`192.168.1.20`) is a real peer on a real network, and filtering private
+/// ranges would break LAN bootstrapping.
+pub fn is_self_dialable(addr: &str) -> bool {
+    let parts: Vec<&str> = addr.trim().split('/').filter(|p| !p.is_empty()).collect();
+    for (i, part) in parts.iter().enumerate() {
+        match *part {
+            "ip4" => {
+                let Some(host) = parts.get(i + 1) else {
+                    return false;
+                };
+                let Ok(ip) = host.parse::<std::net::Ipv4Addr>() else {
+                    return false;
+                };
+                return ip.is_loopback() || ip.is_unspecified() || ip.is_link_local();
+            }
+            "ip6" => {
+                let Some(host) = parts.get(i + 1) else {
+                    return false;
+                };
+                let Ok(ip) = host.parse::<std::net::Ipv6Addr>() else {
+                    return false;
+                };
+                return ip.is_loopback() || ip.is_unspecified() || is_ipv6_link_local(&ip);
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// `fe80::/10`, written out because `Ipv6Addr::is_link_local` is unstable.
+fn is_ipv6_link_local(ip: &std::net::Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xffc0) == 0xfe80
+}
+
 /// Read the persisted peer store from `<base>/gpn-peers.json`. Missing or
 /// corrupt files yield an empty list (never an error).
+///
+/// Entries that point at this machine are dropped on **read** as well as on
+/// write: a store poisoned by an older build must stop causing self-dials
+/// without anyone deleting the file by hand.
 pub fn read_persisted_peers(base: &Path) -> Vec<String> {
     let path = base.join(PEERS_FILE);
     match std::fs::read_to_string(&path) {
-        Ok(text) => parse_seed_payload(&text),
+        Ok(text) => {
+            let all = parse_seed_payload(&text);
+            let kept: Vec<String> = all
+                .iter()
+                .filter(|ma| !is_self_dialable(ma))
+                .cloned()
+                .collect();
+            let dropped = all.len() - kept.len();
+            if dropped > 0 {
+                log::info!(
+                    "peer-store: dropped {dropped} self-address(es) (loopback/link-local) read from \
+                     {} — never dialled (#195)",
+                    path.display()
+                );
+            }
+            kept
+        }
         Err(_) => Vec::new(),
     }
 }
 
 /// Write the persisted peer store, deduplicated and bounded. Best-effort.
+///
+/// Loopback / link-local / unspecified entries are never written: they are
+/// never a usable peer, and persisting one is what produced the self-dial
+/// storm (#195).
 pub fn write_persisted_peers(base: &Path, addrs: &[String]) -> Result<(), String> {
-    let list = merge_dedupe(&[addrs.to_vec()]);
+    let kept: Vec<String> = addrs
+        .iter()
+        .filter(|a| !is_self_dialable(a))
+        .cloned()
+        .collect();
+    let list = merge_dedupe(&[kept]);
     let list: Vec<String> = list.into_iter().take(MAX_PERSISTED_PEERS).collect();
     let doc = serde_json::json!({ "multiaddrs": list });
     let path = base.join(PEERS_FILE);
@@ -979,6 +1054,94 @@ mod tests {
     fn missing_persisted_store_is_empty() {
         let dir = std::env::temp_dir().join("gpn-disc-nonexistent-dir-xyz");
         assert!(read_persisted_peers(&dir).is_empty());
+    }
+
+    /// #195: a peer that advertises its OWN loopback/link-local listen
+    /// addresses (litep2p reports 127.0.0.1 and ::1 for a 0.0.0.0 bind) must
+    /// never enter our address book. Persisting them is what made box 1 dial
+    /// itself thousands of times: `127.0.0.1` is dialable, so the re-dial loop
+    /// kept succeeding at connecting to its own socket.
+    ///
+    /// Private (RFC1918) and public addresses must survive: the LAN seed
+    /// (192.168.1.20) is deliberately dialable.
+    #[test]
+    fn persisted_store_drops_loopback_and_link_local() {
+        let dir = std::env::temp_dir().join(format!("gpn-disc-self-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let pid = "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo";
+        let v4_loop = format!("/ip4/127.0.0.1/tcp/30333/p2p/{pid}");
+        let v6_loop = format!("/ip6/::1/tcp/30333/p2p/{pid}");
+        let v4_ll = format!("/ip4/169.254.13.9/tcp/30333/p2p/{pid}");
+        let v6_ll = format!("/ip6/fe80::1/tcp/30333/p2p/{pid}");
+        let lan = format!("/ip4/192.168.1.20/tcp/30333/p2p/{pid}");
+        let public = B.to_string();
+        write_persisted_peers(
+            &dir,
+            &[
+                v4_loop.clone(),
+                v6_loop,
+                v4_ll,
+                v6_ll,
+                public.clone(),
+                lan.clone(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(read_persisted_peers(&dir), vec![public, lan]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A store poisoned by an older build (or hand-edited) must be filtered on
+    /// READ too — otherwise the existing file keeps causing self-dials until
+    /// somebody deletes it.
+    #[test]
+    fn persisted_read_filters_legacy_loopback_entries() {
+        let dir = std::env::temp_dir().join(format!("gpn-disc-legacy-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let pid = "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo";
+        let doc = serde_json::json!({
+            "multiaddrs": [
+                format!("/ip4/127.0.0.1/tcp/30333/p2p/{pid}"),
+                format!("/ip6/::1/tcp/30333/p2p/{pid}"),
+                format!("/ip6/fe80::2/tcp/30333/p2p/{pid}"),
+                B,
+            ]
+        });
+        std::fs::write(
+            dir.join(PEERS_FILE),
+            serde_json::to_vec_pretty(&doc).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(read_persisted_peers(&dir), vec![B.to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The predicate itself, at the edges. 0.0.0.0/:: are included: dialling
+    /// them reaches the local stack on every platform we ship.
+    #[test]
+    fn self_dialable_predicate_matches_the_actual_edges() {
+        let pid = "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo";
+        for bad in [
+            format!("/ip4/127.0.0.1/tcp/30333/p2p/{pid}"),
+            format!("/ip4/127.9.9.9/tcp/30333/p2p/{pid}"),
+            format!("/ip4/0.0.0.0/tcp/30333/p2p/{pid}"),
+            format!("/ip4/169.254.0.1/tcp/30333/p2p/{pid}"),
+            format!("/ip6/::1/tcp/30333/p2p/{pid}"),
+            format!("/ip6/::/tcp/30333/p2p/{pid}"),
+            format!("/ip6/fe80::1/tcp/30333/p2p/{pid}"),
+            format!("/ip6/febf::1/tcp/30333/p2p/{pid}"),
+        ] {
+            assert!(is_self_dialable(&bad), "{bad} must be filtered");
+        }
+        for good in [
+            format!("/ip4/203.0.113.7/tcp/30334/p2p/{pid}"),
+            format!("/ip4/192.168.1.20/tcp/30333/p2p/{pid}"),
+            format!("/ip4/10.0.0.5/tcp/30333/p2p/{pid}"),
+            format!("/ip6/2603:8002:e400:204f::1/tcp/30333/p2p/{pid}"),
+            format!("/dns4/node1.example.org/tcp/30333/p2p/{pid}"),
+        ] {
+            assert!(!is_self_dialable(&good), "{good} must be kept");
+        }
     }
 
     #[tokio::test]

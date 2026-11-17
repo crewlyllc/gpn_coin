@@ -1,5 +1,38 @@
 # GPN change-log
 
+## 2026-11-16 17:2x PT — self-addresses are never announced, persisted or dialled (#195)
+
+**WHY (measured, 2026-11-15):** litep2p reports a `0.0.0.0` bind as `/ip4/127.0.0.1/tcp/30333` +
+`/ip6/::1/tcp/30333`, and `gpn_provider_status` republished every entry of
+`system_localListenAddresses` verbatim. Peers learned them, wrote them into `gpn-peers.json` as a
+*dialable* peer and re-dialled forever — on the dialling box that address is its OWN listener.
+Box 1 logged **2,833 self-dial lines inside a 4,000-line window**.
+
+**FIX — one rule, three places:**
+* `gpn_provider_status` publishes only reachable addresses in `/status.listen_addrs` (loopback,
+  link-local and the wildcard forms are dropped). The unfiltered list still drives
+  `listen_transport`, so a `/ws` node keeps publishing `/ws`; RFC1918 is **kept** because the LAN
+  seed is a real peer.
+* `gpn-node`'s peer store filters on write **and** read (`dropped N self-address(es) … never
+  dialled`), so a poisoned file self-heals.
+* The merged bootnode set is filtered after every source (static, persisted, DNS, URL, chain), so
+  no publisher can inject a self-address.
+
+**PROOF (same node RPC, two binaries, this host):** 0.3.51 heartbeat on `:18093` →
+`['/ip6/::1/…', '/ip6/fe80::769e:…', '/ip4/127.0.0.1/…', '/ip4/192.168.1.20/…']`; this build on
+`:18094` → `['/ip4/192.168.1.20/tcp/30333/ws']` with the public multiaddr unchanged. Node side:
+poisoned store + loopback `--bootnodes` → deployed binary merged **11** bootnodes silently; this
+build logged `dropped 4` (store) and `dropped 1` (bootnode set) and merged 7.
+
+**ALSO:** `cargo fmt --all --check` was **red at 0.3.51** on the agent crate — 7f6f994's CI verdict
+was cancelled by a later push (W167), so the formatting was never gated. Reformatted in this
+commit, which is why `gpn_scheduler.rs` / `network_directory.rs` appear in the diff.
+
+* Version 0.3.52 on purpose: 0.3.51's bundles exist but its **build commit has no green CI run**
+  (`cancelled`), and `release-cut.sh` refuses to sign an unverified build — 0.3.52 is the batch
+  that can be signed honestly.
+
+
 ## 2026-11-16 15:4x PT — the node runs with NO console window (no window to close)
 
 **WHY (owner, live):** the GPN-Node task ran `cmd /c C:\gpn\start-node.cmd --task`, and Task

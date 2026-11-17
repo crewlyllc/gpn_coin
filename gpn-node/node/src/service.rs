@@ -584,8 +584,30 @@ pub async fn prepare_network_config(
     results.push(Ok(crate::discovery::read_persisted_peers(&base)));
 
     let merged = crate::discovery::merge_sources_lossy(&existing, results);
+    // Reject self-addresses from EVERY source (#195): a seed list, a persisted
+    // store or an on-chain endpoint that says 127.0.0.1/::1/fe80::/0.0.0.0 is
+    // not a peer — dialling it reaches our own listener. Filtered here so no
+    // source can inject one, even if a publisher is wrong.
+    let mut dropped_self = 0usize;
+    let dialable: Vec<String> = merged
+        .iter()
+        .filter(|ma| {
+            let keep = !crate::discovery::is_self_dialable(ma);
+            if !keep {
+                dropped_self += 1;
+            }
+            keep
+        })
+        .cloned()
+        .collect();
+    if dropped_self > 0 {
+        log::info!(
+            "peer-discovery: dropped {dropped_self} self-address(es) (loopback/link-local) from \
+             the bootnode set — dialling those reaches this node (#195)"
+        );
+    }
     let bootnodes: Vec<MultiaddrWithPeerId> =
-        merged.iter().filter_map(|s| s.parse().ok()).collect();
+        dialable.iter().filter_map(|s| s.parse().ok()).collect();
 
     log::info!(
         "peer-discovery: {} bootnode(s) after merging static + persisted + {} DNS + {} URL source(s)",

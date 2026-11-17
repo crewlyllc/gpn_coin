@@ -4745,8 +4745,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // (`dialcheck::verify`) for every provider's primary IPv4 socket and the
     // `/network` document consumes the verdict. Never on the request path: a
     // dial can take seconds and /network is polled continuously.
-    let dialbacks: Arc<Mutex<std::collections::HashMap<String, gpn_agent::network_directory::Dialback>>> =
-        Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let dialbacks: Arc<
+        Mutex<std::collections::HashMap<String, gpn_agent::network_directory::Dialback>>,
+    > = Arc::new(Mutex::new(std::collections::HashMap::new()));
     {
         let registry = registry.clone();
         let dialbacks = dialbacks.clone();
@@ -4798,7 +4799,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         },
                     };
                     let changed = previous.as_ref() != Some(&record);
-                    dialbacks.lock().unwrap().insert(pid.clone(), record.clone());
+                    dialbacks
+                        .lock()
+                        .unwrap()
+                        .insert(pid.clone(), record.clone());
                     if changed {
                         println!(
                             "[network] dial-back {}: {} ({})",
