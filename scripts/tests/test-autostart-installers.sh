@@ -115,7 +115,12 @@ assert_has "$ps1" "Invoke-CimMethod -ClassName Win32_Process -MethodName Create"
 assert_has "$ps1" "CommandLine      ="                          "CIM path passes a CommandLine"
 assert_has "$ps1" "Win32_Process.Create returned"                 "reports a failed CIM launch"
 assert_has "$ps1" "CIM/WMI is unavailable"                        "CIM failure falls back instead of aborting"
-assert_has "$ps1" "Start-Process -FilePath \$Command"            "Start-Process fallback is still present"
+# 2026-11-16 (#198): the fallback launcher is the hidden VBS, not the node
+# command directly -- Start-Process on the node inherited the installer's
+# console. The intent of this assertion (a second, non-CIM launch path exists
+# and it is hidden) is unchanged; only the binary it starts moved.
+assert_has "$ps1" "Start-Process -FilePath 'wscript.exe'"        "Start-Process fallback still starts the hidden launcher"
+assert_has "$ps1" "-WindowStyle Hidden"                         "the fallback launcher is windowless"
 assert_has "$ps1" "start node detached: \$NodeCmd"                "both direct-start sites use the detached launcher"
 assert_has "$ps1" "-1073741510"                                  "the signed console-close code is recognised"
 assert_has "$ps1" "3221225786"                                   "the unsigned console-close code is recognised"

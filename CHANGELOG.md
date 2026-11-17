@@ -16,8 +16,7 @@ later push, leaving three agent files unformatted; `cargo fmt --all --check` is 
 and green here).
 
 ### Fixed
-- **Loopback and link-local addresses are never announced, persisted or dialled (#195).**
-  litep2p reports a `0.0.0.0` bind as `/ip4/127.0.0.1/tcp/30333` and `/ip6/::1/tcp/30333`, and
+- **Loopback and link-local addresses are never announced, persisted or dialled (#195).**  litep2p reports a `0.0.0.0` bind as `/ip4/127.0.0.1/tcp/30333` and `/ip6/::1/tcp/30333`, and
   the heartbeat republished every entry of `system_localListenAddresses` verbatim. Peers
   learned those, kept them as a *dialable* peer in `gpn-peers.json`, and re-dialled them —
   which on the dialling box reaches its OWN listener: box 1 logged **2,833 self-dial lines in a
@@ -30,6 +29,11 @@ and green here).
     file poisoned by an older build self-heals instead of needing to be deleted by hand.
   - Every bootnode source (static, persisted, DNS, URL, on-chain) is filtered before use, so no
     publisher can inject a self-address.
+- **The autostart gate follows the launcher it guards.** `test-autostart-installers.sh` still
+  required the pre-#198 `Start-Process -FilePath $Command` fallback, which #198 replaced with the
+  hidden `wscript.exe` launcher — so `ci` was red on every commit after it (that run's verdict had
+  been cancelled by a later push, which is why nobody saw it). The assertion now names the hidden
+  launcher and keeps its intent: a second, non-CIM launch path exists **and it is windowless**.
 
 ### Verified
 Live, same node RPC, two binaries: the deployed 0.3.51 heartbeat on `:18093` published
