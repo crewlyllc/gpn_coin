@@ -1116,6 +1116,39 @@ function Wait-NodeExit {
   return $false
 }
 
+# End the node AND its worker tree. `/End` alone only ends the task's own
+# process (wscript.exe); the node is a grandchild
+# (wscript -> cmd /c start-node.cmd -> gpn_node.exe -> children), so it survives.
+# The restart that follows is then a no-op: hidden-launch.vbs refuses to start a
+# second supervisor when it already sees gpn_node.exe. Result on box 1
+# (2026-11-16 20:00): the "restart" booted nothing, the RPC still answered the
+# old version, and the confirm gate rolled back while claiming to have retried.
+function Stop-NodeTree {
+  param([int]$GraceSeconds = 60)
+  & schtasks /End /TN $NodeTask 2>&1 | Out-Null
+  $endRc = $LASTEXITCODE
+  if ($endRc -ne 0) { Write-Log ('schtasks /End exited ' + $endRc + ' - the node may not have been running') }
+  if (Wait-NodeExit $GraceSeconds) {
+    Write-Log 'GPN-Node stopped'
+    return $true
+  }
+  Write-Log ('the node did not exit within ' + $GraceSeconds + ' s - ending the worker tree (taskkill /T /F)')
+  foreach ($n in @('gpn_node.exe', 'gpn-node.exe')) {
+    & taskkill /F /T /IM $n 2>&1 | ForEach-Object { if ($_.Trim()) { Write-Log ('taskkill ' + $n + ': ' + $_.Trim()) } }
+  }
+  Get-Process -ErrorAction SilentlyContinue | Where-Object {
+    $_.ProcessName -like 'gpn*' -and $_.ProcessName -ne 'gpn_update' -and $_.Id -ne $PID
+  } | ForEach-Object {
+    try { Stop-Process -Id $_.Id -Force -ErrorAction Stop }
+    catch { Write-Log ('could not stop ' + $_.ProcessName + ' (pid ' + $_.Id + '): ' + $_.Exception.Message + ' - it may be elevated') }
+  }
+  if (Wait-NodeExit 10) {
+    Write-Log 'GPN-Node stopped (forced)'
+    return $true
+  }
+  return $false
+}
+
 # One updater at a time: two instances would extract into the same versions
 # directory and race on the `current` junction. The task also sets
 # MultipleInstances=IgnoreNew, but a manual run can still overlap.
@@ -1191,19 +1224,17 @@ try {
   }
 
   Write-Log 'update available - stopping GPN-Node before applying (Windows locks a running .exe)'
-  & schtasks /End /TN $NodeTask 2>&1 | Out-Null
-  $endRc = $LASTEXITCODE
-  if ($endRc -ne 0) { Write-Log ('schtasks /End exited ' + $endRc + ' - the node may not have been running') }
-
-  if (Wait-NodeExit 60) {
-    Write-Log 'GPN-Node stopped'
-  } else {
-    Write-Log 'the node did not exit within 60 s - stopping the remaining gpn* processes'
-    Get-Process -ErrorAction SilentlyContinue | Where-Object {
-      $_.ProcessName -like 'gpn*' -and $_.ProcessName -ne 'gpn_update' -and $_.Id -ne $PID
-    } | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
-    if (Wait-NodeExit 10) { Write-Log 'GPN-Node stopped (forced)' }
-    else { Write-Log 'WARNING: gpn processes are still running; the apply step may fail' }
+  $stopped = Stop-NodeTree 60
+  if (-not $stopped) {
+    # Applying now would install the new tree, fail to start it (the old node
+    # still owns the ports and the exe handles), and burn this boot's only
+    # attempt on a rollback -- the loop this row exists to stop. Leave the
+    # install untouched instead.
+    Write-Log 'REFUSING to apply: gpn processes survived the stop, so the new build could not start.'
+    Write-Log 'The install is unchanged and the current build keeps running. Cause: an elevated node (-RL HIGHEST) that this non-elevated task cannot kill; reboot, or run the update from an elevated shell.'
+    & schtasks /Run /TN $NodeTask 2>&1 | Out-Null
+    Show-UpdateFailure 1 'stop the node for the update' 'the node could not be stopped, so nothing was installed and this build keeps running'
+    exit 1
   }
 
   $applyLines = & $updater --apply 2>&1 | ForEach-Object { [string]$_ }
@@ -1250,6 +1281,10 @@ try {
   }
   & schtasks /End /TN $NodeTask 2>&1 | Out-Null
   if (Wait-NodeExit 60) { Write-Log 'node stopped for the rollback' }
+  else {
+    Write-Log 'the node survived the stop for the rollback - ending the worker tree'
+    if (-not (Stop-NodeTree 10)) { Write-Log 'WARNING: the node is still running; the rollback restart may not take effect' }
+  }
   & schtasks /Run /TN $NodeTask 2>&1 | Out-Null
   $back = Get-ExpectedVersion
   $backMsg = Confirm-Running -Expect $back -Seconds $ConfirmSecs
@@ -1354,6 +1389,15 @@ function Register-UpdateTask {
   if ($WhatIf) {
     Write-Host "[whatif] register scheduled task $UpdateTask (every 1h, random delay 10m) -> $UpdateScript" -ForegroundColor Cyan
     return $true
+  }
+
+  # The scheduled task can only express one install per task NAME. A second
+  # install on the same box must not silently repoint the first one's autostart.
+  $foreignUpdate = Get-ForeignTaskDir $UpdateTask
+  if ($foreignUpdate) {
+    Warn "$UpdateTask belongs to the install at '$foreignUpdate' -- NOT touching it (this install is $InstallDir)"
+    Warn 'This install will not auto-update until the other install is removed or its task is renamed.'
+    return $false
   }
 
   $xmlPath = Join-Path $env:TEMP 'gpn-update-task.xml'
@@ -1489,6 +1533,31 @@ function Verify-NodeTask {
 
 # ------------------------------------------------------------------ tasks ----
 $script:NodeAutostart = 'none'   # 'task' | 'startup' | 'none'
+# Does an existing scheduled task belong to a DIFFERENT install directory?
+#
+# 2026-11-16, box 1: installing into `C:\gpn-ci` re-pointed the live `GPN-Node`
+# from `C:\gpn\hidden-launch.vbs` at `C:\gpn-ci\hidden-launch.vbs` (and
+# `GPN-Update` likewise), because the reuse test only compared the run-as user
+# (`Jeremy` vs `Jeremy Guo` did not match) and the fallback deleted and recreated
+# the task. A second install on a box must never take over the first one's
+# autostart: that silently stops the node the operator was watching.
+#
+# Returns the foreign install dir, or $null when the task is ours/absent.
+function Get-ForeignTaskDir {
+  param([string]$TaskName)
+  $q = (& cmd /c "schtasks /Query /TN $TaskName /FO LIST /V 2>nul") -join "`n"
+  if (-not $q -or $q -notmatch 'Task To Run:\s*(.+?)\r?\n') { return $null }
+  $tr = $Matches[1]
+  $path = $null
+  if ($tr -match '([A-Za-z]:\\[^"'']*?hidden-launch\.vbs)') { $path = $Matches[1] }
+  elseif ($tr -match '([A-Za-z]:\\[^"'']*?start-node\.cmd)') { $path = $Matches[1] }
+  elseif ($tr -match '([A-Za-z]:\\[^"'']*?update-and-restart\.ps1)') { $path = $Matches[1] }
+  if (-not $path) { return $null }
+  $dir = (Split-Path -Parent $path).TrimEnd('\')
+  if ($dir -eq $InstallDir.TrimEnd('\')) { return $null }
+  return $dir
+}
+
 function Register-NodeTask {
   # Default: create the task at NORMAL privilege. The node binds only high ports
   # (30333/9944/8093/8094/8099), so it needs no admin rights -- and asking for
@@ -1499,6 +1568,13 @@ function Register-NodeTask {
   $createArgs = @('/Create', '/TN', $NodeTask, '/TR', "wscript.exe `"$HiddenLaunch`"", '/SC', 'ONLOGON', '/F')
   if ($RunHighest) { $createArgs += @('/RL', 'HIGHEST') }
   Invoke-Step "schtasks /Create /TN $NodeTask (/SC ONLOGON$(if ($RunHighest) { ' /RL HIGHEST' }))" {
+    $foreign = Get-ForeignTaskDir $NodeTask
+    if ($foreign) {
+      Warn "$NodeTask belongs to the install at '$foreign' -- NOT touching it (this install is $InstallDir)"
+      Warn "Register the autostart from that install, or uninstall it first. Nothing was changed."
+      $script:NodeAutostart = 'none'
+      return
+    }
     # Reuse an existing task that already runs our launcher. A standard (non-admin)
     # Windows account gets "Access is denied" from /Create even when the task is
     # its own (measured 2026-11-04: `schtasks /Create /TN gpntest ... /F` fails on a

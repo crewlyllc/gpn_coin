@@ -201,7 +201,30 @@ impl Options {
             action,
             json,
             quiet,
-            state_dir: state_dir.unwrap_or_else(default_state_dir),
+            // `--state-dir`/`GPN_UPDATE_DIR` win. Otherwise the default is
+            // `~/.gpn/update`, which is right on Linux and **wrong on Windows**,
+            // where the install lives at `<install>\data\update`: an updater
+            // invoked by hand from `C:\gpn\bin` then found no `current`, fell
+            // back to its own compiled-in version and printed "up to date" for a
+            // box that was two releases behind (box 1, 2026-11-16). So: if the
+            // state dir was not given and the default has no `current`, look
+            // beside the target dir before believing anything.
+            state_dir: {
+                let explicit =
+                    state_dir.or_else(|| non_empty_env("GPN_UPDATE_DIR").map(PathBuf::from));
+                let td = target_dir.clone().unwrap_or_else(default_target_dir);
+                match explicit {
+                    Some(d) => d,
+                    None => {
+                        let d = default_state_dir();
+                        if update::installed_version(&d).is_some() {
+                            d
+                        } else {
+                            discover_state_dir(&td).unwrap_or(d)
+                        }
+                    }
+                }
+            },
             target_dir: target_dir.unwrap_or_else(default_target_dir),
             manifest_url: manifest_url.unwrap_or_else(default_manifest_url),
             force,
@@ -288,6 +311,22 @@ fn default_state_dir() -> PathBuf {
     home_dir().join(".gpn").join("update")
 }
 
+/// The state dir that belongs to an install whose binaries are in `target_dir`.
+///
+/// Windows layout: `C:\gpn\bin` with the version trees at `C:\gpn\data\update`.
+/// An older layout put them at `C:\gpn\update`. Accept either, and only when
+/// it actually looks like an install (a `current` pointer or a `versions` dir),
+/// so a lookup can never invent state that is not there.
+fn discover_state_dir(target_dir: &std::path::Path) -> Option<PathBuf> {
+    let parent = target_dir.parent()?;
+    for cand in [parent.join("data").join("update"), parent.join("update")] {
+        if update::installed_version(&cand).is_some() || cand.join("versions").is_dir() {
+            return Some(cand);
+        }
+    }
+    None
+}
+
 fn default_target_dir() -> PathBuf {
     non_empty_env("GPN_UPDATE_TARGET_DIR")
         .map(PathBuf::from)
@@ -355,6 +394,9 @@ struct Report {
     rolled_back_to: Option<String>,
     /// Why an install was skipped by the once-per-boot attempt record.
     attempt_blocked: Option<String>,
+    /// A non-fatal remark worth printing (e.g. a re-cut release re-arming a
+    /// rolled-back attempt).
+    note: Option<String>,
     error: Option<String>,
 }
 
@@ -617,9 +659,32 @@ fn installed_version(o: &Options) -> (String, String) {
         (None, Some((stamp, path))) => (stamp, path.display().to_string()),
         (None, None) => (
             COMPILED_VERSION.to_string(),
-            "compiled-in (no build stamp in the install dir)".to_string(),
+            "compiled-in (nothing installed under the state dir: this is the \
+             updater's own version, NOT what the box runs)"
+                .to_string(),
         ),
     }
+}
+
+/// Did the two sources above actually identify what this box runs?
+///
+/// `installed_version` has one fallback that must never be read as a fact: when
+/// neither `current` nor a build stamp exists it returns the **updater's own**
+/// compiled version. Box 1 (2026-11-16) is the reason this is a separate
+/// question — `--check` invoked from `C:\gpn\bin` without `GPN_UPDATE_DIR` saw
+/// no `current`, answered "current 0.3.52 compiled-in" and then "up to date"
+/// for a box that was running 0.3.50 and had a 0.3.52 available. "Up to date"
+/// from an unknown state is a lie that disables the very lane meant to fix it.
+fn installed_version_known(o: &Options) -> bool {
+    update::installed_version(&o.state_dir).is_some()
+        || [update::node_bin_name(), update::rust_node_bin_name()]
+            .iter()
+            .any(|name| {
+                update::read_build_stamp(&o.target_dir.join(name))
+                    .ok()
+                    .flatten()
+                    .is_some()
+            })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -627,6 +692,21 @@ fn installed_version(o: &Options) -> (String, String) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn run_check(o: &Options, report: &mut Report) -> u8 {
+    // Refuse before the network call: an answer computed from a version we could
+    // not read is worse than no answer (see `installed_version_known`).
+    if !installed_version_known(o) {
+        let msg = format!(
+            "cannot tell which version this box runs: no `current` under {} and no build stamp \
+             in {}. Refusing to call it up to date. Pass --state-dir (or set GPN_UPDATE_DIR) \
+             to the install's update dir — on Windows that is <install>\\data\\update.",
+            o.state_dir.display(),
+            o.target_dir.display()
+        );
+        report.error = Some(msg.clone());
+        emit_error(o, report, &msg);
+        return EXIT_ERROR;
+    }
+
     let m = match fetch_verified_manifest(&o.manifest_url) {
         Ok(m) => m,
         Err(e) => {
@@ -807,6 +887,22 @@ fn guard_install(o: &Options, staged: &Path) -> Result<(), InstallFailure> {
 }
 
 fn run_apply(o: &Options, report: &mut Report) -> u8 {
+    // Same refusal as `--check`: an install decided against an unreadable
+    // "current" cannot run the #148 guard, so it would be replacing a tree it
+    // has not identified.
+    if !installed_version_known(o) {
+        let msg = format!(
+            "cannot tell which version this box runs (no `current` under {}, no build stamp in \
+             {}) — refusing to install over an install it cannot identify. Pass --state-dir (or \
+             set GPN_UPDATE_DIR).",
+            o.state_dir.display(),
+            o.target_dir.display()
+        );
+        report.error = Some(msg.clone());
+        emit_error(o, report, &msg);
+        return EXIT_ERROR;
+    }
+
     let m = match fetch_verified_manifest(&o.manifest_url) {
         Ok(m) => m,
         Err(e) => {
@@ -875,17 +971,34 @@ fn run_apply(o: &Options, report: &mut Report) -> u8 {
     let boot = update::boot_id();
     if !o.force {
         if let Some(prev) = update::attempt_for_this_boot(&o.state_dir, &m.version, &boot) {
-            if update::attempt_blocks(&prev) {
+            if update::attempt_blocks_release(&prev, &asset.sha256) {
                 let msg = format!(
                     "{} was already attempted on this boot ({}, at {} unix) and did not confirm \
-                     — not retrying. The previous build stays running. Rebooting is the \
-                     documented way to re-arm; `--force` overrides this.",
+                     — not retrying. The previous build stays running. A re-cut release, a reboot \
+                     or `--force` re-arms this.",
                     m.version, prev.outcome, prev.at
                 );
                 report.attempt_blocked = Some(msg.clone());
                 report.error = Some(msg.clone());
                 emit_error(o, report, &msg);
                 return EXIT_UPDATE_AVAILABLE;
+            }
+            if update::attempt_blocks(&prev) {
+                // Blocking in principle, but for a *different build* of the same
+                // version: the box is allowed to try the new bytes. Say so, so
+                // the log answers "why did it retry after a rollback?".
+                report.note = Some(format!(
+                    "{} was attempted on this boot against a different build ({}); this release \
+                     is a re-cut, so it is eligible again",
+                    m.version, prev.outcome
+                ));
+                if !o.quiet && !o.json {
+                    println!(
+                        "  note: {} rolled back earlier on this boot for a different build; \
+                         this re-cut is eligible",
+                        m.version
+                    );
+                }
             }
         }
     }
@@ -945,7 +1058,13 @@ fn run_apply(o: &Options, report: &mut Report) -> u8 {
 
     // The install is done; from here on the only question that matters is
     // whether the *running* process becomes the new build.
-    let _ = update::record_attempt(&o.state_dir, &m.version, &boot, update::OUTCOME_STARTED);
+    let _ = update::record_attempt_with_release(
+        &o.state_dir,
+        &m.version,
+        &boot,
+        update::OUTCOME_STARTED,
+        &asset.sha256,
+    );
 
     match restart(o, report) {
         Ok(()) => {
@@ -953,11 +1072,12 @@ fn run_apply(o: &Options, report: &mut Report) -> u8 {
                 match wait_for_version(o, &m.version) {
                     Ok(got) => {
                         report.confirmed_version = Some(got.clone());
-                        let _ = update::record_attempt(
+                        let _ = update::record_attempt_with_release(
                             &o.state_dir,
                             &m.version,
                             &boot,
                             update::OUTCOME_CONFIRMED,
+                            &asset.sha256,
                         );
                         if !o.quiet && !o.json {
                             println!("  confirmed: {got} is running");
@@ -965,7 +1085,12 @@ fn run_apply(o: &Options, report: &mut Report) -> u8 {
                     }
                     Err(reason) => {
                         return roll_back_after_failed_confirm(
-                            o, report, &m.version, &boot, &reason,
+                            o,
+                            report,
+                            &m.version,
+                            &boot,
+                            &asset.sha256,
+                            &reason,
                         )
                     }
                 }
@@ -973,11 +1098,12 @@ fn run_apply(o: &Options, report: &mut Report) -> u8 {
                 // No restart command: the new binaries are on disk and the old
                 // ones are still running. "Installed" is the honest outcome —
                 // not a confirmation, and not a failure.
-                let _ = update::record_attempt(
+                let _ = update::record_attempt_with_release(
                     &o.state_dir,
                     &m.version,
                     &boot,
                     update::OUTCOME_INSTALLED,
+                    &asset.sha256,
                 );
             }
             if o.json {
@@ -986,7 +1112,13 @@ fn run_apply(o: &Options, report: &mut Report) -> u8 {
             EXIT_OK
         }
         Err(msg) => {
-            let _ = update::record_attempt(&o.state_dir, &m.version, &boot, update::OUTCOME_FAILED);
+            let _ = update::record_attempt_with_release(
+                &o.state_dir,
+                &m.version,
+                &boot,
+                update::OUTCOME_FAILED,
+                &asset.sha256,
+            );
             report.error = Some(msg.clone());
             emit_error(o, report, &msg);
             EXIT_ERROR
@@ -1005,6 +1137,7 @@ fn roll_back_after_failed_confirm(
     report: &mut Report,
     version: &str,
     boot: &str,
+    release_id: &str,
     reason: &str,
 ) -> u8 {
     eprintln!("gpn_update: NOT CONFIRMED — {reason}");
@@ -1051,7 +1184,13 @@ fn roll_back_after_failed_confirm(
         Err(e) => eprintln!("gpn_update: could not restart after the rollback: {e}"),
     }
 
-    let _ = update::record_attempt(&o.state_dir, version, boot, update::OUTCOME_ROLLED_BACK);
+    let _ = update::record_attempt_with_release(
+        &o.state_dir,
+        version,
+        boot,
+        update::OUTCOME_ROLLED_BACK,
+        release_id,
+    );
     report.rolled_back_to = prev_label;
     report.error = Some(msg.clone());
     emit_error(o, report, &msg);
@@ -1679,6 +1818,19 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
 
+    /// `current` is a directory link; the tests create it the only way a
+    /// non-privileged process can on this host.
+    fn symlink(target: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link)
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_dir(target, link)
+        }
+    }
+
     #[test]
     fn server_errors_and_transport_failures_are_retried_but_client_errors_are_not() {
         // The exact 2026-11-08 00:55 PT line: a GitHub-wide 504 on the asset.
@@ -1744,5 +1896,85 @@ mod tests {
         .unwrap_err();
         assert_eq!(calls, DOWNLOAD_ATTEMPTS);
         assert!(err.contains("after 3 attempts"), "{err}");
+    }
+
+    /// The Windows layout: binaries in `<install>\bin`, version trees in
+    /// `<install>\data\update`. An updater invoked by hand with no env must find
+    /// the *real* install, or `--check` answers from its own compiled version.
+    #[test]
+    fn the_state_dir_is_found_next_to_the_target_dir() {
+        let root = std::env::temp_dir().join(format!("gpn-disd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let bin = root.join("bin");
+        let update = root.join("data").join("update");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(update.join("versions").join("0.3.50")).unwrap();
+        std::fs::create_dir_all(update.join("versions").join("0.3.52")).unwrap();
+        // `current` is the switch the updater flips: a symlink (a junction on
+        // Windows), not a text file.
+        symlink(
+            &update.join("versions").join("0.3.50"),
+            &update.join("current"),
+        )
+        .unwrap();
+
+        let found = discover_state_dir(&bin).expect("the sibling data/update is found");
+        assert_eq!(found, update);
+        assert_eq!(update::installed_version(&found).as_deref(), Some("0.3.50"));
+
+        // Nothing installed ⇒ no invention: a bare bin dir discovers nothing.
+        let bare = root.join("bare");
+        std::fs::create_dir_all(bare.join("bin")).unwrap();
+        assert!(discover_state_dir(&bare.join("bin")).is_none());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// "Up to date" must never be computed from the updater's own version.
+    #[test]
+    fn an_unidentified_install_is_not_reported_as_up_to_date() {
+        let root = std::env::temp_dir().join(format!("gpn-unknown-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let state = root.join("update");
+        let target = root.join("bin");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+
+        let empty = Options {
+            action: Action::Check,
+            json: false,
+            quiet: true,
+            state_dir: state.clone(),
+            target_dir: target.clone(),
+            manifest_url: "http://127.0.0.1:9/releases.json".into(),
+            force: false,
+            expect_version: None,
+            timeout_secs: 1,
+            rpc_url: "ws://127.0.0.1:9".into(),
+        };
+        assert!(
+            !installed_version_known(&empty),
+            "no current and no stamp means the box's version is unknown"
+        );
+        // The check refuses *before* it tries the network: an unreachable URL
+        // would otherwise answer exit 2 and hide the real reason.
+        let mut report = Report::default();
+        assert_eq!(run_check(&empty, &mut report), EXIT_ERROR);
+        let msg = report.error.clone().unwrap_or_default();
+        assert!(msg.contains("cannot tell which version"), "{msg}");
+        assert!(!report.update_available);
+
+        // With a `current` pointer it answers normally (same dead URL ⇒ 2).
+        std::fs::create_dir_all(state.join("versions").join("0.3.52")).unwrap();
+        symlink(
+            &state.join("versions").join("0.3.52"),
+            &state.join("current"),
+        )
+        .unwrap();
+        assert!(installed_version_known(&empty));
+        let mut report = Report::default();
+        assert_eq!(run_check(&empty, &mut report), EXIT_UNREACHABLE);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

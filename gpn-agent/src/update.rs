@@ -2289,6 +2289,16 @@ pub struct UpdateAttempt {
     pub at: u64,
     /// One of the `OUTCOME_*` constants.
     pub outcome: String,
+    /// Identity of the *release* that was attempted — the asset sha256 from the
+    /// signed manifest.
+    ///
+    /// This is what lets a rolled-back attempt re-arm without waiting for a
+    /// reboot: a version can be re-cut (same `0.3.52`, different bytes), and a
+    /// box that gave up on the old build must still try the new one. Empty for
+    /// ledgers written before this field existed, and then it blocks as it
+    /// always did.
+    #[serde(default)]
+    pub release_id: String,
 }
 
 /// `update-attempts.json`: the small history behind the once-per-boot rule.
@@ -2380,12 +2390,44 @@ pub fn attempt_blocks(prev: &UpdateAttempt) -> bool {
     )
 }
 
+/// Does a recorded attempt forbid trying *this release* again on this boot?
+///
+/// Same rule as [`attempt_blocks`], minus one case: if the failed attempt was
+/// made against a **different build of the same version**, the attempt no
+/// longer applies. A publisher who re-cuts `0.3.52` with the fix (the normal
+/// answer to "the new build rolled back") must not need every box rebooted
+/// before it can take it.
+///
+/// Both ids empty ⇒ an old ledger, or a caller with no release identity: keep
+/// the historical blocking behaviour rather than inventing a re-arm.
+pub fn attempt_blocks_release(prev: &UpdateAttempt, release_id: &str) -> bool {
+    if !attempt_blocks(prev) {
+        return false;
+    }
+    let (had, now) = (prev.release_id.trim(), release_id.trim());
+    if had.is_empty() || now.is_empty() {
+        return true;
+    }
+    had == now
+}
+
 /// Record (or replace) the attempt for `version` on `boot_id`.
 pub fn record_attempt(
     state_dir: &Path,
     version: &str,
     boot_id: &str,
     outcome: &str,
+) -> Result<(), UpdateError> {
+    record_attempt_with_release(state_dir, version, boot_id, outcome, "")
+}
+
+/// [`record_attempt`] that also records which build of the version was tried.
+pub fn record_attempt_with_release(
+    state_dir: &Path,
+    version: &str,
+    boot_id: &str,
+    outcome: &str,
+    release_id: &str,
 ) -> Result<(), UpdateError> {
     let mut ledger = load_attempts(state_dir);
     ledger
@@ -2394,6 +2436,7 @@ pub fn record_attempt(
     ledger.attempts.push(UpdateAttempt {
         version: version.trim().to_string(),
         boot_id: boot_id.to_string(),
+        release_id: release_id.trim().to_string(),
         at: now_unix(),
         outcome: outcome.to_string(),
     });
@@ -4448,6 +4491,53 @@ mod tests {
         assert!(!attempt_blocks(
             &attempt_for_this_boot(&st, "0.3.49", "unknown").unwrap()
         ));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A re-cut release re-arms a rolled-back attempt; the same bytes do not.
+    ///
+    /// Box 1 (2026-11-16) rolled 0.3.52 back, wrote `{version, boot_id,
+    /// outcome:rolled-back}`, and then refused to try 0.3.52 again until a
+    /// reboot — even after the stop-path fix shipped as a new 0.3.52 build. The
+    /// attempt now carries the release identity (asset sha256), so "the release
+    /// changed" is enough to try again while "same broken bytes" still blocks.
+    #[test]
+    fn a_re_cut_release_re_arms_a_rolled_back_attempt() {
+        let dir = td("attempts-recut");
+        let st = dir.join("update");
+        std::fs::create_dir_all(&st).unwrap();
+        let old = "75147271c0e447b0027236ba7b48b99a74678d0941cd5b2c13f5f4728a9ccc1f";
+        let recut = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+        record_attempt_with_release(&st, "0.3.52", "boot-a", OUTCOME_ROLLED_BACK, old).unwrap();
+        let prev = attempt_for_this_boot(&st, "0.3.52", "boot-a").unwrap();
+        assert_eq!(prev.release_id, old);
+        assert!(
+            attempt_blocks_release(&prev, old),
+            "the same build must not be retried on this boot"
+        );
+        assert!(
+            !attempt_blocks_release(&prev, recut),
+            "a re-cut release is a different build and must be eligible"
+        );
+
+        // A ledger written before this field existed still blocks: no identity
+        // means no evidence that anything changed.
+        let legacy = UpdateAttempt {
+            version: "0.3.52".into(),
+            boot_id: "boot-a".into(),
+            at: 0,
+            outcome: OUTCOME_ROLLED_BACK.into(),
+            release_id: String::new(),
+        };
+        assert!(attempt_blocks_release(&legacy, recut));
+
+        // A successful attempt never blocks, whatever the identity says.
+        record_attempt_with_release(&st, "0.3.53", "boot-a", OUTCOME_CONFIRMED, old).unwrap();
+        let ok = attempt_for_this_boot(&st, "0.3.53", "boot-a").unwrap();
+        assert!(!attempt_blocks_release(&ok, old));
+        assert!(!attempt_blocks_release(&ok, recut));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
