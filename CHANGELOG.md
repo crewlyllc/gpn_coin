@@ -8,6 +8,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.54] - 2026-11-17
+
+Bumped from 0.3.53. One subject: **the Windows self-update's confirm window is longer than a
+cold start**, so a build that is merely still starting is not rolled back (task rows #199/#200).
+
+### Changed
+- **Windows: the update confirms for 360 s, not 120 s, and watches the process (#199).** Box 1's
+  first fully automatic 0.3.53 cycle did everything right — `stopping GPN-Node` at 02:00:02 with
+  no 60 s forced wait, `downloading 0.3.53`, `installed 0.3.53`, `current -> versions/0.3.53` — and
+  then declared `NOT CONFIRMED: not confirmed within 120 s: rpc unable to connect` at 02:02:14 and
+  rolled `current` back, while `node.log` shows the new process binding `127.0.0.1:9944` at
+  02:02:18: **125 s** of GPU init and state load. The gate failed correct work by five seconds and
+  left the box inconsistent (running process 0.3.53, `current` 0.3.50). The default window is now
+  360 s (`GPN_UPDATE_CONFIRM_SECS` overrides it), and the wait is no longer a bare RPC poll.
+
+### Fixed
+- **A node that is still starting is no longer a failed update; a dead one fails at once.** New
+  `Test-NodeAlive` in the generated `update-and-restart.ps1`: while the process is up and has not
+  yet answered, the loop logs a `still starting: <version> has not answered yet (N s of 360 s)`
+  progress line every 30 s; if the process is gone it fails immediately with `the node process
+  exited before it answered` instead of waiting out the whole window. Rollback and
+  `previous`-retention are unchanged.
+
 ## [0.3.53] - 2026-11-16
 
 Bumped from 0.3.52. One subject: **the Windows update can stop the node it is replacing, and

@@ -28,6 +28,19 @@ is not ready.
 
 ---
 
+## 0. Sequencing — the rule that binds the rest
+
+- **Work the checklist in order.** You may not tick item N+1 while item N is unticked, and you
+  may not start a new task shecklist while this one is unfinished.
+- **While this checklist is open, nothing else may be committed.** Not docs, not fixes, not a
+  small correction. The only permitted push is this release's own — every other commit cancels
+  a queued CI run for the release that is in flight.
+- **Mechanical, not a promise:** `release-cut` and the driver take `~/.gpn/release-in-flight`;
+  a `pre-commit` hook refuses any commit while it exists. If the hook is missing on a machine,
+  say so rather than relying on discipline.
+- **A tick is a claim with evidence**: version string, log line, or commit sha next to it.
+  A box ticked without evidence is not ticked.
+
 ## 1. Test first (before any code is written)
 
 - [ ] Name the behaviour in one sentence, and the machine-observable thing that proves it.
