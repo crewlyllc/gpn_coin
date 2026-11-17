@@ -2,12 +2,12 @@
 
 ## Release policy (owner, 2026-11-16)
 
-**A task is not done until it is shipped.** If the change needs a release, the row stays
-`IN-PROGRESS (blocked on publish)` until: both platforms built the same commit, the manifest
-serves that version (polled twice), the artifact was scanned for the change's strings, and one
-node reports the new version from its running process. Until then nothing new is started — a
-list that moves on while an earlier change is unpublished is how work piles up behind a release
-that never happens.
+**A task is done only when every box in its checklist is ticked.** Each release gets its own
+copy of this file at `docs/releases/<version>.md`; boxes are ticked only when genuinely
+satisfied, and an item that does not apply is ticked as `n/a` with the reason. The task row
+stays `IN-PROGRESS (blocked on <step>)` until the last box is ticked — and no new row starts
+while one is unfinished.
+
 
 
 - **A version combines everything that is finished but unreleased.** Never cut a release for a
