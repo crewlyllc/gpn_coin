@@ -107,6 +107,19 @@ pub struct Heartbeat {
     /// (`GPN_SITE_GATEWAY=1`). Omitted when false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway: Option<bool>,
+    /// The release version this provider's binary was built as (e.g.
+    /// `0.3.57`), and the git commit it came from (#201).
+    ///
+    /// Why it is on the wire: a node we do not control (box 3, an operator's
+    /// box) must be judged the way a stranger's machine is — "is this build
+    /// current?" has to be answerable from network-visible data alone, never
+    /// by logging into it. Absent on pre-#201 clients (so `null` at the AP =
+    /// an old build that did not say, not "no version").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Short git sha of that build; `None` when the build could not tell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_sha: Option<String>,
     #[serde(default)]
     pub models: Vec<String>,
     #[serde(default)]
@@ -139,6 +152,10 @@ pub struct PushedProvider {
     pub reachability: String,
     /// Site-gateway role (SPEC 47).
     pub gateway: bool,
+    /// The build this provider reported (#201): `None` = it did not say.
+    pub version: Option<String>,
+    /// The commit that build came from, when it said.
+    pub git_sha: Option<String>,
     /// Local ingest time (not the provider's clock) — drives the TTL.
     pub pushed_at: u64,
 }
@@ -233,13 +250,51 @@ pub fn canonical_message_v2(hb: &Heartbeat) -> String {
     )
 }
 
-/// Message the sender must sign: v2 when tier metadata is present.
+/// v3 canonical bytes: v2 plus the build identity (#201).
+///
+/// Same rule as v2 — only used when the client actually sent a build, so a
+/// heartbeat from a build that predates this still verifies under v2/v1. The
+/// build is part of the signed bytes on purpose: a version an operator cannot
+/// trust is worse than no version, because it is what a stranger's box is
+/// judged by.
+pub fn canonical_message_v3(hb: &Heartbeat) -> String {
+    format!(
+        "{}|{}|{}",
+        canonical_message_v2(hb),
+        hb.version.as_deref().unwrap_or(""),
+        hb.git_sha.as_deref().unwrap_or(""),
+    )
+}
+
+/// Message the sender must sign: v3 when a build is attached, else v2 when tier
+/// metadata is present, else v1.
 pub fn signed_message(hb: &Heartbeat) -> String {
-    if hb.reachability.is_some() || hb.gateway.is_some() {
+    if hb.version.is_some() || hb.git_sha.is_some() {
+        canonical_message_v3(hb)
+    } else if hb.reachability.is_some() || hb.gateway.is_some() {
         canonical_message_v2(hb)
     } else {
         canonical_message(hb)
     }
+}
+
+/// Bound a self-reported build string (#201) before it is stored/published.
+///
+/// `0.3.57` / `11c455c` are the two shapes we emit; anything that is not a
+/// short run of version/sha characters is dropped rather than relayed, so a
+/// signed-but-hostile provider cannot put arbitrary text in the directory.
+pub fn clean_build_string(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    if s.is_empty() || s.len() > 64 {
+        return None;
+    }
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'))
+    {
+        return None;
+    }
+    Some(s.to_string())
 }
 
 pub fn sha256_hex(s: &str) -> String {
@@ -383,8 +438,21 @@ impl PushRegistry {
         if onchain != decoded {
             return Err(IngestError::BadSignature);
         }
-        let msg = signed_message(&hb);
-        if !verify_signature(&hb.sig, &msg, &onchain) {
+        // A client and an access point are upgraded independently (each box on
+        // its own update timer), so accept the shape that matches what the
+        // client actually sent: a heartbeat carrying a build must verify over
+        // v3 (the build IS signed — otherwise a box could claim another box's
+        // build), and one that does not must verify over v2 (tier) or v1, so a
+        // pre-#201 client keeps working against a new access point.
+        let candidates: Vec<String> = if hb.version.is_some() || hb.git_sha.is_some() {
+            vec![canonical_message_v3(&hb)]
+        } else {
+            vec![canonical_message_v2(&hb), canonical_message(&hb)]
+        };
+        if !candidates
+            .iter()
+            .any(|msg| verify_signature(&hb.sig, msg, &onchain))
+        {
             return Err(IngestError::BadSignature);
         }
 
@@ -425,6 +493,10 @@ impl PushRegistry {
                 ts: hb.ts,
                 reachability: reachability.to_string(),
                 gateway,
+                // #201: a build string is a claim about bytes, kept as sent
+                // (bounded below) — the signature already proves who said it.
+                version: hb.version.as_deref().and_then(clean_build_string),
+                git_sha: hb.git_sha.as_deref().and_then(clean_build_string),
                 pushed_at: now,
             },
         );
@@ -701,6 +773,8 @@ mod tests {
             multiaddrs: vec![format!("/ip4/203.0.113.7/tcp/30333/p2p/{PEER}")],
             reachability: None,
             gateway: None,
+            version: None,
+            git_sha: None,
             models: vec!["llama3.2:1b".into(), "qwen2.5:1b".into()],
             vram_mb: 8188,
             capacity: 1,
@@ -727,6 +801,44 @@ mod tests {
 
     fn ingest(reg: &mut PushRegistry, hb: &Heartbeat, now: u64) -> Result<(), IngestError> {
         reg.ingest(&serde_json::to_string(hb).unwrap(), now, resolver)
+    }
+
+    #[test]
+    fn a_heartbeat_that_reports_its_build_is_signed_over_it() {
+        // #201: the version is what an unmanaged box is judged by, so it is part
+        // of the signed bytes — a provider cannot claim another box's build.
+        let mut hb = payload(1_000);
+        hb.reachability = Some("backbone".into());
+        hb.version = Some("0.3.57".into());
+        hb.git_sha = Some("11c455c".into());
+        sign_in_place(&signer(), &mut hb);
+        assert!(signed_message(&hb).starts_with("gpn-hb-v1|"));
+        assert!(signed_message(&hb).ends_with("|0.3.57|11c455c"));
+
+        let mut reg = PushRegistry::new();
+        ingest(&mut reg, &hb, 1_000).expect("a v3 build heartbeat must verify");
+        let stored = &reg.live(1_000)[0];
+        assert_eq!(stored.version.as_deref(), Some("0.3.57"));
+        assert_eq!(stored.git_sha.as_deref(), Some("11c455c"));
+
+        // A version edited after signing is not the version that was signed.
+        let mut tampered = hb.clone();
+        tampered.version = Some("9.9.99".into());
+        let mut reg2 = PushRegistry::new();
+        assert_eq!(
+            ingest(&mut reg2, &tampered, 1_000),
+            Err(IngestError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn a_build_string_is_bounded_before_it_is_published() {
+        // Relayed text must stay a version/sha, never arbitrary prose.
+        assert_eq!(clean_build_string("0.3.57"), Some("0.3.57".to_string()));
+        assert_eq!(clean_build_string(" 11c455c "), Some("11c455c".to_string()));
+        assert_eq!(clean_build_string(""), None);
+        assert_eq!(clean_build_string("0.3.57 <script>"), None);
+        assert_eq!(clean_build_string(&"9".repeat(65)), None);
     }
 
     #[test]
@@ -908,6 +1020,8 @@ mod tests {
                     ts: 1_000,
                     reachability: "backbone".to_string(),
                     gateway: false,
+                    version: None,
+                    git_sha: None,
                     pushed_at: i as u64,
                 },
             );

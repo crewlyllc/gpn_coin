@@ -133,6 +133,30 @@ pub fn git_sha() -> &'static str {
         .unwrap_or("unknown")
 }
 
+/// The release version this binary was built as (`CARGO_PKG_VERSION`).
+///
+/// Published in the provider `/status` and on the signed heartbeat (#201) so a
+/// box we may not log into can still be asked "which build are you running?"
+/// from the network alone.
+pub fn build_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+/// [`git_sha`], or `None` when the build could not tell (built outside a git
+/// work tree).
+///
+/// Separate from `git_sha()` on purpose: the literal `unknown` is not a sha and
+/// must be published as `null` rather than as a string some reader might print
+/// as if it were a commit.
+pub fn git_sha_opt() -> Option<&'static str> {
+    let sha = git_sha();
+    if sha.is_empty() || sha == "unknown" {
+        None
+    } else {
+        Some(sha)
+    }
+}
+
 /// The one-line `--version` output, e.g. `gpn_node 0.2.0 (spec 41, d606264)`.
 ///
 /// The runtime `spec_version` is injected at build time from

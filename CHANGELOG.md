@@ -8,6 +8,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.57] - 2026-11-17
+
+One subject: **a provider publishes the build it runs** (task row #201). Box 3 became an
+unmanaged reference node on 2026-11-17 — owner removed it from Tailscale — so "did that box
+update?" has to be answerable from network-visible data alone, the way a stranger's machine is
+judged. `/providers` returned `version: null` for every box, so it was not answerable at all.
+
+### Added
+- **`version` and `git_sha` on the provider `/status`, the signed heartbeat, `/providers` and
+  `/api/network`.** `version` is `CARGO_PKG_VERSION`; `git_sha` is the commit the binary was built
+  from, or `null` when the build could not tell (unknown is published as unknown, never as the
+  literal `unknown` dressed up as a commit).
+- **Signed over the build (heartbeat v3).** A heartbeat carrying a build signs `canonical_message_v3`
+  (v2 + `|version|sha`); a version an operator cannot trust is worse than no version, because it is
+  exactly what an unmanaged box is judged by. A pre-#201 client sends no build and still verifies
+  under v2/v1, so the access point accepts either shape — the two sides upgrade on independent
+  timers.
+- Self-reported build strings are bounded (`[A-Za-z0-9._+-]`, ≤64 chars) before they are stored or
+  relayed, so a signed-but-hostile provider cannot publish prose in the directory.
+
+### Changed
+- `/api/network` provider rows gain `version` / `git_sha`; a chain-only row (registered, never seen
+  by this AP) publishes `null` for both — it has never told us anything.
+
 ## [0.3.56] - 2026-11-17
 
 Bumped from 0.3.55. One subject: **the Windows updater is allowed to stop the node it replaces** —

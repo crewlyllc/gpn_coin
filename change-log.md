@@ -1,5 +1,27 @@
 # GPN change-log
 
+## 2026-11-17 — a provider publishes the build it runs (#201)
+
+**WHY (measured, 2026-11-17):** box 3 became an unmanaged reference node — the owner removed it from
+Tailscale — so from now on it must be judged like a stranger's machine, by network-visible data
+only. `GET :8092/providers` answered `version: null` (the field did not exist), so "did that box
+update?" could not be answered without an SSH session nobody is allowed to open.
+
+**FIX — one fact, four surfaces:**
+* `/status` publishes `version` (`CARGO_PKG_VERSION`) and `git_sha` (`null` when the build could not
+tell — the literal `unknown` is never published as if it were a commit).
+* The signed heartbeat carries the same two fields and signs them: `canonical_message_v3` = v2 +
+  `|version|sha`, used only when a build is attached, so pre-#201 clients keep verifying under
+  v2/v1. The access point accepts whichever shape the sender signed — the two ends upgrade on
+  independent timers and a mismatched shape must not become a push outage.
+* `/providers` and `/api/network` publish both; a chain-only row (registered, never seen here)
+  publishes `null` for both.
+* A self-reported build string is bounded (`[A-Za-z0-9._+-]`, ≤64 chars) before storage, so a
+  signed provider cannot relay prose into the public directory.
+
+**SEEN LIVE (this host, scratch `/status` on :8301, new binary):**
+`version= 0.3.56 git_sha= 11c455c` — the field is real, and `null` remains distinguishable from it.
+
 ## 2026-11-16 17:2x PT — self-addresses are never announced, persisted or dialled (#195)
 
 **WHY (measured, 2026-11-15):** litep2p reports a `0.0.0.0` bind as `/ip4/127.0.0.1/tcp/30333` +

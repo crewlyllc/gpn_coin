@@ -961,6 +961,17 @@ struct Provider {
     /// `None` = not reported / unreadable (unknown), `Some(0)` = the box says it
     /// is alone — two different answers, so it is not a `bool`.
     peers: Option<u64>,
+    /// #201: the release version this provider's binary reported about itself
+    /// (`/status` → `version`, or the signed heartbeat). `None` = it did not
+    /// say (a pre-#201 build, an unreachable endpoint, or a chain-only row) —
+    /// unknown, never "no version".
+    ///
+    /// Why it lives in the directory at all: a box we do not manage must be
+    /// judged the way a stranger's machine is — "is that build current?" has
+    /// to be answerable from the network, not from an SSH session.
+    version: Option<String>,
+    /// The commit that build came from, when the box said. `None` = unknown.
+    git_sha: Option<String>,
 }
 
 fn opt(args: &[String], flag: &str) -> Option<String> {
@@ -1181,6 +1192,15 @@ fn provider_from_caps(addr: &str, v: &Value, status_url: String, latency_ms: u64
         // #W78: the box's own peer count, carried on the poll snapshot. Absent
         // (`null`) on an older build ⇒ unknown, never "0 peers".
         peers: v.get("peers").and_then(|x| x.as_u64()),
+        // #201: the build the box reported, bounded like any self-claim.
+        version: v
+            .get("version")
+            .and_then(|x| x.as_str())
+            .and_then(gpn_agent::provider_heartbeat::clean_build_string),
+        git_sha: v
+            .get("git_sha")
+            .and_then(|x| x.as_str())
+            .and_then(gpn_agent::provider_heartbeat::clean_build_string),
     }
 }
 
@@ -1384,6 +1404,14 @@ fn apply_push_heartbeats(
                 row.active = p.active_jobs;
                 row.last_seen = Some(now);
                 row.source = "push".to_string();
+                // #201: the build rides the signed heartbeat, so a push-only
+                // box is identifiable even when the AP never reaches /status.
+                if p.version.is_some() {
+                    row.version = p.version.clone();
+                }
+                if p.git_sha.is_some() {
+                    row.git_sha = p.git_sha.clone();
+                }
             }
             None => {
                 out.push(Provider {
@@ -1419,6 +1447,8 @@ fn apply_push_heartbeats(
                     // snapshot does); the poll row for this same box supplies
                     // it, and this merge never clears it.
                     peers: None,
+                    version: p.version.clone(),
+                    git_sha: p.git_sha.clone(),
                 });
             }
         }
@@ -1584,6 +1614,9 @@ fn unreachable_placeholder(status_url: String) -> Provider {
         unfunded: None,
         // Nothing answered, so nothing was measured about its peering.
         peers: None,
+        // Nor can an endpoint that never answered say which build it runs.
+        version: None,
+        git_sha: None,
     }
 }
 
@@ -5490,6 +5523,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .unwrap()
                                     .get(p.peer_id.as_deref().unwrap_or(""))
                                     .cloned(),
+                                version: p.version.clone(),
+                                git_sha: p.git_sha.clone(),
                             })
                             .collect()
                     };
@@ -5587,6 +5622,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // directory shows "peered" from this, not from whether the
                     // node happens to peer with the access point.
                     "peers": p.peers,
+                    // #201: the build the box reported about itself, so "did
+                    // that unmanaged node update?" is answerable from the
+                    // network. `null` = it did not say.
+                    "version": p.version,
+                    "git_sha": p.git_sha,
                     "source": p.source
                 })).collect::<Vec<_>>() })
                 }
@@ -8514,6 +8554,8 @@ mod tests {
             ts: 1_000,
             reachability: "backbone".to_string(),
             gateway: false,
+            version: None,
+            git_sha: None,
             pushed_at: 1_000,
         };
         apply_push_heartbeats(&mut out, &[&pushed]);
@@ -8545,6 +8587,8 @@ mod tests {
             ts: 1_000,
             reachability: "backbone".to_string(),
             gateway: false,
+            version: None,
+            git_sha: None,
             pushed_at: 1_000,
         };
         apply_push_heartbeats(&mut out, &[&pushed]);
@@ -8659,6 +8703,35 @@ mod tests {
         assert!(p.models.is_empty() && p.peer_id.is_none());
     }
 
+    /// #201: the access point keeps the build a box reports, and refuses to
+    /// relay anything that is not a version/sha — a provider may sign for
+    /// itself, but signed text is still not an invitation to publish prose.
+    #[test]
+    fn a_poll_snapshot_carries_the_build_and_junk_is_dropped() {
+        let caps = json!({
+            "address": "5ENq",
+            "gflops": 900,
+            "version": "0.3.57",
+            "git_sha": "11c455c",
+            "caps_declared": true,
+            "capabilities": ["LLMInference"]
+        });
+        let p = provider_from_caps("5ENq", &caps, "http://h:8093/status".into(), 5);
+        assert_eq!(p.version.as_deref(), Some("0.3.57"));
+        assert_eq!(p.git_sha.as_deref(), Some("11c455c"));
+
+        // An old box does not send the fields at all: unknown, never a guess.
+        let legacy = json!({"address": "5ENq", "gflops": 900});
+        let q = provider_from_caps("5ENq", &legacy, "http://h:8093/status".into(), 5);
+        assert_eq!(q.version, None);
+        assert_eq!(q.git_sha, None);
+
+        // Hostile text is dropped rather than published.
+        let junk = json!({"address": "5ENq", "version": "<script>alert(1)</script>"});
+        let r = provider_from_caps("5ENq", &junk, "http://h:8093/status".into(), 5);
+        assert_eq!(r.version, None);
+    }
+
     /// #147: the placeholder must not survive as a second row for a host we
     /// already measure — and one address must still be one row.
     #[test]
@@ -8735,6 +8808,8 @@ mod tests {
             pulled_seen: Some(Instant::now()),
             unfunded: None,
             peers: None,
+            version: None,
+            git_sha: None,
         }
     }
 

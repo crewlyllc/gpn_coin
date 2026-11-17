@@ -695,6 +695,45 @@ fn print_compute_unit() {
     );
 }
 
+/// #201: this binary's release version and commit, as published in `/status`
+/// (and therefore carried into the AP's directory by the poll/push lanes).
+/// `version` is always present — it is `CARGO_PKG_VERSION`, which cannot be
+/// unknown. `git_sha` is `null` when the build could not tell (a crate built
+/// outside a git work tree): unknown is published as unknown, never as a
+/// fabricated string.
+fn attach_build(body: &mut Value) {
+    body["version"] = json!(gpn_agent::firstrun::build_version());
+    body["git_sha"] = match gpn_agent::firstrun::git_sha_opt() {
+        Some(sha) => json!(sha),
+        None => Value::Null,
+    };
+}
+
+#[cfg(test)]
+mod build_field_tests {
+    use super::*;
+
+    /// #201: the number a stranger's box is judged by must be on the wire, and
+    /// `git_sha` must be a string or an explicit `null` — never the literal
+    /// `"unknown"` dressed up as a commit.
+    #[test]
+    fn status_publishes_this_build() {
+        let mut body = json!({"address": "5X"});
+        attach_build(&mut body);
+        let version = body["version"].as_str().expect("version must be a string");
+        assert!(!version.is_empty() && version != "unknown", "{body}");
+        assert_eq!(version, env!("CARGO_PKG_VERSION"));
+        match &body["git_sha"] {
+            Value::String(sha) => {
+                assert!(!sha.is_empty() && sha != "unknown", "{body}");
+                assert!(sha.len() <= 64, "{body}");
+            }
+            Value::Null => {}
+            other => panic!("git_sha must be a string or null, got {other}"),
+        }
+    }
+}
+
 /// Item #93: attach the *conditions* of the last attestation measurement, so an
 /// operator can tell a number this box measured on an idle GPU from a stale or
 /// contention-contaminated one. Adds nothing when no state file exists (a fresh
@@ -2340,6 +2379,10 @@ fn push_once(
         // never advertise a dialable address for a leaf.
         reachability: Some(peer.reachability.clone()),
         gateway: if peer.gateway { Some(true) } else { None },
+        // #201: the build goes on the signed heartbeat too, so a push-only box
+        // (one that never serves `/status` to the AP) is still identifiable.
+        version: Some(gpn_agent::firstrun::build_version().to_string()),
+        git_sha: gpn_agent::firstrun::git_sha_opt().map(str::to_string),
         ts: now_secs(),
         sig: String::new(),
     };
@@ -2782,6 +2825,10 @@ fn run_main() -> Result<(), Box<dyn std::error::Error>> {
                     "disk_free_mb": disk.free_mb, "disk_total_mb": disk.total_mb,
                     "disk_free_pct": disk.free_percent()
                 });
+                // #201: publish which build this is. An operator's box — or one
+                // we are not allowed to log into — must answer "is it up to
+                // date?" from network-visible data alone.
+                attach_build(&mut body);
                 // #93: measurement conditions (samples, spread, "attested-idle"
                 // provenance, stale-record warning) — so a low number can be
                 // told apart from one taken under contention.

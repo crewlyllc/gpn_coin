@@ -47,6 +47,11 @@ pub struct DirProvider {
     /// verifier). This — never `reachability` — decides who may claim
     /// backbone: a self-reported tier is not evidence (2026-11-16).
     pub dialback: Option<Dialback>,
+    /// #201: the release version the provider reported about itself. `None` =
+    /// it did not say (pre-#201 build / unreachable / chain-only row).
+    pub version: Option<String>,
+    /// The commit that build came from, when the box said.
+    pub git_sha: Option<String>,
 }
 
 /// One dial-back verdict, as measured by the access point (not by the node).
@@ -508,6 +513,11 @@ pub fn build_full(
             // say (old build / unreadable), which the page treats as unknown
             // and falls back to peer-of-this-node.
             "peers": p.peers,
+            // #201: the build it reported. `null` = it did not say — an
+            // unmanaged box is judged by these two fields from the network, so
+            // "unknown" must stay distinguishable from a version string.
+            "version": p.version,
+            "git_sha": p.git_sha,
             // W50: two facts, two fields. `seen_by_ap` is true by construction
             // (this row exists because the AP has a record), and
             // `chain_registered` is what the chain says — or null.
@@ -549,6 +559,9 @@ pub fn build_full(
                 // Registered on chain but never seen by this AP: nothing has
                 // measured its peering, so it makes no claim.
                 "peers": null,
+                // Nor has it ever reported a build.
+                "version": null,
+                "git_sha": null,
                 "seen_by_ap": false,
                 "chain_registered": true,
             }));
@@ -705,6 +718,8 @@ mod tests {
             gateway: false,
             peers: None,
             dialback: None,
+            version: None,
+            git_sha: None,
         }
     }
 
@@ -892,6 +907,35 @@ mod tests {
         assert_eq!(doc["counts"]["chain_only_now"], 1);
     }
 
+    /// #201: an unmanaged box is judged the way a stranger's machine is — by
+    /// what the network can see. The row must publish the build the box
+    /// reported about itself, and must keep "did not say" distinguishable from
+    /// a version string.
+    #[test]
+    fn a_row_publishes_the_build_the_box_reported() {
+        let mut named = provider(PEER_B, true, "http://198.51.100.7:8093");
+        named.address = "5ENqSp5Q65bxfgryZExQDRnV1rEW1qb2UBztvswLamkoUrqj".into();
+        named.version = Some("0.3.57".into());
+        named.git_sha = Some("11c455c".into());
+        let mut silent = provider(PEER_C, true, "http://198.51.100.8:8093");
+        silent.address = "5HgbpiTYE27CtBQF7gRWLz6Qt3HBxyi4tR2M75FC1oydH48z".into();
+
+        let doc = build_full("t", None, Ok(vec![]), &[named, silent], &[], None, 30333);
+        let rows = doc["providers"].as_array().unwrap();
+        let said = rows
+            .iter()
+            .find(|r| r["peer_id"] == PEER_B)
+            .expect("the reporting box must be published");
+        assert_eq!(said["version"], json!("0.3.57"), "{said}");
+        assert_eq!(said["git_sha"], json!("11c455c"), "{said}");
+
+        // A box that said nothing is `null` — not a fabricated version, and not
+        // missing, so a consumer can tell "old build" from "field absent".
+        let quiet = rows.iter().find(|r| r["peer_id"] == PEER_C).unwrap();
+        assert_eq!(quiet["version"], Value::Null, "{quiet}");
+        assert_eq!(quiet["git_sha"], Value::Null, "{quiet}");
+    }
+
     /// #W78: the row publishes the peer count the box reported about ITSELF, so
     /// the page can answer "is this node peered?" without asking whether it is
     /// peered with this access point. Unknown stays `null`.
@@ -1058,6 +1102,8 @@ mod tests {
             gateway: false,
             peers: Some(2),
             dialback: None,
+            version: None,
+            git_sha: None,
         };
         let doc = build_full("t", None, Ok(vec![]), &[dual, v6only], &[], None, 30333);
         let rows = doc["providers"].as_array().unwrap();
