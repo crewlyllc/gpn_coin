@@ -941,7 +941,12 @@ $Launcher     = Join-Path $InstallDir 'start-node.cmd'
 $CurrentLink  = Join-Path $InstallDir 'data\update\current'
 $RpcUrl       = if ($env:GPN_RPC_URL) { $env:GPN_RPC_URL } else { 'http://127.0.0.1:9944' }
 # How long the new build gets to come up and answer before we roll it back.
-$ConfirmSecs  = if ($env:GPN_UPDATE_CONFIRM_SECS) { [int]$env:GPN_UPDATE_CONFIRM_SECS } else { 120 }
+# 360 s, not 120 (measured 2026-11-17 on box 1): after the swap the node started at
+# 02:00:13 and only bound JSON-RPC at 02:02:18 -- 125 s of GPU init + state load -- so a
+# 120 s window rolled back a build that was already up, and left `current` on the old
+# version while the RUNNING process served the new one. A window shorter than a cold
+# start is a gate that fails correct work.
+$ConfirmSecs  = if ($env:GPN_UPDATE_CONFIRM_SECS) { [int]$env:GPN_UPDATE_CONFIRM_SECS } else { 360 }
 
 function Write-Log {
   param([string]$Message)
@@ -982,6 +987,16 @@ function Get-ExpectedVersion {
   } catch { return $null }
 }
 
+# Any node process alive? "RPC not answering yet" is normal while the GPU miner
+# initialises; "no node process at all" is a real failure and must not wait out the
+# whole window. Returns $null when the question cannot be answered (never claim dead).
+function Test-NodeAlive {
+  try {
+    $p = Get-Process -Name 'gpn_node','gpn-node' -ErrorAction SilentlyContinue | Select-Object -First 1
+    return [bool]$p
+  } catch { return $null }
+}
+
 # Ask the RUNNING node what version it is. This is the only evidence that an
 # update actually took: everything before it describes files on disk.
 # Returns a message on success, $null on failure (reason in $script:ConfirmReason).
@@ -991,7 +1006,22 @@ function Confirm-Running {
   if (-not $Expect) { $script:ConfirmReason = 'no expected version to confirm'; return $null }
   $deadline = (Get-Date).AddSeconds($Seconds)
   $body = '{"jsonrpc":"2.0","id":1,"method":"system_version","params":[]}'
+  $sawAlive = $false
+  $t0 = Get-Date
+  $lastNote = $t0
   while ((Get-Date) -lt $deadline) {
+    # Liveness first: a build that is still starting is not a failure, but one whose
+    # process is gone is -- and waiting 6 minutes to say so helps nobody.
+    $alive = Test-NodeAlive
+    if ($alive -eq $true) { $sawAlive = $true }
+    elseif ($sawAlive -and $alive -eq $false) {
+      $script:ConfirmReason = 'the node process exited before it answered'
+      return $null
+    }
+    if (((Get-Date) - $lastNote).TotalSeconds -ge 30) {
+      $lastNote = Get-Date
+      Write-Log ('still starting: ' + $Expect + ' has not answered yet (' + [int]((Get-Date) - $t0).TotalSeconds + ' s of ' + $Seconds + ' s)')
+    }
     try {
       $r = Invoke-RestMethod -Uri $RpcUrl -Method Post -Body $body -ContentType 'application/json' -TimeoutSec 3
       $got = ([string]$r.result).Trim()

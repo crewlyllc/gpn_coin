@@ -395,6 +395,27 @@ if grep -qE 'schtasks /(End|Run)|--apply' "$tmp/unreachable.txt"; then
 if LC_ALL=C grep -q $'[^\x01-\x7F]' "$uw"; then
   bad "generated update-and-restart.ps1 contains non-ASCII bytes"; else ok "update wrapper is ASCII-only"; fi
 
+# ---- confirm window (measured on box 1, 2026-11-17) ------------------------
+# After a successful swap the new node started at 02:00:13 and bound JSON-RPC at
+# 02:02:18 -- 125 s of GPU init + state load. The window was 120 s, so the wrapper
+# declared NOT CONFIRMED and rolled `current` back to 0.3.50 while the RUNNING
+# process was already serving 0.3.53. A gate shorter than a cold start fails
+# correct work; assert the default outlasts the measurement with room to spare,
+# and that the loop can tell "still starting" from "the process died".
+confirm_default=$(sed -n 's/.*else { \([0-9][0-9]*\) }.*/\1/p' "$uw" | head -1)
+if [ -n "$confirm_default" ] && [ "$confirm_default" -ge 300 ]; then
+  ok "confirm window is ${confirm_default}s (a Windows cold start measured 125 s)"
+else
+  bad "confirm window is '${confirm_default:-unset}'s - shorter than the measured Windows cold start (125 s), so a build that is merely still starting gets rolled back"
+fi
+assert_has "$uw" "Test-NodeAlive" "confirm loop checks the process, not just the RPC"
+assert_has "$uw" "the node process exited before it answered" "a dead process fails the confirm immediately, not after the window"
+# Negative control: the 120 s window this release replaced must be REJECTED by the
+# check above, otherwise the assertion proves nothing.
+printf '%s\n' '$ConfirmSecs  = if ($env:GPN_UPDATE_CONFIRM_SECS) { [int]$env:GPN_UPDATE_CONFIRM_SECS } else { 120 }' > "$tmp/old-window.ps1"
+old_default=$(sed -n 's/.*else { \([0-9][0-9]*\) }.*/\1/p' "$tmp/old-window.ps1" | head -1)
+if [ "${old_default:-0}" -lt 300 ]; then ok "negative control: the pre-0.3.53 120s window is rejected"; else bad "negative control FAILED - a 120s window would pass the confirm-window check"; fi
+
 # Negative control for the ordering checks: a wrapper that applies before it
 # stops must be rejected, otherwise the assertions above prove nothing.
 { echo 'x=$updater --apply'; echo 'schtasks /End /TN $NodeTask'; } > "$tmp/bad-order.ps1"
