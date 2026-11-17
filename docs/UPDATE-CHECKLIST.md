@@ -2,6 +2,14 @@
 
 ## Release policy (owner, 2026-11-16)
 
+**A task is not done until it is shipped.** If the change needs a release, the row stays
+`IN-PROGRESS (blocked on publish)` until: both platforms built the same commit, the manifest
+serves that version (polled twice), the artifact was scanned for the change's strings, and one
+node reports the new version from its running process. Until then nothing new is started — a
+list that moves on while an earlier change is unpublished is how work piles up behind a release
+that never happens.
+
+
 - **A version combines everything that is finished but unreleased.** Never cut a release for a
   single change while others are sitting in the tree — the fleet then has to update twice for
   what is one batch, and each update is a restart, a risk and a wait.
