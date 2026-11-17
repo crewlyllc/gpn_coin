@@ -184,10 +184,13 @@ assert_has "$ps1" "__KEYFILE__"                            "launcher template st
 assert_has "$ps1" "Replace('__KEYFILE__'"                  "install substitutes the fallback path"
 assert_has "$ps1" 'set "GPN_NODE_KEY_FILE=%USERPROFILE%'    "launcher resolves the key path from %USERPROFILE% at runtime"
 assert_has "$ps1" "GetFolderPath('Startup')"               "writes the shortcut to the user Startup folder"
-# The update task must not require elevation either, and the deploy path must
-# never fail the release build when a task cannot be registered.
-assert_has "$ps1" "<RunLevel>LeastPrivilege</RunLevel>"    "update task runs at least privilege"
-assert_lacks "$ps1" "<RunLevel>HighestAvailable</RunLevel>" "update task never requests elevation"
+# The update task MUST be able to stop the node it replaces, and the node runs
+# elevated: the old assertion here demanded `LeastPrivilege` ("must not require
+# elevation"), which is exactly the bug -- box 1, 2026-11-17 07:11:39, every gpn
+# process answered "Reason: Access is denied", so the box could never update
+# itself while the node was running. Inverted with the reason rather than deleted.
+assert_has "$ps1" "<RunLevel>HighestAvailable</RunLevel>"   "update task asks for the integrity level it needs to stop the node"
+assert_lacks "$ps1" "<RunLevel>LeastPrivilege</RunLevel>"   "update task is not left unable to kill an elevated node"
 assert_has "$ps1" "the release is unaffected"              "deploy mode warns instead of failing the build"
 assert_has "$ps1" "-RunHighest"                          "elevated task creation is opt-in, not the default"
 assert_lacks "$ps1" "'/Create', '/TN', \$NodeTask, '/TR', "cmd /c \$NodeCmd", '/SC', 'ONLOGON', '/RL'" \
@@ -436,6 +439,33 @@ else
 fi
 assert_has "$uw" '[string]$_' "taskkill output is cast to a string before any string method"
 assert_has "$uw" 'recovery from an unexpected error' "an unexpected error restarts the node instead of leaving it down"
+
+# ---- the updater must be able to kill the node it replaces (measured box 1, 2026-11-17)
+# Box 1, 07:11:39: the fixed wrapper logged every taskkill line as text and then
+#   ERROR: The process with PID 44560 could not be terminated. Reason: Access is denied.
+# for every gpn process, ending in REFUSING to apply. GPN-Node is registered with
+# -RL HIGHEST, and GPN-Update was registered LeastPrivilege -- a medium-integrity
+# task cannot stop a high-integrity node, so the Windows box can never update
+# itself once the node is up. The updater task must ask for the same integrity
+# level as the node it has to kill.
+update_runlevel=$(awk '/\$UpdateTaskXml/,0' "$ps1" | grep -m1 -o '<RunLevel>[A-Za-z]*</RunLevel>' | sed 's/<[^>]*>//g')
+case "$update_runlevel" in
+  HighestAvailable|Highest) ok "GPN-Update asks for ${update_runlevel} run level (it must kill an elevated GPN-Node)" ;;
+  *) bad "GPN-Update is registered '${update_runlevel:-missing}' - a non-elevated updater cannot stop the elevated node (box 1: 'Reason: Access is denied', REFUSING to apply)" ;;
+esac
+# The catch must name the process, not an empty string: the shipped line logged
+# "could not stop  (pid )" because $_ was the error record, not the process.
+if grep -q "could not stop ' + \$_.ProcessName" "$uw"; then
+  bad "the Stop-Process catch interpolates the error record - it logs an empty name and pid"
+else
+  ok "the Stop-Process catch names the process it could not stop"
+fi
+# Negative control for the run-level check.
+printf '%s\n' '<RunLevel>LeastPrivilege</RunLevel>' > "$tmp/bad-runlevel.txt"
+case "$(sed 's/<[^>]*>//g' "$tmp/bad-runlevel.txt")" in
+  HighestAvailable|Highest) bad "negative control PASSED the run-level check - the check is broken" ;;
+  *) ok "negative control: LeastPrivilege is rejected" ;;
+esac
 # Negative control: the shipped-broken shape must be rejected by the check above.
 printf '%s\n' "    & taskkill /F /T /IM \$n 2>&1 | ForEach-Object { if (\$_.Trim()) { Write-Log ('taskkill ' + \$n + ': ' + \$_.Trim()) } }" > "$tmp/bad-taskkill.ps1"
 if grep -q 'if (\$_.Trim()) { Write-Log (.taskkill ' "$tmp/bad-taskkill.ps1"; then

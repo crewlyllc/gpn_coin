@@ -1178,8 +1178,9 @@ function Stop-NodeTree {
   Get-Process -ErrorAction SilentlyContinue | Where-Object {
     $_.ProcessName -like 'gpn*' -and $_.ProcessName -ne 'gpn_update' -and $_.Id -ne $PID
   } | ForEach-Object {
-    try { Stop-Process -Id $_.Id -Force -ErrorAction Stop }
-    catch { Write-Log ('could not stop ' + $_.ProcessName + ' (pid ' + $_.Id + '): ' + $_.Exception.Message + ' - it may be elevated') }
+    $proc = $_
+    try { Stop-Process -Id $proc.Id -Force -ErrorAction Stop }
+    catch { Write-Log ('could not stop ' + $proc.ProcessName + ' (pid ' + $proc.Id + '): ' + $_.Exception.Message + ' - it may be elevated') }
   }
   if (Wait-NodeExit 10) {
     Write-Log 'GPN-Node stopped (forced)'
@@ -1390,7 +1391,18 @@ $UpdateTaskXml = @'
     <Principal id="Author">
       <UserId>__USER__</UserId>
       <LogonType>InteractiveToken</LogonType>
-      <RunLevel>LeastPrivilege</RunLevel>
+      <!-- HighestAvailable, NOT LeastPrivilege. This task's first job is to stop
+           GPN-Node, and GPN-Node is registered with -RL HIGHEST: a
+           medium-integrity updater cannot terminate a high-integrity process.
+           Box 1, 2026-11-17 07:11:39 -- every gpn process answered
+           "could not be terminated. Reason: Access is denied.", the wrapper
+           logged REFUSING to apply and the box could never update itself while
+           the node was up (the one successful cycle, 05:45, only worked because
+           an earlier crash had left the node stopped). The installer that writes
+           this XML is elevated -- it registers GPN-Node with HIGHEST -- so the
+           request is grantable; a standard account still falls back to the
+           Startup-shortcut loop when registration is refused. -->
+      <RunLevel>HighestAvailable</RunLevel>
     </Principal>
   </Principals>
   <Settings>

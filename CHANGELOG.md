@@ -8,6 +8,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.56] - 2026-11-17
+
+Bumped from 0.3.55. One subject: **the Windows updater is allowed to stop the node it replaces** —
+0.3.55 made the failure visible, this removes it (task rows #199/#200).
+
+### Changed
+- **`GPN-Update` is registered `HighestAvailable`, not `LeastPrivilege`.** `GPN-Node` has always run
+  with `-RL HIGHEST`; a medium-integrity task cannot terminate a high-integrity process. Box 1,
+  2026-11-17 07:11:39 — the first cycle running 0.3.55's fixed wrapper logged every taskkill line
+  (`ERROR: The process with PID 44560 could not be terminated. Reason: Access is denied.`), then
+  `REFUSING to apply: gpn processes survived the stop`, and the box could never update itself while
+  the node was up. The one cycle that did succeed (05:45) only worked because an earlier crash had
+  left the node stopped. The installer that writes this XML is already elevated — it registers
+  `GPN-Node` with HIGHEST — so the request is grantable, and a standard account still falls back to
+  the Startup-shortcut loop when registration is refused.
+
+### Fixed
+- **`could not stop  (pid )` now names the process.** The `Stop-Process` catch interpolated `$_`
+  inside `catch`, where `$_` is the error record rather than the process, so the log line carried an
+  empty name and pid for every survivor. The process object is captured before the `try`.
+- **The old assertions that demanded `LeastPrivilege` are inverted, not deleted**, in
+  `scripts/tests/test-autostart-installers.sh` — they encoded the bug ("update task never requests
+  elevation"), which is why it survived two releases.
+
 ## [0.3.55] - 2026-11-17
 
 Bumped from 0.3.54. One subject: **the Windows update can no longer leave the box with no node
