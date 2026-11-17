@@ -26,6 +26,12 @@ it killed the node: `console-closed`, exit **-1073741510** (0xC000013A = STATUS_
   task the same way. `release-windows.yml` carries its own launcher copy and now writes the vbs and
   points the task at it too.
 
+* Follow-up `cddaea4`: the launcher writer moved out of the deploy step. That step was 19,052 chars
+  before this change and 20,553 after, i.e. over GitHub's ~21,000-char per-step cap once escaped, so
+  the `b5b509d` push was rejected as a workflow-file issue (run 43983698269: `event=push`,
+  `conclusion=failure`, 0 jobs). The deploy step is 19,157 again and the new step is 1,345; no
+  `release-windows.yml` run is created for `cddaea4` at all.
+
 **Evidence (both boxes, 2026-11-16):** `wscript → cmd → conhost MainWindowHandle=0, Title=[]`; task
 `Status: Running`; RPC `system_version` 0.3.50, peers 3 (each box sees the other's peer id);
 `node.log` still growing; closing the `start-gpn.cmd` window left the supervisor pid unchanged
