@@ -418,6 +418,32 @@ if [ "${old_default:-0}" -lt 300 ]; then ok "negative control: the pre-0.3.53 12
 
 # Negative control for the ordering checks: a wrapper that applies before it
 # stops must be rejected, otherwise the assertions above prove nothing.
+
+# ---- the stop must not be able to leave the node down (measured box 1, 2026-11-17)
+# The tree kill piped `taskkill 2>&1` into `if ($_.Trim())`. On Windows PowerShell
+# 5.1 a native command's stderr arrives as an ErrorRecord, so the second iteration
+# (`gpn-node.exe`, already killed as a child of `gpn_node.exe`, therefore "not
+# found" on stderr) threw "does not contain a method named 'Trim'" INSIDE
+# Stop-NodeTree. The unhandled error ended the cycle before --apply and before the
+# restart: update.log stops at the taskkill line and the box is left with NO node
+# running (found down at 04:57, restarted by hand). Two things are asserted: the
+# cast that makes stderr a string, and a catch that restarts the node on any
+# unexpected error, so the "a failed update still restarts" promise is mechanical.
+if grep -q 'if (\$_.Trim()) { Write-Log (.taskkill ' "$uw"; then
+  bad "the taskkill loop trims an ErrorRecord - a stderr line from taskkill kills the cycle and leaves the node down"
+else
+  ok "the taskkill loop treats stderr as text, not an ErrorRecord"
+fi
+assert_has "$uw" '[string]$_' "taskkill output is cast to a string before any string method"
+assert_has "$uw" 'recovery from an unexpected error' "an unexpected error restarts the node instead of leaving it down"
+# Negative control: the shipped-broken shape must be rejected by the check above.
+printf '%s\n' "    & taskkill /F /T /IM \$n 2>&1 | ForEach-Object { if (\$_.Trim()) { Write-Log ('taskkill ' + \$n + ': ' + \$_.Trim()) } }" > "$tmp/bad-taskkill.ps1"
+if grep -q 'if (\$_.Trim()) { Write-Log (.taskkill ' "$tmp/bad-taskkill.ps1"; then
+  ok "negative control: the pre-0.3.55 taskkill loop is rejected"
+else
+  bad "negative control FAILED - the broken taskkill shape would pass"
+fi
+
 { echo 'x=$updater --apply'; echo 'schtasks /End /TN $NodeTask'; } > "$tmp/bad-order.ps1"
 if [ "$(grep -n 'schtasks /End /TN \$NodeTask' "$tmp/bad-order.ps1" | head -1 | cut -d: -f1)" -lt \
      "$(grep -n '\$updater --apply' "$tmp/bad-order.ps1" | head -1 | cut -d: -f1)" ]; then

@@ -8,6 +8,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.55] - 2026-11-17
+
+Bumped from 0.3.54. One subject: **the Windows update can no longer leave the box with no node
+running**, and its tree kill no longer crashes on a `taskkill` error line (task rows #199/#200).
+
+### Fixed
+- **A `taskkill` stderr line killed the update cycle before it applied anything (#199/#200).**
+  `Stop-NodeTree` piped `taskkill … 2>&1` into `if ($_.Trim())`. On Windows PowerShell 5.1 a native
+  command's stderr arrives as an `ErrorRecord`, which has no `Trim()`. The second image name
+  (`gpn-node.exe`) is normally already gone — it was a child of `gpn_node.exe`, killed a moment
+  earlier — so taskkill answers `ERROR: The process "gpn-node.exe" not found.` on stderr and the
+  unguarded call threw inside the function. Box 1's own transcript (2026-11-17 05:06): the cycle
+  logged the taskkill successes and then `TerminatingError(ForEach-Object): "Method invocation failed
+  because [System.Management.Automation.ErrorRecord] does not contain a method named 'Trim'."`,
+  so `--apply` never ran, the restart never ran, and the box was left **with no node at all** (found
+  down at 04:57 and restarted by hand). Output is now cast with `[string]$_` before any string
+  method; proven in the same interpreter: the old idiom `THREW`, the new one logs
+  `F: ERROR: The process "no-such-process-zz.exe" not found.` and survives.
+- **Any unexpected error now restarts the node.** The wrapper's header has always promised "a failed
+  update still restarts: a box with nothing running is worse than a box on the previous build", but
+  a terminating error skipped every restart (it ended the `try` body and fell straight to `finally`,
+  which only closed the lock). A `catch` now logs `UNEXPECTED: <message>` with the position, starts
+  `GPN-Node`, logs `GPN-Node started (recovery from an unexpected error)` and exits 1.
+
 ## [0.3.54] - 2026-11-17
 
 Bumped from 0.3.53. One subject: **the Windows self-update's confirm window is longer than a

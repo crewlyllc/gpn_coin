@@ -1164,7 +1164,16 @@ function Stop-NodeTree {
   }
   Write-Log ('the node did not exit within ' + $GraceSeconds + ' s - ending the worker tree (taskkill /T /F)')
   foreach ($n in @('gpn_node.exe', 'gpn-node.exe')) {
-    & taskkill /F /T /IM $n 2>&1 | ForEach-Object { if ($_.Trim()) { Write-Log ('taskkill ' + $n + ': ' + $_.Trim()) } }
+    # [string] is load-bearing. On Windows PowerShell 5.1 a native command's
+    # stderr reaches the pipeline as an ErrorRecord, which has no Trim(); the
+    # second image name is normally already gone (it was a child of the first),
+    # so taskkill answers "not found" on stderr and the unguarded $_.Trim() threw
+    # INSIDE this function. Box 1, 2026-11-17: the cycle died here with no apply
+    # and no restart, and the box was left with no node running at all.
+    & taskkill /F /T /IM $n 2>&1 | ForEach-Object {
+      $line = [string]$_
+      if ($line.Trim()) { Write-Log ('taskkill ' + $n + ': ' + $line.Trim()) }
+    }
   }
   Get-Process -ErrorAction SilentlyContinue | Where-Object {
     $_.ProcessName -like 'gpn*' -and $_.ProcessName -ne 'gpn_update' -and $_.Id -ne $PID
@@ -1321,6 +1330,17 @@ try {
   if ($backMsg) { Write-Log ('CONFIRMED after rollback: ' + $backMsg) }
   else { Write-Log ('WARNING: even the previous build did not confirm: ' + $script:ConfirmReason) }
   Show-UpdateFailure 1 'confirm the new version' $script:ConfirmReason
+  exit 1
+}
+catch {
+  # The header promises "a failed update still restarts: a box with nothing
+  # running is worse than a box on the previous build". A terminating error is
+  # the one path that used to break that promise (box 1, 2026-11-17: a crash in
+  # Stop-NodeTree left the box with no node at all). Make it mechanical.
+  Write-Log ('UNEXPECTED: ' + $_.Exception.Message)
+  Write-Log ('at: ' + $_.InvocationInfo.PositionMessage)
+  try { & schtasks /Run /TN $NodeTask 2>&1 | Out-Null } catch { }
+  Write-Log 'GPN-Node started (recovery from an unexpected error)'
   exit 1
 }
 finally {
