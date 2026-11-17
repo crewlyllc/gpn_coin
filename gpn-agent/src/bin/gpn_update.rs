@@ -319,12 +319,9 @@ fn default_state_dir() -> PathBuf {
 /// so a lookup can never invent state that is not there.
 fn discover_state_dir(target_dir: &std::path::Path) -> Option<PathBuf> {
     let parent = target_dir.parent()?;
-    for cand in [parent.join("data").join("update"), parent.join("update")] {
-        if update::installed_version(&cand).is_some() || cand.join("versions").is_dir() {
-            return Some(cand);
-        }
-    }
-    None
+    [parent.join("data").join("update"), parent.join("update")]
+        .into_iter()
+        .find(|cand| update::installed_version(cand).is_some() || cand.join("versions").is_dir())
 }
 
 fn default_target_dir() -> PathBuf {
