@@ -8,6 +8,43 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.53] - 2026-11-16
+
+Bumped from 0.3.52. One subject: **the Windows update can stop the node it is replacing, and
+`--check` can no longer report a version the box is not running** (task rows #199/#200). 0.3.52
+taught a node to update itself on Linux; this makes the same sentence true on Windows.
+
+### Fixed
+- **Windows: an update is no longer a no-op that rolls itself back (#199).** Box 1's own
+  `update.log` on the 0.3.50→0.3.52 cycle: `stopping GPN-Node` → `the node did not exit within 60 s`
+  → `apply: installed 0.3.52` → `NOT CONFIRMED: the node reports 0.3.50` → `rolling back`.
+  `schtasks /End` ends only the task's own `wscript.exe`; the worker tree under it
+  (`start-node.cmd` → `gpn_node.exe` → children) kept running and kept answering RPC, so the new
+  build could never take over. The generated `update-and-restart.ps1` now stops the **tree**
+  (`schtasks /End`, then `taskkill /T /F` on `gpn_node.exe`/`gpn-node.exe`, then per-survivor
+  `Stop-Process`) and, if any `gpn*` process survives, **refuses to apply** — it logs
+  `REFUSING to apply: gpn processes survived the stop…`, restarts the node on the current build and
+  exits 1, so the install is untouched and the boot's single attempt is not burned.
+- **`gpn_update --check` can no longer invent the version it is checking (#199).** It read the
+  build stamp in `bin`, which a rollback cannot refresh (`Access is denied` on the running
+  `gpn_update.exe`), so box 1 printed `current 0.3.52 compiled-in (no build stamp in the install
+  dir) -> up to date` while the junction, the runner and RPC all said 0.3.50. It now locates the
+  state dir next to the target dir (`<install>/data/update`, then `<install>/update`) and, when
+  neither `current` nor a stamp exists, **refuses**: `cannot tell which version this box runs…`,
+  exit 1.
+- **A re-cut release re-arms a rolled-back attempt.** The attempt ledger recorded only
+  `version` + a boot id, so one rolled-back attempt disabled auto-update until a reboot — even if
+  the release had been re-cut in the meantime. `UpdateAttempt` now carries the manifest's
+  `release_id` (asset sha256); the same bytes still block, a different release re-arms.
+- **A second install directory cannot hijack another install's scheduled tasks (#200).**
+  `install.ps1` reused an existing `GPN-Node`/`GPN-Update` task only when the run-as user matched,
+  so installing into `C:\gpn-ci` while box 1's task said `Jeremy`/`Jeremy Guo` recreated both tasks
+  and repointed them at `C:\gpn-ci`. `Register-NodeTask`/`Register-UpdateTask` now resolve the
+  install dir from the existing task's own `Task To Run` and **refuse to touch a foreign task**
+  (`belongs to the install at '<dir>' -- NOT touching it`).
+- Clippy gate repair: `discover_state_dir` uses `Iterator::find` instead of a manual loop
+  (`-D warnings` in the agent lane).
+
 ## [0.3.52] - 2026-11-16
 
 Bumped from 0.3.51. One subject: **self-addresses stop being advertised, persisted or

@@ -368,8 +368,12 @@ if grep -qE '(^|[^[:alnum:]_])&[[:space:]]*powershell.*-File[[:space:]]*(\"?\$Re
 
 line_end=$(grep -n 'schtasks /End /TN \$NodeTask' "$uw" | head -1 | cut -d: -f1)
 line_apply=$(grep -n '\$updater --apply' "$uw" | head -1 | cut -d: -f1)
-line_run=$(grep -n 'schtasks /Run /TN \$NodeTask' "$uw" | head -1 | cut -d: -f1)
-line_fail=$(grep -n 'Show-UpdateFailure \$apply' "$uw" | head -1 | cut -d: -f1)
+# 0.3.53: the wrapper also restarts the node on the REFUSAL path ("the node could not be
+# stopped, so nothing was installed and this build keeps running"), which sits *before*
+# --apply by design. Ordering must therefore be checked against the restart that follows
+# the apply, not the first `schtasks /Run` in the file.
+line_run=$(awk -v a="$line_apply" 'NR>a && /schtasks \/Run \/TN \$NodeTask/ {print NR; exit}' "$uw")
+line_fail=$(awk -v a="$line_run" 'NR>a && /Show-UpdateFailure \$apply/ {print NR; exit}' "$uw")
 [ -n "$line_end" ] && [ -n "$line_apply" ] && [ "$line_end" -lt "$line_apply" ] \
   && ok "stops the node BEFORE --apply" || bad "--apply is not preceded by schtasks /End"
 [ -n "$line_apply" ] && [ -n "$line_run" ] && [ "$line_apply" -lt "$line_run" ] \
