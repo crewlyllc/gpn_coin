@@ -5444,6 +5444,45 @@ mod tests {
         );
     }
 
+    /// The field failure of 2026-11-18, on a fifth computer: the first start
+    /// after an update rebuilt the DAG and did not answer RPC until ~400 s, and
+    /// the 360 s window rolled it back with `confirm the new version failed`.
+    /// A first start that is merely slow must be confirmed, not rolled back.
+    #[test]
+    fn a_first_start_that_answers_after_400s_is_confirmed_not_rolled_back() {
+        // 200 polls at 2 s each = 400 s of "process up, RPC not answering".
+        let mut rpc: Vec<Result<String, String>> = (0..200)
+            .map(|_| Err("connection refused".into()))
+            .collect();
+        rpc.push(Ok("0.3.60".into()));
+        let mut probe = ScriptedProbe::new(vec![Some(true)], rpc);
+        let mut log = Vec::new();
+        let out = wait_for_confirm(&mut probe, "0.3.60", confirm_deadlines(true), |l| {
+            log.push(l.to_string())
+        });
+        match out {
+            ConfirmOutcome::Confirmed { version, at_secs } => {
+                assert_eq!(version, "0.3.60");
+                assert_eq!(at_secs, 400, "200 slow polls at 2 s each");
+            }
+            ConfirmOutcome::Failed(f) => panic!(
+                "a 400 s first start is slow, not dead — got {f:?} after {}s; log: {log:?}",
+                f.at_secs()
+            ),
+            other => panic!("expected confirmation, got {other:?}"),
+        }
+        // The wait must have been the *first-start* one, and it must say so.
+        assert!(
+            log.iter()
+                .any(|l| l.contains("past the 900s window") == false),
+            "a 400 s start is inside the first-start window: {log:?}"
+        );
+        assert!(
+            log.iter().any(|l| l.contains("confirm: process=up rpc=no")),
+            "the slow start must be reported as process-up/RPC-absent: {log:?}"
+        );
+    }
+
     /// C: dead at 10 s is dead now, not 900 s from now.
     #[test]
     fn a_process_that_exits_at_ten_seconds_fails_immediately() {
