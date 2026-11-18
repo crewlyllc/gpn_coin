@@ -25,6 +25,8 @@
 #   scripts/commit-paths.sh -m "message" <path> [<path> ...]
 #   scripts/commit-paths.sh -m "message" --dry-run <path> ...
 #   scripts/commit-paths.sh -m "message" --skip-fmt <path> ...
+#   scripts/commit-paths.sh -m "message" --no-verify <path> ...   (bypass pre-commit;
+#       for a commit made BY the release that owns the #204 lock)
 #
 # Optional: install as a pre-commit hook (defence in depth; the hook only sees
 # the index, so it cannot know your intent — it just refuses bulk-looking sets):
@@ -40,6 +42,7 @@ cd "$REPO"
 MSG=""
 DRY=0
 SKIP_FMT=0
+NOVERIFY=0
 PATHS=()
 START_EPOCH="$(date +%s)"
 
@@ -48,6 +51,15 @@ while [ $# -gt 0 ]; do
     -m|--message) MSG="${2:?$1 needs a message}"; shift 2 ;;
     --dry-run)    DRY=1; shift ;;
     --skip-fmt)   SKIP_FMT=1; shift ;;
+    # --no-verify: pass through to `git commit`, bypassing the pre-commit hook.
+    # There is exactly one legitimate caller today — scripts/release-cut.sh's own
+    # publish commit, which happens while that release holds ~/.gpn/release-in-flight
+    # (#204). Without it the lock refuses the release's own manifest commit at
+    # step 6, after the mirror has already been replaced: the public assets would be
+    # 0.3.59 while releases.json still said 0.3.58 (the #134 fleet breakage shape).
+    # The hook's own header documents --no-verify as the emergency escape; this is
+    # the non-emergency, mechanical version of it.
+    --no-verify)  NOVERIFY=1; shift ;;
     -h|--help)    sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -A|--all|.)   echo "REFUSED: '$1' stages the whole tree. Name the paths explicitly." >&2; exit 2 ;;
     -*)           echo "REFUSED: unknown option '$1'" >&2; exit 2 ;;
@@ -180,5 +192,9 @@ if [ "$DRY" = 1 ]; then
   exit 0
 fi
 
-git commit -m "$MSG" -- "${PATHS[@]}"
+if [ "$NOVERIFY" = 1 ]; then
+  git commit --no-verify -m "$MSG" -- "${PATHS[@]}"
+else
+  git commit -m "$MSG" -- "${PATHS[@]}"
+fi
 echo "committed: $(git rev-parse --short HEAD)"

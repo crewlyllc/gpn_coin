@@ -646,7 +646,11 @@ fi
 
 # ────────────────────────────────────────────────────────────── 6 publish ──
 step "6/6 publish and verify"
-"$COMMIT" -m "release: sign $VER (linux $((Z_LINUX/1000000)).$((Z_LINUX/100000%10))MB ${S_LINUX:0:8}, windows $((Z_WIN/1000000)).$((Z_WIN/100000%10))MB ${S_WIN:0:8})" "$MANIFEST_REL"
+# The publish commit must NOT be refused by the lock this release is holding: the
+# #204 guard stops *foreign* commits, and this commit is the release's own. Without
+# --no-verify the hook aborts step 6 after the mirror was already replaced, leaving
+# public assets at the new version and releases.json at the old one (#134).
+"$COMMIT" --no-verify -m "release: sign $VER (linux $((Z_LINUX/1000000)).$((Z_LINUX/100000%10))MB ${S_LINUX:0:8}, windows $((Z_WIN/1000000)).$((Z_WIN/100000%10))MB ${S_WIN:0:8})" "$MANIFEST_REL"
 say "pushing…"
 git -C "$REPO" push origin HEAD:main 2>&1 | scrub || {
   echo "ABORT: push failed; the signed manifest is committed locally but not live." >&2; exit 1; }
