@@ -2317,13 +2317,22 @@ pub struct ConfirmDeadlines {
 }
 
 impl ConfirmDeadlines {
-    /// Replace the window (an operator's `--timeout` / env override). The
-    /// ceiling still caps it: an override can shorten the wait, never extend it
+    /// Apply an operator's `--timeout` / env override.
+    ///
+    /// The override is a budget for the whole wait, so it replaces **both**
+    /// deadlines: window and ceiling are clamped to `secs`, and the hard
+    /// ceiling still caps it. An override can shorten the wait, never extend it
     /// past [`CONFIRM_HARD_CEILING_SECS`].
+    ///
+    /// Clamping only the window was a real defect (2026-11-18, CI run
+    /// 44399271742): `--timeout 1` set the window to 1 s but left the ceiling at
+    /// 900 s, so `--confirm` with nothing listening gave up after 900.8 s — the
+    /// opposite of the bounded-time contract this gate exists to provide.
     pub fn with_window(self, secs: u64) -> Self {
+        let secs = secs.min(self.ceiling_secs);
         ConfirmDeadlines {
-            window_secs: secs.min(self.ceiling_secs),
-            ceiling_secs: self.ceiling_secs,
+            window_secs: secs,
+            ceiling_secs: secs,
         }
     }
 }
@@ -5566,6 +5575,25 @@ mod tests {
         // An override can shorten the wait, never extend it.
         assert_eq!(first.with_window(30).window_secs, 30);
         assert_eq!(first.with_window(5_000).window_secs, 900);
+    }
+
+    /// The operator's `--timeout` is a budget for the whole wait, not just the
+    /// point where the gate starts complaining. `--timeout 1` waited 900.8 s in
+    /// CI (run 44399271742) because only the window was clamped.
+    #[test]
+    fn an_operator_timeout_bounds_the_ceiling_too() {
+        let d = confirm_deadlines(true).with_window(1);
+        assert_eq!(d.window_secs, 1);
+        assert_eq!(d.ceiling_secs, 1, "the ceiling must be the budget too");
+        // And the gate actually stops there, rather than continuing to 900 s.
+        let mut probe = ScriptedProbe::new(vec![None], vec![Err("no answer".into())]);
+        let out = wait_for_confirm(&mut probe, "0.3.59", d, |_| {});
+        match out {
+            ConfirmOutcome::Failed(f) => {
+                assert!(f.at_secs() <= 2, "gave up at {}s", f.at_secs());
+            }
+            other => panic!("expected a failure, got {other:?}"),
+        }
     }
 
     // ── #207 remediation: classify, fix, retry exactly once ──────────────────

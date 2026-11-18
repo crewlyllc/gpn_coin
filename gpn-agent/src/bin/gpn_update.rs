@@ -1223,15 +1223,26 @@ fn roll_back_after_failed_confirm(
     // Confirm the old build actually runs — "rolled back" is a statement about
     // `current`, not about the process, and reporting one as the other is how
     // the fleet was told a node was fine while it ran the failed build.
-    let mut now_running = String::new();
+    //
+    // The operator's `--timeout` bounds this wait too: a rollback confirm that
+    // ignores the budget is how the CLI test suite spent 900 s per case.
+    let rollback_deadlines = || {
+        let d = update::confirm_deadlines(true);
+        if o.timeout_secs == DEFAULT_CONFIRM_TIMEOUT_SECS {
+            d
+        } else {
+            d.with_window(o.timeout_secs)
+        }
+    };
+    let now_running: String;
     let mut down = false;
     if let Some(prev) = &prev_label {
         let mut probe = ProcessRpcProbe::new(&o.rpc_url, expected_trees(o, prev));
-        let d = update::confirm_deadlines(true);
-        match update::wait_for_confirm(&mut probe, prev, d, |line| println!("  {line}")) {
+        let d = rollback_deadlines();
+        match update::wait_for_confirm(&mut probe, prev, d, |line| progress(o, line)) {
             update::ConfirmOutcome::Confirmed { version, at_secs } => {
                 now_running = format!("{version} is running after {at_secs} s");
-                println!("  rollback confirmed: {now_running}");
+                progress(o, &format!("rollback confirmed: {now_running}"));
             }
             update::ConfirmOutcome::Failed(f) => {
                 let why = f.describe(prev);
@@ -1242,11 +1253,14 @@ fn roll_back_after_failed_confirm(
                     eprintln!("gpn_update: the second rollback start failed: {e}");
                 }
                 let mut probe = ProcessRpcProbe::new(&o.rpc_url, expected_trees(o, prev));
-                match update::wait_for_confirm(&mut probe, prev, d, |line| println!("  {line}")) {
+                match update::wait_for_confirm(&mut probe, prev, d, |line| progress(o, line)) {
                     update::ConfirmOutcome::Confirmed { version, at_secs } => {
                         now_running =
                             format!("{version} is running after {at_secs} s (second start)");
-                        println!("  rollback confirmed on the second start: {now_running}");
+                        progress(
+                            o,
+                            &format!("rollback confirmed on the second start: {now_running}"),
+                        );
                     }
                     update::ConfirmOutcome::Failed(f2) => {
                         let (last_exit, tail) = start_evidence(o);
@@ -1267,8 +1281,8 @@ fn roll_back_after_failed_confirm(
         match update::installed_version(&o.state_dir) {
             Some(v) => {
                 let mut probe = ProcessRpcProbe::new(&o.rpc_url, expected_trees(o, &v));
-                let d = update::confirm_deadlines(true);
-                match update::wait_for_confirm(&mut probe, &v, d, |line| println!("  {line}")) {
+                let d = rollback_deadlines();
+                match update::wait_for_confirm(&mut probe, &v, d, |line| progress(o, line)) {
                     update::ConfirmOutcome::Confirmed { version, at_secs } => {
                         now_running = format!("{version} is running after {at_secs} s");
                     }
@@ -1577,7 +1591,7 @@ fn stop_gpn_family() -> usize {
     });
     for (pid, _, name) in ordered {
         if let Some(p) = sys.process(pid) {
-            println!("  remediate: stopping {name} (pid {pid})");
+            eprintln!("  remediate: stopping {name} (pid {pid})");
             p.kill();
         }
     }
@@ -1647,6 +1661,41 @@ fn print_log_tail(tail: &[String]) {
     }
 }
 
+/// Human progress for the confirm gate.
+///
+/// Under `--json` stdout is the report and nothing else: a supervisor parses it
+/// (`update-and-restart.ps1` reads the fields), so a stray `  confirm: ...` line
+/// made the output unparseable (CI run 44399271742: `json: Error("expected
+/// value", line: 1, column: 3)`). Progress therefore goes to stderr when JSON
+/// is requested.
+fn progress(o: &Options, line: &str) {
+    if o.json {
+        eprintln!("  {line}");
+    } else {
+        println!("  {line}");
+    }
+}
+
+/// Is this port holder one the tests have declared to be the fake node?
+///
+/// The port pre-flight below refuses to start while a *foreign* process holds
+/// the RPC port. The integration tests serve RPC from a `tiny_http` server in
+/// the test binary, which is foreign by construction — so debug builds accept an
+/// explicit, pid-exact allowlist. Release builds compile this out, exactly like
+/// `GPN_UPDATE_PUBKEY` above: production never gets a way to wave a holder
+/// through by name.
+fn port_holder_is_declared_test_node(pid: u32) -> bool {
+    if !cfg!(debug_assertions) {
+        return false;
+    }
+    let Ok(spec) = std::env::var("GPN_UPDATE_PREFLIGHT_ALLOW_PID") else {
+        return false;
+    };
+    spec.split(',')
+        .filter_map(|s| s.trim().parse::<u32>().ok())
+        .any(|allowed| allowed == pid)
+}
+
 /// The confirm gate with its single remediation+retry (#207).
 ///
 /// Returns the version that confirmed, or the operator's one-line failure
@@ -1682,14 +1731,30 @@ fn confirm_update(
                 // The listener IS the build under test: it is up and answering
                 // already (the restart just happened). Stopping it here would
                 // kill the process we are waiting for.
-                println!(
-                    "  confirm: rpc port {port} is already held by {expect} (pid {}) - waiting for its answer",
-                    pid.unwrap_or(0)
+                progress(
+                    o,
+                    &format!(
+                        "confirm: rpc port {port} is already held by {expect} (pid {}) - waiting for its answer",
+                        pid.unwrap_or(0)
+                    ),
+                );
+            } else if pid.map(port_holder_is_declared_test_node).unwrap_or(false) {
+                // Test fixture (debug only): the holder is the HTTP server that
+                // stands in for the node. Nothing to stop, nothing to fight.
+                progress(
+                    o,
+                    &format!(
+                        "confirm: rpc port {port} is the declared test node (pid {}) - waiting",
+                        pid.unwrap_or(0)
+                    ),
                 );
             } else if gpn {
-                println!(
-                    "  remediate: rpc port {port} held by {name}{} -> stop the stale gpn family (children-first), retry",
-                    pid.map(|p| format!(" (pid {p})")).unwrap_or_default()
+                progress(
+                    o,
+                    &format!(
+                        "remediate: rpc port {port} held by {name}{} -> stop the stale gpn family (children-first), retry",
+                        pid.map(|p| format!(" (pid {p})")).unwrap_or_default()
+                    ),
                 );
                 let left = stop_gpn_family();
                 if left > 0 {
@@ -1702,7 +1767,7 @@ fn confirm_update(
                         "confirm failed before start: rpc port {port} still listens after stopping the gpn family"
                     ));
                 }
-                println!("  remediate: rpc port {port} freed -> retry");
+                progress(o, &format!("remediate: rpc port {port} freed -> retry"));
             } else {
                 // Two services fighting over a port is worse than one clean
                 // failure. Say exactly who holds it; rollback follows.
@@ -1714,9 +1779,12 @@ fn confirm_update(
         }
     }
 
-    println!(
-        "  confirm: waiting up to {} s (window {} s, ceiling {} s) for {expect}",
-        deadlines.ceiling_secs, deadlines.window_secs, deadlines.ceiling_secs
+    progress(
+        o,
+        &format!(
+            "confirm: waiting up to {} s (window {} s, ceiling {} s) for {expect}",
+            deadlines.ceiling_secs, deadlines.window_secs, deadlines.ceiling_secs
+        ),
     );
 
     let mut make_probe = {
@@ -1780,11 +1848,11 @@ fn confirm_update(
         &mut apply,
         expect,
         deadlines,
-        &mut |line| println!("  {line}"),
+        &mut |line| progress(o, line),
     ) {
         Ok(version) => {
             report.confirmed_version = Some(version.clone());
-            println!("  confirmed {version} is running");
+            progress(o, &format!("confirmed {version} is running"));
             Ok(version)
         }
         Err(reason) => {
@@ -1813,7 +1881,7 @@ fn run_confirm(o: &Options, report: &mut Report) -> u8 {
         d.with_window(o.timeout_secs)
     };
     let mut probe = ProcessRpcProbe::new(&o.rpc_url, expected_trees(o, &expect));
-    match update::wait_for_confirm(&mut probe, &expect, d, |line| println!("  {line}")) {
+    match update::wait_for_confirm(&mut probe, &expect, d, |line| progress(o, line)) {
         update::ConfirmOutcome::Confirmed { version, .. } => {
             report.confirmed_version = Some(version.clone());
             if o.json {

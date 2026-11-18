@@ -264,6 +264,28 @@ impl Ctx {
     }
 
     fn run(&self, args: &[&str], extra_env: &[(&str, &str)], url: &str) -> (i32, String, String) {
+        self.run_inner(args, extra_env, url, true)
+    }
+
+    /// Same, but the port pre-flight is *not* told that the test process holds
+    /// the RPC port: the fixture is then a genuinely foreign holder, which is
+    /// what the refusal branch must be tested against.
+    fn run_undeclared(
+        &self,
+        args: &[&str],
+        extra_env: &[(&str, &str)],
+        url: &str,
+    ) -> (i32, String, String) {
+        self.run_inner(args, extra_env, url, false)
+    }
+
+    fn run_inner(
+        &self,
+        args: &[&str],
+        extra_env: &[(&str, &str)],
+        url: &str,
+        declare_test_node: bool,
+    ) -> (i32, String, String) {
         let mut cmd = std::process::Command::new(BIN);
         cmd.args(args)
             .env("GPN_UPDATE_URL", url)
@@ -271,6 +293,17 @@ impl Ctx {
             .env("GPN_UPDATE_DIR", &self.state)
             .env("GPN_UPDATE_TARGET_DIR", &self.target)
             .env("HOME", &self.root)
+            // The fake node is a `tiny_http` server inside this test process,
+            // so it holds the RPC port under this pid. Debug builds let a test
+            // declare exactly that pid; release builds ignore the variable.
+            .env(
+                "GPN_UPDATE_PREFLIGHT_ALLOW_PID",
+                if declare_test_node {
+                    std::process::id().to_string()
+                } else {
+                    String::new()
+                },
+            )
             // Never inherit a policy/restart setting from the developer's shell.
             .env_remove("GPN_AUTO_UPDATE")
             .env_remove("GPN_UPDATE_RESTART_CMD")
@@ -790,7 +823,36 @@ fn confirm_fails_when_the_old_version_is_still_running() {
     assert_eq!(code, 4, "stdout={out} stderr={err}");
     assert!(err.contains(NEW_VERSION), "stderr={err}");
     assert!(err.contains(OLD_VERSION), "names what it saw: {err}");
-    assert!(err.contains("not running"), "stderr={err}");
+    // The message names the failing signal, not a guess about the process.
+    assert!(err.contains("signal=rpc"), "stderr={err}");
+    assert!(err.contains("not confirmed"), "stderr={err}");
+}
+
+/// The port pre-flight must still refuse a holder nobody vouched for: the
+/// debug-only allowlist is per-pid, not a blanket off-switch.
+#[test]
+fn the_port_preflight_still_refuses_an_undeclared_holder() {
+    let ctx = Ctx::new("preflight-foreign");
+    ctx.seed_old();
+    let (feed, _bundle) = apply_feed();
+    feed.add("/rpc", rpc_body(NEW_VERSION));
+    let rpc = feed.url("/rpc");
+
+    let (code, _out, err) = ctx.run_undeclared(
+        &["--apply", "--json", "--timeout", "2"],
+        &[
+            ("GPN_UPDATE_RESTART_CMD", "true"),
+            ("GPN_BOOT_ID", "boot-foreign"),
+            ("GPN_RPC_URL", &rpc),
+        ],
+        &feed.url("/releases.json"),
+    );
+    assert_ne!(code, 0, "a foreign port holder is a failure: {err}");
+    assert!(
+        err.contains("not a gpn process"),
+        "the refusal names the holder: {err}"
+    );
+    assert!(err.contains("not touching it"), "{err}");
 }
 
 /// Nothing listening at all is the same answer: not confirmed, in bounded time.
