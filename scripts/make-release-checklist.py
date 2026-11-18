@@ -54,6 +54,7 @@ def main():
         short = (short[:110] + "…") if len(short) > 110 else short
         section.append(f"- [ ] **{iid} — {short}**")
         section.append(f"      - done when: {accept[:200]}")
+        section.append("      - notes:")
     # BLOCKED rows are deliberately NOT added (owner decision 2026-11-18): a release
     # checklist contains only what must be done to ship this bundle. Blocked work lives on
     # GPN-LIST.md with its reason; including it here inflated the tick count with lines

@@ -54,6 +54,29 @@ Rules:
 - The final gate is still §9/§10: version published and a node reporting it. A fully ticked file
   with no published release is not done.
 
+## 0b. Every tick carries notes; every finished checklist is filed
+
+**Notes.** A tick is not just a checkmark: append what happened, in this shape —
+
+```
+    [x] The test passes — 105 passed, 0 failed   (example, indented on purpose)
+      notes: the confirm gate needed a 30 s start grace; without it a restart that was
+             still spawning was declared dead at t=0.
+```
+
+Rules for notes:
+- **One line after the box**, indented, prefixed `notes:` — why it passed, what was surprising,
+  what was deferred, what broke and was fixed on the way.
+- Keep it to the things a reader six months from now could not infer from the diff.
+- Never leave a tick with no note at all — `— <command or value>` inline is the minimum.
+
+**Filing.** When §10's last box is ticked and the version is published:
+1. move the file to `docs/releases/archive/<version>.md`
+2. add a row to `docs/releases/INDEX.md` — version, publish date, the item ids it carried
+3. leave a one-line pointer in the list row (`COMPLETE 0.3.60 — archive/0.3.60.md`)
+
+An unfiled checklist is a finished release nobody can find later.
+
 ## 0. Sequencing — the rule that binds the rest
 
 - **Work the checklist in order.** You may not tick item N+1 while item N is unticked, and you
