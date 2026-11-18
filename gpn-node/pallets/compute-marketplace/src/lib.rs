@@ -1175,9 +1175,21 @@ pub mod pallet {
             )
         }
 
+        /// **Accepting a lease is free for the provider (0.3.59, #205).**
+        ///
+        /// `Pays::No` is on the *weight annotation* because the transaction pool
+        /// decides `pays_fee` from the call's `DispatchInfo` **before** dispatch
+        /// runs; a `Pays::No` returned only from dispatch is evaluated too late
+        /// and a zero-balance provider is rejected with
+        /// `InvalidTransaction::Payment` ("Inability to pay some fees"). That is
+        /// exactly what stranded job #6551 on box 1. The post info carries
+        /// `Pays::No` too, so dispatch cannot charge what the pool allowed.
+        ///
+        /// The requestor pays for the work through escrow; the acceptor pays its
+        /// own PoW/attestation cost once, at registration.
         #[pallet::call_index(3)]
-        #[pallet::weight(<T as Config>::WeightInfo::accept_job())]
-        pub fn accept_job(origin: OriginFor<T>, job_id: u64) -> DispatchResult {
+        #[pallet::weight((<T as Config>::WeightInfo::accept_job(), Pays::No))]
+        pub fn accept_job(origin: OriginFor<T>, job_id: u64) -> DispatchResultWithPostInfo {
             let who = ensure_signed(origin)?;
             let provider = who.clone();
             ensure!(
@@ -1217,7 +1229,7 @@ pub mod pallet {
             jobs.push(job_id);
             <ProviderJobs<T>>::insert(&provider, jobs);
             Self::deposit_event(Event::<T>::JobAccepted { job_id, provider });
-            Ok(())
+            Ok(Pays::No.into())
         }
 
         #[pallet::call_index(4)]
@@ -3167,6 +3179,47 @@ mod tests {
             // Carol is not a registered provider
             let result = MarketPallet::accept_job(RuntimeOrigin::signed(CAROL), job_id);
             assert_eq!(result, Err(Error::<Test>::ProviderNotRegistered.into()));
+        });
+    }
+
+    /// #205 — accepting a job must cost the provider nothing; the requestor pays.
+    ///
+    /// Two separate facts, both required, and the first is the one that actually bit
+    /// (incident #6551, box 1): the transaction POOL decides `pays_fee` from the call's
+    /// `DispatchInfo` **before** dispatch runs (see `entry_call_is_fee_free_in_its_dispatch_info`
+    /// above), so a `DispatchResult`-returning `accept_job` says `Pays::Yes` and a
+    /// zero-balance provider is rejected with "Inability to pay some fees" without ever
+    /// reaching dispatch. Returning `Ok(Pays::No.into())` from dispatch is *not enough* —
+    /// the weight annotation must carry `Pays::No`. The second assertion keeps the post
+    /// info honest too, so dispatch cannot quietly charge a fee the pool allowed.
+    #[test]
+    fn accept_job_is_fee_free() {
+        use frame_support::dispatch::{GetDispatchInfo, Pays};
+        use sp_runtime::traits::Dispatchable;
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            let job_id = create_job(ALICE);
+
+            assert_eq!(
+                Call::<Test>::accept_job { job_id }.get_dispatch_info().pays_fee,
+                Pays::No,
+                "accept_job must be Pays::No in DispatchInfo, or a zero-balance provider can never claim work"
+            );
+
+            // A registered provider whose account holds nothing, exactly as #6551 found it.
+            pallet_balances::Pallet::<Test>::force_set_balance(RuntimeOrigin::root(), BOB, 0)
+                .unwrap();
+
+            let post = RuntimeCall::from(Call::<Test>::accept_job { job_id })
+                .dispatch(RuntimeOrigin::signed(BOB))
+                .expect("a zero-balance provider must be able to accept a lease");
+            assert_eq!(
+                post.pays_fee,
+                Pays::No,
+                "accepting must not charge the provider a fee"
+            );
+            assert_eq!(Jobs::<Test>::get(job_id).unwrap().state, JobState::Accepted);
+            assert_eq!(pallet_balances::Pallet::<Test>::free_balance(BOB), 0);
         });
     }
 

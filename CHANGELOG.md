@@ -29,17 +29,27 @@ Bumped from 0.3.58 (`scripts/bump-version.py patch`).
   `GPN_UPDATE_CHECK_HOURS`. A temporary setting with no revert date is how a
   debugging shortcut becomes permanent behaviour.
 - **Accepting a job no longer costs the provider a fee (#205).** `accept_job`
-  returns `Pays::No` (keeping `ensure_signed`, so identity is still proven), so a
-  registered provider with an empty account can accept a lease. That removes the
-  reason the access point had to gate routing on provider balance — the gate that
-  produced incident #6551 (`unfunded` provider advertised `healthy: true`, was
-  leased a job, could not pay to accept, and the caller waited a full deadline)
-  — and the routing `unfunded` check is dropped with it.
+  now carries `Pays::No` **on its weight annotation** (the transaction pool
+  decides `pays_fee` from the call's `DispatchInfo` *before* dispatch, so a
+  `Pays::No` returned only from dispatch is evaluated too late) and returns
+  `Ok(Pays::No.into())` from a `DispatchResultWithPostInfo`, keeping
+  `ensure_signed` so identity is still proven. That is the half that stranded
+  incident #6551: a registered provider with an empty account could not pay to
+  accept, so the access point leased it a job the caller then waited a full
+  deadline for.
 
-### Removed
-- The access point's `unfunded` routing gate (#205): the condition it guarded
-  against can no longer happen, so a provider is no longer excluded from routing
-  by its account balance.
+### Not in this release (recorded, so the changelog is not a promise)
+- **The access point's `unfunded` routing gate is deliberately still in place.**
+  `start_job`, `submit_result`, `submit_result_v2`, `complete_job` and `fail_job`
+  still pay a fee from the provider's account, so dropping the gate now would
+  re-create #6551 one step later: a 0-GPN box would accept the free lease, then
+  be rejected by the pool at `start_job` and the job would sit `Accepted` until
+  the janitor killed it. Making the whole provider lane fee-free is the same
+  runtime change and belongs in the same `set_code` — it is the next row, not a
+  sentence in this one.
+- **`Pays::No` is compile-time**: it only affects a live node after this batch's
+  runtime is enacted with a spec bump and a governance `set_code`. Publishing the
+  0.3.59 binaries is not the end of #205.
 
 ## [0.3.58] - 2026-11-17
 

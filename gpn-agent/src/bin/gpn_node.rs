@@ -1696,7 +1696,10 @@ impl Config {
                 .unwrap_or_else(|| update::MANIFEST_URL.to_string()),
             update_check_hours: env_u64("GPN_UPDATE_CHECK_HOURS")
                 .or(file.update_check_hours)
-                .unwrap_or(6),
+                // #161: one constant, not a second literal — this is what makes
+                // `update::DEFAULT_CHECK_HOURS` a live value instead of a
+                // latent default nothing reads (2026-11-18).
+                .unwrap_or(update::DEFAULT_CHECK_HOURS),
             update_spread_secs: env_u64("GPN_UPDATE_SPREAD_SECS")
                 .or(file.update_spread_secs)
                 .unwrap_or(update::DEFAULT_SPREAD_SECS),

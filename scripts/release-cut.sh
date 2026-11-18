@@ -67,6 +67,7 @@ REPO="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GEN="$SCRIPT_DIR/gen-release-manifest.py"
+RELEASE_LOCK_TOOL="$SCRIPT_DIR/release-lock.sh"
 COMMIT="$SCRIPT_DIR/commit-paths.sh"
 PY="${PYTHON:-/usr/bin/python3}"
 [ -x "$PY" ] || PY="$(command -v python3)"
@@ -150,8 +151,15 @@ acquire_release_lock() {
 }
 
 release_lock_step() {
-  [ -f "$RELEASE_LOCK" ] || return 0
-  printf '{"pid":%d,"started_unix":%d,"step":"%s"}\n' "$$" "$(date +%s)" "$1" > "$RELEASE_LOCK"
+  # The flock marker (concurrent cuts) and the commit lock (the repo) are
+  # different questions; keep both current, and never let either failure abort
+  # a release step.
+  [ -f "$RELEASE_LOCK" ] && printf '{"pid":%d,"started_unix":%d,"step":"%s"}\n' \
+    "$$" "$(date +%s)" "$1" > "$RELEASE_LOCK" 2>/dev/null || true
+  inflight="${GPN_RELEASE_LOCK:-$HOME/.gpn/release-in-flight}"
+  [ -f "$inflight" ] && printf '%s\nholder: release-cut pid %s\nsince:  %s\nstep:   %s\n' \
+    "${VER:-release}" "$$" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" > "$inflight" 2>/dev/null || true
+  return 0
 }
 
 cleanup() {
@@ -480,6 +488,23 @@ case "$VER" in
   *) echo "ABORT: '$VER' is not a MAJOR.MINOR.PATCH version" >&2; exit 1 ;;
 esac
 
+# Take the repo lock now: from here until the signed manifest is live, nothing
+# else may be committed (#204). Every extra push in this window cancels a queued
+# CI run for this release. `scripts/hooks/pre-commit` refuses those commits.
+if [ -x "$RELEASE_LOCK_TOOL" ]; then
+  $SCRIPT_DIR/release-lock.sh take "$VER" || {
+    rc=$?
+    echo "ABORT: could not take the release lock for $VER (exit $rc)." >&2
+    echo "       Another release is in flight; publish it, or release the lock" >&2
+    echo "       deliberately: scripts/release-lock.sh release <version>" >&2
+    exit 2
+  }
+  say "repo locked for $VER (\$HOME/.gpn/release-in-flight) — no commits may land"
+else
+  echo "WARNING: $RELEASE_LOCK_TOOL is missing or not executable — the repo is NOT" >&2
+  echo "         locked, so any commit during this release cancels its CI run." >&2
+fi
+
 # The bundles must come from the same commit, and that commit must have passed CI.
 C_LINUX="$(bundle_commit "$F_LINUX")"
 C_WIN="$(bundle_commit "$F_WIN")"
@@ -653,6 +678,14 @@ for pair in "linux:$URL_LINUX:$S_LINUX" "windows:$URL_WIN:$S_WIN"; do
   fi
   say "$os: ${got:0:16}… matches the signed manifest ($(size_of "$f") bytes)"
 done
+
+# 6b release the repo lock: the manifest is live and verified, so the release no
+# longer owns the tree. Failure to release is loud but not fatal — the release did
+# publish, and a stale lock must be visible rather than silently kept.
+if [ -x "$RELEASE_LOCK_TOOL" ]; then
+  $SCRIPT_DIR/release-lock.sh release "$VER" || \
+    echo "WARNING: the repo lock is still held — run scripts/release-lock.sh status" >&2
+fi
 
 echo
 echo "released $VER — https://gpncoin.ai/releases.json"

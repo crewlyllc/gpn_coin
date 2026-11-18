@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# pre-commit — refuse a commit while a release owns the repo (#204)
+#
+# Installed by scripts/install-git-hooks.sh into .git/hooks/pre-commit.
+# The lock is taken by scripts/release-cut.sh (and the release driver) and
+# released when the signed manifest is live, so nothing lands while a release
+# is in flight: every extra push cancels the queued CI run for that release.
+#
+# Emergency escape, deliberately explicit: `git commit --no-verify`.
+set -uo pipefail
+
+LOCK="${GPN_RELEASE_LOCK:-$HOME/.gpn/release-in-flight}"
+
+if [ ! -f "$LOCK" ]; then
+  exit 0
+fi
+
+version="$(head -n1 "$LOCK" 2>/dev/null)"
+holder="$(sed -n '2p' "$LOCK" 2>/dev/null)"
+since="$(sed -n '3p' "$LOCK" 2>/dev/null)"
+
+cat >&2 <<EOF
+
+  COMMIT REFUSED — release ${version:-<unknown>} is in flight.
+
+  The repo is locked while a release checklist is open: every extra push
+  cancels a queued CI run for the release being built, so nothing else may
+  be committed until the signed manifest is published.
+
+    lock:   $LOCK
+    holder: ${holder#holder: }
+    since:  ${since#since:  }
+
+  Wait for the release to finish, or release the lock if the release is dead:
+    scripts/release-lock.sh status
+    scripts/release-lock.sh release ${version:-<version>}
+
+  Genuine emergency only (bypasses this hook, still cancels CI):
+    git commit --no-verify ...
+
+EOF
+exit 1

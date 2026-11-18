@@ -54,7 +54,9 @@ Then mark every bundled item `COMPLETE` with the version and date. Not before.
 ## 3. Rules that make it work
 
 - **One version in flight.** While a checklist is open: no new bundling, no unrelated commits.
-  `~/.gpn/release-in-flight` holds the lock; a pre-commit hook refuses without it removed.
+  `~/.gpn/release-in-flight` holds the lock; `release-lock.sh take` also arms the repo's
+  pre-commit hook (idempotent, same as `scripts/install-git-hooks.sh`), so the guard is on by
+  default rather than on a machine where someone remembered to install it.
 - **Evidence or it did not happen.** A tick without a version string, log line or commit sha is
   not a tick.
 - **Test first.** A fix starts with a test that fails; if it cannot be tested, it says so to the
