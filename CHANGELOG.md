@@ -8,6 +8,46 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.60] - 2026-11-18
+
+Bumped from 0.3.59 (`scripts/bump-version.py patch`).
+
+### Changed
+- **An update stops the whole `gpn*` process family, verifies none survive, then
+  starts (#206).** `start gpn-node failed (exit 1)` on a fifth computer had the
+  box-3 shape: an orphaned child (`gpn_provider_status` and siblings are *not*
+  named `gpn-agent`) survived the supervisor's stop, kept a handle on
+  `node.log` and the chain DB lock, and the launcher could not open its log for
+  append — exit 1, nothing written. Before starting after a swap the updater now
+  enumerates every process whose name starts with `gpn`, stops them
+  children-first, polls until zero remain, and only then starts; after start it
+  confirms via RPC and writes one line naming how many processes it stopped and
+  the version confirmed. A process it cannot stop (another account) is reported
+  instead of silently blocking the start.
+- **Fee-free `accept_job` in the pallet source (#205, source half only).**
+  `accept_job` returns `DispatchResultWithPostInfo` and `Ok(Pays::No.into())`,
+  keeping `ensure_signed` so identity is still proven. **This does not change
+  any fee on the network yet:** the node still embeds the 481,002 B runtime
+  from `be390db` (2026-10-06), so `Pays::No` reaches no chain until that runtime
+  is rebuilt with a spec bump and enacted via `set_code`. The AP's `unfunded`
+  routing gate therefore stays — see #205.
+
+### Fixed
+- **The update confirm step tells "slow" from "dead" and always leaves a node
+  running (#207).** A fifth computer reported `auto-update: confirm the new
+  version failed (exit 1) not confirmed within 360 s` — a correct rollback fired
+  on a *slow* first start. The wait now polls the process and the RPC
+  separately and logs which is missing (`confirm: process=up rpc=no 45s`), a
+  first start after an update gets 900 s (warm restart keeps 120 s), and a
+  genuine failure rolls back to the previous version, confirms the old version
+  is running, and otherwise starts the old one rather than leaving the machine
+  down. One remediation+retry runs first, classified from
+  `last-exit.json`/`node.log`. A `started` attempt no longer blocks a retry: the
+  attempt is consumed by the confirm step.
+- **An unplaceable node image no longer reports liveness as unknown
+  (#207 follow-up).** Only an image that cannot be placed at all counts as
+  unknown; a version that is merely slow is a slow start.
+
 ## [0.3.59] - 2026-11-17
 
 Bumped from 0.3.58 (`scripts/bump-version.py patch`).
