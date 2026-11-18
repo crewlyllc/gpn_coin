@@ -1496,7 +1496,7 @@ fn port_owner(port: u16) -> Option<(Option<u32>, String)> {
         if text.trim().is_empty() {
             return None;
         }
-        return Some((pid, name));
+        Some((pid, name))
     }
     #[cfg(windows)]
     {

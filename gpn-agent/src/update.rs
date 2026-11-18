@@ -5451,9 +5451,8 @@ mod tests {
     #[test]
     fn a_first_start_that_answers_after_400s_is_confirmed_not_rolled_back() {
         // 200 polls at 2 s each = 400 s of "process up, RPC not answering".
-        let mut rpc: Vec<Result<String, String>> = (0..200)
-            .map(|_| Err("connection refused".into()))
-            .collect();
+        let mut rpc: Vec<Result<String, String>> =
+            (0..200).map(|_| Err("connection refused".into())).collect();
         rpc.push(Ok("0.3.60".into()));
         let mut probe = ScriptedProbe::new(vec![Some(true)], rpc);
         let mut log = Vec::new();
@@ -5473,8 +5472,7 @@ mod tests {
         }
         // The wait must have been the *first-start* one, and it must say so.
         assert!(
-            log.iter()
-                .any(|l| l.contains("past the 900s window") == false),
+            log.iter().any(|l| !l.contains("past the 900s window")),
             "a 400 s start is inside the first-start window: {log:?}"
         );
         assert!(
