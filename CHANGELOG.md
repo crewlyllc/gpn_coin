@@ -8,6 +8,39 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.59] - 2026-11-17
+
+Bumped from 0.3.58 (`scripts/bump-version.py patch`).
+
+### Changed
+- **A release now locks the repo instead of asking politely (#204).** While a
+  release checklist is open, no other commit may land: `release-cut` and the
+  release driver take `~/.gpn/release-in-flight`, and a `pre-commit` hook
+  refuses any commit while that file exists (documented escape: `--no-verify`,
+  for emergencies only). Every extra push during a release cancels a queued CI
+  run for the release in flight — 3 of the API's `cancelled` runs on 2026-11-16
+  were the driver's own doc commits — so the rule is now mechanical. The step-0
+  sequencing gate already written into `docs/UPDATE-CHECKLIST.md` is committed
+  with it.
+- **The update check is back to 6 h (#161).** `DEFAULT_CHECK_HOURS` returns to
+  `6` (it was `1` for the 2026-11-12 review window, so a bad release was caught
+  the same day), and `check_interval_is_clamped` asserts the real default again
+  instead of hard-coding an hour. Operator override is unchanged:
+  `GPN_UPDATE_CHECK_HOURS`. A temporary setting with no revert date is how a
+  debugging shortcut becomes permanent behaviour.
+- **Accepting a job no longer costs the provider a fee (#205).** `accept_job`
+  returns `Pays::No` (keeping `ensure_signed`, so identity is still proven), so a
+  registered provider with an empty account can accept a lease. That removes the
+  reason the access point had to gate routing on provider balance — the gate that
+  produced incident #6551 (`unfunded` provider advertised `healthy: true`, was
+  leased a job, could not pay to accept, and the caller waited a full deadline)
+  — and the routing `unfunded` check is dropped with it.
+
+### Removed
+- The access point's `unfunded` routing gate (#205): the condition it guarded
+  against can no longer happen, so a provider is no longer excluded from routing
+  by its account balance.
+
 ## [0.3.58] - 2026-11-17
 
 ### Added
