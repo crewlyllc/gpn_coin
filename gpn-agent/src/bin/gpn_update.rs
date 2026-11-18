@@ -1223,7 +1223,7 @@ fn roll_back_after_failed_confirm(
     // Confirm the old build actually runs — "rolled back" is a statement about
     // `current`, not about the process, and reporting one as the other is how
     // the fleet was told a node was fine while it ran the failed build.
-    let mut now_running = String::from("unknown");
+    let mut now_running = String::new();
     let mut down = false;
     if let Some(prev) = &prev_label {
         let mut probe = ProcessRpcProbe::new(&o.rpc_url, expected_trees(o, prev));
@@ -1400,9 +1400,11 @@ impl update::ConfirmProbe for ProcessRpcProbe {
                 .or_else(|| p.cmd().first().map(std::path::PathBuf::from));
             match exe {
                 Some(e) if self.trees.iter().any(|d| e.starts_with(d)) => return Some(true),
-                // A gpn process we cannot place (another install, another
-                // profile, unreadable path): say "unknown" instead of guessing.
-                _ => saw_unmatched_gpn = true,
+                // Only a *node* image we cannot place makes liveness unknown.
+                // Provider children (gpn_provider_status, gpn_llm_provider, ...)
+                // are neither the node nor evidence that it is down.
+                _ if is_node_image_name(&name) => saw_unmatched_gpn = true,
+                _ => {}
             }
         }
         if saw_unmatched_gpn {
@@ -1423,6 +1425,11 @@ impl update::ConfirmProbe for ProcessRpcProbe {
     fn wait(&mut self, secs: u64) {
         std::thread::sleep(Duration::from_secs(secs));
     }
+}
+
+/// Is this process name a node image (as opposed to a provider child)?
+fn is_node_image_name(name: &str) -> bool {
+    matches!(name, "gpn_node" | "gpn-node" | "gpn_agent" | "gpn-agent")
 }
 
 /// Is this pid's image inside one of the expected build directories?

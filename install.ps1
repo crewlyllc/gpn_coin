@@ -1035,15 +1035,22 @@ function Test-NodeAlive {
       $_.ProcessName -like 'gpn*' -and $_.ProcessName -notlike 'gpn_update*' -and $_.Id -ne $PID
     })
     if ($procs.Count -eq 0) { return $false }
+    $sawNode = $false
     foreach ($p in $procs) {
       $path = $null
       try { $path = $p.Path } catch { }
-      if (-not $path) { continue }
-      foreach ($t in $trees) {
-        if ($path.StartsWith($t, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+      if ($path) {
+        foreach ($t in $trees) {
+          if ($path.StartsWith($t, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+        }
       }
+      # Only a node image we cannot place makes liveness unknown; provider
+      # children (gpn_provider_status, gpn_llm_provider, ...) are neither the
+      # node nor evidence that it is down.
+      if ($p.ProcessName -in @('gpn_node', 'gpn-node', 'gpn_agent', 'gpn-agent')) { $sawNode = $true }
     }
-    return $null
+    if ($sawNode) { return $null }
+    return $false
   } catch { return $null }
 }
 
