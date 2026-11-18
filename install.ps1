@@ -969,13 +969,19 @@ $NodeTask     = 'GPN-Node'
 $Launcher     = Join-Path $InstallDir 'start-node.cmd'
 $CurrentLink  = Join-Path $InstallDir 'data\update\current'
 $RpcUrl       = if ($env:GPN_RPC_URL) { $env:GPN_RPC_URL } else { 'http://127.0.0.1:9944' }
-# How long the new build gets to come up and answer before we roll it back.
-# 360 s, not 120 (measured 2026-11-17 on box 1): after the swap the node started at
-# 02:00:13 and only bound JSON-RPC at 02:02:18 -- 125 s of GPU init + state load -- so a
-# 120 s window rolled back a build that was already up, and left `current` on the old
-# version while the RUNNING process served the new one. A window shorter than a cold
-# start is a gate that fails correct work.
-$ConfirmSecs  = if ($env:GPN_UPDATE_CONFIRM_SECS) { [int]$env:GPN_UPDATE_CONFIRM_SECS } else { 360 }
+# How long the confirm gate waits. #207: named constants, because the old single
+# 360 s window could not tell "slow" from "dead" and rolled back a build that
+# was already up (box 1, 2026-11-17: JSON-RPC bound 125 s after start).
+#
+#   warm restart            120 s window
+#   first start after update 900 s window  (the DAG is rebuilt and sync starts)
+#   hard ceiling             900 s          (whatever the window was)
+$ConfirmWarmSecs       = 120
+$ConfirmFirstStartSecs = 900
+$ConfirmCeilingSecs    = 900
+$ConfirmStartGraceSecs = 30
+# Operator override: replaces the window, never the ceiling.
+if ($env:GPN_UPDATE_CONFIRM_SECS) { $ConfirmWarmSecs = [int]$env:GPN_UPDATE_CONFIRM_SECS }
 
 function Write-Log {
   param([string]$Message)
@@ -1006,6 +1012,336 @@ function Show-UpdateFailure {
   }
 }
 
+# The directories that identify the build under test. A process counts as "the
+# node" only if its image lives in one of them.
+function Get-ExpectedTrees {
+  param([string]$Version)
+  $trees = @()
+  if ($Version) { $trees += (Join-Path $InstallDir ('data\update\versions\' + $Version)) }
+  $trees += $CurrentLink
+  $trees += $BinDir
+  return $trees
+}
+
+# Is a process running out of the expected version tree? Matched by PATH, not by
+# image name: the family has many children (gpn_node, gpn-agent, provider
+# workers) and a name match alone proves nothing. Returns $null when the
+# question cannot be answered -- never claim dead.
+function Test-NodeAlive {
+  param([string]$Version)
+  $trees = Get-ExpectedTrees $Version
+  try {
+    $procs = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+      $_.ProcessName -like 'gpn*' -and $_.ProcessName -notlike 'gpn_update*' -and $_.Id -ne $PID
+    })
+    if ($procs.Count -eq 0) { return $false }
+    foreach ($p in $procs) {
+      $path = $null
+      try { $path = $p.Path } catch { }
+      if (-not $path) { continue }
+      foreach ($t in $trees) {
+        if ($path.StartsWith($t, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+      }
+    }
+    return $null
+  } catch { return $null }
+}
+
+function Format-Alive {
+  param($Alive)
+  if ($Alive -eq $true) { return 'up' }
+  if ($Alive -eq $false) { return 'down' }
+  return 'unknown'
+}
+
+# Is the port owner the build under test? If so it is already up and answering
+# (the restart just happened) and must NOT be stopped.
+function Test-OwnerIsExpected {
+  param($Owner, [string]$Version)
+  if (-not $Owner -or -not $Owner.Pid) { return $false }
+  $path = $null
+  try { $path = (Get-Process -Id $Owner.Pid -ErrorAction Stop).Path } catch { return $false }
+  if (-not $path) { return $false }
+  foreach ($t in (Get-ExpectedTrees $Version)) {
+    if ($path.StartsWith($t, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+  }
+  return $false
+}
+
+# Poll TWO signals and report them separately (#207): is a process running out
+# of the expected tree, and does JSON-RPC answer `system_version`.
+#
+# Returns @{ Ok; Version; ElapsedSecs } on success, $null on failure with:
+#   $script:ConfirmSignal     'process' or 'rpc'
+#   $script:ConfirmReason     the one line to report
+#   $script:ConfirmProcessUp  $true/$false/$null
+#   $script:ConfirmElapsed    seconds waited
+function Confirm-Running {
+  param(
+    [string]$Expect,
+    [int]$WindowSecs = $ConfirmWarmSecs,
+    [int]$CeilingSecs = $ConfirmCeilingSecs
+  )
+  $script:ConfirmReason    = 'no answer'
+  $script:ConfirmSignal    = 'rpc'
+  $script:ConfirmProcessUp = $null
+  $script:ConfirmElapsed   = 0
+  if (-not $Expect) { $script:ConfirmReason = 'no expected version to confirm'; return $null }
+  if ($WindowSecs -gt $CeilingSecs) { $WindowSecs = $CeilingSecs }
+
+  $body = '{"jsonrpc":"2.0","id":1,"method":"system_version","params":[]}'
+  $t0 = Get-Date
+  $sawAlive = $false
+  $logged = ''
+  $warned = $false
+  while ($true) {
+    $alive = Test-NodeAlive -Version $Expect
+    if ($alive -eq $true) { $sawAlive = $true }
+
+    $rpcOk = $false
+    $ver = $null
+    $rpcErr = $null
+    try {
+      $r = Invoke-RestMethod -Uri $RpcUrl -Method Post -Body $body -ContentType 'application/json' -TimeoutSec 3
+      $ver = ([string]$r.result).Trim()
+      $rpcOk = $true
+    } catch {
+      $rpcErr = $_.Exception.Message
+    }
+    $elapsed = [int]((Get-Date) - $t0).TotalSeconds
+    $script:ConfirmElapsed   = $elapsed
+    $script:ConfirmProcessUp = $alive
+
+    if ($rpcOk) {
+      # An answer proves something is listening, whatever version it names.
+      $sawAlive = $true
+      if ($ver -eq $Expect.Trim()) {
+        Write-Log ('confirm: process=' + (Format-Alive $alive) + ' rpc=yes ' + $elapsed + 's version=' + $ver)
+        return @{ Ok = $true; Version = $ver; ElapsedSecs = $elapsed }
+      }
+      $script:ConfirmReason = 'the node reports ' + $ver + ', expected ' + $Expect
+    } else {
+      $script:ConfirmReason = 'rpc ' + $RpcUrl + ': ' + $rpcErr
+    }
+
+    # SCENARIO C: it was alive and now it is not. Hard failure, immediately.
+    if ($sawAlive -and ($alive -eq $false)) {
+      Write-Log ('confirm: process=down rpc=no ' + $elapsed + 's - the process exited before it confirmed')
+      $script:ConfirmSignal = 'process'
+      $script:ConfirmReason = 'the process exited before it confirmed (' + $script:ConfirmReason + ')'
+      return $null
+    }
+    # C, the other half: it never appeared at all.
+    if ((-not $sawAlive) -and ($alive -eq $false) -and ($elapsed -ge $ConfirmStartGraceSecs)) {
+      Write-Log ('confirm: process=down rpc=no ' + $elapsed + 's - no process in the expected version tree')
+      $script:ConfirmSignal = 'process'
+      $script:ConfirmReason = 'no process ever appeared in ' + $Expect + ' (' + $script:ConfirmReason + ')'
+      return $null
+    }
+
+    $state = (Format-Alive $alive) + '|' + [string]$rpcOk
+    if ($state -ne $logged) {
+      $logged = $state
+      $v = if ($rpcOk -and $ver) { ' version=' + $ver } else { '' }
+      Write-Log ('confirm: process=' + (Format-Alive $alive) + ' rpc=' + $(if ($rpcOk) { 'yes' } else { 'no' }) + ' ' + $elapsed + 's' + $v)
+    }
+
+    # SCENARIO B: past the window with no confirmation. Say it once, then keep
+    # waiting to the hard ceiling.
+    if ((-not $warned) -and ($elapsed -ge $WindowSecs)) {
+      $warned = $true
+      Write-Log ('confirm: process=' + (Format-Alive $alive) + ' rpc=' + $(if ($rpcOk) { 'yes' } else { 'no' }) + ' ' + $elapsed + 's - past the ' + $WindowSecs + 's window, waiting to the ' + $CeilingSecs + 's ceiling')
+    }
+
+    if ($elapsed -ge $CeilingSecs) {
+      Write-Log ('confirm: giving up at ' + $elapsed + 's (ceiling ' + $CeilingSecs + 's)')
+      $script:ConfirmSignal = 'rpc'
+      $tag = if ($alive -eq $true) { 'process up, RPC down' } elseif ($alive -eq $false) { 'process down, RPC down' } else { 'process state unknown, RPC down' }
+      $script:ConfirmReason = $tag + ' after ' + $elapsed + ' s: ' + $script:ConfirmReason
+      return $null
+    }
+    Start-Sleep -Seconds 2
+  }
+}
+
+# --- remediation (#207): fix the known causes, once --------------------------
+
+function Get-RpcPort {
+  if ($RpcUrl -match ':(\d+)') { return [int]$Matches[1] }
+  return 9944
+}
+
+function Test-PortListening {
+  param([int]$Port)
+  try {
+    $c = New-Object System.Net.Sockets.TcpClient
+    $ok = $c.ConnectAsync('127.0.0.1', $Port).Wait(400)
+    $c.Close()
+    return $ok
+  } catch { return $false }
+}
+
+# Who owns the listening socket? $null = could not tell, which is treated as a
+# foreign process: never kill blind.
+function Get-PortOwner {
+  param([int]$Port)
+  try {
+    $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop | Select-Object -First 1
+    if (-not $conn) { return $null }
+    $p = Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue
+    $name = if ($p) { $p.ProcessName } else { 'unidentified process' }
+    return @{ Pid = [int]$conn.OwningProcess; Name = $name }
+  } catch { return $null }
+}
+
+# Stop every gpn* process except this script, children first, and poll until
+# none remain. Returns the number still alive.
+function Stop-GpnFamily {
+  param([int]$TimeoutSecs = 15)
+  $get = {
+    @(Get-CimInstance Win32_Process -Filter "Name LIKE 'gpn%'" -ErrorAction SilentlyContinue |
+      Where-Object { $_.ProcessId -ne $PID -and $_.Name -notlike 'gpn_update*' })
+  }
+  $procs = & $get
+  if ($procs.Count -eq 0) { return 0 }
+  $deadline = (Get-Date).AddSeconds($TimeoutSecs)
+  while ((Get-Date) -lt $deadline) {
+    $procs = & $get
+    if ($procs.Count -eq 0) { return 0 }
+    $parentIds = @($procs | ForEach-Object { [int]$_.ParentProcessId })
+    $leaves = @($procs | Where-Object { $parentIds -notcontains [int]$_.ProcessId })
+    if ($leaves.Count -eq 0) { $leaves = $procs }
+    foreach ($p in $leaves) {
+      Write-Log ('remediate: stopping ' + $p.Name + ' (pid ' + $p.ProcessId + ')')
+      & taskkill /F /PID ([string]$p.ProcessId) 2>&1 | Out-Null
+    }
+    Start-Sleep -Milliseconds 700
+  }
+  return (@(& $get)).Count
+}
+
+# The node's own evidence: the newest last-exit.json record and the log tail.
+function Get-StartEvidence {
+  $exitPath = if ($env:GPN_EXIT_LOG) { $env:GPN_EXIT_LOG } else { Join-Path $env:USERPROFILE '.gpn\last-exit.json' }
+  $lastExit = ''
+  try { $lastExit = (@(Get-Content -LiteralPath $exitPath -Tail 1 -ErrorAction Stop) -join "`n") } catch { }
+  $tail = @()
+  try { $tail = @(Get-Content -LiteralPath (Join-Path $InstallDir 'node.log') -Tail 40 -ErrorAction Stop) } catch { }
+  return @{ LastExit = $lastExit; Tail = $tail }
+}
+
+# Classify a failed start. Returns @{ Kind; Actionable; Line; Stored }.
+function Get-Remediation {
+  param($Evidence, [int]$Port)
+  $text = ([string]$Evidence.LastExit) + "`n" + (@($Evidence.Tail) -join "`n")
+  $low = $text.ToLowerInvariant()
+
+  if ($low -match 'used by another process|lockfile|cannot access the file|os error 32|sharing violation') {
+    return @{ Kind = 'lock'; Actionable = $true;
+      Line = 'remediate: lock held by another process -> stop the orphaned gpn family children-first, then retry' }
+  }
+  if ($low -match 'incompatible pruning modes') {
+    $stored = 'unknown'
+    if ($text -match 'stored:\s*([^;\]]+)') { $stored = $Matches[1].Trim() }
+    return @{ Kind = 'pruning'; Actionable = $true; Stored = $stored;
+      Line = ('remediate: incompatible pruning modes (DB stores ' + $stored + ') -> let the node re-resolve pruning per spawn (drop pinned flags), then retry') }
+  }
+  if ($low -match 'node-key|keystore|corrupt-key|invalid seed|invalid phrase') {
+    $hit = @($Evidence.Tail | Where-Object { $_ -match 'node-key|keystore|corrupt|invalid' } | Select-Object -Last 1)
+    $what = if ($hit.Count -gt 0) { [string]$hit[0] } else { 'keystore or node-key is missing or unusable' }
+    return @{ Kind = 'config'; Actionable = $false;
+      Line = ('remediate: ' + $what.Trim() + ' -> no automatic repair; report the file and roll back') }
+  }
+  if ($low -match 'address already in use|only one usage of each socket address|failed to bind') {
+    $owner = Get-PortOwner $Port
+    if ($owner -and ($owner.Name -like 'gpn*')) {
+      return @{ Kind = 'port-gpn'; Actionable = $true;
+        Line = ('remediate: rpc port ' + $Port + ' held by ' + $owner.Name + ' (pid ' + $owner.Pid + ') -> stop the stale gpn family, then retry') }
+    }
+    $who = if ($owner) { $owner.Name + ' (pid ' + $owner.Pid + ')' } else { 'an unidentified process' }
+    return @{ Kind = 'port-foreign'; Actionable = $false;
+      Line = ('remediate: rpc port ' + $Port + ' is held by ' + $who + ' -> not fighting it; report and roll back') }
+  }
+
+  $last = @($Evidence.Tail | Select-Object -Last 1)
+  $detail = if ($last.Count -gt 0) { ([string]$last[0]).Trim() } else { 'no evidence recorded' }
+  return @{ Kind = 'unknown'; Actionable = $false; Detail = $detail;
+    Line = ('remediate: unrecognised exit (' + $detail + ') -> roll back and quote the last log lines') }
+}
+
+# `Incompatible pruning modes` is fixed by NOT pinning a mode: the supervisor
+# resolves pruning from the DB it finds at spawn time. Strip pinned flags from
+# the launcher so that resolution can run.
+function Repair-PruningArgs {
+  if (-not (Test-Path -LiteralPath $Launcher)) { return }
+  $body = Get-Content -LiteralPath $Launcher -Raw
+  $new = [regex]::Replace($body, '\s--(state-pruning|blocks-pruning|pruning)(=\S+|\s+\S+)?', '')
+  if ($new -eq $body) { return }
+  try {
+    Copy-Item -LiteralPath $Launcher -Destination ($Launcher + '.bak-' + (Get-Date -Format 'yyyyMMddHHmmss'))
+    Set-Content -LiteralPath $Launcher -Value $new -Encoding ascii -NoNewline -ErrorAction Stop
+    Write-Log 'remediate: dropped the pinned pruning flags from start-node.cmd'
+  } catch { Write-Log ('could not rewrite the launcher: ' + $_.Exception.Message) }
+}
+
+# Confirm with at most ONE remediation and retry (#207). Never loops.
+function Confirm-Update {
+  param([string]$Expect, [bool]$FirstStart = $true)
+  $window = if ($FirstStart) { $ConfirmFirstStartSecs } else { $ConfirmWarmSecs }
+  if ($window -gt $ConfirmCeilingSecs) { $window = $ConfirmCeilingSecs }
+  $port = Get-RpcPort
+
+  # Pre-flight: the RPC port is a resource somebody may hold.
+  if (Test-PortListening $port) {
+    $owner = Get-PortOwner $port
+    if ($owner -and ($owner.Name -like 'gpn*') -and (Test-OwnerIsExpected $owner $Expect)) {
+      # The listener is the build under test: it is already up and answering.
+      # Stopping it here would kill the process we are waiting for.
+      Write-Log ('confirm: rpc port ' + $port + ' is already held by ' + $Expect + ' (pid ' + $owner.Pid + ') - waiting for its answer')
+    } elseif ($owner -and ($owner.Name -like 'gpn*')) {
+      Write-Log ('remediate: rpc port ' + $port + ' held by ' + $owner.Name + ' (pid ' + $owner.Pid + ') -> stop the stale gpn family (children-first), retry')
+      $left = Stop-GpnFamily
+      if ($left -gt 0 -or (Test-PortListening $port)) {
+        return @{ Ok = $false; Signal = 'port'; ElapsedSecs = 0; ProcessUp = $null;
+          Reason = ('rpc port ' + $port + ' was held by ' + $owner.Name + ' and could not be freed (' + $left + ' process(es) left)') }
+      }
+      Write-Log ('remediate: rpc port ' + $port + ' freed -> retry')
+    } else {
+      $who = if ($owner) { $owner.Name + ' (pid ' + $owner.Pid + ')' } else { 'an unidentified process' }
+      return @{ Ok = $false; Signal = 'port'; ElapsedSecs = 0; ProcessUp = $null;
+        Reason = ('rpc port ' + $port + ' is held by ' + $who + ' (not a gpn process) - not touching it') }
+    }
+  }
+
+  $res = Confirm-Running -Expect $Expect -WindowSecs $window -CeilingSecs $ConfirmCeilingSecs
+  if ($res) { return $res }
+  $first = 'signal=' + $script:ConfirmSignal + ' after ' + $script:ConfirmElapsed + 's - ' + $script:ConfirmReason
+  $elapsedFirst = $script:ConfirmElapsed
+
+  $evidence = Get-StartEvidence
+  $rem = Get-Remediation -Evidence $evidence -Port $port
+  Write-Log $rem.Line
+  if (-not $rem.Actionable) {
+    foreach ($l in @($evidence.Tail | Select-Object -Last 3)) { Write-Log ('  | ' + $l) }
+    return @{ Ok = $false; Signal = $script:ConfirmSignal; ElapsedSecs = $elapsedFirst;
+      ProcessUp = $script:ConfirmProcessUp; Reason = ($first + '; ' + $rem.Line) }
+  }
+
+  # Apply the one remediation.
+  if ($rem.Kind -eq 'pruning') { Repair-PruningArgs }
+  else { [void](Stop-GpnFamily) }
+
+  Write-Log 'remediate: restarting once (attempt 1/1)'
+  [void](Stop-NodeTree 60)
+  & schtasks /Run /TN $NodeTask 2>&1 | Out-Null
+  $res2 = Confirm-Running -Expect $Expect -WindowSecs $window -CeilingSecs $ConfirmCeilingSecs
+  if ($res2) { return $res2 }
+  foreach ($l in @($evidence.Tail | Select-Object -Last 3)) { Write-Log ('  | ' + $l) }
+  return @{ Ok = $false; Signal = $script:ConfirmSignal; ElapsedSecs = $script:ConfirmElapsed;
+    ProcessUp = $script:ConfirmProcessUp;
+    Reason = ($first + '; remediated once (' + $rem.Line + '); retry then failed: signal=' + $script:ConfirmSignal + ' - ' + $script:ConfirmReason) }
+}
+
 # The version `current` names, i.e. the one the launcher will run next.
 function Get-ExpectedVersion {
   try {
@@ -1014,55 +1350,6 @@ function Get-ExpectedVersion {
     if (-not $t) { return $null }
     return (Split-Path -Leaf $t)
   } catch { return $null }
-}
-
-# Any node process alive? "RPC not answering yet" is normal while the GPU miner
-# initialises; "no node process at all" is a real failure and must not wait out the
-# whole window. Returns $null when the question cannot be answered (never claim dead).
-function Test-NodeAlive {
-  try {
-    $p = Get-Process -Name 'gpn_node','gpn-node' -ErrorAction SilentlyContinue | Select-Object -First 1
-    return [bool]$p
-  } catch { return $null }
-}
-
-# Ask the RUNNING node what version it is. This is the only evidence that an
-# update actually took: everything before it describes files on disk.
-# Returns a message on success, $null on failure (reason in $script:ConfirmReason).
-function Confirm-Running {
-  param([string]$Expect, [int]$Seconds = 120)
-  $script:ConfirmReason = 'no answer'
-  if (-not $Expect) { $script:ConfirmReason = 'no expected version to confirm'; return $null }
-  $deadline = (Get-Date).AddSeconds($Seconds)
-  $body = '{"jsonrpc":"2.0","id":1,"method":"system_version","params":[]}'
-  $sawAlive = $false
-  $t0 = Get-Date
-  $lastNote = $t0
-  while ((Get-Date) -lt $deadline) {
-    # Liveness first: a build that is still starting is not a failure, but one whose
-    # process is gone is -- and waiting 6 minutes to say so helps nobody.
-    $alive = Test-NodeAlive
-    if ($alive -eq $true) { $sawAlive = $true }
-    elseif ($sawAlive -and $alive -eq $false) {
-      $script:ConfirmReason = 'the node process exited before it answered'
-      return $null
-    }
-    if (((Get-Date) - $lastNote).TotalSeconds -ge 30) {
-      $lastNote = Get-Date
-      Write-Log ('still starting: ' + $Expect + ' has not answered yet (' + [int]((Get-Date) - $t0).TotalSeconds + ' s of ' + $Seconds + ' s)')
-    }
-    try {
-      $r = Invoke-RestMethod -Uri $RpcUrl -Method Post -Body $body -ContentType 'application/json' -TimeoutSec 3
-      $got = ([string]$r.result).Trim()
-      if ($got -eq $Expect.Trim()) { return ('{0} is running (rpc {1})' -f $got, $RpcUrl) }
-      $script:ConfirmReason = ('the node reports ' + $got + ', expected ' + $Expect)
-    } catch {
-      $script:ConfirmReason = ('rpc ' + $RpcUrl + ': ' + $_.Exception.Message)
-    }
-    Start-Sleep -Seconds 2
-  }
-  $script:ConfirmReason = ('not confirmed within ' + $Seconds + ' s: ' + $script:ConfirmReason)
-  return $null
 }
 
 # Make the NEXT start run the version tree the updater selects, instead of the
@@ -1148,9 +1435,12 @@ function Invoke-Rollback {
 #     (no restart; the caller restarts and confirms, so a test can be undone)
 if ($args.Count -ge 1 -and $args[0] -eq '-SelfTest') {
   $want = if ($args.Count -ge 2) { [string]$args[1] } else { Get-ExpectedVersion }
-  $m = Confirm-Running -Expect $want -Seconds $ConfirmSecs
-  if ($m) { Write-Log ('SELFTEST CONFIRMED: ' + $m); exit 0 }
-  Write-Log ('SELFTEST NOT CONFIRMED: ' + $script:ConfirmReason)
+  $m = Confirm-Running -Expect $want -WindowSecs $ConfirmWarmSecs -CeilingSecs $ConfirmCeilingSecs
+  if ($m) {
+    Write-Log ('SELFTEST CONFIRMED: ' + $m.Version + ' after ' + $m.ElapsedSecs + ' s')
+    exit 0
+  }
+  Write-Log ('SELFTEST NOT CONFIRMED: signal=' + $script:ConfirmSignal + ' - ' + $script:ConfirmReason)
   exit 4
 }
 if ($args.Count -ge 1 -and $args[0] -eq '-SelfTestRollback') {
@@ -1341,16 +1631,26 @@ try {
 
   # "Applied" is a statement about files on disk. The update is DONE only when
   # the running node reports the installed version -- download, verify, stop,
-  # switch, start, CONFIRM is the whole cycle.
+  # switch, start, CONFIRM is the whole cycle. The first start after an update
+  # gets the long window (the DAG is rebuilt), and the confirm may remediate the
+  # known causes once before we roll back (#207).
   $expect = Get-ExpectedVersion
-  $confirm = Confirm-Running -Expect $expect -Seconds $ConfirmSecs
-  if ($confirm) {
-    Write-Log ('CONFIRMED: ' + $confirm)
+  $confirm = Confirm-Update -Expect $expect -FirstStart $true
+  if ($confirm -and $confirm.Ok) {
+    Write-Log ('CONFIRMED: ' + $confirm.Version + ' is running (rpc ' + $RpcUrl + ') after ' + $confirm.ElapsedSecs + ' s')
+    # The attempt is consumed only now, and the pending marker is cleared with
+    # it (#207).
+    $pendingMarker = Join-Path $InstallDir 'data\update\pending-update.json'
+    if (Test-Path -LiteralPath $pendingMarker) {
+      try { Remove-Item -LiteralPath $pendingMarker -Force -ErrorAction Stop; Write-Log 'cleared pending-update.json' }
+      catch { Write-Log ('could not clear pending-update.json: ' + $_.Exception.Message) }
+    }
     Write-Log 'update cycle complete'
     exit 0
   }
 
-  Write-Log ('NOT CONFIRMED: ' + $script:ConfirmReason)
+  $failureLine = 'signal=' + $confirm.Signal + ' after ' + $confirm.ElapsedSecs + 's - ' + $confirm.Reason
+  Write-Log ('NOT CONFIRMED: ' + $failureLine)
   Write-Log 'rolling back to the previous version and restarting it - a box must not be left on a build that does not come up'
   $rb = Invoke-Rollback
   foreach ($l in $rb.Lines) { if ($l.Trim()) { Write-Log ('rollback: ' + $l.Trim()) } }
@@ -1365,10 +1665,40 @@ try {
   }
   & schtasks /Run /TN $NodeTask 2>&1 | Out-Null
   $back = Get-ExpectedVersion
-  $backMsg = Confirm-Running -Expect $back -Seconds $ConfirmSecs
-  if ($backMsg) { Write-Log ('CONFIRMED after rollback: ' + $backMsg) }
-  else { Write-Log ('WARNING: even the previous build did not confirm: ' + $script:ConfirmReason) }
-  Show-UpdateFailure 1 'confirm the new version' $script:ConfirmReason
+  # Rollback confirmation is a plain gate: the single remediation was already
+  # spent on the new build, and the rule is one per update.
+  $backRes = Confirm-Running -Expect $back -WindowSecs $ConfirmFirstStartSecs -CeilingSecs $ConfirmCeilingSecs
+  if ($backRes) {
+    Write-Log ('CONFIRMED after rollback: ' + $backRes.Version + ' is running after ' + $backRes.ElapsedSecs + ' s')
+    Show-UpdateFailure 1 'confirm the new version' ($failureLine + '; now running ' + $backRes.Version)
+    exit 1
+  }
+
+  # The rollback did not come up either. Start the previous version ONCE MORE
+  # and leave it; never end with the node stopped and no message.
+  Write-Log ('rollback did not confirm: signal=' + $script:ConfirmSignal + ' - ' + $script:ConfirmReason + '; starting ' + $back + ' once more and leaving it')
+  & schtasks /End /TN $NodeTask 2>&1 | Out-Null
+  [void](Stop-NodeTree 30)
+  & schtasks /Run /TN $NodeTask 2>&1 | Out-Null
+  $backRes2 = Confirm-Running -Expect $back -WindowSecs $ConfirmFirstStartSecs -CeilingSecs $ConfirmCeilingSecs
+  if ($backRes2) {
+    Write-Log ('CONFIRMED after the second rollback start: ' + $backRes2.Version + ' is running after ' + $backRes2.ElapsedSecs + ' s')
+    Show-UpdateFailure 1 'confirm the new version' ($failureLine + '; now running ' + $backRes2.Version)
+    exit 1
+  }
+
+  $ev = Get-StartEvidence
+  $tail3 = @($ev.Tail | Select-Object -Last 3)
+  $exitNote = 'last-exit.json has no usable record'
+  if ($ev.LastExit) {
+    try {
+      $j = $ev.LastExit | ConvertFrom-Json
+      $exitNote = 'last exit: ' + $j.kind + ' - ' + $j.detail
+    } catch { $exitNote = 'last exit: ' + ([string]$ev.LastExit) }
+  }
+  $downMsg = $failureLine + '; rollback ' + $back + ' did not confirm either; ' + $exitNote + '; last log: ' + ($tail3 -join ' | ')
+  Write-Log ('NODE DOWN - manual intervention: ' + $downMsg)
+  Show-UpdateFailure 1 'confirm the new version - node down' $downMsg
   exit 1
 }
 catch {

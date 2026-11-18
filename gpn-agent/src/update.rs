@@ -2257,8 +2257,620 @@ pub fn version_matches(expected: &str, reported: &str) -> bool {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// The confirm gate: three ways a start can fail, told apart (#207)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 2026-11-18 (a fifth box, not ours):
+// `auto-update: confirm the new version failed (exit 1) - not confirmed within
+// 360 s`. The swap had run and the confirmation had not succeeded — and the
+// message could not say whether the node was starting slowly, up without RPC,
+// or dead, nor which build was running when the report was written. A gate that
+// cannot tell "slow" from "dead" rolls back correct work and hides real
+// failures. The gate therefore watches two signals separately:
+//
+//   * `process` — an executable running out of the *expected version tree*,
+//                 matched by path (the family has many children, so an image
+//                 name alone proves nothing);
+//   * `rpc`     — `system_version` answering, and what it answers.
+//
+// The three outcomes:
+//   A. slow start   — process up, rpc not answering yet. Wait (up to the hard
+//                     ceiling) and succeed the moment the version arrives.
+//   B. rpc down     — process up for the whole ceiling, rpc never confirmed.
+//                     Report "process up, RPC down" and fail *after* the wait.
+//   C. process died — the process exited before confirming. Fail immediately;
+//                     waiting six minutes to say "it is dead" helps nobody.
+
+/// How long a *warm* restart gets before the gate starts reporting "process up,
+/// RPC down". Not a deadline: the search continues to
+/// [`CONFIRM_HARD_CEILING_SECS`].
+pub const CONFIRM_WARM_SECS: u64 = 120;
+
+/// How long the first start after an update gets. The first boot of a new build
+/// rebuilds the DAG and starts syncing, which is why this is measured in
+/// minutes, not seconds (box 1, 2026-11-17: JSON-RPC bound 125 s after start,
+/// inside the old 360 s window, but a 120 s window had already rolled it back).
+pub const CONFIRM_FIRST_START_SECS: u64 = 900;
+
+/// The gate never waits longer than this, whatever window was requested. A
+/// machine stuck behind a gate is as unavailable as one whose update failed.
+pub const CONFIRM_HARD_CEILING_SECS: u64 = 900;
+
+/// Grace before "I have never seen the process" is called a death. A restart
+/// command may still be spawning; declaring the node dead at t=0 would turn
+/// that into a rollback.
+pub const CONFIRM_START_GRACE_SECS: u64 = 30;
+
+/// Delay between polls. Short enough to notice a version that arrives, long
+/// enough that ~450 polls over 900 s do not flood the node with RPC.
+pub const CONFIRM_POLL_SECS: u64 = 2;
+
+/// The two deadlines the gate works to.
+///
+/// `window_secs` is when "still starting" becomes "process up, RPC down";
+/// `ceiling_secs` is when the gate gives up and the caller rolls back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfirmDeadlines {
+    pub window_secs: u64,
+    pub ceiling_secs: u64,
+}
+
+impl ConfirmDeadlines {
+    /// Replace the window (an operator's `--timeout` / env override). The
+    /// ceiling still caps it: an override can shorten the wait, never extend it
+    /// past [`CONFIRM_HARD_CEILING_SECS`].
+    pub fn with_window(self, secs: u64) -> Self {
+        ConfirmDeadlines {
+            window_secs: secs.min(self.ceiling_secs),
+            ceiling_secs: self.ceiling_secs,
+        }
+    }
+}
+
+/// Deadlines for a confirm: `first_start_after_update` chooses the window, the
+/// ceiling is always the hard one.
+pub fn confirm_deadlines(first_start_after_update: bool) -> ConfirmDeadlines {
+    ConfirmDeadlines {
+        window_secs: if first_start_after_update {
+            CONFIRM_FIRST_START_SECS
+        } else {
+            CONFIRM_WARM_SECS
+        },
+        ceiling_secs: CONFIRM_HARD_CEILING_SECS,
+    }
+}
+
+/// What the two probes look like to the gate. A trait (rather than direct RPC
+/// and `System` calls) so the three scenarios are testable in microseconds
+/// instead of fifteen minutes of real waiting.
+pub trait ConfirmProbe {
+    /// Is a process running out of the expected version tree?
+    ///
+    /// `None` means "cannot tell" — never "dead": a box whose process could
+    /// not be inspected must not be rolled back on that basis alone.
+    fn process_alive(&mut self) -> Option<bool>;
+    /// Ask the running node for `system_version`. `Err` carries why not.
+    fn rpc_version(&mut self) -> Result<String, String>;
+    /// Seconds since the gate started.
+    fn elapsed_secs(&mut self) -> u64;
+    /// Advance the clock (sleep in production, nothing under test).
+    fn wait(&mut self, secs: u64);
+}
+
+/// Why the gate gave up. Each names the signal that failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfirmFailure {
+    /// C: the process exited (or never appeared) before it confirmed.
+    ProcessGone {
+        at_secs: u64,
+        /// "exited" or "never appeared" — the operator needs the difference.
+        detail: &'static str,
+        last_rpc: String,
+    },
+    /// B: the process stayed up but `system_version` never confirmed the build
+    /// — no answer at all, or an answer that was not the expected version.
+    RpcDown {
+        at_secs: u64,
+        /// `None` when process liveness could not be determined.
+        process_up: Option<bool>,
+        last_rpc: String,
+    },
+}
+
+impl ConfirmFailure {
+    /// Which of the two signals failed: `"process"` or `"rpc"`.
+    pub fn signal(&self) -> &'static str {
+        match self {
+            ConfirmFailure::ProcessGone { .. } => "process",
+            ConfirmFailure::RpcDown { .. } => "rpc",
+        }
+    }
+
+    pub fn at_secs(&self) -> u64 {
+        match self {
+            ConfirmFailure::ProcessGone { at_secs, .. } => *at_secs,
+            ConfirmFailure::RpcDown { at_secs, .. } => *at_secs,
+        }
+    }
+
+    /// The one line an operator reads. Names the failing signal, how long the
+    /// gate waited, and what the other signal was doing.
+    pub fn describe(&self, expected: &str) -> String {
+        match self {
+            ConfirmFailure::ProcessGone {
+                at_secs,
+                detail,
+                last_rpc,
+            } => format!(
+                "confirm failed: signal=process ({detail}) after {at_secs} s — {expected} never came up; last rpc: {last_rpc}"
+            ),
+            ConfirmFailure::RpcDown {
+                at_secs,
+                process_up,
+                last_rpc,
+            } => {
+                let proc_txt = match process_up {
+                    Some(true) => "process up, RPC down",
+                    Some(false) => "process down, RPC down",
+                    None => "process state unknown, RPC down",
+                };
+                format!(
+                    "confirm failed: signal=rpc ({proc_txt}) after {at_secs} s — {expected} not confirmed; last rpc: {last_rpc}"
+                )
+            }
+        }
+    }
+}
+
+/// The gate's answer: the version it observed, or why it stopped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfirmOutcome {
+    Confirmed { version: String, at_secs: u64 },
+    Failed(ConfirmFailure),
+}
+
+fn alive_label(alive: Option<bool>) -> &'static str {
+    match alive {
+        Some(true) => "up",
+        Some(false) => "down",
+        None => "unknown",
+    }
+}
+
+/// `last_rpc` for a report: the last thing the endpoint said, or the fact that
+/// it said nothing at all.
+fn rpc_hint(last: &str) -> String {
+    if last.trim().is_empty() {
+        "no answer yet".to_string()
+    } else {
+        last.to_string()
+    }
+}
+
+/// Poll both signals until `expected` is running, the process dies, or the
+/// ceiling passes. Pure apart from the probe and the log callback.
+///
+/// Logs one line each time the (process, rpc) state changes, e.g.
+/// `confirm: process=up rpc=no 45s` and
+/// `confirm: process=up rpc=yes 92s version=0.3.59`.
+pub fn wait_for_confirm(
+    probe: &mut dyn ConfirmProbe,
+    expected: &str,
+    deadlines: ConfirmDeadlines,
+    mut log: impl FnMut(&str),
+) -> ConfirmOutcome {
+    let mut saw_alive = false;
+    let mut last_rpc = String::new();
+    let mut logged: Option<(Option<bool>, bool)> = None;
+    let mut warned_past_window = false;
+
+    loop {
+        let alive = probe.process_alive();
+        if alive == Some(true) {
+            saw_alive = true;
+        }
+        let rpc = probe.rpc_version();
+        let elapsed = probe.elapsed_secs();
+        // "RPC answered" includes answering with the wrong version: the port is
+        // bound and the process is speaking, which is the distinction that
+        // matters here. The version question is what `last_rpc` records.
+        let rpc_ok = rpc.is_ok();
+
+        match &rpc {
+            Ok(v) => {
+                // An answer proves something is listening, whatever its version.
+                saw_alive = true;
+                if version_matches(expected, v) {
+                    log(&format!(
+                        "confirm: process={} rpc=yes {elapsed}s version={v}",
+                        alive_label(alive)
+                    ));
+                    return ConfirmOutcome::Confirmed {
+                        version: v.clone(),
+                        at_secs: elapsed,
+                    };
+                }
+                last_rpc = format!("the node reports {v}, expected {expected}");
+            }
+            Err(e) => last_rpc = e.clone(),
+        }
+
+        // C: it was alive and now it is not. Hard failure, immediate.
+        if saw_alive && alive == Some(false) {
+            log(&format!(
+                "confirm: process=down rpc=no {elapsed}s — the process exited before it confirmed"
+            ));
+            return ConfirmOutcome::Failed(ConfirmFailure::ProcessGone {
+                at_secs: elapsed,
+                detail: "exited",
+                last_rpc: rpc_hint(&last_rpc),
+            });
+        }
+        // C, the other half: it never appeared at all.
+        if !saw_alive && alive == Some(false) && elapsed >= CONFIRM_START_GRACE_SECS {
+            log(&format!(
+                "confirm: process=down rpc=no {elapsed}s — no process in the expected version tree"
+            ));
+            return ConfirmOutcome::Failed(ConfirmFailure::ProcessGone {
+                at_secs: elapsed,
+                detail: "never appeared",
+                last_rpc: rpc_hint(&last_rpc),
+            });
+        }
+
+        let state = (alive, rpc_ok);
+        if logged != Some(state) {
+            let version = match &rpc {
+                Ok(v) => format!(" version={v}"),
+                Err(_) => String::new(),
+            };
+            log(&format!(
+                "confirm: process={} rpc={} {elapsed}s{version}",
+                alive_label(alive),
+                if rpc_ok { "yes" } else { "no" }
+            ));
+            logged = Some(state);
+        }
+
+        // B: past the window with the process up but no confirmation. Say so
+        // once, then keep polling to the hard ceiling.
+        if !warned_past_window && elapsed >= deadlines.window_secs {
+            warned_past_window = true;
+            log(&format!(
+                "confirm: process={} rpc={} {elapsed}s — past the {}s window, waiting to the {}s ceiling",
+                alive_label(alive),
+                if rpc_ok { "yes" } else { "no" },
+                deadlines.window_secs,
+                deadlines.ceiling_secs
+            ));
+        }
+
+        if elapsed >= deadlines.ceiling_secs {
+            log(&format!(
+                "confirm: giving up at {elapsed}s (ceiling {}s)",
+                deadlines.ceiling_secs
+            ));
+            return ConfirmOutcome::Failed(ConfirmFailure::RpcDown {
+                at_secs: elapsed,
+                process_up: alive.or(if saw_alive { Some(true) } else { None }),
+                last_rpc: rpc_hint(&last_rpc),
+            });
+        }
+
+        probe.wait(CONFIRM_POLL_SECS);
+    }
+}
+
 /// Where the attempt ledger lives.
 pub const ATTEMPTS_FILE: &str = "update-attempts.json";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Remediation: a failure is a thing to fix, not only to report (#207)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 2026-11-18 (owner correction): distinguishing the three scenarios is not the
+// fix. B (RPC never binds) and C (process died) both have known causes on this
+// fleet, and every one of them has a mechanical response. The gate therefore
+// classifies a start failure from the node's own evidence — `last-exit.json`
+// and the tail of `node.log` — and applies **at most one** remediation + retry
+// per update. If the retry fails the caller rolls back; nothing loops.
+
+/// The most remediation attempts one update gets. Exactly one, by rule: an
+/// updater that keeps trying is an updater that hides a broken release.
+pub const MAX_REMEDIATION_ATTEMPTS: u32 = 1;
+
+/// Everything the classifier may look at.
+#[derive(Debug, Clone, Copy)]
+pub struct StartFailureContext<'a> {
+    /// `last-exit.json` (NDJSON; the last line is the newest record), or "".
+    pub last_exit: &'a str,
+    /// The last few lines of the node's log, verbatim.
+    pub log_tail: &'a [String],
+}
+
+impl<'a> StartFailureContext<'a> {
+    fn text(&self) -> String {
+        let mut s = self.last_exit.to_string();
+        for l in self.log_tail {
+            s.push('\n');
+            s.push_str(l);
+        }
+        s
+    }
+}
+
+/// What to do about a failure that has a known cause, or a considered refusal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Remediation {
+    /// An orphaned `gpn*` child still holds the DB or the log file. The
+    /// provider/AI children are *not* named `gpn-agent`, so the whole family has
+    /// to be found by name prefix and stopped children-first.
+    OrphanedFamily { cause: String },
+    /// The swapped DB's pruning mode disagrees with the configured one. The
+    /// supervisor re-resolves pruning per spawn; the retry must not pin a mode.
+    PruningMismatch { stored: String, cause: String },
+    /// The RPC port is held by one of *our* processes from an earlier run: stop
+    /// it (children first) and retry.
+    PortHeldByGpn {
+        pid: Option<u32>,
+        name: String,
+        port: u16,
+    },
+    /// RPC port held by something that is not ours. Never fight it.
+    PortHeldByForeign {
+        pid: Option<u32>,
+        name: String,
+        port: u16,
+    },
+    /// A missing/corrupt keystore or node-key: no heroic repair. Roll back.
+    FatalConfig { cause: String },
+    /// Everything else: roll back and quote the evidence.
+    Unknown { detail: String },
+}
+
+impl Remediation {
+    /// `Some` when applying it has a chance of working without a human. A
+    /// foreign process on the RPC port is deliberately *not* actionable: two
+    /// services fighting over a port is worse than one clean failure.
+    pub fn is_actionable(&self) -> bool {
+        matches!(
+            self,
+            Remediation::OrphanedFamily { .. }
+                | Remediation::PruningMismatch { .. }
+                | Remediation::PortHeldByGpn { .. }
+        )
+    }
+
+    /// The `remediate:` line in the log: `<cause> -> <action> -> retry`.
+    pub fn log_line(&self) -> String {
+        match self {
+            Remediation::OrphanedFamily { cause } => format!(
+                "remediate: {cause} -> stop the orphaned gpn family children-first, then retry"
+            ),
+            Remediation::PruningMismatch { stored, cause } => format!(
+                "remediate: {cause} -> let the supervisor re-resolve pruning per spawn (DB stores {stored}), then retry"
+            ),
+            Remediation::PortHeldByGpn { pid, name, port } => format!(
+                "remediate: rpc port {port} held by {name}{} -> stop the stale gpn family (children-first), retry",
+                pid.map(|p| format!(" (pid {p})")).unwrap_or_default()
+            ),
+            Remediation::PortHeldByForeign { pid, name, port } => format!(
+                "remediate: rpc port {port} is held by {name}{} -> not fighting it; report and roll back",
+                pid.map(|p| format!(" (pid {p})")).unwrap_or_default()
+            ),
+            Remediation::FatalConfig { cause } => format!(
+                "remediate: {cause} -> no automatic repair; report the exact file and roll back"
+            ),
+            Remediation::Unknown { detail } => format!(
+                "remediate: unrecognised exit ({detail}) -> roll back and quote the last log lines"
+            ),
+        }
+    }
+}
+
+/// Is this process name part of the gpn family? Prefix, because the tree has
+/// `gpn_node`, `gpn-node`, `gpn_update` and friends, and the child that holds a
+/// lock is often not the one the operator started.
+pub fn is_gpn_process_name(name: &str) -> bool {
+    let n = name.trim().to_ascii_lowercase();
+    n.starts_with("gpn")
+}
+
+/// The stored pruning mode out of a Substrate error such as
+/// `Incompatible pruning modes [stored: Constrained(256); requested: Archive]`.
+/// Returns `"256"` / `"archive"` — what the retry may ask for.
+pub fn parse_stored_pruning(text: &str) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    let at = lower.find("stored:")?;
+    let rest = &text[at + "stored:".len()..];
+    let end = rest.find([']', ';', '\n']).unwrap_or(rest.len());
+    let field = rest[..end].trim();
+    let mode = if let (Some(a), Some(b)) = (field.find('('), field.rfind(')')) {
+        field[a + 1..b].trim().to_string()
+    } else {
+        field.to_ascii_lowercase()
+    };
+    if mode.is_empty() {
+        return None;
+    }
+    // Normalise the names Substrate prints to the ones its CLI accepts.
+    let mode = match mode.as_str() {
+        "archiveall" | "archive-all" => "archive".to_string(),
+        "constrained" => "256".to_string(),
+        other => other.to_string(),
+    };
+    Some(mode)
+}
+
+/// Who holds the RPC port, and what to do about it. `None` owner = could not
+/// tell, which is treated as foreign: killing an unidentified process is how an
+/// updater takes a machine down.
+pub fn classify_port_holder(port: u16, owner: Option<(Option<u32>, String)>) -> Remediation {
+    match owner {
+        Some((pid, name)) if is_gpn_process_name(&name) => {
+            Remediation::PortHeldByGpn { pid, name, port }
+        }
+        Some((pid, name)) => Remediation::PortHeldByForeign { pid, name, port },
+        None => Remediation::PortHeldByForeign {
+            pid: None,
+            name: "unidentified process".to_string(),
+            port,
+        },
+    }
+}
+
+/// Does this text say the RPC port could not be bound?
+pub fn log_says_port_conflict(text: &str) -> bool {
+    let low = text.to_ascii_lowercase();
+    low.contains("address already in use")
+        || low.contains("address in use")
+        || low.contains("only one usage of each socket address")
+        || low.contains("failed to bind")
+}
+
+/// Classify a failed start from the node's own evidence.
+///
+/// Order matters: the lock error is the most common cause on this fleet and the
+/// most cheaply fixed; a pruning mismatch names itself; a keystore problem is
+/// the one we must *not* "fix".
+pub fn classify_start_failure(ctx: &StartFailureContext<'_>) -> Remediation {
+    let text = ctx.text();
+    let lower = text.to_ascii_lowercase();
+
+    let lock = lower.contains("used by another process")
+        || lower.contains("lockfile")
+        || lower.contains("cannot access the file")
+        || lower.contains("os error 32")
+        || lower.contains("sharing violation");
+    if lock {
+        return Remediation::OrphanedFamily {
+            cause: "lock held by another process".to_string(),
+        };
+    }
+
+    if lower.contains("incompatible pruning modes") {
+        return Remediation::PruningMismatch {
+            stored: parse_stored_pruning(&text).unwrap_or_else(|| "unknown".to_string()),
+            cause: "incompatible pruning modes".to_string(),
+        };
+    }
+
+    let key = lower.contains("node-key")
+        || lower.contains("keystore")
+        || lower.contains("corrupt-key")
+        || lower.contains("invalid seed")
+        || lower.contains("invalid phrase");
+    if key {
+        let detail = first_matching_line(ctx, &["node-key", "keystore", "corrupt", "invalid"])
+            .unwrap_or_else(|| "keystore or node-key is missing or unusable".to_string());
+        return Remediation::FatalConfig {
+            cause: detail.trim().to_string(),
+        };
+    }
+
+    let detail = if let Some(l) = ctx.log_tail.last() {
+        l.trim().to_string()
+    } else {
+        last_exit_summary(ctx.last_exit).unwrap_or_else(|| "no evidence recorded".to_string())
+    };
+    Remediation::Unknown { detail }
+}
+
+/// The gate plus **one** remediation and retry (#207).
+///
+/// Pure with respect to the world: the probes, the classification and the
+/// corrective action are all injected, so the four required tests run in
+/// microseconds instead of fifteen minutes each. The rule it enforces is
+/// [`MAX_REMEDIATION_ATTEMPTS`]: at most one remediation per update, never a
+/// loop, and a failed retry is returned to the caller, which rolls back.
+pub fn confirm_with_remediation(
+    make_probe: &mut dyn FnMut() -> Box<dyn ConfirmProbe>,
+    classify: &mut dyn FnMut() -> Remediation,
+    apply: &mut dyn FnMut(&Remediation) -> Result<(), String>,
+    expected: &str,
+    deadlines: ConfirmDeadlines,
+    log: &mut dyn FnMut(&str),
+) -> Result<String, String> {
+    let mut remediations = 0u32;
+    let mut tried: Vec<String> = Vec::new();
+    loop {
+        let mut probe = make_probe();
+        match wait_for_confirm(probe.as_mut(), expected, deadlines, &mut *log) {
+            ConfirmOutcome::Confirmed { version, .. } => return Ok(version),
+            ConfirmOutcome::Failed(failure) => {
+                let why = failure.describe(expected);
+                log(&why);
+                if remediations >= MAX_REMEDIATION_ATTEMPTS {
+                    let suffix = if tried.is_empty() {
+                        String::new()
+                    } else {
+                        format!("; already tried: {}", tried.join(", "))
+                    };
+                    return Err(format!("{why}{suffix}"));
+                }
+                let remediation = classify();
+                let line = remediation.log_line();
+                log(&line);
+                if !remediation.is_actionable() {
+                    return Err(format!("{why}; {line}"));
+                }
+                apply(&remediation)?;
+                tried.push(line);
+                remediations += 1;
+                log(&format!(
+                    "remediate: retrying (attempt {remediations}/{MAX_REMEDIATION_ATTEMPTS})"
+                ));
+            }
+        }
+    }
+}
+
+fn first_matching_line(ctx: &StartFailureContext<'_>, needles: &[&str]) -> Option<String> {
+    ctx.log_tail
+        .iter()
+        .map(|s| s.as_str())
+        .chain(ctx.last_exit.lines())
+        .find(|l| {
+            let low = l.to_ascii_lowercase();
+            needles.iter().any(|n| low.contains(n))
+        })
+        .map(|l| l.trim().to_string())
+}
+
+/// `kind` + `detail` from the newest `last-exit.json` record, if it parses.
+pub fn last_exit_summary(last_exit: &str) -> Option<String> {
+    let line = last_exit.lines().rev().find(|l| !l.trim().is_empty())?;
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("?");
+    let detail = v.get("detail").and_then(|d| d.as_str()).unwrap_or("");
+    Some(if detail.trim().is_empty() {
+        format!("last exit: {kind}")
+    } else {
+        format!("last exit: {kind} — {detail}")
+    })
+}
+
+/// The last `n` non-empty lines, verbatim — what the operator's report quotes.
+pub fn log_tail(text: &str, n: usize) -> Vec<String> {
+    let mut lines: Vec<String> = text
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(n)
+        .map(|l| l.to_string())
+        .collect();
+    lines.reverse();
+    lines
+}
+
+/// The TCP port a JSON-RPC URL points at (`http://127.0.0.1:9944` -> 9944).
+pub fn rpc_port(url: &str) -> Option<u16> {
+    let rest = url.split("://").nth(1).unwrap_or(url);
+    let hostport = rest.split('/').next().unwrap_or(rest);
+    let port = hostport.rsplit(':').next()?;
+    port.parse::<u16>().ok()
+}
 
 /// Retry ladder after a failed attempt: 1 h, 2 h, then 4 h for every further
 /// attempt (#203). A node never gives up — a permanent stop is how box 1 sat
@@ -2399,9 +3011,11 @@ pub fn attempt_for_this_boot(
 
 /// Does a recorded attempt forbid trying again on this boot?
 ///
-/// Only a *failed* or *rolled-back* attempt does. `started` blocks too, so a
-/// machine that dies mid-update does not retry the same build every hour on the
-/// same boot; `confirmed`/`installed` are the successful outcomes.
+/// Only a *failed* or *rolled-back* attempt does — those are outcomes the
+/// confirm step actually produced. `started` deliberately does **not** block
+/// (#207): an attempt is consumed by the confirm step, so a run that died
+/// before confirming (crash, power loss, updater killed) stays retryable.
+/// `confirmed`/`installed` are the successful outcomes.
 ///
 /// An `unknown` boot id never blocks: we cannot tell "same boot" from "new
 /// boot", and treating them as the same would exile a box from every future
@@ -2410,10 +3024,7 @@ pub fn attempt_blocks(prev: &UpdateAttempt) -> bool {
     if prev.boot_id == "unknown" {
         return false;
     }
-    matches!(
-        prev.outcome.as_str(),
-        OUTCOME_STARTED | OUTCOME_ROLLED_BACK | OUTCOME_FAILED
-    )
+    matches!(prev.outcome.as_str(), OUTCOME_ROLLED_BACK | OUTCOME_FAILED)
 }
 
 /// Does a recorded attempt forbid trying *this release* again on this boot?
@@ -4654,8 +5265,9 @@ mod tests {
         let prev = attempt_for_this_boot(&st, "0.3.47", "boot-a").expect("recorded");
         assert_eq!(prev.outcome, OUTCOME_STARTED);
         assert!(
-            attempt_blocks(&prev),
-            "an unfinished attempt blocks a retry"
+            !attempt_blocks(&prev),
+            "#207: an attempt is consumed by the confirm step, so one that never
+             reached it must stay retryable"
         );
 
         // Recording the outcome replaces the entry, it does not append.
@@ -4748,6 +5360,391 @@ mod tests {
         record_attempt(&dir, "0.3.47", "boot-a", OUTCOME_STARTED).unwrap();
         assert_eq!(load_attempts(&dir).attempts.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── #207: the three scenarios, told apart ────────────────────────────────
+
+    /// A probe whose two signals are scripted, with a simulated clock. This is
+    /// why the gate is a trait: four of these tests would otherwise take 40
+    /// minutes of real waiting.
+    struct ScriptedProbe {
+        /// Answers `process_alive` for each poll; the last one repeats.
+        alive: Vec<Option<bool>>,
+        /// `Ok(version)`/`Err(msg)` for each poll; the last one repeats.
+        rpc: Vec<Result<String, String>>,
+        elapsed: u64,
+        polls: usize,
+    }
+
+    impl ScriptedProbe {
+        fn new(alive: Vec<Option<bool>>, rpc: Vec<Result<String, String>>) -> Self {
+            ScriptedProbe {
+                alive,
+                rpc,
+                elapsed: 0,
+                polls: 0,
+            }
+        }
+    }
+
+    impl ConfirmProbe for ScriptedProbe {
+        fn process_alive(&mut self) -> Option<bool> {
+            let i = self.polls.min(self.alive.len().saturating_sub(1));
+            self.alive.get(i).copied().unwrap_or(None)
+        }
+        fn rpc_version(&mut self) -> Result<String, String> {
+            let i = self.polls.min(self.rpc.len().saturating_sub(1));
+            self.polls += 1;
+            self.rpc
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| Err("no answer".into()))
+        }
+        fn elapsed_secs(&mut self) -> u64 {
+            self.elapsed
+        }
+        fn wait(&mut self, secs: u64) {
+            self.elapsed += secs;
+        }
+    }
+
+    /// The four failing polls, then success — a slow start is not a failure.
+    #[test]
+    fn a_slow_first_start_confirms_when_rpc_arrives_after_five_minutes() {
+        let mut probe = ScriptedProbe::new(
+            vec![Some(true)],
+            vec![
+                Err("connection refused".into()),
+                Err("connection refused".into()),
+                Err("connection refused".into()),
+                Err("connection refused".into()),
+                Err("connection refused".into()),
+                Ok("0.3.59".into()),
+            ],
+        );
+        let mut log = Vec::new();
+        let out = wait_for_confirm(&mut probe, "0.3.59", confirm_deadlines(true), |l| {
+            log.push(l.to_string())
+        });
+        match out {
+            ConfirmOutcome::Confirmed { version, at_secs } => {
+                assert_eq!(version, "0.3.59");
+                assert_eq!(at_secs, 10, "five polls at 2 s each");
+            }
+            other => panic!("expected confirmation, got {other:?}"),
+        }
+        assert!(
+            log.iter().any(|l| l.contains("confirm: process=up rpc=no")),
+            "the two signals must be logged separately: {log:?}"
+        );
+        assert!(
+            log.iter()
+                .any(|l| l.contains("rpc=yes") && l.contains("version=0.3.59")),
+            "the observed version must be recorded: {log:?}"
+        );
+    }
+
+    /// C: dead at 10 s is dead now, not 900 s from now.
+    #[test]
+    fn a_process_that_exits_at_ten_seconds_fails_immediately() {
+        let mut probe = ScriptedProbe::new(
+            vec![Some(true), Some(true), Some(true), Some(false)],
+            vec![Err("connection refused".into())],
+        );
+        let mut log = Vec::new();
+        let out = wait_for_confirm(&mut probe, "0.3.59", confirm_deadlines(true), |l| {
+            log.push(l.to_string())
+        });
+        match out {
+            ConfirmOutcome::Failed(f) => {
+                assert_eq!(f.signal(), "process");
+                assert_eq!(f.at_secs(), 6);
+                assert!(matches!(f, ConfirmFailure::ProcessGone { .. }));
+            }
+            other => panic!("expected a process failure, got {other:?}"),
+        }
+        assert!(log.iter().any(|l| l.contains("process=down")), "{log:?}");
+    }
+
+    /// B: up the whole time, RPC never answers — it still gets the full
+    /// ceiling, then fails naming the RPC signal.
+    #[test]
+    fn rpc_that_never_answers_fails_at_the_ceiling_and_names_the_rpc_signal() {
+        let mut probe =
+            ScriptedProbe::new(vec![Some(true)], vec![Err("connection refused".into())]);
+        let mut log = Vec::new();
+        let out = wait_for_confirm(&mut probe, "0.3.59", confirm_deadlines(false), |l| {
+            log.push(l.to_string())
+        });
+        match out {
+            ConfirmOutcome::Failed(f @ ConfirmFailure::RpcDown { process_up, .. }) => {
+                assert_eq!(f.signal(), "rpc");
+                assert_eq!(process_up, Some(true), "the process was up the whole time");
+                assert_eq!(f.at_secs(), CONFIRM_HARD_CEILING_SECS);
+                assert!(f.describe("0.3.59").contains("process up, RPC down"));
+            }
+            other => panic!("expected an RPC failure, got {other:?}"),
+        }
+        assert!(
+            log.iter().any(|l| l.contains("past the 120s window")),
+            "a warm confirm must say when it is past its window: {log:?}"
+        );
+    }
+
+    /// A process whose liveness cannot be read is *not* declared dead.
+    #[test]
+    fn unknown_liveness_waits_and_reports_rpc_rather_than_claiming_death() {
+        let mut probe = ScriptedProbe::new(vec![None], vec![Err("connection refused".into())]);
+        let out = wait_for_confirm(&mut probe, "0.3.59", confirm_deadlines(false), |_| {});
+        match out {
+            ConfirmOutcome::Failed(ConfirmFailure::RpcDown { process_up, .. }) => {
+                assert_eq!(process_up, None);
+            }
+            other => panic!("expected RpcDown with unknown liveness, got {other:?}"),
+        }
+    }
+
+    /// A node that answers with the *old* version is not a confirmation, and
+    /// the reason says so rather than "no answer".
+    #[test]
+    fn an_old_version_answer_is_an_rpc_failure_with_the_version_in_the_reason() {
+        let mut probe = ScriptedProbe::new(vec![Some(true)], vec![Ok("0.3.58".into())]);
+        let out = wait_for_confirm(&mut probe, "0.3.59", confirm_deadlines(true), |_| {});
+        match out {
+            ConfirmOutcome::Failed(ConfirmFailure::RpcDown { last_rpc, .. }) => {
+                assert!(last_rpc.contains("0.3.58"), "{last_rpc}");
+            }
+            other => panic!("expected RpcDown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_deadlines_are_named_and_the_ceiling_always_caps_them() {
+        let warm = confirm_deadlines(false);
+        assert_eq!(warm.window_secs, 120);
+        assert_eq!(warm.ceiling_secs, 900);
+        let first = confirm_deadlines(true);
+        assert_eq!(first.window_secs, 900);
+        assert_eq!(first.ceiling_secs, 900);
+        // An override can shorten the wait, never extend it.
+        assert_eq!(first.with_window(30).window_secs, 30);
+        assert_eq!(first.with_window(5_000).window_secs, 900);
+    }
+
+    // ── #207 remediation: classify, fix, retry exactly once ──────────────────
+
+    fn ctx<'a>(last_exit: &'a str, tail: &'a [String]) -> StartFailureContext<'a> {
+        StartFailureContext {
+            last_exit,
+            log_tail: tail,
+        }
+    }
+
+    #[test]
+    fn a_db_lock_held_by_another_process_is_an_orphaned_family() {
+        let tail = vec![
+            "[node] opening database".to_string(),
+            "Error: The process cannot access the file because it is being used by another process. (os error 32)".to_string(),
+        ];
+        match classify_start_failure(&ctx("", &tail)) {
+            Remediation::OrphanedFamily { .. } => {}
+            other => panic!("expected OrphanedFamily, got {other:?}"),
+        }
+        assert!(classify_start_failure(&ctx("", &tail)).is_actionable());
+    }
+
+    #[test]
+    fn incompatible_pruning_modes_name_the_stored_mode_to_launch_with() {
+        let tail = vec![
+            "Error: Incompatible pruning modes [stored: Constrained(256); requested: Archive]"
+                .to_string(),
+        ];
+        match classify_start_failure(&ctx("", &tail)) {
+            Remediation::PruningMismatch { stored, .. } => assert_eq!(stored, "256"),
+            other => panic!("expected PruningMismatch, got {other:?}"),
+        }
+        assert_eq!(
+            parse_stored_pruning("stored: Archive"),
+            Some("archive".into())
+        );
+        assert_eq!(
+            parse_stored_pruning("stored: ArchiveAll]"),
+            Some("archive".into())
+        );
+        assert_eq!(parse_stored_pruning("nothing here"), None);
+    }
+
+    #[test]
+    fn a_missing_keystore_is_not_repaired_automatically() {
+        let tail = vec![
+            "Error: node-key not found at /home/op/.gpn/chains/gpn/network/secret_ed25519"
+                .to_string(),
+        ];
+        match classify_start_failure(&ctx("", &tail)) {
+            Remediation::FatalConfig { cause } => assert!(cause.contains("node-key")),
+            other => panic!("expected FatalConfig, got {other:?}"),
+        }
+        assert!(!classify_start_failure(&ctx("", &tail)).is_actionable());
+    }
+
+    #[test]
+    fn an_unrecognised_exit_is_unknown_and_keeps_the_line_for_the_report() {
+        let tail = vec!["thread 'main' panicked at 'index out of bounds'".to_string()];
+        match classify_start_failure(&ctx("", &tail)) {
+            Remediation::Unknown { detail } => assert!(detail.contains("panicked")),
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+        assert!(!classify_start_failure(&ctx("", &tail)).is_actionable());
+    }
+
+    #[test]
+    fn a_port_owner_is_only_killed_when_it_is_ours() {
+        let ours = classify_port_holder(9944, Some((Some(42), "gpn_node".into())));
+        assert!(matches!(ours, Remediation::PortHeldByGpn { .. }));
+        assert!(ours.is_actionable());
+        let theirs = classify_port_holder(9944, Some((Some(7), "nginx".into())));
+        assert!(matches!(theirs, Remediation::PortHeldByForeign { .. }));
+        assert!(!theirs.is_actionable());
+        // Unidentified is foreign: never kill blind.
+        assert!(matches!(
+            classify_port_holder(9944, None),
+            Remediation::PortHeldByForeign { .. }
+        ));
+    }
+
+    #[test]
+    fn bind_errors_are_recognised_in_a_log() {
+        assert!(log_says_port_conflict(
+            "Error: failed to bind JSON-RPC address 127.0.0.1:9944: Address already in use"
+        ));
+        assert!(log_says_port_conflict(
+            "Only one usage of each socket address is normally permitted"
+        ));
+        assert!(!log_says_port_conflict("syncing block 42"));
+    }
+
+    /// The four required remediation tests, driven by scripted probes.
+    /// `ScriptedProbe` lives above; this helper runs one gate attempt after
+    /// another, each with its own script.
+    fn run_remediation_case(
+        first: ScriptedProbe,
+        second: ScriptedProbe,
+        remediation: Remediation,
+    ) -> (Result<String, String>, Vec<String>, usize) {
+        let mut probes = vec![first, second].into_iter();
+        let mut make_probe = move || -> Box<dyn ConfirmProbe> {
+            Box::new(probes.next().expect("the gate asked for a third probe"))
+        };
+        let mut classify = || remediation.clone();
+        let mut applied = 0usize;
+        let mut apply = |_r: &Remediation| -> Result<(), String> {
+            applied += 1;
+            Ok(())
+        };
+        let mut loglines = Vec::new();
+        let out = confirm_with_remediation(
+            &mut make_probe,
+            &mut classify,
+            &mut apply,
+            "0.3.59",
+            confirm_deadlines(true),
+            &mut |l| loglines.push(l.to_string()),
+        );
+        (out, loglines, applied)
+    }
+
+    #[test]
+    fn a_stale_gpn_child_holding_the_db_lock_is_stopped_and_the_start_succeeds() {
+        // First attempt: the lock error, so the process dies before confirming.
+        let first = ScriptedProbe::new(
+            vec![Some(true), Some(false)],
+            vec![Err("connection refused".into())],
+        );
+        // After the family is stopped, the retry comes up and confirms.
+        let second = ScriptedProbe::new(vec![Some(true)], vec![Ok("0.3.59".into())]);
+        let (out, logs, applied) = run_remediation_case(
+            first,
+            second,
+            Remediation::OrphanedFamily {
+                cause: "lock held by another process".into(),
+            },
+        );
+        assert_eq!(out, Ok("0.3.59".to_string()));
+        assert_eq!(applied, 1, "exactly one remediation");
+        assert!(logs.iter().any(|l| l.contains("signal=process")));
+        assert!(logs.iter().any(|l| l.contains("orphaned gpn family")));
+    }
+
+    #[test]
+    fn a_port_held_by_a_stale_gpn_process_is_freed_and_the_start_succeeds() {
+        let first = ScriptedProbe::new(vec![Some(true)], vec![Err("connection refused".into())]);
+        let second = ScriptedProbe::new(vec![Some(true)], vec![Ok("0.3.59".into())]);
+        let (out, logs, applied) = run_remediation_case(
+            first,
+            second,
+            Remediation::PortHeldByGpn {
+                pid: Some(42),
+                name: "gpn_node".into(),
+                port: 9944,
+            },
+        );
+        assert_eq!(out, Ok("0.3.59".to_string()));
+        assert_eq!(applied, 1);
+        assert!(logs
+            .iter()
+            .any(|l| l.contains("rpc port 9944") && l.contains("gpn_node")));
+    }
+
+    #[test]
+    fn incompatible_pruning_modes_is_corrected_and_the_start_succeeds() {
+        let first = ScriptedProbe::new(vec![Some(true), Some(false)], vec![Err("exited".into())]);
+        let second = ScriptedProbe::new(vec![Some(true)], vec![Ok("0.3.59".into())]);
+        let (out, logs, applied) = run_remediation_case(
+            first,
+            second,
+            Remediation::PruningMismatch {
+                stored: "256".into(),
+                cause: "incompatible pruning modes".into(),
+            },
+        );
+        assert_eq!(out, Ok("0.3.59".to_string()));
+        assert_eq!(applied, 1);
+        assert!(logs
+            .iter()
+            .any(|l| l.contains("pruning") && l.contains("256")));
+    }
+
+    #[test]
+    fn an_unknown_exit_does_not_retry_and_keeps_the_log_line() {
+        let first = ScriptedProbe::new(vec![Some(true), Some(false)], vec![Err("exited".into())]);
+        let second = ScriptedProbe::new(vec![Some(true)], vec![Ok("0.3.59".into())]);
+        let (out, logs, applied) = run_remediation_case(
+            first,
+            second,
+            Remediation::Unknown {
+                detail: "panicked at 'index out of bounds'".into(),
+            },
+        );
+        let err = out.expect_err("an unknown exit must fail");
+        assert_eq!(applied, 0, "nothing is applied for an unknown exit");
+        assert!(err.contains("panicked at 'index out of bounds'"), "{err}");
+        assert!(logs.iter().any(|l| l.contains("unrecognised exit")));
+    }
+
+    #[test]
+    fn a_second_failure_after_remediation_stops_at_one_attempt() {
+        let first = ScriptedProbe::new(vec![Some(true), Some(false)], vec![Err("exited".into())]);
+        let second = ScriptedProbe::new(vec![Some(true), Some(false)], vec![Err("exited".into())]);
+        let (out, _logs, applied) = run_remediation_case(
+            first,
+            second,
+            Remediation::OrphanedFamily {
+                cause: "lock held by another process".into(),
+            },
+        );
+        let err = out.expect_err("the retry also failed");
+        assert_eq!(applied, 1, "never loops");
+        assert!(err.contains("already tried"), "{err}");
     }
 
     // ── #203: retries never stop ────────────────────────────────────────────
@@ -4854,9 +5851,26 @@ mod tests {
             update_retry_view(&dir).is_none(),
             "no ledger, nothing to say"
         );
+        // `started` is in flight, not pending: the confirm step is the thing
+        // that consumes an attempt (#207), so a start that never reached it
+        // stays retryable and is not reported as "declined until".
         record_attempt_outcome(&dir, "0.3.58", "boot-a", OUTCOME_STARTED, "abc", "started")
             .unwrap();
-        let v = update_retry_view(&dir).expect("a started-but-unfinished attempt is pending");
+        assert!(
+            update_retry_view(&dir).is_none(),
+            "an unfinished start must not look like a scheduled retry"
+        );
+
+        record_attempt_outcome(
+            &dir,
+            "0.3.58",
+            "boot-a",
+            OUTCOME_FAILED,
+            "abc",
+            "did not start",
+        )
+        .unwrap();
+        let v = update_retry_view(&dir).expect("a failed attempt is pending");
         assert_eq!(v.version, "0.3.58");
         assert_eq!(v.attempts, 1);
         let _ = std::fs::remove_dir_all(&dir);

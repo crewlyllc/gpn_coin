@@ -409,26 +409,27 @@ if grep -qE 'schtasks /(End|Run)|--apply' "$tmp/unreachable.txt"; then
 if LC_ALL=C grep -q $'[^\x01-\x7F]' "$uw"; then
   bad "generated update-and-restart.ps1 contains non-ASCII bytes"; else ok "update wrapper is ASCII-only"; fi
 
-# ---- confirm window (measured on box 1, 2026-11-17) ------------------------
+# ---- confirm windows (#207, named constants) ------------------------------
 # After a successful swap the new node started at 02:00:13 and bound JSON-RPC at
-# 02:02:18 -- 125 s of GPU init + state load. The window was 120 s, so the wrapper
-# declared NOT CONFIRMED and rolled `current` back to 0.3.50 while the RUNNING
-# process was already serving 0.3.53. A gate shorter than a cold start fails
-# correct work; assert the default outlasts the measurement with room to spare,
-# and that the loop can tell "still starting" from "the process died".
-confirm_default=$(sed -n 's/.*else { \([0-9][0-9]*\) }.*/\1/p' "$uw" | head -1)
-if [ -n "$confirm_default" ] && [ "$confirm_default" -ge 300 ]; then
-  ok "confirm window is ${confirm_default}s (a Windows cold start measured 125 s)"
-else
-  bad "confirm window is '${confirm_default:-unset}'s - shorter than the measured Windows cold start (125 s), so a build that is merely still starting gets rolled back"
-fi
-assert_has "$uw" "Test-NodeAlive" "confirm loop checks the process, not just the RPC"
-assert_has "$uw" "the node process exited before it answered" "a dead process fails the confirm immediately, not after the window"
-# Negative control: the 120 s window this release replaced must be REJECTED by the
-# check above, otherwise the assertion proves nothing.
-printf '%s\n' '$ConfirmSecs  = if ($env:GPN_UPDATE_CONFIRM_SECS) { [int]$env:GPN_UPDATE_CONFIRM_SECS } else { 120 }' > "$tmp/old-window.ps1"
-old_default=$(sed -n 's/.*else { \([0-9][0-9]*\) }.*/\1/p' "$tmp/old-window.ps1" | head -1)
-if [ "${old_default:-0}" -lt 300 ]; then ok "negative control: the pre-0.3.53 120s window is rejected"; else bad "negative control FAILED - a 120s window would pass the confirm-window check"; fi
+# 02:02:18 -- 125 s of GPU init + state load (box 1, 2026-11-17). A single 360 s
+# window still could not tell "slow" from "dead": the fifth box's report said
+# only `not confirmed within 360 s`, and nobody could say whether it was starting,
+# up without RPC, or dead. #207 splits the signals and names the windows:
+#   warm restart 120 s / first start after an update 900 s / hard ceiling 900 s.
+assert_has "$uw" '$ConfirmWarmSecs       = 120' "warm restart window is a named 120 s constant"
+assert_has "$uw" '$ConfirmFirstStartSecs = 900' "first start after an update gets 900 s"
+assert_has "$uw" '$ConfirmCeilingSecs    = 900' "the hard ceiling is 900 s"
+assert_has "$uw" 'function Confirm-Update' "confirm runs through the remediation-aware gate"
+assert_has "$uw" 'confirm: process=' "the log records the process signal separately"
+assert_has "$uw" "' rpc='" "the log records the RPC signal separately"
+assert_has "$uw" 'process up, RPC down' "an RPC-only failure is reported as 'process up, RPC down'"
+assert_has "$uw" "the process exited before it confirmed" "a dead process fails the confirm immediately, not after the window"
+assert_has "$uw" 'function Stop-GpnFamily' "a stale gpn family can be stopped children-first"
+assert_has "$uw" 'function Get-PortOwner' "the RPC port owner is identified before anything is killed"
+assert_has "$uw" 'Incompatible pruning modes' "the pruning-mode cause is classed, not just logged"
+assert_has "$uw" 'last-exit.json' "the classifier reads the node's own exit record"
+assert_has "$uw" 'NODE DOWN - manual intervention' "both builds failing ends with an operator message, never a silent stop"
+assert_has "$uw" 'attempt 1/1' "at most one remediation+retry per update"
 
 # Negative control for the ordering checks: a wrapper that applies before it
 # stops must be rejected, otherwise the assertions above prove nothing.
@@ -510,6 +511,13 @@ if command -v pwsh >/dev/null 2>&1; then
     fi
   done
   mkdir -p "$tmp/wi" && cd "$tmp/wi" || exit 1
+  # The confirm gate's behaviour, not just its syntax (#207): slow start,
+  # process death, RPC-only failure, and the one-remediation rule.
+  if pwsh -NoProfile -File "$repo/scripts/tests/test-update-confirm.ps1" >"$tmp/confirm-ps.log" 2>&1; then
+    ok "confirm gate behaves as specified (slow / dead / rpc-only / one remediation)"
+  else
+    bad "confirm gate behaviour test failed: $(grep -m3 '^FAIL' "$tmp/confirm-ps.log" | tr '\n' ';')"
+  fi
   # No binaries next to the script -> it must stop before mutating anything,
   # and -WhatIf must print the planned steps first.
   out=$(pwsh -NoProfile -File "$ps1" -WhatIf -InstallDir "$tmp/wi/inst" 2>&1 || true)

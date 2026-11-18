@@ -85,6 +85,11 @@ const EXIT_UPDATE_AVAILABLE: u8 = 3;
 /// `--confirm` could not see the expected version running before the deadline.
 const EXIT_NOT_CONFIRMED: u8 = 4;
 
+/// The default `--timeout`. Kept as a constant so the gate can tell "the
+/// operator set a window" from "nobody did" and use the named deadlines
+/// (`update::CONFIRM_WARM_SECS` / `CONFIRM_FIRST_START_SECS`) otherwise.
+const DEFAULT_CONFIRM_TIMEOUT_SECS: u64 = update::CONFIRM_WARM_SECS;
+
 /// The binary this crate compiles. Reported as `current` only when the install
 /// directory carries no readable build stamp (a hand-built dev tree).
 const COMPILED_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -1096,7 +1101,7 @@ fn run_apply(o: &Options, report: &mut Report) -> u8 {
     match restart(o, report) {
         Ok(()) => {
             if report.restart_ran == Some(true) {
-                match wait_for_version(o, &m.version) {
+                match confirm_update(o, &m.version, true, report) {
                     Ok(got) => {
                         report.confirmed_version = Some(got.clone());
                         let _ = update::record_attempt_with_release(
@@ -1106,6 +1111,9 @@ fn run_apply(o: &Options, report: &mut Report) -> u8 {
                             update::OUTCOME_CONFIRMED,
                             &asset.sha256,
                         );
+                        // The attempt is consumed and the marker cleared only
+                        // now, after the confirm step has actually run (#207).
+                        update::discard_pending(&o.state_dir);
                         if !o.quiet && !o.json {
                             println!("  confirmed: {got} is running");
                         }
@@ -1155,11 +1163,12 @@ fn run_apply(o: &Options, report: &mut Report) -> u8 {
 }
 
 /// The new build did not come up: put the previous one back, start it, and
-/// record the failure so this boot does not try the same release again.
+/// **confirm the old version is running** before reporting (#207).
 ///
-/// The node is never left down: if the rollback itself fails we still run the
-/// restart command, because a box running the previous build is the floor, and
-/// a box with nothing running is worse than the bug we are reacting to.
+/// The node is never left down. If the old build does not confirm either, it is
+/// started once more and left running; if even the process is gone the report
+/// says "node down — manual intervention" with the last-exit reason, and names
+/// what was tried.
 fn roll_back_after_failed_confirm(
     o: &Options,
     report: &mut Report,
@@ -1207,9 +1216,78 @@ fn roll_back_after_failed_confirm(
     };
 
     // Restart whatever is now selected. Never end with the node down.
-    match restart(o, report) {
-        Ok(()) => {}
-        Err(e) => eprintln!("gpn_update: could not restart after the rollback: {e}"),
+    if let Err(e) = restart(o, report) {
+        eprintln!("gpn_update: could not restart after the rollback: {e}");
+    }
+
+    // Confirm the old build actually runs — "rolled back" is a statement about
+    // `current`, not about the process, and reporting one as the other is how
+    // the fleet was told a node was fine while it ran the failed build.
+    let mut now_running = String::from("unknown");
+    let mut down = false;
+    if let Some(prev) = &prev_label {
+        let mut probe = ProcessRpcProbe::new(&o.rpc_url, expected_trees(o, prev));
+        let d = update::confirm_deadlines(true);
+        match update::wait_for_confirm(&mut probe, prev, d, |line| println!("  {line}")) {
+            update::ConfirmOutcome::Confirmed { version, at_secs } => {
+                now_running = format!("{version} is running after {at_secs} s");
+                println!("  rollback confirmed: {now_running}");
+            }
+            update::ConfirmOutcome::Failed(f) => {
+                let why = f.describe(prev);
+                eprintln!("  rollback did not confirm: {why}");
+                // One more start of the previous version, then leave it. A
+                // node that is up but slow beats a node that is stopped.
+                if let Err(e) = restart(o, report) {
+                    eprintln!("gpn_update: the second rollback start failed: {e}");
+                }
+                let mut probe = ProcessRpcProbe::new(&o.rpc_url, expected_trees(o, prev));
+                match update::wait_for_confirm(&mut probe, prev, d, |line| println!("  {line}")) {
+                    update::ConfirmOutcome::Confirmed { version, at_secs } => {
+                        now_running =
+                            format!("{version} is running after {at_secs} s (second start)");
+                        println!("  rollback confirmed on the second start: {now_running}");
+                    }
+                    update::ConfirmOutcome::Failed(f2) => {
+                        let (last_exit, tail) = start_evidence(o);
+                        down = true;
+                        print_log_tail(&tail);
+                        let exit_note = update::last_exit_summary(&last_exit)
+                            .unwrap_or_else(|| "last-exit.json has no usable record".to_string());
+                        now_running = format!(
+                            "node down — manual intervention ({}; {exit_note}; no process came up after two starts of {prev})",
+                            f2.describe(prev)
+                        );
+                    }
+                }
+            }
+        }
+    } else {
+        // No rollback target: whatever is on disk is what should be running.
+        match update::installed_version(&o.state_dir) {
+            Some(v) => {
+                let mut probe = ProcessRpcProbe::new(&o.rpc_url, expected_trees(o, &v));
+                let d = update::confirm_deadlines(true);
+                match update::wait_for_confirm(&mut probe, &v, d, |line| println!("  {line}")) {
+                    update::ConfirmOutcome::Confirmed { version, at_secs } => {
+                        now_running = format!("{version} is running after {at_secs} s");
+                    }
+                    update::ConfirmOutcome::Failed(f) => {
+                        down = true;
+                        now_running = format!(
+                            "node down — manual intervention ({}; no rollback target to restore)",
+                            f.describe(&v)
+                        );
+                    }
+                }
+            }
+            None => {
+                down = true;
+                now_running =
+                    "node down — manual intervention (no installed version could be identified)"
+                        .to_string();
+            }
+        }
     }
 
     let _ = update::record_attempt_outcome(
@@ -1220,9 +1298,13 @@ fn roll_back_after_failed_confirm(
         release_id,
         reason,
     );
+    let mut full = format!("{msg}; {now_running}");
+    if down {
+        full = format!("NODE DOWN: {full}");
+    }
     report.rolled_back_to = prev_label;
-    report.error = Some(msg.clone());
-    emit_error(o, report, &msg);
+    report.error = Some(full.clone());
+    emit_error(o, report, &full);
     EXIT_ERROR
 }
 
@@ -1233,7 +1315,7 @@ fn roll_back_after_failed_confirm(
 /// Ask the running node what version it is, via the same JSON-RPC the operator
 /// and the dashboard use.
 ///
-/// Short per-request timeout: `--confirm` polls, so one slow answer must not
+/// Short per-request timeout: the gate polls, so one slow answer must not
 /// consume the whole deadline.
 fn rpc_system_version(url: &str, timeout: Duration) -> Result<String, String> {
     let client = reqwest::blocking::Client::builder()
@@ -1265,27 +1347,446 @@ fn rpc_system_version(url: &str, timeout: Duration) -> Result<String, String> {
         .ok_or_else(|| format!("{url}: no string `result` in {v}"))
 }
 
-/// Poll the running node until it reports `version`, or the deadline passes.
-fn wait_for_version(o: &Options, version: &str) -> Result<String, String> {
-    let deadline = std::time::Instant::now() + Duration::from_secs(o.timeout_secs);
-    let mut last: Option<String> = None;
-    loop {
-        match rpc_system_version(&o.rpc_url, Duration::from_secs(3)) {
-            Ok(got) if update::version_matches(version, &got) => return Ok(got),
-            Ok(got) => last = Some(format!("the node reports {got}")),
-            Err(e) => last = Some(e),
+// ─────────────────────────────────────────────────────────────────────────────
+// The production probes for the confirm gate (#207)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Polls the real process table and the real RPC endpoint.
+struct ProcessRpcProbe {
+    rpc_url: String,
+    /// Directories that identify the build under test: the version tree, the
+    /// `current` link, and the install target. A `gpn*` process is "the node"
+    /// only if its image is inside one of them — the family has many children
+    /// and an image-name match alone proves nothing.
+    trees: Vec<std::path::PathBuf>,
+    sys: sysinfo::System,
+    t0: std::time::Instant,
+}
+
+impl ProcessRpcProbe {
+    fn new(rpc_url: &str, trees: Vec<std::path::PathBuf>) -> Self {
+        ProcessRpcProbe {
+            rpc_url: rpc_url.to_string(),
+            trees,
+            sys: sysinfo::System::new(),
+            t0: std::time::Instant::now(),
         }
-        if std::time::Instant::now() >= deadline {
-            break;
-        }
-        std::thread::sleep(Duration::from_secs(2));
     }
-    Err(format!(
-        "{version} is not running after {} s: {} (asked {})",
-        o.timeout_secs,
-        last.unwrap_or_else(|| "no answer yet".to_string()),
-        o.rpc_url
-    ))
+}
+
+impl update::ConfirmProbe for ProcessRpcProbe {
+    fn process_alive(&mut self) -> Option<bool> {
+        self.sys.refresh_processes();
+        if self.sys.processes().is_empty() {
+            return None; // the process table could not be read: never "dead"
+        }
+        let me = sysinfo::Pid::from_u32(std::process::id());
+        let mut saw_unmatched_gpn = false;
+        for p in self.sys.processes().values() {
+            if p.pid() == me {
+                continue;
+            }
+            let name = p.name().to_ascii_lowercase();
+            // The updater is part of the family by name and is not the node.
+            if !update::is_gpn_process_name(&name)
+                || name.starts_with("gpn_update")
+                || name.starts_with("gpn-update")
+            {
+                continue;
+            }
+            let exe = p
+                .exe()
+                .map(std::path::PathBuf::from)
+                .or_else(|| p.cmd().first().map(std::path::PathBuf::from));
+            match exe {
+                Some(e) if self.trees.iter().any(|d| e.starts_with(d)) => return Some(true),
+                // A gpn process we cannot place (another install, another
+                // profile, unreadable path): say "unknown" instead of guessing.
+                _ => saw_unmatched_gpn = true,
+            }
+        }
+        if saw_unmatched_gpn {
+            None
+        } else {
+            Some(false)
+        }
+    }
+
+    fn rpc_version(&mut self) -> Result<String, String> {
+        rpc_system_version(&self.rpc_url, Duration::from_secs(3))
+    }
+
+    fn elapsed_secs(&mut self) -> u64 {
+        self.t0.elapsed().as_secs()
+    }
+
+    fn wait(&mut self, secs: u64) {
+        std::thread::sleep(Duration::from_secs(secs));
+    }
+}
+
+/// Is this pid's image inside one of the expected build directories?
+fn process_runs_from(pid: u32, trees: &[std::path::PathBuf]) -> bool {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes();
+    let Some(p) = sys.process(sysinfo::Pid::from_u32(pid)) else {
+        return false;
+    };
+    let exe = p
+        .exe()
+        .map(std::path::PathBuf::from)
+        .or_else(|| p.cmd().first().map(std::path::PathBuf::from));
+    match exe {
+        Some(e) => trees.iter().any(|d| e.starts_with(d)),
+        None => false,
+    }
+}
+
+/// The directories that identify the build under test.
+fn expected_trees(o: &Options, expect: &str) -> Vec<std::path::PathBuf> {
+    let mut v = vec![
+        update::version_dir(&o.state_dir, expect),
+        update::current_link(&o.state_dir),
+    ];
+    v.push(o.target_dir.clone());
+    v
+}
+
+/// Is anything at all bound to `port` on loopback?
+fn port_listening(port: u16) -> bool {
+    use std::net::{TcpStream, ToSocketAddrs};
+    let addr = match ("127.0.0.1", port).to_socket_addrs() {
+        Ok(mut a) => match a.next() {
+            Some(a) => a,
+            None => return false,
+        },
+        Err(_) => return false,
+    };
+    TcpStream::connect_timeout(&addr, Duration::from_millis(400)).is_ok()
+}
+
+/// Best-effort "who owns this port". `None` = could not tell, which is treated
+/// as "do not touch it": killing an unidentified process is how an updater
+/// takes a machine down.
+fn port_owner(port: u16) -> Option<(Option<u32>, String)> {
+    #[cfg(unix)]
+    {
+        let out = std::process::Command::new("ss")
+            .args(["-Hltnp", &format!("sport = :{port}")])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        let pid = text
+            .split("pid=")
+            .nth(1)
+            .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next())
+            .and_then(|s| s.parse::<u32>().ok());
+        let name = text
+            .split('"')
+            .nth(1)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "unidentified process".to_string());
+        if text.trim().is_empty() {
+            return None;
+        }
+        return Some((pid, name));
+    }
+    #[cfg(windows)]
+    {
+        let out = std::process::Command::new("netstat")
+            .args(["-ano"])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        let pid = text
+            .lines()
+            .find(|l| l.contains(&format!(":{port}")) && l.contains("LISTENING"))
+            .and_then(|l| l.split_whitespace().last())
+            .and_then(|s| s.parse::<u32>().ok());
+        let name = pid
+            .and_then(|p| {
+                std::process::Command::new("tasklist")
+                    .args(["/FI", &format!("PID eq {p}"), "/FO", "CSV", "/NH"])
+                    .output()
+                    .ok()
+            })
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .split(',')
+                    .next()
+                    .unwrap_or("")
+                    .trim_matches('"')
+                    .to_string()
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "unidentified process".to_string());
+        if text.trim().is_empty() {
+            return None;
+        }
+        Some((pid, name))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = port;
+        None
+    }
+}
+
+/// Stop every `gpn*` process (children first) except this updater. Returns the
+/// number still alive afterwards.
+fn stop_gpn_family() -> usize {
+    let me = std::process::id();
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes();
+    let targets: Vec<(sysinfo::Pid, Option<sysinfo::Pid>, String)> = sys
+        .processes()
+        .iter()
+        .filter(|(pid, p)| {
+            let name = p.name().to_ascii_lowercase();
+            **pid != sysinfo::Pid::from_u32(me)
+                && update::is_gpn_process_name(&name)
+                && !name.starts_with("gpn_update")
+                && !name.starts_with("gpn-update")
+        })
+        .map(|(pid, p)| (*pid, p.parent(), p.name().to_string()))
+        .collect();
+    if targets.is_empty() {
+        return 0;
+    }
+    // Children first: a parent stopped first can respawn its children, and the
+    // child is what holds the DB handle. Sort by depth descending.
+    let mut ordered = targets.clone();
+    ordered.sort_by_key(|(_, parent, _)| {
+        let mut depth = 0;
+        let mut cur = *parent;
+        while let Some(p) = cur {
+            depth += 1;
+            cur = sys.process(p).and_then(|proc| proc.parent());
+            if depth > 32 {
+                break;
+            }
+        }
+        std::cmp::Reverse(depth)
+    });
+    for (pid, _, name) in ordered {
+        if let Some(p) = sys.process(pid) {
+            println!("  remediate: stopping {name} (pid {pid})");
+            p.kill();
+        }
+    }
+    // Poll until the family is gone (10 s), so the retry does not race it.
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(500));
+        sys.refresh_processes();
+        let left = sys
+            .processes()
+            .iter()
+            .filter(|(pid, p)| {
+                let name = p.name().to_ascii_lowercase();
+                **pid != sysinfo::Pid::from_u32(me)
+                    && update::is_gpn_process_name(&name)
+                    && !name.starts_with("gpn_update")
+                    && !name.starts_with("gpn-update")
+            })
+            .count();
+        if left == 0 {
+            return 0;
+        }
+    }
+    sys.refresh_processes();
+    sys.processes()
+        .iter()
+        .filter(|(pid, p)| {
+            let name = p.name().to_ascii_lowercase();
+            **pid != sysinfo::Pid::from_u32(me)
+                && update::is_gpn_process_name(&name)
+                && !name.starts_with("gpn_update")
+                && !name.starts_with("gpn-update")
+        })
+        .count()
+}
+
+/// The node's log, for the classifier and the operator's report.
+fn node_log_path(o: &Options) -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("GPN_NODE_LOG") {
+        if !p.trim().is_empty() {
+            return std::path::PathBuf::from(p);
+        }
+    }
+    if let Some(install) = update::install_dir_for_state(&o.state_dir) {
+        return install.join("node.log");
+    }
+    o.state_dir.join("node.log")
+}
+
+/// Read the evidence a failed start left behind: the newest `last-exit.json`
+/// line and the tail of the node log.
+fn start_evidence(o: &Options) -> (String, Vec<String>) {
+    let exit_log = std::env::var("GPN_EXIT_LOG")
+        .ok()
+        .filter(|p| !p.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(gpn_agent::exit_report::default_path);
+    let last_exit = std::fs::read_to_string(exit_log).unwrap_or_default();
+    let log = std::fs::read_to_string(node_log_path(o)).unwrap_or_default();
+    (last_exit, update::log_tail(&log, 40))
+}
+
+/// Print the last 3 log lines verbatim, as the report must quote them.
+fn print_log_tail(tail: &[String]) {
+    let start = tail.len().saturating_sub(3);
+    for l in &tail[start..] {
+        eprintln!("  | {l}");
+    }
+}
+
+/// The confirm gate with its single remediation+retry (#207).
+///
+/// Returns the version that confirmed, or the operator's one-line failure
+/// report. Never restarts more than once on its own: `MAX_REMEDIATION_ATTEMPTS`.
+/// The caller owns rollback.
+fn confirm_update(
+    o: &Options,
+    expect: &str,
+    first_start_after_update: bool,
+    report: &mut Report,
+) -> Result<String, String> {
+    let deadlines = {
+        let d = update::confirm_deadlines(first_start_after_update);
+        if o.timeout_secs == DEFAULT_CONFIRM_TIMEOUT_SECS {
+            d
+        } else {
+            d.with_window(o.timeout_secs)
+        }
+    };
+
+    let trees = expected_trees(o, expect);
+
+    // ── Pre-flight: the RPC port is a resource, and somebody may hold it ────
+    if let Some(port) = update::rpc_port(&o.rpc_url) {
+        if port_listening(port) {
+            let owner = port_owner(port);
+            let (pid, name) = owner
+                .clone()
+                .unwrap_or((None, "unidentified process".to_string()));
+            let gpn = update::is_gpn_process_name(&name)
+                && !name.to_ascii_lowercase().starts_with("gpn_update");
+            if gpn && pid.map(|p| process_runs_from(p, &trees)).unwrap_or(false) {
+                // The listener IS the build under test: it is up and answering
+                // already (the restart just happened). Stopping it here would
+                // kill the process we are waiting for.
+                println!(
+                    "  confirm: rpc port {port} is already held by {expect} (pid {}) - waiting for its answer",
+                    pid.unwrap_or(0)
+                );
+            } else if gpn {
+                println!(
+                    "  remediate: rpc port {port} held by {name}{} -> stop the stale gpn family (children-first), retry",
+                    pid.map(|p| format!(" (pid {p})")).unwrap_or_default()
+                );
+                let left = stop_gpn_family();
+                if left > 0 {
+                    return Err(format!(
+                        "confirm failed before start: rpc port {port} was held by {name}, and {left} gpn process(es) survived the stop"
+                    ));
+                }
+                if port_listening(port) {
+                    return Err(format!(
+                        "confirm failed before start: rpc port {port} still listens after stopping the gpn family"
+                    ));
+                }
+                println!("  remediate: rpc port {port} freed -> retry");
+            } else {
+                // Two services fighting over a port is worse than one clean
+                // failure. Say exactly who holds it; rollback follows.
+                return Err(format!(
+                    "confirm failed before start: rpc port {port} is held by {name}{} (not a gpn process) — not touching it",
+                    pid.map(|p| format!(" (pid {p})")).unwrap_or_default()
+                ));
+            }
+        }
+    }
+
+    println!(
+        "  confirm: waiting up to {} s (window {} s, ceiling {} s) for {expect}",
+        deadlines.ceiling_secs, deadlines.window_secs, deadlines.ceiling_secs
+    );
+
+    let mut make_probe = {
+        let url = o.rpc_url.clone();
+        let trees = trees.clone();
+        move || -> Box<dyn update::ConfirmProbe> {
+            Box::new(ProcessRpcProbe::new(&url, trees.clone()))
+        }
+    };
+    let mut classify = || -> update::Remediation {
+        // Read the node's own evidence before deciding anything.
+        let (last_exit, tail) = start_evidence(o);
+        let mut r = update::classify_start_failure(&update::StartFailureContext {
+            last_exit: &last_exit,
+            log_tail: &tail,
+        });
+        // A bind failure is a port question; the classifier cannot know the
+        // owner, so ask the OS. Only consulted when nothing more specific was
+        // found (a lock error and a bind error often smell alike).
+        if matches!(r, update::Remediation::Unknown { .. }) {
+            if let Some(port) = update::rpc_port(&o.rpc_url) {
+                let text = format!("{last_exit}\n{}", tail.join("\n"));
+                if update::log_says_port_conflict(&text) || port_listening(port) {
+                    r = update::classify_port_holder(port, port_owner(port));
+                }
+            }
+        }
+        r
+    };
+    let mut apply = |r: &update::Remediation| -> Result<(), String> {
+        match r {
+            update::Remediation::OrphanedFamily { .. }
+            | update::Remediation::PortHeldByGpn { .. } => {
+                let left = stop_gpn_family();
+                if left > 0 {
+                    return Err(format!("{left} gpn process(es) survived the stop"));
+                }
+                Ok(())
+            }
+            update::Remediation::PruningMismatch { .. } => {
+                // The supervisor re-resolves pruning per spawn; the retry is
+                // only useful if nothing pins a mode.
+                if let Ok(cmd) = std::env::var("GPN_UPDATE_RESTART_CMD") {
+                    if cmd.contains("--state-pruning") || cmd.contains("--pruning") {
+                        return Err(
+                            "the restart command pins a pruning mode, which the DB rejects — \
+                             remove --state-pruning/--pruning from GPN_UPDATE_RESTART_CMD"
+                                .to_string(),
+                        );
+                    }
+                }
+                Ok(())
+            }
+            other => Err(other.log_line()),
+        }
+    };
+
+    match update::confirm_with_remediation(
+        &mut make_probe,
+        &mut classify,
+        &mut apply,
+        expect,
+        deadlines,
+        &mut |line| println!("  {line}"),
+    ) {
+        Ok(version) => {
+            report.confirmed_version = Some(version.clone());
+            println!("  confirmed {version} is running");
+            Ok(version)
+        }
+        Err(reason) => {
+            // Quote the evidence verbatim; the caller rolls back next.
+            let (_, tail) = start_evidence(o);
+            print_log_tail(&tail);
+            Err(reason)
+        }
+    }
 }
 
 /// Wait until the *running* node reports `expect`.
@@ -1296,17 +1797,27 @@ fn run_confirm(o: &Options, report: &mut Report) -> u8 {
         emit_error(o, report, "--confirm needs --expect <version>");
         return EXIT_ERROR;
     }
-    match wait_for_version(o, &expect) {
-        Ok(got) => {
-            report.confirmed_version = Some(got.clone());
+    // `--confirm` is the manual/warm check: no restart, no remediation, just
+    // the two-signal gate with the warm window.
+    let d = update::confirm_deadlines(false);
+    let d = if o.timeout_secs == DEFAULT_CONFIRM_TIMEOUT_SECS {
+        d
+    } else {
+        d.with_window(o.timeout_secs)
+    };
+    let mut probe = ProcessRpcProbe::new(&o.rpc_url, expected_trees(o, &expect));
+    match update::wait_for_confirm(&mut probe, &expect, d, |line| println!("  {line}")) {
+        update::ConfirmOutcome::Confirmed { version, .. } => {
+            report.confirmed_version = Some(version.clone());
             if o.json {
                 emit_json(report);
             } else if !o.quiet {
-                println!("gpn_update: confirmed {got} is running ({})", o.rpc_url);
+                println!("gpn_update: confirmed {version} is running ({})", o.rpc_url);
             }
             EXIT_OK
         }
-        Err(msg) => {
+        update::ConfirmOutcome::Failed(failure) => {
+            let msg = failure.describe(&expect);
             report.error = Some(msg.clone());
             emit_error(o, report, &msg);
             EXIT_NOT_CONFIRMED
