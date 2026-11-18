@@ -1,6 +1,6 @@
 # Fast node onboarding — snapshots, checkpoints, and why fast-sync won't help
 
-*Verified against: chain spec 51 / release 0.3.31 — checked 2026-11-09 at block 271,943.*
+*Verified against: chain spec 51 / release 0.3.59 — checked 2026-11-18 at block 322,923.*
 
 **Task:** GPN-TASKS #23 · **Status:** snapshot tooling SHIPPED + live-verified; signed checkpoint v2 SHIPPED (§2b) — the *scheduled* daily check is not installed yet.
 

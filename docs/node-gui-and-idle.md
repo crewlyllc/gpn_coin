@@ -1,6 +1,6 @@
 # Node dashboard + Idle mode
 
-*Verified against: chain spec 51 / release 0.3.31 — checked 2026-11-09 at block 271,943.*
+*Verified against: chain spec 51 / release 0.3.59 — checked 2026-11-18 at block 322,923.*
 
 A GPN node is meant to run on a gaming PC. **Idle mode** is the "I want to play
 a game now" switch: it pauses the two things that compete for the GPU — Ethash
