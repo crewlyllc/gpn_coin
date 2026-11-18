@@ -1,3 +1,23 @@
+# GPN — robots.txt
+#
+# OpenAI: allow the SEARCH crawler, which is what puts a site into ChatGPT
+# Search results and citations. Separately disallow the TRAINING crawler, so
+# being discoverable is not the same as donating the docs to a model.
+#
+# OpenAI documents both agents by name; `*` below already allows everything,
+# but explicit blocks survive CDN/bot-management rules that treat known agents
+# differently from the default.
+
+User-agent: OAI-SearchBot
+Allow: /
+
+# ChatGPT user-initiated fetches (someone pastes a gpncoin.ai link into a chat).
+User-agent: ChatGPT-User
+Allow: /
+
+User-agent: GPTBot
+Disallow: /
+
 User-agent: *
 Allow: /
 Disallow: /404.html

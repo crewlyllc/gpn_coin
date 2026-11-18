@@ -28,6 +28,32 @@ is not ready.
 
 ---
 
+## 0a. Sections get ticked, not just boxes
+
+Every `##` section is itself an item. When **every box under a section is ticked**, rename the
+section header to mark it done:
+
+```
+```
+```text
+## 2. Implement  DONE 2026-11-18  (3/3)
+```
+
+and when it is partially done, record the count so partial progress is visible without counting:
+
+```
+## 2. Implement  (2/3 - call-site unchecked)
+```
+```
+```
+
+Rules:
+- A section is **not** done because its boxes look done — it is done when each box carries evidence.
+- Never tick a section to make the file look finished. A half-ticked section is information.
+- `scripts/checklist-status.py <file>` prints the per-section tally; use it rather than eyeballing.
+- The final gate is still §9/§10: version published and a node reporting it. A fully ticked file
+  with no published release is not done.
+
 ## 0. Sequencing — the rule that binds the rest
 
 - **Work the checklist in order.** You may not tick item N+1 while item N is unticked, and you
@@ -60,6 +86,11 @@ is not ready.
       `git log --oneline -3 -- <file>` *(`fork_choice.rs` shipped in 0.3.50 while the binaries
       contained none of its strings.)*
 
+## 3b. Items in this release  <!-- generator inserts them here, do NOT hand-edit -->
+
+<!-- make-release-checklist.py replaces this comment with one box per IN-PROGRESS row from
+     GPN-LIST.md. Nothing else goes in this section: no blocked rows, no notes, no samples. -->
+
 ## 3. Bump and record
 
 - [ ] `scripts/bump-version.py patch`
@@ -91,6 +122,12 @@ is not ready.
       signs `website/releases.json`, publishes, re-downloads to verify.
 - [ ] `network.json` `latest_version` equals the published version.
 - [ ] `releases.json` serves the new version **twice**, ten seconds apart.
+
+## 7b. Every surface that names a version must be updated
+
+- [ ] **gpncoin.ai serves the new version** — `releases.json` version equals the crate version, polled twice; `download.html`, `docs/run-a-node` and `seeds.json` show the same version. The site is the version a stranger sees first.
+- [ ] **GitHub carries the same version** — the `linux-latest` and `windows-latest` releases on `jeremyzguo/gpn_coin` hold the new assets, the mirror repo `crewlyllc/gpn_coin` holds the renamed copies the manifest points at, and `network.json`'s `latest_version` matches.
+- [ ] **Both surfaces agree with each other and with the binaries** — site version == GitHub release version == `gpn-node --version` of the built artifact. A mismatch here is how "0.3.52 is live" and "the fleet runs 0.3.50" both end up true.
 
 ## 8. Verify as a stranger would
 
@@ -154,3 +191,43 @@ what is stuck, since when, what it needs.
 - Env flags that silently disable a feature (`GPN_SITE_ELECT`, `GPN_SELF_HEAL`)
 - Mechanisms with no caller — grep for a call site, not a definition
 - A version that moves in `Cargo.toml` but not in `releases.json`, or vice versa
+
+## Persistent working rules (carried into every release, and into the cron)
+
+These live here, in the repo, so they survive any job being recreated. The cron reads this file;
+it does not carry its own private copy of the rules.
+
+### 0a. Check CI for HEAD before any box
+Ask GitHub for the CI run on `origin/main`'s HEAD.
+- **failure** → that is the box: read the failing job's log, **quote the exact error line**,
+  classify it (our code / our test / environment / upstream), fix the cause, run the narrowest
+  local check, push once. Nothing else proceeds while HEAD is red.
+- **queued / in progress** → wait, say nothing.
+- **success** → continue.
+
+Reporting "CI is red" without the failing line is noise, not a status.
+
+### 0b. When something fails, diagnose and fix — do not park it
+A red CI, a failed build, a failed start, a failed update, a failed test, a failed publish: each
+has a cause recorded somewhere.
+1. **Read the failure itself** — job log, node log, `last-exit.json`, command output, the test's own
+   assertion. Quote the line.
+2. **Classify it** — our code, our test, environment (disk, offline runner, missing tool), upstream.
+3. **Fix the cause** — change the code; correct or name the environment problem; add a guard on our
+   side for upstream behaviour.
+4. **Re-run the narrowest thing that proves it.**
+5. Only if it genuinely cannot be fixed here: one line saying what it needs, then the next box.
+
+### 0c. Long steps are dispatched, not waited on
+A build or deploy outlasts one run. Start it, **write the handle (run id / commit sha) into the
+checklist box**, stop. The next run polls it once and continues. State lives in the checklist,
+never in a run's memory.
+
+### 0d. Evidence must be re-derivable
+Tick with something a machine can re-run:
+- good: `releases.json version=0.3.61 (polled 23:41Z)`, `Get-Process gpn* → MainWindowTitle blank`, a commit sha
+- not a tick: "verified", "confirmed working", "looks right"
+
+### 0e. Self-check the previous tick
+Before starting a new box, re-run the previous tick's evidence line. If it no longer holds,
+un-tick it and say which claim failed.
