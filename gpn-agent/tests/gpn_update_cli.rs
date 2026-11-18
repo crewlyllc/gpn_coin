@@ -953,10 +953,12 @@ fn a_release_that_does_not_come_up_is_rolled_back_and_restarted() {
     assert!(update::attempt_blocks(last));
 }
 
-/// One attempt per version per boot: the second run of the same release on the
-/// same boot refuses before downloading anything.
+/// #203: a failed release is retried with backoff, and it never stops trying.
+/// The old behaviour — refuse for the rest of the boot — is exactly what left
+/// box 1 two releases behind on 2026-11-16, so it is now a test that fails if
+/// anyone reintroduces a permanent stop.
 #[test]
-fn a_failed_release_is_not_retried_on_the_same_boot() {
+fn a_failed_release_is_retried_after_its_backoff_and_never_permanently() {
     let ctx = Ctx::new("loop-once");
     ctx.seed_old();
     let (feed, _bundle) = apply_feed();
@@ -973,12 +975,28 @@ fn a_failed_release_is_not_retried_on_the_same_boot() {
     assert_eq!(code, 1, "first attempt fails: {err}");
     let downloads_after_first = feed.hit_count("/gpn-linux.tar.gz");
 
+    // 1. The failure set a retry clock rather than a permanent stop.
+    let rec = update::attempt_for_version(&ctx.state, NEW_VERSION).expect("recorded");
+    assert_eq!(rec.outcome, update::OUTCOME_ROLLED_BACK);
+    assert_eq!(rec.attempts, 1, "first attempt counts as one");
+    assert!(
+        rec.next_retry_at > update::now_unix(),
+        "a failure must be followed by a retry, not by nothing: {rec:?}"
+    );
+    assert!(!rec.reason.trim().is_empty(), "the reason is recorded");
+
+    // 2. The next tick inside the backoff window declines, and says until when
+    //    and why — the exact line the row asks for.
     let (code2, out2, err2) = ctx.run(&["--apply", "--json", "--timeout", "1"], &env, &url);
     assert_eq!(
         code2, 3,
-        "refusal is not an error: stdout={out2} stderr={err2}"
+        "a delayed retry is not an error: stdout={out2} stderr={err2}"
     );
-    assert!(err2.contains("already attempted"), "stderr={err2}");
+    assert!(err2.contains("update declined until"), "stderr={err2}");
+    assert!(
+        err2.contains("(last: "),
+        "the reason is in the line: {err2}"
+    );
     let v: serde_json::Value = serde_json::from_str(&out2).expect("json");
     assert!(
         v["attempt_blocked"]
@@ -987,6 +1005,12 @@ fn a_failed_release_is_not_retried_on_the_same_boot() {
             .contains(NEW_VERSION),
         "the refusal names the release: {out2}"
     );
+    assert_eq!(
+        v["next_retry_at"].as_u64(),
+        Some(rec.next_retry_at),
+        "the JSON says when the retry happens: {out2}"
+    );
+    assert_eq!(v["attempts"].as_u64(), Some(1));
     // The rollback also put the OLD binaries back, so the install dir agrees
     // with `current` instead of advertising the failed build as installed.
     assert_eq!(
@@ -996,22 +1020,50 @@ fn a_failed_release_is_not_retried_on_the_same_boot() {
     assert_eq!(
         feed.hit_count("/gpn-linux.tar.gz"),
         downloads_after_first,
-        "a blocked retry must not download the bundle again"
+        "a delayed retry must not download the bundle again"
     );
 
-    // A reboot is the documented way out: the same release is attempted again.
+    // 3. Once the clock runs out the same boot retries by itself — no reboot,
+    //    no `--force` — and the ladder moves to the next rung (2 h).
+    let mut ledger = update::load_attempts(&ctx.state);
+    for a in ledger.attempts.iter_mut() {
+        if a.version == NEW_VERSION {
+            a.next_retry_at = 1; // long past
+        }
+    }
+    update::save_attempts(&ctx.state, &ledger).unwrap();
+    let (code3, _out3, err3) = ctx.run(&["--apply", "--timeout", "1"], &env, &url);
+    assert_eq!(code3, 1, "the retry really ran (and failed again): {err3}");
+    assert!(
+        err3.contains("retrying") || err3.contains("NOT CONFIRMED"),
+        "the retry is logged as one: {err3}"
+    );
+    let rec2 = update::attempt_for_version(&ctx.state, NEW_VERSION).unwrap();
+    assert_eq!(rec2.attempts, 2, "the second attempt counts: {rec2:?}");
+    assert_eq!(
+        update::retry_backoff_secs(rec2.attempts),
+        7_200,
+        "the second failure waits 2 h, not 1 h"
+    );
+    assert!(rec2.next_retry_at > rec.next_retry_at - 1);
+
+    // 4. A reboot is a shortcut, not the only way out: a new boot id retries
+    //    the same release and keeps counting.
     let env2 = [
         ("GPN_UPDATE_RESTART_CMD", "true"),
         ("GPN_BOOT_ID", "boot-next"),
         ("GPN_RPC_URL", rpc.as_str()),
     ];
-    let (code3, _out3, err3) = ctx.run(&["--apply", "--timeout", "1"], &env2, &url);
-    assert_eq!(
-        code3, 1,
-        "it was attempted again (and failed again): {err3}"
-    );
-    // The verified tree is reused, not re-downloaded: the retry is cheap.
-    assert!(!err3.contains("already attempted"), "stderr={err3}");
+    let mut ledger = update::load_attempts(&ctx.state);
+    for a in ledger.attempts.iter_mut() {
+        if a.version == NEW_VERSION {
+            a.next_retry_at = 1;
+        }
+    }
+    update::save_attempts(&ctx.state, &ledger).unwrap();
+    let (code4, _out4, err4) = ctx.run(&["--apply", "--timeout", "1"], &env2, &url);
+    assert_eq!(code4, 1, "attempted again on the new boot: {err4}");
+    assert!(!err4.contains("update declined until"), "stderr={err4}");
     let ledger = update::load_attempts(&ctx.state);
     assert!(
         ledger

@@ -8,6 +8,38 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.58] - 2026-11-17
+
+### Added
+- `/status` publishes the updater's retry state while a release is waiting:
+  `update_declined` (the exact operator line, `update declined until <UTC time>
+  (last: <reason>)`), plus `update_pending_version`, `update_attempts`,
+  `update_last_attempt_at`, `update_retry_at` and `update_last_reason`. A box
+  whose last update succeeded publishes none of it, so a healthy `/status` is
+  byte-identical to before.
+- The Windows startup summary (`startup-summary.txt`, printed by `start-gpn.cmd`)
+  gains one line when the last update attempt failed: either
+  `update declined until <UTC> (last: <reason>)` or
+  `update retry due now for <version> (last: <reason>)`.
+
+### Changed
+- **The updater never gives up.** A failed attempt (rolled back, failed, or died
+  mid-install) now records `next_retry_at` — 1 h after the first failure, 2 h
+  after the second, then 4 h — and the next tick after that retries the same
+  release, on the same boot, with no reboot and no `--force`. The old rule
+  blocked a version for the rest of the boot, which is how one box declined
+  0.3.51 and 0.3.52 and sat two releases behind (2026-11-16).
+- Every attempt and its reason is recorded in `update-attempts.json` (`attempts`,
+  `reason`, `next_retry_at`), so "why is this box still on the old version?" is
+  answerable from the ledger, `/status` and the update log.
+- The Windows update wrapper logs the updater's own decline line (with the time
+  and the reason) instead of the old `policy, or already attempted on this boot`.
+
+### Fixed
+- A re-cut release (same version, different bytes) is still eligible
+  immediately; a successful update clears the retry clock instead of leaving the
+  old failure as the newest record.
+
 ## [0.3.57] - 2026-11-17
 
 One subject: **a provider publishes the build it runs** (task row #201). Box 3 became an

@@ -356,6 +356,17 @@ assert_has "$uw" "Wait-NodeExit"                   "wrapper waits for the proces
 assert_has "$uw" "[System.IO.FileShare]::None"     "wrapper takes an exclusive lock"
 assert_has "$uw" "release manifest unreachable"    "exit 2 is logged, not treated as a failure"
 assert_has "$uw" "node NOT restarted"              "exit 0/2 do not restart the node"
+# ---- #203: a declined retry must say until when and why --------------------
+# The old line ("policy, or already attempted on this boot") answered neither
+# question, and the rule behind it stopped trying for the rest of the boot —
+# which is how box 1 sat two releases behind. Assert the reason is carried into
+# the log, and that the permanent-stop wording is gone.
+assert_has "$uw" "declined until"                   "a delayed retry names the time the updater will try again"
+assert_has "$uw" "update declined: "                "the updater's own decline line is carried into update.log"
+if grep -q 'already attempted on this boot' "$uw"; then
+  bad "the wrapper still claims a once-per-boot permanent stop (#203)"
+else ok "no once-per-boot permanent stop in the wrapper"; fi
+assert_has "$ps1" "update-attempts.json"            "the summary reads the updater's ledger, not a guess"
 # The reporter must be started DETACHED, never `&`-invoked: report-exit.ps1 ends in a
 # modal MessageBox, so a synchronous call waits for a click that never comes on an
 # unattended box -- the cycle never returns, its finally{} never runs, update.lock

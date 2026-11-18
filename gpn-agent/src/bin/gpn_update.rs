@@ -389,8 +389,12 @@ struct Report {
     confirmed_version: Option<String>,
     /// `--rollback`: the version `current` was flipped back to.
     rolled_back_to: Option<String>,
-    /// Why an install was skipped by the once-per-boot attempt record.
+    /// Why an install was delayed by the retry ladder (#203).
     attempt_blocked: Option<String>,
+    /// Unix seconds when the next attempt is allowed (see `attempt_blocked`).
+    next_retry_at: Option<u64>,
+    /// How many attempts this version has had, across boots.
+    attempts: Option<u32>,
     /// A non-fatal remark worth printing (e.g. a re-cut release re-arming a
     /// rolled-back attempt).
     note: Option<String>,
@@ -961,40 +965,65 @@ fn run_apply(o: &Options, report: &mut Report) -> u8 {
         }
     };
 
-    // Once per version per boot. A release that installs but does not come up
-    // must not be retried every hour on the same boot: that is a restart loop
-    // with a 300 MB download attached. The record is written before the install
-    // and updated with its outcome, so a crash mid-update also counts.
+    // #203: retry with backoff, forever. The old rule read the attempt by
+    // *boot* and stopped for the rest of that boot, which is how box 1 declined
+    // 0.3.51 and 0.3.52 and sat two releases behind. A failed attempt now sets
+    // `next_retry_at` (1 h, 2 h, then 4 h) and the next tick after that retries;
+    // there is no state in which the node stops trying.
     let boot = update::boot_id();
     if !o.force {
-        if let Some(prev) = update::attempt_for_this_boot(&o.state_dir, &m.version, &boot) {
-            if update::attempt_blocks_release(&prev, &asset.sha256) {
-                let msg = format!(
-                    "{} was already attempted on this boot ({}, at {} unix) and did not confirm \
-                     — not retrying. The previous build stays running. A re-cut release, a reboot \
-                     or `--force` re-arms this.",
-                    m.version, prev.outcome, prev.at
-                );
-                report.attempt_blocked = Some(msg.clone());
-                report.error = Some(msg.clone());
-                emit_error(o, report, &msg);
-                return EXIT_UPDATE_AVAILABLE;
-            }
-            if update::attempt_blocks(&prev) {
-                // Blocking in principle, but for a *different build* of the same
-                // version: the box is allowed to try the new bytes. Say so, so
-                // the log answers "why did it retry after a rollback?".
-                report.note = Some(format!(
-                    "{} was attempted on this boot against a different build ({}); this release \
-                     is a re-cut, so it is eligible again",
-                    m.version, prev.outcome
-                ));
-                if !o.quiet && !o.json {
-                    println!(
-                        "  note: {} rolled back earlier on this boot for a different build; \
-                         this re-cut is eligible",
-                        m.version
+        if let Some(prev) = update::attempt_for_version(&o.state_dir, &m.version) {
+            match update::retry_wait_secs(&prev, &asset.sha256, update::now_unix()) {
+                None => {
+                    if prev.outcome != update::OUTCOME_CONFIRMED
+                        && prev.outcome != update::OUTCOME_INSTALLED
+                    {
+                        // Blocking in principle, but for a *different build* of
+                        // the same version: the box is allowed to try the new
+                        // bytes. Say so, so the log answers "why did it retry
+                        // after a rollback?".
+                        report.note = Some(format!(
+                            "{} was attempted earlier ({}) against a different build; this \
+                             release is a re-cut, so it is eligible again",
+                            m.version, prev.outcome
+                        ));
+                        if !o.quiet && !o.json {
+                            println!(
+                                "  note: {} rolled back earlier for a different build; this \
+                                 re-cut is eligible",
+                                m.version
+                            );
+                        }
+                    }
+                }
+                Some(wait) if wait > 0 => {
+                    let msg = update::declined_text(prev.next_retry_at, &prev.reason);
+                    report.attempt_blocked = Some(msg.clone());
+                    report.next_retry_at = Some(prev.next_retry_at);
+                    report.attempts = Some(prev.attempts.max(1));
+                    report.error = Some(msg.clone());
+                    emit_error(o, report, &msg);
+                    return EXIT_UPDATE_AVAILABLE;
+                }
+                Some(_) => {
+                    // Backoff elapsed: this is the retry. Log it as such — the
+                    // operator must be able to see the ladder working.
+                    let msg = format!(
+                        "retrying {} after a failed attempt ({}, attempt {}); last: {}",
+                        m.version,
+                        prev.outcome,
+                        prev.attempts.max(1).saturating_add(1),
+                        if prev.reason.trim().is_empty() {
+                            "no reason recorded"
+                        } else {
+                            prev.reason.trim()
+                        }
                     );
+                    report.note = Some(msg.clone());
+                    if !o.quiet && !o.json {
+                        println!("  note: {msg}");
+                    }
+                    eprintln!("gpn_update: {msg}");
                 }
             }
         }
@@ -1055,12 +1084,13 @@ fn run_apply(o: &Options, report: &mut Report) -> u8 {
 
     // The install is done; from here on the only question that matters is
     // whether the *running* process becomes the new build.
-    let _ = update::record_attempt_with_release(
+    let _ = update::record_attempt_outcome(
         &o.state_dir,
         &m.version,
         &boot,
         update::OUTCOME_STARTED,
         &asset.sha256,
+        "",
     );
 
     match restart(o, report) {
@@ -1109,12 +1139,13 @@ fn run_apply(o: &Options, report: &mut Report) -> u8 {
             EXIT_OK
         }
         Err(msg) => {
-            let _ = update::record_attempt_with_release(
+            let _ = update::record_attempt_outcome(
                 &o.state_dir,
                 &m.version,
                 &boot,
                 update::OUTCOME_FAILED,
                 &asset.sha256,
+                &msg,
             );
             report.error = Some(msg.clone());
             emit_error(o, report, &msg);
@@ -1181,12 +1212,13 @@ fn roll_back_after_failed_confirm(
         Err(e) => eprintln!("gpn_update: could not restart after the rollback: {e}"),
     }
 
-    let _ = update::record_attempt_with_release(
+    let _ = update::record_attempt_outcome(
         &o.state_dir,
         version,
         boot,
         update::OUTCOME_ROLLED_BACK,
         release_id,
+        reason,
     );
     report.rolled_back_to = prev_label;
     report.error = Some(msg.clone());
@@ -1314,11 +1346,13 @@ fn run_rollback(o: &Options, report: &mut Report) -> u8 {
                 .unwrap_or_else(|| prev.display().to_string());
             report.rolled_back_to = Some(v.clone());
             if let Some(from) = from.as_deref() {
-                let _ = update::record_attempt(
+                let _ = update::record_attempt_outcome(
                     &o.state_dir,
                     from,
                     &update::boot_id(),
                     update::OUTCOME_ROLLED_BACK,
+                    "",
+                    "rollback requested with --rollback",
                 );
             }
             if o.json {

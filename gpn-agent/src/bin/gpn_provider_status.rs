@@ -1438,6 +1438,72 @@ fn attach_blocked_reason(body: &mut Value, blocked: Option<&PushBlocked>, now: u
     }
 }
 
+// ── #203: the updater's retry state, on `/status` ────────────────────────
+
+/// Directory the updater keeps `update-attempts.json` in.
+///
+/// Mirrors the writer: `GPN_UPDATE_DIR`, then `GPN_PREFIX/update`, then
+/// `$HOME/.gpn/update`; and because the provider on Windows runs from
+/// `<install>\data\update\current\`, the exe's own grandparents are tried too
+/// (env vars are often absent from a scheduled task). The first candidate that
+/// actually holds a ledger wins — never a guessed path.
+fn update_state_dir() -> Option<std::path::PathBuf> {
+    let mut cands: Vec<std::path::PathBuf> = Vec::new();
+    for v in ["GPN_UPDATE_DIR"] {
+        if let Ok(p) = std::env::var(v) {
+            if !p.trim().is_empty() {
+                cands.push(std::path::PathBuf::from(p));
+            }
+        }
+    }
+    if let Ok(prefix) = std::env::var("GPN_PREFIX") {
+        cands.push(std::path::PathBuf::from(prefix).join("update"));
+    }
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".into());
+    let home = std::path::PathBuf::from(home);
+    cands.push(home.join(".gpn").join("update"));
+    if let Ok(exe) = std::env::current_exe() {
+        // ...\data\update\current\gpn_provider_status.exe -> ...\data\update
+        if let Some(up) = exe.parent().and_then(|p| p.parent()) {
+            cands.push(up.to_path_buf());
+        }
+    }
+    cands
+        .into_iter()
+        .find(|d| d.join(gpn_agent::update::ATTEMPTS_FILE).is_file())
+}
+
+/// Attach the updater's retry state (#203).
+///
+/// Omitted entirely when the last attempt did not fail — a healthy box's
+/// `/status` must stay byte-identical. While a retry is pending, the line the
+/// operator needs is `update_declined`: until when, and why the last attempt
+/// failed. A pending retry that is already due keeps the facts but no
+/// `update_declined`, because nothing is being declined at that moment.
+fn attach_update_retry(body: &mut Value, state_dir: Option<&std::path::Path>, now: u64) {
+    let Some(dir) = state_dir else { return };
+    let Some(v) = gpn_agent::update::update_retry_view(dir) else {
+        return;
+    };
+    body["update_pending_version"] = json!(v.version);
+    body["update_attempts"] = json!(v.attempts);
+    body["update_last_attempt_at"] = json!(v.last_attempt_at);
+    body["update_retry_at"] = json!(v.next_retry_at);
+    body["update_last_reason"] = json!(if v.last_reason.trim().is_empty() {
+        Value::Null
+    } else {
+        json!(v.last_reason)
+    });
+    if v.next_retry_at > now {
+        body["update_declined"] = json!(gpn_agent::update::declined_text(
+            v.next_retry_at,
+            &v.last_reason
+        ));
+    }
+}
+
 /// #W78: how many peers THIS box's node is connected to, read live.
 ///
 /// Three-state, like every other published fact here: `Some(n)` is a real
@@ -2865,6 +2931,10 @@ fn run_main() -> Result<(), Box<dyn std::error::Error>> {
                 // Omitted when the push lane is healthy (byte-identical JSON).
                 let blocked = push_state.lock().ok().and_then(|g| g.clone());
                 attach_blocked_reason(&mut body, blocked.as_ref(), now_secs());
+                // #203: "is this box behind, and if so why isn't it updating?"
+                // must be answerable from the network, not only from a log on
+                // the box. Omitted when the last attempt succeeded.
+                attach_update_retry(&mut body, update_state_dir().as_deref(), now_secs());
                 (body, 200)
             }
             (Method::Get, "/health") => (json!({"status":"ok"}), 200),
@@ -3342,6 +3412,66 @@ mod tests {
         attach_blocked_reason(&mut body, None, 1_000);
         assert_eq!(body.to_string(), before);
         assert_eq!(body.get("blocked_reason"), None);
+    }
+
+    /// #203: a box whose last update failed must say when it will try again and
+    /// why it did not update — from the network, without reading its log.
+    #[test]
+    fn a_pending_update_retry_is_on_status_and_a_success_adds_nothing() {
+        let dir = std::env::temp_dir().join(format!(
+            "gpn-203-status-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // No ledger → nothing published at all (byte-identical).
+        let mut body = json!({"address": "5Abc"});
+        let before = body.to_string();
+        attach_update_retry(&mut body, Some(&dir), 1_000);
+        assert_eq!(body.to_string(), before);
+
+        // A failed attempt → the decline line, until when and why.
+        let now = gpn_agent::update::now_unix();
+        gpn_agent::update::record_attempt_outcome(
+            &dir,
+            "0.3.58",
+            "boot-a",
+            gpn_agent::update::OUTCOME_ROLLED_BACK,
+            "abc",
+            "0.3.58 did not come up (rpc did not answer within 360 s)",
+        )
+        .unwrap();
+        let mut body = json!({"address": "5Abc"});
+        attach_update_retry(&mut body, Some(&dir), now);
+        assert_eq!(body["update_pending_version"], json!("0.3.58"));
+        assert_eq!(body["update_attempts"], json!(1));
+        let line = body["update_declined"].as_str().unwrap_or_default();
+        assert!(line.starts_with("update declined until "), "{line}");
+        assert!(line.contains("(last: 0.3.58 did not come up"), "{line}");
+
+        // Once the clock has run out nothing is being declined — but the facts
+        // (version, attempts, reason) stay visible.
+        let mut body = json!({"address": "5Abc"});
+        attach_update_retry(&mut body, Some(&dir), now + 86_400);
+        assert_eq!(body.get("update_declined"), None);
+        assert_eq!(body["update_attempts"], json!(1));
+
+        // A success is the newest record → the fields disappear again.
+        gpn_agent::update::record_attempt_outcome(
+            &dir,
+            "0.3.58",
+            "boot-a",
+            gpn_agent::update::OUTCOME_CONFIRMED,
+            "abc",
+            "",
+        )
+        .unwrap();
+        let mut body = json!({"address": "5Abc"});
+        let before = body.to_string();
+        attach_update_retry(&mut body, Some(&dir), now);
+        assert_eq!(body.to_string(), before, "a confirmed update adds nothing");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Each AP answer is a different operator action, so each gets its own slug.

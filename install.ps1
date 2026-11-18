@@ -690,6 +690,32 @@ $keyState = if (Test-Path $keyFile) { 'present' } else { 'MISSING' }
 $ollama = 'not reachable'
 try { Invoke-RestMethod 'http://127.0.0.1:11434/api/tags' -TimeoutSec 2 | Out-Null; $ollama = 'reachable' } catch { }
 
+# #203: is this box waiting on a failed update? The updater's ledger is the
+# authority, and the same line it logs is shown here so "why is it still on the
+# old version?" has an answer at the console, not only in update.log. Deliberately
+# silent (empty line) when the last attempt succeeded, so a healthy box's summary
+# is unchanged.
+$updateLine = ''
+$attemptFile = Join-Path $DataDir 'update\update-attempts.json'
+if (Test-Path $attemptFile) {
+  try {
+    # The NEWEST record decides: a confirmed update written after a failure is
+    # the truth, and must silence this line entirely.
+    $rec = @(Get-Content -LiteralPath $attemptFile -Raw | ConvertFrom-Json).attempts |
+      Sort-Object -Property at | Select-Object -Last 1
+    if ($rec -and ($rec.outcome -in @('started','failed','rolled-back'))) {
+      if ($rec.next_retry_at -and [int64]$rec.next_retry_at -gt [int64](Get-Date -UFormat %s)) {
+        $whenUtc = ([datetimeoffset]::FromUnixTimeSeconds([int64]$rec.next_retry_at)).UtcDateTime.ToString('yyyy-MM-dd HH:mm:ss')
+        $why = if ($rec.reason) { [string]$rec.reason } else { 'no reason recorded' }
+        $updateLine = 'update declined until {0} UTC (last: {1})' -f $whenUtc, $why
+      } else {
+        $why = if ($rec.reason) { [string]$rec.reason } else { 'no reason recorded' }
+        $updateLine = 'update retry due now for {0} (last: {1})' -f $rec.version, $why
+      }
+    }
+  } catch { $updateLine = '' }
+}
+
 $lines = @(
   '',
   '  ============================================================',
@@ -703,7 +729,10 @@ $lines = @(
   ('    node key       : {0} ({1})' -f $keyState, $keyFile),
   ('    ollama         : {0}' -f $ollama),
   ('    peers          : {0}' -f $peers),
-  ('    chain head     : {0}' -f $head),
+  ('    chain head     : {0}' -f $head)
+)
+if ($updateLine) { $lines += ('    update         : {0}' -f $updateLine) }
+$lines += @(
   '',
   ('    Live status    : {0}' -f $Dashboard),
   ('    Log file       : {0}' -f $LogPath),
@@ -1293,7 +1322,16 @@ try {
   }
 
   if ($apply -eq 3) {
-    Write-Log 'update declined (policy, or already attempted on this boot) - node restarted on the current build'
+    # #203: the updater says exactly why it is waiting and until when; carry
+    # that line into the log instead of a generic "declined". A policy refusal
+    # (GPN_AUTO_UPDATE=0 / required minimum) has no retry clock, so it gets the
+    # policy wording.
+    $decline = @($applyLines | Where-Object { $_ -match 'declined until|not retrying|GPN_AUTO_UPDATE=0|cap the update' } | Select-Object -First 1)
+    if ($decline -and ([string]$decline).Trim()) {
+      Write-Log ('update declined: ' + ([string]$decline).Trim() + ' - node restarted on the current build')
+    } else {
+      Write-Log 'update declined (policy: GPN_AUTO_UPDATE=0, or nothing to install) - node restarted on the current build'
+    }
     exit 0
   }
   if ($apply -ne 0) {

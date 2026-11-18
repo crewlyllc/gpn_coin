@@ -2257,8 +2257,23 @@ pub fn version_matches(expected: &str, reported: &str) -> bool {
     }
 }
 
-/// Where the once-per-boot attempt ledger lives.
+/// Where the attempt ledger lives.
 pub const ATTEMPTS_FILE: &str = "update-attempts.json";
+
+/// Retry ladder after a failed attempt: 1 h, 2 h, then 4 h for every further
+/// attempt (#203). A node never gives up — a permanent stop is how box 1 sat
+/// two releases behind on 2026-11-16 — and the ladder only keeps a genuinely
+/// broken release from being re-downloaded on every single hourly tick.
+///
+/// The timer cadence (one check per hour) is the floor on how often an attempt
+/// can happen at all: `next_retry_at` can delay a tick, never add one.
+pub const RETRY_BACKOFF_SECS: [u64; 3] = [3_600, 7_200, 14_400];
+
+/// Delay before the next attempt after `attempts` failures (1-based).
+pub fn retry_backoff_secs(attempts: u32) -> u64 {
+    let i = attempts.saturating_sub(1) as usize;
+    RETRY_BACKOFF_SECS[i.min(RETRY_BACKOFF_SECS.len() - 1)]
+}
 
 /// An install was started for this version but no outcome has been recorded.
 pub const OUTCOME_STARTED: &str = "started";
@@ -2299,9 +2314,20 @@ pub struct UpdateAttempt {
     /// always did.
     #[serde(default)]
     pub release_id: String,
+    /// How many attempts this version has had (across boots). Drives the
+    /// backoff ladder; 0 on ledgers written before #203.
+    #[serde(default)]
+    pub attempts: u32,
+    /// Why the last attempt failed, in the operator's words.
+    #[serde(default)]
+    pub reason: String,
+    /// Unix seconds before which the next attempt must not be made. 0 means
+    /// "no delay recorded" (a success, or an old ledger): try again now.
+    #[serde(default)]
+    pub next_retry_at: u64,
 }
 
-/// `update-attempts.json`: the small history behind the once-per-boot rule.
+/// `update-attempts.json`: the small history behind the retry rule.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptLedger {
     #[serde(default)]
@@ -2411,6 +2437,116 @@ pub fn attempt_blocks_release(prev: &UpdateAttempt, release_id: &str) -> bool {
     had == now
 }
 
+/// The newest recorded attempt for `version`, whatever boot it happened in.
+///
+/// #203: retry state must survive a reboot. Looking a failure up *by boot* was
+/// how a box could fail, reboot, fail, reboot and never make progress while the
+/// log said "already attempted on this boot".
+pub fn attempt_for_version(state_dir: &Path, version: &str) -> Option<UpdateAttempt> {
+    load_attempts(state_dir)
+        .attempts
+        .into_iter()
+        .rev()
+        .find(|a| a.version.trim() == version.trim())
+}
+
+/// How many times `version` has been attempted, across every boot.
+pub fn attempts_recorded(state_dir: &Path, version: &str) -> u32 {
+    load_attempts(state_dir)
+        .attempts
+        .iter()
+        .filter(|a| a.version.trim() == version.trim())
+        .map(|a| a.attempts.max(1))
+        .max()
+        .unwrap_or(0)
+}
+
+/// The newest record in the ledger, any version.
+pub fn latest_attempt(state_dir: &Path) -> Option<UpdateAttempt> {
+    load_attempts(state_dir)
+        .attempts
+        .into_iter()
+        .max_by_key(|a| a.at)
+}
+
+/// How long the caller must still wait before retrying *this release*.
+///
+/// * `None` — nothing blocks it (the last attempt was for different bytes, or
+///   the last outcome was a success): install now.
+/// * `Some(0)` — the last attempt failed but its backoff has elapsed: retry
+///   now, on this tick.
+/// * `Some(n)` — wait `n` more seconds. `n` is bounded by the backoff ladder,
+///   never by "the rest of this boot".
+pub fn retry_wait_secs(prev: &UpdateAttempt, release_id: &str, now: u64) -> Option<u64> {
+    if !attempt_blocks_release(prev, release_id) {
+        return None;
+    }
+    Some(prev.next_retry_at.saturating_sub(now))
+}
+
+/// The operator-facing line for a declined retry, used by the log, the CLI and
+/// `/status` so all three say the same words.
+pub fn declined_text(next_retry_at: u64, reason: &str) -> String {
+    let reason = if reason.trim().is_empty() {
+        "no reason recorded"
+    } else {
+        reason.trim()
+    };
+    format!(
+        "update declined until {} (last: {reason})",
+        format_unix_utc(next_retry_at)
+    )
+}
+
+/// `2026-11-17 15:00:00 UTC` — no chrono in this crate, and a wrong timestamp
+/// is worse than a plain one, so the civil-date conversion is here and tested.
+pub fn format_unix_utc(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (h, mi, s) = (rem / 3_600, (rem % 3_600) / 60, rem % 60);
+    // Howard Hinnant's civil_from_days, shifted to the Unix epoch.
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    if m <= 2 {
+        y += 1;
+    }
+    format!("{y:04}-{m:02}-{d:02} {h:02}:{mi:02}:{s:02} UTC")
+}
+
+/// What `/status` may publish about a delayed retry (#203).
+pub struct UpdateRetryView {
+    pub version: String,
+    pub next_retry_at: u64,
+    pub last_reason: String,
+    pub attempts: u32,
+    pub last_attempt_at: u64,
+}
+
+/// The retry state to publish, or `None` when the last attempt did not fail.
+///
+/// A success is the newest record after a good update, so a healthy box
+/// publishes nothing and its `/status` stays byte-identical.
+pub fn update_retry_view(state_dir: &Path) -> Option<UpdateRetryView> {
+    let a = latest_attempt(state_dir)?;
+    if !attempt_blocks(&a) {
+        return None;
+    }
+    Some(UpdateRetryView {
+        version: a.version,
+        next_retry_at: a.next_retry_at,
+        last_reason: a.reason,
+        attempts: a.attempts.max(1),
+        last_attempt_at: a.at,
+    })
+}
+
 /// Record (or replace) the attempt for `version` on `boot_id`.
 pub fn record_attempt(
     state_dir: &Path,
@@ -2418,7 +2554,7 @@ pub fn record_attempt(
     boot_id: &str,
     outcome: &str,
 ) -> Result<(), UpdateError> {
-    record_attempt_with_release(state_dir, version, boot_id, outcome, "")
+    record_attempt_outcome(state_dir, version, boot_id, outcome, "", "").map(|_| ())
 }
 
 /// [`record_attempt`] that also records which build of the version was tried.
@@ -2429,22 +2565,77 @@ pub fn record_attempt_with_release(
     outcome: &str,
     release_id: &str,
 ) -> Result<(), UpdateError> {
+    record_attempt_outcome(state_dir, version, boot_id, outcome, release_id, "").map(|_| ())
+}
+
+/// Record an attempt with its outcome and, for a failure, why it failed.
+///
+/// Returns the stored record, whose `attempts` and `next_retry_at` are what the
+/// retry decision (and `/status`) read. A success clears the retry clock; a
+/// failure sets it `retry_backoff_secs(attempts)` into the future — the ladder
+/// is the *only* thing that ever stops a retry, and only until its next tick.
+pub fn record_attempt_outcome(
+    state_dir: &Path,
+    version: &str,
+    boot_id: &str,
+    outcome: &str,
+    release_id: &str,
+    reason: &str,
+) -> Result<UpdateAttempt, UpdateError> {
     let mut ledger = load_attempts(state_dir);
-    ledger
+    // Count this version's attempts across boots *before* replacing our own
+    // record, so the ladder keeps growing even for a box that reboots.
+    let prior = ledger
         .attempts
-        .retain(|a| !(a.version.trim() == version.trim() && a.boot_id == boot_id));
-    ledger.attempts.push(UpdateAttempt {
+        .iter()
+        .filter(|a| a.version.trim() == version.trim())
+        .map(|a| a.attempts.max(1))
+        .max()
+        .unwrap_or(0);
+    // One attempt produces several records (`started` then the outcome). A
+    // record written on top of an unfinished `started` continues that attempt;
+    // anything else is the next rung of the ladder.
+    let latest = ledger
+        .attempts
+        .iter()
+        .filter(|a| a.version.trim() == version.trim())
+        .max_by_key(|a| a.at)
+        .map(|a| a.outcome.clone());
+    let attempts = if prior == 0 {
+        1
+    } else if latest.as_deref() == Some(OUTCOME_STARTED) {
+        prior
+    } else {
+        prior.saturating_add(1)
+    };
+    let next_retry_at = if outcome == OUTCOME_STARTED
+        || outcome == OUTCOME_FAILED
+        || outcome == OUTCOME_ROLLED_BACK
+    {
+        now_unix().saturating_add(retry_backoff_secs(attempts))
+    } else {
+        0
+    };
+    let record = UpdateAttempt {
         version: version.trim().to_string(),
         boot_id: boot_id.to_string(),
         release_id: release_id.trim().to_string(),
         at: now_unix(),
         outcome: outcome.to_string(),
-    });
+        attempts,
+        reason: reason.trim().to_string(),
+        next_retry_at,
+    };
+    ledger
+        .attempts
+        .retain(|a| !(a.version.trim() == version.trim() && a.boot_id == boot_id));
+    ledger.attempts.push(record.clone());
     if ledger.attempts.len() > MAX_ATTEMPTS {
         let drop = ledger.attempts.len() - MAX_ATTEMPTS;
         ledger.attempts.drain(0..drop);
     }
-    save_attempts(state_dir, &ledger)
+    save_attempts(state_dir, &ledger)?;
+    Ok(record)
 }
 
 /// The install directory a state dir belongs to, for the launcher repair.
@@ -4530,6 +4721,9 @@ mod tests {
             at: 0,
             outcome: OUTCOME_ROLLED_BACK.into(),
             release_id: String::new(),
+            attempts: 0,
+            reason: String::new(),
+            next_retry_at: 0,
         };
         assert!(attempt_blocks_release(&legacy, recut));
 
@@ -4551,6 +4745,143 @@ mod tests {
         assert_eq!(load_attempts(&dir), AttemptLedger::default());
         record_attempt(&dir, "0.3.47", "boot-a", OUTCOME_STARTED).unwrap();
         assert_eq!(load_attempts(&dir).attempts.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── #203: retries never stop ────────────────────────────────────────────
+
+    #[test]
+    fn the_retry_ladder_is_1h_2h_then_a_4h_cap() {
+        assert_eq!(retry_backoff_secs(1), 3_600);
+        assert_eq!(retry_backoff_secs(2), 7_200);
+        assert_eq!(retry_backoff_secs(3), 14_400);
+        assert_eq!(retry_backoff_secs(4), 14_400);
+        assert_eq!(retry_backoff_secs(50), 14_400);
+        // A 0-count (an old ledger) must still wait something sane, not forever.
+        assert_eq!(retry_backoff_secs(0), 3_600);
+    }
+
+    #[test]
+    fn a_failure_sets_a_retry_clock_and_a_success_clears_it() {
+        let dir = td("retry-clock");
+        let before = now_unix();
+        let rec = record_attempt_outcome(
+            &dir,
+            "0.3.58",
+            "boot-a",
+            OUTCOME_ROLLED_BACK,
+            "abc",
+            "0.3.58 did not come up (rpc did not answer within 360 s)",
+        )
+        .unwrap();
+        assert_eq!(rec.attempts, 1);
+        assert_eq!(rec.next_retry_at, before + 3_600);
+        assert!(rec.reason.contains("did not come up"));
+
+        // Second failure on the same version, same boot: 2 h.
+        let rec2 = record_attempt_outcome(
+            &dir,
+            "0.3.58",
+            "boot-a",
+            OUTCOME_ROLLED_BACK,
+            "abc",
+            "still not up",
+        )
+        .unwrap();
+        assert_eq!(rec2.attempts, 2);
+        assert!(rec2.next_retry_at >= before + 7_200);
+
+        // Success supersedes it, and nothing is published afterwards.
+        let ok =
+            record_attempt_outcome(&dir, "0.3.58", "boot-a", OUTCOME_CONFIRMED, "abc", "").unwrap();
+        assert_eq!(ok.next_retry_at, 0);
+        assert!(
+            update_retry_view(&dir).is_none(),
+            "a success publishes nothing"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retry_wait_is_zero_when_due_and_never_negative() {
+        let base = UpdateAttempt {
+            version: "0.3.58".into(),
+            boot_id: "boot-a".into(),
+            at: 100,
+            outcome: OUTCOME_ROLLED_BACK.into(),
+            release_id: "abc".into(),
+            attempts: 1,
+            reason: "boom".into(),
+            next_retry_at: 1_000,
+        };
+        assert_eq!(retry_wait_secs(&base, "abc", 400), Some(600));
+        assert_eq!(retry_wait_secs(&base, "abc", 1_000), Some(0));
+        assert_eq!(retry_wait_secs(&base, "abc", 9_999), Some(0));
+        // A re-cut release is not blocked at all.
+        assert_eq!(retry_wait_secs(&base, "def", 400), None);
+        // Neither is a success.
+        let ok = UpdateAttempt {
+            outcome: OUTCOME_CONFIRMED.into(),
+            ..base
+        };
+        assert_eq!(retry_wait_secs(&ok, "abc", 400), None);
+    }
+
+    #[test]
+    fn the_decline_line_names_the_time_and_the_reason() {
+        assert_eq!(
+            declined_text(1_765_000_000, "rpc did not answer"),
+            "update declined until 2025-12-06 05:46:40 UTC (last: rpc did not answer)"
+        );
+        assert!(declined_text(1_765_000_000, "  ").contains("(last: no reason recorded)"));
+    }
+
+    #[test]
+    fn unix_seconds_render_as_utc() {
+        assert_eq!(format_unix_utc(0), "1970-01-01 00:00:00 UTC");
+        assert_eq!(format_unix_utc(1_000_000_000), "2001-09-09 01:46:40 UTC");
+        // A leap day, and a date round the 2100 non-leap century rule.
+        assert_eq!(format_unix_utc(951_782_400), "2000-02-29 00:00:00 UTC");
+        assert_eq!(format_unix_utc(4_107_542_400), "2100-03-01 00:00:00 UTC");
+    }
+
+    #[test]
+    fn the_status_view_appears_only_while_a_retry_is_pending() {
+        let dir = td("retry-view");
+        assert!(
+            update_retry_view(&dir).is_none(),
+            "no ledger, nothing to say"
+        );
+        record_attempt_outcome(&dir, "0.3.58", "boot-a", OUTCOME_STARTED, "abc", "started")
+            .unwrap();
+        let v = update_retry_view(&dir).expect("a started-but-unfinished attempt is pending");
+        assert_eq!(v.version, "0.3.58");
+        assert_eq!(v.attempts, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The whole point of the row: no outcome, no boot id and no clock value may
+    /// turn into "stop trying forever".
+    #[test]
+    fn a_failure_is_always_followed_by_a_retry_time() {
+        let dir = td("retry-forever");
+        for i in 0..12u32 {
+            let r = record_attempt_outcome(
+                &dir,
+                "0.3.58",
+                &format!("boot-{i}"),
+                OUTCOME_FAILED,
+                "abc",
+                "download failed: HTTP 504",
+            )
+            .unwrap();
+            assert!(
+                r.next_retry_at > now_unix() - 1,
+                "attempt {} must schedule a retry, got {r:?}",
+                i + 1
+            );
+            assert_eq!(r.attempts, i + 1, "the count grows across boots too");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
