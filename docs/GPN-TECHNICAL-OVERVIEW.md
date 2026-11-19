@@ -1,6 +1,6 @@
 # GPN — Technical Overview
 
-*Last updated: 2026-11-18 · See `GPN-WHITEPAPER.md` for the full paper; `GPN-MASTER-REFERENCE.md` for the single-doc reference. Verified against chain spec 51 / release 0.3.59 — checked 2026-11-18 at block 322,923.*
+*Last updated: 2026-11-19 · See `GPN-WHITEPAPER.md` for the full paper; `GPN-MASTER-REFERENCE.md` for the single-doc reference. Verified against chain spec 51 / release 0.3.60 — checked 2026-11-19 at block 327,403.*
 
 ## The model
 A GPN node is **one entity** — one GPU, one identity/wallet — and it is **always miner + AI provider**:
@@ -129,4 +129,4 @@ Permissionless, redundant **access points**; **Bitcoin-style peer discovery** (p
 | **Governance hardening (spec 42)** | **APPLIED (testnet)** | 5-member council / 3-of-5 / 10-block testnet timelock; no cancel or referendum track; bootstrap, not a security guarantee |
 
 ---
-*Status (2026-11-18, spec 51 / 0.3.59):* live on a public testnet — chain, LLM/image/fine-tune marketplace, payment channels, shielded spends, on-chain discovery, public HTTPS API, node GUI + Idle, signed auto-update. *Next:* result verification, public CRS ceremony, mainnet (3-day governance timelock), bridge.
+*Status (2026-11-19, spec 51 / 0.3.60):* live on a public testnet — chain, LLM/image/fine-tune marketplace, payment channels, shielded spends, on-chain discovery, public HTTPS API, node GUI + Idle, signed auto-update. *Next:* result verification, public CRS ceremony, mainnet (3-day governance timelock), bridge.

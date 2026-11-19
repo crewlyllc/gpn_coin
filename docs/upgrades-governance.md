@@ -1,6 +1,6 @@
 # Runtime upgrades on mainnet — the governance pipeline
 
-*Verified against: chain spec 51 / release 0.3.59 — checked 2026-11-18 at block 322,923.*
+*Verified against: chain spec 51 / release 0.3.60 — checked 2026-11-19 at block 327,403.*
 
 **Audience:** the GPN committee (proposers/approvers), the launch operator, and anyone
 verifying an upgrade happened correctly. **Status:** tool + runbook implemented and rehearsed;

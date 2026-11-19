@@ -1,6 +1,6 @@
 # GPN — MASTER REFERENCE (single-document review)
 
-*Verified against: chain spec 51 / release 0.3.59 — checked 2026-11-18 at block 322,923.*
+*Verified against: chain spec 51 / release 0.3.60 — checked 2026-11-19 at block 327,403.*
 
 **Project:** Project 7 — GPN, a GPU-native crypto + AI-compute network
 **Last updated:** 2026-10-22 · **Owner:** main / PM07

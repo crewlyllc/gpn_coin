@@ -1,6 +1,6 @@
 # GPN Peer Discovery
 
-*Verified against: chain spec 51 / release 0.3.59 — checked 2026-11-18 at block 322,923.*
+*Verified against: chain spec 51 / release 0.3.60 — checked 2026-11-19 at block 327,403.*
 
 How a GPN node finds peers at startup — Bitcoin-style. This documents the seed
 sources, the seed-list wire format, how to host a seed, and the security model.

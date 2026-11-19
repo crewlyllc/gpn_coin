@@ -1,6 +1,6 @@
 # GPN — A GPU-Native Network for Mining and AI Compute
 
-*Verified against: chain spec 51 / release 0.3.59 — checked 2026-11-18 at block 322,923.*
+*Verified against: chain spec 51 / release 0.3.60 — checked 2026-11-19 at block 327,403.*
 
 **Whitepaper v0.96 (draft)** · GPN Network · **last updated 2026-10-22**
 
