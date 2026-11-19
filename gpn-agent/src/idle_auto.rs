@@ -210,6 +210,26 @@ impl LoadReading {
         self.foreign_vram_mb >= cfg.min_foreign_vram_mb
     }
 
+    /// What the device is busy with, for the log line and the dashboard.
+    ///
+    /// - `foreign GPU load` — positive evidence of a non-GPN workload.
+    /// - `own workload` — loaded, but every attributable byte is ours (or nothing
+    ///   is attributable and no foreign VRAM is present). #210: an Ethash DAG
+    ///   does not show up in the process table, so an unattributable 99 % is our
+    ///   own miner, not a reason to step aside from it.
+    /// - `quiet` — below the utilisation threshold.
+    /// - `unknown` — no probe, or the probe could not read utilisation.
+    pub fn workload(&self, cfg: &AutoIdleConfig) -> &'static str {
+        if self.is_foreign(cfg) {
+            return "foreign GPU load";
+        }
+        match self.util_percent {
+            None => "unknown",
+            Some(u) if u < cfg.util_percent => "quiet",
+            Some(_) => "own workload",
+        }
+    }
+
     /// `util 87%, VRAM 3006/8188 MiB, 2304 MiB non-GPN (2 foreign PIDs), GPU lock free`
     pub fn evidence(&self) -> String {
         let util = match self.util_percent {
@@ -744,6 +764,10 @@ pub fn spawn(mut opts: RunOptions) -> std::thread::JoinHandle<()> {
         .name("gpn-idle-auto".into())
         .spawn(move || {
             let mut last_sample = 0u64;
+            // Last classification actually logged, so a steady reading does not
+            // print a line every tick (§210 requires the log to say which one
+            // it is, without turning into a flood).
+            let mut last_verdict: &'static str = "";
             while !opts.stop.load(Ordering::SeqCst) {
                 if !opts.shared.enabled() {
                     // Disabled: cheap wakeups so a dashboard toggle is instant.
@@ -757,6 +781,26 @@ pub fn spawn(mut opts: RunOptions) -> std::thread::JoinHandle<()> {
                 if now >= last_sample.saturating_add(opts.tick_secs.max(1)) {
                     last_sample = now;
                     let reading = opts.probe.read();
+                    let verdict = reading
+                        .as_ref()
+                        .map(|r| r.workload(&opts.shared.cfg))
+                        .unwrap_or("unknown");
+                    if verdict != last_verdict {
+                        match verdict {
+                            "own workload" => println!(
+                                "[idle-auto] own workload ({}% util): {} — not stepping aside",
+                                reading.as_ref().and_then(|r| r.util_percent).unwrap_or(0),
+                                reading.as_ref().map(|r| r.evidence()).unwrap_or_default()
+                            ),
+                            "foreign GPU load" => println!(
+                                "[idle-auto] foreign workload ({}% util): {} — counting toward stepping aside",
+                                reading.as_ref().and_then(|r| r.util_percent).unwrap_or(0),
+                                reading.as_ref().map(|r| r.evidence()).unwrap_or_default()
+                            ),
+                            _ => {}
+                        }
+                        last_verdict = verdict;
+                    }
                     let idle_state = idle::state_at(&opts.idle_path, now);
                     let peers = (opts.peers)();
                     // Adopt a window that outlived the previous process.
@@ -958,6 +1002,16 @@ mod tests {
             "own mining read as foreign GPU load: {}",
             r.evidence()
         );
+        // #210: and it says so out loud, with the word the checklist asks for.
+        assert_eq!(r.workload(&cfg()), "own workload");
+    }
+
+    #[test]
+    fn workload_names_each_case() {
+        assert_eq!(busy().workload(&cfg()), "foreign GPU load");
+        assert_eq!(quiet().workload(&cfg()), "quiet");
+        let unreadable = LoadReading::default();
+        assert_eq!(unreadable.workload(&cfg()), "unknown");
     }
 
     #[test]
