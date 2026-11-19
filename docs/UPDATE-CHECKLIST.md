@@ -140,6 +140,14 @@ An unfiled checklist is a finished release nobody can find later.
 
 ## 4. Push (once)
 
+- [ ] **A docs-only commit must not start a build** — `ci.yml` ignores `docs/**`, `**/*.md`, the
+      campaign queues and `brand/**`; anything that can change behaviour is *not* ignored. If a
+      documentation push starts a CI run, `paths-ignore` has been broken and the runner is being
+      spent on prose. (Added 2026-11-19: five docs commits in 40 minutes kept the runner busy and
+      finished nothing, because each push superseded the previous run.)
+- [ ] Batch documentation edits into ONE commit. One commit per question is how a single-slot
+      runner spends an hour verifying nothing.
+
 - [ ] Nothing else pushed in the same window; no push while CI runs for HEAD.
 - [ ] CI green on that exact SHA: fmt, clippy, secret-scan, Linux build, **Windows build**.
 
