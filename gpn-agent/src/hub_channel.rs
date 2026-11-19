@@ -265,6 +265,18 @@ pub fn assignment_payload(a: &Assignment) -> [u8; 32] {
         b.extend_from_slice(&rates.in_rate.to_le_bytes());
         b.extend_from_slice(&rates.out_rate.to_le_bytes());
     }
+    // Audio jobs bind the consent attestation and the reference clip's hash.
+    // Same compatibility rule as the gen block: an assignment WITHOUT audio
+    // hashes exactly as before, so older providers keep verifying text and
+    // render jobs; one WITH audio is a different hash and an older provider
+    // rejects it at accept (a safe `NotAttempted`, never a silent wrong run).
+    if let Some(au) = &a.audio {
+        b.extend_from_slice(HUB_ASSIGN_AUDIO_DOMAIN);
+        b.push(if au.consent { 1 } else { 0 });
+        push_str(&mut b, &au.voice_sha256);
+        push_str(&mut b, &au.language);
+        b.extend_from_slice(&au.max_seconds.to_le_bytes());
+    }
     sp_core::blake2_256(&b)
 }
 
@@ -299,6 +311,9 @@ const HUB_ASSIGN_GEN_DOMAIN: &[u8] = b"GPN-HUB-ASSIGN-GEN-v1";
 /// Domain tag appended to [`assignment_payload`] when per-token billing rates
 /// are present (item #63: settle at actual usage, not the ceiling).
 const HUB_ASSIGN_BILL_DOMAIN: &[u8] = b"GPN-HUB-ASSIGN-BILL-v1";
+/// Domain tag appended to [`assignment_payload`] for audio (speech) jobs:
+/// binds the consent attestation and the reference clip's sha256.
+const HUB_ASSIGN_AUDIO_DOMAIN: &[u8] = b"GPN-HUB-ASSIGN-AUDIO-v1";
 
 /// Per-token rates for the off-chain path, in base units per token.
 ///
@@ -348,6 +363,30 @@ pub struct GenParams {
     pub n: u32,
 }
 
+/// Speech parameters for an audio job (item #202).
+///
+/// The reference clip itself travels beside the assignment as
+/// [`Assignment::voice_ref_b64`], but it is **not** what gets signed: the
+/// signature binds its sha256 ([`Self::voice_sha256`]) plus the consent
+/// attestation, so the clip can be fetched over any channel (inline, proxied,
+/// or re-encoded in transit) and the provider still proves it used the exact
+/// bytes the requestor asked for. A clip whose hash does not match is refused
+/// before `accept`, i.e. before any money moves.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioParams {
+    /// The requestor's "I have permission to clone this voice" attestation.
+    /// Always `true` in a signed assignment: the AP refuses to build one
+    /// otherwise, and the provider refuses one that says `false`.
+    pub consent: bool,
+    /// sha256 (lowercase hex) of the decoded reference-clip bytes.
+    pub voice_sha256: String,
+    /// Language tag handed to the engine (`"en"` when unspecified).
+    pub language: String,
+    /// Ceiling on billable output seconds. Prices are computed from this and
+    /// the provider bills its measured `seconds` clamped to it.
+    pub max_seconds: u32,
+}
+
 /// AP → provider: one job, fully pre-authorised.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Assignment {
@@ -377,6 +416,16 @@ pub struct Assignment {
     /// Render parameters; present only for generation jobs.
     #[serde(default)]
     pub gen: Option<GenParams>,
+    /// Speech parameters; present only for audio jobs (`job_kind`
+    /// `"AudioGeneration"`). See [`AudioParams`].
+    #[serde(default)]
+    pub audio: Option<AudioParams>,
+    /// The reference clip for an audio job, base64-encoded. Carried inline so
+    /// the access point never stores a voice sample (owner decision
+    /// 2026-11-18: per-job fetch, no retention) and is bound by sha256 in
+    /// [`AudioParams::voice_sha256`], not by the signature itself.
+    #[serde(default)]
+    pub voice_ref_b64: Option<String>,
     pub price: u128,
     /// Wall-clock deadline (unix ms) after which the provider must not start.
     pub deadline_ms: u64,
@@ -585,6 +634,8 @@ impl HubChannel {
             temperature_milli,
             job_kind: String::new(),
             gen: None,
+            audio: None,
+            voice_ref_b64: None,
             price,
             deadline_ms,
             request_nonce,
@@ -691,6 +742,33 @@ impl HubChannel {
         a.provider = provider;
         a.job_kind = job_kind.to_string();
         a.gen = Some(gen);
+        a.sig_requestor = Signature64(signer.sign_raw(&assignment_payload(&a)));
+        Ok(a)
+    }
+
+    /// Price and sign one **audio** job (item #202).
+    ///
+    /// Same money path as [`Self::begin_job_gen_for`]; the assignment carries
+    /// [`AudioParams`] instead of [`GenParams`], plus the reference clip the
+    /// provider will use once and discard.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_job_audio_for(
+        &mut self,
+        signer: &Sr25519Signer,
+        provider: PubKey,
+        job_id: u64,
+        model: &str,
+        text: &str,
+        audio: AudioParams,
+        voice_ref_b64: Option<String>,
+        price: u128,
+        deadline_ms: u64,
+    ) -> Result<Assignment, HubError> {
+        let mut a = self.begin_job(signer, job_id, model, text, 0, 0, price, deadline_ms)?;
+        a.provider = provider;
+        a.job_kind = "AudioGeneration".to_string();
+        a.audio = Some(audio);
+        a.voice_ref_b64 = voice_ref_b64;
         a.sig_requestor = Signature64(signer.sign_raw(&assignment_payload(&a)));
         Ok(a)
     }
@@ -1057,6 +1135,39 @@ impl ProviderChannel {
             // Legacy assignment (no rates) keeps the old exact-ceiling semantics.
             (None, _) => job.price,
         };
+        self.sign_result_charged(
+            signer,
+            job_id,
+            output,
+            charge,
+            prompt_tokens,
+            completion_tokens,
+        )
+    }
+
+    /// Sign a result that settles at an **explicit** charge (item #202).
+    ///
+    /// Used by jobs whose billing unit is not tokens: a speech job is priced on
+    /// its measured output seconds, so the provider bills
+    /// `price × measured / ceiling_seconds` and the requestor keeps the rest.
+    /// `charge` is clamped to the assignment's pre-signed ceiling, so this can
+    /// only ever *lower* what the requestor pays — the same trust shape the
+    /// token path uses, and the AP accepts a partial settle on the same nonce.
+    pub fn sign_result_charged(
+        &mut self,
+        signer: &Sr25519Signer,
+        job_id: u64,
+        output: &str,
+        charge: u128,
+        prompt_tokens: u32,
+        completion_tokens: u32,
+    ) -> Result<JobResultMsg, HubError> {
+        let job = self
+            .accepted
+            .get(&job_id)
+            .ok_or(HubError::UnknownJob)?
+            .clone();
+        let charge = charge.min(job.price);
         // `charge <= price` by construction, so the requestor balance cannot
         // underflow and the state stays conserved. The nonce is the SAME one the
         // AP pre-signed: a cheaper settlement is not a second update.
@@ -1219,6 +1330,104 @@ mod tests {
         assert!(ch.state.is_conserved(1_000));
         assert_eq!(ch.pending_len(), 0);
         assert_eq!(pch.pending_len(), 0);
+    }
+
+    #[test]
+    fn audio_assignment_binds_consent_and_clip_hash() {
+        // #202: an audio assignment must carry `audio` (consent + clip hash) and
+        // the signature must cover it. A tampered hash is rejected at accept by
+        // the provider, which is the whole point of binding it.
+        let (ap, prov, mut ch, mut pch) = setup(1_000);
+        let audio = AudioParams {
+            consent: true,
+            voice_sha256: "aa11".repeat(16),
+            language: "en".into(),
+            max_seconds: 20,
+        };
+        let a = ch
+            .begin_job_audio_for(
+                &ap,
+                PubKey(prov.public_key()),
+                7,
+                "xtts-v2",
+                "hello there",
+                audio.clone(),
+                None,
+                100,
+                0,
+            )
+            .unwrap();
+        assert_eq!(a.job_kind, "AudioGeneration");
+        assert!(a.gen.is_none());
+        assert_eq!(a.audio.as_ref().unwrap(), &audio);
+        pch.accept(&a).unwrap();
+
+        // Stealing the consent attestation changes the signed payload.
+        let mut forged = a.clone();
+        forged.audio = Some(AudioParams {
+            consent: false,
+            ..audio.clone()
+        });
+        let mut pch2 = ProviderChannel::new(7, 1_000, PubKey(ap.public_key()));
+        pch2.sync_to_assignment(&a);
+        assert!(pch2.accept(&forged).is_err());
+
+        // Same for a swapped reference clip.
+        let mut swapped = a.clone();
+        swapped.audio = Some(AudioParams {
+            voice_sha256: "bb22".repeat(16),
+            ..audio.clone()
+        });
+        let mut pch3 = ProviderChannel::new(7, 1_000, PubKey(ap.public_key()));
+        pch3.sync_to_assignment(&a);
+        assert!(pch3.accept(&swapped).is_err());
+    }
+
+    #[test]
+    fn audio_result_settles_below_the_ceiling_and_keeps_the_rest() {
+        // Billed on measured output seconds: a provider that charges 40 of a
+        // 100 ceiling leaves 60 with the requestor, on the SAME nonce.
+        let (ap, prov, mut ch, mut pch) = setup(1_000);
+        let audio = AudioParams {
+            consent: true,
+            voice_sha256: "aa11".repeat(16),
+            language: "en".into(),
+            max_seconds: 20,
+        };
+        let a = ch
+            .begin_job_audio_for(
+                &ap,
+                PubKey(prov.public_key()),
+                8,
+                "xtts-v2",
+                "hello there",
+                audio,
+                Some("AAAA".into()),
+                100,
+                0,
+            )
+            .unwrap();
+        pch.accept(&a).unwrap();
+        let r = pch.sign_result_charged(&prov, 8, "{}", 40, 0, 0).unwrap();
+        assert_eq!(r.state_after.nonce, a.state_after.nonce);
+        ch.complete_job(&r).unwrap();
+        assert_eq!(
+            (
+                ch.state.balance_requestor,
+                ch.state.balance_provider,
+                ch.state.nonce
+            ),
+            (960, 40, 1)
+        );
+        assert!(ch.state.is_conserved(1_000));
+        // An over-charge is clamped to the signed ceiling, never above it.
+        let mut pch2 = ProviderChannel::new(7, 1_000, PubKey(ap.public_key()));
+        pch2.sync_to_assignment(&a);
+        pch2.accept(&a).unwrap();
+        let r2 = pch2
+            .sign_result_charged(&prov, 8, "{}", 10_000, 0, 0)
+            .unwrap();
+        assert_eq!(r2.state_after, a.state_after);
     }
 
     #[test]

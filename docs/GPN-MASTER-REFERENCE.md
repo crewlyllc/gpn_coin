@@ -461,7 +461,8 @@ warning — startup never fails on this. 18 tests.
 
 **Public HTTPS API (`worker/`) — LIVE.** `https://gpncoin.ai/api/v1/*` proxies to the AP: implemented
 routes are `GET /v1/models`, `POST /v1/chat/completions`, `POST /v1/images/generations`,
-`GET /v1/images/generations/{id}`, `GET /v1/images/{id}`, `POST /v1/finetunes`, `GET /v1/finetunes/{id}`,
+`GET /v1/images/generations/{id}`, `GET /v1/images/{id}`, `POST /v1/audio/speech`,
+`GET /v1/audio/speech/{id}`, `GET /v1/audio/{id}`, `POST /v1/finetunes`, `GET /v1/finetunes/{id}`,
 `GET /v1/finetunes/{id}/artifact`. Read-only companions sit outside that prefix: `GET /api/providers`,
 `GET /api/jobs/{id}`, `GET /api/network`, `GET /api/health`, `GET /api/mode`. Provider/job lookup are
 **not** at `/api/v1/providers` or `/api/v1/jobs/{id}` (those 404), and there is **no `/api/pricing`**
@@ -496,6 +497,46 @@ New `address_source` field reports which rung won.
 curated three-model list above. (An earlier note here described a pre-2026-10-21 AP build that still
 listed `stories260K:latest`, `tuned-1184:latest`, `deepseek-r1:14b`; that process has since been
 restarted.)
+
+### 6.x Speech synthesis (TTS with voice cloning) — item #202
+
+`POST /v1/audio/speech` (proxied as `/api/v1/audio/speech`) turns text plus a short reference clip
+into an MP3 in the voice of that clip. It is the same asynchronous shape as images: `202` + a
+`poll_url`, then the bytes.
+
+```json
+{
+  "model": "xtts-v2",
+  "input": "text to speak",
+  "voice_ref": "<base64 of a 5-15 s WAV/FLAC clip>",
+  "consent": true,
+  "language": "en",
+  "max_seconds": 20
+}
+```
+
+- **Consent is mandatory.** `consent` must be literally `true`; the AP refuses the request with
+  `gpn_consent_required` *before any escrow*, and the provider re-checks it on the signed assignment.
+  It means "I have permission to clone this voice".
+- **Reference clip: 5-15 s.** Outside that window the engine refuses (below 5 s XTTS has too little
+  speaker information; above 15 s it only costs VRAM and time). The AP caps the upload at 8 MB.
+- **Output is MP3** (24 kHz mono). `response_format` accepts only `mp3` / `audio/mpeg`.
+- **No retention.** The clip travels inside the request and the signed assignment, is written to a
+  provider temp file for the render, and is deleted afterwards — the access point never stores a
+  voice sample. What is kept is the clip's **sha256**, which is signed into the assignment and stored
+  on the job, so the output is provably the product of the clip the caller sent.
+- **Billing is on measured output seconds**, like images are billed on the render: the AP prices a
+  ceiling from `max_seconds` (or an estimate from the text length) and the provider settles
+  `ceiling × measured / max_seconds`, refunding the difference in the same signed channel update.
+- **Capability.** Routing needs a provider advertising `AudioGeneration`; that is off by default and
+  enabled on a box with `GPN_AUDIO=1` (the engine itself lives in a venv — `GPN_AUDIO_PYTHON` — and
+  the helper is `gpn-agent/gpn_audio.py`, chosen with `GPN_AUDIO_SCRIPT`).
+- **Engine.** XTTS-v2 via `coqui-tts`, measured on the 4060 anchor: 1.87 GB VRAM, ~15 s warm load,
+  6.7 s of GPU for 7.55 s of audio. Cold load is ~300 s, so a cold box is refused (`425`) rather than
+  making the caller wait.
+- **On chain there is no Audio job type.** An audio job is submitted as the pallet's `Custom` kind and
+  identified off-chain by `payload_kind == "audio"`; adding a real variant is a runtime upgrade, not a
+  client change.
 
 ---
 

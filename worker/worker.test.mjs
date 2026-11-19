@@ -807,6 +807,85 @@ test("rateLimit counts per key and resets after the window", async () => {
   assert.equal(await __test.rateLimit({}, "203.0.113.99", "unit-c", 0, 0), true);
 });
 
+/* ── /api/v1/audio/speech proxy (item #202) ────────────────────────────────── */
+
+test("speech submit: 202 + poll_url is passed through, clip forwarded", async () => {
+  const seen = [];
+  const res = await worker.fetch(
+    new Request("https://gpncoin.ai/api/v1/audio/speech", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: "https://gpncoin.ai",
+        "cf-connecting-ip": "203.0.113.44",
+      },
+      body: JSON.stringify({
+        input: "hello there",
+        voice_ref: "AAAA",
+        consent: true,
+      }),
+    }),
+    {
+      __test_ap_transport: stubAp(
+        jsonReply(202, {
+          id: "a".repeat(32),
+          object: "audio.speech",
+          status: "pending",
+          poll_url: `/v1/audio/speech/${"a".repeat(32)}`,
+        }),
+        seen,
+      ),
+    },
+    { waitUntil() {} },
+  );
+  assert.equal(res.status, 202);
+  const body = await res.json();
+  assert.equal(body.object, "audio.speech");
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].method, "POST");
+  assert.equal(seen[0].path, "/v1/audio/speech");
+  assert.match(seen[0].body, /"voice_ref":"AAAA"/);
+});
+
+test("speech poll and clip download are proxied; the clip stays binary", async () => {
+  const id = "b".repeat(32);
+  const seen = [];
+  // Poll.
+  const poll = await worker.fetch(
+    new Request(`https://gpncoin.ai/api/v1/audio/speech/${id}`, {
+      headers: { "cf-connecting-ip": "203.0.113.44" },
+    }),
+    {
+      __test_ap_transport: stubAp(
+        jsonReply(200, { id, status: "completed", data: [] }),
+        seen,
+      ),
+    },
+    { waitUntil() {} },
+  );
+  assert.equal(poll.status, 200);
+  assert.equal(seen[0].path, `/v1/audio/speech/${id}`);
+
+  // The MP3 itself: bytes pass through untouched.
+  const mp3 = new Uint8Array([0x49, 0x44, 0x33, 0x04, 0x00]);
+  const dlSeen = [];
+  const dl = await worker.fetch(
+    new Request(`https://gpncoin.ai/api/v1/audio/${id}`, {
+      headers: { "cf-connecting-ip": "203.0.113.44" },
+    }),
+    {
+      __test_ap_transport: stubAp(
+        { status: 200, contentType: "audio/mpeg", body: mp3 },
+        dlSeen,
+      ),
+    },
+    { waitUntil() {} },
+  );
+  assert.equal(dl.status, 200);
+  assert.equal(dlSeen[0].path, `/v1/audio/${id}`);
+  assert.deepEqual(new Uint8Array(await dl.arrayBuffer()), mp3);
+});
+
 /* ── /api/v1/finetunes proxy ──────────────────────────────────────────────── */
 
 /**

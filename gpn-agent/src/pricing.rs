@@ -74,6 +74,21 @@ pub const DIFF_VIDEO_BASE_SECS: f64 = 90.0;
 /// per-latent-frame ratio.
 pub const DIFF_VIDEO_COMPUTE_FACTOR: f64 = 4.0;
 
+// ── speech (TTS) pricing — item #202 ────────────────────────────────────
+//
+// Same anchor-GPU-second model as images, because the buyer must not pay more
+// for a clip because a slow card produced it. Measured on the 4060 anchor
+// (XTTS-v2, one python process per job): 6.7 s of GPU for a 7.55 s clip, plus a
+// ~15 s warm model load inside every job (the helper is a fresh process each
+// time). Cold load is 302 s, but a cold pull is refused by the AP before any
+// price is quoted, so the curve prices the warm case only — the same choice the
+// diffusion curve makes.
+/// Fixed per-job cost of a speech job (engine load), measured warm.
+pub const AUDIO_BASE_SECS: f64 = 15.0;
+/// Marginal GPU-seconds per second of produced audio, measured 6.7/7.55 ≈ 0.89;
+/// rounded up to 1.0 for vocoder overhead at longer inputs.
+pub const AUDIO_SEC_PER_AUDIO_SEC: f64 = 1.0;
+
 /// Legacy image pricing used a flat "512² @ 8 steps ≈ 90 s of GPU time" with no
 /// per-job base and a 20% margin. Kept verbatim for `GPN_PRICING_MODEL=market`
 /// revert parity.
@@ -335,7 +350,6 @@ impl PricingConfig {
     }
 
     /// Buyer price of one generation job, in USD.
-    ///
     /// **Which card: the anchor, not the routed one.** This is the same design
     /// rule the text curve follows (see the module docs): the buyer pays the
     /// same for a 512²/8-step image whether a 4060 or an H100 renders it, so a
@@ -398,6 +412,31 @@ impl PricingConfig {
         util: f64,
     ) -> f64 {
         let usd = self.diffusion_price_usd(width, height, steps, frames, market_hr, util);
+        (self.gpn_per_token(usd, token_price_usd) as f64) / BASE_UNITS_PER_GPN
+    }
+
+    /// GPU-seconds one speech job occupies on the **anchor** card.
+    ///
+    /// `output_seconds` is what the caller asked for (or, for a fixed ceiling,
+    /// the most the engine may produce). The per-job base is the engine load,
+    /// which a fresh python process pays on every job.
+    pub fn audio_seconds(&self, output_seconds: f64) -> f64 {
+        AUDIO_BASE_SECS + output_seconds.max(0.1) * AUDIO_SEC_PER_AUDIO_SEC
+    }
+
+    /// Buyer price of one speech job, in USD — same anchor rule as images.
+    pub fn audio_price_usd(&self, output_seconds: f64) -> f64 {
+        (self.audio_seconds(output_seconds) / 3600.0)
+            * self.anchor_rate_usd_hr
+            * (1.0 + self.margin_frac())
+    }
+
+    /// Buyer price of one speech job, in GPN. Billed on **actual output
+    /// seconds**, like images are billed on the render they produced: the
+    /// ceiling is quoted here and the provider bills its measured `seconds`
+    /// clamped to it.
+    pub fn audio_price_gpn(&self, output_seconds: f64, token_price_usd: f64) -> f64 {
+        let usd = self.audio_price_usd(output_seconds);
         (self.gpn_per_token(usd, token_price_usd) as f64) / BASE_UNITS_PER_GPN
     }
 
@@ -793,6 +832,27 @@ mod tests {
         let vid = c.diffusion_seconds(512.0, 512.0, 30.0, 16.0);
         assert!(vid > 400.0 && vid < 500.0, "video estimate {vid}");
         assert!(vid > c.diffusion_seconds(512.0, 512.0, 30.0, 1.0) * 10.0);
+    }
+
+    #[test]
+    fn audio_price_follows_output_seconds_not_a_flat_fee() {
+        let c = throughput();
+        // Measured on the anchor: 7.55 s of audio in 6.7 s of GPU, plus the
+        // 15 s per-job engine load ⇒ 22.55 s of GPU-seconds.
+        let short = c.audio_seconds(7.55);
+        assert!((short - 22.55).abs() < 1e-6, "audio seconds {short}");
+        // Twice the audio must cost more, but not twice as much: the load is
+        // paid once per job.
+        let long = c.audio_price_usd(15.1);
+        let brief = c.audio_price_usd(7.55);
+        assert!(long > brief);
+        assert!(
+            long < brief * 2.0,
+            "load must not double: {brief} vs {long}"
+        );
+        // The GPN price is the same curve, converted (≥ 1 base unit).
+        let gpn = c.audio_price_gpn(7.55, 0.15);
+        assert!(gpn > 0.0 && gpn < 1.0, "7.55 s clip priced {gpn} GPN");
     }
 
     #[test]

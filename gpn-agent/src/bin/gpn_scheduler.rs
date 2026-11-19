@@ -3494,6 +3494,9 @@ enum ImageFailure {
     Unavailable,
     /// The request itself could not be rendered (refused, bad artifact, ...).
     Failed,
+    /// Served: the artifact was produced, verified and stored. (Speech uses
+    /// this so the caller can log a success without re-reading the record.)
+    Served,
 }
 
 /// Run one image record to completion over the hub channel.
@@ -3696,6 +3699,204 @@ fn respond_image(mut req: tiny_http::Request, id: &str, index: u32) -> bool {
             .with_header(cache),
     );
     true
+}
+
+// ── speech (item #202) ───────────────────────────────────────────────────────
+
+/// Read one produced clip, if it exists.
+fn audio_bytes(id: &str, index: u32) -> Option<Vec<u8>> {
+    if !gpn_agent::audio_jobs::valid_id(id) {
+        return None;
+    }
+    std::fs::read(gpn_agent::audio_jobs::artifact_path(id, index)).ok()
+}
+
+/// Send one stored clip with its real content type.
+fn respond_audio(mut req: tiny_http::Request, id: &str, index: u32) -> bool {
+    let Some(bytes) = audio_bytes(id, index) else {
+        return false;
+    };
+    let ct = Header::from_bytes(&b"Content-Type"[..], &b"audio/mpeg"[..]).unwrap();
+    let cache = Header::from_bytes(&b"Cache-Control"[..], &b"public, max-age=86400"[..]).unwrap();
+    let _ = req.respond(
+        Response::from_data(bytes)
+            .with_header(ct)
+            .with_header(cache),
+    );
+    true
+}
+
+/// Estimated output seconds for a piece of text.
+///
+/// Measured baseline: the acceptance clip was ~110 characters and produced
+/// 7.55 s, i.e. ≈14.6 characters per second of speech at the engine's default
+/// pace. Rounded down (14) so the ceiling is not systematically too small, plus
+/// a 1 s floor for punctuation-heavy inputs. Only ever used to price a ceiling
+/// and to name an estimate — the provider bills the seconds it measured.
+fn estimate_speech_seconds(text: &str) -> f64 {
+    let chars = text.chars().count() as f64;
+    (chars / 14.0).max(1.0)
+}
+
+/// Store one artifact fetched from the provider, verifying everything the
+/// provider signed: its sha256 must match the bytes and the bytes must be an
+/// MP3 stream. Same rule as images — a corrupt clip must never be published.
+fn fetch_and_store_audio(
+    route: &ImageRoute,
+    rec_id: &str,
+    index: u32,
+    channel_id: u64,
+    job_id: u64,
+    meta: &Value,
+) -> Result<gpn_agent::audio_jobs::AudioArtifact, String> {
+    let endpoint = route
+        .channel_endpoint
+        .clone()
+        .or_else(|| image_channel_endpoint(&route.status_url))
+        .ok_or_else(|| "no channel endpoint for the artifact".to_string())?;
+    let base = endpoint
+        .strip_suffix("/channel/job")
+        .ok_or_else(|| "channel endpoint is not a /channel/job URL".to_string())?;
+    let token = gpn_agent::image_channel::artifact_token(channel_id, job_id);
+    let url = format!("{base}/channel/artifact/{job_id}?t={token}");
+    let resp = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("http client: {e}"))?
+        .get(&url)
+        .send()
+        .map_err(|e| format!("artifact fetch failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("artifact fetch -> HTTP {}", resp.status().as_u16()));
+    }
+    const MAX_AUDIO_BYTES: usize = 64 * 1024 * 1024;
+    let bytes = resp.bytes().map_err(|e| format!("artifact body: {e}"))?;
+    if bytes.len() > MAX_AUDIO_BYTES {
+        return Err(format!("artifact is {} bytes, over the cap", bytes.len()));
+    }
+    let want = meta.get("sha256").and_then(|x| x.as_str()).unwrap_or("");
+    let got = gpn_agent::audio_jobs::sha256_hex(&bytes);
+    if !want.eq_ignore_ascii_case(got.as_str()) {
+        return Err(format!(
+            "sha256 mismatch: provider signed {want}, bytes hash {got}"
+        ));
+    }
+    if !gpn_agent::audio_jobs::is_mp3(&bytes) {
+        return Err("artifact is not an MP3 stream".to_string());
+    }
+    gpn_agent::audio_jobs::put_artifact(rec_id, index, &bytes)
+        .map_err(|e| format!("store artifact: {e}"))?;
+    Ok(gpn_agent::audio_jobs::AudioArtifact {
+        index,
+        media_type: meta
+            .get("media_type")
+            .and_then(|x| x.as_str())
+            .unwrap_or("audio/mpeg")
+            .to_string(),
+        sha256: got,
+        bytes: bytes.len() as u64,
+        seconds: meta.get("seconds").and_then(|x| x.as_f64()).unwrap_or(0.0),
+    })
+}
+
+/// Run one speech record to completion over the hub channel.
+fn run_audio_record(
+    ctx: &ImageCtx,
+    rec: &gpn_agent::audio_jobs::AudioJob,
+    voice_b64: &str,
+    units: u128,
+) -> ImageFailure {
+    let audio = gpn_agent::hub_channel::AudioParams {
+        consent: true,
+        voice_sha256: rec.voice_sha256.clone(),
+        language: rec.language.clone(),
+        max_seconds: rec.max_seconds,
+    };
+    let mut refusals: Vec<String> = Vec::new();
+    for route in ctx.routes.iter().take(MAX_ROUTE_ATTEMPTS) {
+        match gpn_agent::hub_ap::try_channel_audio_job(
+            &ctx.hub,
+            &ctx.rt,
+            Some(&ctx.client),
+            &route.provider_addr,
+            &route.status_url,
+            route.channel_endpoint.clone(),
+            &rec.model,
+            &rec.input,
+            audio.clone(),
+            Some(voice_b64.to_string()),
+            units.max(1),
+        ) {
+            Ok(out) => {
+                let parsed: Value = serde_json::from_str(&out.text).unwrap_or(json!({}));
+                let empty = vec![];
+                let metas = parsed
+                    .get("artifacts")
+                    .and_then(|a| a.as_array())
+                    .unwrap_or(&empty);
+                let Some(meta) = metas.first() else {
+                    gpn_agent::audio_jobs::update(&rec.id, |j| {
+                        j.status = "failed".into();
+                        j.payment = "channel".into();
+                        j.error = Some("provider returned no artifacts".into());
+                    });
+                    return ImageFailure::Failed;
+                };
+                match fetch_and_store_audio(route, &rec.id, 0, out.channel_id, out.job_id, meta) {
+                    Ok(a) => {
+                        println!(
+                            "[audio] {} settled on channel {} (job {}) — {:.3}s from {} (charged {} of {} base units)",
+                            rec.id, out.channel_id, out.job_id, a.seconds, route.provider_addr,
+                            out.charge, units
+                        );
+                        gpn_agent::audio_jobs::update(&rec.id, |j| {
+                            j.status = "completed".into();
+                            j.payment = "channel".into();
+                            j.channel_id = Some(out.channel_id);
+                            j.job_id = Some(out.job_id);
+                            j.data = vec![a];
+                            j.error = None;
+                        });
+                        return ImageFailure::Served;
+                    }
+                    Err(e) => {
+                        eprintln!("[audio] {}: artifact rejected: {e}", rec.id);
+                        gpn_agent::audio_jobs::update(&rec.id, |j| {
+                            j.status = "failed".into();
+                            j.payment = "channel".into();
+                            j.channel_id = Some(out.channel_id);
+                            j.job_id = Some(out.job_id);
+                            j.error =
+                                Some(format!("speech completed but the clip was unusable: {e}"));
+                        });
+                        return ImageFailure::Failed;
+                    }
+                }
+            }
+            Err(gpn_agent::hub_ap::ChannelFail::NotAttempted(why)) => {
+                eprintln!("[audio] {}: candidate refused ({why})", rec.id);
+                refusals.push(format!("{}: {why}", route.provider_addr));
+            }
+            Err(gpn_agent::hub_ap::ChannelFail::Ambiguous(why)) => {
+                eprintln!("[audio] {}: ambiguous channel failure ({why})", rec.id);
+                gpn_agent::audio_jobs::update(&rec.id, |j| {
+                    j.status = "failed".into();
+                    j.payment = "channel".into();
+                    j.error = Some(format!("ambiguous channel failure: {why}"));
+                });
+                return ImageFailure::Failed;
+            }
+        }
+    }
+    gpn_agent::audio_jobs::update(&rec.id, |j| {
+        j.status = "failed".into();
+        j.payment = "not_charged".into();
+        j.error = Some(format!(
+            "speech service unavailable: every candidate refused ({})",
+            refusals.join("; ")
+        ));
+    });
+    ImageFailure::Unavailable
 }
 
 /// Rewrite a wildcard bind address (`0.0.0.0:8092`, `[::]:8092`) to its loopback
@@ -4735,11 +4936,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let (r, f) = image_jobs::gc();
         println!("[images] gc at boot: {r} expired record(s), {f} artifact file(s) removed");
+        // Speech records (item #202) expire on the same schedule, and their
+        // sweep also removes any leftover reference clip — the clip must never
+        // outlive the render that used it.
+        let (ar, af) = gpn_agent::audio_jobs::gc();
+        println!("[audio] gc at boot: {ar} expired record(s), {af} file(s) removed");
         std::thread::spawn(|| loop {
             std::thread::sleep(Duration::from_secs(3600));
             let (r, f) = image_jobs::gc();
             if r > 0 || f > 0 {
                 println!("[images] gc: {r} expired record(s), {f} artifact file(s) removed");
+            }
+            let (ar, af) = gpn_agent::audio_jobs::gc();
+            if ar > 0 || af > 0 {
+                println!("[audio] gc: {ar} expired record(s), {af} file(s) removed");
             }
         });
     }
@@ -6701,6 +6911,385 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         return;
                     }
                     respond_image(req, id, i);
+                    return;
+                }
+                // ── public speech synthesis (item #202) ─────────────────────────
+                // `POST /v1/audio/speech` answers 202 + a poll URL, exactly like
+                // images: synthesis is seconds of GPU and a cold engine load is
+                // minutes, which would collide with the Worker's 110 s upstream
+                // limit.
+                //
+                // The requestor's reference clip travels **inside this request**
+                // and inside the signed assignment — the access point never
+                // stores a voice sample (owner decision 2026-11-18: per-job
+                // fetch, no retention). What is kept is its sha256, which is
+                // what proves which clip produced the output.
+                (Method::Post, ["v1", "audio", "speech"]) => {
+                    if let Some(ip) = req.remote_addr().map(|a| a.ip().to_string()) {
+                        if denylist.lock().unwrap().is_ip_banned(&ip) {
+                            let _ = req.respond(
+                                Response::from_string(json!({
+                                    "error": {"message": "service refused (operator denylist)", "type": "gpn_policy_violation"}
+                                }).to_string())
+                                .with_header(hdr.clone())
+                                .with_status_code(403),
+                            );
+                            return;
+                        }
+                    }
+                    if !allow_hot_wallet {
+                        let _ = req.respond(
+                            Response::from_string(json!({
+                                "error": {"message": "public generation is disabled on this access point (mainnet)", "type": "gpn_error"}
+                            }).to_string())
+                            .with_header(hdr.clone())
+                            .with_status_code(403),
+                        );
+                        return;
+                    }
+                    let v: Value = serde_json::from_str(&body).unwrap_or(json!({}));
+                    let bad = |msg: String, ty: &str| {
+                        Response::from_string(
+                            json!({"error": {"message": msg, "type": ty}}).to_string(),
+                        )
+                        .with_header(hdr.clone())
+                        .with_status_code(400)
+                    };
+                    let text = v
+                        .get("input")
+                        .or_else(|| v.get("text"))
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+                    let Some(text) = text else {
+                        let _ = req.respond(bad(
+                            "missing input: send {\"input\": \"text to speak\"}".to_string(),
+                            "gpn_bad_request",
+                        ));
+                        return;
+                    };
+                    if text.chars().count() > 5000 {
+                        let _ = req.respond(bad(
+                            "input is too long: 5000 characters is the per-request limit"
+                                .to_string(),
+                            "gpn_bad_request",
+                        ));
+                        return;
+                    }
+                    // Owner decision: cloning needs an explicit attestation, and
+                    // it is refused BEFORE any escrow — a missing consent is a
+                    // policy error, not a rendered job that gets refunded.
+                    if v.get("consent").and_then(|x| x.as_bool()) != Some(true) {
+                        let _ = req.respond(bad(
+                            "voice cloning requires consent: send \"consent\": true only if you have \
+                             permission to clone this voice"
+                                .to_string(),
+                            "gpn_consent_required",
+                        ));
+                        return;
+                    }
+                    let clip_b64 = v
+                        .get("voice_ref")
+                        .or_else(|| v.get("voice_ref_b64"))
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+                    let Some(clip_b64) = clip_b64 else {
+                        let _ = req.respond(bad(
+                            "missing voice_ref: send the reference clip as base64 in \"voice_ref\" ".to_string(),
+                            "gpn_bad_request",
+                        ));
+                        return;
+                    };
+                    let fmt = v
+                        .get("response_format")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("mp3");
+                    if !matches!(fmt.to_ascii_lowercase().as_str(), "mp3" | "audio/mpeg") {
+                        let _ = req.respond(bad(
+                            format!(
+                                "unsupported response_format '{fmt}': the engine produces MP3 \
+                                 (\"response_format\": \"mp3\")"
+                            ),
+                            "gpn_bad_request",
+                        ));
+                        return;
+                    }
+                    let clip = match gpn_agent::audio_jobs::base64_decode(&clip_b64) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            let _ = req.respond(bad(
+                                format!("voice_ref is not valid base64: {e}"),
+                                "gpn_bad_request",
+                            ));
+                            return;
+                        }
+                    };
+                    // A 15 s WAV is ~1.3 MB; 8 MB decoded is generous and stops
+                    // an upload from being a memory lever on a public endpoint.
+                    if clip.len() > 8 * 1024 * 1024 {
+                        let _ = req.respond(bad(
+                            format!(
+                                "voice_ref is {} bytes; the limit is 8 MB (a 5-15 s clip is ~1 MB)",
+                                clip.len()
+                            ),
+                            "gpn_bad_request",
+                        ));
+                        return;
+                    }
+                    if let Some(cat) = moderation_block(&text) {
+                        let _ = req.respond(
+                            Response::from_string(
+                                json!({"error": {"message": cat.reason(), "type": "gpn_policy_violation", "category": cat.id()}})
+                                    .to_string(),
+                            )
+                            .with_header(hdr.clone())
+                            .with_status_code(451),
+                        );
+                        return;
+                    }
+                    let model = v
+                        .get("model")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("xtts-v2")
+                        .to_string();
+                    let language = v
+                        .get("language")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("en")
+                        .to_string();
+                    let max_seconds = v
+                        .get("max_seconds")
+                        .and_then(|x| x.as_u64())
+                        .map(|n| n.clamp(1, 600) as u32)
+                        .unwrap_or_else(|| {
+                            (estimate_speech_seconds(&text).ceil() as u64).clamp(1, 600) as u32
+                        });
+                    let sync = v.get("sync").and_then(|x| x.as_bool()).unwrap_or(false);
+                    let est = pcfg.audio_seconds(max_seconds as f64);
+                    if sync {
+                        if let Some(msg) = gpn_agent::audio_jobs::sync_refusal(est) {
+                            let _ = req.respond(
+                                Response::from_string(
+                                    json!({
+                                        "error": {
+                                            "message": msg,
+                                            "type": "gpn_sync_too_slow",
+                                            "estimated_seconds": (est * 100.0).round() / 100.0
+                                        }
+                                    })
+                                    .to_string(),
+                                )
+                                .with_header(hdr.clone())
+                                .with_status_code(400),
+                            );
+                            return;
+                        }
+                    }
+                    // Route to a box that advertises AudioGeneration, using the
+                    // same candidate pipeline as every other request.
+                    let reg = registry.lock().unwrap().clone();
+                    let needs = RouteNeeds {
+                        model: model.clone(),
+                        ..Default::default()
+                    };
+                    let candidates = fcfs_order(route_candidates(&reg, JobKind::Audio, &needs));
+                    if candidates.is_empty() {
+                        let empty = reg.iter().all(|p| p.last_seen.is_none());
+                        let mut r = Response::from_string(json!({
+                            "error": {
+                                "message": if empty {
+                                    "provider registry is warming up (no providers polled yet); retry shortly".to_string()
+                                } else {
+                                    "no provider with the AudioGeneration capability is online".to_string()
+                                },
+                                "type": "gpn_unavailable"
+                            }
+                        }).to_string())
+                        .with_header(hdr.clone())
+                        .with_status_code(503);
+                        if empty {
+                            r = r.with_header(retry_after_header());
+                        }
+                        let _ = req.respond(r);
+                        return;
+                    }
+                    // Speech is served by the same media channel as renders
+                    // (one GPU, one job at a time), so the same endpoint probe
+                    // decides which candidates can actually take it.
+                    let mut skipped: Vec<String> = Vec::new();
+                    let mut routes: Vec<ImageRoute> = Vec::new();
+                    for cand in candidates.iter().take(MAX_ROUTE_ATTEMPTS) {
+                        let endpoint = image_channel_endpoint(&cand.provider.status_url);
+                        let reachable = endpoint
+                            .as_deref()
+                            .map(gpn_agent::hub_ap::probe_channel_endpoint)
+                            .unwrap_or(false);
+                        if reachable {
+                            routes.push(ImageRoute {
+                                provider_addr: cand.provider.address.clone(),
+                                status_url: cand.provider.status_url.clone(),
+                                channel_endpoint: endpoint,
+                            });
+                        } else {
+                            skipped.push(format!(
+                                "{}: no channel render endpoint",
+                                cand.provider.address
+                            ));
+                        }
+                    }
+                    if routes.is_empty() {
+                        let msg = format!(
+                            "speech service unavailable: no audio-capable provider serves the channel \
+                             endpoint. No clip was queued and nothing was charged; retry when one is \
+                             online. Candidates: {}",
+                            skipped.join("; ")
+                        );
+                        eprintln!("[audio] refusing speech request: {msg}");
+                        let _ = req.respond(
+                            Response::from_string(
+                                json!({
+                                    "error": {"message": msg, "type": "gpn_unavailable", "candidates": skipped}
+                                })
+                                .to_string(),
+                            )
+                            .with_header(hdr.clone())
+                            .with_header(retry_after_header())
+                            .with_status_code(503),
+                        );
+                        return;
+                    }
+                    let feed = feed_now();
+                    // Priced on output seconds (owner decision): the ceiling is
+                    // `max_seconds`, and the provider bills its measured seconds
+                    // against it, refunding the rest in the same signed update.
+                    let price_gpn = pcfg.audio_price_gpn(max_seconds as f64, feed.token_price_usd);
+                    let voice_sha256 = gpn_agent::audio_jobs::sha256_hex(&clip);
+                    let id = image_jobs::new_id(&text);
+                    let rec = gpn_agent::audio_jobs::AudioJob::new(
+                        id.clone(),
+                        &text,
+                        &model,
+                        &language,
+                        &voice_sha256,
+                        max_seconds,
+                        est,
+                        price_gpn,
+                    );
+                    if let Err(e) = gpn_agent::audio_jobs::save(&rec) {
+                        let _ = req.respond(
+                            Response::from_string(json!({
+                                "error": {"message": format!("cannot persist the job: {e}"), "type": "gpn_error"}
+                            }).to_string())
+                            .with_header(hdr.clone())
+                            .with_status_code(500),
+                        );
+                        return;
+                    }
+                    let ctx = ImageCtx {
+                        hub: hub.clone(),
+                        rt: rt.clone(),
+                        client: client.clone(),
+                        routes,
+                    };
+                    let units = (price_gpn * pricing::BASE_UNITS_PER_GPN) as u128;
+                    if sync {
+                        let started = Instant::now();
+                        let failure = run_audio_record(&ctx, &rec, &clip_b64, units.max(1));
+                        let done = gpn_agent::audio_jobs::get(&id).unwrap_or(rec);
+                        println!(
+                            "[audio] {} sync request finished in {} ms (status {})",
+                            id,
+                            started.elapsed().as_millis(),
+                            done.status
+                        );
+                        let code = if done.status == "completed" {
+                            200
+                        } else if failure == ImageFailure::Unavailable {
+                            503
+                        } else {
+                            502
+                        };
+                        let mut r = Response::from_string(done.public_json().to_string())
+                            .with_header(hdr.clone())
+                            .with_status_code(code);
+                        if code == 503 {
+                            r = r.with_header(retry_after_header());
+                        }
+                        let _ = req.respond(r);
+                        return;
+                    }
+                    let rec_worker = rec.clone();
+                    let clip_worker = clip_b64.clone();
+                    std::thread::spawn(move || {
+                        let _ = run_audio_record(&ctx, &rec_worker, &clip_worker, units.max(1));
+                    });
+                    let mut pending = rec.pending_shape();
+                    pending["payment_hint"] = json!("channel");
+                    pending["gpn"]["price_total_gpn"] = json!(price_gpn);
+                    let _ = req.respond(
+                        Response::from_string(pending.to_string())
+                            .with_header(hdr.clone())
+                            .with_status_code(202),
+                    );
+                    return;
+                }
+                (Method::Get, ["v1", "audio", "speech", id]) => {
+                    match gpn_agent::audio_jobs::get(id) {
+                        Some(j) => {
+                            let unavailable = j.status == "failed" && j.payment == "not_charged";
+                            let mut r = Response::from_string(j.public_json().to_string())
+                                .with_header(hdr.clone());
+                            if unavailable {
+                                r = r.with_header(retry_after_header()).with_status_code(503);
+                            }
+                            let _ = req.respond(r);
+                        }
+                        None => {
+                            let _ = req.respond(
+                                Response::from_string(json!({
+                                    "error": {"message": "unknown or expired speech job id", "type": "gpn_not_found"}
+                                }).to_string())
+                                .with_header(hdr.clone())
+                                .with_status_code(404),
+                            );
+                        }
+                    }
+                    return;
+                }
+                // The finished clip. This is the URL every completed speech job
+                // advertises, and it answers with the audio bytes themselves —
+                // what an OpenAI-shaped client expects from the download URL.
+                (Method::Get, ["v1", "audio", id]) => {
+                    if audio_bytes(id, 0).is_none() {
+                        let _ = req.respond(
+                            Response::from_string(json!({
+                                "error": {"message": "no such clip (unknown id, not finished, or expired)", "type": "gpn_not_found"}
+                            }).to_string())
+                            .with_header(hdr.clone())
+                            .with_status_code(404),
+                        );
+                        return;
+                    }
+                    respond_audio(req, id, 0);
+                    return;
+                }
+                (Method::Get, ["v1", "audio", id, idx]) => {
+                    let i: u32 = idx.parse().unwrap_or(0);
+                    if audio_bytes(id, i).is_none() {
+                        let _ = req.respond(
+                            Response::from_string(
+                                json!({
+                                    "error": {"message": "no such clip", "type": "gpn_not_found"}
+                                })
+                                .to_string(),
+                            )
+                            .with_header(hdr.clone())
+                            .with_status_code(404),
+                        );
+                        return;
+                    }
+                    respond_audio(req, id, i);
                     return;
                 }
                 // ── public fine-tuning (queue item #67): submit ──────────────────

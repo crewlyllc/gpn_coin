@@ -8,6 +8,7 @@ pub mod ap_token;
 pub mod assign_auth;
 pub mod assign_pull;
 pub mod attest_idle;
+pub mod audio_jobs;
 pub mod chain;
 pub mod chainspec;
 pub mod cli;

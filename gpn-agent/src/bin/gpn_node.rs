@@ -139,6 +139,9 @@ struct FileConfig {
     poll_ms: Option<u64>,
     diffusion: Option<bool>,
     diffusion_poll_ms: Option<u64>,
+    /// Serve speech (TTS with voice cloning, item #202). Off unless the box has
+    /// the engine: `GPN_AUDIO=1` / `audio = true`.
+    audio: Option<bool>,
     ml: Option<bool>,
     ml_poll_ms: Option<u64>,
     finetune: Option<bool>,
@@ -196,6 +199,8 @@ struct Config {
     poll_ms: u64,
     diffusion: bool,
     diffusion_poll_ms: u64,
+    /// Advertise and serve `AudioGeneration` (needs the TTS engine on the box).
+    audio: bool,
     ml: bool,
     ml_poll_ms: u64,
     finetune: bool,
@@ -1650,6 +1655,12 @@ impl Config {
             diffusion_poll_ms: env_u64("GPN_DIFFUSION_POLL_MS")
                 .or(file.diffusion_poll_ms)
                 .unwrap_or(2000),
+            // Speech is OFF by default even though every other optional provider
+            // is on: the capability means "this box has a working TTS engine",
+            // and advertising it without one would route clips to a box that
+            // can only refund them (item #202, owner decision: billed on actual
+            // output). `GPN_AUDIO=1` once the engine is installed.
+            audio: env_bool("GPN_AUDIO").or(file.audio).unwrap_or(false),
             ml: env_bool("GPN_ML").or(file.ml).unwrap_or(true),
             ml_poll_ms: env_u64("GPN_ML_POLL_MS")
                 .or(file.ml_poll_ms)
@@ -3680,6 +3691,11 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
             caps.push("ImageGeneration");
             caps.push("VideoGeneration");
         }
+        if cfg.audio {
+            // Item #202: speech is served by the same media provider process
+            // (one GPU, one artifact channel), so it rides the diffusion child.
+            caps.push("AudioGeneration");
+        }
         if cfg.ml {
             caps.push("MLInference");
         }
@@ -3771,6 +3787,17 @@ fn build_children(cfg: &Config) -> Vec<ChildSpec> {
                     envs: vec![
                         ("SIGNER_URI".to_string(), cfg.signer.clone()),
                         ("GPN_AP_URL".to_string(), ap_env.clone()),
+                        // Item #202: the media provider only SERVES speech when
+                        // this box advertises the engine, and that engine's
+                        // interpreter is a venv path, not the system python3.
+                        (
+                            "GPN_AUDIO".to_string(),
+                            if cfg.audio {
+                                "1".to_string()
+                            } else {
+                                "0".to_string()
+                            },
+                        ),
                     ],
                     prune_base: None,
                     explicit_pruning: false,
@@ -4903,6 +4930,7 @@ mod tests {
             poll_ms: 300,
             diffusion: false,
             diffusion_poll_ms: 2000,
+            audio: false,
             ml: false,
             ml_poll_ms: 2000,
             finetune: false,

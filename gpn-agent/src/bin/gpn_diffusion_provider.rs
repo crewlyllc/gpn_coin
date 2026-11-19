@@ -12,7 +12,9 @@
 //! Env: ENDPOINT, SIGNER_URI, POLL_MS, GPN_DIFFUSE_SCRIPT (path to gpn_diffuse.py)
 
 use gpn_agent::chain::ChainClient;
-use gpn_agent::hub_channel::{Assignment, GenParams, JobResultMsg, ProviderChannel, PubKey};
+use gpn_agent::hub_channel::{
+    Assignment, AudioParams, GenParams, JobResultMsg, ProviderChannel, PubKey,
+};
 use gpn_agent::llm::{get_job, LlmStore};
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -525,6 +527,266 @@ fn render_image(
     res
 }
 
+/// True when this box advertises the speech capability (item #202).
+///
+/// Off by default: the capability is a claim that a working TTS engine is
+/// installed, and the AP prices a clip on that claim. A box that advertises it
+/// without the engine can only refund every job routed to it.
+fn audio_enabled() -> bool {
+    matches!(
+        std::env::var("GPN_AUDIO").ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes")
+    )
+}
+
+fn audio_script() -> PathBuf {
+    if let Ok(p) = std::env::var("GPN_AUDIO_SCRIPT") {
+        return PathBuf::from(p);
+    }
+    PathBuf::from("gpn_audio.py")
+}
+
+/// Serve one **speech** assignment (item #202).
+///
+/// Same money path as a render (adopt → sync → accept → run → sign), with three
+/// differences that are the point of the feature:
+///
+/// 1. The reference clip arrives inline (`voice_ref_b64`) and its **sha256 is
+///    signed** in [`AudioParams::voice_sha256`]. A clip that does not hash to
+///    the signed value is refused *before* `accept`, so a mangled or swapped
+///    clip can never be billed.
+/// 2. Consent is re-checked here. The AP refuses to build an assignment
+///    without it, and this provider refuses to run one that says `false` —
+///    neither side trusts the other for an attestation.
+/// 3. Billing is on **measured output seconds**, prorated against the signed
+///    ceiling (`max_seconds`), so a short clip costs less than the ceiling and
+///    the requestor keeps the difference in the same signed state update.
+///
+/// The clip is written to a temp file for the render and deleted on every path
+/// (owner decision: per-job fetch, no retention). `gpn_audio.py` deletes it too
+/// (`delete_reference`), so a crashed helper cannot leave a voice sample behind
+/// for long.
+fn serve_audio_job(ctx: &ChannelCtx, a: Assignment) -> (u16, serde_json::Value) {
+    if !audio_enabled() {
+        // A 4xx before `accept` charges nothing, so the AP's failover can try a
+        // box that actually has the engine.
+        return (
+            409,
+            json!({"ok": false, "error": "speech is disabled on this provider (GPN_AUDIO=0)"}),
+        );
+    }
+    let Some(au) = a.audio.clone() else {
+        return (
+            400,
+            json!({"ok": false, "error": "audio branch without audio params"}),
+        );
+    };
+    if !au.consent {
+        return (
+            400,
+            json!({"ok": false, "error": "Refused: no consent attestation in the assignment"}),
+        );
+    }
+    let Some(clip_b64) = a.voice_ref_b64.clone() else {
+        return (
+            400,
+            json!({"ok": false, "error": "Refused: audio job without a reference clip"}),
+        );
+    };
+    let clip = match gpn_agent::audio_jobs::base64_decode(&clip_b64) {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                400,
+                json!({"ok": false, "error": format!("Refused: reference clip is not base64: {e}")}),
+            )
+        }
+    };
+    let got = gpn_agent::audio_jobs::sha256_hex(&clip);
+    if !got.eq_ignore_ascii_case(au.voice_sha256.trim()) {
+        return (
+            400,
+            json!({
+                "ok": false,
+                "error": format!(
+                    "Refused: reference clip hashes to {got} but the signed assignment says {}",
+                    au.voice_sha256
+                )
+            }),
+        );
+    }
+
+    let mut store = load_channels(&ctx.state_path);
+    if let std::collections::btree_map::Entry::Vacant(e) = store.channels.entry(a.channel_id) {
+        let mut ch = ProviderChannel::new(a.channel_id, a.deposit, PubKey(a.requestor.0));
+        ch.sync_to_assignment(&a);
+        println!(
+            "[channel] adopting channel {} at nonce {} (audio job {})",
+            a.channel_id, ch.state.nonce, a.job_id
+        );
+        e.insert(ch);
+    }
+    {
+        let ch = store.channels.get_mut(&a.channel_id).unwrap();
+        ch.sync_to_assignment(&a);
+        if let Err(e) = ch.accept(&a) {
+            eprintln!("[channel] job {} rejected: {e}", a.job_id);
+            return (
+                409,
+                json!({"ok": false, "error": format!("assignment rejected: {e}")}),
+            );
+        }
+    }
+    save_channels(&ctx.state_path, &store);
+
+    // The clip is ours for the length of this job only.
+    let clip_path = gpn_agent::utils::temp_path(&format!("gpn_voice_ref_{}.wav", a.job_id));
+    if let Err(e) = std::fs::write(&clip_path, &clip) {
+        return refund(
+            ctx,
+            a.channel_id,
+            a.job_id,
+            &format!("cannot stage the reference clip: {e}"),
+        );
+    }
+
+    let out_dir = std::env::var("GPN_ARTIFACTS").unwrap_or_else(|_| {
+        gpn_agent::utils::temp_dir()
+            .join("gpn_artifacts")
+            .to_string_lossy()
+            .to_string()
+    });
+    let _ = std::fs::create_dir_all(&out_dir);
+    let out_path = format!("{out_dir}/chan_{}_.mp3", a.job_id);
+
+    let outcome = render_audio(&a, &au, &clip_path, &out_path);
+    // Never leave a voice sample on disk, whichever way the render went.
+    let _ = std::fs::remove_file(&clip_path);
+
+    match outcome {
+        Ok((path, media_type, sha256, seconds, bytes)) => {
+            if bytes == 0 {
+                return refund(ctx, a.channel_id, a.job_id, "render produced no bytes");
+            }
+            // Bill measured output seconds against the signed ceiling.
+            let ceiling_milli = (au.max_seconds.max(1) as u128) * 1000;
+            let measured_milli = (seconds.max(0.0) * 1000.0).round() as u128;
+            let charge = a.price.saturating_mul(measured_milli.min(ceiling_milli)) / ceiling_milli;
+            store.artifacts.insert(
+                a.job_id,
+                StoredArtifact {
+                    channel_id: a.channel_id,
+                    path: path.clone(),
+                    media_type: media_type.clone(),
+                    sha256: sha256.clone(),
+                    width: 0,
+                    height: 0,
+                    bytes,
+                },
+            );
+            let text = serde_json::to_string(&json!({
+                "artifacts": [{
+                    "index": 0,
+                    "sha256": sha256,
+                    "media_type": media_type,
+                    "bytes": bytes,
+                    "seconds": (seconds * 1000.0).round() / 1000.0,
+                }],
+                "seconds": (seconds * 1000.0).round() / 1000.0,
+                "engine": "xtts-v2",
+            }))
+            .unwrap_or_default();
+            let msg = match store
+                .channels
+                .get_mut(&a.channel_id)
+                .unwrap()
+                .sign_result_charged(&ctx.signer, a.job_id, &text, charge, 0, 0)
+            {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("[channel] audio job {}: cannot sign result: {e}", a.job_id);
+                    return refund(ctx, a.channel_id, a.job_id, &format!("cannot sign: {e}"));
+                }
+            };
+            save_channels(&ctx.state_path, &store);
+            println!(
+                "[channel] audio job {} on channel {} served ({} bytes, {:.3}s, billed {} of {} ceiling)",
+                a.job_id, a.channel_id, bytes, seconds, charge, a.price
+            );
+            (200, serde_json::to_value(&msg).unwrap_or_default())
+        }
+        Err(reason) => {
+            eprintln!("[channel] audio job {} refunded: {reason}", a.job_id);
+            refund(ctx, a.channel_id, a.job_id, &reason)
+        }
+    }
+}
+
+/// Run `gpn_audio.py` for one assignment and return
+/// `(path, media_type, sha256, seconds, bytes)`.
+fn render_audio(
+    a: &Assignment,
+    au: &AudioParams,
+    clip_path: &std::path::Path,
+    out_path: &str,
+) -> Result<(String, String, String, f64, u64), String> {
+    let req_json = json!({
+        "kind": "audio",
+        "model": if a.model.is_empty() { "xtts-v2" } else { &a.model },
+        "text": a.prompt,
+        "speaker_wav": clip_path.to_string_lossy(),
+        "language": if au.language.is_empty() { "en" } else { &au.language },
+        "consent": true,
+        "output": out_path,
+        "delete_reference": false, // we delete it ourselves, on every path
+    });
+    let req_file = gpn_agent::utils::temp_path(&format!("gpn_audio_chan_{}.json", a.job_id));
+    std::fs::write(
+        &req_file,
+        serde_json::to_vec(&req_json).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("cannot write request: {e}"))?;
+    let script = audio_script();
+    let timeout = Duration::from_secs(180 + (au.max_seconds as u64).saturating_mul(10));
+    let req_file2 = req_file.clone();
+    let res = match gpn_agent::gpu_yield::GpuYieldGuard::acquire() {
+        Err(e) => Err(e.to_string()),
+        Ok(_yield) => {
+            let python =
+                std::env::var("GPN_AUDIO_PYTHON").unwrap_or_else(|_| "python3".to_string());
+            let mut cmd = std::process::Command::new(python);
+            cmd.arg(&script).arg(&req_file2);
+            run_with_watchdog(cmd, timeout, &format!("audio job {}", a.job_id)).and_then(
+                |(stdout, _)| {
+                    serde_json::from_str(&stdout)
+                        .map_err(|e| format!("bad helper output: {e} ({stdout})"))
+                },
+            )
+        }
+    };
+    let _ = std::fs::remove_file(&req_file);
+    let v: serde_json::Value = res?;
+    if !v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
+        return Err(v
+            .get("error")
+            .and_then(|x| x.as_str())
+            .unwrap_or("audio generation failed")
+            .to_string());
+    }
+    let path = v["artifact"].as_str().unwrap_or(out_path).to_string();
+    let media_type = v["media_type"].as_str().unwrap_or("audio/mpeg").to_string();
+    let bytes = std::fs::read(&path).map_err(|e| format!("cannot read artifact: {e}"))?;
+    if !gpn_agent::audio_jobs::is_mp3(&bytes) {
+        return Err("engine produced something that is not an MP3 stream".to_string());
+    }
+    let sha256 = gpn_agent::audio_jobs::sha256_hex(&bytes);
+    let seconds = v["seconds"].as_f64().unwrap_or(0.0);
+    if seconds <= 0.0 {
+        return Err("engine reported no output seconds (cannot bill)".to_string());
+    }
+    Ok((path, media_type, sha256, seconds, bytes.len() as u64))
+}
+
 fn serve_channel_job(ctx: &ChannelCtx, body: &str) -> (u16, serde_json::Value) {
     let a: Assignment = match serde_json::from_str(body) {
         Ok(a) => a,
@@ -540,6 +802,13 @@ fn serve_channel_job(ctx: &ChannelCtx, body: &str) -> (u16, serde_json::Value) {
             409,
             json!({"ok": false, "error": "assignment names a different provider"}),
         );
+    }
+    // Item #202: a speech assignment carries `audio` instead of `gen`, and is
+    // served by the same process (one GPU, one job at a time, one artifact
+    // channel) rather than a second provider that would duplicate the whole
+    // accept/sign/artifact path.
+    if a.audio.is_some() {
+        return serve_audio_job(ctx, a);
     }
     let Some(gen) = a.gen.clone() else {
         return (
@@ -813,7 +1082,11 @@ fn handle_channel_request(mut req: tiny_http::Request, ctx: &ChannelCtx) {
         let body = json!({
             "ok": true,
             "channel": true,
-            "kinds": ["image"],
+            "kinds": if audio_enabled() {
+                json!(["image", "video", "audio"])
+            } else {
+                json!(["image", "video"])
+            },
             "provider": ctx.me_hex,
             "channels": ids,
         });
@@ -955,9 +1228,13 @@ async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(cfg) = gpn_agent::assign_pull::PullConfig::from_env(&me) {
         // #100: image/video only — the AP aggregates this with the LLM
         // provider's poll when they share a wallet, so the union stays truthful.
-        gpn_agent::assign_pull::spawn(
-            cfg.with_capabilities(&["ImageGeneration", "VideoGeneration"]),
-        );
+        // #202: speech joins the same list only when the engine is installed,
+        // because advertising it is what routes clips here.
+        let mut caps = vec!["ImageGeneration", "VideoGeneration"];
+        if audio_enabled() {
+            caps.push("AudioGeneration");
+        }
+        gpn_agent::assign_pull::spawn(cfg.with_capabilities(&caps));
     }
 
     // Item #59: the claimable-job scan and the reconcile sweep are chain-heavy

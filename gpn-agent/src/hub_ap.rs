@@ -344,6 +344,10 @@ struct ChannelJobReq<'a> {
     /// Empty = text. `ImageGeneration`/`VideoGeneration` = render job.
     job_kind: &'a str,
     gen: Option<crate::hub_channel::GenParams>,
+    /// Present on an audio (speech) job: consent + reference-clip hash.
+    audio: Option<crate::hub_channel::AudioParams>,
+    /// The reference clip for an audio job, base64 (used once, never stored).
+    voice_ref_b64: Option<String>,
     /// Full `/channel/job` URL when the provider serves its generation endpoint
     /// on a different port than `status_url + 1` (the diffusion provider does:
     /// LLM channel = 8094, diffusion channel = 8095).
@@ -411,6 +415,8 @@ pub fn try_channel_job_billed_ex(
             billing,
             job_kind: "",
             gen: None,
+            audio: None,
+            voice_ref_b64: None,
             endpoint: None,
         },
     )
@@ -450,6 +456,49 @@ pub fn try_channel_gen_job(
             billing: None,
             job_kind,
             gen: Some(gen),
+            audio: None,
+            voice_ref_b64: None,
+            endpoint,
+        },
+    )
+}
+
+/// Route one **audio** (text-to-speech) job through the hub channel.
+///
+/// Same money semantics as [`try_channel_gen_job`]: the assignment carries
+/// [`crate::hub_channel::AudioParams`] (consent + the reference clip's sha256)
+/// and the clip itself, and `price` is the ceiling the provider bills its
+/// measured output seconds against.
+#[allow(clippy::too_many_arguments)]
+pub fn try_channel_audio_job(
+    hub: &HubCtx,
+    rt: &tokio::runtime::Runtime,
+    client: Option<&ChainClient>,
+    provider_addr_hex: &str,
+    status_url: &str,
+    endpoint: Option<String>,
+    model: &str,
+    text: &str,
+    audio: crate::hub_channel::AudioParams,
+    voice_ref_b64: Option<String>,
+    price: u128,
+) -> Result<ChannelJobOut, ChannelFail> {
+    run_channel_job(
+        hub,
+        rt,
+        client,
+        ChannelJobReq {
+            provider_addr_hex,
+            status_url,
+            model,
+            prompt: text,
+            max_tokens: 0,
+            price,
+            billing: None,
+            job_kind: "AudioGeneration",
+            gen: None,
+            audio: Some(audio),
+            voice_ref_b64,
             endpoint,
         },
     )
@@ -471,6 +520,8 @@ fn run_channel_job(
         billing,
         job_kind,
         gen,
+        audio,
+        voice_ref_b64,
         endpoint,
     } = req;
     let no = |m: &str| Err(ChannelFail::NotAttempted(m.to_string()));
@@ -547,7 +598,7 @@ fn run_channel_job(
     // advanced the channel between our read and its `accept` — not proof that
     // the channel is unusable, so it must never be reported as a channel
     // failure on the first occurrence.
-    let is_gen = gen.is_some();
+    let is_gen = gen.is_some() || audio.is_some();
     let mut attempt: u32 = 0;
     let (job_id, resp) = loop {
         attempt += 1;
@@ -563,7 +614,30 @@ fn run_channel_job(
             }
             let job_id = next_job_id();
             let deadline = now_ms().saturating_add(hub.job_deadline_ms);
-            if let Some(g) = gen.clone() {
+            if let Some(au) = audio.clone() {
+                match ch.begin_job_audio_for(
+                    &hub.signer,
+                    provider_pub,
+                    job_id,
+                    model,
+                    prompt,
+                    au,
+                    voice_ref_b64.clone(),
+                    price,
+                    deadline,
+                ) {
+                    Ok(a) => {
+                        let _ = reg.save(&hub.path);
+                        a
+                    }
+                    Err(e) => {
+                        eprintln!("[hub] cannot price audio job on channel {channel_id}: {e}");
+                        return Err(ChannelFail::NotAttempted(format!(
+                            "cannot price audio job on channel {channel_id}: {e}"
+                        )));
+                    }
+                }
+            } else if let Some(g) = gen.clone() {
                 match ch.begin_job_gen_for(
                     &hub.signer,
                     provider_pub,

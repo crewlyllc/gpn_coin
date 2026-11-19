@@ -1270,6 +1270,9 @@ async function rateLimit(env, ip, bucket, max, windowSeconds) {
  *   POST /api/v1/finetunes        -> POST /v1/finetunes (202 + id)
  *   GET  /api/v1/finetunes/<id>   -> GET  /v1/finetunes/<id> (poll)
  *   GET  /api/v1/finetunes/<id>/artifact -> GET /artifact/<id> (adapter zip)
+ *   POST /api/v1/audio/speech      -> POST /v1/audio/speech (202 + poll, item #202)
+ *   GET  /api/v1/audio/speech/<id> -> GET  /v1/audio/speech/<id> (poll)
+ *   GET  /api/v1/audio/<id>        -> GET  /v1/audio/<id> (MP3 bytes)
  *
  * The AP's status code and body are passed through; only transport failures
  * become a 502 here.
@@ -1287,6 +1290,7 @@ async function handleApi(request, env, path) {
       route === "/v1/chat/completions" ||
       route === "/chat/completions" ||
       route === "/v1/images/generations" ||
+      route === "/v1/audio/speech" ||
       route === "/v1/finetunes";
     return apiPreflight(origin, postRoute);
   }
@@ -1329,8 +1333,19 @@ async function handleApi(request, env, path) {
     upstream = route;
     binary = true;
     cache = "public, max-age=86400";
-  } else if (route === "/v1/finetunes") {
-    // OpenAI-style fine-tune submit: 202 + id + poll_url. A LoRA tune is
+  } else if (route === "/v1/audio/speech") {
+    // Speech synthesis (item #202): 202 + poll_url, like images. The clip is
+    // uploaded with the request; the AP never stores it (per-job fetch).
+    upstream = "/v1/audio/speech";
+    allow = "POST";
+  } else if (/^\/v1\/audio\/speech\/[0-9a-f]{32}$/.test(route)) {
+    upstream = route; // poll: pending -> completed | failed
+  } else if (/^\/v1\/audio\/[0-9a-f]{32}(\/\d{1,2})?$/.test(route)) {
+    // The finished clip. Binary: never decode/rewrite it as text.
+    upstream = route;
+    binary = true;
+    cache = "public, max-age=86400";
+  } else if (route === "/v1/finetunes") {    // OpenAI-style fine-tune submit: 202 + id + poll_url. A LoRA tune is
     // GPU-minutes, so — like images — the AP answers immediately and the
     // training happens in the background.
     upstream = "/v1/finetunes";
