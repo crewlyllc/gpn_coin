@@ -54,6 +54,22 @@ Rules:
 - The final gate is still §9/§10: version published and a node reporting it. A fully ticked file
   with no published release is not done.
 
+## 0c. BLOCKED is only for an owner decision (owner rule, 2026-11-19)
+
+**An item may be marked `BLOCKED` for exactly one reason: it needs a design decision that is
+Jeremy's to make.** Nothing else blocks an item.
+
+- A missing tool, a red build, a failed test, a permissions problem, a flaky runner, a broken
+  script, a wrong path, a missing credential on this machine: **solve it.** Install it, fix it,
+  work around it, or replace the approach.
+- If a design question arises in the middle of work, decide whether it is genuinely the owner's
+  (a product, economic or trust decision) or an implementation choice (mine). Implementation
+  choices do not block; make one, note it, move on.
+- When something really is the owner's: state the question in one line, mark the item `BLOCKED`
+  with that question as the reason, and carry on with other work. Do not stop the bundle.
+- `BLOCKED` with any other reason ("no time", "tool missing", "needs a decision from me") is a
+  mis-use of the state and must be converted into work.
+
 ## 0b. Every tick carries notes; every finished checklist is filed
 
 **Notes.** A tick is not just a checkmark: append what happened, in this shape —

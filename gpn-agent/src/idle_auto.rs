@@ -933,6 +933,29 @@ mod tests {
     }
 
     #[test]
+    fn own_workload_only_is_never_foreign() {
+        // Item #210, measured on box 3 (nothing on it but GPN): util 99%, but an
+        // Ethash miner's DAG does not appear in `nvidia-smi --query-compute-apps`,
+        // so `attribute_processes` attributes no VRAM to anyone — not even to us.
+        // Unattributable utilisation must read as `unknown`, never `foreign`:
+        // a box that runs only GPN must not step aside from itself.
+        let r = LoadReading {
+            util_percent: Some(99),
+            vram_used_mb: Some(4970),
+            vram_total_mb: Some(8188),
+            lock_held: false,
+            gpn_vram_mb: 0,
+            foreign_vram_mb: 0,
+            foreign_pids: 0,
+        };
+        assert!(
+            !r.is_foreign(&cfg()),
+            "own mining read as foreign GPU load: {}",
+            r.evidence()
+        );
+    }
+
+    #[test]
     fn unknown_utilisation_never_triggers() {
         let r = LoadReading {
             util_percent: None,
