@@ -8954,8 +8954,17 @@ mod tests {
 
         // It is a valid last resort too: a hardware floor only it clears routes.
         let reg = vec![broke.clone()];
-        let (p, _) = pick(&reg, 0, 16000, 0, 0.0, "llama3.2:1b", 0, &RttOverrides::new())
-            .expect("a zero-balance provider must be routable since accept_job is Pays::No");
+        let (p, _) = pick(
+            &reg,
+            0,
+            16000,
+            0,
+            0.0,
+            "llama3.2:1b",
+            0,
+            &RttOverrides::new(),
+        )
+        .expect("a zero-balance provider must be routable since accept_job is Pays::No");
         assert_eq!(p.address, "broke");
 
         // Unchanged: `None` means "funded OR unknown", never excluded on a guess.
