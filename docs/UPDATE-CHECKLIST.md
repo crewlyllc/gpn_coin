@@ -157,6 +157,12 @@ Two different jobs use Windows, and they must not be confused (owner question, 2
 - [ ] `release-linux-selfhosted.yml` → `gpn-linux.tar.gz` on `linux-latest`
 - [ ] `release-windows.yml` on box 1's runner → `gpn-windows.zip` on `windows-latest`
 - [ ] **Same SHA on both runs.** macOS is not required and is not in the manifest.
+- [ ] **The Windows build carries a GitHub build attestation** (owner requirement 2026-11-19):
+      `actions/attest-build-provenance@v2` runs in the release workflow with `id-token: write`
+      and `attestations: write`, subject = the released zip. Verify with
+      `gh attestation verify gpn-windows.zip --repo jeremyzguo/gpn_coin` and record the output.
+      Reason: an SSH build produces a binary but no provenance; the runner is kept **for this**,
+      not for convenience.
 
 ## 6. Verify the artifact BEFORE publishing
 

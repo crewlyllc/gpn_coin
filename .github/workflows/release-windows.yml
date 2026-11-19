@@ -11,8 +11,10 @@ env:
   LIBCLANG_PATH: "C:\\Program Files\\LLVM\\bin"
 
 permissions:
-  actions: write    # to prune old artifacts
-  contents: write   # to publish downloadable GitHub Releases
+  actions: write      # to prune old artifacts
+  contents: write     # to publish downloadable GitHub Releases
+  id-token: write     # Sigstore OIDC — required for build provenance
+  attestations: write # to store the provenance attestation against the repo
 
 # One build per ref at a time. A second dispatch waits instead of racing the
 # first over the same artifact names (2026-11-06: releases are dispatched by sha).
@@ -631,6 +633,7 @@ jobs:
             if (Test-Path $f) { Copy-Item $f $stage -Force } else { throw "missing required package file: $f" }
           }
           Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Force
+
           Write-Host 'package contents:'
           Get-ChildItem $stage -Recurse -File | ForEach-Object { Write-Host ('  ' + $_.FullName.Substring($stage.Length + 1)) }
           $rel = $null
@@ -643,3 +646,12 @@ jobs:
           $bytes = [System.IO.File]::ReadAllBytes($zip)
           $up = Invoke-RestMethod -Method Post -Headers $h -ContentType 'application/zip' -Body $bytes "https://uploads.github.com/repos/$repo/releases/$($rel.id)/assets?name=gpn-windows.zip"
           Write-Host "release: $($rel.html_url)  asset: $($up.browser_download_url)  ($([math]::Round($up.size/1MB,1))MB)"
+
+
+      # Build provenance (owner request 2026-11-19): the released zip is bound to this run
+      # and commit by a signed attestation, so a stranger can verify the binary came from the
+      # sha the manifest names — not merely that the sha matches what we published.
+      - name: Attest build provenance (windows zip)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: '${{ runner.temp }}\gpn-windows.zip'
