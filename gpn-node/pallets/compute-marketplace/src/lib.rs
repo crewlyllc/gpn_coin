@@ -1232,9 +1232,28 @@ pub mod pallet {
             Ok(Pays::No.into())
         }
 
+        /// **Free for the provider (#205, spec 52).**
+        ///
+        /// #205 made `accept_job` `Pays::No`; a zero-balance provider that
+        /// accepts a lease must then be able to *drive it to a result*, or the
+        /// transaction pool rejects the very next call and the job strands
+        /// exactly as it did in #6551 — one step later. So every state
+        /// transition the **provider** owns on a job it already holds is free:
+        /// `start_job`, `submit_result`, `submit_result_v2`, `fail_job`
+        /// (`FAIL_CANNOT_RUN`). `complete_job` is free because the provider
+        /// reconciles its own zombie/abandoned jobs through it. None of these
+        /// creates value or moves escrow in the caller's favour: billing is
+        /// settled from the *requestor's* escrow, and the access control on
+        /// each call (assigned provider / requestor) is unchanged.
+        ///
+        /// `Pays::No` sits on the **weight annotation** as well, because the
+        /// transaction pool derives `pays_fee` from the call's `DispatchInfo`
+        /// *before* dispatch runs; returning `Pays::No` only from dispatch is
+        /// evaluated too late and the pool rejects the call with
+        /// `InvalidTransaction::Payment`.
         #[pallet::call_index(4)]
-        #[pallet::weight(<T as Config>::WeightInfo::start_job())]
-        pub fn start_job(origin: OriginFor<T>, job_id: u64) -> DispatchResult {
+        #[pallet::weight((<T as Config>::WeightInfo::start_job(), Pays::No))]
+        pub fn start_job(origin: OriginFor<T>, job_id: u64) -> DispatchResultWithPostInfo {
             let who = ensure_signed(origin)?;
             let mut job = <Jobs<T>>::get(job_id).ok_or(Error::<T>::JobNotFound)?;
             ensure!(job.state == JobState::Accepted, Error::<T>::JobNotAccepted);
@@ -1250,17 +1269,17 @@ pub mod pallet {
             );
             <Jobs<T>>::insert(job_id, job);
             Self::deposit_event(Event::<T>::JobStarted { job_id });
-            Ok(())
+            Ok(Pays::No.into())
         }
 
         #[pallet::call_index(5)]
-        #[pallet::weight(<T as Config>::WeightInfo::submit_result())]
+        #[pallet::weight((<T as Config>::WeightInfo::submit_result(), Pays::No))]
         pub fn submit_result(
             origin: OriginFor<T>,
             job_id: u64,
             result_hash: [u8; 32],
             actual_tokens: u32,
-        ) -> DispatchResult {
+        ) -> DispatchResultWithPostInfo {
             let who = ensure_signed(origin)?;
             let mut job = <Jobs<T>>::get(job_id).ok_or(Error::<T>::JobNotFound)?;
             // `Accepted` is allowed for the *assigned* provider: a job attached
@@ -1286,7 +1305,7 @@ pub mod pallet {
                 job_id,
                 provider: who,
             });
-            Ok(())
+            Ok(Pays::No.into())
         }
 
         /// Deliver a result **with the real input/output token split** for a
@@ -1298,14 +1317,14 @@ pub mod pallet {
         /// `actual_tokens` counter so the provider is still paid for the work —
         /// a mismatched call can never zero out a payout.
         #[pallet::call_index(18)]
-        #[pallet::weight(<T as Config>::WeightInfo::submit_result())]
+        #[pallet::weight((<T as Config>::WeightInfo::submit_result(), Pays::No))]
         pub fn submit_result_v2(
             origin: OriginFor<T>,
             job_id: u64,
             result_hash: [u8; 32],
             input_tokens: u32,
             output_tokens: u32,
-        ) -> DispatchResult {
+        ) -> DispatchResultWithPostInfo {
             let who = ensure_signed(origin)?;
             let mut job = <Jobs<T>>::get(job_id).ok_or(Error::<T>::JobNotFound)?;
             ensure!(
@@ -1336,12 +1355,12 @@ pub mod pallet {
                 job_id,
                 provider: who,
             });
-            Ok(())
+            Ok(Pays::No.into())
         }
 
         #[pallet::call_index(6)]
-        #[pallet::weight(<T as Config>::WeightInfo::complete_job())]
-        pub fn complete_job(origin: OriginFor<T>, job_id: u64) -> DispatchResult {
+        #[pallet::weight((<T as Config>::WeightInfo::complete_job(), Pays::No))]
+        pub fn complete_job(origin: OriginFor<T>, job_id: u64) -> DispatchResultWithPostInfo {
             let who = ensure_signed(origin)?;
             let mut job = <Jobs<T>>::get(job_id).ok_or(Error::<T>::JobNotFound)?;
             ensure!(
@@ -1405,7 +1424,7 @@ pub mod pallet {
             Self::settle_escrow(job_id, escrow, &provider, &requestor)?;
             Self::deposit_event(Event::<T>::JobCompleted { job_id, provider });
 
-            Ok(())
+            Ok(Pays::No.into())
         }
 
         #[pallet::call_index(7)]
@@ -1463,8 +1482,12 @@ pub mod pallet {
         /// `JobFailed { job_id, reason }` so off-chain callers can surface a
         /// "job failed" message to the client.
         #[pallet::call_index(8)]
-        #[pallet::weight(<T as Config>::WeightInfo::fail_job())]
-        pub fn fail_job(origin: OriginFor<T>, job_id: u64, reason: u8) -> DispatchResult {
+        #[pallet::weight((<T as Config>::WeightInfo::fail_job(), Pays::No))]
+        pub fn fail_job(
+            origin: OriginFor<T>,
+            job_id: u64,
+            reason: u8,
+        ) -> DispatchResultWithPostInfo {
             let who = ensure_signed(origin)?;
             let mut job = <Jobs<T>>::get(job_id).ok_or(Error::<T>::JobNotFound)?;
             ensure!(
@@ -1530,7 +1553,7 @@ pub mod pallet {
             }
 
             Self::deposit_event(Event::<T>::JobFailed { job_id, reason });
-            Ok(())
+            Ok(Pays::No.into())
         }
 
         /// `expire_job(job_id)` — **permissionless** reclaim of a job that has
@@ -3219,6 +3242,94 @@ mod tests {
                 "accepting must not charge the provider a fee"
             );
             assert_eq!(Jobs::<Test>::get(job_id).unwrap().state, JobState::Accepted);
+            assert_eq!(pallet_balances::Pallet::<Test>::free_balance(BOB), 0);
+        });
+    }
+
+    /// #205, spec 52: the *whole* provider-owned transition chain must be free,
+    /// not just `accept_job`. A zero-balance provider that accepts a lease and
+    /// is then charged (or pool-rejected) for `start_job`/`submit_result`
+    /// strands the job exactly as #6551 did — one call later.
+    #[test]
+    fn zero_balance_provider_can_drive_a_job_to_a_result() {
+        use frame_support::dispatch::{GetDispatchInfo, Pays};
+        use sp_runtime::traits::Dispatchable;
+        new_test_ext().execute_with(|| {
+            register_provider(BOB);
+            let job_id = create_job(ALICE);
+
+            // Every provider-owned transition carries `Pays::No` in its
+            // DispatchInfo, or the transaction pool rejects it before dispatch.
+            let hash = [7u8; 32];
+            for (name, info) in [
+                (
+                    "start_job",
+                    Call::<Test>::start_job { job_id }.get_dispatch_info(),
+                ),
+                (
+                    "submit_result",
+                    Call::<Test>::submit_result {
+                        job_id,
+                        result_hash: hash,
+                        actual_tokens: 10,
+                    }
+                    .get_dispatch_info(),
+                ),
+                (
+                    "submit_result_v2",
+                    Call::<Test>::submit_result_v2 {
+                        job_id,
+                        result_hash: hash,
+                        input_tokens: 4,
+                        output_tokens: 6,
+                    }
+                    .get_dispatch_info(),
+                ),
+                (
+                    "complete_job",
+                    Call::<Test>::complete_job { job_id }.get_dispatch_info(),
+                ),
+                (
+                    "fail_job",
+                    Call::<Test>::fail_job { job_id, reason: 1 }.get_dispatch_info(),
+                ),
+            ] {
+                assert_eq!(
+                    info.pays_fee,
+                    Pays::No,
+                    "{name} must be Pays::No for a zero-balance provider to finish a job"
+                );
+            }
+
+            // The provider holds nothing at all.
+            pallet_balances::Pallet::<Test>::force_set_balance(RuntimeOrigin::root(), BOB, 0)
+                .unwrap();
+
+            let post = RuntimeCall::from(Call::<Test>::accept_job { job_id })
+                .dispatch(RuntimeOrigin::signed(BOB))
+                .expect("zero-balance accept");
+            assert_eq!(post.pays_fee, Pays::No);
+
+            let post = RuntimeCall::from(Call::<Test>::start_job { job_id })
+                .dispatch(RuntimeOrigin::signed(BOB))
+                .expect("zero-balance start_job must not be rejected for payment");
+            assert_eq!(post.pays_fee, Pays::No);
+            assert_eq!(Jobs::<Test>::get(job_id).unwrap().state, JobState::Running);
+
+            let post = RuntimeCall::from(Call::<Test>::submit_result {
+                job_id,
+                result_hash: hash,
+                actual_tokens: 10,
+            })
+            .dispatch(RuntimeOrigin::signed(BOB))
+            .expect("zero-balance submit_result");
+            assert_eq!(post.pays_fee, Pays::No);
+            assert_eq!(
+                Jobs::<Test>::get(job_id).unwrap().state,
+                JobState::AwaitingVerification
+            );
+
+            // The provider is still at zero: nothing on its own path charged it.
             assert_eq!(pallet_balances::Pallet::<Test>::free_balance(BOB), 0);
         });
     }
