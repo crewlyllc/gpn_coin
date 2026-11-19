@@ -949,8 +949,9 @@ struct Provider {
     /// nonce 0, and job #6551 was leased to it with no way to land).
     ///
     /// A *fact from the chain*, not a guess: `None` is "unknown" (an unreadable
-    /// account, or no address to read at all), and unknown must never exclude a
-    /// provider — see `apply_funding`.
+    /// account, or no address to read at all). Reported for operations, but **no
+    /// longer a routing exclusion** since spec 52 made the provider transition
+    /// chain fee-free (#205) — see `route_candidates`' `base_ok`.
     unfunded: Option<bool>,
     /// #W78: how many peers this provider's **own node** reports it is
     /// connected to (`/status` → `peers`, read from that box's `system_peers`).
@@ -2080,9 +2081,8 @@ const MAX_ROUTE_ATTEMPTS: usize = 3;
 ///
 /// The catalogue used to be the union of `models[]` over every registry row,
 /// which publishes promises nobody can keep: on 2026-11-07 the first entry was
-/// `deepseek-r1:14b`, offered only by two 16 GB `pull://` peers whose accounts
-/// hold **0 GPN**, so `route_candidates` excludes them at `base_ok`
-/// (`unfunded == true`, the #146 fix) and the local 8 GB box refuses the weights
+/// `deepseek-r1:14b`, offered only by two 16 GB `pull://` peers, and the local
+/// 8 GB box refuses the weights
 /// (`model_fits_vram`) — a client that picks `data[0]` (or a default set from it)
 /// gets `503 no compatible provider online` in 0.4 ms.
 ///
@@ -2154,13 +2154,19 @@ fn route_candidates(
             None
         }
     };
+    // #205 / spec 52 (runtime `set_code` enacted 2026-11-19, chain
+    // `state_getRuntimeVersion` = 52): the whole provider-owned transition chain
+    // (`accept_job`, `start_job`, `submit_result`, `complete_job`) is `Pays::No`,
+    // so a provider with a zero balance can claim and finish a lease. The old
+    // `p.unfunded != Some(true)` exclusion here protected against exactly one
+    // thing: routing work to a box that could never pay its `accept_job` fee,
+    // which stranded job #6551 on box 1 (2026-11-07). That failure mode no longer
+    // exists on-chain, so the gate is removed rather than left as a way to hide
+    // zero-balance providers. `Provider::unfunded` is still read and reported
+    // (it is a real chain fact and useful in the dashboard), just not routed on.
     let base_ok = |p: &Provider| {
         p.last_seen.is_some()
             && deliverable(p)
-            // A provider whose account cannot pay an `accept_job` fee is not a
-            // candidate at all: handing it a lease creates a job nobody can
-            // claim (2026-11-07 #6551). `None` (unknown) still routes.
-            && p.unfunded != Some(true)
             && has_cap(p)
             && hw_ok(p)
             && gpu_ok(p)
@@ -8852,9 +8858,13 @@ mod tests {
     fn the_catalogue_only_publishes_models_the_fleet_can_route() {
         // Item #149, from the live 2026-11-07 shape: `/v1/models` listed
         // `deepseek-r1:14b` FIRST because two 16 GB `pull://` peers advertise it,
-        // while both peers are `unfunded` (0 GPN, so `base_ok` excludes them and
-        // they can never claim) and the local 8 GB box cannot hold the weights.
-        // A client that took `data[0]` got `503 no compatible provider online`.
+        // while the local 8 GB box cannot hold the weights. A client that took
+        // `data[0]` got `503 no compatible provider online`.
+        //
+        // #205 / spec 52 changed one premise: a 0-GPN peer is no longer excluded
+        // (`base_ok` stopped reading `unfunded`, because `accept_job` and the rest
+        // of the provider transition chain are `Pays::No` on-chain), so a big
+        // enough peer genuinely CAN serve the model. The VRAM floor still decides.
         let mut local = prov("5Local", "http://local/status", 12, "llama3.2:1b");
         local.vram_mb = 8188;
         local.capabilities = vec!["LLMInference".to_string()];
@@ -8862,22 +8872,23 @@ mod tests {
         let mut peer = prov("5Peer", "pull://5Peer", 100, "deepseek-r1:14b");
         peer.vram_mb = 16303;
         peer.can_pull = true;
-        peer.unfunded = Some(true);
+        peer.unfunded = Some(true); // zero balance — routable since spec 52
 
         let reg = vec![local.clone(), peer.clone()];
         let ids = catalogue_models(&reg);
         assert!(ids.contains(&"llama3.2:1b".to_string()), "{ids:?}");
         assert!(
-            !ids.contains(&"deepseek-r1:14b".to_string()),
-            "an unfunded peer's model must not be advertised: {ids:?}"
+            ids.contains(&"deepseek-r1:14b".to_string()),
+            "a zero-balance peer that can serve the model must be advertised: {ids:?}"
         );
 
-        // Funding the peer is the whole fix the operator has: the same model
-        // becomes publishable with no code or restart, because the catalogue
-        // asks the router and the router reads live funding.
-        let mut funded = reg.clone();
-        funded[1].unfunded = Some(false);
-        assert!(catalogue_models(&funded).contains(&"deepseek-r1:14b".to_string()));
+        // A peer that cannot hold the weights is still not advertised, funded or
+        // not: the VRAM gate is the one deciding here.
+        let mut tiny = prov("5Tiny", "pull://5Tiny", 100, "qwen2.5:72b");
+        tiny.vram_mb = 2000;
+        tiny.can_pull = true;
+        tiny.unfunded = Some(false);
+        assert!(!catalogue_models(&[local.clone(), tiny]).contains(&"qwen2.5:72b".to_string()));
 
         // A model nobody offers is never invented.
         assert!(!catalogue_models(&reg).contains(&"qwen2.5:72b".to_string()));
@@ -8914,42 +8925,40 @@ mod tests {
         assert!(pick(&reg, 0, 0, 0, 0.0, "llama3.2:1b", 0, &RttOverrides::new()).is_none());
     }
 
+    /// #205 / spec 52: a zero-balance provider **is** a routing candidate.
+    ///
+    /// History this replaces: 2026-11-07, box1's `5Hgbpi…` advertised 5
+    /// capabilities + 16303 MB VRAM with `healthy: true` while its account was
+    /// 0.0000 GPN / nonce 0, so it could not send its own `accept_job`; job #6551
+    /// was routed to it and could only end in a janitor cancel. The AP's answer
+    /// was to stop routing to unfunded accounts.
+    ///
+    /// That defence is obsolete because the cause is gone: on-chain spec 52
+    /// (runtime `set_code` 2026-11-19, verified `state_getRuntimeVersion` = 52)
+    /// makes `accept_job` — and the rest of the provider transition chain —
+    /// `Pays::No`. A zero-balance provider can claim and complete work, so
+    /// excluding it would now hide a capable box and keep 0-GPN machines out of
+    /// the market for no reason. If this test fails, either the gate came back or
+    /// the runtime went back to charging the provider.
     #[test]
-    fn a_provider_that_cannot_pay_an_accept_fee_is_not_routable() {
-        // 2026-11-07: box1's `5Hgbpi…` advertised 5 capabilities + 16303 MB VRAM
-        // with `healthy: true` while its account was 0.0000 GPN / nonce 0, so it
-        // could never send its own `accept_job`. Job #6551 was routed to it and
-        // could only ever end in a janitor cancel. The chain's answer is now a
-        // routing input: a broke provider is not a candidate, even when it is the
-        // only one that clears the hardware floor — the AP answers 503 instead,
-        // exactly like the min-VRAM gate, rather than creating an unclaimable job.
+    fn a_zero_balance_provider_is_routable() {
         let mut broke = prov("broke", "http://broke/status", 1, "llama3.2:1b");
         broke.vram_mb = 16303;
         broke.unfunded = Some(true);
         let funded = prov("funded", "http://funded/status", 90, "llama3.2:1b");
 
-        // The broke box would otherwise win on latency and VRAM.
+        // The zero-balance box still wins on latency + VRAM: funding is not a gate.
         let reg = vec![broke.clone(), funded.clone()];
         let (p, _) = pick(&reg, 0, 0, 0, 0.0, "llama3.2:1b", 0, &RttOverrides::new()).unwrap();
-        assert_eq!(p.address, "funded");
+        assert_eq!(p.address, "broke");
 
-        // It is not a last resort either: a hardware floor only it clears must
-        // now fail closed instead of producing a job nobody can claim.
+        // It is a valid last resort too: a hardware floor only it clears routes.
         let reg = vec![broke.clone()];
-        assert!(pick(
-            &reg,
-            0,
-            16000,
-            0,
-            0.0,
-            "llama3.2:1b",
-            0,
-            &RttOverrides::new()
-        )
-        .is_none());
+        let (p, _) = pick(&reg, 0, 16000, 0, 0.0, "llama3.2:1b", 0, &RttOverrides::new())
+            .expect("a zero-balance provider must be routable since accept_job is Pays::No");
+        assert_eq!(p.address, "broke");
 
-        // `None` means "funded OR unknown" — an unreadable account must never be
-        // excluded on a guess (the #141/#144 three-state rule).
+        // Unchanged: `None` means "funded OR unknown", never excluded on a guess.
         let unknown = prov("unknown", "http://unknown/status", 1, "llama3.2:1b");
         assert_eq!(unknown.unfunded, None);
         let reg = vec![unknown];
@@ -10168,8 +10177,12 @@ mod tests {
     }
 
     /// Capability-only means capability-only: a provider that asks **first** but
-    /// cannot serve the job (wrong model / too little VRAM / unfunded account) is
+    /// cannot serve the job (wrong model / too little VRAM / no free slot) is
     /// never chosen, and its early poll does not hold up the eligible box.
+    ///
+    /// (This used to use an `unfunded` account as the third ineligible case; since
+    /// spec 52 a zero balance no longer makes a provider ineligible, so the
+    /// third case is a box that is simply full.)
     #[test]
     fn an_ineligible_provider_is_never_chosen_even_when_it_asks_first() {
         let mut wrong_model = prov_caps("wrong", "http://wrong", 0, "other", &["LLMInference"]);
@@ -10177,7 +10190,9 @@ mod tests {
         let mut too_small = prov_caps("small", "http://small", 0, "m", &["LLMInference"]);
         too_small.vram_mb = 2_000;
         let mut broke = prov_caps("broke", "http://broke", 0, "m", &["LLMInference"]);
-        broke.unfunded = Some(true);
+        broke.capacity = 1;
+        broke.active = 1;
+        broke.unfunded = Some(true); // zero balance alone must NOT exclude it
         let mut good = prov_caps("good", "http://good", 9000, "m", &["LLMInference"]);
         good.vram_mb = 24_576;
         let reg = vec![wrong_model, too_small, broke, good];
