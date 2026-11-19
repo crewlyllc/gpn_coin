@@ -197,12 +197,17 @@ impl LoadReading {
         if util < cfg.util_percent {
             return false;
         }
-        if self.foreign_vram_mb >= cfg.min_foreign_vram_mb {
-            return true;
-        }
-        // Nothing of ours is on the GPU at all, so nothing of ours can explain
-        // a loaded device.
-        self.gpn_vram_mb == 0
+        // Foreign load needs *positive evidence* that someone else is on the
+        // device: VRAM the process table attributes to non-GPN processes. A
+        // loaded device with no attribution at all is `unknown`, not `foreign`.
+        //
+        // #210: an Ethash DAG is not listed by `nvidia-smi --query-compute-apps`,
+        // so a box whose only GPU work is our own miner reads util 99% with
+        // `gpn_vram_mb == 0` and `foreign_vram_mb == 0`. The old last arm here
+        // (`self.gpn_vram_mb == 0`) turned that unattributable utilisation into
+        // "foreign" and made the node step aside from itself (idle 99% of the
+        // time on box 3). Unattributable is not evidence of a foreign workload.
+        self.foreign_vram_mb >= cfg.min_foreign_vram_mb
     }
 
     /// `util 87%, VRAM 3006/8188 MiB, 2304 MiB non-GPN (2 foreign PIDs), GPU lock free`
