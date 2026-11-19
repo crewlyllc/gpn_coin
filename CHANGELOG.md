@@ -8,6 +8,66 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.61] - 2026-11-19
+
+Bumped from 0.3.60 (`scripts/bump-version.py patch`).
+
+The bundle for this version is #202, #208, #209, #210, #211, #212 and #194. Each
+entry below is what the change does for a user of a released node; every one of
+them is checked against the built artifacts before the manifest is signed
+(§6 of `docs/releases/0.3.61.md`), so nothing here is published unverified.
+
+### Added
+- **Audio generation from a voice reference: text in, speech out (#202).** A new
+  `AudioGeneration` capability sits beside `LLMInference`/`Image`/`Video`/
+  `FineTuning` so the access point can route it, served by a provider child that
+  calls a local TTS engine and advertises the voices it can run. Requested the
+  same way as the other modalities — `POST /v1/audio/speech` — with the voice
+  reference sent with the job (5–15 s clip, MP3 output, billed on output
+  seconds). The reference is fetched per job by the provider that runs it and
+  discarded afterwards: the access point stores no voice samples, and a request
+  must carry an explicit "I have permission to use this voice" acknowledgement.
+- **A Windows install opens its own firewall holes (#208).** Two inbound rules
+  are added for the **Private** profile only — the node program (via the stable
+  `…\update\current\gpn-node.exe` junction) and TCP 30333 — so a fresh install no
+  longer pops a security prompt whose default answer leaves the node peering
+  with nobody. RPC 9944 and the dashboard 8099 stay loopback. An update re-adds
+  either rule if it is missing and logs one line saying which.
+- **An operator can read their own balance without asking anyone (#211).** The
+  startup summary prints `balance: N GPN` (one RPC read, a dash if unreadable),
+  the dashboard shows a total next to "Earnings Today", and `gpn_wallet balance`
+  with no endpoint argument defaults to the local node and keystore.
+
+### Changed
+- **Auto-idle no longer mistakes GPN's own mining for someone else's work
+  (#210).** `foreign_vram_mb = vram_used − gpn_vram_mb` counted an Ethash DAG as
+  foreign and unattributable utilisation defaulted to `foreign`, so a box running
+  nothing but GPN stepped aside from itself. Load is now attributed by VRAM
+  owner and by the whole `gpn*` process family; unattributable utilisation is
+  `unknown`, never `foreign`; and when the only compute is our own the log says
+  `own workload` once instead of engaging.
+- **"Earnings Today" now names its source and window, and is reconciled
+  against the chain (#212).** The panel states what the number measures
+  (settled channel settlements and block rewards for the stated window, local or
+  UTC), shows a total balance beside it instead of implying one, and renders a
+  disagreement between ledger and chain as a visible dash rather than a
+  plausible-looking number.
+- **Windows binaries are signed, or the installer asks to add a Defender
+  exclusion (#209).** An unsigned new `gpn-node.exe` can be quarantined at first
+  launch, which reads as "the update stopped the node and it did not come back".
+  The release build signs the Windows binaries when the certificate is
+  configured; otherwise the installer offers the two exclusions with the user's
+  consent and a clear log line. The updater's confirm step detects the
+  blocked-by-security-software case and names it, instead of timing out with a
+  generic message.
+
+### Verified
+- **Box 3 fork test (#194).** A deliberate shallow fork must reorg back onto the
+  canonical chain; a fork deeper than the 288-block window must refuse with
+  `reorg=refused:deep-fork` and pause sealing (`gpn-forked`); box 3 is restored
+  to canonical afterwards. No user-facing behaviour change — this is the
+  verification the fork-choice code shipped since 0.3.51 owes.
+
 ## [0.3.60] - 2026-11-18
 
 Bumped from 0.3.59 (`scripts/bump-version.py patch`).
