@@ -221,6 +221,15 @@ Two different jobs use Windows, and they must not be confused (owner question, 2
 
 ---
 
+## 10b. Record how long the steps took
+
+- [ ] `scripts/release-timing.py <version> --json docs/releases/timing/<version>.json` and commit
+      `docs/releases/timing/<version>.md`. It replays the checklist's git history and reports, per
+      box, when it was ticked, elapsed since the checklist existed, and the gap since the previous
+      tick — so the next estimate is measured rather than guessed.
+- [ ] Name the slowest step and say what would shorten it. A step that is slow because it waits on
+      a machine is not the same as one that is slow because it was re-done three times.
+
 ## 11. If a step is stuck — escalate, do not wait
 
 Every step has a budget. **Exceeding it is a signal to stop and review that step, not to keep
