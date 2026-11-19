@@ -215,6 +215,14 @@ pub struct LlmJob {
     pub seed: Option<i64>,
     pub frames: Option<u32>,
     pub fps: Option<u32>,
+    /// Speech work (kind = "audio", item #202): where the caller's voice-reference
+    /// clip is, and the caller's consent attestation — `Some(true)` is required
+    /// before any provider will render it, and the clip is deleted after the job.
+    /// `#[serde(default)]` keeps every older store entry readable.
+    #[serde(default)]
+    pub voice_ref: Option<String>,
+    #[serde(default)]
+    pub consent: Option<bool>,
     /// "queued" -> "running" -> "done"
     pub status: String,
     pub response: Option<String>,
@@ -259,6 +267,8 @@ impl LlmJob {
             seed: None,
             frames: None,
             fps: None,
+            voice_ref: None,
+            consent: None,
             status: "queued".into(),
             response: None,
             result_hash: None,
@@ -302,6 +312,8 @@ impl LlmJob {
             seed: Some(seed.unwrap_or_else(rand_like_seed)),
             frames: Some(frames),
             fps: Some(fps),
+            voice_ref: None,
+            consent: None,
             status: "queued".into(),
             response: None,
             result_hash: None,
@@ -333,6 +345,8 @@ impl LlmJob {
             seed: Some(rand_like_seed()),
             frames: None,
             fps: None,
+            voice_ref: None,
+            consent: None,
             status: "queued".into(),
             response: None,
             result_hash: None,
@@ -367,6 +381,8 @@ impl LlmJob {
             seed: None,
             frames: None,
             fps: None,
+            voice_ref: None,
+            consent: None,
             status: "queued".into(),
             response: None,
             result_hash: None,
@@ -377,6 +393,22 @@ impl LlmJob {
             prompt_tokens: None,
             completion_tokens: None,
         }
+    }
+
+    /// New speech-synthesis job (kind = "audio", item #202). `prompt` is the text
+    /// to speak, `model` the engine id (`xtts-v2`), `voice_ref` the path or
+    /// artifact id of the reference clip the caller is cloning.
+    ///
+    /// **Consent is not a payload detail here, it is the admission condition:**
+    /// without `consent = Some(true)` there is no constructor path that produces
+    /// an audio job, so a provider never has to guess whether it may clone a
+    /// voice. There is deliberately no default and no "unset means yes".
+    pub fn new_audio(model: &str, text: &str, voice_ref: &str, consent: bool) -> Self {
+        let mut job = Self::new_llm(model, text, 0.7, 0);
+        job.kind = "audio".into();
+        job.voice_ref = Some(voice_ref.to_string());
+        job.consent = Some(consent);
+        job
     }
 }
 

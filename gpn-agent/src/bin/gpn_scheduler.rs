@@ -7200,6 +7200,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let _ = req.respond(r);
                         return;
                     }
+                    // Speech (item #202): a voice clone is refused unless the caller
+                    // attested their right to use the reference clip AND named one.
+                    // Both facts are checked BEFORE any escrow exists, so there is no
+                    // window where a job is paid for and unrenderable.
+                    if kind.is_audio() {
+                        let voice_ref = v.get("voice_ref").and_then(|x| x.as_str()).unwrap_or("");
+                        let consent = v.get("consent").and_then(|x| x.as_bool()).unwrap_or(false);
+                        let why = if voice_ref.is_empty() {
+                            Some("audio jobs need `voice_ref`: a 5-15 s reference clip (path or artifact id)")
+                        } else if !consent {
+                            Some("audio jobs clone a voice: pass `consent: true` to attest you have the right to use the reference clip")
+                        } else {
+                            None
+                        };
+                        if let Some(msg) = why {
+                            let r =
+                                Response::from_string(json!({"ok":false,"error":msg}).to_string())
+                                    .with_header(hdr.clone())
+                                    .with_status_code(400);
+                            let _ = req.respond(r);
+                            return;
+                        }
+                    }
                     // Abuse guardrail (item #22): refuse a prohibited-use prompt at
                     // the AP before the on-chain escrow create (fail-closed).
                     if let Some(cat) = moderation_block(prompt.as_deref().unwrap_or("")) {
@@ -7237,8 +7260,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Pending jobs).
                     let jt_lc = job_type.to_ascii_lowercase();
                     let is_gen = kind.is_generation();
+                    // Capability-routed work (renders + speech, item #202): its model id
+                    // is never an Ollama tag, so it must not be resolved against the
+                    // chat catalogue, and it never uses the text channel fast path
+                    // (its answer is an artifact, not text).
+                    let caps_routed = kind.routes_by_capability();
                     let reg = registry.lock().unwrap().clone();
-                    let model = if kind.is_generation() {
+                    let model = if caps_routed {
                         model
                     } else {
                         match resolve_requested_model(&reg, &model) {
@@ -7290,7 +7318,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // no `create_job`/`claim`/`complete`. Falls through to the
                     // on-chain path on ANY failure (safe fallback), so enabling
                     // the mode cannot make a job unservable.
-                    if !is_gen {
+                    if !caps_routed {
                         let prompt_s = prompt.clone().unwrap_or_default();
                         let price = ppt.saturating_mul(mtok_eff as u128).max(1);
                         // Item #63: the caller's own rate card, so a provider
@@ -7447,7 +7475,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     };
                     // escrow/pricing: generation jobs use a flat, job-sized price
                     // (price_gpn from pixels×steps); text jobs use per-token billing.
-                    let (escrow, job_ppt, job_mtok): (u128, u128, u32) = if is_gen {
+                    // Speech (item #202) is flat-priced from the caller's `price_gpn`:
+                    // its cost is output seconds, which nobody knows before the render,
+                    // so the escrow is the caller's ceiling rather than an estimate.
+                    let (escrow, job_ppt, job_mtok): (u128, u128, u32) = if caps_routed {
                         ((price_gpn * 1e12) as u128, 0u128, 0u32)
                     } else if text_rate > 0 && text_cap > 0 {
                         (
@@ -7553,6 +7584,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 // payload whose kind disagrees with the box it was
                                 // routed to is a job nobody can run.
                                 let job = match kind {
+                                    // Speech (item #202): text + the caller's reference clip
+                                    // + the consent attestation. No consent, no job — the
+                                    // refusal happens here, before the escrow is created.
+                                    JobKind::Audio => {
+                                        let voice_ref = v
+                                            .get("voice_ref")
+                                            .and_then(|x| x.as_str())
+                                            .unwrap_or("");
+                                        gpn_agent::llm::LlmJob::new_audio(
+                                            &model, p, voice_ref, true,
+                                        )
+                                    }
                                     JobKind::Image | JobKind::Video => {
                                         let neg = v.get("negative_prompt").and_then(|x| x.as_str());
                                         gpn_agent::llm::LlmJob::new_gen(
@@ -8077,7 +8120,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let kind = route_kind(stored_kind.as_deref(), &qmodel);
                         // A generation model is not an Ollama tag: resolving it against
                         // the chat catalogue is what made these jobs unroutable.
-                        let resolved = if kind.is_generation() {
+                        let resolved = if kind.routes_by_capability() {
                             Ok(qmodel)
                         } else {
                             resolve_requested_model(&reg, &qmodel)
@@ -9939,6 +9982,46 @@ mod tests {
         let ft_only = route_candidates(&reg, JobKind::Finetune, &hf);
         assert_eq!(ft_only.len(), 1);
         assert_eq!(ft_only[0].provider.address, "ft");
+    }
+
+    /// Speech (item #202) is capability-routed like a render but advertised under
+    /// its own name: an audio job must reach the box that runs the TTS engine and
+    /// must NOT reach a box that only lists the five older capabilities — and a box
+    /// whose `/status` omits `capabilities[]` entirely must not be assumed capable
+    /// (that is exactly the `default_capabilities()` list, which deliberately does
+    /// not gain `AudioGeneration`).
+    #[test]
+    fn audio_routes_only_to_a_box_that_advertises_the_engine() {
+        let llm = prov_caps("llm", "http://llm", 10, "llama3.2:1b", &["LLMInference"]);
+        let diff = prov_caps("diff", "http://diff", 10, "", &["ImageGeneration"]);
+        let tts = prov_caps("tts", "http://tts", 10, "", &["AudioGeneration"]);
+        let reg = vec![llm, diff, tts];
+
+        // The engine id (`xtts-v2`) is not an Ollama tag, so the model must not gate.
+        let needs = RouteNeeds {
+            model: "xtts-v2".into(),
+            ..Default::default()
+        };
+        let got = route_candidates(&reg, JobKind::Audio, &needs);
+        assert_eq!(got.len(), 1, "audio must route to exactly the TTS box");
+        assert_eq!(got[0].provider.address, "tts");
+        assert!(!got[0].needs_pull, "audio never needs an Ollama pull");
+
+        // No TTS box online ⇒ not routable (503 upstream), not silently text.
+        let no_tts = vec![
+            prov_caps("llm", "http://llm", 10, "llama3.2:1b", &["LLMInference"]),
+            prov_caps("diff", "http://diff", 10, "", &["ImageGeneration"]),
+        ];
+        assert!(route_candidates(&no_tts, JobKind::Audio, &needs).is_empty());
+
+        // The legacy default list must not claim audio capability: an older
+        // heartbeat with no `capabilities[]` is not evidence of a TTS engine.
+        assert!(!default_capabilities()
+            .iter()
+            .any(|c| c == "AudioGeneration"));
+        assert!(default_capabilities()
+            .iter()
+            .any(|c| c == "ImageGeneration"));
     }
 
     /// `job_type` + model admission (item #76): the native `POST /jobs` path must

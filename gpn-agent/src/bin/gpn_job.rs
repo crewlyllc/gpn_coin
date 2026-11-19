@@ -8,6 +8,10 @@
 //!   gpn_job --wallet <seed> --prompt "..." [--model llama3.2:1b]
 //!           [--price 10] [--min-gflops 150] [--job-type LLMInference]
 //!           [--endpoint ws://127.0.0.1:9944] [--scheduler http://127.0.0.1:8092]
+//!
+//! Speech (item #202): `--job-type audio --model xtts-v2 --voice-ref <clip>
+//! --consent-voice-rights` — the flag is not optional and not defaulted: cloning a
+//! voice without an explicit attestation is refused before anything is charged.
 //! Env: GPN_WALLET, GPN_ENDPOINT, GPN_SCHEDULER
 
 use gpn_agent::chain::ChainClient;
@@ -50,12 +54,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let job_type = kind.onchain_name().to_string();
-    // Generative (image/video) params — only used when the job is a render.
-    let gen_kind: Option<&'static str> = if kind.is_generation() {
-        Some(kind.payload_kind())
-    } else {
-        None
-    };
     let negative = opt(&args, "--negative-prompt");
     let width: u32 = opt(&args, "--width")
         .and_then(|s| s.parse().ok())
@@ -73,11 +71,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fps: u32 = opt(&args, "--fps")
         .and_then(|s| s.parse().ok())
         .unwrap_or(8);
-    // Diffusion model default differs from the LLM fallback.
-    let model = match (gen_kind, model_arg) {
-        (Some(_), None) => "sd-turbo".to_string(),
+    // The model default follows the kind: a render gets a diffusion tag, speech
+    // gets the engine id, anything else the small LLM.
+    let voice_ref = opt(&args, "--voice-ref");
+    // Speech jobs (item #202) are refused before escrow unless the caller states
+    // they have the right to clone the reference voice. An opt-in flag, not a
+    // default: "unset" must never mean "yes".
+    if kind.is_audio() {
+        if !args.iter().any(|a| a == "--consent-voice-rights") {
+            eprintln!(
+                "❌ audio jobs clone a voice: pass --consent-voice-rights to attest you have \
+                 the right to use the reference clip (no job was created)"
+            );
+            std::process::exit(2);
+        }
+        if voice_ref.is_none() {
+            eprintln!("❌ audio jobs need --voice-ref <path-or-artifact-id> (5-15 s clip)");
+            std::process::exit(2);
+        }
+    }
+    let model = match (kind.is_audio(), model_arg) {
+        (true, None) => "xtts-v2".to_string(),
         (_, Some(m)) => m,
-        (None, None) => "llama3.2:1b".to_string(),
+        (false, None) if kind.is_generation() => "sd-turbo".to_string(),
+        (false, None) => "llama3.2:1b".to_string(),
     };
     let endpoint = opt(&args, "--endpoint")
         .or_else(|| std::env::var("GPN_ENDPOINT").ok())
@@ -129,6 +146,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The payload kind must agree with the kind that was written on chain and
     // with the provider that will claim it (item #76).
     let job = match kind {
+        // Speech first: it is capability-routed like a render but its payload is
+        // text + a reference clip, not width/height/steps/frames.
+        gpn_agent::jobkind::JobKind::Audio => gpn_agent::llm::LlmJob::new_audio(
+            &model,
+            &prompt,
+            voice_ref.as_deref().unwrap_or_default(),
+            true,
+        ),
         k if k.is_generation() => gpn_agent::llm::LlmJob::new_gen(
             k.payload_kind(),
             &model,

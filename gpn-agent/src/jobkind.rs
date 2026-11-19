@@ -40,6 +40,8 @@ pub enum JobKind {
     Video,
     Ml,
     Finetune,
+    /// Speech synthesis from text plus a voice-reference clip (item #202).
+    Audio,
 }
 
 impl JobKind {
@@ -51,14 +53,30 @@ impl JobKind {
             JobKind::Video => "VideoGeneration",
             JobKind::Ml => "MLInference",
             JobKind::Finetune => "FineTuning",
+            JobKind::Audio => "AudioGeneration",
         }
     }
 
     /// The name the marketplace pallet stores — identical to [`Self::capability`]
     /// for every kind, but kept as its own method because the two contracts are
     /// independent (a capability rename must not silently change chain state).
+    ///
+    /// **Audio is the one exception**, and it is deliberate rather than an
+    /// oversight: the chain's `compute_marketplace::JobType` enum has exactly six
+    /// variants (`LLMInference`, `FineTuning`, `ImageGeneration`, `MLInference`,
+    /// `Custom`, `VideoGeneration`) and adding a seventh is a runtime upgrade, not
+    /// a client change. `Custom` is the pallet's documented extension point, so
+    /// audio work is submitted on chain as `Custom` and identified off-chain by
+    /// its payload kind `"audio"` — which is why [`Self::from_payload_kind`] must
+    /// keep returning `Audio` for `"audio"` and [`Self::from_job_type`] must keep
+    /// refusing `"Custom"` (a `Custom` job on chain is not evidence of audio).
+    /// The provider still advertises the capability string `AudioGeneration`, so
+    /// routing never depends on the chain-side name.
     pub fn onchain_name(self) -> &'static str {
-        self.capability()
+        match self {
+            JobKind::Audio => "Custom",
+            _ => self.capability(),
+        }
     }
 
     /// Human-facing label for logs and error messages.
@@ -69,7 +87,22 @@ impl JobKind {
             JobKind::Video => "video",
             JobKind::Ml => "ml-inference",
             JobKind::Finetune => "fine-tune",
+            JobKind::Audio => "audio",
         }
+    }
+
+    /// Speech work (item #202): text in, audio artifact out.
+    pub fn is_audio(self) -> bool {
+        matches!(self, JobKind::Audio)
+    }
+
+    /// Routed purely by advertised capability — no Ollama tag to validate and no
+    /// registry model lookup, because the model id (`xtts-v2`) is never in a
+    /// heartbeat's `models[]`. Image/video and audio both qualify, but only
+    /// image/video is a *diffusion render*, so [`Self::is_generation`] stays
+    /// render-only and payload construction keeps its two distinct shapes.
+    pub fn routes_by_capability(self) -> bool {
+        self.is_generation() || self.is_audio()
     }
 
     /// Rendering work: served by a diffusion/video box, routed purely by
@@ -95,6 +128,7 @@ impl JobKind {
             JobKind::Video => "video",
             JobKind::Ml => "ml",
             JobKind::Finetune => "finetune",
+            JobKind::Audio => "audio",
         }
     }
 
@@ -106,6 +140,7 @@ impl JobKind {
             "video" => Some(JobKind::Video),
             "ml" => Some(JobKind::Ml),
             "finetune" | "fine-tune" | "ft" => Some(JobKind::Finetune),
+            "audio" | "speech" | "tts" => Some(JobKind::Audio),
             _ => None,
         }
     }
@@ -129,6 +164,9 @@ impl JobKind {
             "videogeneration" | "video" => Some(JobKind::Video),
             "mlinference" | "ml" => Some(JobKind::Ml),
             "finetuning" | "finetune" | "ft" => Some(JobKind::Finetune),
+            "audiogeneration" | "audio" | "tts" | "speech" | "speechsynthesis" => {
+                Some(JobKind::Audio)
+            }
             _ => None,
         }
     }
@@ -183,6 +221,15 @@ pub fn model_kind(model: &str) -> Option<JobKind> {
     if IMAGE.iter().any(|p| m.contains(p)) {
         return Some(JobKind::Image);
     }
+    // Item #202: speech-synthesis families. Same rule as the render families —
+    // an Ollama chat box can never serve them, so the model name is evidence
+    // regardless of the caller's `job_type`.
+    const AUDIO: &[&str] = &[
+        "xtts", "coqui", "tts", "bark", "tortoise", "vits", "piper", "speecht5",
+    ];
+    if AUDIO.iter().any(|p| m.contains(p)) {
+        return Some(JobKind::Audio);
+    }
     None
 }
 
@@ -199,8 +246,8 @@ impl AdmissionError {
         match self {
             AdmissionError::UnknownJobType(t) => format!(
                 "unknown job_type '{t}': supported are LLMInference, ImageGeneration, \
-                 VideoGeneration, MLInference, FineTuning (omit job_type and the model \
-                 decides); no job was created and nothing was charged"
+                 VideoGeneration, MLInference, FineTuning, AudioGeneration (omit job_type \
+                 and the model decides); no job was created and nothing was charged"
             ),
         }
     }
@@ -233,8 +280,9 @@ pub fn admit(job_type: Option<&str>, model: &str) -> Result<JobKind, AdmissionEr
         ),
     };
     Ok(match (by_type, by_model) {
-        // A generation model cannot be served by a chat box, whatever the caller typed.
-        (Some(_), Some(m)) if m.is_generation() => m,
+        // A capability-only model (render or speech) cannot be served by a chat
+        // box, whatever the caller typed.
+        (Some(_), Some(m)) if m.routes_by_capability() => m,
         (Some(t), _) => t,
         (None, Some(m)) => m,
         (None, None) => JobKind::Text,
@@ -308,11 +356,52 @@ mod tests {
             JobKind::Video,
             JobKind::Ml,
             JobKind::Finetune,
+            JobKind::Audio,
         ] {
+            // The payload kind is the off-chain identity of a job and must
+            // round-trip for every kind, audio included.
             assert_eq!(JobKind::from_payload_kind(k.payload_kind()), Some(k));
+        }
+        // The on-chain name round-trips for every kind the *pallet* knows. Audio
+        // is deliberately `Custom` on chain (no runtime Audio variant yet), and
+        // `Custom` must stay ambiguous — it is not evidence that a job is audio.
+        for k in [
+            JobKind::Text,
+            JobKind::Image,
+            JobKind::Video,
+            JobKind::Ml,
+            JobKind::Finetune,
+        ] {
             assert_eq!(JobKind::from_job_type(k.onchain_name()), Some(k));
         }
+        assert_eq!(JobKind::Audio.onchain_name(), "Custom");
+        assert_eq!(JobKind::from_job_type("Custom"), None);
         assert_eq!(JobKind::from_payload_kind("banana"), None);
+    }
+
+    #[test]
+    fn audio_is_a_capability_job_not_a_render() {
+        // #202: an audio job routes on the advertised capability alone, so it must
+        // not gate on an Ollama model list, and must not be mistaken for a
+        // diffusion render (whose payload carries width/height/steps/frames).
+        assert_eq!(JobKind::Audio.capability(), "AudioGeneration");
+        assert!(JobKind::Audio.routes_by_capability());
+        assert!(!JobKind::Audio.is_generation());
+        assert!(!JobKind::Audio.gates_on_model());
+        assert!(JobKind::Image.routes_by_capability());
+        assert!(!JobKind::Text.routes_by_capability());
+        // A speech model name classifies the job on its own, and overrides a
+        // caller's default `LLMInference` — the #76 failure mode, again.
+        assert_eq!(admit(None, "xtts-v2").unwrap(), JobKind::Audio);
+        assert_eq!(
+            admit(Some("LLMInference"), "xtts-v2").unwrap(),
+            JobKind::Audio
+        );
+        assert_eq!(
+            admit(Some("AudioGeneration"), "auto").unwrap(),
+            JobKind::Audio
+        );
+        assert_eq!(admit(Some("tts"), "auto").unwrap(), JobKind::Audio);
     }
 
     #[test]
