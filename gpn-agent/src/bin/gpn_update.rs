@@ -1806,9 +1806,23 @@ fn confirm_update(
         // found (a lock error and a bind error often smell alike).
         if matches!(r, update::Remediation::Unknown { .. }) {
             if let Some(port) = update::rpc_port(&o.rpc_url) {
-                let text = format!("{last_exit}\n{}", tail.join("\n"));
-                if update::log_says_port_conflict(&text) || port_listening(port) {
-                    r = update::classify_port_holder(port, port_owner(port));
+                // Same rule as the pre-flight above: a fixture pid the tests
+                // declared is not an orphan to stop. Without this, the fake RPC
+                // server (named `gpn_update_cli-…`, so a gpn-family name) was
+                // classified as `PortHeldByGpn`, and the remediation called
+                // `stop_gpn_family()` — which kills every `gpn*` process on the
+                // host, including a live fleet. CI run 44433137297: the ledger
+                // reason became "21 gpn process(es) survived the stop" instead
+                // of naming the release, so the #203 retry test failed here.
+                let declared_fixture = port_owner(port)
+                    .and_then(|(pid, _)| pid)
+                    .map(port_holder_is_declared_test_node)
+                    .unwrap_or(false);
+                if !declared_fixture {
+                    let text = format!("{last_exit}\n{}", tail.join("\n"));
+                    if update::log_says_port_conflict(&text) || port_listening(port) {
+                        r = update::classify_port_holder(port, port_owner(port));
+                    }
                 }
             }
         }
