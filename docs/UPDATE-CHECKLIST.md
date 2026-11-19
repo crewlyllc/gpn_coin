@@ -145,6 +145,15 @@ An unfiled checklist is a finished release nobody can find later.
 
 ## 5. Build both platforms
 
+**The rule, in one line (owner, 2026-11-19):** the final build of every version for Windows is
+done **through the runner** (so it carries an attestation); **everything else Windows is done over
+SSH on box 1.** No per-attempt dispatches, no install tests through CI, no queue in the loop.
+
+**Ordering when both land on box 1:** SSH verification work **yields** while a release job is in
+flight — that job builds, verifies, publishes, attests and then replaces `C:\gpn\bin`, so an
+install test running at that moment would race the deploy. Check the runners API (`busy`) before
+any mutating SSH step; read-only checks (firewall rules, `Get-MpPreference`, logs) are always safe.
+
 Two different jobs use Windows, and they must not be confused (owner question, 2026-11-19):
 
 | What | Route | Why |
