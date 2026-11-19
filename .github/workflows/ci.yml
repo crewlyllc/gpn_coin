@@ -21,7 +21,26 @@ name: CI
 on:
   push:
     branches: [main, master]
+    # Docs-only commits must not buy a full Linux build on the box that also mines
+    # and serves AI (2026-11-19: five docs commits in 40 min kept the runner busy and
+    # finished nothing, because every push started a build the next one superseded).
+    # Anything that can affect behaviour — code, build files, chainspec, installers,
+    # network.json, workflows — is deliberately NOT ignored here.
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - 'x-campaign/**'
+      - 'link-campaign/**'
+      - 'brand/**'
+      - '.gpn/**'
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - 'x-campaign/**'
+      - 'link-campaign/**'
+      - 'brand/**'
+      - '.gpn/**'
   # Weekly dependency audit (RustSec advisories + licence/ban checks).
   schedule:
     - cron: "0 6 * * 1"
