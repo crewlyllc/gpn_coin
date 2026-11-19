@@ -70,5 +70,5 @@ jobs:
           Write-Host "$($Error.Count)"
           if ($Error.Count -gt 0) {
             foreach ($e in $Error) { Write-Host "ERR: $($e.ToString())" }
-            throw "script wrote $($Error.Count) error record(s) — treat as failure, not success"
+            throw "script wrote $($Error.Count) error record(s) - treat as failure, not success"
           }
