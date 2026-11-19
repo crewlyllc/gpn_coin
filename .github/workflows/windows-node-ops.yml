@@ -46,6 +46,31 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       REPO_SHA: ${{ github.sha }}
     steps:
+      # 2026-11-19: the hand-rolled contents-API fetch has now failed twice on this
+      # runner (44595896372 `download rc=22 size=0`; 44606185098 `curl: (22) 404`
+      # with the job token, against a URL that answers 200 from elsewhere). The
+      # runner is already authenticated to the repo, so let checkout do the fetch and
+      # give the ops script a real file on disk: a missing file fails loudly instead
+      # of an empty one exiting 0.
+      - name: Checkout (source for ops scripts)
+        uses: actions/checkout@v4
+        with:
+          path: _ops_src
+          fetch-depth: 1
+          clean: true
+          persist-credentials: false
+
+      - name: Show checked-out source
+        shell: powershell
+        run: |
+          $s = (git -C "$env:GITHUB_WORKSPACE\_ops_src" rev-parse HEAD)
+          Write-Host "checked-out sha=$s"
+          Write-Host "expected    sha=$env:REPO_SHA"
+          $f = Join-Path "$env:GITHUB_WORKSPACE\_ops_src" 'install.ps1'
+          if (-not (Test-Path $f)) { throw "install.ps1 missing from the checkout at $f" }
+          Write-Host "install.ps1 size=$((Get-Item $f).Length)"
+          "OPS_SRC=$env:GITHUB_WORKSPACE\_ops_src" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
+
       - name: Policy check
         shell: powershell
         run: |
@@ -63,6 +88,8 @@ jobs:
           $ErrorActionPreference = 'Continue'
           Write-Host "=== host ==="
           Write-Host "$env:COMPUTERNAME  $(Get-Date -Format o)"
+          Write-Host "=== ops source ==="
+          Write-Host "OPS_SRC=$env:OPS_SRC sha=$env:REPO_SHA"
           Write-Host "=== script ==="
           $Error.Clear()
           Invoke-Expression $env:OPS_SCRIPT
