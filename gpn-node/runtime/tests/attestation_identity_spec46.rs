@@ -48,10 +48,12 @@ fn record(hash: [u8; 32]) -> AttestationRecord {
 /// 48 zero existential deposit · 49 entry call unconditionally `Pays::No`
 /// 50 unsigned proof-of-work entry · 51 `provides` tag on the unsigned entry
 /// (an unsigned extrinsic without a tag is rejected by the pool: "No tags
-/// provided").
+/// provided") · 52 every provider-owned job transition is fee-free, so a
+/// zero-balance provider can walk accept -> start -> submit -> complete
+/// (#205; the pool checks `pays_fee` per call, so accept alone was not enough).
 #[test]
 fn spec_version_matches_live_chain() {
-    assert_eq!(VERSION.spec_version, 51);
+    assert_eq!(VERSION.spec_version, 52);
 }
 
 /// `testnet-no-stake` actually flips the runtime constant to zero; the default
