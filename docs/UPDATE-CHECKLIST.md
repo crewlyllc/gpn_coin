@@ -145,6 +145,15 @@ An unfiled checklist is a finished release nobody can find later.
 
 ## 5. Build both platforms
 
+Two different jobs use Windows, and they must not be confused (owner question, 2026-11-19):
+
+| What | Route | Why |
+|---|---|---|
+| **Per-item Windows proof** (a box in §3b: firewall rules, Defender, install) | **SSH to box 1** — `scripts/box1.sh "<powershell>"` | seconds, not a queue. One single-slot runner means every dispatch waits behind whatever build is running there |
+| **Release artifact build** (`gpn-windows.zip`) | **the runner**, once, at cut time | the artifact strangers download must come from the process that signs and publishes it |
+
+- [ ] Per-item Windows evidence was collected **over SSH** (paste the PowerShell output), not by
+      dispatching the runner for each iteration.
 - [ ] `release-linux-selfhosted.yml` → `gpn-linux.tar.gz` on `linux-latest`
 - [ ] `release-windows.yml` on box 1's runner → `gpn-windows.zip` on `windows-latest`
 - [ ] **Same SHA on both runs.** macOS is not required and is not in the manifest.
@@ -245,6 +254,20 @@ Ask GitHub for the CI run on `origin/main`'s HEAD.
 - **success** → continue.
 
 Reporting "CI is red" without the failing line is noise, not a status.
+
+### 0c. An empty query result is not evidence of absence (added 2026-11-19)
+A `Get-Service` that returns nothing, a `grep` with no matches, a `journalctl -u` that prints
+nothing: each of these means *that command found nothing*, not *the thing is absent*. Before
+claiming something is missing, ask it a different way:
+
+- Is a Windows process running? `Get-Process`, `Get-CimInstance Win32_Process`, `Get-ScheduledTask`
+  — not `Get-Service` (a per-user runner has no service entry).
+- Is a CI runner available? the **GitHub API** (`/actions/runners`) — not anything local.
+- Is a unit logging? `journalctl --user -u <unit>` — a non-`--user` query returns zero matches for
+  a *healthy* user unit, which reads identically to a dead one.
+
+**A queued job behind a busy single-slot runner is contention, not a fault.** Say which it is, with
+the field that proves it (`status`, `busy`), before proposing a repair.
 
 ### 0b. When something fails, diagnose and fix — do not park it
 A red CI, a failed build, a failed start, a failed update, a failed test, a failed publish: each
